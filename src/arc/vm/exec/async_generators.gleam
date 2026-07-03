@@ -24,15 +24,16 @@ import arc/vm/key.{Named}
 import arc/vm/opcode.{AsyncYieldStarNext}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
-  type Heap, type HeapSlot, type State, type StepResult, InternalError, State,
-  StepVmError,
+  type Heap, type HeapSlot, type State, type StepExit, InternalError, State,
+  VmFailed,
 }
 import arc/vm/value.{
-  type AGResumeKind, type AsyncGenCompletion, type AsyncGenRequest, type JsValue,
-  type Ref, AGAwaitingReturn, AGCompleted, AGExecuting, AGNext,
-  AGResumeAwaitingReturn, AGResumeBody, AGResumeDelegate, AGResumeDelegateClose,
-  AGResumeReturnUnwind, AGReturn, AGSuspendedStart, AGSuspendedYield, AGThrow,
-  AsyncGenRequest, AsyncGeneratorObject, AsyncGeneratorSlot, JsNull, JsObject,
+  type AGResumeKind, type AsyncGenCompletion, type AsyncGenRequest,
+  type DelegateMethod, type JsValue, type Ref, AGAwaitingReturn, AGCompleted,
+  AGExecuting, AGNext, AGResumeAwaitingReturn, AGResumeBody, AGResumeDelegate,
+  AGResumeDelegateClose, AGResumeReturnUnwind, AGReturn, AGSuspendedStart,
+  AGSuspendedYield, AGThrow, AsyncGenRequest, AsyncGeneratorObject,
+  AsyncGeneratorSlot, DelegateReturn, DelegateThrow, JsNull, JsObject,
   JsUndefined, ObjectSlot,
 }
 import gleam/list
@@ -76,7 +77,7 @@ pub fn call_native_method(
   completion: AsyncGenCompletion,
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let arg = helpers.first_arg_or_undefined(args)
   let #(h, cap) =
     builtins_promise.new_promise_capability(state.heap, state.builtins)
@@ -116,7 +117,7 @@ pub fn call_native_method(
       }
       case stepped {
         Ok(state) -> ret(state)
-        Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
+        Error(vm_err) -> Error(VmFailed(vm_err, state))
       }
     }
   }
@@ -204,18 +205,23 @@ fn run_body(
   let state = set_gen_state(state, data_ref, AGExecuting)
 
   // yield* delegation? Only relevant when resuming from a yield (push_arg=True)
-  // with a return/throw request AND saved_pc is AsyncYieldStarNext.
+  // with a return/throw request AND saved_pc is AsyncYieldStarNext. This is
+  // the one place a request kind narrows to a `DelegateMethod`; everything
+  // downstream carries that instead of re-deriving it from `req.completion`.
   let delegated = case push_arg, req.completion {
-    True, AGReturn | True, AGThrow -> async_delegate_iterator(gen)
+    True, AGReturn ->
+      pair_delegate(DelegateReturn, async_delegate_iterator(gen))
+    True, AGThrow -> pair_delegate(DelegateThrow, async_delegate_iterator(gen))
     _, _ -> None
   }
   case delegated {
     // The saved slot may be an internal Iterator Record (cached next) —
     // .return/.throw must be looked up and called on the real iterator.
-    Some(iter_ref) ->
+    Some(#(method, iter_ref)) ->
       forward_async_delegate(
         state,
         run,
+        method,
         unwrap_record_ref(state.heap, iter_ref),
       )
     None -> {
@@ -282,6 +288,14 @@ fn build_exec_state(
 // yield* delegation — ES §15.5.5 step 8.b/8.c
 // ============================================================================
 
+/// Tag a delegated-iterator lookup with the method being forwarded to it.
+fn pair_delegate(
+  method: DelegateMethod,
+  iter: Option(Ref),
+) -> Option(#(DelegateMethod, Ref)) {
+  option.map(iter, fn(iter_ref) { #(method, iter_ref) })
+}
+
 /// If suspended at AsyncYieldStarNext, return the delegated iterator ref.
 /// saved_pc was a valid dispatch target — always in bounds.
 fn async_delegate_iterator(gen: AsyncGenData) -> Option(Ref) {
@@ -316,30 +330,25 @@ fn unwrap_record_ref(h: heap.Heap(State(host), host), ref: Ref) -> Ref {
 fn forward_async_delegate(
   state: State(host),
   run: Run(host),
+  method: DelegateMethod,
   iter_ref: Ref,
 ) -> Result(State(host), state.VmError) {
   let iter = JsObject(iter_ref)
-  let method_name = case run.req.completion {
-    AGThrow -> "throw"
-    // AGReturn (AGNext never reaches here by construction)
-    _ -> "return"
+  let method_name = case method {
+    DelegateThrow -> "throw"
+    DelegateReturn -> "return"
   }
   case object_ops.get_value(state, iter_ref, Named(method_name), iter) {
     Error(#(thrown, state)) -> throw_into_gen_body(state, run, thrown)
     Ok(#(JsUndefined, state)) | Ok(#(JsNull, state)) ->
-      delegate_method_missing(state, run, iter_ref)
+      delegate_method_missing(state, run, method, iter_ref)
     Ok(#(method_fn, state)) ->
       case state.call(state, method_fn, iter, [run.req.value]) {
         Error(#(thrown, state)) -> throw_into_gen_body(state, run, thrown)
         Ok(#(result, state)) ->
           // Await the result. Gen stays AGExecuting, req stays at queue head,
           // saved_pc/stack unchanged. Resume via AGResumeDelegate.
-          Ok(setup_await(
-            state,
-            run.data_ref,
-            result,
-            AGResumeDelegate(run.req.completion),
-          ))
+          Ok(setup_await(state, run.data_ref, result, AGResumeDelegate(method)))
       }
   }
 }
@@ -351,10 +360,11 @@ fn forward_async_delegate(
 fn delegate_method_missing(
   state: State(host),
   run: Run(host),
+  method: DelegateMethod,
   iter_ref: Ref,
 ) -> Result(State(host), state.VmError) {
-  case run.req.completion {
-    AGThrow ->
+  case method {
+    DelegateThrow ->
       // §7.b.iii.1-4: AsyncIteratorClose(iter, NormalCompletion(empty)),
       // then throw TypeError into body. closeCompletion is NORMAL here, so
       // per AsyncIteratorClose steps 4-6 an error from GetMethod(iter,
@@ -377,7 +387,7 @@ fn delegate_method_missing(
           // GetMethod/Call threw — propagate into the body (steps 4 & 6).
           throw_into_gen_body(state, run, thrown)
       }
-    AGReturn | AGNext ->
+    DelegateReturn ->
       // §7.c.ii.2-3: no .return → Await(received.[[Value]]) first, THEN the
       // return completion propagates out of the yield*, unwinding the OUTER
       // generator's enclosing finally blocks / iterator closes (shared with
@@ -502,7 +512,7 @@ fn read_iter_result(
 fn resume_after_delegate(
   state: State(host),
   run: Run(host),
-  method: AsyncGenCompletion,
+  method: DelegateMethod,
   is_reject: Bool,
   settled: JsValue,
 ) -> Result(State(host), state.VmError) {
@@ -541,12 +551,12 @@ fn resume_after_delegate(
 fn delegate_done(
   state: State(host),
   run: Run(host),
-  method: AsyncGenCompletion,
+  method: DelegateMethod,
   val: JsValue,
 ) -> Result(State(host), state.VmError) {
   let gen = run.gen
   case method {
-    AGThrow -> {
+    DelegateThrow -> {
       // Bytecode layout (emit.gleam): N=AsyncYieldStarNext, N+1=Await,
       // N+2=AsyncYieldStarResume, N+3=<after yield*>. saved_pc==N.
       let stack_after = case gen.saved_stack {
@@ -557,7 +567,7 @@ fn delegate_done(
         build_exec_state(state, gen, stack_after, gen.saved_pc + 3)
       handle_exec_result(state, run, run.execute_inner(exec_state))
     }
-    AGReturn | AGNext ->
+    DelegateReturn ->
       // §27.5.3.8 step 7.c.viii: the inner iterator's return() reported
       // done — a return completion (carrying its value) propagates out of
       // the yield*, so unwind the outer generator's enclosing finally
@@ -631,18 +641,14 @@ pub fn call_native_resume(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let settled = helpers.first_arg_or_undefined(args)
   let ret = fn(state: State(host)) {
     Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
   }
   case read_slot(state.heap, data_ref) {
     None ->
-      Error(#(
-        StepVmError(InternalError("call_native_resume", "slot missing")),
-        JsUndefined,
-        state,
-      ))
+      Error(VmFailed(InternalError("call_native_resume", "slot missing"), state))
     Some(gen) -> {
       let gen = normalize_queue(gen)
       case gen.queue_front {
@@ -701,7 +707,7 @@ pub fn call_native_resume(
           }
           case stepped {
             Ok(state) -> ret(state)
-            Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
+            Error(vm_err) -> Error(VmFailed(vm_err, state))
           }
         }
       }

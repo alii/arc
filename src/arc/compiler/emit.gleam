@@ -320,23 +320,40 @@ const class_fields_init = ast_util.class_fields_init
 /// Compile error from the emitter. `arc/compiler` re-exports this as
 /// `CompileError`; `compiler.error_message` is the single renderer.
 ///
-/// The three string-carrying variants are deliberately distinct so callers
+/// The two string-carrying variants are deliberately distinct so callers
 /// (and readers) can tell "your code is illegal" from "the engine can't do
-/// this yet" from "the parser and emitter disagree":
+/// this yet":
 ///   - `EarlySyntaxError` — a spec-mandated early error the emitter (not the
 ///     parser) detects. The message is surfaced VERBATIM as a JS SyntaxError
 ///     message, so write it spec/engine-shaped ("Unexpected private name #x").
 ///   - `UnsupportedFeature` — a real JavaScript construct this engine does
 ///     not implement yet. Rendered as "unsupported: <feature>".
-///   - `Internal` — an AST shape the parser guarantees can never reach the
-///     emitter. Reaching one is an engine bug, never a user error. Rendered
-///     as "internal compiler error: <context>".
+///
+/// Every remaining variant names ONE AST shape the parser guarantees can
+/// never reach the emitter. Reaching one is an engine bug, never a user
+/// error — they exist as errors (rather than `panic`) only because the
+/// emitter's `case` arms must be exhaustive. There is deliberately no
+/// stringly-typed `Internal(context: String)` catch-all: a new impossible
+/// state costs a new variant, and `compiler.error_message` cannot be handed
+/// an arbitrary string.
 pub type EmitError {
   BreakOutsideLoop
   ContinueOutsideLoop
   EarlySyntaxError(message: String)
   UnsupportedFeature(feature: String)
-  Internal(context: String)
+  /// `emit_lvalue_get2` reached a non-MemberExpression lvalue.
+  NonMemberLValue
+  /// Statement-position `class` with no name.
+  AnonymousClassDeclaration
+  /// A compound-assignment arm reached a non-compound operator.
+  NonCompoundAssignOperator
+  /// A for-in/of head declared more than one binding.
+  MultiDeclaratorForHead
+  /// A getter/setter/method property inside a destructuring pattern.
+  AccessorInDestructuringPattern
+  /// A defaulted destructuring target that is neither a static nor a
+  /// computed member expression.
+  NonMemberDefaultTarget
 }
 
 // ============================================================================
@@ -2513,7 +2530,7 @@ fn emit_lvalue_get2(
     // Only MemberExpressions reach here (update-expression / compound-
     // assignment callers match on `ast.MemberExpression(..) as member`), and
     // every member shape is covered above.
-    _ -> Error(Internal("emit_lvalue_get2: non-member lvalue"))
+    _ -> Error(NonMemberLValue)
   }
 }
 
@@ -2539,7 +2556,7 @@ fn emit_field_init_call(e: Emitter) -> Emitter {
   |> emit_ir(IrJumpIfFalse(skip))
   |> get_this
   |> emit_ir(IrSwap)
-  |> emit_ir(IrCallMethod("", 0))
+  |> emit_ir(IrCallMethod(0))
   |> emit_ir(IrLabel(skip))
   |> emit_ir(IrPop)
 }
@@ -2587,19 +2604,20 @@ fn emit_stmt_tail(
           let #(e, end_label) = fresh_label(e)
 
           let e = emit_ir(e, IrPushTry(catch_label))
-          use e <- result.try(emit_stmt_tail(e, block))
+          use e <- result.try(emit_block(e, block, tail: True))
           let e = emit_ir(e, IrPopTry)
           let e = emit_ir(e, IrJump(end_label))
 
           use e <- result.map(
-            emit_catch_clause(e, catch_label, param, emit_stmt_tail(
+            emit_catch_clause(e, catch_label, param, emit_block(
               _,
               catch_body,
+              tail: True,
             )),
           )
           emit_ir(e, IrLabel(end_label))
         }
-        None -> emit_stmt_tail(e, block)
+        None -> emit_block(e, block, tail: True)
       }
     }
 
@@ -3018,7 +3036,7 @@ fn compile_function_body(
   name: Option(String),
   self_name: Option(String),
   params: List(ast.Pattern),
-  body: ast.Statement,
+  stmts: List(ast.StmtWithLine),
   is_arrow: Bool,
   is_generator: Bool,
   is_async: Bool,
@@ -3037,10 +3055,6 @@ fn compile_function_body(
   // miscompile the child against the root scope's slots.
   let assert [fn_id, ..rest] = parent.child_fn_cursor
   let parent = Emitter(..parent, child_fn_cursor: rest)
-  let stmts = case body {
-    ast.BlockStatement(s) -> s
-    other -> [ast.StmtWithLine(0, other)]
-  }
   // Direct using/await-using declarations are emitted in place (no AST
   // rewrite) — the lexical-name and hoisting scans below see the user's
   // bindings (collect_top_lex_names treats Using/AwaitUsing as ConstBinding)
@@ -3521,7 +3535,7 @@ fn emit_stmt_inner(
           emit_ir(e, IrDefineField(name))
         }
         ast.NumberLiteral(value: n, ..), False -> {
-          let e = push_const(e, JsNumber(Finite(n)))
+          let e = push_const(e, JsNumber(literal_number(n)))
           use e <- result.map(emit_expr(e, init))
           emit_ir(e, IrDefineFieldComputed)
         }
@@ -3729,13 +3743,17 @@ fn emit_stmt_inner(
 
           let e = emit_ir(e, IrPushTry(catch_label))
           let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
-          use e <- result.try(emit_stmt(e, block))
+          use e <- result.try(emit_block(e, block, tail: False))
           let e = pop_loop(e)
           let e = emit_ir(e, IrPopTry)
           let e = emit_ir(e, IrJump(end_label))
 
           use e <- result.map(
-            emit_catch_clause(e, catch_label, param, emit_stmt(_, catch_body)),
+            emit_catch_clause(e, catch_label, param, emit_block(
+              _,
+              catch_body,
+              tail: False,
+            )),
           )
           emit_ir(e, IrLabel(end_label))
         }
@@ -3751,16 +3769,17 @@ fn emit_stmt_inner(
           let e = emit_ir(e, IrPushTry(throw_label))
           let e =
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
-          use e <- result.try(emit_stmt(e, block))
+          use e <- result.try(emit_block(e, block, tail: False))
           let e = pop_loop(e)
           let e = emit_ir(e, IrPopTry)
           let e = emit_gosub_normal(e, fin_label)
           let e = emit_ir(e, IrJump(end_label))
 
           use e <- result.map(
-            emit_finally_subroutine(e, throw_label, fin_label, emit_stmt(
+            emit_finally_subroutine(e, throw_label, fin_label, emit_block(
               _,
               finally_body,
+              tail: False,
             )),
           )
           emit_ir(e, IrLabel(end_label))
@@ -3773,18 +3792,18 @@ fn emit_stmt_inner(
         Some(ast.CatchClause(param, catch_body)), Some(finally_body) -> {
           use e, catch_label, fin_label <- emit_try_catch_finally(
             e,
-            emit_stmt(_, block),
-            emit_stmt(_, finally_body),
+            emit_block(_, block, tail: False),
+            emit_block(_, finally_body, tail: False),
           )
           use e <- emit_catch_clause(e, catch_label, param)
           let e =
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
-          use e <- result.map(emit_stmt(e, catch_body))
+          use e <- result.map(emit_block(e, catch_body, tail: False))
           pop_loop(e)
         }
 
         // try with neither catch nor finally (shouldn't happen per spec, but handle gracefully)
-        None, None -> emit_stmt(e, block)
+        None, None -> emit_block(e, block, tail: False)
       }
     }
 
@@ -3875,7 +3894,7 @@ fn emit_stmt_inner(
         // Statement-position `class` requires a name (the parser's
         // name_required flag); anonymous `export default class {}` is
         // rewritten to a ClassExpression before it reaches the emitter.
-        None -> Error(Internal("anonymous class declaration"))
+        None -> Error(AnonymousClassDeclaration)
       }
     }
 
@@ -4089,16 +4108,26 @@ fn emit_chain_call_args(
   is_method: Bool,
 ) -> Result(Emitter, EmitError) {
   case is_method {
-    True ->
-      emit_call_args(e, args, IrCallMethod("[chain]", _), IrCallMethodApply)
+    True -> emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
     False -> emit_call_args(e, args, opcode.IrCall, IrCallApply)
+  }
+}
+
+/// A parsed numeric literal as the VM's number type. `1e400` overflows the
+/// double range and denotes +Infinity — a literal is never negative and never
+/// NaN, so those two JsNum cases are unreachable from source.
+fn literal_number(n: ast.LiteralNumber) -> value.JsNum {
+  case n {
+    ast.FiniteNumber(f) -> Finite(f)
+    ast.InfiniteNumber -> value.Infinity
   }
 }
 
 fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
   case expr {
     // Literals
-    ast.NumberLiteral(_, value) -> Ok(push_const(e, JsNumber(Finite(value))))
+    ast.NumberLiteral(_, value) ->
+      Ok(push_const(e, JsNumber(literal_number(value))))
     ast.BigIntLiteral(value: n, ..) ->
       Ok(push_const(e, value.JsBigInt(value.BigInt(n))))
     ast.StringExpression(_, value) -> Ok(push_const(e, JsString(value)))
@@ -4369,8 +4398,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
         // This arm only matches compound operators; plain `=` and the
         // logical assignments have their own arms above/below.
-        Error(Nil) ->
-          Error(Internal("non-compound operator in compound identifier assign"))
+        Error(Nil) -> Error(NonCompoundAssignOperator)
       }
     }
 
@@ -4427,8 +4455,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           emit_ir(e, IrBinOp(bin_kind)) |> emit_lvalue_put(shape)
         }
         // As above: only compound operators reach this arm.
-        Error(Nil) ->
-          Error(Internal("non-compound operator in compound member assign"))
+        Error(Nil) -> Error(NonCompoundAssignOperator)
       }
 
     // Destructuring assignment expression: `[a, x.y] = rhs` or `({a, b} = rhs)`.
@@ -4487,11 +4514,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       args,
     ) -> {
       use e <- result.try(emit_super_method_ref(e, key, computed))
-      let name = case computed, key {
-        False, ast.Identifier(name:, ..) -> name
-        _, _ -> "<super>"
-      }
-      emit_call_args(e, args, IrCallMethod(name, _), IrCallMethodApply)
+      emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
     }
 
     // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding.
@@ -4507,12 +4530,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         False -> {
           use e <- result.try(emit_expr(e, obj))
           let e = emit_get_field2(e, method_name)
-          emit_call_args(
-            e,
-            args,
-            IrCallMethod(method_name, _),
-            IrCallMethodApply,
-          )
+          emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
         }
       }
     // Computed method call: obj[key](args) — must bind `this` to obj.
@@ -4529,14 +4547,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           // [method, key, receiver] → Swap → [key, method, receiver] → Pop → [method, receiver]
           let e = emit_ir(e, IrSwap)
           let e = emit_ir(e, IrPop)
-          // Static name unknown for computed access; CallMethod ignores name
-          // at runtime anyway — it's informational only.
-          emit_call_args(
-            e,
-            args,
-            IrCallMethod("[computed]", _),
-            IrCallMethodApply,
-          )
+          emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
         }
       }
     // Direct eval candidate: `eval(args)` with identifier callee.
@@ -4586,7 +4597,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       case ast_util.unwrap_parens(callee), e.with_stack {
         ast.Identifier(name:, ..), [_, ..] -> {
           let e = emit_var_get_this(e, name)
-          emit_call_args(e, args, IrCallMethod(name, _), IrCallMethodApply)
+          emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
         }
         _, _ -> {
           use e <- result.try(emit_expr(e, callee))
@@ -5061,7 +5072,7 @@ fn make_method_closure(
   e: Emitter,
   name: Option(String),
   params: List(ast.Pattern),
-  body: ast.Statement,
+  body: List(ast.StmtWithLine),
   is_gen: Bool,
   is_async: Bool,
 ) -> Result(Emitter, EmitError) {
@@ -5087,7 +5098,7 @@ fn emit_function_closure(
   e: Emitter,
   name: Option(String),
   params: List(ast.Pattern),
-  body: ast.Statement,
+  body: List(ast.StmtWithLine),
   is_gen: Bool,
   is_async: Bool,
   // True only for a SYNTACTICALLY named function expression — creates the
@@ -5125,17 +5136,18 @@ fn emit_arrow_closure(
   body: ast.ArrowBody,
   is_async: Bool,
 ) -> Result(Emitter, EmitError) {
-  let body_stmt = case body {
-    ast.ArrowBodyExpression(expr) ->
-      ast.BlockStatement([ast.StmtWithLine(0, ast.ReturnStatement(Some(expr)))])
-    ast.ArrowBodyBlock(stmt) -> stmt
+  let body_stmts = case body {
+    ast.ArrowBodyExpression(expr) -> [
+      ast.StmtWithLine(0, ast.ReturnStatement(Some(expr))),
+    ]
+    ast.ArrowBodyBlock(stmts) -> stmts
   }
   compile_function_body(
     e,
     name,
     None,
     params,
-    body_stmt,
+    body_stmts,
     True,
     False,
     is_async,
@@ -5241,7 +5253,7 @@ fn emit_object_property(
     ) ->
       emit_computed_init_property(
         e,
-        fn(e) { Ok(push_const(e, JsNumber(Finite(n)))) },
+        fn(e) { Ok(push_const(e, JsNumber(literal_number(n)))) },
         value,
         method,
       )
@@ -5753,7 +5765,7 @@ fn emit_for_await_of(
   let e = emit_ir(e, IrPushTry(catch_next))
   let e = emit_ir(e, IrDup)
   let e = emit_ir(e, IrGetField2("next"))
-  let e = emit_ir(e, IrCallMethod("next", 0))
+  let e = emit_ir(e, IrCallMethod(0))
   let e = emit_ir(e, IrAwait)
   // §14.7.5.6 step 6.c: awaited next() result must be an Object. Covered by
   // F_next so a non-object correctly does NOT trigger close.
@@ -5792,7 +5804,7 @@ fn emit_for_await_of(
   let e = emit_ir(e, IrDup)
   let e = emit_ir(e, IrJumpIfNullish(no_ret_thr))
   // [ret_fn, iter, thrown, ..base]
-  let e = emit_ir(e, IrCallMethod("return", 0))
+  let e = emit_ir(e, IrCallMethod(0))
   // [result, thrown, ..base] — pad so saved_stack after the Await pop has
   // length B+2 (== F_swallow depth). Reject-unwind then lands at
   // [inner_err, undef, thrown, ..base] = B+3, matching every other path.
@@ -5835,7 +5847,7 @@ fn emit_for_await_of(
   let e = emit_ir(e, IrGetField2("return"))
   let e = emit_ir(e, IrDup)
   let e = emit_ir(e, IrJumpIfNullish(no_ret_brk))
-  let e = emit_ir(e, IrCallMethod("return", 0))
+  let e = emit_ir(e, IrCallMethod(0))
   let e = emit_ir(e, IrAwait)
   let e = emit_ir(e, IrIteratorCheckObject)
   let e = emit_ir(e, IrPop)
@@ -5874,7 +5886,7 @@ fn emit_for_lhs_bind(
         // The grammar allows exactly one ForBinding in a for-in/of head; a
         // second declarator forces the parser down the classic `for(;;)`
         // path, so this arm is unreachable from parser output.
-        _ -> Error(Internal("for-in/of head with multiple declarators"))
+        _ -> Error(MultiDeclaratorForHead)
       }
     }
     ast.ForInitPattern(pattern) ->
@@ -6066,7 +6078,7 @@ fn emit_single_object_prop(
     ) ->
       emit_computed_key_prop(
         e,
-        fn(e) { Ok(push_const(e, JsNumber(Finite(n)))) },
+        fn(e) { Ok(push_const(e, JsNumber(literal_number(n)))) },
         value,
         binding_kind,
         has_rest,
@@ -6468,8 +6480,7 @@ fn emit_single_object_assign_prop(
     // patterns (parser sets has_invalid_pattern). Guard defensively.
     ast.Property(kind: ast.Get, ..)
     | ast.Property(kind: ast.Set, ..)
-    | ast.Property(method: True, ..) ->
-      Error(Internal("accessor/method in destructuring assignment"))
+    | ast.Property(method: True, ..) -> Error(AccessorInDestructuringPattern)
 
     // {a, b, ...target} — §13.15.5.4 RestDestructuringAssignmentEvaluation.
     // Stack: [src, key_n,..,key_1] → ObjectRestCopy(n) → [rest_obj] → assign.
@@ -6668,7 +6679,7 @@ fn emit_elem_keyed_member_default(
     }
     // Only MemberExpression targets reach here, and the two arms above cover
     // static and computed keys.
-    _, _ -> Error(Internal("keyed member default target"))
+    _, _ -> Error(NonMemberDefaultTarget)
   })
   use e <- result.map(emit_default_if_undefined(e, default_expr, None))
   emit_ir(put(e), IrPop)
@@ -6689,7 +6700,8 @@ fn object_prop_key_name(key: ast.Expression) -> Result(String, Nil) {
   case key {
     ast.Identifier(name:, ..) -> Ok(name)
     ast.StringExpression(_, name) -> Ok(name)
-    ast.NumberLiteral(_, n) -> Ok(value.js_format_number(n))
+    ast.NumberLiteral(_, ast.FiniteNumber(f)) -> Ok(value.js_format_number(f))
+    ast.NumberLiteral(_, ast.InfiniteNumber) -> Ok("Infinity")
     _ -> Error(Nil)
   }
 }
@@ -7042,12 +7054,12 @@ fn compile_class_body(
   body: List(ast.ClassElement),
   computed_keys: List(#(Int, ast.Expression)),
 ) -> Result(#(Emitter, Option(Int)), EmitError) {
-  let #(
-    ctor_method,
-    instance_methods,
-    static_methods,
-    instance_fields,
-    static_elements,
+  let ast_util.ClassBodyParts(
+    constructor: ctor_method,
+    instance_methods:,
+    static_methods:,
+    instance_fields:,
+    static_elements:,
   ) = ast_util.classify_class_body(body)
 
   // Build constructor: if none provided, synthesize the spec default. For a
@@ -7057,12 +7069,11 @@ fn compile_class_body(
   // observable array iteration (`in_synth_default_ctor`). For a base class
   // it's an empty body.
   let #(ctor_params, ctor_body, synth_super_forward) = case ctor_method {
-    Some(ast.ClassMethod(value: ast.FunctionExpression(params:, body:, ..), ..)) -> #(
-      params,
-      body,
-      False,
-    )
-    _ -> #([], default_ctor_body(super_class), option.is_some(super_class))
+    Some(ast_util.ClassMethodEl(
+      fun: ast.FunctionLiteral(params:, body:, ..),
+      ..,
+    )) -> #(params, body, False)
+    None -> #([], default_ctor_body(super_class), option.is_some(super_class))
   }
 
   // §13.3.7.1 SuperCall step 12 / §15.7.14 step 28: instance fields are
@@ -7176,12 +7187,14 @@ fn compile_class_body(
 /// empty for base classes. The synthetic call's nodes carry the heritage
 /// expression's span — that is the source token whose presence caused the
 /// implicit super-call to exist.
-fn default_ctor_body(super_class: Option(ast.Expression)) -> ast.Statement {
+fn default_ctor_body(
+  super_class: Option(ast.Expression),
+) -> List(ast.StmtWithLine) {
   case super_class {
-    None -> ast.BlockStatement([])
+    None -> []
     Some(heritage) -> {
       let span = ast.expression_span(heritage)
-      ast.BlockStatement([
+      [
         ast.StmtWithLine(
           0,
           ast.ExpressionStatement(
@@ -7198,7 +7211,7 @@ fn default_ctor_body(super_class: Option(ast.Expression)) -> ast.Statement {
             directive: None,
           ),
         ),
-      ])
+      ]
     }
   }
 }
@@ -7221,7 +7234,7 @@ fn compile_class_init_fn(
         None,
         None,
         [],
-        ast.BlockStatement(stmts),
+        stmts,
         False,
         False,
         False,
@@ -7278,7 +7291,7 @@ fn with_method_target(
 /// or on `ctor.prototype` (`on_prototype: True`). Stack: [ctor] → [ctor].
 fn emit_class_methods(
   e: Emitter,
-  methods: List(ast.ClassElement),
+  methods: List(ast_util.ClassMethodEl),
   on_prototype on_prototype: Bool,
 ) -> Result(Emitter, EmitError) {
   use e, method <- list.try_fold(methods, e)
@@ -7290,9 +7303,15 @@ fn emit_class_methods(
     // PrivateMethodOrAccessorAdd (so it appears only after super() returns,
     // and double initialization via return-override throws).
     // Static: install on the constructor right now as an own private element.
-    ast.ClassMethod(
+    ast_util.ClassMethodEl(
       key: ast.Identifier(name: "#" <> rest, ..),
-      value: ast.FunctionExpression(_, _, params, body, is_gen, is_async),
+      fun: ast.FunctionLiteral(
+        params:,
+        body:,
+        is_generator: is_gen,
+        is_async:,
+        ..,
+      ),
       kind:,
       ..,
     ) -> {
@@ -7328,19 +7347,29 @@ fn emit_class_methods(
       e
     }
     // Static-string key: name() {}, "name"() {}, get name() {}, set name(v) {}
-    ast.ClassMethod(
+    ast_util.ClassMethodEl(
       key: ast.Identifier(name:, ..),
-      value: ast.FunctionExpression(_, _, params, body, is_gen, is_async),
+      fun: ast.FunctionLiteral(
+        params:,
+        body:,
+        is_generator: is_gen,
+        is_async:,
+        ..,
+      ),
       kind:,
       computed: False,
-      ..,
     )
-    | ast.ClassMethod(
+    | ast_util.ClassMethodEl(
         key: ast.StringExpression(_, name),
-        value: ast.FunctionExpression(_, _, params, body, is_gen, is_async),
+        fun: ast.FunctionLiteral(
+          params:,
+          body:,
+          is_generator: is_gen,
+          is_async:,
+          ..,
+        ),
         kind:,
         computed: False,
-        ..,
       ) -> {
       let #(fn_name, define_op) = case kind {
         ast.MethodGet -> #(
@@ -7371,9 +7400,15 @@ fn emit_class_methods(
     // Computed key or numeric-literal key (`[expr]() {}`, `0b10() {}`).
     // Function name left None — SetFunctionName from runtime keys is not yet
     // implemented (matches object-literal computed methods).
-    ast.ClassMethod(
+    ast_util.ClassMethodEl(
       key:,
-      value: ast.FunctionExpression(_, _, params, body, is_gen, is_async),
+      fun: ast.FunctionLiteral(
+        params:,
+        body:,
+        is_generator: is_gen,
+        is_async:,
+        ..,
+      ),
       kind:,
       ..,
     ) -> {
@@ -7398,8 +7433,6 @@ fn emit_class_methods(
           emit_ir(e, IrDefineMethodComputed)
       }
     }
-    // The parser only produces function values for class methods.
-    _ -> Error(Internal("class method with non-function value"))
   }
 }
 
@@ -7414,7 +7447,7 @@ fn emit_call_static_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
       |> emit_ir(IrDup)
       |> emit_ir(IrMakeClosure(idx))
       |> emit_ir(IrMakeMethod)
-      |> emit_ir(IrCallMethod("", 0))
+      |> emit_ir(IrCallMethod(0))
       |> emit_ir(IrPop)
   }
 }
@@ -7463,23 +7496,18 @@ fn stash_computed_element_keys(
 /// add. Spec order: all private methods install BEFORE field initializers
 /// run (InitializeInstanceElements steps 5 then 6).
 fn private_method_init_stmts(
-  methods: List(ast.ClassElement),
+  methods: List(ast_util.ClassMethodEl),
 ) -> List(ast.StmtWithLine) {
   use m <- list.filter_map(methods)
-  case m {
-    ast.ClassMethod(
-      key: ast.Identifier(span: key_span, name: "#" <> rest),
-      kind:,
-      is_static: False,
-      ..,
-    ) ->
+  case m.key {
+    ast.Identifier(span: key_span, name: "#" <> rest) ->
       Ok(ast.StmtWithLine(
         0,
         ast.ClassFieldInit(
           key: ast.Identifier(span: key_span, name: "#" <> rest),
           value: Some(ast.Identifier(
             span: key_span,
-            name: ast_util.private_fn_const(kind, "#" <> rest),
+            name: ast_util.private_fn_const(m.kind, "#" <> rest),
           )),
           computed: False,
         ),
@@ -7490,15 +7518,12 @@ fn private_method_init_stmts(
 
 /// Map every instance ClassField → ClassFieldInit statement.
 /// Per §15.7.14 ClassFieldDefinitionEvaluation, value:None becomes undefined
-/// (handled in emit_stmt). Static fields are filtered out upstream by
-/// classify_class_body, but we guard on is_static:False here for safety.
-fn field_init_stmts(fields: List(ast.ClassElement)) -> List(ast.StmtWithLine) {
-  use field <- list.filter_map(fields)
-  case field {
-    ast.ClassField(key:, value:, computed:, is_static: False) ->
-      Ok(ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:)))
-    _ -> Error(Nil)
-  }
+/// (handled in emit_stmt).
+fn field_init_stmts(
+  fields: List(ast_util.ClassFieldEl),
+) -> List(ast.StmtWithLine) {
+  use ast_util.ClassFieldEl(key:, value:, computed:) <- list.map(fields)
+  ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:))
 }
 
 /// Map static elements → statements for the static-init wrapper body.
@@ -7507,14 +7532,14 @@ fn field_init_stmts(fields: List(ast.ClassElement)) -> List(ast.StmtWithLine) {
 /// (§15.7.1 ClassStaticBlockBody) while inheriting `this`/home_object from
 /// the wrapper. Mirrors QuickJS emit_class_init_start/end.
 fn static_init_stmts(
-  elements: List(ast.ClassElement),
+  elements: List(ast_util.StaticEl),
 ) -> List(ast.StmtWithLine) {
-  use elem <- list.filter_map(elements)
+  use elem <- list.map(elements)
   case elem {
-    ast.ClassField(key:, value:, computed:, is_static: True) ->
-      Ok(ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:)))
-    ast.StaticBlock(body:) ->
-      Ok(ast.StmtWithLine(
+    ast_util.StaticField(ast_util.ClassFieldEl(key:, value:, computed:)) ->
+      ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:))
+    ast_util.StaticBlockEl(body) ->
+      ast.StmtWithLine(
         0,
         ast.ExpressionStatement(
           // Synthetic — no source token, so Span(0, 0).
@@ -7523,15 +7548,14 @@ fn static_init_stmts(
             callee: ast.ArrowFunctionExpression(
               span: ast.Span(0, 0),
               params: [],
-              body: ast.ArrowBodyBlock(ast.BlockStatement(body)),
+              body: ast.ArrowBodyBlock(body),
               is_async: False,
             ),
             arguments: [],
           ),
           directive: None,
         ),
-      ))
-    _ -> Error(Nil)
+      )
   }
 }
 

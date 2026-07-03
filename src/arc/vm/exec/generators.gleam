@@ -10,12 +10,13 @@ import arc/vm/key.{Named}
 import arc/vm/opcode.{type Op, Gosub, IteratorCloseThrow, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
-  type Heap, type HeapSlot, type State, type StepResult, type TryFrame,
-  InternalError, State, StepVmError, Thrown, TryFrame,
+  type Heap, type HeapSlot, type State, type StepExit, type TryFrame,
+  InternalError, State, Threw, TryFrame, VmFailed,
 }
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, GeneratorObject, GeneratorSlot,
-  JsObject, JsUndefined, ObjectSlot,
+  type DelegateMethod, type FuncTemplate, type JsValue, type Ref, DelegateReturn,
+  DelegateThrow, GeneratorObject, GeneratorSlot, JsObject, JsUndefined,
+  ObjectSlot,
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -44,7 +45,7 @@ pub fn call_native_generator_next(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   _unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let next_arg = helpers.first_arg_or_undefined(args)
   resume_generator_next(state, this, next_arg, execute_inner)
   |> alloc_iter_result(rest_stack)
@@ -62,7 +63,7 @@ pub fn resume_generator_next(
   this: JsValue,
   next_arg: JsValue,
   execute_inner: ExecuteInnerFn(host),
-) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
+) -> Result(#(Bool, JsValue, State(host)), StepExit(host)) {
   case get_generator_data(state.heap, this) {
     Some(gen) ->
       case gen.gen_state {
@@ -93,12 +94,9 @@ pub fn resume_generator_next(
 /// Wrap an internal #(done, value, state) resume result into the JS-visible
 /// convention: allocate {value, done} and push it onto rest_stack.
 fn alloc_iter_result(
-  res: Result(
-    #(Bool, JsValue, State(host)),
-    #(StepResult, JsValue, State(host)),
-  ),
+  res: Result(#(Bool, JsValue, State(host)), StepExit(host)),
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   use #(done, val, st) <- result.map(res)
   let #(h, obj) = common.create_iter_result(st.heap, st.builtins, val, done)
   State(..st, heap: h, stack: [obj, ..rest_stack])
@@ -112,7 +110,7 @@ pub fn call_native_generator_return(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let return_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
     Some(gen) ->
@@ -146,7 +144,7 @@ pub fn call_native_generator_return(
                 state,
                 gen,
                 iter_ref,
-                "return",
+                DelegateReturn,
                 return_val,
                 rest_stack,
                 execute_inner,
@@ -189,7 +187,7 @@ fn do_return_resume(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let gen_exec_state =
     build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
   unwind_return(gen_exec_state, return_val, execute_inner, unwind_to_catch)
@@ -205,7 +203,7 @@ pub fn call_native_generator_throw(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let throw_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
     Some(gen) ->
@@ -218,7 +216,7 @@ pub fn call_native_generator_throw(
               gen.data_ref,
               gen_with_state(gen, value.Completed),
             )
-          Error(#(Thrown, throw_val, State(..state, heap: h)))
+          Error(Threw(throw_val, State(..state, heap: h)))
         }
         value.Executing -> {
           state.throw_type_error(state, "Generator is already running")
@@ -230,24 +228,36 @@ pub fn call_native_generator_throw(
                 state,
                 gen,
                 iter_ref,
-                "throw",
+                DelegateThrow,
                 throw_val,
                 rest_stack,
                 execute_inner,
                 fn(state) {
-                  // Inner iterator has no .throw — §27.5.3.8 step 7.b.iii:
-                  // close it, then throw a TypeError.
-                  let state = close_iterator(state, iter_ref)
+                  // Inner iterator has no .throw — §27.5.3.8 step 7.b.iii-vi:
+                  // ? IteratorClose(iteratorRecord, NormalCompletion(empty)),
+                  // then throw a TypeError. The `?` matters: a `.return` that
+                  // is not callable, throws, or yields a non-object propagates
+                  // ITS error instead of the TypeError.
+                  let #(state, closed) =
+                    builtins_iterator.iterator_close_normal(
+                      state,
+                      JsObject(iter_ref),
+                    )
                   let h =
                     heap.write(
                       state.heap,
                       gen.data_ref,
                       gen_with_state(gen, value.Completed),
                     )
-                  state.throw_type_error(
-                    State(..state, heap: h),
-                    "The iterator does not provide a 'throw' method.",
-                  )
+                  let state = State(..state, heap: h)
+                  case closed {
+                    Error(thrown) -> Error(Threw(thrown, state))
+                    Ok(Nil) ->
+                      state.throw_type_error(
+                        state,
+                        "The iterator does not provide a 'throw' method.",
+                      )
+                  }
                 },
               )
             None -> {
@@ -267,7 +277,7 @@ pub fn call_native_generator_throw(
                       gen.data_ref,
                       gen_with_state(gen, value.Completed),
                     )
-                  Error(#(Thrown, throw_val, State(..state, heap: h2)))
+                  Error(Threw(throw_val, State(..state, heap: h2)))
                 }
               }
             }
@@ -276,20 +286,6 @@ pub fn call_native_generator_throw(
     None -> {
       state.throw_type_error(state, "not a generator object")
     }
-  }
-}
-
-/// Best-effort iterator close — call .return() if present, swallow errors.
-fn close_iterator(state: State(host), iter_ref: Ref) -> State(host) {
-  let iter = JsObject(iter_ref)
-  case object_ops.get_value(state, iter_ref, Named("return"), iter) {
-    Ok(#(JsUndefined, state)) | Ok(#(value.JsNull, state)) -> state
-    Ok(#(ret_fn, state)) ->
-      case state.call(state, ret_fn, iter, []) {
-        Ok(#(_, state)) -> state
-        Error(#(_, state)) -> state
-      }
-    Error(#(_, state)) -> state
   }
 }
 
@@ -409,15 +405,14 @@ fn forward_delegate(
   state: State(host),
   gen: GenData,
   iter_ref: Ref,
-  method: String,
+  method: DelegateMethod,
   arg: JsValue,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
-  on_missing: fn(State(host)) ->
-    Result(State(host), #(StepResult, JsValue, State(host))),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+  on_missing: fn(State(host)) -> Result(State(host), StepExit(host)),
+) -> Result(State(host), StepExit(host)) {
   let iter = JsObject(iter_ref)
-  case object_ops.get_value(state, iter_ref, Named(method), iter) {
+  case object_ops.get_value(state, iter_ref, delegate_key(method), iter) {
     Error(#(thrown, state)) -> {
       let h =
         heap.write(
@@ -425,7 +420,7 @@ fn forward_delegate(
           gen.data_ref,
           gen_with_state(gen, value.Completed),
         )
-      Error(#(Thrown, thrown, State(..state, heap: h)))
+      Error(Threw(thrown, State(..state, heap: h)))
     }
     Ok(#(JsUndefined, state)) | Ok(#(value.JsNull, state)) -> on_missing(state)
     Ok(#(method_fn, state)) ->
@@ -437,7 +432,7 @@ fn forward_delegate(
               gen.data_ref,
               gen_with_state(gen, value.Completed),
             )
-          Error(#(Thrown, thrown, State(..state, heap: h)))
+          Error(Threw(thrown, State(..state, heap: h)))
         }
         Ok(#(res, state)) -> {
           // §27.5.3.2 steps 7.a/7.b: IteratorComplete + IteratorValue on the
@@ -448,16 +443,16 @@ fn forward_delegate(
           use #(done, val, state) <- result.try(
             result.map_error(
               builtins_iterator.read_iter_result(state, res),
-              fn(err) {
-                let #(step, thrown, state) = err
-                let h =
-                  heap.write(
+              state.map_exit_state(_, fn(state: State(host)) {
+                State(
+                  ..state,
+                  heap: heap.write(
                     state.heap,
                     gen.data_ref,
                     gen_with_state(gen, value.Completed),
-                  )
-                #(step, thrown, State(..state, heap: h))
-              },
+                  ),
+                )
+              }),
             ),
           )
           case done {
@@ -500,6 +495,14 @@ fn forward_delegate(
   }
 }
 
+/// The property key a delegated method is looked up under.
+fn delegate_key(method: DelegateMethod) -> key.PropertyKey {
+  case method {
+    DelegateReturn -> Named("return")
+    DelegateThrow -> Named("throw")
+  }
+}
+
 /// Delegated iterator returned {done:true}. For .throw, resume the generator
 /// body normally past YieldStar with result.value on stack. For .return, the
 /// outer generator must ALSO return — complete it with that value.
@@ -507,12 +510,12 @@ fn resume_after_delegate(
   state: State(host),
   gen: GenData,
   val: JsValue,
-  method: String,
+  method: DelegateMethod,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case method {
-    "return" -> {
+    DelegateReturn -> {
       // §27.5.3.8 step 7.c.viii: if the inner iterator's return completed,
       // perform a return completion on the outer generator too.
       let h =
@@ -526,7 +529,7 @@ fn resume_after_delegate(
         State(..state, heap: h, stack: [result, ..rest_stack], pc: state.pc + 1),
       )
     }
-    _ -> {
+    DelegateThrow -> {
       // .throw forwarded and inner is done — continue outer body past
       // YieldStar with val on stack (the yield* expression's value).
       let stack_after = case gen.saved_stack {
@@ -550,7 +553,7 @@ fn run_to_completion(
   outer: State(host),
   gen: GenData,
   execute_inner: ExecuteInnerFn(host),
-) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
+) -> Result(#(Bool, JsValue, State(host)), StepExit(host)) {
   settle_completion(execute_inner(resumed), outer, gen)
 }
 
@@ -563,7 +566,7 @@ fn settle_completion(
   exec_result: Result(#(Outcome, State(host)), state.VmError),
   outer: State(host),
   gen: GenData,
-) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
+) -> Result(#(Bool, JsValue, State(host)), StepExit(host)) {
   case exec_result {
     Ok(#(Suspended(completion.Yield, yv), suspended)) -> {
       let st = save_stacks(suspended.try_stack)
@@ -618,19 +621,14 @@ fn settle_completion(
       // Merge globals from the throwing body, exactly like the Normal /
       // Yield arms: jobs it enqueued and ctx mutations must survive the
       // throw, not just its heap.
-      Error(#(
-        Thrown,
+      Error(Threw(
         thrown,
         State(..state.merge_globals(outer, thrown_state, []), heap: h),
       ))
     }
     Ok(#(Suspended(completion.Await, _), _)) ->
-      Error(#(
-        StepVmError(InternalError(
-          "settle_completion",
-          "await in sync generator",
-        )),
-        JsUndefined,
+      Error(VmFailed(
+        InternalError("settle_completion", "await in sync generator"),
         outer,
       ))
     Error(vm_err) -> {
@@ -640,7 +638,7 @@ fn settle_completion(
           gen.data_ref,
           gen_with_state(gen, value.Completed),
         )
-      Error(#(StepVmError(vm_err), JsUndefined, State(..outer, heap: h)))
+      Error(VmFailed(vm_err, State(..outer, heap: h)))
     }
   }
 }

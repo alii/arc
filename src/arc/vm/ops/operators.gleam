@@ -1,8 +1,8 @@
-import arc/vm/opcode.{
-  type BinOpKind, type UnaryOpKind, Add, BitAnd, BitNot, BitOr, BitXor, Div, Eq,
-  Exp, Gt, GtEq, LogicalNot, Lt, LtEq, Mod, Mul, Neg, NotEq, Pos, ShiftLeft,
-  ShiftRight, StrictEq, StrictNotEq, Sub, UShiftRight, Void,
+import arc/vm/binop.{
+  type PureBinOp, BitAnd, BitOr, BitXor, Div, Eq, Exp, Gt, GtEq, Lt, LtEq, Mod,
+  Mul, NotEq, Shl, Shr, StrictEq, StrictNotEq, Sub, UShr,
 }
+import arc/vm/opcode.{type UnaryOpKind, BitNot, LogicalNot, Neg, Pos, Void}
 import arc/vm/value.{
   type JsNum, type JsValue, BigInt, Finite, Infinity, JsBigInt, JsBool, JsNumber,
   JsString, NaN, NegInfinity,
@@ -26,15 +26,17 @@ pub type OpError {
   OpRangeError(msg: String)
 }
 
-/// Execute a binary operation on two JsValues.
+/// Execute a PURE binary operation on two already-primitive JsValues.
+///
+/// The `PureBinOp` argument (rather than the full 22-variant `BinOpKind`) is
+/// what makes this total: `Add`, `In` and `InstanceOf` are handled by the
+/// interpreter and are simply not spellable here.
 pub fn exec_binop(
-  kind: BinOpKind,
+  kind: PureBinOp,
   left: JsValue,
   right: JsValue,
 ) -> Result(JsValue, OpError) {
   case kind {
-    // Add is handled directly in the BinOp dispatcher with ToPrimitive
-    Add -> panic as "Add should be handled in BinOp dispatcher"
     Sub | Mul | Div | Mod | Exp ->
       case left, right {
         // §6.1.6.2 BigInt arithmetic.
@@ -67,7 +69,7 @@ pub fn exec_binop(
 
     // Bitwise / shifts — BigInt×BigInt operates on arbitrary precision
     // (§6.1.6.2), mixed types throw, Number path converts to i32.
-    BitAnd | BitOr | BitXor | ShiftLeft | ShiftRight | UShiftRight ->
+    BitAnd | BitOr | BitXor | Shl | Shr | UShr ->
       case left, right {
         JsBigInt(BigInt(a)), JsBigInt(BigInt(b)) -> bigint_bitwise(kind, a, b)
         JsBigInt(_), _ | _, JsBigInt(_) -> Error(bigint_mix_error)
@@ -80,11 +82,11 @@ pub fn exec_binop(
             // to 31 bits needs up to 62 bits on the BEAM's unbounded Ints, so
             // the result MUST be re-wrapped to int32 (`(1<<31)|0` is
             // -2147483648, not 2147483648).
-            ShiftLeft -> {
+            Shl -> {
               use a, b <- bitwise_binop(left, right)
               wrap_int32(int.bitwise_shift_left(a, int.bitwise_and(b, 31)))
             }
-            ShiftRight -> {
+            Shr -> {
               use a, b <- bitwise_binop(left, right)
               int.bitwise_shift_right(a, int.bitwise_and(b, 31))
             }
@@ -138,10 +140,6 @@ pub fn exec_binop(
           ord == GtOrd || ord == EqOrd
         }
       }
-
-    // In and InstanceOf handled in BinOp dispatcher (needs heap access)
-    opcode.In | opcode.InstanceOf ->
-      panic as "in/instanceof are handled in the BinOp dispatcher"
   }
 }
 
@@ -189,7 +187,7 @@ fn to_number(v: JsValue) -> Result(JsNum, OpError) {
   result.map_error(value.to_number(v), OpTypeError)
 }
 
-fn bigint_arith(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, OpError) {
+fn bigint_arith(kind: PureBinOp, a: Int, b: Int) -> Result(JsValue, OpError) {
   case kind {
     Sub -> Ok(JsBigInt(BigInt(a - b)))
     Mul -> Ok(JsBigInt(BigInt(a * b)))
@@ -229,7 +227,7 @@ fn bigint_pow(base: Int, exp: Int, acc: Int) -> Int {
   }
 }
 
-fn bigint_bitwise(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, OpError) {
+fn bigint_bitwise(kind: PureBinOp, a: Int, b: Int) -> Result(JsValue, OpError) {
   case kind {
     // Erlang band/bor/bxor on arbitrary-precision ints follow infinite
     // two's-complement semantics — exactly §6.1.6.2.17-19.
@@ -238,10 +236,10 @@ fn bigint_bitwise(kind: BinOpKind, a: Int, b: Int) -> Result(JsValue, OpError) {
     BitXor -> Ok(JsBigInt(BigInt(int.bitwise_exclusive_or(a, b))))
     // §6.1.6.2.9/10: shifts are arbitrary-precision; Erlang bsl/bsr accept
     // negative counts and shift the other way, matching leftShift(x, -y).
-    ShiftLeft -> Ok(JsBigInt(BigInt(int.bitwise_shift_left(a, b))))
-    ShiftRight -> Ok(JsBigInt(BigInt(int.bitwise_shift_right(a, b))))
+    Shl -> Ok(JsBigInt(BigInt(int.bitwise_shift_left(a, b))))
+    Shr -> Ok(JsBigInt(BigInt(int.bitwise_shift_right(a, b))))
     // §6.1.6.2.11 BigInt::unsignedRightShift always throws.
-    UShiftRight ->
+    UShr ->
       Error(OpTypeError("BigInts have no unsigned right shift, use >> instead"))
     _ -> Error(OpTypeError("BigInt bitwise: unreachable operator"))
   }
@@ -401,8 +399,11 @@ fn num_div(a: JsNum, b: JsNum) -> JsNum {
   }
 }
 
-/// Check if a float is negative (including -0.0).
-fn is_negative_float(x: Float) -> Bool {
+/// Check if a float is negative (including -0.0) — i.e. its IEEE sign bit is
+/// set. THE test to use whenever a sign decision must treat -0 as negative:
+/// a bare `x <. 0.0` (or its inverse `x >=. 0.0`) is False for -0.0 and
+/// silently picks the +0 branch.
+pub fn is_negative_float(x: Float) -> Bool {
   x <. 0.0 || is_neg_zero(x)
 }
 

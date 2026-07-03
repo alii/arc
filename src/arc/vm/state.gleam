@@ -1,4 +1,5 @@
 import arc/vm/builtins/common.{type Builtins}
+import arc/vm/completion.{type SuspendKind}
 import arc/vm/heap
 import arc/vm/internal/job_queue.{type JobQueue}
 import arc/vm/internal/tuple_array.{type TupleArray}
@@ -161,7 +162,12 @@ pub type RealmCtx(host) {
 /// the SAB's atomics ref for shared storage, a pid-scoped heap id
 /// otherwise — see arc_waiter_ffi:shared_buffer_key/local_buffer_key).
 /// Compared structurally; safe to send between processes.
-pub type WaiterKey
+///
+/// Alias of `value.WaiterKey`: `value.AtomicsWaiter` stores one, so the type
+/// has to be declared where the waiter record can see it. Named here as well
+/// because it is part of the host-capability contract (`WaitRequest.key`).
+pub type WaiterKey =
+  value.WaiterKey
 
 /// Opaque handle to one registered waiterlist entry (its ETS key plus the
 /// unique message ref a notifier will address). Produced by
@@ -262,13 +268,13 @@ pub type HostHooks {
     /// Monotonic clock in milliseconds. Used for Atomics waitAsync deadline
     /// bookkeeping and the event loop's timer wheel. NOT optional — every
     /// host has a clock — so it defaults to the BEAM monotonic clock
-    /// (`arc_atomics_ffi:monotonic_now/0`). An embedder overrides it to
+    /// (`arc_clock_ffi:monotonic_now/0`). An embedder overrides it to
     /// virtualise time (deterministic / mocked clocks).
     monotonic_now: fn() -> Int,
     /// Blocking sleep for the given number of milliseconds (ms <= 0 returns
     /// immediately). Used by the event loop to idle until the next timer /
     /// waitAsync deadline. Defaults to `timer:sleep/1`
-    /// (`arc_atomics_ffi:sleep/1`); an embedder overrides it alongside
+    /// (`arc_clock_ffi:sleep/1`); an embedder overrides it alongside
     /// `monotonic_now` for a virtual clock, or to yield to its own scheduler
     /// instead of blocking the OS thread.
     sleep_ms: fn(Int) -> Nil,
@@ -303,16 +309,17 @@ pub type HostHooks {
 }
 
 /// Default `monotonic_now` capability: the BEAM monotonic clock in
-/// milliseconds — the same `arc_atomics_ffi:monotonic_now/0` external the
+/// milliseconds — the same `arc_clock_ffi:monotonic_now/0` external the
 /// event loop and the Atomics builtin use, so a default-hooks host is
 /// behaviourally identical to one that never thinks about clocks.
-@external(erlang, "arc_atomics_ffi", "monotonic_now")
+@external(erlang, "arc_clock_ffi", "monotonic_now")
 fn host_monotonic_now() -> Int
 
 /// Default `sleep_ms` capability: `timer:sleep/1`, clamped to a no-op for
-/// ms <= 0 — the same `arc_atomics_ffi:sleep/1` external the event loop
-/// uses.
-@external(erlang, "arc_atomics_ffi", "sleep")
+/// ms <= 0 — the same `arc_clock_ffi:sleep/1` external the event loop uses.
+/// Always a BOUNDED idle: an untimed sync Atomics.wait blocks through
+/// `HostHooks.atomics`'s embedder capability, never through this.
+@external(erlang, "arc_clock_ffi", "sleep")
 fn host_sleep_ms(ms: Int) -> Nil
 
 /// The capability-free default: a host that can neither block an agent nor
@@ -320,7 +327,7 @@ fn host_sleep_ms(ms: Int) -> Nil
 /// with a TypeError). "No capabilities" is the safe baseline — sync
 /// Atomics.wait throws (AgentCanSuspend is false) rather than hanging. The
 /// clock and sleep hooks are NOT capability-gated: they default to the real
-/// `arc_atomics_ffi` monotonic clock and `timer:sleep`, which is what every
+/// `arc_clock_ffi` monotonic clock and `timer:sleep`, which is what every
 /// host wants unless it is virtualising time.
 pub fn default_host_hooks() -> HostHooks {
   HostHooks(
@@ -911,6 +918,10 @@ pub type VmError {
   PcOutOfBounds(pc: Int)
   /// Stack underflow
   StackUnderflow(op: String)
+  /// A coroutine suspension (`yield`/`await`) escaped a frame that cannot
+  /// resume it — top-level script, eval, module body, re-entrant native call.
+  /// `site` names the driver that received it.
+  SuspensionLeak(site: String, kind: SuspendKind)
   /// An engine invariant was breached (a bug in the VM, never something a
   /// guest program can trigger). `site` names the code location that detected
   /// it; `detail` says what was expected vs. found.
@@ -923,20 +934,72 @@ pub fn vm_error_message(err: VmError) -> String {
   case err {
     PcOutOfBounds(pc) -> "pc out of bounds: " <> int.to_string(pc)
     StackUnderflow(op) -> "stack underflow in " <> op
+    SuspensionLeak(site:, kind:) ->
+      "internal error at "
+      <> site
+      <> ": "
+      <> suspend_kind_name(kind)
+      <> " suspension escaped a non-coroutine frame"
     InternalError(site:, detail:) ->
       "internal error at " <> site <> ": " <> detail
   }
 }
 
-/// Signals from step() — either continue with new state, or stop.
-pub type StepResult {
-  Done
-  StepVmError(VmError)
-  Thrown
-  /// Generator suspension — yielded a value (or initial suspend).
-  Yielded
-  /// Async suspension — hit `await`, waiting on a promise.
-  Awaited
+fn suspend_kind_name(kind: SuspendKind) -> String {
+  case kind {
+    completion.Yield -> "yield"
+    completion.Await -> "await"
+  }
+}
+
+/// Why one bytecode step stopped the frame instead of continuing to the next
+/// instruction. Every variant carries the State it stopped in AND its own
+/// payload — there is no shared `JsValue` slot whose meaning depends on the
+/// tag (and none to fabricate for a `VmFailed`).
+pub type StepExit(host) {
+  /// A JS exception was raised. `unwind_to_catch` decides where it lands.
+  Threw(JsValue, State(host))
+  /// The outermost frame executed `Return` — the frame's normal completion.
+  Returned(JsValue, State(host))
+  /// A generator suspended. `YieldKind` says which opcode did it, and hence
+  /// which stack/pc fixup the suspended state needs.
+  Yielded(YieldKind, JsValue, State(host))
+  /// An async function/generator hit `await`, waiting on a promise.
+  Awaited(JsValue, State(host))
+  /// An engine invariant broke. Never observable by guest code.
+  VmFailed(VmError, State(host))
+}
+
+/// Which suspension opcode raised a `Yielded`, and therefore how the suspended
+/// state's stack/pc must be fixed up before it is saved. Carrying this on the
+/// exit is what lets the loop avoid re-reading `state.code[state.pc]` after
+/// the step already returned.
+pub type YieldKind {
+  /// `InitialYield` — stack unchanged, pc advances past the opcode.
+  InitialSuspend
+  /// `Yield` — pop the yielded value, pc advances.
+  PlainYield
+  /// `YieldStar` — pop the `.next()` arg but keep the iterator, pc stays put
+  /// so the resume re-executes the same opcode.
+  DelegateYield
+  /// `AsyncYieldStarResume` — drop the consumed result object and jump back
+  /// to the `AsyncYieldStarNext` at `next_pc`.
+  AsyncDelegateResume(next_pc: Int)
+}
+
+/// Rewrite the `State` a `StepExit` carries, leaving its tag and payload
+/// alone (used where an error path must still commit a heap write).
+pub fn map_exit_state(
+  exit: StepExit(host),
+  f: fn(State(host)) -> State(host),
+) -> StepExit(host) {
+  case exit {
+    Threw(v, s) -> Threw(v, f(s))
+    Returned(v, s) -> Returned(v, f(s))
+    Yielded(k, v, s) -> Yielded(k, v, f(s))
+    Awaited(v, s) -> Awaited(v, f(s))
+    VmFailed(e, s) -> VmFailed(e, f(s))
+  }
 }
 
 // ============================================================================
@@ -947,36 +1010,36 @@ pub type StepResult {
 pub fn throw_type_error(
   state: State(host),
   msg: String,
-) -> Result(a, #(StepResult, JsValue, State(host))) {
+) -> Result(a, StepExit(host)) {
   let #(state, err) = alloc_error(state, TypeErr, msg)
-  Error(#(Thrown, err, state))
+  Error(Threw(err, state))
 }
 
 /// Allocate a JS RangeError and return it as a step-level thrown error.
 pub fn throw_range_error(
   state: State(host),
   msg: String,
-) -> Result(a, #(StepResult, JsValue, State(host))) {
+) -> Result(a, StepExit(host)) {
   let #(state, err) = alloc_error(state, RangeErr, msg)
-  Error(#(Thrown, err, state))
+  Error(Threw(err, state))
 }
 
 /// Allocate a JS ReferenceError and return it as a step-level thrown error.
 pub fn throw_reference_error(
   state: State(host),
   msg: String,
-) -> Result(a, #(StepResult, JsValue, State(host))) {
+) -> Result(a, StepExit(host)) {
   let #(state, err) = alloc_error(state, ReferenceErr, msg)
-  Error(#(Thrown, err, state))
+  Error(Threw(err, state))
 }
 
 /// Bridge from inner helpers that return Result(a, #(JsValue, State))
-/// to the step function's Result(a, #(StepResult, JsValue, State)).
+/// to the step function's Result(a, StepExit(host)).
 pub fn rethrow(
   res: Result(a, #(JsValue, State(host))),
-) -> Result(a, #(StepResult, JsValue, State(host))) {
+) -> Result(a, StepExit(host)) {
   result.map_error(res, fn(err) {
     let #(thrown, state) = err
-    #(Thrown, thrown, state)
+    Threw(thrown, state)
   })
 }

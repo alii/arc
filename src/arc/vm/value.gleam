@@ -573,8 +573,9 @@ pub type ArrayIterKind {
   ArrayIterEntries
 }
 
-/// Element type of a TypedArray — ES2024 §23.2 Table 69.
-pub type TypedArrayKind {
+/// The nine element types whose [[ContentType]] is Number — ES2024 §23.2
+/// Table 69. A value of this type is PROOF the element domain is JsNum.
+pub type NumberKind {
   Int8Kind
   Uint8Kind
   Uint8ClampedKind
@@ -584,57 +585,71 @@ pub type TypedArrayKind {
   Uint32Kind
   Float32Kind
   Float64Kind
+}
+
+/// The two element types whose [[ContentType]] is BigInt — ES2024 §23.2
+/// Table 69. A value of this type is PROOF the element domain is BigInt.
+pub type BigIntKind {
   BigInt64Kind
   BigUint64Kind
 }
 
+/// Element type of a TypedArray — ES2024 §23.2 Table 69, split by
+/// [[ContentType]] so a `case` on the kind hands the arms a witness of the
+/// element domain. There is no boolean "is bigint" predicate: matching
+/// `NumKind(_)` / `BigKind(_)` is the ONE spelling of §23.2's ContentType.
+pub type TypedArrayKind {
+  NumKind(NumberKind)
+  BigKind(BigIntKind)
+}
+
 /// All TypedArray kinds, in the order the global constructors are installed.
 pub const all_typed_array_kinds = [
-  Int8Kind,
-  Uint8Kind,
-  Uint8ClampedKind,
-  Int16Kind,
-  Uint16Kind,
-  Int32Kind,
-  Uint32Kind,
-  Float32Kind,
-  Float64Kind,
-  BigInt64Kind,
-  BigUint64Kind,
+  NumKind(Int8Kind),
+  NumKind(Uint8Kind),
+  NumKind(Uint8ClampedKind),
+  NumKind(Int16Kind),
+  NumKind(Uint16Kind),
+  NumKind(Int32Kind),
+  NumKind(Uint32Kind),
+  NumKind(Float32Kind),
+  NumKind(Float64Kind),
+  BigKind(BigInt64Kind),
+  BigKind(BigUint64Kind),
 ]
 
-/// Element size in bytes — §23.2 Table 69.
-pub fn typed_array_element_size(kind: TypedArrayKind) -> Int {
+/// Element size in bytes of a Number content type — §23.2 Table 69.
+pub fn number_kind_size(kind: NumberKind) -> Int {
   case kind {
     Int8Kind | Uint8Kind | Uint8ClampedKind -> 1
     Int16Kind | Uint16Kind -> 2
     Int32Kind | Uint32Kind | Float32Kind -> 4
-    Float64Kind | BigInt64Kind | BigUint64Kind -> 8
+    Float64Kind -> 8
+  }
+}
+
+/// Element size in bytes — §23.2 Table 69. Both BigInt kinds are 8 bytes.
+pub fn typed_array_element_size(kind: TypedArrayKind) -> Int {
+  case kind {
+    NumKind(k) -> number_kind_size(k)
+    BigKind(_) -> 8
   }
 }
 
 /// [[TypedArrayName]] — the constructor's global name.
 pub fn typed_array_name(kind: TypedArrayKind) -> String {
   case kind {
-    Int8Kind -> "Int8Array"
-    Uint8Kind -> "Uint8Array"
-    Uint8ClampedKind -> "Uint8ClampedArray"
-    Int16Kind -> "Int16Array"
-    Uint16Kind -> "Uint16Array"
-    Int32Kind -> "Int32Array"
-    Uint32Kind -> "Uint32Array"
-    Float32Kind -> "Float32Array"
-    Float64Kind -> "Float64Array"
-    BigInt64Kind -> "BigInt64Array"
-    BigUint64Kind -> "BigUint64Array"
-  }
-}
-
-/// Whether the kind's content type is BigInt (§23.2: ContentType).
-pub fn typed_array_is_bigint(kind: TypedArrayKind) -> Bool {
-  case kind {
-    BigInt64Kind | BigUint64Kind -> True
-    _ -> False
+    NumKind(Int8Kind) -> "Int8Array"
+    NumKind(Uint8Kind) -> "Uint8Array"
+    NumKind(Uint8ClampedKind) -> "Uint8ClampedArray"
+    NumKind(Int16Kind) -> "Int16Array"
+    NumKind(Uint16Kind) -> "Uint16Array"
+    NumKind(Int32Kind) -> "Int32Array"
+    NumKind(Uint32Kind) -> "Uint32Array"
+    NumKind(Float32Kind) -> "Float32Array"
+    NumKind(Float64Kind) -> "Float64Array"
+    BigKind(BigInt64Kind) -> "BigInt64Array"
+    BigKind(BigUint64Kind) -> "BigUint64Array"
   }
 }
 
@@ -1060,8 +1075,30 @@ pub type AtomicsNativeFn {
   AtomicsXor
 }
 
+/// Opaque cross-process identity of a buffer's WaiterList (§25.4.3.6
+/// GetWaiterList) — an Erlang term: the SAB's atomics ref for shared storage,
+/// a pid-scoped heap id otherwise (see
+/// arc_waiter_ffi:shared_buffer_key/local_buffer_key). Compared structurally;
+/// safe to send between processes.
+///
+/// It lives here rather than in arc/vm/state because `AtomicsWaiter` below
+/// carries one, and it is the ONE notion of waiter identity: the shared ETS
+/// registry keys tokens by it, so anything that reconciles State's waiters
+/// against that registry must match on it too. `arc/vm/state` re-exports it
+/// as the host-capability contract type.
+pub type WaiterKey
+
 /// A pending Atomics.waitAsync waiter: a promise to resolve with "ok" when
-/// Atomics.notify hits the same (buffer, byte offset) waiter-list slot.
+/// Atomics.notify hits the same waiter-list slot.
+///
+/// `key` is the WaiterList identity of `buffer`, computed ONCE at
+/// registration. It — not `buffer` — is what the shared ETS registry keys
+/// this waiter's token by, so every reconciliation against that registry
+/// (notify's self-token settle, a cross-process wake injection, an expiring
+/// waiter withdrawing its token) matches on `key` and cannot disagree with
+/// the registry about which waiters it is talking about. `buffer` stays for
+/// GC rooting.
+///
 /// `promise_data` is the PromiseSlot ref (for settling); `promise` is the
 /// visible Promise object ref (kept rooted while the waiter is pending).
 /// `deadline` is the absolute monotonic-clock millisecond at which the waiter
@@ -1069,6 +1106,7 @@ pub type AtomicsNativeFn {
 /// EnqueueAtomicsWaitAsyncTimeoutJob) — None for an infinite timeout.
 pub type AtomicsWaiter {
   AtomicsWaiter(
+    key: WaiterKey,
     buffer: Ref,
     byte_offset: Int,
     promise_data: Ref,
@@ -1504,29 +1542,35 @@ pub type CollatorState {
 // The `*_to_js_string` functions render the spec spelling for
 // resolvedOptions.
 
-/// `[[Style]]` (§15.1.3 SetNumberFormatUnitOptions).
+/// `[[Style]]` (§15.1.3 SetNumberFormatUnitOptions). The style-conditional
+/// slots live *inside* the variant that selects them: `[[Currency]]` /
+/// `[[CurrencyDisplay]]` / `[[CurrencySign]]` exist exactly when the style is
+/// currency, `[[Unit]]` / `[[UnitDisplay]]` exactly when it is unit. A
+/// currency style without a currency code is therefore not representable, and
+/// no formatter has to invent a default for a slot the style did not select.
 pub type NumStyle {
   StyleDecimal
   StylePercent
-  StyleCurrency
-  StyleUnit
+  StyleCurrency(currency: String, display: CurrencyDisplay, sign: CurrencySign)
+  StyleUnit(unit: String, display: UnitDisplay)
 }
 
 pub fn num_style_to_js_string(v: NumStyle) -> String {
   case v {
     StyleDecimal -> "decimal"
     StylePercent -> "percent"
-    StyleCurrency -> "currency"
-    StyleUnit -> "unit"
+    StyleCurrency(..) -> "currency"
+    StyleUnit(..) -> "unit"
   }
 }
 
-/// `[[Notation]]` — shared by NumberFormat and PluralRules.
+/// `[[Notation]]` — shared by NumberFormat and PluralRules. `[[CompactDisplay]]`
+/// only exists under compact notation, so it lives in that variant.
 pub type Notation {
   NotationStandard
   NotationScientific
   NotationEngineering
-  NotationCompact
+  NotationCompact(display: CompactDisplay)
 }
 
 pub fn notation_to_js_string(v: Notation) -> String {
@@ -1534,7 +1578,7 @@ pub fn notation_to_js_string(v: Notation) -> String {
     NotationStandard -> "standard"
     NotationScientific -> "scientific"
     NotationEngineering -> "engineering"
-    NotationCompact -> "compact"
+    NotationCompact(..) -> "compact"
   }
 }
 
@@ -1699,23 +1743,17 @@ pub type IntlUseGrouping {
 }
 
 /// Intl.NumberFormat resolved options (§15.1.2 InitializeNumberFormat).
-/// currency*/unit*/compact_display are only populated when the matching
-/// style/notation selects them (and are then omitted from resolvedOptions
-/// when absent). `bound_format` caches the `format` getter's bound function.
+/// The style-/notation-conditional slots (currency*, unit*, compactDisplay)
+/// live inside the `NumStyle` / `Notation` variant that selects them.
+/// `bound_format` caches the `format` getter's bound function.
 pub type NumberFormatState {
   NumberFormatState(
     locale: String,
     numbering_system: String,
     style: NumStyle,
-    currency: Option(String),
-    currency_display: Option(CurrencyDisplay),
-    currency_sign: Option(CurrencySign),
-    unit: Option(String),
-    unit_display: Option(UnitDisplay),
     digits: IntlDigitOptions,
     use_grouping: IntlUseGrouping,
     notation: Notation,
-    compact_display: Option(CompactDisplay),
     sign_display: SignDisplay,
     bound_format: Option(Ref),
   )
@@ -1738,23 +1776,145 @@ pub type DtfComponent {
   DtfTimeZoneName
 }
 
+// --- DateTimeFormat closed option sets (§11.1.2 component table) -----------
+//
+// Each component admits its own fixed set of widths — the §11.1.2 table gives
+// weekday/era/dayPeriod « narrow, short, long », year/day/hour/minute/second
+// « 2-digit, numeric », month all five, timeZoneName its own six. Modelling
+// them as one `String` let a formatter silently default a width the validator
+// had accepted; each is now its own closed sum, so a formatter that forgets a
+// width does not compile.
+
+/// Widths of the numeric-only components (year, day, hour, minute, second).
+pub type NumericWidth {
+  WNumeric
+  WTwoDigit
+}
+
+pub fn numeric_width_to_js_string(v: NumericWidth) -> String {
+  case v {
+    WNumeric -> "numeric"
+    WTwoDigit -> "2-digit"
+  }
+}
+
+/// Widths of the name components (weekday, era, dayPeriod).
+pub type NameWidth {
+  WLong
+  WShort
+  WNarrow
+}
+
+pub fn name_width_to_js_string(v: NameWidth) -> String {
+  case v {
+    WLong -> "long"
+    WShort -> "short"
+    WNarrow -> "narrow"
+  }
+}
+
+/// `month` is the one component that admits both a numeric and a name width.
+pub type MonthWidth {
+  MonthNum(NumericWidth)
+  MonthName(NameWidth)
+}
+
+pub fn month_width_to_js_string(v: MonthWidth) -> String {
+  case v {
+    MonthNum(w) -> numeric_width_to_js_string(w)
+    MonthName(w) -> name_width_to_js_string(w)
+  }
+}
+
+/// `timeZoneName` widths (§11.1.2).
+pub type TimeZoneNameWidth {
+  TzShort
+  TzLong
+  TzShortOffset
+  TzLongOffset
+  TzShortGeneric
+  TzLongGeneric
+}
+
+pub fn time_zone_name_width_to_js_string(v: TimeZoneNameWidth) -> String {
+  case v {
+    TzShort -> "short"
+    TzLong -> "long"
+    TzShortOffset -> "shortOffset"
+    TzLongOffset -> "longOffset"
+    TzShortGeneric -> "shortGeneric"
+    TzLongGeneric -> "longGeneric"
+  }
+}
+
+/// `[[HourCycle]]` (§11.1.2).
+pub type HourCycle {
+  H11
+  H12
+  H23
+  H24
+}
+
+pub fn hour_cycle_to_js_string(v: HourCycle) -> String {
+  case v {
+    H11 -> "h11"
+    H12 -> "h12"
+    H23 -> "h23"
+    H24 -> "h24"
+  }
+}
+
+/// `[[DateStyle]]`.
+pub type DateStyle {
+  DsFull
+  DsLong
+  DsMedium
+  DsShort
+}
+
+pub fn date_style_to_js_string(v: DateStyle) -> String {
+  case v {
+    DsFull -> "full"
+    DsLong -> "long"
+    DsMedium -> "medium"
+    DsShort -> "short"
+  }
+}
+
+/// `[[TimeStyle]]`.
+pub type TimeStyle {
+  TsFull
+  TsLong
+  TsMedium
+  TsShort
+}
+
+pub fn time_style_to_js_string(v: TimeStyle) -> String {
+  case v {
+    TsFull -> "full"
+    TsLong -> "long"
+    TsMedium -> "medium"
+    TsShort -> "short"
+  }
+}
+
 /// The active DateTimeFormat formatting components — which date/time fields
 /// the output contains and in which width (§11.5 DateTimeFormat records).
-/// Each value is a validated width string ("numeric" / "2-digit" / "long" /
-/// …); `None` means the component is not part of the format.
+/// `None` means the component is not part of the format.
 pub type DtfComponents {
   DtfComponents(
-    weekday: Option(String),
-    era: Option(String),
-    year: Option(String),
-    month: Option(String),
-    day: Option(String),
-    day_period: Option(String),
-    hour: Option(String),
-    minute: Option(String),
-    second: Option(String),
-    fractional_second_digits: Option(String),
-    time_zone_name: Option(String),
+    weekday: Option(NameWidth),
+    era: Option(NameWidth),
+    year: Option(NumericWidth),
+    month: Option(MonthWidth),
+    day: Option(NumericWidth),
+    day_period: Option(NameWidth),
+    hour: Option(NumericWidth),
+    minute: Option(NumericWidth),
+    second: Option(NumericWidth),
+    /// `fractionalSecondDigits` is a digit count in 1..3, not a width.
+    fractional_second_digits: Option(Int),
+    time_zone_name: Option(TimeZoneNameWidth),
   )
 }
 
@@ -1793,20 +1953,20 @@ pub type DateTimeFormatState {
     time_zone: String,
     tz_offset_minutes: Int,
     tz_system: Bool,
-    hour_cycle: Option(String),
-    weekday: Option(String),
-    era: Option(String),
-    year: Option(String),
-    month: Option(String),
-    day: Option(String),
-    day_period: Option(String),
-    hour: Option(String),
-    minute: Option(String),
-    second: Option(String),
+    hour_cycle: Option(HourCycle),
+    weekday: Option(NameWidth),
+    era: Option(NameWidth),
+    year: Option(NumericWidth),
+    month: Option(MonthWidth),
+    day: Option(NumericWidth),
+    day_period: Option(NameWidth),
+    hour: Option(NumericWidth),
+    minute: Option(NumericWidth),
+    second: Option(NumericWidth),
     fractional_second_digits: Option(Int),
-    time_zone_name: Option(String),
-    date_style: Option(String),
-    time_style: Option(String),
+    time_zone_name: Option(TimeZoneNameWidth),
+    date_style: Option(DateStyle),
+    time_style: Option(TimeStyle),
     explicit: List(DtfComponent),
     components: DtfComponents,
     bound_format: Option(Ref),
@@ -1814,13 +1974,12 @@ pub type DateTimeFormatState {
 }
 
 /// Intl.PluralRules resolved options (§16.1.2 InitializePluralRules).
-/// `compact_display` is only present for compact notation.
+/// `[[CompactDisplay]]` rides on the compact `Notation` variant.
 pub type PluralRulesState {
   PluralRulesState(
     locale: String,
     plural_type: String,
     notation: Notation,
-    compact_display: Option(CompactDisplay),
     digits: IntlDigitOptions,
   )
 }
@@ -1858,10 +2017,35 @@ pub type DisplayNamesState {
   )
 }
 
+/// A DurationFormat unit's resolved `[[<Unit>Style]]`. `DurFractional` is the
+/// internal-only style a sub-second unit folds into when it rides on the
+/// preceding numeric unit's fraction; resolvedOptions spells it "numeric"
+/// (see `duration_unit_style_to_js_string`).
+pub type DurationUnitStyle {
+  DurLong
+  DurShort
+  DurNarrow
+  DurNumeric
+  DurTwoDigit
+  DurFractional
+}
+
+/// The resolvedOptions spelling of a `[[<Unit>Style]]`.
+pub fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
+  case v {
+    DurLong -> "long"
+    DurShort -> "short"
+    DurNarrow -> "narrow"
+    DurNumeric -> "numeric"
+    DurTwoDigit -> "2-digit"
+    DurFractional -> "numeric"
+  }
+}
+
 /// One DurationFormat unit's resolved `[[<Unit>Style]]` / `[[<Unit>Display]]`
-/// pair (GetDurationUnitOptions).
+/// pair (GetDurationUnitOptions). `style` is the INTERNAL style.
 pub type DurationUnitOptions {
-  DurationUnitOptions(style: String, display: String)
+  DurationUnitOptions(style: DurationUnitStyle, display: String)
 }
 
 /// Intl.DurationFormat resolved options (Intl.DurationFormat §1.1.3), one
@@ -2263,17 +2447,38 @@ pub type AtomicsRef
 /// (`BufShared`): one unsigned 64-bit cell per 8 bytes, little-endian within
 /// the cell, sub-word writes via a compare_exchange retry loop (the cell
 /// mapping is documented in arc_sab_ffi.erl). Growable SABs pre-allocate
-/// max_byte_length cells up front; `byte_length` is the CURRENT length
-/// (grow only bumps this number in the local heap slot).
+/// max_byte_length cells up front. `BufShared` carries NOTHING but the ref:
+/// the CURRENT [[ArrayBufferByteLength]] of a SAB lives in the shared cells
+/// too (§25.2.2.1 makes it a shared 8-byte block), so a `grow` in one agent
+/// is observed by every other agent holding the same buffer.
 pub type BufferData {
   BufBytes(bytes: BitArray)
-  BufShared(ref: AtomicsRef, byte_length: Int)
+  BufShared(ref: AtomicsRef)
 }
 
-/// Allocate a fresh zero-filled shared storage of `max_byte_length` capacity
-/// (atomics cells are zero-initialized by the VM).
+/// Allocate a fresh zero-filled shared storage able to hold
+/// `max_byte_length` bytes, whose current [[ArrayBufferByteLength]] is
+/// `byte_length` (atomics data cells are zero-initialized by the VM).
 @external(erlang, "arc_sab_ffi", "new")
-pub fn sab_new(max_byte_length: Int) -> AtomicsRef
+pub fn sab_new(max_byte_length: Int, byte_length: Int) -> AtomicsRef
+
+/// The SAB's current [[ArrayBufferByteLength]], read out of the shared cell
+/// that holds it — every agent sees the same value.
+@external(erlang, "arc_sab_ffi", "byte_length")
+pub fn sab_byte_length(ref: AtomicsRef) -> Int
+
+/// Result of a §25.2.2.2 GrowSharedArrayBuffer on the shared length cell.
+/// `TooSmall` means another agent already grew the buffer past `new_length`
+/// (the length is monotonic), which is a RangeError for the caller.
+pub type SabGrowResult {
+  Grown
+  TooSmall
+}
+
+/// Publish a new (larger) [[ArrayBufferByteLength]] into the shared length
+/// cell via a monotonic compare-exchange loop.
+@external(erlang, "arc_sab_ffi", "grow")
+pub fn sab_grow(ref: AtomicsRef, new_byte_length: Int) -> SabGrowResult
 
 /// Read `count` bytes starting at `byte_offset` out of shared storage.
 @external(erlang, "arc_sab_ffi", "read_bytes")
@@ -2303,7 +2508,7 @@ pub fn buffer_is_shared(data: BufferData) -> Bool {
 pub fn buffer_byte_size(data: BufferData) -> Int {
   case data {
     BufBytes(bytes:) -> bit_array.byte_size(bytes)
-    BufShared(ref: _, byte_length:) -> byte_length
+    BufShared(ref:) -> sab_byte_length(ref)
   }
 }
 
@@ -2313,20 +2518,7 @@ pub fn buffer_byte_size(data: BufferData) -> Int {
 pub fn buffer_bits(data: BufferData) -> BitArray {
   case data {
     BufBytes(bytes:) -> bytes
-    BufShared(ref:, byte_length:) -> sab_read_bytes(ref, 0, byte_length)
-  }
-}
-
-/// Persist a full-buffer image `new_bits` into the storage. `BufBytes`
-/// simply becomes the new binary; `BufShared` writes the bytes into the
-/// shared cells in place (same ref, length unchanged).
-pub fn buffer_store_bits(data: BufferData, new_bits: BitArray) -> BufferData {
-  case data {
-    BufBytes(bytes: _) -> BufBytes(bytes: new_bits)
-    BufShared(ref:, byte_length:) -> {
-      let Nil = sab_write_bytes(ref, 0, new_bits)
-      BufShared(ref:, byte_length:)
-    }
+    BufShared(ref:) -> sab_read_bytes(ref, 0, sab_byte_length(ref))
   }
 }
 
@@ -2335,6 +2527,10 @@ pub fn buffer_store_bits(data: BufferData, new_bits: BitArray) -> BufferData {
 /// caller actually modified. Other regions of a shared buffer may be
 /// concurrently mutated by other agent processes; writing the whole snapshot
 /// back would clobber their updates.
+///
+/// The region MUST lie inside `new_bits`: every caller has already validated
+/// the write range against the live buffer, so an out-of-range region is an
+/// arithmetic bug in the caller — crash rather than silently drop the store.
 pub fn buffer_store_region(
   data: BufferData,
   new_bits: BitArray,
@@ -2343,12 +2539,11 @@ pub fn buffer_store_region(
 ) -> BufferData {
   case data {
     BufBytes(bytes: _) -> BufBytes(bytes: new_bits)
-    BufShared(ref:, byte_length:) -> {
-      let Nil = case bit_array.slice(new_bits, byte_offset, count) {
-        Ok(region) -> sab_write_bytes(ref, byte_offset, region)
-        Error(Nil) -> Nil
-      }
-      BufShared(ref:, byte_length:)
+    BufShared(ref:) -> {
+      let assert Ok(region) = bit_array.slice(new_bits, byte_offset, count)
+        as "buffer_store_region: write range outside the new buffer image"
+      let Nil = sab_write_bytes(ref, byte_offset, region)
+      BufShared(ref:)
     }
   }
 }
@@ -2477,11 +2672,14 @@ pub type ExoticKind(ctx, host) {
     resources: List(DisposeResource),
   )
   /// ArrayBuffer / SharedArrayBuffer — ES2024 §25.1/§25.2.
-  /// [[ArrayBufferData]] is `data` — `BufBytes` (an immutable BEAM binary)
-  /// for non-shared buffers, `BufShared` (an Erlang `atomics` array shared
-  /// across BEAM processes) for SharedArrayBuffers. [[ArrayBufferByteLength]]
-  /// is derived (`buffer_byte_size(data)`). `detached` models
-  /// [[ArrayBufferData]] = null (data is reset to BufBytes(<<>>) on detach).
+  /// [[ArrayBufferData]] is `data`: `None` is the spec's null (a DETACHED
+  /// buffer — there is no separate `detached` flag, so "detached but still
+  /// holding bytes" is unrepresentable and every read of a buffer's bytes is
+  /// an unwrap the compiler forces you to handle). `Some(BufBytes(_))` is an
+  /// immutable BEAM binary (non-shared buffers); `Some(BufShared(_))` is an
+  /// Erlang `atomics` array shared across BEAM processes
+  /// (SharedArrayBuffers). [[ArrayBufferByteLength]] is derived
+  /// (`buffer_byte_size(data)`).
   /// `max_byte_length` is Some for resizable (AB) / growable (SAB) buffers.
   /// Shared-ness (SharedArrayBuffer, never detachable) is NOT a separate
   /// flag — it is derived from the storage: `buffer_is_shared(data)` is True
@@ -2492,8 +2690,7 @@ pub type ExoticKind(ctx, host) {
   /// results): always BufBytes, never shared, never detachable, never
   /// resizable; every write path (Atomics, TypedArray stores) rejects it.
   ArrayBufferObject(
-    data: BufferData,
-    detached: Bool,
+    data: option.Option(BufferData),
     max_byte_length: option.Option(Int),
     immutable: Bool,
   )
@@ -2521,8 +2718,8 @@ pub type ExoticKind(ctx, host) {
   DateObject(time_value: JsNum)
   /// Intl service instance (ECMA-402) — Intl.Locale, Intl.NumberFormat, etc.
   /// `data` holds the resolved internal slots ([[Locale]], [[Style]], …) as
-  /// a typed per-service record; `service` is always `intl_service(data)`.
-  IntlObject(service: IntlService, data: IntlData)
+  /// a typed per-service record; the brand is `intl_service(data)`.
+  IntlObject(data: IntlData)
   /// DataView object -- ES2024 Section 25.3. [[ViewedArrayBuffer]] is `buffer`,
   /// [[ByteOffset]] is `byte_offset`. `byte_length: None` means byte-length
   /// auto-tracking (view over a resizable buffer with no explicit length).
@@ -3045,6 +3242,17 @@ pub type AsyncGenCompletion {
   AGThrow
 }
 
+/// The two methods a `yield*` delegation forwards to the inner iterator.
+/// `next` is deliberately absent: a next request never leaves the delegating
+/// loop (the YieldStar / AsyncYieldStarNext opcodes call `.next` inline), so
+/// only `.return`/`.throw` are ever forwarded. Naming exactly those two turns
+/// what used to be a doc-comment invariant ("AGNext never reaches here") into
+/// a compile error.
+pub type DelegateMethod {
+  DelegateReturn
+  DelegateThrow
+}
+
 /// What an AsyncGeneratorResume callback is waiting on.
 pub type AGResumeKind {
   /// Body `await` settled — push value / throw into body, continue executing.
@@ -3052,8 +3260,8 @@ pub type AGResumeKind {
   /// .return(v) on a completed gen — settle the head request with awaited v.
   AGResumeAwaitingReturn
   /// yield* delegated iter.return()/iter.throw() result settled.
-  /// Carries the ORIGINAL request kind (AGReturn or AGThrow) for done-dispatch.
-  AGResumeDelegate(method: AsyncGenCompletion)
+  /// Carries which of the two was forwarded, for done-dispatch.
+  AGResumeDelegate(method: DelegateMethod)
   /// AsyncIteratorClose await settled — inner .throw was missing, so we
   /// closed the iter and now throw a TypeError into the body. Result/error
   /// from the close await is discarded per spec (outer abrupt completion
@@ -3509,7 +3717,7 @@ fn do_refs_in_slot(
           dict.fold(exports, acc, fn(a, _name, box_ref) { [box_ref, ..a] })
         // The only heap refs an Intl instance can hold are the cached bound
         // `format`/`compare` function objects; everything else is scalar.
-        IntlObject(data:, ..) ->
+        IntlObject(data:) ->
           case data {
             CollatorData(CollatorState(bound_compare: Some(r), ..))
             | NumberFormatData(NumberFormatState(bound_format: Some(r), ..))
@@ -4606,6 +4814,22 @@ pub fn float_to_int(f: Float) -> Int {
   case f <. 0.0 {
     True -> 0 - float.truncate(float.negate(f))
     False -> float.truncate(f)
+  }
+}
+
+/// `Some(i)` iff `f` is an integral Number (§4.4.31 IsIntegralNumber) whose
+/// value is the Int `i`; `None` for a fractional `f`. THE way to ask "is this
+/// Number integral, and what Int is it" — `float_to_int` alone silently
+/// truncates.
+///
+/// ±0-safe: `+. 0.0` normalizes -0.0 to +0.0 on both sides before comparing.
+/// The naive `int.to_float(i) == f` compiles to BEAM `=:=`, for which
+/// `0.0 =:= -0.0` is False, so it reads -0 as non-integral.
+pub fn integral_int(f: Float) -> Option(Int) {
+  let i = float_to_int(f)
+  case int.to_float(i) +. 0.0 == f +. 0.0 {
+    True -> Some(i)
+    False -> None
   }
 }
 

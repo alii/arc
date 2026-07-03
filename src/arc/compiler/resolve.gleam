@@ -4,22 +4,23 @@
 /// Two-pass algorithm:
 ///   Pass 1: Walk IR, skip IrLabel markers, build Dict(label_id → PC)
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
+import arc/vm/binop
 import arc/vm/internal/tuple_array
 import arc/vm/key
 import arc/vm/opcode.{
-  type IrOp, type LexicalSlots, type Op, type SyntaxPerms, IrArrayFrom,
-  IrArrayFromWithHoles, IrArrayPush, IrArrayPushHole, IrArraySpread,
-  IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrAwait, IrBinOp, IrBoxLocal,
-  IrCall, IrCallApply, IrCallConstructor, IrCallConstructorApply, IrCallEval,
-  IrCallMethod, IrCallMethodApply, IrCmpLocalConstJump, IrCmpLocalLocalJump,
-  IrCreateArguments, IrCreateRestArray, IrDecLocal, IrDeclareEvalVar,
-  IrDeclareGlobalLex, IrDeclareGlobalVar, IrDefineAccessor,
-  IrDefineAccessorComputed, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDefineMethodComputed, IrDefinePrivateAccessor, IrDefinePrivateField,
-  IrDefinePrivateMethod, IrDeleteElem, IrDeleteField, IrDeleteGlobalVar, IrDup,
-  IrForInNext, IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem,
-  IrGetElem2, IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
-  IrGetLocal, IrGetPrivateField, IrGetPrivateField2, IrGetPrivateFieldDyn,
+  type IrOp, type Op, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush,
+  IrArrayPushHole, IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume,
+  IrAwait, IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor,
+  IrCallConstructorApply, IrCallEval, IrCallMethod, IrCallMethodApply,
+  IrCmpLocalConstJump, IrCmpLocalLocalJump, IrCreateArguments, IrCreateRestArray,
+  IrDecLocal, IrDeclareEvalVar, IrDeclareGlobalLex, IrDeclareGlobalVar,
+  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
+  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed,
+  IrDefinePrivateAccessor, IrDefinePrivateField, IrDefinePrivateMethod,
+  IrDeleteElem, IrDeleteField, IrDeleteGlobalVar, IrDup, IrForInNext,
+  IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
+  IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
+  IrGetPrivateField, IrGetPrivateField2, IrGetPrivateFieldDyn,
   IrGetPrivateFieldDyn2, IrGetPrototypeOf, IrGetSuperValue, IrGetSuperValue2,
   IrGetTemplateObject, IrGosub, IrIncLocal, IrInitGlobalLex, IrInitialYield,
   IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
@@ -36,62 +37,34 @@ import arc/vm/opcode.{
   IrWithGetVar, IrWithGetVarThis, IrWithMakeRef, IrWithPutRefValue, IrWithPutVar,
   IrYield, IrYieldStar,
 }
-import arc/vm/value.{
-  type EnvCapture, type FuncTemplate, type JsValue, FuncTemplate,
-}
+import arc/vm/value.{type JsValue}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// Resolve a list of IrOps into a FuncTemplate.
+/// Run Phase 3 over one function body's IR: peephole-fuse, then resolve label
+/// IDs to absolute PCs. Returns the runnable bytecode array plus the constant
+/// pool it indexes into (peephole reads constants, so the two are produced
+/// together).
+///
 /// Variable access is already concrete (the emitter consults the scope tree
 /// and emits GetLocal/GetBoxed/GetGlobal/IrWith* directly); only
 /// IrLabel/IrJump/IrJumpIfFalse/IrJumpIfTrue/IrJumpIfNullish/IrPushTry
 /// still need label→PC resolution.
+///
+/// Assembling the surrounding `value.FuncTemplate` is the CALLER's job
+/// (`compiler.resolve_top_level` / `compiler.compile_child`): they own the
+/// scope-analysis metadata every other template field comes from, so this
+/// module never has to thread sixteen values through untouched.
 pub fn resolve(
-  code code: List(IrOp),
-  constants constants: List(JsValue),
-  local_count local_count: Int,
-  functions functions: List(FuncTemplate),
-  name name: Option(String),
-  arity arity: Int,
-  length length: Int,
-  env_descriptors env_descriptors: List(EnvCapture),
-  is_strict is_strict: Bool,
-  is_arrow is_arrow: Bool,
-  is_derived_constructor is_derived_constructor: Bool,
-  is_generator is_generator: Bool,
-  is_async is_async: Bool,
-  is_constructor is_constructor: Bool,
-  is_class_constructor is_class_constructor: Bool,
-  local_names local_names: Option(List(#(String, Int))),
-  lexical lexical: LexicalSlots,
-  syntax_perms syntax_perms: SyntaxPerms,
-) -> FuncTemplate {
+  code: List(IrOp),
+  constants: List(JsValue),
+) -> #(tuple_array.TupleArray(Op), tuple_array.TupleArray(JsValue)) {
   let const_arr = tuple_array.from_list(constants)
   let code = peephole(code, const_arr, [])
   let label_map = build_label_map(code, 0, dict.new())
   let ops = resolve_ops(code, label_map, [])
-  FuncTemplate(
-    name:,
-    arity:,
-    length:,
-    local_count:,
-    bytecode: tuple_array.from_list(ops),
-    constants: const_arr,
-    functions: tuple_array.from_list(functions),
-    env_descriptors:,
-    is_strict:,
-    is_arrow:,
-    is_derived_constructor:,
-    is_generator:,
-    is_async:,
-    is_constructor:,
-    is_class_constructor:,
-    local_names:,
-    lexical:,
-    syntax_perms:,
-  )
+  #(tuple_array.from_list(ops), const_arr)
 }
 
 /// Peephole pass over the IR, run BEFORE label resolution so removing or
@@ -183,10 +156,10 @@ fn peephole(
 
     // -- Pattern 4: fused compare-and-branch loop conditions -------------
     [IrGetLocal(a), IrGetLocal(b), IrBinOp(kind), IrJumpIfFalse(l), ..rest] ->
-      case is_fusable_cmp(kind) {
-        True ->
-          peephole(rest, consts, [IrCmpLocalLocalJump(a, b, kind, l), ..acc])
-        False ->
+      case fusable_cmp(kind) {
+        Some(pure) ->
+          peephole(rest, consts, [IrCmpLocalLocalJump(a, b, pure, l), ..acc])
+        None ->
           peephole(
             [IrGetLocal(b), IrBinOp(kind), IrJumpIfFalse(l), ..rest],
             consts,
@@ -194,10 +167,10 @@ fn peephole(
           )
       }
     [IrGetLocal(a), IrPushConst(c), IrBinOp(kind), IrJumpIfFalse(l), ..rest] ->
-      case is_fusable_cmp(kind) {
-        True ->
-          peephole(rest, consts, [IrCmpLocalConstJump(a, c, kind, l), ..acc])
-        False ->
+      case fusable_cmp(kind) {
+        Some(pure) ->
+          peephole(rest, consts, [IrCmpLocalConstJump(a, c, pure, l), ..acc])
+        None ->
           peephole(
             [IrPushConst(c), IrBinOp(kind), IrJumpIfFalse(l), ..rest],
             consts,
@@ -211,11 +184,16 @@ fn peephole(
 
 /// Only the pure relational kinds are fused — their step semantics are
 /// exactly binop_direct / binop_with_to_primitive (no In/InstanceOf heap
-/// access, no Add string-concat split, no loose-eq coercion table).
-fn is_fusable_cmp(kind: opcode.BinOpKind) -> Bool {
+/// access, no Add string-concat split, no loose-eq coercion table). Returns
+/// the narrowed `PureBinOp` the fused opcode carries, so the fusion cannot
+/// smuggle an operator the fused step handler can't run.
+fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
   case kind {
-    opcode.Lt | opcode.LtEq | opcode.Gt | opcode.GtEq -> True
-    _ -> False
+    opcode.Lt -> Some(binop.Lt)
+    opcode.LtEq -> Some(binop.LtEq)
+    opcode.Gt -> Some(binop.Gt)
+    opcode.GtEq -> Some(binop.GtEq)
+    _ -> None
   }
 }
 
@@ -457,8 +435,8 @@ fn resolve_ops(
         opcode.CallEval(arity, param_scope_names, with_names, private_names),
         ..acc
       ])
-    [IrCallMethod(name, arity), ..rest] ->
-      resolve_ops(rest, labels, [opcode.CallMethod(name, arity), ..acc])
+    [IrCallMethod(arity), ..rest] ->
+      resolve_ops(rest, labels, [opcode.CallMethod(arity), ..acc])
     [IrCallConstructor(arity), ..rest] ->
       resolve_ops(rest, labels, [opcode.CallConstructor(arity), ..acc])
     [IrCallApply, ..rest] ->

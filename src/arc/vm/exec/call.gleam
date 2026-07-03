@@ -48,8 +48,7 @@ import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
   type ExoticKind, type Heap, type HeapSlot, type NativeFnSlot, type State,
-  type StepResult, type VmError, InternalError, SavedFrame, State, StepVmError,
-  Thrown,
+  type StepExit, type VmError, InternalError, SavedFrame, State, Threw, VmFailed,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot,
@@ -100,7 +99,7 @@ pub fn call_function(
   new_target: JsValue,
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   // §10.2.1 [[Call]] step 2: [[IsClassConstructor]] → TypeError. Construct
   // paths (new / super() / Reflect.construct) always pass an object
   // new_target; only plain calls arrive with JsUndefined.
@@ -189,7 +188,7 @@ fn call_regular_function(
   locals: tuple_array.TupleArray(JsValue),
   constructor_this: option.Option(JsValue),
   new_target: JsValue,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   // Plain `case` (not bool.lazy_guard) — avoids a per-call closure alloc.
   case state.call_depth >= limits.max_call_depth {
     True ->
@@ -234,25 +233,44 @@ fn call_regular_function(
   }
 }
 
-/// Set up an isolated execution state for a (sync or async) generator body.
-fn generator_initial_state(
+/// Set up an isolated execution state to run a coroutine body from its start:
+/// generators, async generators, and async functions all enter this way (empty
+/// stack, pc 0, no caller frames, no try frames, no new.target). The ONE place
+/// that spelling lives — three field-for-field copies used to.
+fn coroutine_initial_state(
   state: State(host),
   callee_template: FuncTemplate,
   args: List(JsValue),
   locals: tuple_array.TupleArray(JsValue),
 ) -> State(host) {
+  coroutine_resume_state(state, callee_template, locals, [], 0, [])
+  |> fn(s) { State(..s, call_args: args) }
+}
+
+/// Set up an isolated execution state to RESUME a coroutine body from a saved
+/// suspension point. Same isolation as `coroutine_initial_state` (no caller
+/// frames, no new.target, no call_args — the arguments object was built before
+/// the first suspension), but with the saved stack/pc/try_stack restored.
+fn coroutine_resume_state(
+  state: State(host),
+  func_template: FuncTemplate,
+  locals: tuple_array.TupleArray(JsValue),
+  stack: List(JsValue),
+  pc: Int,
+  try_stack: List(state.TryFrame),
+) -> State(host) {
   State(
     ..state,
-    stack: [],
+    stack:,
     locals:,
-    func: callee_template,
-    code: callee_template.bytecode,
-    constants: callee_template.constants,
-    pc: 0,
+    func: func_template,
+    code: func_template.bytecode,
+    constants: func_template.constants,
+    pc:,
     call_stack: [],
-    try_stack: [],
+    try_stack:,
     new_target: JsUndefined,
-    call_args: args,
+    call_args: [],
   )
 }
 
@@ -266,7 +284,7 @@ fn alloc_suspended_generator(
   slot: HeapSlot(host),
   make_kind: fn(value.Ref) -> ExoticKind(host),
   prototype: value.Ref,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let #(h, data_ref) = heap.alloc(suspended.heap, slot)
   let #(h, gen_obj_ref) =
     common.alloc_wrapper(h, make_kind(data_ref), prototype)
@@ -290,10 +308,10 @@ fn call_generator_function(
   rest_stack: List(JsValue),
   locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   // Execute until InitialYield (which fires immediately at the start)
   case
-    execute_inner(generator_initial_state(state, callee_template, args, locals))
+    execute_inner(coroutine_initial_state(state, callee_template, args, locals))
   {
     Ok(#(Suspended(completion.Yield, _), suspended)) ->
       alloc_suspended_generator(
@@ -315,26 +333,21 @@ fn call_generator_function(
     // InitialYield is the first op — the body can neither complete nor await
     // before it. Either arriving here is a VM bug.
     Ok(#(Completed(NormalCompletion(_)), _)) ->
-      Error(#(
-        StepVmError(InternalError(
+      Error(VmFailed(
+        InternalError(
           "call_generator_function",
           "completed before InitialYield",
-        )),
-        JsUndefined,
+        ),
         state,
       ))
     Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) ->
-      Error(#(Thrown, thrown, State(..state, heap: thrown_state.heap)))
+      Error(Threw(thrown, State(..state, heap: thrown_state.heap)))
     Ok(#(Suspended(completion.Await, _), _)) ->
-      Error(#(
-        StepVmError(InternalError(
-          "call_generator_function",
-          "await in sync generator",
-        )),
-        JsUndefined,
+      Error(VmFailed(
+        InternalError("call_generator_function", "await in sync generator"),
         state,
       ))
-    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
+    Error(vm_err) -> Error(VmFailed(vm_err, state))
   }
 }
 
@@ -349,9 +362,9 @@ fn call_async_generator_function(
   rest_stack: List(JsValue),
   locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case
-    execute_inner(generator_initial_state(state, callee_template, args, locals))
+    execute_inner(coroutine_initial_state(state, callee_template, args, locals))
   {
     Ok(#(Suspended(completion.Yield, _), suspended)) ->
       alloc_suspended_generator(
@@ -372,19 +385,18 @@ fn call_async_generator_function(
         state.builtins.async_generator.prototype,
       )
     Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) ->
-      Error(#(Thrown, thrown, State(..state, heap: thrown_state.heap)))
+      Error(Threw(thrown, State(..state, heap: thrown_state.heap)))
     Ok(#(Completed(NormalCompletion(_)), _))
     | Ok(#(Suspended(completion.Await, _), _)) ->
       // InitialYield is first op — body never runs before it. Unreachable.
-      Error(#(
-        StepVmError(InternalError(
+      Error(VmFailed(
+        InternalError(
           "call_async_generator_function",
           "didn't hit InitialYield",
-        )),
-        JsUndefined,
+        ),
         state,
       ))
-    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
+    Error(vm_err) -> Error(VmFailed(vm_err, state))
   }
 }
 
@@ -400,7 +412,7 @@ fn call_async_function(
   locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn(host),
   _unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   // Create the outer promise that the async function returns
   let #(h, promise_ref, data_ref) =
     builtins_promise.create_promise(
@@ -415,52 +427,70 @@ fn call_async_function(
       data_ref,
     )
   // Execute body eagerly
-  let async_state =
-    State(
-      ..state,
-      heap: h,
-      stack: [],
-      locals:,
-      func: callee_template,
-      code: callee_template.bytecode,
-      constants: callee_template.constants,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      new_target: JsUndefined,
-      call_args: args,
-    )
   finish_async_execution(
     state,
-    execute_inner(async_state),
-    data_ref,
-    resolve_fn,
-    reject_fn,
-    callee_template,
-    env_ref,
-    None,
-    JsObject(promise_ref),
+    execute_inner(coroutine_initial_state(
+      State(..state, heap: h),
+      callee_template,
+      args,
+      locals,
+    )),
+    AsyncCtx(
+      promise_data_ref: data_ref,
+      resolve: resolve_fn,
+      reject: reject_fn,
+      func_template: callee_template,
+      env_ref:,
+    ),
+    FirstAwait(promise: JsObject(promise_ref)),
     rest_stack,
   )
 }
 
+/// Everything an in-flight async function needs to settle or re-suspend —
+/// exactly the fields `AsyncFunctionSlot` already stores alongside the saved
+/// frame. Bundled so `finish_async_execution` takes a record instead of five
+/// loose positional arguments that must stay in the right order.
+type AsyncCtx {
+  AsyncCtx(
+    promise_data_ref: Ref,
+    resolve: JsValue,
+    reject: JsValue,
+    func_template: FuncTemplate,
+    env_ref: Ref,
+  )
+}
+
+/// Which entry point drove the body, which decides two co-varying things:
+/// whether an AsyncFunctionSlot must be allocated or overwritten, and what the
+/// caller's stack gets pushed. Encoding them as one sum makes the illegal
+/// combinations (fresh call that overwrites a slot; resume that pushes a
+/// second promise) unrepresentable.
+type AsyncEntry {
+  /// The initial call: allocate a fresh slot on the first await, and hand the
+  /// caller the freshly created promise.
+  FirstAwait(promise: JsValue)
+  /// A resume from a settled await: overwrite `slot`, and push `undefined`
+  /// (the AsyncResume native's return value — nobody reads it).
+  Resumed(slot: Ref)
+}
+
 /// Shared completion handling for an async function body execution.
 /// Resolves/rejects the outer promise on completion, or saves the suspension
-/// state and attaches resume callbacks on `await`. `existing_slot_ref` is
-/// `Some` to overwrite an existing AsyncFunctionSlot on re-suspension, `None`
-/// to allocate a fresh slot on first await.
+/// state and attaches resume callbacks on `await`.
 fn finish_async_execution(
   state: State(host),
   exec_result: Result(#(Outcome, State(host)), VmError),
-  promise_data_ref: Ref,
-  resolve: JsValue,
-  reject: JsValue,
-  func_template: FuncTemplate,
-  env_ref: Ref,
-  existing_slot_ref: Option(Ref),
-  result_value: JsValue,
+  ctx: AsyncCtx,
+  entry: AsyncEntry,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
+  let AsyncCtx(promise_data_ref:, resolve:, reject:, func_template:, env_ref:) =
+    ctx
+  let result_value = case entry {
+    FirstAwait(promise:) -> promise
+    Resumed(_) -> JsUndefined
+  }
   case exec_result {
     Ok(#(Suspended(completion.Await, awaited_value), suspended)) -> {
       // Body hit `await` -- save state, set up promise resolution
@@ -478,9 +508,9 @@ fn finish_async_execution(
           saved_stack: suspended.stack,
           saved_try_stack: saved_try,
         )
-      let #(h2, async_data_ref) = case existing_slot_ref {
-        Some(slot_ref) -> #(heap.write(h2, slot_ref, slot), slot_ref)
-        None -> heap.alloc(h2, slot)
+      let #(h2, async_data_ref) = case entry {
+        Resumed(slot_ref) -> #(heap.write(h2, slot_ref, slot), slot_ref)
+        FirstAwait(_) -> heap.alloc(h2, slot)
       }
       let state =
         async_setup_await(
@@ -519,15 +549,14 @@ fn finish_async_execution(
       Ok(State(..state, stack: [result_value, ..rest_stack], pc: state.pc + 1))
     }
     Ok(#(Suspended(completion.Yield, _), _)) ->
-      Error(#(
-        StepVmError(InternalError(
+      Error(VmFailed(
+        InternalError(
           "finish_async_execution",
           "yield in non-generator async function",
-        )),
-        JsUndefined,
+        ),
         state,
       ))
-    Error(vm_err) -> Error(#(StepVmError(vm_err), JsUndefined, state))
+    Error(vm_err) -> Error(VmFailed(vm_err, state))
   }
 }
 
@@ -553,7 +582,7 @@ pub fn call_native_async_resume(
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let settled_value = helpers.first_arg_or_undefined(args)
   case heap.read(state.heap, async_data_ref) {
     Some(AsyncFunctionSlot(
@@ -567,27 +596,19 @@ pub fn call_native_async_resume(
       saved_stack:,
       saved_try_stack:,
     )) -> {
-      // Restore try-stack
-      let restored_try = generators.restore_stacks(saved_try_stack)
       // Build the resume stack: push resolved value for fulfillment
       let resume_stack = case is_reject {
         False -> [settled_value, ..saved_stack]
         True -> saved_stack
       }
       let exec_state =
-        State(
-          ..state,
-          stack: resume_stack,
-          locals: saved_locals,
-          func: func_template,
-          code: func_template.bytecode,
-          constants: func_template.constants,
-          pc: saved_pc,
-          call_stack: [],
-          try_stack: restored_try,
-          new_target: JsUndefined,
-          // arguments was created before first await; post-resume never needs call_args
-          call_args: [],
+        coroutine_resume_state(
+          state,
+          func_template,
+          saved_locals,
+          resume_stack,
+          saved_pc,
+          generators.restore_stacks(saved_try_stack),
         )
       // For rejection, throw the value so try/catch inside async fn can handle it
       let exec_result = case is_reject {
@@ -602,23 +623,23 @@ pub fn call_native_async_resume(
       finish_async_execution(
         state,
         exec_result,
-        promise_data_ref,
-        slot_resolve,
-        slot_reject,
-        func_template,
-        slot_env_ref,
-        Some(async_data_ref),
-        JsUndefined,
+        AsyncCtx(
+          promise_data_ref:,
+          resolve: slot_resolve,
+          reject: slot_reject,
+          func_template:,
+          env_ref: slot_env_ref,
+        ),
+        Resumed(slot: async_data_ref),
         rest_stack,
       )
     }
     _ ->
-      Error(#(
-        StepVmError(InternalError(
+      Error(VmFailed(
+        InternalError(
           "call_native_async_resume",
           "invalid slot for ref " <> string.inspect(async_data_ref),
-        )),
-        JsUndefined,
+        ),
         state,
       ))
   }
@@ -644,7 +665,7 @@ pub fn call_native(
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
   dispatch_fn: DispatchNativeFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case native {
     // Function.prototype.call(thisArg, ...args)
     // `this` is the target function, args[0] is the thisArg
@@ -701,22 +722,27 @@ pub fn call_native(
         True, JsObject(target_ref) -> {
           // Steps 4-6: L = 0 unless Target has an own "length" whose value
           // is a Number: L = max(ToIntegerOrInfinity(targetLen) - nArgs, 0).
-          // The Get goes through accessors/proxies and can throw
-          // (test262: bind/instance-length-* , bind/get-fn-length-error).
-          use #(target_len, state) <- result.try(
-            case
-              object.get_own_property(state.heap, target_ref, Named("length"))
-            {
-              Some(_) ->
-                state.rethrow(object.get_value(
-                  state,
-                  target_ref,
-                  Named("length"),
-                  this,
-                ))
-              None -> Ok(#(JsUndefined, state))
-            },
+          // Step 5's HasOwnProperty and step 6.a's Get both go through the
+          // internal methods — accessors AND proxy traps — and can throw
+          // (test262: bind/instance-length-* , bind/get-fn-length-error,
+          // proxy/bind: `getOwnPropertyDescriptor` fires before `get`).
+          use #(has_length, state) <- result.try(
+            state.rethrow(builtins_object.get_own_property_stateful(
+              state,
+              target_ref,
+              JsString("length"),
+            )),
           )
+          use #(target_len, state) <- result.try(case has_length {
+            Some(_) ->
+              state.rethrow(object.get_value(
+                state,
+                target_ref,
+                Named("length"),
+                this,
+              ))
+            None -> Ok(#(JsUndefined, state))
+          })
           let num_args = list.length(bound_args)
           let length_js = case target_len {
             value.JsNumber(value.Infinity) -> value.JsNumber(value.Infinity)
@@ -996,7 +1022,7 @@ pub fn call_native(
     }
     value.Call(value.PromiseFinallyThrower(reason:)) -> {
       // Ignore argument, throw the captured reason
-      Error(#(Thrown, reason, state))
+      Error(Threw(reason, state))
     }
     // Async function resume (called when awaited promise settles)
     value.Call(value.AsyncResume(async_data_ref:, is_reject:)) ->
@@ -1379,7 +1405,7 @@ pub fn call_native(
                   pc: state.pc + 1,
                 ),
               )
-            Error(#(thrown, new_state)) -> Error(#(Thrown, thrown, new_state))
+            Error(#(thrown, new_state)) -> Error(Threw(thrown, new_state))
           }
       }
     // All other native functions: synchronous dispatch via Dispatch slot.
@@ -1401,7 +1427,7 @@ pub fn call_native(
               pc: state.pc + 1,
             ),
           )
-        Error(thrown) -> Error(#(Thrown, thrown, new_state))
+        Error(thrown) -> Error(Threw(thrown, new_state))
       }
     }
     // Host-provided native: call the embedder's closure directly. Same
@@ -1419,15 +1445,17 @@ pub fn call_native(
               pc: state.pc + 1,
             ),
           )
-        Error(thrown) -> Error(#(Thrown, thrown, new_state))
+        Error(thrown) -> Error(Threw(thrown, new_state))
       }
     }
   }
 }
 
 /// Shared tail for `new String/Number/Boolean`: allocate the primitive
-/// wrapper exotic, push it, advance pc. Prototype is read from newTarget
-/// (§10.1.13.2) so subclass instances get the derived prototype.
+/// wrapper exotic, push it, advance pc. Prototype comes from
+/// §10.1.13.2 GetPrototypeFromConstructor, so subclass instances get the
+/// derived prototype — and a proxy newTarget's `get` trap or an accessor
+/// `prototype` property may throw out of here.
 fn push_wrapper(
   state: State(host),
   rest_stack: List(JsValue),
@@ -1435,8 +1463,13 @@ fn push_wrapper(
   new_target_ref: Ref,
   intrinsic_proto: Ref,
 ) {
-  let proto =
-    prototype_from_new_target_or(state, new_target_ref, intrinsic_proto)
+  use #(proto, state) <- result.try(
+    state.rethrow(object.get_prototype_from_constructor(
+      state,
+      new_target_ref,
+      intrinsic_proto,
+    )),
+  )
   let #(heap, ref) = common.alloc_wrapper(state.heap, kind, proto)
   Ok(
     State(
@@ -1463,7 +1496,7 @@ pub fn do_construct(
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
   dispatch_fn: DispatchNativeFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let new_target = JsObject(new_target_ref)
   // §7.2.4 IsConstructor gate — runs AFTER ArgumentListEvaluation per
   // §13.3.7.2 step 5, so `super(sideEffect())` with a non-ctor parent still
@@ -1478,19 +1511,10 @@ pub fn do_construct(
       )
     },
   )
+  // Every branch below runs with IsConstructor(ctor) already true — arrows,
+  // generators, methods, non-constructible natives and revoked-at-birth proxies
+  // were all rejected by the guard above, so no branch re-checks it.
   case heap.read(state.heap, ctor_ref) {
-    // Functions lacking [[Construct]] — arrows, generators, async functions,
-    // and methods/getters/setters — throw when used with `new` (§7.2.4). The
-    // capability is stored on the template (set at compile from the syntactic
-    // kind); class constructors and normal functions carry it.
-    Some(ObjectSlot(kind: FunctionObject(func_template:, ..), ..))
-      if !func_template.is_constructor
-    ->
-      state.throw_type_error(
-        state,
-        object.inspect(JsObject(ctor_ref), state.heap)
-          <> " is not a constructor",
-      )
     Some(ObjectSlot(
       kind: FunctionObject(func_template:, env: env_ref, home_object:),
       ..,
@@ -1520,9 +1544,10 @@ pub fn do_construct(
           // §10.1.13.2 performs ? Get(newTarget, "prototype"), observable
           // for proxy newTargets — route those through [[Get]].
           use #(proto, state) <- result.try(
-            state.rethrow(prototype_from_new_target_stateful(
+            state.rethrow(object.get_prototype_from_constructor(
               state,
               new_target_ref,
+              state.builtins.object.prototype,
             )),
           )
           let #(heap, new_obj_ref) =
@@ -1532,7 +1557,7 @@ pub fn do_construct(
                 kind: OrdinaryObject,
                 properties: dict.new(),
                 elements: elements.new(),
-                prototype: proto,
+                prototype: Some(proto),
                 symbol_properties: [],
                 extensible: True,
               ),
@@ -1655,7 +1680,7 @@ pub fn do_construct(
         [v, ..] -> coerce.js_to_string(state, v)
       }
       case coerced {
-        Error(#(thrown, st)) -> Error(#(Thrown, thrown, st))
+        Error(#(thrown, st)) -> Error(Threw(thrown, st))
         Ok(#(s, state)) ->
           push_wrapper(
             state,
@@ -1681,7 +1706,7 @@ pub fn do_construct(
         [v, ..] -> coerce.js_to_number(state, v)
       }
       case coerced {
-        Error(#(thrown, st)) -> Error(#(Thrown, thrown, st))
+        Error(#(thrown, st)) -> Error(Threw(thrown, st))
         Ok(#(n, state)) ->
           push_wrapper(
             state,
@@ -1736,7 +1761,11 @@ pub fn do_construct(
       if new_target_ref != ctor_ref
     -> {
       use #(proto, state) <- result.try(
-        state.rethrow(prototype_from_new_target_stateful(state, new_target_ref)),
+        state.rethrow(object.get_prototype_from_constructor(
+          state,
+          new_target_ref,
+          state.builtins.object.prototype,
+        )),
       )
       let #(heap, ref) =
         heap.alloc(
@@ -1745,7 +1774,7 @@ pub fn do_construct(
             kind: OrdinaryObject,
             properties: dict.new(),
             elements: elements.new(),
-            prototype: proto,
+            prototype: Some(proto),
             symbol_properties: [],
             extensible: True,
           ),
@@ -1759,127 +1788,56 @@ pub fn do_construct(
         ),
       )
     }
-    Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
-      case object.is_constructor(state.heap, JsObject(ctor_ref)) {
-        True -> {
-          // Thread newTarget for the native body and re-prototype the result so
-          // subclassing builtins (`class M extends Map {}`) gets the derived
-          // prototype. Only re-prototype when newTarget actually has its own
-          // .prototype data property — natives that should honour a custom
-          // newTarget themselves (or whose newTarget.prototype is an accessor)
-          // are left untouched so the native's own choice stands.
-          // Restore the caller's newTarget on BOTH completion paths — a
-          // throwing native constructor must not leak its newTarget into
-          // subsequent plain calls (which check it to reject call-without-new).
-          use new_state <- result.try(
-            call_native(
-              State(..state, new_target:),
-              native,
-              args,
-              rest_stack,
-              JsUndefined,
-              new_target,
-              execute_inner,
-              unwind_to_catch,
-              dispatch_fn,
-            )
-            |> result.map_error(fn(err) {
-              let #(step, thrown, err_state) = err
-              #(step, thrown, State(..err_state, new_target: state.new_target))
-            }),
-          )
-          let new_state = State(..new_state, new_target: state.new_target)
-          let derived_proto = own_data_prototype(new_state.heap, new_target_ref)
-          case new_target_ref == ctor_ref, derived_proto, new_state.stack {
-            // Plain `new Builtin()` — native already chose the right prototype.
-            True, _, _ -> Ok(new_state)
-            False, Some(proto), [JsObject(result_ref), ..] -> {
-              let heap = set_prototype(new_state.heap, result_ref, Some(proto))
-              Ok(State(..new_state, heap:))
-            }
-            False, _, _ -> Ok(new_state)
-          }
-        }
-        False ->
-          state.throw_type_error(
-            state,
-            object.inspect(JsObject(ctor_ref), state.heap)
-              <> " is not a constructor",
-          )
-      }
-    _ ->
-      state.throw_type_error(
-        state,
-        object.inspect(JsObject(ctor_ref), state.heap)
-          <> " is not a constructor",
+    Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) -> {
+      // Thread newTarget for the native body and re-prototype the result so
+      // subclassing builtins (`class M extends Map {}`) gets the derived
+      // prototype. Only re-prototype when newTarget actually has its own
+      // .prototype data property — natives that should honour a custom
+      // newTarget themselves (or whose newTarget.prototype is an accessor)
+      // are left untouched so the native's own choice stands.
+      // Restore the caller's newTarget on BOTH completion paths — a
+      // throwing native constructor must not leak its newTarget into
+      // subsequent plain calls (which check it to reject call-without-new).
+      use new_state <- result.try(
+        call_native(
+          State(..state, new_target:),
+          native,
+          args,
+          rest_stack,
+          JsUndefined,
+          new_target,
+          execute_inner,
+          unwind_to_catch,
+          dispatch_fn,
+        )
+        |> result.map_error(fn(exit) {
+          use err_state <- state.map_exit_state(exit)
+          State(..err_state, new_target: state.new_target)
+        }),
       )
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor for possibly-proxy newTargets:
-/// `? Get(newTarget, "prototype")` through the proxy's get trap; ordinary
-/// newTargets use the fast slot read.
-fn prototype_from_new_target_stateful(
-  state: State(host),
-  new_target_ref: Ref,
-) -> Result(#(Option(Ref), State(host)), #(JsValue, State(host))) {
-  case object.as_proxy(state.heap, new_target_ref) {
-    Some(_) -> {
-      use #(proto_val, state) <- result.map(object.get_value(
-        state,
-        new_target_ref,
-        Named("prototype"),
-        JsObject(new_target_ref),
-      ))
-      case proto_val {
-        JsObject(p) -> #(Some(p), state)
-        _ -> #(Some(state.builtins.object.prototype), state)
+      let new_state = State(..new_state, new_target: state.new_target)
+      let derived_proto =
+        object.own_data_prototype(new_state.heap, new_target_ref)
+      case new_target_ref == ctor_ref, derived_proto, new_state.stack {
+        // Plain `new Builtin()` — native already chose the right prototype.
+        True, _, _ -> Ok(new_state)
+        False, Some(proto), [JsObject(result_ref), ..] -> {
+          let heap = set_prototype(new_state.heap, result_ref, Some(proto))
+          Ok(State(..new_state, heap:))
+        }
+        False, _, _ -> Ok(new_state)
       }
     }
-    None -> Ok(#(prototype_from_new_target(state, new_target_ref), state))
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor: read newTarget.prototype, fall
-/// back to %Object.prototype% if not an object.
-fn prototype_from_new_target(
-  state: State(host),
-  new_target_ref: Ref,
-) -> Option(Ref) {
-  Some(prototype_from_new_target_or(
-    state,
-    new_target_ref,
-    state.builtins.object.prototype,
-  ))
-}
-
-/// Read newTarget's own `.prototype` only when it's a DataProperty pointing
-/// at an object — accessor prototypes and missing slots return None so the
-/// caller can leave the native ctor's own prototype choice in place.
-fn own_data_prototype(h: Heap(host), new_target_ref: Ref) -> Option(Ref) {
-  case heap.read(h, new_target_ref) {
-    Some(ObjectSlot(properties:, ..)) ->
-      case dict.get(properties, Named("prototype")) {
-        Ok(DataProperty(value: JsObject(proto_ref), ..)) -> Some(proto_ref)
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with explicit intrinsic fallback.
-fn prototype_from_new_target_or(
-  state: State(host),
-  new_target_ref: Ref,
-  intrinsic_proto: Ref,
-) -> Ref {
-  case heap.read(state.heap, new_target_ref) {
-    Some(ObjectSlot(properties:, ..)) ->
-      case dict.get(properties, Named("prototype")) {
-        Ok(DataProperty(value: JsObject(proto_ref), ..)) -> proto_ref
-        _ -> intrinsic_proto
-      }
-    _ -> intrinsic_proto
+    // Unreachable: the IsConstructor guard above admitted only FunctionObject /
+    // NativeFunction / ProxyObject slots, and every one of those has a branch.
+    _ ->
+      Error(VmFailed(
+        InternalError(
+          "do_construct",
+          "IsConstructor passed but slot kind unhandled",
+        ),
+        state,
+      ))
   }
 }
 
@@ -1901,7 +1859,7 @@ pub fn call_value(
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
   dispatch_fn: DispatchNativeFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case callee {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
@@ -2047,7 +2005,7 @@ fn push_iter_result(
   h: Heap(host),
   val: JsValue,
   done: Bool,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let #(h, result) = common.create_iter_result(h, state.builtins, val, done)
   Ok(State(..state, heap: h, stack: [result, ..rest_stack], pc: state.pc + 1))
 }
@@ -2055,7 +2013,7 @@ fn push_iter_result(
 fn iter_incompatible(
   state: State(host),
   tag: String,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   state.throw_type_error(
     state,
     tag <> " Iterator next called on incompatible receiver",
@@ -2067,7 +2025,7 @@ fn call_array_iterator_next(
   state: State(host),
   this: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case this {
     JsObject(iter_ref) ->
       case heap.read(state.heap, iter_ref) {
@@ -2197,62 +2155,11 @@ fn step_array_iterator_generic(
   index: Int,
   iter_kind: value.ArrayIterKind,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
-  case object.as_proxy(state.heap, source) {
-    // Proxy source — §23.1.5.1 generic path: ? Get(array, "length")
-    // and ? Get(array, ToString(index)) fire the proxy's get trap.
-    Some(_) -> {
-      use #(len_val, state) <- result.try(
-        state.rethrow(object.get_value(
-          state,
-          source,
-          Named("length"),
-          JsObject(source),
-        )),
-      )
-      // §7.1.20 LengthOfArrayLike: ? ToLength(len_val). The trap result may
-      // be an object — ToNumber must run ToPrimitive on it (user valueOf,
-      // which can throw), so go through coerce.js_to_number.
-      use #(len_num, state) <- result.try(
-        state.rethrow(coerce.js_to_number(state, len_val)),
-      )
-      let length = case len_num {
-        value.Finite(f) -> int.max(0, value.float_to_int(f))
-        _ -> 0
-      }
-      case index >= length {
-        True -> {
-          let h = bump_array_iter_index(state.heap, iter_ref, source, -1)
-          push_iter_result(state, rest_stack, h, JsUndefined, True)
-        }
-        False -> {
-          // §23.1.5.1 step 8.b.iii: a "key" iterator yields the index
-          // WITHOUT performing Get(array, elementKey) — no get trap fires.
-          use #(out, state) <- result.try(case iter_kind {
-            value.ArrayIterKeys -> Ok(#(value.from_int(index), state))
-            _ -> {
-              use #(elem, state) <- result.try(
-                state.rethrow(object.get_value(
-                  state,
-                  source,
-                  Index(index),
-                  JsObject(source),
-                )),
-              )
-              let #(h, out) =
-                array_iter_out(state.heap, state, iter_kind, index, elem)
-              Ok(#(out, State(..state, heap: h)))
-            }
-          })
-          let h = bump_array_iter_index(state.heap, iter_ref, source, index + 1)
-          push_iter_result(state, rest_stack, h, out, False)
-        }
-      }
-    }
-    None -> {
-      let #(length, elems) =
-        heap.read_array_like(state.heap, source)
-        |> option.unwrap(#(0, elements.new()))
+) -> Result(State(host), StepExit(host)) {
+  case heap.read_array_like(state.heap, source) {
+    // Array/Arguments source: `length` and the element block are right there
+    // in the slot, no [[Get]] needed for the length.
+    Some(#(length, elems)) ->
       case index >= length {
         True -> {
           let h = bump_array_iter_index(state.heap, iter_ref, source, -1)
@@ -2283,6 +2190,57 @@ fn step_array_iterator_generic(
                       JsObject(source),
                     ))
                 },
+              )
+              let #(h, out) =
+                array_iter_out(state.heap, state, iter_kind, index, elem)
+              Ok(#(out, State(..state, heap: h)))
+            }
+          })
+          let h = bump_array_iter_index(state.heap, iter_ref, source, index + 1)
+          push_iter_result(state, rest_stack, h, out, False)
+        }
+      }
+    // Everything else — a Proxy, or any array-LIKE the iterator was borrowed
+    // onto (`Array.prototype.values.call({length: 2, 0: "a"})`) — is the
+    // spec's plain §23.1.5.1: ? Get(array, "length") then ? Get(array,
+    // ToString(index)), both of which run getters / fire proxy traps.
+    None -> {
+      use #(len_val, state) <- result.try(
+        state.rethrow(object.get_value(
+          state,
+          source,
+          Named("length"),
+          JsObject(source),
+        )),
+      )
+      // §7.1.20 LengthOfArrayLike: ? ToLength(len_val). The value may be an
+      // object — ToNumber must run ToPrimitive on it (user valueOf, which can
+      // throw), so go through coerce.js_to_number.
+      use #(len_num, state) <- result.try(
+        state.rethrow(coerce.js_to_number(state, len_val)),
+      )
+      let length = case len_num {
+        value.Finite(f) -> int.max(0, value.float_to_int(f))
+        _ -> 0
+      }
+      case index >= length {
+        True -> {
+          let h = bump_array_iter_index(state.heap, iter_ref, source, -1)
+          push_iter_result(state, rest_stack, h, JsUndefined, True)
+        }
+        False -> {
+          // §23.1.5.1 step 8.b.iii: a "key" iterator yields the index
+          // WITHOUT performing Get(array, elementKey) — no get trap fires.
+          use #(out, state) <- result.try(case iter_kind {
+            value.ArrayIterKeys -> Ok(#(value.from_int(index), state))
+            _ -> {
+              use #(elem, state) <- result.try(
+                state.rethrow(object.get_value(
+                  state,
+                  source,
+                  Index(index),
+                  JsObject(source),
+                )),
               )
               let #(h, out) =
                 array_iter_out(state.heap, state, iter_kind, index, elem)
@@ -2386,7 +2344,7 @@ fn call_set_iterator_next(
   state: State(host),
   this: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case this {
     JsObject(iter_ref) ->
       case heap.read(state.heap, iter_ref) {
@@ -2458,7 +2416,7 @@ fn call_map_iterator_next(
   state: State(host),
   this: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case this {
     JsObject(iter_ref) ->
       case heap.read(state.heap, iter_ref) {
@@ -2844,7 +2802,7 @@ fn this_symbol_value(
   state: State(host),
   this: JsValue,
   method: String,
-) -> Result(#(value.SymbolId, State(host)), #(StepResult, JsValue, State(host))) {
+) -> Result(#(value.SymbolId, State(host)), StepExit(host)) {
   case this {
     value.JsSymbol(id) -> Ok(#(id, state))
     JsObject(ref) ->

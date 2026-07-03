@@ -1,3 +1,4 @@
+import arc/vm/binop.{type PureBinOp}
 import arc/vm/key.{type PropertyKey}
 import gleam/option.{type Option, None}
 
@@ -416,7 +417,9 @@ pub type Op {
     with_names: List(String),
     private_names: List(String),
   )
-  CallMethod(name: String, arity: Int)
+  /// `obj.m(args)`. Stack: [arg_n, ..., arg_1, receiver, fn, ..] → [result, ..]
+  /// (the GetField2 pair). Identical to `Call` except `this` = receiver.
+  CallMethod(arity: Int)
   /// `new ctor(args)` and `super(args)`. Stack:
   /// [arg_n, ..., arg_1, new_target, ctor, ..] → [instance, ..].
   /// §10.1.13 [[Construct]] takes (args, newTarget); for plain `new X()` the
@@ -487,12 +490,13 @@ pub type Op {
   DecLocal(index: Int)
   /// Fused loop-condition compare-and-branch:
   /// GetLocal(left); GetLocal(right); BinOp(kind); JumpIfFalse(target).
-  /// Only emitted for the pure relational kinds (Lt/LtEq/Gt/GtEq), whose
-  /// step semantics are binop_direct / binop_with_to_primitive.
-  CmpLocalLocalJump(left: Int, right: Int, kind: BinOpKind, target: Int)
+  /// Only emitted for the pure relational kinds (Lt/LtEq/Gt/GtEq) — hence the
+  /// `PureBinOp` field: an `Add`/`In`/`InstanceOf` here would be a compile
+  /// error, not a runtime surprise for `binop_direct`.
+  CmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, target: Int)
   /// Same with a constant right operand:
   /// GetLocal(left); PushConst(const_index); BinOp(kind); JumpIfFalse(target).
-  CmpLocalConstJump(left: Int, const_index: Int, kind: BinOpKind, target: Int)
+  CmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, target: Int)
 
   // -- Iteration --
   ForInStart
@@ -671,6 +675,50 @@ pub type BinOpKind {
   InstanceOf
 }
 
+/// A `BinOpKind` split by WHO evaluates it. Produced by `classify`, which is
+/// the single, total place a source-level operator narrows to the pure subset
+/// `ops/operators.exec_binop` can actually run.
+pub type Classified {
+  /// Pure: two primitives in, one JsValue out. `exec_binop` handles it.
+  PureOp(op: PureBinOp)
+  /// §13.15.3 `+`: ToPrimitive(default) then string-concat or numeric add.
+  /// The interpreter's `add_primitives` owns it.
+  AddOp
+  /// `in`: needs the heap (and can run a Proxy trap).
+  InOp
+  /// `instanceof`: needs the heap and can run `Symbol.hasInstance`.
+  InstanceOfOp
+}
+
+/// Total classification of a binary operator. Adding a `BinOpKind` variant is
+/// a compile error here until it is assigned to a handler.
+pub fn classify(kind: BinOpKind) -> Classified {
+  case kind {
+    Add -> AddOp
+    In -> InOp
+    InstanceOf -> InstanceOfOp
+    Sub -> PureOp(binop.Sub)
+    Mul -> PureOp(binop.Mul)
+    Div -> PureOp(binop.Div)
+    Mod -> PureOp(binop.Mod)
+    Exp -> PureOp(binop.Exp)
+    BitAnd -> PureOp(binop.BitAnd)
+    BitOr -> PureOp(binop.BitOr)
+    BitXor -> PureOp(binop.BitXor)
+    ShiftLeft -> PureOp(binop.Shl)
+    ShiftRight -> PureOp(binop.Shr)
+    UShiftRight -> PureOp(binop.UShr)
+    Eq -> PureOp(binop.Eq)
+    NotEq -> PureOp(binop.NotEq)
+    StrictEq -> PureOp(binop.StrictEq)
+    StrictNotEq -> PureOp(binop.StrictNotEq)
+    Lt -> PureOp(binop.Lt)
+    LtEq -> PureOp(binop.LtEq)
+    Gt -> PureOp(binop.Gt)
+    GtEq -> PureOp(binop.GtEq)
+  }
+}
+
 pub type UnaryOpKind {
   Neg
   Pos
@@ -781,7 +829,7 @@ pub type IrOp {
     with_names: List(String),
     private_names: List(String),
   )
-  IrCallMethod(name: String, arity: Int)
+  IrCallMethod(arity: Int)
   IrCallConstructor(arity: Int)
   IrCallApply
   IrCallMethodApply
@@ -804,8 +852,8 @@ pub type IrOp {
   // emitted directly by the AST emitter). See the matching final Ops.
   IrIncLocal(index: Int)
   IrDecLocal(index: Int)
-  IrCmpLocalLocalJump(left: Int, right: Int, kind: BinOpKind, label: Int)
-  IrCmpLocalConstJump(left: Int, const_index: Int, kind: BinOpKind, label: Int)
+  IrCmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, label: Int)
+  IrCmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, label: Int)
   IrForInStart
   IrForInNext
   IrGetIterator

@@ -32,18 +32,9 @@ pub type SuspendKind {
 /// returned alongside is the resumable suspension point). Only coroutine
 /// drivers (generator / async-function / async-generator resume machinery)
 /// may see `Suspended`; a suspension escaping any other frame is an engine
-/// bug and belongs on the `VmError` channel, never in a `Completion`.
+/// bug and belongs on the `VmError` channel as `state.SuspensionLeak`, never
+/// in a `Completion`.
 pub type Outcome {
   Completed(completion: Completion)
   Suspended(kind: SuspendKind, value: JsValue)
-}
-
-/// Detail string for the `InternalError` a non-coroutine consumer raises
-/// when a `Suspended` outcome escapes a frame that cannot resume it.
-pub fn suspension_leak_detail(kind: SuspendKind) -> String {
-  let name = case kind {
-    Yield -> "yield"
-    Await -> "await"
-  }
-  name <> " suspension escaped a non-coroutine frame"
 }

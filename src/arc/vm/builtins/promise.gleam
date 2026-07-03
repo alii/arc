@@ -673,8 +673,11 @@ pub fn resolve_promise(
 
 /// Non-spec utility: set [[PromiseIsHandled]] to true on a PromiseSlot.
 /// Corresponds to §27.2.5.4.1 step 12 and §27.2.1.7 step 7 context.
-/// Used for unhandled rejection tracking.
-fn mark_handled(h: Heap(host), data_ref: Ref) -> Heap(host) {
+/// Used for unhandled rejection tracking, and by any driver that inspects a
+/// capability's settled state itself instead of attaching a JS handler (module
+/// top-level await) — such a promise IS handled, so its rejection must not also
+/// be reported as unhandled.
+pub fn mark_handled(h: Heap(host), data_ref: Ref) -> Heap(host) {
   use slot <- heap.update(h, data_ref)
   case slot {
     PromiseSlot(..) -> PromiseSlot(..slot, is_handled: True)

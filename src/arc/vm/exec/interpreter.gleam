@@ -1,3 +1,4 @@
+import arc/vm/binop
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/disposable_stack
 import arc/vm/builtins/error as builtins_error
@@ -18,9 +19,9 @@ import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Index, Named, max_array_index}
 import arc/vm/opcode.{
-  type Op, Add, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole,
-  ArraySpread, AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal,
-  Call, CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
+  type Op, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread,
+  AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
+  CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
   CallMethodApply, CmpLocalConstJump, CmpLocalLocalJump, CreateArguments,
   CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
   DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
@@ -46,9 +47,10 @@ import arc/vm/ops/operators
 import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
-  type Heap, type NativeFnSlot, type State, type StepResult, type VmError,
-  Awaited, Done, InternalError, SavedFrame, StackUnderflow, State, StepVmError,
-  Thrown, TryFrame, Yielded,
+  type Heap, type NativeFnSlot, type State, type StepExit, type VmError,
+  AsyncDelegateResume, Awaited, DelegateYield, InitialSuspend, InternalError,
+  PlainYield, Returned, SavedFrame, StackUnderflow, State, SuspensionLeak, Threw,
+  TryFrame, VmFailed, Yielded,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
@@ -145,14 +147,25 @@ fn call_value_to_completion(
               Ok(#(comp, merge_back(state, final_state)))
             Error(vm_err) -> Error(vm_err)
           }
-        Error(#(Thrown, thrown, post)) ->
+        Error(Threw(thrown, post)) ->
           Ok(#(ThrowCompletion(thrown), merge_back(state, post)))
-        Error(#(StepVmError(vm_err), _, _)) -> Error(vm_err)
-        Error(#(step, _, _)) ->
+        Error(VmFailed(vm_err, _)) -> Error(vm_err)
+        // A re-entrant call cannot suspend or return here: `call_value` only
+        // pushes the frame; the body runs under `execute_to_completion` above.
+        Error(Yielded(..)) ->
+          Error(SuspensionLeak(
+            site: "call_value_to_completion",
+            kind: completion.Yield,
+          ))
+        Error(Awaited(..)) ->
+          Error(SuspensionLeak(
+            site: "call_value_to_completion",
+            kind: completion.Await,
+          ))
+        Error(Returned(..)) ->
           Error(InternalError(
             "call_value_to_completion",
-            "unexpected step result entering a re-entrant call: "
-              <> string.inspect(step),
+            "frame returned while entering a re-entrant call",
           ))
       }
     }
@@ -301,15 +314,13 @@ fn construct_fn_callback(
                 "VM error during construct: " <> string.inspect(vm_err)
               }
           }
-        Error(#(Thrown, thrown, post)) ->
-          Error(#(thrown, merge_back(state, post)))
-        Error(#(StepVmError(vm_err), _, _)) ->
+        Error(Threw(thrown, post)) -> Error(#(thrown, merge_back(state, post)))
+        Error(VmFailed(vm_err, _)) ->
           panic as { "VM error in do_construct: " <> string.inspect(vm_err) }
-        Error(#(other, _, _post)) ->
-          panic as {
-            "Unexpected step result from do_construct: "
-            <> string.inspect(other)
-          }
+        // `do_construct` only pushes the frame — it can neither suspend nor
+        // return before `execute_to_completion` above drives the body.
+        Error(Yielded(..)) | Error(Awaited(..)) | Error(Returned(..)) ->
+          panic as "Unexpected step exit from do_construct"
       }
     }
     _, _ ->
@@ -389,9 +400,9 @@ pub fn new_state(
 }
 
 /// Agent Record [[CanBlock]] for the booting agent — process-local, default
-/// True. See arc_atomics_ffi.erl; cleared by the test262 runner for tests
+/// True. See arc_agent_ffi.erl; cleared by the test262 runner for tests
 /// flagged CanBlockIsFalse.
-@external(erlang, "arc_atomics_ffi", "can_block")
+@external(erlang, "arc_agent_ffi", "can_block")
 fn host_can_block() -> Bool
 
 pub fn init_state(
@@ -722,8 +733,7 @@ pub fn execute_to_completion(
 ) -> Result(#(Completion, State(host)), VmError) {
   case execute_inner(state) {
     Ok(#(Completed(comp), final_state)) -> Ok(#(comp, final_state))
-    Ok(#(Suspended(kind, _), _)) ->
-      Error(InternalError(site, completion.suspension_leak_detail(kind)))
+    Ok(#(Suspended(kind, _), _)) -> Error(SuspensionLeak(site:, kind:))
     Error(vm_err) -> Error(vm_err)
   }
 }
@@ -909,11 +919,11 @@ fn fast_loop(
     BinOp(kind) ->
       case stack {
         [right, left, ..rest] ->
-          case kind {
+          case opcode.classify(kind) {
             // §13.15.3: objects need ToPrimitive (stateful), string×non-string
             // needs js_to_string (stateful), BigInt mixes throw — all slow.
             // string×string and number×number are pure.
-            Add ->
+            opcode.AddOp ->
               case left, right {
                 JsString(a), JsString(b) ->
                   fast_loop(
@@ -951,9 +961,13 @@ fn fast_loop(
                       dispatch_slow(state, pc, stack, locals, hp, line)
                   }
               }
+            // instanceof / in need heap + can run user code — always slow.
+            opcode.InstanceOfOp | opcode.InOp ->
+              dispatch_slow(state, pc, stack, locals, hp, line)
             // Strict equality compares references — never coerces, pure.
-            opcode.StrictEq | opcode.StrictNotEq ->
-              case operators.exec_binop(kind, left, right) {
+            opcode.PureOp(binop.StrictEq as op)
+            | opcode.PureOp(binop.StrictNotEq as op) ->
+              case operators.exec_binop(op, left, right) {
                 Ok(result) ->
                   fast_loop(
                     state,
@@ -968,18 +982,15 @@ fn fast_loop(
                 // Slow path re-runs the op and throws the same error.
                 Error(_err) -> dispatch_slow(state, pc, stack, locals, hp, line)
               }
-            // instanceof / in need heap + can run user code — always slow.
-            opcode.InstanceOf | opcode.In ->
-              dispatch_slow(state, pc, stack, locals, hp, line)
             // Remaining numeric/relational/bitwise/loose-eq ops: pure when
             // neither operand is an object (no ToPrimitive can fire —
             // mirrors step's is_eq_coercible / object checks).
-            _other_kind ->
+            opcode.PureOp(op) ->
               case left, right {
                 JsObject(_), _ | _, JsObject(_) ->
                   dispatch_slow(state, pc, stack, locals, hp, line)
                 _, _ ->
-                  case operators.exec_binop(kind, left, right) {
+                  case operators.exec_binop(op, left, right) {
                     Ok(result) ->
                       fast_loop(
                         state,
@@ -1051,7 +1062,7 @@ fn fast_loop(
     DecLocal(index) ->
       case tuple_array.unsafe_get(index, locals) {
         value.JsNumber(_) as v ->
-          case operators.exec_binop(opcode.Sub, v, number_one) {
+          case operators.exec_binop(binop.Sub, v, number_one) {
             Ok(result) ->
               fast_loop(
                 state,
@@ -1501,26 +1512,27 @@ fn dispatch_slow(
   line: Int,
 ) -> Result(#(Outcome, State(host)), VmError) {
   let state = State(..state, pc:, stack:, locals:, heap: hp, current_line: line)
-  let op = tuple_array.unsafe_get(state.pc, state.code)
-  case step(state, op) {
+  case step(state, tuple_array.unsafe_get(state.pc, state.code)) {
     Ok(new_state) -> execute_inner(new_state)
-    Error(#(Done, result, post)) ->
+    Error(Returned(result, post)) ->
       Ok(#(Completed(NormalCompletion(result)), post))
-    Error(#(StepVmError(err), _, _)) -> Error(err)
-    Error(#(Yielded, yielded_value, post)) -> {
-      // Generator yielded — build suspended state.
-      // For Yield: pop the yielded value from stack, advance pc.
-      // For YieldStar: pop arg (keep iter), DON'T advance pc — resume
-      //   re-executes YieldStar with [resume_val, iter, ..].
-      // For InitialYield: stack unchanged, just advance pc.
+    Error(VmFailed(err, _)) -> Error(err)
+    Error(Yielded(kind, yielded_value, post)) -> {
+      // Generator yielded — build the suspended state. The suspending opcode
+      // named its own `YieldKind` when it raised, so the fixup below reads it
+      // straight off the exit instead of re-fetching the bytecode.
+      //
       // The suspended state MUST spread from `post`, not the pre-step
       // `state`: user code run by the step (iter.next / a `done`/`value`
       // getter) may have enqueued jobs or mutated ctx globals, and spreading
       // from `state` would silently revert them. Yield/Await handlers keep
       // pc and the caller's stack shape, so the pc/stack surgery below is
       // valid against `post` too.
-      let suspended_state = case op {
-        Yield ->
+      let suspended_state = case kind {
+        // InitialYield: stack unchanged, just advance pc.
+        InitialSuspend -> State(..post, pc: post.pc + 1)
+        // Yield: pop the yielded value from the stack, advance pc.
+        PlainYield ->
           State(
             ..post,
             stack: case post.stack {
@@ -1529,29 +1541,30 @@ fn dispatch_slow(
             },
             pc: post.pc + 1,
           )
-        YieldStar ->
-          // Strip arg; also resolve an internal Iterator Record in the iter
-          // slot (still present on the FIRST YieldStar after GetIterator when
-          // the record has no cached-next fast path) so gen.return/.throw
-          // forwarding off the saved stack sees the real iterator.
+        // YieldStar: pop arg (keep iter), DON'T advance pc — resume
+        // re-executes YieldStar with [resume_val, iter, ..]. Also resolve an
+        // internal Iterator Record in the iter slot (still present on the
+        // FIRST YieldStar after GetIterator when the record has no
+        // cached-next fast path) so gen.return/.throw forwarding off the
+        // saved stack sees the real iterator.
+        DelegateYield ->
           State(..post, stack: case post.stack {
             [_arg, iter, ..rest] -> [unwrap_iterator_record(post, iter), ..rest]
             [_arg] | [] -> []
           })
-        AsyncYieldStarResume(next_pc:) ->
-          // Stack is [result_obj, iter, ..]. result_obj was fully consumed
-          // by step_generators (its .value is yielded_value, .done was
-          // false). Drop it so saved stack = [iter, ..]; resume pushes the
-          // .next(v) arg → [v, iter, ..] and pc jumps back to Next.
+        // AsyncYieldStarResume: stack is [result_obj, iter, ..]. result_obj
+        // was fully consumed by the step (its .value is yielded_value, .done
+        // was false). Drop it so saved stack = [iter, ..]; resume pushes the
+        // .next(v) arg → [v, iter, ..] and pc jumps back to Next.
+        AsyncDelegateResume(next_pc:) ->
           State(..post, pc: next_pc, stack: case post.stack {
             [_result_obj, ..rest] -> rest
             [] -> []
           })
-        _ -> State(..post, pc: post.pc + 1)
       }
       Ok(#(Suspended(completion.Yield, yielded_value), suspended_state))
     }
-    Error(#(Awaited, awaited_value, post)) -> {
+    Error(Awaited(awaited_value, post)) -> {
       // Async function/generator hit await — pop value, advance pc. Spread
       // from `post` (not the pre-step `state`) so globals mutated by the
       // step aren't reverted; see the Yielded arm above.
@@ -1566,7 +1579,7 @@ fn dispatch_slow(
         )
       Ok(#(Suspended(completion.Await, awaited_value), suspended_state))
     }
-    Error(#(Thrown, thrown_value, post)) -> {
+    Error(Threw(thrown_value, post)) -> {
       // Try to unwind to a catch handler. The handler's full post-step state
       // (stack/pc included) is threaded here so opcodes can mutate stack
       // before throwing (e.g., undef the iter slot then propagate).
@@ -1650,8 +1663,23 @@ fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
 fn underflow(
   state: State(host),
   op: String,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
-  Error(#(StepVmError(StackUnderflow(op)), JsUndefined, state))
+) -> Result(State(host), StepExit(host)) {
+  Error(VmFailed(StackUnderflow(op), state))
+}
+
+/// The chain walk behind `#x` (§7.3.31 PrivateGet / §7.3.32 PrivateSet /
+/// `#x in obj`). `find_property` is used rather than `has_property` because
+/// ordinary [[HasProperty]] deliberately hides private-name keys.
+///
+/// A Proxy on the chain answers **absent**: proxies own no [[PrivateElements]]
+/// and never inherit them, so there is no trap that could reveal one — `#x in
+/// proxy` is false and `proxy.#x` throws, exactly as V8 does.
+fn find_private_element(
+  state: State(host),
+  ref: Ref,
+  key: key.PropertyKey,
+) -> Option(value.Property) {
+  object.find_property(state.heap, ref, key) |> object.or_when_proxy(None)
 }
 
 /// Pop top of stack and jump to `target` if `condition(value)` is true,
@@ -1660,7 +1688,7 @@ fn conditional_jump(
   state: State(host),
   target: Int,
   condition: fn(JsValue) -> Bool,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case state.stack {
     [top, ..rest] ->
       case condition(top) {
@@ -1681,7 +1709,7 @@ fn get_super_value(
   state: State(host),
   keep_base: Bool,
   op: String,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case state.stack {
     // Symbol keys are valid property keys (§7.1.19 ToPropertyKey step 3) —
     // e.g. super[Symbol.iterator]. Must come before the generic arm whose
@@ -1733,10 +1761,7 @@ fn get_super_value(
 
 /// Execute a single instruction. Returns Ok(new_state) to continue,
 /// or Error(#(signal, value, heap)) to stop.
-fn step(
-  state: State(host),
-  op: Op,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
   case op {
     // ---- Source mapping ----------------------------------------------
     SetLine(line) -> Ok(State(..state, current_line: line, pc: state.pc + 1))
@@ -1850,16 +1875,11 @@ fn step(
             Some(val) ->
               Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
             None ->
-              Error(#(
-                StepVmError(InternalError("GetBoxed", "not a BoxSlot")),
-                JsUndefined,
-                state,
-              ))
+              Error(VmFailed(InternalError("GetBoxed", "not a BoxSlot"), state))
           }
         _ ->
-          Error(#(
-            StepVmError(InternalError("GetBoxed", "local is not a box ref")),
-            JsUndefined,
+          Error(VmFailed(
+            InternalError("GetBoxed", "local is not a box ref"),
             state,
           ))
       }
@@ -1875,9 +1895,8 @@ fn step(
               Ok(State(..state, heap:, stack: rest_stack, pc: state.pc + 1))
             }
             _ ->
-              Error(#(
-                StepVmError(InternalError("PutBoxed", "local is not a box ref")),
-                JsUndefined,
+              Error(VmFailed(
+                InternalError("PutBoxed", "local is not a box ref"),
                 state,
               ))
           }
@@ -1905,12 +1924,11 @@ fn step(
                   )
               }
             other ->
-              Error(#(
-                StepVmError(InternalError(
+              Error(VmFailed(
+                InternalError(
                   "PutBoxedCheckInit",
                   "local is not a box ref: " <> string.inspect(other),
-                )),
-                JsUndefined,
+                ),
                 state,
               ))
           }
@@ -1951,7 +1969,7 @@ fn step(
                       pc: state.pc + 1,
                     ),
                   )
-                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+                Error(#(thrown, state)) -> Error(Threw(thrown, state))
               }
             Some(value.AccessorProperty(get: None, ..)) ->
               Ok(
@@ -1988,11 +2006,11 @@ fn step(
                           pc: state.pc + 1,
                         ),
                       )
-                    Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+                    Error(#(thrown, state)) -> Error(Threw(thrown, state))
                   }
                 Ok(#(False, state)) ->
                   state.throw_reference_error(state, name <> " is not defined")
-                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+                Error(#(thrown, state)) -> Error(Threw(thrown, state))
               }
           }
         }
@@ -2045,7 +2063,7 @@ fn step(
                       object.PkString(key),
                     )
                   {
-                    Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+                    Error(#(thrown, state)) -> Error(Threw(thrown, state))
                     Ok(#(False, state)) ->
                       state.throw_reference_error(
                         state,
@@ -2070,8 +2088,7 @@ fn step(
                               <> name
                               <> "' of object '#<Object>'",
                           )
-                        Error(#(thrown, state)) ->
-                          Error(#(Thrown, thrown, state))
+                        Error(#(thrown, state)) -> Error(Threw(thrown, state))
                       }
                   }
                 False ->
@@ -2087,7 +2104,7 @@ fn step(
                     )
                   {
                     Ok(#(state, _)) -> Ok(State(..state, pc: state.pc + 1))
-                    Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+                    Error(#(thrown, state)) -> Error(Threw(thrown, state))
                   }
               }
             }
@@ -2728,7 +2745,7 @@ fn step(
           case disposable_stack.make_using_disposer(state, val, is_async:) {
             #(state, Ok(disposer)) ->
               Ok(State(..state, stack: [disposer, ..state.stack]))
-            #(state, Error(thrown)) -> Error(#(Thrown, thrown, state))
+            #(state, Error(thrown)) -> Error(Threw(thrown, state))
           }
         }
         [] -> underflow(state, "GetDisposer")
@@ -2795,10 +2812,17 @@ fn step(
               object.get_own_property(state.heap, state.ctx.global_object, key)
             {
               Some(DataProperty(value: v, ..)) -> Ok(#(v, state))
-              _ ->
-                case
-                  object.has_property(state.heap, state.ctx.global_object, key)
-                {
+              _ -> {
+                // The global's prototype chain may hold a proxy, whose `has`
+                // trap is user code — take the trap-aware [[HasProperty]].
+                use #(has, state) <- result.try(
+                  state.rethrow(object.has_property_stateful(
+                    state,
+                    state.ctx.global_object,
+                    object.PkString(key),
+                  )),
+                )
+                case has {
                   // Property exists on the proto chain (possibly an
                   // accessor) — get_value_of may run a user getter: thread
                   // its state and propagate its throw, mirroring GetGlobal.
@@ -2810,6 +2834,7 @@ fn step(
                     ))
                   False -> Ok(#(JsUndefined, state))
                 }
+              }
             },
           )
           State(
@@ -2829,14 +2854,14 @@ fn step(
       case state.stack {
         [right, left, ..rest] -> {
           // instanceof and in need heap access
-          case kind {
-            opcode.InstanceOf -> {
+          case opcode.classify(kind) {
+            opcode.InstanceOfOp -> {
               use #(result, state) <- result.map(
                 state.rethrow(coerce.js_instanceof(state, left, right)),
               )
               State(..state, stack: [JsBool(result), ..rest], pc: state.pc + 1)
             }
-            opcode.In -> {
+            opcode.InOp -> {
               // left = key, right = object
               case right {
                 JsObject(ref) -> {
@@ -2867,32 +2892,33 @@ fn step(
               }
             }
             // Add needs ToPrimitive for object operands (ES2024 §13.15.3)
-            Add ->
+            opcode.AddOp ->
               case left, right {
                 JsObject(_), _ | _, JsObject(_) ->
                   binop_add_with_to_primitive(state, left, right, rest)
                 _, _ -> add_primitives(state, left, right, rest)
               }
             // Strict equality compares object references — never coerce.
-            opcode.StrictEq | opcode.StrictNotEq ->
-              binop_direct(state, kind, left, right, rest)
+            opcode.PureOp(binop.StrictEq as op)
+            | opcode.PureOp(binop.StrictNotEq as op) ->
+              binop_direct(state, op, left, right, rest)
             // Loose equality: §7.2.14 step 12 only ToPrimitives the object
             // side when the other is Number/String/BigInt/Symbol. Bool is
             // first ToNumber'd (step 10) so it ends up here too. For
             // object×object (reference equality) and object×nullish (always
             // false) we stay on the direct path.
-            opcode.Eq | opcode.NotEq ->
+            opcode.PureOp(binop.Eq as op) | opcode.PureOp(binop.NotEq as op) ->
               case is_eq_coercible(left, right) {
-                True -> binop_with_to_primitive(state, kind, left, right, rest)
-                False -> binop_direct(state, kind, left, right, rest)
+                True -> binop_with_to_primitive(state, op, left, right, rest)
+                False -> binop_direct(state, op, left, right, rest)
               }
             // All remaining ops are numeric/relational/bitwise: ToNumeric →
             // ToPrimitive(number) on both operands (§13.15.4).
-            _ ->
+            opcode.PureOp(op) ->
               case left, right {
                 JsObject(_), _ | _, JsObject(_) ->
-                  binop_with_to_primitive(state, kind, left, right, rest)
-                _, _ -> binop_direct(state, kind, left, right, rest)
+                  binop_with_to_primitive(state, op, left, right, rest)
+                _, _ -> binop_direct(state, op, left, right, rest)
               }
           }
         }
@@ -2920,8 +2946,8 @@ fn step(
     }
 
     // ---- Fused superinstructions (resolver peephole) -------------------
-    IncLocal(index) -> fused_update_local(state, index, Add)
-    DecLocal(index) -> fused_update_local(state, index, opcode.Sub)
+    IncLocal(index) -> fused_update_local(state, index, FusedInc)
+    DecLocal(index) -> fused_update_local(state, index, FusedDec)
 
     CmpLocalLocalJump(left_idx, right_idx, kind, target) ->
       case tuple_array.unsafe_get(left_idx, state.locals) {
@@ -2954,7 +2980,7 @@ fn step(
       }
       case state.call_stack {
         // No caller — top-level return, we're done
-        [] -> Error(#(Done, return_value, state))
+        [] -> Error(Returned(return_value, state))
         // Pop call frame, restore caller, push return value onto caller's stack
         [
           SavedFrame(
@@ -3076,7 +3102,7 @@ fn step(
     opcode.Ret ->
       case state.stack {
         [value.JsNumber(value.Finite(f)), slot, ..rest] if f <. 0.0 ->
-          Error(#(Done, slot, State(..state, stack: rest)))
+          Error(Returned(slot, State(..state, stack: rest)))
         [value.JsNumber(value.Finite(f)), ..rest] ->
           Ok(State(..state, stack: rest, pc: float.truncate(f)))
         _ -> underflow(state, "Ret")
@@ -3099,7 +3125,7 @@ fn step(
 
     opcode.Throw -> {
       case state.stack {
-        [value, ..] -> Error(#(Thrown, value, state))
+        [value, ..] -> Error(Threw(value, state))
         [] -> underflow(state, "Throw")
       }
     }
@@ -3232,7 +3258,7 @@ fn step(
         [JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
           // OrdinaryGet steps 3-7 to it — no second walk via get_value_of.
-          case object.find_property(state.heap, ref, key) {
+          case find_private_element(state, ref, key) {
             Some(prop) -> {
               use #(val, state) <- result.map(
                 state.rethrow(object.property_get_value(state, prop, receiver)),
@@ -3261,7 +3287,7 @@ fn step(
       case state.stack {
         [JsObject(ref) as receiver, ..rest] ->
           // Single chain walk — see GetPrivateField.
-          case object.find_property(state.heap, ref, key) {
+          case find_private_element(state, ref, key) {
             Some(prop) -> {
               use #(val, state) <- result.map(
                 state.rethrow(object.property_get_value(state, prop, receiver)),
@@ -3291,7 +3317,7 @@ fn step(
         [val, JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
           // OrdinarySetWithOwnDescriptor to it — no second walk via set_value.
-          case object.find_property(state.heap, ref, key) {
+          case find_private_element(state, ref, key) {
             Some(prop) -> {
               use #(state, ok) <- result.try(
                 state.rethrow(object.set_found_value(
@@ -3340,7 +3366,7 @@ fn step(
           // Brand check via find_property (chain walk) — has_property hides
           // private-name keys from ordinary [[HasProperty]], so it can't be
           // used here.
-          let found = option.is_some(object.find_property(state.heap, ref, key))
+          let found = option.is_some(find_private_element(state, ref, key))
           Ok(State(..state, stack: [JsBool(found), ..rest], pc: state.pc + 1))
         }
         [_, ..] ->
@@ -4388,11 +4414,11 @@ fn step(
               )
             // Unwind directly with new_state so eval_env (possibly just
             // lazy-allocated in run_direct_eval) threads through. The step
-            // error return #(Thrown, val, Heap) can't carry it.
+            // error return Threw(val, Heap) can't carry it.
             Error(thrown) ->
               case unwind_to_catch(new_state, thrown) {
                 Some(caught) -> Ok(caught)
-                None -> Error(#(Thrown, thrown, new_state))
+                None -> Error(Threw(thrown, new_state))
               }
           }
         }
@@ -4466,7 +4492,7 @@ fn step(
       }
     }
 
-    CallMethod(_name, arity) -> {
+    CallMethod(arity) -> {
       // Stack: [arg_n, ..., arg_1, method, receiver, ...rest]
       // Pop arity args, then method, then receiver
       case pop_n(state.stack, arity) {
@@ -4776,12 +4802,8 @@ fn step(
                 }
               }
             _ ->
-              Error(#(
-                StepVmError(InternalError(
-                  "ForInNext",
-                  "not a ForInIteratorSlot",
-                )),
-                JsUndefined,
+              Error(VmFailed(
+                InternalError("ForInNext", "not a ForInIteratorSlot"),
                 state,
               ))
           }
@@ -4894,10 +4916,9 @@ fn step(
       // the iter slot becomes JsUndefined so subsequent IteratorNext
       // short-circuits and IteratorClose/CloseThrow no-op (§7.4.11/.6).
       let mark_done = fn(rest) {
-        fn(e: #(StepResult, JsValue, State(host))) {
-          let #(r, v, s) = e
-          #(r, v, State(..s, stack: [JsUndefined, ..rest]))
-        }
+        state.map_exit_state(_, fn(s: State(host)) {
+          State(..s, stack: [JsUndefined, ..rest])
+        })
       }
       case state.stack {
         // Iter already exhausted/aborted — short-circuit to done.
@@ -5130,7 +5151,7 @@ fn step(
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case builtins_iterator.iterator_close_normal(state, iter) {
             #(state, Ok(Nil)) -> Ok(state)
-            #(state, Error(thrown)) -> Error(#(Thrown, thrown, state))
+            #(state, Error(thrown)) -> Error(Threw(thrown, state))
           }
         }
         [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
@@ -5149,10 +5170,9 @@ fn step(
           let state = State(..state, stack: rest)
           // Original error wins regardless of what .return() does.
           let #(state, _inner) = builtins_iterator.call_return(state, iter)
-          Error(#(Thrown, thrown, state))
+          Error(Threw(thrown, state))
         }
-        [thrown, _, ..rest] ->
-          Error(#(Thrown, thrown, State(..state, stack: rest)))
+        [thrown, _, ..rest] -> Error(Threw(thrown, State(..state, stack: rest)))
         _ -> underflow(state, "IteratorCloseThrow")
       }
     }
@@ -5168,7 +5188,7 @@ fn step(
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case builtins_iterator.iterator_rest(state, iter) {
             #(state, Ok(arr)) -> Ok(State(..state, stack: [arr, ..rest]))
-            #(state, Error(thrown)) -> Error(#(Thrown, thrown, state))
+            #(state, Error(thrown)) -> Error(Threw(thrown, state))
           }
         }
         // [[Done]] sentinel — a prior IteratorNext exhausted/aborted the
@@ -5203,14 +5223,14 @@ fn step(
     InitialYield ->
       // Suspend immediately at start of generator body.
       // PC advances past InitialYield so resumption starts at the next op.
-      Error(#(Yielded, JsUndefined, state))
+      Error(Yielded(InitialSuspend, JsUndefined, state))
 
     Yield -> {
       // Pop value from stack and suspend the generator.
       // On resume, .next(arg) value will be pushed onto the stack.
       case state.stack {
-        [yielded_value, ..] -> Error(#(Yielded, yielded_value, state))
-        [] -> Error(#(Yielded, JsUndefined, state))
+        [yielded_value, ..] -> Error(Yielded(PlainYield, yielded_value, state))
+        [] -> Error(Yielded(PlainYield, JsUndefined, state))
       }
     }
 
@@ -5264,10 +5284,9 @@ fn step(
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
             False ->
-              // execute_inner's YieldStar arm strips arg from the
-              // original stack and keeps pc here, so resume loops back
-              // with [resume_val, iter, ..rest].
-              Error(#(Yielded, val, state))
+              // DelegateYield strips arg from the original stack and keeps pc
+              // here, so resume loops back with [resume_val, iter, ..rest].
+              Error(Yielded(DelegateYield, val, state))
           }
         }
         _ -> underflow(state, "YieldStar")
@@ -5309,7 +5328,7 @@ fn step(
         _ -> underflow(state, "AsyncYieldStarNext")
       }
 
-    AsyncYieldStarResume(_) ->
+    AsyncYieldStarResume(next_pc:) ->
       // [result_obj, iter, ..rest]. done? → push value, pc+1 : Yielded(value).
       case state.stack {
         [res, _iter, ..rest] -> {
@@ -5318,7 +5337,7 @@ fn step(
           )
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-            False -> Error(#(Yielded, val, state))
+            False -> Error(Yielded(AsyncDelegateResume(next_pc:), val, state))
           }
         }
         _ -> underflow(state, "AsyncYieldStarResume")
@@ -5327,8 +5346,8 @@ fn step(
     Await -> {
       // Pop the awaited value from the stack and suspend the async function.
       case state.stack {
-        [awaited_value, ..] -> Error(#(Awaited, awaited_value, state))
-        [] -> Error(#(Awaited, JsUndefined, state))
+        [awaited_value, ..] -> Error(Awaited(awaited_value, state))
+        [] -> Error(Awaited(JsUndefined, state))
       }
     }
 
@@ -5525,7 +5544,7 @@ fn with_has_binding(
   state: State(host),
   ref: value.Ref,
   name: String,
-) -> Result(#(Bool, State(host)), #(state.StepResult, JsValue, State(host))) {
+) -> Result(#(Bool, State(host)), state.StepExit(host)) {
   use #(found, state) <- result.try(
     state.rethrow(object.has_property_stateful(
       state,
@@ -5622,7 +5641,7 @@ fn call_function(
   this_val: JsValue,
   constructor_this: option.Option(JsValue),
   new_target: JsValue,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   call.call_function(
     state,
     fn_ref,
@@ -5649,7 +5668,7 @@ fn call_native(
   args: List(JsValue),
   rest_stack: List(JsValue),
   this: JsValue,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   call.call_native(
     state,
     native,
@@ -5700,7 +5719,7 @@ fn define_field_full(
   ref: value.Ref,
   key: JsValue,
   val: JsValue,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let #(heap, desc_ref) =
     common.alloc_pojo(state.heap, state.builtins.object.prototype, [
       #("value", value.data_property(val)),
@@ -5733,7 +5752,7 @@ fn check_define_nonconfigurable(
   state: State(host),
   ref: value.Ref,
   pk: key.PropertyKey,
-) -> Result(Nil, #(StepResult, JsValue, State(host))) {
+) -> Result(Nil, StepExit(host)) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(properties:, ..)) ->
       case dict.get(properties, pk) {
@@ -5757,7 +5776,7 @@ fn check_private_add(
   state: State(host),
   ref: value.Ref,
   key_text: String,
-) -> Result(Nil, #(state.StepResult, JsValue, State(host))) {
+) -> Result(Nil, state.StepExit(host)) {
   case object.get_own_property(state.heap, ref, Named(key_text)) {
     Some(_) ->
       state.throw_type_error(
@@ -5864,7 +5883,7 @@ fn do_construct(
   args: List(JsValue),
   rest_stack: List(JsValue),
   new_target_ref: Ref,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   call.do_construct(
     state,
     ctor_ref,
@@ -5883,7 +5902,7 @@ fn call_value(
   callee: JsValue,
   args: List(JsValue),
   this_val: JsValue,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   call.call_value(
     state,
     callee,
@@ -5900,7 +5919,7 @@ fn spread_into_array(
   state: State(host),
   target_ref: Ref,
   iterable: JsValue,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   array_ops.spread_into_array(state, target_ref, iterable, execute_inner)
 }
 
@@ -6025,8 +6044,8 @@ fn is_tail_call(state: State(host), callee: FuncTemplate) -> Bool {
 /// call_regular_function (plain function callee), which always pushes
 /// exactly one frame.
 fn elide_tail_frame(
-  result: Result(State(host), #(StepResult, JsValue, State(host))),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+  result: Result(State(host), StepExit(host)),
+) -> Result(State(host), StepExit(host)) {
   use new_state <- result.map(result)
   case new_state.call_stack {
     [_caller_frame, ..rest_frames] ->
@@ -6066,11 +6085,11 @@ fn pop_n_loop(
 /// ES2024 §13.15.3: ToPrimitive(default) both sides, then string-concat or numeric-add.
 fn binop_direct(
   state: State(host),
-  kind: opcode.BinOpKind,
+  kind: binop.PureBinOp,
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case operators.exec_binop(kind, left, right) {
     Ok(result) -> Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
     Error(err) -> throw_operator_error(state, err)
@@ -6146,7 +6165,7 @@ fn value_root_ids(values: List(JsValue), acc: List(Int)) -> List(Int) {
 /// fused ops fold a GetLocal, so their TDZ path must be indistinguishable.
 fn tdz_reference_error(
   state: State(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   state.throw_reference_error(
     state,
     "Cannot access variable before initialization (TDZ)",
@@ -6156,14 +6175,22 @@ fn tdz_reference_error(
 /// Unwrap a step-helper result that pushed exactly one value onto the stack
 /// passed to it: return that value and the state with it popped again.
 fn pop_top(
-  r: Result(State(host), #(StepResult, JsValue, State(host))),
+  r: Result(State(host), StepExit(host)),
   op: String,
-) -> Result(#(JsValue, State(host)), #(StepResult, JsValue, State(host))) {
+) -> Result(#(JsValue, State(host)), StepExit(host)) {
   use state <- result.try(r)
   case state.stack {
     [top, ..rest] -> Ok(#(top, State(..state, stack: rest)))
-    [] -> Error(#(StepVmError(StackUnderflow(op)), JsUndefined, state))
+    [] -> Error(VmFailed(StackUnderflow(op), state))
   }
+}
+
+/// Which direction a fused postfix update goes. `Add` and `Sub` no longer live
+/// in the same type (Add is not a `PureBinOp`), so the two callers name their
+/// intent instead of smuggling a `BinOpKind` in.
+type FusedUpdate {
+  FusedInc
+  FusedDec
 }
 
 /// Fused statement-position postfix update (IncLocal/DecLocal) — semantics
@@ -6173,8 +6200,8 @@ fn pop_top(
 fn fused_update_local(
   state: State(host),
   index: Int,
-  kind: opcode.BinOpKind,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+  kind: FusedUpdate,
+) -> Result(State(host), StepExit(host)) {
   let next_pc = state.pc + 1
   case tuple_array.unsafe_get(index, state.locals) {
     JsUninitialized -> tdz_reference_error(state)
@@ -6197,12 +6224,12 @@ fn fused_update_local(
       // Add goes through add_primitives and Sub through binop_direct,
       // exactly like the BinOp step arm would route them.
       use #(result, state) <- result.try(case kind {
-        Add ->
+        FusedInc ->
           pop_top(add_primitives(state, n, number_one, state.stack), "IncLocal")
-        _ ->
+        FusedDec ->
           pop_top(
-            binop_direct(state, kind, n, number_one, state.stack),
-            "IncLocal",
+            binop_direct(state, binop.Sub, n, number_one, state.stack),
+            "DecLocal",
           )
       })
       let locals = tuple_array.set_unchecked(index, result, state.locals)
@@ -6217,11 +6244,11 @@ fn fused_update_local(
 /// primitives, binop_with_to_primitive when an operand is an object.
 fn fused_cmp_jump(
   state: State(host),
-  kind: opcode.BinOpKind,
+  kind: binop.PureBinOp,
   left: JsValue,
   right: JsValue,
   target: Int,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let next_pc = state.pc + 1
   use #(result, state) <- result.try(case left, right {
     JsObject(_), _ | _, JsObject(_) ->
@@ -6247,7 +6274,7 @@ fn fused_cmp_jump(
 fn throw_operator_error(
   state: State(host),
   err: operators.OpError,
-) -> Result(a, #(StepResult, JsValue, State(host))) {
+) -> Result(a, StepExit(host)) {
   case err {
     operators.OpRangeError(msg) -> state.throw_range_error(state, msg)
     operators.OpTypeError(msg) -> state.throw_type_error(state, msg)
@@ -6273,13 +6300,13 @@ fn is_eq_coercible(left: JsValue, right: JsValue) -> Bool {
 /// equality uses default hint (matters for Date @@toPrimitive).
 fn binop_with_to_primitive(
   state: State(host),
-  kind: opcode.BinOpKind,
+  kind: binop.PureBinOp,
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let hint = case kind {
-    opcode.Eq | opcode.NotEq -> coerce.DefaultHint
+    binop.Eq | binop.NotEq -> coerce.DefaultHint
     _ -> coerce.NumberHint
   }
   use #(lprim, s1) <- result.try(
@@ -6302,7 +6329,7 @@ fn unaryop_with_to_primitive(
   kind: opcode.UnaryOpKind,
   operand: JsValue,
   rest: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   use #(prim, s1) <- result.try(
     state.rethrow(coerce.to_primitive(state, operand, coerce.NumberHint)),
   )
@@ -6318,7 +6345,7 @@ fn add_primitives(
   lprim: JsValue,
   rprim: JsValue,
   rest: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case lprim, rprim {
     JsString(a), JsString(b) ->
       Ok(State(..state, stack: [JsString(a <> b), ..rest], pc: state.pc + 1))
@@ -6363,7 +6390,7 @@ fn binop_add_with_to_primitive(
   left: JsValue,
   right: JsValue,
   rest: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   use #(lprim, s1) <- result.try(
     state.rethrow(coerce.to_primitive(state, left, coerce.DefaultHint)),
   )
@@ -6398,7 +6425,7 @@ fn is_native_generator_next(h: Heap(host), next_fn: JsValue) -> Bool {
 fn read_iter_step_result(
   state: State(host),
   res: JsValue,
-) -> Result(#(Bool, JsValue, State(host)), #(StepResult, JsValue, State(host))) {
+) -> Result(#(Bool, JsValue, State(host)), StepExit(host)) {
   case res {
     JsObject(rref) -> {
       use #(done, state) <- result.try(
@@ -6429,7 +6456,7 @@ fn push_iterator_record(
   state: State(host),
   iter_ref: Ref,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case heap.read(state.heap, iter_ref) {
     Some(ObjectSlot(kind: GeneratorObject(_), ..))
     | Some(ObjectSlot(kind: ArrayIteratorObject(..), ..))
@@ -6496,7 +6523,7 @@ fn step_array_iterator_source(
   index: Int,
   iter_kind: value.ArrayIterKind,
   rest: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case object.as_proxy(state.heap, source) {
     // Proxy source — §23.1.5.1 generic path: ? Get(array,
     // "length") / ? Get(array, ToString(index)) fire get traps.
@@ -6703,7 +6730,7 @@ fn step_iterator_record(
   iterated: JsValue,
   next_method: JsValue,
   rest: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   use #(result_obj, state) <- result.try(
     state.rethrow(state.call(state, next_method, iterated, [])),
   )
@@ -6727,7 +6754,7 @@ fn step_generic_iterator(
   state: State(host),
   iter_ref: Ref,
   rest: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let iter = JsObject(iter_ref)
   use #(next_fn, state) <- result.try(
     state.rethrow(object.get_value(state, iter_ref, Named("next"), iter)),
@@ -6754,7 +6781,7 @@ fn get_iterator_via_symbol(
   ref: value.Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   // Step 1: Let method be ? GetMethod(obj, @@iterator)
   case object.get_symbol_value(state, ref, value.symbol_iterator, iterable) {
     Ok(#(method, state)) ->
@@ -6772,7 +6799,7 @@ fn get_iterator_via_symbol(
                     "Iterator result is not an object",
                   )
               }
-            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+            Error(#(thrown, state)) -> Error(Threw(thrown, state))
           }
         False ->
           state.throw_type_error(
@@ -6782,7 +6809,7 @@ fn get_iterator_via_symbol(
       }
     // §7.3.10 GetMethod step 1: a throwing getter propagates — it must not
     // be masked by the "not iterable" TypeError (test262 get-abrupt cases).
-    Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+    Error(#(thrown, state)) -> Error(Threw(thrown, state))
   }
 }
 
@@ -6799,7 +6826,7 @@ fn get_async_iterator_via_symbol(
   ref: Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   // Step 1.a: Let method be ? GetMethod(obj, @@asyncIterator).
   use #(method, state) <- result.try(
     state.rethrow(object.get_symbol_value(
@@ -6831,7 +6858,7 @@ fn get_async_from_sync_fallback(
   ref: Ref,
   iterable: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   use #(sync_method, state) <- result.try(
     state.rethrow(object.get_symbol_value(
       state,
@@ -6889,7 +6916,7 @@ fn call_iterator_method(
   state: State(host),
   method: JsValue,
   iterable: JsValue,
-) -> Result(#(JsValue, State(host)), #(StepResult, JsValue, State(host))) {
+) -> Result(#(JsValue, State(host)), StepExit(host)) {
   case helpers.is_callable(state.heap, method) {
     False ->
       state.throw_type_error(

@@ -47,7 +47,7 @@ import arc/vm/internal/job_queue
 import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
-import arc/vm/state.{type State, type StepResult, State}
+import arc/vm/state.{type State, type StepExit, State}
 import arc/vm/value.{type JsValue, type Ref, JsObject, JsString, JsUndefined}
 import gleam/io
 import gleam/list
@@ -90,7 +90,7 @@ pub fn evaluate_import_call(
   specifier: JsValue,
   options: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   // Step 4: NewPromiseCapability(%Promise%).
   let #(heap, promise_ref, data_ref) =
     builtins_promise.create_promise(
@@ -133,7 +133,7 @@ pub fn evaluate_defer_import_call(
   state: State(host),
   specifier: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let #(heap, promise_ref, data_ref) =
     builtins_promise.create_promise(
       state.heap,
@@ -191,7 +191,7 @@ pub fn evaluate_source_import_call(
   state: State(host),
   specifier: JsValue,
   rest_stack: List(JsValue),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let #(heap, promise_ref, data_ref) =
     builtins_promise.create_promise(
       state.heap,

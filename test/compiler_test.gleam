@@ -13,7 +13,6 @@ import arc/vm/value.{
   Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN, NegInfinity,
 }
 import gleam/dict
-import gleam/int
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
@@ -27,10 +26,10 @@ import gleam/string
 fn run_js(
   source: String,
 ) -> Result(#(Result(value.JsValue, value.JsValue), state.Heap(host)), String) {
-  case parser.parse(source, parser.Script) {
+  case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(#(program, sb)) ->
-      case compiler.compile(program, sb) {
+    Ok(#(body, sb)) ->
+      case compiler.compile(body, sb) {
         Error(err) -> Error("compile error: " <> compiler.error_message(err))
         Ok(template) -> {
           let h = heap.new()
@@ -88,13 +87,10 @@ fn assert_promise_rejects(source: String, expected: value.JsValue) -> Nil {
   assert_promise_settles(source, Error(expected), "rejected")
 }
 
+/// The canonical rendering lives in `state.vm_error_message` — go through it so
+/// a new `VmError` variant needs no test-side arm.
 fn inspect_vm_error(err: state.VmError) -> String {
-  case err {
-    state.PcOutOfBounds(pc) -> "PcOutOfBounds(" <> pc |> int.to_string <> ")"
-    state.StackUnderflow(op) -> "StackUnderflow(" <> op <> ")"
-    state.InternalError(site:, detail:) ->
-      "InternalError(" <> site <> ", " <> detail <> ")"
-  }
+  state.vm_error_message(err)
 }
 
 fn assert_normal(source: String, expected: value.JsValue) -> Nil {
@@ -7367,10 +7363,10 @@ fn eval_repl_line(
   b: common.Builtins,
   env: entry.ReplEnv,
 ) -> Result(#(value.JsValue, state.Heap(host), entry.ReplEnv), String) {
-  case parser.parse(source, parser.Script) {
+  case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(#(program, sb)) ->
-      case compiler.compile_repl(program, sb) {
+    Ok(#(body, sb)) ->
+      case compiler.compile_repl(body, sb) {
         Error(err) -> Error("compile error: " <> compiler.error_message(err))
         Ok(template) ->
           case entry.run_and_drain_repl(template, h, b, env) {
@@ -7400,11 +7396,11 @@ fn run_repl_throw_loop(
     [] -> Error("no lines to evaluate")
     [line] -> {
       // Last line — expect it to throw
-      case parser.parse(line, parser.Script) {
+      case parser.parse_script(line) {
         Error(err) ->
           Error("parse error: " <> parser.parse_error_to_string(err))
-        Ok(#(program, sb)) ->
-          case compiler.compile_repl(program, sb) {
+        Ok(#(body, sb)) ->
+          case compiler.compile_repl(body, sb) {
             Error(_) -> Error("compile error on last line")
             Ok(template) ->
               case entry.run_and_drain_repl(template, h, b, env) {
@@ -8018,17 +8014,17 @@ pub fn module_repl_harness_globals_test() -> Nil {
   // Step 1: Compile and run harness script in REPL mode
   let harness_source =
     "function greetFromHarness() { return 'hello from harness'; }"
-  let assert Ok(#(harness_program, harness_sb)) =
-    parser.parse(harness_source, parser.Script)
+  let assert Ok(#(harness_body, harness_sb)) =
+    parser.parse_script(harness_source)
   let assert Ok(harness_template) =
-    compiler.compile_repl(harness_program, harness_sb)
+    compiler.compile_repl(harness_body, harness_sb)
 
   let env = entry.new_repl_env(global_object)
   let assert Ok(#(Ok(_), h, env)) =
     entry.run_and_drain_repl(harness_template, h, b, env)
 
   // Verify greetFromHarness is on globalThis object
-  let assert True =
+  let assert object.Answered(True) =
     object.has_property(h, env.global_object, Named("greetFromHarness"))
 
   // Step 2: Compile and run a module that uses the harness function
@@ -8079,8 +8075,9 @@ pub fn run_export_namespace_call_test() -> Nil {
       fn(_d, _p) { Error("no module loader") },
       fn(_resolved) { Error("no module loader") },
     )
-  let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(namespace), ..)) =
+  let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(ns_ref), ..)) =
     module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
+  let namespace = value.JsObject(ns_ref)
 
   // Read `receive` off the namespace — no VM State needed.
   let assert Some(receive) = module.read_export(h, namespace, "receive")

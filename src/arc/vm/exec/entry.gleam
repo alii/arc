@@ -18,7 +18,6 @@ import arc/vm/realm
 import arc/vm/state.{type Heap, type State, type VmError, RealmCtx, State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot, JsObject,
-  PromiseSlot,
 }
 import gleam/dict
 import gleam/list
@@ -204,9 +203,9 @@ pub fn run_module(
     // `yield` cannot occur outside a generator body — a module top level
     // yielding is an engine bug, reported on the VmError channel.
     Ok(#(Suspended(completion.Yield, _), _)) ->
-      ModuleError(error: state.InternalError(
-        "run_module",
-        completion.suspension_leak_detail(completion.Yield),
+      ModuleError(error: state.SuspensionLeak(
+        site: "run_module",
+        kind: completion.Yield,
       ))
   }
 }
@@ -233,20 +232,7 @@ fn drive_top_level_await(
     )
   // The host always inspects this capability below — mark it handled so a
   // rejection isn't also reported as an unhandled promise rejection.
-  let h = case heap.read(h, data_ref) {
-    Some(PromiseSlot(state:, fulfill_reactions:, reject_reactions:, ..)) ->
-      heap.write(
-        h,
-        data_ref,
-        PromiseSlot(
-          state:,
-          fulfill_reactions:,
-          reject_reactions:,
-          is_handled: True,
-        ),
-      )
-    _ -> h
-  }
+  let h = builtins_promise.mark_handled(h, data_ref)
   let #(h, resolve, reject) =
     builtins_promise.create_resolving_functions(
       h,

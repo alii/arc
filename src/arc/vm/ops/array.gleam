@@ -6,9 +6,10 @@ import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array
 import arc/vm/key.{Index, Named}
+import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{
-  type Heap, type State, type StepResult, type VmError, State, Thrown,
+  type Heap, type State, type StepExit, type VmError, State, Threw,
 }
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, GeneratorObject, JsObject, JsUndefined,
@@ -272,23 +273,16 @@ fn latch_array_iter_done(h: Heap(host), iter_ref: Ref) -> Heap(host) {
 ///   3. Repeat: next = ? IteratorStepValue; if done return; CreateDataProperty(A, idx, next); idx++
 ///
 /// Layout, from most to least specialized:
-///   - GUARDED fast paths for Array/Arguments and ArrayIterator: a pure
-///     raw-heap copy/drain, taken only when "protector" guards —
-///     non-observable heap walks — prove it is equivalent to the spec's
-///     GetIterator + IteratorStepValue loop. Array/Arguments checks BOTH
-///     the source's @@iterator AND %ArrayIteratorPrototype%.next (plus
-///     holes / index overrides); ArrayIterator checks BOTH the iterator's
-///     inherited @@iterator AND its `next` (plus the same hole/override
-///     protector on its source array). See `is_intrinsic_array_values`,
-///     `is_intrinsic_array_iterator_next`,
-///     `is_intrinsic_iterator_proto_iterator` and
-///     `raw_iterator_source_copy_is_safe`; a failed guard falls to
-///     `spread_via_iterator`.
-///   - UNGUARDED fast paths for Generator, Set/Map + their iterators, and
-///     String: these still assume the intrinsic @@iterator/`next` and do
-///     NOT yet notice `s[Symbol.iterator] = ...` or a patched
-///     Set.prototype[Symbol.iterator]. Same protector treatment is the
-///     follow-up if that ever matters.
+///   - GUARDED fast paths for Array/Arguments, ArrayIterator, Set/Map + their
+///     iterators, Generator and String: a pure raw-heap copy/drain, taken only
+///     when `intrinsic_iterator_guard` — a non-observable heap walk of the
+///     source's @@iterator AND the `next` the fresh iterator would resolve —
+///     proves it is equivalent to the spec's GetIterator + IteratorStepValue
+///     loop. Array/Arguments additionally require the observable `length` to
+///     match the stored one (`spread_length_of`) and no holes / index
+///     overrides; ArrayIterator applies the same hole/override protector to
+///     its source (`raw_iterator_source_copy_is_safe`). EVERY failed guard
+///     falls to `spread_via_iterator`.
 ///   - `spread_via_iterator` — the real §7.4.3 GetIterator + §7.4.8
 ///     IteratorStepValue dance. It handles EVERYTHING with a callable
 ///     @@iterator (class instances with a generator @@iterator, Proxies,
@@ -301,57 +295,52 @@ pub fn spread_into_array(
   target_ref: Ref,
   iterable: JsValue,
   execute_inner: ExecuteInnerFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case iterable {
     JsObject(src_ref) ->
       case heap.read(state.heap, src_ref) {
-        Some(ObjectSlot(kind: ArrayObject(length:), elements:, properties:, ..))
+        Some(ObjectSlot(
+          kind: ArrayObject(_) as kind,
+          elements:,
+          properties:,
+          ..,
+        ))
         | Some(ObjectSlot(
-            kind: value.ArgumentsObject(length:),
+            kind: value.ArgumentsObject(_) as kind,
             elements:,
             properties:,
             ..,
-          )) -> {
-          // V8-protector-style guard for the raw-element copy. Both reads
-          // are pure heap walks (no getter runs), so a guard MISS is never
-          // observable; a guard HIT means the whole spec chain is still
-          // intrinsic:
-          //   1. the object's @@iterator is the intrinsic
-          //      %Array.prototype.values% data property — no own override,
-          //      no patched Array.prototype[Symbol.iterator], no swapped
-          //      [[Prototype]]; and
-          //   2. %ArrayIteratorPrototype%.next is still the intrinsic
-          //      (§23.1.5.2.1). GetIteratorDirect does Get(iter, "next") on
-          //      the FRESH array iterator that values() returns, which
-          //      resolves through %ArrayIteratorPrototype% — V8's
-          //      array-iterator protector guards exactly this.
-          let intrinsic_iter =
-            find_symbol_property(state.heap, src_ref, value.symbol_iterator)
-            |> is_intrinsic_array_values(state.heap, _)
-          let intrinsic_next =
-            object.find_property(
+          )) ->
+          case
+            intrinsic_iterator_guard(
               state.heap,
+              src_ref,
+              array_values,
               state.builtins.array_iterator_proto,
-              Named("next"),
-            )
-            |> is_intrinsic_array_iterator_next(state.heap, _)
-          case intrinsic_iter && intrinsic_next {
+              array_iterator_next,
+            ),
+            spread_length_of(kind, properties)
+          {
             // (a) @@iterator was overridden (the raw copy would ignore it
             // entirely — `a[Symbol.iterator] = function*(){yield 9}` must
-            // NOT still spread a's elements), or (b)
+            // NOT still spread a's elements), (b)
             // %ArrayIteratorPrototype%.next was patched (the spec loop
-            // calls it per element) → real iterator protocol.
-            False -> spread_via_iterator(state, iterable, target_ref)
-            True ->
+            // calls it per element), or (c) an `arguments.length = 0`
+            // assignment made the observable length disagree with the raw
+            // element block → real iterator protocol.
+            False, _ -> spread_via_iterator(state, iterable, target_ref)
+            True, None -> spread_array_generic(state, src_ref, target_ref, 0)
+            True, Some(length) ->
               case
                 object.has_index_overrides(properties)
                 || !is_dense(elements, length)
               {
                 False -> {
-                  // (a) intrinsic @@iterator, (b) no dict override for any
-                  // index, (c) dense over [0, length): the raw element
-                  // block IS what the spec iterator's per-index Get would
-                  // return. Copy it in one heap write, no iterator object.
+                  // (a) intrinsic @@iterator + next, (b) observable length ==
+                  // stored length, (c) no dict override for any index, (d)
+                  // dense over [0, length): the raw element block IS what the
+                  // spec iterator's per-index Get would return. Copy it in one
+                  // heap write, no iterator object.
                   let heap =
                     append_range_to_array(
                       state.heap,
@@ -372,10 +361,28 @@ pub fn spread_into_array(
                 True -> spread_array_generic(state, src_ref, target_ref, 0)
               }
           }
-        }
         Some(ObjectSlot(kind: GeneratorObject(_), ..)) ->
-          // Generators are self-iterators. Drain via repeated .next().
-          drain_generator_to_array(state, src_ref, target_ref, execute_inner)
+          // Generators are self-iterators (@@iterator inherited from
+          // %Iterator.prototype%). The raw drain re-enters the VM directly
+          // instead of [[Call]]ing `.next`, so both must still be intrinsic.
+          case
+            intrinsic_iterator_guard(
+              state.heap,
+              src_ref,
+              iterator_self,
+              src_ref,
+              CallFn(value.GeneratorNext),
+            )
+          {
+            False -> spread_via_iterator(state, iterable, target_ref)
+            True ->
+              drain_generator_to_array(
+                state,
+                src_ref,
+                target_ref,
+                execute_inner,
+              )
+          }
         Some(ObjectSlot(
           kind: value.ArrayIteratorObject(source:, index:, iter_kind:),
           ..,
@@ -390,13 +397,15 @@ pub fn spread_into_array(
           //      %ArrayIteratorPrototype%.next (§23.1.5.2.1). An own
           //      `it.next = ...` or a patched %ArrayIteratorPrototype%.next
           //      must be honored per call.
-          let intrinsic_self_iter =
-            find_symbol_property(state.heap, src_ref, value.symbol_iterator)
-            |> is_intrinsic_iterator_proto_iterator(state.heap, _)
-          let intrinsic_next =
-            object.find_property(state.heap, src_ref, Named("next"))
-            |> is_intrinsic_array_iterator_next(state.heap, _)
-          case intrinsic_self_iter && intrinsic_next {
+          case
+            intrinsic_iterator_guard(
+              state.heap,
+              src_ref,
+              iterator_self,
+              src_ref,
+              array_iterator_next,
+            )
+          {
             False -> spread_via_iterator(state, iterable, target_ref)
             True ->
               spread_array_iterator(
@@ -409,125 +418,187 @@ pub fn spread_into_array(
               )
           }
         }
-        Some(ObjectSlot(kind: value.SetObject(store:), ..)) -> {
-          // Set fast path — push values in insertion order.
-          let values = ordered_entries.live_values(store)
-          let heap = append_list_to_array(state.heap, target_ref, values)
-          Ok(State(..state, heap:))
-        }
+        Some(ObjectSlot(kind: value.SetObject(store:), ..)) ->
+          // Set fast path — push values in insertion order. Guarded on
+          // %Set.prototype.values% (the Set's @@iterator) and
+          // %SetIteratorPrototype%.next.
+          case
+            intrinsic_iterator_guard(
+              state.heap,
+              src_ref,
+              set_values,
+              state.builtins.set_iterator_proto,
+              set_iterator_next,
+            )
+          {
+            False -> spread_via_iterator(state, iterable, target_ref)
+            True -> {
+              let values = ordered_entries.live_values(store)
+              let heap = append_list_to_array(state.heap, target_ref, values)
+              Ok(State(..state, heap:))
+            }
+          }
         Some(
           ObjectSlot(
             kind: value.SetIteratorObject(source:, cursor:, done:, kind:),
             ..,
           ) as slot,
-        ) -> {
-          // Drain the LIVE iterator: forward insertion order of the source
-          // from the cursor onward, then latch the iterator done.
-          let entries = case done {
-            True -> []
-            False ->
-              case heap.read(state.heap, source) {
-                Some(ObjectSlot(kind: value.SetObject(store:), ..)) ->
-                  ordered_entries.live_entries_from(store, cursor)
-                _ -> []
-              }
-          }
-          let proto = state.builtins.array.prototype
-          let heap = {
-            use h, els, len <- batch_append(state.heap, target_ref)
-            list.fold(entries, #(h, els, len), fn(acc, e) {
-              let #(h, els, len) = acc
-              case kind {
-                value.SetIterValues -> #(
-                  h,
-                  elements.set(els, len, e.1),
-                  len + 1,
-                )
-                value.SetIterEntries -> {
-                  let #(h, pair) = common.alloc_array(h, [e.1, e.1], proto)
-                  #(h, elements.set(els, len, JsObject(pair)), len + 1)
-                }
-              }
-            })
-          }
-          let heap =
-            heap.write(
-              heap,
+        ) ->
+          case
+            intrinsic_iterator_guard(
+              state.heap,
               src_ref,
-              ObjectSlot(
-                ..slot,
-                kind: value.SetIteratorObject(
-                  source:,
-                  cursor:,
-                  done: True,
-                  kind:,
-                ),
-              ),
+              iterator_self,
+              src_ref,
+              set_iterator_next,
             )
-          Ok(State(..state, heap:))
-        }
-        Some(ObjectSlot(kind: value.MapObject(store:), ..)) -> {
-          // Map fast path — push [k,v] pairs in insertion order.
-          let proto = state.builtins.array.prototype
-          let heap = {
-            use h, els, len <- batch_append(state.heap, target_ref)
-            ordered_entries.live_entries(store)
-            |> list.fold(#(h, els, len), fn(acc, e) {
-              let #(h, els, len) = acc
-              let #(h, pair) =
-                common.alloc_array(h, [value.map_key_to_js(e.0), e.1], proto)
-              #(h, elements.set(els, len, JsObject(pair)), len + 1)
-            })
+          {
+            False -> spread_via_iterator(state, iterable, target_ref)
+            True -> {
+              // Drain the LIVE iterator: forward insertion order of the source
+              // from the cursor onward, then latch the iterator done.
+              let entries = case done {
+                True -> []
+                False ->
+                  case heap.read(state.heap, source) {
+                    Some(ObjectSlot(kind: value.SetObject(store:), ..)) ->
+                      ordered_entries.live_entries_from(store, cursor)
+                    _ -> []
+                  }
+              }
+              let proto = state.builtins.array.prototype
+              let heap = {
+                use h, els, len <- batch_append(state.heap, target_ref)
+                list.fold(entries, #(h, els, len), fn(acc, e) {
+                  let #(h, els, len) = acc
+                  case kind {
+                    value.SetIterValues -> #(
+                      h,
+                      elements.set(els, len, e.1),
+                      len + 1,
+                    )
+                    value.SetIterEntries -> {
+                      let #(h, pair) = common.alloc_array(h, [e.1, e.1], proto)
+                      #(h, elements.set(els, len, JsObject(pair)), len + 1)
+                    }
+                  }
+                })
+              }
+              let heap =
+                heap.write(
+                  heap,
+                  src_ref,
+                  ObjectSlot(
+                    ..slot,
+                    kind: value.SetIteratorObject(
+                      source:,
+                      cursor:,
+                      done: True,
+                      kind:,
+                    ),
+                  ),
+                )
+              Ok(State(..state, heap:))
+            }
           }
-          Ok(State(..state, heap:))
-        }
+        Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
+          case
+            intrinsic_iterator_guard(
+              state.heap,
+              src_ref,
+              map_entries,
+              state.builtins.map_iterator_proto,
+              map_iterator_next,
+            )
+          {
+            False -> spread_via_iterator(state, iterable, target_ref)
+            True -> {
+              // Map fast path — push [k,v] pairs in insertion order.
+              let proto = state.builtins.array.prototype
+              let heap = {
+                use h, els, len <- batch_append(state.heap, target_ref)
+                ordered_entries.live_entries(store)
+                |> list.fold(#(h, els, len), fn(acc, e) {
+                  let #(h, els, len) = acc
+                  let #(h, pair) =
+                    common.alloc_array(
+                      h,
+                      [value.map_key_to_js(e.0), e.1],
+                      proto,
+                    )
+                  #(h, elements.set(els, len, JsObject(pair)), len + 1)
+                })
+              }
+              Ok(State(..state, heap:))
+            }
+          }
         Some(
           ObjectSlot(
             kind: value.MapIteratorObject(source:, cursor:, done:, kind:),
             ..,
           ) as slot,
-        ) -> {
-          let entries = case done {
-            True -> []
-            False ->
-              case heap.read(state.heap, source) {
-                Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
-                  ordered_entries.live_entries_from(store, cursor)
-                _ -> []
-              }
-          }
-          let proto = state.builtins.array.prototype
-          let heap = {
-            use h, els, len <- batch_append(state.heap, target_ref)
-            list.fold(entries, #(h, els, len), fn(acc, e) {
-              let #(h, els, len) = acc
-              let #(k, v) = #(value.map_key_to_js(e.0), e.1)
-              case kind {
-                value.MapIterKeys -> #(h, elements.set(els, len, k), len + 1)
-                value.MapIterValues -> #(h, elements.set(els, len, v), len + 1)
-                value.MapIterEntries -> {
-                  let #(h, arr) = common.alloc_array(h, [k, v], proto)
-                  #(h, elements.set(els, len, JsObject(arr)), len + 1)
-                }
-              }
-            })
-          }
-          let heap =
-            heap.write(
-              heap,
+        ) ->
+          case
+            intrinsic_iterator_guard(
+              state.heap,
               src_ref,
-              ObjectSlot(
-                ..slot,
-                kind: value.MapIteratorObject(
-                  source:,
-                  cursor:,
-                  done: True,
-                  kind:,
-                ),
-              ),
+              iterator_self,
+              src_ref,
+              map_iterator_next,
             )
-          Ok(State(..state, heap:))
-        }
+          {
+            False -> spread_via_iterator(state, iterable, target_ref)
+            True -> {
+              let entries = case done {
+                True -> []
+                False ->
+                  case heap.read(state.heap, source) {
+                    Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
+                      ordered_entries.live_entries_from(store, cursor)
+                    _ -> []
+                  }
+              }
+              let proto = state.builtins.array.prototype
+              let heap = {
+                use h, els, len <- batch_append(state.heap, target_ref)
+                list.fold(entries, #(h, els, len), fn(acc, e) {
+                  let #(h, els, len) = acc
+                  let #(k, v) = #(value.map_key_to_js(e.0), e.1)
+                  case kind {
+                    value.MapIterKeys -> #(
+                      h,
+                      elements.set(els, len, k),
+                      len + 1,
+                    )
+                    value.MapIterValues -> #(
+                      h,
+                      elements.set(els, len, v),
+                      len + 1,
+                    )
+                    value.MapIterEntries -> {
+                      let #(h, arr) = common.alloc_array(h, [k, v], proto)
+                      #(h, elements.set(els, len, JsObject(arr)), len + 1)
+                    }
+                  }
+                })
+              }
+              let heap =
+                heap.write(
+                  heap,
+                  src_ref,
+                  ObjectSlot(
+                    ..slot,
+                    kind: value.MapIteratorObject(
+                      source:,
+                      cursor:,
+                      done: True,
+                      kind:,
+                    ),
+                  ),
+                )
+              Ok(State(..state, heap:))
+            }
+          }
         // Every other object — plain objects, class instances with a
         // generator @@iterator, Proxies, RegExp string iterators, userland
         // `{ [Symbol.iterator]() {...} }` objects — takes the real
@@ -536,14 +607,31 @@ pub fn spread_into_array(
         _ -> spread_via_iterator(state, iterable, target_ref)
       }
     // String primitive: spread iterates code points (ES §22.1.5), matching
-    // the GetIterator string fast path used by for-of.
-    value.JsString(s) -> {
-      let values =
-        string.to_utf_codepoints(s)
-        |> list.map(fn(cp) { value.JsString(string.from_utf_codepoints([cp])) })
-      let heap = append_list_to_array(state.heap, target_ref, values)
-      Ok(State(..state, heap:))
-    }
+    // the GetIterator string fast path used by for-of. `s[@@iterator]`
+    // resolves through %String.prototype%, and Arc's string iterator inherits
+    // %ArrayIteratorPrototype% — guard both, since
+    // `String.prototype[Symbol.iterator] = function*(){yield 9}` is observable.
+    value.JsString(s) ->
+      case
+        intrinsic_iterator_guard(
+          state.heap,
+          state.builtins.string.prototype,
+          string_symbol_iterator,
+          state.builtins.array_iterator_proto,
+          array_iterator_next,
+        )
+      {
+        False -> spread_via_iterator(state, iterable, target_ref)
+        True -> {
+          let values =
+            string.to_utf_codepoints(s)
+            |> list.map(fn(cp) {
+              value.JsString(string.from_utf_codepoints([cp]))
+            })
+          let heap = append_list_to_array(state.heap, target_ref, values)
+          Ok(State(..state, heap:))
+        }
+      }
     // null/undefined/other primitives: not iterable.
     _ -> {
       state.throw_type_error(
@@ -567,11 +655,13 @@ fn spread_array_generic(
   src_ref: Ref,
   target_ref: Ref,
   idx: Int,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
-  let length =
-    heap.read_array_like(state.heap, src_ref)
-    |> option.map(fn(p) { p.0 })
-    |> option.unwrap(0)
+) -> Result(State(host), StepExit(host)) {
+  // §7.1.20 LengthOfArrayLike: ? ToLength(? Get(O, "length")). Re-read every
+  // step — the intrinsic array iterator does, and a getter can grow or shrink
+  // the source mid-iteration. Going through [[Get]] (rather than the stored
+  // ArrayObject/ArgumentsObject count) is what makes `arguments.length = 0;
+  // [...arguments]` spread nothing.
+  use #(length, state) <- result.try(array_like_length(state, src_ref))
   case idx >= length {
     True -> Ok(state)
     False ->
@@ -585,8 +675,26 @@ fn spread_array_generic(
             idx + 1,
           )
         }
-        Error(#(thrown, state)) -> Error(#(Thrown, thrown, state))
+        Error(#(thrown, state)) -> Error(Threw(thrown, state))
       }
+  }
+}
+
+/// §7.1.20 LengthOfArrayLike(O) — ? ToLength(? Get(O, "length")). The Get can
+/// run a getter (and throw); ToNumber can run a user `valueOf`.
+fn array_like_length(
+  state: State(host),
+  ref: Ref,
+) -> Result(#(Int, State(host)), StepExit(host)) {
+  use #(len_val, state) <- result.try(
+    state.rethrow(object.get_value_of(state, JsObject(ref), Named("length"))),
+  )
+  use #(len_num, state) <- result.map(
+    state.rethrow(coerce.js_to_number(state, len_val)),
+  )
+  case len_num {
+    value.Finite(f) -> #(int.max(0, value.float_to_int(f)), state)
+    _ -> #(0, state)
   }
 }
 
@@ -605,7 +713,7 @@ fn spread_array_iterator(
   source: Ref,
   index: Int,
   iter_kind: value.ArrayIterKind,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   case heap.read(state.heap, source) {
     // Typed-array source — §23.1.5.1: validate the buffer witness,
     // then drain the remaining elements from the live backing store.
@@ -747,7 +855,7 @@ fn spread_via_iterator(
   state: State(host),
   iterable: JsValue,
   target_ref: Ref,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   use #(#(iter, next), state) <- result.try(
     state.rethrow(iterator.get_iterator_sync(state, iterable)),
   )
@@ -764,10 +872,10 @@ fn spread_iterator_loop(
   iter: JsValue,
   next: JsValue,
   target_ref: Ref,
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   let #(state, step) = iterator.iterator_step_value(state, iter, next)
   case step {
-    Error(thrown) -> Error(#(Thrown, thrown, state))
+    Error(thrown) -> Error(Threw(thrown, state))
     Ok(None) -> Ok(state)
     Ok(Some(v)) -> {
       let heap = push_onto_array(state.heap, target_ref, v)
@@ -785,78 +893,108 @@ fn spread_iterator_loop(
 // observationally identical to the spec's GetIterator + IteratorStepValue.
 // ============================================================================
 
+/// Names one intrinsic function object by its dispatch tag. Arc has a single
+/// realm, so a tag identifies exactly one heap object — tag equality IS
+/// intrinsic identity, and no separate ref needs to be retained in `Builtins`.
+/// The two constructors mirror `value.NativeFnSlot`'s two builtin variants.
+type IntrinsicFn {
+  DispatchFn(value.NativeFn)
+  CallFn(value.CallNativeFn)
+}
+
 /// True iff `prop` is a plain data property whose value is THE intrinsic
-/// %Array.prototype.values% function object (§23.1.3.35). Arc has a single
-/// realm, so the `ArrayPrototypeValues` dispatch tag identifies exactly one
-/// heap object — tag equality IS intrinsic identity, and no separate ref
-/// needs to be retained in `Builtins`.
+/// function object named by `tag`.
 ///
-/// `None` (@@iterator absent on the whole chain) and accessor properties
-/// both fail the guard: absent means "not iterable" and an accessor's
-/// getter is observable, so both must go through `spread_via_iterator`.
-fn is_intrinsic_array_values(
+/// `None` (the property is absent on the whole chain) and accessor properties
+/// both fail: absent means "not iterable" and an accessor's getter is
+/// observable, so both must go through `spread_via_iterator`.
+fn is_intrinsic_data_property(
   h: Heap(host),
   prop: option.Option(value.Property),
+  tag: IntrinsicFn,
 ) -> Bool {
   case prop {
     Some(value.DataProperty(value: JsObject(fn_ref), ..)) ->
-      case heap.read(h, fn_ref) {
-        Some(ObjectSlot(
-          kind: value.NativeFunction(
-            value.Dispatch(value.ArrayNative(value.ArrayPrototypeValues)),
-            ..,
-          ),
-          ..,
-        )) -> True
-        _ -> False
+      case heap.read(h, fn_ref), tag {
+        Some(ObjectSlot(kind: value.NativeFunction(value.Dispatch(fnv), ..), ..)),
+          DispatchFn(want)
+        -> fnv == want
+        Some(ObjectSlot(kind: value.NativeFunction(value.Call(fnv), ..), ..)),
+          CallFn(want)
+        -> fnv == want
+        _, _ -> False
       }
     _ -> False
   }
 }
 
-/// True iff `prop` is a plain data property whose value is THE intrinsic
-/// %ArrayIteratorPrototype%.next function object (§23.1.5.2.1). Same
-/// single-realm tag-equals-identity argument as `is_intrinsic_array_values`.
-fn is_intrinsic_array_iterator_next(
+/// THE protector for every raw-storage spread fast path. Two pure heap walks
+/// (no getter runs, nothing user-observable, so a MISS can only deoptimise):
+///
+///   1. `src_ref[@@iterator]` is still the intrinsic `expected_iter` data
+///      property — no own override, no patched `Set.prototype[Symbol.iterator]`
+///      / `Array.prototype[Symbol.iterator]`, no swapped [[Prototype]]. §7.4.3
+///      GetIterator calls it, so a patched one MUST be honoured.
+///   2. `next_ref.next` is still the intrinsic `expected_next`. The raw drain
+///      never calls `.next`, so it is only equivalent while `next` resolves to
+///      the intrinsic — for a collection, `next_ref` is the iterator prototype
+///      the fresh iterator would inherit from; for an iterator object it is the
+///      iterator itself (an own `it.next = ...` must be honoured too).
+///
+/// A hit means the raw copy is observationally identical to the spec's
+/// GetIterator + IteratorStepValue loop; a miss deopts to
+/// `spread_via_iterator`, the real protocol.
+fn intrinsic_iterator_guard(
   h: Heap(host),
-  prop: option.Option(value.Property),
+  src_ref: Ref,
+  expected_iter: IntrinsicFn,
+  next_ref: Ref,
+  expected_next: IntrinsicFn,
 ) -> Bool {
-  case prop {
-    Some(value.DataProperty(value: JsObject(fn_ref), ..)) ->
-      case heap.read(h, fn_ref) {
-        Some(ObjectSlot(
-          kind: value.NativeFunction(value.Call(value.ArrayIteratorNext), ..),
-          ..,
-        )) -> True
-        _ -> False
-      }
-    _ -> False
-  }
+  is_intrinsic_data_property(
+    h,
+    find_symbol_property(h, src_ref, value.symbol_iterator),
+    expected_iter,
+  )
+  && is_intrinsic_data_property(
+    h,
+    object.find_property(h, next_ref, Named("next"))
+      // A proxy on the chain is by definition not the intrinsic descriptor →
+      // decline the fast path and let the real protocol fire its traps.
+      |> object.or_when_proxy(None),
+    expected_next,
+  )
 }
 
-/// True iff `prop` is a plain data property whose value is THE intrinsic
-/// %Iterator.prototype%[@@iterator] (§27.1.4.1) — the `return this`
-/// self-iterator every built-in iterator inherits. Same single-realm
-/// tag-equals-identity argument as `is_intrinsic_array_values`.
-fn is_intrinsic_iterator_proto_iterator(
-  h: Heap(host),
-  prop: option.Option(value.Property),
-) -> Bool {
-  case prop {
-    Some(value.DataProperty(value: JsObject(fn_ref), ..)) ->
-      case heap.read(h, fn_ref) {
-        Some(ObjectSlot(
-          kind: value.NativeFunction(
-            value.Dispatch(value.VmNative(value.IteratorSymbolIterator)),
-            ..,
-          ),
-          ..,
-        )) -> True
-        _ -> False
-      }
-    _ -> False
-  }
-}
+/// The intrinsic `%Array.prototype.values%` (§23.1.3.35) — the @@iterator of
+/// Arrays and `arguments` objects.
+const array_values = DispatchFn(value.ArrayNative(value.ArrayPrototypeValues))
+
+/// The intrinsic `%ArrayIteratorPrototype%.next` (§23.1.5.2.1). Arc's string
+/// iterators share %ArrayIteratorPrototype%, so this covers them too.
+const array_iterator_next = CallFn(value.ArrayIteratorNext)
+
+/// The intrinsic `%Iterator.prototype%[@@iterator]` (§27.1.4.1) — the
+/// `return this` self-iterator every built-in iterator (and every generator)
+/// inherits.
+const iterator_self = DispatchFn(value.VmNative(value.IteratorSymbolIterator))
+
+/// The intrinsic `%Set.prototype.values%` (§24.2.4.11) — a Set's @@iterator.
+const set_values = DispatchFn(value.SetNative(value.SetPrototypeValues))
+
+/// The intrinsic `%SetIteratorPrototype%.next` (§24.2.5.2.1).
+const set_iterator_next = CallFn(value.SetIteratorNext)
+
+/// The intrinsic `%Map.prototype.entries%` (§24.1.3.4) — a Map's @@iterator.
+const map_entries = DispatchFn(value.MapNative(value.MapPrototypeEntries))
+
+/// The intrinsic `%MapIteratorPrototype%.next` (§24.1.5.2.1).
+const map_iterator_next = CallFn(value.MapIteratorNext)
+
+/// The intrinsic `%String.prototype%[@@iterator]` (§22.1.3.36).
+const string_symbol_iterator = DispatchFn(
+  value.StringNative(value.StringPrototypeSymbolIterator),
+)
 
 /// Resolve a symbol-keyed property along the prototype chain WITHOUT running
 /// any getter — the symbol analogue of `object.find_property`. Used only as
@@ -871,6 +1009,34 @@ fn find_symbol_property(
       case list.key_find(symbol_properties, sym) {
         Ok(prop) -> Some(prop)
         Error(Nil) -> option.then(prototype, find_symbol_property(h, _, sym))
+      }
+    _ -> None
+  }
+}
+
+/// The `length` the spec's array iterator would OBSERVE, when the raw element
+/// block can stand in for it — `None` means "deopt to per-index [[Get]]".
+///
+/// An Array's `length` is virtual: it always tracks `ArrayObject(length)`, so
+/// the stored value is the observable one. An `arguments` object's is a real
+/// own data property seeded with the initial arg count and freely assignable
+/// (`arguments.length = 0`), so the kind's count is only trustworthy while
+/// that property still agrees with it. Anything else — a deleted or
+/// redefined-to-accessor `length` — declines the fast path.
+fn spread_length_of(
+  kind: value.ExoticKind(State(host), host),
+  properties: dict.Dict(key.PropertyKey, value.Property),
+) -> option.Option(Int) {
+  case kind {
+    ArrayObject(length:) -> Some(length)
+    value.ArgumentsObject(length:) ->
+      case dict.get(properties, Named("length")) {
+        Ok(value.DataProperty(value: v, ..)) ->
+          case v == value.from_int(length) {
+            True -> Some(length)
+            False -> None
+          }
+        _ -> None
       }
     _ -> None
   }
@@ -909,7 +1075,7 @@ pub fn drain_generator_to_array(
   gen_ref: Ref,
   target_ref: Ref,
   execute_inner: ExecuteInnerFn(host),
-) -> Result(State(host), #(StepResult, JsValue, State(host))) {
+) -> Result(State(host), StepExit(host)) {
   use #(done, val, next_state) <- result.try(generators.resume_generator_next(
     state,
     JsObject(gen_ref),
