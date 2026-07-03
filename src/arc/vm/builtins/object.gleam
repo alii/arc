@@ -12,18 +12,19 @@ import arc/vm/ops/property
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsElements, type JsValue, type ObjectNativeFn, type Ref, AccessorProperty,
-  ArrayObject, DataProperty, Dispatch, FunctionObject, GeneratorObject, JsBool,
-  JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, NativeFunction,
-  ObjectAssign, ObjectConstructor, ObjectCreate, ObjectDefineProperties,
-  ObjectDefineProperty, ObjectEntries, ObjectFreeze, ObjectFromEntries,
-  ObjectGetOwnPropertyDescriptor, ObjectGetOwnPropertyDescriptors,
-  ObjectGetOwnPropertyNames, ObjectGetOwnPropertySymbols, ObjectGetPrototypeOf,
-  ObjectHasOwn, ObjectIs, ObjectIsExtensible, ObjectIsFrozen, ObjectIsSealed,
-  ObjectKeys, ObjectNative, ObjectPreventExtensions,
-  ObjectPrototypeHasOwnProperty, ObjectPrototypePropertyIsEnumerable,
-  ObjectPrototypeToString, ObjectPrototypeValueOf, ObjectSeal,
-  ObjectSetPrototypeOf, ObjectSlot, ObjectValues, OrdinaryObject,
+  type JsElements, type JsValue, type ObjectKey, type ObjectNativeFn, type Ref,
+  AccessorProperty, ArrayObject, DataProperty, Dispatch, FunctionObject,
+  GeneratorObject, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
+  JsUndefined, NativeFunction, ObjectAssign, ObjectConstructor, ObjectCreate,
+  ObjectDefineProperties, ObjectDefineProperty, ObjectEntries, ObjectFreeze,
+  ObjectFromEntries, ObjectGetOwnPropertyDescriptor,
+  ObjectGetOwnPropertyDescriptors, ObjectGetOwnPropertyNames,
+  ObjectGetOwnPropertySymbols, ObjectGetPrototypeOf, ObjectHasOwn, ObjectIs,
+  ObjectIsExtensible, ObjectIsFrozen, ObjectIsSealed, ObjectKeys, ObjectNative,
+  ObjectPreventExtensions, ObjectPrototypeHasOwnProperty,
+  ObjectPrototypePropertyIsEnumerable, ObjectPrototypeToString,
+  ObjectPrototypeValueOf, ObjectSeal, ObjectSetPrototypeOf, ObjectSlot,
+  ObjectValues, OrdinaryObject, StringPropKey, SymbolPropKey,
 }
 import gleam/bool
 import gleam/dict
@@ -41,73 +42,65 @@ const cannot_convert = "Cannot convert undefined or null to object"
 /// (TDZ) export binding (§10.4.6 [[Get]] / [[GetOwnProperty]]).
 const tdz_message = "Cannot access module export before initialization"
 
-/// Resolved ToPropertyKey result — unifies string and symbol keys for
-/// apply_descriptor so it can look up/write to the right dict without
-/// threading two code paths through the validation logic.
-type DefineKey {
-  StringKey(pkey: key.PropertyKey, display: String)
-  SymbolKey(sym: value.SymbolId)
-}
-
-/// ToPropertyKey (§7.1.19) resolved to this module's DefineKey (a PropKey
+/// ToPropertyKey (§7.1.19) resolved to a value.ObjectKey (a PropKey
 /// plus a cached display string for error messages). The spec-order
 /// conversion — ToPrimitive(argument, string) FIRST, then the Symbol check,
 /// so `{[Symbol.toPrimitive]: () => sym}` used as a key produces a symbol
 /// key — is property.to_prop_key; this only re-shapes the result.
-fn to_define_key(
+fn to_object_key(
   state: State(host),
   key_val: JsValue,
-) -> Result(#(DefineKey, State(host)), #(JsValue, State(host))) {
+) -> Result(#(ObjectKey, State(host)), #(JsValue, State(host))) {
   use #(pk, state) <- result.map(property.to_prop_key(state, key_val))
-  #(prop_key_to_define_key(pk), state)
+  #(prop_key_to_object_key(pk), state)
 }
 
-/// The DefineKey form of an already-resolved PropKey.
+/// The ObjectKey form of an already-resolved PropKey.
 ///
-/// The `display` string is NOT just for error messages: `define_key_value`
+/// The `display` string is NOT just for error messages: `object_key_value`
 /// hands it to proxy `defineProperty` / `getOwnPropertyDescriptor` traps as
 /// the property-key argument, and the String-exotic gOPD path compares it to
 /// "length". So it must be the exact ToPropertyKey string — never
 /// `key.key_to_string`, which is a *renderer* that strips the engine's
 /// internal private-name NUL marker and would hand traps a mangled key.
-fn prop_key_to_define_key(pk: object.PropKey) -> DefineKey {
+fn prop_key_to_object_key(pk: object.PropKey) -> ObjectKey {
   case pk {
-    object.PkSymbol(sym) -> SymbolKey(sym)
+    object.PkSymbol(sym) -> SymbolPropKey(sym)
     object.PkString(pkey) ->
-      StringKey(pkey, case pkey {
+      StringPropKey(pkey, case pkey {
         Named(s) -> s
         Index(i) -> int.to_string(i)
       })
   }
 }
 
-/// CPS form of `to_define_key` so callers can `use` before `case this`,
+/// CPS form of `to_object_key` so callers can `use` before `case this`,
 /// preserving spec ordering (hasOwnProperty does ToPropertyKey step 1,
 /// ToObject step 2).
 fn try_to_property_key(
   state: State(host),
   key_val: JsValue,
-  cont: fn(DefineKey, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(ObjectKey, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case to_define_key(state, key_val) {
+  case to_object_key(state, key_val) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     Ok(#(dkey, state)) -> cont(dkey, state)
   }
 }
 
-/// [[GetOwnProperty]] dispatching on a resolved DefineKey.
+/// [[GetOwnProperty]] dispatching on a resolved ObjectKey.
 fn get_own_property_by_key(
   heap: Heap(host),
   ref: Ref,
-  key: DefineKey,
+  key: ObjectKey,
 ) -> Option(value.Property) {
   case key {
-    SymbolKey(sym) -> object.get_own_symbol_property(heap, ref, sym)
+    SymbolPropKey(sym) -> object.get_own_symbol_property(heap, ref, sym)
     // Private elements (NUL-marker keys, see key.private_key) are stored in
     // the ordinary property table but are invisible to reflection (spec keeps
     // them in [[PrivateElements]]).
-    StringKey(pkey: Named("\u{0}" <> _), ..) -> None
-    StringKey(pkey:, ..) -> object.get_own_property(heap, ref, pkey)
+    StringPropKey(pkey: Named("\u{0}" <> _), ..) -> None
+    StringPropKey(pkey:, ..) -> object.get_own_property(heap, ref, pkey)
   }
 }
 
@@ -295,20 +288,20 @@ fn call_native(
 /// derive from it, so they agree by construction. String *wrapper objects*
 /// take the mirror-image path in ops/object.own_property_of_slot.
 ///
-/// Matching on the resolved `DefineKey` (not the display string) is
+/// Matching on the resolved `ObjectKey` (not the display string) is
 /// load-bearing: ToPropertyKey already canonicalized array indices, so
 /// "01", "+1" or " 1" arrive as `Named(..)` and correctly report no own
 /// property — re-parsing the display string with int.parse would fabricate
 /// index properties for them.
 fn string_exotic_own_property(
   s: String,
-  key: DefineKey,
+  key: ObjectKey,
 ) -> Option(value.Property) {
   // seq: 0 on both arms — synthesized descriptors, only rendered by
   // make_descriptor_object, never stored in a property table.
   case key {
     // §10.4.3.4 StringCreate step 10: "length" is { W:F, E:F, C:F }.
-    StringKey(pkey: Named("length"), ..) ->
+    StringPropKey(pkey: Named("length"), ..) ->
       Some(DataProperty(
         value: value.from_int(object.string_length(s)),
         writable: False,
@@ -318,7 +311,7 @@ fn string_exotic_own_property(
       ))
     // §10.4.3.5 steps 5-10: an in-range integer index yields
     // { value: <element>, W:F, E:T, C:F }; out of range → undefined.
-    StringKey(pkey: Index(i), ..) -> {
+    StringPropKey(pkey: Index(i), ..) -> {
       use ch <- option.map(object.string_char_at(s, i))
       DataProperty(
         value: JsString(ch),
@@ -330,7 +323,7 @@ fn string_exotic_own_property(
     }
     // Any other string name, and every symbol, is not an own property of a
     // String primitive.
-    StringKey(pkey: Named(_), ..) | SymbolKey(_) -> None
+    StringPropKey(pkey: Named(_), ..) | SymbolPropKey(_) -> None
   }
 }
 
@@ -361,13 +354,10 @@ fn get_own_property_descriptor(
     JsObject(ref) -> {
       // Step 2: Let key be ? ToPropertyKey(P).
       use key, state <- try_to_property_key(state, key_val)
-      // Step 3: Let desc be ? obj.[[GetOwnProperty]](key) — trap-aware.
-      use prop_opt, state <- state.try_op(own_property_via(state, ref, key))
+      // Step 3: Let desc be ? obj.[[GetOwnProperty]](key) — trap-aware. (A TDZ
+      // namespace binding throws inside it, per §10.4.6.5.)
+      use prop_opt, state <- state.try_op(own_property_keyed(state, ref, key))
       case prop_opt {
-        // §10.4.6.5: a namespace [[GetOwnProperty]] performs [[Get]], so a TDZ
-        // binding throws before a descriptor can be built.
-        Some(DataProperty(value: value.JsUninitialized, ..)) ->
-          state.reference_error(state, tdz_message)
         Some(prop) -> {
           // Step 4: Return FromPropertyDescriptor(desc).
           // (desc is not undefined, so we build a descriptor object.)
@@ -516,7 +506,18 @@ pub fn apply_descriptor(
   key_val: JsValue,
   desc_ref: Ref,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  use #(dkey, state) <- result.try(to_define_key(state, key_val))
+  use #(dkey, state) <- result.try(to_object_key(state, key_val))
+  apply_descriptor_keyed(state, target_ref, dkey, desc_ref)
+}
+
+/// apply_descriptor for callers whose key is already a resolved ObjectKey (so
+/// no ToPropertyKey step, which could otherwise re-run user code).
+fn apply_descriptor_keyed(
+  state: State(host),
+  target_ref: Ref,
+  dkey: ObjectKey,
+  desc_ref: Ref,
+) -> Result(State(host), #(JsValue, State(host))) {
   use #(parsed, state) <- result.try(parse_descriptor(state, JsObject(desc_ref)))
   // DefinePropertyOrThrow (§7.3.8): a false [[DefineOwnProperty]] result and
   // a genuine abrupt completion both surface as a throw here.
@@ -531,17 +532,17 @@ pub fn apply_descriptor(
 fn define_parsed(
   state: State(host),
   target_ref: Ref,
-  dkey: DefineKey,
+  dkey: ObjectKey,
   parsed: ParsedDesc,
 ) -> Result(State(host), #(DefineFailure, State(host))) {
   case heap.read(state.heap, target_ref) {
     Some(ObjectSlot(kind: ArrayObject(length:), ..)) ->
       case dkey {
-        StringKey(pkey: Named("length"), ..) ->
+        StringPropKey(pkey: Named("length"), ..) ->
           array_define_length(state, target_ref, parsed, length)
         // An array index is an integer in [0, 2^32-1) — "4294967295" is a
         // plain property name on arrays, not an index (§6.1.7).
-        StringKey(pkey: Index(idx), ..) if idx < 4_294_967_295 ->
+        StringPropKey(pkey: Index(idx), ..) if idx < 4_294_967_295 ->
           array_define_index(state, target_ref, idx, parsed, length)
           |> result.map_error(as_rejected)
         _ ->
@@ -557,7 +558,7 @@ fn define_parsed(
       ..,
     )) ->
       case dkey {
-        StringKey(pkey: Index(idx), ..) ->
+        StringPropKey(pkey: Index(idx), ..) ->
           typed_array_define_index(
             state,
             buffer,
@@ -567,7 +568,7 @@ fn define_parsed(
             idx,
             parsed,
           )
-        StringKey(pkey: Named(s), ..) ->
+        StringPropKey(pkey: Named(s), ..) ->
           case object.is_canonical_numeric_string(s) {
             // Step 1.b.i: a canonical numeric string that survived
             // canonical_key is never a valid integer index ("1.5", "-0",
@@ -580,7 +581,7 @@ fn define_parsed(
               ordinary_define(state, target_ref, dkey, parsed)
               |> result.map_error(as_rejected)
           }
-        SymbolKey(_) ->
+        SymbolPropKey(_) ->
           ordinary_define(state, target_ref, dkey, parsed)
           |> result.map_error(as_rejected)
       }
@@ -590,8 +591,9 @@ fn define_parsed(
     // writing to the dict.
     Some(ObjectSlot(kind: value.StringObject(value: s), extensible:, ..)) -> {
       let synthesized = case dkey {
-        StringKey(pkey: Named("length"), ..) -> True
-        StringKey(pkey: Index(i), ..) -> i >= 0 && i < object.string_length(s)
+        StringPropKey(pkey: Named("length"), ..) -> True
+        StringPropKey(pkey: Index(i), ..) ->
+          i >= 0 && i < object.string_length(s)
         _ -> False
       }
       case synthesized {
@@ -603,7 +605,7 @@ fn define_parsed(
             False ->
               reject_define(
                 state,
-                "Cannot redefine property: " <> define_key_label(dkey),
+                "Cannot redefine property: " <> object_key_label(dkey),
               )
               |> result.map(fn(_) { state })
               |> result.map_error(as_rejected)
@@ -623,10 +625,10 @@ fn define_parsed(
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
       case dkey {
         // Step 1: If P is a Symbol, return OrdinaryDefineOwnProperty(O, P, Desc).
-        SymbolKey(_) ->
+        SymbolPropKey(_) ->
           ordinary_define(state, target_ref, dkey, parsed)
           |> result.map_error(as_rejected)
-        StringKey(pkey: _, display: name) ->
+        StringPropKey(pkey: _, display: name) ->
           namespace_define(state, exports, name, parsed)
           |> result.map_error(as_rejected)
       }
@@ -645,7 +647,7 @@ fn define_parsed(
           reject_define(
             state,
             "'defineProperty' on proxy: trap returned falsish for property "
-              <> define_key_label(dkey),
+              <> object_key_label(dkey),
           )
           |> result.map(fn(_) { state })
           |> result.map_error(as_rejected)
@@ -761,7 +763,7 @@ fn array_define_index(
   use state <- result.try(ordinary_define(
     state,
     target_ref,
-    StringKey(Index(idx), int.to_string(idx)),
+    StringPropKey(Index(idx), int.to_string(idx)),
     desc,
   ))
   // Steps 2.f-2.g: grow length to index + 1.
@@ -1128,12 +1130,11 @@ fn shrink_array(
 fn ordinary_define(
   state: State(host),
   target_ref: Ref,
-  dkey: DefineKey,
+  dkey: ObjectKey,
   desc: ParsedDesc,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  let has_accessor = desc_is_accessor(desc)
+  let is_accessor = desc_is_accessor(desc)
   let has_data = desc_is_data(desc)
-  let is_accessor = has_accessor
   let desc_get = desc.get
   let desc_set = desc.set
   let desc_value = desc.value
@@ -1154,7 +1155,7 @@ fn ordinary_define(
         _ -> False
       }
       let existing = case dkey {
-        StringKey(pkey: Index(idx), ..) if indexed_kind ->
+        StringPropKey(pkey: Index(idx), ..) if indexed_kind ->
           case dict.get(properties, Index(idx)) {
             Ok(p) -> Ok(p)
             Error(Nil) ->
@@ -1172,122 +1173,36 @@ fn ordinary_define(
                 None -> Error(Nil)
               }
           }
-        StringKey(pkey:, ..) -> dict.get(properties, pkey)
-        SymbolKey(sym:) -> list.key_find(symbol_properties, sym)
+        StringPropKey(pkey:, ..) -> dict.get(properties, pkey)
+        SymbolPropKey(sym:) -> list.key_find(symbol_properties, sym)
       }
+      // V8's error text: the bare key, no quotes.
       let key = case dkey {
-        StringKey(display:, ..) -> display
-        SymbolKey(_) -> "[Symbol]"
+        StringPropKey(display:, ..) -> display
+        SymbolPropKey(_) -> "[Symbol]"
       }
-
-      // §10.1.6.3 step 2: If property doesn't exist and object is not extensible, reject.
-      use Nil <- result.try(case existing, extensible {
-        Error(Nil), False ->
-          reject_define(
-            state,
-            "Cannot define property " <> key <> ", object is not extensible",
-          )
-        _, _ -> Ok(Nil)
-      })
-
-      // §10.1.6.3 ValidateAndApplyPropertyDescriptor step 5 (sub-steps 5a–5e):
-      // Validate that the change is permitted on non-configurable properties.
-      use Nil <- result.try(case existing {
-        Ok(existing_prop) -> {
-          let current_configurable = value.prop_configurable(existing_prop)
-          case current_configurable {
+      // §10.1.6.3 steps 2 + 5-11: is the change permitted at all? Exactly the
+      // question `is_compatible_descriptor` (IsCompatiblePropertyDescriptor,
+      // §10.1.6.2) answers — the same predicate the proxy and String-exotic
+      // paths validate against, so all three agree on SameValue (notably that
+      // -0 and +0 differ, which structural equality misses).
+      use Nil <- result.try(case option.from_result(existing) {
+        // Step 2: a new property needs an extensible object.
+        None ->
+          case extensible {
             True -> Ok(Nil)
-            False -> {
-              // Step 7a: Cannot make a non-configurable property configurable.
-              use Nil <- result.try(case desc_configurable {
-                Some(True) ->
-                  reject_define(state, "Cannot redefine property: " <> key)
-                _ -> Ok(Nil)
-              })
-              // Step 7b: Cannot change enumerable on non-configurable property.
-              let current_enumerable = value.prop_enumerable(existing_prop)
-              use Nil <- result.try(case desc_enumerable {
-                Some(e) if e != current_enumerable ->
-                  reject_define(state, "Cannot redefine property: " <> key)
-                _ -> Ok(Nil)
-              })
-              // Step 9a: Cannot change property kind (data <-> accessor) on non-configurable.
-              let current_is_accessor = case existing_prop {
-                AccessorProperty(..) -> True
-                _ -> False
-              }
-              use Nil <- result.try(
-                case
-                  current_is_accessor != is_accessor
-                  && { has_accessor || has_data }
-                {
-                  True ->
-                    reject_define(state, "Cannot redefine property: " <> key)
-                  False -> Ok(Nil)
-                },
+            False ->
+              reject_define(
+                state,
+                "Cannot define property " <> key <> ", object is not extensible",
               )
-              // Step 10a: Non-configurable data property checks.
-              use Nil <- result.try(case existing_prop {
-                DataProperty(writable: False, value: cur_val, ..)
-                  if !current_is_accessor
-                -> {
-                  // Step 10a.i: Cannot change writable from false to true.
-                  use Nil <- result.try(case desc_writable {
-                    Some(True) ->
-                      reject_define(state, "Cannot redefine property: " <> key)
-                    _ -> Ok(Nil)
-                  })
-                  // Step 10a.ii: Cannot change value on non-writable.
-                  use Nil <- result.try(case desc_value {
-                    Some(v) if v != cur_val ->
-                      reject_define(state, "Cannot redefine property: " <> key)
-                    _ -> Ok(Nil)
-                  })
-                  Ok(Nil)
-                }
-                _ -> Ok(Nil)
-              })
-              // Step 11a: Non-configurable accessor property checks.
-              use Nil <- result.try(case existing_prop {
-                AccessorProperty(get: cur_get, set: cur_set, ..) -> {
-                  // Cannot change getter on non-configurable accessor.
-                  use Nil <- result.try(case desc_get {
-                    Some(g) -> {
-                      let cur_g = option.unwrap(cur_get, JsUndefined)
-                      case g != cur_g {
-                        True ->
-                          reject_define(
-                            state,
-                            "Cannot redefine property: " <> key,
-                          )
-                        False -> Ok(Nil)
-                      }
-                    }
-                    _ -> Ok(Nil)
-                  })
-                  // Cannot change setter on non-configurable accessor.
-                  case desc_set {
-                    Some(s) -> {
-                      let cur_s = option.unwrap(cur_set, JsUndefined)
-                      case s != cur_s {
-                        True ->
-                          reject_define(
-                            state,
-                            "Cannot redefine property: " <> key,
-                          )
-                        False -> Ok(Nil)
-                      }
-                    }
-                    _ -> Ok(Nil)
-                  }
-                }
-                _ -> Ok(Nil)
-              })
-              Ok(Nil)
-            }
           }
-        }
-        _ -> Ok(Nil)
+        // Steps 5-11: a non-configurable property constrains the redefinition.
+        Some(cur) ->
+          case is_compatible_descriptor(extensible, desc, Some(cur)) {
+            True -> Ok(Nil)
+            False -> reject_define(state, "Cannot redefine property: " <> key)
+          }
       })
 
       let enumerable =
@@ -1397,7 +1312,7 @@ fn ordinary_define(
       // store; non-default attributes / accessors become dict overrides
       // (the element copy is removed so exactly one store owns the index).
       let #(properties, symbol_properties, elements) = case dkey {
-        StringKey(pkey: Index(idx), ..) if indexed_kind ->
+        StringPropKey(pkey: Index(idx), ..) if indexed_kind ->
           case new_prop {
             DataProperty(
               value: v,
@@ -1416,12 +1331,12 @@ fn ordinary_define(
               elements.delete(elements, idx),
             )
           }
-        StringKey(pkey:, ..) -> #(
+        StringPropKey(pkey:, ..) -> #(
           dict.insert(properties, pkey, new_prop),
           symbol_properties,
           elements,
         )
-        SymbolKey(sym:) -> #(
+        SymbolPropKey(sym:) -> #(
           properties,
           list.key_set(symbol_properties, sym, new_prop),
           elements,
@@ -1632,12 +1547,13 @@ fn own_keys_impl(
               state.ok_array(state, list.map(ks, JsString))
             }
             False -> {
-              use all_keys, state <- state.try_op(own_keys_stateful(state, ref))
+              use all_keys, state <- state.try_op(own_property_keys(state, ref))
+              // Step 4: keep the String keys, drop the Symbol ones.
               let strings =
-                list.filter(all_keys, fn(k) {
+                list.filter_map(all_keys, fn(k) {
                   case k {
-                    JsString(_) -> True
-                    _ -> False
+                    StringPropKey(display:, ..) -> Ok(JsString(display))
+                    SymbolPropKey(_) -> Error(Nil)
                   }
                 })
               state.ok_array(state, strings)
@@ -1734,6 +1650,15 @@ fn string_index_keys(i: Int, len: Int) -> List(JsValue) {
   }
 }
 
+/// The same index keys as ObjectKeys — the String exotic's [[OwnPropertyKeys]]
+/// (§10.4.3.3 step 3) for callers that look each key back up.
+fn string_index_object_keys(i: Int, len: Int) -> List(ObjectKey) {
+  case i >= len {
+    True -> []
+    False -> [index_object_key(i), ..string_index_object_keys(i + 1, len)]
+  }
+}
+
 /// Object.prototype.hasOwnProperty(key)
 /// Checks if the object has an own property with the given key (NOT prototype chain).
 /// ES2024: ToObject(this) — throws on null/undefined, primitives coerce (→ false).
@@ -1762,14 +1687,9 @@ fn has_own_property(
     // Step 2: Let O be ? ToObject(this value).
     // Step 3: Return ? HasOwnProperty(O, P) — trap-aware.
     JsObject(ref) -> {
-      use prop_opt, state <- state.try_op(own_property_via(state, ref, key))
-      case prop_opt {
-        // §10.4.6.5: a namespace [[GetOwnProperty]] performs [[Get]], so a TDZ
-        // binding throws (only namespace descriptors carry JsUninitialized).
-        Some(DataProperty(value: value.JsUninitialized, ..)) ->
-          state.reference_error(state, tdz_message)
-        prop -> #(state, Ok(JsBool(option.is_some(prop))))
-      }
+      // (A TDZ namespace binding throws inside [[GetOwnProperty]].)
+      use prop_opt, state <- state.try_op(own_property_keyed(state, ref, key))
+      #(state, Ok(JsBool(option.is_some(prop_opt))))
     }
     // Step 2: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
@@ -1805,10 +1725,8 @@ fn property_is_enumerable(
       // Steps 3-5: [[GetOwnProperty]] (trap-aware) → desc.[[Enumerable]] or
       // false. A namespace TDZ binding throws (its [[GetOwnProperty]]
       // performs [[Get]]).
-      use prop_opt, state <- state.try_op(own_property_via(state, ref, key))
+      use prop_opt, state <- state.try_op(own_property_keyed(state, ref, key))
       case prop_opt {
-        Some(DataProperty(value: value.JsUninitialized, ..)) ->
-          state.reference_error(state, tdz_message)
         Some(p) -> #(state, Ok(JsBool(value.prop_enumerable(p))))
         None -> #(state, Ok(JsBool(False)))
       }
@@ -2083,7 +2001,7 @@ fn own_enumerable_impl(
         // trap — the spec's observable interleaving (desc:a, get:a, desc:b,
         // get:b, …), which test262 asserts.
         Some(_) -> {
-          use keys, state <- state.try_op(own_keys_stateful(state, ref))
+          use keys, state <- state.try_op(own_property_keys(state, ref))
           use items, state <- state.try_op(
             collect_enumerable_via_traps(
               state,
@@ -2142,18 +2060,17 @@ fn collect_enumerable_via_traps(
   state: State(host),
   ref: Ref,
   receiver: JsValue,
-  keys: List(JsValue),
+  keys: List(ObjectKey),
   combine: fn(String, JsValue) -> a,
   acc: List(a),
 ) -> Result(#(List(a), State(host)), #(JsValue, State(host))) {
   case keys {
     [] -> Ok(#(list.reverse(acc), state))
-    [JsString(s) as key_val, ..rest] -> {
-      use #(prop, state) <- result.try(get_own_property_stateful(
-        state,
-        ref,
-        key_val,
-      ))
+    // §7.3.23 step 3.a: symbol keys are not part of EnumerableOwnProperties.
+    [SymbolPropKey(_), ..rest] ->
+      collect_enumerable_via_traps(state, ref, receiver, rest, combine, acc)
+    [StringPropKey(pkey:, display: s) as skey, ..rest] -> {
+      use #(prop, state) <- result.try(own_property_keyed(state, ref, skey))
       let enumerable =
         option.map(prop, value.prop_enumerable) |> option.unwrap(False)
       case enumerable {
@@ -2161,7 +2078,7 @@ fn collect_enumerable_via_traps(
           use #(val, state) <- result.try(object.get_value(
             state,
             ref,
-            key.canonical_key(s),
+            pkey,
             receiver,
           ))
           collect_enumerable_via_traps(state, ref, receiver, rest, combine, [
@@ -2173,8 +2090,6 @@ fn collect_enumerable_via_traps(
           collect_enumerable_via_traps(state, ref, receiver, rest, combine, acc)
       }
     }
-    [_, ..rest] ->
-      collect_enumerable_via_traps(state, ref, receiver, rest, combine, acc)
   }
 }
 
@@ -2309,7 +2224,7 @@ fn define_properties_on(
       // symbol-inclusive, so `Object.create(p, {[Symbol.x]: {..}})` defines
       // the symbol property and a Proxy props object goes through its
       // ownKeys trap.
-      use keys, state <- state.try_op(own_keys_stateful(state, props_ref))
+      use keys, state <- state.try_op(own_property_keys(state, props_ref))
       // Steps 4-5 (merged): For each key, read descriptor, validate, apply.
       define_props_loop(state, target_ref, props_ref, keys)
     }
@@ -2337,43 +2252,36 @@ fn define_props_loop(
   state: State(host),
   target_ref: Ref,
   props_ref: Ref,
-  remaining: List(JsValue),
+  remaining: List(ObjectKey),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case remaining {
     // Step 6: Return O (all keys processed).
     [] -> #(state, Ok(JsObject(target_ref)))
-    [key_val, ..rest] -> {
+    [dkey, ..rest] -> {
       // Step 4.a: propDesc = ? props.[[GetOwnProperty]](nextKey) — trap-aware.
-      use prop, state <- state.try_op(get_own_property_stateful(
-        state,
-        props_ref,
-        key_val,
-      ))
+      use prop, state <- state.try_op(own_property_keyed(state, props_ref, dkey))
       let enumerable =
         option.map(prop, value.prop_enumerable) |> option.unwrap(False)
       case enumerable {
         // Step 4.b: propDesc undefined or not enumerable → skip.
         False -> define_props_loop(state, target_ref, props_ref, rest)
         True -> {
-          // key_val is a String/Symbol from [[OwnPropertyKeys]], so
-          // ToPropertyKey is a pure fast path (no user code, cannot throw).
-          use pk, state <- state.try_op(property.to_prop_key(state, key_val))
           // Step 4.b.i: descObj = Get(props, nextKey) — a real [[Get]], so
           // accessor descriptors have their getter invoked (and symbol keys
           // reach define_parsed instead of being silently dropped).
           use desc_val, state <- state.try_op(object.get_prop_value(
             state,
             props_ref,
-            pk,
+            object_key_prop_key(dkey),
             JsObject(props_ref),
           ))
           case desc_val {
             // Step 4.b.ii: ToPropertyDescriptor + step 5.a DefinePropertyOrThrow.
             JsObject(desc_ref) -> {
-              use state <- state.try_state(apply_descriptor(
+              use state <- state.try_state(apply_descriptor_keyed(
                 state,
                 target_ref,
-                key_val,
+                dkey,
                 desc_ref,
               ))
               define_props_loop(state, target_ref, props_ref, rest)
@@ -2471,7 +2379,7 @@ fn assign_source(
         // Proxy source: [[OwnPropertyKeys]] / [[GetOwnProperty]] / [[Get]]
         // must all run through the traps (§20.1.2.1 step 3.a.ii-iii).
         Some(_) -> {
-          use #(keys, state) <- result.try(own_keys_stateful(state, src_ref))
+          use #(keys, state) <- result.try(own_property_keys(state, src_ref))
           assign_proxy_keys(state, target_ref, src_ref, receiver, keys)
         }
         None -> {
@@ -2624,27 +2532,24 @@ fn assign_proxy_keys(
   target_ref: Ref,
   src_ref: Ref,
   receiver: JsValue,
-  keys: List(JsValue),
+  keys: List(ObjectKey),
 ) -> Result(State(host), #(JsValue, State(host))) {
   case keys {
     [] -> Ok(state)
     [k, ..rest] -> {
       // Step 1: desc = ? from.[[GetOwnProperty]](nextKey) — trap-aware.
-      use #(prop, state) <- result.try(get_own_property_stateful(
-        state,
-        src_ref,
-        k,
-      ))
+      use #(prop, state) <- result.try(own_property_keyed(state, src_ref, k))
       let enumerable =
         option.map(prop, value.prop_enumerable) |> option.unwrap(False)
       use state <- result.try(case enumerable, k {
-        True, JsString(s) -> {
-          let key = key.canonical_key(s)
+        // Not enumerable / not own — skipped per step 2.
+        False, _ -> Ok(state)
+        True, StringPropKey(pkey:, display: s) -> {
           // Step 2.a: Let propValue be ? Get(from, nextKey).
           use #(val, state) <- result.try(object.get_value(
             state,
             src_ref,
-            key,
+            pkey,
             receiver,
           ))
           // Step 2.b: Perform ? Set(to, nextKey, propValue, true) — a
@@ -2652,7 +2557,7 @@ fn assign_proxy_keys(
           use #(state, ok) <- result.try(object.set_value(
             state,
             target_ref,
-            key,
+            pkey,
             val,
             JsObject(target_ref),
           ))
@@ -2661,7 +2566,7 @@ fn assign_proxy_keys(
             False -> assign_set_failed(state, s)
           }
         }
-        True, JsSymbol(sym) -> {
+        True, SymbolPropKey(sym) -> {
           use #(val, state) <- result.try(object.get_symbol_value(
             state,
             src_ref,
@@ -2680,9 +2585,6 @@ fn assign_proxy_keys(
             False -> assign_set_failed(state, symbol_key_label(state, sym))
           }
         }
-        // Not enumerable / not own — skipped per step 2. (own_keys_stateful
-        // only yields String/Symbol values, so other shapes are unreachable.)
-        _, _ -> Ok(state)
       })
       assign_proxy_keys(state, target_ref, src_ref, receiver, rest)
     }
@@ -2706,7 +2608,7 @@ pub fn copy_data_properties_stateful(
         Some(_) -> {
           // Step 3: Let keys be ? from.[[OwnPropertyKeys]]() — ownKeys trap
           // (throws TypeError when the proxy is revoked).
-          use #(keys, state) <- result.try(own_keys_stateful(state, src_ref))
+          use #(keys, state) <- result.try(own_property_keys(state, src_ref))
           copy_proxy_keys(
             state,
             src_ref,
@@ -2743,7 +2645,7 @@ fn copy_proxy_keys(
   state: State(host),
   src_ref: Ref,
   target_ref: Ref,
-  keys: List(JsValue),
+  keys: List(ObjectKey),
   excluded_keys: set.Set(key.PropertyKey),
   excluded_syms: set.Set(value.SymbolId),
 ) -> Result(State(host), #(JsValue, State(host))) {
@@ -2752,9 +2654,8 @@ fn copy_proxy_keys(
     [k, ..rest] -> {
       // Step 4.a-b: skip keys named in excludedItems.
       let excluded = case k {
-        JsString(s) -> set.contains(excluded_keys, key.canonical_key(s))
-        JsSymbol(sym) -> set.contains(excluded_syms, sym)
-        _ -> True
+        StringPropKey(pkey:, ..) -> set.contains(excluded_keys, pkey)
+        SymbolPropKey(sym) -> set.contains(excluded_syms, sym)
       }
       use state <- result.try(case excluded {
         True -> Ok(state)
@@ -2777,33 +2678,27 @@ fn copy_one_proxy_key(
   state: State(host),
   src_ref: Ref,
   target_ref: Ref,
-  k: JsValue,
+  k: ObjectKey,
 ) -> Result(State(host), #(JsValue, State(host))) {
   // Step 4.c.i: Let desc be ? from.[[GetOwnProperty]](nextKey) — trap-aware.
-  use #(prop, state) <- result.try(get_own_property_stateful(state, src_ref, k))
+  use #(prop, state) <- result.try(own_property_keyed(state, src_ref, k))
   let enumerable =
     option.map(prop, value.prop_enumerable) |> option.unwrap(False)
   case enumerable, k {
     False, _ -> Ok(state)
-    True, JsString(s) -> {
+    True, StringPropKey(pkey:, ..) -> {
       // Step 4.c.ii.1: Let propValue be ? Get(from, nextKey) — get trap.
       use #(val, state) <- result.map(object.get_value(
         state,
         src_ref,
-        key.canonical_key(s),
+        pkey,
         JsObject(src_ref),
       ))
       // Step 4.c.ii.2: CreateDataPropertyOrThrow(target, nextKey, propValue).
-      let heap =
-        object.create_data_property(
-          state.heap,
-          target_ref,
-          key.canonical_key(s),
-          val,
-        )
+      let heap = object.create_data_property(state.heap, target_ref, pkey, val)
       State(..state, heap:)
     }
-    True, JsSymbol(sym) -> {
+    True, SymbolPropKey(sym) -> {
       use #(val, state) <- result.map(object.get_symbol_value(
         state,
         src_ref,
@@ -2819,8 +2714,6 @@ fn copy_one_proxy_key(
         )
       State(..state, heap:)
     }
-    // own_keys_stateful only yields String/Symbol values.
-    True, _ -> Ok(state)
   }
 }
 
@@ -2910,7 +2803,7 @@ fn has_own(
       // Step 1: ToObject(O) — identity for objects.
       // Steps 2-3: ToPropertyKey + HasOwnProperty(obj, key) — trap-aware.
       use key, state <- try_to_property_key(state, key_val)
-      use prop_opt, state <- state.try_op(own_property_via(state, ref, key))
+      use prop_opt, state <- state.try_op(own_property_keyed(state, ref, key))
       #(state, Ok(JsBool(option.is_some(prop_opt))))
     }
     // Step 1: ToObject throws TypeError on null/undefined.
@@ -3169,11 +3062,11 @@ fn lookup_getter_setter(
 fn lookup_accessor_chain(
   state: State(host),
   ref: Ref,
-  dkey: DefineKey,
+  dkey: ObjectKey,
   kind: AccessorKind,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 3.a: desc = ? O.[[GetOwnProperty]](key).
-  case own_property_via(state, ref, dkey) {
+  case own_property_keyed(state, ref, dkey) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     // Step 3.b.i: accessor descriptor — return its [[Get]]/[[Set]] slot.
     Ok(#(Some(AccessorProperty(get:, set:, ..)), state)) -> {
@@ -3415,7 +3308,7 @@ fn set_integrity_level(
           )
         True -> {
           // Step 6: ? O.[[OwnPropertyKeys]]() — trap-aware.
-          use keys, state <- state.try_op(own_keys_stateful(state, ref))
+          use keys, state <- state.try_op(own_property_keys(state, ref))
           // Steps 7-8: ? DefinePropertyOrThrow per key.
           use state <- state.try_state(set_integrity_keys(
             state,
@@ -3438,18 +3331,17 @@ fn set_integrity_level(
 /// [[DefineOwnProperty]] funnels.
 ///
 /// Private elements never appear here — [[OwnPropertyKeys]]
-/// (own_keys_stateful → collect_own_keys) excludes private names, so they
+/// (own_property_keys → collect_own_keys) excludes private names, so they
 /// stay writable after freeze without a per-key filter.
 fn set_integrity_keys(
   state: State(host),
   ref: Ref,
-  keys: List(JsValue),
+  keys: List(ObjectKey),
   level: IntegrityLevel,
 ) -> Result(State(host), #(JsValue, State(host))) {
   case keys {
     [] -> Ok(state)
-    [key_val, ..rest] -> {
-      let dkey = key_value_to_define_key(key_val)
+    [dkey, ..rest] -> {
       use #(desc, state) <- result.try(case level {
         // Step 7.a: sealed → { [[Configurable]]: false } for every key.
         Sealed -> Ok(#(Some(seal_level_desc), state))
@@ -3457,7 +3349,7 @@ fn set_integrity_keys(
         // (trap-aware); an absent key (e.g. one an ownKeys trap invented) is
         // skipped per step 8.a.ii.
         Frozen -> {
-          use #(cur, state) <- result.map(own_property_via(state, ref, dkey))
+          use #(cur, state) <- result.map(own_property_keyed(state, ref, dkey))
           #(option.map(cur, frozen_level_desc), state)
         }
       })
@@ -3562,7 +3454,7 @@ fn test_integrity_level(
         True -> #(state, Ok(JsBool(False)))
         False -> {
           // Step 6: ? O.[[OwnPropertyKeys]]() — trap-aware.
-          use keys, state <- state.try_op(own_keys_stateful(state, ref))
+          use keys, state <- state.try_op(own_property_keys(state, ref))
           // Steps 7-9.
           use ok, state <- state.try_op(keys_at_integrity_level(
             state,
@@ -3587,18 +3479,14 @@ fn test_integrity_level(
 fn keys_at_integrity_level(
   state: State(host),
   ref: Ref,
-  keys: List(JsValue),
+  keys: List(ObjectKey),
   level: IntegrityLevel,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case keys {
     [] -> Ok(#(True, state))
-    [key_val, ..rest] -> {
+    [dkey, ..rest] -> {
       // Step 8.a: ? O.[[GetOwnProperty]](k) — trap-aware.
-      use #(cur, state) <- result.try(own_property_via(
-        state,
-        ref,
-        key_value_to_define_key(key_val),
-      ))
+      use #(cur, state) <- result.try(own_property_keyed(state, ref, dkey))
       case option.map(cur, prop_at_integrity_level(_, level)) {
         Some(False) -> Ok(#(False, state))
         Some(True) | None -> keys_at_integrity_level(state, ref, rest, level)
@@ -3747,14 +3635,14 @@ fn get_own_property_descriptors(
       // Step 2: ownKeys = ? obj.[[OwnPropertyKeys]]() — trap-aware, and the
       // one funnel that already yields fast-element indices, string-exotic /
       // typed-array indices and symbol keys in §10.1.11 order.
-      use keys, state <- state.try_op(own_keys_stateful(state, ref))
+      use keys, state <- state.try_op(own_property_keys(state, ref))
       // Steps 3-5: per key ? obj.[[GetOwnProperty]](key) (trap-aware) →
       // FromPropertyDescriptor, accumulated in key order.
       descriptors_from_keys(
         state,
         keys,
         object_proto,
-        fn(state, dkey) { own_property_via(state, ref, dkey) },
+        fn(state, dkey) { own_property_keyed(state, ref, dkey) },
         dict.new(),
         [],
       )
@@ -3764,8 +3652,8 @@ fn get_own_property_descriptors(
     // own-property table.
     JsString(s) -> {
       let keys =
-        list.append(string_index_keys(0, object.string_length(s)), [
-          JsString("length"),
+        list.append(string_index_object_keys(0, object.string_length(s)), [
+          named_object_key("length"),
         ])
       descriptors_from_keys(
         state,
@@ -3794,9 +3682,9 @@ fn get_own_property_descriptors(
 /// denies) are skipped.
 fn descriptors_from_keys(
   state: State(host),
-  keys: List(JsValue),
+  keys: List(ObjectKey),
   object_proto: Ref,
-  own_property: fn(State(host), DefineKey) ->
+  own_property: fn(State(host), ObjectKey) ->
     Result(#(Option(value.Property), State(host)), #(JsValue, State(host))),
   props: dict.Dict(key.PropertyKey, value.Property),
   syms: List(#(value.SymbolId, value.Property)),
@@ -3819,15 +3707,11 @@ fn descriptors_from_keys(
         )
       #(State(..state, heap:), Ok(JsObject(result_ref)))
     }
-    [key_val, ..rest] -> {
-      let dkey = key_value_to_define_key(key_val)
-      // Step 4.a: desc = ? obj.[[GetOwnProperty]](key).
+    [dkey, ..rest] -> {
+      // Step 4.a: desc = ? obj.[[GetOwnProperty]](key). (A TDZ namespace
+      // binding throws inside it, per §10.4.6.5.)
       use prop_opt, state <- state.try_op(own_property(state, dkey))
       case prop_opt {
-        // §10.4.6.5: a namespace [[GetOwnProperty]] performs [[Get]], so a
-        // TDZ binding throws before a descriptor can be built.
-        Some(DataProperty(value: value.JsUninitialized, ..)) ->
-          state.reference_error(state, tdz_message)
         // Steps 4.b-c: FromPropertyDescriptor + CreateDataPropertyOrThrow.
         Some(prop) -> {
           let #(heap, desc_ref) =
@@ -3835,8 +3719,8 @@ fn descriptors_from_keys(
           let state = State(..state, heap:)
           let desc = value.data_property(JsObject(desc_ref))
           let #(props, syms) = case dkey {
-            SymbolKey(sym) -> #(props, [#(sym, desc), ..syms])
-            StringKey(pkey:, ..) -> #(dict.insert(props, pkey, desc), syms)
+            SymbolPropKey(sym) -> #(props, [#(sym, desc), ..syms])
+            StringPropKey(pkey:, ..) -> #(dict.insert(props, pkey, desc), syms)
           }
           descriptors_from_keys(
             state,
@@ -3886,12 +3770,12 @@ fn get_own_property_symbols(
       case object.as_proxy(state.heap, ref) {
         // Proxy: [[OwnPropertyKeys]] trap, keep only Symbols.
         Some(_) -> {
-          use all_keys, state <- state.try_op(own_keys_stateful(state, ref))
+          use all_keys, state <- state.try_op(own_property_keys(state, ref))
           let syms =
-            list.filter(all_keys, fn(k) {
+            list.filter_map(all_keys, fn(k) {
               case k {
-                JsSymbol(_) -> True
-                _ -> False
+                SymbolPropKey(sym) -> Ok(JsSymbol(sym))
+                StringPropKey(..) -> Error(Nil)
               }
             })
           state.ok_array(state, syms)
@@ -4018,12 +3902,11 @@ fn group_by(
     False -> state.type_error(state, "Object.groupBy callback is not callable")
     True -> {
       // §7.3.35 step 4: iteratorRecord = ? GetIterator(items, sync).
-      use iter_rec, state <- state.try_op(iter_protocol.get_iterator_sync(
+      use rec, state <- state.try_op(iter_protocol.get_iterator_sync(
         state,
         items,
       ))
-      let #(iter, next) = iter_rec
-      group_by_loop(state, iter, next, callback, 0, dict.new(), [])
+      group_by_loop(state, rec, callback, 0, dict.new(), [])
     }
   }
 }
@@ -4038,8 +3921,7 @@ fn group_by(
 /// per-item lookup O(log n) instead of an O(groups) assoc-list scan.
 fn group_by_loop(
   state: State(host),
-  iter: JsValue,
-  next: JsValue,
+  rec: value.IteratorRecord,
   callback: JsValue,
   index: Int,
   groups: dict.Dict(JsValue, List(JsValue)),
@@ -4047,7 +3929,7 @@ fn group_by_loop(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 6.c: value = ? IteratorStepValue(iteratorRecord). An abrupt
   // completion here propagates WITHOUT close (§7.4.8 already marked it done).
-  let #(state, step) = iter_protocol.iterator_step_value(state, iter, next)
+  let #(state, step) = iter_protocol.iterator_step_value(state, rec)
   case step {
     Error(thrown) -> #(state, Error(thrown))
     // Object.groupBy steps 3-4: obj = OrdinaryObjectCreate(null), then for
@@ -4078,23 +3960,23 @@ fn group_by_loop(
       // IfAbruptCloseIterator(key, iteratorRecord).
       use key_val, state <- iter_protocol.or_close(
         state.call(state, callback, JsUndefined, [item, value.from_int(index)]),
-        iter,
+        rec.iterator,
       )
       // Step 6.g (property coercion): key = ? ToPropertyKey(key) — a symbol key
       // groups under the symbol, never a stringification. Abrupt →
       // IfAbruptCloseIterator.
       use dkey, state <- iter_protocol.or_close(
-        to_define_key(state, key_val),
-        iter,
+        to_object_key(state, key_val),
+        rec.iterator,
       )
-      let key = define_key_value(dkey)
+      let key = object_key_value(dkey)
       // AddValueToKeyedGroup: append to the existing group without moving it,
       // so `order` only grows on a key's FIRST occurrence.
       let #(groups, order) = case dict.get(groups, key) {
         Ok(members) -> #(dict.insert(groups, key, [item, ..members]), order)
         Error(Nil) -> #(dict.insert(groups, key, [item]), [key, ..order])
       }
-      group_by_loop(state, iter, next, callback, index + 1, groups, order)
+      group_by_loop(state, rec, callback, index + 1, groups, order)
     }
   }
 }
@@ -4132,33 +4014,65 @@ fn group_by_finish(
 
 // ============================================================================
 // Proxy trap machinery for descriptor/key operations — §10.5.5/.6/.11
-// (lives here, not ops/object, because it needs the ParsedDesc/DefineKey
+// (lives here, not ops/object, because it needs the ParsedDesc/ObjectKey
 // descriptor plumbing above)
 // ============================================================================
 
-/// DefineKey → trap-argument JsValue (String or Symbol).
-fn define_key_value(key: DefineKey) -> JsValue {
+/// ObjectKey → trap-argument JsValue (String or Symbol).
+fn object_key_value(key: ObjectKey) -> JsValue {
   case key {
-    StringKey(display:, ..) -> JsString(display)
-    SymbolKey(sym) -> JsSymbol(sym)
+    StringPropKey(display:, ..) -> JsString(display)
+    SymbolPropKey(sym) -> JsSymbol(sym)
   }
 }
 
 /// Human-readable key for invariant-violation error messages.
-fn define_key_label(key: DefineKey) -> String {
+fn object_key_label(key: ObjectKey) -> String {
   case key {
-    StringKey(display:, ..) -> "'" <> display <> "'"
-    SymbolKey(_) -> "[symbol]"
+    StringPropKey(display:, ..) -> "'" <> display <> "'"
+    SymbolPropKey(_) -> "[symbol]"
   }
 }
 
-/// JsValue (String/Symbol) → DefineKey. Non-keys map to an empty string key
-/// (callers validate first).
-fn key_value_to_define_key(val: JsValue) -> DefineKey {
+/// JsValue → ObjectKey, for the JS-visible entry points that still take a raw
+/// value. `None` for anything that is not a String or a Symbol: §6.1.7 says
+/// such a value is not a property key, so no object can have an own property
+/// under it. (Never fabricate a key here — an empty-string stand-in would
+/// alias a real "" property.)
+fn object_key_of_value(val: JsValue) -> Option(ObjectKey) {
   case val {
-    JsSymbol(sym) -> SymbolKey(sym)
-    JsString(s) -> StringKey(key.canonical_key(s), s)
-    _ -> StringKey(key.canonical_key(""), "")
+    JsSymbol(sym) -> Some(SymbolPropKey(sym))
+    JsString(s) -> Some(StringPropKey(key.canonical_key(s), s))
+    _ -> None
+  }
+}
+
+/// The `arc/vm/ops/object` PropKey view of an ObjectKey (drops the display
+/// string) — for the ops-layer [[Get]]/[[Set]] entry points.
+fn object_key_prop_key(k: ObjectKey) -> object.PropKey {
+  case k {
+    StringPropKey(pkey:, ..) -> object.PkString(pkey)
+    SymbolPropKey(sym) -> object.PkSymbol(sym)
+  }
+}
+
+/// The ObjectKey for a plain string key (no index parsing needed when the
+/// caller already knows the shape).
+fn named_object_key(name: String) -> ObjectKey {
+  StringPropKey(Named(name), name)
+}
+
+/// The ObjectKey for an array-index key.
+fn index_object_key(idx: Int) -> ObjectKey {
+  StringPropKey(Index(idx), int.to_string(idx))
+}
+
+/// Keep the string keys of an [[OwnPropertyKeys]] result, paired with their
+/// name — for the string-only reflections (Object.keys, for-in).
+fn string_key_and_name(k: ObjectKey) -> Result(#(ObjectKey, String), Nil) {
+  case k {
+    StringPropKey(display:, ..) -> Ok(#(k, display))
+    SymbolPropKey(_) -> Error(Nil)
   }
 }
 
@@ -4392,26 +4306,42 @@ fn parse_descriptor(
 
 /// Trap-aware [[GetOwnProperty]] — §10.1.5.1 for ordinary objects, §10.5.5
 /// for proxies. The single entry point for getOwnPropertyDescriptor-style
-/// reflection on possibly-proxy refs.
+/// reflection on possibly-proxy refs. A key that is neither String nor Symbol
+/// (§6.1.7) can be no object's own property, so it reports undefined.
 pub fn get_own_property_stateful(
   state: State(host),
   ref: Ref,
   key_val: JsValue,
 ) -> Result(#(Option(value.Property), State(host)), #(JsValue, State(host))) {
-  own_property_via(state, ref, key_value_to_define_key(key_val))
+  case object_key_of_value(key_val) {
+    Some(key) -> own_property_keyed(state, ref, key)
+    None -> Ok(#(None, state))
+  }
 }
 
-/// DefineKey-keyed variant of get_own_property_stateful for in-module callers
+/// ObjectKey-keyed variant of get_own_property_stateful for in-module callers
 /// that already resolved the key.
-fn own_property_via(
+///
+/// The engine's TDZ sentinel is filtered out HERE, once, so a returned
+/// `Option(value.Property)` structurally cannot carry it: §10.4.6.5 says a
+/// module namespace's [[GetOwnProperty]] performs [[Get]] on the binding, and
+/// an uninitialized binding throws a ReferenceError before any descriptor
+/// exists. Callers therefore never see `DataProperty(value: JsUninitialized)`
+/// and cannot leak it (or the `undefined` it renders as) into JS.
+pub fn own_property_keyed(
   state: State(host),
   ref: Ref,
-  key: DefineKey,
+  key: ObjectKey,
 ) -> Result(#(Option(value.Property), State(host)), #(JsValue, State(host))) {
-  case object.as_proxy(state.heap, ref) {
+  use #(prop, state) <- result.try(case object.as_proxy(state.heap, ref) {
     Some(#(target, handler)) ->
       proxy_get_own_property(state, target, handler, key)
     None -> Ok(#(get_own_property_by_key(state.heap, ref, key), state))
+  })
+  case prop {
+    Some(DataProperty(value: value.JsUninitialized, ..)) ->
+      Error(state.reference_error_value(state, tdz_message))
+    _ -> Ok(#(prop, state))
   }
 }
 
@@ -4420,7 +4350,7 @@ fn proxy_get_own_property(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  key: DefineKey,
+  key: ObjectKey,
 ) -> Result(#(Option(value.Property), State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(object.proxy_trap(
     state,
@@ -4430,13 +4360,13 @@ fn proxy_get_own_property(
   ))
   case trap {
     // Step 6: no trap → target.[[GetOwnProperty]](P).
-    None -> get_own_property_stateful(state, t, define_key_value(key))
+    None -> own_property_keyed(state, t, key)
     Some(trap_fn) -> {
       // Step 7: Call(trap, handler, « target, P »).
       use #(res, state) <- result.try(
         state.call(state, trap_fn, JsObject(h), [
           JsObject(t),
-          define_key_value(key),
+          object_key_value(key),
         ]),
       )
       let target_desc = get_own_property_by_key(state.heap, t, key)
@@ -4452,7 +4382,7 @@ fn proxy_get_own_property(
                   use Nil <- result.map(reject_define(
                     state,
                     "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
-                      <> define_key_label(key)
+                      <> object_key_label(key)
                       <> " which is non-configurable in the proxy target",
                   ))
                   #(None, state)
@@ -4461,7 +4391,7 @@ fn proxy_get_own_property(
                   use Nil <- result.map(reject_define(
                     state,
                     "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
-                      <> define_key_label(key)
+                      <> object_key_label(key)
                       <> " which exists in the non-extensible proxy target",
                   ))
                   #(None, state)
@@ -4507,7 +4437,7 @@ fn proxy_get_own_property(
                 reject_define(
                   state,
                   "'getOwnPropertyDescriptor' on proxy: trap returned descriptor for property "
-                    <> define_key_label(key)
+                    <> object_key_label(key)
                     <> " that is incompatible with the existing property in the proxy target",
                 )
               True -> Ok(Nil)
@@ -4523,7 +4453,7 @@ fn proxy_get_own_property(
                   reject_define(
                     state,
                     "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
-                      <> define_key_label(key)
+                      <> object_key_label(key)
                       <> " which is non-existent in the proxy target",
                   )
                 Some(td) ->
@@ -4532,7 +4462,7 @@ fn proxy_get_own_property(
                       reject_define(
                         state,
                         "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
-                          <> define_key_label(key)
+                          <> object_key_label(key)
                           <> " which is configurable in the proxy target",
                       )
                     False ->
@@ -4543,7 +4473,7 @@ fn proxy_get_own_property(
                           reject_define(
                             state,
                             "'getOwnPropertyDescriptor' on proxy: trap reported non-writability for property "
-                              <> define_key_label(key)
+                              <> object_key_label(key)
                               <> " which is writable in the proxy target",
                           )
                         _, _ -> Ok(Nil)
@@ -4557,7 +4487,7 @@ fn proxy_get_own_property(
           use Nil <- result.map(reject_define(
             state,
             "'getOwnPropertyDescriptor' on proxy: trap returned neither object nor undefined for property "
-              <> define_key_label(key),
+              <> object_key_label(key),
           ))
           #(None, state)
         }
@@ -4573,7 +4503,7 @@ fn proxy_define_own_property(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-  key: DefineKey,
+  key: ObjectKey,
   parsed: ParsedDesc,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(object.proxy_trap(
@@ -4612,7 +4542,7 @@ fn proxy_define_own_property(
       use #(res, state) <- result.try(
         state.call(state, trap_fn, JsObject(h), [
           JsObject(t),
-          define_key_value(key),
+          object_key_value(key),
           JsObject(desc_obj_ref),
         ]),
       )
@@ -4630,7 +4560,7 @@ fn proxy_define_own_property(
                   reject_define(
                     state,
                     "'defineProperty' on proxy: trap returned truish for adding property "
-                      <> define_key_label(key)
+                      <> object_key_label(key)
                       <> " to the non-extensible proxy target",
                   )
                 True -> Ok(Nil)
@@ -4640,7 +4570,7 @@ fn proxy_define_own_property(
                   reject_define(
                     state,
                     "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
-                      <> define_key_label(key)
+                      <> object_key_label(key)
                       <> " which is either non-existent or configurable in the proxy target",
                   )
                 False -> Ok(Nil)
@@ -4654,7 +4584,7 @@ fn proxy_define_own_property(
                     reject_define(
                       state,
                       "'defineProperty' on proxy: trap returned truish for adding property "
-                        <> define_key_label(key)
+                        <> object_key_label(key)
                         <> " that is incompatible with the existing property in the proxy target",
                     )
                   True -> Ok(Nil)
@@ -4666,7 +4596,7 @@ fn proxy_define_own_property(
                     reject_define(
                       state,
                       "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
-                        <> define_key_label(key)
+                        <> object_key_label(key)
                         <> " which is either non-existent or configurable in the proxy target",
                     )
                   False -> Ok(Nil)
@@ -4681,7 +4611,7 @@ fn proxy_define_own_property(
                       reject_define(
                         state,
                         "'defineProperty' on proxy: trap returned truish for defining non-writable property "
-                          <> define_key_label(key)
+                          <> object_key_label(key)
                           <> " which is writable in the proxy target",
                       )
                     _ -> Ok(Nil)
@@ -4708,7 +4638,7 @@ pub fn define_property_bool(
   key_val: JsValue,
   desc_ref: Ref,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
-  use #(dkey, state) <- result.try(to_define_key(state, key_val))
+  use #(dkey, state) <- result.try(to_object_key(state, key_val))
   use #(parsed, state) <- result.try(parse_descriptor(state, JsObject(desc_ref)))
   case object.as_proxy(state.heap, ref) {
     Some(#(target, handler)) ->
@@ -4772,21 +4702,19 @@ pub fn create_data_property(
       enumerable: Some(True),
       configurable: Some(True),
     )
-  let defined = {
-    use #(dkey, state) <- result.try(to_define_key(state, key_val))
-    // Trap-aware [[DefineOwnProperty]] on the already-parsed record —
-    // the same tail define_property_bool dispatches to after parsing.
-    case object.as_proxy(state.heap, ref) {
-      Some(#(target, handler)) ->
-        proxy_define_own_property(state, target, handler, dkey, parsed)
-      None ->
-        case define_parsed(state, ref, dkey, parsed) {
-          Ok(state) -> Ok(#(state, True))
-          // [[DefineOwnProperty]] validated to false → false (not rethrown).
-          Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
-          Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
-        }
-    }
+  use #(dkey, state) <- result.try(to_object_key(state, key_val))
+  // Trap-aware [[DefineOwnProperty]] on the already-parsed record —
+  // the same tail define_property_bool dispatches to after parsing.
+  let defined = case object.as_proxy(state.heap, ref) {
+    Some(#(target, handler)) ->
+      proxy_define_own_property(state, target, handler, dkey, parsed)
+    None ->
+      case define_parsed(state, ref, dkey, parsed) {
+        Ok(state) -> Ok(#(state, True))
+        // [[DefineOwnProperty]] validated to false → false (not rethrown).
+        Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
+        Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
+      }
   }
   case defined {
     Ok(#(state, True)) -> Ok(state)
@@ -4794,8 +4722,7 @@ pub fn create_data_property(
     Ok(#(state, False)) ->
       Error(state.type_error_value(
         state,
-        "Cannot create property "
-          <> define_key_label(key_value_to_define_key(key_val)),
+        "Cannot create property " <> object_key_label(dkey),
       ))
     Error(#(thrown, state)) -> Error(#(thrown, state))
   }
@@ -4804,20 +4731,38 @@ pub fn create_data_property(
 /// Trap-aware [[OwnPropertyKeys]] — §10.1.11 for ordinary objects, §10.5.11
 /// for proxies. Returns the full key list: integer-index strings ascending,
 /// then named strings, then symbols (or whatever order the proxy trap chose).
-pub fn own_keys_stateful(
+///
+/// Every element is a String or a Symbol *by construction* — the ordinary path
+/// builds them from the property tables, the proxy path validates the trap
+/// result (§7.3.19). Hence `ObjectKey`, not `JsValue`: no caller has to invent
+/// a "not a key" branch, and none can silently drop one.
+pub fn own_property_keys(
   state: State(host),
   ref: Ref,
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+) -> Result(#(List(ObjectKey), State(host)), #(JsValue, State(host))) {
   case object.as_proxy(state.heap, ref) {
     Some(#(target, handler)) -> proxy_own_keys(state, target, handler)
     None -> {
       let strings =
-        collect_own_keys(state.heap, ref, False) |> list.map(JsString)
+        collect_own_keys(state.heap, ref, False)
+        |> list.map(fn(s) { StringPropKey(key.canonical_key(s), s) })
       let syms =
-        collect_own_symbol_keys(state.heap, ref, False) |> list.map(JsSymbol)
+        collect_own_symbol_keys(state.heap, ref, False)
+        |> list.map(SymbolPropKey)
       Ok(#(list.append(strings, syms), state))
     }
   }
+}
+
+/// [[OwnPropertyKeys]] as JS values — CreateArrayFromList's input, i.e. the
+/// JS-visible boundary (Reflect.ownKeys, the keyed Promise combinators).
+/// Prefer `own_property_keys` for anything that then looks the key back up.
+pub fn own_keys_stateful(
+  state: State(host),
+  ref: Ref,
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+  use #(keys, state) <- result.map(own_property_keys(state, ref))
+  #(list.map(keys, object_key_value), state)
 }
 
 /// §10.5.11 Proxy [[OwnPropertyKeys]] ( ).
@@ -4825,7 +4770,7 @@ fn proxy_own_keys(
   state: State(host),
   target: Option(Ref),
   handler: Option(Ref),
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+) -> Result(#(List(ObjectKey), State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(object.proxy_trap(
     state,
     target,
@@ -4834,7 +4779,7 @@ fn proxy_own_keys(
   ))
   case trap {
     // Step 6: no trap → target.[[OwnPropertyKeys]]().
-    None -> own_keys_stateful(state, t)
+    None -> own_property_keys(state, t)
     Some(trap_fn) -> {
       // Step 7: Call(trap, handler, « target »).
       use #(res, state) <- result.try(
@@ -4853,12 +4798,10 @@ fn proxy_own_keys(
       })
       let ext = proxy_target_extensible(state.heap, t)
       // Steps 11-14: split target keys by configurability.
-      use #(target_keys, state) <- result.try(own_keys_stateful(state, t))
+      use #(target_keys, state) <- result.try(own_property_keys(state, t))
       let #(nonconf, conf) =
         list.partition(target_keys, fn(k) {
-          case
-            get_own_property_by_key(state.heap, t, key_value_to_define_key(k))
-          {
+          case get_own_property_by_key(state.heap, t, k) {
             Some(prop) -> !value.prop_configurable(prop)
             None -> False
           }
@@ -4872,7 +4815,7 @@ fn proxy_own_keys(
               reject_define(
                 state,
                 "'ownKeys' on proxy: trap result did not include "
-                  <> key_label_of_value(k)
+                  <> object_key_label(k)
                   <> ", a non-configurable key of the proxy target",
               )
           }
@@ -4891,7 +4834,7 @@ fn proxy_own_keys(
                   reject_define(
                     state,
                     "'ownKeys' on proxy: trap result did not include "
-                      <> key_label_of_value(k)
+                      <> object_key_label(k)
                       <> ", a key of the non-extensible proxy target",
                   )
               }
@@ -4915,15 +4858,8 @@ fn proxy_own_keys(
   }
 }
 
-fn key_label_of_value(k: JsValue) -> String {
-  case k {
-    JsString(s) -> "'" <> s <> "'"
-    _ -> "[symbol]"
-  }
-}
-
 /// True when `keys` contains the same String/Symbol value twice.
-fn has_duplicate_keys(keys: List(JsValue), seen: List(JsValue)) -> Bool {
+fn has_duplicate_keys(keys: List(ObjectKey), seen: List(ObjectKey)) -> Bool {
   case keys {
     [] -> False
     [k, ..rest] ->
@@ -4935,21 +4871,21 @@ fn has_duplicate_keys(keys: List(JsValue), seen: List(JsValue)) -> Bool {
 }
 
 /// CreateListFromArrayLike(obj, property-key) — §7.3.19. Each element must be
-/// a String or Symbol, else TypeError.
+/// a String or Symbol, else TypeError — so the result is a list of ObjectKeys.
 fn keys_from_array_like(
   state: State(host),
   val: JsValue,
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+) -> Result(#(List(ObjectKey), State(host)), #(JsValue, State(host))) {
   case val {
     JsObject(arr_ref) ->
       case heap.read_array_like(state.heap, arr_ref) {
         // Fast path: genuine array-backed object — read elements directly.
         Some(#(length, els)) -> {
           let items = gather_array_like(els, 0, length, [])
-          use Nil <- result.map(
-            list.try_each(items, validate_trap_key(state, _)),
+          use keys <- result.map(
+            list.try_map(items, validate_trap_key(state, _)),
           )
-          #(items, state)
+          #(keys, state)
         }
         // Generic §7.3.19 path: ToLength(? Get(obj, "length")), then
         // ? Get(obj, ToString(i)) for each index — honors array-like plain
@@ -4978,14 +4914,15 @@ fn keys_from_array_like(
 }
 
 /// §7.3.19 step 7.c (property-key element types): each element of the ownKeys
-/// trap result must be a String or a Symbol.
+/// trap result must be a String or a Symbol — the one place a JsValue becomes
+/// an ObjectKey, so downstream code never re-checks.
 fn validate_trap_key(
   state: State(host),
   item: JsValue,
-) -> Result(Nil, #(JsValue, State(host))) {
-  case item {
-    JsString(_) | JsSymbol(_) -> Ok(Nil)
-    _ ->
+) -> Result(ObjectKey, #(JsValue, State(host))) {
+  case object_key_of_value(item) {
+    Some(k) -> Ok(k)
+    None ->
       reject_define(
         state,
         "'ownKeys' on proxy: trap returned a non-String, non-Symbol key",
@@ -5024,8 +4961,8 @@ fn gather_keys_via_get(
   arr_ref: Ref,
   idx: Int,
   length: Int,
-  acc: List(JsValue),
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+  acc: List(ObjectKey),
+) -> Result(#(List(ObjectKey), State(host)), #(JsValue, State(host))) {
   case idx >= length {
     True -> Ok(#(list.reverse(acc), state))
     False -> {
@@ -5037,8 +4974,8 @@ fn gather_keys_via_get(
         obj,
       ))
       // Step 7.c: validate the element type.
-      use Nil <- result.try(validate_trap_key(state, item))
-      gather_keys_via_get(state, obj, arr_ref, idx + 1, length, [item, ..acc])
+      use k <- result.try(validate_trap_key(state, item))
+      gather_keys_via_get(state, obj, arr_ref, idx + 1, length, [k, ..acc])
     }
   }
 }
@@ -5063,21 +5000,12 @@ pub fn enumerable_string_keys_stateful(
   state: State(host),
   ref: Ref,
 ) -> Result(#(List(String), State(host)), #(JsValue, State(host))) {
-  use #(keys, state) <- result.try(own_keys_stateful(state, ref))
-  let string_keys =
-    list.filter_map(keys, fn(k) {
-      case k {
-        JsString(s) -> Ok(s)
-        _ -> Error(Nil)
-      }
-    })
-  list.try_fold(string_keys, #([], state), fn(acc, s) {
+  use #(keys, state) <- result.try(own_property_keys(state, ref))
+  let string_keys = list.filter_map(keys, string_key_and_name)
+  list.try_fold(string_keys, #([], state), fn(acc, entry) {
     let #(found, state) = acc
-    use #(prop, state) <- result.map(get_own_property_stateful(
-      state,
-      ref,
-      JsString(s),
-    ))
+    let #(k, s) = entry
+    use #(prop, state) <- result.map(own_property_keyed(state, ref, k))
     case prop {
       Some(p) ->
         case value.prop_enumerable(p) {
@@ -5147,25 +5075,16 @@ fn enumerate_chain(
   seen: List(String),
   acc_rev: List(String),
 ) -> Result(#(List(String), List(String), State(host)), #(JsValue, State(host))) {
-  use #(keys, state) <- result.try(own_keys_stateful(state, ref))
-  let string_keys =
-    list.filter_map(keys, fn(k) {
-      case k {
-        JsString(s) -> Ok(s)
-        _ -> Error(Nil)
-      }
-    })
+  use #(keys, state) <- result.try(own_property_keys(state, ref))
+  let string_keys = list.filter_map(keys, string_key_and_name)
   use #(seen, acc_rev, state) <- result.try(
-    list.try_fold(string_keys, #(seen, acc_rev, state), fn(st, s) {
+    list.try_fold(string_keys, #(seen, acc_rev, state), fn(st, entry) {
       let #(seen, acc_rev, state) = st
+      let #(k, s) = entry
       case list.contains(seen, s) {
         True -> Ok(#(seen, acc_rev, state))
         False -> {
-          use #(prop, state) <- result.map(get_own_property_stateful(
-            state,
-            ref,
-            JsString(s),
-          ))
+          use #(prop, state) <- result.map(own_property_keyed(state, ref, k))
           case prop {
             Some(p) ->
               case value.prop_enumerable(p) {
