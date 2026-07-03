@@ -405,28 +405,62 @@ pub type State(host) {
 // -- Child-execution seed / merge --------------------------------------------
 // A child execution state (eval / Function realm, $262.evalScript,
 // ShadowRealm.prototype.evaluate, generator/async resumption, job re-entry)
-// runs with its OWN copy of the agent-wide event-loop queues. `seed_child`
-// is the ONE place that defines which queues a child inherits from its
-// caller; `merge_child` is its exact mirror, threading the same set back
-// after the child has run. Every call site must use the pair — a
-// hand-rolled field-by-field copy is how a queue gets silently reset
+// runs with its OWN copy of the agent-wide event-loop queues and its own
+// `RealmCtx`. `seed_child` is the ONE place that defines what a child
+// inherits from its caller; `merge_child` is its exact mirror, threading the
+// same set back after the child has run. Every call site must use the pair —
+// a hand-rolled field-by-field copy is how a queue gets silently reset
 // (dropping the caller's outstanding host promises, Atomics waiters, or
-// pending unhandled-rejection reports).
+// pending unhandled-rejection reports) or an agent-wide table gets forked
+// (giving a child realm its own tagged-template cache).
 //
 // EXCEPTION: children that finish with a NESTED `event_loop.drain_jobs`
 // ($262.evalScript, ShadowRealm.prototype.evaluate) must use the
 // `seed_draining_child` / `merge_draining_child` pair below instead — see
 // its doc for why the caller's Atomics waiters and pending
 // unhandled-rejection reports must never reach a nested drain.
+//
+// WHICH `RealmCtx` FIELDS THE PAIRS COPY, and why:
+//
+//   AGENT-WIDE — one table per agent, shared by every realm; seeded in from
+//   the caller and threaded back out here, so no boot site can fork them:
+//     * `realms`           — Ref → Builtins for every live realm slot.
+//     * `template_objects` — GetTemplateObject cache (§13.2.8.4), keyed by
+//                            globally unique compile-time site ids.
+//
+//   AGENT-WIDE, but NOT copied here — the cross-realm callers rebuild them
+//   from the target `value.RealmSlot` before booting the child (evalScript
+//   adopts the child realm's tables, ShadowRealm the union), so they are
+//   passed positionally into `new_state` instead of spread from the caller.
+//   The one place they are unconditionally adopted from a finished child is
+//   `merge_globals` (same-realm children, whose tables only ever grow):
+//     * `symbol_descriptions`, `symbol_registry` (§20.4.2.2)
+//   Being per-State rather than heap-resident is why a boot site that starts
+//   from `dict.new()` (`exec/entry.run_module`) can still reset them.
+//
+//   REALM-LOCAL — belong to the child's own realm and must NOT leak into the
+//   caller's ctx (a cross-realm merge that adopted them would splice a
+//   foreign realm's globals into the caller):
+//     * `lexical_globals`, `global_object`
+//
+//   ENGINE PLUMBING — installed once by `new_state` / passed positionally,
+//   never spread from a caller State:
+//     * `call_fn`, `construct_fn`, `to_number_fn`, `to_bigint_fn`,
+//       `callback_sentinel`, `host_hooks`
 
-/// Seed the agent-wide event-loop queues a child execution state must
-/// inherit from its caller: the pending job queue, the outstanding
-/// `host.suspend` promise count, the Atomics.waitAsync waiter list, and the
-/// pending unhandled-rejection list. MUST stay the mirror image of
-/// `merge_child`.
+/// Seed the agent-wide state a child execution must inherit from its caller:
+/// the pending job queue, the outstanding `host.suspend` promise count, the
+/// Atomics.waitAsync waiter list, the pending unhandled-rejection list, and
+/// the agent-wide `RealmCtx` tables (realm registry, tagged-template cache).
+/// MUST stay the mirror image of `merge_child`.
 pub fn seed_child(child: State(host), caller: State(host)) -> State(host) {
   State(
     ..child,
+    ctx: RealmCtx(
+      ..child.ctx,
+      realms: caller.ctx.realms,
+      template_objects: caller.ctx.template_objects,
+    ),
     job_queue: caller.job_queue,
     outstanding: caller.outstanding,
     atomics_waiters: caller.atomics_waiters,
@@ -434,15 +468,22 @@ pub fn seed_child(child: State(host), caller: State(host)) -> State(host) {
   )
 }
 
-/// Thread the agent-wide event-loop queues back from a finished child
-/// execution to its caller. MUST stay the mirror image of `seed_child`.
-/// Realm-context fields (lexical globals, realms, template objects) are NOT
-/// covered — same-realm callers want `merge_globals`, while cross-realm
-/// callers (evalScript / ShadowRealm) must NOT adopt the child realm's
-/// lexical globals and so thread their ctx explicitly on top of this.
+/// Thread the agent-wide state back from a finished child execution to its
+/// caller. MUST stay the mirror image of `seed_child`. The child's
+/// realm-LOCAL ctx (lexical globals, global object) is deliberately not
+/// adopted: same-realm callers want `merge_globals`, while cross-realm
+/// callers (evalScript / ShadowRealm) write the child realm's lexical globals
+/// back to its own `value.RealmSlot`.
 pub fn merge_child(caller: State(host), child: State(host)) -> State(host) {
   State(
     ..caller,
+    ctx: RealmCtx(
+      ..caller.ctx,
+      // Realms registered and template objects cached during the child
+      // execution are agent-wide and must survive the merge.
+      realms: child.ctx.realms,
+      template_objects: child.ctx.template_objects,
+    ),
     job_queue: child.job_queue,
     outstanding: child.outstanding,
     atomics_waiters: child.atomics_waiters,
@@ -464,13 +505,19 @@ pub fn merge_child(caller: State(host), child: State(host)) -> State(host) {
 ///   "handler attached later in the same turn" case. The unhandled-rejection
 ///   checkpoint belongs to the caller's own end-of-job drain.
 /// The child starts both lists empty; whatever it registers is unioned back
-/// by `merge_draining_child`, the mirror of this function.
+/// by `merge_draining_child`, the mirror of this function. The agent-wide
+/// `RealmCtx` tables are seeded exactly as in `seed_child`.
 pub fn seed_draining_child(
   child: State(host),
   caller: State(host),
 ) -> State(host) {
   State(
     ..child,
+    ctx: RealmCtx(
+      ..child.ctx,
+      realms: caller.ctx.realms,
+      template_objects: caller.ctx.template_objects,
+    ),
     job_queue: caller.job_queue,
     outstanding: caller.outstanding,
     atomics_waiters: [],
@@ -478,16 +525,22 @@ pub fn seed_draining_child(
   )
 }
 
-/// Mirror of `seed_draining_child`: thread the job queue and outstanding
-/// count back, and APPEND the Atomics waiters / unhandled-rejection refs the
-/// child registered (and its nested drain left unsettled / unreported) to the
-/// caller's own lists — which the child never saw and must not clobber.
+/// Mirror of `seed_draining_child`: thread the job queue, outstanding count
+/// and agent-wide `RealmCtx` tables back, and APPEND the Atomics waiters /
+/// unhandled-rejection refs the child registered (and its nested drain left
+/// unsettled / unreported) to the caller's own lists — which the child never
+/// saw and must not clobber.
 pub fn merge_draining_child(
   caller: State(host),
   child: State(host),
 ) -> State(host) {
   State(
     ..caller,
+    ctx: RealmCtx(
+      ..caller.ctx,
+      realms: child.ctx.realms,
+      template_objects: child.ctx.template_objects,
+    ),
     job_queue: child.job_queue,
     outstanding: child.outstanding,
     atomics_waiters: list.append(caller.atomics_waiters, child.atomics_waiters),
@@ -499,9 +552,9 @@ pub fn merge_draining_child(
 }
 
 /// Thread VM-global state from a SAME-REALM child execution back to parent:
-/// the `merge_child` event-loop set plus the realm context the child may
-/// have mutated (lexical globals, symbol tables, tagged-template cache,
-/// realm registry).
+/// everything `merge_child` covers (event-loop set + agent-wide RealmCtx
+/// tables), plus the two realm-local/agent-wide extras only a same-realm
+/// caller may adopt — the child's lexical globals and its symbol tables.
 /// Does NOT thread heap (caller handles separately since it's often further
 /// mutated).
 pub fn merge_globals(
@@ -509,10 +562,12 @@ pub fn merge_globals(
   child: State(host),
   extra_jobs: List(value.Job),
 ) -> State(host) {
+  let merged = merge_child(parent, child)
   State(
-    ..merge_child(parent, child),
+    ..merged,
     ctx: RealmCtx(
-      ..parent.ctx,
+      ..merged.ctx,
+      // Same realm, so the child's global lexical bindings ARE the parent's.
       lexical_globals: child.ctx.lexical_globals,
       // Symbol descriptions / the Symbol.for registry are agent-wide and
       // only ever grow, so the child's tables are a superset of the
@@ -520,10 +575,6 @@ pub fn merge_globals(
       // execution must survive the merge.
       symbol_descriptions: child.ctx.symbol_descriptions,
       symbol_registry: child.ctx.symbol_registry,
-      template_objects: child.ctx.template_objects,
-      // Realms registered during the child execution (ShadowRealm /
-      // $262.createRealm constructors) must survive the merge.
-      realms: child.ctx.realms,
     ),
     job_queue: job_queue.append(child.job_queue, extra_jobs),
   )

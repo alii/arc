@@ -129,7 +129,7 @@ pub fn eval_script_native(
         state,
         realm_builtins,
         source_str,
-        parser.parse(_, parser.Script),
+        parser.parse_script,
         // $262.evalScript runs the source "as if by ScriptEvaluation"
         // (test262 INTERPRETING.md), NOT as eval code: §16.1.7
         // GlobalDeclarationInstantiation, so its top-level var / function
@@ -139,11 +139,11 @@ pub fn eval_script_native(
       )
       // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
       let locals = seed_top_level_locals(template, JsObject(realm_global))
-      // Seed the pending job queue and outstanding host-promise count from
-      // the caller. NOT `seed_child`: this child ends in a nested,
-      // non-yielding `drain_jobs`, so the caller's Atomics waiters and
-      // pending unhandled-rejection reports must stay behind (see
-      // `state.seed_draining_child`).
+      // Seed the agent-wide state (job queue, outstanding host-promise count,
+      // realm registry, tagged-template cache) from the caller. NOT
+      // `seed_child`: this child ends in a nested, non-yielding `drain_jobs`,
+      // so the caller's Atomics waiters and pending unhandled-rejection
+      // reports must stay behind (see `state.seed_draining_child`).
       let eval_state =
         state.seed_draining_child(
           new_state_fn(
@@ -159,17 +159,6 @@ pub fn eval_script_native(
             state.ctx.host_hooks,
           ),
           state,
-        )
-      let eval_state =
-        State(
-          ..eval_state,
-          ctx: state.RealmCtx(
-            ..eval_state.ctx,
-            realms: state.ctx.realms,
-            // Tagged-template cache is keyed by globally unique site ids, so
-            // it is shared across realms; thread it in and back out.
-            template_objects: state.ctx.template_objects,
-          ),
         )
       case run_to_completion(eval_state) {
         Error(vm_err) ->
@@ -189,19 +178,12 @@ pub fn eval_script_native(
               symbol_registry: drained.ctx.symbol_registry,
             )
           let h = heap.write(drained.heap, realm_ref, updated_realm)
-          // Propagate the event-loop queues, heap and cross-realm ctx back to
-          // the caller. NOT merge_globals: the child realm's lexical globals
-          // belong in its RealmSlot (written above), not in the caller's ctx.
+          // Propagate the event-loop queues, agent-wide ctx tables and heap
+          // back to the caller. NOT merge_globals: the child realm's lexical
+          // globals belong in its RealmSlot (written above), not in the
+          // caller's ctx.
           let state =
-            State(
-              ..state.merge_draining_child(state, drained),
-              heap: h,
-              ctx: state.RealmCtx(
-                ..state.ctx,
-                realms: drained.ctx.realms,
-                template_objects: drained.ctx.template_objects,
-              ),
-            )
+            State(..state.merge_draining_child(state, drained), heap: h)
           case completion {
             NormalCompletion(val) -> #(state, Ok(val))
             ThrowCompletion(thrown) -> #(state, Error(thrown))
@@ -347,7 +329,7 @@ pub fn build_262(
 // wake messages, which is embedder territory (the same boundary as the
 // Atomics host capabilities — see arc/host.gleam). The test262 harness
 // registers a hook here (process-local, like the CanBlock flag read at
-// realm boot — see arc_atomics_ffi.erl) and build_262 applies it to EVERY
+// realm boot — see arc_agent_ffi.erl) and build_262 applies it to EVERY
 // $262 it builds: the initial one, each $262.createRealm() child, and the
 // $262 of each realm a spawned agent process boots (the harness re-registers
 // the hook inside the agent child's process body). Embedders that register
@@ -380,14 +362,16 @@ fn get_extend_262() -> Result(Extend262(host), Nil)
 /// completion. CPS so callers write `use template <- compile_or_throw(...)`.
 /// `parse` is injected so direct-eval can seed parser context (new.target
 /// permission today; full SyntaxPerms in P11) while indirect-eval / Function
-/// constructor stay context-free.
+/// constructor stay context-free. Every caller here evaluates SCRIPT source,
+/// so `parse` yields the statement list `compile` consumes — no `ast.Program`
+/// wrapper to unwrap, no module variant to reject at runtime.
 fn compile_or_throw(
   state: State(host),
   builtins: Builtins,
   source: String,
   parse: fn(String) ->
-    Result(#(ast.Program, scope.ScopeBuilder), parser.ParseError),
-  compile: fn(ast.Program, scope.ScopeBuilder) ->
+    Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), parser.ParseError),
+  compile: fn(List(ast.StmtWithLine), scope.ScopeBuilder) ->
     Result(FuncTemplate, compiler.CompileError),
   cont: fn(FuncTemplate) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
@@ -405,8 +389,8 @@ fn compile_or_throw(
     compile_task.run(string.byte_size(source), fn() {
       case parse(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
-        Ok(#(program, sb)) ->
-          case compile(program, sb) {
+        Ok(#(body, sb)) ->
+          case compile(body, sb) {
             Error(err) -> Error(compiler.error_message(err))
             Ok(template) -> Ok(template)
           }
@@ -438,10 +422,11 @@ fn run_eval(
   run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Seed the agent-wide event-loop queues from the caller: merge_globals
-  // threads them back after execution, so starting from new_state's empty
-  // defaults would drop the caller's pending waiters and rejection reports
-  // and zero the outstanding host.suspend count.
+  // Seed the agent-wide state (event-loop queues, realm registry,
+  // tagged-template cache) from the caller: merge_globals threads it back
+  // after execution, so starting from new_state's empty defaults would drop
+  // the caller's pending waiters and rejection reports, zero the outstanding
+  // host.suspend count, and fork the template cache.
   let eval_state =
     State(
       ..state.seed_child(
@@ -460,17 +445,6 @@ fn run_eval(
         state,
       ),
       eval_env:,
-    )
-  let eval_state =
-    State(
-      ..eval_state,
-      ctx: state.RealmCtx(
-        ..eval_state.ctx,
-        realms: state.ctx.realms,
-        // Thread the tagged-template cache in (new_state_fn starts empty);
-        // merge_globals threads it back out after execution.
-        template_objects: state.ctx.template_objects,
-      ),
     )
   case run_to_completion(eval_state) {
     Error(vm_err) ->
@@ -510,7 +484,7 @@ fn run_source_in_current_realm(
     state,
     state.builtins,
     source,
-    parser.parse(_, parser.Script),
+    parser.parse_script,
     compiler.compile_eval,
   )
   // §19.2.1.1 PerformEval: indirect eval runs in global scope,
@@ -612,21 +586,34 @@ fn run_direct_eval(
   // A sentinel head entry marks the caller frame's VariableEnvironment as
   // the GLOBAL environment (script/REPL top level) — sloppy eval'd `var`
   // declarations then target the global object, not an eval_env dict.
-  let #(caller_is_global, name_table) = case name_table {
+  let #(var_env, name_table) = case name_table {
     [#(sentinel, -1), ..rest] if sentinel == compiler.global_frame_sentinel -> #(
-      True,
+      compiler.GlobalVarEnv,
       rest,
     )
-    _ -> #(False, name_table)
+    _ -> #(compiler.FrameVarEnv, name_table)
   }
   // Compile with caller's local names as pre-boxed captures. The eval'd
   // code's slot i corresponds to name_table[i]'s variable. The caller's
   // lexical `this` (if any) is threaded as one extra capture after the
   // named ones, so eval('this') aliases the caller's slot.
-  let parent_names = list.map(name_table, fn(pair) { pair.0 })
   let parent_slots = state.func.lexical
   let perms = state.func.syntax_perms
   let caller_strict = state.func.is_strict
+  let caller =
+    compiler.DirectEvalCaller(
+      names: list.map(name_table, fn(pair) { pair.0 }),
+      slots: parent_slots,
+      perms:,
+      strictness: case caller_strict {
+        True -> compiler.Strict
+        False -> compiler.Sloppy
+      },
+      var_env:,
+      param_scope_names:,
+      with_names:,
+      private_names:,
+    )
   use template <- compile_or_throw(
     state,
     state.builtins,
@@ -639,20 +626,7 @@ fn run_direct_eval(
       allow_arguments: perms.arguments_allowed,
       outer_private_names: private_names,
     ),
-    fn(program, sb) {
-      compiler.compile_eval_direct(
-        program,
-        sb,
-        parent_names,
-        parent_slots,
-        perms,
-        caller_strict,
-        caller_is_global,
-        param_scope_names,
-        with_names,
-        private_names,
-      )
-    },
+    fn(body, sb) { compiler.compile_eval_direct(body, sb, caller) },
   )
   // Seed locals[0..N-1] with the caller's box refs (pulled from caller's
   // locals at the indices in name_table), then the caller's lexical box refs
@@ -681,7 +655,10 @@ fn run_direct_eval(
   // Strict: compile_eval_direct rewrites those vars to locals in the
   // eval body, so no eval_env needed. Global caller: vars go straight to
   // the global object (fallthrough ToGlobal), so no eval_env either.
-  let #(h, eval_env) = case caller_strict || caller_is_global, state.eval_env {
+  let #(h, eval_env) = case
+    caller_strict || var_env == compiler.GlobalVarEnv,
+    state.eval_env
+  {
     True, _ -> #(state.heap, None)
     False, Some(ref) -> #(state.heap, Some(ref))
     False, None -> {
@@ -1317,7 +1294,7 @@ fn do_shadow_realm_evaluate(
         state,
         caller_builtins,
         source,
-        parser.parse(_, parser.Script),
+        parser.parse_script,
         compiler.compile_eval,
       )
       // Sync the running realm's slot so re-entrant calls from the shadow
@@ -1332,11 +1309,11 @@ fn do_shadow_realm_evaluate(
         dict.merge(state.ctx.symbol_descriptions, realm.symbol_descriptions)
       let merged_registry =
         dict.merge(state.ctx.symbol_registry, realm.symbol_registry)
-      // Seed the pending job queue and outstanding host-promise count from
-      // the caller. NOT `seed_child`: this child ends in a nested,
-      // non-yielding `drain_jobs`, so the caller's Atomics waiters and
-      // pending unhandled-rejection reports must stay behind (see
-      // `state.seed_draining_child`).
+      // Seed the agent-wide state (job queue, outstanding host-promise count,
+      // realm registry, tagged-template cache) from the caller. NOT
+      // `seed_child`: this child ends in a nested, non-yielding `drain_jobs`,
+      // so the caller's Atomics waiters and pending unhandled-rejection
+      // reports must stay behind (see `state.seed_draining_child`).
       let eval_state =
         state.seed_draining_child(
           new_state_fn(
@@ -1353,17 +1330,6 @@ fn do_shadow_realm_evaluate(
             state.ctx.host_hooks,
           ),
           state,
-        )
-      let eval_state =
-        State(
-          ..eval_state,
-          ctx: state.RealmCtx(
-            ..eval_state.ctx,
-            realms: state.ctx.realms,
-            // Tagged-template cache is keyed by globally unique site ids, so
-            // it is shared across realms; thread it in and back out.
-            template_objects: state.ctx.template_objects,
-          ),
         )
       case run_to_completion(eval_state) {
         Error(vm_err) ->
@@ -1383,21 +1349,21 @@ fn do_shadow_realm_evaluate(
               symbol_registry: drained.ctx.symbol_registry,
             )
           let h = heap.write(drained.heap, realm_ref, updated_realm)
-          // Propagate the event-loop queues, heap and cross-realm ctx back to
-          // the caller. NOT merge_globals: the shadow realm's lexical globals
-          // belong in its RealmSlot (written above), not in the caller's ctx.
-          // The drained symbol tables are a superset of the caller's (the
-          // eval was seeded with the union) — adopt them agent-wide.
+          // Propagate the event-loop queues, agent-wide ctx tables and heap
+          // back to the caller. NOT merge_globals: the shadow realm's lexical
+          // globals belong in its RealmSlot (written above), not in the
+          // caller's ctx. The drained symbol tables are a superset of the
+          // caller's (the eval was seeded with the union) — adopt them
+          // agent-wide.
+          let merged = state.merge_draining_child(state, drained)
           let state =
             State(
-              ..state.merge_draining_child(state, drained),
+              ..merged,
               heap: h,
               ctx: state.RealmCtx(
-                ..state.ctx,
-                realms: drained.ctx.realms,
+                ..merged.ctx,
                 symbol_descriptions: drained.ctx.symbol_descriptions,
                 symbol_registry: drained.ctx.symbol_registry,
-                template_objects: drained.ctx.template_objects,
               ),
             )
           case completion {
