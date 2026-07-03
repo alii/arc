@@ -1625,7 +1625,7 @@ fn array_shift(
         use els, len <- try_elements_fast_path(state, ref, length)
         let first = elements.get(els, 0)
         let els =
-          elements.move_down(els, 1, len, 1) |> elements.truncate(len - 1)
+          elements.move_range(els, 1, len, -1) |> elements.truncate(len - 1)
         #(els, len - 1, first)
       }
       case fast {
@@ -1757,7 +1757,8 @@ fn array_unshift(
   let fast = {
     use els, len <- try_elements_fast_path(state, ref, length)
     let els =
-      elements.move_up(els, 0, len, arg_count) |> elements.write_list(0, args)
+      elements.move_range(els, 0, len, arg_count)
+      |> elements.write_list(0, args)
     #(els, len + arg_count, Nil)
   }
   case fast {
@@ -4803,10 +4804,9 @@ fn array_splice(
   let fast = {
     use els, len <- try_elements_fast_path(state, ref, length)
     let move_from = actual_start + actual_delete_count
-    let els = case shift > 0, shift < 0 {
-      True, _ -> elements.move_up(els, move_from, len, shift)
-      _, True -> elements.move_down(els, move_from, len, -shift)
-      _, _ -> els
+    let els = case shift == 0 {
+      True -> els
+      False -> elements.move_range(els, move_from, len, shift)
     }
     let els =
       elements.write_list(els, actual_start, items)

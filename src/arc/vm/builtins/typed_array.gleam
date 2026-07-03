@@ -15,7 +15,9 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
-import arc/vm/internal/typed_array_ffi.{ta_fill_region, ta_splice, ta_zeroed}
+import arc/vm/internal/typed_array_ffi.{
+  splice_clamped, ta_fill_region, ta_zeroed,
+}
 import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -57,6 +59,17 @@ const max_byte_length = 2_147_483_647
 
 /// 2^53 - 1 — MAX_SAFE_INTEGER, the ToIndex/ToLength upper bound.
 const max_safe_integer = 9_007_199_254_740_991
+
+/// §23.2 [[ContentType]] agreement: a BigInt view and a Number view never
+/// mix (construct-from, set(), species-create all reject the pairing).
+fn same_content_type(a: TypedArrayKind, b: TypedArrayKind) -> Bool {
+  case a, b {
+    value.NumKind(_), value.NumKind(_) -> True
+    value.BigKind(_), value.BigKind(_) -> True
+    value.NumKind(_), value.BigKind(_) | value.BigKind(_), value.NumKind(_) ->
+      False
+  }
+}
 
 // ============================================================================
 // Init — %TypedArray%, %TypedArray%.prototype, and the 11 concrete ctors
@@ -206,12 +219,12 @@ pub fn init(
           3,
           [size_prop],
         )
-      // §23.2.6.2: the ctor's "prototype" property is {W:F, E:F, C:F}.
-      let h = freeze_prototype_prop(h, bt.constructor, bt.prototype)
+      // §23.2.6.2: the ctor's "prototype" property is {W:F, E:F, C:F} —
+      // installed that way by common.init_type.
       // proposal-arraybuffer-base64: own methods of Uint8Array.prototype and
       // statics of the Uint8Array constructor (NOT on %TypedArray%).
       let h = case kind {
-        value.Uint8Kind -> {
+        value.NumKind(value.Uint8Kind) -> {
           let #(h, u8_methods) =
             common.alloc_methods(h, function_proto, [
               #(
@@ -243,7 +256,6 @@ pub fn init(
       }
       #(h, [#(kind, bt), ..lst])
     })
-  let h = freeze_prototype_prop(h, ta.constructor, ta.prototype)
   // %TypedArray%.from / %TypedArray%.of — statics inherited by all 11 ctors.
   let #(h, statics) =
     common.alloc_methods(h, function_proto, [
@@ -269,25 +281,6 @@ fn add_named_props(
             let #(name, prop) = entry
             dict.insert(acc, Named(name), prop)
           }),
-        )
-      other -> other
-    }
-  })
-}
-
-/// Rewrite a constructor's "prototype" property to the spec attributes for
-/// TypedArray constructors: non-writable, non-enumerable, non-configurable.
-fn freeze_prototype_prop(h: Heap(host), ctor: Ref, proto: Ref) -> Heap(host) {
-  heap.update(h, ctor, fn(slot) {
-    case slot {
-      ObjectSlot(properties:, ..) as s ->
-        ObjectSlot(
-          ..s,
-          properties: dict.insert(
-            properties,
-            Named("prototype"),
-            value.data(JsObject(proto)),
-          ),
         )
       other -> other
     }
@@ -763,8 +756,7 @@ fn alloc_fresh_ta(
     common.alloc_wrapper(
       state.heap,
       value.ArrayBufferObject(
-        data: value.BufBytes(data),
-        detached: False,
+        data: Some(value.BufBytes(data)),
         max_byte_length: None,
         immutable: False,
       ),
@@ -911,18 +903,15 @@ fn from_typed_array(
   src_len: Int,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Step 6.c: BigInt and Number content types never mix.
-  use <- bool.lazy_guard(
-    value.typed_array_is_bigint(kind) != value.typed_array_is_bigint(src_kind),
-    fn() {
-      Error(state.type_error_value(
-        state,
-        "Cannot initialize "
-          <> value.typed_array_name(kind)
-          <> " from "
-          <> value.typed_array_name(src_kind),
-      ))
-    },
-  )
+  use <- bool.lazy_guard(!same_content_type(kind, src_kind), fn() {
+    Error(state.type_error_value(
+      state,
+      "Cannot initialize "
+        <> value.typed_array_name(kind)
+        <> " from "
+        <> value.typed_array_name(src_kind),
+    ))
+  })
   case object.typed_array_buffer_data(state.heap, src_buf) {
     None ->
       Error(state.type_error_value(
@@ -1016,13 +1005,12 @@ fn convert_elements_loop(
       // JsBigInt; a missing element (out-of-bounds read) encodes as zero.
       let seg = case
         object.typed_array_element(h, src_buf, src_kind, src_off, src_len, i)
-        |> option.then(typed_array_elements.decoded_element)
+        |> option.then(typed_array_elements.decoded_element(dst_kind, _))
       {
         Some(el) ->
           typed_array_elements.typed_array_encode_value(
             ta_zeroed(dst_size),
             0,
-            dst_kind,
             el,
           )
         None -> ta_zeroed(dst_size)
@@ -1356,18 +1344,14 @@ fn try_bulk_store(
       use <- bool.guard(byte_offset + len * size > byte_size, Some(state))
       let count = int.clamp(len - start, 0, bit_array.byte_size(region) / size)
       use <- bool.guard(count <= 0, Some(state))
+      // Whole ELEMENTS only; splice_clamped's byte clamp is just the backstop.
       let region = case count * size == bit_array.byte_size(region) {
         True -> region
         False -> bit_array.slice(region, 0, count * size) |> result.unwrap(<<>>)
       }
-      let h =
-        write_buffer_data(
-          state.heap,
-          buffer,
-          ta_splice(data, byte_offset + start * size, region),
-          byte_offset + start * size,
-          count * size,
-        )
+      let off = byte_offset + start * size
+      let #(new_data, written) = splice_clamped(data, off, region)
+      let h = write_buffer_data(state.heap, buffer, new_data, off, written)
       Some(State(..state, heap: h))
     }
   }
@@ -1619,7 +1603,6 @@ fn proto_fill(
         typed_array_elements.typed_array_encode_value(
           ta_zeroed(size),
           0,
-          kind,
           converted,
         )
       let new_data = ta_fill_region(data, off + start * size, end - start, elem)
@@ -1648,14 +1631,14 @@ fn convert_for_kind(
   #(typed_array_elements.TypedElement, State(host)),
   #(JsValue, State(host)),
 ) {
-  case value.typed_array_is_bigint(kind) {
-    False -> {
+  case kind {
+    value.NumKind(k) -> {
       use #(n, state) <- result.map(coerce.js_to_number(state, val))
-      #(typed_array_elements.NumberElement(n), state)
+      #(typed_array_elements.NumberElement(k, n), state)
     }
-    True -> {
+    value.BigKind(k) -> {
       use #(n, state) <- result.map(coerce.to_bigint(state, val))
-      #(typed_array_elements.BigIntElement(n), state)
+      #(typed_array_elements.BigIntElement(k, n), state)
     }
   }
 }
@@ -1789,10 +1772,9 @@ fn set_from_typed_array(
   use <- bool.lazy_guard(!src_live, fn() {
     state.type_error(state, "Cannot perform set from a detached ArrayBuffer")
   })
-  use <- bool.lazy_guard(
-    value.typed_array_is_bigint(kind) != value.typed_array_is_bigint(src_kind),
-    fn() { state.type_error(state, "Cannot mix BigInt and other types") },
-  )
+  use <- bool.lazy_guard(!same_content_type(kind, src_kind), fn() {
+    state.type_error(state, "Cannot mix BigInt and other types")
+  })
   use <- bool.lazy_guard(src_len + offset > len, fn() {
     state.range_error(state, "offset is out of bounds")
   })
@@ -1828,16 +1810,11 @@ fn set_from_typed_array(
         True -> region
         False -> bit_array.slice(region, 0, avail) |> result.unwrap(<<>>)
       }
-      case avail > 0 {
+      let #(new_data, written) = splice_clamped(data, start, region)
+      case written > 0 {
         True -> {
           let h =
-            write_buffer_data(
-              state.heap,
-              dst_buf,
-              ta_splice(data, start, region),
-              start,
-              avail,
-            )
+            write_buffer_data(state.heap, dst_buf, new_data, start, written)
           #(State(..state, heap: h), Ok(JsUndefined))
         }
         False -> #(state, Ok(JsUndefined))
@@ -2062,13 +2039,15 @@ fn proto_slice(
                     True -> seq_copy_region(tdata, src_byte, target_off, avail)
                     False -> copy_region(state.heap, buffer, src_byte, avail)
                   }
+                  let #(new_data, written) =
+                    splice_clamped(tdata, target_off, region)
                   let h =
                     write_buffer_data(
                       state.heap,
                       target_buf,
-                      ta_splice(tdata, target_off, region),
+                      new_data,
                       target_off,
-                      avail,
+                      written,
                     )
                   #(State(..state, heap: h), Ok(target))
                 }
@@ -2781,7 +2760,8 @@ fn proto_copy_within(
       use <- bool.guard(count <= 0, #(state, Ok(this)))
       case bit_array.slice(data, off + from * size, count * size) {
         Ok(region) -> {
-          let new_data = ta_splice(data, off + to * size, region)
+          let target = off + to * size
+          let #(new_data, written) = splice_clamped(data, target, region)
           #(
             State(
               ..state,
@@ -2789,8 +2769,8 @@ fn proto_copy_within(
                 state.heap,
                 buffer,
                 new_data,
-                off + to * size,
-                count * size,
+                target,
+                written,
               ),
             ),
             Ok(this),
@@ -2840,11 +2820,11 @@ fn proto_reverse(
     Some(data) -> {
       let size = value.typed_array_element_size(kind)
       let region = reversed_bytes(data, off, len, size)
-      let new_data = ta_splice(data, off, region)
+      let #(new_data, written) = splice_clamped(data, off, region)
       #(
         State(
           ..state,
-          heap: write_buffer_data(state.heap, buffer, new_data, off, len * size),
+          heap: write_buffer_data(state.heap, buffer, new_data, off, written),
         ),
         Ok(this),
       )
@@ -2951,7 +2931,6 @@ fn proto_with(
       typed_array_elements.typed_array_encode_value(
         data,
         actual * size,
-        kind,
         converted,
       )
     False -> data
@@ -3157,14 +3136,9 @@ fn encode_region(
   // The values are a snapshot READ from the typed array (sorted_snapshot),
   // so each one is a JsNumber / JsBigInt; anything else encodes as zero.
   list.map(values, fn(v) {
-    case typed_array_elements.decoded_element(v) {
+    case typed_array_elements.decoded_element(kind, v) {
       Some(el) ->
-        typed_array_elements.typed_array_encode_value(
-          ta_zeroed(size),
-          0,
-          kind,
-          el,
-        )
+        typed_array_elements.typed_array_encode_value(ta_zeroed(size), 0, el)
       None -> ta_zeroed(size)
     }
   })
@@ -3227,16 +3201,10 @@ fn proto_sort(
         True -> region
         False -> bit_array.slice(region, 0, avail) |> result.unwrap(<<>>)
       }
-      case avail > 0 {
+      let #(new_data, written) = splice_clamped(data, off, region)
+      case written > 0 {
         True -> {
-          let h =
-            write_buffer_data(
-              state.heap,
-              buffer,
-              ta_splice(data, off, region),
-              off,
-              avail,
-            )
+          let h = write_buffer_data(state.heap, buffer, new_data, off, written)
           #(State(..state, heap: h), Ok(this))
         }
         False -> #(state, Ok(this))
@@ -3330,10 +3298,11 @@ fn resolve_species_ctor(
   exemplar: JsValue,
   kind: TypedArrayKind,
 ) -> Result(#(Option(JsValue), State(host)), #(JsValue, State(host))) {
-  let default_ctor =
-    state.builtins.typed_arrays
-    |> list.key_find(kind)
-    |> result.map(fn(bt: BuiltinType) { bt.constructor })
+  // Every kind is installed at realm boot; a miss is a boot bug, not a
+  // reason to treat every @@species as a non-default one.
+  let assert Ok(default_bt) = list.key_find(state.builtins.typed_arrays, kind)
+    as "every TypedArray kind is installed at realm boot"
+  let default_ctor = default_bt.constructor
   // C = Get(exemplar, "constructor").
   use #(ctor, state) <- result.try(object.get_value_of(
     state,
@@ -3352,7 +3321,7 @@ fn resolve_species_ctor(
       case species {
         value.JsNull | JsUndefined -> Ok(#(None, state))
         JsObject(species_ref) ->
-          case Ok(species_ref) == default_ctor {
+          case species_ref == default_ctor {
             True -> Ok(#(None, state))
             False ->
               case object.is_constructor(state.heap, species) {
@@ -3392,10 +3361,7 @@ fn check_content_type(
       kind: value.TypedArrayObject(elem_kind: result_kind, ..),
       ..,
     )) ->
-      case
-        value.typed_array_is_bigint(result_kind)
-        == value.typed_array_is_bigint(kind)
-      {
+      case same_content_type(result_kind, kind) {
         True -> Ok(#(#(obj, obj_ref), state))
         False ->
           Error(state.type_error_value(
@@ -3456,9 +3422,48 @@ fn try_state3(
 // toBase64 / toHex / setFromBase64 / setFromHex / fromBase64 / fromHex
 // ============================================================================
 
-const b64_alphabets = ["base64", "base64url"]
+/// The "alphabet" option — proposal-arraybuffer-base64.
+pub type B64Alphabet {
+  Base64
+  Base64Url
+}
 
-const b64_chunk_handlings = ["loose", "strict", "stop-before-partial"]
+/// The "lastChunkHandling" option — proposal-arraybuffer-base64.
+pub type LastChunkHandling {
+  Loose
+  Strict
+  StopBeforePartial
+}
+
+/// Which decoder produced a DecodeResult — names the SyntaxError.
+pub type Codec {
+  Base64Codec
+  HexCodec
+}
+
+fn parse_b64_alphabet(s: String) -> Option(B64Alphabet) {
+  case s {
+    "base64" -> Some(Base64)
+    "base64url" -> Some(Base64Url)
+    _ -> None
+  }
+}
+
+fn parse_last_chunk_handling(s: String) -> Option(LastChunkHandling) {
+  case s {
+    "loose" -> Some(Loose)
+    "strict" -> Some(Strict)
+    "stop-before-partial" -> Some(StopBeforePartial)
+    _ -> None
+  }
+}
+
+fn codec_name(codec: Codec) -> String {
+  case codec {
+    Base64Codec -> "base64"
+    HexCodec -> "hex"
+  }
+}
 
 /// ValidateUint8Array — RequireInternalSlot([[TypedArrayName]]) plus the
 /// Uint8Array brand check. Does NOT check buffer liveness (that happens
@@ -3468,7 +3473,7 @@ fn validate_u8(
   state: State(host),
 ) -> Result(State(host), #(JsValue, State(host))) {
   case ta_slot(state.heap, this) {
-    Some(TaView(kind: value.Uint8Kind, ..)) -> Ok(state)
+    Some(TaView(kind: value.NumKind(value.Uint8Kind), ..)) -> Ok(state)
     _ ->
       Error(state.type_error_value(
         state,
@@ -3561,21 +3566,24 @@ fn get_option_value(
 }
 
 /// String-enum option per the proposal: undefined → default; a non-String
-/// value or a String outside `allowed` → TypeError (NO ToString coercion).
-fn get_string_enum_option(
+/// value or a String `parse` rejects → TypeError (NO ToString coercion). The
+/// accepted spellings live in `parse`, so the option's value can only ever
+/// leave here as one of the enum's variants — a downstream `== "base64url"`
+/// against a typo'd string is not expressible.
+fn get_enum_option(
   state: State(host),
   opts: Option(Ref),
   key: String,
-  allowed: List(String),
-  default: String,
-) -> Result(#(String, State(host)), #(JsValue, State(host))) {
+  parse: fn(String) -> Option(a),
+  default: a,
+) -> Result(#(a, State(host)), #(JsValue, State(host))) {
   use #(got, state) <- result.try(get_option_value(state, opts, key))
   case got {
     JsUndefined -> Ok(#(default, state))
     JsString(s) ->
-      case list.contains(allowed, s) {
-        True -> Ok(#(s, state))
-        False ->
+      case parse(s) {
+        Some(v) -> Ok(#(v, state))
+        None ->
           Error(state.type_error_value(
             state,
             "\"" <> s <> "\" is not a valid value for option " <> key,
@@ -3597,21 +3605,24 @@ fn get_string_enum_option(
 fn read_b64_options(
   state: State(host),
   opt_arg: JsValue,
-) -> Result(#(String, String, State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(B64Alphabet, LastChunkHandling, State(host)),
+  #(JsValue, State(host)),
+) {
   use #(opts, state) <- result.try(get_opts_object(state, opt_arg))
-  use #(alphabet, state) <- result.try(get_string_enum_option(
+  use #(alphabet, state) <- result.try(get_enum_option(
     state,
     opts,
     "alphabet",
-    b64_alphabets,
-    "base64",
+    parse_b64_alphabet,
+    Base64,
   ))
-  use #(handling, state) <- result.map(get_string_enum_option(
+  use #(handling, state) <- result.map(get_enum_option(
     state,
     opts,
     "lastChunkHandling",
-    b64_chunk_handlings,
-    "loose",
+    parse_last_chunk_handling,
+    Loose,
   ))
   #(alphabet, handling, state)
 }
@@ -3656,18 +3667,13 @@ fn u8_write_bytes(
   off: Int,
   bytes: BitArray,
 ) -> State(host) {
-  case bit_array.byte_size(bytes) {
+  let #(new_data, written) = splice_clamped(data, off, bytes)
+  case written {
     0 -> state
     _ ->
       State(
         ..state,
-        heap: write_buffer_data(
-          state.heap,
-          buffer,
-          ta_splice(data, off, bytes),
-          off,
-          bit_array.byte_size(bytes),
-        ),
+        heap: write_buffer_data(state.heap, buffer, new_data, off, written),
       )
   }
 }
@@ -3684,12 +3690,12 @@ fn u8_to_base64(
       state,
       helpers.first_arg_or_undefined(args),
     ))
-    use #(alphabet, state) <- result.try(get_string_enum_option(
+    use #(alphabet, state) <- result.try(get_enum_option(
       state,
       opts,
       "alphabet",
-      b64_alphabets,
-      "base64",
+      parse_b64_alphabet,
+      Base64,
     ))
     use #(omit_val, state) <- result.try(get_option_value(
       state,
@@ -3700,8 +3706,8 @@ fn u8_to_base64(
     use #(_buffer, data, off, len) <- result.map(u8_live_view(state, this))
     let view = bit_array.slice(data, off, len) |> result.unwrap(<<>>)
     let out = case alphabet {
-      "base64url" -> bit_array.base64_url_encode(view, padding)
-      _ -> bit_array.base64_encode(view, padding)
+      Base64Url -> bit_array.base64_url_encode(view, padding)
+      Base64 -> bit_array.base64_encode(view, padding)
     }
     #(JsString(out), state)
   })
@@ -3738,8 +3744,8 @@ fn u8_set_from_base64(
       helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
     ))
     use #(buffer, data, off, len) <- result.try(u8_live_view(state, this))
-    let res = from_base64(s, alphabet == "base64url", handling, len)
-    decode_into_view(state, buffer, data, off, res, "base64")
+    let res = from_base64(s, alphabet, handling, len)
+    decode_into_view(state, buffer, data, off, res, Base64Codec)
   })
 }
 
@@ -3758,12 +3764,15 @@ fn u8_set_from_hex(
     ))
     use #(buffer, data, off, len) <- result.try(u8_live_view(state, this))
     let res = from_hex(s, len)
-    decode_into_view(state, buffer, data, off, res, "hex")
+    decode_into_view(state, buffer, data, off, res, HexCodec)
   })
 }
 
-fn decode_error(state: State(host), codec: String) -> #(JsValue, State(host)) {
-  state.syntax_error_value(state, "unable to decode " <> codec <> " string")
+fn decode_error(state: State(host), codec: Codec) -> #(JsValue, State(host)) {
+  state.syntax_error_value(
+    state,
+    "unable to decode " <> codec_name(codec) <> " string",
+  )
 }
 
 /// Shared setFromBase64/setFromHex tail. Per spec, bytes decoded before an
@@ -3774,7 +3783,7 @@ fn decode_into_view(
   data: BitArray,
   off: Int,
   res: DecodeResult,
-  codec: String,
+  codec: Codec,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case res {
     DecodeFailed(partial:) ->
@@ -3795,7 +3804,7 @@ fn decode_into_view(
 fn decode_to_new_u8(
   state: State(host),
   res: DecodeResult,
-  codec: String,
+  codec: Codec,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case res {
     DecodeFailed(partial: _) -> Error(decode_error(state, codec))
@@ -3817,9 +3826,8 @@ fn u8_from_base64(
       state,
       helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
     ))
-    let res =
-      from_base64(s, alphabet == "base64url", handling, max_safe_integer)
-    decode_to_new_u8(state, res, "base64")
+    let res = from_base64(s, alphabet, handling, max_safe_integer)
+    decode_to_new_u8(state, res, Base64Codec)
   })
 }
 
@@ -3834,7 +3842,7 @@ fn u8_from_hex(
       helpers.first_arg_or_undefined(args),
     ))
     let res = from_hex(s, max_safe_integer)
-    decode_to_new_u8(state, res, "hex")
+    decode_to_new_u8(state, res, HexCodec)
   })
 }
 
@@ -3846,8 +3854,8 @@ fn u8_alloc_from_bytes(
   let len = bit_array.byte_size(bytes)
   use #(ta, state) <- result.map(alloc_ta_with_length(
     state,
-    value.Uint8Kind,
-    default_proto_for(state, value.Uint8Kind),
+    value.NumKind(value.Uint8Kind),
+    default_proto_for(state, value.NumKind(value.Uint8Kind)),
     len,
   ))
   // Fresh buffer — this caller owns every byte.
@@ -3886,12 +3894,23 @@ fn decode_bytes(acc: List(BitArray)) -> BitArray {
 /// FromBase64 ( string, alphabet, lastChunkHandling, maxLength )
 fn from_base64(
   s: String,
-  url: Bool,
-  handling: String,
+  alphabet: B64Alphabet,
+  handling: LastChunkHandling,
   max_len: Int,
 ) -> DecodeResult {
   use <- bool.guard(max_len == 0, Decoded(0, <<>>))
-  b64_loop(bit_array.from_string(s), 0, 0, [], 0, 0, 0, url, handling, max_len)
+  b64_loop(
+    bit_array.from_string(s),
+    0,
+    0,
+    [],
+    0,
+    0,
+    0,
+    alphabet,
+    handling,
+    max_len,
+  )
 }
 
 /// SkipAsciiWhitespace — TAB LF FF CR SPACE.
@@ -3911,8 +3930,8 @@ fn b64_loop(
   written: Int,
   chunk: Int,
   chunk_len: Int,
-  url: Bool,
-  handling: String,
+  alphabet: B64Alphabet,
+  handling: LastChunkHandling,
   max_len: Int,
 ) -> DecodeResult {
   let #(bin, index) = b64_skip_ws(bin, index)
@@ -3921,8 +3940,8 @@ fn b64_loop(
       case chunk_len > 0 {
         True ->
           case handling {
-            "stop-before-partial" -> Decoded(read, decode_bytes(acc))
-            "loose" ->
+            StopBeforePartial -> Decoded(read, decode_bytes(acc))
+            Loose ->
               case chunk_len == 1 {
                 True -> DecodeFailed(decode_bytes(acc))
                 False ->
@@ -3931,7 +3950,7 @@ fn b64_loop(
                     None -> DecodeFailed(decode_bytes(acc))
                   }
               }
-            _ -> DecodeFailed(decode_bytes(acc))
+            Strict -> DecodeFailed(decode_bytes(acc))
           }
         False -> Decoded(index, decode_bytes(acc))
       }
@@ -3939,7 +3958,7 @@ fn b64_loop(
     <<61, rest:bits>> ->
       b64_padding(rest, index + 1, read, acc, chunk, chunk_len, handling)
     <<c, rest:bits>> ->
-      case b64_value(c, url) {
+      case b64_value(c, alphabet) {
         None -> DecodeFailed(decode_bytes(acc))
         Some(v) -> {
           let remaining = max_len - written
@@ -3965,7 +3984,7 @@ fn b64_loop(
                         written,
                         0,
                         0,
-                        url,
+                        alphabet,
                         handling,
                         max_len,
                       )
@@ -3980,7 +3999,7 @@ fn b64_loop(
                     written,
                     chunk,
                     chunk_len + 1,
-                    url,
+                    alphabet,
                     handling,
                     max_len,
                   )
@@ -4003,7 +4022,7 @@ fn b64_padding(
   acc: List(BitArray),
   chunk: Int,
   chunk_len: Int,
-  handling: String,
+  handling: LastChunkHandling,
 ) -> DecodeResult {
   use <- bool.guard(chunk_len < 2, DecodeFailed(decode_bytes(acc)))
   let #(bin, index) = b64_skip_ws(bin, index)
@@ -4011,9 +4030,9 @@ fn b64_padding(
     True ->
       case bin {
         <<>> ->
-          case handling == "stop-before-partial" {
-            True -> Decoded(read, decode_bytes(acc))
-            False -> DecodeFailed(decode_bytes(acc))
+          case handling {
+            StopBeforePartial -> Decoded(read, decode_bytes(acc))
+            Loose | Strict -> DecodeFailed(decode_bytes(acc))
           }
         // second '='
         <<61, rest:bits>> -> {
@@ -4034,11 +4053,11 @@ fn b64_finish_padding(
   acc: List(BitArray),
   chunk: Int,
   chunk_len: Int,
-  handling: String,
+  handling: LastChunkHandling,
 ) -> DecodeResult {
   case bin {
     <<>> ->
-      case b64_decode_partial(chunk, chunk_len, handling == "strict") {
+      case b64_decode_partial(chunk, chunk_len, handling == Strict) {
         Some(tail) -> Decoded(index, decode_bytes([tail, ..acc]))
         None -> DecodeFailed(decode_bytes(acc))
       }
@@ -4075,7 +4094,8 @@ fn b64_decode_partial(
 
 /// Map a base64 character (as its code unit) to its 6-bit value. In the
 /// base64url alphabet '-'/'_' replace '+'/'/'.
-fn b64_value(c: Int, url: Bool) -> Option(Int) {
+fn b64_value(c: Int, alphabet: B64Alphabet) -> Option(Int) {
+  let url = alphabet == Base64Url
   case c {
     _ if c >= 65 && c <= 90 -> Some(c - 65)
     _ if c >= 97 && c <= 122 -> Some(c - 71)
@@ -4133,12 +4153,15 @@ fn hex_value(c: Int) -> Option(Int) {
 // Small shared helpers
 // ============================================================================
 
-/// The intrinsic default prototype for a concrete TypedArray kind.
+/// The intrinsic default prototype for a concrete TypedArray kind. Every one
+/// of `all_typed_array_kinds` is installed in `builtins.typed_arrays` at
+/// realm boot, so a miss is a boot bug — crash rather than silently hand back
+/// the ABSTRACT %TypedArray%.prototype, which would produce instances whose
+/// prototype has no constructor and no @@toStringTag.
 fn default_proto_for(state: State(host), kind: TypedArrayKind) -> Ref {
-  state.builtins.typed_arrays
-  |> list.key_find(kind)
-  |> result.map(fn(bt: BuiltinType) { bt.prototype })
-  |> result.unwrap(state.builtins.typed_array.prototype)
+  let assert Ok(bt) = list.key_find(state.builtins.typed_arrays, kind)
+    as "every TypedArray kind is installed at realm boot"
+  bt.prototype
 }
 
 /// Replace a buffer slot's backing bytes with a full-buffer image,
@@ -4164,27 +4187,26 @@ fn write_buffer_data(
         s
       ObjectSlot(
         kind: value.ArrayBufferObject(
-          detached:,
           max_byte_length:,
           immutable:,
-          data: old_data,
+          data: Some(old_data),
         ),
         ..,
       ) as s ->
         ObjectSlot(
           ..s,
           kind: value.ArrayBufferObject(
-            data: value.buffer_store_region(
+            data: Some(value.buffer_store_region(
               old_data,
               new_data,
               byte_offset,
               count,
-            ),
-            detached:,
+            )),
             max_byte_length:,
             immutable:,
           ),
         )
+      // Detached (`data: None`) or not a buffer at all: nothing to write into.
       other -> other
     }
   })

@@ -4357,21 +4357,14 @@ pub fn prevent_extensions_stateful(
 /// For shared (atomics-backed) buffers this copies the live bytes out of the
 /// shared cells; for plain buffers it is the backing binary itself.
 pub fn typed_array_buffer_data(h: Heap(host), buffer: Ref) -> Option(BitArray) {
-  case heap.read(h, buffer) {
-    Some(ObjectSlot(kind: value.ArrayBufferObject(data: Some(data), ..), ..)) ->
-      Some(value.buffer_bits(data))
-    _ -> None
-  }
+  typed_array_elements.buffer_bytes(h, buffer)
 }
 
 /// §10.4.5.13 TypedArrayLength — current [[ArrayLength]] of a typed-array
-/// view. `length: None` is [[ArrayLength]] = AUTO (a length-tracking view
-/// over a resizable buffer): its element count follows the buffer's live
-/// byte length. Detached buffers and tracking views whose byte offset lies
-/// past the end of a shrunk buffer resolve to 0 — callers detect those as
-/// out of bounds via the usual `byte_offset + len * size > byte_size` check
-/// (with len = 0 that reduces to `byte_offset > byte_size`, which is exactly
-/// the §10.4.5.14 IsTypedArrayOutOfBounds condition for AUTO views).
+/// view. The primitive itself lives in ops/typed_array_elements (a leaf w.r.t.
+/// this module) so the write half can share it: this is the read half's name
+/// for it, kept because most of the engine reaches TypedArrayLength through
+/// the object MOP.
 pub fn typed_array_view_length(
   h: Heap(host),
   buffer: Ref,
@@ -4379,17 +4372,7 @@ pub fn typed_array_view_length(
   byte_offset: Int,
   length: Option(Int),
 ) -> Int {
-  case length {
-    Some(n) -> n
-    None ->
-      case typed_array_buffer_data(h, buffer) {
-        None -> 0
-        Some(data) -> {
-          let size = value.typed_array_element_size(elem_kind)
-          int.max(0, { bit_array.byte_size(data) - byte_offset } / size)
-        }
-      }
-  }
+  typed_array_elements.view_length(h, buffer, elem_kind, byte_offset, length)
 }
 
 /// §10.4.5.15 IntegerIndexedElementGet — element at `idx`, or None when the
@@ -4402,20 +4385,24 @@ pub fn typed_array_element(
   length: Int,
   idx: Int,
 ) -> Option(JsValue) {
-  use <- bool.guard(idx < 0 || idx >= length, None)
   case typed_array_buffer_data(h, buffer) {
     None -> None
     Some(data) -> {
       let size = value.typed_array_element_size(elem_kind)
-      let off = byte_offset + idx * size
-      // §10.4.5.14 IsValidIntegerIndex: validate against the CURRENT backing
-      // store, not the view's construction-time length — a resizable
-      // ArrayBuffer may have shrunk below the view. An out-of-bounds view
-      // behaves like a detached one: EVERY index is invalid, even ones whose
-      // bytes still exist, so check the whole view, not just this element.
-      let view_end = byte_offset + length * size
-      case view_end <= bit_array.byte_size(data) {
-        True -> Some(decode_typed_element(data, off, elem_kind))
+      // §10.4.5.14 IsValidIntegerIndex against the CURRENT backing store — the
+      // SAME predicate the write half applies (typed_array_elements owns it),
+      // so a read and a write can never disagree about which indices exist.
+      case
+        typed_array_elements.valid_integer_index(
+          bit_array.byte_size(data),
+          size,
+          byte_offset,
+          length,
+          idx,
+        )
+      {
+        True ->
+          Some(decode_typed_element(data, byte_offset + idx * size, elem_kind))
         False -> None
       }
     }

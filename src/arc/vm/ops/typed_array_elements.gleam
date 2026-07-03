@@ -19,7 +19,8 @@
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/typed_array_ffi.{
-  ta_clamp_uint8, ta_set_float, ta_set_int, ta_zeroed,
+  F32, F64, I16, I32, I64, I8, U16, U32, U64, U8, ta_clamp_uint8, ta_set_float,
+  ta_set_int, ta_zeroed,
 }
 import arc/vm/key.{type PropertyKey, Index}
 import arc/vm/state.{type Heap, type State, State}
@@ -71,8 +72,8 @@ pub fn typed_array_store(
     buffer_is_immutable(state.heap, buffer),
     Ok(#(state, False)),
   )
-  case value.typed_array_is_bigint(elem_kind) {
-    True -> {
+  case elem_kind {
+    value.BigKind(big_kind) -> {
       // §7.1.13 ToBigInt via the canonical hook (coerce.to_bigint).
       let to_bigint = state.ctx.to_bigint_fn
       use #(n, state) <- result.try(to_bigint(state, val))
@@ -84,11 +85,11 @@ pub fn typed_array_store(
           byte_offset,
           length,
           idx,
-          fn(data, off) { ta_set_int(data, off, 64, n) },
+          fn(data, off) { ta_set_int(data, off, bigint_int_elem(big_kind), n) },
         ),
       )
     }
-    False -> {
+    value.NumKind(num_kind) -> {
       // §7.1.4 ToNumber via the canonical hook (coerce.js_to_number).
       let to_number = state.ctx.to_number_fn
       use #(num, state) <- result.try(to_number(state, val))
@@ -100,7 +101,7 @@ pub fn typed_array_store(
           byte_offset,
           length,
           idx,
-          fn(data, off) { encode_typed_number(data, off, elem_kind, num) },
+          fn(data, off) { encode_typed_number(data, off, num_kind, num) },
         ),
       )
     }
@@ -117,6 +118,74 @@ pub fn buffer_is_immutable(h: Heap(host), buffer: Ref) -> Bool {
   }
 }
 
+/// Read a snapshot of the backing store of a non-detached ArrayBuffer slot.
+/// None when the ref isn't an ArrayBuffer or the buffer is detached. For
+/// shared (atomics-backed) buffers this copies the live bytes out of the
+/// shared cells; for plain buffers it is the backing binary itself.
+pub fn buffer_bytes(h: Heap(host), buffer: Ref) -> Option(BitArray) {
+  case heap.read(h, buffer) {
+    Some(ObjectSlot(kind: value.ArrayBufferObject(data: Some(data), ..), ..)) ->
+      Some(value.buffer_bits(data))
+    _ -> None
+  }
+}
+
+/// §10.4.5.13 TypedArrayLength, resolved against a live byte size the caller
+/// ALREADY has in hand (the store path reads the buffer slot once and must
+/// not read it twice). `length: None` is [[ArrayLength]] = AUTO — a
+/// length-tracking view over a resizable buffer, whose element count follows
+/// the live byte length. Detached buffers and tracking views whose byte
+/// offset lies past the end of a shrunk buffer resolve to 0.
+pub fn resolved_view_length(
+  byte_size: Int,
+  elem_size: Int,
+  byte_offset: Int,
+  length: Option(Int),
+) -> Int {
+  case length {
+    Some(n) -> n
+    None -> int.max(0, { byte_size - byte_offset } / elem_size)
+  }
+}
+
+/// §10.4.5.13 TypedArrayLength against the buffer currently in the heap.
+pub fn view_length(
+  h: Heap(host),
+  buffer: Ref,
+  elem_kind: value.TypedArrayKind,
+  byte_offset: Int,
+  length: Option(Int),
+) -> Int {
+  let byte_size =
+    buffer_bytes(h, buffer)
+    |> option.map(bit_array.byte_size)
+    |> option.unwrap(0)
+  resolved_view_length(
+    byte_size,
+    value.typed_array_element_size(elem_kind),
+    byte_offset,
+    length,
+  )
+}
+
+/// §10.4.5.14 IsValidIntegerIndex, against a live byte size. `len` is the
+/// already-resolved TypedArrayLength (see `resolved_view_length`). An
+/// out-of-bounds view — a fixed view over a resizable buffer that shrank
+/// below it — has NO valid indices, even for elements whose bytes still
+/// exist, so the whole view is checked, not just this element. Both the read
+/// half (`ops/object`'s IntegerIndexedElementGet) and the write half
+/// (`do_typed_store` below) go through here: the two bounds checks cannot
+/// drift apart.
+pub fn valid_integer_index(
+  byte_size: Int,
+  elem_size: Int,
+  byte_offset: Int,
+  len: Int,
+  idx: Int,
+) -> Bool {
+  idx >= 0 && idx < len && byte_offset + len * elem_size <= byte_size
+}
+
 /// Shared store tail: bounds/detach check, then rebuild the buffer binary.
 fn do_typed_store(
   state: State(host),
@@ -128,13 +197,12 @@ fn do_typed_store(
   write: fn(BitArray, Int) -> BitArray,
 ) -> #(State(host), Bool) {
   case idx {
-    Some(i) if i >= 0 ->
+    Some(i) ->
       case heap.read(state.heap, buffer) {
         Some(
           ObjectSlot(
             kind: value.ArrayBufferObject(
-              data:,
-              detached: False,
+              data: Some(data),
               max_byte_length:,
               immutable:,
             ),
@@ -143,18 +211,14 @@ fn do_typed_store(
         ) -> {
           let size = value.typed_array_element_size(elem_kind)
           let byte_size = value.buffer_byte_size(data)
-          // §10.4.5.14 IsValidIntegerIndex against the LIVE buffer, resolved
-          // HERE (not at [[Set]] entry): the ToNumber/ToBigInt conversion
-          // above may have run user code that resized the buffer. A
-          // length-tracking view (None) follows the live byte length; a
-          // fixed view that no longer fits is wholly out of bounds and the
-          // write is a silent no-op, like a detached buffer.
-          let len = case length {
-            Some(n) -> n
-            None -> int.max(0, { byte_size - byte_offset } / size)
-          }
+          // §10.4.5.13/§10.4.5.14 against the LIVE buffer, resolved HERE (not
+          // at [[Set]] entry): the ToNumber/ToBigInt conversion above may have
+          // run user code that resized the buffer. Same two primitives the
+          // read half uses, so an out-of-bounds write can never be accepted by
+          // one and rejected by the other.
+          let len = resolved_view_length(byte_size, size, byte_offset, length)
           let off = byte_offset + i * size
-          case i < len && byte_offset + len * size <= byte_size {
+          case valid_integer_index(byte_size, size, byte_offset, len, i) {
             False -> #(state, True)
             True ->
               case immutable {
@@ -179,8 +243,7 @@ fn do_typed_store(
                       ObjectSlot(
                         ..slot,
                         kind: value.ArrayBufferObject(
-                          data: new_data,
-                          detached: False,
+                          data: Some(new_data),
                           max_byte_length:,
                           immutable: False,
                         ),
@@ -199,71 +262,90 @@ fn do_typed_store(
   }
 }
 
-/// §25.1.2.12 SetValueInBuffer for Number content types.
+/// The FFI element codec for a BigInt content type.
+fn bigint_int_elem(kind: value.BigIntKind) -> typed_array_ffi.IntElem {
+  case kind {
+    value.BigInt64Kind -> I64
+    value.BigUint64Kind -> U64
+  }
+}
+
+/// §25.1.2.12 SetValueInBuffer for Number content types. Total over
+/// `NumberKind`, so the BigInt kinds cannot even be passed here.
 fn encode_typed_number(
   data: BitArray,
   off: Int,
-  elem_kind: value.TypedArrayKind,
+  elem_kind: value.NumberKind,
   num: value.JsNum,
 ) -> BitArray {
   case elem_kind {
-    value.Uint8ClampedKind -> ta_set_int(data, off, 8, ta_clamp_uint8(num))
-    value.Float32Kind -> ta_set_float(data, off, 32, num)
-    value.Float64Kind -> ta_set_float(data, off, 64, num)
-    value.Int8Kind | value.Uint8Kind ->
-      ta_set_int(data, off, 8, jsnum_to_store_int(num))
-    value.Int16Kind | value.Uint16Kind ->
-      ta_set_int(data, off, 16, jsnum_to_store_int(num))
-    value.Int32Kind | value.Uint32Kind ->
-      ta_set_int(data, off, 32, jsnum_to_store_int(num))
-    // BigInt kinds never reach here (typed_array_store routes them through
-    // the ToBigInt hook), but keep the encode total just in case.
-    value.BigInt64Kind | value.BigUint64Kind ->
-      ta_set_int(data, off, 64, jsnum_to_store_int(num))
+    value.Uint8ClampedKind -> ta_set_int(data, off, U8, ta_clamp_uint8(num))
+    value.Float32Kind -> ta_set_float(data, off, F32, num)
+    value.Float64Kind -> ta_set_float(data, off, F64, num)
+    value.Int8Kind -> ta_set_int(data, off, I8, jsnum_to_store_int(num))
+    value.Uint8Kind -> ta_set_int(data, off, U8, jsnum_to_store_int(num))
+    value.Int16Kind -> ta_set_int(data, off, I16, jsnum_to_store_int(num))
+    value.Uint16Kind -> ta_set_int(data, off, U16, jsnum_to_store_int(num))
+    value.Int32Kind -> ta_set_int(data, off, I32, jsnum_to_store_int(num))
+    value.Uint32Kind -> ta_set_int(data, off, U32, jsnum_to_store_int(num))
   }
 }
 
 /// An element value ALREADY converted to a typed array's content-type domain
-/// (§10.4.5's "numValue"): the ToNumber result for the Number content types,
-/// the ToBigInt result for BigInt64/BigUint64. This is the ONLY value shape
-/// the encoders accept — an unconverted JsValue (a string, an object, …)
-/// cannot reach a buffer write.
+/// (§10.4.5's "numValue"), TOGETHER with the element kind it was converted
+/// for: the ToNumber result for a Number content type, the ToBigInt result
+/// for BigInt64/BigUint64. This is the ONLY value shape the encoders accept —
+/// an unconverted JsValue (a string, an object, …) cannot reach a buffer
+/// write, and neither can a BigInt paired with an Int8Array slot: the pairing
+/// is the constructor.
 pub type TypedElement {
-  NumberElement(value.JsNum)
-  BigIntElement(Int)
+  NumberElement(kind: value.NumberKind, num: value.JsNum)
+  BigIntElement(kind: value.BigIntKind, int: Int)
+}
+
+/// Byte width of the slot an element fits — read straight off the element's
+/// own kind, so the bounds guard below can never disagree with the encoder.
+fn element_size(el: TypedElement) -> Int {
+  case el {
+    NumberElement(kind:, ..) -> value.number_kind_size(kind)
+    BigIntElement(..) -> 8
+  }
 }
 
 /// Re-classify a value READ back out of a typed array (always a JsNumber for
 /// the Number content types, a JsBigInt for the BigInt ones) as a
-/// TypedElement for re-encoding. None for any other value — element reads
-/// never produce one, so callers treat it like a missing element.
-pub fn decoded_element(val: JsValue) -> Option(TypedElement) {
-  case val {
-    JsNumber(n) -> Some(NumberElement(n))
-    value.JsBigInt(value.BigInt(n)) -> Some(BigIntElement(n))
-    _ -> None
+/// TypedElement destined for a `kind` slot. None when the value's shape does
+/// not match `kind`'s content type — element reads never produce one, so
+/// callers treat it like a missing element.
+pub fn decoded_element(
+  kind: value.TypedArrayKind,
+  val: JsValue,
+) -> Option(TypedElement) {
+  case kind, val {
+    value.NumKind(k), JsNumber(n) -> Some(NumberElement(k, n))
+    value.BigKind(k), value.JsBigInt(value.BigInt(n)) ->
+      Some(BigIntElement(k, n))
+    _, _ -> None
   }
 }
 
 /// Encode an ALREADY-CONVERTED element into the backing store at byte offset
 /// `off`. No coercion, no user code — used by TypedArray bulk operations
-/// (fill/slice/constructor copies).
+/// (fill/slice/constructor copies). The element carries its own kind, so the
+/// bounds guard and the encoder can never disagree about the slot width.
 pub fn typed_array_encode_value(
   data: BitArray,
   off: Int,
-  elem_kind: value.TypedArrayKind,
   el: TypedElement,
 ) -> BitArray {
   // Guard against writes past the CURRENT backing store (a resizable
   // ArrayBuffer may have shrunk below the view) — out-of-bounds typed-array
   // writes are silent no-ops, never crashes.
-  use <- bool.guard(
-    off + value.typed_array_element_size(elem_kind) > bit_array.byte_size(data),
-    data,
-  )
+  use <- bool.guard(off + element_size(el) > bit_array.byte_size(data), data)
   case el {
-    NumberElement(n) -> encode_typed_number(data, off, elem_kind, n)
-    BigIntElement(n) -> ta_set_int(data, off, 64, n)
+    NumberElement(kind:, num:) -> encode_typed_number(data, off, kind, num)
+    BigIntElement(kind:, int:) ->
+      ta_set_int(data, off, bigint_int_elem(kind), int)
   }
 }
 
@@ -278,35 +360,27 @@ pub fn typed_array_encode_primitives(
   values: List(JsValue),
 ) -> Option(BitArray) {
   let size = value.typed_array_element_size(elem_kind)
-  encode_primitives_loop(
-    elem_kind,
-    size,
-    value.typed_array_is_bigint(elem_kind),
-    values,
-    [],
-  )
+  encode_primitives_loop(elem_kind, size, values, [])
 }
 
 fn encode_primitives_loop(
   elem_kind: value.TypedArrayKind,
   size: Int,
-  bigint: Bool,
   values: List(JsValue),
   acc: List(BitArray),
 ) -> Option(BitArray) {
   case values {
     [] -> Some(bit_array.concat(list.reverse(acc)))
     [v, ..rest] -> {
-      let seg = case bigint, v {
-        True, value.JsBigInt(value.BigInt(n)) ->
-          Some(ta_set_int(ta_zeroed(size), 0, 64, n))
+      let seg = case elem_kind, v {
+        value.BigKind(k), value.JsBigInt(value.BigInt(n)) ->
+          Some(ta_set_int(ta_zeroed(size), 0, bigint_int_elem(k), n))
         // Anything else → ToBigInt may throw (or run user code on objects).
-        True, _ -> None
-        False, JsObject(_) -> None
-        False, _ ->
+        value.BigKind(_), _ -> None
+        value.NumKind(_), JsObject(_) -> None
+        value.NumKind(k), _ ->
           case value.to_number(v) {
-            Ok(num) ->
-              Some(encode_typed_number(ta_zeroed(size), 0, elem_kind, num))
+            Ok(num) -> Some(encode_typed_number(ta_zeroed(size), 0, k, num))
             // Symbol/BigInt → TypeError; decline so the per-element path
             // raises it at the right index (with the right error class).
             Error(value.BigIntNotConvertible)
@@ -314,8 +388,7 @@ fn encode_primitives_loop(
           }
       }
       case seg {
-        Some(s) ->
-          encode_primitives_loop(elem_kind, size, bigint, rest, [s, ..acc])
+        Some(s) -> encode_primitives_loop(elem_kind, size, rest, [s, ..acc])
         None -> None
       }
     }

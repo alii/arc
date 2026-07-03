@@ -64,7 +64,14 @@ pub fn has(elements: JsElements, index: Int) -> Bool {
 }
 
 /// Set element at index. May promote NoElements→Dense or Dense→Sparse.
+///
+/// A negative index is a caller bug, and one that used to fail differently
+/// per representation: DenseElements crashed with a `function_clause` deep in
+/// the :array FFI, while SparseElements happily inserted a `-1` key that no
+/// reader (indices/get/has all assume >= 0) would ever find. Enforce it once,
+/// here — the same crash-on-caller-bug convention the rest of the VM uses.
 pub fn set(elements: JsElements, index: Int, val: JsValue) -> JsElements {
+  let assert True = index >= 0 as "elements.set: negative index"
   case elements {
     NoElements ->
       // Promote to dense and re-dispatch so large-gap check applies.
@@ -192,59 +199,23 @@ fn put_option(
   }
 }
 
-/// Move elements in [from, len) down by `delta` positions (toward index 0),
-/// preserving holes (a hole source deletes the target slot). Iterates
-/// ascending so the overlapping in-place move is safe (delta > 0). The
-/// vacated trailing slots [len - delta, len) are left untouched — callers
-/// truncate to the new length afterwards. Pure JsElements transformation:
-/// used by the Array.prototype shift/splice fast path so the whole move is
-/// one heap read + one heap write instead of 3-4 heap ops per element.
-pub fn move_down(
+/// Move elements in [from, len) by a SIGNED `delta`: negative shifts them
+/// toward index 0, positive away from it. Holes are preserved (a hole source
+/// deletes the target slot). This is `copy_within` with a computed
+/// destination, so the overlapping in-place move picks its own iteration
+/// direction from the sign of `delta` — a caller cannot pair a "move up" with
+/// a negative shift and silently walk the wrong way. The vacated slots are
+/// left untouched; callers truncate to the new length afterwards. Pure
+/// JsElements transformation: used by the Array.prototype
+/// shift/unshift/splice fast paths so the whole move is one heap read + one
+/// heap write instead of 3-4 heap ops per element.
+pub fn move_range(
   elements: JsElements,
   from: Int,
   len: Int,
   delta: Int,
 ) -> JsElements {
-  case from >= len {
-    True -> elements
-    False ->
-      move_down(
-        put_option(elements, from - delta, get_option(elements, from)),
-        from + 1,
-        len,
-        delta,
-      )
-  }
-}
-
-/// Move elements in [from, len) up by `delta` positions (away from index 0),
-/// preserving holes. Iterates descending so the overlapping in-place move is
-/// safe (delta > 0). Used by the unshift/splice-insert fast path.
-pub fn move_up(
-  elements: JsElements,
-  from: Int,
-  len: Int,
-  delta: Int,
-) -> JsElements {
-  move_up_loop(elements, len - 1, from, delta)
-}
-
-fn move_up_loop(
-  elements: JsElements,
-  idx: Int,
-  from: Int,
-  delta: Int,
-) -> JsElements {
-  case idx < from {
-    True -> elements
-    False ->
-      move_up_loop(
-        put_option(elements, idx + delta, get_option(elements, idx)),
-        idx - 1,
-        from,
-        delta,
-      )
-  }
+  copy_within(elements, from, from + delta, len - from)
 }
 
 /// Reverse elements [0, len) in place, holes included.
