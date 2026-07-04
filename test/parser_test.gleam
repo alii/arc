@@ -806,3 +806,53 @@ pub fn arrow_preserves_enclosing_cover_grammar_errors_test() {
   ]
   |> report("cover-grammar boundary cases failed")
 }
+
+/// The grammar's [In] parameter — off inside a `for` head so `in` reads as the
+/// for-in keyword — is a nesting-sensitive Ctx flag: a function boundary is
+/// always [+In] and must not inherit the head's restriction, and the head must
+/// get its restriction back once the nested function is done.
+pub fn for_head_no_in_stops_at_function_boundary_test() {
+  [
+    // A function/method/arrow BODY nested in the head is [+In].
+    expect_parses(
+      "for (let x = function(){ return 'a' in {} };;) break;",
+      parser.Script,
+    ),
+    expect_parses(
+      "for (let x = { get f() { return 'a' in {} } };;) break;",
+      parser.Script,
+    ),
+    expect_parses(
+      "for (let x = class { m(){ return 'a' in {} } };;) break;",
+      parser.Script,
+    ),
+    expect_parses("for (let x = () => { 'a' in {} };;) break;", parser.Script),
+    // FormalParameters take no [In] parameter — defaults are always [+In].
+    expect_parses("for (let f = (a = 'a' in {}) => a;;) break;", parser.Script),
+    expect_parses(
+      "for (let f = function(a = 'a' in {}){};;) break;",
+      parser.Script,
+    ),
+    // §15.3 ArrowFunction[?In]: a CONCISE body inherits the head's [~In].
+    expect_parse_error("for (let f = a => 'a' in {};;) break;", parser.Script),
+    expect_parse_error("for (let f = () => 'a' in {};;) break;", parser.Script),
+    // ...and outside a for head, the same concise body is fine.
+    expect_parses("let f = a => 'a' in {};", parser.Script),
+    // Bracketed sub-expressions in the head are [+In]...
+    expect_parses("for (var x = ('a' in {});;) break;", parser.Script),
+    expect_parses("for (var x = ['a' in {}];;) break;", parser.Script),
+    expect_parses("for (var x = f('a' in {});;) break;", parser.Script),
+    expect_parses("for (var x = {}['a' in {}];;) break;", parser.Script),
+    expect_parses("for (var x = `${'a' in {}}`;;) break;", parser.Script),
+    expect_parses("for (var x = import('a' in {});;) break;", parser.Script),
+    // ...but the restriction comes back for the rest of the head: this `in`
+    // still reads as the for-in keyword (so: for-in with an initializer),
+    // rather than as a relational operator that would make `;;` legal.
+    expect_parse_error("for (var x = ('a') in {};;) break;", parser.Script),
+    expect_parse_error(
+      "for (var x = function(){ 'a' in {} } in {};;) break;",
+      parser.Script,
+    ),
+  ]
+  |> report("for-head [In] boundary cases failed")
+}
