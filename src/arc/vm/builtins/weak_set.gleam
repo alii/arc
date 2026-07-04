@@ -5,23 +5,37 @@
 /// JsValues — `JsObject(ref)` compares by object identity, `JsSymbol(id)`
 /// by symbol identity — exactly like WeakMap keys.
 /// Not truly weak (GC doesn't collect entries) but API-compatible.
+///
+/// Everything WeakSet shares with WeakMap — RequireInternalSlot, the
+/// read/mutate discipline, `has`, `delete`, the constructor — lives in
+/// `weak_collection`, parameterized by the `kind()` value below. This module
+/// keeps only the WeakSet-specific surface: `add`.
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/builtins/helpers.{
-  can_be_held_weakly, first_arg_or_undefined, is_callable,
-}
+import arc/vm/builtins/helpers.{can_be_held_weakly, first_arg_or_undefined}
 import arc/vm/builtins/iterator
-import arc/vm/heap
-import arc/vm/key.{Named}
-import arc/vm/ops/object
-import arc/vm/state.{type Heap, type State, State}
+import arc/vm/builtins/weak_collection.{type WeakKind, WeakKind}
+import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
-  type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsBool, JsNull,
-  JsObject, JsUndefined, ObjectSlot, WeakSetConstructor, WeakSetNative,
-  WeakSetObject, WeakSetPrototypeAdd, WeakSetPrototypeDelete,
+  type JsValue, type Ref, type WeakSetNativeFn, Dispatch, WeakSetConstructor,
+  WeakSetNative, WeakSetObject, WeakSetPrototypeAdd, WeakSetPrototypeDelete,
   WeakSetPrototypeHas,
 }
-import gleam/dict.{type Dict}
+import gleam/dict
 import gleam/option.{None, Some}
+
+/// The three things that make a WeakSet a WeakSet rather than a WeakMap.
+fn kind() -> WeakKind(host, Nil) {
+  WeakKind(
+    unwrap: fn(slot_kind) {
+      case slot_kind {
+        WeakSetObject(data:) -> Some(data)
+        _ -> None
+      }
+    },
+    wrap: WeakSetObject,
+    type_name: "WeakSet",
+  )
+}
 
 /// Set up WeakSet.prototype and WeakSet constructor.
 pub fn init(
@@ -61,80 +75,26 @@ pub fn dispatch(
   case native {
     WeakSetConstructor(proto:) -> construct(proto, args, state)
     WeakSetPrototypeAdd -> weak_set_add(this, args, state)
-    WeakSetPrototypeHas -> weak_set_has(this, args, state)
-    WeakSetPrototypeDelete -> weak_set_delete(this, args, state)
+    WeakSetPrototypeHas -> weak_collection.has(kind(), this, args, state)
+    WeakSetPrototypeDelete -> weak_collection.delete(kind(), this, args, state)
   }
 }
 
-/// ES2024 §24.4.1.1 WeakSet ( [ iterable ] )
-///
-///   1. If NewTarget is undefined, throw a TypeError exception.
-///   2. Let set be ? OrdinaryCreateFromConstructor(NewTarget,
-///      "%WeakSet.prototype%", « [[WeakSetData]] »).
-///   3. Set set.[[WeakSetData]] to a new empty List.
-///   4. If iterable is undefined or null, return set.
-///   5-6. adder = ? Get(set, "add"); must be callable.
-///   7. Iterate the iterable, calling adder(set, v) for each value.
+/// ES2024 §24.4.1.1 WeakSet ( [ iterable ] ) — the shared skeleton, with
+/// "add" as the adder and value-iteration as the iteration step.
 fn construct(
   proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Steps 1-2: reject a plain call and resolve new.target.prototype.
-  use proto, state <- helpers.require_new_target(state, "WeakSet", proto)
-  let #(heap, set_ref) =
-    common.alloc_wrapper(state.heap, WeakSetObject(data: dict.new()), proto)
-  let state = State(..state, heap:)
-  let set = JsObject(set_ref)
-  case first_arg_or_undefined(args) {
-    // Step 4: If iterable is undefined or null, return set.
-    JsUndefined | JsNull -> #(state, Ok(set))
-    iterable -> {
-      // Steps 5-6: adder = ? Get(set, "add"); must be callable.
-      use adder, state <- state.try_op(object.get_value_of(
-        state,
-        set,
-        Named("add"),
-      ))
-      case is_callable(state.heap, adder) {
-        False ->
-          state.type_error(state, "'add' property of WeakSet is not a function")
-        // Step 7: iterate the iterable's values, calling adder(set, v) for
-        // each one and closing the iterator on any abrupt completion.
-        True -> iterator.add_values_from_iterable(state, set, iterable, adder)
-      }
-    }
-  }
-}
-
-/// RequireInternalSlot(this, [[WeakSetData]]) — proves `this` is a WeakSet and
-/// hands over its membership dict, or throws a TypeError naming `method`.
-/// CPS-style — `use data, ref, state <- require_weak_set(this, state, "add")`.
-fn require_weak_set(
-  this: JsValue,
-  state: State(host),
-  method: String,
-  cont: fn(Dict(JsValue, Nil), Ref, State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let found = case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: WeakSetObject(data:), ..)) -> Some(#(data, ref))
-        _ -> None
-      }
-    _ -> None
-  }
-  case found {
-    Some(#(data, ref)) -> cont(data, ref, state)
-    None ->
-      state.type_error(
-        state,
-        "Method WeakSet.prototype."
-          <> method
-          <> " called on incompatible receiver",
-      )
-  }
+  weak_collection.construct(
+    kind(),
+    proto,
+    args,
+    state,
+    "add",
+    iterator.add_values_from_iterable,
+  )
 }
 
 /// ES2024 §24.4.3.1 WeakSet.prototype.add ( value )
@@ -145,64 +105,14 @@ fn weak_set_add(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _data, ref, state <- require_weak_set(this, state, "add")
+  use ref, state <- weak_collection.require(kind(), this, state, "add")
   let val = first_arg_or_undefined(args)
   case can_be_held_weakly(state, val) {
     True -> {
-      let state = mutate(state, ref, dict.insert(_, val, Nil))
+      let state =
+        weak_collection.mutate(kind(), state, ref, dict.insert(_, val, Nil))
       #(state, Ok(this))
     }
     False -> state.type_error(state, "Invalid value used in weak set")
   }
-}
-
-/// ES2024 §24.4.3.3 WeakSet.prototype.has ( value )
-/// Non-weakly-holdable values are never present, so this is a plain lookup.
-fn weak_set_has(
-  this: JsValue,
-  args: List(JsValue),
-  state: State(host),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, _ref, state <- require_weak_set(this, state, "has")
-  let val = first_arg_or_undefined(args)
-  #(state, Ok(JsBool(dict.has_key(data, val))))
-}
-
-/// ES2024 §24.4.3.2 WeakSet.prototype.delete ( value )
-fn weak_set_delete(
-  this: JsValue,
-  args: List(JsValue),
-  state: State(host),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use data, ref, state <- require_weak_set(this, state, "delete")
-  let val = first_arg_or_undefined(args)
-  case dict.has_key(data, val) {
-    True -> {
-      let state = mutate(state, ref, dict.delete(_, val))
-      #(state, Ok(JsBool(True)))
-    }
-    False -> #(state, Ok(JsBool(False)))
-  }
-}
-
-/// Read-modify-write the WeakSet's membership dict inside a single heap access.
-/// `ref` must have been proved a WeakSet by `require_weak_set`.
-///
-/// Takes a *function* rather than a finished dict on purpose: a caller cannot
-/// hand back a dict it captured before running user code, so a stale write can
-/// never silently revert a re-entrant mutation.
-fn mutate(
-  state: State(host),
-  ref: Ref,
-  update: fn(Dict(JsValue, Nil)) -> Dict(JsValue, Nil),
-) -> State(host) {
-  // A heap slot's kind never changes after allocation, so `require_weak_set`
-  // having passed makes anything else a wiring bug — crash rather than
-  // silently dropping the mutation.
-  let assert Some(ObjectSlot(kind: WeakSetObject(data:), ..)) =
-    heap.read(state.heap, ref)
-    as "weak_set: ref is not a WeakSet slot"
-  let heap =
-    heap.update_kind(state.heap, ref, WeakSetObject(data: update(data)))
-  State(..state, heap:)
 }
