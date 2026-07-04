@@ -4597,18 +4597,27 @@ fn static_dispatch(
       #(state, Ok(v))
     }
     TemporalDurationKind, "from" -> {
-      use d, state <- state.try_op(to_temporal_duration(state, helpers.arg_at(args, 0)))
+      use d, state <- state.try_op(to_temporal_duration(
+        state,
+        helpers.arg_at(args, 0),
+      ))
       let #(state, v) = make_duration(state, protos, d)
       #(state, Ok(v))
     }
     TemporalDurationKind, "compare" -> duration_compare(args, state)
     TemporalInstantKind, "from" -> {
-      use ns, state <- state.try_op(to_temporal_instant(state, helpers.arg_at(args, 0)))
+      use ns, state <- state.try_op(to_temporal_instant(
+        state,
+        helpers.arg_at(args, 0),
+      ))
       let #(state, v) = make_instant(state, protos, ns)
       #(state, Ok(v))
     }
     TemporalInstantKind, "fromEpochMilliseconds" -> {
-      use n, state <- state.try_op(coerce.js_to_number(state, helpers.arg_at(args, 0)))
+      use n, state <- state.try_op(coerce.js_to_number(
+        state,
+        helpers.arg_at(args, 0),
+      ))
       case n {
         Finite(f) -> {
           // -0 IS an integral Number, so this needs the ±0-safe predicate.
@@ -4631,7 +4640,10 @@ fn static_dispatch(
       }
     }
     TemporalInstantKind, "fromEpochNanoseconds" -> {
-      use ns, state <- state.try_op(coerce.to_bigint(state, helpers.arg_at(args, 0)))
+      use ns, state <- state.try_op(coerce.to_bigint(
+        state,
+        helpers.arg_at(args, 0),
+      ))
       case int.absolute_value(ns) <= ns_max_instant {
         False -> state.range_error(state, "epoch nanoseconds out of range")
         True -> {
@@ -4641,8 +4653,14 @@ fn static_dispatch(
       }
     }
     TemporalInstantKind, "compare" -> {
-      use a, state <- state.try_op(to_temporal_instant(state, helpers.arg_at(args, 0)))
-      use b, state <- state.try_op(to_temporal_instant(state, helpers.arg_at(args, 1)))
+      use a, state <- state.try_op(to_temporal_instant(
+        state,
+        helpers.arg_at(args, 0),
+      ))
+      use b, state <- state.try_op(to_temporal_instant(
+        state,
+        helpers.arg_at(args, 1),
+      ))
       #(state, Ok(value.from_int(int_sign(a - b))))
     }
     TemporalZonedDateTimeKind, "from" -> {
@@ -5832,9 +5850,18 @@ fn duration_compare(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use a, state <- state.try_op(to_temporal_duration(state, helpers.arg_at(args, 0)))
-  use b, state <- state.try_op(to_temporal_duration(state, helpers.arg_at(args, 1)))
-  use opts, state <- state.try_op(get_options_object(state, helpers.arg_at(args, 2)))
+  use a, state <- state.try_op(to_temporal_duration(
+    state,
+    helpers.arg_at(args, 0),
+  ))
+  use b, state <- state.try_op(to_temporal_duration(
+    state,
+    helpers.arg_at(args, 1),
+  ))
+  use opts, state <- state.try_op(get_options_object(
+    state,
+    helpers.arg_at(args, 2),
+  ))
   use relative_to, state <- state.try_op(case opts {
     None -> Ok(#(JsUndefined, state))
     Some(oref) ->
@@ -7024,19 +7051,56 @@ fn unit_rank(u: Unit) -> Int {
   }
 }
 
-/// Length of a fixed-length unit in nanoseconds. Year/Month/Week have no
-/// fixed length; every caller guards on unit_rank before reaching here, and
-/// 1 keeps `n * unit_ns(u)` an identity if one ever did.
-fn unit_ns(u: Unit) -> Int {
+/// The units that have a fixed nanosecond length: day and below. Year, month
+/// and week are deliberately absent — a calendar unit's length depends on the
+/// date it is measured from, so it cannot be turned into a nanosecond count.
+/// Anything measured in nanoseconds takes a `TimeUnit`, never a `Unit`.
+pub type TimeUnit {
+  UDay
+  UHour
+  UMinute
+  USecond
+  UMillisecond
+  UMicrosecond
+  UNanosecond
+}
+
+/// The fixed-length view of a unit, or None for a calendar unit.
+fn as_time_unit(u: Unit) -> Option(TimeUnit) {
   case u {
-    Year | Month | Week -> 1
-    Day -> ns_per_day
-    Hour -> ns_per_hour
-    Minute -> ns_per_minute
-    Second -> ns_per_second
-    Millisecond -> ns_per_ms
-    Microsecond -> ns_per_us
-    Nanosecond -> 1
+    Year | Month | Week -> None
+    Day -> Some(UDay)
+    Hour -> Some(UHour)
+    Minute -> Some(UMinute)
+    Second -> Some(USecond)
+    Millisecond -> Some(UMillisecond)
+    Microsecond -> Some(UMicrosecond)
+    Nanosecond -> Some(UNanosecond)
+  }
+}
+
+/// `as_time_unit` where the surrounding spec step has already rejected
+/// calendar units; the RangeError restates that guard for the type checker.
+fn require_time_unit(u: Unit) -> Result(TimeUnit, TErr) {
+  case as_time_unit(u) {
+    Some(t) -> Ok(t)
+    None ->
+      Error(RangeE(
+        unit_to_string(u) <> " has no fixed length; expected a time unit",
+      ))
+  }
+}
+
+/// Length of a fixed-length unit in nanoseconds. Total by construction.
+fn time_unit_ns(u: TimeUnit) -> Int {
+  case u {
+    UDay -> ns_per_day
+    UHour -> ns_per_hour
+    UMinute -> ns_per_minute
+    USecond -> ns_per_second
+    UMillisecond -> ns_per_ms
+    UMicrosecond -> ns_per_us
+    UNanosecond -> 1
   }
 }
 
@@ -7217,7 +7281,10 @@ fn get_difference_settings(
   cont: fn(Option(Unit), Option(Unit), Int, RoundingMode, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use opts, state <- state.try_op(get_options_object(state, helpers.arg_at(args, 1)))
+  use opts, state <- state.try_op(get_options_object(
+    state,
+    helpers.arg_at(args, 1),
+  ))
   use largest, state <- state.try_op(get_unit_option(
     state,
     opts,
@@ -7756,7 +7823,7 @@ fn plain_time_method(
             None -> t
             Some(u) -> {
               let rounded =
-                round_to_increment(time_to_ns(t), sinc * unit_ns(u), mode)
+                round_to_increment(time_to_ns(t), sinc * time_unit_ns(u), mode)
               ns_to_time(math_mod(rounded, ns_per_day))
             }
           }
@@ -7815,7 +7882,7 @@ fn plain_time_method(
             helpers.arg_at(args, 0),
             allow_day: False,
           ))
-          let u_ns = unit_ns(su)
+          let u_ns = time_unit_ns(su)
           let max = ns_per_day / u_ns
           case valid_time_increment(inc, max) {
             False -> state.range_error(state, "invalid roundingIncrement")
@@ -7847,7 +7914,7 @@ fn to_string_time_options(
   state: State(host),
   opts: Option(Ref),
 ) -> Result(
-  #(#(Precision, Option(Unit), Int, RoundingMode), State(host)),
+  #(#(Precision, Option(TimeUnit), Int, RoundingMode), State(host)),
   #(JsValue, State(host)),
 ) {
   use #(digits, state) <- result.try(get_fractional_digits(state, opts))
@@ -7878,21 +7945,21 @@ fn seconds_string_precision(
   digits: FractionalDigits,
   su: Option(Unit),
   mode: RoundingMode,
-) -> Result(#(Precision, Option(Unit), Int, RoundingMode), TErr) {
+) -> Result(#(Precision, Option(TimeUnit), Int, RoundingMode), TErr) {
   case su {
     Some(Year) | Some(Month) | Some(Week) | Some(Day) | Some(Hour) ->
       Error(RangeE("smallestUnit must be a time unit"))
-    Some(Minute) -> Ok(#(MinutePrec, Some(Minute), 1, mode))
-    Some(Second) -> Ok(#(FixedPrec(0), Some(Second), 1, mode))
-    Some(Millisecond) -> Ok(#(FixedPrec(3), Some(Millisecond), 1, mode))
-    Some(Microsecond) -> Ok(#(FixedPrec(6), Some(Microsecond), 1, mode))
-    Some(Nanosecond) -> Ok(#(FixedPrec(9), Some(Nanosecond), 1, mode))
+    Some(Minute) -> Ok(#(MinutePrec, Some(UMinute), 1, mode))
+    Some(Second) -> Ok(#(FixedPrec(0), Some(USecond), 1, mode))
+    Some(Millisecond) -> Ok(#(FixedPrec(3), Some(UMillisecond), 1, mode))
+    Some(Microsecond) -> Ok(#(FixedPrec(6), Some(UMicrosecond), 1, mode))
+    Some(Nanosecond) -> Ok(#(FixedPrec(9), Some(UNanosecond), 1, mode))
     None ->
       case digits {
         DigitsAuto -> Ok(#(AutoPrec, None, 1, mode))
-        DigitsFixed(0) -> Ok(#(FixedPrec(0), Some(Second), 1, mode))
+        DigitsFixed(0) -> Ok(#(FixedPrec(0), Some(USecond), 1, mode))
         DigitsFixed(n) ->
-          Ok(#(FixedPrec(n), Some(Nanosecond), pow10(9 - n), mode))
+          Ok(#(FixedPrec(n), Some(UNanosecond), pow10(9 - n), mode))
       }
   }
 }
@@ -7942,16 +8009,15 @@ fn round_options(
   state: State(host),
   arg: JsValue,
   allow_day allow_day: Bool,
-) -> Result(#(#(Unit, Int, RoundingMode), State(host)), #(JsValue, State(host))) {
+) -> Result(
+  #(#(TimeUnit, Int, RoundingMode), State(host)),
+  #(JsValue, State(host)),
+) {
   case arg {
     JsUndefined -> type_error_result(state, "options parameter is required")
     JsString(s) ->
-      case singular_unit(s) {
-        Some(u) ->
-          case unit_ok_for_round(u, allow_day) {
-            True -> Ok(#(#(u, 1, HalfExpand), state))
-            False -> range_error_result(state, "invalid smallestUnit")
-          }
+      case singular_unit(s) |> option.then(round_unit(_, allow_day)) {
+        Some(u) -> Ok(#(#(u, 1, HalfExpand), state))
         None -> range_error_result(state, "invalid smallestUnit")
       }
     JsObject(ref) -> {
@@ -7973,9 +8039,9 @@ fn round_options(
       case su {
         None -> range_error_result(state, "smallestUnit is required")
         Some(u) ->
-          case unit_ok_for_round(u, allow_day) {
-            True -> Ok(#(#(u, inc, mode), state))
-            False -> range_error_result(state, "invalid smallestUnit")
+          case round_unit(u, allow_day) {
+            Some(tu) -> Ok(#(#(tu, inc, mode), state))
+            None -> range_error_result(state, "invalid smallestUnit")
           }
       }
     }
@@ -7983,11 +8049,12 @@ fn round_options(
   }
 }
 
-fn unit_ok_for_round(u: Unit, allow_day: Bool) -> Bool {
-  case u {
-    Day -> allow_day
-    Hour | Minute | Second | Millisecond | Microsecond | Nanosecond -> True
-    Year | Month | Week -> False
+/// A round() smallestUnit: a fixed-length unit, with `day` accepted only where
+/// the receiver has days (so a calendar unit can never reach the rounding).
+fn round_unit(u: Unit, allow_day: Bool) -> Option(TimeUnit) {
+  case as_time_unit(u) {
+    Some(UDay) if !allow_day -> None
+    other -> other
   }
 }
 
@@ -8057,9 +8124,10 @@ fn time_until_since(
             "largestUnit must not be smaller than smallestUnit",
           )
         False -> {
+          use su <- terr(state, require_time_unit(smallest))
           let mode2 = apply_since_mode(mode, is_since)
           let diff = time_to_ns(t2) - time_to_ns(t1)
-          let rounded = round_to_increment(diff, inc * unit_ns(smallest), mode2)
+          let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
           let rounded = apply_since_ns(rounded, is_since)
           let dur = balance_time_ns(rounded, largest)
           let #(state, v) = make_duration(state, protos, dur)
@@ -8156,7 +8224,8 @@ fn plain_date_time_method(
             None -> #(d, t)
             Some(u) -> {
               let total = epoch_days(d) * ns_per_day + time_to_ns(t)
-              let rounded = round_to_increment(total, sinc * unit_ns(u), mode)
+              let rounded =
+                round_to_increment(total, sinc * time_unit_ns(u), mode)
               epoch_ns_to_iso(rounded, 0)
             }
           }
@@ -8273,9 +8342,9 @@ fn plain_date_time_method(
             helpers.arg_at(args, 0),
             allow_day: True,
           ))
-          let u_ns = unit_ns(su)
+          let u_ns = time_unit_ns(su)
           let max = case su {
-            Day -> 1
+            UDay -> 1
             _ -> ns_per_day / u_ns
           }
           case valid_time_increment(inc, max) {
@@ -8446,11 +8515,12 @@ fn diff_date_time_core(
           )
         False -> {
           // Time-unit smallestUnit: round days+time in ns (NudgeToDayOrTime).
+          use su <- result.try(require_time_unit(smallest))
           let time_total = days * ns_per_day + time_diff
           let rounded = case smallest == Nanosecond && inc == 1 {
             True -> time_total
             False ->
-              round_to_increment(time_total, inc * unit_ns(smallest), mode2)
+              round_to_increment(time_total, inc * time_unit_ns(su), mode2)
           }
           let whole_days = truncate_div(time_total, ns_per_day)
           let rounded_whole = truncate_div(rounded, ns_per_day)
@@ -8477,11 +8547,12 @@ fn diff_date_time_core(
     }
     False -> {
       // Pure time-based difference.
+      use su <- result.try(require_time_unit(smallest))
       let total =
         { epoch_days(b.0) - epoch_days(a.0) }
         * ns_per_day
         + { time_to_ns(b.1) - time_to_ns(a.1) }
-      let rounded = round_to_increment(total, inc * unit_ns(smallest), mode2)
+      let rounded = round_to_increment(total, inc * time_unit_ns(su), mode2)
       Ok(balance_time_ns(rounded, largest))
     }
   }
@@ -9188,7 +9259,7 @@ fn duration_method(
             state,
             duration_string_precision(digits, su),
           )
-          use d2 <- terr(state, case runit == Nanosecond && rinc == 1 {
+          use d2 <- terr(state, case runit == UNanosecond && rinc == 1 {
             True -> Ok(d)
             False -> round_duration_for_string(d, rinc, runit, mode)
           })
@@ -9520,9 +9591,10 @@ fn duration_round_with(
                 "relativeTo is required for calendar-unit rounding",
               )
             False -> {
+              use su <- terr(state, require_time_unit(smallest))
               let total = time_duration_ns(d)
               let rounded =
-                round_to_increment(total, inc * unit_ns(smallest), mode)
+                round_to_increment(total, inc * time_unit_ns(su), mode)
               let result = balance_time_ns(rounded, largest)
               case is_valid_duration(result) {
                 False -> state.range_error(state, "invalid duration")
@@ -9540,9 +9612,10 @@ fn duration_round_with(
           use target_ns <- terr(state, add_zoned_ns(rel_ns, tz, cal, d))
           case unit_rank(largest) <= unit_rank(Hour) {
             True -> {
+              use su <- terr(state, require_time_unit(smallest))
               let diff = target_ns - rel_ns
               let rounded =
-                round_to_increment(diff, inc * unit_ns(smallest), mode)
+                round_to_increment(diff, inc * time_unit_ns(su), mode)
               let result = balance_time_ns(rounded, largest)
               case is_valid_duration(result) {
                 False -> state.range_error(state, "invalid duration")
@@ -9740,17 +9813,19 @@ fn zoned_nudge_time(
 ) -> Result(DurRec, TErr) {
   let #(a_d, a_t) = a_dt
   let #(years, months, weeks, days) = ymwd
+  use su <- result.try(require_time_unit(smallest))
   let end_date = iso_date_from_epoch_days(epoch_days(start_date) + sign)
   use end_ns <- result.try(get_epoch_ns_for(tz, end_date, a_t, Compatible))
   let day_span = end_ns - start_ns
-  let rounded_t = round_to_increment(time_rem, inc * unit_ns(smallest), mode)
+  let smallest_ns = inc * time_unit_ns(su)
+  let rounded_t = round_to_increment(time_rem, smallest_ns, mode)
   let beyond = rounded_t - day_span
   case int_sign(beyond) != 0 - sign {
     // Rounded time fills (or exceeds) the whole day: carry one day and
     // round the remainder beyond it, then bubble into larger units.
     True -> {
       let rounded_t2 =
-        round_to_increment(time_rem - day_span, inc * unit_ns(smallest), mode)
+        round_to_increment(time_rem - day_span, smallest_ns, mode)
       let time_part = balance_time_ns(rounded_t2, Hour)
       let base = DurRec(..time_part, years:, months:, weeks:, days: days + sign)
       let nudged_inst = end_ns + rounded_t2
@@ -9851,8 +9926,9 @@ fn duration_total_with(
             "relativeTo is required to total calendar units",
           )
         False -> {
+          use tu <- terr(state, require_time_unit(unit))
           let total = time_duration_ns(d)
-          #(state, Ok(JsNumber(Finite(ns_div_float(total, unit_ns(unit))))))
+          #(state, Ok(JsNumber(Finite(ns_div_float(total, time_unit_ns(tu))))))
         }
       }
     }
@@ -9860,8 +9936,9 @@ fn duration_total_with(
       use target_ns <- terr(state, add_zoned_ns(anchor_ns, tz, cal, d))
       case unit_rank(unit) <= unit_rank(Hour) {
         True -> {
+          use tu <- terr(state, require_time_unit(unit))
           let diff = target_ns - anchor_ns
-          #(state, Ok(JsNumber(Finite(ns_div_float(diff, unit_ns(unit))))))
+          #(state, Ok(JsNumber(Finite(ns_div_float(diff, time_unit_ns(tu))))))
         }
         False -> {
           // Whole calendar units in wall-clock space + fractional progress
@@ -9944,8 +10021,9 @@ fn duration_total_with(
       let target_ns = epoch_days(target.0) * ns_per_day + time_to_ns(target.1)
       case unit_rank(unit) <= unit_rank(Day) {
         True -> {
+          use tu <- terr(state, require_time_unit(unit))
           let diff = target_ns - rel_ns
-          #(state, Ok(JsNumber(Finite(ns_div_float(diff, unit_ns(unit))))))
+          #(state, Ok(JsNumber(Finite(ns_div_float(diff, time_unit_ns(tu))))))
         }
         False -> {
           // Whole calendar units + fractional progress between bounds
@@ -10075,12 +10153,12 @@ fn scale_ratio(a: Int, b: Int, s: Int) -> #(Int, Int) {
 fn duration_string_precision(
   digits: FractionalDigits,
   su: Option(Unit),
-) -> Result(#(Precision, Unit, Int), TErr) {
+) -> Result(#(Precision, TimeUnit, Int), TErr) {
   case su {
-    Some(Second) -> Ok(#(FixedPrec(0), Second, 1))
-    Some(Millisecond) -> Ok(#(FixedPrec(3), Millisecond, 1))
-    Some(Microsecond) -> Ok(#(FixedPrec(6), Microsecond, 1))
-    Some(Nanosecond) -> Ok(#(FixedPrec(9), Nanosecond, 1))
+    Some(Second) -> Ok(#(FixedPrec(0), USecond, 1))
+    Some(Millisecond) -> Ok(#(FixedPrec(3), UMillisecond, 1))
+    Some(Microsecond) -> Ok(#(FixedPrec(6), UMicrosecond, 1))
+    Some(Nanosecond) -> Ok(#(FixedPrec(9), UNanosecond, 1))
     Some(u) ->
       Error(RangeE(
         unit_to_string(u)
@@ -10088,9 +10166,9 @@ fn duration_string_precision(
       ))
     None ->
       case digits {
-        DigitsAuto -> Ok(#(AutoPrec, Nanosecond, 1))
-        DigitsFixed(0) -> Ok(#(FixedPrec(0), Second, 1))
-        DigitsFixed(n) -> Ok(#(FixedPrec(n), Nanosecond, pow10(9 - n)))
+        DigitsAuto -> Ok(#(AutoPrec, UNanosecond, 1))
+        DigitsFixed(0) -> Ok(#(FixedPrec(0), USecond, 1))
+        DigitsFixed(n) -> Ok(#(FixedPrec(n), UNanosecond, pow10(9 - n)))
       }
   }
 }
@@ -10101,11 +10179,11 @@ fn duration_string_precision(
 fn round_duration_for_string(
   d: DurRec,
   inc: Int,
-  unit: Unit,
+  unit: TimeUnit,
   mode: RoundingMode,
 ) -> Result(DurRec, TErr) {
   let time_ns = time_only_ns(d)
-  let rounded = round_to_increment(time_ns, inc * unit_ns(unit), mode)
+  let rounded = round_to_increment(time_ns, inc * time_unit_ns(unit), mode)
   let largest = max_unit(default_largest_unit(d), Second)
   let result = case unit_rank(largest) >= unit_rank(Day) {
     True -> {
@@ -10236,7 +10314,7 @@ fn instant_method(
             Some(u) ->
               round_to_increment(
                 ns,
-                sinc * unit_ns(u),
+                sinc * time_unit_ns(u),
                 as_if_positive_mode(mode),
               )
           }
@@ -10303,7 +10381,7 @@ fn instant_method(
             helpers.arg_at(args, 0),
             allow_day: False,
           ))
-          let u_ns = unit_ns(su)
+          let u_ns = time_unit_ns(su)
           // For Instant: increment*unit must divide 24h.
           let max = ns_per_day / u_ns
           case inc >= 1 && inc <= max && max % inc == 0 {
@@ -10374,9 +10452,10 @@ fn instant_until_since(
             "largestUnit must not be smaller than smallestUnit",
           )
         False -> {
+          use su <- terr(state, require_time_unit(smallest))
           let mode2 = apply_since_mode(mode, is_since)
           let diff = b - a
-          let rounded = round_to_increment(diff, inc * unit_ns(smallest), mode2)
+          let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
           let rounded = apply_since_ns(rounded, is_since)
           let dur = balance_time_ns(rounded, largest)
           let #(state, v) = make_duration(state, protos, dur)
@@ -10444,7 +10523,7 @@ fn zoned_date_time_method(
             Some(u) ->
               round_to_increment(
                 ns,
-                sinc * unit_ns(u),
+                sinc * time_unit_ns(u),
                 as_if_positive_mode(mode),
               )
           }
@@ -10573,11 +10652,11 @@ fn zoned_date_time_method(
             helpers.arg_at(args, 0),
             allow_day: True,
           ))
-          let u_ns = unit_ns(su)
+          let u_ns = time_unit_ns(su)
           let max = case su {
-            Day -> 1
-            Hour -> 24
-            Minute | Second -> 60
+            UDay -> 1
+            UHour -> 24
+            UMinute | USecond -> 60
             _ -> 1000
           }
           case valid_time_increment(inc, max) {
@@ -10586,7 +10665,7 @@ fn zoned_date_time_method(
               let local = ns + off
               let day_part = floor_div(local, ns_per_day)
               let local_date = iso_date_from_epoch_days(day_part)
-              case su == Day {
+              case su == UDay {
                 // Round within the day bounded by start-of-day instants;
                 // both bounds must be representable.
                 True -> {
@@ -10820,8 +10899,9 @@ fn zoned_until_since(
   case unit_rank(largest) <= unit_rank(Hour) {
     True -> {
       // Exact-time difference, like Instant.
+      use su <- terr(state, require_time_unit(smallest))
       let diff = b_ns - a_ns
-      let rounded = round_to_increment(diff, inc * unit_ns(smallest), mode2)
+      let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
       let rounded = apply_since_ns(rounded, is_since)
       let dur = balance_time_ns(rounded, largest)
       let #(state, v) = make_duration(state, protos, dur)
