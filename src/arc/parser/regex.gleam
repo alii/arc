@@ -83,8 +83,6 @@ pub type PatternError {
   /// A group name that is not a valid identifier (or a malformed escape
   /// within one).
   InvalidGroupName(pos: Int)
-  /// A `(?` group head that is not a recognised group kind.
-  InvalidGroup(pos: Int)
   /// Inline modifiers (`(?ims-ims:`) that are malformed.
   InvalidModifierFlags(pos: Int)
   /// `(?-:` — the add and remove modifier sets are both empty.
@@ -151,7 +149,6 @@ pub fn pattern_error_message(e: PatternError) -> String {
       "Invalid regular expression: unterminated group name"
     EmptyGroupName(_) -> "Invalid regular expression: empty group name"
     InvalidGroupName(_) -> "Invalid regular expression: invalid group name"
-    InvalidGroup(_) -> "Invalid regular expression: invalid group"
     InvalidModifierFlags(_) ->
       "Invalid regular expression: invalid modifier flags"
     EmptyModifiers(_) ->
@@ -173,17 +170,81 @@ pub fn pattern_error_pos(e: PatternError) -> Int {
 
 // ---- Source byte access ----
 
-/// O(1) character access into the source bytes (ASCII only, for regex scanning).
-pub fn char_at_source(bytes: BitArray, pos: Int) -> String {
+/// The lone ASCII character at byte `pos`, or `None` when there isn't one —
+/// `pos` is out of bounds, or the byte there belongs to a multi-byte code
+/// point. `None` is the *only* way absence is signalled: there is no empty
+/// character, so a caller can never confuse "nothing here" with a real char.
+pub fn ascii_at(bytes: BitArray, pos: Int) -> Option(String) {
   case bit_array.slice(bytes, pos, 1) {
-    Error(_) -> ""
-    Ok(<<byte>>) if byte < 0x80 -> {
-      case bit_array.to_string(<<byte>>) {
-        Ok(s) -> s
-        Error(_) -> ""
+    Ok(<<byte>>) if byte < 0x80 ->
+      option.from_result(bit_array.to_string(<<byte>>))
+    Ok(_) | Error(Nil) -> None
+  }
+}
+
+/// The code point at `pos` and its byte width, or `Eof` past the end of the
+/// bytes. A byte that isn't valid UTF-8 decodes as its own value with width 1
+/// (enough for the scanners to make progress); only genuine end-of-input is
+/// `Eof`, so an "absent" code point can never leak into a value position.
+type CodePoint {
+  Cp(value: Int, width: Int)
+  Eof
+}
+
+/// Decode the UTF-8 code point at `pos`.
+fn codepoint_at(bytes: BitArray, pos: Int) -> CodePoint {
+  case bit_array.slice(bytes, pos, 1) {
+    Ok(<<b>>) if b < 0x80 -> Cp(b, 1)
+    Ok(<<b>>) -> {
+      let w = utf8_byte_width(b)
+      case bit_array.slice(bytes, pos, w) {
+        Ok(chunk) ->
+          case bit_array.to_string(chunk) {
+            Ok(s) ->
+              case string.to_utf_codepoints(s) {
+                [c, ..] -> Cp(string.utf_codepoint_to_int(c), w)
+                [] -> Cp(b, 1)
+              }
+            Error(Nil) -> Cp(b, 1)
+          }
+        Error(Nil) -> Cp(b, 1)
       }
     }
-    _ -> ""
+    Ok(_) | Error(Nil) -> Eof
+  }
+}
+
+/// Bytes to advance past `pos`; 1 at end of input (so scanners terminate).
+fn advance_width(bytes: BitArray, pos: Int) -> Int {
+  case codepoint_at(bytes, pos) {
+    Cp(_, w) -> w
+    Eof -> 1
+  }
+}
+
+/// What sits at `pos` within a pattern body that ends at `end`. Exhaustive:
+/// the three cases the old `""` sentinel conflated are now separate variants.
+type At {
+  /// A lone ASCII character.
+  Ascii(ch: String)
+  /// A code point of `width` bytes that is not a lone ASCII character.
+  NonAscii(width: Int)
+  /// `pos` is at or past `end` — nothing here.
+  AtEnd
+}
+
+fn at(bytes: BitArray, pos: Int, end: Int) -> At {
+  case pos >= end {
+    True -> AtEnd
+    False ->
+      case ascii_at(bytes, pos) {
+        Some(ch) -> Ascii(ch)
+        None ->
+          case codepoint_at(bytes, pos) {
+            Cp(_, w) -> NonAscii(w)
+            Eof -> AtEnd
+          }
+      }
   }
 }
 
@@ -193,32 +254,99 @@ pub fn byte_slice_source(bytes: BitArray, start: Int, len: Int) -> String {
     Ok(s) ->
       case bit_array.to_string(s) {
         Ok(str) -> str
-        Error(_) -> ""
+        Error(Nil) -> ""
       }
-    Error(_) -> ""
+    Error(Nil) -> ""
   }
 }
 
-/// Check if a single character is a hex digit (0-9, a-f, A-F).
-fn is_hex_char(ch: String) -> Bool {
+/// Value of an ASCII hex digit (0-9, a-f, A-F).
+fn hex_value(ch: String) -> Option(Int) {
   case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
-    "a" | "b" | "c" | "d" | "e" | "f" -> True
-    "A" | "B" | "C" | "D" | "E" | "F" -> True
-    _ -> False
+    "0" -> Some(0)
+    "1" -> Some(1)
+    "2" -> Some(2)
+    "3" -> Some(3)
+    "4" -> Some(4)
+    "5" -> Some(5)
+    "6" -> Some(6)
+    "7" -> Some(7)
+    "8" -> Some(8)
+    "9" -> Some(9)
+    "a" | "A" -> Some(10)
+    "b" | "B" -> Some(11)
+    "c" | "C" -> Some(12)
+    "d" | "D" -> Some(13)
+    "e" | "E" -> Some(14)
+    "f" | "F" -> Some(15)
+    _ -> None
   }
 }
 
-/// Skip consecutive hex digits in the source bytes starting at pos,
-/// returning the position after the last hex digit.
-fn skip_regex_hex_run(bytes: BitArray, pos: Int, end: Int) -> Int {
-  case pos >= end {
-    True -> pos
-    False ->
-      case is_hex_char(char_at_source(bytes, pos)) {
-        True -> skip_regex_hex_run(bytes, pos + 1, end)
-        False -> pos
-      }
+/// Value of an ASCII decimal digit.
+fn digit_value(ch: String) -> Option(Int) {
+  case ch {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> hex_value(ch)
+    _ -> None
+  }
+}
+
+/// Value of the hex digit at `pos`, if the byte there is one.
+fn hex_at(bytes: BitArray, pos: Int) -> Option(Int) {
+  case ascii_at(bytes, pos) {
+    Some(ch) -> hex_value(ch)
+    None -> None
+  }
+}
+
+fn is_hex_at(bytes: BitArray, pos: Int) -> Bool {
+  option.is_some(hex_at(bytes, pos))
+}
+
+/// Value of the decimal digit at `pos`, if the byte there is one.
+fn digit_at(bytes: BitArray, pos: Int) -> Option(Int) {
+  case ascii_at(bytes, pos) {
+    Some(ch) -> digit_value(ch)
+    None -> None
+  }
+}
+
+fn is_digit_at(bytes: BitArray, pos: Int) -> Bool {
+  option.is_some(digit_at(bytes, pos))
+}
+
+/// Scan a run of decimal digits in `[pos, end)`, returning the position after
+/// the run and its value — `Some` iff the run was non-empty. The value is
+/// accumulated as we walk, so there is no re-slice + re-parse step that could
+/// fail and silently yield 0.
+fn decimal_run(bytes: BitArray, pos: Int, end: Int) -> #(Int, Option(Int)) {
+  digit_run_loop(bytes, pos, end, 10, digit_at, None)
+}
+
+/// Same, for a run of hex digits.
+fn hex_run(bytes: BitArray, pos: Int, end: Int) -> #(Int, Option(Int)) {
+  digit_run_loop(bytes, pos, end, 16, hex_at, None)
+}
+
+fn digit_run_loop(
+  bytes: BitArray,
+  pos: Int,
+  end: Int,
+  base: Int,
+  digit: fn(BitArray, Int) -> Option(Int),
+  acc: Option(Int),
+) -> #(Int, Option(Int)) {
+  case pos < end, digit(bytes, pos) {
+    True, Some(d) ->
+      digit_run_loop(
+        bytes,
+        pos + 1,
+        end,
+        base,
+        digit,
+        Some(option.unwrap(acc, 0) * base + d),
+      )
+    _, _ -> #(pos, acc)
   }
 }
 
@@ -235,7 +363,7 @@ pub fn scan_regex_source(
     // End of source before the closing /.
     Error(_) -> Error(UnterminatedRegex(pos))
     // Non-ASCII byte: part of the regex body (any SourceCharacter is allowed,
-    // e.g. the Cf format-control U+180E). char_at_source is ASCII-only, so we
+    // e.g. the Cf format-control U+180E). ascii_at is ASCII-only, so we
     // handle these here. U+2028/U+2029 are line terminators and end the regex.
     Ok(<<b>>) if b >= 0x80 ->
       case is_unicode_line_terminator(bytes, pos) {
@@ -243,10 +371,9 @@ pub fn scan_regex_source(
         False -> scan_regex_source(bytes, pos + utf8_byte_width(b), in_class)
       }
     Ok(_) -> {
-      let ch = char_at_source(bytes, pos)
-      case ch {
-        "\n" | "\r" -> Error(UnterminatedRegex(pos))
-        "\\" -> {
+      case ascii_at(bytes, pos) {
+        Some("\n") | Some("\r") -> Error(UnterminatedRegex(pos))
+        Some("\\") -> {
           // Escaped character — skip the backslash and the next character
           // (which may itself be multi-byte, e.g. an escaped non-ASCII char).
           // A line terminator after `\` is not allowed (RegularExpressionChar
@@ -269,13 +396,13 @@ pub fn scan_regex_source(
             Ok(_) -> scan_regex_source(bytes, pos + 2, in_class)
           }
         }
-        "[" -> scan_regex_source(bytes, pos + 1, True)
-        "]" ->
+        Some("[") -> scan_regex_source(bytes, pos + 1, True)
+        Some("]") ->
           case in_class {
             True -> scan_regex_source(bytes, pos + 1, False)
             False -> scan_regex_source(bytes, pos + 1, in_class)
           }
-        "/" ->
+        Some("/") ->
           case in_class {
             True -> scan_regex_source(bytes, pos + 1, in_class)
             False -> Ok(pos + 1)
@@ -394,9 +521,9 @@ fn scan_groups(
   case pos >= end {
     True -> #(captures, names, has_named)
     False ->
-      case char_at_source(bytes, pos), class_depth {
-        "\\", _ -> {
-          let #(_, w) = codepoint_at(bytes, pos + 1)
+      case ascii_at(bytes, pos), class_depth {
+        Some("\\"), _ -> {
+          let w = advance_width(bytes, pos + 1)
           scan_groups(
             bytes,
             pos + 1 + w,
@@ -408,7 +535,7 @@ fn scan_groups(
             has_named,
           )
         }
-        "[", _ -> {
+        Some("["), _ -> {
           // Legacy/u classes don't nest — a `[` inside one is a literal.
           let depth = case mode {
             UnicodeSets -> class_depth + 1
@@ -425,7 +552,7 @@ fn scan_groups(
             has_named,
           )
         }
-        "]", _ -> {
+        Some("]"), _ -> {
           let depth = case mode {
             UnicodeSets -> int.max(class_depth - 1, 0)
             Legacy | Unicode -> 0
@@ -441,13 +568,13 @@ fn scan_groups(
             has_named,
           )
         }
-        "(", 0 ->
-          case char_at_source(bytes, pos + 1) {
-            "?" ->
-              case char_at_source(bytes, pos + 2) {
-                "<" ->
-                  case char_at_source(bytes, pos + 3) {
-                    "=" | "!" ->
+        Some("("), 0 ->
+          case ascii_at(bytes, pos + 1) {
+            Some("?") ->
+              case ascii_at(bytes, pos + 2) {
+                Some("<") ->
+                  case ascii_at(bytes, pos + 3) {
+                    Some("=") | Some("!") ->
                       scan_groups(
                         bytes,
                         pos + 4,
@@ -464,7 +591,7 @@ fn scan_groups(
                       // has_named switch.
                       let names2 = case parse_group_name(bytes, pos + 3, end) {
                         Ok(#(name, _)) -> [name, ..names]
-                        Error(_) -> names
+                        Error(_malformed_name) -> names
                       }
                       scan_groups(
                         bytes,
@@ -503,7 +630,7 @@ fn scan_groups(
               )
           }
         _, _ -> {
-          let #(_, w) = codepoint_at(bytes, pos)
+          let w = advance_width(bytes, pos)
           scan_groups(
             bytes,
             pos + w,
@@ -524,7 +651,7 @@ fn p_disjunction(
   pos: Int,
 ) -> Result(#(Int, List(String)), PatternError) {
   use #(pos2, names) <- result.try(p_alternative(ctx, pos, []))
-  case pos2 < ctx.end && char_at_source(ctx.bytes, pos2) == "|" {
+  case pos2 < ctx.end && ascii_at(ctx.bytes, pos2) == Some("|") {
     True -> {
       use #(pos3, names2) <- result.map(p_disjunction(ctx, pos2 + 1))
       // Names in different alternatives may legally repeat (they can never
@@ -543,8 +670,8 @@ fn p_alternative(
   case pos >= ctx.end {
     True -> Ok(#(pos, acc))
     False ->
-      case char_at_source(ctx.bytes, pos) {
-        "|" | ")" -> Ok(#(pos, acc))
+      case ascii_at(ctx.bytes, pos) {
+        Some("|") | Some(")") -> Ok(#(pos, acc))
         _ -> {
           use #(pos2, tnames, kind) <- result.try(p_term(ctx, pos))
           use Nil <- result.try(check_no_duplicate(tnames, acc, pos))
@@ -579,48 +706,45 @@ fn p_term(
   ctx: Ctx,
   pos: Int,
 ) -> Result(#(Int, List(String), TermKind), PatternError) {
-  case char_at_source(ctx.bytes, pos) {
-    "^" | "$" -> Ok(#(pos + 1, [], KAssertion))
-    "\\" ->
-      case char_at_source(ctx.bytes, pos + 1) {
-        "b" | "B" -> Ok(#(pos + 2, [], KAssertion))
+  case ascii_at(ctx.bytes, pos) {
+    Some("^") | Some("$") -> Ok(#(pos + 1, [], KAssertion))
+    Some("\\") ->
+      case ascii_at(ctx.bytes, pos + 1) {
+        Some("b") | Some("B") -> Ok(#(pos + 2, [], KAssertion))
         _ -> {
           use pos2 <- result.map(p_atom_escape(ctx, pos))
           #(pos2, [], KAtom)
         }
       }
-    "(" -> p_group(ctx, pos)
-    "*" | "+" | "?" -> Error(NothingToRepeat(pos))
-    "{" ->
+    Some("(") -> p_group(ctx, pos)
+    Some("*") | Some("+") | Some("?") -> Error(NothingToRepeat(pos))
+    Some("{") ->
       case ctx.mode {
         // Annex B: a braced-quantifier-shaped `{...}` with nothing to
         // quantify is the InvalidBracedQuantifier early error; any other
         // `{` is an ExtendedPatternCharacter.
         Legacy ->
-          case braced_quantifier_end(ctx.bytes, pos, ctx.end) {
-            Ok(_) -> Error(NothingToRepeat(pos))
-            Error(Nil) -> Ok(#(pos + 1, [], KAtom))
+          case braced_quantifier(ctx.bytes, pos, ctx.end) {
+            Some(_) -> Error(NothingToRepeat(pos))
+            None -> Ok(#(pos + 1, [], KAtom))
           }
         Unicode | UnicodeSets -> Error(LoneQuantifierBrackets(pos))
       }
-    "}" ->
+    Some("}") ->
       case ctx.mode {
         Legacy -> Ok(#(pos + 1, [], KAtom))
         Unicode | UnicodeSets -> Error(LoneQuantifierBrackets(pos))
       }
-    "]" ->
+    Some("]") ->
       case ctx.mode {
         Legacy -> Ok(#(pos + 1, [], KAtom))
         Unicode | UnicodeSets -> Error(LoneClassBracket(pos))
       }
-    "[" -> {
+    Some("[") -> {
       use pos2 <- result.map(p_class(ctx, pos + 1))
       #(pos2, [], KAtom)
     }
-    _ -> {
-      let #(_, w) = codepoint_at(ctx.bytes, pos)
-      Ok(#(pos + w, [], KAtom))
-    }
+    _ -> Ok(#(pos + advance_width(ctx.bytes, pos), [], KAtom))
   }
 }
 
@@ -628,20 +752,20 @@ fn p_group(
   ctx: Ctx,
   pos: Int,
 ) -> Result(#(Int, List(String), TermKind), PatternError) {
-  case char_at_source(ctx.bytes, pos + 1) {
-    "?" ->
-      case char_at_source(ctx.bytes, pos + 2) {
-        "=" | "!" -> {
+  case ascii_at(ctx.bytes, pos + 1) {
+    Some("?") ->
+      case ascii_at(ctx.bytes, pos + 2) {
+        Some("=") | Some("!") -> {
           use #(pos2, names) <- result.map(p_group_body(ctx, pos + 3))
           #(pos2, names, KLookahead)
         }
-        ":" -> {
+        Some(":") -> {
           use #(pos2, names) <- result.map(p_group_body(ctx, pos + 3))
           #(pos2, names, KAtom)
         }
-        "<" ->
-          case char_at_source(ctx.bytes, pos + 3) {
-            "=" | "!" -> {
+        Some("<") ->
+          case ascii_at(ctx.bytes, pos + 3) {
+            Some("=") | Some("!") -> {
               use #(pos2, names) <- result.map(p_group_body(ctx, pos + 4))
               #(pos2, names, KAssertion)
             }
@@ -674,7 +798,7 @@ fn p_group_body(
   pos: Int,
 ) -> Result(#(Int, List(String)), PatternError) {
   use #(pos2, names) <- result.try(p_disjunction(ctx, pos))
-  case pos2 < ctx.end && char_at_source(ctx.bytes, pos2) == ")" {
+  case pos2 < ctx.end && ascii_at(ctx.bytes, pos2) == Some(")") {
     True -> Ok(#(pos2 + 1, names))
     False -> Error(MissingClosingParen(pos2))
   }
@@ -688,16 +812,17 @@ fn p_quantifier_opt(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
   case pos >= ctx.end {
     True -> Ok(#(pos, False))
     False ->
-      case char_at_source(ctx.bytes, pos) {
-        "*" | "+" | "?" -> Ok(#(skip_lazy(ctx.bytes, pos + 1), True))
-        "{" ->
-          case braced_quantifier_end(ctx.bytes, pos, ctx.end) {
-            Ok(#(after, lo, hi)) ->
-              case hi {
-                Some(h) if h < lo -> Error(OutOfOrderQuantifier(pos))
+      case ascii_at(ctx.bytes, pos) {
+        Some("*") | Some("+") | Some("?") ->
+          Ok(#(skip_lazy(ctx.bytes, pos + 1), True))
+        Some("{") ->
+          case braced_quantifier(ctx.bytes, pos, ctx.end) {
+            Some(BracedQuantifier(after:, min:, max:)) ->
+              case max {
+                Some(m) if m < min -> Error(OutOfOrderQuantifier(pos))
                 _ -> Ok(#(skip_lazy(ctx.bytes, after), True))
               }
-            Error(Nil) ->
+            None ->
               case ctx.mode {
                 Legacy -> Ok(#(pos, False))
                 Unicode | UnicodeSets -> Error(LoneQuantifierBrackets(pos))
@@ -709,51 +834,40 @@ fn p_quantifier_opt(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
 }
 
 fn skip_lazy(bytes: BitArray, pos: Int) -> Int {
-  case char_at_source(bytes, pos) {
-    "?" -> pos + 1
+  case ascii_at(bytes, pos) {
+    Some("?") -> pos + 1
     _ -> pos
   }
 }
 
-/// Parse `{n}`, `{n,}` or `{n,m}` starting at the `{`. Returns the position
-/// after the `}` and the bounds, or Error(Nil) if the shape doesn't match.
-fn braced_quantifier_end(
+/// A well-formed `{n}` / `{n,}` / `{n,m}`: the position after the `}` and the
+/// decoded bounds (`max` is `None` for the open-ended forms).
+type BracedQuantifier {
+  BracedQuantifier(after: Int, min: Int, max: Option(Int))
+}
+
+/// Parse a braced quantifier starting at the `{`. `None` means "this `{` is
+/// not a quantifier" — an absence, not a failure: the caller decides whether
+/// that is legal (Annex B) or an error (Unicode modes).
+fn braced_quantifier(
   bytes: BitArray,
   pos: Int,
   end: Int,
-) -> Result(#(Int, Int, Option(Int)), Nil) {
-  let lo_end = skip_decimal_run(bytes, pos + 1, end)
-  case lo_end == pos + 1 {
-    True -> Error(Nil)
-    False -> {
-      let lo =
-        int.parse(byte_slice_source(bytes, pos + 1, lo_end - pos - 1))
-        |> result.unwrap(0)
-      case char_at_source(bytes, lo_end) {
-        "}" -> Ok(#(lo_end + 1, lo, None))
-        "," -> {
-          let hi_end = skip_decimal_run(bytes, lo_end + 1, end)
-          case char_at_source(bytes, hi_end) {
-            "}" ->
-              case hi_end == lo_end + 1 {
-                True -> Ok(#(hi_end + 1, lo, None))
-                False -> {
-                  let hi =
-                    int.parse(byte_slice_source(
-                      bytes,
-                      lo_end + 1,
-                      hi_end - lo_end - 1,
-                    ))
-                    |> result.unwrap(0)
-                  Ok(#(hi_end + 1, lo, Some(hi)))
-                }
-              }
-            _ -> Error(Nil)
+) -> Option(BracedQuantifier) {
+  case decimal_run(bytes, pos + 1, end) {
+    #(_, None) -> None
+    #(lo_end, Some(min)) ->
+      case ascii_at(bytes, lo_end) {
+        Some("}") -> Some(BracedQuantifier(after: lo_end + 1, min:, max: None))
+        Some(",") -> {
+          let #(hi_end, max) = decimal_run(bytes, lo_end + 1, end)
+          case ascii_at(bytes, hi_end) {
+            Some("}") -> Some(BracedQuantifier(after: hi_end + 1, min:, max:))
+            _ -> None
           }
         }
-        _ -> Error(Nil)
+        _ -> None
       }
-    }
   }
 }
 
@@ -762,32 +876,49 @@ fn braced_quantifier_end(
 fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   let strict = ctx.mode != Legacy
   let invalid = InvalidEscape(pos)
-  case char_at_source(ctx.bytes, pos + 1) {
-    "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> {
-      let after = skip_decimal_run(ctx.bytes, pos + 1, ctx.end)
+  case at(ctx.bytes, pos + 1, ctx.end) {
+    // The scanner prevents a lone trailing `\` in a literal; `new RegExp("\\")`
+    // reaches here.
+    AtEnd -> Error(BackslashAtEnd(pos))
+    // An escaped non-ASCII character: an IdentityEscape only in Annex B.
+    NonAscii(w) ->
       case strict {
+        True -> Error(invalid)
+        False -> Ok(pos + 1 + w)
+      }
+    Ascii("1")
+    | Ascii("2")
+    | Ascii("3")
+    | Ascii("4")
+    | Ascii("5")
+    | Ascii("6")
+    | Ascii("7")
+    | Ascii("8")
+    | Ascii("9") -> {
+      let #(after, n) = decimal_run(ctx.bytes, pos + 1, ctx.end)
+      case strict, n {
         // Annex B: a too-large backreference falls back to a legacy octal
         // escape or identity, so anything goes.
-        False -> Ok(after)
-        True -> {
-          let n =
-            int.parse(byte_slice_source(ctx.bytes, pos + 1, after - pos - 1))
-            |> result.unwrap(0)
-          case n > ctx.captures {
-            True -> Error(BackReferenceOutOfRange(pos, n, ctx.captures))
-            False -> Ok(after)
-          }
-        }
+        False, _ -> Ok(after)
+        True, Some(n) if n > ctx.captures ->
+          Error(BackReferenceOutOfRange(pos, n, ctx.captures))
+        True, _ -> Ok(after)
       }
     }
-    "0" ->
-      case strict && is_digit_char(char_at_source(ctx.bytes, pos + 2)) {
+    Ascii("0") ->
+      case strict && is_digit_at(ctx.bytes, pos + 2) {
         True -> Error(InvalidDecimalEscape(pos))
         False -> Ok(pos + 2)
       }
-    "f" | "n" | "r" | "t" | "v" -> Ok(pos + 2)
-    "d" | "D" | "s" | "S" | "w" | "W" -> Ok(pos + 2)
-    "p" | "P" ->
+    Ascii("f") | Ascii("n") | Ascii("r") | Ascii("t") | Ascii("v") ->
+      Ok(pos + 2)
+    Ascii("d")
+    | Ascii("D")
+    | Ascii("s")
+    | Ascii("S")
+    | Ascii("w")
+    | Ascii("W") -> Ok(pos + 2)
+    Ascii("p") | Ascii("P") ->
       case ctx.mode {
         Legacy -> Ok(pos + 2)
         Unicode -> {
@@ -800,7 +931,7 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
           pos + len
         }
         UnicodeSets -> {
-          let allow = char_at_source(ctx.bytes, pos + 1) == "p"
+          let allow = ascii_at(ctx.bytes, pos + 1) == Some("p")
           use len <- result.map(property_escape_length(
             ctx.bytes,
             pos,
@@ -810,8 +941,8 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
           pos + len
         }
       }
-    "c" ->
-      case is_ascii_letter(char_at_source(ctx.bytes, pos + 2)) {
+    Ascii("c") ->
+      case is_letter_at(ctx.bytes, pos + 2) {
         True -> Ok(pos + 3)
         False ->
           case strict {
@@ -821,11 +952,8 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
             False -> Ok(pos + 1)
           }
       }
-    "x" ->
-      case
-        is_hex_char(char_at_source(ctx.bytes, pos + 2))
-        && is_hex_char(char_at_source(ctx.bytes, pos + 3))
-      {
+    Ascii("x") ->
+      case is_hex_at(ctx.bytes, pos + 2) && is_hex_at(ctx.bytes, pos + 3) {
         True -> Ok(pos + 4)
         False ->
           case strict {
@@ -833,12 +961,12 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
             False -> Ok(pos + 2)
           }
       }
-    "u" -> p_unicode_escape(ctx, pos)
-    "k" ->
+    Ascii("u") -> p_unicode_escape(ctx, pos)
+    Ascii("k") ->
       case strict || ctx.has_named {
         True ->
-          case char_at_source(ctx.bytes, pos + 2) {
-            "<" -> {
+          case ascii_at(ctx.bytes, pos + 2) {
+            Some("<") -> {
               use #(name, after) <- result.try(parse_group_name(
                 ctx.bytes,
                 pos + 3,
@@ -853,21 +981,7 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
           }
         False -> Ok(pos + 2)
       }
-    "" ->
-      // Either the end of the body (the scanner prevents this) or an
-      // escaped non-ASCII character.
-      case pos + 1 >= ctx.end {
-        True -> Error(BackslashAtEnd(pos))
-        False ->
-          case strict {
-            True -> Error(invalid)
-            False -> {
-              let #(_, w) = codepoint_at(ctx.bytes, pos + 1)
-              Ok(pos + 1 + w)
-            }
-          }
-      }
-    other ->
+    Ascii(other) ->
       case strict {
         // Unicode-mode IdentityEscape: SyntaxCharacter or `/` only.
         True ->
@@ -886,42 +1000,39 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
 fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   let bytes = ctx.bytes
   let hex4 =
-    is_hex_char(char_at_source(bytes, pos + 2))
-    && is_hex_char(char_at_source(bytes, pos + 3))
-    && is_hex_char(char_at_source(bytes, pos + 4))
-    && is_hex_char(char_at_source(bytes, pos + 5))
+    is_hex_at(bytes, pos + 2)
+    && is_hex_at(bytes, pos + 3)
+    && is_hex_at(bytes, pos + 4)
+    && is_hex_at(bytes, pos + 5)
   case hex4 {
     True -> Ok(pos + 6)
     False ->
       case ctx.mode {
         Legacy -> Ok(pos + 2)
         Unicode | UnicodeSets ->
-          case char_at_source(bytes, pos + 2) {
-            "{" -> {
-              let after = skip_regex_hex_run(bytes, pos + 3, ctx.end)
-              let closed =
-                after > pos + 3 && char_at_source(bytes, after) == "}"
-              case closed {
-                False -> Error(InvalidUnicodeEscape(pos))
-                True -> {
-                  let value =
-                    parse_hex_value(byte_slice_source(
-                      bytes,
-                      pos + 3,
-                      after - pos - 3,
-                    ))
-                    |> result.unwrap(0)
-                  case value > 0x10FFFF {
-                    True -> Error(InvalidUnicodeEscapeValue(pos))
-                    False -> Ok(after + 1)
-                  }
-                }
+          case ascii_at(bytes, pos + 2) {
+            Some("{") -> {
+              let #(after, value) = hex_run(bytes, pos + 3, ctx.end)
+              case value, ascii_at(bytes, after) {
+                Some(v), Some("}") if v > 0x10FFFF ->
+                  Error(InvalidUnicodeEscapeValue(pos))
+                Some(_), Some("}") -> Ok(after + 1)
+                // No digits, or no closing brace.
+                _, _ -> Error(InvalidUnicodeEscape(pos))
               }
             }
             _ -> Error(InvalidUnicodeEscape(pos))
           }
       }
   }
+}
+
+/// Which grammar the ClassRanges walk below is running under. Produced only
+/// by `p_class`'s non-v branch, so `strict = mode == UnicodeClass` in every
+/// function it is threaded through — the v-mode class never gets here.
+type ClassMode {
+  LegacyClass
+  UnicodeClass
 }
 
 /// Character class starting just after the `[`. v-mode classes have their
@@ -931,49 +1042,57 @@ fn p_class(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   case ctx.mode {
     UnicodeSets -> skip_v_class(ctx.bytes, pos, ctx.end)
     Legacy | Unicode -> {
-      let pos2 = case char_at_source(ctx.bytes, pos) {
-        "^" -> pos + 1
+      let mode = case ctx.mode {
+        Unicode -> UnicodeClass
+        Legacy | UnicodeSets -> LegacyClass
+      }
+      let pos2 = case ascii_at(ctx.bytes, pos) {
+        Some("^") -> pos + 1
         _ -> pos
       }
-      p_class_ranges(ctx, pos2)
+      p_class_ranges(ctx, mode, pos2)
     }
   }
 }
 
-fn p_class_ranges(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
+fn p_class_ranges(
+  ctx: Ctx,
+  mode: ClassMode,
+  pos: Int,
+) -> Result(Int, PatternError) {
   case pos >= ctx.end {
     True -> Error(UnterminatedClass(pos))
     False ->
-      case char_at_source(ctx.bytes, pos) {
-        "]" -> Ok(pos + 1)
+      case ascii_at(ctx.bytes, pos) {
+        Some("]") -> Ok(pos + 1)
         _ -> {
-          use #(after_a, a_is_class, a_val) <- result.try(p_class_atom(ctx, pos))
+          use #(after_a, a_is_class, a_val) <- result.try(p_class_atom(
+            ctx,
+            mode,
+            pos,
+          ))
           let is_range =
-            char_at_source(ctx.bytes, after_a) == "-"
+            ascii_at(ctx.bytes, after_a) == Some("-")
             && after_a + 1 < ctx.end
-            && char_at_source(ctx.bytes, after_a + 1) != "]"
+            && ascii_at(ctx.bytes, after_a + 1) != Some("]")
           case is_range {
             True -> {
               use #(after_b, b_is_class, b_val) <- result.try(p_class_atom(
                 ctx,
+                mode,
                 after_a + 1,
               ))
               // Unicode mode: \d \s \w \p{..} etc. are not valid range
               // endpoints. Annex B treats such a `-` as a literal.
-              let bad = ctx.mode == Unicode && { a_is_class || b_is_class }
+              let bad = mode == UnicodeClass && { a_is_class || b_is_class }
               use Nil <- result.try(case bad {
                 True -> Error(InvalidClassRange(pos))
                 False -> Ok(Nil)
               })
-              use Nil <- result.try(check_range_order(
-                ctx.mode,
-                a_val,
-                b_val,
-                pos,
-              ))
-              p_class_ranges(ctx, after_b)
+              use Nil <- result.try(check_range_order(mode, a_val, b_val, pos))
+              p_class_ranges(ctx, mode, after_b)
             }
-            False -> p_class_ranges(ctx, after_a)
+            False -> p_class_ranges(ctx, mode, after_a)
           }
         }
       }
@@ -984,14 +1103,14 @@ fn p_class_ranges(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
 /// Escaped endpoints are skipped (their values aren't decoded here), as are
 /// non-BMP literals in legacy mode (which split into surrogate halves).
 fn check_range_order(
-  mode: RegexMode,
+  mode: ClassMode,
   a_val: Option(Int),
   b_val: Option(Int),
   pos: Int,
 ) -> Result(Nil, PatternError) {
   case a_val, b_val {
     Some(av), Some(bv) -> {
-      let unknowable = mode == Legacy && { av > 0xFFFF || bv > 0xFFFF }
+      let unknowable = mode == LegacyClass && { av > 0xFFFF || bv > 0xFFFF }
       case !unknowable && av > bv {
         True -> Error(OutOfOrderClassRange(pos))
         False -> Ok(Nil)
@@ -1006,35 +1125,53 @@ fn check_range_order(
 /// characters — used for the range-order check.
 fn p_class_atom(
   ctx: Ctx,
+  mode: ClassMode,
   pos: Int,
 ) -> Result(#(Int, Bool, Option(Int)), PatternError) {
   case pos >= ctx.end {
     True -> Error(UnterminatedClass(pos))
     False ->
-      case char_at_source(ctx.bytes, pos) {
-        "\\" -> {
-          use #(after, is_class) <- result.map(p_class_escape(ctx, pos))
+      case ascii_at(ctx.bytes, pos) {
+        Some("\\") -> {
+          use #(after, is_class) <- result.map(p_class_escape(ctx, mode, pos))
           #(after, is_class, None)
         }
-        _ -> {
-          let #(cp, w) = codepoint_at(ctx.bytes, pos)
-          Ok(#(pos + w, False, Some(cp)))
-        }
+        _ ->
+          case codepoint_at(ctx.bytes, pos) {
+            Cp(cp, w) -> Ok(#(pos + w, False, Some(cp)))
+            Eof -> Error(UnterminatedClass(pos))
+          }
       }
   }
 }
 
 /// ClassEscape at `pos` (the backslash) inside a legacy or u-mode class.
-fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
-  let strict = ctx.mode == Unicode
+fn p_class_escape(
+  ctx: Ctx,
+  mode: ClassMode,
+  pos: Int,
+) -> Result(#(Int, Bool), PatternError) {
+  let strict = mode == UnicodeClass
   let invalid = InvalidClassEscape(pos)
-  case char_at_source(ctx.bytes, pos + 1) {
-    "b" | "-" -> Ok(#(pos + 2, False))
-    "d" | "D" | "s" | "S" | "w" | "W" -> Ok(#(pos + 2, True))
-    "p" | "P" ->
-      case ctx.mode {
-        Legacy -> Ok(#(pos + 2, False))
-        Unicode | UnicodeSets -> {
+  case at(ctx.bytes, pos + 1, ctx.end) {
+    AtEnd -> Error(UnterminatedClass(pos))
+    // An escaped non-ASCII character: an IdentityEscape only in Annex B.
+    NonAscii(w) ->
+      case strict {
+        True -> Error(invalid)
+        False -> Ok(#(pos + 1 + w, False))
+      }
+    Ascii("b") | Ascii("-") -> Ok(#(pos + 2, False))
+    Ascii("d")
+    | Ascii("D")
+    | Ascii("s")
+    | Ascii("S")
+    | Ascii("w")
+    | Ascii("W") -> Ok(#(pos + 2, True))
+    Ascii("p") | Ascii("P") ->
+      case mode {
+        LegacyClass -> Ok(#(pos + 2, False))
+        UnicodeClass -> {
           use len <- result.map(property_escape_length(
             ctx.bytes,
             pos,
@@ -1044,10 +1181,10 @@ fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
           #(pos + len, True)
         }
       }
-    "f" | "n" | "r" | "t" | "v" -> Ok(#(pos + 2, False))
-    "c" -> {
-      let c2 = char_at_source(ctx.bytes, pos + 2)
-      case is_ascii_letter(c2) {
+    Ascii("f") | Ascii("n") | Ascii("r") | Ascii("t") | Ascii("v") ->
+      Ok(#(pos + 2, False))
+    Ascii("c") ->
+      case is_letter_at(ctx.bytes, pos + 2) {
         True -> Ok(#(pos + 3, False))
         False ->
           case strict {
@@ -1055,18 +1192,17 @@ fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
             False ->
               // Annex B ClassControlLetter also allows digits and `_`;
               // otherwise the backslash alone is a class atom matching `\`.
-              case is_digit_char(c2) || c2 == "_" {
+              case
+                is_digit_at(ctx.bytes, pos + 2)
+                || ascii_at(ctx.bytes, pos + 2) == Some("_")
+              {
                 True -> Ok(#(pos + 3, False))
                 False -> Ok(#(pos + 1, False))
               }
           }
       }
-    }
-    "x" ->
-      case
-        is_hex_char(char_at_source(ctx.bytes, pos + 2))
-        && is_hex_char(char_at_source(ctx.bytes, pos + 3))
-      {
+    Ascii("x") ->
+      case is_hex_at(ctx.bytes, pos + 2) && is_hex_at(ctx.bytes, pos + 3) {
         True -> Ok(#(pos + 4, False))
         False ->
           case strict {
@@ -1074,43 +1210,40 @@ fn p_class_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
             False -> Ok(#(pos + 2, False))
           }
       }
-    "u" -> {
+    Ascii("u") -> {
       use after <- result.map(p_unicode_escape(ctx, pos))
       #(after, False)
     }
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
+    Ascii("0")
+    | Ascii("1")
+    | Ascii("2")
+    | Ascii("3")
+    | Ascii("4")
+    | Ascii("5")
+    | Ascii("6")
+    | Ascii("7")
+    | Ascii("8")
+    | Ascii("9") ->
       case strict {
         // Annex B: legacy octal escapes and \8 \9 identity.
         False -> Ok(#(pos + 2, False))
         True ->
           case
-            char_at_source(ctx.bytes, pos + 1) == "0"
-            && !is_digit_char(char_at_source(ctx.bytes, pos + 2))
+            ascii_at(ctx.bytes, pos + 1) == Some("0")
+            && !is_digit_at(ctx.bytes, pos + 2)
           {
             True -> Ok(#(pos + 2, False))
             False -> Error(invalid)
           }
       }
-    "k" ->
+    Ascii("k") ->
       // IdentityEscape excludes `k` whenever the pattern has named groups
       // (and \k is never a ClassEscape group reference).
       case strict || ctx.has_named {
         True -> Error(invalid)
         False -> Ok(#(pos + 2, False))
       }
-    "" ->
-      case pos + 1 >= ctx.end {
-        True -> Error(UnterminatedClass(pos))
-        False ->
-          case strict {
-            True -> Error(invalid)
-            False -> {
-              let #(_, w) = codepoint_at(ctx.bytes, pos + 1)
-              Ok(#(pos + 1 + w, False))
-            }
-          }
-      }
-    other ->
+    Ascii(other) ->
       case strict {
         True ->
           case is_syntax_char(other) || other == "/" {
@@ -1139,8 +1272,8 @@ fn skip_v_class(
 ) -> Result(Int, PatternError) {
   // Skip the optional leading negation `^` (a lone `^` here is the negation
   // marker, not an atom — `[^^^]` is negation + the reserved `^^`).
-  let pos2 = case char_at_source(bytes, pos) {
-    "^" -> pos + 1
+  let pos2 = case ascii_at(bytes, pos) {
+    Some("^") -> pos + 1
     _ -> pos
   }
   v_class_loop(bytes, pos2, end, False)
@@ -1152,89 +1285,97 @@ fn v_class_loop(
   end: Int,
   prev_atom: Bool,
 ) -> Result(Int, PatternError) {
-  let nxt = char_at_source(bytes, pos + 1)
-  case pos >= end, char_at_source(bytes, pos) {
+  let nxt = ascii_at(bytes, pos + 1)
+  case pos >= end, ascii_at(bytes, pos) {
     True, _ -> Error(UnterminatedClass(pos))
-    _, "]" -> Ok(pos + 1)
-    _, "[" -> {
+    _, Some("]") -> Ok(pos + 1)
+    _, Some("[") -> {
       use after <- result.try(skip_v_class(bytes, pos + 1, end))
       v_class_loop(bytes, after, end, True)
     }
-    _, "\\" ->
+    _, Some("\\") ->
       case nxt {
         // \p{...} \P{...} \q{...} \u{...} — skip the whole braced payload so
         // its contents aren't misread as class syntax.
-        "p" | "P" | "q" | "u" ->
-          case char_at_source(bytes, pos + 2) {
-            "{" -> {
+        Some("p") | Some("P") | Some("q") | Some("u") ->
+          case ascii_at(bytes, pos + 2) {
+            Some("{") -> {
               use after <- result.try(skip_to_close_brace(bytes, pos + 3, end))
               v_class_loop(bytes, after, end, True)
             }
             _ -> v_class_loop(bytes, pos + 2, end, True)
           }
-        _ -> {
-          let #(_, w) = codepoint_at(bytes, pos + 1)
-          v_class_loop(bytes, pos + 1 + w, end, True)
-        }
+        _ ->
+          v_class_loop(
+            bytes,
+            pos + 1 + advance_width(bytes, pos + 1),
+            end,
+            True,
+          )
       }
-    _, "&" ->
+    _, Some("&") ->
       case nxt {
-        "&" -> {
-          let after2 = char_at_source(bytes, pos + 2)
-          case prev_atom && after2 != "]" && after2 != "&" && pos + 2 < end {
+        Some("&") -> {
+          let after2 = ascii_at(bytes, pos + 2)
+          case
+            prev_atom
+            && after2 != Some("]")
+            && after2 != Some("&")
+            && pos + 2 < end
+          {
             True -> v_class_loop(bytes, pos + 2, end, False)
             False -> Error(InvalidClassSetOperation(pos))
           }
         }
         _ -> v_class_loop(bytes, pos + 1, end, True)
       }
-    _, "-" ->
+    _, Some("-") ->
       case nxt {
-        "-" -> {
-          let after2 = char_at_source(bytes, pos + 2)
-          case prev_atom && after2 != "]" && pos + 2 < end {
+        Some("-") -> {
+          let after2 = ascii_at(bytes, pos + 2)
+          case prev_atom && after2 != Some("]") && pos + 2 < end {
             True -> v_class_loop(bytes, pos + 2, end, False)
             False -> Error(InvalidClassSetOperation(pos))
           }
         }
         _ ->
           // Single dash: only valid as a range separator between operands.
-          case prev_atom && nxt != "]" && pos + 1 < end {
+          case prev_atom && nxt != Some("]") && pos + 1 < end {
             True -> v_class_loop(bytes, pos + 1, end, False)
             False -> Error(InvalidClassCharacter(pos))
           }
       }
-    _, "(" | _, ")" | _, "{" | _, "}" | _, "/" | _, "|" ->
-      Error(InvalidClassCharacter(pos))
-    _, "!"
-    | _, "#"
-    | _, "$"
-    | _, "%"
-    | _, "*"
-    | _, "+"
-    | _, ","
-    | _, "."
-    | _, ":"
-    | _, ";"
-    | _, "<"
-    | _, "="
-    | _, ">"
-    | _, "?"
-    | _, "@"
-    | _, "`"
-    | _, "~"
-    | _, "^"
-    -> {
-      let ch = char_at_source(bytes, pos)
-      case nxt == ch {
+    _, Some("(")
+    | _, Some(")")
+    | _, Some("{")
+    | _, Some("}")
+    | _, Some("/")
+    | _, Some("|")
+    -> Error(InvalidClassCharacter(pos))
+    _, Some("!" as ch)
+    | _, Some("#" as ch)
+    | _, Some("$" as ch)
+    | _, Some("%" as ch)
+    | _, Some("*" as ch)
+    | _, Some("+" as ch)
+    | _, Some("," as ch)
+    | _, Some("." as ch)
+    | _, Some(":" as ch)
+    | _, Some(";" as ch)
+    | _, Some("<" as ch)
+    | _, Some("=" as ch)
+    | _, Some(">" as ch)
+    | _, Some("?" as ch)
+    | _, Some("@" as ch)
+    | _, Some("`" as ch)
+    | _, Some("~" as ch)
+    | _, Some("^" as ch)
+    ->
+      case nxt == Some(ch) {
         True -> Error(ReservedDoublePunctuator(pos))
         False -> v_class_loop(bytes, pos + 1, end, True)
       }
-    }
-    _, _ -> {
-      let #(_, w) = codepoint_at(bytes, pos)
-      v_class_loop(bytes, pos + w, end, True)
-    }
+    _, _ -> v_class_loop(bytes, pos + advance_width(bytes, pos), end, True)
   }
 }
 
@@ -1247,8 +1388,8 @@ fn skip_to_close_brace(
   case pos >= end {
     True -> Error(UnterminatedClass(pos))
     False ->
-      case char_at_source(bytes, pos) {
-        "}" -> Ok(pos + 1)
+      case ascii_at(bytes, pos) {
+        Some("}") -> Ok(pos + 1)
         _ -> skip_to_close_brace(bytes, pos + 1, end)
       }
   }
@@ -1273,14 +1414,14 @@ fn group_name_loop(
   is_first: Bool,
   acc: List(Int),
 ) -> Result(#(String, Int), PatternError) {
-  case pos >= end, char_at_source(bytes, pos) {
+  case pos >= end, ascii_at(bytes, pos) {
     True, _ -> Error(UnterminatedGroupName(pos))
-    _, ">" ->
+    _, Some(">") ->
       case is_first {
         True -> Error(EmptyGroupName(pos))
         False -> Ok(#(codepoints_to_string(list.reverse(acc)), pos + 1))
       }
-    _, "\\" -> {
+    _, Some("\\") -> {
       use #(cp0, next0) <- result.try(decode_name_escape(bytes, pos))
       // Combine a surrogate pair written as two \uXXXX escapes.
       let #(cp, next) = case cp0 >= 0xD800 && cp0 <= 0xDBFF {
@@ -1299,13 +1440,15 @@ fn group_name_loop(
         False -> Error(InvalidGroupName(pos))
       }
     }
-    _, _ -> {
-      let #(cp, width) = codepoint_at(bytes, pos)
-      case lexer.validate_identifier_codepoint(cp, is_first) {
-        True -> group_name_loop(bytes, pos + width, end, False, [cp, ..acc])
-        False -> Error(InvalidGroupName(pos))
+    _, _ ->
+      case codepoint_at(bytes, pos) {
+        Cp(cp, width) ->
+          case lexer.validate_identifier_codepoint(cp, is_first) {
+            True -> group_name_loop(bytes, pos + width, end, False, [cp, ..acc])
+            False -> Error(InvalidGroupName(pos))
+          }
+        Eof -> Error(UnterminatedGroupName(pos))
       }
-    }
   }
 }
 
@@ -1319,44 +1462,25 @@ fn decode_name_escape(
   bytes: BitArray,
   pos: Int,
 ) -> Result(#(Int, Int), PatternError) {
-  case char_at_source(bytes, pos + 1) {
-    "u" ->
-      case char_at_source(bytes, pos + 2) {
-        "{" -> {
-          let after = skip_regex_hex_run(bytes, pos + 3, pos + 100)
-          case char_at_source(bytes, after) {
-            "}" ->
-              case
-                parse_hex_value(byte_slice_source(
-                  bytes,
-                  pos + 3,
-                  after - { pos + 3 },
-                ))
-              {
-                // Reject code points above U+10FFFF here — downstream
-                // identifier checks assume a valid Unicode scalar range.
-                Ok(cp) if cp <= 0x10FFFF -> Ok(#(cp, after + 1))
-                Ok(_) | Error(Nil) -> Error(InvalidGroupName(pos))
-              }
-            _ -> Error(InvalidGroupName(pos))
+  case ascii_at(bytes, pos + 1) {
+    Some("u") ->
+      case ascii_at(bytes, pos + 2) {
+        Some("{") -> {
+          let #(after, value) = hex_run(bytes, pos + 3, pos + 100)
+          case value, ascii_at(bytes, after) {
+            // Reject code points above U+10FFFF here — downstream identifier
+            // checks assume a valid Unicode scalar range.
+            Some(cp), Some("}") if cp <= 0x10FFFF -> Ok(#(cp, after + 1))
+            _, _ -> Error(InvalidGroupName(pos))
           }
         }
         _ -> {
-          // Require exactly four hex digits before parsing: int.base_parse
-          // (Erlang binary_to_integer) accepts a leading sign, so without
-          // this check `\u+041` would decode to 0x41 instead of erroring.
-          let all_hex =
-            is_hex_char(char_at_source(bytes, pos + 2))
-            && is_hex_char(char_at_source(bytes, pos + 3))
-            && is_hex_char(char_at_source(bytes, pos + 4))
-            && is_hex_char(char_at_source(bytes, pos + 5))
-          case all_hex {
-            True ->
-              case parse_hex_value(byte_slice_source(bytes, pos + 2, 4)) {
-                Ok(cp) -> Ok(#(cp, pos + 6))
-                Error(Nil) -> Error(InvalidGroupName(pos))
-              }
-            False -> Error(InvalidGroupName(pos))
+          // Exactly four hex digits: `hex_run` bounded to `pos + 6` cannot
+          // consume more, and `after == pos + 6` rejects any shorter run.
+          let #(after, value) = hex_run(bytes, pos + 2, pos + 6)
+          case value, after == pos + 6 {
+            Some(cp), True -> Ok(#(cp, pos + 6))
+            _, _ -> Error(InvalidGroupName(pos))
           }
         }
       }
@@ -1368,22 +1492,23 @@ fn decode_name_escape(
 /// `(?-i:`. Only i/m/s are allowed; no flag may repeat (including across the
 /// add/remove sets), and the two sets must not both be empty. Returns the
 /// position just after the `:`.
+///
+/// PRECONDITION: the character at `pos` is not `:` — `p_group` handles `(?:`
+/// itself and only falls through to here for other `(?x` heads. So a `:` at
+/// `pos2` implies at least one add flag was consumed, and `(?:` can never be
+/// mistaken for an empty modifier set.
 fn p_modifiers(
   bytes: BitArray,
   pos: Int,
   end: Int,
 ) -> Result(Int, PatternError) {
   use #(pos2, add) <- result.try(p_mod_flags(bytes, pos, end, []))
-  case char_at_source(bytes, pos2) {
-    ":" ->
-      case add {
-        [] -> Error(InvalidGroup(pos2))
-        _ -> Ok(pos2 + 1)
-      }
-    "-" -> {
+  case ascii_at(bytes, pos2) {
+    Some(":") -> Ok(pos2 + 1)
+    Some("-") -> {
       use #(pos3, remove) <- result.try(p_mod_flags(bytes, pos2 + 1, end, []))
-      use Nil <- result.try(case char_at_source(bytes, pos3) {
-        ":" -> Ok(Nil)
+      use Nil <- result.try(case ascii_at(bytes, pos3) {
+        Some(":") -> Ok(Nil)
         _ -> Error(InvalidModifierFlags(pos3))
       })
       use Nil <- result.try(case add, remove {
@@ -1408,16 +1533,22 @@ fn p_mod_flags(
   case pos >= end {
     True -> Ok(#(pos, seen))
     False ->
-      case char_at_source(bytes, pos) {
-        "i" | "m" | "s" -> {
-          let f = char_at_source(bytes, pos)
+      case ascii_at(bytes, pos) {
+        Some("i" as f) | Some("m" as f) | Some("s" as f) ->
           case list.contains(seen, f) {
             True -> Error(RepeatedModifierFlag(pos))
             False -> p_mod_flags(bytes, pos + 1, end, [f, ..seen])
           }
-        }
         _ -> Ok(#(pos, seen))
       }
+  }
+}
+
+/// True when the byte at `pos` is an ASCII letter (a-z A-Z).
+fn is_letter_at(bytes: BitArray, pos: Int) -> Bool {
+  case ascii_at(bytes, pos) {
+    Some(ch) -> is_ascii_letter(ch)
+    None -> False
   }
 }
 
@@ -1428,13 +1559,6 @@ fn is_ascii_letter(ch: String) -> Bool {
       let c = string.utf_codepoint_to_int(cp)
       { c >= 0x41 && c <= 0x5A } || { c >= 0x61 && c <= 0x7A }
     }
-    _ -> False
-  }
-}
-
-fn is_digit_char(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
     _ -> False
   }
 }
@@ -1457,44 +1581,6 @@ fn is_syntax_char(ch: String) -> Bool {
     | "}"
     | "|" -> True
     _ -> False
-  }
-}
-
-/// Skip a run of decimal digits, returning the position after the last one.
-fn skip_decimal_run(bytes: BitArray, pos: Int, end: Int) -> Int {
-  case pos < end && is_digit_char(char_at_source(bytes, pos)) {
-    True -> skip_decimal_run(bytes, pos + 1, end)
-    False -> pos
-  }
-}
-
-/// Decode the UTF-8 code point at `pos`, returning #(codepoint, byte_width).
-/// Returns #(-1, 1) at end of input.
-fn codepoint_at(bytes: BitArray, pos: Int) -> #(Int, Int) {
-  case bit_array.slice(bytes, pos, 1) {
-    Ok(<<b>>) if b < 0x80 -> #(b, 1)
-    Ok(<<b>>) -> {
-      let w = case b {
-        _ if b >= 0xF0 -> 4
-        _ if b >= 0xE0 -> 3
-        _ if b >= 0xC0 -> 2
-        _ -> 1
-      }
-      case bit_array.slice(bytes, pos, w) {
-        Ok(chunk) ->
-          case bit_array.to_string(chunk) {
-            Ok(s) ->
-              case string.to_utf_codepoints(s) {
-                [c, ..] -> #(string.utf_codepoint_to_int(c), w)
-                [] -> #(b, 1)
-              }
-            Error(_) -> #(b, 1)
-          }
-        Error(_) -> #(b, 1)
-      }
-    }
-    Ok(_) -> #(-1, 1)
-    Error(_) -> #(-1, 1)
   }
 }
 
@@ -1550,9 +1636,15 @@ fn scan_regex_flags(
   pos: Int,
   seen: List(String),
 ) -> Result(#(Int, List(String)), PatternError) {
-  let ch = char_at_source(bytes, pos)
-  case ch {
-    "g" | "i" | "m" | "s" | "u" | "v" | "y" | "d" ->
+  case ascii_at(bytes, pos) {
+    Some("g" as ch)
+    | Some("i" as ch)
+    | Some("m" as ch)
+    | Some("s" as ch)
+    | Some("u" as ch)
+    | Some("v" as ch)
+    | Some("y" as ch)
+    | Some("d" as ch) ->
       case list.contains(seen, ch) {
         True -> Error(DuplicateFlag(pos, ch))
         False -> scan_regex_flags(bytes, pos + 1, [ch, ..seen])
@@ -1600,13 +1692,13 @@ fn is_property_char(ch: String) -> Bool {
 
 /// Skip a run of property name/value characters.
 fn skip_property_chars(bytes: BitArray, pos: Int, end: Int) -> Int {
-  case pos >= end {
-    True -> pos
-    False ->
-      case is_property_char(char_at_source(bytes, pos)) {
-        True -> skip_property_chars(bytes, pos + 1, end)
-        False -> pos
-      }
+  let is_property_at = case ascii_at(bytes, pos) {
+    Some(ch) -> is_property_char(ch)
+    None -> False
+  }
+  case pos < end && is_property_at {
+    True -> skip_property_chars(bytes, pos + 1, end)
+    False -> pos
   }
 }
 
@@ -1621,12 +1713,12 @@ fn property_escape_length(
   allow_strings allow_strings: Bool,
 ) -> Result(Int, PatternError) {
   let invalid = InvalidPropertyName(pos)
-  case char_at_source(bytes, pos + 2) {
-    "{" -> {
+  case ascii_at(bytes, pos + 2) {
+    Some("{") -> {
       let name_end = skip_property_chars(bytes, pos + 3, end)
       let name = byte_slice_source(bytes, pos + 3, name_end - pos - 3)
-      case char_at_source(bytes, name_end) {
-        "}" ->
+      case ascii_at(bytes, name_end) {
+        Some("}") ->
           case classify_lone_property(name) {
             PropValid -> Ok(name_end + 1 - pos)
             PropString ->
@@ -1636,12 +1728,12 @@ fn property_escape_length(
               }
             PropInvalid -> Error(invalid)
           }
-        "=" -> {
+        Some("=") -> {
           let value_end = skip_property_chars(bytes, name_end + 1, end)
           let value =
             byte_slice_source(bytes, name_end + 1, value_end - name_end - 1)
-          case char_at_source(bytes, value_end) {
-            "}" ->
+          case ascii_at(bytes, value_end) {
+            Some("}") ->
               case classify_pair_property(name, value) {
                 PropValid -> Ok(value_end + 1 - pos)
                 PropString | PropInvalid -> Error(invalid)
@@ -1683,13 +1775,13 @@ fn validate_vmode_loop(
   case pos >= end {
     True -> Ok(Nil)
     False ->
-      case char_at_source(bytes, pos) {
-        "\\" ->
-          case char_at_source(bytes, pos + 1) {
-            "p" | "P" -> {
+      case ascii_at(bytes, pos) {
+        Some("\\") ->
+          case ascii_at(bytes, pos + 1) {
+            Some("p") | Some("P") -> {
               let in_negated_class = list.contains(class_negations, True)
               let allow_strings =
-                char_at_source(bytes, pos + 1) == "p" && !in_negated_class
+                ascii_at(bytes, pos + 1) == Some("p") && !in_negated_class
               use len <- result.try(property_escape_length(
                 bytes,
                 pos,
@@ -1700,9 +1792,9 @@ fn validate_vmode_loop(
             }
             _ -> validate_vmode_loop(bytes, pos + 2, end, class_negations)
           }
-        "[" ->
-          case char_at_source(bytes, pos + 1) {
-            "^" ->
+        Some("[") ->
+          case ascii_at(bytes, pos + 1) {
+            Some("^") ->
               validate_vmode_loop(bytes, pos + 2, end, [True, ..class_negations])
             _ ->
               validate_vmode_loop(bytes, pos + 1, end, [
@@ -1710,7 +1802,7 @@ fn validate_vmode_loop(
                 ..class_negations
               ])
           }
-        "]" ->
+        Some("]") ->
           case class_negations {
             [_, ..rest] -> validate_vmode_loop(bytes, pos + 1, end, rest)
             [] -> validate_vmode_loop(bytes, pos + 1, end, [])
@@ -1718,9 +1810,4 @@ fn validate_vmode_loop(
         _ -> validate_vmode_loop(bytes, pos + 1, end, class_negations)
       }
   }
-}
-
-/// Parse a hex string into an integer value.
-fn parse_hex_value(hex_str: String) -> Result(Int, Nil) {
-  int.base_parse(hex_str, 16)
 }
