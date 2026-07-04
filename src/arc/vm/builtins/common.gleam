@@ -179,17 +179,16 @@ fn init_function_intrinsic(
     )
   // §27.5.1.1 / §27.6.1.1: Generator.prototype.constructor is the fn_proto
   // object itself ({ W:F, E:F, C:T }). Nothing to backpatch for %AsyncFunction%.
-  let h =
-    generator_proto
-    |> option.map(fn(gp) {
+  let h = case generator_proto {
+    Some(gp) ->
       add_named_property(
         h,
         gp,
         "constructor",
         value.data(JsObject(fn_proto_ref)) |> value.configurable,
       )
-    })
-    |> option.unwrap(h)
+    None -> h
+  }
   #(h, fn_proto_ref)
 }
 
