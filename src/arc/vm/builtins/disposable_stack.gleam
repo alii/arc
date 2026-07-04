@@ -16,16 +16,18 @@ import arc/vm/internal/elements
 import arc/vm/ops/object
 import arc/vm/state.{type State, State}
 import arc/vm/value.{
-  type DisposableStackNativeFn, type DisposeResource, type JsValue, type Ref,
-  AsyncDisposableStackConstructor, AsyncDisposableStackDisposedGetter,
-  AsyncDisposableStackPrototypeAdopt, AsyncDisposableStackPrototypeDefer,
-  AsyncDisposableStackPrototypeDisposeAsync, AsyncDisposableStackPrototypeMove,
-  AsyncDisposableStackPrototypeUse, AsyncDisposeContinue, AsyncFallbackDispose,
-  Dispatch, DisposableStackConstructor, DisposableStackDisposedGetter,
+  type DisposableStackNativeFn, type DisposableState, type DisposeResource,
+  type JsValue, type Ref, AsyncDisposableStackConstructor,
+  AsyncDisposableStackDisposedGetter, AsyncDisposableStackPrototypeAdopt,
+  AsyncDisposableStackPrototypeDefer, AsyncDisposableStackPrototypeDisposeAsync,
+  AsyncDisposableStackPrototypeMove, AsyncDisposableStackPrototypeUse,
+  AsyncDisposeContinue, AsyncFallbackDispose, Dispatch,
+  DisposableStackConstructor, DisposableStackDisposedGetter,
   DisposableStackNative, DisposableStackObject, DisposableStackPrototypeAdopt,
   DisposableStackPrototypeDefer, DisposableStackPrototypeDispose,
   DisposableStackPrototypeMove, DisposableStackPrototypeUse, DisposeCallback,
-  JsBool, JsNull, JsObject, JsUndefined, NullDispose, ObjectSlot, SyncDispose,
+  Disposed, JsBool, JsNull, JsObject, JsUndefined, NullDispose, ObjectSlot,
+  Pending, SyncDispose,
 }
 import gleam/dict
 import gleam/list
@@ -260,50 +262,18 @@ pub fn make_using_disposer(
   case val {
     // CreateDisposableResource step 1.a: null/undefined → method undefined.
     JsUndefined | JsNull -> #(state, Ok(JsUndefined))
-    JsObject(_) ->
-      case is_async {
-        False -> {
-          // GetDisposeMethod(V, sync-dispose) = GetMethod(V, @@dispose) —
-          // captured ONCE here, not again at dispose time.
-          use method, state <- try_get_method(state, val, value.symbol_dispose)
-          case method {
-            JsUndefined ->
-              state.type_error(
-                state,
-                "Object does not have a [Symbol.dispose] method",
-              )
-            _ -> alloc_using_disposer(state, method, val, discard: False)
-          }
-        }
-        True -> {
-          // GetDisposeMethod(V, async-dispose): @@asyncDispose first, then
-          // fall back to a result-discarding wrapper around @@dispose.
-          use method, state <- try_get_method(
-            state,
-            val,
-            value.symbol_async_dispose,
-          )
-          case method {
-            JsUndefined -> {
-              use sync_method, state <- try_get_method(
-                state,
-                val,
-                value.symbol_dispose,
-              )
-              case sync_method {
-                JsUndefined ->
-                  state.type_error(
-                    state,
-                    "Object does not have a [Symbol.asyncDispose] or [Symbol.dispose] method",
-                  )
-                _ ->
-                  alloc_using_disposer(state, sync_method, val, discard: True)
-              }
-            }
-            _ -> alloc_using_disposer(state, method, val, discard: False)
-          }
-        }
+    JsObject(_) -> {
+      // GetDisposeMethod(V, hint) — captured ONCE here, not again at dispose
+      // time. The async hint's @@dispose fallback wraps the method in a
+      // result-discarding closure (GetDisposeMethod step 1.b.ii).
+      use dispose_method, state <- get_dispose_method(state, val, is_async:)
+      case dispose_method {
+        DirectDispose(method) ->
+          alloc_using_disposer(state, method, val, discard: False)
+        SyncFallbackDispose(method) ->
+          alloc_using_disposer(state, method, val, discard: True)
       }
+    }
     _ ->
       state.type_error(
         state,
@@ -357,22 +327,21 @@ fn construct(
   use proto_ref, state <- helpers.require_new_target(state, name, proto)
   // Steps 3-4: pending state, empty resource stack
   let #(heap, ref) =
-    alloc_stack(state.heap, proto_ref, async:, disposed: False, resources: [])
+    alloc_stack(state.heap, proto_ref, async:, disposable_state: Pending([]))
   #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
-/// Allocate a DisposableStackObject with the given brand/state/resources.
+/// Allocate a DisposableStackObject with the given brand and disposable state.
 fn alloc_stack(
   h: state.Heap(host),
   proto: Ref,
   async async: Bool,
-  disposed disposed: Bool,
-  resources resources: List(DisposeResource),
+  disposable_state disposable_state: DisposableState,
 ) -> #(state.Heap(host), Ref) {
   heap.alloc(
     h,
     ObjectSlot(
-      kind: DisposableStackObject(async:, disposed:, resources:),
+      kind: DisposableStackObject(async:, state: disposable_state),
       properties: dict.new(),
       elements: elements.new(),
       prototype: Some(proto),
@@ -390,18 +359,18 @@ fn require_stack(
   state: State(host),
   async: Bool,
   method: String,
-  cont: fn(Ref, Bool, List(DisposeResource), State(host)) ->
+  cont: fn(Ref, DisposableState, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
-          kind: DisposableStackObject(async: a, disposed:, resources:),
+          kind: DisposableStackObject(async: a, state: disposable_state),
           ..,
         ))
           if a == async
-        -> cont(ref, disposed, resources, state)
+        -> cont(ref, disposable_state, state)
         _ -> incompatible(state, async, method)
       }
     _ -> incompatible(state, async, method)
@@ -427,8 +396,9 @@ fn incompatible(
   )
 }
 
-/// Write back a stack's disposable state / [[DisposableResourceStack]].
-/// The brand (`async`) never changes after allocation.
+/// Write back a stack's disposable state (which carries the
+/// [[DisposableResourceStack]]). The brand (`async`) never changes after
+/// allocation, and writing `Disposed` structurally drops the resources.
 ///
 /// Every caller reaches here only after `require_stack` (RequireInternalSlot)
 /// has proven `ref` is a live DisposableStackObject, so any other slot shape
@@ -436,15 +406,14 @@ fn incompatible(
 fn write_stack(
   state: State(host),
   ref: Ref,
-  disposed disposed: Bool,
-  resources resources: List(DisposeResource),
+  disposable_state: DisposableState,
 ) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
       let assert ObjectSlot(kind: DisposableStackObject(async:, ..), ..) = slot
       ObjectSlot(
         ..slot,
-        kind: DisposableStackObject(async:, disposed:, resources:),
+        kind: DisposableStackObject(async:, state: disposable_state),
       )
     })
   State(..state, heap:)
@@ -460,13 +429,16 @@ fn disposed_getter(
   state: State(host),
   async async: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _ref, disposed, _resources, state <- require_stack(
+  use _ref, disposable_state, state <- require_stack(
     this,
     state,
     async,
     "disposed",
   )
-  #(state, Ok(JsBool(disposed)))
+  case disposable_state {
+    Disposed -> #(state, Ok(JsBool(True)))
+    Pending(_) -> #(state, Ok(JsBool(False)))
+  }
 }
 
 /// §12.3.3.3 DisposableStack.prototype.dispose ( )
@@ -481,19 +453,19 @@ fn dispose(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, disposed, resources, state <- require_stack(
+  use ref, disposable_state, state <- require_stack(
     this,
     state,
     False,
     "dispose",
   )
-  case disposed {
+  case disposable_state {
     // Step 3: already disposed — no-op
-    True -> #(state, Ok(JsUndefined))
-    False -> {
-      // Step 4: mark disposed and drop the resource stack BEFORE running
-      // disposers (re-entrant dispose() must not re-invoke them).
-      let state = write_stack(state, ref, disposed: True, resources: [])
+    Disposed -> #(state, Ok(JsUndefined))
+    Pending(resources:) -> {
+      // Step 4: mark disposed — which drops the resource stack — BEFORE
+      // running disposers (re-entrant dispose() must not re-invoke them).
+      let state = write_stack(state, ref, Disposed)
       // Step 5: DisposeResources — resources is newest-first, which is the
       // spec's reverse list order.
       dispose_resources(state, resources, Ok(JsUndefined))
@@ -570,13 +542,8 @@ fn use_resource(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, disposed, resources, state <- require_stack(
-    this,
-    state,
-    False,
-    "use",
-  )
-  use Nil, state <- try_not_disposed(state, disposed)
+  use ref, disposable_state, state <- require_stack(this, state, False, "use")
+  use resources, state <- try_pending(state, disposable_state)
   let val = helpers.first_arg_or_undefined(args)
   case val {
     // AddDisposableResource step 1.a: null/undefined with sync-dispose and
@@ -586,24 +553,18 @@ fn use_resource(
     JsObject(_) -> {
       // CreateDisposableResource step 1.b.ii: GetDisposeMethod(V, sync-dispose)
       // = GetMethod(V, @@dispose) — read ONCE here, not again at dispose time.
-      use method, state <- try_get_method(state, val, value.symbol_dispose)
-      case method {
-        // CreateDisposableResource step 1.b.iii: method undefined → TypeError
-        JsUndefined ->
-          state.type_error(
-            state,
-            "Object does not have a [Symbol.dispose] method",
-          )
-        _ -> {
-          let resource = SyncDispose(value: val, method:)
-          let state =
-            write_stack(state, ref, disposed: False, resources: [
-              resource,
-              ..resources
-            ])
-          #(state, Ok(val))
-        }
+      // The sync hint never yields the async fallback variant.
+      use dispose_method, state <- get_dispose_method(
+        state,
+        val,
+        is_async: False,
+      )
+      let resource = case dispose_method {
+        DirectDispose(method) | SyncFallbackDispose(method) ->
+          SyncDispose(value: val, method:)
       }
+      let state = write_stack(state, ref, Pending([resource, ..resources]))
+      #(state, Ok(val))
     }
     _ ->
       state.type_error(
@@ -624,66 +585,33 @@ fn use_resource_async(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, disposed, resources, state <- require_stack(this, state, True, "use")
-  use Nil, state <- try_not_disposed(state, disposed)
+  use ref, disposable_state, state <- require_stack(this, state, True, "use")
+  use resources, state <- try_pending(state, disposable_state)
   let val = helpers.first_arg_or_undefined(args)
   case val {
     // CreateDisposableResource step 1.a: V null/undefined with async-dispose
     // → V = undefined, method = undefined. DisposeResources will still
     // perform one Await(undefined) for it (needsAwait).
     JsUndefined | JsNull -> {
-      let state =
-        write_stack(state, ref, disposed: False, resources: [
-          NullDispose,
-          ..resources
-        ])
+      let state = write_stack(state, ref, Pending([NullDispose, ..resources]))
       #(state, Ok(val))
     }
     JsObject(_) -> {
       // GetDisposeMethod(V, async-dispose): GetMethod(V, @@asyncDispose),
       // falling back to a closure around GetMethod(V, @@dispose).
-      use method, state <- try_get_method(
+      use dispose_method, state <- get_dispose_method(
         state,
         val,
-        value.symbol_async_dispose,
+        is_async: True,
       )
-      case method {
-        JsUndefined -> {
-          use sync_method, state <- try_get_method(
-            state,
-            val,
-            value.symbol_dispose,
-          )
-          case sync_method {
-            JsUndefined ->
-              state.type_error(
-                state,
-                "Object does not have a [Symbol.asyncDispose] or [Symbol.dispose] method",
-              )
-            _ -> {
-              // GetDisposeMethod step 1.b.ii: wrapper closure — call the sync
-              // method, discard its result, await undefined.
-              let resource =
-                AsyncFallbackDispose(value: val, method: sync_method)
-              let state =
-                write_stack(state, ref, disposed: False, resources: [
-                  resource,
-                  ..resources
-                ])
-              #(state, Ok(val))
-            }
-          }
-        }
-        _ -> {
-          let resource = SyncDispose(value: val, method:)
-          let state =
-            write_stack(state, ref, disposed: False, resources: [
-              resource,
-              ..resources
-            ])
-          #(state, Ok(val))
-        }
+      let resource = case dispose_method {
+        DirectDispose(method) -> SyncDispose(value: val, method:)
+        // GetDisposeMethod step 1.b.ii: wrapper closure — call the sync
+        // method, discard its result, await undefined.
+        SyncFallbackDispose(method) -> AsyncFallbackDispose(value: val, method:)
       }
+      let state = write_stack(state, ref, Pending([resource, ..resources]))
+      #(state, Ok(val))
     }
     _ ->
       state.type_error(
@@ -717,6 +645,77 @@ fn try_get_method(
   }
 }
 
+/// The outcome of GetDisposeMethod(V, hint) — which method was found and
+/// therefore how it must be invoked at dispose time.
+pub type DisposeMethod {
+  /// The hint's own method: @@dispose for sync-dispose, @@asyncDispose for
+  /// async-dispose. Its result is used as-is (awaited on an async stack).
+  DirectDispose(method: JsValue)
+  /// async-dispose falling back to @@dispose (GetDisposeMethod step 1.b.ii):
+  /// the wrapper closure calls the sync method, DISCARDS its result and
+  /// awaits undefined instead. Only ever produced for the async hint.
+  SyncFallbackDispose(method: JsValue)
+}
+
+/// GetDisposeMethod ( V, hint ) — proposal §3.1.2. For sync-dispose:
+/// GetMethod(V, @@dispose). For async-dispose: GetMethod(V, @@asyncDispose),
+/// falling back to a result-discarding wrapper around GetMethod(V, @@dispose).
+/// A missing method is a TypeError. V is always an object here.
+fn get_dispose_method(
+  state: State(host),
+  val: JsValue,
+  is_async is_async: Bool,
+  cont cont: fn(DisposeMethod, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case is_async {
+    False -> {
+      use method, state <- try_get_method(state, val, value.symbol_dispose)
+      case method {
+        JsUndefined -> no_dispose_method(state, is_async)
+        _ -> cont(DirectDispose(method), state)
+      }
+    }
+    True -> {
+      use method, state <- try_get_method(
+        state,
+        val,
+        value.symbol_async_dispose,
+      )
+      case method {
+        JsUndefined -> {
+          use sync_method, state <- try_get_method(
+            state,
+            val,
+            value.symbol_dispose,
+          )
+          case sync_method {
+            JsUndefined -> no_dispose_method(state, is_async)
+            _ -> cont(SyncFallbackDispose(sync_method), state)
+          }
+        }
+        _ -> cont(DirectDispose(method), state)
+      }
+    }
+  }
+}
+
+/// GetDisposeMethod's "no method for this hint" TypeError.
+fn no_dispose_method(
+  state: State(host),
+  is_async: Bool,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case is_async {
+    True ->
+      state.type_error(
+        state,
+        "Object does not have a [Symbol.asyncDispose] or [Symbol.dispose] method",
+      )
+    False ->
+      state.type_error(state, "Object does not have a [Symbol.dispose] method")
+  }
+}
+
 /// §12.3.3.1 / §12.4.3.1 (Async)DisposableStack.prototype.adopt ( value, onDispose )
 ///
 ///   1. Let stack be the this value.
@@ -732,13 +731,8 @@ fn adopt(
   state: State(host),
   async async: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, disposed, resources, state <- require_stack(
-    this,
-    state,
-    async,
-    "adopt",
-  )
-  use Nil, state <- try_not_disposed(state, disposed)
+  use ref, disposable_state, state <- require_stack(this, state, async, "adopt")
+  use resources, state <- try_pending(state, disposable_state)
   let val = helpers.first_arg_or_undefined(args)
   let on_dispose = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   case helpers.is_callable(state.heap, on_dispose) {
@@ -747,11 +741,7 @@ fn adopt(
     True -> {
       // Steps 5-7: stored as DisposeCallback — Call(onDispose, undefined, « value »)
       let resource = DisposeCallback(callback: on_dispose, args: [val])
-      let state =
-        write_stack(state, ref, disposed: False, resources: [
-          resource,
-          ..resources
-        ])
+      let state = write_stack(state, ref, Pending([resource, ..resources]))
       // Step 8
       #(state, Ok(val))
     }
@@ -768,13 +758,8 @@ fn defer(
   state: State(host),
   async async: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, disposed, resources, state <- require_stack(
-    this,
-    state,
-    async,
-    "defer",
-  )
-  use Nil, state <- try_not_disposed(state, disposed)
+  use ref, disposable_state, state <- require_stack(this, state, async, "defer")
+  use resources, state <- try_pending(state, disposable_state)
   let on_dispose = helpers.first_arg_or_undefined(args)
   case helpers.is_callable(state.heap, on_dispose) {
     // Step 4: onDispose must be callable
@@ -782,11 +767,7 @@ fn defer(
     True -> {
       // Step 5: Call(onDispose, undefined) with no arguments at dispose time
       let resource = DisposeCallback(callback: on_dispose, args: [])
-      let state =
-        write_stack(state, ref, disposed: False, resources: [
-          resource,
-          ..resources
-        ])
+      let state = write_stack(state, ref, Pending([resource, ..resources]))
       // Step 6
       #(state, Ok(JsUndefined))
     }
@@ -812,32 +793,29 @@ fn move(
   state: State(host),
   async async: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, disposed, resources, state <- require_stack(
-    this,
-    state,
-    async,
-    "move",
-  )
-  use Nil, state <- try_not_disposed(state, disposed)
+  use ref, disposable_state, state <- require_stack(this, state, async, "move")
+  use resources, state <- try_pending(state, disposable_state)
   // Steps 4-6: new pending stack takes over the resources
   let #(heap, new_ref) =
-    alloc_stack(state.heap, proto, async:, disposed: False, resources:)
+    alloc_stack(state.heap, proto, async:, disposable_state: Pending(resources))
   let state = State(..state, heap:)
-  // Steps 7-8: original becomes disposed with an empty capability
-  let state = write_stack(state, ref, disposed: True, resources: [])
+  // Steps 7-8: original becomes disposed — Disposed carries no resources, so
+  // its capability is emptied by construction.
+  let state = write_stack(state, ref, Disposed)
   #(state, Ok(JsObject(new_ref)))
 }
 
 /// Step 3 of use/adopt/defer/move: disposed stacks reject mutation with a
-/// ReferenceError.
-fn try_not_disposed(
+/// ReferenceError; a pending stack yields its resource stack.
+fn try_pending(
   state: State(host),
-  disposed: Bool,
-  cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+  disposable_state: DisposableState,
+  cont: fn(List(DisposeResource), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case disposed {
-    True -> state.reference_error(state, "DisposableStack already disposed")
-    False -> cont(Nil, state)
+  case disposable_state {
+    Disposed -> state.reference_error(state, "DisposableStack already disposed")
+    Pending(resources:) -> cont(resources, state)
   }
 }
 
@@ -871,9 +849,9 @@ fn dispose_async(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(
-          kind: DisposableStackObject(async: True, disposed:, resources:),
+          kind: DisposableStackObject(async: True, state: disposable_state),
           ..,
-        )) -> Some(#(ref, disposed, resources))
+        )) -> Some(#(ref, disposable_state))
         _ -> None
       }
     _ -> None
@@ -890,13 +868,14 @@ fn dispose_async(
       #(state, Ok(promise))
     }
     // Step 4: already disposed → resolve with undefined
-    Some(#(_ref, True, _resources)) -> {
+    Some(#(_ref, Disposed)) -> {
       let state = settle_capability(state, cap.resolve, JsUndefined)
       #(state, Ok(promise))
     }
-    Some(#(ref, False, resources)) -> {
-      // Step 5: mark disposed and drop the stack before running disposers
-      let state = write_stack(state, ref, disposed: True, resources: [])
+    Some(#(ref, Pending(resources:))) -> {
+      // Step 5: mark disposed — which drops the resource stack — before
+      // running disposers
+      let state = write_stack(state, ref, Disposed)
       // Step 6: async DisposeResources loop
       let state =
         async_dispose_loop(
