@@ -74,27 +74,24 @@ pub fn assign_non_hole_indices(
 /// slots stay unset). forEach/map correctly skip these per §23.1.3.
 pub fn grow_array_length(h: Heap(host), ref: Ref) -> Heap(host) {
   use slot <- heap.update(h, ref)
-  case slot {
-    ObjectSlot(kind: ArrayObject(length:), ..) ->
-      ObjectSlot(..slot, kind: ArrayObject(length + 1))
-    _ -> slot
-  }
+  let assert ObjectSlot(kind: ArrayObject(length:), ..) = slot
+    as "array op target is not an ArrayObject"
+  ObjectSlot(..slot, kind: ArrayObject(length + 1))
 }
 
 /// Append one value to the end of an array (ArrayPush opcode helper).
 /// Reads current length, sets element at that index, increments length.
-/// Non-array refs are a no-op — shouldn't happen for compiler-emitted literals.
+/// The ref always names a compiler-emitted array literal, so a non-array slot
+/// is a wiring bug — crash rather than silently dropping the element.
 pub fn push_onto_array(h: Heap(host), ref: Ref, val: JsValue) -> Heap(host) {
   use slot <- heap.update(h, ref)
-  case slot {
-    ObjectSlot(kind: ArrayObject(length:), elements:, ..) ->
-      ObjectSlot(
-        ..slot,
-        kind: ArrayObject(length + 1),
-        elements: elements.set(elements, length, val),
-      )
-    _ -> slot
-  }
+  let assert ObjectSlot(kind: ArrayObject(length:), elements:, ..) = slot
+    as "array op target is not an ArrayObject"
+  ObjectSlot(
+    ..slot,
+    kind: ArrayObject(length + 1),
+    elements: elements.set(elements, length, val),
+  )
 }
 
 /// Batch-append to target array with ONE heap read + ONE heap write for
@@ -244,7 +241,7 @@ fn shape_iter_values(
   }
 }
 
-/// Latch an Array Iterator as exhausted (index -1) after a full drain —
+/// Latch an Array Iterator as exhausted (`cursor: None`) after a full drain —
 /// further .next() calls answer done, matching the spec's
 /// [[IteratedObject]] = undefined "already returned" state.
 fn latch_array_iter_done(h: Heap(host), iter_ref: Ref) -> Heap(host) {
@@ -257,7 +254,7 @@ fn latch_array_iter_done(h: Heap(host), iter_ref: Ref) -> Heap(host) {
         iter_ref,
         ObjectSlot(
           ..slot,
-          kind: value.ArrayIteratorObject(source:, index: -1, iter_kind:),
+          kind: value.ArrayIteratorObject(source:, cursor: None, iter_kind:),
         ),
       )
     _ -> h
@@ -383,7 +380,7 @@ pub fn spread_into_array(
               )
           }
         Some(ObjectSlot(
-          kind: value.ArrayIteratorObject(source:, index:, iter_kind:),
+          kind: value.ArrayIteratorObject(source:, cursor:, iter_kind:),
           ..,
         )) -> {
           // Guard (both reads are pure heap walks, no getter runs):
@@ -412,7 +409,7 @@ pub fn spread_into_array(
                 src_ref,
                 target_ref,
                 source,
-                index,
+                cursor,
                 iter_kind,
               )
           }
@@ -709,7 +706,7 @@ fn spread_array_iterator(
   src_ref: Ref,
   target_ref: Ref,
   source: Ref,
-  index: Int,
+  cursor: option.Option(Int),
   iter_kind: value.ArrayIterKind,
 ) -> Result(State(host), StepExit(host)) {
   case heap.read(state.heap, source) {
@@ -730,10 +727,10 @@ fn spread_array_iterator(
       {
         Error(msg) -> state.throw_type_error(state, msg)
         Ok(len) -> {
-          // index < 0 is the exhaustion latch — nothing to drain.
-          let values = case index < 0 {
-            True -> []
-            False ->
+          // `cursor: None` is the exhaustion latch — nothing to drain.
+          let values = case cursor {
+            None -> []
+            Some(index) ->
               typed_array_values_range(
                 state.heap,
                 buffer,
@@ -750,7 +747,7 @@ fn spread_array_iterator(
               state.heap,
               state.builtins.array.prototype,
               iter_kind,
-              int.max(index, 0),
+              option.unwrap(cursor, 0),
               values,
             )
           let heap = append_list_to_array(heap, target_ref, values)
@@ -771,12 +768,12 @@ fn spread_array_iterator(
         None -> spread_via_iterator(state, JsObject(src_ref), target_ref)
         // Drain remaining elements from the iterator's current position.
         Some(#(length, elems)) -> {
-          let from = int.max(index, 0)
-          let heap = case iter_kind, index < 0 {
-            _, True -> state.heap
-            value.ArrayIterValues, False ->
+          let from = option.unwrap(cursor, 0)
+          let heap = case iter_kind, cursor {
+            _, None -> state.heap
+            value.ArrayIterValues, Some(_) ->
               append_range_to_array(state.heap, target_ref, elems, from, length)
-            _, False -> {
+            _, Some(_) -> {
               let values = case from >= length {
                 True -> []
                 False ->
