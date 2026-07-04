@@ -15,9 +15,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
-import arc/vm/internal/typed_array_ffi.{
-  splice_clamped, ta_fill_region, ta_zeroed,
-}
+import arc/vm/internal/typed_array_ffi.{fill_clamped, splice_clamped, ta_zeroed}
 import arc/vm/js_string
 import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
@@ -257,7 +255,7 @@ fn init_ctor(
   function_proto: Ref,
   kind: TypedArrayKind,
 ) -> #(Heap(host), BuiltinType) {
-  let size = value.typed_array_element_size(kind)
+  let size = typed_array_ffi.elem_size(kind)
   let size_prop = #("BYTES_PER_ELEMENT", value.data(value.from_int(size)))
   let #(h, bt) =
     common.init_type(
@@ -370,14 +368,18 @@ pub fn dispatch(
     TypedArrayPrototypeForEach -> proto_for_each(this, args, state)
     TypedArrayPrototypeMap -> proto_map(this, args, state)
     TypedArrayPrototypeFilter -> proto_filter(this, args, state)
-    TypedArrayPrototypeFind -> proto_find(this, args, state, 1, FindValue)
-    TypedArrayPrototypeFindIndex -> proto_find(this, args, state, 1, FindIdx)
-    TypedArrayPrototypeFindLast -> proto_find(this, args, state, -1, FindValue)
+    TypedArrayPrototypeFind ->
+      proto_find(this, args, state, Ascending, FindValue)
+    TypedArrayPrototypeFindIndex ->
+      proto_find(this, args, state, Ascending, FindIdx)
+    TypedArrayPrototypeFindLast ->
+      proto_find(this, args, state, Descending, FindValue)
     TypedArrayPrototypeFindLastIndex ->
-      proto_find(this, args, state, -1, FindIdx)
+      proto_find(this, args, state, Descending, FindIdx)
     TypedArrayPrototypeLastIndexOf -> proto_last_index_of(this, args, state)
-    TypedArrayPrototypeReduce -> proto_reduce(this, args, state, 1)
-    TypedArrayPrototypeReduceRight -> proto_reduce(this, args, state, -1)
+    TypedArrayPrototypeReduce -> proto_reduce(this, args, state, Ascending)
+    TypedArrayPrototypeReduceRight ->
+      proto_reduce(this, args, state, Descending)
     TypedArrayPrototypeReverse -> proto_reverse(this, state)
     TypedArrayPrototypeToReversed -> proto_to_reversed(this, state)
     TypedArrayPrototypeSort -> proto_sort(this, args, state)
@@ -442,9 +444,9 @@ fn ta_create_with_args(
       // Step 2: ValidateTypedArray(newTypedArray) — a constructor that
       // returned a view over a detached buffer (or one that no longer
       // fits its resizable buffer) throws TypeError.
-      case view_witness_error(state.heap, view) {
-        Some(err) -> Error(state.type_error_value(state, witness_message(err)))
-        None -> {
+      case view_witness_bytes(state.heap, view) {
+        Error(err) -> Error(state.type_error_value(state, witness_message(err)))
+        Ok(_bytes) -> {
           let l =
             object.typed_array_view_length(
               state.heap,
@@ -773,7 +775,7 @@ fn alloc_ta_with_length(
   proto: Ref,
   len: Int,
 ) -> Result(#(FreshTa, State(host)), #(JsValue, State(host))) {
-  let size = value.typed_array_element_size(kind)
+  let size = typed_array_ffi.elem_size(kind)
   let byte_len = len * size
   use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
     Error(state.range_error_value(state, "Invalid typed array length"))
@@ -825,7 +827,7 @@ fn from_buffer(
   buf_ref: Ref,
   rest: List(JsValue),
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  let size = value.typed_array_element_size(kind)
+  let size = typed_array_ffi.elem_size(kind)
   let offset_arg = helpers.first_arg_or_undefined(rest)
   let len_arg = helpers.list_at(rest, 1) |> option.unwrap(JsUndefined)
   // Step 2: offset = ToIndex(byteOffset).
@@ -960,7 +962,7 @@ fn from_typed_array(
         "Cannot perform Construct on a detached ArrayBuffer",
       ))
     Some(src_data) -> {
-      let size = value.typed_array_element_size(kind)
+      let size = typed_array_ffi.elem_size(kind)
       let byte_len = src_len * size
       use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
         Error(state.range_error_value(state, "Invalid typed array length"))
@@ -968,7 +970,7 @@ fn from_typed_array(
       // §23.2.5.1.2 step 5 (MakeTypedArrayWithBufferWitnessRecord +
       // IsTypedArrayOutOfBounds): a source view whose resizable buffer has
       // shrunk below it behaves like detached → TypeError.
-      let src_size = value.typed_array_element_size(src_kind)
+      let src_size = typed_array_ffi.elem_size(src_kind)
       use <- bool.lazy_guard(
         src_off + src_len * src_size > bit_array.byte_size(src_data),
         fn() {
@@ -979,12 +981,13 @@ fn from_typed_array(
         },
       )
       let new_data = case kind == src_kind {
-        // Same element type: raw byte copy (in range per the guard above).
-        True ->
-          case bit_array.slice(src_data, src_off, byte_len) {
-            Ok(bytes) -> bytes
-            Error(Nil) -> ta_zeroed(byte_len)
-          }
+        // Same element type: raw byte copy. The out-of-bounds guard above
+        // PROVED src_off + byte_len <= byte_size(src_data), so a failure here
+        // is a broken proof, not a shrunk buffer — crash, don't zero-fill.
+        True -> {
+          let assert Ok(bytes) = bit_array.slice(src_data, src_off, byte_len)
+          bytes
+        }
         // Different element type: element-wise convert (no user code runs).
         False ->
           convert_elements(
@@ -1384,7 +1387,7 @@ fn try_bulk_store(
     // Detached → every per-element store is a silent no-op.
     None -> Some(state)
     Some(data) -> {
-      let size = value.typed_array_element_size(kind)
+      let size = typed_array_ffi.elem_size(kind)
       let byte_size = bit_array.byte_size(data)
       let len = case length {
         Some(n) -> n
@@ -1395,9 +1398,13 @@ fn try_bulk_store(
       let count = int.clamp(len - start, 0, bit_array.byte_size(region) / size)
       use <- bool.guard(count <= 0, Some(state))
       // Whole ELEMENTS only; splice_clamped's byte clamp is just the backstop.
+      // `count` was clamped by byte_size(region) / size, so the slice fits.
       let region = case count * size == bit_array.byte_size(region) {
         True -> region
-        False -> bit_array.slice(region, 0, count * size) |> result.unwrap(<<>>)
+        False -> {
+          let assert Ok(region) = bit_array.slice(region, 0, count * size)
+          region
+        }
       }
       let off = byte_offset + start * size
       let #(new_data, written) = splice_clamped(data, off, region)
@@ -1456,7 +1463,7 @@ fn validate_ta(
   case object.typed_array_buffer_data(state.heap, buffer) {
     None -> witness_type_error(state, Detached)
     Some(data) -> {
-      let size = value.typed_array_element_size(kind)
+      let size = typed_array_ffi.elem_size(kind)
       case off + len * size > bit_array.byte_size(data) {
         True -> witness_type_error(state, OutOfBounds)
         False -> cont(view, state)
@@ -1521,8 +1528,7 @@ fn view_in_bounds(
   case object.typed_array_buffer_data(h, buffer) {
     None -> False
     Some(data) ->
-      off + len * value.typed_array_element_size(kind)
-      <= bit_array.byte_size(data)
+      off + len * typed_array_ffi.elem_size(kind) <= bit_array.byte_size(data)
   }
 }
 
@@ -1533,7 +1539,7 @@ fn get_byte_length(
   use view, state <- require_ta(this, state)
   let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
   let n = case view_in_bounds(state.heap, buffer, kind, off, len) {
-    True -> len * value.typed_array_element_size(kind)
+    True -> len * typed_array_ffi.elem_size(kind)
     False -> 0
   }
   #(state, Ok(value.from_int(n)))
@@ -1637,37 +1643,21 @@ fn proto_fill(
   // — a detached buffer or an out-of-bounds view throws TypeError. (A
   // shrunk length-tracking view stays in bounds; the clamp below handles
   // it.)
-  use <- lazy_witness_guard(state, this)
-  case object.typed_array_buffer_data(state.heap, buffer) {
-    None ->
-      state.type_error(state, "Cannot perform fill on a detached ArrayBuffer")
-    Some(data) -> {
-      let size = value.typed_array_element_size(kind)
-      // Clamp to the LIVE buffer (a resizable buffer may have shrunk below
-      // the view) — out-of-bounds element writes are silent no-ops.
-      let avail = int.max(0, { bit_array.byte_size(data) - off } / size)
-      let start = int.min(start, avail)
-      let end = int.min(end, avail)
-      // Single-pass fill: encode the element ONCE, then build the region
-      // with binary:copy + one splice (O(n), not O(n²)).
-      let elem =
-        typed_array_elements.typed_array_encode_value(
-          ta_zeroed(size),
-          0,
-          converted,
-        )
-      let new_data = ta_fill_region(data, off + start * size, end - start, elem)
-      let h =
-        write_buffer_data(
-          state.heap,
-          buffer,
-          new_data,
-          off + start * size,
-          int.max(end - start, 0) * size,
-        )
-      #(State(..state, heap: h), Ok(this))
-    }
-  }
+  use data <- lazy_witness_guard(state, this)
+  let size = typed_array_ffi.elem_size(kind)
+  // Clamp to the LIVE buffer (a resizable buffer may have shrunk below
+  // the view) — out-of-bounds element writes are silent no-ops.
+  let avail = int.max(0, { bit_array.byte_size(data) - off } / size)
+  let start = int.min(start, avail)
+  let end = int.min(end, avail)
+  // Single-pass fill: encode the element ONCE, then build the region
+  // with binary:copy + one splice (O(n), not O(n²)).
+  let elem =
+    typed_array_elements.typed_array_encode_value(ta_zeroed(size), 0, converted)
+  let region_off = off + start * size
+  let #(new_data, written) = fill_clamped(data, region_off, end - start, elem)
+  let h = write_buffer_data(state.heap, buffer, new_data, region_off, written)
+  #(State(..state, heap: h), Ok(this))
 }
 
 /// Convert a JS value to the typed array's element domain ONCE — §7.1.13
@@ -1718,7 +1708,7 @@ fn proto_set(
   // SetTypedArrayFrom* step 2: target detached or out of bounds → TypeError
   // (checked AFTER the observable offset coercion, which can detach/resize
   // it). targetLength is the LIVE length, re-read for the same reason.
-  use <- lazy_witness_guard(state, this)
+  use dst_data <- lazy_witness_guard(state, this)
   let len = ta_live_length(state.heap, this)
   case src {
     JsObject(src_ref) ->
@@ -1733,11 +1723,12 @@ fn proto_set(
           ) = src_view
           // §23.2.3.26.1 step 4: SOURCE detached or out of bounds →
           // TypeError; srcLength is its live length.
-          case view_witness_error(state.heap, src_view) {
-            Some(err) -> witness_type_error(state, err)
-            None ->
+          case view_witness_bytes(state.heap, src_view) {
+            Error(err) -> witness_type_error(state, err)
+            Ok(_src_bytes) ->
               set_from_typed_array(
                 view,
+                dst_data,
                 state,
                 offset,
                 len,
@@ -1784,22 +1775,25 @@ fn proto_set(
   }
 }
 
-/// bool.lazy_guard-shaped wrapper over ta_witness_error: throws TypeError
-/// when the view's buffer is detached or the view is out of bounds,
-/// otherwise continues.
+/// bool.lazy_guard-shaped wrapper over ta_witness_bytes: throws TypeError
+/// when the view's buffer is detached or the view is out of bounds, otherwise
+/// continues WITH the live backing bytes it just proved exist. Continuations
+/// therefore never re-read the buffer, and the "detached" case is
+/// structurally unrepresentable downstream.
 fn lazy_witness_guard(
   state: State(host),
   this: JsValue,
-  cont: fn() -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(BitArray) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case ta_witness_error(state.heap, this) {
-    Some(err) -> witness_type_error(state, err)
-    None -> cont()
+  case ta_witness_bytes(state.heap, this) {
+    Error(err) -> witness_type_error(state, err)
+    Ok(data) -> cont(data)
   }
 }
 
 fn set_from_typed_array(
   view: TaWitness,
+  data: BitArray,
   state: State(host),
   offset: Int,
   len: Int,
@@ -1823,7 +1817,7 @@ fn set_from_typed_array(
   use <- bool.lazy_guard(src_len + offset > len, fn() {
     state.range_error(state, "offset is out of bounds")
   })
-  let size = value.typed_array_element_size(kind)
+  let size = typed_array_ffi.elem_size(kind)
   // Build the encoded source region in ONE pass (raw byte copy when kinds
   // match, element-wise convert+concat otherwise — no user code runs)...
   let region = case kind == src_kind {
@@ -1841,30 +1835,27 @@ fn set_from_typed_array(
   }
   // ...then splice it into the destination buffer with ONE rebuild,
   // clamped to the live buffer (out-of-bounds writes are silent no-ops,
-  // matching per-element store semantics; detached → no-op).
-  case object.typed_array_buffer_data(state.heap, dst_buf) {
-    None -> #(state, Ok(JsUndefined))
-    Some(data) -> {
-      let start = dst_off + offset * size
-      let avail =
-        {
-          int.clamp(bit_array.byte_size(data) - start, 0, src_len * size) / size
-        }
-        * size
-      let region = case avail == src_len * size {
-        True -> region
-        False -> bit_array.slice(region, 0, avail) |> result.unwrap(<<>>)
-      }
-      let #(new_data, written) = splice_clamped(data, start, region)
-      case written > 0 {
-        True -> {
-          let h =
-            write_buffer_data(state.heap, dst_buf, new_data, start, written)
-          #(State(..state, heap: h), Ok(JsUndefined))
-        }
-        False -> #(state, Ok(JsUndefined))
-      }
+  // matching per-element store semantics). `data` is the caller's witness:
+  // nothing between the guard and here can run user code, so it is current.
+  let start = dst_off + offset * size
+  let avail =
+    { int.clamp(bit_array.byte_size(data) - start, 0, src_len * size) / size }
+    * size
+  // `region` is exactly src_len * size bytes and avail <= that.
+  let region = case avail == src_len * size {
+    True -> region
+    False -> {
+      let assert Ok(region) = bit_array.slice(region, 0, avail)
+      region
     }
+  }
+  let #(new_data, written) = splice_clamped(data, start, region)
+  case written > 0 {
+    True -> {
+      let h = write_buffer_data(state.heap, dst_buf, new_data, start, written)
+      #(State(..state, heap: h), Ok(JsUndefined))
+    }
+    False -> #(state, Ok(JsUndefined))
   }
 }
 
@@ -1958,7 +1949,7 @@ fn do_subarray(
     _ -> to_int_or_inf(state, b_arg)
   })
   let begin = relative_index(b, src_length)
-  let size = value.typed_array_element_size(kind)
+  let size = typed_array_ffi.elem_size(kind)
   let new_off = off + begin * size
   // Step 15: a length-tracking source with `end` undefined produces a
   // length-tracking result — « buffer, beginByteOffset », NO length arg.
@@ -2034,9 +2025,9 @@ fn proto_slice(
   // start/end valueOf) may have detached its buffer or shrunk it below a
   // fixed view; both throw TypeError. (A shrunk length-tracking view stays
   // in bounds — the copy below just reads fewer live bytes.)
-  case ta_witness_error(state.heap, this) {
-    Some(err) -> witness_type_error(state, err)
-    None ->
+  case ta_witness_bytes(state.heap, this) {
+    Error(err) -> witness_type_error(state, err)
+    Ok(_source_bytes) ->
       case ta_slot(state.heap, target) {
         Some(TaView(
           buffer: target_buf,
@@ -2048,7 +2039,7 @@ fn proto_slice(
             // Same element kind → single byte-region copy spliced into the
             // target's buffer at its view offset.
             True -> {
-              let size = value.typed_array_element_size(kind)
+              let size = typed_array_ffi.elem_size(kind)
               // Step 14.c: endIndex = min(final, live TypedArrayLength) —
               // only WHOLE live source elements are copied (a shrink
               // "between elements" must not copy a partial element); the
@@ -2115,20 +2106,41 @@ fn proto_slice(
 /// later step, so the leading `dst - src` bytes repeat across the result.
 fn seq_copy_region(data: BitArray, src: Int, dst: Int, n: Int) -> BitArray {
   case dst > src && dst < src + n {
-    False -> bit_array.slice(data, src, n) |> result.unwrap(<<>>)
-    True -> {
-      let pattern = bit_array.slice(data, src, dst - src) |> result.unwrap(<<>>)
-      repeat_to(pattern, n, <<>>)
-    }
+    // `n` is clamped to the TARGET's remaining bytes, not the source's, so
+    // the source range may run past the live buffer: clamp.
+    False -> slice_clamped(data, src, n)
+    True -> repeat_to(slice_clamped(data, src, dst - src), n, <<>>)
   }
 }
 
 fn repeat_to(pattern: BitArray, n: Int, acc: BitArray) -> BitArray {
   use <- bool.guard(bit_array.byte_size(pattern) == 0, acc)
   case bit_array.byte_size(acc) >= n {
-    True -> bit_array.slice(acc, 0, n) |> result.unwrap(<<>>)
+    True -> {
+      let assert Ok(bytes) = bit_array.slice(acc, 0, n)
+      bytes
+    }
     False -> repeat_to(pattern, n, bit_array.concat([acc, pattern]))
   }
+}
+
+/// The single answer to "bytes past the live buffer": the `len` bytes at
+/// `off`, clamped to whatever of `[off, off + len)` actually lies inside
+/// `data`. Total by construction — the slice below cannot fail.
+///
+/// This module used to spell the answer two ways: `|> result.unwrap(<<>>)`
+/// (silently truncate to nothing) at eight sites and `Error(Nil) ->
+/// ta_zeroed(n)` (silently zero-fill) at another. Both were unreachable
+/// paperwork; now there is one policy and one place to read it. Where a
+/// preceding witness check PROVES the range in bounds, the call sites use
+/// `let assert Ok(..) = bit_array.slice(..)` instead, so a broken proof
+/// crashes rather than quietly returning the wrong bytes.
+fn slice_clamped(data: BitArray, off: Int, len: Int) -> BitArray {
+  let size = bit_array.byte_size(data)
+  let start = int.clamp(off, 0, size)
+  let assert Ok(bytes) =
+    bit_array.slice(data, start, int.clamp(len, 0, size - start))
+  bytes
 }
 
 /// Copy `byte_len` bytes starting at `byte_off` of a view's backing buffer
@@ -2144,14 +2156,11 @@ fn copy_region(
   case object.typed_array_buffer_data(h, buffer) {
     None -> ta_zeroed(byte_len)
     Some(data) -> {
-      let avail = int.clamp(bit_array.byte_size(data) - byte_off, 0, byte_len)
-      case bit_array.slice(data, byte_off, avail) {
-        Ok(bytes) ->
-          case avail == byte_len {
-            True -> bytes
-            False -> bit_array.concat([bytes, ta_zeroed(byte_len - avail)])
-          }
-        Error(Nil) -> ta_zeroed(byte_len)
+      let bytes = slice_clamped(data, byte_off, byte_len)
+      let got = bit_array.byte_size(bytes)
+      case got == byte_len {
+        True -> bytes
+        False -> bit_array.concat([bytes, ta_zeroed(byte_len - got)])
       }
     }
   }
@@ -2388,34 +2397,45 @@ fn witness_type_error(
 }
 
 /// §23.2.4.4 ValidateTypedArray buffer-witness checks against the LIVE
-/// buffer: Some(error) when the buffer is detached or the view is out of
+/// buffer: Error(..) when the buffer is detached or the view is out of
 /// bounds (a fixed view past the end of a shrunk resizable buffer, or a
 /// length-tracking view whose byte offset is past the end).
-fn view_witness_error(h: Heap(host), view: TaView) -> Option(WitnessError) {
+///
+/// On success it hands back the LIVE bytes it just read to prove all that.
+/// Returning only `None` forced every caller to re-read the same buffer and
+/// write an unreachable `None -> "detached"` branch; the bytes ARE the proof,
+/// so they travel with it.
+fn view_witness_bytes(
+  h: Heap(host),
+  view: TaView,
+) -> Result(BitArray, WitnessError) {
   let TaView(buffer:, kind:, byte_offset: off, length: declared, ..) = view
   case object.typed_array_buffer_data(h, buffer) {
-    None -> Some(Detached)
+    None -> Error(Detached)
     Some(data) -> {
       let byte_size = bit_array.byte_size(data)
-      let size = value.typed_array_element_size(kind)
+      let size = typed_array_ffi.elem_size(kind)
       let oob = case declared {
         Some(n) -> off + n * size > byte_size
         None -> off > byte_size
       }
       case oob {
-        True -> Some(OutOfBounds)
-        False -> None
+        True -> Error(OutOfBounds)
+        False -> Ok(data)
       }
     }
   }
 }
 
-/// view_witness_error keyed by the TypedArray value itself (re-reads the
+/// view_witness_bytes keyed by the TypedArray value itself (re-reads the
 /// slot so resizes since validation are observed).
-fn ta_witness_error(h: Heap(host), this: JsValue) -> Option(WitnessError) {
+fn ta_witness_bytes(
+  h: Heap(host),
+  this: JsValue,
+) -> Result(BitArray, WitnessError) {
   case ta_slot(h, this) {
-    Some(view) -> view_witness_error(h, view)
-    None -> Some(NotTypedArray)
+    Some(view) -> view_witness_bytes(h, view)
+    None -> Error(NotTypedArray)
   }
 }
 
@@ -2430,14 +2450,36 @@ fn ta_live_length(h: Heap(host), this: JsValue) -> Int {
   }
 }
 
-/// Generic callback loop: visits indices from `k` by `step` while inside
+/// Which way an index-visiting loop walks. Was a bare `Int` step threaded
+/// through find/reduce/iterate — `0` type-checked and looped forever, and
+/// nothing tied "step is negative" to "start at len - 1".
+type Direction {
+  Ascending
+  Descending
+}
+
+fn direction_step(dir: Direction) -> Int {
+  case dir {
+    Ascending -> 1
+    Descending -> -1
+  }
+}
+
+fn direction_start(dir: Direction, len: Int) -> Int {
+  case dir {
+    Ascending -> 0
+    Descending -> len - 1
+  }
+}
+
+/// Generic callback loop: visits indices from `k` in `dir` while inside
 /// [0, len), calling cb(element, k, this). `decide` inspects the callback
 /// result and may stop the loop with a final value.
 fn iterate_calls(
   state: State(host),
   view: TaWitness,
   k: Int,
-  step: Int,
+  dir: Direction,
   cb: JsValue,
   this_arg: JsValue,
   decide: fn(JsValue, JsValue, Int) -> Option(JsValue),
@@ -2453,7 +2495,16 @@ fn iterate_calls(
   )
   case decide(res, el, k) {
     Some(v) -> Ok(#(Some(v), state))
-    None -> iterate_calls(state, view, k + step, step, cb, this_arg, decide)
+    None ->
+      iterate_calls(
+        state,
+        view,
+        k + direction_step(dir),
+        dir,
+        cb,
+        this_arg,
+        decide,
+      )
   }
 }
 
@@ -2476,7 +2527,7 @@ fn proto_every_some(
     state,
     view,
     0,
-    1,
+    Ascending,
     cb,
     this_arg,
     decide,
@@ -2493,7 +2544,9 @@ fn proto_for_each(
   use view, state <- validate_ta(this, state)
   use cb, this_arg, state <- require_cb(args, state)
   use _early, state <- try_state(
-    iterate_calls(state, view, 0, 1, cb, this_arg, fn(_res, _el, _k) { None }),
+    iterate_calls(state, view, 0, Ascending, cb, this_arg, fn(_res, _el, _k) {
+      None
+    }),
   )
   #(state, Ok(JsUndefined))
 }
@@ -2509,15 +2562,12 @@ fn proto_find(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
-  step: Int,
+  dir: Direction,
   mode: FindMode,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- validate_ta(this, state)
   use cb, this_arg, state <- require_cb(args, state)
-  let start = case step > 0 {
-    True -> 0
-    False -> view.length - 1
-  }
+  let start = direction_start(dir, view.length)
   let decide = fn(res, el, k) {
     case value.is_truthy(res) {
       True ->
@@ -2532,7 +2582,7 @@ fn proto_find(
     state,
     view,
     start,
-    step,
+    dir,
     cb,
     this_arg,
     decide,
@@ -2670,12 +2720,12 @@ fn write_values(
   }
 }
 
-/// §23.2.3.23/.24 reduce / reduceRight. `step` is +1 (reduce) or -1.
+/// §23.2.3.23/.24 reduce (Ascending) / reduceRight (Descending).
 fn proto_reduce(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
-  step: Int,
+  dir: Direction,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- validate_ta(this, state)
   let len = view.length
@@ -2683,19 +2733,16 @@ fn proto_reduce(
   use <- bool.lazy_guard(!helpers.is_callable(state.heap, cb), fn() {
     state.type_error(state, string.inspect(cb) <> " is not a function")
   })
-  let start = case step > 0 {
-    True -> 0
-    False -> len - 1
-  }
+  let start = direction_start(dir, len)
   case helpers.list_at(args, 1) {
-    Some(init) -> reduce_loop(state, view, start, step, cb, init)
+    Some(init) -> reduce_loop(state, view, start, dir, cb, init)
     None ->
       case len == 0 {
         True ->
           state.type_error(state, "Reduce of empty array with no initial value")
         False -> {
           let acc = ta_get(state.heap, view.ref, start)
-          reduce_loop(state, view, start + step, step, cb, acc)
+          reduce_loop(state, view, start + direction_step(dir), dir, cb, acc)
         }
       }
   }
@@ -2705,7 +2752,7 @@ fn reduce_loop(
   state: State(host),
   view: TaWitness,
   k: Int,
-  step: Int,
+  dir: Direction,
   cb: JsValue,
   acc: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
@@ -2717,7 +2764,7 @@ fn reduce_loop(
     value.from_int(k),
     JsObject(view.ref),
   ])
-  reduce_loop(state, view, k + step, step, cb, res)
+  reduce_loop(state, view, k + direction_step(dir), dir, cb, res)
 }
 
 // ============================================================================
@@ -2750,46 +2797,29 @@ fn proto_copy_within(
   // Steps 12.c-d: re-validate against the live buffer — the coercions above
   // can run user code that detaches the buffer or shrinks it below a FIXED
   // view; both throw TypeError.
-  use <- lazy_witness_guard(state, this)
-  case object.typed_array_buffer_data(state.heap, buffer) {
-    None ->
-      state.type_error(
-        state,
-        "Cannot perform copyWithin on a detached ArrayBuffer",
-      )
-    Some(data) -> {
-      let size = value.typed_array_element_size(kind)
-      // Steps 12.e-f: len = min(len, TypedArrayLength) — a length-tracking
-      // view follows a SHRUNK buffer (clamp indices/count down), but a grow
-      // never raises the snapshot bounds.
-      let live_len = int.min(len, ta_live_length(state.heap, this))
-      let to = int.min(to, live_len)
-      let from = int.min(from, live_len)
-      let final = int.min(final, live_len)
-      let count = int.min(final - from, live_len - to)
-      use <- bool.guard(count <= 0, #(state, Ok(this)))
-      case bit_array.slice(data, off + from * size, count * size) {
-        Ok(region) -> {
-          let target = off + to * size
-          let #(new_data, written) = splice_clamped(data, target, region)
-          #(
-            State(
-              ..state,
-              heap: write_buffer_data(
-                state.heap,
-                buffer,
-                new_data,
-                target,
-                written,
-              ),
-            ),
-            Ok(this),
-          )
-        }
-        Error(Nil) -> #(state, Ok(this))
-      }
-    }
-  }
+  use data <- lazy_witness_guard(state, this)
+  let size = typed_array_ffi.elem_size(kind)
+  // Steps 12.e-f: len = min(len, TypedArrayLength) — a length-tracking
+  // view follows a SHRUNK buffer (clamp indices/count down), but a grow
+  // never raises the snapshot bounds.
+  let live_len = int.min(len, ta_live_length(state.heap, this))
+  let to = int.min(to, live_len)
+  let from = int.min(from, live_len)
+  let final = int.min(final, live_len)
+  let count = int.min(final - from, live_len - to)
+  use <- bool.guard(count <= 0, #(state, Ok(this)))
+  // In range: the witness guard proved off + len * size fits `data`, and
+  // from + count <= live_len <= len.
+  let assert Ok(region) = bit_array.slice(data, off + from * size, count * size)
+  let target = off + to * size
+  let #(new_data, written) = splice_clamped(data, target, region)
+  #(
+    State(
+      ..state,
+      heap: write_buffer_data(state.heap, buffer, new_data, target, written),
+    ),
+    Ok(this),
+  )
 }
 
 /// Concatenation of a view's elements in reverse element order.
@@ -2808,10 +2838,8 @@ fn reversed_bytes_loop(
   case i >= len {
     True -> bit_array.concat(acc)
     False -> {
-      let elem = case bit_array.slice(data, off + i * size, size) {
-        Ok(b) -> b
-        Error(Nil) -> ta_zeroed(size)
-      }
+      // Callers pass a range already proved to lie inside `data`.
+      let assert Ok(elem) = bit_array.slice(data, off + i * size, size)
       reversed_bytes_loop(data, off, len, size, i + 1, [elem, ..acc])
     }
   }
@@ -2828,7 +2856,7 @@ fn proto_reverse(
   case object.typed_array_buffer_data(state.heap, buffer) {
     None -> #(state, Ok(this))
     Some(data) -> {
-      let size = value.typed_array_element_size(kind)
+      let size = typed_array_ffi.elem_size(kind)
       let region = reversed_bytes(data, off, len, size)
       let #(new_data, written) = splice_clamped(data, off, region)
       #(
@@ -2882,7 +2910,7 @@ fn proto_to_reversed(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- validate_ta(this, state)
   let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
-  let size = value.typed_array_element_size(kind)
+  let size = typed_array_ffi.elem_size(kind)
   use fresh, state <- try_state(ta_same_type_create(state, kind, len))
   let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
   let src = copy_region(state.heap, buffer, off, len * size)
@@ -2913,7 +2941,7 @@ fn proto_with(
   // Step 8: numeric conversion happens BEFORE the index range check — and
   // its valueOf may RESIZE the buffer.
   use converted, state <- try_state(convert_for_kind(state, kind, value_arg))
-  let size = value.typed_array_element_size(kind)
+  let size = typed_array_ffi.elem_size(kind)
   // Step 9: IsValidIntegerIndex(O, actualIndex) against the LIVE view — a
   // grow during the conversion can make an initially out-of-bounds index
   // valid (and vice versa).
@@ -3175,7 +3203,7 @@ fn proto_sort(
   case object.typed_array_buffer_data(state.heap, buffer) {
     None -> #(state, Ok(this))
     Some(data) -> {
-      let size = value.typed_array_element_size(kind)
+      let size = typed_array_ffi.elem_size(kind)
       // Build the sorted region in ONE pass, then splice it into the live
       // buffer with ONE rebuild — clamped to the view's CURRENTLY VALID
       // indices (the buffer may have shrunk during a user comparefn).
@@ -3184,9 +3212,13 @@ fn proto_sort(
       // while a shrunk length-tracking view accepts its first live elements.
       let region = encode_region(kind, size, sorted)
       let avail = int.min(len, ta_live_length(state.heap, this)) * size
+      // `region` is exactly len * size bytes and avail <= that.
       let region = case avail == len * size {
         True -> region
-        False -> bit_array.slice(region, 0, avail) |> result.unwrap(<<>>)
+        False -> {
+          let assert Ok(region) = bit_array.slice(region, 0, avail)
+          region
+        }
       }
       let #(new_data, written) = splice_clamped(data, off, region)
       case written > 0 {
@@ -3210,7 +3242,7 @@ fn proto_to_sorted(
   let TaWitness(kind:, length: len, ..) = view
   use fresh, state <- try_state(ta_same_type_create(state, kind, len))
   let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
-  let size = value.typed_array_element_size(kind)
+  let size = typed_array_ffi.elem_size(kind)
   // The fresh buffer is exactly len * size bytes, so the concatenated
   // region IS the new buffer contents — no splice needed.
   let new_data = case object.typed_array_buffer_data(state.heap, new_buf) {
@@ -3665,7 +3697,8 @@ fn u8_to_base64(
     ))
     let padding = !value.is_truthy(omit_val)
     use #(_buffer, data, off, len) <- result.map(u8_live_view(state, this))
-    let view = bit_array.slice(data, off, len) |> result.unwrap(<<>>)
+    // u8_live_view proved off + len <= byte_size(data).
+    let assert Ok(view) = bit_array.slice(data, off, len)
     let out = case alphabet {
       Base64Url -> bit_array.base64_url_encode(view, padding)
       Base64 -> bit_array.base64_encode(view, padding)
@@ -3682,7 +3715,8 @@ fn u8_to_hex(
   wrap({
     use state <- result.try(validate_u8(this, state))
     use #(_buffer, data, off, len) <- result.map(u8_live_view(state, this))
-    let view = bit_array.slice(data, off, len) |> result.unwrap(<<>>)
+    // u8_live_view proved off + len <= byte_size(data).
+    let assert Ok(view) = bit_array.slice(data, off, len)
     #(JsString(string.lowercase(bit_array.base16_encode(view))), state)
   })
 }

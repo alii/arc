@@ -8,15 +8,19 @@
 //// signature exists exactly once and the compiler checks every caller
 //// against it.
 ////
+//// It also owns the ONE `TypedArrayKind -> element codec` mapping
+//// (`elem_of_kind`) and the byte width derived from it (`elem_size`), so a
+//// new element kind cannot be given a codec in one table and a width in
+//// another.
+////
 //// Float elements speak `value.JsNum` directly (`{finite, F} | na_n |
 //// infinity | neg_infinity` on the Erlang side) — the same technique as
 //// `arc_math_ffi`. There is no int-tag side channel: the compiler forces
 //// every caller to handle the non-finite constructors.
 
-import arc/vm/value.{type JsNum}
+import arc/vm/value.{type BigIntKind, type JsNum, type TypedArrayKind}
 import gleam/bit_array
 import gleam/int
-import gleam/result
 
 /// The integer element widths+signednesses the codecs implement, as one
 /// closed set. `size_bits: Int` + `signed: Bool` used to be two independent
@@ -48,9 +52,14 @@ pub fn ta_zeroed(byte_len: Int) -> BitArray
 /// Replace `byte_size(region)` bytes of `data` at `byte_off` with `region`
 /// in ONE rebuild. PRIVATE: the Erlang clause `badmatch`es when the region
 /// runs off the end of `data`, and that precondition is enforced once, by
-/// `splice_clamped` below, instead of by every call site.
+/// `splice_clamped` below, instead of by every call site. `splice_clamped`
+/// (and `fill_clamped`, which routes through it) is the ONLY way in.
 @external(erlang, "arc_typed_array_ffi", "ta_splice")
 fn ta_splice(data: BitArray, byte_off: Int, region: BitArray) -> BitArray
+
+/// `binary:copy/2` — `n` concatenated copies of `elem`.
+@external(erlang, "binary", "copy")
+fn binary_copy(elem: BitArray, n: Int) -> BitArray
 
 /// The single-pass primitive for bulk typed-array writes (fill/set/slice/
 /// sort/copyWithin): splice as much of `region` into `data` at `byte_off` as
@@ -75,22 +84,90 @@ pub fn splice_clamped(
     False -> {
       let region = case written == bit_array.byte_size(region) {
         True -> region
-        False -> bit_array.slice(region, 0, written) |> result.unwrap(<<>>)
+        // Invariant on this branch: 0 < written < byte_size(region), so the
+        // slice CANNOT fail. Silently substituting `<<>>` here would splice
+        // nothing yet still report `written` bytes — a lie the caller uses
+        // for byte accounting — so a broken invariant must crash instead.
+        False -> {
+          let assert Ok(region) = bit_array.slice(region, 0, written)
+          region
+        }
       }
       #(ta_splice(data, byte_off, region), written)
     }
   }
 }
 
-/// Write `count` copies of the encoded element `elem` at `byte_off`.
-/// O(byte_size(data) + count * elem) — one rebuild for the whole fill.
-@external(erlang, "arc_typed_array_ffi", "ta_fill_region")
-pub fn ta_fill_region(
+/// Write as many of `count` copies of the encoded element `elem` at
+/// `byte_off` as FIT in the live buffer, and report the bytes written — the
+/// fill sibling of `splice_clamped`, and the only public path to a bulk fill.
+/// O(byte_size(data) + count * elem): one region build, one rebuild.
+pub fn fill_clamped(
   data: BitArray,
   byte_off: Int,
   count: Int,
   elem: BitArray,
-) -> BitArray
+) -> #(BitArray, Int) {
+  case count <= 0 {
+    True -> #(data, 0)
+    False -> splice_clamped(data, byte_off, binary_copy(elem, count))
+  }
+}
+
+/// Which FFI codec an element kind speaks: an integer element (widths and
+/// signednesses per `IntElem`) or a float element. The ONE place the
+/// `TypedArrayKind -> codec` mapping lives; `elem_size` derives the byte
+/// width from it, so the width table cannot drift from the codec table.
+pub type Elem {
+  Int(IntElem)
+  Float(FloatElem)
+}
+
+/// The codec for a BigInt content type — always a 64-bit integer element.
+pub fn bigint_elem(kind: BigIntKind) -> IntElem {
+  case kind {
+    value.BigInt64Kind -> I64
+    value.BigUint64Kind -> U64
+  }
+}
+
+/// The codec for any typed-array element kind. Total: adding a kind is a
+/// compile error here rather than a wrong-width read somewhere downstream.
+///
+/// Uint8Clamped decodes exactly like Uint8 (`U8`); only its *store* path
+/// differs (§7.1.12 ToUint8Clamp), which is why the encoders special-case it
+/// before consulting this mapping.
+pub fn elem_of_kind(kind: TypedArrayKind) -> Elem {
+  case kind {
+    value.NumKind(value.Int8Kind) -> Int(I8)
+    value.NumKind(value.Uint8Kind) | value.NumKind(value.Uint8ClampedKind) ->
+      Int(U8)
+    value.NumKind(value.Int16Kind) -> Int(I16)
+    value.NumKind(value.Uint16Kind) -> Int(U16)
+    value.NumKind(value.Int32Kind) -> Int(I32)
+    value.NumKind(value.Uint32Kind) -> Int(U32)
+    value.NumKind(value.Float32Kind) -> Float(F32)
+    value.NumKind(value.Float64Kind) -> Float(F64)
+    value.BigKind(k) -> Int(bigint_elem(k))
+  }
+}
+
+/// Byte width of a float element.
+pub fn float_elem_size(elem: FloatElem) -> Int {
+  case elem {
+    F32 -> 4
+    F64 -> 8
+  }
+}
+
+/// Element size in bytes — §23.2 Table 69, derived from `elem_of_kind` so
+/// there is exactly one table.
+pub fn elem_size(kind: TypedArrayKind) -> Int {
+  case elem_of_kind(kind) {
+    Int(e) -> int_elem_size(e)
+    Float(e) -> float_elem_size(e)
+  }
+}
 
 /// Byte width of an integer element.
 pub fn int_elem_size(elem: IntElem) -> Int {

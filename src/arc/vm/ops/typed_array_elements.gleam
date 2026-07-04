@@ -19,8 +19,7 @@
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/typed_array_ffi.{
-  F32, F64, I16, I32, I64, I8, U16, U32, U64, U8, ta_clamp_uint8, ta_set_float,
-  ta_set_int, ta_zeroed,
+  U8, ta_clamp_uint8, ta_set_float, ta_set_int, ta_zeroed,
 }
 import arc/vm/key.{type PropertyKey, Index}
 import arc/vm/state.{type Heap, type State, State}
@@ -85,7 +84,9 @@ pub fn typed_array_store(
           byte_offset,
           length,
           idx,
-          fn(data, off) { ta_set_int(data, off, bigint_int_elem(big_kind), n) },
+          fn(data, off) {
+            ta_set_int(data, off, typed_array_ffi.bigint_elem(big_kind), n)
+          },
         ),
       )
     }
@@ -162,7 +163,7 @@ pub fn view_length(
     |> option.unwrap(0)
   resolved_view_length(
     byte_size,
-    value.typed_array_element_size(elem_kind),
+    typed_array_ffi.elem_size(elem_kind),
     byte_offset,
     length,
   )
@@ -209,7 +210,7 @@ fn do_typed_store(
             ..,
           ) as slot,
         ) -> {
-          let size = value.typed_array_element_size(elem_kind)
+          let size = typed_array_ffi.elem_size(elem_kind)
           let byte_size = value.buffer_byte_size(data)
           // §10.4.5.13/§10.4.5.14 against the LIVE buffer, resolved HERE (not
           // at [[Set]] entry): the ToNumber/ToBigInt conversion above may have
@@ -262,14 +263,6 @@ fn do_typed_store(
   }
 }
 
-/// The FFI element codec for a BigInt content type.
-fn bigint_int_elem(kind: value.BigIntKind) -> typed_array_ffi.IntElem {
-  case kind {
-    value.BigInt64Kind -> I64
-    value.BigUint64Kind -> U64
-  }
-}
-
 /// §25.1.2.12 SetValueInBuffer for Number content types. Total over
 /// `NumberKind`, so the BigInt kinds cannot even be passed here.
 fn encode_typed_number(
@@ -279,15 +272,15 @@ fn encode_typed_number(
   num: value.JsNum,
 ) -> BitArray {
   case elem_kind {
+    // The ONE kind whose store differs from its codec: Uint8Clamped reads as
+    // U8 but writes through §7.1.12 ToUint8Clamp instead of the ToInt wrap.
     value.Uint8ClampedKind -> ta_set_int(data, off, U8, ta_clamp_uint8(num))
-    value.Float32Kind -> ta_set_float(data, off, F32, num)
-    value.Float64Kind -> ta_set_float(data, off, F64, num)
-    value.Int8Kind -> ta_set_int(data, off, I8, jsnum_to_store_int(num))
-    value.Uint8Kind -> ta_set_int(data, off, U8, jsnum_to_store_int(num))
-    value.Int16Kind -> ta_set_int(data, off, I16, jsnum_to_store_int(num))
-    value.Uint16Kind -> ta_set_int(data, off, U16, jsnum_to_store_int(num))
-    value.Int32Kind -> ta_set_int(data, off, I32, jsnum_to_store_int(num))
-    value.Uint32Kind -> ta_set_int(data, off, U32, jsnum_to_store_int(num))
+    _ ->
+      case typed_array_ffi.elem_of_kind(value.NumKind(elem_kind)) {
+        typed_array_ffi.Int(e) ->
+          ta_set_int(data, off, e, jsnum_to_store_int(num))
+        typed_array_ffi.Float(e) -> ta_set_float(data, off, e, num)
+      }
   }
 }
 
@@ -307,7 +300,7 @@ pub type TypedElement {
 /// own kind, so the bounds guard below can never disagree with the encoder.
 fn element_size(el: TypedElement) -> Int {
   case el {
-    NumberElement(kind:, ..) -> value.number_kind_size(kind)
+    NumberElement(kind:, ..) -> typed_array_ffi.elem_size(value.NumKind(kind))
     BigIntElement(..) -> 8
   }
 }
@@ -345,7 +338,7 @@ pub fn typed_array_encode_value(
   case el {
     NumberElement(kind:, num:) -> encode_typed_number(data, off, kind, num)
     BigIntElement(kind:, int:) ->
-      ta_set_int(data, off, bigint_int_elem(kind), int)
+      ta_set_int(data, off, typed_array_ffi.bigint_elem(kind), int)
   }
 }
 
@@ -359,7 +352,7 @@ pub fn typed_array_encode_primitives(
   elem_kind: value.TypedArrayKind,
   values: List(JsValue),
 ) -> Option(BitArray) {
-  let size = value.typed_array_element_size(elem_kind)
+  let size = typed_array_ffi.elem_size(elem_kind)
   encode_primitives_loop(elem_kind, size, values, [])
 }
 
@@ -374,7 +367,7 @@ fn encode_primitives_loop(
     [v, ..rest] -> {
       let seg = case elem_kind, v {
         value.BigKind(k), value.JsBigInt(value.BigInt(n)) ->
-          Some(ta_set_int(ta_zeroed(size), 0, bigint_int_elem(k), n))
+          Some(ta_set_int(ta_zeroed(size), 0, typed_array_ffi.bigint_elem(k), n))
         // Anything else → ToBigInt may throw (or run user code on objects).
         value.BigKind(_), _ -> None
         value.NumKind(_), JsObject(_) -> None
