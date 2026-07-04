@@ -74,9 +74,119 @@ pub fn dispatch(
   let #(state, res) = case native {
     JsonParse -> json_parse(args, state)
     JsonStringify -> json_stringify(args, state)
+    JsonRawJson -> json_raw_json(args, state)
     JsonIsRawJson -> json_is_raw_json(args, state)
   }
   #(State(..state, builtins: caller_builtins), res)
+}
+
+// ============================================================================
+// JSON.rawJSON(text)
+// ============================================================================
+
+/// JSON.rawJSON ( text ) — proposal-json-parse-with-source.
+///
+/// Steps:
+///   1. Let jsonString be ? ToString(text).
+///   2. Throw a SyntaxError if jsonString is empty, or if its first or last
+///      code unit is one of U+0009, U+000A, U+000D, U+0020.
+///   3. Parse jsonString as a JSON text (ECMA-404); throw a SyntaxError if it
+///      is invalid, or if its outermost value is an object or an array.
+///   4-8. obj = OrdinaryObjectCreate(null, « [[IsRawJSON]] »),
+///        CreateDataPropertyOrThrow(obj, "rawJSON", jsonString),
+///        SetIntegrityLevel(obj, frozen), return obj.
+fn json_raw_json(
+  args: List(JsValue),
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  // Step 1: ToString(text)
+  let to_string_result = case args {
+    [JsString(s), ..] -> Ok(#(s, state))
+    [other, ..] -> coerce.js_to_string(state, other)
+    [] -> Ok(#("undefined", state))
+  }
+  use json_str, state <- state.try_op(to_string_result)
+
+  // Steps 2-3: validate the text.
+  case validate_raw_json_text(bit_array.from_string(json_str)) {
+    Error(msg) -> state.syntax_error(state, msg)
+    Ok(Nil) -> {
+      // Steps 4-8: the frozen, null-prototype [[IsRawJSON]] box.
+      let #(state, ref) = alloc_raw_json(state, json_str)
+      #(state, Ok(JsObject(ref)))
+    }
+  }
+}
+
+/// Steps 2-3 of JSON.rawJSON: the text must be non-empty, must not begin or
+/// end with JSON whitespace, and must be a complete JSON *primitive* literal.
+/// Returns the SyntaxError message on rejection.
+fn validate_raw_json_text(bytes: BitArray) -> Result(Nil, String) {
+  use Nil <- result.try(case bytes {
+    <<>> -> Error("JSON.rawJSON text must not be empty")
+    <<first, _:bits>> ->
+      case is_json_whitespace_byte(first) || last_byte_is_whitespace(bytes) {
+        True -> Error("JSON.rawJSON text must not start or end with whitespace")
+        False -> Ok(Nil)
+      }
+    _ -> Error("Invalid UTF-8 in JSON input")
+  })
+
+  use #(parsed, rest) <- result.try(
+    parse_value(bytes) |> result.map_error(json_error_message),
+  )
+  use Nil <- result.try(case skip_whitespace(rest) {
+    <<>> -> Ok(Nil)
+    _ -> Error("Unexpected non-whitespace character after JSON")
+  })
+  case parsed {
+    JsonArray(_) | JsonObject(_) ->
+      Error("JSON.rawJSON text must not be an object or an array")
+    _ -> Ok(Nil)
+  }
+}
+
+fn is_json_whitespace_byte(byte: Int) -> Bool {
+  byte == 0x09 || byte == 0x0a || byte == 0x0d || byte == 0x20
+}
+
+fn last_byte_is_whitespace(bytes: BitArray) -> Bool {
+  let size = bit_array.byte_size(bytes)
+  case bit_array.slice(bytes, size - 1, 1) {
+    Ok(<<last>>) -> is_json_whitespace_byte(last)
+    Ok(_) -> False
+    Error(Nil) -> False
+  }
+}
+
+/// OrdinaryObjectCreate(null, « [[IsRawJSON]] ») + CreateDataPropertyOrThrow +
+/// SetIntegrityLevel(frozen): a null-prototype, non-extensible object whose
+/// only own property is a non-writable, non-configurable "rawJSON" string.
+fn alloc_raw_json(state: State(host), raw: String) -> #(State(host), Ref) {
+  let #(heap, ref) =
+    heap.alloc(
+      state.heap,
+      ObjectSlot(
+        kind: RawJsonObject(raw:),
+        properties: dict.from_list([
+          #(
+            key.canonical_key("rawJSON"),
+            value.DataProperty(
+              value: JsString(raw),
+              writable: False,
+              enumerable: True,
+              configurable: False,
+              seq: value.next_prop_seq(),
+            ),
+          ),
+        ]),
+        elements: elements.new(),
+        prototype: None,
+        symbol_properties: [],
+        extensible: False,
+      ),
+    )
+  #(State(..state, heap:), ref)
 }
 
 /// The builtins of the realm whose `JSON` namespace object is `this`, or the
@@ -382,14 +492,19 @@ type JsonValue {
   JsonObject(List(#(String, JsonValue)))
 }
 
-/// The exact source text of a primitive literal, or `None` for arrays and
-/// objects (whose reviver `context` never gets a `source` property).
-fn json_node_source(node: JsonValue) -> Option(String) {
+/// A primitive literal node's `#(value it produced, exact source text)`, or
+/// `None` for arrays and objects (whose reviver `context` never gets a
+/// `source` property).
+///
+/// The value comes back alongside the text because InternalizeJSONProperty
+/// only exposes `source` while the value sitting in the holder is still the
+/// one this literal produced — see `unmodified_source`.
+fn json_node_primitive(node: JsonValue) -> Option(#(JsValue, String)) {
   case node {
-    JsonNull(source:) -> Some(source)
-    JsonBool(source:, ..) -> Some(source)
-    JsonNumber(source:, ..) -> Some(source)
-    JsonString(source:, ..) -> Some(source)
+    JsonNull(source:) -> Some(#(JsNull, source))
+    JsonBool(value: b, source:) -> Some(#(JsBool(b), source))
+    JsonNumber(value: n, source:) -> Some(#(JsNumber(n), source))
+    JsonString(value: s, source:) -> Some(#(JsString(s), source))
     JsonArray(_) | JsonObject(_) -> None
   }
 }
