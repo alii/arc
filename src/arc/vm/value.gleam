@@ -5599,34 +5599,30 @@ pub fn same_value(left: JsValue, right: JsValue) -> Bool {
 @external(erlang, "arc_vm_ffi", "float_same_term")
 fn float_same_term(a: Float, b: Float) -> Bool
 
-pub fn abstract_equal(left: JsValue, right: JsValue) -> Bool {
-  case left, right {
-    // Same type — use strict equality
-    JsNull, JsNull
-    | JsUndefined, JsUndefined
-    | JsNull, JsUndefined
-    | JsUndefined, JsNull
-    -> True
-    JsNumber(_), JsNumber(_)
-    | JsBool(_), JsBool(_)
-    | JsString(_), JsString(_)
-    | JsObject(_), JsObject(_)
-    | JsSymbol(_), JsSymbol(_)
-    | JsBigInt(_), JsBigInt(_)
-    -> strict_equal(left, right)
-    // Number vs String — coerce string to number
-    JsNumber(_), JsString(s) ->
-      to_number(JsString(s))
-      |> result.map(fn(n) { strict_equal(left, JsNumber(n)) })
-      |> result.unwrap(False)
-    JsString(_), JsNumber(_) -> abstract_equal(right, left)
-    // Bool vs anything — coerce bool to number
-    JsBool(_), _ ->
-      to_number(left)
-      |> result.map(fn(n) { abstract_equal(JsNumber(n), right) })
-      |> result.unwrap(False)
-    _, JsBool(_) -> abstract_equal(right, left)
-    _, _ -> False
+/// §7.1.14 StringToBigInt — decimal (with sign) or 0x/0o/0b prefixed;
+/// empty/whitespace-only → 0; anything else fails (None).
+///
+/// Lives here, next to `BigInt`, because both `ops/operators` (loose equality,
+/// relational comparison) and `ops/coerce` (ToBigInt) need it and `operators`
+/// cannot import `coerce`. One copy: a fix lands everywhere.
+pub fn string_to_bigint(s: String) -> Option(Int) {
+  let s = string.trim(s)
+  case s {
+    "" -> Some(0)
+    "0x" <> rest | "0X" <> rest -> parse_bigint_radix_digits(rest, 16)
+    "0o" <> rest | "0O" <> rest -> parse_bigint_radix_digits(rest, 8)
+    "0b" <> rest | "0B" <> rest -> parse_bigint_radix_digits(rest, 2)
+    _ -> int.parse(s) |> option.from_result
+  }
+}
+
+/// Digits after a 0x/0o/0b prefix. The grammar (§7.1.14
+/// NonDecimalIntegerLiteral) has no SignedInteger, so a sign is a failure
+/// even though int.base_parse would accept it.
+fn parse_bigint_radix_digits(digits: String, base: Int) -> Option(Int) {
+  case digits {
+    "-" <> _ | "+" <> _ -> None
+    _ -> int.base_parse(digits, base) |> option.from_result
   }
 }
 

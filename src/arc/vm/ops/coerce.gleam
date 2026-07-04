@@ -11,9 +11,8 @@ import arc/vm/value.{
   NativeFunction, NegInfinity, ObjectSlot,
 }
 import gleam/int
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 import gleam/result
-import gleam/string
 
 // ============================================================================
 // ToPrimitive / ToString with VM re-entry (ES2024 §7.1.1, §7.1.12)
@@ -610,7 +609,7 @@ pub fn to_bigint(
     value.PBool(True) -> Ok(#(1, state))
     value.PBool(False) -> Ok(#(0, state))
     value.PString(s) ->
-      case string_to_bigint(s) {
+      case value.string_to_bigint(s) {
         Some(n) -> Ok(#(n, state))
         // §7.1.13: StringToBigInt returning undefined throws a SyntaxError
         // (not TypeError — that's for Number/Symbol/null/undefined).
@@ -688,25 +687,3 @@ pub fn to_index_cps(
   }
 }
 
-/// §7.1.14 StringToBigInt — decimal (with sign) or 0x/0o/0b prefixed;
-/// empty/whitespace-only → 0; anything else fails.
-pub fn string_to_bigint(s: String) -> Option(Int) {
-  let s = string.trim(s)
-  case s {
-    "" -> Some(0)
-    "0x" <> rest | "0X" <> rest -> parse_radix_digits(rest, 16)
-    "0o" <> rest | "0O" <> rest -> parse_radix_digits(rest, 8)
-    "0b" <> rest | "0B" <> rest -> parse_radix_digits(rest, 2)
-    _ -> int.parse(s) |> option.from_result
-  }
-}
-
-/// Parse the digits after a 0x/0o/0b prefix. The grammar (§7.1.14
-/// NonDecimalIntegerLiteral) has no SignedInteger, so a sign here is a
-/// syntax error even though int.base_parse would accept it.
-fn parse_radix_digits(digits: String, base: Int) -> Option(Int) {
-  case digits {
-    "-" <> _ | "+" <> _ -> None
-    _ -> int.base_parse(digits, base) |> option.from_result
-  }
-}
