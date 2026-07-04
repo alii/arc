@@ -33,7 +33,6 @@ import arc/vm/builtins/weak_map as builtins_weak_map
 import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Named}
 import arc/vm/state.{type Heap}
 import arc/vm/value.{JsObject, JsUndefined, ObjectSlot, OrdinaryObject}
 import gleam/dict
@@ -601,7 +600,7 @@ pub fn globals(b: Builtins, h: Heap(host)) -> #(Heap(host), value.Ref) {
   let entries =
     list.append(
       entries,
-      list.map(b.typed_arrays, fn(entry) {
+      list.map(common.typed_array_entries(b.typed_arrays), fn(entry) {
         let #(kind, bt) = entry
         Builtin(value.typed_array_name(kind), JsObject(bt.constructor))
       }),
@@ -626,20 +625,12 @@ pub fn globals(b: Builtins, h: Heap(host)) -> #(Heap(host), value.Ref) {
 
   // Add globalThis self-reference property
   let h =
-    heap.update(h, global_ref, fn(slot) {
-      case slot {
-        ObjectSlot(properties: props, ..) ->
-          ObjectSlot(
-            ..slot,
-            properties: dict.insert(
-              props,
-              Named("globalThis"),
-              value.builtin_property(JsObject(global_ref)),
-            ),
-          )
-        _ -> slot
-      }
-    })
+    common.add_named_property(
+      h,
+      global_ref,
+      "globalThis",
+      value.builtin_property(JsObject(global_ref)),
+    )
 
   #(h, global_ref)
 }

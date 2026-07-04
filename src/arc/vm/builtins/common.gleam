@@ -16,6 +16,55 @@ pub type BuiltinType {
   BuiltinType(prototype: Ref, constructor: Ref)
 }
 
+/// The 11 concrete TypedArray constructors — one field per element kind, so
+/// the mapping is TOTAL: every kind has exactly one constructor, none can be
+/// missing or duplicated, and adding a kind to `value.TypedArrayKind` breaks
+/// the build here rather than at a runtime lookup.
+pub type TypedArrays {
+  TypedArrays(
+    int8: BuiltinType,
+    uint8: BuiltinType,
+    uint8_clamped: BuiltinType,
+    int16: BuiltinType,
+    uint16: BuiltinType,
+    int32: BuiltinType,
+    uint32: BuiltinType,
+    float32: BuiltinType,
+    float64: BuiltinType,
+    big_int64: BuiltinType,
+    big_uint64: BuiltinType,
+  )
+}
+
+/// The concrete constructor for a TypedArray element kind. Total — no lookup,
+/// no failure mode.
+pub fn typed_array_of(
+  t: TypedArrays,
+  kind: value.TypedArrayKind,
+) -> BuiltinType {
+  case kind {
+    value.NumKind(value.Int8Kind) -> t.int8
+    value.NumKind(value.Uint8Kind) -> t.uint8
+    value.NumKind(value.Uint8ClampedKind) -> t.uint8_clamped
+    value.NumKind(value.Int16Kind) -> t.int16
+    value.NumKind(value.Uint16Kind) -> t.uint16
+    value.NumKind(value.Int32Kind) -> t.int32
+    value.NumKind(value.Uint32Kind) -> t.uint32
+    value.NumKind(value.Float32Kind) -> t.float32
+    value.NumKind(value.Float64Kind) -> t.float64
+    value.BigKind(value.BigInt64Kind) -> t.big_int64
+    value.BigKind(value.BigUint64Kind) -> t.big_uint64
+  }
+}
+
+/// The 11 constructors keyed by kind, in global-installation order.
+pub fn typed_array_entries(
+  t: TypedArrays,
+) -> List(#(value.TypedArrayKind, BuiltinType)) {
+  use kind <- list.map(value.all_typed_array_kinds)
+  #(kind, typed_array_of(t, kind))
+}
+
 /// Generator intrinsics. `prototype` is %GeneratorPrototype% — the prototype
 /// for generator OBJECTS. `fn_proto` is %GeneratorFunction.prototype% — the
 /// [[Prototype]] of generator FUNCTION objects (§27.3.3); its "constructor"
@@ -205,8 +254,8 @@ pub type Builtins {
     shared_array_buffer: BuiltinType,
     /// %TypedArray% — the abstract intrinsic (Object.getPrototypeOf(Int8Array)).
     typed_array: BuiltinType,
-    /// The 11 concrete TypedArray constructors, keyed by element kind.
-    typed_arrays: List(#(value.TypedArrayKind, BuiltinType)),
+    /// The 11 concrete TypedArray constructors, one per element kind.
+    typed_arrays: TypedArrays,
     /// The BigInt global function (§21.2.1.1, callable, not constructible)
     /// plus %BigInt.prototype% (§21.2.3) — primitive BigInt property access
     /// delegates to the prototype (toString/toLocaleString/valueOf).
@@ -230,6 +279,15 @@ pub type Builtins {
     async_from_sync_iterator_proto: Ref,
     intl: Ref,
   )
+}
+
+/// The concrete constructor for a TypedArray element kind, straight off the
+/// realm's builtins. Total: no lookup, so no "kind was never installed" case.
+pub fn typed_array_builtin(
+  b: Builtins,
+  kind: value.TypedArrayKind,
+) -> BuiltinType {
+  typed_array_of(b.typed_arrays, kind)
 }
 
 /// Allocate an ordinary prototype object on the heap, root it, and return
@@ -611,60 +669,6 @@ fn proto_properties(
   extras: List(#(String, Property)),
 ) -> List(#(String, Property)) {
   [#("constructor", value.builtin_property(JsObject(ctor_ref))), ..extras]
-}
-
-/// ES2024 §13.5.3 The typeof Operator
-///
-/// Table 41 — typeof Operator Results:
-///
-///   Type of val                              Result
-///   ─────────────────────────────────────────────────────
-///   Undefined                                "undefined"
-///   Null                                     "object"
-///   Boolean                                  "boolean"
-///   Number                                   "number"
-///   String                                   "string"
-///   Symbol                                   "symbol"
-///   BigInt                                   "bigint"
-///   Object (does not implement [[Call]])      "object"
-///   Object (implements [[Call]])              "function"
-///
-/// JsUninitialized (TDZ sentinel, not in spec) maps to "undefined".
-/// This matches V8/SpiderMonkey behavior where accessing a TDZ variable throws
-/// a ReferenceError before typeof ever runs, but our compiler may allow typeof
-/// on uninitialized bindings as a defensive measure.
-pub fn typeof_value(val: JsValue, heap: Heap(ctx, host)) -> String {
-  case val {
-    // Table 41 row 1: Undefined → "undefined"
-    // Also handles JsUninitialized (internal TDZ sentinel, not in spec)
-    value.JsUndefined | value.JsUninitialized -> "undefined"
-    // Table 41 row 2: Null → "object"
-    value.JsNull -> "object"
-    // Table 41 row 3: Boolean → "boolean"
-    value.JsBool(_) -> "boolean"
-    // Table 41 row 4: Number → "number"
-    value.JsNumber(_) -> "number"
-    // Table 41 row 5: String → "string"
-    value.JsString(_) -> "string"
-    // Table 41 row 8: BigInt → "bigint"
-    value.JsBigInt(_) -> "bigint"
-    // Table 41 row 7: Symbol → "symbol"
-    value.JsSymbol(_) -> "symbol"
-    // Table 41 rows 9-10: Object — check for [[Call]]
-    value.JsObject(ref) ->
-      case heap.read(heap, ref) {
-        // Row 10: Object implements [[Call]] → "function"
-        Some(ObjectSlot(kind: value.FunctionObject(..), ..))
-        | Some(ObjectSlot(kind: value.NativeFunction(..), ..))
-        | // Proxy: has [[Call]] iff target was callable at creation (§10.5.15);
-          // survives revocation (typeof of revoked function proxy = "function").
-          Some(ObjectSlot(kind: value.ProxyObject(callable: True, ..), ..)) ->
-          "function"
-
-        // Row 9: Object does not implement [[Call]] → "object"
-        _ -> "object"
-      }
-  }
 }
 
 /// Full proto-ctor cycle for a new builtin type using forward references.

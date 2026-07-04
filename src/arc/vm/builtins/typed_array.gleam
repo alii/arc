@@ -18,9 +18,11 @@ import arc/vm/heap
 import arc/vm/internal/typed_array_ffi.{
   splice_clamped, ta_fill_region, ta_zeroed,
 }
+import arc/vm/js_string
 import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/ops/operators
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -1320,6 +1322,14 @@ pub type TaView {
 /// The view a require_ta / validate_ta continuation receives: same slots,
 /// but with [[ArrayLength]] RESOLVED to the current element count (AUTO
 /// views included), so downstream bounds checks see a plain Int.
+///
+/// The record runs at TWO speeds, and callers must not confuse them:
+/// `length` (like the other slot copies) is a SNAPSHOT taken at validation
+/// time, whereas `ref` is a LIVE handle — re-reading the object through it
+/// (`ta_read`/`ta_get`) observes user code that detached or resized the
+/// buffer mid-method. That is exactly what the spec's per-element Get
+/// requires, so the loops below iterate up to the snapshot `length` but read
+/// each element through `ref`.
 pub type TaWitness {
   TaWitness(
     ref: Ref,
@@ -1727,7 +1737,7 @@ fn proto_set(
             Some(err) -> witness_type_error(state, err)
             None ->
               set_from_typed_array(
-                this,
+                view,
                 state,
                 offset,
                 len,
@@ -1795,7 +1805,7 @@ fn lazy_witness_guard(
 }
 
 fn set_from_typed_array(
-  this: JsValue,
+  view: TaWitness,
   state: State(host),
   offset: Int,
   len: Int,
@@ -1804,7 +1814,6 @@ fn set_from_typed_array(
   src_off: Int,
   src_len: Int,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use view, state <- require_ta(this, state)
   let TaWitness(buffer: dst_buf, kind:, byte_offset: dst_off, ..) = view
   // §23.2.3.26.1 step 9: source buffer detached/out of bounds → TypeError.
   let src_live = case object.typed_array_buffer_data(state.heap, src_buf) {
@@ -2230,10 +2239,7 @@ fn proto_search(
   let len = view.length
   use <- bool.guard(len == 0, #(state, Ok(done(-1))))
   let search = helpers.first_arg_or_undefined(args)
-  use n, state <- try_state(to_int_or_inf(
-    state,
-    helpers.arg_at(args, 1),
-  ))
+  use n, state <- try_state(to_int_or_inf(state, helpers.arg_at(args, 1)))
   let k = case n {
     INegInf -> 0
     // A +Infinity start is past every index, so search_loop returns -1.
@@ -3586,7 +3592,7 @@ fn get_enum_option(
         "option "
           <> key
           <> " must be a string, got "
-          <> common.typeof_value(other, state.heap),
+          <> operators.typeof(state.heap, other),
       ))
   }
 }
@@ -3630,7 +3636,7 @@ fn require_string(
       Error(state.type_error_value(
         state,
         "expected input to be a string, got "
-          <> common.typeof_value(other, state.heap),
+          <> operators.typeof(state.heap, other),
       ))
   }
 }
@@ -4103,7 +4109,7 @@ fn b64_value(c: Int, alphabet: B64Alphabet) -> Option(Int) {
 fn from_hex(s: String, max_len: Int) -> DecodeResult {
   // The odd-length check is on the string's UTF-16 length, not its UTF-8
   // byte count (they can differ when the bad char is non-ASCII).
-  case object.string_length(s) % 2 != 0 {
+  case js_string.length(s) % 2 != 0 {
     True -> DecodeFailed(<<>>)
     False -> hex_loop(bit_array.from_string(s), 0, [], 0, max_len)
   }
