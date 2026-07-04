@@ -4102,6 +4102,14 @@ pub type Job {
     resolve: JsValue,
     reject: JsValue,
   )
+  /// Call `run()` for its effects only. It carries NO child promise
+  /// capability: it neither resolves nor rejects anything on the job queue's
+  /// behalf, and its return value is discarded (an abrupt completion is
+  /// reported on stderr, like any other job-level throw). Used by hosts that
+  /// own settlement themselves (`import.defer`'s hook), where a
+  /// `PromiseReactionJob` would have to carry non-callable resolve/reject
+  /// sentinels the executor would then try to call.
+  HostJob(run: JsValue)
 }
 
 /// Internal promise state (pending/fulfilled/rejected).

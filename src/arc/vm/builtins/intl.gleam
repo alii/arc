@@ -22,6 +22,7 @@ import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
+import arc/vm/unicode_case
 import arc/vm/value.{
   type CaseFirst, type CollatorSensitivity, type CollatorState, type DateStyle,
   type DateTimeFormatState, type DisplayNamesState, type DtfComponent,
@@ -5990,34 +5991,21 @@ fn host_locale_case(
       }
     [] -> "en"
   }
-  // Apply locale special casing first, then delegate to the engine's own
-  // toLowerCase/toUpperCase (final sigma etc. live there).
+  // Apply locale special casing first, then run the same Unicode Default Case
+  // Conversion `String.prototype.toLowerCase` runs (final sigma etc. live in
+  // `unicode_case`). Deliberately NOT a [[Get]] + [[Call]] of
+  // `String.prototype.toLowerCase`: reassigning that property must not change
+  // what `toLocaleLowerCase` returns.
   let pre = case lang {
     "tr" | "az" -> turkic_case(s, upper)
     "lt" -> lithuanian_case(s, upper)
     _ -> s
   }
-  let method = case upper {
-    True -> "toUpperCase"
-    False -> "toLowerCase"
+  let cased = case upper {
+    True -> unicode_case.to_upper_case(pre)
+    False -> unicode_case.to_lower_case(pre)
   }
-  use #(case_fn, state) <- result.try(object.get_value(
-    state,
-    state.builtins.string.prototype,
-    Named(method),
-    JsObject(state.builtins.string.prototype),
-  ))
-  case helpers.is_callable(state.heap, case_fn) {
-    True -> state.call(state, case_fn, JsString(pre), [])
-    False ->
-      Ok(#(
-        JsString(case upper {
-          True -> string.uppercase(pre)
-          False -> string.lowercase(pre)
-        }),
-        state,
-      ))
-  }
+  Ok(#(JsString(cased), state))
 }
 
 /// Turkish/Azeri dotted and dotless I special casing (pre-transform only —
