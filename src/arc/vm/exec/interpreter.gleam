@@ -1801,6 +1801,52 @@ fn private_get_dyn(
   }
 }
 
+/// Tail of every private-field write: given the already-looked-up private
+/// element (the brand check), apply OrdinarySetWithOwnDescriptor and push the
+/// written value — no second chain walk via set_value.
+///
+/// §7.3.32 PrivateSet: kind ~method~ (non-writable data) or an accessor without
+/// a setter throws TypeError, regardless of strict mode.
+///
+/// `key_text` is the key's storage text — the raw source name for a static
+/// access, a minted `name <> uid` for a dyn one. `private_display_name` strips
+/// the uid when there is one and is the identity otherwise, so both callers can
+/// hand it straight over; it is only walked on the two throwing paths.
+fn private_put_found(
+  state: State(host),
+  found: Option(value.Property),
+  receiver: JsValue,
+  key: key.PropertyKey,
+  key_text: String,
+  val: JsValue,
+  rest: List(JsValue),
+) -> Result(State(host), StepExit(host)) {
+  case found {
+    Some(prop) -> {
+      use #(state, ok) <- result.try(
+        state.rethrow(object.set_found_value(state, receiver, prop, key, val)),
+      )
+      case ok {
+        True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+        False ->
+          state.throw_type_error(
+            state,
+            "Cannot write private member "
+              <> value.private_display_name(key_text)
+              <> ": it is a method or has no setter",
+          )
+      }
+    }
+    None ->
+      state.throw_type_error(
+        state,
+        "Cannot write private member "
+          <> value.private_display_name(key_text)
+          <> " to an object whose class did not declare it",
+      )
+  }
+}
+
 /// Pop top of stack and jump to `target` if `condition(value)` is true,
 /// otherwise advance to next instruction.
 fn conditional_jump(
@@ -3271,39 +3317,15 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
         [val, JsObject(ref) as receiver, ..rest] ->
           // Single chain walk: find the descriptor (brand check), then apply
           // OrdinarySetWithOwnDescriptor to it — no second walk via set_value.
-          case find_private_element(state, ref, key) {
-            Some(prop) -> {
-              use #(state, ok) <- result.try(
-                state.rethrow(object.set_found_value(
-                  state,
-                  receiver,
-                  prop,
-                  key,
-                  val,
-                )),
-              )
-              // §7.3.32 PrivateSet: kind ~method~ or an accessor without a
-              // setter throws TypeError (regardless of strict mode).
-              case ok {
-                True ->
-                  Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-                False ->
-                  state.throw_type_error(
-                    state,
-                    "Cannot write private member "
-                      <> name
-                      <> ": it is a method or has no setter",
-                  )
-              }
-            }
-            None ->
-              state.throw_type_error(
-                state,
-                "Cannot write private member "
-                  <> name
-                  <> " to an object whose class did not declare it",
-              )
-          }
+          private_put_found(
+            state,
+            find_private_element(state, ref, key),
+            receiver,
+            key,
+            name,
+            val,
+            rest,
+          )
         [_, _, ..] ->
           state.throw_type_error(
             state,
@@ -3356,39 +3378,15 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       case state.stack {
         [JsString(key_text), val, JsObject(ref) as receiver, ..rest] -> {
           let key = private_key_from_text(key_text)
-          case object.get_own_property(state.heap, ref, key) {
-            Some(prop) -> {
-              use #(state, ok) <- result.try(
-                state.rethrow(object.set_found_value(
-                  state,
-                  receiver,
-                  prop,
-                  key,
-                  val,
-                )),
-              )
-              // kind ~method~ (non-writable data) or an accessor without a
-              // setter throws TypeError regardless of strict mode.
-              case ok {
-                True ->
-                  Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-                False ->
-                  state.throw_type_error(
-                    state,
-                    "Cannot write private member "
-                      <> value.private_display_name(key_text)
-                      <> ": it is a method or has no setter",
-                  )
-              }
-            }
-            None ->
-              state.throw_type_error(
-                state,
-                "Cannot write private member "
-                  <> value.private_display_name(key_text)
-                  <> " to an object whose class did not declare it",
-              )
-          }
+          private_put_found(
+            state,
+            object.get_own_property(state.heap, ref, key),
+            receiver,
+            key,
+            key_text,
+            val,
+            rest,
+          )
         }
         [JsString(key_text), _, _, ..] ->
           state.throw_type_error(
