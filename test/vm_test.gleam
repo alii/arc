@@ -64,8 +64,8 @@ fn make_func(
     is_constructor: True,
     is_class_constructor: False,
     local_names: None,
-    lexical: opcode.no_lexical_slots,
-    syntax_perms: opcode.script_perms,
+    lexical: opcode.NoLexicalSlots,
+    code_kind: opcode.ScriptCode,
   )
 }
 

@@ -343,7 +343,10 @@ pub type AnalyzeOpts {
     /// the slot before the body runs (§16.2 instantiation). Their bindings
     /// reserve the slot and a boxed binding but emit NO init/box op.
     linker_seeded: Set(String),
-    /// With-object slots inherited from the caller (innermost first).
+    /// With-object holders inherited from the caller: slot indices INTO
+    /// `parent_names` (every holder is one of the caller's local names,
+    /// seeded as a capture), innermost first. They are therefore already
+    /// counted by `parent_names` and reserve no extra frame slots.
     with_stack: List(Int),
   )
 }
@@ -1432,7 +1435,7 @@ fn blank_function_info(
 ) -> FunctionInfo {
   FunctionInfo(
     local_count: 0,
-    lexical: opcode.no_lexical_slots,
+    lexical: opcode.NoLexicalSlots,
     lexical_boxed: opcode.no_lexical_refs,
     captures: [],
     lexical_captures: dict.new(),
@@ -1481,14 +1484,14 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       )
     })
   let root_raw_fn = sb_fn_info(sb, root_scope_id)
-  // Root local_count starts past the seeded captures + inherited
-  // with-stack holders + inherited lexical pseudo-slots — the
-  // captures-first frame layout `do_lookup` / `child_parent_view` assume
-  // — so user bindings allocate from the first free slot after them.
+  // Root local_count starts past the seeded captures + inherited lexical
+  // pseudo-slots — the captures-first frame layout `do_lookup` /
+  // `child_parent_view` assume — so user bindings allocate from the first
+  // free slot after them. `opts.with_stack` is NOT added: its entries are
+  // slot indices INTO `opts.parent_names` (every with-holder is one of the
+  // caller's locals), so they are already counted.
   let root_base =
-    dict.size(opts.parent_names)
-    + list.length(opts.with_stack)
-    + dict.size(opts.lexical_captures)
+    dict.size(opts.parent_names) + dict.size(opts.lexical_captures)
   // A non-direct-eval Script root OWNS all four lexical pseudo-slots
   // (this/active_func/home_object/new.target) — the runtime call
   // prologue seeds them at frame entry (interpreter.gleam:428-437),
@@ -1496,9 +1499,9 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   // roots stay non-owners (`this === undefined` per §16.2.1.6.4);
   // direct-eval Script roots inherit the CALLER's environment and so
   // are non-owners too. The owner test is `root_base == 0` — NO
-  // inherited parent_names/with_stack/lexical_captures — NOT
+  // inherited parent_names/lexical_captures — NOT
   // `dict.is_empty(lexical_captures)` alone: a direct-eval whose
-  // caller has locals but `func.lexical == no_lexical_slots` (e.g. an
+  // caller has locals but `func.lexical == NoLexicalSlots` (e.g. an
   // arrow at Module top-level) arrives with empty lexical_captures and
   // non-empty parent_names, and treating it as an owner would assign
   // `this -> slot root_base` here while compute_down recomputes from
@@ -1506,15 +1509,10 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   let script_root_owns_lexical = root_raw.kind == Script && root_base == 0
   let #(root_local_count, root_lexical) = case script_root_owns_lexical {
     True -> #(
-      root_base + 4,
-      opcode.LexicalSlots(
-        this: Some(root_base),
-        active_func: Some(root_base + 1),
-        home_object: Some(root_base + 2),
-        new_target: Some(root_base + 3),
-      ),
+      root_base + opcode.owned_lexical_slot_count,
+      opcode.OwnedLexicalSlots(base: root_base),
     )
-    False -> #(root_base, opcode.no_lexical_slots)
+    False -> #(root_base, opcode.NoLexicalSlots)
   }
   let root_fn =
     FunctionInfo(
@@ -2620,10 +2618,12 @@ fn compute_down(
   let fn_scope_kind = { get_scope(tree, fn_id) }.kind
   let is_root = fn_id == root_scope_id
   let seeded_info = function_info(tree, fn_id)
+  let seeded_root_owns_lexical = case seeded_info.lexical {
+    opcode.OwnedLexicalSlots(_) -> True
+    opcode.CapturedLexicalSlots(..) | opcode.NoLexicalSlots -> False
+  }
   let script_root_owns =
-    is_root
-    && fn_scope_kind == Script
-    && seeded_info.lexical != opcode.no_lexical_slots
+    is_root && fn_scope_kind == Script && seeded_root_owns_lexical
   let #(lexical_captures, own_lexical_available) = case is_root, inp.is_arrow {
     True, _ -> {
       let seeded = seeded_info.lexical_captures
@@ -2678,9 +2678,9 @@ fn compute_down(
     // nested arrow's `parent_info.lexical` lookup at compiler.gleam
     // succeeds (it has no lexical_captures fallback). For the root
     // and non-arrow non-owners `lexical_captures` is empty, so this
-    // degenerates to `no_lexical_slots`.
+    // degenerates to `NoLexicalSlots`.
     False -> #(
-      opcode.LexicalSlots(
+      opcode.captured_lexical_slots(
         this: dict.get(lexical_captures, RefThis) |> option.from_result,
         active_func: dict.get(lexical_captures, RefActiveFunc)
           |> option.from_result,
@@ -2692,13 +2692,8 @@ fn compute_down(
       0,
     )
     True -> #(
-      opcode.LexicalSlots(
-        this: Some(lex_base),
-        active_func: Some(lex_base + 1),
-        home_object: Some(lex_base + 2),
-        new_target: Some(lex_base + 3),
-      ),
-      4,
+      opcode.OwnedLexicalSlots(base: lex_base),
+      opcode.owned_lexical_slot_count,
     )
   }
 
@@ -2773,7 +2768,7 @@ fn compute_down(
   // into the function-root scope. Without this, captures and own bindings
   // collide at the same slot indices and grandchildren capture the wrong
   // parent slot. The ROOT scope's bindings are already offset (`finalize`
-  // seeds its `local_count` past `opts.parent_names` + `opts.with_stack` +
+  // seeds its `local_count` past `opts.parent_names` +
   // `opts.lexical_captures` and pre-inserts the parent-name CaptureBindings)
   // so it is skipped — root captures are caller-supplied, not computed here.
   let cap_count = lex_base + own_lexical_count
@@ -2815,7 +2810,7 @@ fn compute_down(
       // finalize — already offset past parent_names/with_stack. For
       // every other root (Module, direct-eval Script) the locally
       // computed `lexical` (derived from `lexical_captures`) is the
-      // correct value; finalize wrote `no_lexical_slots` for those,
+      // correct value; finalize wrote `NoLexicalSlots` for those,
       // and preserving it would strand a direct-eval child arrow's
       // capture lookup at compiler.gleam:557.
       let lexical = case script_root_owns {

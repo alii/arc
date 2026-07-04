@@ -20,9 +20,10 @@ import arc/compiler/scope
 import arc/esm
 import arc/parser/ast
 import arc/vm/internal/tuple_array
-import arc/vm/opcode.{type LexicalSlots, type SyntaxPerms}
+import arc/vm/opcode.{type CodeKind, type LexicalSlots}
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, CaptureLocal, FuncTemplate, JsUndefined,
+  type EvalNameTable, type FuncTemplate, type JsValue, type VarEnvKind,
+  CaptureLocal, EvalNameTable, FuncTemplate, GlobalVarEnv, JsUndefined,
   JsUninitialized,
 }
 import gleam/dict.{type Dict}
@@ -78,15 +79,6 @@ fn internal_error(context: String) -> String {
   "internal compiler error: " <> context
 }
 
-/// Whether the direct-eval CALLER's frame has the global environment as its
-/// VariableEnvironment (script/REPL top level) or its own function frame.
-/// Sloppy direct eval in a global frame sends `var` declarations to the
-/// global object; in a function frame they land in the frame's eval_env dict.
-pub type VarEnvKind {
-  GlobalVarEnv
-  FrameVarEnv
-}
-
 /// The direct-eval CALLER's strictness (§19.2.1.1 PerformEval step 2's
 /// `strictCaller`). Named rather than `Bool` so it can't be transposed with
 /// the other flags `compile_eval_direct` used to take positionally.
@@ -106,8 +98,9 @@ pub type DirectEvalCaller {
     /// The caller's lexical pseudo-slots (`this` / `new.target` / …); each
     /// `Some` entry becomes one further capture slot after `names`.
     slots: LexicalSlots,
-    /// What syntax the caller's body permits (§19.2.1.1 step 6).
-    perms: SyntaxPerms,
+    /// What kind of code the caller's body is — decides what syntax the eval
+    /// body may use (§19.2.1.1 step 6).
+    code_kind: CodeKind,
     /// `strictCaller` — a strict caller upgrades the eval body to strict.
     strictness: Strictness,
     /// Whether the caller's VariableEnvironment is the global environment.
@@ -122,13 +115,6 @@ pub type DirectEvalCaller {
   )
 }
 
-/// Sentinel head entry in FuncTemplate.local_names marking a frame whose
-/// VariableEnvironment is the GLOBAL environment (script/REPL top level).
-/// Sloppy direct eval in such a frame sends `var` declarations to the global
-/// object instead of a function-frame eval_env dict. The `<` prefix can never
-/// collide with a user binding name; run_direct_eval strips it before use.
-pub const global_frame_sentinel = "<global>"
-
 /// Phase 3 for a top-level body (script, module, or eval): unnamed, zero
 /// arity, no env captures, and not an arrow/constructor/generator/async.
 fn resolve_top_level(
@@ -137,8 +123,8 @@ fn resolve_top_level(
   info: scope.FunctionInfo,
   child_templates: List(FuncTemplate),
   is_strict: Bool,
-  perms: SyntaxPerms,
-  local_names: Option(List(#(String, Int))),
+  code_kind: CodeKind,
+  local_names: Option(EvalNameTable),
 ) -> FuncTemplate {
   let #(bytecode, constants) = resolve.resolve(code, constants)
   FuncTemplate(
@@ -159,7 +145,7 @@ fn resolve_top_level(
     is_class_constructor: False,
     local_names:,
     lexical: info.lexical,
-    syntax_perms: perms,
+    code_kind:,
   )
 }
 
@@ -348,7 +334,7 @@ fn compile_module_with_scope(
       info,
       child_templates,
       is_strict,
-      opcode.script_perms,
+      opcode.ScriptCode,
       None,
     )
   CompiledModuleBody(
@@ -433,9 +419,15 @@ pub fn compile_eval_direct(
     )
   // The caller's enclosing with-object holders are themselves entries
   // in caller.names; their capture-slot indices form the inherited
-  // with_stack the analyzer probes before falling through.
+  // with_stack the analyzer probes before falling through. Every holder
+  // MUST be one of caller.names — dropping one silently would compile
+  // `with (o) { eval("x") }` to a plain global read.
   let with_stack =
-    list.filter_map(caller.with_names, fn(n) { dict.get(parent_dict, n) })
+    list.map(caller.with_names, fn(n) {
+      let assert Ok(slot) = dict.get(parent_dict, n)
+        as "direct-eval caller's with-holder is not one of its local names"
+      slot
+    })
   // Phase 1: finalize the parser-built scope tree, seeded with the
   // caller's environment.
   let opts =
@@ -510,16 +502,18 @@ pub fn compile_eval_direct(
   // Expose the name table only when a nested top-level eval needs it —
   // run_direct_eval consults state.func.local_names to decide between
   // direct (aliasing) and indirect fallback semantics. A global caller's
-  // VariableEnvironment propagates: a nested eval in this body shares it,
-  // so keep the sentinel (see compile_script). Keyed on the analyzer's
+  // VariableEnvironment propagates: a nested eval in this body shares it
+  // (see compile_script). Keyed on the analyzer's
   // FunctionInfo.contains_direct_eval — populated by scope.finalize from
   // the per-Scope flags the parser sets, so emit no longer needs to
   // surface a `has_eval_call` side-channel.
-  let local_names = case info.contains_direct_eval, caller.var_env {
-    True, GlobalVarEnv ->
-      Some([#(global_frame_sentinel, -1), ..dict.to_list(info.names)])
-    True, FrameVarEnv -> Some(dict.to_list(info.names))
-    False, _ -> None
+  let local_names = case info.contains_direct_eval {
+    True ->
+      Some(EvalNameTable(
+        var_env: caller.var_env,
+        names: dict.to_list(info.names),
+      ))
+    False -> None
   }
   // The template's strictness must reflect how the body was COMPILED
   // (caller strictness upgrades the body — vars were rewritten to
@@ -531,7 +525,7 @@ pub fn compile_eval_direct(
     info,
     child_templates,
     strict,
-    caller.perms,
+    caller.code_kind,
     local_names,
   ))
 }
@@ -571,11 +565,12 @@ fn compile_script(
   // (compile_eval_direct). Without the table, direct_eval_native falls back
   // to indirect semantics and `with (o) { eval('x') }` at top level never
   // sees `o`. The analyzer already boxed every declared local for this case.
-  // The sentinel head entry marks this frame's VariableEnvironment as the
-  // GLOBAL environment: sloppy direct eval here must send `var` declarations
+  // `GlobalVarEnv` records that this frame's VariableEnvironment IS the
+  // global environment: sloppy direct eval here must send `var` declarations
   // to the global object (not a function-frame eval_env dict).
   let local_names = case info.contains_direct_eval {
-    True -> Some([#(global_frame_sentinel, -1), ..dict.to_list(info.names)])
+    True ->
+      Some(EvalNameTable(var_env: GlobalVarEnv, names: dict.to_list(info.names)))
     False -> None
   }
   // Phase 3: Resolve labels (label IDs → PC addresses).
@@ -585,7 +580,7 @@ fn compile_script(
     info,
     child_templates,
     is_strict,
-    opcode.script_perms,
+    opcode.ScriptCode,
     local_names,
   )
 }
@@ -615,7 +610,7 @@ fn compile_child(
 
   // env_descriptors: one CaptureLocal per named capture (parent slot index
   // already paired by the analyzer), then the lexical captures in canonical
-  // `all_lexical_refs` order — same layout setup_locals assumes. The
+  // `all_lexical_refs` order — same layout setup_frame assumes. The
   // analyzer records WHICH lexical refs this child captures (and at what
   // slot in its OWN frame) in `info.lexical_captures`; the PARENT slot
   // index for each comes from `parent_info.lexical`.
@@ -646,8 +641,13 @@ fn compile_child(
   // names in the eval'd source to the caller's boxed local slots. Needed
   // if eval is anywhere in the subtree — a nested eval still reaches this
   // function's locals through the closure chain.
+  // A child function's VariableEnvironment is always its own frame.
   let local_names = case info.eval_in_subtree {
-    True -> Some(dict.to_list(info.names))
+    True ->
+      Some(EvalNameTable(
+        var_env: value.FrameVarEnv,
+        names: dict.to_list(info.names),
+      ))
     False -> None
   }
 
@@ -676,7 +676,7 @@ fn compile_child(
     is_class_constructor: child.is_class_constructor,
     local_names:,
     lexical: info.lexical,
-    syntax_perms: child.syntax_perms,
+    code_kind: child.code_kind,
   )
 }
 

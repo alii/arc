@@ -1,3 +1,4 @@
+import arc/vm/builtins/temporal_tz
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/temporal_calendar.{type Calendar}
 import arc/vm/internal/tree_array.{type TreeArray}
@@ -144,6 +145,27 @@ pub type BigInt {
   BigInt(value: Int)
 }
 
+/// Whether a frame's VariableEnvironment is the GLOBAL environment
+/// (script/REPL top level) or the frame's own eval_env dict. Sloppy direct
+/// eval sends `var` declarations to one or the other.
+pub type VarEnvKind {
+  GlobalVarEnv
+  FrameVarEnv
+}
+
+/// The name table a direct eval in this body needs: every local binding's
+/// name → local slot index (all such locals are boxed — BoxSlot refs — so
+/// direct eval can read/write them by index), plus the kind of
+/// VariableEnvironment the frame runs in.
+///
+/// `var_env` used to be smuggled through `names` as a `#("<global>", -1)`
+/// sentinel head entry that the runtime decoded by string comparison; it is
+/// a field now, so a user binding can never be mistaken for it and the
+/// runtime can never forget to strip it.
+pub type EvalNameTable {
+  EvalNameTable(var_env: VarEnvKind, names: List(#(String, Int)))
+}
+
 /// Compiled function definition. Stored directly on FunctionObject
 /// per ES spec §10.2 (ordinary function objects carry [[ECMAScriptCode]]).
 pub type FuncTemplate {
@@ -176,20 +198,19 @@ pub type FuncTemplate {
     /// (base AND derived) throw TypeError when invoked without `new`.
     is_class_constructor: Bool,
     /// Present only for functions that contain a direct eval call.
-    /// Maps variable name → local slot index. All such locals are boxed
-    /// (BoxSlot refs), so direct eval can read/write them by index.
-    local_names: Option(List(#(String, Int))),
+    local_names: Option(EvalNameTable),
     /// Local-slot indices for the §9.1.1.3 FunctionEnvironmentRecord quartet
     /// (`this` / `[[FunctionObject]]` / `[[HomeObject]]` / `[[NewTarget]]`).
-    /// Non-arrows own all four (setup_locals writes them at frame entry);
+    /// Non-arrows own all four (setup_frame writes them at frame entry);
     /// arrows that reference a given binding hold the env_descriptors capture
-    /// index for it instead (setup_locals does NOT write — is_arrow guards
-    /// that). None means unallocated/unreferenced.
+    /// index for it instead (setup_frame does NOT write — is_arrow guards
+    /// that).
     lexical: opcode.LexicalSlots,
-    /// What syntax is allowed in *this* body's direct eval / nested arrow
-    /// scope (§19.2.1.1 PerformEval step 6). Mirrors QuickJS's
+    /// What KIND of code this body is (§19.2.1.1 PerformEval step 6 derives
+    /// the new.target/super/super()/arguments legality bits from it, for this
+    /// body's direct eval and nested arrows). Mirrors QuickJS's
     /// JSFunctionBytecode.{new_target,super,super_call,arguments}_allowed.
-    syntax_perms: opcode.SyntaxPerms,
+    code_kind: opcode.CodeKind,
   )
 }
 
@@ -813,23 +834,10 @@ pub const all_typed_array_kinds = [
   BigKind(BigUint64Kind),
 ]
 
-/// Element size in bytes of a Number content type — §23.2 Table 69.
-pub fn number_kind_size(kind: NumberKind) -> Int {
-  case kind {
-    Int8Kind | Uint8Kind | Uint8ClampedKind -> 1
-    Int16Kind | Uint16Kind -> 2
-    Int32Kind | Uint32Kind | Float32Kind -> 4
-    Float64Kind -> 8
-  }
-}
-
-/// Element size in bytes — §23.2 Table 69. Both BigInt kinds are 8 bytes.
-pub fn typed_array_element_size(kind: TypedArrayKind) -> Int {
-  case kind {
-    NumKind(k) -> number_kind_size(k)
-    BigKind(_) -> 8
-  }
-}
+// Element size in bytes (§23.2 Table 69) is NOT here: it lives in
+// arc/vm/internal/typed_array_ffi as `elem_size`, derived from the same
+// `elem_of_kind` table the read/write codecs use. A second width table here
+// is exactly how a kind's width and its codec drift apart.
 
 /// [[TypedArrayName]] — the constructor's global name.
 pub fn typed_array_name(kind: TypedArrayKind) -> String {
@@ -1385,7 +1393,7 @@ pub type DataViewNativeFn {
 
 /// Iterator Helper kind — ES2025 §27.1.3. Which lazy combinator created
 /// this %IteratorHelper% object, together with that combinator's own state.
-/// Stored in IteratorHelperObject.kind. Keeping the per-kind payload inside
+/// Stored in `ClassicHelper.kind`. Keeping the per-kind payload inside
 /// the variant means take/drop provably have no callback and map/filter/
 /// flatMap provably have one — there is no "func is JsUndefined" sentinel.
 pub type IteratorHelperKind {
@@ -1400,6 +1408,39 @@ pub type IteratorHelperKind {
   /// half-initialized inner (an iterator without its cached next method) is
   /// unrepresentable.
   HelperFlatMap(func: JsValue, inner: Option(IteratorRecord))
+}
+
+/// The per-flavour body of an `IteratorHelperObject` — everything about a
+/// %IteratorHelperPrototype% object EXCEPT its [[GeneratorState]], which is a
+/// sibling field so the generator lifecycle is written in ONE place for all
+/// three flavours.
+pub type HelperBody {
+  /// Iterator.prototype.{map,filter,take,drop,flatMap} — ES2025 §27.1.3.2.
+  /// `underlying`'s next method is cached once by GetIteratorDirect (§7.4.9),
+  /// so monkey-patching `underlying.next` after creation has no effect.
+  /// `kind` carries the combinator's own state; `counter` is the spec's running
+  /// element index passed to map/filter/flatMap callbacks (take/drop's
+  /// countdown lives in their `kind` variants instead).
+  ClassicHelper(
+    kind: IteratorHelperKind,
+    underlying: IteratorRecord,
+    counter: Int,
+  )
+  /// Iterator.zip / Iterator.zipKeyed — the tc39 joint-iteration proposal's
+  /// IteratorZip generator. `members` is the spec's iters list (a ZipExhausted
+  /// member is the spec's null entry, and each member carries its own padding
+  /// value); `keys` is None for Iterator.zip (array results) and Some(property
+  /// keys) for Iterator.zipKeyed (null-proto object results).
+  ZipHelper(
+    members: List(ZipMember),
+    mode: ZipMode,
+    keys: Option(List(ObjectKey)),
+  )
+  /// Iterator.concat — the tc39 iterator-sequencing proposal. `remaining` holds
+  /// the not-yet-opened items; `inner` is the currently open iterator record.
+  /// The two are different types on purpose — a `ConcatItem` cannot be handed
+  /// to something expecting an already-opened `IteratorRecord`, or vice versa.
+  ConcatHelper(remaining: List(ConcatItem), inner: Option(IteratorRecord))
 }
 
 /// An OPENED Iterator Record — ES2024 §7.4: the iterator object plus its
@@ -2090,14 +2131,46 @@ pub type LocaleState {
 pub type CollatorState {
   CollatorState(
     locale: String,
-    usage: String,
-    sensitivity: String,
+    usage: CollatorUsage,
+    sensitivity: CollatorSensitivity,
     ignore_punctuation: Bool,
     collation: String,
     numeric: Bool,
     case_first: CaseFirst,
     bound_compare: Option(Ref),
   )
+}
+
+/// `[[Usage]]` (§10.1.2 InitializeCollator).
+pub type CollatorUsage {
+  UsageSort
+  UsageSearch
+}
+
+pub fn collator_usage_to_js_string(v: CollatorUsage) -> String {
+  case v {
+    UsageSort -> "sort"
+    UsageSearch -> "search"
+  }
+}
+
+/// `[[Sensitivity]]` (§10.1.2 InitializeCollator). Parsed once at construction
+/// so the comparator dispatches on the variants exhaustively — a misspelled
+/// sensitivity can never reach it and be silently treated as `variant`.
+pub type CollatorSensitivity {
+  SensBase
+  SensAccent
+  SensCase
+  SensVariant
+}
+
+pub fn collator_sensitivity_to_js_string(v: CollatorSensitivity) -> String {
+  case v {
+    SensBase -> "base"
+    SensAccent -> "accent"
+    SensCase -> "case"
+    SensVariant -> "variant"
+  }
 }
 
 /// `[[CaseFirst]]` (§10.1.2 InitializeCollator, UTS 35 `kf`). Parsed once at
@@ -2528,6 +2601,33 @@ pub const empty_dtf_components = DtfComponents(
   time_zone_name: None,
 )
 
+/// A DateTimeFormat's [[TimeZone]].
+///
+/// A UTC offset is never stored on the formatter: it is a function of the
+/// zone *and the instant being formatted*, so it is resolved per format call
+/// (see `intl.zone_offset_at`). That makes "formatter built in January prints
+/// July with January's offset" unrepresentable.
+pub type DtfTimeZone {
+  /// The host environment's default zone. Its identifier is not observable,
+  /// so resolvedOptions reports "UTC"; the offset is the live host offset at
+  /// the formatted instant.
+  HostZone
+  /// A named IANA zone, validated against the system tzdata. Its offset
+  /// varies with the instant (DST).
+  NamedZone(id: String, zone: temporal_tz.Zone)
+  /// A zone whose offset never varies: "UTC", "GMT", "Etc/GMT+3", "+05:30".
+  FixedZone(id: String, offset_minutes: Int)
+}
+
+/// The identifier resolvedOptions() reports for a formatter's time zone.
+pub fn dtf_time_zone_id(tz: DtfTimeZone) -> String {
+  case tz {
+    HostZone -> "UTC"
+    NamedZone(id:, ..) -> id
+    FixedZone(id:, ..) -> id
+  }
+}
+
 /// Intl.DateTimeFormat resolved options (§11.1.2 CreateDateTimeFormat).
 ///
 /// The `weekday` … `time_style` fields are the resolvedOptions view (the
@@ -2538,16 +2638,12 @@ pub const empty_dtf_components = DtfComponents(
 ///
 /// `explicit` lists the component options the user provided explicitly —
 /// GetDateTimeFormat needs it for Temporal ~relevant~ inheritance.
-/// `tz_system` marks the host default zone: the offset is then resolved live
-/// per formatted instant instead of from `tz_offset_minutes`.
 pub type DateTimeFormatState {
   DateTimeFormatState(
     locale: String,
     calendar: String,
     numbering_system: String,
-    time_zone: String,
-    tz_offset_minutes: Int,
-    tz_system: Bool,
+    time_zone: DtfTimeZone,
     hour_cycle: Option(HourCycle),
     weekday: Option(NameWidth),
     era: Option(NameWidth),
@@ -2573,15 +2669,65 @@ pub type DateTimeFormatState {
 pub type PluralRulesState {
   PluralRulesState(
     locale: String,
-    plural_type: String,
+    plural_type: PluralType,
     notation: Notation,
     digits: IntlDigitOptions,
   )
 }
 
+/// `[[Type]]` (§16.1.2 InitializePluralRules).
+pub type PluralType {
+  Cardinal
+  Ordinal
+}
+
+pub fn plural_type_to_js_string(v: PluralType) -> String {
+  case v {
+    Cardinal -> "cardinal"
+    Ordinal -> "ordinal"
+  }
+}
+
 /// Intl.ListFormat resolved options (§13.1.2).
 pub type ListFormatState {
-  ListFormatState(locale: String, list_type: String, style: String)
+  ListFormatState(
+    locale: String,
+    list_type: ListFormatType,
+    style: ListFormatStyle,
+  )
+}
+
+/// `[[Type]]` (§13.1.2). `UnitList` is the "unit" spelling — the list-format
+/// type, not to be confused with `NumStyle`'s `StyleUnit`.
+pub type ListFormatType {
+  Conjunction
+  Disjunction
+  UnitList
+}
+
+pub fn list_format_type_to_js_string(v: ListFormatType) -> String {
+  case v {
+    Conjunction -> "conjunction"
+    Disjunction -> "disjunction"
+    UnitList -> "unit"
+  }
+}
+
+/// `[[Style]]` (§13.1.2). The engine picks its separator patterns by matching
+/// `#(ListFormatType, ListFormatStyle)` exhaustively, so no combination can
+/// silently fall through to the conjunction/long pattern.
+pub type ListFormatStyle {
+  LLong
+  LShort
+  LNarrow
+}
+
+pub fn list_format_style_to_js_string(v: ListFormatStyle) -> String {
+  case v {
+    LLong -> "long"
+    LShort -> "short"
+    LNarrow -> "narrow"
+  }
 }
 
 /// Intl.RelativeTimeFormat resolved options (§17.1.2). `numeric` here is the
@@ -2589,15 +2735,60 @@ pub type ListFormatState {
 pub type RelativeTimeFormatState {
   RelativeTimeFormatState(
     locale: String,
-    style: String,
-    numeric: String,
+    style: RtfStyle,
+    numeric: RtfNumeric,
     numbering_system: String,
   )
 }
 
+/// `[[Style]]` (§17.1.2) — selects the unit spellings ("3 hr. ago").
+pub type RtfStyle {
+  RtfLong
+  RtfShort
+  RtfNarrow
+}
+
+pub fn rtf_style_to_js_string(v: RtfStyle) -> String {
+  case v {
+    RtfLong -> "long"
+    RtfShort -> "short"
+    RtfNarrow -> "narrow"
+  }
+}
+
+/// `[[Numeric]]` (§17.1.2) — "auto" allows the special names ("yesterday").
+pub type RtfNumeric {
+  RtfAlways
+  RtfAuto
+}
+
+pub fn rtf_numeric_to_js_string(v: RtfNumeric) -> String {
+  case v {
+    RtfAlways -> "always"
+    RtfAuto -> "auto"
+  }
+}
+
 /// Intl.Segmenter resolved options (§18.1.2).
 pub type SegmenterState {
-  SegmenterState(locale: String, granularity: String)
+  SegmenterState(locale: String, granularity: Granularity)
+}
+
+/// `[[SegmenterGranularity]]` (§18.1.2). The segmenter dispatches on the
+/// variants exhaustively, so a misspelling can no longer silently degrade to
+/// grapheme segmentation.
+pub type Granularity {
+  GGrapheme
+  GWord
+  GSentence
+}
+
+pub fn granularity_to_js_string(v: Granularity) -> String {
+  case v {
+    GGrapheme -> "grapheme"
+    GWord -> "word"
+    GSentence -> "sentence"
+  }
 }
 
 /// Intl.DisplayNames resolved options (§12.1.2). `language_display` is only
@@ -2605,11 +2796,59 @@ pub type SegmenterState {
 pub type DisplayNamesState {
   DisplayNamesState(
     locale: String,
-    style: String,
-    display_type: String,
-    fallback: String,
-    language_display: Option(String),
+    style: NameWidth,
+    display_type: DisplayNamesType,
+    fallback: DisplayNamesFallback,
+    language_display: Option(LanguageDisplay),
   )
+}
+
+/// `[[Type]]` (§12.1.2) — the code space `Intl.DisplayNames.prototype.of`
+/// interprets its argument in.
+pub type DisplayNamesType {
+  DnLanguage
+  DnRegion
+  DnScript
+  DnCurrency
+  DnCalendar
+  DnDateTimeField
+}
+
+pub fn display_names_type_to_js_string(v: DisplayNamesType) -> String {
+  case v {
+    DnLanguage -> "language"
+    DnRegion -> "region"
+    DnScript -> "script"
+    DnCurrency -> "currency"
+    DnCalendar -> "calendar"
+    DnDateTimeField -> "dateTimeField"
+  }
+}
+
+/// `[[Fallback]]` (§12.1.2) — what `.of()` returns when there is no name.
+pub type DisplayNamesFallback {
+  FbCode
+  FbNone
+}
+
+pub fn display_names_fallback_to_js_string(v: DisplayNamesFallback) -> String {
+  case v {
+    FbCode -> "code"
+    FbNone -> "none"
+  }
+}
+
+/// `[[LanguageDisplay]]` (§12.1.2), only meaningful for type "language".
+pub type LanguageDisplay {
+  LdDialect
+  LdStandard
+}
+
+pub fn language_display_to_js_string(v: LanguageDisplay) -> String {
+  case v {
+    LdDialect -> "dialect"
+    LdStandard -> "standard"
+  }
 }
 
 /// A DurationFormat unit's resolved `[[<Unit>Style]]`. `DurFractional` is the
@@ -2699,13 +2938,13 @@ pub type DurationFormatState {
 /// %SegmentsPrototype% instance state: the segmenter's granularity plus the
 /// string being segmented.
 pub type SegmentsState {
-  SegmentsState(string: String, granularity: String)
+  SegmentsState(string: String, granularity: Granularity)
 }
 
 /// %SegmentIteratorPrototype% instance state: a `SegmentsState` plus the
 /// UTF-16 code-unit position the next segment starts at.
 pub type SegmentIteratorState {
-  SegmentIteratorState(string: String, granularity: String, position: Int)
+  SegmentIteratorState(string: String, granularity: Granularity, position: Int)
 }
 
 /// Identifies an Intl native function (ECMA-402).
@@ -3485,52 +3724,20 @@ pub type ExoticKind(ctx, host) {
   /// `sync_next` is the sync iterator record's [[NextMethod]], cached by
   /// GetIteratorFromMethod (§7.4.4) — .next() must NOT re-Get it per call.
   AsyncFromSyncIteratorObject(sync_iter: Ref, sync_next: JsValue)
-  /// Iterator Helper — ES2025 §27.1.3.2. Created by
-  /// Iterator.prototype.{map,filter,take,drop,flatMap}.
-  /// `underlying`'s next method is cached once per GetIteratorDirect (spec
-  /// §7.4.9) so monkey-patching `underlying.next` after creation has no effect.
-  /// `kind` carries the combinator's own state (callback, take/drop
-  /// remaining, flatMap inner iterator). `counter` is the spec's running
-  /// element index passed to map/filter/flatMap callbacks; take/drop's
-  /// countdown lives in their variants instead. `gen_state` is the closure
-  /// generator's [[GeneratorState]]: GeneratorValidate rejects a reentrant
+  /// Iterator Helper — EVERY object on %IteratorHelperPrototype%: the ES2025
+  /// §27.1.3.2 lazy combinators (map/filter/take/drop/flatMap), Iterator.zip /
+  /// Iterator.zipKeyed, and Iterator.concat. All three flavours are closure
+  /// generators sharing one `next`/`return`, so they share one exotic kind.
+  ///
+  /// `gen_state` is that closure generator's [[GeneratorState]] and lives
+  /// OUTSIDE `body` deliberately: GeneratorValidate rejects a reentrant
   /// next/return while it is `Executing`, and `Completed` latches forever.
-  IteratorHelperObject(
-    kind: IteratorHelperKind,
-    underlying: IteratorRecord,
-    counter: Int,
-    gen_state: GeneratorState,
-  )
+  /// Every lifecycle write therefore has exactly ONE place to land, whatever
+  /// the flavour — a new `HelperBody` variant cannot forget one.
+  IteratorHelperObject(gen_state: GeneratorState, body: HelperBody)
   /// Wrap For Valid Iterator — ES2025 §27.1.2.1.2. Created by Iterator.from
   /// when the source isn't already an instance of %Iterator.prototype%.
   WrapForValidIteratorObject(iterated: JsValue, next_method: JsValue)
-  /// Iterator.zip / Iterator.zipKeyed result — tc39 joint-iteration
-  /// proposal's IteratorZip generator, modelled as a data-driven helper on
-  /// %IteratorHelperPrototype%. `members` is the spec's iters list (a
-  /// ZipExhausted member is the spec's null entry, and each member carries its
-  /// own padding value); `keys` is None for Iterator.zip (array results) and
-  /// Some(property keys) for Iterator.zipKeyed (null-proto object results).
-  /// `gen_state` is the IteratorZip closure generator's [[GeneratorState]] —
-  /// `Executing` makes a reentrant next/return a TypeError, and suspended-start
-  /// vs suspended-yield picks the .return() path.
-  IteratorZipObject(
-    members: List(ZipMember),
-    mode: ZipMode,
-    keys: Option(List(ObjectKey)),
-    gen_state: GeneratorState,
-  )
-  /// Iterator.concat result — tc39 iterator-sequencing proposal, modelled as
-  /// a data-driven helper on %IteratorHelperPrototype%. `remaining` holds the
-  /// not-yet-opened items; `inner` is the currently open iterator record. The
-  /// two are different types on purpose — a `ConcatItem` cannot be handed to
-  /// something expecting an already-opened `IteratorRecord`, or vice versa.
-  /// `gen_state` is the closure generator's [[GeneratorState]] — a reentrant
-  /// next/return while `Executing` is a TypeError.
-  IteratorConcatObject(
-    remaining: List(ConcatItem),
-    inner: Option(IteratorRecord),
-    gen_state: GeneratorState,
-  )
   /// Module Namespace Exotic Object — ES2024 §10.4.6. `exports` maps each
   /// exported name to the BoxSlot ref holding the binding's live value, so
   /// [[Get]] re-reads the cell (and throws ReferenceError on a TDZ binding).
@@ -4267,6 +4474,44 @@ fn push_iter_record(rec: IteratorRecord, acc: List(Ref)) -> List(Ref) {
   push_value_ref(rec.next_method, push_value_ref(rec.iterator, acc))
 }
 
+/// Every heap reference reachable from an %IteratorHelper%'s body. Exhaustive
+/// per variant, so a new helper flavour cannot silently escape the GC.
+fn helper_body_refs(body: HelperBody, acc: List(Ref)) -> List(Ref) {
+  case body {
+    ClassicHelper(kind:, underlying:, counter: _) -> {
+      let acc = push_iter_record(underlying, acc)
+      case kind {
+        HelperTake(remaining: _) | HelperDrop(remaining: _) -> acc
+        HelperMap(func:)
+        | HelperFilter(func:)
+        | HelperFlatMap(func:, inner: None) -> push_value_ref(func, acc)
+        HelperFlatMap(func:, inner: Some(inner)) ->
+          push_iter_record(inner, push_value_ref(func, acc))
+      }
+    }
+    // `keys` holds no heap refs (an ObjectKey is a string or a symbol), so
+    // only the members (iterator record + its padding value) are traced.
+    ZipHelper(members:, mode: _, keys: _) ->
+      list.fold(members, acc, fn(a, m) {
+        case m {
+          ZipOpen(record:, padding:) ->
+            push_value_ref(padding, push_iter_record(record, a))
+          ZipExhausted(padding:) -> push_value_ref(padding, a)
+        }
+      })
+    ConcatHelper(remaining:, inner:) -> {
+      let acc =
+        list.fold(remaining, acc, fn(a, item) {
+          push_value_ref(item.iterable, push_value_ref(item.open_method, a))
+        })
+      case inner {
+        Some(inner) -> push_iter_record(inner, acc)
+        None -> acc
+      }
+    }
+  }
+}
+
 fn push_option_value(v: Option(JsValue), acc: List(Ref)) -> List(Ref) {
   case v {
     Some(val) -> push_value_ref(val, acc)
@@ -4399,40 +4644,10 @@ fn do_refs_in_slot(
         ]
         AsyncFromSyncIteratorObject(sync_iter:, sync_next:) ->
           push_value_ref(sync_next, [sync_iter, ..acc])
-        IteratorHelperObject(kind:, underlying:, ..) -> {
-          let acc = push_iter_record(underlying, acc)
-          case kind {
-            HelperTake(remaining: _) | HelperDrop(remaining: _) -> acc
-            HelperMap(func:)
-            | HelperFilter(func:)
-            | HelperFlatMap(func:, inner: None) -> push_value_ref(func, acc)
-            HelperFlatMap(func:, inner: Some(inner)) ->
-              push_iter_record(inner, push_value_ref(func, acc))
-          }
-        }
+        IteratorHelperObject(body:, ..) -> helper_body_refs(body, acc)
         WrapForValidIteratorObject(iterated:, next_method:)
         | IteratorRecordObject(iterated:, next_method:) ->
           push_value_ref(next_method, push_value_ref(iterated, acc))
-        // `keys` holds no heap refs (an ObjectKey is a string or a symbol),
-        // so only the members (iterator record + its padding value) are traced.
-        IteratorZipObject(members:, ..) ->
-          list.fold(members, acc, fn(a, m) {
-            case m {
-              ZipOpen(record:, padding:) ->
-                push_value_ref(padding, push_iter_record(record, a))
-              ZipExhausted(padding:) -> push_value_ref(padding, a)
-            }
-          })
-        IteratorConcatObject(remaining:, inner:, ..) -> {
-          let acc =
-            list.fold(remaining, acc, fn(a, item) {
-              push_value_ref(item.iterable, push_value_ref(item.open_method, a))
-            })
-          case inner {
-            Some(inner) -> push_iter_record(inner, acc)
-            None -> acc
-          }
-        }
         MapObject(store:) ->
           ordered_entries.fold(store, acc, fn(a, k, v) {
             push_value_ref(v, push_value_ref(map_key_to_js(k), a))
@@ -5812,6 +6027,37 @@ fn trim_string_ws(bytes: BitArray) -> BitArray {
         Ok(trimmed) -> trimmed
         // Unreachable: keep is always <= byte_size.
         Error(Nil) -> bytes
+      }
+  }
+}
+
+/// §22.1.3.32.1 TrimString with `where` = start — the ONE definition of "a
+/// leading JS whitespace character" in the engine, shared by
+/// `String.prototype.trim{,Start}`, `parseInt` and `parseFloat`.
+///
+/// Do NOT reach for `gleam/string.trim_start`: it trims Erlang's Unicode
+/// White_Space set, which both misses U+FEFF ZWNBSP and wrongly includes
+/// U+0085 NEL.
+pub fn trim_leading_js_whitespace(s: String) -> String {
+  case drop_leading_string_ws(bit_array.from_string(s)) |> bit_array.to_string {
+    Ok(trimmed) -> trimmed
+    // Unreachable: whole codepoints are dropped, so the rest is valid UTF-8.
+    Error(Nil) -> s
+  }
+}
+
+/// §22.1.3.32.1 TrimString with `where` = end. The trailing twin of
+/// `trim_leading_js_whitespace`.
+pub fn trim_trailing_js_whitespace(s: String) -> String {
+  let bytes = bit_array.from_string(s)
+  let keep = content_length(bytes, 0, 0)
+  case keep == bit_array.byte_size(bytes) {
+    True -> s
+    False ->
+      case bit_array.slice(bytes, 0, keep) |> result.try(bit_array.to_string) {
+        Ok(trimmed) -> trimmed
+        // Unreachable: keep is a codepoint boundary <= byte_size.
+        Error(Nil) -> s
       }
   }
 }

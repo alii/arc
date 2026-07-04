@@ -1,6 +1,6 @@
 import arc/vm/binop.{type PureBinOp}
 import arc/vm/key.{type PropertyKey}
-import gleam/option.{type Option, None}
+import gleam/option.{type Option, None, Some}
 
 // ============================================================================
 // Lexical bindings — `this` / active-function (super) / new.target
@@ -34,7 +34,7 @@ pub type LexicalRef {
 }
 
 /// Canonical iteration order. Compiler, resolver and runtime MUST agree on
-/// this so slot indices line up — see call.setup_locals.
+/// this so slot indices line up — see frame.setup_frame.
 pub const all_lexical_refs = [
   RefThis,
   RefActiveFunc,
@@ -42,25 +42,74 @@ pub const all_lexical_refs = [
   RefNewTarget,
 ]
 
-/// Per-binding local-slot index for a body. None when the binding is neither
-/// owned (non-arrow, allocated by DeclareLexical) nor inherited as a capture.
+/// Where a body's four lexical pseudo-bindings live in its locals frame.
+///
+/// A body either OWNS all four (non-arrow function / class static block /
+/// non-eval script root: the call prologue seeds them at frame entry), or
+/// owns none and reads whichever ones it references through captures
+/// (arrows, direct-eval bodies), or has none at all (module root).
+///
+/// `OwnedLexicalSlots(base)` carries only the base index: the four owned
+/// slots are ALWAYS contiguous, in `all_lexical_refs` order, starting at
+/// `base`. That contiguity used to be an unwritten convention the emitter
+/// upheld and `arc_vm_ffi:setup_locals_seeded/10` silently assumed; here it
+/// is a fact of the type, so a mis-ordered or gappy owned layout is
+/// unrepresentable.
 pub type LexicalSlots {
-  LexicalSlots(
+  /// All four owned, contiguous, at `base`..`base + 3` in canonical order.
+  OwnedLexicalSlots(base: Int)
+  /// Some subset inherited from the enclosing non-arrow via captures; each
+  /// `Some` is a slot in THIS frame holding the parent's box ref.
+  CapturedLexicalSlots(
     this: Option(Int),
     active_func: Option(Int),
     home_object: Option(Int),
     new_target: Option(Int),
   )
+  /// Neither owned nor captured (module root; a body that references none).
+  NoLexicalSlots
 }
 
-pub const no_lexical_slots = LexicalSlots(None, None, None, None)
+/// Number of local slots an `OwnedLexicalSlots` body reserves.
+pub const owned_lexical_slot_count = 4
+
+/// Smart constructor for the captured case: all-None collapses to
+/// `NoLexicalSlots` so "nothing here" has exactly one representation.
+pub fn captured_lexical_slots(
+  this this: Option(Int),
+  active_func active_func: Option(Int),
+  home_object home_object: Option(Int),
+  new_target new_target: Option(Int),
+) -> LexicalSlots {
+  case this, active_func, home_object, new_target {
+    None, None, None, None -> NoLexicalSlots
+    _, _, _, _ ->
+      CapturedLexicalSlots(this:, active_func:, home_object:, new_target:)
+  }
+}
 
 pub fn lexical_slot(slots: LexicalSlots, ref: LexicalRef) -> Option(Int) {
+  case slots {
+    NoLexicalSlots -> None
+    OwnedLexicalSlots(base) -> Some(base + lexical_ref_offset(ref))
+    CapturedLexicalSlots(this:, active_func:, home_object:, new_target:) ->
+      case ref {
+        RefThis -> this
+        RefActiveFunc -> active_func
+        RefHomeObject -> home_object
+        RefNewTarget -> new_target
+      }
+  }
+}
+
+/// Position of `ref` in the canonical `all_lexical_refs` order — the offset
+/// from an `OwnedLexicalSlots` base.
+pub fn lexical_ref_offset(ref: LexicalRef) -> Int {
   case ref {
-    RefThis -> slots.this
-    RefActiveFunc -> slots.active_func
-    RefHomeObject -> slots.home_object
-    RefNewTarget -> slots.new_target
+    RefThis -> 0
+    RefActiveFunc -> 1
+    RefHomeObject -> 2
+    RefNewTarget -> 3
   }
 }
 
@@ -95,41 +144,65 @@ pub fn lexical_refs_get(refs: LexicalRefs, ref: LexicalRef) -> Bool {
   }
 }
 
-/// Syntax-legality flags inherited by arrows and direct eval. Stored on
-/// FuncTemplate so PerformEval (§19.2.1.1 steps 6-12) can SyntaxError on
-/// `new.target` / `super` / `super()` / `arguments` correctly. Mirrors
-/// QuickJS's new_target_allowed/super_allowed/super_call_allowed/
+/// What KIND of code a body is. Stored on FuncTemplate; the syntax-legality
+/// bits PerformEval (§19.2.1.1 steps 6-12) needs — may this body's direct
+/// eval / nested arrow use `new.target`, `super.x`, `super()`, `arguments`?
+/// — are DERIVED from it below, so the five legal combinations are the only
+/// representable ones. (The old 4-bool `SyntaxPerms` record could spell 16,
+/// including nonsense like "super() allowed but no [[HomeObject]]".)
+/// Mirrors QuickJS's new_target_allowed/super_allowed/super_call_allowed/
 /// arguments_allowed bits on JSFunctionBytecode.
-pub type SyntaxPerms {
-  SyntaxPerms(
-    new_target_allowed: Bool,
-    super_prop_allowed: Bool,
-    super_call_allowed: Bool,
-    arguments_allowed: Bool,
-  )
+pub type CodeKind {
+  /// Top-level scripts/modules/indirect-eval: none of the function-only
+  /// syntax forms are legal. `arguments` resolves as an ordinary (likely
+  /// undefined) global, so it's "allowed" in the sense of not being a
+  /// SyntaxError.
+  ScriptCode
+  /// Ordinary non-arrow function body: new.target and arguments allowed,
+  /// super forms not (no [[HomeObject]]).
+  FunctionCode
+  /// Class/object-literal method body: super.prop allowed (has [[HomeObject]]).
+  MethodCode
+  /// Derived-class constructor body: super.prop and super() allowed.
+  DerivedCtorCode
+  /// Class instance-field initializer body (§15.7.14): runs as a synthetic
+  /// method-like function. new.target is allowed (evaluates to undefined
+  /// since the init fn is [[Call]]ed, not constructed); super.prop is allowed
+  /// (init fn has [[HomeObject]] = class prototype); super() and arguments
+  /// are not.
+  FieldInitCode
 }
 
-/// Top-level scripts/modules/indirect-eval: none of the function-only
-/// syntax forms are legal. `arguments` resolves as an ordinary (likely
-/// undefined) global, so it's "allowed" in the sense of not being a
-/// SyntaxError.
-pub const script_perms = SyntaxPerms(False, False, False, True)
+pub fn new_target_allowed(kind: CodeKind) -> Bool {
+  case kind {
+    ScriptCode -> False
+    FunctionCode | MethodCode | DerivedCtorCode | FieldInitCode -> True
+  }
+}
 
-/// Ordinary non-arrow function body: new.target and arguments allowed,
-/// super forms not (no [[HomeObject]]).
-pub const fn_perms = SyntaxPerms(True, False, False, True)
+/// `super.x` requires a [[HomeObject]] — methods, derived constructors and
+/// field initializers have one; plain functions and scripts do not.
+pub fn super_prop_allowed(kind: CodeKind) -> Bool {
+  case kind {
+    ScriptCode | FunctionCode -> False
+    MethodCode | DerivedCtorCode | FieldInitCode -> True
+  }
+}
 
-/// Class/object-literal method body: super.prop allowed (has [[HomeObject]]).
-pub const method_perms = SyntaxPerms(True, True, False, True)
+/// `super()` is legal only in a derived-class constructor.
+pub fn super_call_allowed(kind: CodeKind) -> Bool {
+  case kind {
+    DerivedCtorCode -> True
+    ScriptCode | FunctionCode | MethodCode | FieldInitCode -> False
+  }
+}
 
-/// Derived-class constructor body: super.prop and super() allowed.
-pub const derived_ctor_perms = SyntaxPerms(True, True, True, True)
-
-/// Class instance-field initializer body (§15.7.14): runs as a synthetic
-/// method-like function. new.target is allowed (evaluates to undefined since
-/// the init fn is [[Call]]ed, not constructed); super.prop is allowed (init
-/// fn has [[HomeObject]] = class prototype); super() and arguments are not.
-pub const field_init_perms = SyntaxPerms(True, True, False, False)
+pub fn arguments_allowed(kind: CodeKind) -> Bool {
+  case kind {
+    FieldInitCode -> False
+    ScriptCode | FunctionCode | MethodCode | DerivedCtorCode -> True
+  }
+}
 
 // ============================================================================
 // Final Bytecode — resolved, ready for VM execution

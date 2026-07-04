@@ -103,8 +103,8 @@ pub type CompiledChild {
     /// IrScope*Var("arguments"). For arrows, the enclosing non-arrow uses
     /// this to decide whether to materialise its `arguments` object.
     references_arguments: Bool,
-    /// Syntax-legality flags inherited by direct eval.
-    syntax_perms: opcode.SyntaxPerms,
+    /// What kind of code this body is; direct eval inherits it.
+    code_kind: opcode.CodeKind,
   )
 }
 
@@ -187,9 +187,9 @@ pub opaque type Emitter {
     /// emission to decide whether the `arguments` object is created — so
     /// functions that never touch `arguments` pay zero allocation cost.
     references_arguments: Bool,
-    /// Syntax-legality flags for the body being emitted. Arrows inherit the
-    /// parent's verbatim; non-arrows compute from function kind.
-    syntax_perms: opcode.SyntaxPerms,
+    /// What kind of code the body being emitted is. Arrows inherit the
+    /// parent's verbatim; non-arrows take it from their function kind.
+    code_kind: opcode.CodeKind,
     /// Where top-level let/const/class go. LexGlobal only for the REPL
     /// program emitter; everything else (scripts, eval, modules, function
     /// bodies) uses LexLocal.
@@ -1265,7 +1265,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     is_arrow: False,
     lexical_refs: opcode.no_lexical_refs,
     references_arguments: False,
-    syntax_perms: opcode.script_perms,
+    code_kind: opcode.ScriptCode,
     top_lex: tree.top_lex,
     scope_tree: tree,
     fn_scope: fn_id,
@@ -1442,7 +1442,7 @@ fn enter_root_scope(e: Emitter) -> Emitter {
   // Owned lexical pseudo-slots (this / active_func / home_object /
   // new.target) are NOT in `Scope.bindings` — they live in
   // `FunctionInfo.lexical` and are seeded by the runtime before pc=0
-  // (call.setup_locals). When an inner arrow / direct-eval captures one,
+  // (frame.setup_frame). When an inner arrow / direct-eval captures one,
   // `analyze_captures` sets the matching `FunctionInfo.lexical_boxed` flag
   // and `resolve_lexical` reports the slot as boxed, so reads emit
   // IrGetBoxed — the slot must therefore be wrapped in a box here, in the
@@ -1672,11 +1672,7 @@ fn emit_declare_var_global(e: Emitter, name: String) -> Emitter {
     // `deletable_global_vars` is the §9.1.1.4.17 CreateGlobalVarBinding
     // D argument: False for scripts (§9.1.1.4.18 — `delete x` on a
     // top-level var / hoisted function is false and the binding
-    // survives), True for direct-eval units (§19.2.1.3). GAP: indirect
-    // eval (compile_eval) compiles through the same emit_program entry
-    // as a script, so its global vars are wrongly created non-deletable
-    // (delete answers false and the binding survives; nothing is
-    // destroyed).
+    // survives), True for eval units, direct and indirect (§19.2.1.3).
     ToGlobal ->
       emit_ir(e, IrDeclareGlobalVar(name, deletable: e.deletable_global_vars))
     ToEvalEnv -> emit_ir(e, opcode.IrDeclareEvalVar(name))
@@ -2491,7 +2487,7 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
 /// body — `FunctionInfo.lexical_captures`) is always a parent box.
 ///
 /// Returns `None` when neither exists. This is the legitimate state for a
-/// Script/Module root body — the analyzer assigns it `no_lexical_slots`
+/// Script/Module root body — the analyzer assigns it `NoLexicalSlots`
 /// and (absent direct-eval) an empty `lexical_captures`, so a top-level
 /// `this` / `new.target` has no backing slot. §16.1.6 / §11.2.4: module
 /// `this` reads `undefined`; the old IR-level resolver lowered this case
@@ -3048,7 +3044,7 @@ fn collect_hoisted_funcs(
             is_async,
             // Function declaration: a constructor unless gen/async.
             !is_gen && !is_async,
-            opcode.fn_perms,
+            opcode.FunctionCode,
             NoFieldInit,
           ))
           let #(e, idx) = add_child_function(e, child)
@@ -3073,13 +3069,6 @@ fn emit_hoisted_funcs(
   })
 }
 
-/// Compile a function body into a CompiledChild. Pops the next entry from
-/// `parent.child_fn_cursor` to learn THIS body's analyzer-assigned
-/// function-scope id, projects a per-function tree from
-/// `parent.scope_tree` rooted there, and threads that tree into the
-/// child emitter so its emit_var_* / get_lexical / set_this calls resolve
-/// against the analyzer's slot/box decisions. Returns the updated parent
-/// (cursor popped) and the compiled child.
 /// §10.2.11 step 28.f.i.2: a body-scope `var n` where `n` is also a
 /// parameter binding (a formal name, or `arguments` for non-arrows) is
 /// initialized to the PARAMETER's current value rather than undefined —
@@ -3139,6 +3128,13 @@ fn emit_body_param_copies(
   }
 }
 
+/// Compile a function body into a CompiledChild. Pops the next entry from
+/// `parent.child_fn_cursor` to learn THIS body's analyzer-assigned
+/// function-scope id, projects a per-function tree from
+/// `parent.scope_tree` rooted there, and threads that tree into the
+/// child emitter so its emit_var_* / get_lexical / set_this calls resolve
+/// against the analyzer's slot/box decisions. Returns the updated parent
+/// (cursor popped) and the compiled child.
 fn compile_function_body(
   parent: Emitter,
   name: Option(String),
@@ -3149,7 +3145,7 @@ fn compile_function_body(
   is_generator: Bool,
   is_async: Bool,
   is_constructor: Bool,
-  perms: opcode.SyntaxPerms,
+  code_kind_if_not_arrow: opcode.CodeKind,
   field_init: FieldInitMode,
 ) -> Result(#(Emitter, CompiledChild), EmitError) {
   // Consume the next child-function scope id. The analyzer's
@@ -3174,14 +3170,14 @@ fn compile_function_body(
   // (Classes force strict at the call site by passing a strict parent emitter.)
   let child_strict = parent.strict || ast_util.has_use_strict_directive(stmts)
 
-  // SyntaxPerms (mirrors quickjs.c:36052-36076). Arrows inherit the parent
-  // emitter's perms verbatim — `perms` is ignored. Non-arrows use `perms` as
-  // passed by the caller (fn_perms / method_perms / derived_ctor_perms).
-  let syntax_perms = case is_arrow {
-    True -> parent.syntax_perms
-    False -> perms
+  // CodeKind (mirrors quickjs.c:36052-36076). Arrows inherit the parent
+  // emitter's kind verbatim — `code_kind_if_not_arrow` is ignored for them.
+  // Non-arrows take it as passed by the caller.
+  let code_kind = case is_arrow {
+    True -> parent.code_kind
+    False -> code_kind_if_not_arrow
   }
-  // Like SyntaxPerms, arrows inherit FieldInitMode so `()=>super()` inside a
+  // Like CodeKind, arrows inherit FieldInitMode so `()=>super()` inside a
   // derived ctor can emit the init call; non-arrows take the caller's value
   // (only ctors get a non-NoFieldInit). Only FieldInitAfterSuper is
   // inherited — it fires on the `super()` call itself. FieldInitAtStart must
@@ -3213,7 +3209,7 @@ fn compile_function_body(
       strict: child_strict,
       is_async:,
       is_arrow:,
-      syntax_perms:,
+      code_kind:,
       field_init:,
       // Enclosing `with` scopes stay visible to nested functions — their
       // free names must check the with objects (captured from the parent).
@@ -3226,7 +3222,7 @@ fn compile_function_body(
       in_synth_default_ctor: parent.in_synth_default_ctor,
     )
   // Non-arrows own all four lexical slots starting at len(captures), in
-  // canonical order — pre-registered by the analyzer. Runtime setup_locals
+  // canonical order — pre-registered by the analyzer. Runtime setup_frame
   // writes [this, active_func, home_object, new_target] there before pc=0.
   // Arrows skip — their get_lexical resolves to captures from the
   // enclosing non-arrow.
@@ -3527,7 +3523,7 @@ fn compile_function_body(
       is_class_constructor: False,
       lexical_refs: e.lexical_refs,
       references_arguments: e.references_arguments,
-      syntax_perms:,
+      code_kind:,
     )
   // Thread the child's scope tree back to the parent: `fresh_slot` /
   // `alloc_scratch` bumped this child's FunctionInfo.local_count (and any
@@ -5178,7 +5174,7 @@ fn register_closure(
 
 /// Compile a method / getter / setter body into a child function, register
 /// it, and emit IrMakeClosure for it. Never a constructor (methods/accessors
-/// have no [[Construct]], so `new o.m()` must throw); always method_perms.
+/// have no [[Construct]], so `new o.m()` must throw); always MethodCode.
 fn make_method_closure(
   e: Emitter,
   name: Option(String),
@@ -5197,7 +5193,7 @@ fn make_method_closure(
     is_gen,
     is_async,
     False,
-    opcode.method_perms,
+    opcode.MethodCode,
     NoFieldInit,
   )
   |> register_closure
@@ -5231,7 +5227,7 @@ fn emit_function_closure(
     is_gen,
     is_async,
     !is_gen && !is_async,
-    opcode.fn_perms,
+    opcode.FunctionCode,
     NoFieldInit,
   )
   |> register_closure
@@ -5263,7 +5259,7 @@ fn emit_arrow_closure(
     False,
     is_async,
     False,
-    opcode.fn_perms,
+    opcode.FunctionCode,
     NoFieldInit,
   )
   |> register_closure
@@ -7216,9 +7212,9 @@ fn compile_class_body(
       field_init_stmts(instance_fields),
     ),
   ))
-  let #(ctor_perms, field_init) = case super_class {
-    Some(_) -> #(opcode.derived_ctor_perms, FieldInitAfterSuper)
-    None -> #(opcode.method_perms, FieldInitAtStart)
+  let #(ctor_kind, field_init) = case super_class {
+    Some(_) -> #(opcode.DerivedCtorCode, FieldInitAfterSuper)
+    None -> #(opcode.MethodCode, FieldInitAtStart)
   }
   use #(e, child) <- result.try(compile_function_body(
     // Scoped to this one compile: the child emitter inherits the flag.
@@ -7232,7 +7228,7 @@ fn compile_class_body(
     False,
     // Class constructor — IS a constructor.
     True,
-    ctor_perms,
+    ctor_kind,
     option.map(init_idx, fn(_) { field_init })
       |> option.unwrap(NoFieldInit),
   ))
@@ -7343,7 +7339,7 @@ fn default_ctor_body(
 }
 
 /// Compile a list of statements into a synthetic non-arrow initializer
-/// function with field_init_perms — a method-like body (§15.7.14: "the
+/// function with FieldInitCode — a method-like body (§15.7.14: "the
 /// function created for [[Initializer]] is never directly accessible to
 /// ECMAScript code"). Shared by instance-field init (this = instance,
 /// [[HomeObject]] = ctor.prototype) and static-element init (this = ctor,
@@ -7366,7 +7362,7 @@ fn compile_class_init_fn(
         False,
         // Synthetic field initializer — never directly constructible.
         False,
-        opcode.field_init_perms,
+        opcode.FieldInitCode,
         NoFieldInit,
       ))
       let #(e, idx) = add_child_function(e, child)

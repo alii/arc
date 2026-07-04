@@ -115,10 +115,9 @@ pub fn call_function(
           <> " cannot be invoked without 'new'",
       )
     False -> {
-      let #(heap, this_val) = frame.bind_this(state, callee_template, this_val)
-      let locals =
-        frame.setup_locals(
-          heap,
+      let #(heap, locals) =
+        frame.setup_frame(
+          state,
           env_ref,
           fn_ref,
           home_object,
