@@ -2995,6 +2995,33 @@ fn read_bag_int_field(
   }
 }
 
+/// `read_bag_int_field` with ToIntegerWithTruncation.
+fn read_int_field(
+  state: State(host),
+  ref: Ref,
+  key: String,
+) -> Result(#(Option(Int), State(host)), #(JsValue, State(host))) {
+  read_bag_int_field(state, ref, key, to_integer_with_truncation)
+}
+
+/// `read_bag_int_field` with ToPositiveIntegerWithTruncation.
+fn read_pos_int_field(
+  state: State(host),
+  ref: Ref,
+  key: String,
+) -> Result(#(Option(Int), State(host)), #(JsValue, State(host))) {
+  read_bag_int_field(state, ref, key, to_positive_integer_with_truncation)
+}
+
+/// `read_bag_int_field` with ToIntegerIfIntegral.
+fn read_integral_int_field(
+  state: State(host),
+  ref: Ref,
+  key: String,
+) -> Result(#(Option(Int), State(host)), #(JsValue, State(host))) {
+  read_bag_int_field(state, ref, key, to_integer_if_integral)
+}
+
 /// Read the "monthCode" field: must be a String primitive "M01".."M13"
 /// optionally with an "L" suffix (leap month).
 fn read_month_code(
@@ -3181,34 +3208,18 @@ fn read_date_fields(
   ref: Ref,
   cal: tcal.Calendar,
 ) -> Result(#(DateFields, State(host)), #(JsValue, State(host))) {
-  use #(day, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "day",
-    to_positive_integer_with_truncation,
-  ))
+  use #(day, state) <- result.try(read_pos_int_field(state, ref, "day"))
   use #(era, state) <- result.try(case tcal.has_eras(cal) {
     True -> read_bag_era(state, ref)
     False -> Ok(#(None, state))
   })
   use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
-    True ->
-      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    True -> read_int_field(state, ref, "eraYear")
     False -> Ok(#(None, state))
   })
-  use #(month, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "month",
-    to_positive_integer_with_truncation,
-  ))
+  use #(month, state) <- result.try(read_pos_int_field(state, ref, "month"))
   use #(month_code, state) <- result.try(read_month_code(state, ref))
-  use #(year, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "year",
-    to_integer_with_truncation,
-  ))
+  use #(year, state) <- result.try(read_int_field(state, ref, "year"))
   Ok(#(DateFields(day:, era:, era_year:, month:, month_code:, year:), state))
 }
 
@@ -3246,42 +3257,12 @@ fn read_time_fields(
   state: State(host),
   ref: Ref,
 ) -> Result(#(TimeFields, State(host)), #(JsValue, State(host))) {
-  use #(hour, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "hour",
-    to_integer_with_truncation,
-  ))
-  use #(us, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "microsecond",
-    to_integer_with_truncation,
-  ))
-  use #(ms, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "millisecond",
-    to_integer_with_truncation,
-  ))
-  use #(minute, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "minute",
-    to_integer_with_truncation,
-  ))
-  use #(ns, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "nanosecond",
-    to_integer_with_truncation,
-  ))
-  use #(second, state) <- result.map(read_bag_int_field(
-    state,
-    ref,
-    "second",
-    to_integer_with_truncation,
-  ))
+  use #(hour, state) <- result.try(read_int_field(state, ref, "hour"))
+  use #(us, state) <- result.try(read_int_field(state, ref, "microsecond"))
+  use #(ms, state) <- result.try(read_int_field(state, ref, "millisecond"))
+  use #(minute, state) <- result.try(read_int_field(state, ref, "minute"))
+  use #(ns, state) <- result.try(read_int_field(state, ref, "nanosecond"))
+  use #(second, state) <- result.map(read_int_field(state, ref, "second"))
   #(TimeFields(hour:, minute:, second:, ms:, us:, ns:), state)
 }
 
@@ -3311,78 +3292,32 @@ fn read_date_time_fields(
   read_offset read_offset: Bool,
   read_tz read_tz: Bool,
 ) -> Result(#(DateTimeFields, State(host)), #(JsValue, State(host))) {
-  use #(day, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "day",
-    to_positive_integer_with_truncation,
-  ))
+  use #(day, state) <- result.try(read_pos_int_field(state, ref, "day"))
   use #(era, state) <- result.try(case tcal.has_eras(cal) {
     True -> read_bag_era(state, ref)
     False -> Ok(#(None, state))
   })
   use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
-    True ->
-      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    True -> read_int_field(state, ref, "eraYear")
     False -> Ok(#(None, state))
   })
-  use #(hour, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "hour",
-    to_integer_with_truncation,
-  ))
-  use #(us, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "microsecond",
-    to_integer_with_truncation,
-  ))
-  use #(ms, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "millisecond",
-    to_integer_with_truncation,
-  ))
-  use #(minute, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "minute",
-    to_integer_with_truncation,
-  ))
-  use #(month, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "month",
-    to_positive_integer_with_truncation,
-  ))
+  use #(hour, state) <- result.try(read_int_field(state, ref, "hour"))
+  use #(us, state) <- result.try(read_int_field(state, ref, "microsecond"))
+  use #(ms, state) <- result.try(read_int_field(state, ref, "millisecond"))
+  use #(minute, state) <- result.try(read_int_field(state, ref, "minute"))
+  use #(month, state) <- result.try(read_pos_int_field(state, ref, "month"))
   use #(month_code, state) <- result.try(read_month_code(state, ref))
-  use #(ns, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "nanosecond",
-    to_integer_with_truncation,
-  ))
+  use #(ns, state) <- result.try(read_int_field(state, ref, "nanosecond"))
   use #(offset, state) <- result.try(case read_offset {
     True -> read_bag_offset(state, ref)
     False -> Ok(#(None, state))
   })
-  use #(second, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "second",
-    to_integer_with_truncation,
-  ))
+  use #(second, state) <- result.try(read_int_field(state, ref, "second"))
   use #(tz_raw, state) <- result.try(case read_tz {
     True -> ops_object.get_value(state, ref, Named("timeZone"), JsObject(ref))
     False -> Ok(#(JsUndefined, state))
   })
-  use #(year, state) <- result.map(read_bag_int_field(
-    state,
-    ref,
-    "year",
-    to_integer_with_truncation,
-  ))
+  use #(year, state) <- result.map(read_int_field(state, ref, "year"))
   // ToTemporalTimeZoneIdentifier: a ZonedDateTime contributes its time zone.
   let tz = case tz_raw {
     JsObject(tz_ref) ->
@@ -4175,66 +4110,40 @@ fn duration_from_bag(
   state: State(host),
   ref: Ref,
 ) -> Result(#(DurRec, State(host)), #(JsValue, State(host))) {
-  use #(days, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "days",
-    to_integer_if_integral,
-  ))
-  use #(hours, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "hours",
-    to_integer_if_integral,
-  ))
-  use #(us, state) <- result.try(read_bag_int_field(
+  use #(days, state) <- result.try(read_integral_int_field(state, ref, "days"))
+  use #(hours, state) <- result.try(read_integral_int_field(state, ref, "hours"))
+  use #(us, state) <- result.try(read_integral_int_field(
     state,
     ref,
     "microseconds",
-    to_integer_if_integral,
   ))
-  use #(ms, state) <- result.try(read_bag_int_field(
+  use #(ms, state) <- result.try(read_integral_int_field(
     state,
     ref,
     "milliseconds",
-    to_integer_if_integral,
   ))
-  use #(minutes, state) <- result.try(read_bag_int_field(
+  use #(minutes, state) <- result.try(read_integral_int_field(
     state,
     ref,
     "minutes",
-    to_integer_if_integral,
   ))
-  use #(months, state) <- result.try(read_bag_int_field(
+  use #(months, state) <- result.try(read_integral_int_field(
     state,
     ref,
     "months",
-    to_integer_if_integral,
   ))
-  use #(ns, state) <- result.try(read_bag_int_field(
+  use #(ns, state) <- result.try(read_integral_int_field(
     state,
     ref,
     "nanoseconds",
-    to_integer_if_integral,
   ))
-  use #(seconds, state) <- result.try(read_bag_int_field(
+  use #(seconds, state) <- result.try(read_integral_int_field(
     state,
     ref,
     "seconds",
-    to_integer_if_integral,
   ))
-  use #(weeks, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "weeks",
-    to_integer_if_integral,
-  ))
-  use #(years, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "years",
-    to_integer_if_integral,
-  ))
+  use #(weeks, state) <- result.try(read_integral_int_field(state, ref, "weeks"))
+  use #(years, state) <- result.try(read_integral_int_field(state, ref, "years"))
   let all = [days, hours, us, ms, minutes, months, ns, seconds, weeks, years]
   case list.all(all, fn(f) { f == None }) {
     True ->
@@ -4900,23 +4809,12 @@ fn year_month_from_bag(
     False -> Ok(#(None, state))
   })
   use #(era_year, state) <- result.try(case tcal.has_eras(cal) {
-    True ->
-      read_bag_int_field(state, ref, "eraYear", to_integer_with_truncation)
+    True -> read_int_field(state, ref, "eraYear")
     False -> Ok(#(None, state))
   })
-  use #(month, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "month",
-    to_positive_integer_with_truncation,
-  ))
+  use #(month, state) <- result.try(read_pos_int_field(state, ref, "month"))
   use #(month_code, state) <- result.try(read_month_code(state, ref))
-  use #(year, state) <- result.try(read_bag_int_field(
-    state,
-    ref,
-    "year",
-    to_integer_with_truncation,
-  ))
+  use #(year, state) <- result.try(read_int_field(state, ref, "year"))
   use #(overflow, state) <- result.try(validated_overflow(state, options))
   let fields =
     DateFields(day: None, era:, era_year:, month:, month_code:, year:)
@@ -8641,28 +8539,16 @@ fn plain_year_month_method(
             False -> Ok(#(None, state))
           })
           use era_year, state <- state.try_op(case tcal.has_eras(cal) {
-            True ->
-              read_bag_int_field(
-                state,
-                bag,
-                "eraYear",
-                to_integer_with_truncation,
-              )
+            True -> read_int_field(state, bag, "eraYear")
             False -> Ok(#(None, state))
           })
-          use month, state <- state.try_op(read_bag_int_field(
+          use month, state <- state.try_op(read_pos_int_field(
             state,
             bag,
             "month",
-            to_positive_integer_with_truncation,
           ))
           use month_code, state <- state.try_op(read_month_code(state, bag))
-          use year, state <- state.try_op(read_bag_int_field(
-            state,
-            bag,
-            "year",
-            to_integer_with_truncation,
-          ))
+          use year, state <- state.try_op(read_int_field(state, bag, "year"))
           case
             month == None
             && month_code == None
@@ -8716,11 +8602,10 @@ fn plain_year_month_method(
         PymToPlainDate -> {
           case helpers.arg_at(args, 0) {
             JsObject(ref) -> {
-              use day, state <- state.try_op(read_bag_int_field(
+              use day, state <- state.try_op(read_pos_int_field(
                 state,
                 ref,
                 "day",
-                to_positive_integer_with_truncation,
               ))
               case day {
                 Some(dd) -> {
@@ -9058,21 +8943,10 @@ fn plain_month_day_method(
                 False -> Ok(#(None, state))
               })
               use era_year, state <- state.try_op(case tcal.has_eras(cal) {
-                True ->
-                  read_bag_int_field(
-                    state,
-                    ref,
-                    "eraYear",
-                    to_integer_with_truncation,
-                  )
+                True -> read_int_field(state, ref, "eraYear")
                 False -> Ok(#(None, state))
               })
-              use year, state <- state.try_op(read_bag_int_field(
-                state,
-                ref,
-                "year",
-                to_integer_with_truncation,
-              ))
+              use year, state <- state.try_op(read_int_field(state, ref, "year"))
               case year != None || { era != None && era_year != None } {
                 True -> {
                   case cal {
@@ -9214,65 +9088,55 @@ fn duration_method(
         DmWith -> {
           case helpers.arg_at(args, 0) {
             JsObject(ref) -> {
-              use days, state <- state.try_op(read_bag_int_field(
+              use days, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "days",
-                to_integer_if_integral,
               ))
-              use hours, state <- state.try_op(read_bag_int_field(
+              use hours, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "hours",
-                to_integer_if_integral,
               ))
-              use us, state <- state.try_op(read_bag_int_field(
+              use us, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "microseconds",
-                to_integer_if_integral,
               ))
-              use ms, state <- state.try_op(read_bag_int_field(
+              use ms, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "milliseconds",
-                to_integer_if_integral,
               ))
-              use minutes, state <- state.try_op(read_bag_int_field(
+              use minutes, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "minutes",
-                to_integer_if_integral,
               ))
-              use months, state <- state.try_op(read_bag_int_field(
+              use months, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "months",
-                to_integer_if_integral,
               ))
-              use ns, state <- state.try_op(read_bag_int_field(
+              use ns, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "nanoseconds",
-                to_integer_if_integral,
               ))
-              use seconds, state <- state.try_op(read_bag_int_field(
+              use seconds, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "seconds",
-                to_integer_if_integral,
               ))
-              use weeks, state <- state.try_op(read_bag_int_field(
+              use weeks, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "weeks",
-                to_integer_if_integral,
               ))
-              use years, state <- state.try_op(read_bag_int_field(
+              use years, state <- state.try_op(read_integral_int_field(
                 state,
                 ref,
                 "years",
-                to_integer_if_integral,
               ))
               let all = [
                 days, hours, us, ms, minutes, months, ns, seconds, weeks, years,
