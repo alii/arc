@@ -1,5 +1,5 @@
 //// Realm-wide module registry — the heap-resident caches the module system
-//// keeps on hidden global-object properties.
+//// keeps on PRIVATE-keyed global-object properties, invisible to guest JS.
 ////
 //// Module evaluation state must be observable by three parties that cannot
 //// share Gleam data (it's immutable): the link-time DFS evaluator
@@ -8,7 +8,7 @@
 //// (`arc/module_host`). So that state lives in the heap: one hidden object
 //// per cache on the realm's global object, keyed by resolved specifier.
 ////
-//// This module is the ONLY reader and writer of those hidden properties.
+//// This module is the ONLY reader and writer of those private properties.
 //// Each cache has a typed accessor pair, so the heap encoding of an entry —
 //// and what "absent" means for it — is decided in exactly one place:
 ////
@@ -27,7 +27,7 @@
 
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Named}
+import arc/vm/key.{type PropertyKey, Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
@@ -38,23 +38,39 @@ import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 // =============================================================================
-// Hidden global-object property names — one per cache, private to this module.
+// Hidden global-object property keys — one per cache, private to this module.
+//
+// Each cache hangs off the realm's global object under a NUL-marker PRIVATE
+// key (`key.private_key`, the same hidden namespace class private elements
+// live in). Every reflection surface — ownKeys, spread, `in`, has_property,
+// for-in, JSON, freeze — filters those out (`value.is_private_name`), so guest
+// JS can neither enumerate, read, overwrite nor delete the module registry.
 // =============================================================================
 
 /// Resolved specifier → the module's `ModuleStatus`.
-const status_property = "__arc_module_status__"
+fn status_property() -> PropertyKey {
+  key.private_key("arc_module_status")
+}
 
 /// Resolved specifier → the value the module's evaluation threw.
-const error_cache_property = "__arc_module_errors__"
+fn error_cache_property() -> PropertyKey {
+  key.private_key("arc_module_errors")
+}
 
 /// Resolved specifier → the module's Module Namespace Exotic Object.
-const namespace_cache_property = "__arc_module_cache__"
+fn namespace_cache_property() -> PropertyKey {
+  key.private_key("arc_module_cache")
+}
 
 /// Resolved specifier → the module's Deferred Module Namespace.
-const deferred_cache_property = "__arc_module_deferred__"
+fn deferred_cache_property() -> PropertyKey {
+  key.private_key("arc_module_deferred")
+}
 
 /// Resolved specifier → in-flight namespace promise (top-level await).
-const pending_cache_property = "__arc_module_pending__"
+fn pending_cache_property() -> PropertyKey {
+  key.private_key("arc_module_pending")
+}
 
 // =============================================================================
 // Status — [[Status]] of a module record (§16.2.1.5)
@@ -82,7 +98,7 @@ pub fn read_module_status(
   global_object: Ref,
   spec: String,
 ) -> Option(ModuleStatus) {
-  case read_entry(h, global_object, status_property, spec) {
+  case read_entry(h, global_object, status_property(), spec) {
     Some(JsString("evaluating")) -> Some(Evaluating)
     Some(JsString("evaluated")) -> Some(Evaluated)
     Some(_) | None -> None
@@ -99,7 +115,7 @@ pub fn write_module_status(
     Evaluating -> "evaluating"
     Evaluated -> "evaluated"
   }
-  write_entry(h, global_object, status_property, spec, JsString(encoded))
+  write_entry(h, global_object, status_property(), spec, JsString(encoded))
 }
 
 /// Forget the module's status (back to "not started") — a failed body clears
@@ -110,7 +126,7 @@ pub fn clear_module_status(
   global_object: Ref,
   spec: String,
 ) -> Heap(host) {
-  write_entry(h, global_object, status_property, spec, JsUndefined)
+  write_entry(h, global_object, status_property(), spec, JsUndefined)
 }
 
 // =============================================================================
@@ -126,7 +142,7 @@ pub fn read_module_error(
   global_object: Ref,
   spec: String,
 ) -> Option(JsValue) {
-  read_entry(h, global_object, error_cache_property, spec)
+  read_entry(h, global_object, error_cache_property(), spec)
 }
 
 /// Record the value the module's evaluation threw. Every later import or
@@ -137,7 +153,7 @@ pub fn write_module_error(
   spec: String,
   err: JsValue,
 ) -> Heap(host) {
-  write_entry(h, global_object, error_cache_property, spec, err)
+  write_entry(h, global_object, error_cache_property(), spec, err)
 }
 
 // =============================================================================
@@ -150,7 +166,7 @@ pub fn read_namespace(
   global_object: Ref,
   spec: String,
 ) -> Option(Ref) {
-  read_object_entry(h, global_object, namespace_cache_property, spec)
+  read_object_entry(h, global_object, namespace_cache_property(), spec)
 }
 
 /// Register the module's Module Namespace Exotic Object so later imports
@@ -159,9 +175,15 @@ pub fn write_namespace(
   h: Heap(host),
   global_object: Ref,
   spec: String,
-  namespace: JsValue,
+  namespace: Ref,
 ) -> Heap(host) {
-  write_entry(h, global_object, namespace_cache_property, spec, namespace)
+  write_entry(
+    h,
+    global_object,
+    namespace_cache_property(),
+    spec,
+    JsObject(namespace),
+  )
 }
 
 /// Roll back a namespace registration for a module whose body never
@@ -171,7 +193,7 @@ pub fn clear_namespace(
   global_object: Ref,
   spec: String,
 ) -> Heap(host) {
-  write_entry(h, global_object, namespace_cache_property, spec, JsUndefined)
+  write_entry(h, global_object, namespace_cache_property(), spec, JsUndefined)
 }
 
 /// The module's registered Deferred Module Namespace, if any.
@@ -180,7 +202,7 @@ pub fn read_deferred_namespace(
   global_object: Ref,
   spec: String,
 ) -> Option(Ref) {
-  read_object_entry(h, global_object, deferred_cache_property, spec)
+  read_object_entry(h, global_object, deferred_cache_property(), spec)
 }
 
 /// Register the module's Deferred Module Namespace: `import defer` /
@@ -189,9 +211,26 @@ pub fn write_deferred_namespace(
   h: Heap(host),
   global_object: Ref,
   spec: String,
-  namespace: JsValue,
+  namespace: Ref,
 ) -> Heap(host) {
-  write_entry(h, global_object, deferred_cache_property, spec, namespace)
+  write_entry(
+    h,
+    global_object,
+    deferred_cache_property(),
+    spec,
+    JsObject(namespace),
+  )
+}
+
+/// Roll back a deferred-namespace registration for a module whose body never
+/// completed — its exports would read uninitialized cells, and a later
+/// `import defer` must build a fresh namespace over a re-evaluated module.
+pub fn clear_deferred_namespace(
+  h: Heap(host),
+  global_object: Ref,
+  spec: String,
+) -> Heap(host) {
+  write_entry(h, global_object, deferred_cache_property(), spec, JsUndefined)
 }
 
 // =============================================================================
@@ -206,7 +245,7 @@ pub fn read_pending_promise(
   global_object: Ref,
   spec: String,
 ) -> Option(Ref) {
-  read_object_entry(h, global_object, pending_cache_property, spec)
+  read_object_entry(h, global_object, pending_cache_property(), spec)
 }
 
 pub fn write_pending_promise(
@@ -218,7 +257,7 @@ pub fn write_pending_promise(
   write_entry(
     h,
     global_object,
-    pending_cache_property,
+    pending_cache_property(),
     spec,
     JsObject(promise_ref),
   )
@@ -231,7 +270,32 @@ pub fn clear_pending_promise(
   global_object: Ref,
   spec: String,
 ) -> Heap(host) {
-  write_entry(h, global_object, pending_cache_property, spec, JsUndefined)
+  write_entry(h, global_object, pending_cache_property(), spec, JsUndefined)
+}
+
+// =============================================================================
+// Whole-module rollback
+// =============================================================================
+
+/// Un-register a module whose body never completed: every registration a
+/// bundle publishes for it (status, namespace, deferred namespace, in-flight
+/// promise) is dropped together, so a later import re-links and re-evaluates
+/// it from scratch. The single counterpart to registration — a partially
+/// rolled-back module (say, namespace cleared but the deferred namespace still
+/// live over uninitialized cells) is not expressible.
+///
+/// The error cache is deliberately untouched: an evaluation error is sticky
+/// (§16.2.1.5.3) and must be rethrown, not re-run.
+pub fn clear_module_registrations(
+  h: Heap(host),
+  global_object: Ref,
+  spec: String,
+) -> Heap(host) {
+  h
+  |> clear_module_status(global_object, spec)
+  |> clear_namespace(global_object, spec)
+  |> clear_deferred_namespace(global_object, spec)
+  |> clear_pending_promise(global_object, spec)
 }
 
 // =============================================================================
@@ -243,10 +307,10 @@ pub fn clear_pending_promise(
 fn read_entry(
   h: Heap(host),
   global_object: Ref,
-  property: String,
+  property: PropertyKey,
   key: String,
 ) -> Option(JsValue) {
-  case object.get_own_property(h, global_object, Named(property)) {
+  case object.get_own_property(h, global_object, property) {
     Some(DataProperty(value: JsObject(cache_ref), ..)) ->
       case object.get_own_property(h, cache_ref, Named(key)) {
         Some(DataProperty(value: cached, ..)) -> Some(cached)
@@ -262,7 +326,7 @@ fn read_entry(
 fn read_object_entry(
   h: Heap(host),
   global_object: Ref,
-  property: String,
+  property: PropertyKey,
   key: String,
 ) -> Option(Ref) {
   case read_entry(h, global_object, property, key) {
@@ -273,15 +337,20 @@ fn read_object_entry(
 
 /// Write `key` → `val` into the hidden cache object `property` on the global,
 /// creating the cache object on first use.
+///
+/// Both writes go through the TOTAL define path (`define_method_property`),
+/// never `set_property`: an ordinary [[Set]] returns a success Bool that a
+/// caller can drop on the floor, and a refused registry write must not be able
+/// to pass silently.
 fn write_entry(
   h: Heap(host),
   global_object: Ref,
-  property: String,
+  property: PropertyKey,
   key: String,
   val: JsValue,
 ) -> Heap(host) {
   let #(h, cache_ref) = case
-    object.get_own_property(h, global_object, Named(property))
+    object.get_own_property(h, global_object, property)
   {
     Some(DataProperty(value: JsObject(cache_ref), ..)) -> #(h, cache_ref)
     _ -> {
@@ -301,12 +370,11 @@ fn write_entry(
         object.define_method_property(
           h,
           global_object,
-          Named(property),
+          property,
           JsObject(cache_ref),
         )
       #(h, cache_ref)
     }
   }
-  let #(h, _) = object.set_property(h, cache_ref, Named(key), val)
-  h
+  object.define_method_property(h, cache_ref, Named(key), val)
 }
