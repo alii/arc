@@ -11,6 +11,10 @@
 //// (Reingold & Dershowitz) and ICU, which is what test262 expectations
 //// are based on.
 
+import arc/internal/gregorian.{
+  civil_from_days, days_from_civil, days_in_month as gregorian_days_in_month,
+  floor_div, floor_mod, is_leap_year as is_gregorian_leap,
+}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -142,76 +146,6 @@ fn arithmetic(cal: Calendar) -> Arithmetic {
     Hebrew -> HebrewArith
     Chinese -> LunisolarArith(chinese_data)
     Dangi -> LunisolarArith(dangi_data)
-  }
-}
-
-// ============================================================================
-// Math helpers
-// ============================================================================
-
-fn floor_div(a: Int, b: Int) -> Int {
-  let q = a / b
-  case a % b != 0 && { a < 0 } != { b < 0 } {
-    True -> q - 1
-    False -> q
-  }
-}
-
-fn floor_mod(a: Int, b: Int) -> Int {
-  a - floor_div(a, b) * b
-}
-
-// ============================================================================
-// Proleptic Gregorian (epoch days <-> y/m/d), Hinnant's algorithms
-// ============================================================================
-
-fn is_gregorian_leap(y: Int) -> Bool {
-  floor_mod(y, 4) == 0 && { floor_mod(y, 100) != 0 || floor_mod(y, 400) == 0 }
-}
-
-fn gregorian_days_in_month(y: Int, m: Int) -> Int {
-  case m {
-    1 | 3 | 5 | 7 | 8 | 10 | 12 -> 31
-    4 | 6 | 9 | 11 -> 30
-    _ ->
-      case is_gregorian_leap(y) {
-        True -> 29
-        False -> 28
-      }
-  }
-}
-
-/// Days since 1970-01-01 for a proleptic Gregorian date.
-fn days_from_civil(y: Int, m: Int, d: Int) -> Int {
-  let y = case m <= 2 {
-    True -> y - 1
-    False -> y
-  }
-  let era = floor_div(y, 400)
-  let yoe = y - era * 400
-  let mp = floor_mod(m + 9, 12)
-  let doy = { 153 * mp + 2 } / 5 + d - 1
-  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
-  era * 146_097 + doe - 719_468
-}
-
-/// Proleptic Gregorian date from days since 1970-01-01.
-fn civil_from_days(z: Int) -> #(Int, Int, Int) {
-  let z = z + 719_468
-  let era = floor_div(z, 146_097)
-  let doe = z - era * 146_097
-  let yoe = { doe - doe / 1460 + doe / 36_524 - doe / 146_096 } / 365
-  let y = yoe + era * 400
-  let doy = doe - { 365 * yoe + yoe / 4 - yoe / 100 }
-  let mp = { 5 * doy + 2 } / 153
-  let d = doy - { 153 * mp + 2 } / 5 + 1
-  let m = case mp < 10 {
-    True -> mp + 3
-    False -> mp - 9
-  }
-  case m <= 2 {
-    True -> #(y + 1, m, d)
-    False -> #(y, m, d)
   }
 }
 

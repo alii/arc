@@ -10,6 +10,7 @@
 //// no query function can be handed an id that was never checked against the
 //// zone-name table.
 
+import arc/internal/gregorian.{floor_div}
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
@@ -64,14 +65,6 @@ fn ffi_next_transition(id: String, epoch_seconds: Int) -> FfiTransition
 fn ffi_previous_transition(id: String, epoch_seconds: Int) -> FfiTransition
 
 const ns_per_second = 1_000_000_000
-
-fn floor_div(a: Int, b: Int) -> Int {
-  let q = a / b
-  case a % b != 0 && { a < 0 } != { b < 0 } {
-    True -> q - 1
-    False -> q
-  }
-}
 
 /// UTC offset of a named zone, in nanoseconds, at the given epoch instant.
 /// `Error(Nil)` when the zone's TZif data cannot be read/parsed.

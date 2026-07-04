@@ -5,6 +5,7 @@
 //// ECMA-402 (PartitionNumberPattern, PartitionDateTimePattern, …). The
 //// builtins layer turns parts into strings or {type, value} part objects.
 
+import arc/internal/gregorian.{civil_from_days, floor_div}
 import arc/vm/ops/operators
 import arc/vm/value.{
   type CompactDisplay, type CurrencyDisplay, type IntlUseGrouping,
@@ -969,13 +970,6 @@ pub fn is_well_formed_unit(unit: String) -> Bool {
   }
 }
 
-fn floor_div(a: Int, b: Int) -> Int {
-  let q = a / b
-  case a % b < 0 {
-    True -> q - 1
-    False -> q
-  }
-}
 
 // ============================================================================
 // Exact decimal core — digits are kept as strings, rounding is performed on
@@ -1732,30 +1726,6 @@ fn divmod(a: Int, b: Int) -> #(Int, Int) {
     False -> a / b
   }
   #(q, a - q * b)
-}
-
-/// Howard Hinnant's civil_from_days algorithm.
-fn civil_from_days(z: Int) -> #(Int, Int, Int) {
-  let z = z + 719_468
-  let era = case z >= 0 {
-    True -> z / 146_097
-    False -> { z - 146_096 } / 146_097
-  }
-  let doe = z - era * 146_097
-  let yoe = { doe - doe / 1460 + doe / 36_524 - doe / 146_096 } / 365
-  let y = yoe + era * 400
-  let doy = doe - { 365 * yoe + yoe / 4 - yoe / 100 }
-  let mp = { 5 * doy + 2 } / 153
-  let d = doy - { 153 * mp + 2 } / 5 + 1
-  let m = case mp < 10 {
-    True -> mp + 3
-    False -> mp - 9
-  }
-  let y = case m <= 2 {
-    True -> y + 1
-    False -> y
-  }
-  #(y, m, d)
 }
 
 pub fn month_name(m: Int, width: NameWidth) -> String {

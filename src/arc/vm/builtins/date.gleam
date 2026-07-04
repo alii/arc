@@ -13,6 +13,7 @@
 /// in pure Gleam Int arithmetic ported from the QuickJS algorithms; only
 /// `now_ms` and the two local-time-zone offset lookups go through FFI.
 import arc/internal/digits.{take_digits}
+import arc/internal/gregorian.{days_in_year, floor_div, floor_mod as math_mod}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
@@ -297,17 +298,6 @@ const ms_per_day = 86_400_000
 
 const max_time_value = 8.64e15
 
-/// Euclidean integer division (floor toward -infinity). Divisor is always
-/// positive in our calls so the stdlib's Result(Nil) error path is unreachable.
-fn floor_div(a: Int, b: Int) -> Int {
-  int.floor_divide(a, b) |> result.unwrap(0)
-}
-
-/// Euclidean modulo (result has sign of divisor). Divisor always positive here.
-fn math_mod(a: Int, b: Int) -> Int {
-  int.modulo(a, b) |> result.unwrap(0)
-}
-
 /// ES2024 §21.4.1.3 Day Number from year. Days since epoch to Jan 1 of `y`.
 fn days_from_year(y: Int) -> Int {
   365
@@ -315,17 +305,6 @@ fn days_from_year(y: Int) -> Int {
   + floor_div(y - 1969, 4)
   - floor_div(y - 1901, 100)
   + floor_div(y - 1601, 400)
-}
-
-fn is_leap_year(y: Int) -> Bool {
-  math_mod(y, 4) == 0 && { math_mod(y, 100) != 0 || math_mod(y, 400) == 0 }
-}
-
-fn days_in_year(y: Int) -> Int {
-  case is_leap_year(y) {
-    True -> 366
-    False -> 365
-  }
 }
 
 /// Return #(year, day_within_year) for an absolute day number since epoch.
@@ -347,17 +326,9 @@ fn year_from_days_loop(y: Int, days: Int) -> #(Int, Int) {
   }
 }
 
-/// Days in month `m` (0-based) for year `y`.
+/// Days in month `m` (0-based, as ES exposes it) for year `y`.
 fn days_in_month(y: Int, m: Int) -> Int {
-  case m {
-    1 ->
-      case is_leap_year(y) {
-        True -> 29
-        False -> 28
-      }
-    3 | 5 | 8 | 10 -> 30
-    _ -> 31
-  }
+  gregorian.days_in_month(y, m + 1)
 }
 
 /// ES2024 §21.4.1.31 TimeClip(time). NaN/±Infinity → NaN; finite out-of-range
