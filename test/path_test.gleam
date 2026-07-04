@@ -49,6 +49,20 @@ pub fn normalize_dotdot_at_root_stays_root_test() {
   assert path.normalize("/..") == "/"
 }
 
+// A trailing slash also leaves an empty segment behind, so a RELATIVE path that
+// cancels to nothing must not be mistaken for the filesystem root.
+pub fn normalize_relative_trailing_slash_is_current_directory_test() {
+  assert path.normalize("a/../") == "."
+}
+
+pub fn normalize_dot_slash_is_current_directory_test() {
+  assert path.normalize("./") == "."
+}
+
+pub fn normalize_empty_path_is_current_directory_test() {
+  assert path.normalize("") == "."
+}
+
 // ----------------------------------------------------------------------------
 // path.resolve_specifier — path-shaped vs bare specifiers are different kinds
 // of thing, and the type says so.
@@ -67,6 +81,10 @@ pub fn resolve_specifier_parent_relative_is_a_path_test() {
 pub fn resolve_specifier_absolute_is_a_normalized_path_test() {
   assert path.resolve_specifier("/x/../b.js", "a.js")
     == path.PathSpecifier("/b.js")
+}
+
+pub fn resolve_specifier_relative_directory_is_current_directory_test() {
+  assert path.resolve_specifier("./dir/../", "a.js") == path.PathSpecifier(".")
 }
 
 pub fn resolve_specifier_bare_is_not_a_path_test() {

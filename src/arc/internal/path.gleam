@@ -11,7 +11,12 @@ import gleam/string
 ///  - `PathSpecifier` — a canonical, normalized path a loader may read.
 ///  - `BareSpecifier` — a builtin/package/URL name (`"fs"`, `"https://…"`).
 ///    Arc imposes NO path meaning on it; a filesystem loader must reject it
-///    rather than treat it as a relative path.
+///    rather than treat it as a relative path. An embedder that registers host
+///    modules under bare names (`engine.register_host_module("dance", …)`) must
+///    consult its host-module registry on this arm and pass the name through —
+///    the module graph resolves a specifier BEFORE it asks whether the result
+///    is a host module, so rejecting every `BareSpecifier` outright makes such
+///    imports unreachable.
 pub type Specifier {
   PathSpecifier(path: String)
   BareSpecifier(text: String)
@@ -57,8 +62,10 @@ pub fn resolve_specifier(raw: String, parent: String) -> Specifier {
 /// same module as an `import "./a.js"` edge resolved against `.` does.
 ///
 /// Rendering is TOTAL: a path that resolves to no segments still denotes a
-/// directory, so `.` and `a/..` normalize to `"."` and `/`, `/..` to `"/"` —
-/// never the empty string, which would be a module identity naming nothing.
+/// directory, and WHICH directory is decided by the input, not by what the fold
+/// left behind — `.`, `a/..` and `a/../` all normalize to `"."`, while `/` and
+/// `/..` normalize to `"/"`. Never the empty string, which would be a module
+/// identity naming nothing.
 pub fn normalize(path: String) -> String {
   let parts = string.split(path, "/")
   let resolved =
@@ -87,10 +94,14 @@ pub fn normalize(path: String) -> String {
       }
     })
   case resolved {
-    // Everything cancelled out: the current directory.
-    [] -> "."
-    // The root marker alone: "/" (its own directory).
-    [""] -> "/"
+    // Everything cancelled out. Which directory that leaves is a property of
+    // the input, not of the accumulator: a trailing slash also parks a `""` in
+    // `acc`, so `a/../` must not be mistaken for the root marker of `/..`.
+    [] | [""] ->
+      case string.starts_with(path, "/") {
+        True -> "/"
+        False -> "."
+      }
     segments -> list.reverse(segments) |> string.join("/")
   }
 }
