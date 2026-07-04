@@ -142,6 +142,39 @@ pub fn array_constructor_negative_zero_length_test() {
   assert eval(range_error("new Array(4294967296)")) == JsBool(True)
 }
 
+/// `arr.length = n` (§10.4.2.4 ArraySetLength) is a validator distinct from the
+/// `Array(n)` constructor above, and it had drifted: it accepted ANY
+/// non-negative integer, so `arr.length = 2 ** 32` silently produced a
+/// 2^32-length array, while `arr.length = -0` threw. Both now route through
+/// `value.array_length`.
+pub fn array_set_length_bounds_test() {
+  assert eval("const a = []; a.length = -0; a.length === 0") == JsBool(True)
+  assert eval("const a = []; a.length = 4294967295; a.length === 4294967295")
+    == JsBool(True)
+  // >= 2^32 is not a uint32: ToUint32(len) !== ToNumber(len) → RangeError.
+  assert eval(range_error("const a = []; a.length = 4294967296"))
+    == JsBool(True)
+  assert eval(range_error("const a = []; a.length = 1e21")) == JsBool(True)
+  assert eval(range_error("const a = []; a.length = -1")) == JsBool(True)
+  assert eval(range_error("const a = []; a.length = 1.5")) == JsBool(True)
+  // defineProperty agrees with the assignment path.
+  assert eval(
+      range_error("Object.defineProperty([], 'length', { value: 4294967296 })"),
+    )
+    == JsBool(True)
+}
+
+/// IsIntegralNumber(-0) is true, so Number.isInteger(-0) and
+/// Number.isSafeInteger(-0) are too. The open-coded
+/// `int.to_float(float.truncate(n)) == n` reads -0 as non-integral (see the
+/// module header) — both wrongly returned false.
+pub fn number_is_integer_negative_zero_test() {
+  assert eval("Number.isInteger(-0)") == JsBool(True)
+  assert eval("Number.isSafeInteger(-0)") == JsBool(True)
+  assert eval("Number.isInteger(1.5) === false") == JsBool(True)
+  assert eval("Number.isSafeInteger(2 ** 53) === false") == JsBool(True)
+}
+
 /// Temporal.Instant.fromEpochMilliseconds(-0) is the epoch, not a "not an
 /// integral number" RangeError.
 pub fn temporal_instant_negative_zero_epoch_test() {

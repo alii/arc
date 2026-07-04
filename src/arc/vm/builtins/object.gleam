@@ -548,7 +548,7 @@ fn define_parsed(
           array_define_length(state, target_ref, parsed, length)
         // An array index is an integer in [0, 2^32-1) — "4294967295" is a
         // plain property name on arrays, not an index (§6.1.7).
-        StringPropKey(pkey: Index(idx), ..) if idx < 4_294_967_295 ->
+        StringPropKey(pkey: Index(idx), ..) if idx <= key.max_array_index ->
           array_define_index(state, target_ref, idx, parsed, length)
           |> result.map_error(as_rejected)
         _ ->
@@ -946,21 +946,17 @@ fn array_define_length(
 }
 
 /// ArraySetLength steps 3-5: validate a ToNumber result as a uint32 length.
-/// The `+. 0.0` normalizes -0 (SameValueZero treats ±0 as equal, and
-/// ToUint32(-0) is +0, so -0 is a valid length of 0).
+/// NaN / ±Infinity: ToUint32 is 0, which ≠ the value, so step 5 throws.
 fn parse_array_length(
   state: State(host),
   num: value.JsNum,
 ) -> Result(Int, #(JsValue, State(host))) {
   case num {
-    value.Finite(f) -> {
-      let f = f +. 0.0
-      let n = value.float_to_int(f)
-      case int.to_float(n) == f && n >= 0 && n <= 4_294_967_295 {
-        True -> Ok(n)
-        False -> reject_range(state, "Invalid array length")
+    value.Finite(f) ->
+      case value.array_length(f) {
+        Some(n) -> Ok(n)
+        None -> reject_range(state, "Invalid array length")
       }
-    }
     _ -> reject_range(state, "Invalid array length")
   }
 }

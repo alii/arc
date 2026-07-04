@@ -5567,6 +5567,20 @@ pub fn integral_int(f: Float) -> Option(Int) {
   }
 }
 
+/// `Some(len)` iff `f` is a valid Array `length` (§10.4.2.4 ArraySetLength
+/// steps 3-5): an integral uint32 in [0, 2^32 - 1]. `None` means the caller
+/// must throw a RangeError, because ToUint32(f) ≠ ToNumber(f).
+///
+/// THE way to validate an array length — the uint32 upper bound is the half a
+/// hand-rolled integrality check always forgets, and `2 ** 32` then silently
+/// becomes a length. Delegates the ±0 half to `integral_int`.
+pub fn array_length(f: Float) -> Option(Int) {
+  case integral_int(f) {
+    Some(n) if n >= 0 && n <= key.max_array_length -> Some(n)
+    _ -> None
+  }
+}
+
 /// JS === (IsStrictlyEqual). NaN !== NaN; +0 === -0.
 /// BEAM's =:= distinguishes ±0, so we normalize by adding 0.0 before comparing
 /// (IEEE 754: -0.0 + 0.0 = +0.0).

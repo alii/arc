@@ -2657,7 +2657,7 @@ fn from_async_array_create(
   state: State(host),
   len: Int,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  case len > 4_294_967_295 {
+  case len > key.max_array_length {
     True -> Error(state.range_error_value(state, "Invalid array length"))
     False -> {
       let #(h, ref) =

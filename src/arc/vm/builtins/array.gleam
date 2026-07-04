@@ -270,14 +270,12 @@ fn construct(
     // 8. Return array.
     [JsNumber(num)] ->
       case num {
-        Finite(n) -> {
-          case value.integral_int(n) {
-            Some(len) if len >= 0 && len <= max_array_length ->
-              alloc_array(state, len, elements.new(), array_proto)
+        Finite(n) ->
+          case value.array_length(n) {
+            Some(len) -> alloc_array(state, len, elements.new(), array_proto)
             // intLen ≠ len → RangeError (spec step 6b)
-            _ -> state.range_error(state, "Invalid array length")
+            None -> state.range_error(state, "Invalid array length")
           }
-        }
         // ToUint32(NaN | ±Infinity) is 0, which ≠ len → RangeError.
         value.NaN | value.Infinity | value.NegInfinity ->
           state.range_error(state, "Invalid array length")

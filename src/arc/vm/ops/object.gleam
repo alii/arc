@@ -1616,22 +1616,19 @@ fn array_set_length(
 /// ToNumber(Desc.[[Value]]); step 5 if SameValueZero(newLen, numberLen) is
 /// false, throw RangeError.
 ///
-/// Simplified: we accept finite numbers that are non-negative integers.
-/// Fractional, negative, NaN and Infinity are `InvalidLength` (step-5
-/// RangeError). Values whose ToNumber we cannot compute here are
+/// `value.array_length` is that validation: whatever it rejects — fractional,
+/// negative, or `>= 2^32` — is `InvalidLength` (step-5 RangeError), as are NaN
+/// and ±Infinity. Values whose ToNumber we cannot compute here are
 /// `UncoercibleLength` — a deviation, NOT a step-5 failure. This covers both
 /// internal Set(O,"length",n,true) calls from Array.prototype mutators and
 /// user-level `arr.length = 3.5`.
 fn coerce_length(h: Heap(host), val: JsValue) -> LengthCoercion {
   case length_to_number(h, val) {
     None -> UncoercibleLength
-    Some(Finite(f)) -> {
-      let n = value.float_to_int(f)
-      case n >= 0 && int.to_float(n) == f {
-        True -> CoercedLength(n)
-        False -> InvalidLength
-      }
-    }
+    Some(Finite(f)) ->
+      value.array_length(f)
+      |> option.map(CoercedLength)
+      |> option.unwrap(InvalidLength)
     // NaN / ±Infinity: ToUint32 differs from ToNumber, so step 5 throws.
     Some(value.NaN) | Some(value.Infinity) | Some(value.NegInfinity) ->
       InvalidLength
@@ -1644,8 +1641,8 @@ fn coerce_length(h: Heap(host), val: JsValue) -> LengthCoercion {
 type LengthCoercion {
   /// ToUint32(Desc.[[Value]]) == ToNumber(Desc.[[Value]]) — a real length.
   CoercedLength(length: Int)
-  /// Step 5: coerced fine, but the number is not a uint32 (`-1`, `3.5`, `NaN`,
-  /// `Infinity`, `undefined`) → RangeError.
+  /// Step 5: coerced fine, but the number is not a uint32 (`-1`, `3.5`,
+  /// `2 ** 32`, `NaN`, `Infinity`, `undefined`) → RangeError.
   InvalidLength
   /// TODO(Deviation): ToNumber here would need user code (a plain object's
   /// valueOf/toString) or should be a TypeError (Symbol, BigInt). Neither is
