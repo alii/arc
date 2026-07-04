@@ -13,7 +13,6 @@ import arc/vm/value.{
   NumberPrototypeValueOf,
 }
 import gleam/float
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -555,11 +554,9 @@ fn number_is_integer(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let result = case args {
     // Steps 1-2: Must be a finite Number.
-    [JsNumber(Finite(n)), ..] -> {
-      // Steps 3-5: truncate(n) == n means no fractional part.
-      let truncated = int.to_float(float.truncate(n))
-      value.JsBool(truncated == n)
-    }
+    // Steps 3-5: ±0-safe integrality — see value.integral_int.
+    [JsNumber(Finite(n)), ..] ->
+      value.JsBool(option.is_some(value.integral_int(n)))
     _ -> value.JsBool(False)
   }
   #(state, Ok(result))
@@ -650,14 +647,13 @@ fn number_is_safe_integer(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let result = case args {
-    [JsNumber(Finite(n)), ..] -> {
-      let truncated = int.to_float(float.truncate(n))
+    // ±0-safe integrality — see value.integral_int.
+    [JsNumber(Finite(n)), ..] ->
       value.JsBool(
-        truncated == n
+        option.is_some(value.integral_int(n))
         && n >=. -9_007_199_254_740_991.0
         && n <=. 9_007_199_254_740_991.0,
       )
-    }
     _ -> value.JsBool(False)
   }
   #(state, Ok(result))
