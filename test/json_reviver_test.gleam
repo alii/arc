@@ -213,6 +213,50 @@ pub fn reviver_source_absent_after_forward_replacement_test() {
     == JsString("p:1|q:undefined|:undefined")
 }
 
+pub fn reviver_source_absent_after_forward_array_replacement_test() {
+  // Replacing an array slot with a *structurally identical* array still drops
+  // the whole parse record: the record's [[Value]] is not the new array, so
+  // neither its `source` nor its element records reach the children.
+  assert eval(
+      "var log = [];
+       JSON.parse('{\"a\":1,\"b\":[2]}', function (k, v, ctx) {
+         if (k === 'a') this.b = [2];
+         log.push(k + ':' + String(ctx.source));
+         return v;
+       });
+       log.join('|')",
+    )
+    == JsString("a:1|0:undefined|b:undefined|:undefined")
+}
+
+pub fn reviver_source_absent_for_replaced_array_elements_test() {
+  // Same for a nested array inside an array literal.
+  assert eval(
+      "var log = [];
+       JSON.parse('[1,[5]]', function (k, v, ctx) {
+         log.push(k + ':' + String(ctx.source));
+         if (v === 1) this[1] = [5];
+         return this[k];
+       });
+       log.join('|')",
+    )
+    == JsString("0:1|0:undefined|1:undefined|:undefined")
+}
+
+pub fn reviver_source_absent_for_replaced_object_members_test() {
+  // And for an object slot replaced with an identical-looking object.
+  assert eval(
+      "var log = [];
+       JSON.parse('{\"p\":1,\"q\":{\"x\":2}}', function (k, v, ctx) {
+         log.push(k + ':' + String(ctx.source));
+         if (v === 1) this.q = { x: 2 };
+         return this[k];
+       });
+       log.join('|')",
+    )
+    == JsString("p:1|x:undefined|q:undefined|:undefined")
+}
+
 pub fn reviver_source_absent_for_added_object_key_test() {
   // A key the reviver adds has no parse node at all.
   assert eval(
