@@ -6011,80 +6011,50 @@ fn to_locale_string_loop(
   }
 }
 
+/// ES2024 §23.1.5.1 CreateArrayIterator(array, kind)
+/// LAZY: each .next() re-reads the live source, so mid-iteration mutation
+/// (push, length change, a resizable buffer resize for typed-array
+/// receivers) is observed per spec.
+fn create_array_iterator(
+  this: JsValue,
+  state: State(host),
+  kind: value.ArrayIterKind,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use _this, ref, length, state <- require_array(this, state)
+  // Pragmatic bound: consuming the iterator visits all length indices
+  // (see iteration_budget_msg); fail at creation like the other guards.
+  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+    state.range_error(state, iteration_budget_msg)
+  })
+  let #(heap, iter_ref) =
+    common.alloc_wrapper(
+      state.heap,
+      value.ArrayIteratorObject(source: ref, cursor: Some(0), iter_kind: kind),
+      state.builtins.array_iterator_proto,
+    )
+  #(State(..state, heap:), Ok(JsObject(iter_ref)))
+}
+
 /// ES2024 §23.1.3.16 Array.prototype.keys ( )
-/// CreateArrayIterator(O, key) — LAZY: each .next() re-reads the live
-/// source, so mid-iteration mutation (push, length change, a resizable
-/// buffer resize for typed-array receivers) is observed per spec.
 fn array_keys(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _this, ref, length, state <- require_array(this, state)
-  // Pragmatic bound: consuming the iterator visits all length indices
-  // (see iteration_budget_msg); fail at creation like the other guards.
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    state.range_error(state, iteration_budget_msg)
-  })
-  let #(heap, iter_ref) =
-    common.alloc_wrapper(
-      state.heap,
-      value.ArrayIteratorObject(
-        source: ref,
-        cursor: Some(0),
-        iter_kind: value.ArrayIterKeys,
-      ),
-      state.builtins.array_iterator_proto,
-    )
-  #(State(..state, heap:), Ok(JsObject(iter_ref)))
+  create_array_iterator(this, state, value.ArrayIterKeys)
 }
 
 /// ES2024 §23.1.3.37 Array.prototype.values ( )
-/// Returns a new Array Iterator object (§23.1.5.1 CreateArrayIterator).
 fn array_values(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _this, ref, length, state <- require_array(this, state)
-  // Pragmatic bound: consuming the iterator visits all length indices
-  // (see iteration_budget_msg); fail at creation like the other guards.
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    state.range_error(state, iteration_budget_msg)
-  })
-  let #(heap, iter_ref) =
-    common.alloc_wrapper(
-      state.heap,
-      value.ArrayIteratorObject(
-        source: ref,
-        cursor: Some(0),
-        iter_kind: value.ArrayIterValues,
-      ),
-      state.builtins.array_iterator_proto,
-    )
-  #(State(..state, heap:), Ok(JsObject(iter_ref)))
+  create_array_iterator(this, state, value.ArrayIterValues)
 }
 
 /// ES2024 §23.1.3.4 Array.prototype.entries ( )
-/// CreateArrayIterator(O, key+value) — LAZY, like array_keys: each .next()
-/// re-reads the live source and allocates a fresh [index, value] pair.
 fn array_entries(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _this, ref, length, state <- require_array(this, state)
-  // Pragmatic bound: consuming the iterator visits all length indices
-  // (see iteration_budget_msg); fail at creation like the other guards.
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    state.range_error(state, iteration_budget_msg)
-  })
-  let #(heap, iter_ref) =
-    common.alloc_wrapper(
-      state.heap,
-      value.ArrayIteratorObject(
-        source: ref,
-        cursor: Some(0),
-        iter_kind: value.ArrayIterEntries,
-      ),
-      state.builtins.array_iterator_proto,
-    )
-  #(State(..state, heap:), Ok(JsObject(iter_ref)))
+  create_array_iterator(this, state, value.ArrayIterEntries)
 }
