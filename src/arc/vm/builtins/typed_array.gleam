@@ -2872,19 +2872,14 @@ fn ta_same_type_create(
   alloc_ta_with_length(state, kind, default_proto_for(state, kind), len)
 }
 
-/// §23.2.3.32 toReversed ( ).
-fn proto_to_reversed(
-  this: JsValue,
+/// Commit `new_data` into a freshly allocated buffer this caller owns every
+/// byte of, and return the new typed array as the successful result.
+fn write_fresh_buffer(
   state: State(host),
+  new_buf: Ref,
+  new_data: BitArray,
+  ta_val: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use view, state <- validate_ta(this, state)
-  let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
-  let size = value.typed_array_element_size(kind)
-  use fresh, state <- try_state(ta_same_type_create(state, kind, len))
-  let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
-  let src = copy_region(state.heap, buffer, off, len * size)
-  let new_data = reversed_bytes(src, 0, len, size)
-  // Fresh buffer — this caller owns every byte.
   #(
     State(
       ..state,
@@ -2898,6 +2893,21 @@ fn proto_to_reversed(
     ),
     Ok(ta_val),
   )
+}
+
+/// §23.2.3.32 toReversed ( ).
+fn proto_to_reversed(
+  this: JsValue,
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use view, state <- validate_ta(this, state)
+  let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
+  let size = value.typed_array_element_size(kind)
+  use fresh, state <- try_state(ta_same_type_create(state, kind, len))
+  let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
+  let src = copy_region(state.heap, buffer, off, len * size)
+  let new_data = reversed_bytes(src, 0, len, size)
+  write_fresh_buffer(state, new_buf, new_data, ta_val)
 }
 
 /// §23.2.3.36 with ( index, value ).
@@ -2945,20 +2955,7 @@ fn proto_with(
       )
     False -> data
   }
-  // Fresh buffer — this caller owns every byte.
-  #(
-    State(
-      ..state,
-      heap: write_buffer_data(
-        state.heap,
-        new_buf,
-        new_data,
-        0,
-        bit_array.byte_size(new_data),
-      ),
-    ),
-    Ok(ta_val),
-  )
+  write_fresh_buffer(state, new_buf, new_data, ta_val)
 }
 
 // ============================================================================
@@ -3240,20 +3237,7 @@ fn proto_to_sorted(
     Some(_fresh) -> encode_region(kind, size, sorted)
     None -> ta_zeroed(len * size)
   }
-  // Fresh buffer — this caller owns every byte.
-  #(
-    State(
-      ..state,
-      heap: write_buffer_data(
-        state.heap,
-        new_buf,
-        new_data,
-        0,
-        bit_array.byte_size(new_data),
-      ),
-    ),
-    Ok(ta_val),
-  )
+  write_fresh_buffer(state, new_buf, new_data, ta_val)
 }
 
 // ============================================================================
