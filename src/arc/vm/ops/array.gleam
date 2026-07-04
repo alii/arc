@@ -257,6 +257,49 @@ fn latch_array_iter_done(h: Heap(host), iter_ref: Ref) -> Heap(host) {
   )
 }
 
+/// Shared drain for the Set-iterator and Map-iterator spread fast paths — both
+/// iterate an `OrderedEntries` store, so the shape is identical: take the live
+/// entries of the source collection from `cursor` (none once the iterator is
+/// exhausted), append one element per entry with `build`, then latch the
+/// iterator to `latched_kind` (itself with `done: True`) so further `.next()`
+/// calls answer done. `build` only allocates entry-pair arrays, never touching
+/// `target_ref`, so `batch_append`'s single read/write of the target stays valid.
+/// A Set iterator's `source` is always a Set (and a Map iterator's a Map), so
+/// accepting either store kind here can't mis-bind.
+fn spread_collection_iterator(
+  state: State(host),
+  src_ref: Ref,
+  target_ref: Ref,
+  source: Ref,
+  cursor: Int,
+  done: Bool,
+  latched_kind: state.ExoticKind(host),
+  build: fn(#(Heap(host), value.JsElements, Int), #(value.MapKey, JsValue)) ->
+    #(Heap(host), value.JsElements, Int),
+) -> Result(State(host), StepExit(host)) {
+  let entries = case done {
+    True -> []
+    False ->
+      case heap.read(state.heap, source) {
+        Some(ObjectSlot(kind: value.SetObject(store:), ..))
+        | Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
+          ordered_entries.live_entries_from(store, cursor)
+        _ -> []
+      }
+  }
+  let heap = {
+    use h, els, len <- batch_append(state.heap, target_ref)
+    list.fold(entries, #(h, els, len), build)
+  }
+  let heap = {
+    use slot <- heap.update(heap, src_ref)
+    let assert ObjectSlot(..) as slot = slot
+      as "collection iterator ref is not an ObjectSlot"
+    ObjectSlot(..slot, kind: latched_kind)
+  }
+  Ok(State(..state, heap:))
+}
+
 /// Drain an iterable into the target array (ArraySpread opcode helper).
 ///
 /// Per ES §13.2.4.1 ArrayAccumulation (SpreadElement):
@@ -430,12 +473,10 @@ pub fn spread_into_array(
               Ok(State(..state, heap:))
             }
           }
-        Some(
-          ObjectSlot(
-            kind: value.SetIteratorObject(source:, cursor:, done:, kind:),
-            ..,
-          ) as slot,
-        ) ->
+        Some(ObjectSlot(
+          kind: value.SetIteratorObject(source:, cursor:, done:, kind:),
+          ..,
+        )) ->
           case
             intrinsic_iterator_guard(
               state.heap,
@@ -449,48 +490,28 @@ pub fn spread_into_array(
             True -> {
               // Drain the LIVE iterator: forward insertion order of the source
               // from the cursor onward, then latch the iterator done.
-              let entries = case done {
-                True -> []
-                False ->
-                  case heap.read(state.heap, source) {
-                    Some(ObjectSlot(kind: value.SetObject(store:), ..)) ->
-                      ordered_entries.live_entries_from(store, cursor)
-                    _ -> []
-                  }
-              }
               let proto = state.builtins.array.prototype
-              let heap = {
-                use h, els, len <- batch_append(state.heap, target_ref)
-                list.fold(entries, #(h, els, len), fn(acc, e) {
-                  let #(h, els, len) = acc
-                  case kind {
-                    value.SetIterValues -> #(
-                      h,
-                      elements.set(els, len, e.1),
-                      len + 1,
-                    )
-                    value.SetIterEntries -> {
-                      let #(h, pair) = common.alloc_array(h, [e.1, e.1], proto)
-                      #(h, elements.set(els, len, JsObject(pair)), len + 1)
-                    }
-                  }
-                })
-              }
-              let heap =
-                heap.write(
-                  heap,
-                  src_ref,
-                  ObjectSlot(
-                    ..slot,
-                    kind: value.SetIteratorObject(
-                      source:,
-                      cursor:,
-                      done: True,
-                      kind:,
-                    ),
-                  ),
+              use acc, e <- spread_collection_iterator(
+                state,
+                src_ref,
+                target_ref,
+                source,
+                cursor,
+                done,
+                value.SetIteratorObject(source:, cursor:, done: True, kind:),
+              )
+              let #(h, els, len) = acc
+              case kind {
+                value.SetIterValues -> #(
+                  h,
+                  elements.set(els, len, e.1),
+                  len + 1,
                 )
-              Ok(State(..state, heap:))
+                value.SetIterEntries -> {
+                  let #(h, pair) = common.alloc_array(h, [e.1, e.1], proto)
+                  #(h, elements.set(els, len, JsObject(pair)), len + 1)
+                }
+              }
             }
           }
         Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
@@ -524,12 +545,10 @@ pub fn spread_into_array(
               Ok(State(..state, heap:))
             }
           }
-        Some(
-          ObjectSlot(
-            kind: value.MapIteratorObject(source:, cursor:, done:, kind:),
-            ..,
-          ) as slot,
-        ) ->
+        Some(ObjectSlot(
+          kind: value.MapIteratorObject(source:, cursor:, done:, kind:),
+          ..,
+        )) ->
           case
             intrinsic_iterator_guard(
               state.heap,
@@ -541,54 +560,26 @@ pub fn spread_into_array(
           {
             False -> spread_via_iterator(state, iterable, target_ref)
             True -> {
-              let entries = case done {
-                True -> []
-                False ->
-                  case heap.read(state.heap, source) {
-                    Some(ObjectSlot(kind: value.MapObject(store:), ..)) ->
-                      ordered_entries.live_entries_from(store, cursor)
-                    _ -> []
-                  }
-              }
               let proto = state.builtins.array.prototype
-              let heap = {
-                use h, els, len <- batch_append(state.heap, target_ref)
-                list.fold(entries, #(h, els, len), fn(acc, e) {
-                  let #(h, els, len) = acc
-                  let #(k, v) = #(value.map_key_to_js(e.0), e.1)
-                  case kind {
-                    value.MapIterKeys -> #(
-                      h,
-                      elements.set(els, len, k),
-                      len + 1,
-                    )
-                    value.MapIterValues -> #(
-                      h,
-                      elements.set(els, len, v),
-                      len + 1,
-                    )
-                    value.MapIterEntries -> {
-                      let #(h, arr) = common.alloc_array(h, [k, v], proto)
-                      #(h, elements.set(els, len, JsObject(arr)), len + 1)
-                    }
-                  }
-                })
+              use acc, e <- spread_collection_iterator(
+                state,
+                src_ref,
+                target_ref,
+                source,
+                cursor,
+                done,
+                value.MapIteratorObject(source:, cursor:, done: True, kind:),
+              )
+              let #(h, els, len) = acc
+              let #(k, v) = #(value.map_key_to_js(e.0), e.1)
+              case kind {
+                value.MapIterKeys -> #(h, elements.set(els, len, k), len + 1)
+                value.MapIterValues -> #(h, elements.set(els, len, v), len + 1)
+                value.MapIterEntries -> {
+                  let #(h, arr) = common.alloc_array(h, [k, v], proto)
+                  #(h, elements.set(els, len, JsObject(arr)), len + 1)
+                }
               }
-              let heap =
-                heap.write(
-                  heap,
-                  src_ref,
-                  ObjectSlot(
-                    ..slot,
-                    kind: value.MapIteratorObject(
-                      source:,
-                      cursor:,
-                      done: True,
-                      kind:,
-                    ),
-                  ),
-                )
-              Ok(State(..state, heap:))
             }
           }
         // Every other object — plain objects, class instances with a
