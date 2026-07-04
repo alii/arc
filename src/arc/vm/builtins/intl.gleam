@@ -1471,11 +1471,19 @@ fn lid_u_keywords(lid: tags.LocaleId) -> List(#(String, String)) {
   |> list.flatten
 }
 
-/// Build the resolved [[Locale]] string: data locale + supported u-keywords.
+/// Build the resolved [[Locale]] string: data locale + the u-keywords whose
+/// value actually came from the locale extension (the `Bool` in each entry).
 fn build_resolved_locale(
   data_locale: String,
-  keywords: List(#(String, String)),
+  candidates: List(#(String, Bool, String)),
 ) -> String {
+  let keywords =
+    list.filter_map(candidates, fn(t) {
+      case t {
+        #(k, True, v) -> Ok(#(k, v))
+        #(_, False, _) -> Error(Nil)
+      }
+    })
   case keywords {
     [] -> data_locale
     _ -> {
@@ -2007,11 +2015,7 @@ fn resolve_nu_locale(
   let #(_locale, data_locale, ext_kws) = resolve_locale(requested)
   let #(nu, nu_from_ext) =
     resolve_keyword(ext_kws, "nu", nu_opt, is_numbering_system, "latn")
-  let locale =
-    build_resolved_locale(data_locale, case nu_from_ext {
-      True -> [#("nu", nu)]
-      False -> []
-    })
+  let locale = build_resolved_locale(data_locale, [#("nu", nu_from_ext, nu)])
   #(nu, locale, state)
 }
 
@@ -2106,24 +2110,15 @@ fn collator_state(
     "ignorePunctuation",
     Some(ignore_punct_default),
   ))
-  let ext_used =
-    list.filter_map(
-      [
-        #("co", co_from_ext, collation),
-        #("kn", kn_from_ext, case numeric {
-          True -> "true"
-          False -> "false"
-        }),
-        #("kf", kf_from_ext, value.case_first_to_js_string(case_first)),
-      ],
-      fn(t) {
-        case t {
-          #(k, True, v) -> Ok(#(k, v))
-          _ -> Error(Nil)
-        }
-      },
-    )
-  let locale = build_resolved_locale(data_locale, ext_used)
+  let locale =
+    build_resolved_locale(data_locale, [
+      #("co", co_from_ext, collation),
+      #("kn", kn_from_ext, case numeric {
+        True -> "true"
+        False -> "false"
+      }),
+      #("kf", kf_from_ext, value.case_first_to_js_string(case_first)),
+    ])
   Ok(#(
     CollatorState(
       locale:,
@@ -2770,25 +2765,12 @@ fn dtf_state_required(
     Some(False) -> H23
     None -> hc
   }
-  let ext_used =
-    list.filter_map(
-      [
-        #("ca", ca_from_ext, calendar),
-        #("nu", nu_from_ext, nu),
-        #(
-          "hc",
-          hc_from_ext && hour12 == None,
-          value.hour_cycle_to_js_string(hc),
-        ),
-      ],
-      fn(t) {
-        case t {
-          #(k, True, v) -> Ok(#(k, v))
-          _ -> Error(Nil)
-        }
-      },
-    )
-  let locale = build_resolved_locale(data_locale, ext_used)
+  let locale =
+    build_resolved_locale(data_locale, [
+      #("ca", ca_from_ext, calendar),
+      #("nu", nu_from_ext, nu),
+      #("hc", hc_from_ext && hour12 == None, value.hour_cycle_to_js_string(hc)),
+    ])
   // timeZone
   use #(tz_v, state) <- result.try(opt_get(state, opts, "timeZone"))
   use #(tz_name, tz_offset, tz_system, state) <- result.try(case tz_v {
