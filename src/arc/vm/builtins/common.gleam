@@ -73,16 +73,10 @@ pub type GeneratorBuiltin {
   GeneratorBuiltin(prototype: Ref, fn_proto: Ref)
 }
 
-/// §27.3/§27.4: build a %GeneratorFunction%-style intrinsic pair — the
-/// dynamic constructor plus the prototype that generator FUNCTION objects use
-/// as [[Prototype]]. Layout (§27.3.2/§27.3.3):
-///   ctor.[[Prototype]] = %Function% (the Function constructor)
-///   ctor.prototype = fn_proto                 { W:F, E:F, C:F }
-///   fn_proto.[[Prototype]] = Function.prototype
-///   fn_proto.constructor = ctor               { W:F, E:F, C:T }
-///   fn_proto.prototype = generator_proto      { W:F, E:F, C:T }
-///   fn_proto[@@toStringTag] = name            { W:F, E:F, C:T }
-/// Returns the fn_proto ref (the ctor is reachable via its "constructor").
+/// §27.3/§27.4: build a %GeneratorFunction%-style intrinsic pair — the dynamic
+/// constructor plus the prototype that generator FUNCTION objects use as
+/// [[Prototype]] (§27.3.2/§27.3.3). See `init_function_intrinsic` for the
+/// layout; the generator flavor is the `Some(generator_proto)` case.
 pub fn init_generator_function(
   h: Heap(ctx, host),
   name: String,
@@ -91,73 +85,53 @@ pub fn init_generator_function(
   function_ctor: Ref,
   generator_proto: Ref,
 ) -> #(Heap(ctx, host), Ref) {
-  let #(h, fn_proto_ref) = heap.reserve(h)
-  let h = heap.root(h, fn_proto_ref)
-  let #(h, ctor_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(Dispatch(native), constructible: True),
-        properties: named_props([
-          #("length", fn_length_property(1)),
-          #("name", fn_name_property(name)),
-          #("prototype", fn_prototype_property(fn_proto_ref)),
-        ]),
-        elements: elements.new(),
-        prototype: Some(function_ctor),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
-  let h = heap.root(h, ctor_ref)
-  let h =
-    heap.fill(
-      h,
-      fn_proto_ref,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties: named_props([
-          #("constructor", value.data(JsObject(ctor_ref)) |> value.configurable),
-          #(
-            "prototype",
-            value.data(JsObject(generator_proto)) |> value.configurable,
-          ),
-        ]),
-        elements: elements.new(),
-        prototype: Some(function_proto),
-        symbol_properties: [to_string_tag(name)],
-        extensible: True,
-      ),
-    )
-  // §27.5.1.1 / §27.6.1.1: Generator.prototype.constructor is the fn_proto
-  // object itself ({ W:F, E:F, C:T }).
-  let h =
-    add_named_property(
-      h,
-      generator_proto,
-      "constructor",
-      value.data(JsObject(fn_proto_ref)) |> value.configurable,
-    )
-  #(h, fn_proto_ref)
+  init_function_intrinsic(
+    h,
+    name,
+    native,
+    function_proto,
+    function_ctor,
+    Some(generator_proto),
+  )
 }
 
 /// §27.7: build the %AsyncFunction% intrinsic pair — the dynamic constructor
-/// plus %AsyncFunction.prototype%, the [[Prototype]] of async FUNCTION
-/// objects. Layout (§27.7.2/§27.7.3):
-///   ctor.[[Prototype]] = %Function% (the Function constructor)
-///   ctor.prototype = fn_proto                 { W:F, E:F, C:F }
-///   fn_proto.[[Prototype]] = Function.prototype
-///   fn_proto.constructor = ctor               { W:F, E:F, C:T }
-///   fn_proto[@@toStringTag] = "AsyncFunction" { W:F, E:F, C:T }
-/// Unlike %GeneratorFunction.prototype%, fn_proto is an ordinary non-callable
-/// object with NO "prototype" property (async functions are not constructors).
-/// Returns the fn_proto ref (the ctor is reachable via its "constructor").
+/// plus %AsyncFunction.prototype%, the [[Prototype]] of async FUNCTION objects
+/// (§27.7.2/§27.7.3). See `init_function_intrinsic` for the layout; unlike the
+/// generator flavor, fn_proto has NO "prototype" property (async functions are
+/// not constructors), i.e. the `None` case.
 pub fn init_async_function(
   h: Heap(ctx, host),
   name: String,
   native: NativeFn,
   function_proto: Ref,
   function_ctor: Ref,
+) -> #(Heap(ctx, host), Ref) {
+  init_function_intrinsic(h, name, native, function_proto, function_ctor, None)
+}
+
+/// Shared core of `init_generator_function` / `init_async_function`: build a
+/// dynamic constructor plus the fn_proto that the corresponding FUNCTION
+/// objects use as [[Prototype]]. Common layout:
+///   ctor.[[Prototype]] = %Function% (the Function constructor)
+///   ctor.prototype = fn_proto                 { W:F, E:F, C:F }
+///   fn_proto.[[Prototype]] = Function.prototype
+///   fn_proto.constructor = ctor               { W:F, E:F, C:T }
+///   fn_proto[@@toStringTag] = name            { W:F, E:F, C:T }
+///
+/// The ONLY difference between the two intrinsics is `generator_proto`:
+///   * `Some(gp)` — additionally fn_proto.prototype = gp { W:F, E:F, C:T },
+///     and gp.constructor is backpatched to fn_proto (§27.5.1.1 / §27.6.1.1).
+///   * `None`     — no `prototype` property, nothing to backpatch (§27.7.3).
+///
+/// Returns the fn_proto ref (the ctor is reachable via its "constructor").
+fn init_function_intrinsic(
+  h: Heap(ctx, host),
+  name: String,
+  native: NativeFn,
+  function_proto: Ref,
+  function_ctor: Ref,
+  generator_proto: Option(Ref),
 ) -> #(Heap(ctx, host), Ref) {
   let #(h, fn_proto_ref) = heap.reserve(h)
   let h = heap.root(h, fn_proto_ref)
@@ -178,21 +152,44 @@ pub fn init_async_function(
       ),
     )
   let h = heap.root(h, ctor_ref)
+  // `constructor` is stamped BEFORE `prototype` — `value.data` takes its `seq`
+  // from a global counter at call time, and that seq is what orders
+  // Object.getOwnPropertyNames. Hoisting this binding keeps the original
+  // enumeration order regardless of where the case arms place the entries.
+  let ctor_prop = value.data(JsObject(ctor_ref)) |> value.configurable
+  let proto_props = case generator_proto {
+    Some(gp) -> [
+      #("constructor", ctor_prop),
+      #("prototype", value.data(JsObject(gp)) |> value.configurable),
+    ]
+    None -> [#("constructor", ctor_prop)]
+  }
   let h =
     heap.fill(
       h,
       fn_proto_ref,
       ObjectSlot(
         kind: OrdinaryObject,
-        properties: named_props([
-          #("constructor", value.data(JsObject(ctor_ref)) |> value.configurable),
-        ]),
+        properties: named_props(proto_props),
         elements: elements.new(),
         prototype: Some(function_proto),
         symbol_properties: [to_string_tag(name)],
         extensible: True,
       ),
     )
+  // §27.5.1.1 / §27.6.1.1: Generator.prototype.constructor is the fn_proto
+  // object itself ({ W:F, E:F, C:T }). Nothing to backpatch for %AsyncFunction%.
+  let h =
+    generator_proto
+    |> option.map(fn(gp) {
+      add_named_property(
+        h,
+        gp,
+        "constructor",
+        value.data(JsObject(fn_proto_ref)) |> value.configurable,
+      )
+    })
+    |> option.unwrap(h)
   #(h, fn_proto_ref)
 }
 
