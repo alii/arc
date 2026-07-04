@@ -3,6 +3,7 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/disposable_stack
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/regexp as builtins_regexp
@@ -2203,10 +2204,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           Ok(
             State(
               ..state,
-              stack: [
-                JsString(common.typeof_value(v, state.heap)),
-                ..state.stack
-              ],
+              stack: [JsString(operators.typeof(state.heap, v)), ..state.stack],
               pc: state.pc + 1,
             ),
           )
@@ -2772,7 +2770,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           Ok(
             State(
               ..state,
-              stack: [JsString(common.typeof_value(val, state.heap)), ..rest],
+              stack: [JsString(operators.typeof(state.heap, val)), ..rest],
               pc: state.pc + 1,
             ),
           )
@@ -2796,7 +2794,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             State(
               ..state,
               stack: [
-                JsString(common.typeof_value(val, state.heap)),
+                JsString(operators.typeof(state.heap, val)),
                 ..state.stack
               ],
               pc: state.pc + 1,
@@ -2838,10 +2836,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           )
           State(
             ..state,
-            stack: [
-              JsString(common.typeof_value(val, state.heap)),
-              ..state.stack
-            ],
+            stack: [JsString(operators.typeof(state.heap, val)), ..state.stack],
             pc: state.pc + 1,
           )
         }
@@ -5021,7 +5016,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           // hits the real iterator object.
           let iter = unwrap_iterator_record(state, iter)
           let state = State(..state, stack: rest, pc: state.pc + 1)
-          case builtins_iterator.iterator_close_normal(state, iter) {
+          case iter_protocol.iterator_close_normal(state, iter) {
             #(state, Ok(Nil)) -> Ok(state)
             #(state, Error(thrown)) -> Error(Threw(thrown, state))
           }
@@ -5041,7 +5036,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           let iter = unwrap_iterator_record(state, iter)
           let state = State(..state, stack: rest)
           // Original error wins regardless of what .return() does.
-          let #(state, _inner) = builtins_iterator.call_return(state, iter)
+          let #(state, _inner) = iter_protocol.call_return(state, iter)
           Error(Threw(thrown, state))
         }
         [thrown, _, ..rest] -> Error(Threw(thrown, State(..state, stack: rest)))

@@ -1,13 +1,15 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
-import arc/vm/builtins/iterator
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/object as object_builtin
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/js_string
 import arc/vm/key.{Index, Named, max_array_index, max_array_length}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ArrayNativeFn, type JsElements, type JsValue, type Property, type Ref,
@@ -648,7 +650,7 @@ fn require_array(
         // enumeration).
         // §7.1.18 String row / §10.4.3: String exotic object.
         Some(ObjectSlot(kind: value.StringObject(value: s), ..)) ->
-          cont(this, ref, object.string_length(s), state)
+          cont(this, ref, js_string.length(s), state)
         // Generic object: LengthOfArrayLike (§7.3.18) — Get(obj, "length"),
         // then ToLength (§7.1.17). The Get may invoke a getter (user code)
         // and the ToLength may invoke valueOf — both can throw, and their
@@ -680,7 +682,7 @@ fn require_array(
       cont(
         JsObject(wrapper_ref),
         wrapper_ref,
-        object.string_length(s),
+        js_string.length(s),
         State(..state, heap: h),
       )
     }
@@ -803,7 +805,7 @@ fn get_index_if_present(
     // out-of-range falls through to String.prototype (§7.3.11 walks the
     // wrapper's prototype chain).
     JsString(s) ->
-      case idx >= 0, object.string_char_at(s, idx) {
+      case idx >= 0, js_string.char_at(s, idx) {
         True, Some(ch) -> Ok(#(Some(JsString(ch)), state))
         _, _ ->
           inherited_index(
@@ -1212,7 +1214,7 @@ fn object_length(
     // writable/configurable dict property (§10.4.4.6) and overrides must be
     // honored (e.g. concat spreading after defineProperty length).
     Some(ObjectSlot(kind: value.StringObject(value: s), ..)) ->
-      Ok(#(object.string_length(s), state))
+      Ok(#(js_string.length(s), state))
     Some(ObjectSlot(properties:, ..)) ->
       length_of_properties(state, ref, properties)
     _ -> Ok(#(0, state))
@@ -1319,7 +1321,7 @@ fn require_callback(
     False ->
       state.type_error(
         state,
-        common.typeof_value(cb, state.heap) <> " is not a function",
+        operators.typeof(state.heap, cb) <> " is not a function",
       )
   }
 }
@@ -3774,7 +3776,7 @@ fn with_comparefn(
         False ->
           state.type_error(
             state,
-            common.typeof_value(comparefn, state.heap) <> " is not a function",
+            operators.typeof(state.heap, comparefn) <> " is not a function",
           )
       }
   }
@@ -4523,7 +4525,7 @@ fn reduce_impl(
     !helpers.is_callable(state.heap, cb),
     state.type_error(
       state,
-      common.typeof_value(cb, state.heap) <> " is not a function",
+      operators.typeof(state.heap, cb) <> " is not a function",
     ),
   )
   // Step 5: k = 0 (reduce) or len - 1 (reduceRight); loop bound is exclusive.
@@ -5335,7 +5337,7 @@ fn array_from(
             False ->
               state.type_error(
                 state,
-                common.typeof_value(mf, state.heap) <> " is not a function",
+                operators.typeof(state.heap, mf) <> " is not a function",
               )
           }
       }
@@ -5359,7 +5361,7 @@ fn array_from_array_like(
     JsNull | JsUndefined ->
       state.type_error(
         state,
-        "Cannot create array from " <> common.typeof_value(items, state.heap),
+        "Cannot create array from " <> operators.typeof(state.heap, items),
       )
     _ -> {
       // §23.1.2.1 step 4: usingIterator = ? GetMethod(items, @@iterator).
@@ -5409,7 +5411,7 @@ fn array_from_array_like(
             False ->
               state.type_error(
                 state,
-                common.typeof_value(m, state.heap) <> " is not a function",
+                operators.typeof(state.heap, m) <> " is not a function",
               )
           }
       }
@@ -5432,7 +5434,7 @@ fn array_from_iterator(
   this_arg: JsValue,
   array_proto: Ref,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use rec, state <- state.try_op(iterator.get_iterator_from_method(
+  use rec, state <- state.try_op(iter_protocol.get_iterator_from_method(
     state,
     items,
     iter_method,
@@ -5451,7 +5453,7 @@ fn array_from_iterator_loop(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // §7.4.8: an abrupt .next()/`done`/`value` read propagates WITHOUT
   // IteratorClose — the iterator record is already [[Done]].
-  case iterator.iterator_step_value(state, rec) {
+  case iter_protocol.iterator_step_value(state, rec) {
     #(state, Error(thrown)) -> #(state, Error(thrown))
     #(state, Ok(None)) -> {
       let #(heap, ref) =
@@ -5465,7 +5467,7 @@ fn array_from_iterator_loop(
           case state.call(state, mf, this_arg, [item, value.from_int(k)]) {
             Ok(#(v, state)) -> #(state, Ok(v))
             Error(#(thrown, state)) ->
-              iterator.close_throw(state, rec.iterator, thrown)
+              iter_protocol.close_throw(state, rec.iterator, thrown)
           }
         None -> #(state, Ok(item))
       }
@@ -5990,7 +5992,7 @@ fn to_locale_string_loop(
           use <- bool.lazy_guard(!helpers.is_callable(state.heap, method), fn() {
             state.type_error(
               state,
-              common.typeof_value(method, state.heap) <> " is not a function",
+              operators.typeof(state.heap, method) <> " is not a function",
             )
           })
           // ECMA-402 §18.4.1: Invoke(element, "toLocaleString",

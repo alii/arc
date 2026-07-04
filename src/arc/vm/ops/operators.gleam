@@ -1,10 +1,11 @@
 import arc/vm/binop.{
   type ArithOp, type BitwiseOp, type CompareOp, type EqualityOp, type PureBinOp,
-  AndOp, ArithDiv, ArithExp, ArithMod, ArithMul, ArithSub, BitAnd, BitOr,
-  BitXor, Div, Eq, EqOp, Exp, Gt, GtCmp, GtEq, GtEqCmp, Lt, LtCmp, LtEq,
-  LtEqCmp, Mod, Mul, NotEq, NotEqOp, OrOp, Shl, ShlOp, Shr, ShrOp, StrictEq,
-  StrictEqOp, StrictNotEq, StrictNotEqOp, Sub, UShr, UShrOp, XorOp,
+  AndOp, ArithDiv, ArithExp, ArithMod, ArithMul, ArithSub, BitAnd, BitOr, BitXor,
+  Div, Eq, EqOp, Exp, Gt, GtCmp, GtEq, GtEqCmp, Lt, LtCmp, LtEq, LtEqCmp, Mod,
+  Mul, NotEq, NotEqOp, OrOp, Shl, ShlOp, Shr, ShrOp, StrictEq, StrictEqOp,
+  StrictNotEq, StrictNotEqOp, Sub, UShr, UShrOp, XorOp,
 }
+import arc/vm/heap.{type Heap}
 import arc/vm/opcode.{type UnaryOpKind, BitNot, LogicalNot, Neg, Pos, Void}
 import arc/vm/value.{
   type JsNum, type JsValue, BigInt, Finite, Infinity, JsBigInt, JsBool, JsNumber,
@@ -306,18 +307,31 @@ fn bigint_bitwise(kind: BitwiseOp, a: Int, b: Int) -> Result(JsValue, OpError) {
 // Loose equality with BigInt support — §7.2.14 IsLooselyEqual
 // ============================================================================
 
-/// §7.2.14 steps 6-9, 10-11: BigInt × Number/String/Boolean comparisons.
-/// Everything else delegates to value.abstract_equal.
-fn loose_equal(left: JsValue, right: JsValue) -> Bool {
+/// §7.2.14 IsLooselyEqual (`==`), on primitives. THE loose-equality entry point
+/// of the engine: object operands are ToPrimitive'd by the caller (see
+/// `interpreter.is_eq_coercible`), everything else lands here. It is complete —
+/// including the BigInt arms — so there is no half-right sibling to reach for.
+pub fn loose_equal(left: JsValue, right: JsValue) -> Bool {
   case left, right {
+    // Steps 1-2: same type → strict equality. null == undefined (steps 3/4).
+    value.JsNull, value.JsNull
+    | value.JsUndefined, value.JsUndefined
+    | value.JsNull, value.JsUndefined
+    | value.JsUndefined, value.JsNull
+    -> True
+    JsNumber(_), JsNumber(_)
+    | JsBool(_), JsBool(_)
+    | JsString(_), JsString(_)
+    | value.JsObject(_), value.JsObject(_)
+    | value.JsSymbol(_), value.JsSymbol(_)
+    | JsBigInt(_), JsBigInt(_)
+    -> value.strict_equal(left, right)
     // Steps 10/11: Boolean operand → ToNumber, then redo.
-    JsBool(a), JsBigInt(_) ->
-      loose_equal(JsNumber(Finite(bool_to_float(a))), right)
-    JsBigInt(_), JsBool(b) ->
-      loose_equal(left, JsNumber(Finite(bool_to_float(b))))
+    JsBool(a), _ -> loose_equal(JsNumber(Finite(bool_to_float(a))), right)
+    _, JsBool(b) -> loose_equal(left, JsNumber(Finite(bool_to_float(b))))
     // Steps 6/7: BigInt × String via StringToBigInt.
     JsBigInt(BigInt(a)), JsString(s) ->
-      case string_to_bigint(s) {
+      case value.string_to_bigint(s) {
         Some(b) -> a == b
         None -> False
       }
@@ -325,7 +339,13 @@ fn loose_equal(left: JsValue, right: JsValue) -> Bool {
     // Step 12: BigInt × Number — equal mathematical values only.
     JsBigInt(BigInt(a)), JsNumber(n) -> bigint_equals_number(a, n)
     JsNumber(n), JsBigInt(BigInt(b)) -> bigint_equals_number(b, n)
-    _, _ -> value.abstract_equal(left, right)
+    // Steps 5/8/9: Number × String → ToNumber(String).
+    JsNumber(_), JsString(s) ->
+      value.to_number(JsString(s))
+      |> result.map(fn(n) { value.strict_equal(left, JsNumber(n)) })
+      |> result.unwrap(False)
+    JsString(_), JsNumber(_) -> loose_equal(right, left)
+    _, _ -> False
   }
 }
 
@@ -340,29 +360,6 @@ fn bool_to_float(b: Bool) -> Float {
 /// any Number with a fractional part.
 fn bigint_equals_number(a: Int, n: JsNum) -> Bool {
   compare_bigint_num(a, n) == Some(EqOrd)
-}
-
-/// §7.1.14 StringToBigInt — decimal (with sign) or 0x/0o/0b prefixed;
-/// empty/whitespace-only → 0; anything else fails (None).
-fn string_to_bigint(s: String) -> Option(Int) {
-  let s = string.trim(s)
-  case s {
-    "" -> Some(0)
-    "0x" <> rest | "0X" <> rest -> parse_bigint_radix_digits(rest, 16)
-    "0o" <> rest | "0O" <> rest -> parse_bigint_radix_digits(rest, 8)
-    "0b" <> rest | "0B" <> rest -> parse_bigint_radix_digits(rest, 2)
-    _ -> int.parse(s) |> option.from_result
-  }
-}
-
-/// Digits after a 0x/0o/0b prefix. The grammar (§7.1.14
-/// NonDecimalIntegerLiteral) has no SignedInteger, so a sign is a failure
-/// even though int.base_parse would accept it.
-fn parse_bigint_radix_digits(digits: String, base: Int) -> Option(Int) {
-  case digits {
-    "-" <> _ | "+" <> _ -> None
-    _ -> int.base_parse(digits, base) |> option.from_result
-  }
 }
 
 // ============================================================================
@@ -728,12 +725,12 @@ fn compare_values(
     // §7.2.13 IsLessThan steps 3.c/d: BigInt × String goes through
     // StringToBigInt; an unparseable string yields undefined → false.
     JsBigInt(BigInt(a)), JsString(s) ->
-      case string_to_bigint(s) {
+      case value.string_to_bigint(s) {
         Some(b) -> Ok(JsBool(pred(compare_ints(a, b))))
         None -> Ok(JsBool(False))
       }
     JsString(s), JsBigInt(BigInt(b)) ->
-      case string_to_bigint(s) {
+      case value.string_to_bigint(s) {
         Some(a) -> Ok(JsBool(pred(compare_ints(a, b))))
         None -> Ok(JsBool(False))
       }
@@ -875,4 +872,58 @@ pub fn wrap_int32(i: Int) -> Int {
 /// a true modulo-2^32 reduction for any sign.
 pub fn wrap_uint32(i: Int) -> Int {
   int.bitwise_and(i, 0xFFFFFFFF)
+}
+
+/// ES2024 §13.5.3 The typeof Operator
+///
+/// Table 41 — typeof Operator Results:
+///
+///   Type of val                              Result
+///   ─────────────────────────────────────────────────────
+///   Undefined                                "undefined"
+///   Null                                     "object"
+///   Boolean                                  "boolean"
+///   Number                                   "number"
+///   String                                   "string"
+///   Symbol                                   "symbol"
+///   BigInt                                   "bigint"
+///   Object (does not implement [[Call]])      "object"
+///   Object (implements [[Call]])              "function"
+///
+/// JsUninitialized (TDZ sentinel, not in spec) maps to "undefined".
+/// This matches V8/SpiderMonkey behavior where accessing a TDZ variable throws
+/// a ReferenceError before typeof ever runs, but our compiler may allow typeof
+/// on uninitialized bindings as a defensive measure.
+pub fn typeof(heap: Heap(ctx, host), val: JsValue) -> String {
+  case val {
+    // Table 41 row 1: Undefined → "undefined"
+    // Also handles JsUninitialized (internal TDZ sentinel, not in spec)
+    value.JsUndefined | value.JsUninitialized -> "undefined"
+    // Table 41 row 2: Null → "object"
+    value.JsNull -> "object"
+    // Table 41 row 3: Boolean → "boolean"
+    value.JsBool(_) -> "boolean"
+    // Table 41 row 4: Number → "number"
+    value.JsNumber(_) -> "number"
+    // Table 41 row 5: String → "string"
+    value.JsString(_) -> "string"
+    // Table 41 row 8: BigInt → "bigint"
+    value.JsBigInt(_) -> "bigint"
+    // Table 41 row 7: Symbol → "symbol"
+    value.JsSymbol(_) -> "symbol"
+    // Table 41 rows 9-10: Object — check for [[Call]]
+    value.JsObject(ref) ->
+      case heap.read(heap, ref) {
+        // Row 10: Object implements [[Call]] → "function"
+        Some(value.ObjectSlot(kind: value.FunctionObject(..), ..))
+        | Some(value.ObjectSlot(kind: value.NativeFunction(..), ..))
+        | // Proxy: has [[Call]] iff target was callable at creation (§10.5.15);
+          // survives revocation (typeof of revoked function proxy = "function").
+          Some(value.ObjectSlot(kind: value.ProxyObject(callable: True, ..), ..)) ->
+          "function"
+
+        // Row 9: Object does not implement [[Call]] → "object"
+        _ -> "object"
+      }
+  }
 }

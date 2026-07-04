@@ -23,6 +23,7 @@ import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type HostFn, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, Finite, HostObject, JsBool, JsNumber, JsObject,
@@ -482,6 +483,6 @@ fn invalid_arg_type(
       <> "\" argument must be of type "
       <> expected
       <> ". Received type "
-      <> common.typeof_value(received, s.heap),
+      <> operators.typeof(s.heap, received),
   )
 }

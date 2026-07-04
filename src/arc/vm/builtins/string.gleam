@@ -1,6 +1,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
+import arc/vm/js_string
 import arc/vm/key.{Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
@@ -251,7 +252,7 @@ fn string_char_at(
   // Steps 4-6: bounds check built into FFI, returns None if out of range
   case idx >= 0 {
     True ->
-      case object.string_char_at(s, idx) {
+      case js_string.char_at(s, idx) {
         Some(ch) -> #(state, Ok(JsString(ch)))
         None -> #(state, Ok(JsString("")))
       }
@@ -286,7 +287,7 @@ fn string_char_code_at(
   )
   // Steps 4-6: bounds check built into FFI, returns None if out of range
   let ch = case idx >= 0 {
-    True -> object.string_char_at(s, idx)
+    True -> js_string.char_at(s, idx)
     False -> None
   }
   case ch {
@@ -334,7 +335,7 @@ fn string_index_of(
     None -> JsUndefined
   }
   use pos, state <- coerce.try_to_integer_or_infinity(state, pos_val)
-  let from = int.clamp(pos, 0, object.string_length(s))
+  let from = int.clamp(pos, 0, js_string.length(s))
   // Step 8: StringIndexOf(S, searchStr, start)
   let result = index_of_from(s, search, from)
   #(state, Ok(value.from_int(result)))
@@ -401,12 +402,9 @@ fn string_last_index_of(
     helpers.first_arg_or_undefined(args),
   )
   // Step 7: len = length of S
-  let len = object.string_length(s)
+  let len = js_string.length(s)
   // Steps 4-6, 8: ToNumber(position), handle NaN => len, clamp
-  use num, state <- coerce.try_to_number(
-    state,
-    helpers.arg_at(args, 1),
-  )
+  use num, state <- coerce.try_to_number(state, helpers.arg_at(args, 1))
   let from = case num {
     // Step 6: NaN => +inf, clamped to len
     NaN -> len
@@ -471,8 +469,8 @@ fn string_search_bool(
         state,
         helpers.arg_at(args, 1),
       )
-      let from = int.clamp(pos, 0, object.string_length(s))
-      let sub = object.string_drop_start(s, from)
+      let from = int.clamp(pos, 0, js_string.length(s))
+      let sub = js_string.drop_start(s, from)
       #(state, Ok(value.JsBool(predicate(sub, search))))
     }
   }
@@ -539,11 +537,11 @@ fn string_ends_with(
       // Step 5: ToString(searchString)
       use search, state <- coerce.try_to_string(state, search_val)
       // Step 6: len = length of S
-      let len = object.string_length(s)
+      let len = js_string.length(s)
       // Steps 7-8: endPosition handling, clamp to [0, len]
       use end_pos, state <- string_end_position(state, args, len)
       // Steps 10-13: take prefix of length end_pos, check ends_with
-      let sub = object.string_slice(s, 0, end_pos)
+      let sub = js_string.slice(s, 0, end_pos)
       #(state, Ok(value.JsBool(string.ends_with(sub, search))))
     }
   }
@@ -591,7 +589,7 @@ fn string_slice(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Step 3: len = length of S
-  let len = object.string_length(s)
+  let len = js_string.length(s)
   // Steps 4-7: ToIntegerOrInfinity(start), resolve negatives
   use int_start, state <- coerce.try_to_integer_or_infinity(
     state,
@@ -602,7 +600,7 @@ fn string_slice(
   use end, state <- string_slice_end(state, args, len)
   // Steps 12-13: if from >= to return "", else return substring
   case end > start {
-    True -> #(state, Ok(JsString(object.string_slice(s, start, end - start))))
+    True -> #(state, Ok(JsString(js_string.slice(s, start, end - start))))
     False -> #(state, Ok(JsString("")))
   }
 }
@@ -657,7 +655,7 @@ fn string_substring(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Step 3: len = length of S
-  let len = object.string_length(s)
+  let len = js_string.length(s)
   // Step 4: ToIntegerOrInfinity(start)
   use raw_start, state <- coerce.try_to_integer_or_infinity(
     state,
@@ -674,7 +672,7 @@ fn string_substring(
     False -> #(start, end)
   }
   // Step 10: return substring from..to
-  #(state, Ok(JsString(object.string_slice(s, start, end - start))))
+  #(state, Ok(JsString(js_string.slice(s, start, end - start))))
 }
 
 /// substring step 5: end undefined => len, else ToIntegerOrInfinity.
@@ -994,7 +992,7 @@ fn js_trim_start(s: String) -> String {
   case ffi_codepoint_at(s, 0) {
     Some(cp) ->
       case is_js_whitespace(cp) {
-        True -> js_trim_start(object.string_drop_start(s, 1))
+        True -> js_trim_start(js_string.drop_start(s, 1))
         False -> s
       }
     None -> s
@@ -1017,7 +1015,7 @@ fn js_trim_end(s: String) -> String {
     |> list.length
   case trailing {
     0 -> s
-    _ -> object.string_slice(s, 0, len - trailing)
+    _ -> js_string.slice(s, 0, len - trailing)
   }
 }
 
@@ -1290,7 +1288,7 @@ fn replace_string_search(
   replace_val: JsValue,
   all: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let search_len = object.string_length(search_str)
+  let search_len = js_string.length(search_str)
   // Step 5: functionalReplace = IsCallable(replaceValue)
   case helpers.is_callable(state.heap, replace_val) {
     True ->
@@ -1347,8 +1345,8 @@ fn replace_loop_functional(
   case index_of_from(tail, search_str, 0) {
     -1 -> #(state, Ok(JsString(acc <> tail)))
     rel -> {
-      let preserved = object.string_slice(tail, 0, rel)
-      let after = object.string_drop_start(tail, rel + search_len)
+      let preserved = js_string.slice(tail, 0, rel)
+      let after = js_string.drop_start(tail, rel + search_len)
       let p = abs_pos + rel
       use result, state <- state.try_call(state, replace_fn, JsUndefined, [
         JsString(search_str),
@@ -1367,12 +1365,12 @@ fn replace_loop_functional(
             _ ->
               replace_loop_functional(
                 state,
-                object.string_drop_start(after, 1),
+                js_string.drop_start(after, 1),
                 s,
                 search_str,
                 search_len,
                 p + 1,
-                acc <> object.string_slice(after, 0, 1),
+                acc <> js_string.slice(after, 0, 1),
                 replace_fn,
                 all,
               )
@@ -1411,8 +1409,8 @@ fn replace_loop_template(
   case index_of_from(tail, search_str, 0) {
     -1 -> acc <> tail
     rel -> {
-      let preserved = object.string_slice(tail, 0, rel)
-      let after = object.string_drop_start(tail, rel + search_len)
+      let preserved = js_string.slice(tail, 0, rel)
+      let after = js_string.drop_start(tail, rel + search_len)
       let replacement = case has_dollar {
         True ->
           get_substitution(template, search_str, before <> preserved, after)
@@ -1427,13 +1425,13 @@ fn replace_loop_template(
           case after {
             "" -> acc
             _ -> {
-              let cp = object.string_slice(after, 0, 1)
+              let cp = js_string.slice(after, 0, 1)
               let before = case has_dollar {
                 True -> before <> cp
                 False -> ""
               }
               replace_loop_template(
-                object.string_drop_start(after, 1),
+                js_string.drop_start(after, 1),
                 search_str,
                 search_len,
                 template,
@@ -1580,7 +1578,7 @@ fn string_split_parts(
         0 -> state.ok_array(state, [])
         _ -> {
           let parts = case sep {
-            "" -> object.string_explode(s) |> list.map(JsString)
+            "" -> js_string.explode(s) |> list.map(JsString)
             _ -> string.split(s, sep) |> list.map(JsString)
           }
           state.ok_array(state, list.take(parts, lim))
@@ -1823,7 +1821,7 @@ fn string_at(
     helpers.first_arg_or_undefined(args),
   )
   // Step 3: len = length of S
-  let len = object.string_length(s)
+  let len = js_string.length(s)
   // Steps 5-6: resolve relative index
   let actual_idx = case idx < 0 {
     True -> len + idx
@@ -1831,7 +1829,7 @@ fn string_at(
   }
   // Steps 7-8: bounds check, return char or undefined
   case actual_idx >= 0 && actual_idx < len {
-    True -> #(state, Ok(JsString(object.string_slice(s, actual_idx, 1))))
+    True -> #(state, Ok(JsString(js_string.slice(s, actual_idx, 1))))
     False -> #(state, Ok(JsUndefined))
   }
 }
@@ -1877,7 +1875,7 @@ fn string_code_point_at(
 }
 
 /// Integer codepoint at codepoint index `pos`, or None when out of bounds.
-/// Shares the cursor cache with object.string_char_at, so sequential scans
+/// Shares the cursor cache with js_string.char_at, so sequential scans
 /// resume from the previous position instead of re-walking from byte 0.
 @external(erlang, "arc_string_ffi", "string_codepoint_at")
 fn ffi_codepoint_at(s: String, pos: Int) -> option.Option(Int)
@@ -2213,7 +2211,7 @@ fn string_substr(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use s, state <- with_this_string(this, state)
-  let size = object.string_length(s)
+  let size = js_string.length(s)
   // B.2.2.1 step 3: intStart = ToIntegerOrInfinity(start)
   use raw_start, state <- coerce.try_to_integer_or_infinity(
     state,
@@ -2232,7 +2230,7 @@ fn string_substr(
   let end = int.min(start + len, size)
   case start >= end {
     True -> #(state, Ok(JsString("")))
-    False -> #(state, Ok(JsString(object.string_slice(s, start, end - start))))
+    False -> #(state, Ok(JsString(js_string.slice(s, start, end - start))))
   }
 }
 
@@ -2526,7 +2524,7 @@ fn string_transform(
 ///   5. Return -1 (not found).
 fn index_of_from(s: String, search: String, from: Int) -> Int {
   case search {
-    "" -> int.clamp(from, 0, object.string_length(s))
+    "" -> int.clamp(from, 0, js_string.length(s))
     _ -> ffi_index_of(s, search, from)
   }
 }
@@ -2539,15 +2537,14 @@ fn ffi_index_of(haystack: String, needle: String, from: Int) -> Int
 /// Used by String.prototype.lastIndexOf (ES2024 22.1.3.11, steps 10-11).
 fn last_index_of_from(s: String, search: String, from: Int) -> Int {
   case search {
-    "" -> int.clamp(from, 0, object.string_length(s))
+    "" -> int.clamp(from, 0, js_string.length(s))
     _ -> ffi_last_index_of(s, search, from)
   }
 }
 
 @external(erlang, "arc_string_ffi", "string_last_index_of")
 fn ffi_last_index_of(haystack: String, needle: String, from: Int) -> Int
-
-// The codepoint string primitives (`object.string_slice`,
-// `object.string_drop_start`, `object.string_explode`) live next to
-// `object.string_length`/`object.string_char_at` in `arc/vm/ops/object` — one
-// place that defines what a JS string index means for the whole engine.
+// The codepoint string primitives (`js_string.slice`,
+// `js_string.drop_start`, `js_string.explode`, `js_string.length`,
+// `js_string.char_at`) all live in `arc/vm/js_string` — one place that
+// defines what a JS string index means for the whole engine.

@@ -24,6 +24,7 @@ import arc/vm/heap
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/key.{Named}
 import arc/vm/ops/object
+import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type MapKey, type MapNativeFn, type Ref, Dispatch, JsBool,
@@ -355,7 +356,7 @@ fn map_for_each(
     False ->
       state.type_error(
         state,
-        common.typeof_value(cb, state.heap) <> " is not a function",
+        operators.typeof(state.heap, cb) <> " is not a function",
       )
     True -> {
       // Steps 1-2: RequireInternalSlot

@@ -1,5 +1,5 @@
 import arc/vm/builtins/common
-import arc/vm/builtins/iterator
+import arc/vm/builtins/iter_protocol
 import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
@@ -852,7 +852,7 @@ fn spread_via_iterator(
   target_ref: Ref,
 ) -> Result(State(host), StepExit(host)) {
   use #(rec, state) <- result.try(
-    state.rethrow(iterator.get_iterator_sync(state, iterable)),
+    state.rethrow(iter_protocol.get_iterator_sync(state, iterable)),
   )
   spread_iterator_loop(state, rec, target_ref)
 }
@@ -867,7 +867,7 @@ fn spread_iterator_loop(
   rec: value.IteratorRecord,
   target_ref: Ref,
 ) -> Result(State(host), StepExit(host)) {
-  let #(state, step) = iterator.iterator_step_value(state, rec)
+  let #(state, step) = iter_protocol.iterator_step_value(state, rec)
   case step {
     Error(thrown) -> Error(Threw(thrown, state))
     Ok(None) -> Ok(state)

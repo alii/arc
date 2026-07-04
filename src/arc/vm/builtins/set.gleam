@@ -12,6 +12,7 @@
 /// ordered_entries.live_values to recover forward insertion order.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/iterator
 import arc/vm/heap
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
@@ -673,7 +674,7 @@ fn close_keys_iterator_and_answer_false(
   state: State(host),
   iter: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case iterator.iterator_close_normal(state, iter) {
+  case iter_protocol.iterator_close_normal(state, iter) {
     #(state, Ok(Nil)) -> #(state, Ok(JsBool(False)))
     #(state, Error(thrown)) -> #(state, Error(thrown))
   }

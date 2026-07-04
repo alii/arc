@@ -4,6 +4,7 @@ import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/symbol
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/js_string
 import arc/vm/key.{Index, Named, Private}
 import arc/vm/limits
 import arc/vm/ops/coerce
@@ -281,7 +282,7 @@ fn call_native(
 ///
 /// This is the single source of truth for which keys are own properties of a
 /// String primitive: getOwnPropertyDescriptor(s), hasOwnProperty,
-/// Object.hasOwn, propertyIsEnumerable and (via `object.string_length`, the
+/// Object.hasOwn, propertyIsEnumerable and (via `js_string.length`, the
 /// same length source) the [[OwnPropertyKeys]] listing in own_keys_impl all
 /// derive from it, so they agree by construction. String *wrapper objects*
 /// take the mirror-image path in ops/object.own_property_of_slot.
@@ -301,7 +302,7 @@ fn string_exotic_own_property(
     // §10.4.3.4 StringCreate step 10: "length" is { W:F, E:F, C:F }.
     StringPropKey(pkey: Named("length"), ..) ->
       Some(DataProperty(
-        value: value.from_int(object.string_length(s)),
+        value: value.from_int(js_string.length(s)),
         writable: False,
         enumerable: False,
         configurable: False,
@@ -310,7 +311,7 @@ fn string_exotic_own_property(
     // §10.4.3.5 steps 5-10: an in-range integer index yields
     // { value: <element>, W:F, E:T, C:F }; out of range → undefined.
     StringPropKey(pkey: Index(i), ..) -> {
-      use ch <- option.map(object.string_char_at(s, i))
+      use ch <- option.map(js_string.char_at(s, i))
       DataProperty(
         value: JsString(ch),
         writable: False,
@@ -597,8 +598,7 @@ fn define_parsed(
     Some(ObjectSlot(kind: value.StringObject(value: s), extensible:, ..)) -> {
       let synthesized = case dkey {
         StringPropKey(pkey: Named("length"), ..) -> True
-        StringPropKey(pkey: Index(i), ..) ->
-          i >= 0 && i < object.string_length(s)
+        StringPropKey(pkey: Index(i), ..) -> i >= 0 && i < js_string.length(s)
         _ -> False
       }
       case synthesized {
@@ -1585,11 +1585,11 @@ fn own_keys_impl(
     // Step 1: ToObject — null/undefined throw TypeError
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
     // String primitives: own keys are index chars + "length". The length
-    // comes from object.string_length, the same source
+    // comes from js_string.length, the same source
     // string_exotic_own_property uses, so the key LIST and the per-key
     // [[GetOwnProperty]] lookups agree by construction.
     JsString(s) -> {
-      let len = object.string_length(s)
+      let len = js_string.length(s)
       let index_keys = string_index_keys(0, len)
       // "length" is own but non-enumerable — include for getOwnPropertyNames, skip for keys
       let ks = case enumerable_only {
@@ -2044,16 +2044,16 @@ fn own_enumerable_impl(
 /// The own index-property VALUES of a String primitive, in index order.
 ///
 /// The exact counterpart of the index KEYS, which every other String-exotic
-/// path derives from `object.string_length` (see `string_index_keys`,
+/// path derives from `js_string.length` (see `string_index_keys`,
 /// `own_property_names`, `has_own`): both count CODEPOINTS, so
 /// `Object.keys(s)` and `Object.values(s)` cannot disagree in length and
-/// `Object.values(s)` cannot disagree with `s[i]` (`object.string_char_at`).
+/// `Object.values(s)` cannot disagree with `s[i]` (`js_string.char_at`).
 ///
 /// A grapheme cluster is not a JS string unit — `string.to_graphemes("e\u{301}")`
 /// yields ONE entry where the engine has TWO indices — so it must never appear
 /// on a String-exotic own-property path.
 fn string_own_index_values(s: String) -> List(String) {
-  object.string_explode(s)
+  js_string.explode(s)
 }
 
 /// EnumerableOwnProperties §7.3.23 step 3 for a proxy ref — per String key:
@@ -3680,7 +3680,7 @@ fn get_own_property_descriptors(
     // own-property table.
     JsString(s) -> {
       let keys =
-        list.append(string_index_object_keys(0, object.string_length(s)), [
+        list.append(string_index_object_keys(0, js_string.length(s)), [
           named_object_key("length"),
         ])
       descriptors_from_keys(

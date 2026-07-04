@@ -133,16 +133,6 @@ pub fn alloc(
   }
 }
 
-pub fn info_about_jsvalue(heap: Heap(ctx, host), value: value.JsValue) {
-  use ref <- option.map(case value {
-    value.JsObject(ref) -> Some(ref)
-    _ -> None
-  })
-
-  let assert Some(data) = read(heap, ref)
-  data
-}
-
 /// Mint the lazy `.prototype` ref for the closure `fn_ref` — a pure id
 /// computation, no heap mutation at all. `read` synthesises the ObjectSlot on
 /// demand and any write/update materialises it into `data`. `has_constructor`

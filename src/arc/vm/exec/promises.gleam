@@ -8,6 +8,7 @@ import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State, type StepExit, State, Threw}
 import arc/vm/value.{
   type JsValue, type ObjectKey, type Ref, ArrayObject, Finite, JsBool, JsObject,
@@ -2119,7 +2120,7 @@ fn from_async_closure(
         False ->
           coerce.thrown_type_error(
             state,
-            common.typeof_value(mf, state.heap) <> " is not a function",
+            operators.typeof(state.heap, mf) <> " is not a function",
           )
       }
   })
@@ -2129,9 +2130,7 @@ fn from_async_closure(
     JsUndefined | value.JsNull ->
       coerce.thrown_type_error(
         state,
-        "Cannot convert "
-          <> common.typeof_value(items, state.heap)
-          <> " to object",
+        "Cannot convert " <> operators.typeof(state.heap, items) <> " to object",
       )
     _ -> Ok(Nil)
   })
@@ -2249,7 +2248,7 @@ fn from_async_get_method(
         False ->
           coerce.thrown_type_error(
             state,
-            common.typeof_value(method, state.heap) <> " is not a function",
+            operators.typeof(state.heap, method) <> " is not a function",
           )
       }
   }

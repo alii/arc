@@ -137,12 +137,12 @@ fn handle_repl_line(state: ReplState(host), line: String) -> ReplStep(host) {
       let #(new_state, result) = eval(state, source)
 
       case result {
-        Ok(val) -> {
-          heap.info_about_jsvalue(new_state.heap, val)
+        Ok(value.JsObject(ref)) ->
+          heap.read(new_state.heap, ref)
           |> option.map(value.heap_slot_to_string)
-          |> option.unwrap("none")
+          |> option.unwrap("<collected>")
           |> io.println
-        }
+        Ok(_) -> io.println("not an object")
         Error(err) -> io.println(format_repl_error(err, new_state.heap))
       }
 

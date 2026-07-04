@@ -1,5 +1,6 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/completion.{
   type Outcome, Completed, NormalCompletion, Suspended, ThrowCompletion,
@@ -232,7 +233,7 @@ pub fn call_native_generator_throw(
                   // is not callable, throws, or yields a non-object propagates
                   // ITS error instead of the TypeError.
                   let #(state, closed) =
-                    builtins_iterator.iterator_close_normal(
+                    iter_protocol.iterator_close_normal(
                       state,
                       JsObject(iter_ref),
                     )

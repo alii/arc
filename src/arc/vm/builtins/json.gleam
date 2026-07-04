@@ -3,6 +3,7 @@ import arc/vm/builtins/helpers
 import arc/vm/builtins/object as object_builtins
 import arc/vm/heap
 import arc/vm/internal/elements
+import arc/vm/js_string
 import arc/vm/key
 import arc/vm/ops/coerce
 import arc/vm/ops/object as objops
@@ -700,8 +701,8 @@ fn number_span_to_num(s: String, span: NumberSpan) -> value.JsNum {
       // `s` is a JSON number token, so `int_len` counts ASCII characters and
       // codepoint slicing is exact. `string.slice`/`string.drop_start` would
       // segment graphemes here for no reason.
-      let mantissa = objops.string_slice(s, 0, span.int_len)
-      let exponent = objops.string_drop_start(s, span.int_len)
+      let mantissa = js_string.slice(s, 0, span.int_len)
+      let exponent = js_string.drop_start(s, span.int_len)
       float_or_saturate(mantissa <> ".0" <> exponent, s)
     }
     False, False ->
@@ -1091,9 +1092,9 @@ fn compute_gap(
     // gap of ten combining marks is ten code units, and `string.slice` would
     // fold them into one cluster and keep the whole string.
     JsString(s) ->
-      case objops.string_length(s) <= 10 {
+      case js_string.length(s) <= 10 {
         True -> s
-        False -> objops.string_slice(s, 0, 10)
+        False -> js_string.slice(s, 0, 10)
       }
     // Step 8: otherwise no gap.
     _ -> ""

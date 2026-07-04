@@ -2,6 +2,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/typed_array_ffi.{ta_get_float, ta_get_int}
+import arc/vm/js_string
 import arc/vm/key.{type PropertyKey, Index, Named, Private}
 import arc/vm/opcode
 import arc/vm/ops/typed_array_elements
@@ -53,10 +54,10 @@ pub fn get_value_of(
       case key {
         // §10.4.3.4 StringCreate: "length" is an ordinary own data property
         // {value: len, W:F, E:F, C:F} (NOT produced by StringGetOwnProperty).
-        Named("length") -> Ok(#(value.from_int(string_length(s)), state))
+        Named("length") -> Ok(#(value.from_int(js_string.length(s)), state))
         // §10.4.3.5 steps 2-10: numeric index → single-char string
         Index(idx) ->
-          case string_char_at(s, idx) {
+          case js_string.char_at(s, idx) {
             Some(ch) -> Ok(#(JsString(ch), state))
             // Out of bounds — delegate to String.prototype via [[Get]]
             None -> get_value(state, state.builtins.string.prototype, key, val)
@@ -350,54 +351,6 @@ pub fn get_own_index(heap: Heap(host), ref: Ref, idx: Int) -> OwnIndex {
   }
 }
 
-/// Get the character at codepoint index `idx`, or None if out of bounds.
-///
-/// Implements **StringGetOwnProperty** §10.4.3.5 steps 8-10.
-///
-/// FFI walks UTF-8 codepoints directly — ~20x faster than gleam/string.slice
-/// which does grapheme cluster segmentation via unicode_util:gc.
-///
-/// TODO(Deviation): JS indexes by UTF-16 code unit, so astral-plane chars
-/// should count as 2 indices. Codepoint indexing matches code-unit indexing
-/// for all BMP chars, so this is strictly more correct than grapheme
-/// indexing was. Full fix needs UTF-16 string storage.
-@external(erlang, "arc_string_ffi", "string_char_at")
-pub fn string_char_at(s: String, idx: Int) -> Option(String)
-
-/// Codepoint count — ~20x faster than gleam/string.length (no grapheme
-/// clustering). Same UTF-16 deviation as string_char_at.
-@external(erlang, "arc_string_ffi", "string_codepoint_length")
-pub fn string_length(s: String) -> Int
-
-/// Codepoint-based substring: `len` codepoints starting at codepoint `start`.
-///
-/// The counterpart of `gleam/string.slice` for JS strings. A grapheme cluster
-/// is never a JS string unit, so `string.slice` must not appear on any path
-/// that measures a JS string value; use this instead. Plain UTF-8 byte walk
-/// returning a sub-binary — no per-character allocation, unlike
-/// `string.slice`'s grapheme clustering (~20x slower). Same UTF-16 deviation
-/// as `string_char_at`.
-@external(erlang, "arc_string_ffi", "string_cp_slice")
-pub fn string_slice(s: String, start: Int, len: Int) -> String
-
-/// Drop the first `n` codepoints (clamps; n <= 0 returns `s` unchanged).
-/// The counterpart of `gleam/string.drop_start` for JS strings — sub-binary
-/// result, alloc-free walk, and it never merges a combining mark into the
-/// character before it.
-@external(erlang, "arc_string_ffi", "string_cp_drop")
-pub fn string_drop_start(s: String, n: Int) -> String
-
-/// Split into single-codepoint strings, one per index of the JS string.
-///
-/// The counterpart of `gleam/string.to_graphemes` for JS strings, and the
-/// only correct one: `to_graphemes` folds a combining mark into the character
-/// before it, so it yields FEWER entries than `string_length` reports and
-/// disagrees with `string_char_at` on every index after the mark. This walks
-/// the same codepoints `string_length` counts, so
-/// `list.length(string_explode(s)) == string_length(s)` always holds.
-@external(erlang, "arc_string_ffi", "string_cp_explode")
-pub fn string_explode(s: String) -> List(String)
-
 /// **[[GetOwnProperty]](P)** — dispatches to the appropriate spec algorithm
 /// based on object kind.
 ///
@@ -609,7 +562,7 @@ fn own_property_of_slot(
           // seq: 0 — synthesized virtual descriptor, never stored or
           // enumerated through the seq-ordered named-key path.
           Some(DataProperty(
-            value: value.from_int(string_length(s)),
+            value: value.from_int(js_string.length(s)),
             writable: False,
             enumerable: False,
             configurable: False,
@@ -617,7 +570,7 @@ fn own_property_of_slot(
           ))
         // §10.4.3.5 steps 2-4: CanonicalNumericIndexString → integer index
         Index(idx) ->
-          case string_char_at(s, idx) {
+          case js_string.char_at(s, idx) {
             // §10.4.3.5 step 10: return {value: char, W:F, E:T, C:F}
             Some(ch) ->
               // seq: 0 — synthesized Index-key descriptor; index keys
@@ -1518,7 +1471,7 @@ fn set_property_on_slot(
           }
         // --- §10.4.3.2 String exotic [[DefineOwnProperty]] ---
         value.StringObject(value: s) -> {
-          let len = string_length(s)
+          let len = js_string.length(s)
           // §10.4.3.2 step 2: If P is a CanonicalNumericIndexString for an
           // integer in [0, length), the property is non-configurable/non-writable,
           // so [[DefineOwnProperty]] returns false for any change.
@@ -2406,7 +2359,7 @@ pub fn delete_property(
           case key {
             Named("length") -> #(h, False)
             Index(i) ->
-              case string_char_at(s, i) {
+              case js_string.char_at(s, i) {
                 Some(_) -> #(h, False)
                 None -> delete_string_property(h, ref, key, slot)
               }
@@ -2516,7 +2469,7 @@ pub fn own_string_keys_flagged(
           |> list.filter(fn(idx) { idx < length })
         value.StringObject(value: s) ->
           int.range(
-            from: string_length(s) - 1,
+            from: js_string.length(s) - 1,
             to: -1,
             with: [],
             run: fn(acc, i) { [i, ..acc] },
@@ -2986,11 +2939,11 @@ fn copy_string_element_range(
   s: String,
   excluded_keys: set.Set(PropertyKey),
 ) -> Heap(host) {
-  use h, idx <- int.range(from: 0, to: string_length(s), with: heap)
+  use h, idx <- int.range(from: 0, to: js_string.length(s), with: heap)
   case set.contains(excluded_keys, Index(idx)) {
     True -> h
     False ->
-      case string_char_at(s, idx) {
+      case js_string.char_at(s, idx) {
         Some(ch) -> define_own_property(h, target_ref, Index(idx), JsString(ch))
         None -> h
       }
