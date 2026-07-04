@@ -1699,6 +1699,108 @@ fn find_private_element(
   object.find_property(state.heap, ref, key) |> object.or_when_proxy(None)
 }
 
+/// Tail of every private-field read: apply OrdinaryGet steps 3-7 to an
+/// already-looked-up private element and push the value, keeping the receiver
+/// beneath it for the `...2` opcode variants.
+fn private_get_found(
+  state: State(host),
+  prop: value.Property,
+  receiver: JsValue,
+  rest: List(JsValue),
+  keep_receiver: Bool,
+) -> Result(State(host), StepExit(host)) {
+  use #(val, state) <- result.map(
+    state.rethrow(object.property_get_value(state, prop, receiver)),
+  )
+  let stack = case keep_receiver {
+    True -> [val, receiver, ..rest]
+    False -> [val, ..rest]
+  }
+  State(..state, stack:, pc: state.pc + 1)
+}
+
+/// GetPrivateField / GetPrivateField2: [obj, ..] → [val, ..] (or [val, obj, ..]).
+/// Single chain walk: find the descriptor (brand check), then apply OrdinaryGet
+/// steps 3-7 to it — no second walk via get_value_of.
+fn private_get_static(
+  state: State(host),
+  name: String,
+  keep_receiver: Bool,
+) -> Result(State(host), StepExit(host)) {
+  case state.stack {
+    [JsObject(ref) as receiver, ..rest] ->
+      case find_private_element(state, ref, key.private_key(name)) {
+        Some(prop) ->
+          private_get_found(state, prop, receiver, rest, keep_receiver)
+        None ->
+          state.throw_type_error(
+            state,
+            "Cannot read private member "
+              <> name
+              <> " from an object whose class did not declare it",
+          )
+      }
+    [_, ..] ->
+      state.throw_type_error(
+        state,
+        "Cannot read private member " <> name <> " on non-object",
+      )
+    [] ->
+      underflow(state, case keep_receiver {
+        True -> "GetPrivateField2"
+        False -> "GetPrivateField"
+      })
+  }
+}
+
+/// §7.3.30 PrivateGet with a minted key: [key, obj, ..] → [val, ..] (or
+/// [val, obj, ..]). Own-only lookup — spec [[PrivateElements]] never inherit
+/// through the prototype chain.
+fn private_get_dyn(
+  state: State(host),
+  keep_receiver: Bool,
+) -> Result(State(host), StepExit(host)) {
+  case state.stack {
+    [JsString(key_text), JsObject(ref) as receiver, ..rest] ->
+      case
+        object.get_own_property(
+          state.heap,
+          ref,
+          private_key_from_text(key_text),
+        )
+      {
+        Some(value.AccessorProperty(get: None, ..)) ->
+          state.throw_type_error(
+            state,
+            "'"
+              <> value.private_display_name(key_text)
+              <> "' was defined without a getter",
+          )
+        Some(prop) ->
+          private_get_found(state, prop, receiver, rest, keep_receiver)
+        None ->
+          state.throw_type_error(
+            state,
+            "Cannot read private member "
+              <> value.private_display_name(key_text)
+              <> " from an object whose class did not declare it",
+          )
+      }
+    [JsString(key_text), _, ..] ->
+      state.throw_type_error(
+        state,
+        "Cannot read private member "
+          <> value.private_display_name(key_text)
+          <> " on non-object",
+      )
+    [_, _, ..] | [_] | [] ->
+      underflow(state, case keep_receiver {
+        True -> "GetPrivateFieldDyn2"
+        False -> "GetPrivateFieldDyn"
+      })
+  }
+}
+
 /// Pop top of stack and jump to `target` if `condition(value)` is true,
 /// otherwise advance to next instruction.
 fn conditional_jump(
@@ -3247,64 +3349,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       }
     }
 
-    GetPrivateField(name) -> {
-      let key = key.private_key(name)
-      case state.stack {
-        [JsObject(ref) as receiver, ..rest] ->
-          // Single chain walk: find the descriptor (brand check), then apply
-          // OrdinaryGet steps 3-7 to it — no second walk via get_value_of.
-          case find_private_element(state, ref, key) {
-            Some(prop) -> {
-              use #(val, state) <- result.map(
-                state.rethrow(object.property_get_value(state, prop, receiver)),
-              )
-              State(..state, stack: [val, ..rest], pc: state.pc + 1)
-            }
-            None ->
-              state.throw_type_error(
-                state,
-                "Cannot read private member "
-                  <> name
-                  <> " from an object whose class did not declare it",
-              )
-          }
-        [_, ..] ->
-          state.throw_type_error(
-            state,
-            "Cannot read private member " <> name <> " on non-object",
-          )
-        [] -> underflow(state, "GetPrivateField")
-      }
-    }
+    GetPrivateField(name) -> private_get_static(state, name, False)
 
-    GetPrivateField2(name) -> {
-      let key = key.private_key(name)
-      case state.stack {
-        [JsObject(ref) as receiver, ..rest] ->
-          // Single chain walk — see GetPrivateField.
-          case find_private_element(state, ref, key) {
-            Some(prop) -> {
-              use #(val, state) <- result.map(
-                state.rethrow(object.property_get_value(state, prop, receiver)),
-              )
-              State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
-            }
-            None ->
-              state.throw_type_error(
-                state,
-                "Cannot read private member "
-                  <> name
-                  <> " from an object whose class did not declare it",
-              )
-          }
-        [_, ..] ->
-          state.throw_type_error(
-            state,
-            "Cannot read private member " <> name <> " on non-object",
-          )
-        [] -> underflow(state, "GetPrivateField2")
-      }
-    }
+    GetPrivateField2(name) -> private_get_static(state, name, True)
 
     PutPrivateField(name) -> {
       let key = key.private_key(name)
@@ -3388,92 +3435,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       )
     }
 
-    GetPrivateFieldDyn -> {
-      // §7.3.30 PrivateGet. [key, obj, ..] → [val, ..]. Own-only lookup —
-      // spec [[PrivateElements]] never inherit through the prototype chain.
-      case state.stack {
-        [JsString(key_text), JsObject(ref) as receiver, ..rest] ->
-          case
-            object.get_own_property(
-              state.heap,
-              ref,
-              private_key_from_text(key_text),
-            )
-          {
-            Some(value.AccessorProperty(get: None, ..)) ->
-              state.throw_type_error(
-                state,
-                "'"
-                  <> value.private_display_name(key_text)
-                  <> "' was defined without a getter",
-              )
-            Some(prop) -> {
-              use #(val, state) <- result.map(
-                state.rethrow(object.property_get_value(state, prop, receiver)),
-              )
-              State(..state, stack: [val, ..rest], pc: state.pc + 1)
-            }
-            None ->
-              state.throw_type_error(
-                state,
-                "Cannot read private member "
-                  <> value.private_display_name(key_text)
-                  <> " from an object whose class did not declare it",
-              )
-          }
-        [JsString(key_text), _, ..] ->
-          state.throw_type_error(
-            state,
-            "Cannot read private member "
-              <> value.private_display_name(key_text)
-              <> " on non-object",
-          )
-        [_, _, ..] | [_] | [] -> underflow(state, "GetPrivateFieldDyn")
-      }
-    }
+    GetPrivateFieldDyn -> private_get_dyn(state, False)
 
-    GetPrivateFieldDyn2 -> {
-      // Like GetPrivateFieldDyn but keeps obj: [key, obj, ..] → [val, obj, ..]
-      case state.stack {
-        [JsString(key_text), JsObject(ref) as receiver, ..rest] ->
-          case
-            object.get_own_property(
-              state.heap,
-              ref,
-              private_key_from_text(key_text),
-            )
-          {
-            Some(value.AccessorProperty(get: None, ..)) ->
-              state.throw_type_error(
-                state,
-                "'"
-                  <> value.private_display_name(key_text)
-                  <> "' was defined without a getter",
-              )
-            Some(prop) -> {
-              use #(val, state) <- result.map(
-                state.rethrow(object.property_get_value(state, prop, receiver)),
-              )
-              State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
-            }
-            None ->
-              state.throw_type_error(
-                state,
-                "Cannot read private member "
-                  <> value.private_display_name(key_text)
-                  <> " from an object whose class did not declare it",
-              )
-          }
-        [JsString(key_text), _, ..] ->
-          state.throw_type_error(
-            state,
-            "Cannot read private member "
-              <> value.private_display_name(key_text)
-              <> " on non-object",
-          )
-        [_, _, ..] | [_] | [] -> underflow(state, "GetPrivateFieldDyn2")
-      }
-    }
+    GetPrivateFieldDyn2 -> private_get_dyn(state, True)
 
     PutPrivateFieldDyn -> {
       // §7.3.31 PrivateSet. [key, val, obj, ..] → [val, ..]. Own-only.
