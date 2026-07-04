@@ -26,7 +26,7 @@ const outdated_fail_tests = [
   // `"\\8"` / `"\\9"` — NonOctalDecimalEscapeSequence (ES2019, spec B.1.2):
   // legal in sloppy-mode strings (`'\\8' === '8'`), a SyntaxError only in
   // strict code. These fixtures predate that spec addition. See
-  // legacy_octal.has_strict_forbidden_escape.
+  // lexer.Token.annex_b_legacy.
   "79f882da06f88c9f.js",
   "0d5e450f1da8a92a.js",
   "92b6af54adef3624.js",

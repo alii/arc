@@ -13,7 +13,6 @@
 ///   parser/token        — TokenKind classification and conversion
 ///   parser/number       — Numeric literal classification (Number vs BigInt)
 ///   parser/regex        — Regex literal scanning and /u validation
-///   parser/legacy_octal — Annex B legacy-form detection (strict checks)
 ///
 /// The mutually-recursive core (statements ↔ expressions ↔ patterns) lives
 /// here since Gleam doesn't support cross-module recursion.
@@ -67,9 +66,6 @@ import arc/parser/error.{
   UsingAtScriptTopLevel, UsingInCaseClause, UsingInForIn,
   UsingMissingInitializer, UsingPatternBinding, WithNotAllowedStrictMode,
   YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode,
-}
-import arc/parser/legacy_octal.{
-  has_strict_forbidden_escape, is_legacy_octal_number,
 }
 import arc/parser/lexer.{
   type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
@@ -1857,12 +1853,11 @@ fn specifier_name_value(p: P) -> Result(String, ParseError) {
 }
 
 fn string_token_value(p: P, strict: Bool) -> Result(String, ParseError) {
-  let raw = peek_value(p)
   use <- bool.guard(
-    strict && has_strict_forbidden_escape(raw),
+    strict && peek_annex_b_legacy(p),
     Error(OctalEscapeStrictMode(pos_of(p))),
   )
-  Ok(decode_string_escapes(raw))
+  Ok(decode_string_escapes(peek_value(p)))
 }
 
 /// Parse a property name and return (parser, key_expression, is_computed).
@@ -1874,7 +1869,7 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
     }
     Number -> {
       use <- bool.guard(
-        p.ctx.strict && is_legacy_octal_number(peek_value(p)),
+        p.ctx.strict && peek_annex_b_legacy(p),
         Error(OctalLiteralStrictMode(pos_of(p))),
       )
       use lit <- result.map(numeric_literal(p))
@@ -6004,7 +5999,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     }
     Number -> {
       use <- bool.guard(
-        p.ctx.strict && is_legacy_octal_number(peek_value(p)),
+        p.ctx.strict && peek_annex_b_legacy(p),
         Error(OctalLiteralStrictMode(pos_of(p))),
       )
       use lit <- result.map(numeric_literal(p))
@@ -7417,16 +7412,16 @@ fn look_skip_semicolon(look: Look) -> Look {
 }
 
 /// Walk the directive prologue at the lookahead cursor (pure lookahead —
-/// nothing is consumed): `Some(raw directive strings seen BEFORE it)`
+/// nothing is consumed): `Some(the directive tokens seen BEFORE it)`
 /// when a "use strict" directive is present, `None` otherwise. The one
 /// walk both the boolean check and strict-mode activation share.
-fn prologue_use_strict(look: Look, seen: List(String)) -> Option(List(String)) {
+fn prologue_use_strict(look: Look, seen: List(Token)) -> Option(List(Token)) {
   let #(token, look) = look_next(look)
   case token.kind {
     KString ->
       case token.value {
         "use strict" -> Some(seen)
-        val -> prologue_use_strict(look_skip_semicolon(look), [val, ..seen])
+        _ -> prologue_use_strict(look_skip_semicolon(look), [token, ..seen])
       }
     _ -> None
   }
@@ -7452,23 +7447,24 @@ fn check_use_strict_at_start(p: P) -> Result(P, ParseError) {
 fn scan_directive_prologue(p: P, look: Look) -> Result(P, ParseError) {
   case prologue_use_strict(look, []) {
     None -> Ok(p)
-    Some(seen_strings) -> {
-      use Nil <- result.try(check_retroactive_octals(p, seen_strings))
+    Some(seen_directives) -> {
+      use Nil <- result.try(check_retroactive_octals(p, seen_directives))
       let p = P(..p, ctx: Ctx(..p.ctx, strict: True))
       check_retroactive_params(p)
     }
   }
 }
 
-/// Check if any seen directive strings contain an Annex B escape form
-/// (`\07` legacy octal, or `\8`/`\9` non-octal decimal) that "use strict"
-/// retroactively forbids.
+/// Check if any directive string seen before the "use strict" contained an
+/// Annex B escape form (`\07` legacy octal, or `\8`/`\9` non-octal decimal)
+/// that the directive retroactively forbids. The lexer flagged those tokens
+/// as it scanned them (`lexer.Token.annex_b_legacy`).
 fn check_retroactive_octals(
   p: P,
-  seen_strings: List(String),
+  seen_directives: List(Token),
 ) -> Result(Nil, ParseError) {
   use <- bool.guard(
-    list.any(seen_strings, has_strict_forbidden_escape),
+    list.any(seen_directives, fn(token) { token.annex_b_legacy }),
     Error(OctalEscapeStrictMode(pos_of(p))),
   )
   Ok(Nil)
@@ -7884,6 +7880,17 @@ fn peek_value_at(p: P, n: Int) -> String {
 fn peek_had_escape(p: P) -> Bool {
   case p.tokens {
     [lexer.Token(had_escape: e, ..), ..] -> e
+    [] -> False
+  }
+}
+
+/// True if the current token used one of the Annex B legacy forms strict code
+/// forbids: a leading-zero numeric literal (`010`, `08`) on a `Number` token,
+/// or a legacy octal / `\8` / `\9` escape on a `KString` token. The lexer
+/// decides this while scanning the token — see `lexer.Token.annex_b_legacy`.
+fn peek_annex_b_legacy(p: P) -> Bool {
+  case p.tokens {
+    [lexer.Token(annex_b_legacy: legacy, ..), ..] -> legacy
     [] -> False
   }
 }
