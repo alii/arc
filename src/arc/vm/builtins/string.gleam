@@ -539,7 +539,9 @@ fn string_ends_with(
       // Step 6: len = length of S
       let len = js_string.length(s)
       // Steps 7-8: endPosition handling, clamp to [0, len]
-      use end_pos, state <- string_end_position(state, args, len)
+      use end_pos, state <- second_arg_index_or_len(state, args, len, fn(n, l) {
+        int.clamp(n, 0, l)
+      })
       // Steps 10-13: take prefix of length end_pos, check ends_with
       let sub = js_string.slice(s, 0, end_pos)
       #(state, Ok(value.JsBool(string.ends_with(sub, search))))
@@ -547,19 +549,21 @@ fn string_ends_with(
   }
 }
 
-/// endsWith steps 7-8: endPosition undefined => len, else
-/// ToIntegerOrInfinity clamped to [0, len].
-fn string_end_position(
+/// Shared shape for endsWith/slice/substring's second argument: if it is
+/// absent or undefined the result is `len`, otherwise ToIntegerOrInfinity
+/// passed through `map` (which resolves/clamps per that method's spec).
+fn second_arg_index_or_len(
   state: State(host),
   args: List(JsValue),
   len: Int,
+  map: fn(Int, Int) -> Int,
   cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     [_, JsUndefined, ..] -> cont(len, state)
-    [_, pos_val, ..] -> {
-      use pos, state <- coerce.try_to_integer_or_infinity(state, pos_val)
-      cont(int.clamp(pos, 0, len), state)
+    [_, v, ..] -> {
+      use n, state <- coerce.try_to_integer_or_infinity(state, v)
+      cont(map(n, len), state)
     }
     _ -> cont(len, state)
   }
@@ -597,29 +601,16 @@ fn string_slice(
   )
   let start = resolve_slice_index(int_start, len)
   // Steps 8-11: end handling, resolve negatives
-  use end, state <- string_slice_end(state, args, len)
+  use end, state <- second_arg_index_or_len(
+    state,
+    args,
+    len,
+    resolve_slice_index,
+  )
   // Steps 12-13: if from >= to return "", else return substring
   case end > start {
     True -> #(state, Ok(JsString(js_string.slice(s, start, end - start))))
     False -> #(state, Ok(JsString("")))
-  }
-}
-
-/// slice steps 8-11: end undefined => len, else ToIntegerOrInfinity with
-/// negative resolution.
-fn string_slice_end(
-  state: State(host),
-  args: List(JsValue),
-  len: Int,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case args {
-    [_, JsUndefined, ..] -> cont(len, state)
-    [_, v, ..] -> {
-      use int_end, state <- coerce.try_to_integer_or_infinity(state, v)
-      cont(resolve_slice_index(int_end, len), state)
-    }
-    _ -> cont(len, state)
   }
 }
 
@@ -662,7 +653,9 @@ fn string_substring(
     helpers.first_arg_or_undefined(args),
   )
   // Step 5: end handling
-  use raw_end, state <- string_substring_end(state, args, len)
+  use raw_end, state <- second_arg_index_or_len(state, args, len, fn(n, _len) {
+    n
+  })
   // Steps 6-7: clamp to [0, len]
   let start = int.clamp(raw_start, 0, len)
   let end = int.clamp(raw_end, 0, len)
@@ -673,20 +666,6 @@ fn string_substring(
   }
   // Step 10: return substring from..to
   #(state, Ok(JsString(js_string.slice(s, start, end - start))))
-}
-
-/// substring step 5: end undefined => len, else ToIntegerOrInfinity.
-fn string_substring_end(
-  state: State(host),
-  args: List(JsValue),
-  len: Int,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case args {
-    [_, JsUndefined, ..] -> cont(len, state)
-    [_, v, ..] -> coerce.try_to_integer_or_infinity(state, v, cont)
-    _ -> cont(len, state)
-  }
 }
 
 /// ES2024 22.1.3.27 — String.prototype.toLowerCase ( )
