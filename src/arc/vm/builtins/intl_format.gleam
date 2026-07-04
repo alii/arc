@@ -102,6 +102,68 @@ pub fn part_type_to_js_string(t: PartType) -> String {
   }
 }
 
+/// The behavioural class of a part type: the single place the 27 variants are
+/// bucketed. Every predicate over `PartType` is expressed over this class, so
+/// exhaustiveness is checked exactly once, in `part_class`.
+pub type PartClass {
+  /// Digits of the value itself (integer/fraction).
+  NumberDigit
+  /// Digits of a scientific exponent — transliterated, but not value digits.
+  NumberExponentDigit
+  /// Non-digit pieces of the numeric core (separators, NaN/Infinity, compact).
+  NumberCore
+  /// Signs, currency and unit decoration around the numeric core.
+  NumberAffix
+  /// Date-time fields written in digits.
+  DateNumeric
+  /// Date-time fields written as words/symbols.
+  DateText
+  /// Literals and list elements.
+  OtherPart
+}
+
+pub fn part_class(t: PartType) -> PartClass {
+  case t {
+    PInteger | PFraction -> NumberDigit
+    PExponentInteger -> NumberExponentDigit
+    PGroup
+    | PDecimal
+    | PCompact
+    | PNaN
+    | PInfinity
+    | PExponentSeparator
+    | PExponentMinusSign -> NumberCore
+    PCurrency | PPercentSign | PPlusSign | PMinusSign | PUnit -> NumberAffix
+    PYear | PMonth | PDay | PHour | PMinute | PSecond | PFractionalSecond ->
+      DateNumeric
+    PWeekday | PEra | PDayPeriod | PTimeZoneName -> DateText
+    PLiteral | PElement -> OtherPart
+  }
+}
+
+/// Whether the numbering system's digits apply to this part of a formatted
+/// number.
+pub fn is_number_digit(t: PartType) -> Bool {
+  case part_class(t) {
+    NumberDigit | NumberExponentDigit -> True
+    NumberCore | NumberAffix | DateNumeric | DateText | OtherPart -> False
+  }
+}
+
+/// Whether the numbering system's digits apply to this part of a formatted
+/// date-time.
+pub fn is_date_numeric(t: PartType) -> Bool {
+  case part_class(t) {
+    DateNumeric -> True
+    NumberDigit
+    | NumberExponentDigit
+    | NumberCore
+    | NumberAffix
+    | DateText
+    | OtherPart -> False
+  }
+}
+
 /// A formatted part: #(type, value), e.g. #(PInteger, "1"), #(PGroup, ",").
 pub type Part =
   #(PartType, String)
@@ -167,35 +229,9 @@ fn split_range_affixes(
   parts: List(Part),
 ) -> #(List(Part), List(Part), List(Part)) {
   let is_core = fn(p: Part) {
-    case p.0 {
-      PInteger
-      | PGroup
-      | PDecimal
-      | PFraction
-      | PNaN
-      | PInfinity
-      | PExponentSeparator
-      | PExponentMinusSign
-      | PExponentInteger
-      | PCompact -> True
-      PCurrency
-      | PPercentSign
-      | PPlusSign
-      | PMinusSign
-      | PUnit
-      | PLiteral
-      | PElement
-      | PWeekday
-      | PEra
-      | PYear
-      | PMonth
-      | PDay
-      | PHour
-      | PMinute
-      | PSecond
-      | PFractionalSecond
-      | PDayPeriod
-      | PTimeZoneName -> False
+    case part_class(p.0) {
+      NumberDigit | NumberExponentDigit | NumberCore -> True
+      NumberAffix | DateNumeric | DateText | OtherPart -> False
     }
   }
   let #(pre, rest) = list.split_while(parts, fn(p) { !is_core(p) })
@@ -683,34 +719,14 @@ fn unit_affixes(
 /// Whether a part carries the value's decimal digits (as opposed to affixes,
 /// separators or date/list decoration).
 fn is_digit_part(t: PartType) -> Bool {
-  case t {
-    PInteger | PFraction -> True
-    PGroup
-    | PDecimal
-    | PCurrency
-    | PPercentSign
-    | PPlusSign
-    | PMinusSign
-    | PUnit
-    | PCompact
-    | PExponentSeparator
-    | PExponentMinusSign
-    | PExponentInteger
-    | PNaN
-    | PInfinity
-    | PLiteral
-    | PElement
-    | PWeekday
-    | PEra
-    | PYear
-    | PMonth
-    | PDay
-    | PHour
-    | PMinute
-    | PSecond
-    | PFractionalSecond
-    | PDayPeriod
-    | PTimeZoneName -> False
+  case part_class(t) {
+    NumberDigit -> True
+    NumberExponentDigit
+    | NumberCore
+    | NumberAffix
+    | DateNumeric
+    | DateText
+    | OtherPart -> False
   }
 }
 
@@ -969,7 +985,6 @@ pub fn is_well_formed_unit(unit: String) -> Bool {
       }
   }
 }
-
 
 // ============================================================================
 // Exact decimal core — digits are kept as strings, rounding is performed on

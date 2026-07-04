@@ -11,11 +11,8 @@ import arc/vm/builtins/common
 import arc/vm/builtins/date
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/intl_format.{
-  PCompact, PCurrency, PDay, PDayPeriod, PDecimal, PElement, PEra,
-  PExponentInteger, PExponentMinusSign, PExponentSeparator, PFraction,
-  PFractionalSecond, PGroup, PHour, PInfinity, PInteger, PLiteral, PMinusSign,
-  PMinute, PMonth, PNaN, PPercentSign, PPlusSign, PSecond, PTimeZoneName, PUnit,
-  PWeekday, PYear,
+  PDay, PDayPeriod, PElement, PEra, PFraction, PFractionalSecond, PHour,
+  PInteger, PLiteral, PMinute, PMonth, PSecond, PTimeZoneName, PWeekday, PYear,
 } as fmt
 import arc/vm/builtins/intl_locale as tags
 import arc/vm/builtins/temporal_tz
@@ -1260,42 +1257,21 @@ fn is_numbering_system(s: String) -> Bool {
   list.contains(numbering_systems(), s)
 }
 
-/// Transliterate latn digits in numeric parts to the numbering system.
-fn apply_numbering_system(parts: List(fmt.Part), nu: String) -> List(fmt.Part) {
+/// Transliterate latn digits to the numbering system, in the parts selected by
+/// `translits` (`fmt.is_number_digit` for numbers, `fmt.is_date_numeric` for
+/// date-times).
+fn apply_numbering_system(
+  parts: List(fmt.Part),
+  nu: String,
+  translits: fn(fmt.PartType) -> Bool,
+) -> List(fmt.Part) {
   case nu {
     "latn" -> parts
     _ ->
       list.map(parts, fn(part: fmt.Part) {
-        case part.0 {
-          PInteger | PFraction | PExponentInteger -> #(
-            part.0,
-            translit_digits(part.1, nu),
-          )
-          PGroup
-          | PDecimal
-          | PCurrency
-          | PPercentSign
-          | PPlusSign
-          | PMinusSign
-          | PUnit
-          | PCompact
-          | PExponentSeparator
-          | PExponentMinusSign
-          | PNaN
-          | PInfinity
-          | PLiteral
-          | PElement
-          | PWeekday
-          | PEra
-          | PYear
-          | PMonth
-          | PDay
-          | PHour
-          | PMinute
-          | PSecond
-          | PFractionalSecond
-          | PDayPeriod
-          | PTimeZoneName -> part
+        case translits(part.0) {
+          True -> #(part.0, translit_digits(part.1, nu))
+          False -> part
         }
       })
   }
@@ -4562,6 +4538,7 @@ fn nf_format_parts(
             apply_numbering_system(
               fmt.format_decimal_string_parts(opts, string.trim(str)),
               nu,
+              fmt.is_number_digit,
             ),
             state,
           ))
@@ -4609,7 +4586,7 @@ fn nf_format_number(
     value.NegInfinity -> fmt.format_infinity_parts(opts, True)
     value.Finite(f) -> fmt.format_number_parts(opts, f)
   }
-  Ok(#(apply_numbering_system(parts, nu), state))
+  Ok(#(apply_numbering_system(parts, nu, fmt.is_number_digit), state))
 }
 
 fn nf_range_parts(
@@ -5029,7 +5006,10 @@ fn dtf_format_parts(
     Some(t) -> {
       use #(d, state) <- result.try(dtf_temporal_state(state, d, t))
       let parts = build_dtf_parts(d, dtf_temporal_fields(d, t))
-      Ok(#(apply_numbering_system_dtf(parts, d.numbering_system), state))
+      Ok(#(
+        apply_numbering_system(parts, d.numbering_system, fmt.is_date_numeric),
+        state,
+      ))
     }
     None -> dtf_format_parts_number(state, d, date_v)
   }
@@ -5042,54 +5022,10 @@ fn dtf_format_parts_number(
 ) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
   use #(fields, state) <- result.try(dtf_fields_number(state, d, date_v))
   let parts = build_dtf_parts(d, fields)
-  Ok(#(apply_numbering_system_dtf(parts, d.numbering_system), state))
-}
-
-fn apply_numbering_system_dtf(
-  parts: List(fmt.Part),
-  nu: String,
-) -> List(fmt.Part) {
-  case nu {
-    "latn" -> parts
-    _ ->
-      list.map(parts, fn(part: fmt.Part) {
-        case part.0 {
-          PYear
-          | PMonth
-          | PDay
-          | PHour
-          | PMinute
-          | PSecond
-          | PFractionalSecond -> #(part.0, translit_dtf(part.1, nu))
-          PInteger
-          | PGroup
-          | PDecimal
-          | PFraction
-          | PCurrency
-          | PPercentSign
-          | PPlusSign
-          | PMinusSign
-          | PUnit
-          | PCompact
-          | PExponentSeparator
-          | PExponentMinusSign
-          | PExponentInteger
-          | PNaN
-          | PInfinity
-          | PLiteral
-          | PElement
-          | PWeekday
-          | PEra
-          | PDayPeriod
-          | PTimeZoneName -> part
-        }
-      })
-  }
-}
-
-fn translit_dtf(s: String, nu: String) -> String {
-  // Reuse digit transliteration; non-digits pass through.
-  translit_digits(s, nu)
+  Ok(#(
+    apply_numbering_system(parts, d.numbering_system, fmt.is_date_numeric),
+    state,
+  ))
 }
 
 fn build_dtf_parts(
@@ -6312,7 +6248,8 @@ fn rtf_method_parts(
   })
   let abs_opts = fmt.NumOpts(..fmt.default_num_opts(), sign_display: SignNever)
   let value_parts = fmt.format_number_parts(abs_opts, float.absolute_value(f))
-  let value_parts = apply_numbering_system(value_parts, r.numbering_system)
+  let value_parts =
+    apply_numbering_system(value_parts, r.numbering_system, fmt.is_number_digit)
   Ok(#(fmt.rtf_parts_en(r.style, r.numeric, f, unit, value_parts), state))
 }
 
@@ -6919,7 +6856,7 @@ fn build_duration_parts(
               }
               let unit_tag = duration_unit_singular(unit)
               let parts =
-                apply_numbering_system(parts, nu)
+                apply_numbering_system(parts, nu, fmt.is_number_digit)
                 |> list.map(fn(part: fmt.Part) {
                   let t = fmt.part_type_to_js_string(part.0)
                   case part.0 {
