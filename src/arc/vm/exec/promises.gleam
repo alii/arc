@@ -1,5 +1,6 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
@@ -11,9 +12,9 @@ import arc/vm/ops/object
 import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State, type StepExit, State, Threw}
 import arc/vm/value.{
-  type JsValue, type ObjectKey, type Ref, ArrayObject, Finite, JsBool, JsObject,
-  JsString, JsUndefined, ObjectSlot, OrdinaryObject, StringPropKey,
-  SymbolPropKey,
+  type IteratorRecord, type JsValue, type ObjectKey, type Ref, ArrayObject,
+  Finite, JsBool, JsObject, JsString, JsUndefined, ObjectSlot, OrdinaryObject,
+  StringPropKey, SymbolPropKey,
 }
 import gleam/bool
 import gleam/dict
@@ -52,11 +53,6 @@ pub fn return_promise(
 /// functions the constructor handed to the GetCapabilitiesExecutor.
 type Capability {
   Capability(promise: JsValue, resolve: JsValue, reject: JsValue)
-}
-
-/// Iterator Record (§7.4.1): iterator object + cached `next` method.
-type IterRecord {
-  IterRecord(iterator: JsValue, next_method: JsValue)
 }
 
 /// One IteratorStepValue (§7.4.8) outcome: exhausted, or produced a value.
@@ -177,46 +173,11 @@ fn get_promise_resolve(
   }
 }
 
-/// §7.4.3 GetIterator(iterable, sync): look up @@iterator, call it, cache
-/// the `next` method.
-fn get_iterator_native(
-  state: State(host),
-  iterable: JsValue,
-) -> Result(#(IterRecord, State(host)), #(JsValue, State(host))) {
-  use #(method, state) <- result.try(object.get_symbol_value_of(
-    state,
-    iterable,
-    value.symbol_iterator,
-  ))
-  use <- bool.lazy_guard(!helpers.is_callable(state.heap, method), fn() {
-    Error(state.type_error_value(
-      state,
-      object.inspect(iterable, state.heap) <> " is not iterable",
-    ))
-  })
-  use #(iter, state) <- result.try(state.call(state, method, iterable, []))
-  case iter {
-    JsObject(_) -> {
-      use #(next_method, state) <- result.map(object.get_value_of(
-        state,
-        iter,
-        Named("next"),
-      ))
-      #(IterRecord(iterator: iter, next_method:), state)
-    }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Result of the Symbol.iterator method is not an object",
-      ))
-  }
-}
-
 /// §7.4.8 IteratorStepValue: call next(), check done, read value. Any abrupt
 /// completion marks the iterator done (the caller must not IteratorClose).
 fn iterator_step_value_native(
   state: State(host),
-  rec: IterRecord,
+  rec: IteratorRecord,
 ) -> Result(#(IterStep, State(host)), CombinatorError(host)) {
   use result_val, state <- done_iter(
     state.call(state, rec.next_method, rec.iterator, []),
@@ -250,34 +211,6 @@ fn iterator_step_value_native(
   }
 }
 
-/// §7.4.11 IteratorClose for a throw completion: call the iterator's
-/// `return` method for its side effects. For throw completions the original
-/// error always wins (step 3), so any error raised here is dropped.
-fn iterator_close_for_throw(
-  state: State(host),
-  iterator: JsValue,
-  err: JsValue,
-) -> #(State(host), JsValue) {
-  case object.get_value_of(state, iterator, Named("return")) {
-    Error(#(_return_get_err, state)) -> #(state, err)
-    Ok(#(ret_fn, state)) ->
-      case ret_fn {
-        JsUndefined | value.JsNull -> #(state, err)
-        _ ->
-          case helpers.is_callable(state.heap, ret_fn) {
-            // GetMethod would throw TypeError here, but the original throw
-            // completion still wins per §7.4.11 step 3.
-            False -> #(state, err)
-            True ->
-              case state.call(state, ret_fn, iterator, []) {
-                Ok(#(_return_result, state)) -> #(state, err)
-                Error(#(_return_err, state)) -> #(state, err)
-              }
-          }
-      }
-  }
-}
-
 /// Shared scaffold for Promise.all/allSettled/any/race (§27.2.4.1 steps 1-8):
 /// C = this value, NewPromiseCapability(C), GetPromiseResolve(C),
 /// GetIterator(iterable), then run `perform`. NewPromiseCapability errors
@@ -289,7 +222,7 @@ fn with_spec_combinator(
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  perform: fn(State(host), IterRecord, JsValue, Capability, JsValue) ->
+  perform: fn(State(host), IteratorRecord, JsValue, Capability, JsValue) ->
     Result(State(host), CombinatorError(host)),
 ) -> Result(State(host), StepExit(host)) {
   // Drop the args from the operand stack before re-entrant calls; the
@@ -328,20 +261,20 @@ fn combinator_prepare_and_perform(
   c: JsValue,
   iterable: JsValue,
   cap: Capability,
-  perform: fn(State(host), IterRecord, JsValue, Capability, JsValue) ->
+  perform: fn(State(host), IteratorRecord, JsValue, Capability, JsValue) ->
     Result(State(host), CombinatorError(host)),
 ) -> Result(State(host), #(JsValue, State(host))) {
   use #(promise_resolve, state) <- result.try(get_promise_resolve(state, c))
-  use #(rec, state) <- result.try(get_iterator_native(state, iterable))
+  use #(rec, state) <- result.try(iter_protocol.get_iterator_sync(
+    state,
+    iterable,
+  ))
   case perform(state, rec, c, cap, promise_resolve) {
     Ok(state) -> Ok(state)
     Error(#(err, done, state)) ->
       case done {
         True -> Error(#(err, state))
-        False -> {
-          let #(state, err) = iterator_close_for_throw(state, rec.iterator, err)
-          Error(#(err, state))
-        }
+        False -> Error(iter_protocol.close_and_throw(state, rec.iterator, err))
       }
   }
 }
@@ -352,7 +285,7 @@ fn combinator_prepare_and_perform(
 /// Invoke(nextPromise, "then", «onFulfilled, onRejected»).
 fn perform_combinator_loop(
   state: State(host),
-  rec: IterRecord,
+  rec: IteratorRecord,
   c: JsValue,
   promise_resolve: JsValue,
   index: Int,
