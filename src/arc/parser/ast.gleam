@@ -135,10 +135,13 @@ pub type Statement {
     is_await: Bool,
   )
   SwitchStatement(discriminant: Expression, cases: List(SwitchCase))
+  /// `block` and `finalizer` are the raw statement lists of the `{...}`
+  /// Blocks the grammar requires (§14.15) — not `Statement`s. A `try` whose
+  /// block "wasn't a Block" is unspellable, so no consumer needs a fallback.
   TryStatement(
-    block: Statement,
+    block: List(StmtWithLine),
     handler: Option(CatchClause),
-    finalizer: Option(Statement),
+    finalizer: Option(List(StmtWithLine)),
   )
   BreakStatement(label: Option(String))
   ContinueStatement(label: Option(String))
@@ -151,7 +154,7 @@ pub type Statement {
   FunctionDeclaration(
     name: Option(NamedBinding),
     params: List(Pattern),
-    body: Statement,
+    body: List(StmtWithLine),
     is_generator: Bool,
     is_async: Bool,
   )
@@ -182,14 +185,30 @@ pub type SwitchCase {
   SwitchCase(condition: Option(Expression), consequent: List(StmtWithLine))
 }
 
+/// `body` is the raw statement list of the catch Block (§14.15) — the
+/// grammar admits nothing else there.
 pub type CatchClause {
-  CatchClause(param: Option(Pattern), body: Statement)
+  CatchClause(param: Option(Pattern), body: List(StmtWithLine))
+}
+
+/// The function a method definition (§15.4) or a `function`/`class` element
+/// denotes, WITHOUT the expression wrapper. `ClassMethod.value` holds one of
+/// these rather than an `Expression`, so "a class method whose value is not a
+/// function" is unrepresentable and no consumer needs a fallback arm.
+pub type FunctionLiteral {
+  FunctionLiteral(
+    name: Option(NamedBinding),
+    params: List(Pattern),
+    body: List(StmtWithLine),
+    is_generator: Bool,
+    is_async: Bool,
+  )
 }
 
 pub type ClassElement {
   ClassMethod(
     key: Expression,
-    value: Expression,
+    value: FunctionLiteral,
     kind: MethodKind,
     is_static: Bool,
     computed: Bool,
@@ -227,6 +246,17 @@ pub type VariableDeclarator {
   VariableDeclarator(id: Pattern, init: Option(Expression))
 }
 
+/// The Number value a NumericLiteral denotes. Isomorphic to the subset of
+/// `vm/value.JsNum` a literal can reach: a literal carries no sign (unary
+/// minus is a separate operator) and can never denote NaN, so the only
+/// non-finite value it takes is +Infinity — `1e400`, whose mathematical value
+/// overflows the IEEE double range. BEAM's Float has no infinity, hence the
+/// dedicated constructor rather than clamping to Number.MAX_VALUE.
+pub type LiteralNumber {
+  FiniteNumber(value: Float)
+  InfiniteNumber
+}
+
 /// Every variant carries `span: Span` as its FIRST field — the half-open
 /// `[start, end)` UTF-8 byte range of the WHOLE expression in the original
 /// source, including delimiters: `(x)` spans both parens, `f(a)` runs from
@@ -243,7 +273,7 @@ pub type Expression {
   /// the identifier token in the source, so a bundler can locate and rewrite
   /// each occurrence (e.g. an imported reference `x` → member access `mod.x`).
   Identifier(span: Span, name: String)
-  NumberLiteral(span: Span, value: Float)
+  NumberLiteral(span: Span, value: LiteralNumber)
   /// BigInt literal (`7n`, `0xFFn`). Value is exact — BEAM ints are bignums.
   BigIntLiteral(span: Span, value: Int)
   StringExpression(span: Span, value: String)
@@ -312,7 +342,7 @@ pub type Expression {
     span: Span,
     name: Option(NamedBinding),
     params: List(Pattern),
-    body: Statement,
+    body: List(StmtWithLine),
     is_generator: Bool,
     is_async: Bool,
   )
@@ -396,7 +426,9 @@ pub type ImportPhase {
 
 pub type ArrowBody {
   ArrowBodyExpression(Expression)
-  ArrowBodyBlock(Statement)
+  /// The raw statement list of the arrow's `{...}` body — the grammar admits
+  /// nothing else, so consumers never need a "wasn't a Block" fallback.
+  ArrowBodyBlock(List(StmtWithLine))
 }
 
 pub type Property {

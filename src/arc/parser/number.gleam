@@ -1,10 +1,41 @@
-/// JavaScript number literal parsing.
-/// Pure functions for converting number literal strings to Float values.
-/// Handles hex/octal/binary prefixes, numeric separators, and float formats.
+/// JavaScript numeric-literal parsing.
+///
+/// ONE classifier — `parse_numeric_literal` — turns the raw source text of a
+/// NumericLiteral token into the value it denotes. Everything a caller could
+/// otherwise re-derive from the string (is this hex? is this a legacy octal?
+/// is this a BigInt?) is decided exactly once, in `classify`.
+import arc/parser/ast.{type LiteralNumber, FiniteNumber, InfiniteNumber}
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+
+/// The value a NumericLiteral token denotes: a Number or a BigInt. Which one
+/// is decided by the trailing `n`, inside the classifier — callers no longer
+/// sniff the suffix themselves.
+pub type NumericLiteral {
+  NumberValue(value: LiteralNumber)
+  BigIntValue(value: Int)
+}
+
+/// Why raw text handed to `parse_numeric_literal` is not a numeric literal.
+/// The lexer should never emit such a token; the parser turns this into a
+/// SyntaxError rather than silently cooking the literal to 0.
+pub type NumberParseError {
+  /// A digit the radix does not admit, or text that is not numeric-literal
+  /// syntax at all. Carries the offending digits.
+  NotANumericLiteral(text: String)
+  /// A radix prefix (0x/0o/0b) or a BigInt suffix with no digits behind it.
+  EmptyDigits
+}
+
+pub fn parse_error_message(err: NumberParseError) -> String {
+  case err {
+    NotANumericLiteral(text) -> "Malformed numeric literal: " <> text
+    EmptyDigits -> "Numeric literal has no digits"
+  }
+}
 
 /// Why converting a decimal float literal to a Float can fail.
 pub type FloatParseError {
@@ -13,99 +44,139 @@ pub type FloatParseError {
   /// `binary_to_float` raises for overflow; underflow rounds to 0.0.
   OutOfRange
   /// The text is not something Erlang can parse as a float at all.
-  /// Unreachable for the literals the lexer emits.
   Invalid
 }
 
-/// Parse the raw source text of a numeric literal to its Float value.
-/// The lexer guarantees well-formedness, so the "impossible" failure arms
-/// below fall back to 0.0 rather than crashing the parser.
-pub fn parse_js_number(raw: String) -> Float {
-  case raw {
-    "0x" <> hex | "0X" <> hex -> prefixed_literal_to_float(hex, 16)
-    "0o" <> oct | "0O" <> oct -> prefixed_literal_to_float(oct, 8)
-    "0b" <> bin | "0B" <> bin -> prefixed_literal_to_float(bin, 2)
-    _ -> {
-      // Remove numeric separators
-      let clean = string.replace(raw, "_", "")
-      // A dot or exponent means a float literal; otherwise a decimal integer.
-      case
-        string.contains(clean, ".")
-        || string.contains(clean, "e")
-        || string.contains(clean, "E")
-      {
-        True ->
-          case parse_float(normalize_dot(clean)) {
-            Ok(f) -> f
-            // A literal never carries a sign (unary minus is a separate
-            // operator), so an out-of-range float literal always overflows
-            // towards +Infinity.
-            Error(OutOfRange) -> overflow_clamp(negative: False)
-            // Unreachable: the lexer only emits well-formed decimal
-            // literals, which normalize_dot turns into valid float syntax.
-            Error(Invalid) -> 0.0
-          }
-        False ->
-          case gleam_int_parse(clean) {
-            Ok(i) -> int_to_float(i)
-            // Unreachable: the lexer only emits decimal digits here.
-            Error(Nil) -> 0.0
-          }
-      }
+/// The shapes a NumericLiteral token can take, with numeric separators
+/// already stripped. Classified once, up front, so no downstream code has to
+/// re-scan the string to learn which shape it is looking at.
+type LiteralForm {
+  /// `0xFF` / `0o17` / `0b101` — an integer in the prefixed radix.
+  Radix(digits: String, radix: Int)
+  /// Annex B §B.1.1 LegacyOctalIntegerLiteral: `010` is 8, NOT 10. Sloppy
+  /// mode only — the parser rejects it under "use strict".
+  LegacyOctal(digits: String)
+  /// Annex B §B.1.1 NonOctalDecimalIntegerLiteral: `08`, `09` — a leading
+  /// zero that cannot be octal, so it is base 10. Sloppy mode only.
+  NonOctalDecimal(digits: String)
+  /// An ordinary DecimalLiteral, with an optional fraction and/or exponent.
+  Decimal(text: String)
+  /// A BigInt literal, `n` suffix already stripped.
+  BigInt(digits: String, radix: Int)
+}
+
+/// Parse the raw source text of a numeric literal token to its value.
+pub fn parse_numeric_literal(
+  raw: String,
+) -> Result(NumericLiteral, NumberParseError) {
+  case classify(raw) {
+    Radix(digits:, radix:) -> integer_number(digits, radix)
+    // The whole point of the classifier: `010` is base 8.
+    LegacyOctal(digits) -> integer_number(digits, 8)
+    NonOctalDecimal(digits) -> integer_number(digits, 10)
+    Decimal(text) -> {
+      use n <- result.map(parse_decimal(text))
+      NumberValue(n)
+    }
+    BigInt(digits:, radix:) -> {
+      use i <- result.map(parse_digits(digits, radix))
+      BigIntValue(i)
     }
   }
 }
 
-/// A radix-prefixed (0x/0o/0b) literal's digits to its Float value.
-fn prefixed_literal_to_float(digits: String, radix: Int) -> Float {
-  parse_prefixed_int(digits, radix)
-  |> result.map(int_to_float)
-  // Unreachable: the lexer rejects a radix prefix without valid digits.
-  |> result.unwrap(0.0)
+fn integer_number(
+  digits: String,
+  radix: Int,
+) -> Result(NumericLiteral, NumberParseError) {
+  use i <- result.map(parse_digits(digits, radix))
+  NumberValue(nonneg_int_to_number(i))
 }
 
-/// The digits after a 0x/0o/0b radix prefix (numeric separators allowed) to
-/// their exact integer value. Shared by parse_js_number and parse_js_bigint.
-fn parse_prefixed_int(digits: String, radix: Int) -> Result(Int, Nil) {
-  digits
-  |> string.replace("_", "")
-  |> parse_int_radix(radix)
+fn classify(raw: String) -> LiteralForm {
+  // Numeric separators are only ever legal between digits, so a blanket
+  // strip is safe and keeps every arm below separator-free.
+  let clean = string.replace(raw, "_", "")
+  case string.ends_with(clean, "n") {
+    True -> {
+      let #(digits, radix) = split_radix(string.drop_end(clean, 1))
+      BigInt(digits:, radix:)
+    }
+    False ->
+      case clean {
+        "0x" <> hex | "0X" <> hex -> Radix(hex, 16)
+        "0o" <> oct | "0O" <> oct -> Radix(oct, 8)
+        "0b" <> bin | "0B" <> bin -> Radix(bin, 2)
+        "0" <> rest -> classify_leading_zero(rest)
+        _ -> Decimal(clean)
+      }
+  }
+}
+
+/// A `0`-prefixed literal that is not 0x/0o/0b. All-octal digits behind the
+/// zero make it a LegacyOctalIntegerLiteral; an 8 or a 9 makes it a
+/// NonOctalDecimalIntegerLiteral; anything else (`0`, `0.5`, `0e3`) is an
+/// ordinary DecimalLiteral that just happens to start with a zero.
+fn classify_leading_zero(rest: String) -> LiteralForm {
+  case string.to_graphemes(rest) {
+    [] -> Decimal("0")
+    graphemes ->
+      case list.all(graphemes, is_octal_digit) {
+        True -> LegacyOctal(rest)
+        False ->
+          case list.all(graphemes, is_decimal_digit) {
+            True -> NonOctalDecimal(rest)
+            False -> Decimal("0" <> rest)
+          }
+      }
+  }
+}
+
+fn split_radix(digits: String) -> #(String, Int) {
+  case digits {
+    "0x" <> hex | "0X" <> hex -> #(hex, 16)
+    "0o" <> oct | "0O" <> oct -> #(oct, 8)
+    "0b" <> bin | "0B" <> bin -> #(bin, 2)
+    _ -> #(digits, 10)
+  }
+}
+
+fn parse_decimal(text: String) -> Result(LiteralNumber, NumberParseError) {
+  // A dot or an exponent means a float literal; otherwise a decimal integer,
+  // which we convert exactly (see nonneg_int_to_number).
+  case
+    string.contains(text, ".")
+    || string.contains(text, "e")
+    || string.contains(text, "E")
+  {
+    True ->
+      case parse_float(normalize_dot(text)) {
+        Ok(f) -> Ok(FiniteNumber(f))
+        // A literal never carries a sign (unary minus is a separate
+        // operator), so an out-of-range float literal is always +Infinity.
+        Error(OutOfRange) -> Ok(InfiniteNumber)
+        Error(Invalid) -> Error(NotANumericLiteral(text))
+      }
+    False -> {
+      use i <- result.map(parse_digits(text, 10))
+      nonneg_int_to_number(i)
+    }
+  }
 }
 
 const two52 = 4_503_599_627_370_496
 
 const two53 = 9_007_199_254_740_992
 
-/// The value a numeric literal takes when its magnitude exceeds the IEEE
-/// double range. Shared by the decimal-integer path (int_to_float) and the
-/// float/exponent path (parse_js_number).
-///
-/// KNOWN SPEC DEVIATION. Per ES2024 the mathematical value is ±Infinity, and
-/// the VM can represent it (value.JsNum has Infinity/NegInfinity;
-/// value.num_from_int already returns Infinity for the same overflow). The
-/// only reason we clamp to the largest finite double instead is that
-/// ast.NumberLiteral stores a plain Float and BEAM's Float type has no
-/// infinity, so this function's return type cannot express the right answer.
-/// So `1e400 === Number.MAX_VALUE` is true here where it should be false.
-/// Fixing it means widening NumberLiteral to carry a value.JsNum (or a
-/// Finite|Infinity sum) through parser.gleam and emit.gleam's push_const /
-/// js_format_number sites — a cross-module change, not a local one.
-/// The clamp is still strictly better than the pre-existing behaviour of
-/// cooking an overflowing literal to 0.0.
-fn overflow_clamp(negative negative: Bool) -> Float {
-  case negative {
-    True -> -1.7976931348623157e308
-    False -> 1.7976931348623157e308
-  }
-}
-
-/// Integer → Float with correct rounding (round-to-nearest, ties-to-even).
-/// Erlang's float/1 mis-rounds integers wider than 53 bits, so reduce to a
-/// 53-bit mantissa ourselves and convert the (exactly representable) result.
-fn int_to_float(i: Int) -> Float {
-  let a = int.absolute_value(i)
+/// A non-negative Int → the Number it denotes, with correct rounding
+/// (round-to-nearest, ties-to-even). Erlang's float/1 mis-rounds integers
+/// wider than 53 bits, so reduce to a 53-bit mantissa ourselves and convert
+/// the (exactly representable) result. Past the double range the value is
+/// Infinity, per ES2024 §12.9.3 — a numeric literal is never negative, so
+/// there is no -Infinity to consider.
+fn nonneg_int_to_number(a: Int) -> LiteralNumber {
   case a < two53 {
-    True -> int.to_float(i)
+    True -> FiniteNumber(int.to_float(a))
     False -> {
       let s = bit_length(a, 0) - 53
       let q0 = int.bitwise_shift_right(a, s)
@@ -121,14 +192,8 @@ fn int_to_float(i: Int) -> Float {
       }
       case 53 + s > 1024 {
         // Beyond the double range (erlang float conversion would crash).
-        True -> overflow_clamp(negative: i < 0)
-        False -> {
-          let f = int.to_float(int.bitwise_shift_left(q, s))
-          case i < 0 {
-            True -> 0.0 -. f
-            False -> f
-          }
-        }
+        True -> InfiniteNumber
+        False -> FiniteNumber(int.to_float(int.bitwise_shift_left(q, s)))
       }
     }
   }
@@ -176,77 +241,55 @@ fn split_exponent(s: String) -> #(String, String) {
 @external(erlang, "arc_parser_ffi", "parse_float")
 fn parse_float(s: String) -> Result(Float, FloatParseError)
 
-fn parse_int_radix(s: String, radix: Int) -> Result(Int, Nil) {
+/// The exact integer value of a run of digits in `radix`.
+fn parse_digits(s: String, radix: Int) -> Result(Int, NumberParseError) {
   case string.to_graphemes(s) {
-    [] -> Error(Nil)
+    [] -> Error(EmptyDigits)
     graphemes ->
       list.try_fold(graphemes, 0, fn(acc, ch) {
-        let digit = case ch {
-          "0" -> Ok(0)
-          "1" -> Ok(1)
-          "2" -> Ok(2)
-          "3" -> Ok(3)
-          "4" -> Ok(4)
-          "5" -> Ok(5)
-          "6" -> Ok(6)
-          "7" -> Ok(7)
-          "8" -> Ok(8)
-          "9" -> Ok(9)
-          "a" | "A" -> Ok(10)
-          "b" | "B" -> Ok(11)
-          "c" | "C" -> Ok(12)
-          "d" | "D" -> Ok(13)
-          "e" | "E" -> Ok(14)
-          "f" | "F" -> Ok(15)
-          _ -> Error(Nil)
-        }
-        use d <- result.try(digit)
+        use d <- result.try(
+          digit_value(ch) |> option.to_result(NotANumericLiteral(s)),
+        )
         case d < radix {
           True -> Ok(acc * radix + d)
-          False -> Error(Nil)
+          False -> Error(NotANumericLiteral(s))
         }
       })
   }
 }
 
-fn gleam_int_parse(s: String) -> Result(Int, Nil) {
-  case string.to_graphemes(s) {
-    [] -> Error(Nil)
-    _ -> {
-      let result =
-        list.try_fold(string.to_graphemes(s), 0, fn(acc, ch) {
-          case ch {
-            "0" -> Ok(acc * 10)
-            "1" -> Ok(acc * 10 + 1)
-            "2" -> Ok(acc * 10 + 2)
-            "3" -> Ok(acc * 10 + 3)
-            "4" -> Ok(acc * 10 + 4)
-            "5" -> Ok(acc * 10 + 5)
-            "6" -> Ok(acc * 10 + 6)
-            "7" -> Ok(acc * 10 + 7)
-            "8" -> Ok(acc * 10 + 8)
-            "9" -> Ok(acc * 10 + 9)
-            _ -> Error(Nil)
-          }
-        })
-      result
-    }
+fn digit_value(ch: String) -> Option(Int) {
+  case ch {
+    "0" -> Some(0)
+    "1" -> Some(1)
+    "2" -> Some(2)
+    "3" -> Some(3)
+    "4" -> Some(4)
+    "5" -> Some(5)
+    "6" -> Some(6)
+    "7" -> Some(7)
+    "8" -> Some(8)
+    "9" -> Some(9)
+    "a" | "A" -> Some(10)
+    "b" | "B" -> Some(11)
+    "c" | "C" -> Some(12)
+    "d" | "D" -> Some(13)
+    "e" | "E" -> Some(14)
+    "f" | "F" -> Some(15)
+    _ -> None
   }
 }
 
-/// Parse a BigInt literal's raw text (INCLUDING the trailing "n") to its
-/// exact integer value. Handles 0x/0o/0b prefixes and numeric separators.
-/// The lexer guarantees well-formedness, so parse failures map to 0.
-pub fn parse_js_bigint(raw: String) -> Int {
-  let digits =
-    raw
-    |> string.drop_end(1)
-    |> string.replace("_", "")
-  let parsed = case digits {
-    "0x" <> hex | "0X" <> hex -> parse_prefixed_int(hex, 16)
-    "0o" <> oct | "0O" <> oct -> parse_prefixed_int(oct, 8)
-    "0b" <> bin | "0B" <> bin -> parse_prefixed_int(bin, 2)
-    _ -> gleam_int_parse(digits)
+fn is_octal_digit(ch: String) -> Bool {
+  case ch {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
+    _ -> False
   }
-  result.unwrap(parsed, 0)
+}
+
+fn is_decimal_digit(ch: String) -> Bool {
+  case ch {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
+    _ -> False
+  }
 }

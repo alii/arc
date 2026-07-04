@@ -2759,10 +2759,12 @@ pub type IntlMethodName {
 }
 
 /// The ECMA-402 locale-sensitive host overrides (§17-19) installed on the
-/// Number / String / Date prototypes at Intl init.
+/// Number / BigInt / String / Date prototypes at Intl init.
 pub type HostOverride {
   /// Number.prototype.toLocaleString (§18.2.1)
   NumberToLocaleString
+  /// BigInt.prototype.toLocaleString (§18.3.1)
+  BigIntToLocaleString
   /// String.prototype.localeCompare (§19.1.1)
   StringLocaleCompare
   /// String.prototype.toLocaleLowerCase (§19.1.2)

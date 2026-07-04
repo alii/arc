@@ -85,3 +85,30 @@ pub fn reviver_can_replace_with_object_test() {
     )
     == JsString("[{\"n\":1}]")
 }
+
+pub fn reviver_replace_of_non_configurable_key_does_not_throw_test() {
+  // §25.5.1.1 step 2.c.ii.3 is a bare `Perform ? CreateDataProperty(...)` —
+  // the Boolean is discarded, so a rejected define keeps the old value rather
+  // than throwing (test262 reviver-object-non-configurable-prop-create.js).
+  assert eval(
+      "JSON.stringify(JSON.parse('{\"a\":1,\"b\":2}', function (k, v) {
+         if (k === 'a') Object.defineProperty(this, 'b', { configurable: false });
+         if (k === 'b') return 22;
+         return v;
+       }))",
+    )
+    == JsString("{\"a\":1,\"b\":2}")
+}
+
+pub fn reviver_replace_of_non_configurable_index_does_not_throw_test() {
+  // Same for the array walk, §25.5.1.1 step 2.b.iii.4
+  // (test262 reviver-array-non-configurable-prop-create.js).
+  assert eval(
+      "JSON.stringify(JSON.parse('[1,2]', function (k, v) {
+         if (k === '0') Object.defineProperty(this, '1', { configurable: false });
+         if (k === '1') return 22;
+         return v;
+       }))",
+    )
+    == JsString("[1,2]")
+}

@@ -34,17 +34,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option}
 
-// -- Argument access ----------------------------------------------------------
-
-/// The i-th argument a host function was called with, or `undefined` — JS's
-/// rule that a missing argument is undefined. Pair it with a validator to
-/// reject the wrong type instead of silently defaulting:
-///
-///     use text, s <- host.validate_string(s, host.arg_at(args, 0), "text")
-pub fn arg_at(args: List(JsValue), idx: Int) -> JsValue {
-  helpers.arg_at(args, idx)
-}
-
 // -- Validators --------------------------------------------------------------
 
 /// Reject unless `val` is a JS string. Unwraps to the Gleam `String`.

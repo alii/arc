@@ -11,18 +11,24 @@
 -define(IS_HEX4(A, B, C, D),
     (?IS_HEX1(A) andalso ?IS_HEX1(B) andalso ?IS_HEX1(C) andalso ?IS_HEX1(D))).
 
-%% Byte-offset slicing of the lexer's source binary. The implementation (and
-%% the single documented out-of-range policy: clamp, never raise, never
-%% validate UTF-8) lives in arc_bytes_ffi, shared with arc_regexp_ffi — the
-%% two used to keep divergent copies of the same three functions. The lexer's
-%% source binary comes from an already-valid Gleam String and every offset the
-%% lexer produces is a char boundary, so no offset here can reach the clamp.
-unsafe_byte_slice(Bin, Start, Len) ->
-    arc_bytes_ffi:unsafe_slice(Bin, Start, Len).
+%% Slice [Start, Start+Len) out of the lexer's source binary and return it as
+%% a Gleam String WITHOUT re-validating UTF-8. The lexer's source binary comes
+%% from an already-valid Gleam String and every offset the lexer produces is a
+%% char boundary, so validation (bit_array:to_string's is_utf8 walk) is pure
+%% overhead. Out-of-range slices return <<>> to match bit_array.slice's
+%% previous checked behavior.
+unsafe_byte_slice(Bin, Start, Len)
+    when Start >= 0, Len >= 0, Start + Len =< byte_size(Bin) ->
+    binary:part(Bin, Start, Len);
+unsafe_byte_slice(_Bin, _Start, _Len) ->
+    <<>>.
 
-%% Tail of the source binary from byte offset Pos.
-drop_bytes(Bin, Pos) ->
-    arc_bytes_ffi:drop_start(Bin, Pos).
+%% Tail of the source binary from byte offset Pos. Out-of-range returns <<>>,
+%% matching the previous bit_array.slice-based implementation.
+drop_bytes(Bin, Pos) when Pos >= 0, Pos < byte_size(Bin) ->
+    binary:part(Bin, Pos, byte_size(Bin) - Pos);
+drop_bytes(_Bin, _Pos) ->
+    <<>>.
 
 %% Convert a decimal float/exponent literal to a double.
 %% Returns {ok, Float};

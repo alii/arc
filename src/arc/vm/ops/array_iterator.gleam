@@ -49,10 +49,16 @@ pub fn step(
   case heap.read(state.heap, iter_ref) {
     Some(ObjectSlot(kind: value.ArrayIteratorObject(cursor: None, ..), ..)) ->
       Ok(#(Exhausted, state))
-    Some(ObjectSlot(
-      kind: value.ArrayIteratorObject(source:, cursor: Some(index), iter_kind:),
-      ..,
-    )) -> step_at(state, iter_ref, source, index, iter_kind)
+    Some(
+      ObjectSlot(
+        kind: value.ArrayIteratorObject(
+          source:,
+          cursor: Some(index),
+          iter_kind:,
+        ),
+        ..,
+      ) as slot,
+    ) -> step_at(state, iter_ref, slot, source, index, iter_kind)
     _ ->
       Error(VmFailed(
         InternalError("ArrayIteratorNext", "not an array-iterator slot"),
@@ -61,9 +67,13 @@ pub fn step(
   }
 }
 
+/// `slot` is the iterator's own heap slot, already read by `step` — threaded
+/// through so the cursor write never re-reads it (`heap.read` is the hottest
+/// function in the VM, and this is the inner loop of `for..of` over an array).
 fn step_at(
   state: State(host),
   iter_ref: Ref,
+  slot: state.HeapSlot(host),
   source: Ref,
   index: Int,
   iter_kind: ArrayIterKind,
@@ -88,7 +98,11 @@ fn step_at(
         Error(msg) -> throw_type_error(state, msg)
         Ok(len) ->
           case index >= len {
-            True -> Ok(#(Exhausted, exhaust(state, iter_ref)))
+            True ->
+              Ok(#(
+                Exhausted,
+                exhaust_direct(state, iter_ref, slot, source, iter_kind),
+              ))
             False -> {
               let elem =
                 object.typed_array_element(
@@ -100,7 +114,15 @@ fn step_at(
                   index,
                 )
                 |> option.unwrap(JsUndefined)
-              Ok(yield_at(state, iter_ref, iter_kind, index, elem))
+              Ok(yield_at_direct(
+                state,
+                iter_ref,
+                slot,
+                source,
+                iter_kind,
+                index,
+                elem,
+              ))
             }
           }
       }
@@ -122,18 +144,20 @@ fn step_at(
                 value.ArrayIterKeys ->
                   Ok(yield_at(state, iter_ref, iter_kind, index, JsUndefined))
                 _ -> {
-                  use #(elem, state) <- result.map(case
-                    element_without_override(state.heap, source, elems, index)
-                  {
-                    Some(v) -> Ok(#(v, state))
-                    None ->
-                      rethrow(object.get_value(
-                        state,
-                        source,
-                        Index(index),
-                        JsObject(source),
-                      ))
-                  })
+                  use #(elem, state) <- result.map(
+                    case
+                      element_without_override(state.heap, source, elems, index)
+                    {
+                      Some(v) -> Ok(#(v, state))
+                      None ->
+                        rethrow(object.get_value(
+                          state,
+                          source,
+                          Index(index),
+                          JsObject(source),
+                        ))
+                    },
+                  )
                   yield_at(state, iter_ref, iter_kind, index, elem)
                 }
               }
@@ -181,10 +205,9 @@ fn array_like_length(
   use #(len_val, state) <- result.try(
     rethrow(object.get_value(state, source, Named("length"), JsObject(source))),
   )
-  use #(len_num, state) <- result.map(rethrow(coerce.js_to_number(
-    state,
-    len_val,
-  )))
+  use #(len_num, state) <- result.map(
+    rethrow(coerce.js_to_number(state, len_val)),
+  )
   let length = case len_num {
     value.Finite(f) -> int.max(0, value.float_to_int(f))
     _ -> 0
@@ -192,9 +215,9 @@ fn array_like_length(
   #(length, state)
 }
 
-/// Shape one iteration result for the iterator's kind (§23.1.5.1) — the index
-/// ("key"), the element ("value"), or a fresh [index, element] pair array
-/// ("key+value") — and bump the cursor past `index`.
+/// Bump the cursor past `index`, then shape one iteration result for the
+/// iterator's kind (§23.1.5.1) — the index ("key"), the element ("value"), or a
+/// fresh [index, element] pair array ("key+value").
 fn yield_at(
   state: State(host),
   iter_ref: Ref,
@@ -203,6 +226,39 @@ fn yield_at(
   elem: JsValue,
 ) -> #(ArrayIterStep, State(host)) {
   let heap = set_cursor(state.heap, iter_ref, Some(index + 1))
+  shape_yield(state, heap, iter_kind, index, elem)
+}
+
+/// `yield_at` for a caller holding a still-current iterator slot — see
+/// `set_cursor_direct`.
+fn yield_at_direct(
+  state: State(host),
+  iter_ref: Ref,
+  slot: state.HeapSlot(host),
+  source: Ref,
+  iter_kind: ArrayIterKind,
+  index: Int,
+  elem: JsValue,
+) -> #(ArrayIterStep, State(host)) {
+  let heap =
+    set_cursor_direct(
+      state.heap,
+      iter_ref,
+      slot,
+      source,
+      iter_kind,
+      Some(index + 1),
+    )
+  shape_yield(state, heap, iter_kind, index, elem)
+}
+
+fn shape_yield(
+  state: State(host),
+  heap: state.Heap(host),
+  iter_kind: ArrayIterKind,
+  index: Int,
+  elem: JsValue,
+) -> #(ArrayIterStep, State(host)) {
   let #(heap, out) =
     shape_result(heap, state.builtins.array.prototype, iter_kind, index, elem)
   #(Yielded(out), State(..state, heap:))
@@ -212,6 +268,21 @@ fn yield_at(
 /// undefined state.
 fn exhaust(state: State(host), iter_ref: Ref) -> State(host) {
   State(..state, heap: set_cursor(state.heap, iter_ref, None))
+}
+
+/// `exhaust` for a caller holding a still-current iterator slot — see
+/// `set_cursor_direct`.
+fn exhaust_direct(
+  state: State(host),
+  iter_ref: Ref,
+  slot: state.HeapSlot(host),
+  source: Ref,
+  iter_kind: ArrayIterKind,
+) -> State(host) {
+  State(
+    ..state,
+    heap: set_cursor_direct(state.heap, iter_ref, slot, source, iter_kind, None),
+  )
 }
 
 /// §23.1.5.1: shape one iteration result for the iterator's kind — the
@@ -236,7 +307,10 @@ pub fn shape_result(
 }
 
 /// Move an ArrayIteratorObject's cursor (preserving source and iteration
-/// kind). No-op if the ref no longer holds an array-iterator slot.
+/// kind), re-reading the slot first: this step read the element through
+/// [[Get]], so an accessor or a proxy trap may have run and mutated the
+/// iterator object itself. No-op if the ref no longer holds an array-iterator
+/// slot (a getter can swap the whole slot out).
 fn set_cursor(
   h: state.Heap(host),
   iter_ref: Ref,
@@ -245,7 +319,25 @@ fn set_cursor(
   case heap.read(h, iter_ref) {
     Some(
       ObjectSlot(kind: value.ArrayIteratorObject(source:, iter_kind:, ..), ..) as slot,
-    ) ->
+    ) -> set_cursor_direct(h, iter_ref, slot, source, iter_kind, cursor)
+    _ -> h
+  }
+}
+
+/// `set_cursor` for a caller that already holds the iterator's slot and knows
+/// no user code has run since it was read (the typed-array path reads the
+/// element straight out of the backing store) — saves a `heap.read`, the VM's
+/// hottest function, in the inner loop of `for (const x of typedArray)`.
+fn set_cursor_direct(
+  h: state.Heap(host),
+  iter_ref: Ref,
+  slot: state.HeapSlot(host),
+  source: Ref,
+  iter_kind: ArrayIterKind,
+  cursor: Option(Int),
+) -> state.Heap(host) {
+  case slot {
+    ObjectSlot(..) ->
       heap.write(
         h,
         iter_ref,
@@ -254,6 +346,7 @@ fn set_cursor(
           kind: value.ArrayIteratorObject(source:, cursor:, iter_kind:),
         ),
       )
+    // Unreachable: every caller matched an ObjectSlot to get here.
     _ -> h
   }
 }

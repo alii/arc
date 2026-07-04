@@ -37,7 +37,8 @@ import arc/vm/value.{
   type PluralRulesState, type Ref, type RelativeTimeFormatState,
   type SegmentIteratorState, type SegmenterState, type SegmentsState,
   type TimeStyle, type TimeZoneNameWidth, BsDigital, BsLong, BsNarrow, BsShort,
-  CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CollatorData, CollatorState,
+  BigIntToLocaleString, CaseFirstFalse, CaseFirstLower, CaseFirstUpper,
+  CollatorData, CollatorState,
   CompactLong, CompactShort, CurAccounting, CurCode, CurName, CurNarrowSymbol,
   CurStandard, CurSymbol, DateTimeFormatData, DateTimeFormatState,
   DateToLocaleDateString, DateToLocaleString, DateToLocaleTimeString, Dispatch,
@@ -107,6 +108,7 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
   number_proto: Ref,
+  bigint_proto: Ref,
   string_proto: Ref,
   date_proto: Ref,
 ) -> #(Heap(host), IntlBuiltin) {
@@ -361,12 +363,17 @@ pub fn init(
   ]
   let #(h, namespace) = common.init_namespace(h, object_proto, "Intl", ns_props)
 
-  // ECMA-402 §17-19: locale-sensitive overrides on Number/String/Date.
+  // ECMA-402 §17-19: locale-sensitive overrides on Number/BigInt/String/Date.
   let #(h, number_methods) =
     common.alloc_methods(h, function_proto, [
       #("toLocaleString", IntlNative(IntlHostOverride(NumberToLocaleString)), 0),
     ])
   let h = add_named_properties(h, number_proto, number_methods)
+  let #(h, bigint_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("toLocaleString", IntlNative(IntlHostOverride(BigIntToLocaleString)), 0),
+    ])
+  let h = add_named_properties(h, bigint_proto, bigint_methods)
   let #(h, string_methods) =
     common.alloc_methods(h, function_proto, [
       #("localeCompare", IntlNative(IntlHostOverride(StringLocaleCompare)), 1),
@@ -5964,7 +5971,7 @@ fn run_method(
   })
 }
 
-/// The Number/String/Date prototype locale-sensitive overrides
+/// The Number/BigInt/String/Date prototype locale-sensitive overrides
 /// (ECMA-402 §17-19) — installed by `init`, no Intl brand check.
 fn run_host_override(
   which: HostOverride,
@@ -5977,6 +5984,8 @@ fn run_host_override(
   run(case which {
     NumberToLocaleString ->
       host_number_to_locale_string(state, this, arg0, arg1)
+    BigIntToLocaleString ->
+      host_bigint_to_locale_string(state, this, arg0, arg1)
     StringLocaleCompare -> {
       let arg2 = helpers.arg_at(args, 2)
       host_locale_compare(state, this, arg0, arg1, arg2)
@@ -6019,6 +6028,40 @@ fn host_number_to_locale_string(
   use #(nf, state) <- result.try(number_format_state(state, locales, options))
   use #(parts, state) <- result.try(nf_format_parts(state, nf, JsNumber(n)))
   Ok(#(JsString(fmt.parts_to_string(parts)), state))
+}
+
+/// BigInt.prototype.toLocaleString (ECMA-402 §18.3.1) — same NumberFormat path
+/// as Number.prototype.toLocaleString, but the value is handed over as its
+/// exact decimal string so arbitrarily large BigInts keep every digit.
+fn host_bigint_to_locale_string(
+  state: State(host),
+  this: JsValue,
+  locales: JsValue,
+  options: JsValue,
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
+  use n <- result.try(case this {
+    value.JsBigInt(value.BigInt(n)) -> Ok(n)
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: value.BigIntObject(value.BigInt(n)), ..)) -> Ok(n)
+        _ -> throw_bigint_receiver(state)
+      }
+    _ -> throw_bigint_receiver(state)
+  })
+  use #(nf, state) <- result.try(number_format_state(state, locales, options))
+  use #(parts, state) <- result.try(nf_format_parts(
+    state,
+    nf,
+    JsString(int.to_string(n)),
+  ))
+  Ok(#(JsString(fmt.parts_to_string(parts)), state))
+}
+
+fn throw_bigint_receiver(state: State(host)) -> Result(a, Thrown(host)) {
+  throw_type(
+    state,
+    "BigInt.prototype.toLocaleString requires that 'this' be a BigInt",
+  )
 }
 
 /// String.prototype.localeCompare (ECMA-402 §19.1.1).

@@ -827,6 +827,27 @@ pub fn for_head_no_in_stops_at_function_boundary_test() {
       parser.Script,
     ),
     expect_parses("for (let x = () => { 'a' in {} };;) break;", parser.Script),
+    // §15.7 FieldDefinition : ClassElementName Initializer[+In].
+    expect_parses(
+      "for (var x = class { f = 'a' in {} };;) break;",
+      parser.Script,
+    ),
+    expect_parses(
+      "for (var x = class { static f = 'a' in {} };;) break;",
+      parser.Script,
+    ),
+    // §13.14: the ternary's middle operand is [+In]...
+    expect_parses("for (var x = 0 ? 'a' in {} : 1;;) break;", parser.Script),
+    // ...while the alternative inherits the head's [~In].
+    expect_parse_error(
+      "for (var x = 0 ? 1 : 'a' in {};;) break;",
+      parser.Script,
+    ),
+    // §14.7.4: the WHOLE declarator list of a for head is [~In], not just the
+    // first declarator's initializer.
+    expect_parse_error("for (var x = 1, y = 'a' in {};;) break;", parser.Script),
+    expect_parse_error("for (let x = 1, y = 'a' in {};;) break;", parser.Script),
+    expect_parse_error("for (var x, y = 'a' in {};;) break;", parser.Script),
     // FormalParameters take no [In] parameter — defaults are always [+In].
     expect_parses("for (let f = (a = 'a' in {}) => a;;) break;", parser.Script),
     expect_parses(

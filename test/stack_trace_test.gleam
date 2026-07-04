@@ -11,10 +11,10 @@ import gleam/string
 fn run_js(
   source: String,
 ) -> Result(Result(value.JsValue, value.JsValue), String) {
-  case parser.parse(source, parser.Script) {
+  case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(#(program, sb)) ->
-      case compiler.compile(program, sb) {
+    Ok(#(body, sb)) ->
+      case compiler.compile(body, sb) {
         Error(e) -> Error("compile error: " <> string.inspect(e))
         Ok(template) -> {
           let h = heap.new()

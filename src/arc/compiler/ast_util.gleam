@@ -23,6 +23,7 @@ import arc/parser/ast
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 
 // ============================================================================
 // Pattern / declarator name extraction
@@ -84,13 +85,18 @@ fn collect_vars_located(s: ast.StmtWithLine) -> List(String) {
   collect_vars_stmt(s.statement)
 }
 
+/// VarDeclaredNames of a raw statement list (a block/try/catch body).
+fn collect_vars_stmts(stmts: List(ast.StmtWithLine)) -> List(String) {
+  list.flat_map(stmts, collect_vars_located)
+}
+
 /// VarDeclaredNames of a single statement (recurses into nested blocks /
 /// loops / try, NOT into nested function bodies).
 fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
   case stmt {
     ast.VariableDeclaration(ast.Var, declarators) ->
       declarator_names(declarators)
-    ast.BlockStatement(body) -> list.flat_map(body, collect_vars_located)
+    ast.BlockStatement(body) -> collect_vars_stmts(body)
     ast.IfStatement(_, consequent, alternate) ->
       list.append(
         collect_vars_stmt(consequent),
@@ -107,12 +113,12 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
     }
     ast.TryStatement(block, handler, finalizer) -> {
       let handler_vars = case handler {
-        Some(ast.CatchClause(_, body)) -> collect_vars_stmt(body)
+        Some(ast.CatchClause(_, body)) -> collect_vars_stmts(body)
         None -> []
       }
       let finally_vars =
-        finalizer |> option.map(collect_vars_stmt) |> option.unwrap([])
-      list.flatten([collect_vars_stmt(block), handler_vars, finally_vars])
+        finalizer |> option.map(collect_vars_stmts) |> option.unwrap([])
+      list.flatten([collect_vars_stmts(block), handler_vars, finally_vars])
     }
     ast.ForInStatement(left, _, body) | ast.ForOfStatement(left, _, body, ..) -> {
       let left_vars = case left {
@@ -136,7 +142,23 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
     // Annex B var promotion is handled separately via the parser-populated
     // RawFunctionInfo.annexb_candidates.
     ast.FunctionDeclaration(..) -> []
-    _ -> []
+    // The leaves: statements that neither declare a `var` nor contain a
+    // nested statement to recurse into. Spelled out (no `_ -> []`) so that
+    // ADDING a statement variant that carries a nested body is a compile
+    // error here rather than a silent loss of that body's var hoisting.
+    ast.EmptyStatement
+    | ast.ExpressionStatement(..)
+    | ast.VariableDeclaration(ast.Let, _)
+    | ast.VariableDeclaration(ast.Const, _)
+    | ast.VariableDeclaration(ast.Using, _)
+    | ast.VariableDeclaration(ast.AwaitUsing, _)
+    | ast.ReturnStatement(..)
+    | ast.ThrowStatement(..)
+    | ast.BreakStatement(..)
+    | ast.ContinueStatement(..)
+    | ast.DebuggerStatement
+    | ast.ClassDeclaration(..)
+    | ast.ClassFieldInit(..) -> []
   }
 }
 
@@ -439,66 +461,147 @@ pub fn has_spread_element(elements: List(Option(ast.Expression))) -> Bool {
 // naming functions below — one source of truth for the slot layout.
 // ============================================================================
 
-/// Partition a class body into (constructor, instance methods, static
-/// methods, instance fields, static elements). Static elements are static
+/// A method definition of a class body, narrowed: the grammar guarantees the
+/// value is a function, so consumers get an `ast.FunctionLiteral` and never a
+/// "class method with a non-function value" arm to invent a fallback for.
+pub type ClassMethodEl {
+  ClassMethodEl(
+    key: ast.Expression,
+    computed: Bool,
+    kind: ast.MethodKind,
+    fun: ast.FunctionLiteral,
+  )
+}
+
+/// A field definition of a class body, narrowed. `is_static` is not carried:
+/// which list a field lands in already answers that.
+pub type ClassFieldEl {
+  ClassFieldEl(
+    key: ast.Expression,
+    computed: Bool,
+    value: Option(ast.Expression),
+  )
+}
+
+/// One entry of `ClassBodyParts.static_elements` — a static field or a static
+/// initialization block, kept interleaved in source order.
+pub type StaticEl {
+  StaticField(ClassFieldEl)
+  StaticBlockEl(List(ast.StmtWithLine))
+}
+
+/// A class body split into the five buckets §15.7.14 evaluates separately.
+/// Labelled (not a 5-tuple) so swapping, say, `instance_methods` and
+/// `static_methods` at a destructure site is a compile error rather than a
+/// silently mis-installed method.
+pub type ClassBodyParts {
+  ClassBodyParts(
+    constructor: Option(ClassMethodEl),
+    instance_methods: List(ClassMethodEl),
+    static_methods: List(ClassMethodEl),
+    instance_fields: List(ClassFieldEl),
+    static_elements: List(StaticEl),
+  )
+}
+
+/// The five bucket predicates. Every class element belongs to exactly one.
+/// `classify_class_body` (emit's view) and parser.gleam's class-body scope
+/// fold BOTH partition through these — that is what keeps the parser's child
+/// scopes and emit's positional `child_fn_cursor` in the same order.
+pub fn is_class_ctor(el: ast.ClassElement) -> Bool {
+  case el {
+    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> True
+    ast.ClassMethod(..) | ast.ClassField(..) | ast.StaticBlock(..) -> False
+  }
+}
+
+pub fn is_instance_method(el: ast.ClassElement) -> Bool {
+  case el {
+    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> False
+    ast.ClassMethod(is_static: False, ..) -> True
+    ast.ClassMethod(is_static: True, ..)
+    | ast.ClassField(..)
+    | ast.StaticBlock(..) -> False
+  }
+}
+
+pub fn is_static_method(el: ast.ClassElement) -> Bool {
+  case el {
+    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> False
+    ast.ClassMethod(is_static: True, ..) -> True
+    ast.ClassMethod(is_static: False, ..)
+    | ast.ClassField(..)
+    | ast.StaticBlock(..) -> False
+  }
+}
+
+pub fn is_instance_field(el: ast.ClassElement) -> Bool {
+  case el {
+    ast.ClassField(is_static: False, ..) -> True
+    ast.ClassField(is_static: True, ..)
+    | ast.ClassMethod(..)
+    | ast.StaticBlock(..) -> False
+  }
+}
+
+pub fn is_static_element(el: ast.ClassElement) -> Bool {
+  case el {
+    ast.ClassField(is_static: True, ..) | ast.StaticBlock(..) -> True
+    ast.ClassField(is_static: False, ..) | ast.ClassMethod(..) -> False
+  }
+}
+
+/// Narrow a `ClassMethod` element to its `ClassMethodEl`. Only ever applied
+/// to elements one of the method predicates above already accepted.
+fn as_method_el(el: ast.ClassElement) -> Result(ClassMethodEl, Nil) {
+  case el {
+    ast.ClassMethod(key:, value:, kind:, computed:, ..) ->
+      Ok(ClassMethodEl(key:, computed:, kind:, fun: value))
+    ast.ClassField(..) | ast.StaticBlock(..) -> Error(Nil)
+  }
+}
+
+fn as_field_el(el: ast.ClassElement) -> Result(ClassFieldEl, Nil) {
+  case el {
+    ast.ClassField(key:, value:, computed:, ..) ->
+      Ok(ClassFieldEl(key:, computed:, value:))
+    ast.ClassMethod(..) | ast.StaticBlock(..) -> Error(Nil)
+  }
+}
+
+fn as_static_el(el: ast.ClassElement) -> Result(StaticEl, Nil) {
+  case el {
+    ast.ClassField(..) -> as_field_el(el) |> result.map(StaticField)
+    ast.StaticBlock(body:) -> Ok(StaticBlockEl(body))
+    ast.ClassMethod(..) -> Error(Nil)
+  }
+}
+
+/// Partition a class body into its five buckets. Static elements are static
 /// fields + static blocks, interleaved in source order — §15.7.14 step 31
 /// requires textual order. Class bodies are tiny (≪50 elements) and this
 /// runs once per class, so five filter passes are no worse than one fold +
-/// five reverses, and avoid 5-tuple unpack/repack boilerplate in every arm.
+/// five reverses.
 ///
 /// The PARSER (which orders the ClassBody scope's children at the closing
 /// `}` — see parser.gleam's class-body scope handling) and emit.gleam's
 /// `compile_class_body` MUST partition identically so child scopes are
 /// created/consumed in the EXACT order `child_fn_cursor` entries are
-/// popped — hence one shared copy.
-pub fn classify_class_body(
-  body: List(ast.ClassElement),
-) -> #(
-  Option(ast.ClassElement),
-  List(ast.ClassElement),
-  List(ast.ClassElement),
-  List(ast.ClassElement),
-  List(ast.ClassElement),
-) {
-  let ctor =
-    list.find(body, fn(el) {
-      case el {
-        ast.ClassMethod(kind: ast.MethodConstructor, ..) -> True
-        _ -> False
-      }
-    })
-    |> option.from_result
-  let instance_methods =
-    list.filter(body, fn(el) {
-      case el {
-        ast.ClassMethod(kind: ast.MethodConstructor, ..) -> False
-        ast.ClassMethod(is_static: False, ..) -> True
-        _ -> False
-      }
-    })
-  let static_methods =
-    list.filter(body, fn(el) {
-      case el {
-        ast.ClassMethod(kind: ast.MethodConstructor, ..) -> False
-        ast.ClassMethod(is_static: True, ..) -> True
-        _ -> False
-      }
-    })
-  let instance_fields =
-    list.filter(body, fn(el) {
-      case el {
-        ast.ClassField(is_static: False, ..) -> True
-        _ -> False
-      }
-    })
-  let static_elements =
-    list.filter(body, fn(el) {
-      case el {
-        ast.ClassField(is_static: True, ..) | ast.StaticBlock(..) -> True
-        _ -> False
-      }
-    })
-  #(ctor, instance_methods, static_methods, instance_fields, static_elements)
+/// popped — hence the shared predicates above.
+pub fn classify_class_body(body: List(ast.ClassElement)) -> ClassBodyParts {
+  ClassBodyParts(
+    constructor: list.find(body, is_class_ctor)
+      |> result.try(as_method_el)
+      |> option.from_result,
+    instance_methods: list.filter(body, is_instance_method)
+      |> list.filter_map(as_method_el),
+    static_methods: list.filter(body, is_static_method)
+      |> list.filter_map(as_method_el),
+    instance_fields: list.filter(body, is_instance_field)
+      |> list.filter_map(as_field_el),
+    static_elements: list.filter(body, is_static_element)
+      |> list.filter_map(as_static_el),
+  )
 }
 
 /// QuickJS JS_ATOM_class_fields_init. Declared as a const in the per-class

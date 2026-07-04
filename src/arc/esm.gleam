@@ -13,8 +13,96 @@
 //// separate opt-in functions so consumers only pay for what they use.
 
 import arc/parser/ast
+import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
+
+// =============================================================================
+// Specifiers: raw (as written) vs resolved (module identity)
+// =============================================================================
+//
+// A module specifier exists in two incompatible flavours, and mixing them is
+// the module system's classic silent bug: `./m` (what the source wrote) is
+// meaningless without a referrer, while `m` (what the host resolved it to) IS
+// the module's identity — the key of every graph, bundle and cache. They are
+// distinct types so a swap is a compile error, and `resolve/2` is the ONLY
+// bridge between them.
+
+/// A module specifier exactly as written in source: `"./m"`, `"../lib/x.js"`,
+/// `"node:fs"`. Only meaningful relative to the module that wrote it, so it
+/// can never be a graph key.
+pub opaque type Raw {
+  Raw(String)
+}
+
+/// A specifier the host resolved to a canonical module identity — the key
+/// every module graph, bundle and registry is keyed by. Two requests that
+/// resolve to the same `Resolved` are the same module.
+pub opaque type Resolved {
+  Resolved(String)
+}
+
+/// The specifier as written in source. Free: source text is raw by definition.
+pub fn raw(text: String) -> Raw {
+  Raw(text)
+}
+
+/// The source text of a raw specifier — for error messages, which quote what
+/// the programmer wrote, and for handing to a host resolver.
+pub fn raw_text(r: Raw) -> String {
+  let Raw(text) = r
+  text
+}
+
+/// Assert `text` is already a canonical module identity. The only way to mint
+/// a `Resolved` outside `resolve/2`, and deliberately named so its two callers
+/// stand out: the value a host resolver returned, and the entry specifier the
+/// embedder named (which `arc/internal/path.canonicalize` normalizes first).
+pub fn resolved_unchecked(text: String) -> Resolved {
+  Resolved(text)
+}
+
+/// The identity string of a resolved specifier — for keying the heap-resident
+/// caches, and for error messages naming a concrete module.
+pub fn resolved_text(r: Resolved) -> String {
+  let Resolved(text) = r
+  text
+}
+
+/// One module's raw → resolved projection. TOTAL over that module's own
+/// requests: `arc/module/graph` builds it with one entry per `ModuleRequest`,
+/// so a raw specifier taken from the same module's import/export entries always
+/// has an entry.
+pub opaque type SpecifierMap {
+  SpecifierMap(entries: Dict(String, String))
+}
+
+/// A module with no dependencies (a host/synthetic module) resolves nothing.
+pub fn new_specifier_map() -> SpecifierMap {
+  SpecifierMap(dict.new())
+}
+
+pub fn insert_specifier(
+  map: SpecifierMap,
+  from: Raw,
+  to: Resolved,
+) -> SpecifierMap {
+  let SpecifierMap(entries) = map
+  let Raw(from) = from
+  let Resolved(to) = to
+  SpecifierMap(dict.insert(entries, from, to))
+}
+
+/// The one bridge from `Raw` to `Resolved`. `None` means `r` is not one of this
+/// module's requests — unreachable for a map projected off the module's own
+/// graph node, so callers treat it as "no such dependency" rather than falling
+/// back to the raw text (which would silently look the WRONG key up in the
+/// graph, and occasionally hit).
+pub fn resolve(map: SpecifierMap, r: Raw) -> Option(Resolved) {
+  let SpecifierMap(entries) = map
+  let Raw(text) = r
+  dict.get(entries, text) |> option.from_result |> option.map(Resolved)
+}
 
 /// The phase of a namespace import. Deliberately narrower than the AST's
 /// ImportPhase: source-phase declarations (`import source x from "m"`) parse,
@@ -22,8 +110,11 @@ import gleam/option.{None, Some}
 /// walk rejects them (`graph.SourcePhaseUnsupported`), so they never reach
 /// these bindings.
 pub type Phase {
-  /// `import * as ns from 'mod'` — evaluated eagerly with the importer.
-  Default
+  /// The ~evaluation~ phase (`ast.PhaseEvaluation`): `import * as ns from
+  /// 'mod'`, and every non-defer form — evaluated eagerly with the importer.
+  /// Named for the PHASE, not for `import foo from 'mod'` (that's
+  /// `DefaultImport`).
+  Evaluation
   /// `import defer * as ns from 'mod'` (defer-import-eval proposal) — the
   /// module's evaluation is deferred until its namespace is first accessed.
   Deferred
@@ -46,22 +137,22 @@ pub type ExportEntry {
   /// For default exports, export_name is "default" and local_name is "*default*".
   LocalExport(export_name: String, local_name: String)
   /// Re-export a named binding: `export { x } from 'mod'` or `export { x as y } from 'mod'`
-  ReExport(export_name: String, imported_name: String, source_specifier: String)
+  ReExport(export_name: String, imported_name: String, source_specifier: Raw)
   /// Re-export everything: `export * from 'mod'`
-  ReExportAll(source_specifier: String)
+  ReExportAll(source_specifier: Raw)
   /// Re-export everything under a namespace: `export * as ns from 'mod'`
-  ReExportNamespace(export_name: String, source_specifier: String)
+  ReExportNamespace(export_name: String, source_specifier: Raw)
 }
 
 /// A ModuleRequest Record (§16.2.1.2): one unique specifier this module
 /// references, with the phases of all its declarations merged.
 pub type ModuleRequest {
   ModuleRequest(
-    specifier: String,
-    /// Default (~evaluation~) unless EVERY reference is `import defer * as
-    /// ns` — a single eager declaration or re-export of the same specifier
-    /// forces evaluation, so eager wins the merge. InnerModuleEvaluation
-    /// skips Deferred requests (§16.2.1.5.3.1), deferring the dependency's
+    specifier: Raw,
+    /// ~evaluation~ unless EVERY reference is `import defer * as ns` — a
+    /// single eager declaration or re-export of the same specifier forces
+    /// evaluation, so eager wins the merge. InnerModuleEvaluation skips
+    /// Deferred requests (§16.2.1.5.3.1), deferring the dependency's
     /// evaluation to first namespace access.
     phase: Phase,
   )
@@ -70,9 +161,11 @@ pub type ModuleRequest {
 /// Everything statically knowable about a module's imports and exports.
 pub type ModuleSummary {
   ModuleSummary(
-    /// Import declarations in source order: (raw_specifier, bindings).
+    /// Import declarations in source order: (raw specifier text, bindings).
     /// A bare `import "m"` contributes an entry with no bindings. Un-merged:
-    /// the same specifier may appear in several declarations.
+    /// the same specifier may appear in several declarations. The specifier is
+    /// source text; consumers that resolve it tag it with `raw` first (see
+    /// `link.LinkableModule`).
     imports: List(#(String, List(ImportBinding))),
     exports: List(ExportEntry),
     /// [[RequestedModules]]: the unique specifiers this module references
@@ -97,33 +190,19 @@ type Analysis {
 }
 
 /// Full static analysis of a parsed module, in one pass over the top-level
-/// items. For a Script, everything is empty.
-pub fn analyze(program: ast.Program) -> ModuleSummary {
-  case program {
-    ast.Script(_) ->
-      ModuleSummary(
-        imports: [],
-        exports: [],
-        requested: [],
-        has_source_phase: False,
-      )
-    ast.Module(body) -> {
-      let empty =
-        Analysis(
-          imports: [],
-          exports: [],
-          requests: [],
-          has_source_phase: False,
-        )
-      let analysis = list.fold(body, empty, analyze_item)
-      ModuleSummary(
-        imports: list.reverse(analysis.imports),
-        exports: list.reverse(analysis.exports),
-        requested: merge_requests(list.reverse(analysis.requests)),
-        has_source_phase: analysis.has_source_phase,
-      )
-    }
-  }
+/// items. Takes the module ITEMS (`parser.parse_module`'s first element), not
+/// an `ast.Program`: there is no such thing as a script's import/export
+/// summary, so there is no empty-summary branch to fall into by mistake.
+pub fn analyze(items: List(ast.ModuleItem)) -> ModuleSummary {
+  let empty =
+    Analysis(imports: [], exports: [], requests: [], has_source_phase: False)
+  let analysis = list.fold(items, empty, analyze_item)
+  ModuleSummary(
+    imports: list.reverse(analysis.imports),
+    exports: list.reverse(analysis.exports),
+    requested: merge_requests(list.reverse(analysis.requests)),
+    has_source_phase: analysis.has_source_phase,
+  )
 }
 
 /// One top-level item into the accumulator. Lists are built reversed.
@@ -141,7 +220,7 @@ fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
       // rejects the whole module before the phase could matter.)
       let request_phase = case phase {
         ast.PhaseDefer -> Deferred
-        ast.PhaseEvaluation | ast.PhaseSource -> Default
+        ast.PhaseEvaluation | ast.PhaseSource -> Evaluation
       }
       Analysis(
         imports: [
@@ -150,7 +229,7 @@ fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
         ],
         exports: acc.exports,
         requests: [
-          ModuleRequest(specifier: source, phase: request_phase),
+          ModuleRequest(specifier: Raw(source), phase: request_phase),
           ..acc.requests
         ],
         has_source_phase: acc.has_source_phase || phase == ast.PhaseSource,
@@ -183,7 +262,7 @@ fn request_of_entry(entry: ExportEntry) -> Result(ModuleRequest, Nil) {
     ReExport(source_specifier:, ..)
     | ReExportAll(source_specifier:)
     | ReExportNamespace(source_specifier:, ..) ->
-      Ok(ModuleRequest(specifier: source_specifier, phase: Default))
+      Ok(ModuleRequest(specifier: source_specifier, phase: Evaluation))
     LocalExport(..) -> Error(Nil)
   }
 }
@@ -209,11 +288,11 @@ fn merge_requests(requests: List(ModuleRequest)) -> List(ModuleRequest) {
     case seen, request.phase {
       Error(Nil), _ -> list.append(merged, [request])
       // Already eager: the earliest eager occurrence keeps the slot.
-      Ok(ModuleRequest(phase: Default, ..)), _ -> merged
+      Ok(ModuleRequest(phase: Evaluation, ..)), _ -> merged
       // Deferred so far, another deferred request: nothing changes.
       Ok(ModuleRequest(phase: Deferred, ..)), Deferred -> merged
       // Deferred so far, FIRST eager request: eager phase + this position.
-      Ok(ModuleRequest(phase: Deferred, ..)), Default ->
+      Ok(ModuleRequest(phase: Deferred, ..)), Evaluation ->
         list.append(
           list.filter(merged, fn(e) { e.specifier != request.specifier }),
           [request],
@@ -231,7 +310,7 @@ fn declaration_bindings(
     ast.PhaseDefer -> Deferred
     // A PhaseSource declaration binds no namespace (the grammar only allows
     // `import source x`), so this arm only ever fires for PhaseEvaluation.
-    ast.PhaseEvaluation | ast.PhaseSource -> Default
+    ast.PhaseEvaluation | ast.PhaseSource -> Evaluation
   }
   list.map(specifiers, fn(spec) {
     case spec {
@@ -282,7 +361,7 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
             ReExport(
               export_name: exported,
               imported_name: local,
-              source_specifier: source,
+              source_specifier: Raw(source),
             )
         }
       })
@@ -291,10 +370,10 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
       source: ast.StringLit(source),
       ..,
     ) -> [
-      ReExportNamespace(export_name: name, source_specifier: source),
+      ReExportNamespace(export_name: name, source_specifier: Raw(source)),
     ]
     ast.ExportAllDeclaration(exported: None, source: ast.StringLit(source), ..) -> [
-      ReExportAll(source_specifier: source),
+      ReExportAll(source_specifier: Raw(source)),
     ]
     ast.StatementItem(_) | ast.ImportDeclaration(..) -> []
   }

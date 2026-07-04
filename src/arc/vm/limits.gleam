@@ -19,10 +19,11 @@ import gleam/string
 pub const max_iteration = 10_000_000
 
 /// Largest index the dense (`:array`-backed) element representation will
-/// hold. Mirrors the Erlang FFI's MAX_DENSE_ELEMENTS cap in arc_vm_ffi.erl.
-/// `elements.set` enforces this: an index at or past it promotes the array
-/// to the sparse dict representation instead of ever reaching the FFI, so
-/// the FFI never has to (and does not) silently drop an out-of-range write.
+/// hold. This constant is the ONLY copy of the dense/sparse policy — the FFI
+/// no longer duplicates it. `elements.set` enforces it: an index at or past it
+/// promotes the array to the sparse dict representation instead of ever
+/// reaching the FFI, so the FFI never has to (and does not) silently drop an
+/// out-of-range write.
 pub const max_dense_index = 10_000_000
 
 /// 2^53 - 1: Number.MAX_SAFE_INTEGER. Spec cap on array-like `.length`.

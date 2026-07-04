@@ -4,7 +4,9 @@
 %% DATA-ONLY MODULE (host-capability contract clause 4, see arc/host.gleam):
 %% this is the shared waiterlist REGISTRY — pure ETS operations, zero
 %% event-driven mailbox interaction. It never executes a `receive` for
-%% wake messages and never sends one. The blocking wait (the old
+%% wake messages and never sends one. (Its ONLY receive is the boot-time
+%% sync-join handshake in start_registry/0, plus the table owner's own idle
+%% loop; neither is part of the wake protocol.) The blocking wait (the old
 %% await_notify), the bounded dry-queue receive (the old wait_for_notify)
 %% and the actual `Pid ! {arc_notify, Ref, Key, ByteIndex}` wake sends all
 %% live in EMBEDDER FFI (test/test262_exec_ffi.erl for the test262
@@ -16,14 +18,22 @@
 %% over the (SabKey, ByteIndex) prefix is therefore FIFO, matching the
 %% spec's waiterlist ordering. The value is {Pid, Ref, IsAsync}. The table
 %% is owned by a dedicated long-lived process so it survives the death of
-%% whichever (possibly short-lived) process first touched it.
+%% whichever (possibly short-lived) process first touched it. It is created
+%% ONCE per node, explicitly, by start_registry/0 at realm boot
+%% (interpreter.new_state) — never lazily from a waiterlist operation, so
+%% every function below is a plain ETS access that cannot fail with
+%% "the table doesn't exist yet".
 %%
 %% Wake protocol — who may message a waiter:
 %%   * Only the process that successfully ets:take/2-s an entry may have
 %%     the {arc_notify, Ref, SabKey, ByteIndex} message sent for it. take
 %%     is atomic, so an entry is claimed at most once. take_waiters RETURNS
 %%     the claimed remote waiters; the claimer's embedder performs the
-%%     sends (deliver_wake).
+%%     sends (deliver_wake). A notifier that has NO deliver_wake capability
+%%     must therefore never call take_waiters — it would claim (and count)
+%%     remote waiters it cannot wake, blocking them forever. Such a
+%%     notifier calls take_self_async_tokens/3 instead, which claims only
+%%     the calling process's own async tokens (settled in-core, no message).
 %%   * A blocked sync waiter that times out tries to ets:take its OWN key
 %%     (in the embedder's await_notify). If the take succeeds nobody
 %%     claimed it -> "timed-out". If the take finds nothing, a notifier
@@ -37,24 +47,35 @@
 %% promise itself lives on the registering agent's State.atomics_waiters
 %% (FIFO); the ETS entry only makes the waiter visible to notifiers in
 %% other processes and lets notify count it. Same-process notify settles
-%% the State waiter directly (take_waiters reports those as SelfAsync);
-%% cross-process notify wakes arrive in the owning EMBEDDER's mailbox and
-%% are injected into core via event_loop.inject_notify, which settles the
-%% first matching State waiter. Because tokens at the same
-%% (SabKey, ByteIndex, Pid) are interchangeable, settling FIFO from State
-%% is equivalent to tracking entry identity.
+%% those directly (take_waiters reports them as SelfAsync); cross-process
+%% notify wakes arrive in the owning EMBEDDER's mailbox and are injected
+%% into core via event_loop.inject_notify, which settles the first matching
+%% State waiter. A wake message names no waiter, so what has to stay
+%% balanced is the COUNT of a process's live tokens against its count of
+%% pending State waiters — hence one primitive, take_self_async_tokens/3,
+%% for both "notify settles my own tokens" (budget = count) and "an expiring
+%% waiter withdraws one of mine" (budget = 1). Withdrawing "one of ours"
+%% rather than "this specific one" is what keeps that balance: a waiter that
+%% withdrew ITS OWN entry after a notifier had claimed a DIFFERENT one would
+%% settle itself "ok" and still leave the notifier's in-flight wake to settle
+%% a second waiter — two wakeups for one claim.
 %%
-%% Known approximation (documented, accepted): if an async waiter's timeout
-%% expires in the same instant a notifier in another process claims its
-%% token, the waiter settles "timed-out" while the in-flight notify message
-%% finds no pending State waiter and is dropped — the notifier may
-%% overcount by one in that window. The spec closes this with the agent
-%% critical section; a lock-free mailbox protocol cannot, so we accept the
-%% race.
+%% Async timeout vs. cross-process claim: take_self_async_tokens/3 finding
+%% none of ours means a notifier atomically claimed one first and counted us
+%% as woken, so the expiring waiter settles "ok" rather than "timed-out" and
+%% the notifier's count stays truthful. The remaining, accepted approximation
+%% is only in the ORDER of the two: the notifier's in-flight wake message
+%% then finds no pending State waiter and is dropped. The spec closes even
+%% that with the agent critical section; a lock-free mailbox protocol cannot.
+%%
+%% cancel_waiter/1 (SYNC entries, whose handle its own waiter holds for the
+%% duration of the blocking wait) reports which side won as
+%% `withdrew | already_claimed`.
 -module(arc_waiter_ffi).
 
--export([local_buffer_key/1, shared_buffer_key/1, insert_waiter/3,
-         cancel_waiter/1, take_waiters/3, remove_async_token/2]).
+-export([local_buffer_key/1, shared_buffer_key/1, start_registry/0,
+         insert_waiter/3, cancel_waiter/1, take_waiters/3,
+         take_self_async_tokens/3]).
 
 -define(TAB, arc_atomics_waiterlist).
 
@@ -74,42 +95,48 @@ shared_buffer_key(AtomicsRef) ->
 
 %% Register the calling process as a waiter on (SabKey, ByteIndex).
 %% IsAsync is false for a blocking Atomics.wait, true for a waitAsync
-%% token. Returns the opaque handle ({EtsKey, MsgRef}) used by cancel and
-%% by the embedder's blocking wait.
+%% token. Returns the opaque handle ({EtsKey, MsgRef}) that uniquely names
+%% THIS entry — used by cancel_waiter/1 and by the embedder's blocking
+%% wait. Requires start_registry/0 to have run in this node.
 insert_waiter(SabKey, ByteIndex, IsAsync) ->
-    ok = ensure_table(),
     Seq = erlang:unique_integer([monotonic]),
     Ref = make_ref(),
     Key = {SabKey, ByteIndex, Seq},
     true = ets:insert(?TAB, {Key, self(), Ref, IsAsync}),
     {Key, Ref}.
 
-%% Drop our own entry (the post-insert re-read saw a different value ->
-%% "not-equal"). DATA-ONLY: just the ets:take, no flush receive — but the
-%% caller MUST know whether a notifier already claimed the entry, because
-%% the claimer's {arc_notify, Ref, ...} wake message is then in flight to
-%% our mailbox and would otherwise sit there forever, spuriously settling
+%% Withdraw the exact entry named by Handle — a SYNC waiter's, whose caller
+%% holds the handle for the whole wait: its post-insert re-read saw a
+%% different value ("not-equal"), or an error unwound out of that re-read
+%% (detached / shrunk buffer). DATA-ONLY: just the ets:take, no flush receive
+%% — but the caller MUST know whether a notifier already claimed the entry,
+%% because the claimer's {arc_notify, Ref, ...} wake message is then in flight
+%% to our mailbox and would otherwise sit there forever, spuriously settling
 %% the NEXT waiter this agent registers at the same (key, byte index)
-%% (embedder loops match wakes by key+index, not ref). Returns `true` when
-%% the entry was already claimed — core then delegates the bounded flush
-%% receive to the embedder's sync_wait capability (whose await_notify
-%% selectively receives on the exact Ref) — and `false` when we removed
-%% the entry ourselves and no wake can be in flight.
+%% (embedder loops match wakes by key+index, not ref).
+%%
+%% Returns `already_claimed` when a notifier got there first — core then
+%% delegates the bounded flush receive to the embedder's sync_wait capability,
+%% whose await_notify selectively receives on the exact Ref — and `withdrew`
+%% when we removed the entry ourselves, so no wake can be in flight.
 cancel_waiter({Key, _Ref}) ->
     case ets:take(?TAB, Key) of
-        [_] -> false;
-        [] -> true
+        [_] -> withdrew;
+        [] -> already_claimed
     end.
 
-%% Atomics.notify: atomically claim up to Count waiters on
-%% (SabKey, ByteIndex) in FIFO order. Returns {Claimed, SelfAsyncTaken}:
-%% Claimed is the list of claimed REMOTE waiters as opaque
-%% {Pid, Ref, SabKey, ByteIndex} terms — the caller routes them to the
-%% embedder's deliver_wake capability, which owns the message sends —
+%% Atomics.notify with a wake-DELIVERY capability in hand: atomically claim
+%% up to Count waiters on (SabKey, ByteIndex) in FIFO order. Returns
+%% {Claimed, SelfAsyncTaken}: Claimed is the list of claimed REMOTE waiters
+%% as opaque {Pid, Ref, SabKey, ByteIndex} terms — the caller routes them to
+%% the embedder's deliver_wake capability, which owns the message sends —
 %% and SelfAsyncTaken counts our own waitAsync tokens, which the caller
 %% settles directly on State.
+%%
+%% Claiming a remote waiter is a PROMISE to wake it, so this function is
+%% only reachable from a notifier holding the deliver_wake capability; a
+%% notifier without one calls take_self_async_tokens/3.
 take_waiters(SabKey, ByteIndex, Count) ->
-    ok = ensure_table(),
     {Claimed, SelfAsync} =
         take_loop(first_key(SabKey, ByteIndex), SabKey, ByteIndex, Count,
                   self(), [], 0),
@@ -146,25 +173,46 @@ take_loop(Key, S, B, N, Self, Claimed, SelfAsync) ->
             end
     end.
 
-%% Remove one of our own async tokens for (SabKey, ByteIndex) — the
-%% matching State waiter expired and settled "timed-out". If a notifier
-%% claimed the token first its message is dropped by the embedder loop (no
-%% pending State waiter matches); see the race note in the module doc.
-remove_async_token(SabKey, ByteIndex) ->
-    ok = ensure_table(),
-    remove_async_loop(first_key(SabKey, ByteIndex), SabKey, ByteIndex,
-                      self()).
+%% Claim up to Count of the calling process's OWN waitAsync tokens on
+%% (SabKey, ByteIndex), FIFO, and return how many were taken. Two callers,
+%% one operation:
+%%
+%%   * Atomics.notify WITHOUT a wake-delivery capability. Other processes'
+%%     entries are left registered and untouched: we could not deliver their
+%%     wake message, and a claimed-but-undeliverable waiter is a waiter that
+%%     blocks forever. Settling our own tokens needs no message at all — the
+%%     caller fulfils their promises straight from State.
+%%   * An expiring waitAsync waiter withdrawing itself (Count = 1). Tokens
+%%     are fungible, so "one of mine" is the correct budget; a return of 0
+%%     means a notifier claimed one first (and counted us as woken).
+%%
+%% Removal is an ets:take/2 — atomic. Candidate keys are identified with a
+%% lookup first, so a blind take can never unregister a waiter belonging to
+%% another process. A key's value never changes once inserted (the Seq
+%% component makes every entry's key unique), so a key that read as ours can
+%% only ever be taken as ours or found already gone (a notifier in another
+%% process claimed it, and counted it, first).
+take_self_async_tokens(SabKey, ByteIndex, Count) ->
+    self_async_loop(first_key(SabKey, ByteIndex), SabKey, ByteIndex, Count,
+                    self(), 0).
 
-remove_async_loop(none, _S, _B, _Self) ->
-    nil;
-remove_async_loop(Key, S, B, Self) ->
+self_async_loop(none, _S, _B, _N, _Self, Taken) ->
+    Taken;
+self_async_loop(_Key, _S, _B, 0, _Self, Taken) ->
+    Taken;
+self_async_loop(Key, S, B, N, Self, Taken) ->
     Next = next_key(Key, S, B),
     case ets:lookup(?TAB, Key) of
         [{Key, Self, _Ref, true}] ->
-            true = ets:delete(?TAB, Key),
-            nil;
+            case ets:take(?TAB, Key) of
+                [_] ->
+                    self_async_loop(Next, S, B, N - 1, Self, Taken + 1);
+                [] ->
+                    %% A notifier claimed it between our lookup and our take.
+                    self_async_loop(Next, S, B, N, Self, Taken)
+            end;
         _ ->
-            remove_async_loop(Next, S, B, Self)
+            self_async_loop(Next, S, B, N, Self, Taken)
     end.
 
 %% ---------------------------------------------------------------------
@@ -183,56 +231,51 @@ check_key({S, B, _} = Key, S, B) -> Key;
 check_key(_, _, _) -> none.
 
 %% ---------------------------------------------------------------------
-%% Lazy table creation, owned by a dedicated process so the table is not
-%% torn down when its creator (e.g. a per-test worker) exits. Creation
-%% races resolve via register/2: exactly one spawned owner wins; losers
-%% ack immediately and the caller polls until the winner's table exists.
+%% Registry lifecycle. Called ONCE per realm boot (interpreter.new_state,
+%% at the same seam that reads arc_agent_ffi:can_block/0) — never lazily
+%% from a waiterlist operation, so no hot-path function has to carry a
+%% "table might not exist" failure mode.
 %%
-%% BOUNDARY JUSTIFICATION: the single `receive` below is a synchronous
-%% spawn-ack JOIN on table creation (a one-shot creation barrier, same
-%% category as arc_vm_ffi:run_compile_task's spawn-compute-join), not an
-%% event-driven mailbox interaction — no wake/notify/IO message ever
-%% arrives through it, and it completes before insert_waiter returns.
+%% The table is owned by a dedicated process so it is not torn down when
+%% its creator (e.g. a per-test worker) exits. Creation races between
+%% concurrently booting agent processes resolve inside ets:new/2 itself:
+%% creating a NAMED table whose name is taken raises badarg, and by the
+%% time it does the table exists — so both the winner and every loser can
+%% report "ready" and every caller returns with the table live. The join is
+%% synchronous (a monitored spawn + one ack), so no caller ever races ahead
+%% of the table's existence and no poll/timeout heuristic is needed.
 %% ---------------------------------------------------------------------
 
-ensure_table() ->
+start_registry() ->
     case ets:whereis(?TAB) of
-        undefined -> start_owner();
-        _ -> ok
+        undefined -> spawn_owner();
+        _ -> nil
     end.
 
-start_owner() ->
+spawn_owner() ->
     Caller = self(),
     Tag = make_ref(),
-    %% Plain spawn (unlinked): the owner must outlive the caller.
-    _Pid = spawn(fun() ->
-        try register(arc_atomics_waiterlist_owner, self()) of
-            true ->
-                ?TAB = ets:new(?TAB, [ordered_set, public, named_table,
-                                      {write_concurrency, true},
-                                      {read_concurrency, true}]),
+    %% Monitored, NOT linked: the owner must outlive this caller, but a
+    %% caller must not hang if the owner dies before acking.
+    {Pid, Mon} = spawn_monitor(fun() ->
+        try ets:new(?TAB, [ordered_set, public, named_table,
+                           {write_concurrency, true},
+                           {read_concurrency, true}]) of
+            ?TAB ->
                 Caller ! {Tag, ready},
                 owner_loop()
         catch
             error:badarg ->
-                %% Another owner exists (or is mid-creation).
+                %% Another owner created the table first — it exists NOW.
                 Caller ! {Tag, ready}
         end
     end),
     receive
-        {Tag, ready} -> ok
-    end,
-    await_table(200).
-
-await_table(0) ->
-    erlang:error(arc_atomics_waiterlist_unavailable);
-await_table(N) ->
-    case ets:whereis(?TAB) of
-        undefined ->
-            timer:sleep(1),
-            await_table(N - 1);
-        _ ->
-            ok
+        {Tag, ready} ->
+            true = erlang:demonitor(Mon, [flush]),
+            nil;
+        {'DOWN', Mon, process, Pid, Reason} ->
+            erlang:error({arc_atomics_waiterlist_unavailable, Reason})
     end.
 
 owner_loop() ->

@@ -10,6 +10,7 @@
 import arc/engine.{Returned, Threw}
 import arc/host
 import arc/module_host
+import arc/vm/builtins/helpers
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
 import gleam/list
@@ -61,7 +62,11 @@ pub fn main() -> Nil {
 /// A missing or non-string argument throws a TypeError back into JS rather
 /// than quietly printing an empty line.
 fn emit(args, _this, s) {
-  use text, s <- host.validate_string(s, host.arg_at(args, 0), "text")
+  use text, s <- host.validate_string(
+    s,
+    helpers.first_arg_or_undefined(args),
+    "text",
+  )
   io.println(text)
   #(s, Ok(JsUndefined))
 }

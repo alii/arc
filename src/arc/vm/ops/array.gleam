@@ -107,17 +107,15 @@ fn batch_append(
   fold: fn(Heap(host), value.JsElements, Int) ->
     #(Heap(host), value.JsElements, Int),
 ) -> Heap(host) {
-  case heap.read(h, target_ref) {
-    Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..) as slot) -> {
-      let #(h, elements, length) = fold(h, elements, length)
-      heap.write(
-        h,
-        target_ref,
-        ObjectSlot(..slot, kind: ArrayObject(length:), elements:),
-      )
-    }
-    _ -> h
-  }
+  let assert Some(ObjectSlot(kind: ArrayObject(length:), elements:, ..) as slot) =
+    heap.read(h, target_ref)
+    as "array op target is not an ArrayObject"
+  let #(h, elements, length) = fold(h, elements, length)
+  heap.write(
+    h,
+    target_ref,
+    ObjectSlot(..slot, kind: ArrayObject(length:), elements:),
+  )
 }
 
 /// Append a list of values onto the target array — one heap read, one
@@ -245,20 +243,18 @@ fn shape_iter_values(
 /// further .next() calls answer done, matching the spec's
 /// [[IteratedObject]] = undefined "already returned" state.
 fn latch_array_iter_done(h: Heap(host), iter_ref: Ref) -> Heap(host) {
-  case heap.read(h, iter_ref) {
-    Some(
-      ObjectSlot(kind: value.ArrayIteratorObject(source:, iter_kind:, ..), ..) as slot,
-    ) ->
-      heap.write(
-        h,
-        iter_ref,
-        ObjectSlot(
-          ..slot,
-          kind: value.ArrayIteratorObject(source:, cursor: None, iter_kind:),
-        ),
-      )
-    _ -> h
-  }
+  let assert Some(
+    ObjectSlot(kind: value.ArrayIteratorObject(source:, iter_kind:, ..), ..) as slot,
+  ) = heap.read(h, iter_ref)
+    as "array iterator ref is not an ArrayIteratorObject"
+  heap.write(
+    h,
+    iter_ref,
+    ObjectSlot(
+      ..slot,
+      kind: value.ArrayIteratorObject(source:, cursor: None, iter_kind:),
+    ),
+  )
 }
 
 /// Drain an iterable into the target array (ArraySpread opcode helper).

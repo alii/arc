@@ -55,8 +55,7 @@ fn first_module_expr(source: String) -> ast.Expression {
 /// re-tokenized), so they round-trip against `source` directly.
 fn first_generator_body_expr(source: String) -> ast.Expression {
   let assert [ast.StmtWithLine(statement: decl, ..)] = script_statements(source)
-  let assert ast.FunctionDeclaration(body: block, ..) = decl
-  let assert ast.BlockStatement(body: inner) = block
+  let assert ast.FunctionDeclaration(body: inner, ..) = decl
   let assert [ast.StmtWithLine(statement: stmt, ..)] = inner
   let assert ast.ExpressionStatement(expression: expr, ..) = stmt
   expr

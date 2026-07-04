@@ -28,10 +28,10 @@ import gleam/string
 // ── helpers ────────────────────────────────────────────────────────────
 
 fn run(source: String) -> Result(value.JsValue, String) {
-  case parser.parse(source, parser.Script) {
+  case parser.parse_script(source) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
-    Ok(#(program, sb)) ->
-      case compiler.compile(program, sb) {
+    Ok(#(body, sb)) ->
+      case compiler.compile(body, sb) {
         Error(ce) -> Error("compile: " <> string.inspect(ce))
         Ok(template) -> {
           let h = heap.new()

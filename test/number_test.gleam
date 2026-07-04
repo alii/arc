@@ -314,11 +314,16 @@ pub fn eval_to_string_radix_range_test() {
     == JsString("RangeError")
 }
 
-pub fn eval_bigint_to_locale_string_ignores_locale_test() {
+pub fn eval_bigint_to_locale_string_test() {
   // §21.2.3.2's first argument is `locales`, NOT a radix: it must not be
-  // coerced to a number and used as a base.
-  assert eval("(255n).toLocaleString('de-DE')") == JsString("255")
+  // coerced to a number and used as a base. ECMA-402 is installed, so the
+  // locale is honoured and grouping follows the requested tag.
+  assert eval("(1234567n).toLocaleString('de-DE')") == JsString("1.234.567")
+  assert eval("(1234567n).toLocaleString('en-US')") == JsString("1,234,567")
+  assert eval("[1234567n].toLocaleString('de-DE')") == JsString("1.234.567")
   assert eval("(255n).toLocaleString(16)") == JsString("255")
   assert eval("(255n).toLocaleString()") == JsString("255")
   assert eval("(255n).toString(16)") == JsString("ff")
+  assert eval("try { (1n).toLocaleString('en_US') } catch (e) { e.name }")
+    == JsString("RangeError")
 }

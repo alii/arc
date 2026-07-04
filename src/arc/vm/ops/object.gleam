@@ -1792,17 +1792,15 @@ fn define_own_property(
   val: JsValue,
 ) -> Heap(host) {
   use slot <- heap.update(heap, ref)
-  case slot {
-    ObjectSlot(properties:, ..) ->
-      // Single-traversal FFI upsert: a brand-new key gets a fresh creation
-      // seq, a re-defined key keeps its old one (§10.1.11 — e.g. duplicate
-      // keys in an object literal keep the first key's position).
-      ObjectSlot(
-        ..slot,
-        properties: ffi_define_own_data_property(properties, key, val),
-      )
-    _ -> slot
-  }
+  let assert ObjectSlot(properties:, ..) = slot
+    as "define_own_property target is not an ObjectSlot"
+  // Single-traversal FFI upsert: a brand-new key gets a fresh creation
+  // seq, a re-defined key keeps its old one (§10.1.11 — e.g. duplicate
+  // keys in an object literal keep the first key's position).
+  ObjectSlot(
+    ..slot,
+    properties: ffi_define_own_data_property(properties, key, val),
+  )
 }
 
 /// §7.3.5 CreateDataProperty upsert in one map traversal — see
@@ -1841,18 +1839,14 @@ pub fn define_method_property(
     False -> value.builtin_property(val)
   }
   use slot <- heap.update(heap, ref)
-  case slot {
-    ObjectSlot(properties:, ..) -> {
-      // Re-defining an existing key keeps its creation seq (§10.1.11).
-      let prop = case dict.get(properties, key) {
-        Ok(old) -> value.with_seq_of(prop, old)
-        Error(Nil) -> prop
-      }
-      let new_props = dict.insert(properties, key, prop)
-      ObjectSlot(..slot, properties: new_props)
-    }
-    _ -> slot
+  let assert ObjectSlot(properties:, ..) = slot
+    as "define_method_property target is not an ObjectSlot"
+  // Re-defining an existing key keeps its creation seq (§10.1.11).
+  let prop = case dict.get(properties, key) {
+    Ok(old) -> value.with_seq_of(prop, old)
+    Error(Nil) -> prop
   }
+  ObjectSlot(..slot, properties: dict.insert(properties, key, prop))
 }
 
 /// [[Extensible]] of an object slot (non-stateful read — no proxy trap).
@@ -1883,11 +1877,9 @@ pub fn define_private_data(
     False -> value.data(val) |> value.configurable()
   }
   use slot <- heap.update(heap, ref)
-  case slot {
-    ObjectSlot(properties:, ..) ->
-      ObjectSlot(..slot, properties: dict.insert(properties, key, prop))
-    _ -> slot
-  }
+  let assert ObjectSlot(properties:, ..) = slot
+    as "define_private_data target is not an ObjectSlot"
+  ObjectSlot(..slot, properties: dict.insert(properties, key, prop))
 }
 
 /// §10.1.6.3 step 6.c.i: merge a getter/setter into an existing accessor
@@ -1952,14 +1944,11 @@ pub fn define_accessor(
   enumerable enumerable: Bool,
 ) -> Heap(host) {
   use slot <- heap.update(heap, ref)
-  case slot {
-    ObjectSlot(properties:, ..) -> {
-      let new_prop =
-        merge_accessor(dict.get(properties, key), func, kind, enumerable)
-      ObjectSlot(..slot, properties: dict.insert(properties, key, new_prop))
-    }
-    _ -> slot
-  }
+  let assert ObjectSlot(properties:, ..) = slot
+    as "define_accessor target is not an ObjectSlot"
+  let new_prop =
+    merge_accessor(dict.get(properties, key), func, kind, enumerable)
+  ObjectSlot(..slot, properties: dict.insert(properties, key, new_prop))
 }
 
 /// Symbol-keyed variant of define_accessor — used by DefineAccessorComputed
@@ -1973,22 +1962,19 @@ pub fn define_symbol_accessor(
   enumerable enumerable: Bool,
 ) -> Heap(host) {
   use slot <- heap.update(heap, ref)
-  case slot {
-    ObjectSlot(symbol_properties:, ..) -> {
-      let new_prop =
-        merge_accessor(
-          list.key_find(symbol_properties, sym),
-          func,
-          kind,
-          enumerable,
-        )
-      ObjectSlot(
-        ..slot,
-        symbol_properties: list.key_set(symbol_properties, sym, new_prop),
-      )
-    }
-    _ -> slot
-  }
+  let assert ObjectSlot(symbol_properties:, ..) = slot
+    as "define_symbol_accessor target is not an ObjectSlot"
+  let new_prop =
+    merge_accessor(
+      list.key_find(symbol_properties, sym),
+      func,
+      kind,
+      enumerable,
+    )
+  ObjectSlot(
+    ..slot,
+    symbol_properties: list.key_set(symbol_properties, sym, new_prop),
+  )
 }
 
 /// §10.1.5.1 OrdinaryGetOwnProperty ( O, P ) — symbol-keyed variant.
@@ -3167,13 +3153,12 @@ pub fn define_symbol_property(
   prop: Property,
 ) -> Heap(host) {
   use slot <- heap.update(heap, ref)
-  case slot {
-    ObjectSlot(symbol_properties:, ..) -> {
-      let new_sym_props = list.key_set(symbol_properties, key, prop)
-      ObjectSlot(..slot, symbol_properties: new_sym_props)
-    }
-    _ -> slot
-  }
+  let assert ObjectSlot(symbol_properties:, ..) = slot
+    as "define_symbol_property target is not an ObjectSlot"
+  ObjectSlot(
+    ..slot,
+    symbol_properties: list.key_set(symbol_properties, key, prop),
+  )
 }
 
 // ============================================================================

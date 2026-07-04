@@ -4740,13 +4740,57 @@ pub fn create_data_property_or_throw(
 
 /// §7.3.7 CreateDataPropertyOrThrow as a plain fallible op — the shape the
 /// `iter_protocol` entry sinks want. `create_data_property_or_throw` is the
-/// CPS wrapper over it.
+/// CPS wrapper over it, `create_data_property_bool` the un-thrown §7.3.5 it
+/// wraps.
 pub fn create_data_property(
   state: State(host),
   ref: Ref,
   key_val: JsValue,
   val: JsValue,
 ) -> Result(State(host), #(JsValue, State(host))) {
+  use #(dkey, state) <- result.try(to_object_key(state, key_val))
+  use #(state, defined) <- result.try(create_data_property_dkey(
+    state,
+    ref,
+    dkey,
+    val,
+  ))
+  case defined {
+    True -> Ok(state)
+    // §7.3.7 step 3: success is false → throw a TypeError exception.
+    False ->
+      Error(state.type_error_value(
+        state,
+        "Cannot create property " <> object_key_label(dkey),
+      ))
+  }
+}
+
+/// §7.3.5 CreateDataProperty ( O, P, V ) — the un-thrown form: a rejected
+/// [[DefineOwnProperty]] comes back as `False`, only genuine abrupt
+/// completions (proxy trap throws, user getters) are propagated. Callers whose
+/// spec text says a bare `Perform ? CreateDataProperty(...)` (JSON.parse's
+/// reviver, §25.5.1.1) want this one — the OrThrow variant would invent a
+/// TypeError the spec never throws.
+pub fn create_data_property_bool(
+  state: State(host),
+  ref: Ref,
+  key_val: JsValue,
+  val: JsValue,
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
+  use #(dkey, state) <- result.try(to_object_key(state, key_val))
+  create_data_property_dkey(state, ref, dkey, val)
+}
+
+/// The shared tail of §7.3.5, past ToPropertyKey — so the OrThrow wrapper can
+/// name the key in its message without converting `key_val` twice (a
+/// `Symbol.toPrimitive` key would be observably re-run).
+fn create_data_property_dkey(
+  state: State(host),
+  ref: Ref,
+  dkey: ObjectKey,
+  val: JsValue,
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   // §7.3.5 builds the Property Descriptor RECORD directly — it never runs
   // ToPropertyDescriptor over a descriptor object. Materializing a real JS
   // POJO here and re-parsing it would (a) make the internal descriptor
@@ -4763,10 +4807,9 @@ pub fn create_data_property(
       enumerable: Some(True),
       configurable: Some(True),
     )
-  use #(dkey, state) <- result.try(to_object_key(state, key_val))
   // Trap-aware [[DefineOwnProperty]] on the already-parsed record —
   // the same tail define_property_bool dispatches to after parsing.
-  let defined = case object.as_proxy(state.heap, ref) {
+  case object.as_proxy(state.heap, ref) {
     Some(#(target, handler)) ->
       proxy_define_own_property(state, target, handler, dkey, parsed)
     None ->
@@ -4776,16 +4819,6 @@ pub fn create_data_property(
         Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
         Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
       }
-  }
-  case defined {
-    Ok(#(state, True)) -> Ok(state)
-    // §7.3.7 step 3: success is false → throw a TypeError exception.
-    Ok(#(state, False)) ->
-      Error(state.type_error_value(
-        state,
-        "Cannot create property " <> object_key_label(dkey),
-      ))
-    Error(#(thrown, state)) -> Error(#(thrown, state))
   }
 }
 

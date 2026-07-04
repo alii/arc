@@ -173,9 +173,10 @@ pub fn bigint_proto_to_string(
 /// §21.2.3.2 BigInt.prototype.toLocaleString ( [ reserved1 [ , reserved2 ] ] )
 ///
 /// NOT an alias of toString: its first argument is `locales` (ECMA-402
-/// §18.3.1), never a radix. With no ECMA-402 BigInt.NumberFormat host hook the
-/// spec fallback applies — both arguments are ignored and the value is
-/// rendered in decimal.
+/// §18.3.1), never a radix. This is the no-Intl fallback — both arguments are
+/// ignored and the value is rendered in decimal. When ECMA-402 is present its
+/// `init` overwrites this slot with the Intl.NumberFormat-backed override,
+/// which does honour `locales`/`options`.
 pub fn bigint_proto_to_locale_string(
   this: JsValue,
   _args: List(JsValue),

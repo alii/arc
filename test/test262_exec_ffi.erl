@@ -231,8 +231,9 @@ take_report() ->
 %% Waiter handles are the {EtsKey, MsgRef} pairs produced by
 %% arc_waiter_ffi:insert_waiter.
 
-%% The waiterlist table (created and owned by arc_waiter_ffi:ensure_table;
-%% by the time any function below runs, insert_waiter has created it).
+%% The waiterlist table (created and owned by arc_waiter_ffi:start_registry,
+%% run once at realm boot; by the time any function below can be reached, a
+%% waiter has been inserted into it).
 -define(WAITER_TAB, arc_atomics_waiterlist).
 %% Safety valve for the "a notifier claimed our entry but its message never
 %% arrived" case (the notifying process died between take and send).

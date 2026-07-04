@@ -383,6 +383,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       object_proto,
       function.prototype,
       number.prototype,
+      bigint.prototype,
       string.prototype,
       date.prototype,
     )

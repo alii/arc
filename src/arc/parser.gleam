@@ -2234,6 +2234,10 @@ fn parse_for_declaration(
 /// pattern (and optional initializer) is known and the head is committed to
 /// classic form: collect any `, name = init` declarators, consume the
 /// trailing `;`, drop the for-decl context, then parse condition/update/body.
+///
+/// §14.7.4: the WHOLE `VariableDeclarationList` of a for head is [~In], not
+/// just the first declarator, so the remaining declarators parse under
+/// `with_allow_in(False)` too.
 fn finish_for_classic_decl(
   p: P,
   outer: P,
@@ -2243,7 +2247,10 @@ fn finish_for_classic_decl(
   init: Option(ast.Expression),
 ) -> Result(#(P, ast.Statement), ParseError) {
   let first = ast.VariableDeclarator(id: pattern, init:)
-  use #(p2, rest) <- result.try(parse_remaining_declarators(p, kind, []))
+  use #(p2, rest) <- result.try({
+    use p <- with_allow_in(p, False)
+    parse_remaining_declarators(p, kind, [])
+  })
   let decl =
     ast.ForInitDeclaration(kind: var_kind, declarations: [first, ..rest])
   use p3 <- result.try(expect(p2, Semicolon))
@@ -5139,7 +5146,13 @@ fn parse_conditional_expression(
   case peek(p2) {
     Question -> {
       let p3 = advance(p2)
-      use #(p4, consequent) <- result.try(parse_assignment_expression(p3))
+      // §13.14: the middle operand is AssignmentExpression[+In] regardless of
+      // the inherited [In]; only the alternative inherits [?In].
+      use #(p4, consequent) <- result.try(with_allow_in(
+        p3,
+        True,
+        parse_assignment_expression,
+      ))
       use p5 <- result.try(expect(p4, Colon))
       // Conditional expression is not a valid assignment target
       use #(p6, alternate) <- result.try(parse_assignment_expression(p5))

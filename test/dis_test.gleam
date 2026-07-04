@@ -10,8 +10,8 @@ import gleam/string
 /// Parse + compile a script and disassemble it — the front half of what
 /// `arc --dis <file>` does, without touching the filesystem.
 fn dis_js(source: String) -> String {
-  let assert Ok(#(program, sb)) = parser.parse(source, parser.Script)
-  let assert Ok(template) = compiler.compile(program, sb)
+  let assert Ok(#(body, sb)) = parser.parse_script(source)
+  let assert Ok(template) = compiler.compile(body, sb)
   dis.disassemble(template)
 }
 

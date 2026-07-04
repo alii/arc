@@ -147,6 +147,10 @@ fn json_parse(
 /// Recursion here is ordinary Gleam recursion; the re-entrant JS calls go
 /// through `state.call`, the same convention `serialize_property` uses to
 /// invoke `toJSON` and the replacer.
+///
+/// NOT IMPLEMENTED: the ES2025 json-parse-with-source third argument — the
+/// reviver is called with `(key, value)` only, never a `context` object
+/// carrying `source`.
 fn internalize_json_property(
   state: State(host),
   holder: Ref,
@@ -232,8 +236,11 @@ fn internalize_keys(
 }
 
 /// §25.5.1.1 steps 2.b.ii.2-3 / 2.c.ii.2-3: an `undefined` result from the
-/// reviver deletes the child (a `false` [[Delete]] result is ignored — the
-/// spec writes a bare `Perform ?`); anything else is CreateDataProperty'd back.
+/// reviver deletes the child, anything else is CreateDataProperty'd back.
+/// Both spec steps are a bare `Perform ?`, so a `false` [[Delete]] /
+/// [[DefineOwnProperty]] result is DISCARDED — a reviver that makes a sibling
+/// key non-configurable must not turn the next replacement into a TypeError.
+/// Hence `create_data_property_bool`, not the OrThrow variant.
 fn replace_or_delete(
   state: State(host),
   ref: Ref,
@@ -249,13 +256,17 @@ fn replace_or_delete(
       ))
       state
     }
-    _ ->
-      object_builtins.create_data_property(
-        state,
-        ref,
-        JsString(name),
-        new_element,
+    _ -> {
+      use #(state, _defined) <- result.map(
+        object_builtins.create_data_property_bool(
+          state,
+          ref,
+          JsString(name),
+          new_element,
+        ),
       )
+      state
+    }
   }
 }
 

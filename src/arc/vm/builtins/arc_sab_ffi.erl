@@ -2,10 +2,12 @@
 %%
 %% Cell mapping
 %% ------------
-%% One UNSIGNED 64-bit atomics cell per 8 bytes of buffer. Buffer byte K
-%% lives in cell (K div 8) + 1 (atomics arrays are 1-indexed), at
-%% little-endian byte position (K rem 8) within the cell — i.e. a cell
-%% holding bytes B0..B7 has the integer value
+%% Cell 1 (atomics arrays are 1-indexed) is RESERVED for the buffer's current
+%% [[ArrayBufferByteLength]] — see "Growable SABs" below. Data starts at cell
+%% 2: one UNSIGNED 64-bit atomics cell per 8 bytes of buffer, so buffer byte K
+%% lives in cell (K div 8) + ?DATA_BASE, at little-endian byte position
+%% (K rem 8) within the cell — i.e. a cell holding bytes B0..B7 has the
+%% integer value
 %%   B0 + (B1 bsl 8) + ... + (B7 bsl 56)
 %% so <<CellValue:64/little>> reproduces the byte run exactly.
 %%
@@ -24,13 +26,16 @@
 %%
 %% Growable SABs
 %% -------------
-%% Growable SharedArrayBuffers PRE-ALLOCATE max_byte_length worth of cells
-%% up front (atomics cells are zero-initialized by the VM, matching
-%% CreateSharedByteDataBlock). The buffer's CURRENT byte length lives in the
-%% Gleam heap slot (value.BufShared byte_length); grow() only bumps that
-%% number. Documented limitation: a grow performed in one agent is not
-%% observed by agents that already hold the buffer — the 25 target test262
-%% tests do not require cross-agent grow visibility.
+%% Growable SharedArrayBuffers PRE-ALLOCATE max_byte_length worth of data
+%% cells up front (atomics cells are zero-initialized by the VM, matching
+%% CreateSharedByteDataBlock). §25.2.2.1 requires [[ArrayBufferByteLength]]
+%% itself to live in a SHARED 8-byte block, so it does: cell 1 holds the
+%% current byte length, and grow/2 publishes a new length with a monotonic
+%% compare_exchange loop. A grow performed in one agent is therefore observed
+%% by every other agent holding the same buffer, and a losing racer (a grow to
+%% a length another agent has already passed) is told `too_small` rather than
+%% silently shrinking the buffer.
+%%
 %% Atomic element RMW
 %% -------------------
 %% Atomics read-modify-write ops (add/sub/and/or/xor/exchange) and
@@ -45,22 +50,55 @@
 %% returned.
 -module(arc_sab_ffi).
 
--export([new/1, read_bytes/3, write_bytes/3, rmw_element/5, cas_element/6]).
+-export([new/2, byte_length/1, grow/2, read_bytes/3, write_bytes/3,
+         rmw_element/5, cas_element/6]).
 
-%% Allocate zero-filled shared storage able to hold MaxByteLength bytes.
-new(MaxByteLength) when is_integer(MaxByteLength), MaxByteLength >= 0 ->
-    Cells = max(1, (MaxByteLength + 7) div 8),
-    atomics:new(Cells, [{signed, false}]).
+%% Cell 1 holds the buffer's current [[ArrayBufferByteLength]].
+-define(LEN_CELL, 1).
+%% Buffer byte 0 lives in cell ?DATA_BASE.
+-define(DATA_BASE, 2).
+
+%% Allocate zero-filled shared storage able to hold MaxByteLength bytes, whose
+%% current [[ArrayBufferByteLength]] is ByteLength.
+new(MaxByteLength, ByteLength)
+  when is_integer(MaxByteLength), MaxByteLength >= 0,
+       is_integer(ByteLength), ByteLength >= 0, ByteLength =< MaxByteLength ->
+    DataCells = max(1, (MaxByteLength + 7) div 8),
+    Ref = atomics:new(DataCells + 1, [{signed, false}]),
+    atomics:put(Ref, ?LEN_CELL, ByteLength),
+    Ref.
+
+%% The buffer's current [[ArrayBufferByteLength]], as every agent sees it.
+byte_length(Ref) ->
+    atomics:get(Ref, ?LEN_CELL).
+
+%% §25.2.2.2 GrowSharedArrayBuffer: publish NewLen as the buffer's byte
+%% length. The length is monotonic, so a NewLen below the value another agent
+%% has already published is rejected (`too_small`) rather than shrinking the
+%% buffer under it. Retries when a concurrent grow raced the CAS.
+grow(Ref, NewLen) when is_integer(NewLen), NewLen >= 0 ->
+    Cur = atomics:get(Ref, ?LEN_CELL),
+    if
+        NewLen < Cur ->
+            too_small;
+        NewLen =:= Cur ->
+            grown;
+        true ->
+            case atomics:compare_exchange(Ref, ?LEN_CELL, Cur, NewLen) of
+                ok -> grown;
+                _Raced -> grow(Ref, NewLen)
+            end
+    end.
 
 %% Read Count bytes starting at byte Offset.
 read_bytes(_Ref, _Offset, 0) ->
     <<>>;
 read_bytes(Ref, Offset, Count)
   when is_integer(Offset), Offset >= 0, is_integer(Count), Count > 0 ->
-    FirstCell = Offset div 8,
-    %% Exclusive cell bound covering the last requested byte.
-    EndCell = (Offset + Count + 7) div 8,
-    Bin = cells_to_bin(Ref, FirstCell + 1, EndCell, []),
+    FirstCell = Offset div 8 + ?DATA_BASE,
+    %% Inclusive index of the cell holding the last requested byte.
+    LastCell = (Offset + Count + 7) div 8 + ?DATA_BASE - 1,
+    Bin = cells_to_bin(Ref, FirstCell, LastCell, []),
     Skip = Offset rem 8,
     binary:part(Bin, Skip, Count).
 
@@ -81,7 +119,7 @@ write_bytes(Ref, Offset, Bin)
 do_write(_Ref, _Offset, <<>>) ->
     ok;
 do_write(Ref, Offset, Bin) ->
-    Cell = Offset div 8 + 1,
+    Cell = Offset div 8 + ?DATA_BASE,
     Skip = Offset rem 8,
     InCell = min(8 - Skip, byte_size(Bin)),
     <<Chunk:InCell/binary, Rest/binary>> = Bin,
@@ -116,7 +154,7 @@ cas_merge(Ref, Cell, Skip, Chunk) ->
 %% read-compute-write when another writer raced the cell.
 rmw_element(Ref, ByteOffset, SizeBits, Signed, Fun)
   when is_integer(ByteOffset), ByteOffset >= 0 ->
-    Cell = ByteOffset div 8 + 1,
+    Cell = ByteOffset div 8 + ?DATA_BASE,
     Skip = ByteOffset rem 8,
     Size = SizeBits div 8,
     OldCell = atomics:get(Ref, Cell),
@@ -135,7 +173,7 @@ rmw_element(Ref, ByteOffset, SizeBits, Signed, Fun)
 %% witnessed old value either way. Retries only when the CAS itself raced.
 cas_element(Ref, ByteOffset, SizeBits, Signed, Expected, Replacement)
   when is_integer(ByteOffset), ByteOffset >= 0 ->
-    Cell = ByteOffset div 8 + 1,
+    Cell = ByteOffset div 8 + ?DATA_BASE,
     Skip = ByteOffset rem 8,
     Size = SizeBits div 8,
     OldCell = atomics:get(Ref, Cell),

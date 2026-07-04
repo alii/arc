@@ -1,37 +1,26 @@
+%% JS RegExp -> PCRE (`re`) bridge: JS flags to re:compile options, the source
+%% pattern scan (group count / named groups), the escape + v-mode class
+%% translation, the compiled-pattern cache and exec.
+%%
+%% Two neighbours own the parts that are not about `re`:
+%%   arc_regex_charset — the codepoint set algebra (union/intersection/
+%%     complement over ranges), simple case folding, and rendering a set back
+%%     to a PCRE class. Pure, no `re` dependency.
+%%   arc_bytes_ffi     — byte-offset UTF-8 slicing, shared with the lexer.
 -module(arc_regexp_ffi).
 -export([regexp_exec_info/5,
          byte_slice/3, byte_drop_start/2, next_char_boundary/2]).
 
-%% O(1) sub-binary slice by byte offsets. re:run returns byte indices, so
-%% slicing must be byte-based (grapheme-based slicing would be both wrong
-%% and O(offset+len)). Bounds are clamped so binary:part never raises.
-byte_slice(Bin, Start, Len) ->
-    Size = byte_size(Bin),
-    S = min(max(Start, 0), Size),
-    L = min(max(Len, 0), Size - S),
-    binary:part(Bin, S, L).
+%% The codepoint-set algebra module, abbreviated: it appears often enough in
+%% the v-mode class evaluator that spelling it out would hide the code.
+-define(CS, arc_regex_charset).
 
-%% O(1) suffix from byte offset Start (clamped).
-byte_drop_start(Bin, Start) ->
-    Size = byte_size(Bin),
-    S = min(max(Start, 0), Size),
-    binary:part(Bin, S, Size - S).
-
-%% Smallest UTF-8 character boundary strictly greater than Pos. Skips
-%% continuation bytes (2#10xxxxxx). re:run raises badarg for an offset in
-%% the middle of a multibyte character, so byte-offset loops that step
-%% forward (AdvanceStringIndex, ES2026 22.2.7.3) must use this instead of
-%% Pos + 1. May return a value past byte_size(Bin) (e.g. Pos at the last
-%% character), which callers use as their loop-termination signal.
-next_char_boundary(Bin, Pos) ->
-    next_boundary(Bin, Pos + 1, byte_size(Bin)).
-
-next_boundary(_Bin, P, Size) when P >= Size -> P;
-next_boundary(Bin, P, Size) ->
-    case binary:at(Bin, P) band 16#C0 of
-        16#80 -> next_boundary(Bin, P + 1, Size);
-        _ -> P
-    end.
+%% Byte-offset helpers for the Gleam caller. re:run returns byte indices, so
+%% slicing must be byte-based (grapheme-based slicing would be both wrong and
+%% O(offset+len)). One implementation, one out-of-range policy: arc_bytes_ffi.
+byte_slice(Bin, Start, Len) -> arc_bytes_ffi:unsafe_slice(Bin, Start, Len).
+byte_drop_start(Bin, Start) -> arc_bytes_ffi:drop_start(Bin, Start).
+next_char_boundary(Bin, Pos) -> arc_bytes_ffi:next_char_boundary(Bin, Pos).
 
 %% Convert JS flags to re:compile options
 flags_to_opts(Flags) ->
@@ -216,10 +205,16 @@ unicode_mode(<<"u", Rest/binary>>) ->
     end;
 unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
 
-%% Word-character class matching JS \w: [0-9A-Za-z_]. Used both as a class and,
-%% under PCRE caseless, to get JS's case-fold closure for free — caseless
-%% folding maps U+017F (long s) to s and U+212A (Kelvin) to k, so `(?i:[a-z])`
-%% matches them. PCRE's own \w doesn't do this, and `ucp` over-broadens \s/\b.
+%% Word-character class matching JS \w: [0-9A-Za-z_]. Spelled out (rather than
+%% left as PCRE's \w) only under the u/v flag: there JS's Canonicalize is simple
+%% case folding, and PCRE's caseless folding of a spelled-out class picks up
+%% exactly the two extra word characters the spec asks for — U+017F (long s)
+%% folds to s, U+212A (Kelvin) folds to k, so /\w/iu matches them.
+%% Without u/v, JS's Canonicalize is the toUpperCase rule, which refuses to map
+%% a >=128 character onto a <128 one, so WordCharacters has NO extra members and
+%% /\w/i must reject both. A spelled-out class cannot opt out of `caseless`, so
+%% non-unicode mode leaves \w/\W to PCRE — they are ASCII-only and are never
+%% case-folded, which is precisely the non-unicode semantics. See word_atom/1.
 -define(WORD_BODY, "0-9A-Za-z_").
 -define(WORD, "[" ?WORD_BODY "]").
 -define(NWORD, "[^" ?WORD_BODY "]").
@@ -339,35 +334,50 @@ translate_pat([$\\, P, ${ | Rest], InClass, Mode, CI)
         none ->
             [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI)]
     end;
-%% \s, \S, \w, \W -> the explicit JS sets. PCRE's own \s/\w are ASCII-only and
-%% `ucp` both over- and under-shoots, so every one of them is spelled out.
-%% Outside a class the negated forms are their own negated bracket class;
-%% inside a class they must become class ITEMS (classes cannot nest), so the
-%% negated forms splice their complement — see class_complement/2.
+%% \s, \S -> the explicit JS sets: PCRE's own \s is ASCII-only and `ucp` \s both
+%% over- and under-shoots. \w, \W -> the explicit sets under u/v only; see
+%% word_atom/1. Outside a class the negated forms are their own negated bracket
+%% class; inside a class they must become class ITEMS (classes cannot nest), so
+%% the negated forms splice their complement — see class_complement/2.
 translate_pat([$\\, $s | Rest], false, Mode, CI) ->
     "[" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI);
 translate_pat([$\\, $S | Rest], false, Mode, CI) ->
     "[^" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI);
 translate_pat([$\\, $w | Rest], false, Mode, CI) ->
-    ?WORD ++ translate_pat(Rest, false, Mode, CI);
+    word_atom(Mode) ++ translate_pat(Rest, false, Mode, CI);
 translate_pat([$\\, $W | Rest], false, Mode, CI) ->
-    ?NWORD ++ translate_pat(Rest, false, Mode, CI);
+    nword_atom(Mode) ++ translate_pat(Rest, false, Mode, CI);
 translate_pat([$\\, $s | Rest], true, Mode, CI) ->
     splice_in_class(?JSS_CHARS, Rest, Mode, CI);
-translate_pat([$\\, $w | Rest], true, Mode, CI) ->
-    splice_in_class(?WORD_BODY, Rest, Mode, CI);
 translate_pat([$\\, $S | Rest], true, Mode, CI) ->
-    splice_in_class(class_complement(vspace(), CI), Rest, Mode, CI);
+    splice_in_class(?CS:class_complement(?CS:vspace(), CI), Rest, Mode, CI);
+translate_pat([$\\, $w | Rest], true, Mode, CI) ->
+    splice_in_class(word_items(Mode), Rest, Mode, CI);
 translate_pat([$\\, $W | Rest], true, Mode, CI) ->
-    splice_in_class(class_complement(vword(), CI), Rest, Mode, CI);
+    splice_in_class(nword_items(Mode, CI), Rest, Mode, CI);
+%% \d/\D need no translation, but they are class escapes too, so route them
+%% through splice_in_class for the dash rule below (`[\d-x]` is three atoms in
+%% JS; PCRE would reject it as a bad range).
+translate_pat([$\\, D | Rest], true, Mode, CI) when D =:= $d; D =:= $D ->
+    splice_in_class([$\\, D], Rest, Mode, CI);
+%% A `-` immediately BEFORE a class escape is a literal, never a range operator
+%% (JS never lets a class escape be a range endpoint). Escape it and let the
+%% escape splice normally, or PCRE reads `[!-\w]` as the range `!`-`0` and
+%% silently widens the class. Mirror image of the trailing dash that
+%% splice_in_class/4 escapes.
+translate_pat([$-, $\\, E | Rest], true, Mode, CI)
+  when E =:= $d; E =:= $D; E =:= $s; E =:= $S; E =:= $w; E =:= $W ->
+    [$\\, $- | translate_pat([$\\, E | Rest], true, Mode, CI)];
 %% \b, \B outside a character class (inside one, \b is backspace).
 translate_pat([$\\, $b | Rest], false, Mode, CI) ->
     %% Word boundary: word|nonword transition (start/end count as nonword).
-    "(?:(?<=" ?WORD ")(?!" ?WORD ")|(?<!" ?WORD ")(?=" ?WORD "))"
+    W = word_atom(Mode),
+    "(?:(?<=" ++ W ++ ")(?!" ++ W ++ ")|(?<!" ++ W ++ ")(?=" ++ W ++ "))"
         ++ translate_pat(Rest, false, Mode, CI);
 translate_pat([$\\, $B | Rest], false, Mode, CI) ->
     %% Non-boundary: both sides word, or both sides nonword/edge.
-    "(?:(?<=" ?WORD ")(?=" ?WORD ")|(?<!" ?WORD ")(?!" ?WORD "))"
+    W = word_atom(Mode),
+    "(?:(?<=" ++ W ++ ")(?=" ++ W ++ ")|(?<!" ++ W ++ ")(?!" ++ W ++ "))"
         ++ translate_pat(Rest, false, Mode, CI);
 %% Preserve any other escape pair verbatim (don't reinterpret its 2nd char).
 translate_pat([$\\, C | Rest], InClass, Mode, CI) ->
@@ -388,10 +398,10 @@ translate_pat([$[ | Rest], false, v, CI) ->
             %% XCLASS item lists), so close the final set over the scf
             %% equivalence classes ourselves instead of relying on it.
             Ranges = case CI of
-                         true -> vclose(Ranges0);
+                         true -> ?CS:vclose(Ranges0);
                          false -> Ranges0
                      end,
-            emit_vclass(Ranges, Strings) ++ translate_pat(Rest2, false, v, CI);
+            ?CS:emit_vclass(Ranges, Strings) ++ translate_pat(Rest2, false, v, CI);
         error ->
             [$[ | translate_pat(Rest, true, v, CI)]
     end;
@@ -416,23 +426,23 @@ splice_in_class(Items, [$-, C | Rest], Mode, CI) when C =/= $] ->
 splice_in_class(Items, Rest, Mode, CI) ->
     Items ++ translate_pat(Rest, true, Mode, CI).
 
-%% Class ITEMS for a negated JS class escape (\S, \W) spliced into a [...]:
-%% PCRE has no nested classes, so the complement set has to be written out.
-%%
-%% Under `caseless` PCRE folds every class item at match time, so a spliced
-%% item drags its case partners into the class — closing the POSITIVE set over
-%% the scf equivalence classes first is what stops a complement item folding
-%% back onto a member of it. That is what makes /[\W]/i reject "ſ" and "K"
-%% (they fold to word characters), exactly like the out-of-class /\W/i, which
-%% PCRE renders as [^0-9A-Za-z_] and folds for us. Surrogates are dropped:
-%% PCRE2 rejects them in UTF patterns and valid subjects cannot contain them.
-class_complement(Set, CI) ->
-    Closed = case CI of
-                 true -> vclose(Set);
-                 false -> vnorm(Set)
-             end,
-    Ranges = vstrip_surrogates(vcomplement(Closed)),
-    unicode:characters_to_list(iolist_to_binary(vrender_ranges(Ranges))).
+%% JS \w / \W as PCRE text, per unicode mode. Under u/v the spelled-out class is
+%% what earns the spec's two extra word characters (U+017F, U+212A) from PCRE's
+%% caseless folding; without u/v those must NOT fold in, and PCRE's own \w/\W —
+%% ASCII-only, never case-folded even under `caseless` — are exactly right.
+%% The *_items forms are the same thing as class ITEMS, spliced into an
+%% enclosing [...] (which cannot nest, hence the complement for \W).
+word_atom(none) -> "\\w";
+word_atom(_UOrV) -> ?WORD.
+
+nword_atom(none) -> "\\W";
+nword_atom(_UOrV) -> ?NWORD.
+
+word_items(none) -> "\\w";
+word_items(_UOrV) -> ?WORD_BODY.
+
+nword_items(none, _CI) -> "\\W";
+nword_items(_UOrV, CI) -> ?CS:class_complement(?CS:vword(), CI).
 
 %% Collect a property-escape payload up to the closing }. Only property
 %% name/value characters and a single = are expected; anything else means
@@ -462,20 +472,16 @@ prop_translation(Payload, Negated, InClass, Mode) ->
 %% validated literals, so this evaluator is lenient: anything it can't
 %% express returns `error` and the class falls back to the generic path.
 %%
-%% CI (caseless, the i flag) changes the algebra per the spec: every
-%% primitive operand set is mapped through simple case folding first
-%% (MaybeSimpleCaseFolding, §22.2.2.4), and complement is taken over the
-%% scf fixed points (AllCharacters in UnicodeSets+IgnoreCase mode,
-%% §22.2.2.6) — NOT over all of 0..10FFFF. Complement-after-folding is what
-%% keeps e.g. /[^k]/iv from matching "K": "K" folds to "k", which the
-%% complement excludes. PCRE's caseless option then folds the subject at
-%% match time, completing Canonicalize.
+%% What lives here is only the PARSER: it walks the class body and hands the
+%% operand sets it recognises to ?CS (arc_regex_charset), which owns the set
+%% algebra, the case folding (CI, the i flag, changes what every primitive
+%% operand set means — see that module) and the emit back to PCRE text.
 
 %% vclass(L, CI): parse the body of a class after `[`, through the closing `]`.
 vclass([$^ | Rest], CI) ->
     case vexpr(Rest, CI) of
         {ok, Ranges, [], Rest2} ->
-            {ok, vcomp(Ranges, CI), [], Rest2};
+            {ok, ?CS:vcomp(Ranges, CI), [], Rest2};
         %% A negated class may not contain strings (MayContainStrings).
         {ok, _Ranges, [_ | _], _Rest2} -> error;
         error -> error
@@ -522,10 +528,10 @@ vchain(L, Op, R, S, CI) ->
     end.
 
 vapply(inter, R, S, R2, S2) ->
-    {vinter(vnorm(R), vnorm(R2)),
+    {?CS:vinter(?CS:vnorm(R), ?CS:vnorm(R2)),
      ordsets:intersection(ordsets:from_list(S), ordsets:from_list(S2))};
 vapply(subtract, R, S, R2, S2) ->
-    {vinter(vnorm(R), vcomplement(vnorm(R2))),
+    {?CS:vinter(?CS:vnorm(R), ?CS:vcomplement(?CS:vnorm(R2))),
      ordsets:subtract(ordsets:from_list(S), ordsets:from_list(S2))}.
 
 %% One ClassSetOperand, possibly extended to a ClassSetRange (`a-z`).
@@ -540,7 +546,7 @@ vrange_or_item(L, CI) ->
             case vitem(R2, CI) of
                 %% Range validity uses the RAW endpoints; the resulting set
                 %% is then folded (MaybeSimpleCaseFolding of CharacterRange).
-                {char, Hi, R3} when Lo =< Hi -> {ok, vfold([{Lo, Hi}], CI), [], R3};
+                {char, Hi, R3} when Lo =< Hi -> {ok, ?CS:vfold([{Lo, Hi}], CI), [], R3};
                 {char, _Hi, _R3} -> error;
                 {set, _R, _S, _Rest} -> error;
                 error -> error
@@ -550,7 +556,7 @@ vrange_or_item(L, CI) ->
         error -> error
     end.
 
-vsingle({char, CP, Rest}, CI) -> {ok, vfold([{CP, CP}], CI), [], Rest}.
+vsingle({char, CP, Rest}, CI) -> {ok, ?CS:vfold([{CP, CP}], CI), [], Rest}.
 
 %% One operand: nested class, escape, or literal ClassSetCharacter.
 vitem([$[ | Rest], CI) ->
@@ -572,12 +578,12 @@ vitem([], _CI) ->
 %% Class escapes (\d, \w, ...), character escapes, \q{...} and \p{...}.
 %% Set-producing escapes fold their set here; {char, ...} results are raw
 %% (range endpoints must stay raw) and are folded by vsingle/vrange_or_item.
-vescape([$d | R], CI) -> {set, vfold(vdigit(), CI), [], R};
-vescape([$D | R], CI) -> {set, vcomp(vfold(vdigit(), CI), CI), [], R};
-vescape([$w | R], CI) -> {set, vfold(vword(), CI), [], R};
-vescape([$W | R], CI) -> {set, vcomp(vfold(vword(), CI), CI), [], R};
-vescape([$s | R], CI) -> {set, vfold(vspace(), CI), [], R};
-vescape([$S | R], CI) -> {set, vcomp(vfold(vspace(), CI), CI), [], R};
+vescape([$d | R], CI) -> {set, ?CS:vfold(?CS:vdigit(), CI), [], R};
+vescape([$D | R], CI) -> {set, ?CS:vcomp(?CS:vfold(?CS:vdigit(), CI), CI), [], R};
+vescape([$w | R], CI) -> {set, ?CS:vfold(?CS:vword(), CI), [], R};
+vescape([$W | R], CI) -> {set, ?CS:vcomp(?CS:vfold(?CS:vword(), CI), CI), [], R};
+vescape([$s | R], CI) -> {set, ?CS:vfold(?CS:vspace(), CI), [], R};
+vescape([$S | R], CI) -> {set, ?CS:vcomp(?CS:vfold(?CS:vspace(), CI), CI), [], R};
 vescape([$b | R], _CI) -> {char, 16#08, R};
 vescape([$t | R], _CI) -> {char, $\t, R};
 vescape([$n | R], _CI) -> {char, $\n, R};
@@ -663,8 +669,8 @@ vstrings(L, CurRev, Rs, Ss, CI) ->
             end
     end.
 
-vstring_close([CP], Rs, Ss, CI) -> {vfold([{CP, CP}], CI) ++ Rs, Ss};
-vstring_close(Str, Rs, Ss, CI) -> {Rs, [vfold_str(Str, CI) | Ss]}.
+vstring_close([CP], Rs, Ss, CI) -> {?CS:vfold([{CP, CP}], CI) ++ Rs, Ss};
+vstring_close(Str, Rs, Ss, CI) -> {Rs, [?CS:vfold_str(Str, CI) | Ss]}.
 
 %% One ClassString character — a ClassSetCharacter; no class escapes here.
 vstring_char([$\\ | R], CI) ->
@@ -689,9 +695,9 @@ vprop(Negated, L, CI) ->
             PayloadBin = list_to_binary(Payload),
             case arc_regex_props_ffi:char_set(PayloadBin) of
                 {ok, Ranges} when Negated ->
-                    {set, vcomp(vfold(Ranges, CI), CI), [], Rest};
+                    {set, ?CS:vcomp(?CS:vfold(Ranges, CI), CI), [], Rest};
                 {ok, Ranges} ->
-                    {set, vfold(Ranges, CI), [], Rest};
+                    {set, ?CS:vfold(Ranges, CI), [], Rest};
                 %% Only a property OF STRINGS has a string list, and only \p
                 %% (never \P) may name one — no blind retry on other causes.
                 {error, property_of_strings} when not Negated ->
@@ -706,205 +712,12 @@ vprop(Negated, L, CI) ->
 vstring_prop(PayloadBin, Rest, CI) ->
     case arc_regex_props_ffi:string_list(PayloadBin) of
         {ok, Strs} ->
-            {R, S} = vsplit_singles(Strs, CI),
+            {R, S} = ?CS:vsplit_singles(Strs, CI),
             {set, R, S, Rest};
         %% RGI_Emoji is stored as a compressed regex the desugarer cannot
         %% decode; the class then falls back to the non-desugared translation.
         {error, no_exact_data} -> error
     end.
-
-vsplit_singles(Strs, CI) ->
-    lists:foldl(
-      fun([CP], {R, S}) -> {vfold([{CP, CP}], CI) ++ R, S};
-         (Str, {R, S}) -> {R, [vfold_str(Str, CI) | S]}
-      end,
-      {[], []},
-      Strs).
-
-vdigit() -> [{16#30, 16#39}].
-vword() -> [{16#30, 16#39}, {16#41, 16#5A}, {16#5F, 16#5F}, {16#61, 16#7A}].
-%% JS \s per §22.2.2.9 (same set as ?JSS_CHARS above).
-vspace() ->
-    [{16#09, 16#0D}, {16#20, 16#20}, {16#A0, 16#A0}, {16#1680, 16#1680},
-     {16#2000, 16#200A}, {16#2028, 16#2029}, {16#202F, 16#202F},
-     {16#205F, 16#205F}, {16#3000, 16#3000}, {16#FEFF, 16#FEFF}].
-
-%% Sort and merge into disjoint ascending ranges.
-vnorm(Ranges) -> vmerge(lists:sort(Ranges)).
-
-vmerge([{Lo, Hi}, {Lo2, Hi2} | Rest]) when Lo2 =< Hi + 1 ->
-    vmerge([{Lo, max(Hi, Hi2)} | Rest]);
-vmerge([R | Rest]) -> [R | vmerge(Rest)];
-vmerge([]) -> [].
-
-%% Complement over 0..10FFFF (input normalized).
-vcomplement(Ranges) -> vcomplement(Ranges, 0).
-
-vcomplement([], Next) when Next =< 16#10FFFF -> [{Next, 16#10FFFF}];
-vcomplement([], _Next) -> [];
-vcomplement([{Lo, Hi} | Rest], Next) when Lo > Next ->
-    [{Next, Lo - 1} | vcomplement(Rest, Hi + 1)];
-vcomplement([{_Lo, Hi} | Rest], Next) ->
-    vcomplement(Rest, max(Next, Hi + 1)).
-
-%% Intersection of two normalized range lists.
-vinter([], _B) -> [];
-vinter(_A, []) -> [];
-vinter([{ALo, AHi} | AR] = A, [{BLo, BHi} | BR] = B) ->
-    Lo = max(ALo, BLo),
-    Hi = min(AHi, BHi),
-    Head = case Lo =< Hi of
-               true -> [{Lo, Hi}];
-               false -> []
-           end,
-    Head ++ case AHi =< BHi of
-                true -> vinter(AR, B);
-                false -> vinter(A, BR)
-            end.
-
-%% MaybeSimpleCaseFolding (§22.2.2.4): with the i flag in v mode, map every
-%% codepoint of an operand set through scf BEFORE any set algebra. Only
-%% codepoints in the scf domain can change, so split the set against the
-%% domain and remap just that (small) part.
-vfold(Ranges, false) -> Ranges;
-vfold(Ranges, true) ->
-    N = vnorm(Ranges),
-    Dom = scf_domain(),
-    Fixed = vinter(N, vcomplement(Dom)),
-    Folded = [{F, F} || {Lo, Hi} <- vinter(N, Dom),
-                        C <- lists:seq(Lo, Hi),
-                        F <- [scf(C)]],
-    vnorm(Fixed ++ Folded).
-
-vfold_str(Str, false) -> Str;
-vfold_str(Str, true) -> [scf(C) || C <- Str].
-
-%% Close a folded set over the scf equivalence classes: add every codepoint
-%% whose scf image is a member (the match-time half of Canonicalize, done at
-%% translation time so the emitted class needs no help from PCRE's caseless
-%% logic — its own additions then become no-ops, since case partners always
-%% share an scf image).
-vclose(Ranges) ->
-    N = vnorm(Ranges),
-    Dom = scf_domain(),
-    Extra = [{C, C} || {Lo, Hi} <- Dom,
-                       C <- lists:seq(Lo, Hi),
-                       vmember(scf(C), N)],
-    vnorm(N ++ Extra).
-
-%% Membership test on normalized (sorted, disjoint) ranges.
-vmember(_CP, []) -> false;
-vmember(CP, [{Lo, Hi} | _]) when CP >= Lo, CP =< Hi -> true;
-vmember(CP, [{_Lo, Hi} | Rest]) when CP > Hi -> vmember(CP, Rest);
-vmember(_CP, _Ranges) -> false.
-
-%% CharacterComplement (§22.2.2.5) over AllCharacters (§22.2.2.6): with the
-%% i flag in v mode the universe is the scf FIXED POINTS, not 0..10FFFF —
-%% complement happens after case folding, so a folded-away codepoint (e.g.
-%% "K", which folds to "k") is never re-admitted by [^k].
-vcomp(Ranges, false) -> vcomplement(vnorm(Ranges));
-vcomp(Ranges, true) -> vcomplement(vnorm(Ranges ++ scf_domain())).
-
-%% scf(CP): Simple Case Folding (CaseFolding.txt C+S mappings), the spec's
-%% scf abstract operation. string:casefold/1 implements FULL folding (C+F):
-%% a single-codepoint result is the common (C) mapping, which scf shares.
-%% A multi-codepoint result means CP only has a full (F) mapping — under
-%% scf those map to themselves — EXCEPT the 31 codepoints with an explicit
-%% simple (S) mapping, hardcoded below (stable per Unicode's policy on
-%% existing case foldings).
-scf(16#1E9E) -> 16#DF;            %% LATIN CAPITAL LETTER SHARP S
-scf(16#1FBC) -> 16#1FB3;          %% GREEK CAPITAL ALPHA WITH PROSGEGRAMMENI
-scf(16#1FCC) -> 16#1FC3;          %% GREEK CAPITAL ETA WITH PROSGEGRAMMENI
-scf(16#1FD3) -> 16#0390;          %% GREEK SMALL IOTA, DIALYTIKA AND OXIA
-scf(16#1FE3) -> 16#03B0;          %% GREEK SMALL UPSILON, DIALYTIKA AND OXIA
-scf(16#1FFC) -> 16#1FF3;          %% GREEK CAPITAL OMEGA WITH PROSGEGRAMMENI
-scf(16#FB05) -> 16#FB06;          %% LATIN SMALL LIGATURE LONG S T
-scf(CP) when CP >= 16#1F88, CP =< 16#1F8F;     %% GREEK CAPITAL ALPHA/ETA/
-             CP >= 16#1F98, CP =< 16#1F9F;     %% OMEGA + PROSGEGRAMMENI
-             CP >= 16#1FA8, CP =< 16#1FAF ->   %% rows fold to -8
-    CP - 8;
-scf(CP) ->
-    case string:casefold([CP]) of
-        [F] -> F;
-        _ -> CP
-    end.
-
-%% The scf domain — codepoints with scf(c) =/= c — as normalized ranges,
-%% cached per process. Derived from Changes_When_Casefolded (a superset:
-%% it also contains the F-only codepoints, which scf fixes; filter those
-%% out by applying scf).
-%%
-%% The table carrying Changes_When_Casefolded is a hard invariant of this
-%% module: without it every case-insensitive class silently evaluates against
-%% an EMPTY fold domain and matches the wrong characters. Crash on a missing
-%% table rather than degrade forever.
-scf_domain() ->
-    case erlang:get(arc_scf_domain) of
-        undefined ->
-            {ok, Cwcf} =
-                arc_regex_props_ffi:char_set(<<"Changes_When_Casefolded">>),
-            Dom = vnorm([{C, C} || {Lo, Hi} <- Cwcf,
-                                   C <- lists:seq(Lo, Hi),
-                                   scf(C) =/= C]),
-            erlang:put(arc_scf_domain, Dom),
-            Dom;
-        Dom ->
-            Dom
-    end.
-
-%% PCRE2 rejects surrogate codepoints in UTF patterns, and valid-UTF-8
-%% subjects cannot contain them — drop them from emitted sets.
-vstrip_surrogates([]) -> [];
-vstrip_surrogates([{Lo, Hi} | Rest]) when Hi < 16#D800; Lo > 16#DFFF ->
-    [{Lo, Hi} | vstrip_surrogates(Rest)];
-vstrip_surrogates([{Lo, Hi} | Rest]) ->
-    Left = case Lo < 16#D800 of
-               true -> [{Lo, 16#D7FF}];
-               false -> []
-           end,
-    Right = case Hi > 16#DFFF of
-                true -> [{16#E000, Hi}];
-                false -> []
-            end,
-    Left ++ Right ++ vstrip_surrogates(Rest).
-
-%% Render the evaluated set back to PCRE: longer strings first (the spec
-%% matches CharSetOfStrings longest-first), then the codepoint class, then
-%% the empty string (matches last).
-emit_vclass(Ranges0, Strings0) ->
-    Ranges = vstrip_surrogates(vnorm(Ranges0)),
-    Strings = lists:usort(Strings0),
-    NonEmpty = [S || S <- Strings, S =/= []],
-    HasEmpty = lists:member([], Strings),
-    Sorted = lists:sort(
-               fun(A, B) -> {-length(A), A} =< {-length(B), B} end,
-               NonEmpty),
-    StrParts = [vrender_string(S) || S <- Sorted],
-    ClassPart = case Ranges of
-                    [] -> [];
-                    _ -> [[$[, vrender_ranges(Ranges), $]]]
-                end,
-    EmptyPart = case HasEmpty of
-                    true -> [[]];
-                    false -> []
-                end,
-    Txt = case {StrParts, ClassPart, EmptyPart} of
-              %% Nothing at all: a class that can never match.
-              {[], [], []} -> ["[^\\x{0}-\\x{10FFFF}]"];
-              {[], [Class], []} -> [Class];
-              {Ps, Cs, Es} -> ["(?:", lists:join($|, Ps ++ Cs ++ Es), ")"]
-          end,
-    unicode:characters_to_list(iolist_to_binary(Txt)).
-
-vrender_string(CPs) ->
-    [["\\x{", integer_to_list(CP, 16), "}"] || CP <- CPs].
-
-vrender_ranges([]) -> [];
-vrender_ranges([{Lo, Lo} | Rest]) ->
-    ["\\x{", integer_to_list(Lo, 16), "}" | vrender_ranges(Rest)];
-vrender_ranges([{Lo, Hi} | Rest]) ->
-    ["\\x{", integer_to_list(Lo, 16), "}-\\x{", integer_to_list(Hi, 16), "}"
-     | vrender_ranges(Rest)].
 
 take_hex([C | Rest], Acc) ->
     case is_hex(C) of
