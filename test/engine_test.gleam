@@ -1,5 +1,6 @@
 import arc/engine.{Returned}
 import arc/internal/erlang
+import arc/module_host
 import arc/vm/builtins/console
 import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
 import gleam/option.{Some}
@@ -357,12 +358,12 @@ pub fn host_fn_can_throw_test() {
 // ----------------------------------------------------------------------------
 
 /// Single self-contained module — reject every import.
-fn reject_imports(_raw: String, _parent: String) {
-  Error("no imports")
+fn reject_imports(raw: String, _parent: String) {
+  Error(module_host.ImportsForbidden(raw))
 }
 
-fn reject_loads(_resolved: String) {
-  Error("no imports")
+fn reject_loads(resolved: String) {
+  Error(module_host.ImportsForbidden(resolved))
 }
 
 pub fn eval_module_reads_export_test() {
@@ -420,7 +421,7 @@ pub fn destructured_declaration_exports_test() {
   let load = fn(resolved: String) {
     case resolved {
       "dep" -> Ok(dep)
-      other -> Error("no such module: " <> other)
+      other -> Error(module_host.NotFound(other))
     }
   }
   let assert Ok(#(evaluated, eng)) =

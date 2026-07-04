@@ -27,3 +27,53 @@ pub fn normalize_plain_dotdot_pops_a_segment_test() {
 pub fn normalize_dot_segments_are_dropped_test() {
   assert path.normalize("./a/./b") == "a/b"
 }
+
+// ----------------------------------------------------------------------------
+// path.normalize — a path that cancels down to no segments still denotes a
+// DIRECTORY, never the empty string (an empty module identity naming nothing).
+// ----------------------------------------------------------------------------
+
+pub fn normalize_dot_is_current_directory_test() {
+  assert path.normalize(".") == "."
+}
+
+pub fn normalize_segment_popped_by_dotdot_is_current_directory_test() {
+  assert path.normalize("a/..") == "."
+}
+
+pub fn normalize_root_stays_root_test() {
+  assert path.normalize("/") == "/"
+}
+
+pub fn normalize_dotdot_at_root_stays_root_test() {
+  assert path.normalize("/..") == "/"
+}
+
+// ----------------------------------------------------------------------------
+// path.resolve_specifier — path-shaped vs bare specifiers are different kinds
+// of thing, and the type says so.
+// ----------------------------------------------------------------------------
+
+pub fn resolve_specifier_relative_is_a_path_test() {
+  assert path.resolve_specifier("./b.js", "dir/a.js")
+    == path.PathSpecifier("dir/b.js")
+}
+
+pub fn resolve_specifier_parent_relative_is_a_path_test() {
+  assert path.resolve_specifier("../b.js", "dir/sub/a.js")
+    == path.PathSpecifier("dir/b.js")
+}
+
+pub fn resolve_specifier_absolute_is_a_normalized_path_test() {
+  assert path.resolve_specifier("/x/../b.js", "a.js")
+    == path.PathSpecifier("/b.js")
+}
+
+pub fn resolve_specifier_bare_is_not_a_path_test() {
+  assert path.resolve_specifier("fs", "dir/a.js") == path.BareSpecifier("fs")
+}
+
+pub fn resolve_specifier_url_is_bare_test() {
+  assert path.resolve_specifier("https://x/y.js", "a.js")
+    == path.BareSpecifier("https://x/y.js")
+}

@@ -149,13 +149,13 @@ fn harness_template(
 fn compile_harness_source(
   source: String,
 ) -> Result(value.FuncTemplate, String) {
-  use #(program, sb) <- result.try(
-    parser.parse(source, parser.Script)
+  use #(body, sb) <- result.try(
+    parser.parse_script(source)
     |> result.map_error(fn(err) {
       "harness parse: " <> parser.parse_error_to_string(err)
     }),
   )
-  compiler.compile_repl(program, sb)
+  compiler.compile_repl(body, sb)
   |> result.map_error(fn(err) { "harness compile: " <> string.inspect(err) })
 }
 
@@ -733,7 +733,14 @@ fn do_run_module(
   ))
   let global_object = env.global_object
 
-  case module.compile_bundle(path, source, test262_resolve, test262_load) {
+  case
+    module.compile_bundle(
+      path,
+      source,
+      module_host.rendered_resolve(test262_resolve),
+      module_host.rendered_load(test262_load),
+    )
+  {
     Error(err) -> Error("module: " <> string.inspect(err))
     Ok(bundle) -> {
       // Evaluate through the realm-wide module registry so a dynamic
@@ -778,21 +785,27 @@ fn do_run_module(
 }
 
 /// Resolve a test262 dependency specifier relative to its parent's directory.
+/// The runner is a filesystem loader: a bare specifier is not a path.
 fn test262_resolve(
   raw_specifier: String,
   parent_specifier: String,
-) -> Result(String, String) {
-  Ok(path.resolve_specifier(raw_specifier, parent_specifier))
+) -> Result(String, module_host.ModuleLoadError) {
+  case path.resolve_specifier(raw_specifier, parent_specifier) {
+    path.PathSpecifier(resolved) -> Ok(resolved)
+    path.BareSpecifier(bare) ->
+      Error(module_host.UnsupportedBareSpecifier(bare))
+  }
 }
 
 /// Read a resolved test262 module from disk.
-fn test262_load(resolved: String) -> Result(String, String) {
+fn test262_load(
+  resolved: String,
+) -> Result(String, module_host.ModuleLoadError) {
   case simplifile.read(resolved) {
     Ok(source) -> Ok(source)
+    Error(simplifile.Enoent) -> Error(module_host.NotFound(resolved))
     Error(err) ->
-      Error(
-        "file not found: " <> resolved <> " (" <> string.inspect(err) <> ")",
-      )
+      Error(module_host.ReadFailed(resolved, simplifile.describe_error(err)))
   }
 }
 
@@ -821,10 +834,10 @@ fn do_run_script_with_harness(
     NonStrict -> source
   }
 
-  case parser.parse(test_source, parser.Script) {
+  case parser.parse_script(test_source) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
-    Ok(#(program, sb)) ->
-      case compiler.compile_repl(program, sb) {
+    Ok(#(body, sb)) ->
+      case compiler.compile_repl(body, sb) {
         Error(err) -> Error("compile: " <> string.inspect(err))
         Ok(template) ->
           // The test source runs with the harness's host capabilities
@@ -895,7 +908,6 @@ fn eval_harness(
           value.RealmSlot(
             global_object:,
             lexical_globals: dict.new(),
-            symbol_descriptions: dict.new(),
             symbol_registry: dict.new(),
           ),
         )
@@ -930,7 +942,6 @@ fn eval_harness(
         entry.ReplEnv(
           global_object:,
           lexical_globals: dict.new(),
-          symbol_descriptions: dict.new(),
           symbol_registry: dict.new(),
           realms:,
         )
@@ -1187,7 +1198,6 @@ fn run_agent_child(source: String) -> Nil {
       value.RealmSlot(
         global_object: global_ref,
         lexical_globals: dict.new(),
-        symbol_descriptions: dict.new(),
         symbol_registry: dict.new(),
       ),
     )
@@ -1211,10 +1221,10 @@ fn run_agent_child(source: String) -> Nil {
   }
   let compiled =
     ffi_run_compile_task(string.byte_size(source), fn() {
-      case parser.parse(source, parser.Script) {
+      case parser.parse_script(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
-        Ok(#(program, sb)) ->
-          case compiler.compile_eval(program, sb) {
+        Ok(#(body, sb)) ->
+          case compiler.compile_eval(body, sb) {
             Error(err) -> Error(string.inspect(err))
             Ok(template) -> Ok(template)
           }
@@ -1238,7 +1248,6 @@ fn run_agent_child(source: String) -> Nil {
           h,
           b,
           global_ref,
-          dict.new(),
           dict.new(),
           dict.new(),
           harness_host_hooks(),
@@ -1337,8 +1346,7 @@ fn payload_to_value(
         common.alloc_wrapper(
           st.heap,
           value.ArrayBufferObject(
-            data:,
-            detached: False,
+            data: Some(data),
             max_byte_length:,
             immutable:,
           ),
@@ -1408,10 +1416,10 @@ fn make_broadcast_payload(
   case v {
     value.JsObject(ref) ->
       case heap.read(st.heap, ref) {
+        // A detached buffer (`data: None`) has no storage to ship.
         Some(value.ObjectSlot(
           kind: value.ArrayBufferObject(
-            data:,
-            detached: _,
+            data: Some(data),
             max_byte_length:,
             immutable:,
           ),
@@ -1720,10 +1728,10 @@ fn settle_pending_wakes(s: State(host)) -> State(host) {
   }
 }
 
-/// See arc_vm_ffi:run_compile_task/2 — runs the compile in a short-lived,
-/// generously sized-heap process (sync spawn-compute-join), keeping the
-/// agent child's own heap small.
-@external(erlang, "arc_vm_ffi", "run_compile_task")
+/// See arc_compile_task_ffi:run_compile_task/2 — runs the compile in a
+/// short-lived, generously sized-heap process (sync spawn-compute-join),
+/// keeping the agent child's own heap small.
+@external(erlang, "arc_compile_task_ffi", "run_compile_task")
 fn ffi_run_compile_task(_source_bytes: Int, _task: fn() -> a) -> a {
   panic as beam_only_test
 }

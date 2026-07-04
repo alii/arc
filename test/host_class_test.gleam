@@ -4,6 +4,7 @@
 //// work against a live `State` without installing a global shim.
 
 import arc/engine.{Returned}
+import arc/module_host
 import arc/vm/builtins/common
 import arc/vm/key.{Named}
 import arc/vm/ops/object
@@ -16,12 +17,14 @@ import gleam/option.{Some}
 /// Base-class `[[Construct]]`: allocate `this` with the leaf subclass's
 /// prototype (via `new_target`), set `this.id`, return it.
 fn service_ctor(_args, _this, s: state.State(host)) {
-  let #(h, obj) =
-    common.ordinary_create_from_constructor(
-      s.heap,
-      s.new_target,
-      s.builtins.object.prototype,
-    )
+  // §10.1.13.1 OrdinaryCreateFromConstructor(NewTarget, %Object.prototype%):
+  // step 2's `? Get(newTarget, "prototype")` is a real [[Get]], so it can throw.
+  use proto, s <- object.proto_from_new_target(
+    s,
+    s.new_target,
+    s.builtins.object.prototype,
+  )
+  let #(h, obj) = common.alloc_pojo(s.heap, proto, [])
   let s = state.State(..s, heap: h)
   case object.set_value(s, obj, Named("id"), JsString("svc-1"), JsObject(obj)) {
     Ok(#(s, _)) -> #(s, Ok(JsObject(obj)))
@@ -163,8 +166,8 @@ fn dance_resolve(raw: String, _ref: String) {
   Ok(raw)
 }
 
-fn no_source_loads(_resolved: String) {
-  Error("no source modules in this bundle")
+fn no_source_loads(resolved: String) {
+  Error(module_host.ImportsForbidden(resolved))
 }
 
 pub fn host_module_named_import_test() {

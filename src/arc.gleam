@@ -3,6 +3,7 @@ import arc/dis
 import arc/engine.{Threw}
 import arc/esm
 import arc/internal/path
+import arc/module_host.{type ModuleLoadError}
 import arc/parser
 import arc/repl/examples
 import arc/vm/builtins/common.{type Builtins}
@@ -313,35 +314,38 @@ fn run_module_file(
 ) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
   // The entry specifier is a module IDENTITY, and it comes straight from argv.
-  // Canonicalize it, or `arc ./a.js` names a different module than the `a.js` a
+  // Normalize it, or `arc ./a.js` names a different module than the `a.js` a
   // dependency's `import "./a.js"` resolves to — one file, two module records.
-  let entry = path.canonicalize(entry_path)
+  let entry = path.normalize(entry_path)
   engine.eval_module(eng, entry, source, resolve_dep, load_dep)
   |> result.replace(Nil)
   |> result.map_error(EvalFailed)
 }
 
 /// Resolve a dependency specifier: relative paths (./foo, ../bar) against
-/// the parent module's directory.
+/// the parent module's directory. The CLI is a filesystem loader, so a bare
+/// specifier ("fs", a URL) has no path meaning here — it is rejected as such,
+/// never probed as if it were a file.
 fn resolve_dep(
   raw_specifier: String,
   parent_specifier: String,
-) -> Result(String, String) {
-  Ok(path.resolve_specifier(raw_specifier, parent_specifier))
+) -> Result(String, ModuleLoadError) {
+  case path.resolve_specifier(raw_specifier, parent_specifier) {
+    path.PathSpecifier(resolved) -> Ok(resolved)
+    path.BareSpecifier(bare) ->
+      Error(module_host.UnsupportedBareSpecifier(bare))
+  }
 }
 
-/// Read a resolved dependency's source from disk.
-fn load_dep(resolved: String) -> Result(String, String) {
+/// Read a resolved dependency's source from disk. Only a genuinely absent
+/// file is `NotFound`; a directory, a permissions failure or an I/O error is a
+/// `ReadFailed` carrying simplifile's own description.
+fn load_dep(resolved: String) -> Result(String, ModuleLoadError) {
   case simplifile.read(resolved) {
     Ok(source) -> Ok(source)
+    Error(simplifile.Enoent) -> Error(module_host.NotFound(resolved))
     Error(err) ->
-      Error(
-        "file not found: "
-        <> resolved
-        <> " ("
-        <> simplifile.describe_error(err)
-        <> ")",
-      )
+      Error(module_host.ReadFailed(resolved, simplifile.describe_error(err)))
   }
 }
 

@@ -8,6 +8,7 @@
 //// one file. Run with: gleam run -m arc/examples/module_instance
 
 import arc/engine.{Returned, Threw}
+import arc/module_host
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
 import gleam/list
@@ -66,10 +67,10 @@ fn emit(args, _this, s) {
 }
 
 /// Self-contained demo module — reject every import.
-fn reject_imports(_raw: String, _parent: String) {
-  Error("this demo module imports nothing")
+fn reject_imports(raw: String, _parent: String) {
+  Error(module_host.ImportsForbidden(raw))
 }
 
-fn reject_loads(_specifier: String) {
-  Error("this demo module imports nothing")
+fn reject_loads(specifier: String) {
+  Error(module_host.ImportsForbidden(specifier))
 }

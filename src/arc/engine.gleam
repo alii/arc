@@ -14,6 +14,7 @@ import arc/compiler
 import arc/internal/erlang
 import arc/module
 import arc/module/graph
+import arc/module_host
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
@@ -69,6 +70,10 @@ pub type EvalError(host) {
   ParseError(parser.ParseError)
   CompileError(compiler.CompileError)
   VmError(state.VmError)
+  /// AOT compilation of a module graph failed (parse / resolve / load /
+  /// bytecode). Carries no heap — nothing has been allocated yet.
+  ModuleCompileError(module.CompileBundleError)
+  /// Linking or evaluating a module graph failed.
   ModuleError(module.ModuleError(host))
 }
 
@@ -254,7 +259,8 @@ pub fn host_fn(
 /// receives `(args, this, state)`; it reads `state.new_target` to learn the leaf
 /// subclass (for `class Sub extends This {}`, `new_target` is `Sub`), allocates
 /// and returns the `this` object (e.g. via
-/// `common.ordinary_create_from_constructor(heap, new_target, proto)`), and the
+/// `ops/object.proto_from_new_target(state, new_target, proto, ...)` +
+/// `common.alloc_pojo`), and the
 /// engine re-prototypes the result to the subclass's `prototype`. `methods` are
 /// installed on the class prototype; `statics` on the constructor itself (and so
 /// inherited by subclasses — a static can read `this.name`).
@@ -390,11 +396,11 @@ pub fn eval_with(
   // grows; only the compact FuncTemplate (or error) crosses back.
   use template <- result.try(
     compile_task.run(string.byte_size(source), fn() {
-      use #(program, sb) <- result.try(
-        parser.parse(source, parser.Script)
+      use #(body, sb) <- result.try(
+        parser.parse_script(source)
         |> result.map_error(ParseError),
       )
-      compiler.compile(program, sb)
+      compiler.compile(body, sb)
       |> result.map_error(CompileError)
     }),
   )
@@ -419,8 +425,10 @@ pub fn eval_with(
 /// Compile and evaluate an ES module bundle, draining microtasks afterwards.
 /// `resolve` maps (raw, referrer) to the dependency's canonical specifier and
 /// `load` reads a resolved specifier's source (called once per unique
-/// module). Returns the entry module's value + namespace, plus a new engine
-/// carrying the updated heap.
+/// module); both fail with a `module_host.ModuleLoadError` category, never a
+/// bare string a loader could accidentally return as a success. Returns the
+/// entry module's value + namespace, plus a new engine carrying the updated
+/// heap.
 ///
 /// A module that throws at top level surfaces as `Error(ModuleError(...))`
 /// (mirroring `module.evaluate_bundle`), not a `Threw` outcome — read its
@@ -429,8 +437,8 @@ pub fn eval_module(
   engine: Engine(host),
   specifier: String,
   source: String,
-  resolve: fn(String, String) -> Result(String, String),
-  load: fn(String) -> Result(String, String),
+  resolve: module_host.ResolveFn,
+  load: module_host.LoadFn,
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   eval_module_with(engine, specifier, source, resolve, load, event_loop.finish)
 }
@@ -446,19 +454,21 @@ pub fn eval_module_with(
   engine: Engine(host),
   specifier: String,
   source: String,
-  resolve: fn(String, String) -> Result(String, String),
-  load: fn(String) -> Result(String, String),
+  resolve: module_host.ResolveFn,
+  load: module_host.LoadFn,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(
+    // The graph walk speaks in rendered messages; the embedder speaks in
+    // `module_host.ModuleLoadError` categories. Render exactly here.
     module.compile_bundle_with_hosts(
       specifier,
       source,
-      resolve,
-      load,
+      module_host.rendered_resolve(resolve),
+      module_host.rendered_load(load),
       engine.host_modules,
     )
-    |> result.map_error(ModuleError),
+    |> result.map_error(ModuleCompileError),
   )
   use evaluated <- result.map(
     module.evaluate_bundle_with_hooks(
@@ -472,7 +482,10 @@ pub fn eval_module_with(
     |> result.map_error(ModuleError),
   )
   let module.EvaluatedBundle(value:, heap:, namespace:) = evaluated
-  #(EvaluatedModule(value:, namespace:), Engine(..engine, heap:))
+  #(
+    EvaluatedModule(value:, namespace: option.map(namespace, JsObject)),
+    Engine(..engine, heap:),
+  )
 }
 
 /// Read a named export off a Module Namespace object (the `namespace` from
@@ -676,6 +689,20 @@ fn outcome_of(settled: Result(JsValue, JsValue)) -> Outcome {
   }
 }
 
+/// Prefix `module.compile_bundle_error_message`'s prose with the pipeline
+/// phase that failed.
+fn module_compile_error_message(err: module.CompileBundleError) -> String {
+  let phase = case err {
+    module.GraphError(error: graph.ParseFailed(..)) -> "SyntaxError: "
+    module.GraphError(error: graph.ResolveFailed(..))
+    | module.GraphError(error: graph.LoadFailed(..)) -> "ResolutionError: "
+    // A source-phase import is a link-time SyntaxError (§16.2.1.7.2).
+    module.GraphError(error: graph.SourcePhaseUnsupported(..)) -> "LinkError: "
+    module.CompileError(..) -> "CompileError: "
+  }
+  phase <> module.compile_bundle_error_message(err)
+}
+
 /// Prefix `module.error_message`'s prose with the pipeline phase that failed.
 /// Evaluation results carry no phase label: an `EvaluationError` renders as
 /// the uncaught thrown value, and `EvaluationPending` is only reachable with a
@@ -683,13 +710,7 @@ fn outcome_of(settled: Result(JsValue, JsValue)) -> Outcome {
 /// `EvaluationError` inside `module.evaluate_linked`).
 fn module_error_message(err: module.ModuleError(host)) -> String {
   let phase = case err {
-    module.GraphError(error: graph.ParseFailed(..)) -> "SyntaxError: "
-    module.GraphError(error: graph.ResolveFailed(..))
-    | module.GraphError(error: graph.LoadFailed(..))
-    | module.ModuleNotInBundle(..) -> "ResolutionError: "
-    // A source-phase import is a link-time SyntaxError (§16.2.1.7.2).
-    module.GraphError(error: graph.SourcePhaseUnsupported(..)) -> "LinkError: "
-    module.CompileError(..) -> "CompileError: "
+    module.NotInBundle(..) -> "ResolutionError: "
     module.EvaluationError(..) | module.EvaluationPending(..) -> ""
   }
   phase <> module.error_message(err)
@@ -700,6 +721,7 @@ pub fn eval_error_message(err: EvalError(host)) -> String {
     ParseError(e) -> parser.parse_error_to_string(e)
     CompileError(e) -> compiler.error_message(e)
     VmError(e) -> state.vm_error_message(e)
+    ModuleCompileError(e) -> module_compile_error_message(e)
     ModuleError(e) -> module_error_message(e)
   }
 }

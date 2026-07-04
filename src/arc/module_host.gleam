@@ -29,6 +29,7 @@ import gleam/dict
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/set
 import gleam/string
 
@@ -38,14 +39,72 @@ import gleam/string
 // the module evaluator so a deferred-namespace trigger and a dynamic import
 // observe the same state.
 
+/// Why an embedder's loader could not produce a module. A CATEGORY, never a
+/// pre-worded message: the wording lives in `module_load_error_message`, and
+/// because failure has its own type a loader can no longer return its error
+/// text as an `Ok` value.
+pub type ModuleLoadError {
+  /// Nothing exists at this resolved specifier.
+  NotFound(specifier: String)
+  /// This graph is not allowed to import anything.
+  ImportsForbidden(specifier: String)
+  /// The module exists but its source could not be read (permissions, it is a
+  /// directory, an I/O error). `reason` is the host's own description.
+  ReadFailed(specifier: String, reason: String)
+  /// A raw specifier could not be mapped to a module identity.
+  ResolveFailed(raw: String, referrer: String)
+  /// A bare specifier ("fs", a URL) this loader gives no meaning to — NOT a
+  /// missing file: no path was ever probed.
+  UnsupportedBareSpecifier(specifier: String)
+}
+
+/// The ONE place a `ModuleLoadError` is worded. Every JS-visible resolve/load
+/// rejection message is rendered here, so a loader can no longer invent a
+/// category — a self-contradicting "file not found: ./lib (is a directory)"
+/// is unrepresentable.
+pub fn module_load_error_message(error: ModuleLoadError) -> String {
+  case error {
+    NotFound(specifier:) -> "Cannot find module '" <> specifier <> "'"
+    ImportsForbidden(specifier:) ->
+      "Cannot import '" <> specifier <> "': imports are not allowed here"
+    ReadFailed(specifier:, reason:) ->
+      "Cannot read module '" <> specifier <> "': " <> reason
+    ResolveFailed(raw:, referrer:) ->
+      "Cannot resolve module '" <> raw <> "' from '" <> referrer <> "'"
+    UnsupportedBareSpecifier(specifier:) ->
+      "Cannot resolve bare specifier '"
+      <> specifier
+      <> "': this loader resolves paths only"
+  }
+}
+
 /// Resolve a raw specifier against its referrer to the module's canonical
 /// specifier — specifier math and existence probing, no source reading.
 pub type ResolveFn =
-  fn(String, String) -> Result(String, String)
+  fn(String, String) -> Result(String, ModuleLoadError)
 
 /// Read the source of a resolved specifier.
 pub type LoadFn =
-  fn(String) -> Result(String, String)
+  fn(String) -> Result(String, ModuleLoadError)
+
+/// Adapt a typed resolver to the plain-string callback the graph walk takes:
+/// that `String` error is an ALREADY-RENDERED message (`graph.ResolveFailed`
+/// only ever carries text to print), never a category to re-inspect.
+pub fn rendered_resolve(
+  resolve: ResolveFn,
+) -> fn(String, String) -> Result(String, String) {
+  fn(raw, referrer) {
+    resolve(raw, referrer) |> result.map_error(module_load_error_message)
+  }
+}
+
+/// Adapt a typed loader to the plain-string callback the graph walk takes —
+/// see `rendered_resolve`.
+pub fn rendered_load(load: LoadFn) -> fn(String) -> Result(String, String) {
+  fn(specifier) {
+    load(specifier) |> result.map_error(module_load_error_message)
+  }
+}
 
 /// Build the dynamic-import host hook. `referrer` is the path of the entry
 /// script/module (relative specifiers resolve against it when no module body
@@ -165,12 +224,9 @@ fn import_module(
     Error(message) -> state.type_error(state, message)
     Ok(ImportCall(specifier:, referrer:, phase:)) ->
       case resolve(specifier, referrer) {
-        Error(reason) ->
+        Error(load_error) ->
           // Resolution failure → TypeError (host resolution error).
-          state.type_error(
-            state,
-            "Cannot find module '" <> specifier <> "': " <> reason,
-          )
+          state.type_error(state, module_load_error_message(load_error))
         Ok(resolved) ->
           case phase {
             Defer(resolve_fn:, reject_fn:) ->
@@ -249,8 +305,15 @@ fn evaluate_module(
   load: LoadFn,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use source <- with_loaded_source(state, resolved, load)
-  case module.compile_bundle(resolved, source, resolve, load) {
-    Error(err) -> compile_bundle_rejection(state, resolved, err)
+  case
+    module.compile_bundle(
+      resolved,
+      source,
+      rendered_resolve(resolve),
+      rendered_load(load),
+    )
+  {
+    Error(err) -> compile_bundle_rejection(state, err)
     Ok(bundle) -> {
       // Evaluate WITHOUT draining a nested event loop: this hook runs inside
       // a promise job on the host's own event loop, and a nested drain would
@@ -278,9 +341,9 @@ fn evaluate_module(
           job_queue: job_queue.append(state.job_queue, jobs),
         )
       case result {
-        Ok(module.EvaluatedBundle(value: _, namespace: Some(namespace), ..)) -> #(
+        Ok(module.EvaluatedBundle(value: _, namespace: Some(ns_ref), ..)) -> #(
           state,
-          Ok(namespace),
+          Ok(JsObject(ns_ref)),
         )
         Ok(module.EvaluatedBundle(value: _, namespace: None, ..)) ->
           state.type_error(
@@ -294,13 +357,13 @@ fn evaluate_module(
         }
         Error(module.EvaluationPending(promise_data_ref:, heap: _)) ->
           pending_module_promise(state, resolved, promise_data_ref)
-        Error(other) ->
+        Error(module.NotInBundle(..) as other) ->
           state.type_error(
             state,
             "Failed to evaluate module '"
               <> resolved
               <> "': "
-              <> string.inspect(other),
+              <> module.error_message(other),
           )
       }
     }
@@ -346,8 +409,15 @@ fn defer_import_module(
           settle_defer_import(state, resolve_fn, JsObject(deferred_ns_ref))
         None -> {
           use source <- with_loaded_source(state, resolved, load)
-          case module.compile_bundle(resolved, source, resolve, load) {
-            Error(err) -> compile_bundle_rejection(state, resolved, err)
+          case
+            module.compile_bundle(
+              resolved,
+              source,
+              rendered_resolve(resolve),
+              rendered_load(load),
+            )
+          {
+            Error(err) -> compile_bundle_rejection(state, err)
             Ok(bundle) ->
               case
                 link_bundle_with_registry(
@@ -367,7 +437,7 @@ fn defer_import_module(
                     "Failed to link module '"
                       <> resolved
                       <> "': "
-                      <> string.inspect(other),
+                      <> module.error_message(other),
                   )
                 Ok(#(h, linked_bundle)) -> {
                   let #(h, deferred_ns) =
@@ -379,7 +449,7 @@ fn defer_import_module(
                     )
                   let state = State(..state, heap: h)
                   case deferred_ns {
-                    Some(JsObject(_) as ns) -> {
+                    Ok(ns_ref) -> {
                       let state =
                         State(
                           ..state,
@@ -387,23 +457,28 @@ fn defer_import_module(
                             state.heap,
                             state.ctx.global_object,
                             resolved,
-                            ns,
+                            ns_ref,
                           ),
                         )
                       evaluate_deferred_async_deps(
                         state,
                         resolved,
-                        ns,
+                        JsObject(ns_ref),
                         linked_bundle,
                         resolve_fn,
                         reject_fn,
                       )
                     }
-                    Some(_) | None ->
+                    Error(module.DeferredSpecifierNotInBundle(specifier:)) ->
+                      state.type_error(
+                        state,
+                        "Cannot find module '" <> specifier <> "'",
+                      )
+                    Error(module.DeferredNamespaceBoxCorrupt(specifier:)) ->
                       state.type_error(
                         state,
                         "Module '"
-                          <> resolved
+                          <> specifier
                           <> "' produced no deferred namespace",
                       )
                   }
@@ -436,11 +511,8 @@ fn with_loaded_source(
   then: fn(String) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case load(resolved) {
-    Error(reason) ->
-      state.type_error(
-        state,
-        "Cannot load module '" <> resolved <> "': " <> reason,
-      )
+    Error(load_error) ->
+      state.type_error(state, module_load_error_message(load_error))
     Ok(source) -> then(source)
   }
 }
@@ -487,13 +559,14 @@ fn evaluate_deferred_async_deps(
       let state = cache_module_error(state, resolved, thrown)
       #(state, Error(thrown))
     }
-    Error(other) ->
+    Error(module.NotInBundle(..) as other)
+    | Error(module.EvaluationPending(..) as other) ->
       state.type_error(
         state,
         "Failed to evaluate async dependencies of module '"
           <> resolved
           <> "': "
-          <> string.inspect(other),
+          <> module.error_message(other),
       )
   }
 }
@@ -635,10 +708,10 @@ fn link_bundle_with_registry(
     Ok(#(h, linked_bundle)) -> {
       let h =
         list.fold(module.linked_namespaces(linked_bundle, h), h, fn(h, pair) {
-          let #(spec, ns) = pair
+          let #(spec, ns_ref) = pair
           case dict.has_key(preexisting, spec) {
             True -> h
-            False -> registry.write_namespace(h, global_object, spec, ns)
+            False -> registry.write_namespace(h, global_object, spec, ns_ref)
           }
         })
       let h =
@@ -646,11 +719,16 @@ fn link_bundle_with_registry(
           module.linked_deferred_namespaces(linked_bundle, h),
           h,
           fn(h, pair) {
-            let #(spec, ns) = pair
+            let #(spec, ns_ref) = pair
             case dict.has_key(preexisting_deferred, spec) {
               True -> h
               False ->
-                registry.write_deferred_namespace(h, global_object, spec, ns)
+                registry.write_deferred_namespace(
+                  h,
+                  global_object,
+                  spec,
+                  ns_ref,
+                )
             }
           },
         )
@@ -848,14 +926,18 @@ pub fn evaluate_bundle_with_registry(
       case result {
         Ok(module.EvaluatedBundle(heap:, ..)) -> #(heap, jobs, result)
         Error(module.EvaluationError(value:, heap:)) -> {
-          // Roll back nodes whose bodies never completed.
+          // Roll back nodes whose bodies never completed — every registration
+          // `link_bundle_with_registry` published for them, not just the
+          // namespace (a surviving deferred namespace would hand out
+          // uninitialized cells to a later `import defer`).
           let h =
             list.fold(specs, heap, fn(h, spec) {
               case
                 dict.has_key(preexisting, spec) || set.contains(evaluated, spec)
               {
                 True -> h
-                False -> registry.clear_namespace(h, global_object, spec)
+                False ->
+                  registry.clear_module_registrations(h, global_object, spec)
               }
             })
           #(h, jobs, Error(module.EvaluationError(value:, heap: h)))
@@ -868,7 +950,7 @@ pub fn evaluate_bundle_with_registry(
           jobs,
           result,
         )
-        Error(_) -> #(h, jobs, result)
+        Error(module.NotInBundle(..)) -> #(h, jobs, result)
       }
     }
   }
@@ -877,31 +959,19 @@ pub fn evaluate_bundle_with_registry(
 /// Turn a `module.compile_bundle` failure into the JS-visible rejection value.
 /// Per HostLoadImportedModule: parse failures, source-phase imports and
 /// compile failures reject with a SyntaxError; a request that cannot be
-/// resolved or loaded (or points outside the bundle) rejects with a
-/// TypeError. Evaluation errors carry the already-thrown value as-is.
+/// resolved or loaded rejects with a TypeError. `CompileBundleError` carries no
+/// heap, so there is no evaluation-error case here to forget about.
 fn compile_bundle_rejection(
   state: State(host),
-  resolved: String,
-  err: module.ModuleError(host),
+  err: module.CompileBundleError,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case err {
     module.GraphError(error: graph.ParseFailed(..))
     | module.GraphError(error: graph.SourcePhaseUnsupported(..))
     | module.CompileError(..) ->
-      state.syntax_error(state, module.error_message(err))
+      state.syntax_error(state, module.compile_bundle_error_message(err))
     module.GraphError(error: graph.ResolveFailed(..))
-    | module.GraphError(error: graph.LoadFailed(..))
-    | module.ModuleNotInBundle(..) ->
-      state.type_error(state, module.error_message(err))
-    module.EvaluationError(value: thrown, heap:) -> #(
-      State(..state, heap:),
-      Error(thrown),
-    )
-    // compile_bundle never evaluates — unreachable, but keep the heap.
-    module.EvaluationPending(promise_data_ref: _, heap:) ->
-      state.type_error(
-        State(..state, heap:),
-        "Failed to compile module '" <> resolved <> "'",
-      )
+    | module.GraphError(error: graph.LoadFailed(..)) ->
+      state.type_error(state, module.compile_bundle_error_message(err))
   }
 }
