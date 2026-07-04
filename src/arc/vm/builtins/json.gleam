@@ -9,10 +9,10 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object as objops
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type JsonNativeFn, type Property, type Ref, Finite, JsBool,
-  JsNull, JsNumber, JsObject, JsString, JsUndefined, JsonIsRawJson, JsonNative,
-  JsonParse, JsonRawJson, JsonStringify, NaN, NegInfinity, ObjectSlot,
-  OrdinaryObject, RawJsonObject,
+  type JsValue, type JsonNativeFn, type Ref, Finite, JsBool, JsNull, JsNumber,
+  JsObject, JsString, JsUndefined, JsonIsRawJson, JsonNative, JsonParse,
+  JsonRawJson, JsonStringify, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
+  RawJsonObject,
 }
 import gleam/bit_array
 import gleam/dict
@@ -63,6 +63,13 @@ pub fn init(
 /// cross-realm call, so resolve the owning realm from the receiver — the JSON
 /// namespace object these methods live on — run the body with that realm's
 /// builtins installed, and restore the caller's afterwards.
+///
+/// The swap covers only what the JSON builtin itself allocates. User callbacks
+/// the builtin re-enters — a reviver, a replacer, a `toJSON` — must NOT run
+/// with the JSON namespace's realm installed: the objects and errors *their*
+/// code creates belong to the running realm, exactly as they did before any of
+/// this realm handling existed. `call_in_caller_realm` puts the caller's
+/// builtins back for the duration of each such call.
 pub fn dispatch(
   native: JsonNativeFn,
   args: List(JsValue),
@@ -72,12 +79,31 @@ pub fn dispatch(
   let caller_builtins = state.builtins
   let state = State(..state, builtins: owner_realm_builtins(state, this))
   let #(state, res) = case native {
-    JsonParse -> json_parse(args, state)
-    JsonStringify -> json_stringify(args, state)
+    JsonParse -> json_parse(args, caller_builtins, state)
+    JsonStringify -> json_stringify(args, caller_builtins, state)
     JsonRawJson -> json_raw_json(args, state)
     JsonIsRawJson -> json_is_raw_json(args, state)
   }
   #(State(..state, builtins: caller_builtins), res)
+}
+
+/// Re-enter user code (a reviver / replacer / toJSON) with `caller` — the realm
+/// that was running when the JSON builtin was invoked — reinstalled, restoring
+/// the JSON function's own realm afterwards. Whatever the callback allocates
+/// must come from the running realm's intrinsics, not the JSON namespace's.
+fn call_in_caller_realm(
+  state: State(host),
+  caller: common.Builtins,
+  callee: JsValue,
+  this: JsValue,
+  args: List(JsValue),
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  let owner = state.builtins
+  let state = State(..state, builtins: caller)
+  case state.call(state, callee, this, args) {
+    Ok(#(v, state)) -> Ok(#(v, State(..state, builtins: owner)))
+    Error(#(e, state)) -> Error(#(e, State(..state, builtins: owner)))
+  }
 }
 
 // ============================================================================
@@ -259,6 +285,7 @@ pub fn is_raw_json(h: Heap(host), value: JsValue) -> Bool {
 ///   10. Otherwise return unfiltered.
 fn json_parse(
   args: List(JsValue),
+  caller_builtins: common.Builtins,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: ToString(text)
@@ -282,7 +309,8 @@ fn json_parse(
       case rest {
         <<>> -> {
           // Successfully parsed — materialize the value on the heap
-          let #(heap, unfiltered) = materialize(state.heap, state.builtins, val)
+          let #(heap, record) = materialize(state.heap, state.builtins, val)
+          let unfiltered = record_value(record)
           let state = State(..state, heap:)
           // Steps 7-10: run the reviver, if one was supplied and is callable.
           case helpers.list_at(args, 1) {
@@ -291,12 +319,13 @@ fn json_parse(
                 False -> #(state, Ok(unfiltered))
                 True -> {
                   let #(state, root) = alloc_holder(state, unfiltered)
+                  let ctx = ReviveCtx(reviver:, caller_builtins:)
                   use revived, state <- state.try_op(internalize_json_property(
                     state,
+                    ctx,
                     root,
                     "",
-                    reviver,
-                    Some(val),
+                    Some(record),
                   ))
                   #(state, Ok(revived))
                 }
@@ -357,22 +386,12 @@ fn json_parse(
 /// Recursion here is ordinary Gleam recursion; the re-entrant JS calls go
 /// through `state.call`, the same convention `serialize_property` uses to
 /// invoke `toJSON` and the replacer.
-///
-/// The one deviation from the letter of the spec: "node's [[Value]] is val" is
-/// only checked for primitive literals (`unmodified_source`), because the
-/// intermediate `JsonValue` tree records source text, not the heap refs the
-/// arrays/objects were materialized into. The observable difference needs a
-/// reviver that overwrites an array/object slot with a *different* array or
-/// object before that slot is walked; the replacement's own children are then
-/// matched against the original literal's children before their sources are
-/// handed out, so a source can only survive if the child value is SameValue to
-/// what the literal produced.
 fn internalize_json_property(
   state: State(host),
+  ctx: ReviveCtx,
   holder: Ref,
   name: String,
-  reviver: JsValue,
-  node: Option(JsonValue),
+  node: Option(ParseRecord),
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Step 1: val = ? Get(holder, name).
   use #(val, state) <- result.try(objops.get_value(
@@ -381,6 +400,12 @@ fn internalize_json_property(
     key.canonical_key(name),
     JsObject(holder),
   ))
+  // Step 3: the parse record only describes `val` while `val` is still the very
+  // value that literal materialized into. An earlier reviver call that
+  // overwrote this slot leaves the record stale, and a stale record must leak
+  // neither a `source` nor its children's records — the replacement's children
+  // did not come from that source text.
+  let node = fresh_record(node, val)
   // Steps 4-5: if val is an Object, revive its children in place first.
   use state <- result.try(case val {
     JsObject(ref) -> {
@@ -389,14 +414,14 @@ fn internalize_json_property(
         // Step 5.b: indices 0..len-1, len from LengthOfArrayLike.
         True -> {
           use #(len, state) <- result.try(length_of_array_like(state, ref))
-          internalize_elements(state, ref, 0, len, reviver, node)
+          internalize_elements(state, ctx, ref, 0, len, record_elements(node))
         }
         // Step 5.c: EnumerableOwnPropertyNames(val, key).
         False -> {
           use #(keys, state) <- result.try(
             object_builtins.enumerable_string_keys_stateful(state, ref),
           )
-          internalize_keys(state, ref, keys, reviver, node)
+          internalize_keys(state, ctx, ref, keys, record_members(node))
         }
       }
     }
@@ -404,77 +429,104 @@ fn internalize_json_property(
   })
   // Steps 2-3: the `context` object, carrying `source` only for an unmodified
   // primitive literal.
-  let #(state, context) = alloc_context(state, unmodified_source(node, val))
+  let #(state, context) = alloc_context(state, record_source(node))
   // Step 6: return ? Call(reviver, holder, « name, val, context »).
-  state.call(state, reviver, JsObject(holder), [
-    JsString(name),
-    val,
-    JsObject(context),
-  ])
+  call_in_caller_realm(
+    state,
+    ctx.caller_builtins,
+    ctx.reviver,
+    JsObject(holder),
+    [
+      JsString(name),
+      val,
+      JsObject(context),
+    ],
+  )
 }
 
-/// Step 3.a: the literal's source text, but only while `val` is still the value
-/// that literal produced. A reviver that overwrote the slot before we got here
-/// (`reviver-call-args-after-forward-modification.js`) leaves the parse node
-/// stale, and a stale node must not leak a `source` describing a value that is
-/// no longer there.
-fn unmodified_source(node: Option(JsonValue), val: JsValue) -> Option(String) {
-  use #(parsed, source) <- option.then(option.then(node, json_node_primitive))
-  case value.same_value(parsed, val) {
-    True -> Some(source)
+/// The reviver, plus the realm that was running when JSON.parse was called —
+/// the one the reviver's own allocations must come from (see `dispatch`).
+type ReviveCtx {
+  ReviveCtx(reviver: JsValue, caller_builtins: common.Builtins)
+}
+
+/// Step 3: keep the parse record only if it is still the record for `val` —
+/// SameValue(record's [[Value]], val). For arrays and objects that is a heap
+/// ref identity check, so a reviver that swapped in a *different* array/object
+/// (`reviver-call-args-after-forward-modification.js`) drops the record, and
+/// with it both the `source` and every child record.
+fn fresh_record(
+  node: Option(ParseRecord),
+  val: JsValue,
+) -> Option(ParseRecord) {
+  use record <- option.then(node)
+  case value.same_value(record_value(record), val) {
+    True -> Some(record)
     False -> None
   }
 }
 
 /// §25.5.1.1 step 5.b.iii: recurse over array indices 0..len-1 in order,
-/// handing each element the parse node it was scanned from (if any).
+/// handing each element the parse record it was scanned from (if any).
+///
+/// The remaining child records travel alongside the index rather than being
+/// looked up by it: the walk visits 0..len-1 in order, so popping the head each
+/// step is the same record an O(i) `list_at` would find, and the whole walk
+/// stays linear instead of quadratic in the array's length. Indices past the
+/// records (elements a reviver added, or a `length` larger than the literal)
+/// simply run out and get `None`.
 fn internalize_elements(
   state: State(host),
+  ctx: ReviveCtx,
   ref: Ref,
   i: Int,
   len: Int,
-  reviver: JsValue,
-  node: Option(JsonValue),
+  children: List(ParseRecord),
 ) -> Result(State(host), #(JsValue, State(host))) {
   case i >= len {
     True -> Ok(state)
     False -> {
+      let #(child, rest_children) = case children {
+        [child, ..rest] -> #(Some(child), rest)
+        [] -> #(None, [])
+      }
       let name = int.to_string(i)
       use #(new_element, state) <- result.try(internalize_json_property(
         state,
+        ctx,
         ref,
         name,
-        reviver,
-        option.then(node, json_node_element(_, i)),
+        child,
       ))
       use state <- result.try(replace_or_delete(state, ref, name, new_element))
-      internalize_elements(state, ref, i + 1, len, reviver, node)
+      internalize_elements(state, ctx, ref, i + 1, len, rest_children)
     }
   }
 }
 
 /// §25.5.1.1 step 5.c.iii: recurse over the object's own enumerable string
-/// keys, handing each the parse node it was scanned from (a key a reviver added
-/// has none).
+/// keys, handing each the parse record it was scanned from (a key a reviver
+/// added has none). `members` is built once per object (see `record_members`),
+/// so each key costs one dict lookup rather than a scan of every member.
 fn internalize_keys(
   state: State(host),
+  ctx: ReviveCtx,
   ref: Ref,
   keys: List(String),
-  reviver: JsValue,
-  node: Option(JsonValue),
+  members: dict.Dict(String, ParseRecord),
 ) -> Result(State(host), #(JsValue, State(host))) {
   case keys {
     [] -> Ok(state)
     [p, ..rest] -> {
       use #(new_element, state) <- result.try(internalize_json_property(
         state,
+        ctx,
         ref,
         p,
-        reviver,
-        option.then(node, json_node_member(_, p)),
+        dict.get(members, p) |> option.from_result,
       ))
       use state <- result.try(replace_or_delete(state, ref, p, new_element))
-      internalize_keys(state, ref, rest, reviver, node)
+      internalize_keys(state, ctx, ref, rest, members)
     }
   }
 }
@@ -539,15 +591,24 @@ fn alloc_holder(state: State(host), val: JsValue) -> #(State(host), Ref) {
 /// carrying a `source` own data property (writable, enumerable, configurable —
 /// what CreateDataPropertyOrThrow gives) when the value came from an unmodified
 /// primitive literal, and no own property at all otherwise.
+///
+/// This is the one place the recorded source bytes are decoded — reached only
+/// with a reviver in play, so a plain `JSON.parse` never pays for it.
 fn alloc_context(
   state: State(host),
-  source: Option(String),
+  source: Option(BitArray),
 ) -> #(State(host), Ref) {
   let properties = case source {
-    Some(text) ->
+    Some(raw) -> {
+      // The slice spans a whole literal of a document that came from a Gleam
+      // String, so it is valid UTF-8 by construction. Assert rather than fall
+      // back — a broken invariant must not silently hand the reviver a bogus
+      // `source`.
+      let assert Ok(text) = bit_array.to_string(raw)
       dict.from_list([
         #(key.canonical_key("source"), value.data_property(JsString(text))),
       ])
+    }
     None -> dict.new()
   }
   let #(heap, ref) =
@@ -574,57 +635,83 @@ fn alloc_context(
 /// reviver as `context.source`; only primitives ever expose it, so arrays and
 /// objects carry no source of their own.
 ///
-/// The slices use the scanner's zero-copy technique (`bit_array.slice` yields a
-/// sub-binary), so recording them costs one O(1) slice per primitive and no
-/// extra byte scanning.
+/// It is kept as raw BYTES, not a String, and stays that way until a reviver
+/// asks for it (`alloc_context`). `bit_array.slice` is a genuinely O(1)
+/// sub-binary, but `bit_array.to_string` validates the whole slice as UTF-8 —
+/// so decoding a string literal's source eagerly would re-scan every string in
+/// the document, on every JSON.parse, including the overwhelmingly common calls
+/// with no reviver at all, where the source is thrown away unread. Slicing here
+/// and decoding there costs the byte-scanning parser nothing.
 type JsonValue {
-  JsonNull(source: String)
-  JsonBool(value: Bool, source: String)
-  JsonNumber(value: value.JsNum, source: String)
-  JsonString(value: String, source: String)
+  JsonNull(source: BitArray)
+  JsonBool(value: Bool, source: BitArray)
+  JsonNumber(value: value.JsNum, source: BitArray)
+  JsonString(value: String, source: BitArray)
   JsonArray(List(JsonValue))
   JsonObject(List(#(String, JsonValue)))
 }
 
-/// A primitive literal node's `#(value it produced, exact source text)`, or
-/// `None` for arrays and objects (whose reviver `context` never gets a
-/// `source` property).
+/// The proposal's JSON Parse Record: a literal node paired with the exact
+/// `JsValue` it materialized into ([[Value]]) — the heap `Ref` for arrays and
+/// objects — plus its children's records.
 ///
-/// The value comes back alongside the text because InternalizeJSONProperty
-/// only exposes `source` while the value sitting in the holder is still the
-/// one this literal produced — see `unmodified_source`.
-fn json_node_primitive(node: JsonValue) -> Option(#(JsValue, String)) {
-  case node {
-    JsonNull(source:) -> Some(#(JsNull, source))
-    JsonBool(value: b, source:) -> Some(#(JsBool(b), source))
-    JsonNumber(value: n, source:) -> Some(#(JsNumber(n), source))
-    JsonString(value: s, source:) -> Some(#(JsString(s), source))
-    JsonArray(_) | JsonObject(_) -> None
+/// InternalizeJSONProperty compares [[Value]] against whatever is actually
+/// sitting in the holder before it hands out either the `source` text or the
+/// child records, so a reviver that swaps a slot for a different value cannot
+/// make the source of the original literal describe the replacement.
+type ParseRecord {
+  /// A primitive literal: `[[Value]]` and its exact source text, still as the
+  /// undecoded bytes the scanner sliced out (see `JsonValue`).
+  PrimRecord(value: JsValue, source: BitArray)
+  /// An array literal: the array object it produced, and its elements' records.
+  ArrayRecord(value: JsValue, elements: List(ParseRecord))
+  /// An object literal: the object it produced, and its members' records.
+  ObjectRecord(value: JsValue, entries: List(#(String, ParseRecord)))
+}
+
+/// The record's [[Value]]: what materializing this literal produced.
+fn record_value(record: ParseRecord) -> JsValue {
+  case record {
+    PrimRecord(value:, ..)
+    | ArrayRecord(value:, ..)
+    | ObjectRecord(value:, ..) -> value
   }
 }
 
-/// The child node at array index `i`, or `None` if the node is not an array
-/// literal / the index is out of range (e.g. an element a reviver added).
-fn json_node_element(node: JsonValue, i: Int) -> Option(JsonValue) {
-  case node {
-    JsonArray(items) -> helpers.list_at(items, i)
-    _ -> None
+/// Step 3.a: the literal's exact source text — primitives only. Arrays and
+/// objects never expose a `source`, so their reviver `context` stays empty.
+fn record_source(record: Option(ParseRecord)) -> Option(BitArray) {
+  case record {
+    Some(PrimRecord(source:, ..)) -> Some(source)
+    Some(ArrayRecord(..)) | Some(ObjectRecord(..)) | None -> None
   }
 }
 
-/// The child node for object key `k`, or `None` if the node is not an object
-/// literal / has no such key. Duplicate keys resolve to the LAST occurrence,
-/// matching how `value.props_dict_from_pairs` materializes them.
-fn json_node_member(node: JsonValue, k: String) -> Option(JsonValue) {
-  case node {
-    JsonObject(entries) ->
-      list.fold(entries, None, fn(acc, entry) {
-        case entry.0 == k {
-          True -> Some(entry.1)
-          False -> acc
-        }
+/// The child records of an array literal, in index order — empty for anything
+/// else (a primitive, an object, or a slot with no live record at all).
+/// `internalize_elements` walks them in lockstep with the indices, so no child
+/// is ever looked up by index.
+fn record_elements(record: Option(ParseRecord)) -> List(ParseRecord) {
+  case record {
+    Some(ArrayRecord(elements:, ..)) -> elements
+    _ -> []
+  }
+}
+
+/// The child records of an object literal, keyed by member name and built once
+/// per object so `internalize_keys` pays one dict lookup per key instead of a
+/// fold over every member. Duplicate keys resolve to the LAST occurrence
+/// (later inserts win), matching how `value.props_dict_from_pairs` materializes
+/// them.
+fn record_members(
+  record: Option(ParseRecord),
+) -> dict.Dict(String, ParseRecord) {
+  case record {
+    Some(ObjectRecord(entries:, ..)) ->
+      list.fold(entries, dict.new(), fn(acc, entry) {
+        dict.insert(acc, entry.0, entry.1)
       })
-    _ -> None
+    _ -> dict.new()
   }
 }
 
@@ -703,21 +790,22 @@ fn parse_value(
     <<>> -> Error(UnexpectedEnd)
     // "null"
     <<0x6E, 0x75, 0x6C, 0x6C, rest:bytes>> ->
-      Ok(#(JsonNull(source: "null"), rest))
+      Ok(#(JsonNull(source: <<"null":utf8>>), rest))
     // "true"
     <<0x74, 0x72, 0x75, 0x65, rest:bytes>> ->
-      Ok(#(JsonBool(value: True, source: "true"), rest))
+      Ok(#(JsonBool(value: True, source: <<"true":utf8>>), rest))
     // "false"
     <<0x66, 0x61, 0x6C, 0x73, 0x65, rest:bytes>> ->
-      Ok(#(JsonBool(value: False, source: "false"), rest))
+      Ok(#(JsonBool(value: False, source: <<"false":utf8>>), rest))
     // '"'
     <<0x22, rest:bytes>> -> {
       use #(s, rest) <- result.try(parse_string(rest))
       // The literal's source text is everything the string scanner consumed,
       // opening quote included: `rest` is a sub-binary of `bytes`, so the byte
-      // lengths differ by exactly the span, and the slice is O(1).
+      // lengths differ by exactly the span, and the slice is O(1). It stays
+      // undecoded — see `JsonValue`.
       let span = bit_array.byte_size(bytes) - bit_array.byte_size(rest)
-      use raw <- result.map(take_string(bytes, span))
+      use raw <- result.map(take_bytes(bytes, span))
       #(JsonString(value: s, source: raw), rest)
     }
     // '['
@@ -926,9 +1014,13 @@ fn parse_number(
     Ok(span) -> {
       let len = span.int_len + span.frac_len + span.exp_len
       use num_str <- result.map(take_string(bytes, len))
-      // `num_str` already IS the literal's exact source text.
+      // `num_str` already IS the literal's exact source text; on BEAM a String
+      // is a binary, so re-viewing it as bytes is free (no copy, no scan).
       #(
-        JsonNumber(value: number_span_to_num(num_str, span), source: num_str),
+        JsonNumber(
+          value: number_span_to_num(num_str, span),
+          source: bit_array.from_string(num_str),
+        ),
         drop_bytes(bytes, len),
       )
     }
@@ -1168,6 +1260,13 @@ fn take_string(bytes: BitArray, len: Int) -> Result(String, JsonParseError) {
   }
 }
 
+/// Slice the first `len` bytes off `bytes`, undecoded.
+/// Truly O(1) — a zero-copy sub-binary, with none of the UTF-8 validation
+/// `bit_array.to_string` (and hence `take_string`) walks the whole slice for.
+fn take_bytes(bytes: BitArray, len: Int) -> Result(BitArray, JsonParseError) {
+  bit_array.slice(bytes, 0, len) |> result.replace_error(UnexpectedEnd)
+}
+
 /// Drop the first `n` bytes of `bytes` (O(1) sub-binary).
 fn drop_bytes(bytes: BitArray, n: Int) -> BitArray {
   case bit_array.slice(bytes, n, bit_array.byte_size(bytes) - n) {
@@ -1176,24 +1275,39 @@ fn drop_bytes(bytes: BitArray, n: Int) -> BitArray {
   }
 }
 
-/// Materialize a parsed JsonValue into a JsValue, allocating objects on the heap.
+/// Materialize a parsed JsonValue onto the JS heap, returning its parse record:
+/// the JsValue produced (`record_value`) plus, for arrays and objects, the
+/// records of everything underneath it. The record tree is what feeds
+/// InternalizeJSONProperty's `context.source`.
 fn materialize(
   h: Heap(host),
   b: common.Builtins,
   val: JsonValue,
-) -> #(Heap(host), JsValue) {
+) -> #(Heap(host), ParseRecord) {
   case val {
-    JsonNull(..) -> #(h, JsNull)
-    JsonBool(value: b_val, ..) -> #(h, JsBool(b_val))
-    JsonNumber(value: n, ..) -> #(h, JsNumber(n))
-    JsonString(value: s, ..) -> #(h, JsString(s))
+    JsonNull(source:) -> #(h, PrimRecord(value: JsNull, source:))
+    JsonBool(value: b_val, source:) -> #(h, PrimRecord(JsBool(b_val), source:))
+    JsonNumber(value: n, source:) -> #(h, PrimRecord(JsNumber(n), source:))
+    JsonString(value: s, source:) -> #(h, PrimRecord(JsString(s), source:))
     JsonArray(items) -> {
-      let #(h, js_items) = materialize_list(h, b, items, [])
-      let #(h, ref) = common.alloc_array(h, js_items, b.array.prototype)
-      #(h, JsObject(ref))
+      let #(h, elements) = materialize_list(h, b, items, [])
+      let #(h, ref) =
+        common.alloc_array(
+          h,
+          list.map(elements, record_value),
+          b.array.prototype,
+        )
+      #(h, ArrayRecord(value: JsObject(ref), elements:))
     }
     JsonObject(entries) -> {
-      let #(h, props) = materialize_object_entries(h, b, entries, [])
+      let #(h, entries) = materialize_object_entries(h, b, entries, [])
+      let props =
+        list.map(entries, fn(entry) {
+          #(
+            key.canonical_key(entry.0),
+            value.data_property(record_value(entry.1)),
+          )
+        })
       let #(h, ref) =
         heap.alloc(
           h,
@@ -1208,7 +1322,7 @@ fn materialize(
             extensible: True,
           ),
         )
-      #(h, JsObject(ref))
+      #(h, ObjectRecord(value: JsObject(ref), entries:))
     }
   }
 }
@@ -1217,13 +1331,13 @@ fn materialize_list(
   h: Heap(host),
   b: common.Builtins,
   items: List(JsonValue),
-  acc: List(JsValue),
-) -> #(Heap(host), List(JsValue)) {
+  acc: List(ParseRecord),
+) -> #(Heap(host), List(ParseRecord)) {
   case items {
     [] -> #(h, list.reverse(acc))
     [item, ..rest] -> {
-      let #(h, val) = materialize(h, b, item)
-      materialize_list(h, b, rest, [val, ..acc])
+      let #(h, record) = materialize(h, b, item)
+      materialize_list(h, b, rest, [record, ..acc])
     }
   }
 }
@@ -1232,16 +1346,13 @@ fn materialize_object_entries(
   h: Heap(host),
   b: common.Builtins,
   entries: List(#(String, JsonValue)),
-  acc: List(#(key.PropertyKey, Property)),
-) -> #(Heap(host), List(#(key.PropertyKey, Property))) {
+  acc: List(#(String, ParseRecord)),
+) -> #(Heap(host), List(#(String, ParseRecord))) {
   case entries {
     [] -> #(h, list.reverse(acc))
-    [#(key, val), ..rest] -> {
-      let #(h, js_val) = materialize(h, b, val)
-      materialize_object_entries(h, b, rest, [
-        #(key.canonical_key(key), value.data_property(js_val)),
-        ..acc
-      ])
+    [#(name, val), ..rest] -> {
+      let #(h, record) = materialize(h, b, val)
+      materialize_object_entries(h, b, rest, [#(name, record), ..acc])
     }
   }
 }
@@ -1260,6 +1371,7 @@ fn materialize_object_entries(
 /// value is not serializable.
 fn json_stringify(
   args: List(JsValue),
+  caller_builtins: common.Builtins,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let val = helpers.first_arg_or_undefined(args)
@@ -1277,7 +1389,7 @@ fn json_stringify(
     // Steps 9-11: wrapper = OrdinaryObjectCreate(%Object.prototype%) with
     // CreateDataPropertyOrThrow(wrapper, "", value).
     let #(state, wrapper) = alloc_holder(state, val)
-    let ctx = StringifyCtx(replacer_fn:, property_list:, gap:)
+    let ctx = StringifyCtx(replacer_fn:, property_list:, gap:, caller_builtins:)
     // Step 12.
     serialize_property(state, ctx, [], "", "", wrapper)
   }
@@ -1290,11 +1402,14 @@ fn json_stringify(
 
 /// Immutable parts of the spec's JSON Serialization Record: ReplacerFunction,
 /// PropertyList and Gap. (Stack and Indent are threaded as parameters.)
+/// `caller_builtins` is not the spec's — it is the realm the replacer and any
+/// `toJSON` must run in, see `dispatch`.
 type StringifyCtx {
   StringifyCtx(
     replacer_fn: Option(JsValue),
     property_list: Option(List(String)),
     gap: String,
+    caller_builtins: common.Builtins,
   )
 }
 
@@ -1515,7 +1630,10 @@ fn serialize_property(
         key.canonical_key("toJSON"),
       ))
       case helpers.is_callable(state.heap, to_json) {
-        True -> state.call(state, to_json, val, [JsString(key)])
+        True ->
+          call_in_caller_realm(state, ctx.caller_builtins, to_json, val, [
+            JsString(key),
+          ])
         False -> Ok(#(val, state))
       }
     }
@@ -1523,7 +1641,11 @@ fn serialize_property(
   })
   // Step 3: ReplacerFunction — called with the holder as `this`.
   use #(val, state) <- result.try(case ctx.replacer_fn {
-    Some(rf) -> state.call(state, rf, JsObject(holder), [JsString(key), val])
+    Some(rf) ->
+      call_in_caller_realm(state, ctx.caller_builtins, rf, JsObject(holder), [
+        JsString(key),
+        val,
+      ])
     None -> Ok(#(val, state))
   })
   // Step 4.e (json-parse-with-source): a [[IsRawJSON]] box is emitted verbatim.
