@@ -406,6 +406,17 @@ pub fn read_boolean_object(h: Heap(ctx, host), ref: Ref) -> Option(Bool) {
   }
 }
 
+/// Read a BigIntObject's [[BigIntData]] slot.
+pub fn read_bigint_object(
+  h: Heap(ctx, host),
+  ref: Ref,
+) -> Option(value.BigInt) {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.BigIntObject(value:), ..)) -> Some(value)
+    _ -> None
+  }
+}
+
 // -----------------------------------------------------------------------------
 
 /// Sentinel ref with no backing slot. `read` returns Error, `write`/`update`
@@ -463,16 +474,6 @@ pub fn update_kind(
     value.ObjectSlot(..) -> value.ObjectSlot(..slot, kind:)
     other -> other
   }
-}
-
-/// Write a slot at a ref unconditionally. Used to fill reserved
-/// (forward-reference) slots that have no data in the heap yet.
-pub fn fill(
-  heap: Heap(ctx, host),
-  ref: Ref,
-  slot: HeapSlot(ctx, host),
-) -> Heap(ctx, host) {
-  Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
 }
 
 /// Mark a ref as a persistent GC root.

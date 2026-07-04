@@ -155,7 +155,7 @@ fn init_stack_type(
   let h = heap.root(h, ctor_ref)
 
   let h =
-    heap.fill(
+    heap.write(
       h,
       proto_ref,
       ObjectSlot(
@@ -378,8 +378,9 @@ fn require_stack(
     },
     fn(kind) {
       case kind {
-        DisposableStackObject(async: a, state: disposable_state) if a == async ->
-          Some(disposable_state)
+        DisposableStackObject(async: a, state: disposable_state)
+          if a == async
+        -> Some(disposable_state)
         _ -> None
       }
     },

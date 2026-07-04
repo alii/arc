@@ -2180,28 +2180,6 @@ pub fn delete_symbol_property(
   }
 }
 
-/// Read a dict property out of an already-matched ObjectSlot (delete path).
-fn dict_get_option_for_delete(
-  slot: HeapSlot(host),
-  key: PropertyKey,
-) -> Option(Property) {
-  case slot {
-    ObjectSlot(properties:, ..) -> dict_get_option(properties, key)
-    _ -> None
-  }
-}
-
-/// Remove a key from an already-matched ObjectSlot's properties dict.
-fn delete_prop_key(
-  slot: HeapSlot(host),
-  key: PropertyKey,
-) -> dict.Dict(PropertyKey, Property) {
-  case slot {
-    ObjectSlot(properties:, ..) -> dict.delete(properties, key)
-    _ -> dict.new()
-  }
-}
-
 pub fn delete_property(
   h: Heap(host),
   ref: Ref,
@@ -2215,7 +2193,19 @@ pub fn delete_property(
         True -> #(h, False)
         False -> #(h, True)
       }
-    Some(ObjectSlot(kind:, elements:, ..) as slot) ->
+    Some(ObjectSlot(kind:, elements:, properties:, ..) as slot) -> {
+      // §10.1.10.1 OrdinaryDelete for the string/private-key case: shared by
+      // every exotic arm below that falls back to ordinary behavior.
+      let ordinary_delete = fn() {
+        case ordinary_delete_outcome(properties, key) {
+          DeleteRemoved(rest) -> #(
+            heap.write(h, ref, ObjectSlot(..slot, properties: rest)),
+            True,
+          )
+          DeleteVacuous -> #(h, True)
+          DeleteRefused -> #(h, False)
+        }
+      }
       case kind {
         // §10.4.5.5 TypedArray [[Delete]]: canonical numeric index keys are
         // deletable iff they are NOT valid indices (nothing to delete);
@@ -2239,9 +2229,9 @@ pub fn delete_property(
             Named(s) ->
               case is_canonical_numeric_string(s) {
                 True -> #(h, True)
-                False -> delete_string_property(h, ref, key, slot)
+                False -> ordinary_delete()
               }
-            Private(_) -> delete_string_property(h, ref, key, slot)
+            Private(_) -> ordinary_delete()
           }
         // Array/Arguments exotic: check if key is an array index
         ArrayObject(_) | value.ArgumentsObject(_) ->
@@ -2249,7 +2239,7 @@ pub fn delete_property(
             Index(idx) ->
               // Dict override (defineProperty-created attributes) wins:
               // §10.1.10.1 step 3 honors its [[Configurable]].
-              case dict_get_option_for_delete(slot, key) {
+              case dict_get_option(properties, key) {
                 Some(prop) ->
                   case value.prop_configurable(prop) {
                     True -> #(
@@ -2258,7 +2248,7 @@ pub fn delete_property(
                         ref,
                         ObjectSlot(
                           ..slot,
-                          properties: delete_prop_key(slot, key),
+                          properties: dict.delete(properties, key),
                           elements: elements.delete(elements, idx),
                         ),
                       ),
@@ -2291,9 +2281,9 @@ pub fn delete_property(
             Named("length") ->
               case kind {
                 ArrayObject(_) -> #(h, False)
-                _ -> delete_string_property(h, ref, key, slot)
+                _ -> ordinary_delete()
               }
-            Named(_) | Private(_) -> delete_string_property(h, ref, key, slot)
+            Named(_) | Private(_) -> ordinary_delete()
           }
         // String exotic: "length" and in-range indices are synthesized
         // non-configurable properties (§10.4.3) — never deletable.
@@ -2303,49 +2293,45 @@ pub fn delete_property(
             Index(i) ->
               case js_string.char_at(s, i) {
                 Some(_) -> #(h, False)
-                None -> delete_string_property(h, ref, key, slot)
+                None -> ordinary_delete()
               }
-            Named(_) | Private(_) -> delete_string_property(h, ref, key, slot)
+            Named(_) | Private(_) -> ordinary_delete()
           }
-        _ -> delete_string_property(h, ref, key, slot)
+        _ -> ordinary_delete()
       }
+    }
     // Step 2: No slot found — treat as non-existent, return true.
     _ -> #(h, True)
   }
 }
 
-/// §10.1.10.1 OrdinaryDelete ( O, P ) — string-keyed property case.
+/// Outcome of §10.1.10.1 OrdinaryDelete ( O, P ) run against a properties
+/// dict — the string/private-key case.
 ///
 /// Step 1: Let desc be ? O.[[GetOwnProperty]](P).
 /// Step 2: If desc is undefined, return true.
 /// Step 3: If desc.[[Configurable]] is true, remove and return true.
 /// Step 4: Return false.
-fn delete_string_property(
-  h: Heap(host),
-  ref: Ref,
+type DeleteOutcome {
+  /// Step 3: configurable → the properties dict with the key removed.
+  DeleteRemoved(dict.Dict(PropertyKey, Property))
+  /// Step 2: no such own property → nothing to write, "true".
+  DeleteVacuous
+  /// Step 4: non-configurable → "false".
+  DeleteRefused
+}
+
+fn ordinary_delete_outcome(
+  properties: dict.Dict(PropertyKey, Property),
   key: PropertyKey,
-  slot: HeapSlot(host),
-) -> #(Heap(host), Bool) {
-  case slot {
-    ObjectSlot(properties:, ..) ->
-      case dict.get(properties, key) {
-        // Step 3: desc.[[Configurable]] is true → remove own property, return true.
-        Ok(DataProperty(configurable: True, ..))
-        | Ok(value.AccessorProperty(configurable: True, ..)) -> #(
-          heap.write(
-            h,
-            ref,
-            ObjectSlot(..slot, properties: dict.delete(properties, key)),
-          ),
-          True,
-        )
-        // Step 4: desc.[[Configurable]] is false → return false.
-        Ok(DataProperty(configurable: False, ..))
-        | Ok(value.AccessorProperty(configurable: False, ..)) -> #(h, False)
-        // Step 2: desc is undefined → return true.
-        Error(_) -> #(h, True)
-      }
-    _ -> #(h, True)
+) -> DeleteOutcome {
+  case dict.get(properties, key) {
+    Ok(DataProperty(configurable: True, ..))
+    | Ok(value.AccessorProperty(configurable: True, ..)) ->
+      DeleteRemoved(dict.delete(properties, key))
+    Ok(DataProperty(configurable: False, ..))
+    | Ok(value.AccessorProperty(configurable: False, ..)) -> DeleteRefused
+    Error(Nil) -> DeleteVacuous
   }
 }
 
@@ -3245,8 +3231,6 @@ fn inspect_object(
           ))
           <> ")"
         value.IteratorHelperObject(..) -> "[Iterator Helper]"
-        value.IteratorZipObject(..) -> "[Iterator Helper]"
-        value.IteratorConcatObject(..) -> "[Iterator Helper]"
         value.WrapForValidIteratorObject(..) -> "[Iterator]"
         value.TemporalDateSlot(..) -> "Temporal.PlainDate {}"
         value.TemporalTimeSlot(..) -> "Temporal.PlainTime {}"
@@ -4303,7 +4287,7 @@ pub fn typed_array_element(
   case typed_array_buffer_data(h, buffer) {
     None -> None
     Some(data) -> {
-      let size = value.typed_array_element_size(elem_kind)
+      let size = typed_array_ffi.elem_size(elem_kind)
       // §10.4.5.14 IsValidIntegerIndex against the CURRENT backing store — the
       // SAME predicate the write half applies (typed_array_elements owns it),
       // so a read and a write can never disagree about which indices exist.
@@ -4346,26 +4330,55 @@ pub fn typed_array_element_live(
   )
 }
 
+/// Why a typed-array view failed its buffer witness. The two cases are NOT
+/// interchangeable — a detached buffer has no bytes at all, an out-of-bounds
+/// view is a resizable buffer that shrank below the view — so callers get a
+/// category, never a pre-worded string they could accidentally reword.
+pub type ViewWitnessError {
+  /// The view's `ArrayBuffer` was detached (transferred, or `.transfer()`d).
+  BufferDetached
+  /// The buffer is live but no longer covers the view's byte range.
+  OutOfBoundsView
+}
+
+/// The ONE place a `ViewWitnessError` becomes prose.
+pub fn view_witness_error_message(err: ViewWitnessError) -> String {
+  case err {
+    BufferDetached -> "Cannot perform operation on a detached ArrayBuffer"
+    OutOfBoundsView -> "TypedArray is out of bounds"
+  }
+}
+
+/// Throw the `TypeError` a failed buffer witness demands. Both categories are
+/// TypeErrors (§23.1.5.1), and this owns that decision along with the wording,
+/// so no caller can pick a different error class for one of them.
+pub fn throw_view_witness_error(
+  state: State(host),
+  err: ViewWitnessError,
+) -> Result(a, state.StepExit(host)) {
+  state.throw_type_error(state, view_witness_error_message(err))
+}
+
 /// §23.1.5.1 CreateArrayIterator buffer-witness check for typed-array
 /// sources: each `.next()` re-validates the view against the CURRENT buffer
 /// (MakeTypedArrayWithBufferWitnessRecord + IsTypedArrayOutOfBounds) and
-/// throws TypeError on a detached buffer or an out-of-bounds view (a
-/// resizable buffer that shrank below the view). Ok(length) otherwise.
+/// fails on a detached buffer or an out-of-bounds view (a resizable buffer
+/// that shrank below the view). Ok(length) otherwise.
 pub fn typed_array_iter_length(
   h: Heap(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
   length: Option(Int),
-) -> Result(Int, String) {
+) -> Result(Int, ViewWitnessError) {
   let length =
     typed_array_view_length(h, buffer, elem_kind, byte_offset, length)
   case typed_array_buffer_data(h, buffer) {
-    None -> Error("Cannot perform operation on a detached ArrayBuffer")
+    None -> Error(BufferDetached)
     Some(data) -> {
-      let size = value.typed_array_element_size(elem_kind)
+      let size = typed_array_ffi.elem_size(elem_kind)
       case byte_offset + length * size > bit_array.byte_size(data) {
-        True -> Error("TypedArray is out of bounds")
+        True -> Error(OutOfBoundsView)
         False -> Ok(length)
       }
     }
@@ -4387,7 +4400,7 @@ pub fn typed_array_live_length(
   case typed_array_buffer_data(h, buffer) {
     None -> 0
     Some(data) -> {
-      let size = value.typed_array_element_size(elem_kind)
+      let size = typed_array_ffi.elem_size(elem_kind)
       case byte_offset + length * size <= bit_array.byte_size(data) {
         True -> length
         False -> 0
@@ -4422,27 +4435,18 @@ fn decode_typed_element(
   off: Int,
   elem_kind: value.TypedArrayKind,
 ) -> JsValue {
+  // The kind -> codec mapping is typed_array_ffi.elem_of_kind's job; all this
+  // adds is the wrapper the content type calls for (Number vs BigInt).
   case elem_kind {
-    value.NumKind(value.Int8Kind) ->
-      value.from_int(ta_get_int(data, off, typed_array_ffi.I8))
-    value.NumKind(value.Uint8Kind) | value.NumKind(value.Uint8ClampedKind) ->
-      value.from_int(ta_get_int(data, off, typed_array_ffi.U8))
-    value.NumKind(value.Int16Kind) ->
-      value.from_int(ta_get_int(data, off, typed_array_ffi.I16))
-    value.NumKind(value.Uint16Kind) ->
-      value.from_int(ta_get_int(data, off, typed_array_ffi.U16))
-    value.NumKind(value.Int32Kind) ->
-      value.from_int(ta_get_int(data, off, typed_array_ffi.I32))
-    value.NumKind(value.Uint32Kind) ->
-      value.from_int(ta_get_int(data, off, typed_array_ffi.U32))
-    value.NumKind(value.Float32Kind) ->
-      JsNumber(ta_get_float(data, off, typed_array_ffi.F32))
-    value.NumKind(value.Float64Kind) ->
-      JsNumber(ta_get_float(data, off, typed_array_ffi.F64))
-    value.BigKind(value.BigInt64Kind) ->
-      value.JsBigInt(value.BigInt(ta_get_int(data, off, typed_array_ffi.I64)))
-    value.BigKind(value.BigUint64Kind) ->
-      value.JsBigInt(value.BigInt(ta_get_int(data, off, typed_array_ffi.U64)))
+    value.BigKind(k) ->
+      value.JsBigInt(
+        value.BigInt(ta_get_int(data, off, typed_array_ffi.bigint_elem(k))),
+      )
+    value.NumKind(_) ->
+      case typed_array_ffi.elem_of_kind(elem_kind) {
+        typed_array_ffi.Int(e) -> value.from_int(ta_get_int(data, off, e))
+        typed_array_ffi.Float(e) -> JsNumber(ta_get_float(data, off, e))
+      }
   }
 }
 

@@ -547,8 +547,9 @@ fn read_uint(chunk: BitArray, little: Bool) -> Int {
     False, <<v:size(32)>> -> v
     True, <<v:size(64)-little>> -> v
     False, <<v:size(64)>> -> v
-    // Unreachable: chunk width always matches element_size.
-    _, _ -> 0
+    // The chunk width always matches element_size; anything else would decode
+    // as a bogus 0 rather than the bytes actually in the buffer.
+    _, _ -> panic as "data_view: element chunk is not 1, 2, 4 or 8 bytes wide"
   }
 }
 
@@ -653,11 +654,10 @@ fn apply_sign(f: Float, sign: Int) -> Float {
 
 /// 2^e as a Float for the small exponent range half-floats need.
 fn pow2(e: Int) -> Float {
-  case float.power(2.0, int.to_float(e)) {
-    Ok(f) -> f
-    // Unreachable for e in [-24, 5]: base is positive.
-    Error(Nil) -> 1.0
-  }
+  // Total for e in [-24, 5]: the base is positive.
+  let assert Ok(f) = float.power(2.0, int.to_float(e))
+    as "data_view: 2^e is undefined"
+  f
 }
 
 /// Coerce + encode the value for SetViewValue. Produces the element's raw
@@ -732,11 +732,8 @@ fn f16_to_bits(num: value.JsNum) -> Int {
     Infinity -> 0x7C00
     NegInfinity -> 0xFC00
     Finite(f) -> {
-      let b = case <<f:float-size(64)>> {
-        <<u:size(64)>> -> u
-        // Unreachable: a 64-bit construction always yields 64 bits.
-        _ -> 0
-      }
+      let assert <<b:size(64)>> = <<f:float-size(64)>>
+        as "data_view: 64-bit float is not 64 bits wide"
       let sign_bits = int.bitwise_shift_left(int.bitwise_shift_right(b, 63), 15)
       let exp = int.bitwise_and(int.bitwise_shift_right(b, 52), 0x7FF)
       let mant = int.bitwise_and(b, 0xFFFFFFFFFFFFF)
@@ -806,7 +803,9 @@ fn to_endian(chunk: BitArray, little: Bool, size: Int) -> BitArray {
         <<v:size(16)>> -> <<v:size(16)-little>>
         <<v:size(32)>> -> <<v:size(32)-little>>
         <<v:size(64)>> -> <<v:size(64)-little>>
-        other -> other
+        // Returning `chunk` unflipped here would silently store big-endian
+        // bytes for a little-endian write.
+        _ -> panic as "data_view: element chunk is not 2, 4 or 8 bytes wide"
       }
   }
 }

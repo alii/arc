@@ -126,7 +126,7 @@ pub fn init(
       constructible: False,
     )
   let h =
-    heap.fill(
+    heap.write(
       h,
       proto_ref,
       ObjectSlot(

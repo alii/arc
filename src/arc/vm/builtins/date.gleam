@@ -588,11 +588,12 @@ fn require_time_value(
 fn set_this_time_value(state: State(host), ref: Ref, tv: JsNum) -> State(host) {
   let heap =
     heap.update(state.heap, ref, fn(slot) {
-      case slot {
-        ObjectSlot(kind: DateObject(_), ..) ->
-          ObjectSlot(..slot, kind: DateObject(time_value: tv))
-        other -> other
-      }
+      // Only reachable via `require_time_value`, which proved this ref holds a
+      // Date. Silently keeping the old slot would drop the store while every
+      // caller still reports the new time value back to JS.
+      let assert ObjectSlot(kind: DateObject(_), ..) as obj = slot
+        as "date: slot is not a Date object"
+      ObjectSlot(..obj, kind: DateObject(time_value: tv))
     })
   State(..state, heap:)
 }

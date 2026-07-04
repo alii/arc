@@ -680,7 +680,7 @@ fn init_temporal_type(
     )
   let h = heap.root(h, ctor_ref)
   let h =
-    heap.fill(
+    heap.write(
       h,
       proto_ref,
       ObjectSlot(
@@ -1088,24 +1088,18 @@ fn read_kind(
   }
 }
 
-fn this_date(state: State(host), this: JsValue) -> Option(IsoDate) {
+/// Every calendared receiver hands its calendar back with its date (as
+/// `this_zoned` already did), so a caller that has the date always has the
+/// calendar the date is expressed in — there is no separate lookup that could
+/// miss and fall back to iso8601.
+fn this_date(
+  state: State(host),
+  this: JsValue,
+) -> Option(#(IsoDate, tcal.Calendar)) {
   case read_kind(state, this) {
-    Some(TemporalDateSlot(year:, month:, day:, calendar: _)) ->
-      Some(IsoDate(year:, month:, day:))
+    Some(TemporalDateSlot(year:, month:, day:, calendar:)) ->
+      Some(#(IsoDate(year:, month:, day:), calendar))
     _ -> None
-  }
-}
-
-/// Calendar slot of any calendared Temporal object (PlainDate,
-/// PlainDateTime, PlainYearMonth, PlainMonthDay, ZonedDateTime).
-fn this_calendar(state: State(host), this: JsValue) -> tcal.Calendar {
-  case read_kind(state, this) {
-    Some(TemporalDateSlot(calendar:, ..)) -> calendar
-    Some(TemporalDateTimeSlot(calendar:, ..)) -> calendar
-    Some(TemporalYearMonthSlot(calendar:, ..)) -> calendar
-    Some(TemporalMonthDaySlot(calendar:, ..)) -> calendar
-    Some(TemporalZonedDateTimeSlot(calendar:, ..)) -> calendar
-    _ -> tcal.Iso8601
   }
 }
 
@@ -1127,7 +1121,7 @@ fn this_time(state: State(host), this: JsValue) -> Option(TimeRec) {
 fn this_date_time(
   state: State(host),
   this: JsValue,
-) -> Option(#(IsoDate, TimeRec)) {
+) -> Option(#(IsoDate, TimeRec, tcal.Calendar)) {
   case read_kind(state, this) {
     Some(TemporalDateTimeSlot(
       year:,
@@ -1139,11 +1133,12 @@ fn this_date_time(
       millisecond:,
       microsecond:,
       nanosecond:,
-      calendar: _,
+      calendar:,
     )) ->
       Some(#(
         IsoDate(year, month, day),
         TimeRec(hour, minute, second, millisecond, microsecond, nanosecond),
+        calendar,
       ))
     _ -> None
   }
@@ -1152,10 +1147,10 @@ fn this_date_time(
 fn this_year_month(
   state: State(host),
   this: JsValue,
-) -> Option(#(Int, Int, Int)) {
+) -> Option(#(Int, Int, Int, tcal.Calendar)) {
   case read_kind(state, this) {
-    Some(TemporalYearMonthSlot(year:, month:, day:, calendar: _)) ->
-      Some(#(year, month, day))
+    Some(TemporalYearMonthSlot(year:, month:, day:, calendar:)) ->
+      Some(#(year, month, day, calendar))
     _ -> None
   }
 }
@@ -1163,10 +1158,10 @@ fn this_year_month(
 fn this_month_day(
   state: State(host),
   this: JsValue,
-) -> Option(#(Int, Int, Int)) {
+) -> Option(#(Int, Int, Int, tcal.Calendar)) {
   case read_kind(state, this) {
-    Some(TemporalMonthDaySlot(month:, day:, ref_year:, calendar: _)) ->
-      Some(#(month, day, ref_year))
+    Some(TemporalMonthDaySlot(month:, day:, ref_year:, calendar:)) ->
+      Some(#(month, day, ref_year, calendar))
     _ -> None
   }
 }
@@ -1534,6 +1529,31 @@ fn type_error_result(
   msg: String,
 ) -> Result(#(a, State(host)), #(JsValue, State(host))) {
   Error(state.type_error_value(st, msg))
+}
+
+/// The one place a `TErr` becomes an ops-level thrown JS error, mirroring
+/// `throw_terr` for the `#(State, Result(..))` boundary. A new `TErr` variant
+/// breaks here rather than at every op that can raise one.
+fn throw_terr_op(
+  state: State(host),
+  e: TErr,
+) -> Result(#(a, State(host)), #(JsValue, State(host))) {
+  case e {
+    RangeE(m) -> range_error_result(state, m)
+    TypeE(m) -> type_error_result(state, m)
+  }
+}
+
+/// Adapter: a pure `Result(a, TErr)` op as an ops-level result, throwing on
+/// Error. Use `terr_r` instead when the success value feeds more work.
+fn terr_op(
+  state: State(host),
+  r: Result(a, TErr),
+) -> Result(#(a, State(host)), #(JsValue, State(host))) {
+  case r {
+    Ok(v) -> Ok(#(v, state))
+    Error(e) -> throw_terr_op(state, e)
+  }
 }
 
 // ============================================================================
@@ -3118,12 +3138,7 @@ fn read_bag_calendar(
   ))
   case got {
     #(JsUndefined, st) -> Ok(#(tcal.Iso8601, st))
-    #(JsString(s), st) ->
-      case calendar_from_string(s) {
-        Ok(c) -> Ok(#(c, st))
-        Error(RangeE(m)) -> range_error_result(st, m)
-        Error(TypeE(m)) -> type_error_result(st, m)
-      }
+    #(JsString(s), st) -> terr_op(st, calendar_from_string(s))
     #(JsObject(oref), st) ->
       // A Temporal object with a calendar slot acts as its calendar.
       case heap.read(st.heap, oref) {
@@ -3146,12 +3161,7 @@ fn to_temporal_calendar_identifier(
   v: JsValue,
 ) -> Result(#(tcal.Calendar, State(host)), #(JsValue, State(host))) {
   case v {
-    JsString(s) ->
-      case calendar_from_string(s) {
-        Ok(c) -> Ok(#(c, state))
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-      }
+    JsString(s) -> terr_op(state, calendar_from_string(s))
     JsObject(oref) ->
       case heap.read(state.heap, oref) {
         Some(ObjectSlot(kind: TemporalDateSlot(calendar:, ..), ..))
@@ -3368,8 +3378,8 @@ fn resolve_calendar_month(
   overflow: Overflow,
 ) -> Result(Int, TErr) {
   case f.month_code {
-    Some(tcal.MonthCode(number: num, leap:)) -> {
-      use ordinal <- result.try(case tcal.month_for_code(cal, year, num, leap) {
+    Some(mc) -> {
+      use ordinal <- result.try(case tcal.month_for_code(cal, year, mc) {
         Ok(o) -> Ok(o)
         Error(tcal.NeverValid) ->
           Error(RangeE(
@@ -3494,12 +3504,10 @@ fn calendar_date_add(
       use m1 <- result.try(case dur.years == 0 {
         True -> Ok(cd.month)
         False -> {
-          let tcal.MonthCode(number: num, leap:) =
-            tcal.month_code_of(cal, cd.year, cd.month)
-          case tcal.month_for_code(cal, y1, num, leap) {
+          let mc = tcal.month_code_of(cal, cd.year, cd.month)
+          case tcal.carry_month_code(cal, y1, mc) {
             Ok(o) -> Ok(o)
-            Error(tcal.NeverValid) -> Error(RangeE("invalid month"))
-            Error(tcal.NotInThisYear(skip_to)) ->
+            Error(skip_to) ->
               case overflow {
                 Reject -> Error(RangeE("month not present in year"))
                 Constrain -> Ok(skip_to)
@@ -3610,12 +3618,10 @@ fn add_calendar_years_constrain(
   years: Int,
 ) -> tcal.CalDate {
   let y = cd.year + years
-  let tcal.MonthCode(number: num, leap:) =
-    tcal.month_code_of(cal, cd.year, cd.month)
-  let m = case tcal.month_for_code(cal, y, num, leap) {
+  let mc = tcal.month_code_of(cal, cd.year, cd.month)
+  let m = case tcal.carry_month_code(cal, y, mc) {
     Ok(o) -> o
-    Error(tcal.NotInThisYear(skip_to)) -> skip_to
-    Error(tcal.NeverValid) -> int.min(cd.month, tcal.months_in_year(cal, y))
+    Error(skip_to) -> skip_to
   }
   let d = int.min(cd.day, tcal.days_in_month(cal, y, m))
   tcal.CalDate(y, m, d)
@@ -3663,14 +3669,14 @@ fn stepped_month_pos(
   target_year: Int,
   sign: Int,
 ) -> Int {
-  let tcal.MonthCode(number: num, leap:) =
-    tcal.month_code_of(cal, cd1.year, cd1.month)
+  let mc = tcal.month_code_of(cal, cd1.year, cd1.month)
+  let tcal.MonthCode(number: num, leap:) = mc
   case leap {
     False -> num * 2
     True ->
-      case tcal.month_for_code(cal, target_year, num, leap) {
+      case tcal.carry_month_code(cal, target_year, mc) {
         Ok(_) -> num * 2 + 1
-        Error(tcal.NotInThisYear(_)) | Error(tcal.NeverValid) ->
+        Error(_) ->
           case sign > 0 {
             True -> num * 2 + 2
             False -> num * 2
@@ -3771,22 +3777,17 @@ fn to_temporal_date(
         _ -> date_from_bag(state, ref, options)
       }
     JsString(s) -> {
-      case parse_plain_datetime_string(s) {
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-        Ok(p) ->
-          case p.date {
-            Some(d) -> {
-              use cal <- terr_r(state, parsed_calendar_id(p))
-              use #(_opts, st) <- result.try(validated_overflow(state, options))
-              case iso_date_within_limits(d) {
-                True -> Ok(#(#(d, cal), st))
-                False ->
-                  range_error_result(st, "date outside of supported range")
-              }
-            }
-            None -> range_error_result(state, "invalid date string")
+      use p <- terr_r(state, parse_plain_datetime_string(s))
+      case p.date {
+        Some(d) -> {
+          use cal <- terr_r(state, parsed_calendar_id(p))
+          use #(_opts, st) <- result.try(validated_overflow(state, options))
+          case iso_date_within_limits(d) {
+            True -> Ok(#(#(d, cal), st))
+            False -> range_error_result(st, "date outside of supported range")
           }
+        }
+        None -> range_error_result(state, "invalid date string")
       }
     }
     _ -> type_error_result(state, "cannot convert to a Temporal.PlainDate")
@@ -3809,8 +3810,7 @@ fn terr_r(
 ) -> Result(#(b, State(host)), #(JsValue, State(host))) {
   case r {
     Ok(v) -> k(v)
-    Error(RangeE(m)) -> range_error_result(state, m)
-    Error(TypeE(m)) -> type_error_result(state, m)
+    Error(e) -> throw_terr_op(state, e)
   }
 }
 
@@ -3919,15 +3919,11 @@ fn to_temporal_time(
         }
         _ -> time_from_bag(state, ref, options)
       }
-    JsString(s) ->
-      case parse_time_string(s) {
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-        Ok(t) -> {
-          use #(_o, st) <- result.try(validated_overflow(state, options))
-          Ok(#(t, st))
-        }
-      }
+    JsString(s) -> {
+      use t <- terr_r(state, parse_time_string(s))
+      use #(_o, st) <- result.try(validated_overflow(state, options))
+      Ok(#(t, st))
+    }
     _ -> type_error_result(state, "cannot convert to a Temporal.PlainTime")
   }
 }
@@ -4069,10 +4065,36 @@ fn to_temporal_duration(
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: TemporalDurationSlot(..), ..)) -> {
-          let assert Some(d) = this_duration(state, item)
-          Ok(#(d, state))
-        }
+        Some(ObjectSlot(
+          kind: TemporalDurationSlot(
+            years:,
+            months:,
+            weeks:,
+            days:,
+            hours:,
+            minutes:,
+            seconds:,
+            milliseconds:,
+            microseconds:,
+            nanoseconds:,
+          ),
+          ..,
+        )) ->
+          Ok(#(
+            DurRec(
+              years,
+              months,
+              weeks,
+              days,
+              hours,
+              minutes,
+              seconds,
+              milliseconds,
+              microseconds,
+              nanoseconds,
+            ),
+            state,
+          ))
         _ -> duration_from_bag(state, ref)
       }
     JsString(s) ->
@@ -4586,10 +4608,25 @@ fn to_temporal_date_time(
   case item {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: TemporalDateTimeSlot(calendar:, ..), ..)) -> {
-          let assert Some(#(d, t)) = this_date_time(state, item)
+        Some(ObjectSlot(
+          kind: TemporalDateTimeSlot(
+            year:,
+            month:,
+            day:,
+            hour:,
+            minute:,
+            second:,
+            millisecond:,
+            microsecond:,
+            nanosecond:,
+            calendar:,
+          ),
+          ..,
+        )) -> {
           use #(_o, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(d, t, calendar), st))
+          let t =
+            TimeRec(hour, minute, second, millisecond, microsecond, nanosecond)
+          Ok(#(#(IsoDate(year, month, day), t, calendar), st))
         }
         Some(ObjectSlot(
           kind: TemporalDateSlot(year:, month:, day:, calendar:),
@@ -4608,25 +4645,21 @@ fn to_temporal_date_time(
         }
         _ -> date_time_from_bag(state, ref, options)
       }
-    JsString(s) ->
-      case parse_plain_datetime_string(s) {
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-        Ok(p) ->
-          case p.date {
-            Some(d) -> {
-              let t = option.unwrap(p.time, midnight)
-              use cal <- terr_r(state, parsed_calendar_id(p))
-              use #(_o, st) <- result.try(validated_overflow(state, options))
-              case iso_datetime_within_limits(d, t) {
-                True -> Ok(#(#(d, t, cal), st))
-                False ->
-                  range_error_result(st, "date-time outside supported range")
-              }
-            }
-            None -> range_error_result(state, "invalid date-time string")
+    JsString(s) -> {
+      use p <- terr_r(state, parse_plain_datetime_string(s))
+      case p.date {
+        Some(d) -> {
+          let t = option.unwrap(p.time, midnight)
+          use cal <- terr_r(state, parsed_calendar_id(p))
+          use #(_o, st) <- result.try(validated_overflow(state, options))
+          case iso_datetime_within_limits(d, t) {
+            True -> Ok(#(#(d, t, cal), st))
+            False -> range_error_result(st, "date-time outside supported range")
           }
+        }
+        None -> range_error_result(state, "invalid date-time string")
       }
+    }
     _ -> type_error_result(state, "cannot convert to a Temporal.PlainDateTime")
   }
 }
@@ -4681,15 +4714,11 @@ fn to_temporal_year_month(
         }
         _ -> year_month_from_bag(state, ref, options)
       }
-    JsString(s) ->
-      case parse_year_month_string(s) {
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-        Ok(#(y, m, rd, cal)) -> {
-          use #(_o, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(y, m, rd, cal), st))
-        }
-      }
+    JsString(s) -> {
+      use #(y, m, rd, cal) <- terr_r(state, parse_year_month_string(s))
+      use #(_o, st) <- result.try(validated_overflow(state, options))
+      Ok(#(#(y, m, rd, cal), st))
+    }
     _ -> type_error_result(state, "cannot convert to a Temporal.PlainYearMonth")
   }
 }
@@ -4864,15 +4893,11 @@ fn to_temporal_month_day(
         }
         _ -> month_day_from_bag(state, ref, options)
       }
-    JsString(s) ->
-      case parse_month_day_string(s) {
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-        Ok(#(m, d, ry, cal)) -> {
-          use #(_o, st) <- result.try(validated_overflow(state, options))
-          Ok(#(#(m, d, ry, cal), st))
-        }
-      }
+    JsString(s) -> {
+      use #(m, d, ry, cal) <- terr_r(state, parse_month_day_string(s))
+      use #(_o, st) <- result.try(validated_overflow(state, options))
+      Ok(#(#(m, d, ry, cal), st))
+    }
     _ -> type_error_result(state, "cannot convert to a Temporal.PlainMonthDay")
   }
 }
@@ -4948,12 +4973,10 @@ fn try_month_day_as_datetime(
             True -> Ok(Nil)
           })
           let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-          let tcal.MonthCode(number: num, leap:) =
-            tcal.month_code_of(cal, cd.year, cd.month)
+          let mc = tcal.month_code_of(cal, cd.year, cd.month)
           use iso <- result.try(month_day_reference_iso(
             cal,
-            num,
-            leap,
+            mc,
             cd.day,
             Constrain,
           ))
@@ -4972,13 +4995,12 @@ const md_reference_boundary = 1095
 /// 1972-12-31 with the given month code and day.
 fn month_day_reference_iso(
   cal: tcal.Calendar,
-  num: Int,
-  leap: Bool,
+  mc: tcal.MonthCode,
   day: Int,
   overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   let boundary_cd = tcal.date_from_epoch_days(cal, md_reference_boundary)
-  case md_search(cal, num, leap, day, boundary_cd.year, 300) {
+  case md_search(cal, mc, day, boundary_cd.year, 300) {
     Ok(iso) -> Ok(iso)
     Error(Nil) -> {
       // No year in the window has this exact day. Constrain clamps to the
@@ -4986,10 +5008,10 @@ fn month_day_reference_iso(
       case overflow {
         Reject -> Error(RangeE("day out of range for month"))
         Constrain -> {
-          let dmax = md_max_day(cal, num, leap, boundary_cd.year, 300, 0)
+          let dmax = md_max_day(cal, mc, boundary_cd.year, 300, 0)
           case dmax > 0 {
             True ->
-              case md_search(cal, num, leap, dmax, boundary_cd.year, 300) {
+              case md_search(cal, mc, dmax, boundary_cd.year, 300) {
                 Ok(iso) -> Ok(iso)
                 Error(Nil) -> Error(RangeE("invalid month-day"))
               }
@@ -5003,8 +5025,7 @@ fn month_day_reference_iso(
 
 fn md_search(
   cal: tcal.Calendar,
-  num: Int,
-  leap: Bool,
+  mc: tcal.MonthCode,
   day: Int,
   year: Int,
   tries: Int,
@@ -5012,20 +5033,20 @@ fn md_search(
   case tries <= 0 {
     True -> Error(Nil)
     False ->
-      case tcal.month_for_code(cal, year, num, leap) {
+      case tcal.month_for_code(cal, year, mc) {
         // NeverValid depends only on the code, not the year: no earlier year
         // can produce this month either, so stop rather than spin.
         Error(tcal.NeverValid) -> Error(Nil)
         Error(tcal.NotInThisYear(_)) ->
-          md_search(cal, num, leap, day, year - 1, tries - 1)
+          md_search(cal, mc, day, year - 1, tries - 1)
         Ok(m) ->
           case day <= tcal.days_in_month(cal, year, m) {
-            False -> md_search(cal, num, leap, day, year - 1, tries - 1)
+            False -> md_search(cal, mc, day, year - 1, tries - 1)
             True -> {
               let days = tcal.date_to_epoch_days(cal, year, m, day)
               case days <= md_reference_boundary {
                 True -> Ok(iso_date_from_epoch_days(days))
-                False -> md_search(cal, num, leap, day, year - 1, tries - 1)
+                False -> md_search(cal, mc, day, year - 1, tries - 1)
               }
             }
           }
@@ -5036,8 +5057,7 @@ fn md_search(
 /// Largest day the month with this code reaches in the search window.
 fn md_max_day(
   cal: tcal.Calendar,
-  num: Int,
-  leap: Bool,
+  mc: tcal.MonthCode,
   year: Int,
   tries: Int,
   best: Int,
@@ -5045,17 +5065,16 @@ fn md_max_day(
   case tries <= 0 {
     True -> best
     False ->
-      case tcal.month_for_code(cal, year, num, leap) {
+      case tcal.month_for_code(cal, year, mc) {
         // As in `md_search`: NeverValid is year-independent, so `best` is
         // already final.
         Error(tcal.NeverValid) -> best
         Error(tcal.NotInThisYear(_)) ->
-          md_max_day(cal, num, leap, year - 1, tries - 1, best)
+          md_max_day(cal, mc, year - 1, tries - 1, best)
         Ok(m) ->
           md_max_day(
             cal,
-            num,
-            leap,
+            mc,
             year - 1,
             tries - 1,
             int.max(best, tcal.days_in_month(cal, year, m)),
@@ -5097,14 +5116,6 @@ fn resolve_calendar_month_day(
     _, _ -> Ok(Nil)
   })
   let has_year = f.year != None || { f.era != None && f.era_year != None }
-  // Month without year is only ambiguous for non-ISO calendars; for iso8601
-  // the month maps directly to a month code (reference year 1972).
-  use Nil <- result.try(
-    case cal != tcal.Iso8601 && f.month_code == None && !has_year {
-      True -> Error(TypeE("either year or monthCode required with month"))
-      False -> Ok(Nil)
-    },
-  )
   case cal {
     tcal.Iso8601 -> {
       use m <- result.try(resolve_iso_month(f))
@@ -5118,9 +5129,20 @@ fn resolve_calendar_month_day(
       Ok(#(date.month, d2, 1972, cal))
     }
     _ -> {
+      // What pins down the reference-year search. Absent a year, only a bare
+      // month code can: producing it here is what makes it available below,
+      // rather than re-deriving it from `f.month_code` and asserting.
+      // (For iso8601 the month maps straight to a code, so this is non-ISO
+      // only.)
+      use anchor <- result.try(case has_year, f.month_code {
+        True, _ -> Ok(AnchorFromYear)
+        False, Some(mc) -> Ok(AnchorFromCode(mc))
+        False, None ->
+          Error(TypeE("either year or monthCode required with month"))
+      })
       // Determine the month code (and day) to anchor the reference search.
-      use #(num, leap, day) <- result.try(case has_year {
-        True -> {
+      use #(mc, day) <- result.try(case anchor {
+        AnchorFromYear -> {
           use y <- result.try(resolve_calendar_year(cal, f))
           // Bail out before any month-info computation when no date in the
           // calendar year is within the representable ISO range.
@@ -5134,14 +5156,12 @@ fn resolve_calendar_month_day(
           )
           use m <- result.try(resolve_calendar_month(cal, y, f, overflow))
           use d <- result.try(regulate_calendar_day(cal, y, m, day, overflow))
-          let tcal.MonthCode(number: num, leap:) = tcal.month_code_of(cal, y, m)
-          Ok(#(num, leap, d))
+          Ok(#(tcal.month_code_of(cal, y, m), d))
         }
-        False -> {
-          let assert Some(tcal.MonthCode(number: num, leap:)) = f.month_code
+        AnchorFromCode(mc) -> {
           // Validate the code can ever occur in this calendar.
           use Nil <- result.try(
-            case tcal.month_for_code(cal, md_probe_year(cal, leap), num, leap) {
+            case tcal.month_for_code(cal, md_probe_year(cal, mc.leap), mc) {
               Error(tcal.NeverValid) ->
                 Error(RangeE(
                   "monthCode is not valid for calendar " <> tcal.identifier(cal),
@@ -5151,37 +5171,39 @@ fn resolve_calendar_month_day(
           )
           case f.month {
             Some(_) -> Error(TypeE("year is required when month is present"))
-            None -> Ok(#(num, leap, day))
+            None -> Ok(#(mc, day))
           }
         }
       })
       // chinese/dangi leap month-day pairs with no ISO reference year in the
       // spec's reference-year table throw under reject; constrain falls back
       // to the non-leap month (keeping the day).
-      use #(num, leap) <- result.try(
+      use mc <- result.try(
         case
           { cal == tcal.Chinese || cal == tcal.Dangi }
-          && leap
-          && chinese_ref_year_missing(num, day)
+          && mc.leap
+          && chinese_ref_year_missing(mc.number, day)
         {
           True ->
             case overflow {
               Reject -> Error(RangeE("no reference year for monthCode and day"))
-              Constrain -> Ok(#(num, False))
+              Constrain -> Ok(tcal.MonthCode(number: mc.number, leap: False))
             }
-          False -> Ok(#(num, leap))
+          False -> Ok(mc)
         },
       )
-      use iso <- result.try(month_day_reference_iso(
-        cal,
-        num,
-        leap,
-        day,
-        overflow,
-      ))
+      use iso <- result.try(month_day_reference_iso(cal, mc, day, overflow))
       Ok(#(iso.month, iso.day, iso.year, cal))
     }
   }
+}
+
+/// What pins the month-day reference-year search to a specific year: an
+/// explicit calendar year in the fields, or — when there is none — the bare
+/// month code, which is then the only thing that can identify the month.
+type MdAnchor {
+  AnchorFromYear
+  AnchorFromCode(tcal.MonthCode)
 }
 
 /// chinese/dangi leap-month + day combinations that have no ISO reference
@@ -5294,36 +5316,34 @@ fn to_temporal_zoned(
         }
         _ -> zoned_from_bag(state, ref, options)
       }
-    JsString(s) ->
-      case parse_zoned_string(s) {
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-        Ok(#(d, t_opt, z, off_opt, off_sub, tz)) -> {
-          use cal <- terr_r(state, case extract_calendar_annotation(s) {
-            Some(c) -> canonicalize_calendar(c)
-            None -> Ok(tcal.Iso8601)
-          })
-          use #(#(dis, offset_opt, _ov), st) <- result.try(
-            validated_zdt_options(state, options),
-          )
-          case
-            zoned_string_epoch_ns(
-              d,
-              t_opt,
-              z,
-              off_opt,
-              off_sub,
-              tz,
-              dis,
-              offset_opt,
-            )
-          {
-            Ok(ns) -> Ok(#(#(ns, tz, cal), st))
-            Error(RangeE(m)) -> range_error_result(st, m)
-            Error(TypeE(m)) -> type_error_result(st, m)
-          }
-        }
-      }
+    JsString(s) -> {
+      use #(d, t_opt, z, off_opt, off_sub, tz) <- terr_r(
+        state,
+        parse_zoned_string(s),
+      )
+      use cal <- terr_r(state, case extract_calendar_annotation(s) {
+        Some(c) -> canonicalize_calendar(c)
+        None -> Ok(tcal.Iso8601)
+      })
+      use #(#(dis, offset_opt, _ov), st) <- result.try(validated_zdt_options(
+        state,
+        options,
+      ))
+      use ns <- terr_r(
+        st,
+        zoned_string_epoch_ns(
+          d,
+          t_opt,
+          z,
+          off_opt,
+          off_sub,
+          tz,
+          dis,
+          offset_opt,
+        ),
+      )
+      Ok(#(#(ns, tz, cal), st))
+    }
     _ -> type_error_result(state, "cannot convert to a Temporal.ZonedDateTime")
   }
 }
@@ -5445,30 +5465,25 @@ fn zoned_from_bag(
   // timeZone is required.
   case f.tz {
     JsUndefined -> type_error_result(state, "timeZone is required")
-    JsString(tz_str) ->
-      case parse_time_zone_id(tz_str) {
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-        Ok(tz) -> {
-          use #(#(dis, offset_opt, ov), state) <- result.try(
-            validated_zdt_options(state, options),
-          )
-          use date <- terr_r(state, resolve_calendar_date(cal, f.date, ov))
-          let t0 = time_fields_apply(f.time, midnight)
-          use t <- terr_r(state, regulate_time(t0, ov))
-          let behaviour = case f.offset {
-            Some(o) -> OptionOffset(o)
-            None -> WallOffset
-          }
-          case
-            interpret_offset(date, t, behaviour, tz, dis, offset_opt, False)
-          {
-            Ok(ens) -> Ok(#(#(ens, tz, cal), state))
-            Error(RangeE(m)) -> range_error_result(state, m)
-            Error(TypeE(m)) -> type_error_result(state, m)
-          }
-        }
+    JsString(tz_str) -> {
+      use tz <- terr_r(state, parse_time_zone_id(tz_str))
+      use #(#(dis, offset_opt, ov), state) <- result.try(validated_zdt_options(
+        state,
+        options,
+      ))
+      use date <- terr_r(state, resolve_calendar_date(cal, f.date, ov))
+      let t0 = time_fields_apply(f.time, midnight)
+      use t <- terr_r(state, regulate_time(t0, ov))
+      let behaviour = case f.offset {
+        Some(o) -> OptionOffset(o)
+        None -> WallOffset
       }
+      use ens <- terr_r(
+        state,
+        interpret_offset(date, t, behaviour, tz, dis, offset_opt, False),
+      )
+      Ok(#(#(ens, tz, cal), state))
+    }
     _ -> type_error_result(state, "timeZone must be a string")
   }
 }
@@ -5846,10 +5861,7 @@ fn getter_dispatch(
   case getter {
     PlainDateGetter(g) ->
       case this_date(state, this) {
-        Some(d) -> #(
-          state,
-          Ok(date_field_cal(this_calendar(state, this), d, g)),
-        )
+        Some(#(d, cal)) -> #(state, Ok(date_field_cal(cal, d, g)))
         None -> brand_error(state, "PlainDate", date_getter_name(g))
       }
     PlainTimeGetter(g) ->
@@ -5859,29 +5871,26 @@ fn getter_dispatch(
       }
     PlainDateTimeGetter(g) ->
       case this_date_time(state, this) {
-        Some(#(d, t)) ->
+        Some(#(d, t, cal)) ->
           case g {
             DtTime(tg) -> #(state, Ok(time_field(t, tg)))
-            DtDate(dg) -> #(
-              state,
-              Ok(date_field_cal(this_calendar(state, this), d, dg)),
-            )
+            DtDate(dg) -> #(state, Ok(date_field_cal(cal, d, dg)))
           }
         None -> brand_error(state, "PlainDateTime", date_time_getter_name(g))
       }
     PlainYearMonthGetter(g) ->
       case this_year_month(state, this) {
-        Some(#(y, m, rd)) -> #(
+        Some(#(y, m, rd, cal)) -> #(
           state,
-          Ok(year_month_field_cal(this_calendar(state, this), y, m, rd, g)),
+          Ok(year_month_field_cal(cal, y, m, rd, g)),
         )
         None -> brand_error(state, "PlainYearMonth", year_month_getter_name(g))
       }
     PlainMonthDayGetter(g) ->
       case this_month_day(state, this) {
-        Some(#(m, d, ry)) -> #(
+        Some(#(m, d, ry, cal)) -> #(
           state,
-          Ok(month_day_field_cal(this_calendar(state, this), m, d, ry, g)),
+          Ok(month_day_field_cal(cal, m, d, ry, g)),
         )
         None -> brand_error(state, "PlainMonthDay", month_day_getter_name(g))
       }
@@ -6284,12 +6293,7 @@ fn now_tz_arg(
 ) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   case helpers.arg_at(args, 0) {
     JsUndefined -> Ok(#("UTC", state))
-    JsString(s) ->
-      case parse_time_zone_id(s) {
-        Ok(tz) -> Ok(#(tz, state))
-        Error(RangeE(m)) -> range_error_result(state, m)
-        Error(TypeE(m)) -> type_error_result(state, m)
-      }
+    JsString(s) -> terr_op(state, parse_time_zone_id(s))
     _ -> type_error_result(state, "time zone must be a string")
   }
 }
@@ -6490,8 +6494,7 @@ fn plain_date_method(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_date(state, this) {
     None -> brand_error(state, "PlainDate", plain_date_method_name(m))
-    Some(d) -> {
-      let cal = this_calendar(state, this)
+    Some(#(d, cal)) -> {
       case m {
         PdToJson | PdToLocaleString -> #(
           state,
@@ -6587,11 +6590,10 @@ fn plain_date_method(
             }
             _ -> {
               let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-              let tcal.MonthCode(number: num, leap:) =
-                tcal.month_code_of(cal, cd.year, cd.month)
+              let mc = tcal.month_code_of(cal, cd.year, cd.month)
               use iso <- terr(
                 state,
-                month_day_reference_iso(cal, num, leap, cd.day, Constrain),
+                month_day_reference_iso(cal, mc, cd.day, Constrain),
               )
               let #(state, v) =
                 make_month_day_cal(
@@ -7787,11 +7789,7 @@ fn to_string_time_options(
     "smallestUnit",
     allow_auto: False,
   ))
-  case seconds_string_precision(digits, su, mode) {
-    Ok(r) -> Ok(#(r, state))
-    Error(RangeE(m)) -> range_error_result(state, m)
-    Error(TypeE(m)) -> type_error_result(state, m)
-  }
+  terr_op(state, seconds_string_precision(digits, su, mode))
 }
 
 /// The fractionalSecondDigits option: "auto" or 0..9. Distinct from
@@ -8047,8 +8045,7 @@ fn plain_date_time_method(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this_date_time(state, this) {
     None -> brand_error(state, "PlainDateTime", plain_date_time_method_name(m))
-    Some(#(d, t)) -> {
-      let cal = this_calendar(state, this)
+    Some(#(d, t, cal)) -> {
       case m {
         PdtToJson -> #(
           state,
@@ -8407,8 +8404,7 @@ fn plain_year_month_method(
   case this_year_month(state, this) {
     None ->
       brand_error(state, "PlainYearMonth", plain_year_month_method_name(meth))
-    Some(#(y, m, rd)) -> {
-      let cal = this_calendar(state, this)
+    Some(#(y, m, rd, cal)) -> {
       case meth {
         PymToJson | PymToLocaleString -> #(
           state,
@@ -8837,8 +8833,7 @@ fn plain_month_day_method(
   case this_month_day(state, this) {
     None ->
       brand_error(state, "PlainMonthDay", plain_month_day_method_name(meth))
-    Some(#(m, d, ry)) -> {
-      let cal = this_calendar(state, this)
+    Some(#(m, d, ry, cal)) -> {
       case meth {
         PmdToJson | PmdToLocaleString -> #(
           state,
@@ -8908,20 +8903,20 @@ fn plain_month_day_method(
                 False -> Ok(#(None, state))
               })
               use year, state <- state.try_op(read_int_field(state, ref, "year"))
-              case year != None || { era != None && era_year != None } {
-                True -> {
-                  case cal {
-                    tcal.Iso8601 -> {
-                      let assert Some(y) = year
-                      use date <- terr(
-                        state,
-                        regulate_iso_date(y, m, d, Constrain),
-                      )
-                      use date <- terr(state, check_date_limits(date))
-                      let #(state, v) = make_date_cal(state, protos, date, cal)
-                      #(state, Ok(v))
-                    }
-                    _ -> {
+              // iso8601 has no eras, so an explicit `year` is the only thing
+              // that can satisfy the "year is required" rule for it — matching
+              // on the pair produces the year rather than asserting it later.
+              case cal, year {
+                tcal.Iso8601, Some(y) -> {
+                  use date <- terr(state, regulate_iso_date(y, m, d, Constrain))
+                  use date <- terr(state, check_date_limits(date))
+                  let #(state, v) = make_date_cal(state, protos, date, cal)
+                  #(state, Ok(v))
+                }
+                tcal.Iso8601, None -> state.type_error(state, "year is required")
+                _, _ ->
+                  case year != None || { era != None && era_year != None } {
+                    True -> {
                       let cd =
                         tcal.date_from_epoch_days(
                           cal,
@@ -8945,9 +8940,8 @@ fn plain_month_day_method(
                       let #(state, v) = make_date_cal(state, protos, date, cal)
                       #(state, Ok(v))
                     }
+                    False -> state.type_error(state, "year is required")
                   }
-                }
-                False -> state.type_error(state, "year is required")
               }
             }
             _ -> state.type_error(state, "argument must be an object")

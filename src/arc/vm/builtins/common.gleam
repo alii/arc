@@ -165,7 +165,7 @@ fn init_function_intrinsic(
     None -> [#("constructor", ctor_prop)]
   }
   let h =
-    heap.fill(
+    heap.write(
       h,
       fn_proto_ref,
       ObjectSlot(
@@ -720,7 +720,7 @@ pub fn init_type(
 
   // Fill reserved proto — ctor_ref is now known, single write with all properties
   let h =
-    heap.fill(
+    heap.write(
       h,
       proto_ref,
       ObjectSlot(
@@ -1052,7 +1052,8 @@ pub fn make_syntax_error(
 ///
 /// Returns Option instead of Result — callers handle the TypeError themselves
 /// because they need access to the Builtins to allocate the error object,
-/// and this function already receives Builtins.
+/// and this function already receives Builtins. `None` has exactly one
+/// meaning: the argument was undefined or null (Table 15 rows 1-2).
 ///
 /// TODO(Deviation): SymbolObject uses Object.prototype instead of Symbol.prototype
 ///   (no dedicated Symbol.prototype with toString/valueOf/description yet).
@@ -1081,8 +1082,11 @@ pub fn to_object(
     // Table 15 row 7: BigInt → new BigInt object with [[BigIntData]]
     value.JsBigInt(bv) ->
       Some(alloc_wrapper(h, value.BigIntObject(bv), b.bigint.prototype))
-    // Internal: TDZ sentinel, not in spec — treat as Undefined (→ TypeError)
-    value.JsUninitialized -> None
+    // Internal: the TDZ sentinel is not a JS value — reaching ToObject with it
+    // is an engine bug (frame.gleam asserts the same invariant), not the spec's
+    // "argument is undefined or null" TypeError that `None` means.
+    value.JsUninitialized ->
+      panic as "to_object: TDZ sentinel escaped into a JS value position"
   }
 }
 

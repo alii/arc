@@ -13,18 +13,17 @@
 import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Index, Named}
-import arc/vm/ops/coerce
+import arc/vm/key.{Index}
+import arc/vm/limits
 import arc/vm/ops/object
+import arc/vm/ops/property
 import arc/vm/state.{
   type State, type StepExit, InternalError, State, VmFailed, rethrow,
-  throw_type_error,
 }
 import arc/vm/value.{
   type ArrayIterKind, type JsValue, type Ref, JsObject, JsUndefined, ObjectSlot,
 }
 import gleam/dict
-import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
@@ -58,7 +57,17 @@ pub fn step(
         ),
         ..,
       ) as slot,
-    ) -> step_at(state, iter_ref, slot, source, index, iter_kind)
+    ) ->
+      // Pragmatic drain budget: an iterator over `Array(2**32-1)` or over a
+      // hostile `{length: 1e300}` array-like is spec-legal to CREATE (§23.1.5.1
+      // is ToObject and nothing else) but must not be allowed to spin the VM
+      // for hours. Bail on the STEP that exceeds the budget, not at creation —
+      // creation reads nothing and can never be observed to fail.
+      case index >= limits.max_iteration {
+        True ->
+          rethrow(Error(state.range_error_value(state, "Invalid array length")))
+        False -> step_at(state, iter_ref, slot, source, index, iter_kind)
+      }
     _ ->
       Error(VmFailed(
         InternalError("ArrayIteratorNext", "not an array-iterator slot"),
@@ -95,7 +104,7 @@ fn step_at(
           length,
         )
       {
-        Error(msg) -> throw_type_error(state, msg)
+        Error(err) -> object.throw_view_witness_error(state, err)
         Ok(len) ->
           case index >= len {
             True ->
@@ -195,24 +204,15 @@ fn step_at(
   }
 }
 
-/// §7.1.20 LengthOfArrayLike: ? ToLength(? Get(source, "length")). The value
-/// may be an object — ToNumber must run ToPrimitive on it (user valueOf, which
-/// can throw), so go through coerce.js_to_number.
+/// §7.1.20 LengthOfArrayLike, in this module's StepExit error shape — the
+/// implementation itself is `property.length_of_array_like`, so a hostile
+/// `{length: 1e300}` / `{length: NaN}` source is clamped to [0, 2^53-1] the
+/// same way every other array-like iteration in the runtime clamps it.
 fn array_like_length(
   state: State(host),
   source: Ref,
 ) -> Result(#(Int, State(host)), StepExit(host)) {
-  use #(len_val, state) <- result.try(
-    rethrow(object.get_value(state, source, Named("length"), JsObject(source))),
-  )
-  use #(len_num, state) <- result.map(
-    rethrow(coerce.js_to_number(state, len_val)),
-  )
-  let length = case len_num {
-    value.Finite(f) -> int.max(0, value.float_to_int(f))
-    _ -> 0
-  }
-  #(length, state)
+  rethrow(property.length_of_array_like(state, source, JsObject(source)))
 }
 
 /// Bump the cursor past `index`, then shape one iteration result for the
@@ -336,19 +336,19 @@ fn set_cursor_direct(
   iter_kind: ArrayIterKind,
   cursor: Option(Int),
 ) -> state.Heap(host) {
-  case slot {
-    ObjectSlot(..) ->
-      heap.write(
-        h,
-        iter_ref,
-        ObjectSlot(
-          ..slot,
-          kind: value.ArrayIteratorObject(source:, cursor:, iter_kind:),
-        ),
-      )
-    // Unreachable: every caller matched an ObjectSlot to get here.
-    _ -> h
-  }
+  // Every caller matched an ObjectSlot to get here; a non-object slot means
+  // the caller was miswired, and silently dropping the cursor write would
+  // spin the iterator forever.
+  let assert ObjectSlot(..) as obj = slot
+    as "array_iterator: cursor target is not an object slot"
+  heap.write(
+    h,
+    iter_ref,
+    ObjectSlot(
+      ..obj,
+      kind: value.ArrayIteratorObject(source:, cursor:, iter_kind:),
+    ),
+  )
 }
 
 /// Fast-path element read for the array iterator: Some(value) only when the

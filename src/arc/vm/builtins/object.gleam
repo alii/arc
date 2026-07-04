@@ -606,7 +606,7 @@ fn define_parsed(
             False ->
               reject_define(
                 state,
-                "Cannot redefine property: " <> object_key_label(dkey),
+                "Cannot redefine property: " <> key_quoted(dkey),
               )
               |> result.map(fn(_) { state })
               |> result.map_error(as_rejected)
@@ -631,7 +631,6 @@ fn define_parsed(
           |> result.map_error(as_rejected)
         StringPropKey(pkey: _, display: name) ->
           namespace_define(state, exports, name, parsed)
-          |> result.map_error(as_rejected)
       }
     // §10.5.6 Proxy [[DefineOwnProperty]] — the throwing wrapper
     // (DefinePropertyOrThrow) converts a false trap result to TypeError.
@@ -648,7 +647,7 @@ fn define_parsed(
           reject_define(
             state,
             "'defineProperty' on proxy: trap returned falsish for property "
-              <> object_key_label(dkey),
+              <> key_quoted(dkey),
           )
           |> result.map(fn(_) { state })
           |> result.map_error(as_rejected)
@@ -669,7 +668,7 @@ fn namespace_define(
   exports: dict.Dict(String, Ref),
   name: String,
   parsed: ParsedDesc,
-) -> Result(State(host), #(JsValue, State(host))) {
+) -> Result(State(host), #(DefineFailure, State(host))) {
   // Steps 2-3: current = O.[[GetOwnProperty]](P); undefined → false.
   use box <- result.try(case dict.get(exports, name) {
     Ok(box) -> Ok(box)
@@ -678,6 +677,7 @@ fn namespace_define(
         state,
         "Cannot define property " <> name <> ", object is not extensible",
       )
+      |> result.map_error(as_rejected)
   })
   // Step 4: Desc.[[Configurable]] present and true → false.
   // Step 5: Desc.[[Enumerable]] present and false → false.
@@ -689,7 +689,9 @@ fn namespace_define(
     || desc_is_accessor(parsed)
     || parsed.writable == Some(False)
   use Nil <- result.try(case incompatible {
-    True -> reject_define(state, "Cannot redefine property: " <> name)
+    True ->
+      reject_define(state, "Cannot redefine property: " <> name)
+      |> result.map_error(as_rejected)
     False -> Ok(Nil)
   })
   case parsed.value {
@@ -700,16 +702,22 @@ fn namespace_define(
       // [[GetOwnProperty]] reads the live binding; an uninitialized (TDZ)
       // binding throws ReferenceError (§10.4.6.5 performs [[Get]]).
       case heap.read_box(state.heap, box) {
+        // A genuine abrupt completion, NOT a boolean-false define result:
+        // Reflect.defineProperty(ns, ...) must throw this, not return false.
         Some(value.JsUninitialized) ->
-          Error(state.reference_error_value(
-            state,
-            "Cannot access '" <> name <> "' before initialization",
-          ))
+          Error(
+            as_thrown(state.reference_error_value(
+              state,
+              "Cannot access '" <> name <> "' before initialization",
+            )),
+          )
         current -> {
           let current_value = option.unwrap(current, JsUndefined)
           case value.same_value(requested, current_value) {
             True -> Ok(state)
-            False -> reject_define(state, "Cannot redefine property: " <> name)
+            False ->
+              reject_define(state, "Cannot redefine property: " <> name)
+              |> result.map_error(as_rejected)
           }
         }
       }
@@ -1174,10 +1182,7 @@ fn ordinary_define(
         SymbolPropKey(sym:) -> list.key_find(symbol_properties, sym)
       }
       // V8's error text: the bare key, no quotes.
-      let key = case dkey {
-        StringPropKey(display:, ..) -> display
-        SymbolPropKey(_) -> "[Symbol]"
-      }
+      let key = key_text(dkey)
       // §10.1.6.3 steps 2 + 5-11: is the change permitted at all? Exactly the
       // question `is_compatible_descriptor` (IsCompatiblePropertyDescriptor,
       // §10.1.6.2) answers — the same predicate the proxy and String-exotic
@@ -3597,7 +3602,7 @@ fn from_entries(
       // Step 2: obj = OrdinaryObjectCreate(%Object.prototype%).
       let #(heap, obj_ref) =
         common.alloc_pojo(state.heap, state.builtins.object.prototype, [])
-      use state, key_val, val <- iter_protocol.add_entries_from_iterable(
+      use state, key_val, val <- iter_protocol.add_entries_with_sink(
         State(..state, heap:),
         JsObject(obj_ref),
         iterable,
@@ -4032,8 +4037,18 @@ pub fn object_key_value(key: ObjectKey) -> JsValue {
   }
 }
 
-/// Human-readable key for invariant-violation error messages.
-fn object_key_label(key: ObjectKey) -> String {
+/// ObjectKey → bare error-message text (V8 prints the key unquoted in
+/// "Cannot define property x, ..."). THE renderer for that shape.
+fn key_text(key: ObjectKey) -> String {
+  case key {
+    StringPropKey(display:, ..) -> display
+    SymbolPropKey(_) -> "[symbol]"
+  }
+}
+
+/// ObjectKey → quoted error-message text, for messages that name the key
+/// mid-sentence ("Cannot redefine property: 'x'").
+fn key_quoted(key: ObjectKey) -> String {
   case key {
     StringPropKey(display:, ..) -> "'" <> display <> "'"
     SymbolPropKey(_) -> "[symbol]"
@@ -4398,7 +4413,7 @@ fn proxy_get_own_property(
                   use Nil <- result.map(reject_define(
                     state,
                     "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
-                      <> object_key_label(key)
+                      <> key_quoted(key)
                       <> " which is non-configurable in the proxy target",
                   ))
                   #(None, state)
@@ -4407,7 +4422,7 @@ fn proxy_get_own_property(
                   use Nil <- result.map(reject_define(
                     state,
                     "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
-                      <> object_key_label(key)
+                      <> key_quoted(key)
                       <> " which exists in the non-extensible proxy target",
                   ))
                   #(None, state)
@@ -4453,7 +4468,7 @@ fn proxy_get_own_property(
                 reject_define(
                   state,
                   "'getOwnPropertyDescriptor' on proxy: trap returned descriptor for property "
-                    <> object_key_label(key)
+                    <> key_quoted(key)
                     <> " that is incompatible with the existing property in the proxy target",
                 )
               True -> Ok(Nil)
@@ -4469,7 +4484,7 @@ fn proxy_get_own_property(
                   reject_define(
                     state,
                     "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
-                      <> object_key_label(key)
+                      <> key_quoted(key)
                       <> " which is non-existent in the proxy target",
                   )
                 Some(td) ->
@@ -4478,7 +4493,7 @@ fn proxy_get_own_property(
                       reject_define(
                         state,
                         "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
-                          <> object_key_label(key)
+                          <> key_quoted(key)
                           <> " which is configurable in the proxy target",
                       )
                     False ->
@@ -4489,7 +4504,7 @@ fn proxy_get_own_property(
                           reject_define(
                             state,
                             "'getOwnPropertyDescriptor' on proxy: trap reported non-writability for property "
-                              <> object_key_label(key)
+                              <> key_quoted(key)
                               <> " which is writable in the proxy target",
                           )
                         _, _ -> Ok(Nil)
@@ -4503,7 +4518,7 @@ fn proxy_get_own_property(
           use Nil <- result.map(reject_define(
             state,
             "'getOwnPropertyDescriptor' on proxy: trap returned neither object nor undefined for property "
-              <> object_key_label(key),
+              <> key_quoted(key),
           ))
           #(None, state)
         }
@@ -4576,7 +4591,7 @@ fn proxy_define_own_property(
                   reject_define(
                     state,
                     "'defineProperty' on proxy: trap returned truish for adding property "
-                      <> object_key_label(key)
+                      <> key_quoted(key)
                       <> " to the non-extensible proxy target",
                   )
                 True -> Ok(Nil)
@@ -4586,7 +4601,7 @@ fn proxy_define_own_property(
                   reject_define(
                     state,
                     "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
-                      <> object_key_label(key)
+                      <> key_quoted(key)
                       <> " which is either non-existent or configurable in the proxy target",
                   )
                 False -> Ok(Nil)
@@ -4600,7 +4615,7 @@ fn proxy_define_own_property(
                     reject_define(
                       state,
                       "'defineProperty' on proxy: trap returned truish for adding property "
-                        <> object_key_label(key)
+                        <> key_quoted(key)
                         <> " that is incompatible with the existing property in the proxy target",
                     )
                   True -> Ok(Nil)
@@ -4612,7 +4627,7 @@ fn proxy_define_own_property(
                     reject_define(
                       state,
                       "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
-                        <> object_key_label(key)
+                        <> key_quoted(key)
                         <> " which is either non-existent or configurable in the proxy target",
                     )
                   False -> Ok(Nil)
@@ -4627,7 +4642,7 @@ fn proxy_define_own_property(
                       reject_define(
                         state,
                         "'defineProperty' on proxy: trap returned truish for defining non-writable property "
-                          <> object_key_label(key)
+                          <> key_quoted(key)
                           <> " which is writable in the proxy target",
                       )
                     _ -> Ok(Nil)
@@ -4729,7 +4744,7 @@ pub fn create_data_property(
     False ->
       Error(state.type_error_value(
         state,
-        "Cannot create property " <> object_key_label(dkey),
+        "Cannot create property " <> key_quoted(dkey),
       ))
   }
 }
@@ -4877,7 +4892,7 @@ fn proxy_own_keys(
               reject_define(
                 state,
                 "'ownKeys' on proxy: trap result did not include "
-                  <> object_key_label(k)
+                  <> key_quoted(k)
                   <> ", a non-configurable key of the proxy target",
               )
           }
@@ -4896,7 +4911,7 @@ fn proxy_own_keys(
                   reject_define(
                     state,
                     "'ownKeys' on proxy: trap result did not include "
-                      <> object_key_label(k)
+                      <> key_quoted(k)
                       <> ", a key of the non-extensible proxy target",
                   )
               }

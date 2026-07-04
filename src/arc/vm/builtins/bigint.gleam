@@ -16,7 +16,7 @@ import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, type Ref, BigIntGlobal, BigIntPrototypeToLocaleString,
   BigIntPrototypeToString, BigIntPrototypeValueOf, Dispatch, Finite, JsNumber,
-  JsObject, JsString, JsUndefined, ObjectSlot, VmNative,
+  JsObject, JsString, JsUndefined, VmNative,
 }
 import gleam/int
 import gleam/option.{None, Some}
@@ -129,10 +129,9 @@ fn this_bigint_value(
   case this {
     value.JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
     JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: value.BigIntObject(value.BigInt(n)), ..)) ->
-          Ok(#(n, state))
-        _ -> incompatible()
+      case heap.read_bigint_object(state.heap, ref) {
+        Some(value.BigInt(n)) -> Ok(#(n, state))
+        None -> incompatible()
       }
     _ -> incompatible()
   }

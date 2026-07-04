@@ -4,7 +4,6 @@ import arc/vm/builtins/disposable_stack
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
-import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/regexp as builtins_regexp
 import arc/vm/completion.{
@@ -18,7 +17,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
-import arc/vm/key.{Index, Named, max_array_index, private_key_from_text}
+import arc/vm/key.{Index, Named, private_key_from_text}
 import arc/vm/opcode.{
   type Op, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread,
   AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
@@ -71,15 +70,16 @@ import gleam/string
 
 /// Single-traversal `obj.x = v` overwrite of an existing own writable data
 /// property, preserving its attribute flags and creation seq (§10.1.11 —
-/// the key keeps its enumeration position). Error(Nil) when the key is
-/// absent, non-writable, or an accessor — callers take the full [[Set]]
-/// path. FFI mirrors the DataProperty tuple layout; see arc_vm_ffi.erl.
+/// the key keeps its enumeration position). `None` when the key is absent,
+/// non-writable, or an accessor — a MISSING fast path, not a failure, so
+/// callers take the full [[Set]] path. FFI mirrors the DataProperty tuple
+/// layout; see arc_vm_ffi.erl.
 @external(erlang, "arc_vm_ffi", "put_existing_writable_data")
 fn put_existing_writable_data(
   properties: dict.Dict(key.PropertyKey, value.Property),
   key: key.PropertyKey,
   val: JsValue,
-) -> Result(dict.Dict(key.PropertyKey, value.Property), Nil)
+) -> Option(dict.Dict(key.PropertyKey, value.Property))
 
 // ============================================================================
 // Internal state (types defined in state.gleam for cross-module access)
@@ -449,14 +449,14 @@ pub fn init_state(
 
 /// Build the locals array for a top-level (script/module/eval/REPL) template:
 /// JsUndefined everywhere, then seed the lexical-`this` slot if present.
-/// Function bodies use call.setup_locals instead — this is only for entries
+/// Function bodies use frame.setup_frame instead — this is only for entries
 /// that don't go through the call protocol.
 pub fn init_top_level_locals(
   func: FuncTemplate,
   this_val: JsValue,
 ) -> tuple_array.TupleArray(JsValue) {
   let locals = tuple_array.repeat(JsUndefined, func.local_count)
-  case func.lexical.this {
+  case opcode.lexical_slot(func.lexical, opcode.RefThis) {
     Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
     None -> locals
   }
@@ -500,8 +500,8 @@ fn empty_template() -> FuncTemplate {
     is_constructor: False,
     is_class_constructor: False,
     local_names: None,
-    lexical: opcode.no_lexical_slots,
-    syntax_perms: opcode.script_perms,
+    lexical: opcode.NoLexicalSlots,
+    code_kind: opcode.ScriptCode,
   )
 }
 
@@ -645,7 +645,7 @@ pub fn make_closure(
     }
   }
   let heap =
-    heap.fill(
+    heap.write(
       heap,
       closure_ref,
       ObjectSlot(
@@ -1187,13 +1187,11 @@ fn fast_loop(
     // a hole (prototype walk) bails to the generic slow path.
     GetElem ->
       case stack {
-        [value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] -> {
-          // +. 0.0 normalizes -0.0 → +0.0, same as to_prop_key.
-          let n = f +. 0.0
-          let idx = float.truncate(n)
-          case int.to_float(idx) == n && idx >= 0 && idx <= max_array_index {
-            False -> dispatch_slow(state, pc, stack, locals, hp, line)
-            True ->
+        [value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] ->
+          // The canonical-array-index test — the same one to_prop_key uses.
+          case key.array_index_of_float(f) {
+            None -> dispatch_slow(state, pc, stack, locals, hp, line)
+            Some(idx) ->
               case heap.read(hp, ref) {
                 Some(ObjectSlot(
                   kind: ArrayObject(_),
@@ -1229,7 +1227,6 @@ fn fast_loop(
                 _ -> dispatch_slow(state, pc, stack, locals, hp, line)
               }
           }
-        }
         _ -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
 
@@ -1244,12 +1241,10 @@ fn fast_loop(
     // overflow, primitives) bails to the generic set_value chain.
     PutElem ->
       case stack {
-        [val, value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] -> {
-          let n = f +. 0.0
-          let idx = float.truncate(n)
-          case int.to_float(idx) == n && idx >= 0 && idx <= max_array_index {
-            False -> dispatch_slow(state, pc, stack, locals, hp, line)
-            True ->
+        [val, value.JsNumber(value.Finite(f)), JsObject(ref), ..rest] ->
+          case key.array_index_of_float(f) {
+            None -> dispatch_slow(state, pc, stack, locals, hp, line)
+            Some(idx) ->
               case heap.read(hp, ref) {
                 Some(
                   ObjectSlot(
@@ -1327,7 +1322,6 @@ fn fast_loop(
                 _ -> dispatch_slow(state, pc, stack, locals, hp, line)
               }
           }
-        }
         _ -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
 
@@ -1372,7 +1366,7 @@ fn fast_loop(
           case heap.read(hp, ref) {
             Some(ObjectSlot(kind: OrdinaryObject, properties:, ..) as slot) ->
               case put_existing_writable_data(properties, Named(name), val) {
-                Ok(new_props) -> {
+                Some(new_props) -> {
                   let hp =
                     heap.write(
                       hp,
@@ -1390,7 +1384,7 @@ fn fast_loop(
                     line,
                   )
                 }
-                Error(Nil) -> dispatch_slow(state, pc, stack, locals, hp, line)
+                None -> dispatch_slow(state, pc, stack, locals, hp, line)
               }
             _ -> dispatch_slow(state, pc, stack, locals, hp, line)
           }
@@ -4917,7 +4911,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
         [JsObject(_) as iter, ..rest] -> {
           let iter = unwrap_iterator_record(state, iter)
           let state = State(..state, stack: rest, pc: state.pc + 1)
-          case builtins_iterator.iterator_rest(state, iter) {
+          case iter_protocol.iterator_rest(state, iter) {
             #(state, Ok(arr)) -> Ok(State(..state, stack: [arr, ..rest]))
             #(state, Error(thrown)) -> Error(Threw(thrown, state))
           }
@@ -5008,7 +5002,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 use #(res, state) <- result.try(
                   state.rethrow(state.call(state, next_fn, iter, [arg])),
                 )
-                builtins_iterator.read_iter_result(state, res)
+                iter_protocol.read_iter_result(state, res)
               }
             },
           )
@@ -5065,9 +5059,10 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // [result_obj, iter, ..rest]. done? → push value, pc+1 : Yielded(value).
       case state.stack {
         [res, _iter, ..rest] -> {
-          use #(done, val, state) <- result.try(
-            builtins_iterator.read_iter_result(state, res),
-          )
+          use #(done, val, state) <- result.try(iter_protocol.read_iter_result(
+            state,
+            res,
+          ))
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
             False -> Error(Yielded(AsyncDelegateResume(next_pc:), val, state))
@@ -6241,7 +6236,7 @@ fn is_native_generator_next(h: Heap(host), next_fn: JsValue) -> Bool {
 /// §7.4.8 IteratorStep / §7.4.9 IteratorStepValue: IteratorComplete reads
 /// `done` first; when done is true, `value` is NOT read (observable — the
 /// result object's value getter must not fire). yield* keeps the plain
-/// `builtins_iterator.read_iter_result` because §27.5.3.2 DOES read value
+/// `iter_protocol.read_iter_result` because §27.5.3.2 DOES read value
 /// when done.
 fn read_iter_step_result(
   state: State(host),

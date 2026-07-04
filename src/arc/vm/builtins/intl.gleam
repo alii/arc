@@ -23,28 +23,32 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type CaseFirst, type CollatorState, type DateStyle, type DateTimeFormatState,
-  type DisplayNamesState, type DtfComponent, type DtfComponents,
-  type DurationBaseStyle, type DurationFormatState, type DurationUnitOptions,
-  type DurationUnitStyle, type HostOverride, type HourCycle, type IntlData,
+  type CaseFirst, type CollatorSensitivity, type CollatorState, type DateStyle,
+  type DateTimeFormatState, type DisplayNamesState, type DtfComponent,
+  type DtfComponents, type DtfTimeZone, type DurationBaseStyle,
+  type DurationFormatState, type DurationUnitOptions, type DurationUnitStyle,
+  type Granularity, type HostOverride, type HourCycle, type IntlData,
   type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
-  type IntlService, type JsValue, type ListFormatState, type LocaleGetterName,
-  type LocaleMethodName, type LocaleState, type MonthWidth, type NameWidth,
-  type Notation, type NumberFormatState, type NumericWidth,
-  type PluralRulesState, type Ref, type RelativeTimeFormatState,
-  type SegmentIteratorState, type SegmenterState, type SegmentsState,
-  type TimeStyle, type TimeZoneNameWidth, BigIntToLocaleString, BsDigital,
-  BsLong, BsNarrow, BsShort, CaseFirstFalse, CaseFirstLower, CaseFirstUpper,
-  CollatorData, CollatorState, CompactLong, CompactShort, CurAccounting, CurCode,
-  CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
+  type IntlService, type JsValue, type ListFormatState, type ListFormatStyle,
+  type LocaleGetterName, type LocaleMethodName, type LocaleState,
+  type MonthWidth, type NameWidth, type Notation, type NumberFormatState,
+  type NumericWidth, type PluralRulesState, type Ref,
+  type RelativeTimeFormatState, type SegmentIteratorState, type SegmenterState,
+  type SegmentsState, type TimeStyle, type TimeZoneNameWidth,
+  BigIntToLocaleString, BsDigital, BsLong, BsNarrow, BsShort, Cardinal,
+  CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CollatorData, CollatorState,
+  CompactLong, CompactShort, Conjunction, CurAccounting, CurCode, CurName,
+  CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
   DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
-  DateToLocaleTimeString, Dispatch, DisplayAlways, DisplayAuto, DisplayNamesData,
-  DisplayNamesState, DsFull, DsLong, DsMedium, DsShort, DtfComponents, DtfDay,
-  DtfDayPeriod, DtfEra, DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth,
-  DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong,
-  DurNarrow, DurNumeric, DurShort, DurTwoDigit, DurationFormatData,
-  DurationFormatState, DurationUnitOptions, GroupingAlways, GroupingAuto,
-  GroupingMin2, GroupingNever, H11, H12, H23, H24, IntlBoundGetter,
+  DateToLocaleTimeString, Disjunction, Dispatch, DisplayAlways, DisplayAuto,
+  DisplayNamesData, DisplayNamesState, DnCalendar, DnCurrency, DnDateTimeField,
+  DnLanguage, DnRegion, DnScript, DsFull, DsLong, DsMedium, DsShort,
+  DtfComponents, DtfDay, DtfDayPeriod, DtfEra, DtfFractionalSecondDigits,
+  DtfHour, DtfMinute, DtfMonth, DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear,
+  DurFractional, DurLong, DurNarrow, DurNumeric, DurShort, DurTwoDigit,
+  DurationFormatData, DurationFormatState, DurationUnitOptions, FbCode, FbNone,
+  FixedZone, GGrapheme, GSentence, GWord, GroupingAlways, GroupingAuto,
+  GroupingMin2, GroupingNever, H11, H12, H23, H24, HostZone, IntlBoundGetter,
   IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
   IntlDigitOptions, IntlDisplayNames, IntlDurationFormat, IntlFormat,
   IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
@@ -55,30 +59,37 @@ import arc/vm/value.{
   IntlSegmenter, IntlSegmenterSegment, IntlSegments, IntlSegmentsContaining,
   IntlSegmentsIterator, IntlSelect, IntlSelectRange, IntlSupportedLocalesOf,
   IntlSupportedValuesOf, JsBool, JsNumber, JsObject, JsString, JsUndefined,
-  ListFormatData, ListFormatState, LocaleBaseName, LocaleCalendar,
-  LocaleCaseFirst, LocaleCollation, LocaleData, LocaleFirstDayOfWeek,
-  LocaleGetCalendars, LocaleGetCollations, LocaleGetHourCycles,
-  LocaleGetNumberingSystems, LocaleGetTextInfo, LocaleGetTimeZones,
-  LocaleGetWeekInfo, LocaleHourCycle, LocaleLanguage, LocaleMaximize,
-  LocaleMinimize, LocaleNumberingSystem, LocaleNumeric, LocaleRegion,
-  LocaleScript, LocaleState, LocaleToString, LocaleVariants, MonthName, MonthNum,
-  NotationCompact, NotationEngineering, NotationScientific, NotationStandard,
-  NumberFormatData, NumberFormatState, NumberToLocaleString, ObjectSlot,
-  PluralRulesData, PluralRulesState, PriorityAuto, PriorityLessPrecision,
-  PriorityMorePrecision, RelativeTimeFormatData, RelativeTimeFormatState,
-  RoundCeil, RoundExpand, RoundFloor, RoundHalfCeil, RoundHalfEven,
-  RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
+  LLong, LNarrow, LShort, LdDialect, LdStandard, ListFormatData, ListFormatState,
+  LocaleBaseName, LocaleCalendar, LocaleCaseFirst, LocaleCollation, LocaleData,
+  LocaleFirstDayOfWeek, LocaleGetCalendars, LocaleGetCollations,
+  LocaleGetHourCycles, LocaleGetNumberingSystems, LocaleGetTextInfo,
+  LocaleGetTimeZones, LocaleGetWeekInfo, LocaleHourCycle, LocaleLanguage,
+  LocaleMaximize, LocaleMinimize, LocaleNumberingSystem, LocaleNumeric,
+  LocaleRegion, LocaleScript, LocaleState, LocaleToString, LocaleVariants,
+  MonthName, MonthNum, NamedZone, NotationCompact, NotationEngineering,
+  NotationScientific, NotationStandard, NumberFormatData, NumberFormatState,
+  NumberToLocaleString, ObjectSlot, Ordinal, PluralRulesData, PluralRulesState,
+  PriorityAuto, PriorityLessPrecision, PriorityMorePrecision,
+  RelativeTimeFormatData, RelativeTimeFormatState, RoundCeil, RoundExpand,
+  RoundFloor, RoundHalfCeil, RoundHalfEven, RoundHalfExpand, RoundHalfFloor,
+  RoundHalfTrunc, RoundTrunc, RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort,
   SegmentIteratorData, SegmentIteratorState, SegmenterData, SegmenterState,
-  SegmentsData, SegmentsState, SignAlways, SignAuto, SignExceptZero,
-  SignNegative, SignNever, StringLocaleCompare, StringToLocaleLowerCase,
-  StringToLocaleUpperCase, StyleCurrency, StyleDecimal, StylePercent, StyleUnit,
-  TemporalDateSlot, TemporalDateTimeSlot, TemporalInstantSlot,
-  TemporalMonthDaySlot, TemporalTimeSlot, TemporalYearMonthSlot,
-  TemporalZonedDateTimeSlot, TsFull, TsLong, TsMedium, TsShort, TzLong,
-  TzLongGeneric, TzLongOffset, TzShort, TzShortGeneric, TzShortOffset, TzdAuto,
-  TzdStripIfInteger, UnitLong, UnitNarrow, UnitShort, WLong, WNarrow, WNumeric,
+  SegmentsData, SegmentsState, SensAccent, SensBase, SensCase, SensVariant,
+  SignAlways, SignAuto, SignExceptZero, SignNegative, SignNever,
+  StringLocaleCompare, StringToLocaleLowerCase, StringToLocaleUpperCase,
+  StyleCurrency, StyleDecimal, StylePercent, StyleUnit, TemporalDateSlot,
+  TemporalDateTimeSlot, TemporalInstantSlot, TemporalMonthDaySlot,
+  TemporalTimeSlot, TemporalYearMonthSlot, TemporalZonedDateTimeSlot, TsFull,
+  TsLong, TsMedium, TsShort, TzLong, TzLongGeneric, TzLongOffset, TzShort,
+  TzShortGeneric, TzShortOffset, TzdAuto, TzdStripIfInteger, UnitList, UnitLong,
+  UnitNarrow, UnitShort, UsageSearch, UsageSort, WLong, WNarrow, WNumeric,
   WShort, WTwoDigit,
 }
+
+//
+// Closed option-value sum types (§10.1.2, §12.1.2, §13.1.2, §16.1.2,
+// §17.1.2, §18.1.2). Parsed once here, at the JS boundary; the formatting
+// engines only ever see the variants.
 import gleam/dict
 import gleam/float
 import gleam/int
@@ -808,20 +819,24 @@ fn parts_to_js(
   alloc_array(state, list.reverse(objs))
 }
 
+/// The formatted string a range's parts spell out (formatRange).
+fn range_parts_to_string(parts: List(fmt.RangePart)) -> String {
+  parts |> list.map(fn(p: fmt.RangePart) { p.value }) |> string.join("")
+}
+
 /// Parts → JS array of `{ type, value, source }` objects (formatRangeToParts).
 fn parts_to_js_sourced(
   state: State(host),
-  parts: List(#(String, String, String)),
+  parts: List(fmt.RangePart),
 ) -> #(State(host), JsValue) {
   let #(state, objs) =
-    list.fold(parts, #(state, []), fn(acc, part) {
+    list.fold(parts, #(state, []), fn(acc, part: fmt.RangePart) {
       let #(state, objs) = acc
-      let #(t, v, src) = part
       let #(state, obj) =
         alloc_pojo(state, [
-          #("type", JsString(t)),
-          #("value", JsString(v)),
-          #("source", JsString(src)),
+          #("type", JsString(fmt.part_type_to_js_string(part.type_))),
+          #("value", JsString(part.value)),
+          #("source", JsString(fmt.part_source_to_js_string(part.source))),
         ])
       #(state, [obj, ..objs])
     })
@@ -832,15 +847,16 @@ fn parts_to_js_sourced(
 /// DurationFormat formatToParts). Empty unit string means no unit property.
 fn parts_to_js_with_unit(
   state: State(host),
-  parts: List(#(String, String, String)),
+  parts: List(fmt.UnitPart),
 ) -> #(State(host), JsValue) {
   let #(state, objs) =
-    list.fold(parts, #(state, []), fn(acc, part) {
+    list.fold(parts, #(state, []), fn(acc, part: fmt.UnitPart) {
       let #(state, objs) = acc
-      let #(t, v, unit) = part
-      let props = case unit {
+      let t = fmt.part_type_to_js_string(part.type_)
+      let v = part.value
+      let props = case part.unit {
         "" -> [#("type", JsString(t)), #("value", JsString(v))]
-        _ -> [
+        unit -> [
           #("type", JsString(t)),
           #("value", JsString(v)),
           #("unit", JsString(unit)),
@@ -2031,12 +2047,12 @@ fn collator_state(
     locales_v,
   ))
   use #(opts, state) <- result.try(coerce_options(state, options_v))
-  use #(usage, state) <- result.try(get_str_opt(
+  use #(usage, state) <- result.try(get_enum_opt(
     state,
     opts,
     "usage",
-    ["sort", "search"],
-    Some("sort"),
+    [#("sort", UsageSort), #("search", UsageSearch)],
+    UsageSort,
   ))
   use state <- result.try(read_locale_matcher(state, opts))
   use #(collation_opt, state) <- result.try(get_str_opt(
@@ -2095,14 +2111,18 @@ fn collator_state(
       value.case_first_from_js_string,
       CaseFirstFalse,
     )
-  use #(sensitivity, state) <- result.try(get_str_opt(
+  use #(sensitivity, state) <- result.try(get_enum_opt(
     state,
     opts,
     "sensitivity",
-    ["base", "accent", "case", "variant"],
-    None,
+    [
+      #("base", SensBase),
+      #("accent", SensAccent),
+      #("case", SensCase),
+      #("variant", SensVariant),
+    ],
+    SensVariant,
   ))
-  let sensitivity = option.unwrap(sensitivity, "variant")
   let ignore_punct_default = string.starts_with(data_locale, "th")
   use #(ignore_punct, state) <- result.try(get_bool_opt(
     state,
@@ -2122,7 +2142,7 @@ fn collator_state(
   Ok(#(
     CollatorState(
       locale:,
-      usage: option.unwrap(usage, "sort"),
+      usage:,
       sensitivity:,
       ignore_punctuation: option.unwrap(ignore_punct, False),
       collation:,
@@ -2773,18 +2793,14 @@ fn dtf_state_required(
     ])
   // timeZone
   use #(tz_v, state) <- result.try(opt_get(state, opts, "timeZone"))
-  use #(tz_name, tz_offset, tz_system, state) <- result.try(case tz_v {
-    // DefaultTimeZone: the host environment zone (offset resolved per-date).
-    JsUndefined -> {
-      let offset = 0 - date.tz_offset_minutes(date.now_ms())
-      // The host zone name is unknown; expose "UTC" while formatting with
-      // the live host offset (tzSystem).
-      Ok(#("UTC", offset, True, state))
-    }
+  use #(time_zone, state) <- result.try(case tz_v {
+    // DefaultTimeZone: the host environment zone. Its offset (like every
+    // zone's) is resolved per formatted instant, not snapshotted here.
+    JsUndefined -> Ok(#(HostZone, state))
     _ -> {
       use #(s, state) <- result.try(coerce.js_to_string(state, tz_v))
       case canonical_time_zone(s) {
-        Some(#(name, offset)) -> Ok(#(name, offset, False, state))
+        Some(tz) -> Ok(#(tz, state))
         None -> throw_range(state, "Invalid time zone specified: " <> s)
       }
     }
@@ -2978,9 +2994,7 @@ fn dtf_state_required(
       locale:,
       calendar:,
       numbering_system: nu,
-      time_zone: tz_name,
-      tz_offset_minutes: tz_offset,
-      tz_system:,
+      time_zone:,
       hour_cycle: case has_hour {
         True -> Some(hc)
         False -> None
@@ -3155,10 +3169,11 @@ fn time_style_components(style: Option(TimeStyle)) -> DtfComponents {
   }
 }
 
-/// IsValidTimeZoneName + identifier case normalization. Offsets come from a
-/// fixed standard-time table for common zones, falling back to the system
-/// tzdata for the rest (see `tzdata_zone`). Returns #(name, offset_min).
-fn canonical_time_zone(s: String) -> Option(#(String, Int)) {
+/// IsValidTimeZoneName + identifier case normalization. Named zones are
+/// resolved against the system tzdata (Temporal's TZif backend), which is
+/// also what supplies their per-instant offset later; the remaining forms
+/// (UTC/GMT aliases, ±HH:MM, Etc/GMT±N) have an offset that never varies.
+fn canonical_time_zone(s: String) -> Option(DtfTimeZone) {
   let lower = string.lowercase(s)
   case lower {
     "utc"
@@ -3169,7 +3184,7 @@ fn canonical_time_zone(s: String) -> Option(#(String, Int)) {
     | "etc/utc"
     | "etc/uct"
     | "uct" ->
-      Some(#(
+      Some(FixedZone(
         case lower {
           "etc/utc" -> "Etc/UTC"
           "etc/uct" -> "Etc/UCT"
@@ -3178,11 +3193,12 @@ fn canonical_time_zone(s: String) -> Option(#(String, Int)) {
         },
         0,
       ))
-    "gmt" | "etc/greenwich" | "greenwich" -> Some(#("GMT", 0))
-    "etc/gmt" | "etc/gmt0" | "etc/gmt+0" | "etc/gmt-0" -> Some(#("Etc/GMT", 0))
+    "gmt" | "etc/greenwich" | "greenwich" -> Some(FixedZone("GMT", 0))
+    "etc/gmt" | "etc/gmt0" | "etc/gmt+0" | "etc/gmt-0" ->
+      Some(FixedZone("Etc/GMT", 0))
     _ ->
       case parse_offset_zone(s) {
-        Some(minutes) -> Some(#(format_offset_zone(minutes), minutes))
+        Some(minutes) -> Some(FixedZone(format_offset_zone(minutes), minutes))
         None ->
           case etc_gmt_zone(lower) {
             Some(res) -> Some(res)
@@ -3192,8 +3208,22 @@ fn canonical_time_zone(s: String) -> Option(#(String, Int)) {
   }
 }
 
+/// The UTC offset (minutes) a formatter's zone has at a given instant. The
+/// only place a DateTimeFormat offset ever comes from.
+fn zone_offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
+  case tz {
+    HostZone -> 0 - date.tz_offset_minutes(instant_ms)
+    FixedZone(offset_minutes:, ..) -> offset_minutes
+    NamedZone(zone:, ..) ->
+      temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000)
+      |> result.map(fn(ns) { ns / 60_000_000_000 })
+      // Unloadable TZif for a zone `lookup` accepted: fall back to UTC.
+      |> result.unwrap(0)
+  }
+}
+
 /// Etc/GMT+N (UTC-N) and Etc/GMT-N (UTC+N), N in 1..14.
-fn etc_gmt_zone(lower: String) -> Option(#(String, Int)) {
+fn etc_gmt_zone(lower: String) -> Option(DtfTimeZone) {
   case string.split_once(lower, "etc/gmt") {
     Ok(#("", rest)) -> {
       let #(sign, num) = case string.pop_grapheme(rest) {
@@ -3209,7 +3239,7 @@ fn etc_gmt_zone(lower: String) -> Option(#(String, Int)) {
           }
           case sign < 0 && n > 12 {
             True -> None
-            False -> Some(#(name, sign * n * 60))
+            False -> Some(FixedZone(name, sign * n * 60))
           }
         }
         _, _ -> None
@@ -3219,21 +3249,26 @@ fn etc_gmt_zone(lower: String) -> Option(#(String, Int)) {
   }
 }
 
-/// IANA Area/Location identifiers: structural validation, canonical casing,
-/// and a fixed standard-time offset table.
-fn iana_zone(lower: String) -> Option(#(String, Int)) {
+/// Named IANA zones: the abbreviation zones plus structurally-valid
+/// Area/Location identifiers. ECMA-402 §6.5: an implementation supporting
+/// named zones must accept every IANA Zone/Link name, so resolution goes
+/// through the system tzdata (Temporal's TZif backend) rather than a
+/// hardcoded table; names absent from tzdata get the caller's
+/// "Invalid time zone specified" RangeError instead of silently rendering as
+/// UTC (offset 0).
+fn iana_zone(lower: String) -> Option(DtfTimeZone) {
   case lower {
-    "est" -> Some(#("EST", -300))
-    "cst6cdt" -> Some(#("CST6CDT", -360))
-    "est5edt" -> Some(#("EST5EDT", -300))
-    "mst7mdt" -> Some(#("MST7MDT", -420))
-    "pst8pdt" -> Some(#("PST8PDT", -480))
-    "mst" -> Some(#("MST", -420))
-    "hst" -> Some(#("HST", -600))
-    "cet" -> Some(#("CET", 60))
-    "eet" -> Some(#("EET", 120))
-    "met" -> Some(#("MET", 60))
-    "wet" -> Some(#("WET", 0))
+    "est"
+    | "cst6cdt"
+    | "est5edt"
+    | "mst7mdt"
+    | "pst8pdt"
+    | "mst"
+    | "hst"
+    | "cet"
+    | "eet"
+    | "met"
+    | "wet" -> tzdata_zone(lower)
     _ ->
       case string.split(lower, "/") {
         [area, ..rest] if rest != [] -> {
@@ -3247,20 +3282,7 @@ fn iana_zone(lower: String) -> Option(#(String, Int)) {
             )
           let parts_ok = list.all(rest, fn(p) { p != "" && is_zone_word(p) })
           case known_area && parts_ok {
-            True -> {
-              let name = normalize_zone_case(lower)
-              // ECMA-402 §6.5: an implementation supporting named zones must
-              // accept every IANA Zone/Link name, not just the ones in our
-              // small hardcoded offset table. For names the table misses,
-              // resolve against the system tzdata (Temporal's TZif backend)
-              // and only reject names absent from tzdata too — those get the
-              // caller's "Invalid time zone specified" RangeError instead of
-              // silently rendering as UTC (offset 0).
-              case iana_zone_offset(name) {
-                Some(offset) -> Some(#(name, offset))
-                None -> tzdata_zone(lower)
-              }
-            }
+            True -> tzdata_zone(lower)
             False -> None
           }
         }
@@ -3269,17 +3291,13 @@ fn iana_zone(lower: String) -> Option(#(String, Int)) {
   }
 }
 
-/// Structurally-valid IANA names absent from the hardcoded offset table,
-/// resolved against the system tzdata via Temporal's TZif backend. Returns
-/// the properly-cased identifier and its UTC offset (minutes) at the current
-/// instant; None when the name is not in tzdata either.
-fn tzdata_zone(lower: String) -> Option(#(String, Int)) {
-  let epoch_ns = date.now_ms() * 1_000_000
-  option.from_result({
-    use zone <- result.try(temporal_tz.lookup(lower))
-    use offset_ns <- result.map(temporal_tz.offset_ns_at(zone, epoch_ns))
-    #(temporal_tz.zone_id(zone), offset_ns / 60_000_000_000)
-  })
+/// Resolve a zone id against the system tzdata. The `Zone` handle it returns
+/// is what supplies the offset at each formatted instant — no offset is
+/// snapshotted here. `None` when the name is not in tzdata.
+fn tzdata_zone(lower: String) -> Option(DtfTimeZone) {
+  temporal_tz.lookup(lower)
+  |> result.map(fn(zone) { NamedZone(temporal_tz.zone_id(zone), zone) })
+  |> option.from_result
 }
 
 fn is_zone_word(p: String) -> Bool {
@@ -3293,32 +3311,6 @@ fn is_zone_word(p: String) -> Bool {
     || c == 0x2b
     || c == 0x2d
   })
-}
-
-/// Canonical IANA casing: capitalize the first letter of each word
-/// (split on "/", "_", "-").
-fn normalize_zone_case(lower: String) -> String {
-  string.split(lower, "/")
-  |> list.map(fn(seg) {
-    string.split(seg, "_")
-    |> list.map(fn(word) {
-      string.split(word, "-")
-      |> list.index_map(fn(piece, i) {
-        // Minor words inside hyphenated names stay lowercase
-        // ("Port-au-Prince"); leading pieces are capitalized.
-        case
-          i > 0
-          && list.contains(["au", "of", "es", "de", "du", "da", "la"], piece)
-        {
-          True -> piece
-          False -> titlecase_ascii(piece)
-        }
-      })
-      |> string.join("-")
-    })
-    |> string.join("_")
-  })
-  |> string.join("/")
 }
 
 /// ±HH:MM offset time zones.
@@ -3375,60 +3367,6 @@ fn format_offset_zone(minutes: Int) -> String {
   sign <> fmt.pad2(m / 60) <> ":" <> fmt.pad2(m % 60)
 }
 
-/// Standard (non-DST) offsets for common IANA zones.
-fn iana_zone_offset(s: String) -> Option(Int) {
-  case s {
-    "America/New_York" | "America/Toronto" -> Some(-300)
-    "America/Chicago" | "America/Mexico_City" -> Some(-360)
-    "America/Denver" | "America/Phoenix" -> Some(-420)
-    "America/Los_Angeles" | "America/Vancouver" -> Some(-480)
-    "America/Anchorage" -> Some(-540)
-    "America/Sao_Paulo" | "America/Argentina/Buenos_Aires" -> Some(-180)
-    "Pacific/Honolulu" -> Some(-600)
-    "Europe/London" | "Europe/Lisbon" | "Atlantic/Reykjavik" -> Some(0)
-    "Europe/Paris"
-    | "Europe/Berlin"
-    | "Europe/Madrid"
-    | "Europe/Rome"
-    | "Europe/Amsterdam"
-    | "Europe/Brussels"
-    | "Europe/Vienna"
-    | "Europe/Warsaw"
-    | "Europe/Stockholm"
-    | "Europe/Zurich"
-    | "Europe/Oslo"
-    | "Europe/Copenhagen"
-    | "Europe/Prague"
-    | "Europe/Budapest" -> Some(60)
-    "Europe/Athens"
-    | "Europe/Helsinki"
-    | "Europe/Kiev"
-    | "Europe/Bucharest"
-    | "Africa/Cairo"
-    | "Africa/Johannesburg"
-    | "Asia/Jerusalem" -> Some(120)
-    "Europe/Moscow" | "Europe/Istanbul" | "Asia/Riyadh" -> Some(180)
-    "Asia/Dubai" -> Some(240)
-    "Asia/Karachi" -> Some(300)
-    "Asia/Kolkata" | "Asia/Calcutta" -> Some(330)
-    "Asia/Kathmandu" | "Asia/Katmandu" -> Some(345)
-    "Asia/Dhaka" -> Some(360)
-    "Asia/Bangkok" | "Asia/Jakarta" -> Some(420)
-    "Asia/Shanghai"
-    | "Asia/Hong_Kong"
-    | "Asia/Singapore"
-    | "Asia/Taipei"
-    | "Australia/Perth"
-    | "Asia/Macau" -> Some(480)
-    "Asia/Tokyo" | "Asia/Seoul" -> Some(540)
-    "Australia/Sydney" | "Australia/Melbourne" | "Australia/Brisbane" ->
-      Some(600)
-    "Pacific/Auckland" -> Some(720)
-    "Pacific/Apia" -> Some(780)
-    _ -> None
-  }
-}
-
 // --- Intl.PluralRules ---
 
 fn plural_rules_state(
@@ -3442,12 +3380,12 @@ fn plural_rules_state(
     options_v,
     strict: False,
   ))
-  use #(type_, state) <- result.try(get_str_opt(
+  use #(type_, state) <- result.try(get_enum_opt(
     state,
     opts,
     "type",
-    ["cardinal", "ordinal"],
-    Some("cardinal"),
+    [#("cardinal", Cardinal), #("ordinal", Ordinal)],
+    Cardinal,
   ))
   use #(notation_kind, state) <- result.try(get_enum_opt(
     state,
@@ -3468,7 +3406,7 @@ fn plural_rules_state(
   Ok(#(
     PluralRulesState(
       locale: data_locale,
-      plural_type: option.unwrap(type_, "cardinal"),
+      plural_type: type_,
       notation:,
       digits:,
     ),
@@ -3489,29 +3427,30 @@ fn list_format_state(
     options_v,
     strict: True,
   ))
-  use #(type_, state) <- result.try(get_str_opt(
+  use #(type_, state) <- result.try(get_enum_opt(
     state,
     opts,
     "type",
-    ["conjunction", "disjunction", "unit"],
-    Some("conjunction"),
+    [
+      #("conjunction", Conjunction),
+      #("disjunction", Disjunction),
+      #("unit", UnitList),
+    ],
+    Conjunction,
   ))
-  use #(style, state) <- result.try(get_str_opt(
+  use #(style, state) <- result.try(get_enum_opt(
     state,
     opts,
     "style",
-    ["long", "short", "narrow"],
-    Some("long"),
+    list_format_style_variants(),
+    LLong,
   ))
   let #(_locale, data_locale, _ext) = resolve_locale(requested)
-  Ok(#(
-    ListFormatState(
-      locale: data_locale,
-      list_type: option.unwrap(type_, "conjunction"),
-      style: option.unwrap(style, "long"),
-    ),
-    state,
-  ))
+  Ok(#(ListFormatState(locale: data_locale, list_type: type_, style:), state))
+}
+
+fn list_format_style_variants() -> List(#(String, ListFormatStyle)) {
+  [#("long", LLong), #("short", LShort), #("narrow", LNarrow)]
 }
 
 // --- Intl.RelativeTimeFormat ---
@@ -3532,27 +3471,22 @@ fn rtf_state(
     opts,
     requested,
   ))
-  use #(style, state) <- result.try(get_str_opt(
+  use #(style, state) <- result.try(get_enum_opt(
     state,
     opts,
     "style",
-    ["long", "short", "narrow"],
-    Some("long"),
+    [#("long", RtfLong), #("short", RtfShort), #("narrow", RtfNarrow)],
+    RtfLong,
   ))
-  use #(numeric, state) <- result.try(get_str_opt(
+  use #(numeric, state) <- result.try(get_enum_opt(
     state,
     opts,
     "numeric",
-    ["always", "auto"],
-    Some("always"),
+    [#("always", RtfAlways), #("auto", RtfAuto)],
+    RtfAlways,
   ))
   Ok(#(
-    RelativeTimeFormatState(
-      locale:,
-      style: option.unwrap(style, "long"),
-      numeric: option.unwrap(numeric, "always"),
-      numbering_system: nu,
-    ),
+    RelativeTimeFormatState(locale:, style:, numeric:, numbering_system: nu),
     state,
   ))
 }
@@ -3570,21 +3504,19 @@ fn segmenter_state(
     options_v,
     strict: True,
   ))
-  use #(granularity, state) <- result.try(get_str_opt(
+  use #(granularity, state) <- result.try(get_enum_opt(
     state,
     opts,
     "granularity",
-    ["grapheme", "word", "sentence"],
-    Some("grapheme"),
+    [
+      #("grapheme", GGrapheme),
+      #("word", GWord),
+      #("sentence", GSentence),
+    ],
+    GGrapheme,
   ))
   let #(_locale, data_locale, _ext) = resolve_locale(requested)
-  Ok(#(
-    SegmenterState(
-      locale: data_locale,
-      granularity: option.unwrap(granularity, "grapheme"),
-    ),
-    state,
-  ))
+  Ok(#(SegmenterState(locale: data_locale, granularity:), state))
 }
 
 // --- Intl.DisplayNames ---
@@ -3600,18 +3532,25 @@ fn display_names_state(
     options_v,
     strict: True,
   ))
-  use #(style, state) <- result.try(get_str_opt(
+  use #(style, state) <- result.try(get_enum_opt(
     state,
     opts,
     "style",
-    ["narrow", "short", "long"],
-    Some("long"),
+    [#("narrow", WNarrow), #("short", WShort), #("long", WLong)],
+    WLong,
   ))
-  use #(type_, state) <- result.try(get_str_opt(
+  use #(type_, state) <- result.try(get_enum_opt(
     state,
     opts,
     "type",
-    ["language", "region", "script", "currency", "calendar", "dateTimeField"],
+    [
+      #("language", Some(DnLanguage)),
+      #("region", Some(DnRegion)),
+      #("script", Some(DnScript)),
+      #("currency", Some(DnCurrency)),
+      #("calendar", Some(DnCalendar)),
+      #("dateTimeField", Some(DnDateTimeField)),
+    ],
     None,
   ))
   use type_ <- result.try(case type_ {
@@ -3619,30 +3558,30 @@ fn display_names_state(
     None ->
       throw_type(state, "Intl.DisplayNames constructor requires type option")
   })
-  use #(fallback, state) <- result.try(get_str_opt(
+  use #(fallback, state) <- result.try(get_enum_opt(
     state,
     opts,
     "fallback",
-    ["code", "none"],
-    Some("code"),
+    [#("code", FbCode), #("none", FbNone)],
+    FbCode,
   ))
-  use #(language_display, state) <- result.try(get_str_opt(
+  use #(language_display, state) <- result.try(get_enum_opt(
     state,
     opts,
     "languageDisplay",
-    ["dialect", "standard"],
-    Some("dialect"),
+    [#("dialect", LdDialect), #("standard", LdStandard)],
+    LdDialect,
   ))
   let #(_locale, data_locale, _ext) = resolve_locale(requested)
   Ok(#(
     DisplayNamesState(
       locale: data_locale,
-      style: option.unwrap(style, "long"),
+      style:,
       display_type: type_,
-      fallback: option.unwrap(fallback, "code"),
+      fallback:,
       language_display: case type_ {
-        "language" -> Some(option.unwrap(language_display, "dialect"))
-        _ -> None
+        DnLanguage -> Some(language_display)
+        DnRegion | DnScript | DnCurrency | DnCalendar | DnDateTimeField -> None
       },
     ),
     state,
@@ -4011,10 +3950,11 @@ fn duration_base_unit_style(base: DurationBaseStyle) -> DurationUnitStyle {
 
 /// The ListFormat style the assembled duration groups are joined with —
 /// `digital` has no list style of its own and joins like `short`.
-fn duration_list_style(base: DurationBaseStyle) -> String {
+fn duration_list_style(base: DurationBaseStyle) -> ListFormatStyle {
   case base {
-    BsDigital -> "short"
-    BsLong | BsShort | BsNarrow -> value.duration_base_style_to_js_string(base)
+    BsDigital | BsShort -> LShort
+    BsLong -> LLong
+    BsNarrow -> LNarrow
   }
 }
 
@@ -4060,8 +4000,11 @@ fn resolved_options(
       LocaleData(l) -> #(state, [#("locale", JsString(l.locale))])
       CollatorData(c) -> #(state, [
         #("locale", JsString(c.locale)),
-        #("usage", JsString(c.usage)),
-        #("sensitivity", JsString(c.sensitivity)),
+        #("usage", JsString(value.collator_usage_to_js_string(c.usage))),
+        #(
+          "sensitivity",
+          JsString(value.collator_sensitivity_to_js_string(c.sensitivity)),
+        ),
         #("ignorePunctuation", JsBool(c.ignore_punctuation)),
         #("collation", JsString(c.collation)),
         #("numeric", JsBool(c.numeric)),
@@ -4119,7 +4062,7 @@ fn resolved_options(
           #("locale", Some(JsString(d.locale))),
           #("calendar", Some(JsString(d.calendar))),
           #("numberingSystem", Some(JsString(d.numbering_system))),
-          #("timeZone", Some(JsString(d.time_zone))),
+          #("timeZone", Some(JsString(value.dtf_time_zone_id(d.time_zone)))),
           #(
             "hourCycle",
             option.map(d.hour_cycle, fn(hc) {
@@ -4174,7 +4117,10 @@ fn resolved_options(
           state,
           present_pairs([
             #("locale", Some(JsString(p.locale))),
-            #("type", Some(JsString(p.plural_type))),
+            #(
+              "type",
+              Some(JsString(value.plural_type_to_js_string(p.plural_type))),
+            ),
             #(
               "notation",
               Some(JsString(value.notation_to_js_string(p.notation))),
@@ -4189,27 +4135,45 @@ fn resolved_options(
       }
       ListFormatData(l) -> #(state, [
         #("locale", JsString(l.locale)),
-        #("type", JsString(l.list_type)),
-        #("style", JsString(l.style)),
+        #("type", JsString(value.list_format_type_to_js_string(l.list_type))),
+        #("style", JsString(value.list_format_style_to_js_string(l.style))),
       ])
       RelativeTimeFormatData(r) -> #(state, [
         #("locale", JsString(r.locale)),
-        #("style", JsString(r.style)),
-        #("numeric", JsString(r.numeric)),
+        #("style", JsString(value.rtf_style_to_js_string(r.style))),
+        #("numeric", JsString(value.rtf_numeric_to_js_string(r.numeric))),
         #("numberingSystem", JsString(r.numbering_system)),
       ])
       SegmenterData(s) -> #(state, [
         #("locale", JsString(s.locale)),
-        #("granularity", JsString(s.granularity)),
+        #(
+          "granularity",
+          JsString(value.granularity_to_js_string(s.granularity)),
+        ),
       ])
       DisplayNamesData(d) -> #(
         state,
         present_pairs([
           #("locale", Some(JsString(d.locale))),
-          #("style", Some(JsString(d.style))),
-          #("type", Some(JsString(d.display_type))),
-          #("fallback", Some(JsString(d.fallback))),
-          #("languageDisplay", option.map(d.language_display, JsString)),
+          #("style", Some(JsString(value.name_width_to_js_string(d.style)))),
+          #(
+            "type",
+            Some(
+              JsString(value.display_names_type_to_js_string(d.display_type)),
+            ),
+          ),
+          #(
+            "fallback",
+            Some(
+              JsString(value.display_names_fallback_to_js_string(d.fallback)),
+            ),
+          ),
+          #(
+            "languageDisplay",
+            option.map(d.language_display, fn(ld) {
+              JsString(value.language_display_to_js_string(ld))
+            }),
+          ),
         ]),
       )
       DurationFormatData(df) -> #(
@@ -4471,7 +4435,7 @@ fn num_opts_from_nf(nf: NumberFormatState) -> fmt.NumOpts {
   with_digits(
     fmt.NumOpts(
       ..d,
-      locale: nf.locale,
+      locale: fmt.locale_key(nf.locale),
       style: nf.style,
       use_grouping: nf.use_grouping,
       notation: nf.notation,
@@ -4486,7 +4450,7 @@ fn num_opts_from_nf(nf: NumberFormatState) -> fmt.NumOpts {
 fn num_opts_from_plural(p: PluralRulesState) -> fmt.NumOpts {
   let d = fmt.default_num_opts()
   with_digits(
-    fmt.NumOpts(..d, locale: p.locale, notation: p.notation),
+    fmt.NumOpts(..d, locale: fmt.locale_key(p.locale), notation: p.notation),
     p.digits,
   )
 }
@@ -4576,7 +4540,7 @@ fn nf_range_parts(
   nf: NumberFormatState,
   x_v: JsValue,
   y_v: JsValue,
-) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
+) -> Result(#(List(fmt.RangePart), State(host)), Thrown(host)) {
   use Nil <- result.try(case x_v, y_v {
     JsUndefined, _ | _, JsUndefined ->
       throw_type(state, "Invalid range arguments")
@@ -4601,7 +4565,10 @@ fn nf_range_parts(
   }
   use #(x_parts, state) <- result.try(nf_format_parts(state, nf, x_fmt))
   use #(y_parts, state) <- result.try(nf_format_parts(state, nf, y_fmt))
-  Ok(#(fmt.format_range_combine(nf.locale, x_parts, y_parts), state))
+  Ok(#(
+    fmt.format_range_combine(fmt.locale_key(nf.locale), x_parts, y_parts),
+    state,
+  ))
 }
 
 // ============================================================================
@@ -4906,13 +4873,27 @@ fn civil_week_day(year: Int, month: Int, day: Int) -> Int {
   { { days % 7 } + 11 } % 7
 }
 
-/// Wall-clock fields for a Temporal value. Plain types format their fields
-/// directly (the formatter's time zone is ignored); Instant converts through
-/// the formatter's zone like a Number time value.
+/// Wall-clock fields for a Temporal value, and the zone offset that produced
+/// them (which a requested `timeZoneName` renders). Plain types format their
+/// fields directly (the formatter's time zone is ignored); Instant converts
+/// through the formatter's zone like a Number time value.
 fn dtf_temporal_fields(
   d: DateTimeFormatState,
   t: TemporalFormattable,
-) -> fmt.DateFields {
+) -> #(fmt.DateFields, Int) {
+  case t {
+    TfInstant(epoch_ns:) -> {
+      let ms = floor_div(epoch_ns, 1_000_000)
+      let offset = zone_offset_at(d.time_zone, ms)
+      #(fmt.fields_from_epoch_ms(int.to_float(ms), offset), offset)
+    }
+    // Plain types carry no instant, so a requested timeZoneName can only show
+    // the zone's offset now.
+    _ -> #(plain_temporal_fields(t), zone_offset_at(d.time_zone, date.now_ms()))
+  }
+}
+
+fn plain_temporal_fields(t: TemporalFormattable) -> fmt.DateFields {
   case t {
     TfDate(year:, month:, day:, ..) | TfYearMonth(year:, month:, day:, ..) ->
       fmt.DateFields(
@@ -4958,16 +4939,9 @@ fn dtf_temporal_fields(
         millisecond:,
         week_day: civil_week_day(year, month, day),
       )
-    TfInstant(epoch_ns:) -> {
-      let ms = floor_div(epoch_ns, 1_000_000)
-      let offset = case d.tz_system {
-        True -> 0 - date.tz_offset_minutes(ms)
-        False -> d.tz_offset_minutes
-      }
-      fmt.fields_from_epoch_ms(int.to_float(ms), offset)
-    }
-    TfZoned ->
-      // Unreachable: dtf_temporal_state throws for ZonedDateTime first.
+    TfInstant(..) | TfZoned ->
+      // TfInstant is handled by the caller; dtf_temporal_state throws for
+      // ZonedDateTime before we get here.
       fmt.fields_from_epoch_ms(0.0, 0)
   }
 }
@@ -4987,7 +4961,8 @@ fn dtf_format_parts(
   case dtf_temporal_value(state, date_v) {
     Some(t) -> {
       use #(d, state) <- result.try(dtf_temporal_state(state, d, t))
-      let parts = build_dtf_parts(d, dtf_temporal_fields(d, t))
+      let #(fields, offset) = dtf_temporal_fields(d, t)
+      let parts = build_dtf_parts(d, fields, offset)
       Ok(#(
         apply_numbering_system(parts, d.numbering_system, fmt.is_date_numeric),
         state,
@@ -5002,8 +4977,8 @@ fn dtf_format_parts_number(
   d: DateTimeFormatState,
   date_v: JsValue,
 ) -> Result(#(List(fmt.Part), State(host)), Thrown(host)) {
-  use #(fields, state) <- result.try(dtf_fields_number(state, d, date_v))
-  let parts = build_dtf_parts(d, fields)
+  use #(fields, offset, state) <- result.try(dtf_fields_number(state, d, date_v))
+  let parts = build_dtf_parts(d, fields, offset)
   Ok(#(
     apply_numbering_system(parts, d.numbering_system, fmt.is_date_numeric),
     state,
@@ -5013,6 +4988,7 @@ fn dtf_format_parts_number(
 fn build_dtf_parts(
   d: DateTimeFormatState,
   fields: fmt.DateFields,
+  offset: Int,
 ) -> List(fmt.Part) {
   let DtfComponents(
     weekday:,
@@ -5193,7 +5169,7 @@ fn build_dtf_parts(
   }
   let tz_parts = case tz_name {
     Some(width) -> {
-      let name = tz_display(d.time_zone, width, d.tz_offset_minutes)
+      let name = tz_display(value.dtf_time_zone_id(d.time_zone), width, offset)
       [#(PLiteral, " "), #(PTimeZoneName, name)]
     }
     None -> []
@@ -5293,7 +5269,7 @@ fn dtf_range_parts(
   d: DateTimeFormatState,
   x_v: JsValue,
   y_v: JsValue,
-) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
+) -> Result(#(List(fmt.RangePart), State(host)), Thrown(host)) {
   use Nil <- result.try(case x_v, y_v {
     JsUndefined, _ | _, JsUndefined ->
       throw_type(state, "Invalid range arguments")
@@ -5347,17 +5323,15 @@ fn dtf_range_parts(
     None -> {
       use #(x_parts, state) <- result.try(dtf_format_parts(state, d, x_v))
       use #(y_parts, state) <- result.try(dtf_format_parts(state, d, y_v))
-      let sourced = fn(p: fmt.Part, source) {
-        #(fmt.part_type_to_js_string(p.0), p.1, source)
-      }
+      let sourced = fn(p: fmt.Part, source) { fmt.RangePart(p.0, p.1, source) }
       case fmt.parts_to_string(x_parts) == fmt.parts_to_string(y_parts) {
-        True -> Ok(#(list.map(x_parts, sourced(_, "shared")), state))
+        True -> Ok(#(list.map(x_parts, sourced(_, fmt.SourceShared)), state))
         False ->
           Ok(#(
             list.flatten([
-              list.map(x_parts, sourced(_, "startRange")),
-              [sourced(#(PLiteral, " – "), "shared")],
-              list.map(y_parts, sourced(_, "endRange")),
+              list.map(x_parts, sourced(_, fmt.SourceStart)),
+              [sourced(#(PLiteral, " – "), fmt.SourceShared)],
+              list.map(y_parts, sourced(_, fmt.SourceEnd)),
             ]),
             state,
           ))
@@ -5373,10 +5347,7 @@ fn dtf_collapsed_range(
   d: DateTimeFormatState,
   x_v: JsValue,
   y_v: JsValue,
-) -> Result(
-  Option(#(List(#(String, String, String)), State(host))),
-  Thrown(host),
-) {
+) -> Result(Option(#(List(fmt.RangePart), State(host))), Thrown(host)) {
   let c = d.components
   let date_only =
     c.hour == None && c.minute == None && c.second == None && c.weekday == None
@@ -5402,27 +5373,35 @@ fn dtf_collapsed_range(
             case xf.month == yf.month, xf.day != yf.day {
               True, True -> {
                 let parts = [
-                  #("month", mname(xf.month), "shared"),
-                  #("literal", " ", "shared"),
-                  #("day", day_str(day_style, xf.day), "startRange"),
-                  #("literal", " – ", "shared"),
-                  #("day", day_str(day_style, yf.day), "endRange"),
-                  #("literal", ", ", "shared"),
-                  #("year", year_str, "shared"),
+                  fmt.RangePart(PMonth, mname(xf.month), fmt.SourceShared),
+                  fmt.RangePart(PLiteral, " ", fmt.SourceShared),
+                  fmt.RangePart(
+                    PDay,
+                    day_str(day_style, xf.day),
+                    fmt.SourceStart,
+                  ),
+                  fmt.RangePart(PLiteral, " – ", fmt.SourceShared),
+                  fmt.RangePart(PDay, day_str(day_style, yf.day), fmt.SourceEnd),
+                  fmt.RangePart(PLiteral, ", ", fmt.SourceShared),
+                  fmt.RangePart(PYear, year_str, fmt.SourceShared),
                 ]
                 Ok(Some(#(parts, state)))
               }
               False, _ -> {
                 let parts = [
-                  #("month", mname(xf.month), "startRange"),
-                  #("literal", " ", "startRange"),
-                  #("day", day_str(day_style, xf.day), "startRange"),
-                  #("literal", " – ", "shared"),
-                  #("month", mname(yf.month), "endRange"),
-                  #("literal", " ", "endRange"),
-                  #("day", day_str(day_style, yf.day), "endRange"),
-                  #("literal", ", ", "shared"),
-                  #("year", year_str, "shared"),
+                  fmt.RangePart(PMonth, mname(xf.month), fmt.SourceStart),
+                  fmt.RangePart(PLiteral, " ", fmt.SourceStart),
+                  fmt.RangePart(
+                    PDay,
+                    day_str(day_style, xf.day),
+                    fmt.SourceStart,
+                  ),
+                  fmt.RangePart(PLiteral, " – ", fmt.SourceShared),
+                  fmt.RangePart(PMonth, mname(yf.month), fmt.SourceEnd),
+                  fmt.RangePart(PLiteral, " ", fmt.SourceEnd),
+                  fmt.RangePart(PDay, day_str(day_style, yf.day), fmt.SourceEnd),
+                  fmt.RangePart(PLiteral, ", ", fmt.SourceShared),
+                  fmt.RangePart(PYear, year_str, fmt.SourceShared),
                 ]
                 Ok(Some(#(parts, state)))
               }
@@ -5442,16 +5421,27 @@ fn dtf_fields(
   date_v: JsValue,
 ) -> Result(#(fmt.DateFields, State(host)), Thrown(host)) {
   case dtf_temporal_value(state, date_v) {
-    Some(t) -> Ok(#(dtf_temporal_fields(d, t), state))
-    None -> dtf_fields_number(state, d, date_v)
+    Some(t) -> {
+      let #(fields, _offset) = dtf_temporal_fields(d, t)
+      Ok(#(fields, state))
+    }
+    None -> {
+      use #(fields, _offset, state) <- result.map(dtf_fields_number(
+        state,
+        d,
+        date_v,
+      ))
+      #(fields, state)
+    }
   }
 }
 
+/// Civil fields for a Number time value, plus the zone offset used.
 fn dtf_fields_number(
   state: State(host),
   d: DateTimeFormatState,
   date_v: JsValue,
-) -> Result(#(fmt.DateFields, State(host)), Thrown(host)) {
+) -> Result(#(fmt.DateFields, Int, State(host)), Thrown(host)) {
   use #(tv, state) <- result.try(case date_v {
     JsUndefined -> Ok(#(value.Finite(int.to_float(date.now_ms())), state))
     _ -> coerce.js_to_number(state, date_v)
@@ -5467,11 +5457,8 @@ fn dtf_fields_number(
     }
     _ -> throw_range(state, "Invalid time value")
   })
-  let offset = case d.tz_system {
-    True -> 0 - date.tz_offset_minutes(float.truncate(tv_f))
-    False -> d.tz_offset_minutes
-  }
-  Ok(#(fmt.fields_from_epoch_ms(tv_f, offset), state))
+  let offset = zone_offset_at(d.time_zone, float.truncate(tv_f))
+  Ok(#(fmt.fields_from_epoch_ms(tv_f, offset), offset, state))
 }
 
 // ============================================================================
@@ -5511,7 +5498,7 @@ fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
 /// Secondary (accents) and tertiary (case) comparisons per sensitivity.
 /// The tertiary (case) level honours `[[CaseFirst]]` (§10.1.2 `kf`).
 fn collator_levels(
-  sensitivity: String,
+  sensitivity: CollatorSensitivity,
   case_first: CaseFirst,
   a: String,
   b: String,
@@ -5535,15 +5522,14 @@ fn collator_levels(
     }
   }
   case sensitivity {
-    "base" -> 0
-    "accent" -> secondary()
-    "case" ->
+    SensBase -> 0
+    SensAccent -> secondary()
+    SensCase ->
       case tertiary() {
         0 -> 0
         n -> n
       }
-    // variant
-    _ ->
+    SensVariant ->
       case secondary() {
         0 -> tertiary()
         n -> n
@@ -5775,8 +5761,7 @@ fn run_method(
       }
       IntlFormatRange, NumberFormatData(nf) -> {
         use #(parts, state) <- result.try(nf_range_parts(state, nf, arg0, arg1))
-        let s = parts |> list.map(fn(p) { p.1 }) |> string.join("")
-        Ok(#(JsString(s), state))
+        Ok(#(JsString(range_parts_to_string(parts)), state))
       }
       IntlFormatRangeToParts, NumberFormatData(nf) -> {
         use #(parts, state) <- result.try(nf_range_parts(state, nf, arg0, arg1))
@@ -5790,8 +5775,7 @@ fn run_method(
       }
       IntlFormatRange, DateTimeFormatData(d) -> {
         use #(parts, state) <- result.try(dtf_range_parts(state, d, arg0, arg1))
-        let s = parts |> list.map(fn(p) { p.1 }) |> string.join("")
-        Ok(#(JsString(s), state))
+        Ok(#(JsString(range_parts_to_string(parts)), state))
       }
       IntlFormatRangeToParts, DateTimeFormatData(d) -> {
         use #(parts, state) <- result.try(dtf_range_parts(state, d, arg0, arg1))
@@ -5831,8 +5815,7 @@ fn run_method(
       }
       IntlFormat, RelativeTimeFormatData(r) -> {
         use #(parts, state) <- result.try(rtf_method_parts(state, r, arg0, arg1))
-        let str = parts |> list.map(fn(part) { part.1 }) |> string.join("")
-        Ok(#(JsString(str), state))
+        Ok(#(JsString(fmt.unit_parts_to_string(parts)), state))
       }
       IntlFormatToParts, RelativeTimeFormatData(r) -> {
         use #(parts, state) <- result.try(rtf_method_parts(state, r, arg0, arg1))
@@ -5842,8 +5825,7 @@ fn run_method(
       IntlOf, DisplayNamesData(dn) -> display_names_of(state, dn, arg0)
       IntlFormat, DurationFormatData(df) -> {
         use #(parts, state) <- result.try(duration_parts(state, df, arg0))
-        let str = parts |> list.map(fn(part) { part.1 }) |> string.join("")
-        Ok(#(JsString(str), state))
+        Ok(#(JsString(fmt.unit_parts_to_string(parts)), state))
       }
       IntlFormatToParts, DurationFormatData(df) -> {
         use #(parts, state) <- result.try(duration_parts(state, df, arg0))
@@ -5941,9 +5923,9 @@ fn host_bigint_to_locale_string(
   use n <- result.try(case this {
     value.JsBigInt(value.BigInt(n)) -> Ok(n)
     JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: value.BigIntObject(value.BigInt(n)), ..)) -> Ok(n)
-        _ -> throw_bigint_receiver(state)
+      case heap.read_bigint_object(state.heap, ref) {
+        Some(value.BigInt(n)) -> Ok(n)
+        None -> throw_bigint_receiver(state)
       }
     _ -> throw_bigint_receiver(state)
   })
@@ -6217,7 +6199,7 @@ fn rtf_method_parts(
   r: RelativeTimeFormatState,
   value_v: JsValue,
   unit_v: JsValue,
-) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
+) -> Result(#(List(fmt.UnitPart), State(host)), Thrown(host)) {
   use #(n, state) <- result.try(coerce.js_to_number(state, value_v))
   use f <- result.try(case n {
     value.Finite(f) -> Ok(f)
@@ -6335,7 +6317,7 @@ fn display_names_of(
   let type_ = dn.display_type
   let fallback = dn.fallback
   use #(canonical, name) <- result.try(case type_ {
-    "language" ->
+    DnLanguage ->
       case tags.parse(code) {
         Ok(lid) ->
           // Must match unicode_language_id: no extensions/private use.
@@ -6348,7 +6330,7 @@ fn display_names_of(
           }
         Error(Nil) -> throw_range(state, "invalid language code: " <> code)
       }
-    "region" ->
+    DnRegion ->
       case is_region_subtag(code) {
         True -> {
           let r = string.uppercase(code)
@@ -6356,7 +6338,7 @@ fn display_names_of(
         }
         False -> throw_range(state, "invalid region code: " <> code)
       }
-    "script" ->
+    DnScript ->
       case is_script_subtag(code) {
         True -> {
           let s = titlecase_ascii(code)
@@ -6364,7 +6346,7 @@ fn display_names_of(
         }
         False -> throw_range(state, "invalid script code: " <> code)
       }
-    "currency" ->
+    DnCurrency ->
       case is_alpha_str(code) && string.length(code) == 3 {
         True -> {
           let c = string.uppercase(code)
@@ -6372,7 +6354,7 @@ fn display_names_of(
         }
         False -> throw_range(state, "invalid currency code: " <> code)
       }
-    "calendar" ->
+    DnCalendar ->
       case is_type_sequence(string.lowercase(code)) {
         True -> {
           let c = string.lowercase(code)
@@ -6385,8 +6367,7 @@ fn display_names_of(
         }
         False -> throw_range(state, "invalid calendar code: " <> code)
       }
-    // dateTimeField
-    _ ->
+    DnDateTimeField ->
       case
         list.contains(
           [
@@ -6411,8 +6392,8 @@ fn display_names_of(
   })
   case name, fallback {
     Some(n), _ -> Ok(#(JsString(n), state))
-    None, "code" -> Ok(#(JsString(canonical), state))
-    None, _ -> Ok(#(JsUndefined, state))
+    None, FbCode -> Ok(#(JsString(canonical), state))
+    None, FbNone -> Ok(#(JsUndefined, state))
   }
 }
 
@@ -6431,7 +6412,7 @@ fn duration_parts(
   state: State(host),
   df: DurationFormatState,
   duration_v: JsValue,
-) -> Result(#(List(#(String, String, String)), State(host)), Thrown(host)) {
+) -> Result(#(List(fmt.UnitPart), State(host)), Thrown(host)) {
   use #(fields, state) <- result.try(to_duration_record(state, duration_v))
   // DurationSign consistency + IsValidDuration ranges.
   let values = duration_values(fields)
@@ -6711,7 +6692,7 @@ fn parse_duration_number(s: String) -> Result(Float, Nil) {
 fn build_duration_parts(
   df: DurationFormatState,
   fields: DurationRecord,
-) -> List(#(String, String, String)) {
+) -> List(fmt.UnitPart) {
   let nu = df.numbering_system
   let base_style = df.style
   let frac_digits = df.fractional_digits
@@ -6840,10 +6821,9 @@ fn build_duration_parts(
               let parts =
                 apply_numbering_system(parts, nu, fmt.is_number_digit)
                 |> list.map(fn(part: fmt.Part) {
-                  let t = fmt.part_type_to_js_string(part.0)
                   case part.0 {
-                    PLiteral -> #(t, part.1, "")
-                    _ -> #(t, part.1, unit_tag)
+                    PLiteral -> fmt.UnitPart(part.0, part.1, "")
+                    _ -> fmt.UnitPart(part.0, part.1, unit_tag)
                   }
                 })
               case need_sep {
@@ -6852,7 +6832,11 @@ fn build_duration_parts(
                   case groups {
                     [last, ..earlier] -> #(
                       [
-                        list.flatten([last, [#("literal", ":", "")], parts]),
+                        list.flatten([
+                          last,
+                          [fmt.UnitPart(PLiteral, ":", "")],
+                          parts,
+                        ]),
                         ..earlier
                       ],
                       need_sep,
@@ -6874,13 +6858,10 @@ fn build_duration_parts(
       }
     })
   let groups = list.reverse(groups_rev)
-  let strings =
-    list.map(groups, fn(g) {
-      g |> list.map(fn(part) { part.1 }) |> string.join("")
-    })
+  let strings = list.map(groups, fmt.unit_parts_to_string)
   // Re-expand element parts so formatToParts keeps the numeric structure.
   let lf_parts =
-    fmt.list_format_parts("unit", duration_list_style(base_style), strings)
+    fmt.list_format_parts(UnitList, duration_list_style(base_style), strings)
   expand_list_elements(lf_parts, groups, [])
 }
 
@@ -6962,9 +6943,9 @@ fn pow10_i(e: Int) -> Int {
 /// Substitute "element" parts from ListFormat with the group's real parts.
 fn expand_list_elements(
   lf_parts: List(fmt.Part),
-  groups: List(List(#(String, String, String))),
-  acc: List(List(#(String, String, String))),
-) -> List(#(String, String, String)) {
+  groups: List(List(fmt.UnitPart)),
+  acc: List(List(fmt.UnitPart)),
+) -> List(fmt.UnitPart) {
   case lf_parts {
     [] -> list.flatten(list.reverse(acc))
     [#(PElement, _), ..rest] ->
@@ -6973,10 +6954,7 @@ fn expand_list_elements(
         [] -> expand_list_elements(rest, [], acc)
       }
     [#(t, v), ..rest] ->
-      expand_list_elements(rest, groups, [
-        [#(fmt.part_type_to_js_string(t), v, "")],
-        ..acc
-      ])
+      expand_list_elements(rest, groups, [[fmt.UnitPart(t, v, "")], ..acc])
   }
 }
 
@@ -7028,7 +7006,7 @@ fn segments_iterator(
 fn make_segment_data(
   state: State(host),
   input: String,
-  granularity: String,
+  granularity: Granularity,
   segment: String,
   index: Int,
   word_like: Bool,
@@ -7039,8 +7017,8 @@ fn make_segment_data(
     #("input", JsString(input)),
   ]
   let props = case granularity {
-    "word" -> list.append(base, [#("isWordLike", JsBool(word_like))])
-    _ -> base
+    GWord -> list.append(base, [#("isWordLike", JsBool(word_like))])
+    GGrapheme | GSentence -> base
   }
   alloc_pojo(state, props)
 }
