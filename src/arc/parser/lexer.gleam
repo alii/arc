@@ -19,6 +19,18 @@ pub type Token {
   /// through to the parser — no rendered prose in `value` to re-parse. Every
   /// other token, including a LENIENT `Illegal` (a stray character a regex
   /// body could have made legal), has `None`.
+  ///
+  /// `annex_b_legacy` records that this token's source used one of the Annex B
+  /// legacy forms that strict code rejects as an early SyntaxError, decided by
+  /// the scan that read the token rather than by re-scanning its text later:
+  ///   * `Number` — the literal has a leading zero (§B.1.1
+  ///     LegacyOctalIntegerLiteral `010`, or NonOctalDecimalIntegerLiteral
+  ///     `08`, `09`, `08.5`); §12.9.3.1 forbids both in strict code.
+  ///   * `KString` — the literal contains a §B.1.2 LegacyOctalEscapeSequence
+  ///     (`\7`, `\012`, `\0` followed by a decimal digit) or a
+  ///     NonOctalDecimalEscapeSequence (`\8`, `\9`); §12.9.4.1 forbids both.
+  /// Never set on any other kind: templates reject those escapes outright, so
+  /// there is nothing for strict mode to reject a second time.
   Token(
     kind: TokenKind,
     value: String,
@@ -27,6 +39,7 @@ pub type Token {
     raw_len: Int,
     had_escape: Bool,
     lex_error: Option(LexError),
+    annex_b_legacy: Bool,
   )
 }
 
@@ -275,13 +288,13 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
       let token_line = line + ws_newlines
       case read_fast_punct(rest) {
         Some(#(kind, value)) -> #(
-          Token(kind, value, new_pos, token_line, 1, False, None),
+          Token(kind, value, new_pos, token_line, 1, False, None, False),
           Scanner(bytes:, pos: new_pos + 1, line: token_line, mode:),
         )
         None ->
           case char_at(bytes, new_pos) {
             "" -> #(
-              Token(Eof, "", new_pos, token_line, 0, False, None),
+              Token(Eof, "", new_pos, token_line, 0, False, None, False),
               Scanner(bytes:, pos: new_pos, line: token_line, mode:),
             )
             _ ->
@@ -327,7 +340,7 @@ fn hard_error_token(
   let epos = lex_error_pos(err)
   let err_line = line + count_newlines_in(byte_slice(bytes, from, epos - from))
   #(
-    Token(Illegal, "", epos, err_line, 0, False, Some(err)),
+    Token(Illegal, "", epos, err_line, 0, False, Some(err), False),
     Scanner(bytes:, pos: bit_array.byte_size(bytes), line: err_line, mode:),
   )
 }
@@ -527,6 +540,7 @@ fn tokn(kind: TokenKind, value: String, pos: Int, raw_len: Int) -> Token {
     raw_len:,
     had_escape: False,
     lex_error: None,
+    annex_b_legacy: False,
   )
 }
 
@@ -595,6 +609,7 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
                 raw_len: escape_span,
                 had_escape: True,
                 lex_error: None,
+                annex_b_legacy: False,
               ))
             }
           }
@@ -808,26 +823,36 @@ fn is_hex_digit(ch: String) -> Bool {
   }
 }
 
+/// A validated escape sequence: how many bytes it spans (backslash included),
+/// and whether it is one of the Annex B legacy forms strict code forbids —
+/// §B.1.2 LegacyOctalEscapeSequence (`\7`, `\012`, `\0` + a decimal digit) or
+/// NonOctalDecimalEscapeSequence (`\8`, `\9`). The escape grammar lives HERE
+/// and nowhere else, so no later pass has to walk the raw text again to
+/// re-derive either fact.
+type Escape {
+  Escape(skip: Int, annex_b_legacy: Bool)
+}
+
 /// Validate escape sequence starting after the backslash.
 /// `pos` points to the character right after `\`.
-/// Returns Ok(skip_count) where skip_count is how many bytes to skip total
-/// (including the backslash), or Error with a LexError.
+/// Returns Ok(Escape) with the total byte span (including the backslash),
+/// or Error with a LexError.
 fn validate_escape(
   bytes: BitArray,
   pos: Int,
   backslash_pos: Int,
   in_template: Bool,
-) -> Result(Int, LexError) {
+) -> Result(Escape, LexError) {
   let ch = char_at(bytes, pos)
   case ch {
     // \8 and \9 — NonOctalDecimalEscapeSequence.
     // In templates: a NotEscapeSequence, always invalid.
     // In strings: legal in sloppy mode ('\8' === '8'), rejected in strict code
-    // at parser level (see legacy_octal.has_strict_forbidden_escape).
+    // at parser level (via the token's `annex_b_legacy` flag).
     "8" | "9" ->
       case in_template {
         True -> Error(InvalidEscapeSequence(backslash_pos))
-        False -> Ok(2)
+        False -> Ok(Escape(2, True))
       }
 
     // Legacy octal escapes \0-\7
@@ -839,14 +864,19 @@ fn validate_escape(
           // In templates, only \0 NOT followed by a digit is valid (null char)
           case ch {
             "0" ->
-              case char_at(bytes, pos + 1) {
-                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-                  Error(InvalidEscapeSequence(backslash_pos))
-                _ -> Ok(2)
+              case is_decimal_digit(char_at(bytes, pos + 1)) {
+                True -> Error(InvalidEscapeSequence(backslash_pos))
+                False -> Ok(Escape(2, False))
               }
             _ -> Error(InvalidEscapeSequence(backslash_pos))
           }
-        False -> Ok(2)
+        False ->
+          case ch {
+            // `\0` alone is the NUL escape, legal in strict code; `\0` followed
+            // by any decimal digit is a LegacyOctalEscapeSequence.
+            "0" -> Ok(Escape(2, is_decimal_digit(char_at(bytes, pos + 1))))
+            _ -> Ok(Escape(2, True))
+          }
       }
 
     // \x must be followed by exactly 2 hex digits
@@ -854,7 +884,7 @@ fn validate_escape(
       let h1 = char_at(bytes, pos + 1)
       let h2 = char_at(bytes, pos + 2)
       case is_hex_digit(h1) && is_hex_digit(h2) {
-        True -> Ok(4)
+        True -> Ok(Escape(4, False))
         False -> Error(InvalidHexEscapeSequence(backslash_pos))
       }
     }
@@ -863,11 +893,11 @@ fn validate_escape(
     "u" -> validate_unicode_escape(bytes, pos + 1, backslash_pos)
 
     // Line continuations — \r\n is 3 bytes total (\=1, \r\n=2), others are 2
-    "\r\n" -> Ok(3)
-    "\r" | "\n" -> Ok(2)
+    "\r\n" -> Ok(Escape(3, False))
+    "\r" | "\n" -> Ok(Escape(2, False))
 
     // Standard escapes and all other single-char escapes
-    _ -> Ok(1 + char_width_at(bytes, pos))
+    _ -> Ok(Escape(1 + char_width_at(bytes, pos), False))
   }
 }
 
@@ -876,7 +906,7 @@ fn validate_unicode_escape(
   bytes: BitArray,
   pos: Int,
   backslash_pos: Int,
-) -> Result(Int, LexError) {
+) -> Result(Escape, LexError) {
   case char_at(bytes, pos) {
     "{" -> {
       // Braced unicode escape: \u{XXXX}
@@ -896,7 +926,7 @@ fn validate_unicode_escape(
                   case value > 0x10FFFF {
                     True -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
                     // Total skip: \ u { digits } = 2 + 1 + digit_count + 1
-                    False -> Ok(digit_count + 4)
+                    False -> Ok(Escape(digit_count + 4, False))
                   }
                 Error(Nil) -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
               }
@@ -917,7 +947,7 @@ fn validate_unicode_escape(
         && is_hex_digit(h3)
         && is_hex_digit(h4)
       {
-        True -> Ok(6)
+        True -> Ok(Escape(6, False))
         False -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
       }
     }
@@ -971,28 +1001,39 @@ fn read_string(
     "\"" -> 0x22
     _ -> 0x27
   }
-  read_string_body(bytes, start + 1, start, q)
+  read_string_body(bytes, start + 1, start, q, False)
 }
 
+/// `annex_b_legacy` accumulates over the escapes already scanned: True once
+/// any of them was a legacy octal / non-octal-decimal escape. The strict-mode
+/// early error (§12.9.4.1) is decided from this flag on the token, so nothing
+/// downstream re-walks the escape grammar.
 fn read_string_body(
   bytes: BitArray,
   pos: Int,
   start: Int,
   quote: Int,
+  annex_b_legacy: Bool,
 ) -> Result(Token, LexError) {
   case scan_string_inner(drop_bytes(bytes, pos), 0, quote) {
     StrQuote(n) -> {
       let raw_len = pos + n - start + 1
       let content = byte_slice(bytes, start + 1, raw_len - 2)
-      Ok(tokn(KString, content, start, raw_len))
+      Ok(Token(..tokn(KString, content, start, raw_len), annex_b_legacy:))
     }
     StrEscape(n) -> {
       let at = pos + n
       case char_at(bytes, at + 1) {
         "" -> Ok(unterminated_quote_token(bytes, start))
         _ -> {
-          use skip <- result.try(validate_escape(bytes, at + 1, at, False))
-          read_string_body(bytes, at + skip, start, quote)
+          use escape <- result.try(validate_escape(bytes, at + 1, at, False))
+          read_string_body(
+            bytes,
+            at + escape.skip,
+            start,
+            quote,
+            annex_b_legacy || escape.annex_b_legacy,
+          )
         }
       }
     }
@@ -1096,7 +1137,9 @@ fn read_template_span(
         "" -> Ok(unterminated_quote_token(bytes, start))
         _ ->
           case validate_escape(bytes, pos + 1, pos, True) {
-            Ok(skip) -> read_template_span(bytes, pos + skip, start)
+            // A template's escapes are never Annex B legacy forms — those are
+            // hard errors above — so nothing to record on the token.
+            Ok(escape) -> read_template_span(bytes, pos + escape.skip, start)
             // Invalid escape sequences are LEGAL in tagged templates (the
             // cooked value becomes undefined, §12.9.6); the lexer can't know
             // whether this template is tagged, so it tolerates them and the
@@ -1195,12 +1238,28 @@ fn read_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
   }
 }
 
+/// A leading zero on the integer part is exactly the Annex B shape strict
+/// code forbids (§12.9.3.1): a LegacyOctalIntegerLiteral (`010`) or a
+/// NonOctalDecimalIntegerLiteral (`08`, `09`, and the `08.5` / `09e2` decimals
+/// built on one). Recorded on the token here, where the digits were scanned;
+/// the parser reads `annex_b_legacy` rather than re-inspecting the text.
 fn read_decimal_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
   use pos <- result.try(skip_digits(bytes, start))
+  let has_leading_zero = char_at(bytes, start) == "0" && pos - start > 1
+  use token <- result.map(read_decimal_body(bytes, start, pos, has_leading_zero))
+  Token(..token, annex_b_legacy: has_leading_zero)
+}
+
+/// The digits [start, pos) are already scanned; decide what follows them.
+fn read_decimal_body(
+  bytes: BitArray,
+  start: Int,
+  pos: Int,
+  has_leading_zero: Bool,
+) -> Result(Token, LexError) {
   // 0-prefixed integer: LegacyOctalIntegerLiteral (01, 07) or
   // NonOctalDecimalIntegerLiteral (08, 09). Neither allows numeric
   // separators, and neither can be a BigInt.
-  let has_leading_zero = char_at(bytes, start) == "0" && pos - start > 1
   use Nil <- result.try(
     case has_leading_zero && has_separator(bytes, start, pos) {
       True -> Error(LeadingNumericSeparator(start))
@@ -1331,7 +1390,7 @@ fn number_token(bytes: BitArray, start: Int, end: Int) -> Token {
   // not IdentifierStart, so the number token ends cleanly before them.
   let id_follows = case next {
     "" -> False
-    "\\" -> result.is_ok(validate_identifier_escape(bytes, end, True))
+    "\\" -> result.is_ok(read_identifier_escape(bytes, end, True))
     _ -> is_identifier_start(next)
   }
   case id_follows {
@@ -1428,121 +1487,55 @@ fn skip_digits_loop(
 
 // --- Identifier reader ---
 
-/// Build an identifier token from its raw source span (byte positions).
-/// If the raw text contains unicode escapes (\uXXXX or \u{XXXX}),
-/// the token value is the decoded canonical name and raw_len preserves
-/// the original source length for position tracking.
+/// Build an identifier token from its source span (byte positions) and its
+/// already-decoded canonical `name`. `raw_len` preserves the source length so
+/// an escaped identifier keeps its true width for position tracking.
 /// Escaped identifiers are always Identifier kind (never keywords).
-fn make_identifier_token(bytes: BitArray, start: Int, end: Int) -> Token {
-  let raw_len = end - start
-  let raw = byte_slice(bytes, start, raw_len)
-  case string.contains(raw, "\\") {
-    False -> {
-      let kind = keyword_or_identifier(raw)
-      Token(
-        kind:,
-        value: raw,
-        pos: start,
-        line: 0,
-        raw_len:,
-        had_escape: False,
-        lex_error: None,
-      )
-    }
-    True -> {
-      // Decode unicode escapes to canonical form.
-      // Escaped identifiers are always Identifier, never keywords.
-      let decoded = decode_identifier_escapes(raw)
-      Token(
-        kind: Identifier,
-        value: decoded,
-        pos: start,
-        line: 0,
-        raw_len:,
-        had_escape: True,
-        lex_error: None,
-      )
-    }
+fn identifier_token(
+  start: Int,
+  end: Int,
+  name: String,
+  had_escape: Bool,
+) -> Token {
+  let kind = case had_escape {
+    True -> Identifier
+    False -> keyword_or_identifier(name)
   }
-}
-
-/// Decode unicode escape sequences in an identifier string.
-/// Converts \uXXXX and \u{XXXX} to their actual Unicode characters.
-fn decode_identifier_escapes(raw: String) -> String {
-  decode_id_escapes_loop(raw, "")
-}
-
-fn decode_id_escapes_loop(remaining: String, acc: String) -> String {
-  // Jump to the next backslash instead of iterating char-by-char
-  case string.split_once(remaining, "\\") {
-    Error(Nil) -> acc <> remaining
-    Ok(#(before, after)) -> {
-      // after starts just past the backslash
-      case after {
-        "u{" <> rest -> {
-          // Braced: \u{XXXX} — find closing brace
-          case string.split_once(rest, "}") {
-            Ok(#(hex_str, after_brace)) ->
-              case int.base_parse(hex_str, 16) {
-                Ok(cp) ->
-                  case string.utf_codepoint(cp) {
-                    Ok(codepoint) -> {
-                      let char = string.from_utf_codepoints([codepoint])
-                      decode_id_escapes_loop(after_brace, acc <> before <> char)
-                    }
-                    // Already validated, shouldn't happen
-                    Error(Nil) ->
-                      decode_id_escapes_loop(after_brace, acc <> before)
-                  }
-                // Already validated
-                Error(Nil) -> decode_id_escapes_loop(after_brace, acc <> before)
-              }
-            Error(Nil) -> acc <> before
-          }
-        }
-        "u" <> rest -> {
-          // Non-braced: \uXXXX — exactly 4 hex digits
-          let hex_str = string.slice(rest, 0, 4)
-          let after_digits = string.drop_start(rest, 4)
-          case int.base_parse(hex_str, 16) {
-            Ok(cp) ->
-              case string.utf_codepoint(cp) {
-                Ok(codepoint) -> {
-                  let char = string.from_utf_codepoints([codepoint])
-                  decode_id_escapes_loop(after_digits, acc <> before <> char)
-                }
-                Error(Nil) ->
-                  decode_id_escapes_loop(after_digits, acc <> before)
-              }
-            Error(Nil) -> decode_id_escapes_loop(after_digits, acc <> before)
-          }
-        }
-        // Shouldn't happen (already validated)
-        _ -> acc <> before
-      }
-    }
-  }
+  Token(
+    kind:,
+    value: name,
+    pos: start,
+    line: 0,
+    raw_len: end - start,
+    had_escape:,
+    lex_error: None,
+    annex_b_legacy: False,
+  )
 }
 
 fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
   case char_at(bytes, start) {
     "\\" -> {
       // Must be a valid unicode escape that decodes to ID_Start
-      use first_end <- result.try(validate_identifier_escape(bytes, start, True))
-      use end <- result.try(skip_identifier_chars_checked(bytes, first_end))
-      Ok(make_identifier_token(bytes, start, end))
+      use #(first_end, head) <- result.try(read_identifier_escape(
+        bytes,
+        start,
+        True,
+      ))
+      let tail = scan_identifier_tail(bytes, first_end)
+      Ok(escaped_head_token(bytes, start, first_end, head, tail))
     }
     "#" -> {
       // Private field: # followed by identifier char
       case char_at(bytes, start + 1) {
         "\\" -> {
-          use first_end <- result.try(validate_identifier_escape(
+          use #(first_end, head) <- result.try(read_identifier_escape(
             bytes,
             start + 1,
             True,
           ))
-          use end <- result.try(skip_identifier_chars_checked(bytes, first_end))
-          Ok(make_identifier_token(bytes, start, end))
+          let tail = scan_identifier_tail(bytes, first_end)
+          Ok(escaped_head_token(bytes, start, first_end, "#" <> head, tail))
         }
         ch2 -> {
           // The char after # must be a valid identifier start (not # or \)
@@ -1550,11 +1543,8 @@ fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
             True -> {
               // # is 1 byte, then skip the first identifier char
               let first_end = start + 1 + char_width_at(bytes, start + 1)
-              use end <- result.try(skip_identifier_chars_checked(
-                bytes,
-                first_end,
-              ))
-              Ok(make_identifier_token(bytes, start, end))
+              let tail = scan_identifier_tail(bytes, first_end)
+              Ok(plain_head_token(bytes, start, first_end, tail))
             }
             // A lone `#` is legal inside a regex literal (`/#/`), which the
             // parser re-scans from source. Emit an Illegal token — the parser
@@ -1566,21 +1556,67 @@ fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
     }
     _ -> {
       let first_end = start + char_width_at(bytes, start)
-      use end <- result.try(skip_identifier_chars_checked(bytes, first_end))
-      Ok(make_identifier_token(bytes, start, end))
+      let tail = scan_identifier_tail(bytes, first_end)
+      Ok(plain_head_token(bytes, start, first_end, tail))
     }
   }
 }
 
-/// Validate a unicode escape in an identifier context.
-/// `pos` points to the `\` character.
-/// `is_start` indicates whether this is the first character (ID_Start) or not (ID_Continue).
-/// Returns Ok(end_pos) after the escape, or Error.
-fn validate_identifier_escape(
+/// The identifier's first character came from an escape, so `head` is its
+/// decoded text (plus a leading `#` for a private name) and the token can never
+/// be a keyword. `first_end` is where the raw tail begins.
+fn escaped_head_token(
+  bytes: BitArray,
+  start: Int,
+  first_end: Int,
+  head: String,
+  tail: IdentTail,
+) -> Token {
+  case tail {
+    NoEscapes(end:) ->
+      identifier_token(
+        start,
+        end,
+        head <> byte_slice(bytes, first_end, end - first_end),
+        True,
+      )
+    WithEscapes(end:, text:) -> identifier_token(start, end, head <> text, True)
+  }
+}
+
+/// The identifier's first character was written literally, so if the tail holds
+/// no escapes either the canonical name is exactly the source span.
+fn plain_head_token(
+  bytes: BitArray,
+  start: Int,
+  first_end: Int,
+  tail: IdentTail,
+) -> Token {
+  case tail {
+    NoEscapes(end:) ->
+      identifier_token(start, end, byte_slice(bytes, start, end - start), False)
+    WithEscapes(end:, text:) ->
+      identifier_token(
+        start,
+        end,
+        byte_slice(bytes, start, first_end - start) <> text,
+        True,
+      )
+  }
+}
+
+/// Read a unicode escape in an identifier context. `pos` points to the `\`.
+/// `is_start` indicates whether this is the first character (ID_Start) or not
+/// (ID_Continue).
+///
+/// Returns Ok(#(end_pos, decoded_char)) — the position after the escape and the
+/// character it denotes. Validating and decoding happen here together, so a
+/// caller cannot accept an escape and then decode it a second, differing way.
+fn read_identifier_escape(
   bytes: BitArray,
   pos: Int,
   is_start: Bool,
-) -> Result(Int, LexError) {
+) -> Result(#(Int, String), LexError) {
   // Must be \u
   case char_at(bytes, pos + 1) {
     "u" -> {
@@ -1601,10 +1637,10 @@ fn validate_identifier_escape(
                       case cp > 0x10FFFF {
                         True -> Error(InvalidUnicodeEscapeSequence(pos))
                         False ->
-                          case validate_identifier_codepoint(cp, is_start) {
-                            True -> Ok(digits_end + 1)
-                            False -> Error(InvalidUnicodeEscapeSequence(pos))
-                          }
+                          decoded_identifier_char(cp, is_start, digits_end + 1)
+                          |> result.replace_error(InvalidUnicodeEscapeSequence(
+                            pos,
+                          ))
                       }
                     Error(Nil) -> Error(InvalidUnicodeEscapeSequence(pos))
                   }
@@ -1629,11 +1665,9 @@ fn validate_identifier_escape(
               let hex_str = byte_slice(bytes, pos + 2, 4)
               case int.base_parse(hex_str, 16) {
                 Ok(cp) ->
-                  case validate_identifier_codepoint(cp, is_start) {
-                    True -> Ok(pos + 6)
-                    False -> Error(InvalidUnicodeEscapeSequence(pos))
-                  }
-                Error(_) -> Error(InvalidUnicodeEscapeSequence(pos))
+                  decoded_identifier_char(cp, is_start, pos + 6)
+                  |> result.replace_error(InvalidUnicodeEscapeSequence(pos))
+                Error(Nil) -> Error(InvalidUnicodeEscapeSequence(pos))
               }
             }
             False -> Error(InvalidUnicodeEscapeSequence(pos))
@@ -1643,6 +1677,21 @@ fn validate_identifier_escape(
     }
     _ -> Error(InvalidUnicodeEscapeSequence(pos))
   }
+}
+
+/// An escape is usable in an identifier only if its codepoint is legal at this
+/// position and encodable — surrogates fail both, and `validate_identifier_
+/// codepoint` already rejects them, so `string.utf_codepoint` cannot fail here.
+/// It is still threaded as an error rather than assumed away: this is the one
+/// place that turns a codepoint into identifier text.
+fn decoded_identifier_char(
+  cp: Int,
+  is_start: Bool,
+  end_pos: Int,
+) -> Result(#(Int, String), Nil) {
+  use <- bool.guard(!validate_identifier_codepoint(cp, is_start), Error(Nil))
+  use codepoint <- result.map(string.utf_codepoint(cp))
+  #(end_pos, string.from_utf_codepoints([codepoint]))
 }
 
 /// Check if a decoded codepoint is valid for an identifier position.
@@ -1672,23 +1721,58 @@ pub fn validate_identifier_codepoint(cp: Int, is_start: Bool) -> Bool {
   }
 }
 
-/// Skip identifier continuation characters with validation.
-/// Returns Ok(end_pos) or Error for invalid escapes.
-fn skip_identifier_chars_checked(
+/// The continuation characters of an identifier, scanned from some `pos`.
+/// `NoEscapes` means the canonical text of the span is exactly its source
+/// bytes, so callers can slice it; `WithEscapes` carries the decoded text of
+/// [pos, end) because the source and the name differ.
+type IdentTail {
+  NoEscapes(end: Int)
+  WithEscapes(end: Int, text: String)
+}
+
+/// Scan identifier continuation characters from `pos`, decoding any unicode
+/// escapes as they are validated. Never fails: an escape that does not decode
+/// to an ID_Continue codepoint simply ends the identifier at the backslash,
+/// which lets the lexer continue past characters the parser will re-scan as a
+/// regex body.
+fn scan_identifier_tail(bytes: BitArray, pos: Int) -> IdentTail {
+  scan_identifier_tail_loop(bytes, pos, "", False)
+}
+
+fn scan_identifier_tail_loop(
   bytes: BitArray,
   pos: Int,
-) -> Result(Int, LexError) {
+  acc: String,
+  saw_escape: Bool,
+) -> IdentTail {
   case skip_ident_inner(drop_bytes(bytes, pos), 0) {
-    IdEnd(n) -> Ok(pos + n)
+    IdEnd(n) -> finish_identifier_tail(bytes, pos, n, acc, saw_escape)
     IdEscape(n) ->
-      // Try to validate a unicode escape continuation (\uXXXX or \u{XXXX}).
-      // If it fails, treat the backslash as the end of the identifier rather
-      // than a hard error. This allows the lexer to continue past characters
-      // that will be re-scanned as regex body by the parser.
-      case validate_identifier_escape(bytes, pos + n, False) {
-        Ok(next_pos) -> skip_identifier_chars_checked(bytes, next_pos)
-        Error(_) -> Ok(pos + n)
+      case read_identifier_escape(bytes, pos + n, False) {
+        Ok(#(next_pos, char)) ->
+          scan_identifier_tail_loop(
+            bytes,
+            next_pos,
+            acc <> byte_slice(bytes, pos, n) <> char,
+            True,
+          )
+        // Not an identifier escape — the identifier ends before the backslash.
+        Error(_not_an_identifier_escape) ->
+          finish_identifier_tail(bytes, pos, n, acc, saw_escape)
       }
+  }
+}
+
+fn finish_identifier_tail(
+  bytes: BitArray,
+  pos: Int,
+  n: Int,
+  acc: String,
+  saw_escape: Bool,
+) -> IdentTail {
+  case saw_escape {
+    False -> NoEscapes(end: pos + n)
+    True -> WithEscapes(end: pos + n, text: acc <> byte_slice(bytes, pos, n))
   }
 }
 
