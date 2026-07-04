@@ -17,6 +17,7 @@
 /// QuickJS has no Temporal, engine262's implementation was consulted for
 /// abstract-operation semantics (ToIntegerWithTruncation, RegulateISODate,
 /// ISODateTimeWithinLimits, IsValidDuration, ParseISODateTime).
+import arc/internal/digits.{take_digits}
 import arc/vm/builtins/common
 import arc/vm/builtins/date
 import arc/vm/builtins/helpers
@@ -1860,41 +1861,6 @@ type ParsedIso {
   )
 }
 
-fn digit(c: String) -> Option(Int) {
-  case c {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    _ -> None
-  }
-}
-
-fn take_digits(s: String, n: Int) -> Option(#(Int, String)) {
-  take_digits_loop(s, n, 0)
-}
-
-fn take_digits_loop(s: String, n: Int, acc: Int) -> Option(#(Int, String)) {
-  case n {
-    0 -> Some(#(acc, s))
-    _ ->
-      case string.pop_grapheme(s) {
-        Ok(#(c, rest)) ->
-          case digit(c) {
-            Some(d) -> take_digits_loop(rest, n - 1, acc * 10 + d)
-            None -> None
-          }
-        Error(Nil) -> None
-      }
-  }
-}
-
 /// Take up to `max` digits (at least 1), returning value, count, rest.
 fn take_some_digits(s: String, max: Int) -> Option(#(Int, Int, String)) {
   take_some_digits_loop(s, max, 0, 0)
@@ -1911,7 +1877,7 @@ fn take_some_digits_loop(
     False ->
       case string.pop_grapheme(s) {
         Ok(#(c, rest)) ->
-          case digit(c) {
+          case digits.digit_value(c) {
             Some(d) ->
               take_some_digits_loop(rest, max - 1, acc * 10 + d, count + 1)
             None ->
@@ -2164,7 +2130,7 @@ fn split_bracket(s: String, acc: String) -> Option(#(String, String)) {
 fn is_annotation_key(s: String) -> Bool {
   s != ""
   && list.all(string.to_graphemes(s), fn(c) {
-    is_lower_alpha(c) || c == "-" || c == "_" || digit(c) != None
+    is_lower_alpha(c) || c == "-" || c == "_" || digits.digit_value(c) != None
   })
 }
 
@@ -2199,7 +2165,7 @@ fn is_tz_leading_char(c: String) -> Bool {
 }
 
 fn is_tz_char(c: String) -> Bool {
-  is_tz_leading_char(c) || digit(c) != None || c == "-" || c == "+"
+  is_tz_leading_char(c) || digits.digit_value(c) != None || c == "-" || c == "+"
 }
 
 /// Parse a full Temporal date-time string:

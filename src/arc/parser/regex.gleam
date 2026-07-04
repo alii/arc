@@ -2,6 +2,7 @@
 /// Pure bit-array scanning functions split from parser.gleam.
 /// The parser re-lexes regex literals from source bytes since the lexer
 /// can't always distinguish / (divide) from / (regex start).
+import arc/internal/digits
 import arc/parser/lexer
 import gleam/bit_array
 import gleam/int
@@ -260,41 +261,10 @@ pub fn byte_slice_source(bytes: BitArray, start: Int, len: Int) -> String {
   }
 }
 
-/// Value of an ASCII hex digit (0-9, a-f, A-F).
-fn hex_value(ch: String) -> Option(Int) {
-  case ch {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    "a" | "A" -> Some(10)
-    "b" | "B" -> Some(11)
-    "c" | "C" -> Some(12)
-    "d" | "D" -> Some(13)
-    "e" | "E" -> Some(14)
-    "f" | "F" -> Some(15)
-    _ -> None
-  }
-}
-
-/// Value of an ASCII decimal digit.
-fn digit_value(ch: String) -> Option(Int) {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> hex_value(ch)
-    _ -> None
-  }
-}
-
 /// Value of the hex digit at `pos`, if the byte there is one.
 fn hex_at(bytes: BitArray, pos: Int) -> Option(Int) {
   case ascii_at(bytes, pos) {
-    Some(ch) -> hex_value(ch)
+    Some(ch) -> digits.hex_value(ch)
     None -> None
   }
 }
@@ -306,7 +276,7 @@ fn is_hex_at(bytes: BitArray, pos: Int) -> Bool {
 /// Value of the decimal digit at `pos`, if the byte there is one.
 fn digit_at(bytes: BitArray, pos: Int) -> Option(Int) {
   case ascii_at(bytes, pos) {
-    Some(ch) -> digit_value(ch)
+    Some(ch) -> digits.digit_value(ch)
     None -> None
   }
 }

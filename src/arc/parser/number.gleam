@@ -4,10 +4,11 @@
 /// NumericLiteral token into the value it denotes. Everything a caller could
 /// otherwise re-derive from the string (is this hex? is this a legacy octal?
 /// is this a BigInt?) is decided exactly once, in `classify`.
+import arc/internal/digits
 import arc/parser/ast.{type LiteralNumber, FiniteNumber, InfiniteNumber}
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option
 import gleam/result
 import gleam/string
 
@@ -248,35 +249,13 @@ fn parse_digits(s: String, radix: Int) -> Result(Int, NumberParseError) {
     graphemes ->
       list.try_fold(graphemes, 0, fn(acc, ch) {
         use d <- result.try(
-          digit_value(ch) |> option.to_result(NotANumericLiteral(s)),
+          digits.hex_value(ch) |> option.to_result(NotANumericLiteral(s)),
         )
         case d < radix {
           True -> Ok(acc * radix + d)
           False -> Error(NotANumericLiteral(s))
         }
       })
-  }
-}
-
-fn digit_value(ch: String) -> Option(Int) {
-  case ch {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    "a" | "A" -> Some(10)
-    "b" | "B" -> Some(11)
-    "c" | "C" -> Some(12)
-    "d" | "D" -> Some(13)
-    "e" | "E" -> Some(14)
-    "f" | "F" -> Some(15)
-    _ -> None
   }
 }
 

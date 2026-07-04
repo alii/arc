@@ -12,6 +12,7 @@
 /// Date math (year/month/day/weekday/hour/minute/second/ms breakdown) is done
 /// in pure Gleam Int arithmetic ported from the QuickJS algorithms; only
 /// `now_ms` and the two local-time-zone offset lookups go through FFI.
+import arc/internal/digits.{take_digits}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
@@ -1249,43 +1250,6 @@ fn parse_hhmm(s: String) -> Option(#(Int, String)) {
     _ -> take_digits(rest, 2) |> option.unwrap(#(0, rest))
   }
   Some(#(h * 60 + m, rest))
-}
-
-/// Consume exactly `n` ASCII digits, returning #(value, rest). None if fewer
-/// than `n` digits are available.
-fn take_digits(s: String, n: Int) -> Option(#(Int, String)) {
-  take_digits_loop(s, n, 0)
-}
-
-fn take_digits_loop(s: String, n: Int, acc: Int) -> Option(#(Int, String)) {
-  case n {
-    0 -> Some(#(acc, s))
-    _ ->
-      case string.pop_grapheme(s) {
-        Ok(#(c, rest)) ->
-          case digit_value(c) {
-            Some(d) -> take_digits_loop(rest, n - 1, acc * 10 + d)
-            None -> None
-          }
-        Error(Nil) -> None
-      }
-  }
-}
-
-fn digit_value(c: String) -> Option(Int) {
-  case c {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    _ -> None
-  }
 }
 
 fn jsnum_add_minutes(n: JsNum, minutes: Int) -> JsNum {
