@@ -18,6 +18,10 @@
 /// abstract-operation semantics (ToIntegerWithTruncation, RegulateISODate,
 /// ISODateTimeWithinLimits, IsValidDuration, ParseISODateTime).
 import arc/internal/digits.{take_digits}
+import arc/internal/gregorian.{
+  days_in_month, days_in_year as days_in_iso_year, floor_div,
+  floor_mod as math_mod, is_leap_year,
+}
 import arc/vm/builtins/common
 import arc/vm/builtins/date
 import arc/vm/builtins/helpers
@@ -785,38 +789,6 @@ fn apply_new_target_proto(
 // ============================================================================
 // Pure calendar math (ISO 8601 proleptic Gregorian)
 // ============================================================================
-
-fn floor_div(a: Int, b: Int) -> Int {
-  int.floor_divide(a, b) |> result.unwrap(0)
-}
-
-fn math_mod(a: Int, b: Int) -> Int {
-  int.modulo(a, b) |> result.unwrap(0)
-}
-
-fn is_leap_year(y: Int) -> Bool {
-  math_mod(y, 4) == 0 && { math_mod(y, 100) != 0 || math_mod(y, 400) == 0 }
-}
-
-fn days_in_iso_year(y: Int) -> Int {
-  case is_leap_year(y) {
-    True -> 366
-    False -> 365
-  }
-}
-
-/// Days in 1-based month `m` of year `y`.
-fn days_in_month(y: Int, m: Int) -> Int {
-  case m {
-    2 ->
-      case is_leap_year(y) {
-        True -> 29
-        False -> 28
-      }
-    4 | 6 | 9 | 11 -> 30
-    _ -> 31
-  }
-}
 
 /// Days since epoch to Jan 1 of year y.
 fn days_from_year(y: Int) -> Int {
@@ -7275,6 +7247,24 @@ fn get_difference_settings(
   cont(largest, smallest, inc, mode, state)
 }
 
+/// GetDifferenceSettings tail shared by every until/since: largestUnit must
+/// not be smaller than smallestUnit, else RangeError.
+fn require_largest_ge_smallest(
+  state: State(host),
+  largest: Unit,
+  smallest: Unit,
+  cont: fn() -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case unit_rank(largest) < unit_rank(smallest) {
+    True ->
+      state.range_error(
+        state,
+        "largestUnit must not be smaller than smallestUnit",
+      )
+    False -> cont()
+  }
+}
+
 /// since: negate the rounding mode per spec (difference computed two→one).
 fn apply_since_mode(mode: RoundingMode, is_since: Bool) -> RoundingMode {
   case is_since {
@@ -7318,24 +7308,17 @@ fn date_until_since(
   case unit_rank(smallest) < unit_rank(Day) {
     True ->
       state.range_error(state, "smallestUnit must be a date unit for PlainDate")
-    False ->
-      case unit_rank(largest) < unit_rank(smallest) {
-        True ->
-          state.range_error(
-            state,
-            "largestUnit must not be smaller than smallestUnit",
-          )
-        False -> {
-          let mode = apply_since_mode(mode, is_since)
-          use dur <- terr(
-            state,
-            difference_calendar_date(cal, d1, d2, largest, smallest, inc, mode),
-          )
-          let dur = apply_since_dur(dur, is_since)
-          let #(state, v) = make_duration(state, protos, dur)
-          #(state, Ok(v))
-        }
-      }
+    False -> {
+      use <- require_largest_ge_smallest(state, largest, smallest)
+      let mode = apply_since_mode(mode, is_since)
+      use dur <- terr(
+        state,
+        difference_calendar_date(cal, d1, d2, largest, smallest, inc, mode),
+      )
+      let dur = apply_since_dur(dur, is_since)
+      let #(state, v) = make_duration(state, protos, dur)
+      #(state, Ok(v))
+    }
   }
 }
 
@@ -8089,24 +8072,17 @@ fn time_until_since(
     || unit_rank(largest) > unit_rank(Hour)
   {
     True -> state.range_error(state, "units must be time units for PlainTime")
-    False ->
-      case unit_rank(largest) < unit_rank(smallest) {
-        True ->
-          state.range_error(
-            state,
-            "largestUnit must not be smaller than smallestUnit",
-          )
-        False -> {
-          use su <- terr(state, require_time_unit(smallest))
-          let mode2 = apply_since_mode(mode, is_since)
-          let diff = time_to_ns(t2) - time_to_ns(t1)
-          let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
-          let rounded = apply_since_ns(rounded, is_since)
-          let dur = balance_time_ns(rounded, largest)
-          let #(state, v) = make_duration(state, protos, dur)
-          #(state, Ok(v))
-        }
-      }
+    False -> {
+      use <- require_largest_ge_smallest(state, largest, smallest)
+      use su <- terr(state, require_time_unit(smallest))
+      let mode2 = apply_since_mode(mode, is_since)
+      let diff = time_to_ns(t2) - time_to_ns(t1)
+      let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
+      let rounded = apply_since_ns(rounded, is_since)
+      let dur = balance_time_ns(rounded, largest)
+      let #(state, v) = make_duration(state, protos, dur)
+      #(state, Ok(v))
+    }
   }
 }
 
@@ -8867,79 +8843,72 @@ fn year_month_until_since(
   let largest = option.unwrap(largest, max_unit(smallest, Year))
   case unit_rank(smallest) < unit_rank(Month) {
     True -> state.range_error(state, "smallestUnit must be year or month")
-    False ->
-      case unit_rank(largest) < unit_rank(smallest) {
-        True ->
-          state.range_error(
-            state,
-            "largestUnit must not be smaller than smallestUnit",
-          )
-        False -> {
-          let mode2 = apply_since_mode(mode, is_since)
-          let total_months = case cal {
-            tcal.Iso8601 -> { b.0 - a.0 } * 12 + b.1 - a.1
-            _ -> {
-              // Count whole calendar months between the two month-firsts.
-              let ia = IsoDate(a.0, a.1, a.2)
-              let ib = IsoDate(b.0, b.1, b.2)
-              let #(_, months, _) = calendar_date_until(cal, ia, ib, Month)
-              months
-            }
-          }
-          let rounded = case smallest {
-            Year -> round_to_increment(total_months, inc * 12, mode2) / 12
-            _ -> round_to_increment(total_months, inc, mode2)
-          }
-          use dur <- terr(state, case cal {
-            tcal.Iso8601 ->
-              Ok(case smallest, largest {
-                Year, _ -> DurRec(..zero_dur, years: rounded)
-                _, Year ->
-                  DurRec(
-                    ..zero_dur,
-                    years: truncate_div(rounded, 12),
-                    months: math_mod_signed(rounded, 12),
-                  )
-                _, _ -> DurRec(..zero_dur, months: rounded)
-              })
-            _ -> {
-              // Calendar-space years/months decomposition. RoundRelativeDuration
-              // is calendar-agnostic, so roundingMode/roundingIncrement apply
-              // here too: years are nudged against real calendar-year
-              // boundaries, and a rounded month total is re-decomposed by
-              // stepping calendar years (not recomputed unrounded).
-              let ia = IsoDate(a.0, a.1, a.2)
-              let ib = IsoDate(b.0, b.1, b.2)
-              case smallest, largest {
-                Year, _ -> {
-                  use yrs <- result.map(round_calendar_year_total(
-                    cal,
-                    ia,
-                    ib,
-                    inc,
-                    mode2,
-                  ))
-                  DurRec(..zero_dur, years: yrs)
-                }
-                _, Year -> {
-                  use mid <- result.map(calendar_date_add(
-                    cal,
-                    ia,
-                    DurRec(..zero_dur, months: rounded),
-                    Constrain,
-                  ))
-                  let #(yrs, mos, _) = calendar_date_until(cal, ia, mid, Year)
-                  DurRec(..zero_dur, years: yrs, months: mos)
-                }
-                _, _ -> Ok(DurRec(..zero_dur, months: rounded))
-              }
-            }
-          })
-          let dur = apply_since_dur(dur, is_since)
-          let #(state, v) = make_duration(state, protos, dur)
-          #(state, Ok(v))
+    False -> {
+      use <- require_largest_ge_smallest(state, largest, smallest)
+      let mode2 = apply_since_mode(mode, is_since)
+      let total_months = case cal {
+        tcal.Iso8601 -> { b.0 - a.0 } * 12 + b.1 - a.1
+        _ -> {
+          // Count whole calendar months between the two month-firsts.
+          let ia = IsoDate(a.0, a.1, a.2)
+          let ib = IsoDate(b.0, b.1, b.2)
+          let #(_, months, _) = calendar_date_until(cal, ia, ib, Month)
+          months
         }
       }
+      let rounded = case smallest {
+        Year -> round_to_increment(total_months, inc * 12, mode2) / 12
+        _ -> round_to_increment(total_months, inc, mode2)
+      }
+      use dur <- terr(state, case cal {
+        tcal.Iso8601 ->
+          Ok(case smallest, largest {
+            Year, _ -> DurRec(..zero_dur, years: rounded)
+            _, Year ->
+              DurRec(
+                ..zero_dur,
+                years: truncate_div(rounded, 12),
+                months: math_mod_signed(rounded, 12),
+              )
+            _, _ -> DurRec(..zero_dur, months: rounded)
+          })
+        _ -> {
+          // Calendar-space years/months decomposition. RoundRelativeDuration
+          // is calendar-agnostic, so roundingMode/roundingIncrement apply
+          // here too: years are nudged against real calendar-year
+          // boundaries, and a rounded month total is re-decomposed by
+          // stepping calendar years (not recomputed unrounded).
+          let ia = IsoDate(a.0, a.1, a.2)
+          let ib = IsoDate(b.0, b.1, b.2)
+          case smallest, largest {
+            Year, _ -> {
+              use yrs <- result.map(round_calendar_year_total(
+                cal,
+                ia,
+                ib,
+                inc,
+                mode2,
+              ))
+              DurRec(..zero_dur, years: yrs)
+            }
+            _, Year -> {
+              use mid <- result.map(calendar_date_add(
+                cal,
+                ia,
+                DurRec(..zero_dur, months: rounded),
+                Constrain,
+              ))
+              let #(yrs, mos, _) = calendar_date_until(cal, ia, mid, Year)
+              DurRec(..zero_dur, years: yrs, months: mos)
+            }
+            _, _ -> Ok(DurRec(..zero_dur, months: rounded))
+          }
+        }
+      })
+      let dur = apply_since_dur(dur, is_since)
+      let #(state, v) = make_duration(state, protos, dur)
+      #(state, Ok(v))
+    }
   }
 }
 
@@ -10367,24 +10336,17 @@ fn instant_until_since(
     || unit_rank(largest) > unit_rank(Hour)
   {
     True -> state.range_error(state, "units must be time units for Instant")
-    False ->
-      case unit_rank(largest) < unit_rank(smallest) {
-        True ->
-          state.range_error(
-            state,
-            "largestUnit must not be smaller than smallestUnit",
-          )
-        False -> {
-          use su <- terr(state, require_time_unit(smallest))
-          let mode2 = apply_since_mode(mode, is_since)
-          let diff = b - a
-          let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
-          let rounded = apply_since_ns(rounded, is_since)
-          let dur = balance_time_ns(rounded, largest)
-          let #(state, v) = make_duration(state, protos, dur)
-          #(state, Ok(v))
-        }
-      }
+    False -> {
+      use <- require_largest_ge_smallest(state, largest, smallest)
+      use su <- terr(state, require_time_unit(smallest))
+      let mode2 = apply_since_mode(mode, is_since)
+      let diff = b - a
+      let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
+      let rounded = apply_since_ns(rounded, is_since)
+      let dur = balance_time_ns(rounded, largest)
+      let #(state, v) = make_duration(state, protos, dur)
+      #(state, Ok(v))
+    }
   }
 }
 
