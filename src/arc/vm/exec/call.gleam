@@ -48,8 +48,8 @@ import arc/vm/ops/object
 import arc/vm/ops/property
 import arc/vm/realm
 import arc/vm/state.{
-  type ExoticKind, type Heap, type HeapSlot, type NativeFnSlot, type State,
-  type StepExit, type VmError, InternalError, SavedFrame, State, Threw, VmFailed,
+  type Heap, type NativeFnSlot, type State, type StepExit, type VmError,
+  InternalError, SavedFrame, State, Threw, VmFailed,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot,
@@ -128,46 +128,16 @@ pub fn call_function(
           new_target,
         )
       case callee_template.is_generator, callee_template.is_async {
-        True, True ->
+        True, is_async ->
           call_coroutine_function(
             State(..state, heap:),
             callee_template,
             args,
             rest_stack,
             locals,
+            env_ref,
             execute_inner,
-            fn(frame) {
-              AsyncGeneratorSlot(
-                gen_state: value.AGSuspendedStart,
-                queue: #([], []),
-                func_template: callee_template,
-                env_ref:,
-                frame:,
-              )
-            },
-            AsyncGeneratorObject,
-            state.builtins.async_generator.prototype,
-            "call_async_generator_function",
-          )
-        True, False ->
-          call_coroutine_function(
-            State(..state, heap:),
-            callee_template,
-            args,
-            rest_stack,
-            locals,
-            execute_inner,
-            fn(frame) {
-              GeneratorSlot(
-                gen_state: value.SuspendedStart,
-                func_template: callee_template,
-                env_ref:,
-                frame:,
-              )
-            },
-            GeneratorObject,
-            state.builtins.generator.prototype,
-            "call_generator_function",
+            is_async,
           )
         False, True ->
           call_async_function(
@@ -305,31 +275,52 @@ fn coroutine_resume_state(
 /// two flavours differ only in the slot they build, the exotic kind, the
 /// prototype and the InternalError label — everything else, including the
 /// "can't have completed or awaited yet" impossibility arms, is identical.
-///
-/// Called once per generator *creation*, never on resume, so the closure
-/// arguments cost nothing on the resume hot path.
+/// All four are derived from `is_async` here, so a mismatched slot/kind/
+/// prototype trio is unrepresentable at the call site.
 fn call_coroutine_function(
   state: State(host),
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
   locals: tuple_array.TupleArray(JsValue),
+  env_ref: value.Ref,
   execute_inner: ExecuteInnerFn(host),
-  make_slot: fn(value.SuspendedFrame) -> HeapSlot(host),
-  make_kind: fn(value.Ref) -> ExoticKind(host),
-  prototype: value.Ref,
-  label: String,
+  is_async: Bool,
 ) -> Result(State(host), StepExit(host)) {
   case
     execute_inner(coroutine_initial_state(state, callee_template, args, locals))
   {
     Ok(#(Suspended(completion.Yield, _), suspended)) -> {
-      let #(h, data_ref) =
-        heap.alloc(suspended.heap, make_slot(generators.suspended_frame(
-          suspended,
-        )))
-      let #(h, gen_obj_ref) =
-        common.alloc_wrapper(h, make_kind(data_ref), prototype)
+      let frame = generators.suspended_frame(suspended)
+      let slot = case is_async {
+        True ->
+          AsyncGeneratorSlot(
+            gen_state: value.AGSuspendedStart,
+            queue: #([], []),
+            func_template: callee_template,
+            env_ref:,
+            frame:,
+          )
+        False ->
+          GeneratorSlot(
+            gen_state: value.SuspendedStart,
+            func_template: callee_template,
+            env_ref:,
+            frame:,
+          )
+      }
+      let #(h, data_ref) = heap.alloc(suspended.heap, slot)
+      let #(kind, prototype) = case is_async {
+        True -> #(
+          AsyncGeneratorObject(data_ref),
+          state.builtins.async_generator.prototype,
+        )
+        False -> #(
+          GeneratorObject(data_ref),
+          state.builtins.generator.prototype,
+        )
+      }
+      let #(h, gen_obj_ref) = common.alloc_wrapper(h, kind, prototype)
       Ok(
         State(
           ..state.adopt_child(state, suspended),
@@ -344,8 +335,13 @@ fn call_coroutine_function(
     // InitialYield is the first op — the body can neither complete nor await
     // before it. Either arriving here is a VM bug.
     Ok(#(Completed(NormalCompletion(_)), _))
-    | Ok(#(Suspended(completion.Await, _), _)) ->
+    | Ok(#(Suspended(completion.Await, _), _)) -> {
+      let label = case is_async {
+        True -> "call_async_generator_function"
+        False -> "call_generator_function"
+      }
       Error(VmFailed(InternalError(label, "didn't hit InitialYield"), state))
+    }
     Error(vm_err) -> Error(VmFailed(vm_err, state))
   }
 }
