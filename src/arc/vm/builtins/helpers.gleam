@@ -56,8 +56,13 @@ pub fn brand_of(
   case this {
     JsObject(ref) ->
       case heap.read(h, ref) {
+        // Not `option.map(fn(v) { #(v, ref) })`: that closure would allocate on
+        // the success path of every branded builtin call (Map.get, Set.has, ...).
         Some(ObjectSlot(kind:, ..)) ->
-          extract(kind) |> option.map(fn(v) { #(v, ref) })
+          case extract(kind) {
+            Some(v) -> Some(#(v, ref))
+            None -> None
+          }
         _ -> None
       }
     _ -> None

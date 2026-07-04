@@ -882,12 +882,16 @@ fn require_set(
     fn() {
       "Method Set.prototype." <> method <> " called on incompatible receiver"
     },
-    fn(kind) {
-      case kind {
-        SetObject(..) -> Some(Nil)
-        _ -> None
-      }
-    },
+    set_brand_of,
   )
   cont(ref, state)
+}
+
+/// The [[SetData]] brand check handed to `require_brand` — a named function
+/// (not an inline lambda) so the hot brand check builds no closure per call.
+fn set_brand_of(kind: state.ExoticKind(host)) -> Option(Nil) {
+  case kind {
+    SetObject(..) -> Some(Nil)
+    _ -> None
+  }
 }

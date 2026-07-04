@@ -339,15 +339,19 @@ fn require_data_view(
     this,
     state,
     fn() { "Method called on incompatible receiver: expected a DataView" },
-    fn(kind) {
-      case kind {
-        DataViewObject(buffer:, byte_offset:, byte_length:) ->
-          Some(ViewRecord(buffer:, byte_offset:, byte_length:))
-        _ -> None
-      }
-    },
+    view_record_of,
   )
   cont(view, state)
+}
+
+/// The [[DataView]] extractor handed to `require_brand` — a named function
+/// (not an inline lambda) so the brand check builds no closure per call.
+fn view_record_of(kind: state.ExoticKind(host)) -> Option(ViewRecord) {
+  case kind {
+    DataViewObject(buffer:, byte_offset:, byte_length:) ->
+      Some(ViewRecord(buffer:, byte_offset:, byte_length:))
+    _ -> None
+  }
 }
 
 /// Immutable ArrayBuffer proposal — SetViewValue step 3: writes through a

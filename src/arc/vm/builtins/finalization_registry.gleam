@@ -245,12 +245,18 @@ fn require_registry(
       <> method
       <> " called on incompatible receiver"
     },
-    fn(kind) {
-      case kind {
-        FinalizationRegistryObject(cells:, ..) -> Some(cells)
-        _ -> None
-      }
-    },
+    registry_cells_of,
     cont,
   )
+}
+
+/// The [[Cells]] extractor handed to `require_brand` — a named function (not
+/// an inline lambda) so the brand check builds no closure per call.
+fn registry_cells_of(
+  kind: state.ExoticKind(host),
+) -> option.Option(List(value.FinRegCell)) {
+  case kind {
+    FinalizationRegistryObject(cells:, ..) -> Some(cells)
+    _ -> None
+  }
 }

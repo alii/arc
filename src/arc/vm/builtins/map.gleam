@@ -463,14 +463,20 @@ fn require_map(
     fn() {
       "Method Map.prototype." <> method <> " called on incompatible receiver"
     },
-    fn(kind) {
-      case kind {
-        MapObject(store:) -> Some(store)
-        _ -> None
-      }
-    },
+    map_store_of,
     cont,
   )
+}
+
+/// The [[MapData]] extractor handed to `require_brand`. A named function (not
+/// an inline lambda) so the hot brand check doesn't build a closure per call.
+fn map_store_of(
+  kind: state.ExoticKind(host),
+) -> option.Option(OrderedEntries(MapKey, JsValue)) {
+  case kind {
+    MapObject(store:) -> Some(store)
+    _ -> None
+  }
 }
 
 /// Update the MapObject data on an existing heap slot.
