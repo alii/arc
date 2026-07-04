@@ -5,7 +5,12 @@
 ///
 /// DenseElements uses JsUninitialized as its tree_array default so holes
 /// (deleted/unset slots) are distinguishable from explicit `arr[i]=undefined`.
-/// The sentinel never leaks: get/get_option convert it to JsUndefined/None.
+/// The sentinel never leaks: get/get_option convert it to JsUndefined/None,
+/// and no store path can put one back in (see `assert_storable`).
+///
+/// Two invariants hold at EVERY entry point, not just some of them:
+///   - indices are >= 0 (`assert_index`)
+///   - stored values are never the JsUninitialized sentinel (`assert_storable`)
 import arc/vm/internal/tree_array
 import arc/vm/limits
 import arc/vm/value.{
@@ -24,8 +29,32 @@ pub fn new() -> JsElements {
   NoElements
 }
 
+/// Every entry point that stores a value goes through this. `JsUninitialized`
+/// is the TDZ sentinel AND the tree_array default that marks a DenseElements
+/// hole, so storing it as an element would silently turn a present element
+/// into a hole (and, once promoted to sparse, an *undeletable* one). It can
+/// only get here by leaking out of the binding layer, which is a bug — crash
+/// at the boundary that let it in rather than corrupting the array.
+fn assert_storable(val: JsValue) -> Nil {
+  let assert False = val == JsUninitialized
+    as "elements: TDZ sentinel stored as element"
+  Nil
+}
+
+/// Every entry point that takes an index goes through this. A negative index
+/// is a caller bug, and one that used to fail differently per representation:
+/// DenseElements crashed with a `function_clause` deep in the :array FFI,
+/// while SparseElements happily inserted a `-1` key that no reader
+/// (indices/get/has all assume >= 0) would ever find. Enforce it uniformly —
+/// the same crash-on-caller-bug convention the rest of the VM uses.
+fn assert_index(index: Int, what: String) -> Nil {
+  let assert True = index >= 0 as what
+  Nil
+}
+
 /// Build dense elements from a list of values.
 pub fn from_list(items: List(JsValue)) -> JsElements {
+  list.each(items, assert_storable)
   DenseElements(tree_array.from_list(items, JsUninitialized))
 }
 
@@ -33,6 +62,10 @@ pub fn from_list(items: List(JsValue)) -> JsElements {
 /// representation where missing indices are treated as holes (return undefined
 /// on access). Used for array literals containing elisions (e.g. `[1,,3]`).
 pub fn from_indexed(items: List(#(Int, JsValue))) -> JsElements {
+  list.each(items, fn(item) {
+    assert_index(item.0, "elements.from_indexed: negative index")
+    assert_storable(item.1)
+  })
   SparseElements(dict.from_list(items))
 }
 
@@ -64,14 +97,9 @@ pub fn has(elements: JsElements, index: Int) -> Bool {
 }
 
 /// Set element at index. May promote NoElements→Dense or Dense→Sparse.
-///
-/// A negative index is a caller bug, and one that used to fail differently
-/// per representation: DenseElements crashed with a `function_clause` deep in
-/// the :array FFI, while SparseElements happily inserted a `-1` key that no
-/// reader (indices/get/has all assume >= 0) would ever find. Enforce it once,
-/// here — the same crash-on-caller-bug convention the rest of the VM uses.
 pub fn set(elements: JsElements, index: Int, val: JsValue) -> JsElements {
-  let assert True = index >= 0 as "elements.set: negative index"
+  assert_index(index, "elements.set: negative index")
+  assert_storable(val)
   case elements {
     NoElements ->
       // Promote to dense and re-dispatch so large-gap check applies.
@@ -99,6 +127,7 @@ pub fn set(elements: JsElements, index: Int, val: JsValue) -> JsElements {
 /// Delete element at index (creates hole). Stays dense — :array natively
 /// supports holes via reset. O(log n) vs the old O(n) dense→sparse copy.
 pub fn delete(elements: JsElements, index: Int) -> JsElements {
+  assert_index(index, "elements.delete: negative index")
   case elements {
     NoElements -> NoElements
     DenseElements(data) -> DenseElements(tree_array.reset(index, data))

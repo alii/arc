@@ -144,16 +144,22 @@ pub fn live_values(store: OrderedEntries(k, v)) -> List(v) {
 
 /// Live (key, value) entries whose insertion sequence number is >= `cursor`,
 /// in forward insertion order. Used to drain a partially-consumed iterator.
+///
+/// Built from `entries` alone: a live key already carries its own seq, so
+/// there is nothing to look up in `order` and no row that could go missing.
 pub fn live_entries_from(
   store: OrderedEntries(k, v),
   cursor: Int,
 ) -> List(#(k, v)) {
-  dict.to_list(store.order)
-  |> list.filter(fn(p) { p.0 >= cursor })
-  |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
-  |> list.filter_map(fn(p) {
-    dict.get(store.entries, p.1) |> result.map(fn(e) { #(p.1, e.1) })
+  dict.fold(store.entries, [], fn(acc, k, entry) {
+    let #(seq, v) = entry
+    case seq >= cursor {
+      True -> [#(seq, #(k, v)), ..acc]
+      False -> acc
+    }
   })
+  |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
+  |> list.map(fn(p) { p.1 })
 }
 
 /// First live entry at sequence number >= `cursor`, scanning past the gaps
