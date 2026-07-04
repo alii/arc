@@ -8913,7 +8913,8 @@ fn plain_month_day_method(
                   let #(state, v) = make_date_cal(state, protos, date, cal)
                   #(state, Ok(v))
                 }
-                tcal.Iso8601, None -> state.type_error(state, "year is required")
+                tcal.Iso8601, None ->
+                  state.type_error(state, "year is required")
                 _, _ ->
                   case year != None || { era != None && era_year != None } {
                     True -> {

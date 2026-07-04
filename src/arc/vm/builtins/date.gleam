@@ -87,8 +87,9 @@ pub fn offset_at_local_ms(local_ms: Int) -> Int
 /// The `Date.prototype.getTimezoneOffset` sign convention: minutes UTC is
 /// *ahead of* local (US Pacific Standard is +480). This negation is the only
 /// place the runtime flips the sign — everything else, arc_tz_ffi and Temporal
-/// included, speaks local − UTC.
-pub fn tz_offset_minutes(epoch_ms: Int) -> Int {
+/// included, speaks local − UTC. Deliberately private: a caller that wants an
+/// offset wants `offset_at_utc_ms`, not this getter's inverted convention.
+fn js_get_timezone_offset_minutes(epoch_ms: Int) -> Int {
   0 - offset_at_utc_ms(epoch_ms)
 }
 
@@ -212,81 +213,157 @@ pub fn dispatch(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  // The name every "called on incompatible receiver" TypeError reports. It has
+  // to come from `native` — the shared getter/setter helpers below serve a
+  // dozen methods each and cannot know which one they are.
+  let name = method_name(native)
   case native {
     DateConstructor(proto:) -> date_constructor(proto, args, state)
     DateNow -> #(state, Ok(value.from_int(now_ms())))
     DateParse -> date_parse(args, state)
     DateUTC -> date_utc(args, state)
-    DatePrototypeValueOf | DatePrototypeGetTime -> date_get_time(this, state)
-    DatePrototypeGetTimezoneOffset -> date_get_tz_offset(this, state)
+    DatePrototypeValueOf | DatePrototypeGetTime ->
+      date_get_time(this, state, name)
+    DatePrototypeGetTimezoneOffset -> date_get_tz_offset(this, state, name)
     DatePrototypeGetFullYear ->
-      date_get_field(this, state, FieldYear, LocalTime)
+      date_get_field(this, state, name, FieldYear, LocalTime)
     DatePrototypeGetUTCFullYear ->
-      date_get_field(this, state, FieldYear, UtcTime)
-    DatePrototypeGetMonth -> date_get_field(this, state, FieldMonth, LocalTime)
-    DatePrototypeGetUTCMonth -> date_get_field(this, state, FieldMonth, UtcTime)
-    DatePrototypeGetDate -> date_get_field(this, state, FieldDate, LocalTime)
-    DatePrototypeGetUTCDate -> date_get_field(this, state, FieldDate, UtcTime)
-    DatePrototypeGetDay -> date_get_field(this, state, FieldWeekday, LocalTime)
-    DatePrototypeGetUTCDay -> date_get_field(this, state, FieldWeekday, UtcTime)
-    DatePrototypeGetHours -> date_get_field(this, state, FieldHours, LocalTime)
-    DatePrototypeGetUTCHours -> date_get_field(this, state, FieldHours, UtcTime)
+      date_get_field(this, state, name, FieldYear, UtcTime)
+    DatePrototypeGetMonth ->
+      date_get_field(this, state, name, FieldMonth, LocalTime)
+    DatePrototypeGetUTCMonth ->
+      date_get_field(this, state, name, FieldMonth, UtcTime)
+    DatePrototypeGetDate ->
+      date_get_field(this, state, name, FieldDate, LocalTime)
+    DatePrototypeGetUTCDate ->
+      date_get_field(this, state, name, FieldDate, UtcTime)
+    DatePrototypeGetDay ->
+      date_get_field(this, state, name, FieldWeekday, LocalTime)
+    DatePrototypeGetUTCDay ->
+      date_get_field(this, state, name, FieldWeekday, UtcTime)
+    DatePrototypeGetHours ->
+      date_get_field(this, state, name, FieldHours, LocalTime)
+    DatePrototypeGetUTCHours ->
+      date_get_field(this, state, name, FieldHours, UtcTime)
     DatePrototypeGetMinutes ->
-      date_get_field(this, state, FieldMinutes, LocalTime)
+      date_get_field(this, state, name, FieldMinutes, LocalTime)
     DatePrototypeGetUTCMinutes ->
-      date_get_field(this, state, FieldMinutes, UtcTime)
+      date_get_field(this, state, name, FieldMinutes, UtcTime)
     DatePrototypeGetSeconds ->
-      date_get_field(this, state, FieldSeconds, LocalTime)
+      date_get_field(this, state, name, FieldSeconds, LocalTime)
     DatePrototypeGetUTCSeconds ->
-      date_get_field(this, state, FieldSeconds, UtcTime)
+      date_get_field(this, state, name, FieldSeconds, UtcTime)
     DatePrototypeGetMilliseconds ->
-      date_get_field(this, state, FieldMs, LocalTime)
+      date_get_field(this, state, name, FieldMs, LocalTime)
     DatePrototypeGetUTCMilliseconds ->
-      date_get_field(this, state, FieldMs, UtcTime)
-    DatePrototypeSetTime -> date_set_time(this, args, state)
+      date_get_field(this, state, name, FieldMs, UtcTime)
+    DatePrototypeSetTime -> date_set_time(this, args, state, name)
     DatePrototypeSetMilliseconds ->
-      date_set_field(this, args, state, FieldMs, 1, LocalTime)
+      date_set_field(this, args, state, name, FieldMs, 1, LocalTime)
     DatePrototypeSetUTCMilliseconds ->
-      date_set_field(this, args, state, FieldMs, 1, UtcTime)
+      date_set_field(this, args, state, name, FieldMs, 1, UtcTime)
     DatePrototypeSetSeconds ->
-      date_set_field(this, args, state, FieldSeconds, 2, LocalTime)
+      date_set_field(this, args, state, name, FieldSeconds, 2, LocalTime)
     DatePrototypeSetUTCSeconds ->
-      date_set_field(this, args, state, FieldSeconds, 2, UtcTime)
+      date_set_field(this, args, state, name, FieldSeconds, 2, UtcTime)
     DatePrototypeSetMinutes ->
-      date_set_field(this, args, state, FieldMinutes, 3, LocalTime)
+      date_set_field(this, args, state, name, FieldMinutes, 3, LocalTime)
     DatePrototypeSetUTCMinutes ->
-      date_set_field(this, args, state, FieldMinutes, 3, UtcTime)
+      date_set_field(this, args, state, name, FieldMinutes, 3, UtcTime)
     DatePrototypeSetHours ->
-      date_set_field(this, args, state, FieldHours, 4, LocalTime)
+      date_set_field(this, args, state, name, FieldHours, 4, LocalTime)
     DatePrototypeSetUTCHours ->
-      date_set_field(this, args, state, FieldHours, 4, UtcTime)
+      date_set_field(this, args, state, name, FieldHours, 4, UtcTime)
     DatePrototypeSetDate ->
-      date_set_field(this, args, state, FieldDate, 1, LocalTime)
+      date_set_field(this, args, state, name, FieldDate, 1, LocalTime)
     DatePrototypeSetUTCDate ->
-      date_set_field(this, args, state, FieldDate, 1, UtcTime)
+      date_set_field(this, args, state, name, FieldDate, 1, UtcTime)
     DatePrototypeSetMonth ->
-      date_set_field(this, args, state, FieldMonth, 2, LocalTime)
+      date_set_field(this, args, state, name, FieldMonth, 2, LocalTime)
     DatePrototypeSetUTCMonth ->
-      date_set_field(this, args, state, FieldMonth, 2, UtcTime)
+      date_set_field(this, args, state, name, FieldMonth, 2, UtcTime)
     DatePrototypeSetFullYear ->
-      date_set_field(this, args, state, FieldYear, 3, LocalTime)
+      date_set_field(this, args, state, name, FieldYear, 3, LocalTime)
     DatePrototypeSetUTCFullYear ->
-      date_set_field(this, args, state, FieldYear, 3, UtcTime)
-    DatePrototypeGetYear -> date_get_year(this, state)
-    DatePrototypeSetYear -> date_set_year(this, args, state)
-    DatePrototypeToString -> date_to_string(this, state, FmtLocal, DateAndTime)
-    DatePrototypeToDateString -> date_to_string(this, state, FmtLocal, DateOnly)
-    DatePrototypeToTimeString -> date_to_string(this, state, FmtLocal, TimeOnly)
-    DatePrototypeToISOString -> date_to_string(this, state, FmtIso, DateAndTime)
-    DatePrototypeToUTCString -> date_to_string(this, state, FmtUtc, DateAndTime)
+      date_set_field(this, args, state, name, FieldYear, 3, UtcTime)
+    DatePrototypeGetYear -> date_get_year(this, state, name)
+    DatePrototypeSetYear -> date_set_year(this, args, state, name)
+    DatePrototypeToString ->
+      date_to_string(this, state, name, FmtLocal, DateAndTime)
+    DatePrototypeToDateString ->
+      date_to_string(this, state, name, FmtLocal, DateOnly)
+    DatePrototypeToTimeString ->
+      date_to_string(this, state, name, FmtLocal, TimeOnly)
+    DatePrototypeToISOString ->
+      date_to_string(this, state, name, FmtIso, DateAndTime)
+    DatePrototypeToUTCString ->
+      date_to_string(this, state, name, FmtUtc, DateAndTime)
     DatePrototypeToLocaleString ->
-      date_to_string(this, state, FmtLocale, DateAndTime)
+      date_to_string(this, state, name, FmtLocale, DateAndTime)
     DatePrototypeToLocaleDateString ->
-      date_to_string(this, state, FmtLocale, DateOnly)
+      date_to_string(this, state, name, FmtLocale, DateOnly)
     DatePrototypeToLocaleTimeString ->
-      date_to_string(this, state, FmtLocale, TimeOnly)
+      date_to_string(this, state, name, FmtLocale, TimeOnly)
     DatePrototypeToJSON -> date_to_json(this, state)
     DatePrototypeSymbolToPrimitive -> date_to_primitive(this, args, state)
+  }
+}
+
+/// The JS-visible name of a Date native, as it appears in error messages.
+/// Exhaustive by construction: adding a `DateNativeFn` variant without naming
+/// it here is a compile error, so no method can inherit a stale placeholder.
+fn method_name(native: DateNativeFn) -> String {
+  case native {
+    DateConstructor(..) -> "constructor"
+    DateNow -> "now"
+    DateParse -> "parse"
+    DateUTC -> "UTC"
+    DatePrototypeValueOf -> "valueOf"
+    DatePrototypeGetTime -> "getTime"
+    DatePrototypeGetTimezoneOffset -> "getTimezoneOffset"
+    DatePrototypeGetFullYear -> "getFullYear"
+    DatePrototypeGetUTCFullYear -> "getUTCFullYear"
+    DatePrototypeGetMonth -> "getMonth"
+    DatePrototypeGetUTCMonth -> "getUTCMonth"
+    DatePrototypeGetDate -> "getDate"
+    DatePrototypeGetUTCDate -> "getUTCDate"
+    DatePrototypeGetDay -> "getDay"
+    DatePrototypeGetUTCDay -> "getUTCDay"
+    DatePrototypeGetHours -> "getHours"
+    DatePrototypeGetUTCHours -> "getUTCHours"
+    DatePrototypeGetMinutes -> "getMinutes"
+    DatePrototypeGetUTCMinutes -> "getUTCMinutes"
+    DatePrototypeGetSeconds -> "getSeconds"
+    DatePrototypeGetUTCSeconds -> "getUTCSeconds"
+    DatePrototypeGetMilliseconds -> "getMilliseconds"
+    DatePrototypeGetUTCMilliseconds -> "getUTCMilliseconds"
+    DatePrototypeSetTime -> "setTime"
+    DatePrototypeSetMilliseconds -> "setMilliseconds"
+    DatePrototypeSetUTCMilliseconds -> "setUTCMilliseconds"
+    DatePrototypeSetSeconds -> "setSeconds"
+    DatePrototypeSetUTCSeconds -> "setUTCSeconds"
+    DatePrototypeSetMinutes -> "setMinutes"
+    DatePrototypeSetUTCMinutes -> "setUTCMinutes"
+    DatePrototypeSetHours -> "setHours"
+    DatePrototypeSetUTCHours -> "setUTCHours"
+    DatePrototypeSetDate -> "setDate"
+    DatePrototypeSetUTCDate -> "setUTCDate"
+    DatePrototypeSetMonth -> "setMonth"
+    DatePrototypeSetUTCMonth -> "setUTCMonth"
+    DatePrototypeSetFullYear -> "setFullYear"
+    DatePrototypeSetUTCFullYear -> "setUTCFullYear"
+    DatePrototypeGetYear -> "getYear"
+    DatePrototypeSetYear -> "setYear"
+    DatePrototypeToString -> "toString"
+    DatePrototypeToDateString -> "toDateString"
+    DatePrototypeToTimeString -> "toTimeString"
+    DatePrototypeToISOString -> "toISOString"
+    DatePrototypeToUTCString -> "toUTCString"
+    DatePrototypeToLocaleString -> "toLocaleString"
+    DatePrototypeToLocaleDateString -> "toLocaleDateString"
+    DatePrototypeToLocaleTimeString -> "toLocaleTimeString"
+    DatePrototypeToJSON -> "toJSON"
+    DatePrototypeSymbolToPrimitive -> "[Symbol.toPrimitive]"
   }
 }
 
@@ -726,21 +803,27 @@ fn date_utc(
 fn date_get_time(
   this: JsValue,
   state: State(host),
+  name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _, tv <- require_time_value(state, this, "valueOf")
+  use _, tv <- require_time_value(state, this, name)
   #(state, Ok(JsNumber(tv)))
 }
 
 fn date_get_tz_offset(
   this: JsValue,
   state: State(host),
+  name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _, tv <- require_time_value(state, this, "getTimezoneOffset")
+  use _, tv <- require_time_value(state, this, name)
   case tv {
     Finite(f) -> #(
       state,
       Ok(
-        JsNumber(Finite(int.to_float(tz_offset_minutes(value.float_to_int(f))))),
+        JsNumber(
+          Finite(int.to_float(js_get_timezone_offset_minutes(
+            value.float_to_int(f),
+          ))),
+        ),
       ),
     )
     _ -> #(state, Ok(JsNumber(NaN)))
@@ -751,10 +834,11 @@ fn date_get_tz_offset(
 fn date_get_field(
   this: JsValue,
   state: State(host),
+  name: String,
   field: DateField,
   time_ref: TimeRef,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _, tv <- require_time_value(state, this, "get")
+  use _, tv <- require_time_value(state, this, name)
   case tv {
     Finite(f) -> {
       let fields = get_date_fields(value.float_to_int(f), time_ref)
@@ -773,8 +857,9 @@ fn date_set_time(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
+  name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, _ <- require_time_value(state, this, "setTime")
+  use ref, _ <- require_time_value(state, this, name)
   let arg = helpers.first_arg_or_undefined(args)
   use n, st <- state.try_op(coerce.js_to_number(state, arg))
   let tv = time_clip(n)
@@ -793,11 +878,12 @@ fn date_set_field(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
+  name: String,
   first: DateField,
   max_args: Int,
   time_ref: TimeRef,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, tv <- require_time_value(state, this, "set")
+  use ref, tv <- require_time_value(state, this, name)
   // Coerce supplied args (capped at max_args) to JsNum — full ToNumber so
   // valueOf side effects and abrupt completions are observed in order.
   let supplied = list.take(args, max_args)
@@ -955,10 +1041,11 @@ fn pad3(n: Int) -> String {
 fn date_to_string(
   this: JsValue,
   state: State(host),
+  name: String,
   fmt: DateFmt,
   part: DatePart,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _, tv <- require_time_value(state, this, "toString")
+  use _, tv <- require_time_value(state, this, name)
   case tv {
     Finite(f) -> {
       let time_ref = case fmt {
@@ -1119,20 +1206,30 @@ fn parse_date_string(s: String) -> JsNum {
   parse_iso(s) |> option.unwrap(NaN)
 }
 
+/// The parsed time-of-day of a date-time form. Its absence (`None` at the call
+/// site) means the string was date-only — never "the time was there but some
+/// required field of it wasn't", which is what the old all-optional tuple with
+/// its always-`True` `has_time` flag could not distinguish.
+type IsoTime {
+  IsoTime(hours: Int, minutes: Int, seconds: Int, ms: Int)
+}
+
 fn parse_iso(s: String) -> Option(JsNum) {
   // Year: "+YYYYYY" / "-YYYYYY" / "YYYY"
-  use #(year, rest, has_sign) <- option.then(parse_year(s))
+  use #(year, rest) <- option.then(parse_year(s))
   // Month + day (optional)
   let #(mon, rest) = parse_dash_int(rest, 2) |> option.unwrap(#(1, rest))
   let #(day, rest) = parse_dash_int(rest, 2) |> option.unwrap(#(1, rest))
-  // Time (optional, after "T")
-  let #(h, mi, sec, ms, rest, has_time) = case rest {
-    "T" <> t -> parse_time(t)
-    _ -> #(0, 0, 0, 0, rest, False)
-  }
+  // Time (optional, after "T"). Once "T" is seen, "HH:mm" is mandatory.
+  use #(time, rest) <- option.then(case rest {
+    "T" <> t -> parse_time(t) |> option.map(fn(p) { #(Some(p.0), p.1) })
+    _ -> Some(#(None, rest))
+  })
+  let IsoTime(h, mi, sec, ms) = option.unwrap(time, IsoTime(0, 0, 0, 0))
   // Zone (optional). Date-only forms are UTC; date-time forms with no zone
-  // are local time per spec — but only when no zone is present.
-  use #(zone, rest) <- option.then(parse_zone(rest, has_time, has_sign))
+  // are local time per spec.
+  use #(zone, rest) <- option.then(parse_zone(rest, option.is_some(time)))
+  use Nil <- option.then(validate_iso(year, mon, day, h, mi, sec, ms))
   case rest {
     "" ->
       Some(case zone {
@@ -1145,13 +1242,52 @@ fn parse_iso(s: String) -> Option(JsNum) {
   }
 }
 
-fn parse_year(s: String) -> Option(#(Int, String, Bool)) {
+/// Component range gate for §21.4.1.32. Out-of-range components make the whole
+/// string invalid — they must NOT reach `make_date`, whose MakeDay/MakeTime
+/// arithmetic happily rolls "2021-13-01" over into 2022 and "2021-01-01T25:00"
+/// into the next day. Parsing rejects; only construction rolls over.
+fn validate_iso(
+  year: Int,
+  mon: Int,
+  day: Int,
+  h: Int,
+  mi: Int,
+  sec: Int,
+  ms: Int,
+) -> Option(Nil) {
+  // HH may be 24 only as the "end of day" designator, i.e. exactly 24:00:00.000.
+  let hours_ok = case h {
+    24 -> mi == 0 && sec == 0 && ms == 0
+    _ -> h <= 23
+  }
+  case
+    mon >= 1
+    && mon <= 12
+    && day >= 1
+    && day <= days_in_month(year, mon - 1)
+    && hours_ok
+    && mi <= 59
+    && sec <= 59
+  {
+    True -> Some(Nil)
+    False -> None
+  }
+}
+
+fn parse_year(s: String) -> Option(#(Int, String)) {
   case s {
-    "+" <> rest ->
-      take_digits(rest, 6) |> option.map(fn(p) { #(p.0, p.1, True) })
+    "+" <> rest -> take_digits(rest, 6)
+    // "-000000" is not a valid extended year: the year 0 is positive and must
+    // be written "+000000" (test262 built-ins/Date/parse/year-zero.js).
     "-" <> rest ->
-      take_digits(rest, 6) |> option.map(fn(p) { #(0 - p.0, p.1, True) })
-    _ -> take_digits(s, 4) |> option.map(fn(p) { #(p.0, p.1, False) })
+      take_digits(rest, 6)
+      |> option.then(fn(p) {
+        case p.0 {
+          0 -> None
+          y -> Some(#(0 - y, p.1))
+        }
+      })
+    _ -> take_digits(s, 4)
   }
 }
 
@@ -1162,21 +1298,23 @@ fn parse_dash_int(s: String, n: Int) -> Option(#(Int, String)) {
   }
 }
 
-fn parse_time(s: String) -> #(Int, Int, Int, Int, String, Bool) {
-  let #(h, rest) = take_digits(s, 2) |> option.unwrap(#(0, s))
-  let #(mi, rest) = case rest {
-    ":" <> r -> take_digits(r, 2) |> option.unwrap(#(0, r))
-    _ -> #(0, rest)
-  }
-  let #(sec, rest) = case rest {
-    ":" <> r -> take_digits(r, 2) |> option.unwrap(#(0, r))
-    _ -> #(0, rest)
-  }
-  let #(ms, rest) = case rest {
-    "." <> r -> take_digits(r, 3) |> option.unwrap(#(0, r))
-    _ -> #(0, rest)
-  }
-  #(h, mi, sec, ms, rest, True)
+/// `HH:mm[:ss[.sss]]`. `HH:mm` is required; every optional part that claims a
+/// separator must then supply all of its digits.
+fn parse_time(s: String) -> Option(#(IsoTime, String)) {
+  use #(h, rest) <- option.then(take_digits(s, 2))
+  use #(mi, rest) <- option.then(case rest {
+    ":" <> r -> take_digits(r, 2)
+    _ -> None
+  })
+  use #(sec, rest) <- option.then(case rest {
+    ":" <> r -> take_digits(r, 2)
+    _ -> Some(#(0, rest))
+  })
+  use #(ms, rest) <- option.then(case rest {
+    "." <> r -> take_digits(r, 3)
+    _ -> Some(#(0, rest))
+  })
+  Some(#(IsoTime(h, mi, sec, ms), rest))
 }
 
 /// The time zone designation (or lack of one) at the end of an ISO string.
@@ -1191,12 +1329,10 @@ type Zone {
 
 /// Parse the optional trailing zone designator, returning the zone and the
 /// unconsumed remainder. `has_time` selects the no-designator default:
-/// date-only → UTC, date-time → local.
-fn parse_zone(
-  s: String,
-  has_time: Bool,
-  has_sign: Bool,
-) -> Option(#(Zone, String)) {
+/// date-only → UTC, date-time → local. That is the whole rule — the extended
+/// year prefix does not enter into it (test262
+/// built-ins/Date/parse/without-utc-offset.js).
+fn parse_zone(s: String, has_time: Bool) -> Option(#(Zone, String)) {
   case s {
     "Z" <> rest -> Some(#(FixedOffset(0), rest))
     "+" <> rest ->
@@ -1205,7 +1341,7 @@ fn parse_zone(
       parse_hhmm(rest) |> option.map(fn(p) { #(FixedOffset(p.0), p.1) })
     "" ->
       Some(#(
-        case has_time && !has_sign {
+        case has_time {
           True -> LocalZone
           False -> FixedOffset(0)
         },
@@ -1215,12 +1351,14 @@ fn parse_zone(
   }
 }
 
+/// The `HH:mm` / `HHmm` body of a `±` offset. Minutes are not optional — a
+/// bare `+05` is not a Date Time String Format offset.
 fn parse_hhmm(s: String) -> Option(#(Int, String)) {
   use #(h, rest) <- option.then(take_digits(s, 2))
-  let #(m, rest) = case rest {
-    ":" <> r -> take_digits(r, 2) |> option.unwrap(#(0, r))
-    _ -> take_digits(rest, 2) |> option.unwrap(#(0, rest))
-  }
+  use #(m, rest) <- option.then(case rest {
+    ":" <> r -> take_digits(r, 2)
+    _ -> take_digits(rest, 2)
+  })
   Some(#(h * 60 + m, rest))
 }
 
@@ -1253,8 +1391,9 @@ fn args_to_nums(
 fn date_get_year(
   this: JsValue,
   state: State(host),
+  name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _, tv <- require_time_value(state, this, "getYear")
+  use _, tv <- require_time_value(state, this, name)
   case tv {
     Finite(f) -> {
       let fields = get_date_fields(value.float_to_int(f), LocalTime)
@@ -1270,8 +1409,9 @@ fn date_set_year(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
+  name: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ref, tv <- require_time_value(state, this, "setYear")
+  use ref, tv <- require_time_value(state, this, name)
   let arg = helpers.first_arg_or_undefined(args)
   use n, st <- state.try_op(coerce.js_to_number(state, arg))
   case n {

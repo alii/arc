@@ -1403,13 +1403,16 @@ pub fn month_code(cal: Calendar, year: Int, month: Int) -> String {
   month_code_string(month_code_of(cal, year, month))
 }
 
-/// Resolve a month code to an ordinal month within `year`.
+/// Resolve a USER-supplied month code to an ordinal month within `year`.
+/// `NeverValid` is only reachable for codes that came in from JavaScript, so
+/// this is the parse-boundary entry point; code minted by `month_code_of` and
+/// carried into another year goes through `carry_month_code` instead.
 pub fn month_for_code(
   cal: Calendar,
   year: Int,
-  num: Int,
-  leap: Bool,
+  mc: MonthCode,
 ) -> Result(Int, MonthCodeIssue) {
+  let MonthCode(number: num, leap:) = mc
   case arithmetic(cal), leap {
     HebrewArith, True ->
       case num == 5 {
@@ -1425,13 +1428,13 @@ pub fn month_for_code(
       case num >= 1 && num <= 12 {
         False -> Error(NeverValid)
         True -> {
-          let leap = lunisolar_leap_num(data, year)
-          case leap == num {
+          let leap_month = lunisolar_leap_num(data, year)
+          case leap_month == num {
             True -> Ok(num + 1)
             // Constrain MxxL to the regular month Mxx of this year.
             False ->
               Error(
-                NotInThisYear(case leap > 0 && num > leap {
+                NotInThisYear(case leap_month > 0 && num > leap_month {
                   True -> num + 1
                   False -> num
                 }),
@@ -1463,8 +1466,8 @@ pub fn month_for_code(
     LunisolarArith(data), False ->
       case num >= 1 && num <= 12 {
         True -> {
-          let leap = lunisolar_leap_num(data, year)
-          case leap > 0 && num > leap {
+          let leap_month = lunisolar_leap_num(data, year)
+          case leap_month > 0 && num > leap_month {
             True -> Ok(num + 1)
             False -> Ok(num)
           }
@@ -1481,6 +1484,29 @@ pub fn month_for_code(
         True -> Ok(num)
         False -> Error(NeverValid)
       }
+  }
+}
+
+/// Carry a month code MINTED BY `month_code_of` (so it is a code the calendar
+/// really has) into `target_year`. `Ok(ordinal)` when the code occurs there;
+/// `Error(skip_to)` — the ordinal to constrain to — when it does not, which
+/// only ever happens for a leap month absent from that year.
+///
+/// This is `month_for_code` minus its `NeverValid` variant: minted codes
+/// cannot be invalid for their own calendar, so callers that carry a code
+/// forward do not have to invent an answer for a case that cannot occur.
+pub fn carry_month_code(
+  cal: Calendar,
+  target_year: Int,
+  mc: MonthCode,
+) -> Result(Int, Int) {
+  case month_for_code(cal, target_year, mc) {
+    Ok(ordinal) -> Ok(ordinal)
+    Error(NotInThisYear(skip_to)) -> Error(skip_to)
+    // Unreachable for a minted code. Absorb it here, once, rather than at
+    // every call site: clamp into the target year like any other overflow.
+    Error(NeverValid) ->
+      Error(int.min(mc.number, months_in_year(cal, target_year)))
   }
 }
 
@@ -1577,64 +1603,80 @@ pub type Era {
 }
 
 /// era + eraYear for a calendar date. `None` for era-less calendars.
+///
+/// Only decides WHICH era code applies; the eraYear then falls out of the
+/// shift `eras_of` already declares for that code, so the two directions of
+/// the mapping cannot drift apart.
 pub fn era_for(cal: Calendar, year: Int, month: Int, day: Int) -> Option(Era) {
+  use code <- option.then(era_code_for(cal, year, month, day))
+  use shift <- option.map(option.from_result(list.key_find(eras_of(cal), code)))
+  Era(code, era_year(shift, year))
+}
+
+/// The era code a calendar date falls in. `None` for era-less calendars.
+fn era_code_for(
+  cal: Calendar,
+  year: Int,
+  month: Int,
+  day: Int,
+) -> Option(EraCode) {
   case cal {
     Iso8601 | Chinese | Dangi -> None
     Gregory ->
-      case year >= 1 {
-        True -> Some(Era(Ce, year))
-        False -> Some(Era(Bce, 1 - year))
-      }
-    Buddhist -> Some(Era(Be, year))
-    Japanese -> Some(japanese_era(year, month, day))
+      Some(case year >= 1 {
+        True -> Ce
+        False -> Bce
+      })
+    Buddhist -> Some(Be)
+    Japanese -> Some(japanese_era_code(year, month, day))
     Roc ->
-      case year >= 1 {
-        True -> Some(Era(Minguo, year))
-        False -> Some(Era(BeforeMinguo, 1 - year))
-      }
-    Coptic -> Some(Era(Am, year))
+      Some(case year >= 1 {
+        True -> Minguo
+        False -> BeforeMinguo
+      })
+    Coptic -> Some(Am)
     Ethiopic ->
-      case year >= 1 {
-        True -> Some(Era(Am, year))
-        False -> Some(Era(Aa, year + 5500))
-      }
-    Ethioaa -> Some(Era(Aa, year))
-    Hebrew -> Some(Era(Am, year))
+      Some(case year >= 1 {
+        True -> Am
+        False -> Aa
+      })
+    Ethioaa -> Some(Aa)
+    Hebrew -> Some(Am)
     IslamicCivil | IslamicTbla | IslamicUmalqura ->
-      case year >= 1 {
-        True -> Some(Era(Ah, year))
-        False -> Some(Era(Bh, 1 - year))
-      }
-    Persian -> Some(Era(Ap, year))
-    Indian -> Some(Era(Shaka, year))
+      Some(case year >= 1 {
+        True -> Ah
+        False -> Bh
+      })
+    Persian -> Some(Ap)
+    Indian -> Some(Shaka)
   }
 }
 
 /// Japanese era for an ISO date (japanese arithmetic year == ISO year).
 /// Modern named eras start: meiji 6 = 1873-01-01 (output cutoff), taisho
 /// 1912-07-30, showa 1926-12-25, heisei 1989-01-08, reiwa 2019-05-01.
-fn japanese_era(y: Int, m: Int, d: Int) -> Era {
+fn japanese_era_code(y: Int, m: Int, d: Int) -> EraCode {
   let after = fn(ey: Int, em: Int, ed: Int) {
     y > ey || { y == ey && { m > em || { m == em && d >= ed } } }
   }
   case after(2019, 5, 1) {
-    True -> Era(Reiwa, y - 2018)
+    True -> Reiwa
     False ->
       case after(1989, 1, 8) {
-        True -> Era(Heisei, y - 1988)
+        True -> Heisei
         False ->
           case after(1926, 12, 25) {
-            True -> Era(Showa, y - 1925)
+            True -> Showa
             False ->
               case after(1912, 7, 30) {
-                True -> Era(Taisho, y - 1911)
+                True -> Taisho
                 False ->
                   case after(1873, 1, 1) {
-                    True -> Era(Meiji, y - 1867)
+                    True -> Meiji
                     False ->
                       case y >= 1 {
-                        True -> Era(Ce, y)
-                        False -> Era(Bce, 1 - y)
+                        True -> Ce
+                        False -> Bce
                       }
                   }
               }
@@ -1691,6 +1733,15 @@ pub fn year_for_era(cal: Calendar, era: EraCode, ey: Int) -> Result(Int, Nil) {
   case shift {
     Forward(k) -> k + ey
     Backward(k) -> k - ey
+  }
+}
+
+/// eraYear for an arithmetic year under a shift — the exact inverse of the
+/// arithmetic `year_for_era` performs, so `era_for` never restates an offset.
+fn era_year(shift: EraShift, year: Int) -> Int {
+  case shift {
+    Forward(k) -> year - k
+    Backward(k) -> k - year
   }
 }
 

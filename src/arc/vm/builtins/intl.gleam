@@ -3212,7 +3212,7 @@ fn canonical_time_zone(s: String) -> Option(DtfTimeZone) {
 /// only place a DateTimeFormat offset ever comes from.
 fn zone_offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
   case tz {
-    HostZone -> 0 - date.tz_offset_minutes(instant_ms)
+    HostZone -> date.offset_at_utc_ms(instant_ms)
     FixedZone(offset_minutes:, ..) -> offset_minutes
     NamedZone(zone:, ..) ->
       temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000)
