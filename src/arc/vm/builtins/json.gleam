@@ -10,8 +10,9 @@ import arc/vm/ops/object as objops
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type JsonNativeFn, type Property, type Ref, Finite, JsBool,
-  JsNull, JsNumber, JsObject, JsString, JsUndefined, JsonNative, JsonParse,
-  JsonStringify, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
+  JsNull, JsNumber, JsObject, JsString, JsUndefined, JsonIsRawJson, JsonNative,
+  JsonParse, JsonRawJson, JsonStringify, NaN, NegInfinity, ObjectSlot,
+  OrdinaryObject, RawJsonObject,
 }
 import gleam/bit_array
 import gleam/dict
@@ -40,6 +41,8 @@ pub fn init(
     common.alloc_methods(h, function_proto, [
       #("parse", JsonNative(JsonParse), 2),
       #("stringify", JsonNative(JsonStringify), 3),
+      #("rawJSON", JsonNative(JsonRawJson), 1),
+      #("isRawJSON", JsonNative(JsonIsRawJson), 1),
     ])
 
   common.init_namespace(h, object_proto, "JSON", methods)
@@ -50,15 +53,82 @@ pub fn init(
 // ============================================================================
 
 /// Per-module dispatch for JSON native functions.
+///
+/// Everything a JSON builtin allocates — thrown errors, the parsed objects,
+/// the reviver's `context` — must come from the intrinsics of the realm the
+/// *function* belongs to, not the realm that happens to be running:
+/// `otherRealm.JSON.rawJSON('')` throws `otherRealm.SyntaxError`, and
+/// `otherRealm.JSON.parse('{}')` yields an object whose prototype is
+/// `otherRealm.Object.prototype`. Arc never rebinds `state.builtins` on a
+/// cross-realm call, so resolve the owning realm from the receiver — the JSON
+/// namespace object these methods live on — run the body with that realm's
+/// builtins installed, and restore the caller's afterwards.
 pub fn dispatch(
   native: JsonNativeFn,
   args: List(JsValue),
-  _this: JsValue,
+  this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case native {
+  let caller_builtins = state.builtins
+  let state = State(..state, builtins: owner_realm_builtins(state, this))
+  let #(state, res) = case native {
     JsonParse -> json_parse(args, state)
     JsonStringify -> json_stringify(args, state)
+    JsonIsRawJson -> json_is_raw_json(args, state)
+  }
+  #(State(..state, builtins: caller_builtins), res)
+}
+
+/// The builtins of the realm whose `JSON` namespace object is `this`, or the
+/// running realm's when the receiver is not a JSON namespace (a detached
+/// `JSON.parse` invoked with some other receiver keeps the running realm's
+/// intrinsics — the receiver is the only realm handle a JSON native has).
+fn owner_realm_builtins(state: State(host), this: JsValue) -> common.Builtins {
+  case this {
+    JsObject(ref) ->
+      case ref.id == state.builtins.json.id {
+        True -> state.builtins
+        False ->
+          state.ctx.realms
+          |> dict.values
+          |> list.find(fn(b) { b.json.id == ref.id })
+          |> result.unwrap(state.builtins)
+      }
+    _ -> state.builtins
+  }
+}
+
+// ============================================================================
+// JSON.isRawJSON(value)
+// ============================================================================
+
+/// proposal-json-parse-with-source §JSON.isRawJSON ( O )
+///
+///   1. If O is an Object and O has an [[IsRawJSON]] internal slot, return true.
+///   2. Return false.
+///
+/// Nothing is coerced, nothing is looked up on the object, and it never throws:
+/// a missing argument, a primitive, an ordinary `{ rawJSON: "123" }`, or a
+/// Proxy wrapping a rawJSON box all answer false — only the box itself carries
+/// the internal slot.
+fn json_is_raw_json(
+  args: List(JsValue),
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  #(state, Ok(JsBool(is_raw_json(state.heap, helpers.arg_at(args, 0)))))
+}
+
+/// True iff `value` is an object carrying the [[IsRawJSON]] internal slot —
+/// i.e. a box produced by `JSON.rawJSON`. Used by `JSON.isRawJSON` and by
+/// `JSON.stringify` to emit the raw text verbatim.
+pub fn is_raw_json(h: Heap(host), value: JsValue) -> Bool {
+  case value {
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(kind: value.RawJsonObject(_), ..)) -> True
+        _ -> False
+      }
+    _ -> False
   }
 }
 
@@ -293,13 +363,60 @@ fn alloc_holder(state: State(host), val: JsValue) -> #(State(host), Ref) {
 
 /// Intermediate parsed JSON value — not yet materialized onto the JS heap.
 /// We parse into this first, then walk it to create JsValues/heap objects.
+///
+/// Primitive nodes carry `source`: the EXACT source text of the literal they
+/// were scanned from — `1.1`, `"foo"` (quotes kept, escapes left undecoded),
+/// `null`. That is what the ES2025 json-parse-with-source proposal hands the
+/// reviver as `context.source`; only primitives ever expose it, so arrays and
+/// objects carry no source of their own.
+///
+/// The slices use the scanner's zero-copy technique (`bit_array.slice` yields a
+/// sub-binary), so recording them costs one O(1) slice per primitive and no
+/// extra byte scanning.
 type JsonValue {
-  JsonNull
-  JsonBool(Bool)
-  JsonNumber(value.JsNum)
-  JsonString(String)
+  JsonNull(source: String)
+  JsonBool(value: Bool, source: String)
+  JsonNumber(value: value.JsNum, source: String)
+  JsonString(value: String, source: String)
   JsonArray(List(JsonValue))
   JsonObject(List(#(String, JsonValue)))
+}
+
+/// The exact source text of a primitive literal, or `None` for arrays and
+/// objects (whose reviver `context` never gets a `source` property).
+fn json_node_source(node: JsonValue) -> Option(String) {
+  case node {
+    JsonNull(source:) -> Some(source)
+    JsonBool(source:, ..) -> Some(source)
+    JsonNumber(source:, ..) -> Some(source)
+    JsonString(source:, ..) -> Some(source)
+    JsonArray(_) | JsonObject(_) -> None
+  }
+}
+
+/// The child node at array index `i`, or `None` if the node is not an array
+/// literal / the index is out of range (e.g. an element a reviver added).
+fn json_node_element(node: JsonValue, i: Int) -> Option(JsonValue) {
+  case node {
+    JsonArray(items) -> helpers.list_at(items, i)
+    _ -> None
+  }
+}
+
+/// The child node for object key `k`, or `None` if the node is not an object
+/// literal / has no such key. Duplicate keys resolve to the LAST occurrence,
+/// matching how `value.props_dict_from_pairs` materializes them.
+fn json_node_member(node: JsonValue, k: String) -> Option(JsonValue) {
+  case node {
+    JsonObject(entries) ->
+      list.fold(entries, None, fn(acc, entry) {
+        case entry.0 == k {
+          True -> Some(entry.1)
+          False -> acc
+        }
+      })
+    _ -> None
+  }
 }
 
 /// Everything that can go wrong while scanning JSON text.
@@ -376,15 +493,23 @@ fn parse_value(
   case bytes {
     <<>> -> Error(UnexpectedEnd)
     // "null"
-    <<0x6E, 0x75, 0x6C, 0x6C, rest:bytes>> -> Ok(#(JsonNull, rest))
+    <<0x6E, 0x75, 0x6C, 0x6C, rest:bytes>> ->
+      Ok(#(JsonNull(source: "null"), rest))
     // "true"
-    <<0x74, 0x72, 0x75, 0x65, rest:bytes>> -> Ok(#(JsonBool(True), rest))
+    <<0x74, 0x72, 0x75, 0x65, rest:bytes>> ->
+      Ok(#(JsonBool(value: True, source: "true"), rest))
     // "false"
-    <<0x66, 0x61, 0x6C, 0x73, 0x65, rest:bytes>> -> Ok(#(JsonBool(False), rest))
+    <<0x66, 0x61, 0x6C, 0x73, 0x65, rest:bytes>> ->
+      Ok(#(JsonBool(value: False, source: "false"), rest))
     // '"'
     <<0x22, rest:bytes>> -> {
-      use #(s, rest) <- result.map(parse_string(rest))
-      #(JsonString(s), rest)
+      use #(s, rest) <- result.try(parse_string(rest))
+      // The literal's source text is everything the string scanner consumed,
+      // opening quote included: `rest` is a sub-binary of `bytes`, so the byte
+      // lengths differ by exactly the span, and the slice is O(1).
+      let span = bit_array.byte_size(bytes) - bit_array.byte_size(rest)
+      use raw <- result.map(take_string(bytes, span))
+      #(JsonString(value: s, source: raw), rest)
     }
     // '['
     <<0x5B, rest:bytes>> -> parse_array(rest, [])
@@ -592,7 +717,11 @@ fn parse_number(
     Ok(span) -> {
       let len = span.int_len + span.frac_len + span.exp_len
       use num_str <- result.map(take_string(bytes, len))
-      #(JsonNumber(number_span_to_num(num_str, span)), drop_bytes(bytes, len))
+      // `num_str` already IS the literal's exact source text.
+      #(
+        JsonNumber(value: number_span_to_num(num_str, span), source: num_str),
+        drop_bytes(bytes, len),
+      )
     }
     // Report the whole number-looking span (e.g. "01", "1e", "-"), not just
     // the prefix that scanned cleanly.
@@ -845,10 +974,10 @@ fn materialize(
   val: JsonValue,
 ) -> #(Heap(host), JsValue) {
   case val {
-    JsonNull -> #(h, JsNull)
-    JsonBool(b_val) -> #(h, JsBool(b_val))
-    JsonNumber(n) -> #(h, JsNumber(n))
-    JsonString(s) -> #(h, JsString(s))
+    JsonNull(..) -> #(h, JsNull)
+    JsonBool(value: b_val, ..) -> #(h, JsBool(b_val))
+    JsonNumber(value: n, ..) -> #(h, JsNumber(n))
+    JsonString(value: s, ..) -> #(h, JsString(s))
     JsonArray(items) -> {
       let #(h, js_items) = materialize_list(h, b, items, [])
       let #(h, ref) = common.alloc_array(h, js_items, b.array.prototype)
@@ -1188,6 +1317,16 @@ fn serialize_property(
     Some(rf) -> state.call(state, rf, JsObject(holder), [JsString(key), val])
     None -> Ok(#(val, state))
   })
+  // Step 4.e (json-parse-with-source): a [[IsRawJSON]] box is emitted verbatim.
+  // The check runs AFTER the toJSON call (step 2) and the replacer call (step
+  // 3) — so a BigInt whose toJSON/replacer hands back JSON.rawJSON(...) round-
+  // trips instead of throwing at step 10 — and BEFORE the wrapper unwrap and the
+  // type dispatch, so the box is never serialized as an ordinary object. The box
+  // is frozen with a null prototype, so `Get(value, "rawJSON")` is unobservable
+  // and its payload is exactly the validated source text: emitted with no
+  // quoting/escaping, and with no effect on gap/indent, the serialization stack
+  // (no recursion, hence no circular check) or the replacer paths.
+  use <- emit_raw_json(state, raw_json_text(state.heap, val))
   // Step 4: unwrap Number/String/Boolean/BigInt wrapper objects.
   use #(val, state) <- result.try(case val {
     JsObject(ref) ->
@@ -1258,6 +1397,36 @@ fn serialize_property(
     // Step 12: undefined / symbol → omitted.
     JsUndefined | value.JsSymbol(_) | value.JsUninitialized ->
       Ok(#(None, state))
+  }
+}
+
+/// The [[IsRawJSON]] payload of `value`, if it is a `JSON.rawJSON` box: the
+/// already-validated JSON source text, which is exactly what
+/// `Get(value, "rawJSON")` would return (the box is frozen with a null
+/// prototype, so no getter or proxy trap can observe the lookup).
+fn raw_json_text(h: Heap(host), value: JsValue) -> Option(String) {
+  case value {
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(kind: value.RawJsonObject(raw), ..)) -> Some(raw)
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// SerializeJSONProperty step 4.e: when `raw` is present, the raw JSON text is
+/// the serialization of the property — emitted verbatim, no quoting, escaping
+/// or recursion. Otherwise fall through to the rest of the algorithm.
+fn emit_raw_json(
+  state: State(host),
+  raw: Option(String),
+  otherwise: fn() ->
+    Result(#(Option(String), State(host)), #(JsValue, State(host))),
+) -> Result(#(Option(String), State(host)), #(JsValue, State(host))) {
+  case raw {
+    Some(text) -> Ok(#(Some(text), state))
+    None -> otherwise()
   }
 }
 
