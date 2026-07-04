@@ -235,12 +235,6 @@ pub fn radix(base: Int) -> Result(Radix, Nil) {
   }
 }
 
-/// Base 10 — the default radix, and the one that routes to the FFI's
-/// JS-compatible decimal formatting.
-pub fn decimal_radix() -> Radix {
-  Radix(10)
-}
-
 /// The digit alphabet: 0-9 then lowercase a-z for digit values 10..35.
 const radix_alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 
@@ -266,6 +260,11 @@ pub fn format_number(n: JsNum) -> String {
 /// by digit until the emitted digits round-trip back to `f` (the same
 /// shortest-representation criterion V8's DoubleToRadixCString and QuickJS's
 /// js_dtoa_radix use), so `(3.5).toString(16)` is `"3.8"`.
+///
+/// The fractional part matches V8 digit for digit; the integer part is
+/// rendered exactly rather than zero-padded the way V8 pads low-order digits
+/// above 2^53 (radix != 10 output is implementation-approximated, so both are
+/// spec-conforming).
 pub fn format_number_radix(n: JsNum, r: Radix) -> String {
   case n, r.base {
     _, 10 -> format_number(n)
@@ -4424,8 +4423,13 @@ fn do_refs_in_slot(
           dict.fold(exports, acc, fn(a, _name, box_ref) { [box_ref, ..a] })
         // The only heap refs an Intl instance can hold are the cached bound
         // `format`/`compare` function objects; everything else is scalar.
-        // Exhaustive on purpose — a new IntlData variant that carries a Ref
+        // Exhaustive on purpose — a new IntlData *variant* that carries a Ref
         // MUST be added here or its target can be collected while reachable.
+        // The guarantee stops at the variant: the ref-free arms still spread
+        // their state records with `..`/`_`, so adding a Ref-carrying *field*
+        // to an existing state (a second cached bound method, say) compiles
+        // fine and is silently traced as ref-free. Push such a field's Ref
+        // onto `acc` here by hand.
         IntlObject(data:) ->
           case data {
             CollatorData(CollatorState(bound_compare: Some(r), ..))
