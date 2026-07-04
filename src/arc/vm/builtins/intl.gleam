@@ -10,7 +10,13 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/date
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
-import arc/vm/builtins/intl_format as fmt
+import arc/vm/builtins/intl_format.{
+  PCompact, PCurrency, PDay, PDayPeriod, PDecimal, PElement, PEra,
+  PExponentInteger, PExponentMinusSign, PExponentSeparator, PFraction,
+  PFractionalSecond, PGroup, PHour, PInfinity, PInteger, PLiteral, PMinusSign,
+  PMinute, PMonth, PNaN, PPercentSign, PPlusSign, PSecond, PTimeZoneName, PUnit,
+  PWeekday, PYear,
+} as fmt
 import arc/vm/builtins/intl_locale as tags
 import arc/vm/builtins/temporal_tz
 import arc/vm/heap
@@ -20,7 +26,7 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type CollatorState, type DateStyle, type DateTimeFormatState,
+  type CaseFirst, type CollatorState, type DateStyle, type DateTimeFormatState,
   type DisplayNamesState, type DtfComponent, type DtfComponents,
   type DurationBaseStyle, type DurationFormatState, type DurationUnitOptions,
   type DurationUnitStyle, type HostOverride, type HourCycle, type IntlData,
@@ -31,22 +37,22 @@ import arc/vm/value.{
   type PluralRulesState, type Ref, type RelativeTimeFormatState,
   type SegmentIteratorState, type SegmenterState, type SegmentsState,
   type TimeStyle, type TimeZoneNameWidth, BsDigital, BsLong, BsNarrow, BsShort,
-  CollatorData, CollatorState, CompactLong, CompactShort, CurAccounting, CurCode,
-  CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
-  DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
-  DateToLocaleTimeString, Dispatch, DisplayAlways, DisplayAuto, DisplayNamesData,
-  DisplayNamesState, DsFull, DsLong, DsMedium, DsShort, DtfComponents, DtfDay,
-  DtfDayPeriod, DtfEra, DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth,
-  DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong,
-  DurNarrow, DurNumeric, DurShort, DurTwoDigit, DurationFormatData,
-  DurationFormatState, DurationUnitOptions, GroupingAlways, GroupingAuto,
-  GroupingMin2, GroupingNever, H11, H12, H23, H24, IntlBoundGetter,
-  IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
-  IntlDigitOptions, IntlDisplayNames, IntlDurationFormat, IntlFormat,
-  IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
-  IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat, IntlLocale,
-  IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat,
-  IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
+  CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CollatorData, CollatorState,
+  CompactLong, CompactShort, CurAccounting, CurCode, CurName, CurNarrowSymbol,
+  CurStandard, CurSymbol, DateTimeFormatData, DateTimeFormatState,
+  DateToLocaleDateString, DateToLocaleString, DateToLocaleTimeString, Dispatch,
+  DisplayAlways, DisplayAuto, DisplayNamesData, DisplayNamesState, DsFull,
+  DsLong, DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
+  DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
+  DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
+  DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
+  DurationUnitOptions, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever,
+  H11, H12, H23, H24, IntlBoundGetter, IntlBoundMethod, IntlCollator,
+  IntlConstructor, IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames,
+  IntlDurationFormat, IntlFormat, IntlFormatRange, IntlFormatRangeToParts,
+  IntlFormatToParts, IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat,
+  IntlLocale, IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative,
+  IntlNumberFormat, IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
   IntlResolvedOptions, IntlSegmentIterator, IntlSegmentIteratorNext,
   IntlSegmenter, IntlSegmenterSegment, IntlSegments, IntlSegmentsContaining,
   IntlSegmentsIterator, IntlSelect, IntlSelectRange, IntlSupportedLocalesOf,
@@ -799,7 +805,10 @@ fn parts_to_js(
       let #(state, objs) = acc
       let #(t, v) = part
       let #(state, obj) =
-        alloc_pojo(state, [#("type", JsString(t)), #("value", JsString(v))])
+        alloc_pojo(state, [
+          #("type", JsString(fmt.part_type_to_js_string(t))),
+          #("value", JsString(v)),
+        ])
       #(state, [obj, ..objs])
     })
   alloc_array(state, list.reverse(objs))
@@ -1259,14 +1268,37 @@ fn apply_numbering_system(parts: List(fmt.Part), nu: String) -> List(fmt.Part) {
   case nu {
     "latn" -> parts
     _ ->
-      list.map(parts, fn(part) {
-        let #(t, v) = part
-        case t {
-          "integer" | "fraction" | "exponentInteger" -> #(
-            t,
-            translit_digits(v, nu),
+      list.map(parts, fn(part: fmt.Part) {
+        case part.0 {
+          PInteger | PFraction | PExponentInteger -> #(
+            part.0,
+            translit_digits(part.1, nu),
           )
-          _ -> part
+          PGroup
+          | PDecimal
+          | PCurrency
+          | PPercentSign
+          | PPlusSign
+          | PMinusSign
+          | PUnit
+          | PCompact
+          | PExponentSeparator
+          | PExponentMinusSign
+          | PNaN
+          | PInfinity
+          | PLiteral
+          | PElement
+          | PWeekday
+          | PEra
+          | PYear
+          | PMonth
+          | PDay
+          | PHour
+          | PMinute
+          | PSecond
+          | PFractionalSecond
+          | PDayPeriod
+          | PTimeZoneName -> part
         }
       })
   }
@@ -1403,7 +1435,7 @@ fn supported_locales_of(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let locales = first_arg_or_undefined(args)
-  let options_v = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let options_v = helpers.arg_at(args, 1)
   run({
     use #(requested, state) <- result.try(canonicalize_locale_list(
       state,
@@ -1528,7 +1560,7 @@ fn construct_service(
       )
     False -> {
       let arg0 = first_arg_or_undefined(args)
-      let arg1 = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+      let arg1 = helpers.arg_at(args, 1)
       run({
         use #(data, state) <- result.try(case service {
           IntlLocale -> {
@@ -2044,11 +2076,15 @@ fn collator_state(
     "numeric",
     None,
   ))
-  use #(case_first_opt, state) <- result.try(get_str_opt(
+  use #(case_first_opt, state) <- result.try(get_enum_opt(
     state,
     opts,
     "caseFirst",
-    ["upper", "lower", "false"],
+    [
+      #("upper", Some(CaseFirstUpper)),
+      #("lower", Some(CaseFirstLower)),
+      #("false", Some(CaseFirstFalse)),
+    ],
     None,
   ))
   let #(_locale, data_locale, ext_kws) = resolve_locale(requested)
@@ -2075,12 +2111,12 @@ fn collator_state(
     )
   let numeric = numeric_str == "true"
   let #(case_first, kf_from_ext) =
-    resolve_keyword(
+    resolve_typed_keyword(
       ext_kws,
       "kf",
       case_first_opt,
-      fn(v) { v == "upper" || v == "lower" || v == "false" },
-      "false",
+      value.case_first_from_js_string,
+      CaseFirstFalse,
     )
   use #(sensitivity, state) <- result.try(get_str_opt(
     state,
@@ -2105,7 +2141,7 @@ fn collator_state(
           True -> "true"
           False -> "false"
         }),
-        #("kf", kf_from_ext, case_first),
+        #("kf", kf_from_ext, value.case_first_to_js_string(case_first)),
       ],
       fn(t) {
         case t {
@@ -4074,7 +4110,7 @@ fn resolved_options(
         #("ignorePunctuation", JsBool(c.ignore_punctuation)),
         #("collation", JsString(c.collation)),
         #("numeric", JsBool(c.numeric)),
-        #("caseFirst", JsString(c.case_first)),
+        #("caseFirst", JsString(value.case_first_to_js_string(c.case_first))),
       ])
       NumberFormatData(nf) -> {
         let dg = nf.digits
@@ -4470,7 +4506,7 @@ fn bound_method(
         ))
         use #(b, state) <- result.try(coerce.js_to_string(
           state,
-          helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+          helpers.arg_at(args, 1),
         ))
         Ok(#(value.from_int(collator_compare(c, a, b)), state))
       }
@@ -5028,17 +5064,36 @@ fn apply_numbering_system_dtf(
   case nu {
     "latn" -> parts
     _ ->
-      list.map(parts, fn(part) {
-        let #(t, v) = part
-        case t {
-          "year"
-          | "month"
-          | "day"
-          | "hour"
-          | "minute"
-          | "second"
-          | "fractionalSecond" -> #(t, translit_dtf(v, nu))
-          _ -> part
+      list.map(parts, fn(part: fmt.Part) {
+        case part.0 {
+          PYear
+          | PMonth
+          | PDay
+          | PHour
+          | PMinute
+          | PSecond
+          | PFractionalSecond -> #(part.0, translit_dtf(part.1, nu))
+          PInteger
+          | PGroup
+          | PDecimal
+          | PFraction
+          | PCurrency
+          | PPercentSign
+          | PPlusSign
+          | PMinusSign
+          | PUnit
+          | PCompact
+          | PExponentSeparator
+          | PExponentMinusSign
+          | PExponentInteger
+          | PNaN
+          | PInfinity
+          | PLiteral
+          | PElement
+          | PWeekday
+          | PEra
+          | PDayPeriod
+          | PTimeZoneName -> part
         }
       })
   }
@@ -5079,22 +5134,22 @@ fn build_dtf_parts(
     }
   }
   let weekday_parts = case weekday {
-    Some(w) -> [#("weekday", fmt.weekday_name(fields.week_day, w))]
+    Some(w) -> [#(PWeekday, fmt.weekday_name(fields.week_day, w))]
     None -> []
   }
   // Date portion.
   let date_parts = case month {
     Some(MonthName(mw)) -> {
-      let m_part = [#("month", fmt.month_name(fields.month, mw))]
+      let m_part = [#(PMonth, fmt.month_name(fields.month, mw))]
       let d_part = case day {
-        Some(dw) -> [#("literal", " "), #("day", day_str(dw, fields.day))]
+        Some(dw) -> [#(PLiteral, " "), #(PDay, day_str(dw, fields.day))]
         None -> []
       }
       let y_part = case year {
         Some(yw) ->
           case day {
-            Some(_) -> [#("literal", ", "), #("year", year_str(yw))]
-            None -> [#("literal", " "), #("year", year_str(yw))]
+            Some(_) -> [#(PLiteral, ", "), #(PYear, year_str(yw))]
+            None -> [#(PLiteral, " "), #(PYear, year_str(yw))]
           }
         None -> []
       }
@@ -5116,9 +5171,9 @@ fn build_dtf_parts(
           ["de", "fi", "ru", "cs", "tr", "nb", "pl", "uk", "bg", "sr", "lv"],
           lang,
         )
-      let m_pair = #("month", month_num)
-      let d_pair = #("day", option.map(day, fn(dw) { day_str(dw, fields.day) }))
-      let y_pair = #("year", option.map(year, year_str))
+      let m_pair = #(PMonth, month_num)
+      let d_pair = #(PDay, option.map(day, fn(dw) { day_str(dw, fields.day) }))
+      let y_pair = #(PYear, option.map(year, year_str))
       let raw = case dotted {
         True -> [d_pair, m_pair, y_pair]
         False -> [m_pair, d_pair, y_pair]
@@ -5133,8 +5188,8 @@ fn build_dtf_parts(
   let date_parts = case era, date_parts {
     Some(e), [_, ..] ->
       list.append(date_parts, [
-        #("literal", " "),
-        #("era", fmt.era_name(fields.year, e)),
+        #(PLiteral, " "),
+        #(PEra, fmt.era_name(fields.year, e)),
       ])
     _, _ -> date_parts
   }
@@ -5161,8 +5216,8 @@ fn build_dtf_parts(
     H23 -> #(fields.hour, "")
   }
   let hour_parts = case hour {
-    Some(WTwoDigit) -> [#("hour", fmt.pad2(display_hour))]
-    Some(WNumeric) -> [#("hour", int.to_string(display_hour))]
+    Some(WTwoDigit) -> [#(PHour, fmt.pad2(display_hour))]
+    Some(WNumeric) -> [#(PHour, int.to_string(display_hour))]
     None -> []
   }
   let minute_parts = case minute {
@@ -5177,8 +5232,8 @@ fn build_dtf_parts(
           }
       }
       case hour_parts {
-        [] -> [#("minute", v)]
-        _ -> [#("literal", ":"), #("minute", v)]
+        [] -> [#(PMinute, v)]
+        _ -> [#(PLiteral, ":"), #(PMinute, v)]
       }
     }
     None -> []
@@ -5194,8 +5249,8 @@ fn build_dtf_parts(
           }
       }
       case minute_parts {
-        [] -> [#("second", v)]
-        _ -> [#("literal", ":"), #("second", v)]
+        [] -> [#(PSecond, v)]
+        _ -> [#(PLiteral, ":"), #(PSecond, v)]
       }
     }
     None -> []
@@ -5205,35 +5260,35 @@ fn build_dtf_parts(
       let ms3 = string.pad_start(int.to_string(fields.millisecond), 3, "0")
       let v = string.slice(ms3, 0, digits)
       case second_parts {
-        [] -> [#("fractionalSecond", v)]
-        _ -> [#("literal", "."), #("fractionalSecond", v)]
+        [] -> [#(PFractionalSecond, v)]
+        _ -> [#(PLiteral, "."), #(PFractionalSecond, v)]
       }
     }
     None -> []
   }
   let day_period_parts = case day_period, hour {
     Some(dpw), _ -> [
-      #("literal", " "),
-      #("dayPeriod", fmt.day_period_name(fields.hour, fields.minute, dpw)),
+      #(PLiteral, " "),
+      #(PDayPeriod, fmt.day_period_name(fields.hour, fields.minute, dpw)),
     ]
     None, Some(_) ->
       case dp {
         "" -> []
-        _ -> [#("literal", " "), #("dayPeriod", dp)]
+        _ -> [#(PLiteral, " "), #(PDayPeriod, dp)]
       }
     None, None -> []
   }
   // Standalone dayPeriod (no hour): no leading space.
   let day_period_parts = case hour, day_period {
     None, Some(dpw) -> [
-      #("dayPeriod", fmt.day_period_name(fields.hour, fields.minute, dpw)),
+      #(PDayPeriod, fmt.day_period_name(fields.hour, fields.minute, dpw)),
     ]
     _, _ -> day_period_parts
   }
   let tz_parts = case tz_name {
     Some(width) -> {
       let name = tz_display(d.time_zone, width, d.tz_offset_minutes)
-      [#("literal", " "), #("timeZoneName", name)]
+      [#(PLiteral, " "), #(PTimeZoneName, name)]
     }
     None -> []
   }
@@ -5246,18 +5301,17 @@ fn build_dtf_parts(
       day_period_parts,
     ])
   let time_parts = case time_parts, tz_parts {
-    [], [#("literal", _), ..rest] -> rest
+    [], [#(PLiteral, _), ..rest] -> rest
     _, _ -> list.append(time_parts, tz_parts)
   }
   let all = case weekday_parts, date_parts, time_parts {
     [], [], t -> t
     w, [], [] -> w
     [], d, [] -> d
-    w, d, [] -> list.flatten([w, [#("literal", ", ")], d])
-    [], d, t -> list.flatten([d, [#("literal", ", ")], t])
-    w, [], t -> list.flatten([w, [#("literal", " ")], t])
-    w, d, t ->
-      list.flatten([w, [#("literal", ", ")], d, [#("literal", ", ")], t])
+    w, d, [] -> list.flatten([w, [#(PLiteral, ", ")], d])
+    [], d, t -> list.flatten([d, [#(PLiteral, ", ")], t])
+    w, [], t -> list.flatten([w, [#(PLiteral, " ")], t])
+    w, d, t -> list.flatten([w, [#(PLiteral, ", ")], d, [#(PLiteral, ", ")], t])
   }
   all
 }
@@ -5287,7 +5341,7 @@ fn join_parts(pieces: List(fmt.Part), sep: String) -> List(fmt.Part) {
   case pieces {
     [] -> []
     [first, ..rest] ->
-      list.fold(rest, [first], fn(acc, p) { [p, #("literal", sep), ..acc] })
+      list.fold(rest, [first], fn(acc, p) { [p, #(PLiteral, sep), ..acc] })
       |> list.reverse
   }
 }
@@ -5387,14 +5441,17 @@ fn dtf_range_parts(
     None -> {
       use #(x_parts, state) <- result.try(dtf_format_parts(state, d, x_v))
       use #(y_parts, state) <- result.try(dtf_format_parts(state, d, y_v))
+      let sourced = fn(p: fmt.Part, source) {
+        #(fmt.part_type_to_js_string(p.0), p.1, source)
+      }
       case fmt.parts_to_string(x_parts) == fmt.parts_to_string(y_parts) {
-        True -> Ok(#(list.map(x_parts, fn(p) { #(p.0, p.1, "shared") }), state))
+        True -> Ok(#(list.map(x_parts, sourced(_, "shared")), state))
         False ->
           Ok(#(
             list.flatten([
-              list.map(x_parts, fn(p) { #(p.0, p.1, "startRange") }),
-              [#("literal", " – ", "shared")],
-              list.map(y_parts, fn(p) { #(p.0, p.1, "endRange") }),
+              list.map(x_parts, sourced(_, "startRange")),
+              [sourced(#(PLiteral, " – "), "shared")],
+              list.map(y_parts, sourced(_, "endRange")),
             ]),
             state,
           ))
@@ -5530,22 +5587,29 @@ fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
   // Primary: base letters (case- and accent-folded).
   let pa = collation_primary(a)
   let pb = collation_primary(b)
+  let levels = fn() { collator_levels(sensitivity, c.case_first, a, b) }
   case numeric {
     True ->
       case numeric_compare(string.to_graphemes(pa), string.to_graphemes(pb)) {
-        0 -> collator_levels(sensitivity, a, b)
+        0 -> levels()
         n -> n
       }
     False ->
       case simple_compare(pa, pb) {
-        0 -> collator_levels(sensitivity, a, b)
+        0 -> levels()
         n -> n
       }
   }
 }
 
 /// Secondary (accents) and tertiary (case) comparisons per sensitivity.
-fn collator_levels(sensitivity: String, a: String, b: String) -> Int {
+/// The tertiary (case) level honours `[[CaseFirst]]` (§10.1.2 `kf`).
+fn collator_levels(
+  sensitivity: String,
+  case_first: CaseFirst,
+  a: String,
+  b: String,
+) -> Int {
   let secondary = fn() {
     simple_compare(
       string.lowercase(fold_combining(a)),
@@ -5553,8 +5617,16 @@ fn collator_levels(sensitivity: String, a: String, b: String) -> Int {
     )
   }
   let tertiary = fn() {
-    // Lowercase sorts before uppercase in the en default (caseFirst false).
-    simple_compare(swap_case(fold_combining(a)), swap_case(fold_combining(b)))
+    case case_first {
+      // Uppercase first: compare as-is, so "A" (0x41) precedes "a" (0x61).
+      CaseFirstUpper -> simple_compare(fold_combining(a), fold_combining(b))
+      // Lowercase first — also the `false` (en locale default) order.
+      CaseFirstLower | CaseFirstFalse ->
+        simple_compare(
+          swap_case(fold_combining(a)),
+          swap_case(fold_combining(b)),
+        )
+    }
   }
   case sensitivity {
     "base" -> 0
@@ -5781,7 +5853,7 @@ fn run_method(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let arg0 = first_arg_or_undefined(args)
-  let arg1 = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let arg1 = helpers.arg_at(args, 1)
   let js_name =
     "Intl."
     <> service_name(service)
@@ -5901,12 +5973,12 @@ fn run_host_override(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let arg0 = first_arg_or_undefined(args)
-  let arg1 = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let arg1 = helpers.arg_at(args, 1)
   run(case which {
     NumberToLocaleString ->
       host_number_to_locale_string(state, this, arg0, arg1)
     StringLocaleCompare -> {
-      let arg2 = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
+      let arg2 = helpers.arg_at(args, 2)
       host_locale_compare(state, this, arg0, arg1, arg2)
     }
     StringToLocaleLowerCase -> host_locale_case(state, this, arg0, False)
@@ -6175,18 +6247,18 @@ fn plural_select(p: PluralRulesState, n: value.JsNum) -> String {
       let parts = fmt.format_number_parts(opts, f)
       let int_digits =
         parts
-        |> list.filter_map(fn(p) {
-          case p {
-            #("integer", v) -> Ok(v)
+        |> list.filter_map(fn(p: fmt.Part) {
+          case p.0 {
+            PInteger -> Ok(p.1)
             _ -> Error(Nil)
           }
         })
         |> string.join("")
       let frac_digits =
         parts
-        |> list.filter_map(fn(p) {
-          case p {
-            #("fraction", v) -> Ok(v)
+        |> list.filter_map(fn(p: fmt.Part) {
+          case p.0 {
+            PFraction -> Ok(p.1)
             _ -> Error(Nil)
           }
         })
@@ -6824,11 +6896,11 @@ fn build_duration_parts(
               let unit_tag = duration_unit_singular(unit)
               let parts =
                 apply_numbering_system(parts, nu)
-                |> list.map(fn(part) {
-                  let #(t, v) = part
-                  case t {
-                    "literal" -> #(t, v, "")
-                    _ -> #(t, v, unit_tag)
+                |> list.map(fn(part: fmt.Part) {
+                  let t = fmt.part_type_to_js_string(part.0)
+                  case part.0 {
+                    PLiteral -> #(t, part.1, "")
+                    _ -> #(t, part.1, unit_tag)
                   }
                 })
               case need_sep {
@@ -6952,13 +7024,16 @@ fn expand_list_elements(
 ) -> List(#(String, String, String)) {
   case lf_parts {
     [] -> list.flatten(list.reverse(acc))
-    [#("element", _), ..rest] ->
+    [#(PElement, _), ..rest] ->
       case groups {
         [g, ..gs] -> expand_list_elements(rest, gs, [g, ..acc])
         [] -> expand_list_elements(rest, [], acc)
       }
     [#(t, v), ..rest] ->
-      expand_list_elements(rest, groups, [[#(t, v, "")], ..acc])
+      expand_list_elements(rest, groups, [
+        [#(fmt.part_type_to_js_string(t), v, "")],
+        ..acc
+      ])
   }
 }
 

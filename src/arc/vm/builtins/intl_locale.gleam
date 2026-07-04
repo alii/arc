@@ -400,20 +400,53 @@ fn parse_t_fields(
 // Canonicalization — UTS 35 §3.2.1
 // ============================================================================
 
-/// CLDR languageAlias subset. Keys joined with "-" in lowercase; the most
-/// specific key (language + script/region/variants) is tried first.
-fn language_aliases() -> dict.Dict(String, String) {
-  dict.from_list([
+/// CLDR languageAlias subset, pre-parsed. Both sides of every row are parsed
+/// exactly once here: the key is re-rendered in the same canonical lookup form
+/// `apply_language_alias` builds its candidates in (variants sorted), and the
+/// replacement is stored as a `LocaleId` so a lookup never re-parses. A row
+/// that does not parse is a data bug, and panics loudly at construction rather
+/// than degrading into "alias silently never applied".
+///
+/// Rows whose key cannot be produced by the lookup at all — legacy tags whose
+/// subtags are not valid script/region/variant subtags, e.g. `zh-min-nan`,
+/// `zh-gan`, `no-bok` — are therefore not listed: `parse` rejects those tags
+/// outright, so no locale could ever match them.
+fn language_aliases() -> dict.Dict(String, LocaleId) {
+  language_alias_rows()
+  |> list.map(fn(row) {
+    let #(key, replacement) = row
+    #(alias_lookup_key(key), parse_alias(replacement))
+  })
+  |> dict.from_list
+}
+
+/// Parse an alias-table tag; a malformed row is a bug in the table above.
+fn parse_alias(tag: String) -> LocaleId {
+  case parse(tag) {
+    Ok(lid) -> lid
+    Error(Nil) -> panic as { "malformed languageAlias row: " <> tag }
+  }
+}
+
+/// The exact key form `apply_language_alias` looks up with.
+fn alias_lookup_key(tag: String) -> String {
+  let lid = parse_alias(tag)
+  key_join(
+    [lid.language],
+    lid.script,
+    lid.region,
+    list.sort(lid.variants, string.compare),
+  )
+}
+
+fn language_alias_rows() -> List(#(String, String)) {
+  [
     // Full-tag / variant-inclusive aliases (legacy tags)
     #("art-lojban", "jbo"),
     #("cel-gaulish", "xtg"),
     #("zh-guoyu", "zh"),
     #("zh-hakka", "hak"),
     #("zh-xiang", "hsn"),
-    #("zh-min-nan", "nan"),
-    #("zh-gan", "gan"),
-    #("zh-wuu", "wuu"),
-    #("zh-yue", "yue"),
     #("ja-latn-hepburn-heploc", "ja-latn-alalc97"),
     #("hy-arevela", "hy"),
     #("hy-arevmda", "hyw"),
@@ -506,9 +539,7 @@ fn language_aliases() -> dict.Dict(String, String) {
     // Legacy macro-language replacements with extra subtags
     #("sh", "sr-latn"),
     #("cnr", "sr-me"),
-    #("no-bok", "nb"),
-    #("no-nyn", "nn"),
-  ])
+  ]
 }
 
 /// CLDR territoryAlias subset — single-replacement entries.
@@ -909,34 +940,72 @@ fn apply_aliases(lid: LocaleId) -> LocaleId {
 
 /// Try language-alias keys from most to least specific. Components included
 /// in a matched key are consumed (replaced by the replacement's components).
+/// One alias-lookup key plus which of the original locale's fields the key
+/// spelled out (and which the replacement therefore consumes). Named fields,
+/// not a tuple of three same-typed booleans: transposing "consumes region" and
+/// "consumes variants" would otherwise compile cleanly and silently produce a
+/// wrong canonical tag.
+type AliasCandidate {
+  AliasCandidate(
+    key: String,
+    consumes_script: Bool,
+    consumes_region: Bool,
+    consumes_variants: Bool,
+  )
+}
+
 fn apply_language_alias(lid: LocaleId) -> LocaleId {
   let aliases = language_aliases()
   let sorted_variants = list.sort(lid.variants, string.compare)
-  // Candidate keys: (key parts, fields consumed flags: script, region, variants)
   let candidates = [
-    #(
-      key_join([lid.language], lid.script, lid.region, sorted_variants),
-      True,
-      True,
-      True,
+    AliasCandidate(
+      key: key_join([lid.language], lid.script, lid.region, sorted_variants),
+      consumes_script: True,
+      consumes_region: True,
+      consumes_variants: True,
     ),
-    #(
-      key_join([lid.language], lid.script, None, sorted_variants),
-      True,
-      False,
-      True,
+    AliasCandidate(
+      key: key_join([lid.language], lid.script, None, sorted_variants),
+      consumes_script: True,
+      consumes_region: False,
+      consumes_variants: True,
     ),
-    #(
-      key_join([lid.language], None, lid.region, sorted_variants),
-      False,
-      True,
-      True,
+    AliasCandidate(
+      key: key_join([lid.language], None, lid.region, sorted_variants),
+      consumes_script: False,
+      consumes_region: True,
+      consumes_variants: True,
     ),
-    #(key_join([lid.language], None, None, sorted_variants), False, False, True),
-    #(key_join([lid.language], lid.script, lid.region, []), True, True, False),
-    #(key_join([lid.language], None, lid.region, []), False, True, False),
-    #(key_join([lid.language], lid.script, None, []), True, False, False),
-    #(key_join([lid.language], None, None, []), False, False, False),
+    AliasCandidate(
+      key: key_join([lid.language], None, None, sorted_variants),
+      consumes_script: False,
+      consumes_region: False,
+      consumes_variants: True,
+    ),
+    AliasCandidate(
+      key: key_join([lid.language], lid.script, lid.region, []),
+      consumes_script: True,
+      consumes_region: True,
+      consumes_variants: False,
+    ),
+    AliasCandidate(
+      key: key_join([lid.language], None, lid.region, []),
+      consumes_script: False,
+      consumes_region: True,
+      consumes_variants: False,
+    ),
+    AliasCandidate(
+      key: key_join([lid.language], lid.script, None, []),
+      consumes_script: True,
+      consumes_region: False,
+      consumes_variants: False,
+    ),
+    AliasCandidate(
+      key: key_join([lid.language], None, None, []),
+      consumes_script: False,
+      consumes_region: False,
+      consumes_variants: False,
+    ),
   ]
   find_language_alias(lid, aliases, candidates)
 }
@@ -959,44 +1028,31 @@ fn key_join(
 
 fn find_language_alias(
   lid: LocaleId,
-  aliases: dict.Dict(String, String),
-  candidates: List(#(String, Bool, Bool, Bool)),
+  aliases: dict.Dict(String, LocaleId),
+  candidates: List(AliasCandidate),
 ) -> LocaleId {
   case candidates {
     [] -> lid
-    [#(key, used_script, used_region, used_variants), ..rest] ->
-      case dict.get(aliases, key) {
+    [candidate, ..rest] ->
+      case dict.get(aliases, candidate.key) {
         Error(Nil) -> find_language_alias(lid, aliases, rest)
-        Ok(replacement) ->
-          case parse(replacement) {
-            Error(Nil) -> lid
-            Ok(rep) -> {
-              // Replacement components fill in; original components kept
-              // only when not consumed by the key and not in the replacement.
-              let script = case used_script {
-                True -> rep.script
-                False -> option.or(lid.script, rep.script)
-              }
-              let region = case used_region {
-                True -> rep.region
-                False -> option.or(lid.region, rep.region)
-              }
-              let variants = case used_variants {
-                True -> rep.variants
-                False -> list.append(lid.variants, rep.variants)
-              }
-              LocaleId(
-                ..lid,
-                language: rep.language,
-                script: case lid.script, used_script {
-                  Some(s), False -> Some(s)
-                  _, _ -> script
-                },
-                region:,
-                variants:,
-              )
-            }
+        Ok(rep) -> {
+          // Replacement components fill in; original components are kept only
+          // when the key did not consume them and the replacement is silent.
+          let script = case candidate.consumes_script {
+            True -> rep.script
+            False -> option.or(lid.script, rep.script)
           }
+          let region = case candidate.consumes_region {
+            True -> rep.region
+            False -> option.or(lid.region, rep.region)
+          }
+          let variants = case candidate.consumes_variants {
+            True -> rep.variants
+            False -> list.append(lid.variants, rep.variants)
+          }
+          LocaleId(..lid, language: rep.language, script:, region:, variants:)
+        }
       }
   }
 }
