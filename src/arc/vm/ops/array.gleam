@@ -291,12 +291,7 @@ fn spread_collection_iterator(
     use h, els, len <- batch_append(state.heap, target_ref)
     list.fold(entries, #(h, els, len), build)
   }
-  let heap = {
-    use slot <- heap.update(heap, src_ref)
-    let assert ObjectSlot(..) as slot = slot
-      as "collection iterator ref is not an ObjectSlot"
-    ObjectSlot(..slot, kind: latched_kind)
-  }
+  let heap = heap.update_kind(heap, src_ref, latched_kind)
   Ok(State(..state, heap:))
 }
 
