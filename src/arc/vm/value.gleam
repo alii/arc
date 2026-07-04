@@ -3922,8 +3922,8 @@ pub type SavedTryFrame {
 /// execution `State`. Shared verbatim by `GeneratorSlot` and
 /// `AsyncGeneratorSlot` — the two suspend/resume paths save exactly the same
 /// snapshot, so they save it through the same record.
-pub type SavedFrame {
-  SavedFrame(
+pub type SuspendedFrame {
+  SuspendedFrame(
     pc: Int,
     locals: TupleArray(JsValue),
     stack: List(JsValue),
@@ -4069,7 +4069,7 @@ pub type HeapSlot(ctx, host) {
     gen_state: GeneratorState,
     func_template: FuncTemplate,
     env_ref: Ref,
-    frame: SavedFrame,
+    frame: SuspendedFrame,
   )
   /// Engine-internal async function suspended state.
   /// Saves the full execution context so await can resume. There is no
@@ -4107,7 +4107,7 @@ pub type HeapSlot(ctx, host) {
     queue: #(List(AsyncGenRequest), List(AsyncGenRequest)),
     func_template: FuncTemplate,
     env_ref: Ref,
-    frame: SavedFrame,
+    frame: SuspendedFrame,
   )
   /// Stores realm context for $262 methods.
   /// evalScript and createRealm read this to know which realm to operate in.
@@ -4296,9 +4296,9 @@ fn push_dispose_resources(
 
 /// Root a suspended coroutine frame plus the function environment it resumes
 /// into: locals, operand stack, and the frame's own direct-eval var dict.
-fn push_saved_frame_refs(
+fn push_suspended_frame_refs(
   env_ref: Ref,
-  frame: SavedFrame,
+  frame: SuspendedFrame,
   acc: List(Ref),
 ) -> List(Ref) {
   push_saved_locals_stack_refs(frame.locals, frame.stack, [
@@ -4550,7 +4550,7 @@ fn do_refs_in_slot(
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
     }
     GeneratorSlot(env_ref:, frame:, ..) ->
-      push_saved_frame_refs(env_ref, frame, acc)
+      push_suspended_frame_refs(env_ref, frame, acc)
     AsyncFunctionSlot(
       promise_data_ref:,
       resolve:,
@@ -4575,7 +4575,7 @@ fn do_refs_in_slot(
       }
       let acc = list.fold(queue_front, acc, push_request)
       let acc = list.fold(queue_back, acc, push_request)
-      push_saved_frame_refs(env_ref, frame, acc)
+      push_suspended_frame_refs(env_ref, frame, acc)
     }
     RealmSlot(global_object:, lexical_globals:, symbol_registry: _) ->
       dict.fold(lexical_globals, [global_object, ..acc], fn(a, _k, v) {

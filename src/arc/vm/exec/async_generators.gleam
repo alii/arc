@@ -753,7 +753,7 @@ type AsyncGenFrame {
     func_template: value.FuncTemplate,
     env_ref: Ref,
     /// The suspended body snapshot — the same record the heap slot stores.
-    saved: value.SavedFrame,
+    saved: value.SuspendedFrame,
   )
 }
 
@@ -916,7 +916,7 @@ fn save_suspended(
     frame: AsyncGenFrame(
       ..live.frame,
       gen_state: new_state,
-      saved: generators.saved_frame(suspended),
+      saved: generators.suspended_frame(suspended),
     ),
   )
 }

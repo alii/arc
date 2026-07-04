@@ -283,7 +283,7 @@ type GenData {
     gen_state: value.GeneratorState,
     func_template: FuncTemplate,
     env_ref: Ref,
-    frame: value.SavedFrame,
+    frame: value.SuspendedFrame,
   )
 }
 
@@ -544,7 +544,7 @@ fn settle_completion(
             gen_state: value.SuspendedYield,
             func_template: gen.func_template,
             env_ref: gen.env_ref,
-            frame: saved_frame(suspended),
+            frame: suspended_frame(suspended),
           ),
         )
       Ok(#(
@@ -784,10 +784,10 @@ fn replace_return_with_throw(
 }
 
 /// Snapshot a suspended body's execution context — the one place a
-/// `value.SavedFrame` is built from a live `State`, shared by every
+/// `value.SuspendedFrame` is built from a live `State`, shared by every
 /// generator/async-generator suspension point.
-pub fn saved_frame(suspended: State(host)) -> value.SavedFrame {
-  value.SavedFrame(
+pub fn suspended_frame(suspended: State(host)) -> value.SuspendedFrame {
+  value.SuspendedFrame(
     pc: suspended.pc,
     locals: suspended.locals,
     stack: suspended.stack,
