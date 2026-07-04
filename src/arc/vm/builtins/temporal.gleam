@@ -7432,6 +7432,32 @@ fn apply_unsigned_rounding(
   }
 }
 
+/// Round a value that lies at `num`/`den` progress between the bounding
+/// unsigned candidates `abs_r1` and `abs_r2` (multiples of `inc`), per `mode`
+/// applied to a value of the given `sign`.
+fn round_between(
+  abs_r1: Int,
+  abs_r2: Int,
+  num: Int,
+  den: Int,
+  inc: Int,
+  mode: RoundingMode,
+  sign: Int,
+) -> Int {
+  case num == 0, num == den {
+    True, _ -> abs_r1
+    _, True -> abs_r2
+    _, _ ->
+      apply_unsigned_rounding(
+        abs_r1,
+        abs_r2,
+        int_sign(2 * int.absolute_value(num) - int.absolute_value(den)),
+        math_mod(abs_r1 / inc, 2) == 0,
+        unsigned_rounding_mode(mode, sign > 0),
+      )
+  }
+}
+
 /// ComputeNudgeWindow: bounding durations/instants for rounding `unit`.
 /// Returns #(r1, r2, start_dur, end_dur, start_ns, end_ns).
 fn nudge_window(
@@ -7521,21 +7547,7 @@ fn nudge_calendar_unit(
   let den = end_ns - start_ns
   let abs_r1 = int.absolute_value(r1)
   let abs_r2 = int.absolute_value(r2)
-  let rounded_abs = case num == 0, num == den {
-    True, _ -> abs_r1
-    _, True -> abs_r2
-    _, _ -> {
-      let cmp = int_sign(2 * int.absolute_value(num) - int.absolute_value(den))
-      let even = math_mod(abs_r1 / inc, 2) == 0
-      apply_unsigned_rounding(
-        abs_r1,
-        abs_r2,
-        cmp,
-        even,
-        unsigned_rounding_mode(mode, sign > 0),
-      )
-    }
-  }
+  let rounded_abs = round_between(abs_r1, abs_r2, num, den, inc, mode, sign)
   let expanded_here = rounded_abs == abs_r2
   let did_expand = pre_expanded || expanded_here
   let chosen = case expanded_here {
@@ -8833,24 +8845,16 @@ fn round_calendar_year_total(
   ))
   let num = dest - epoch_days(start)
   let den = epoch_days(end_date) - epoch_days(start)
-  let abs_r1 = int.absolute_value(r1)
-  let abs_r2 = int.absolute_value(r2)
-  let rounded_abs = case num == 0, num == den {
-    True, _ -> abs_r1
-    _, True -> abs_r2
-    _, _ -> {
-      let cmp = int_sign(2 * int.absolute_value(num) - int.absolute_value(den))
-      let even = math_mod(abs_r1 / inc, 2) == 0
-      apply_unsigned_rounding(
-        abs_r1,
-        abs_r2,
-        cmp,
-        even,
-        unsigned_rounding_mode(mode, sign > 0),
-      )
-    }
-  }
-  rounded_abs * sign
+  round_between(
+    int.absolute_value(r1),
+    int.absolute_value(r2),
+    num,
+    den,
+    inc,
+    mode,
+    sign,
+  )
+  * sign
 }
 
 // ----------------------------------------------------------------------------
