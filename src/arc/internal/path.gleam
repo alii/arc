@@ -22,15 +22,6 @@ pub type Specifier {
   BareSpecifier(text: String)
 }
 
-/// The specifier's text — the module IDENTITY, whichever arm it is. Use this
-/// (never a raw string) as the module-map key.
-pub fn specifier_text(specifier: Specifier) -> String {
-  case specifier {
-    PathSpecifier(path) -> path
-    BareSpecifier(text) -> text
-  }
-}
-
 /// Resolve a module specifier relative to the parent module's path.
 /// - Relative paths (./foo, ../bar) are resolved against the parent's directory
 /// - Absolute paths (/foo) are normalized

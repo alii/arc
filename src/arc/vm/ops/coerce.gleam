@@ -304,12 +304,6 @@ pub fn jsnum_to_int32(num: value.JsNum) -> Int {
   operators.num_to_int32(num)
 }
 
-/// ES2024 §7.1.7 ToUint32 of an already-ToNumber'd value (see
-/// `jsnum_to_int32`).
-pub fn jsnum_to_uint32(num: value.JsNum) -> Int {
-  operators.num_to_uint32(num)
-}
-
 /// CPS ToInt32 (ES2024 §7.1.6): full ToNumber (ToPrimitive on objects,
 /// TypeError on Symbol/BigInt), then modular reduction to [-2^31, 2^31).
 ///   use i, state <- coerce.try_to_int32(state, val)
@@ -386,23 +380,6 @@ pub fn try_relative_index(
       }
       cont(k, state)
     }
-  }
-}
-
-/// Fast-path unwrap of primitive wrapper objects (Number/String/Boolean) to
-/// their [[PrimitiveValue]]. Returns `val` unchanged for any other input.
-/// Unlike full ToPrimitive this does NOT honor user-overridden valueOf or
-/// @@toPrimitive — use js_to_number/js_to_string for spec-exact coercion.
-pub fn unwrap_primitive_wrapper(h: Heap(host), val: JsValue) -> JsValue {
-  case val {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: value.NumberObject(value: n), ..)) -> JsNumber(n)
-        Some(ObjectSlot(kind: value.StringObject(value: s), ..)) -> JsString(s)
-        Some(ObjectSlot(kind: value.BooleanObject(value: b), ..)) -> JsBool(b)
-        _ -> val
-      }
-    other -> other
   }
 }
 

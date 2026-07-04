@@ -485,11 +485,6 @@ pub fn unroot(heap: Heap(ctx, host), ref: Ref) -> Heap(ctx, host) {
   Heap(..heap, roots: set.delete(heap.roots, ref.id))
 }
 
-/// The persistent root set (for external use like spawn GC).
-pub fn root_set(heap: Heap(ctx, host)) -> Set(Int) {
-  heap.roots
-}
-
 /// Number of live (allocated) slots. Unmaterialised lazy function prototypes
 /// occupy no heap entry, so they are not counted.
 pub fn size(heap: Heap(ctx, host)) -> Int {

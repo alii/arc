@@ -7002,21 +7002,6 @@ pub fn unit_to_string(u: Unit) -> String {
   }
 }
 
-/// JS-facing name of a rounding mode.
-pub fn rounding_mode_to_string(m: RoundingMode) -> String {
-  case m {
-    Ceil -> "ceil"
-    Floor -> "floor"
-    Expand -> "expand"
-    Trunc -> "trunc"
-    HalfCeil -> "halfCeil"
-    HalfFloor -> "halfFloor"
-    HalfExpand -> "halfExpand"
-    HalfTrunc -> "halfTrunc"
-    HalfEven -> "halfEven"
-  }
-}
-
 /// GetTemporalUnitValuedOption's name table: the singular and plural forms
 /// map to the unit, anything else is rejected. The ONLY String → Unit
 /// conversion.
