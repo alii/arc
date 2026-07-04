@@ -335,25 +335,19 @@ fn require_data_view(
   state: State(host),
   cont: fn(ViewRecord, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let found = case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(
-          kind: DataViewObject(buffer:, byte_offset:, byte_length:),
-          ..,
-        )) -> Some(ViewRecord(buffer:, byte_offset:, byte_length:))
+  use view, _ref, state <- helpers.require_brand(
+    this,
+    state,
+    fn() { "Method called on incompatible receiver: expected a DataView" },
+    fn(kind) {
+      case kind {
+        DataViewObject(buffer:, byte_offset:, byte_length:) ->
+          Some(ViewRecord(buffer:, byte_offset:, byte_length:))
         _ -> None
       }
-    _ -> None
-  }
-  case found {
-    Some(view) -> cont(view, state)
-    None ->
-      state.type_error(
-        state,
-        "Method called on incompatible receiver: expected a DataView",
-      )
-  }
+    },
+  )
+  cont(view, state)
 }
 
 /// Immutable ArrayBuffer proposal — SetViewValue step 3: writes through a

@@ -362,38 +362,29 @@ fn require_stack(
   cont: fn(Ref, DisposableState, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(
-          kind: DisposableStackObject(async: a, state: disposable_state),
-          ..,
-        ))
-          if a == async
-        -> cont(ref, disposable_state, state)
-        _ -> incompatible(state, async, method)
-      }
-    _ -> incompatible(state, async, method)
-  }
-}
-
-fn incompatible(
-  state: State(host),
-  async: Bool,
-  method: String,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let type_name = case async {
-    True -> "AsyncDisposableStack"
-    False -> "DisposableStack"
-  }
-  state.type_error(
+  use disposable_state, ref, state <- helpers.require_brand(
+    this,
     state,
-    "Method "
+    fn() {
+      let type_name = case async {
+        True -> "AsyncDisposableStack"
+        False -> "DisposableStack"
+      }
+      "Method "
       <> type_name
       <> ".prototype."
       <> method
-      <> " called on incompatible receiver",
+      <> " called on incompatible receiver"
+    },
+    fn(kind) {
+      case kind {
+        DisposableStackObject(async: a, state: disposable_state) if a == async ->
+          Some(disposable_state)
+        _ -> None
+      }
+    },
   )
+  cont(ref, disposable_state, state)
 }
 
 /// Write back a stack's disposable state (which carries the

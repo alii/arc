@@ -33,7 +33,7 @@ import arc/vm/value.{
   MapPrototypeGetSize, MapPrototypeHas, MapPrototypeKeys, MapPrototypeSet,
   MapPrototypeValues, ObjectSlot,
 }
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 
 // ============================================================================
 // Init — set up Map constructor + Map.prototype
@@ -441,21 +441,6 @@ fn map_iterator(
 // Helpers
 // ============================================================================
 
-/// `this`'s [[MapData]] store and heap ref, or `None` if `this` isn't a Map.
-fn map_store(
-  h: Heap(host),
-  this: JsValue,
-) -> Option(#(OrderedEntries(MapKey, JsValue), Ref)) {
-  case this {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: MapObject(store:), ..)) -> Some(#(store, ref))
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
 /// RequireInternalSlot(M, [[MapData]]) — validates that `this` is a Map object
 /// and extracts its internal data, or throws a TypeError naming `method`.
 ///
@@ -472,14 +457,20 @@ fn require_map(
   cont: fn(OrderedEntries(MapKey, JsValue), Ref, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case map_store(state.heap, this) {
-    Some(#(store, ref)) -> cont(store, ref, state)
-    None ->
-      state.type_error(
-        state,
-        "Method Map.prototype." <> method <> " called on incompatible receiver",
-      )
-  }
+  helpers.require_brand(
+    this,
+    state,
+    fn() {
+      "Method Map.prototype." <> method <> " called on incompatible receiver"
+    },
+    fn(kind) {
+      case kind {
+        MapObject(store:) -> Some(store)
+        _ -> None
+      }
+    },
+    cont,
+  )
 }
 
 /// Update the MapObject data on an existing heap slot.

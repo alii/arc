@@ -597,18 +597,10 @@ fn branded(
   service: IntlService,
   method: String,
 ) -> Result(#(Ref, IntlData), Thrown(host)) {
-  case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: IntlObject(data:), ..)) ->
-          case value.intl_service(data) == service {
-            True -> Ok(#(ref, data))
-            False ->
-              throw_type(state, method <> " called on incompatible receiver")
-          }
-        _ -> throw_type(state, method <> " called on incompatible receiver")
-      }
-    _ -> throw_type(state, method <> " called on incompatible receiver")
+  use data <- branded_of(state, this, method)
+  case value.intl_service(data) == service {
+    True -> Some(data)
+    False -> None
   }
 }
 
@@ -625,18 +617,16 @@ fn branded_of(
   method: String,
   extract: fn(IntlData) -> Option(a),
 ) -> Result(#(Ref, a), Thrown(host)) {
-  case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: IntlObject(data:), ..)) ->
-          case extract(data) {
-            Some(v) -> Ok(#(ref, v))
-            None ->
-              throw_type(state, method <> " called on incompatible receiver")
-          }
-        _ -> throw_type(state, method <> " called on incompatible receiver")
+  let found =
+    helpers.brand_of(state.heap, this, fn(kind) {
+      case kind {
+        IntlObject(data:) -> extract(data)
+        _ -> None
       }
-    _ -> throw_type(state, method <> " called on incompatible receiver")
+    })
+  case found {
+    Some(#(v, ref)) -> Ok(#(ref, v))
+    None -> throw_type(state, method <> " called on incompatible receiver")
   }
 }
 

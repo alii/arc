@@ -861,18 +861,6 @@ fn set_record_has(
 
 // ---- helpers ----
 
-/// The heap ref of `this` if it is a Set object, else `None`.
-fn set_ref(h: Heap(host), this: JsValue) -> Option(Ref) {
-  case this {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: SetObject(..), ..)) -> Some(ref)
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
 /// RequireInternalSlot(this, [[SetData]]) — proves `this` is a Set, or throws
 /// a TypeError naming `method`.
 ///
@@ -888,12 +876,18 @@ fn require_set(
   method: String,
   cont: fn(Ref, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case set_ref(state.heap, this) {
-    Some(ref) -> cont(ref, state)
-    None ->
-      state.type_error(
-        state,
-        "Method Set.prototype." <> method <> " called on incompatible receiver",
-      )
-  }
+  use Nil, ref, state <- helpers.require_brand(
+    this,
+    state,
+    fn() {
+      "Method Set.prototype." <> method <> " called on incompatible receiver"
+    },
+    fn(kind) {
+      case kind {
+        SetObject(..) -> Some(Nil)
+        _ -> None
+      }
+    },
+  )
+  cont(ref, state)
 }

@@ -237,23 +237,20 @@ fn require_registry(
   cont: fn(List(value.FinRegCell), Ref, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let found = case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: FinalizationRegistryObject(cells:, ..), ..)) ->
-          Some(#(cells, ref))
+  helpers.require_brand(
+    this,
+    state,
+    fn() {
+      "FinalizationRegistry.prototype."
+      <> method
+      <> " called on incompatible receiver"
+    },
+    fn(kind) {
+      case kind {
+        FinalizationRegistryObject(cells:, ..) -> Some(cells)
         _ -> None
       }
-    _ -> None
-  }
-  case found {
-    Some(#(cells, ref)) -> cont(cells, ref, state)
-    None ->
-      state.type_error(
-        state,
-        "FinalizationRegistry.prototype."
-          <> method
-          <> " called on incompatible receiver",
-      )
-  }
+    },
+    cont,
+  )
 }

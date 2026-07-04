@@ -42,6 +42,49 @@ pub fn require_new_target(
   }
 }
 
+/// The one heap read behind every branded builtin's RequireInternalSlot check:
+/// `this` must be an object whose slot kind `extract` recognises. Yields the
+/// extracted internal slot alongside the receiver's `Ref`.
+///
+/// `require_brand` is this plus the TypeError; use `brand_of` directly only
+/// when the failure path isn't a plain throw (Intl's `Thrown` result, say).
+pub fn brand_of(
+  h: state.Heap(host),
+  this: JsValue,
+  extract: fn(state.ExoticKind(host)) -> Option(a),
+) -> Option(#(a, Ref)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(kind:, ..)) ->
+          extract(kind) |> option.map(fn(v) { #(v, ref) })
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// RequireInternalSlot(this, [[Slot]]) — `this` must be an object carrying the
+/// brand `extract` recognises, else a TypeError with `msg`. Yields the
+/// extracted internal slot and the receiver's `Ref`. CPS-style:
+///
+///   use store, ref, state <- helpers.require_brand(this, state, msg, extract)
+///
+/// `msg` is a thunk so the (always-concatenated) message costs nothing on the
+/// overwhelmingly common path where the brand matches.
+pub fn require_brand(
+  this: JsValue,
+  state: State(host),
+  msg: fn() -> String,
+  extract: fn(state.ExoticKind(host)) -> Option(a),
+  cont: fn(a, Ref, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case brand_of(state.heap, this, extract) {
+    Some(#(v, ref)) -> cont(v, ref, state)
+    None -> state.type_error(state, msg())
+  }
+}
+
 /// ES2024 §9.13 CanBeHeldWeakly ( v )
 ///
 /// True for objects and non-registered Symbols — a symbol minted by

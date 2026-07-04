@@ -22,7 +22,7 @@ import arc/vm/value.{
   type JsValue, type Ref, JsBool, JsNull, JsObject, JsUndefined, ObjectSlot,
 }
 import gleam/dict.{type Dict}
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, Some}
 
 /// Everything that distinguishes a WeakMap from a WeakSet.
 ///
@@ -62,27 +62,19 @@ pub fn require(
   method: String,
   cont: fn(WeakRef, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let found = case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: slot_kind, ..)) ->
-          kind.unwrap(slot_kind) |> option.map(fn(_) { WeakRef(ref) })
-        _ -> None
-      }
-    _ -> None
-  }
-  case found {
-    Some(weak_ref) -> cont(weak_ref, state)
-    None ->
-      state.type_error(
-        state,
-        "Method "
-          <> kind.type_name
-          <> ".prototype."
-          <> method
-          <> " called on incompatible receiver",
-      )
-  }
+  use _data, ref, state <- helpers.require_brand(
+    this,
+    state,
+    fn() {
+      "Method "
+      <> kind.type_name
+      <> ".prototype."
+      <> method
+      <> " called on incompatible receiver"
+    },
+    kind.unwrap,
+  )
+  cont(WeakRef(ref), state)
 }
 
 /// The collection's *live* entry dict, read straight from the heap.
