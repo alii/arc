@@ -5,9 +5,10 @@
 //// ECMA-402 (PartitionNumberPattern, PartitionDateTimePattern, …). The
 //// builtins layer turns parts into strings or {type, value} part objects.
 
+import arc/vm/ops/operators
 import arc/vm/value.{
-  type CompactDisplay, type CurrencyDisplay, type CurrencySign,
-  type IntlUseGrouping, type Notation, type NumStyle, type RoundingMode,
+  type CompactDisplay, type CurrencyDisplay, type IntlUseGrouping,
+  type NameWidth, type Notation, type NumStyle, type RoundingMode,
   type RoundingPriority, type SignDisplay, type TrailingZeroDisplay,
   type UnitDisplay, CompactLong, CompactShort, CurAccounting, CurCode, CurName,
   CurNarrowSymbol, CurStandard, CurSymbol, GroupingAlways, GroupingAuto,
@@ -17,7 +18,7 @@ import arc/vm/value.{
   RoundHalfEven, RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
   SignAlways, SignAuto, SignExceptZero, SignNegative, SignNever, StyleCurrency,
   StyleDecimal, StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitLong,
-  UnitNarrow, UnitShort,
+  UnitNarrow, UnitShort, WLong, WNarrow, WShort,
 }
 import gleam/bool
 import gleam/float
@@ -27,9 +28,82 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-/// A formatted part: #(type, value), e.g. #("integer", "1"), #("group", ",").
+/// The kind of a formatted part. Covers every part type ECMA-402 lets the
+/// number, date-time and list formatters emit; the spec-visible strings live
+/// in `part_type_to_js_string` and nowhere else.
+pub type PartType {
+  // Number parts (§15.5.x)
+  PInteger
+  PGroup
+  PDecimal
+  PFraction
+  PCurrency
+  PPercentSign
+  PPlusSign
+  PMinusSign
+  PUnit
+  PCompact
+  PExponentSeparator
+  PExponentMinusSign
+  PExponentInteger
+  PNaN
+  PInfinity
+  // Date-time parts (§11.5.x)
+  PWeekday
+  PEra
+  PYear
+  PMonth
+  PDay
+  PHour
+  PMinute
+  PSecond
+  PFractionalSecond
+  PDayPeriod
+  PTimeZoneName
+  // List parts (§13.5.x)
+  PElement
+  // Shared
+  PLiteral
+}
+
+/// The spec-visible `type` string of a part. Only the JS boundary
+/// (`formatToParts` and friends) should call this.
+pub fn part_type_to_js_string(t: PartType) -> String {
+  case t {
+    PInteger -> "integer"
+    PGroup -> "group"
+    PDecimal -> "decimal"
+    PFraction -> "fraction"
+    PCurrency -> "currency"
+    PPercentSign -> "percentSign"
+    PPlusSign -> "plusSign"
+    PMinusSign -> "minusSign"
+    PUnit -> "unit"
+    PCompact -> "compact"
+    PExponentSeparator -> "exponentSeparator"
+    PExponentMinusSign -> "exponentMinusSign"
+    PExponentInteger -> "exponentInteger"
+    PNaN -> "nan"
+    PInfinity -> "infinity"
+    PWeekday -> "weekday"
+    PEra -> "era"
+    PYear -> "year"
+    PMonth -> "month"
+    PDay -> "day"
+    PHour -> "hour"
+    PMinute -> "minute"
+    PSecond -> "second"
+    PFractionalSecond -> "fractionalSecond"
+    PDayPeriod -> "dayPeriod"
+    PTimeZoneName -> "timeZoneName"
+    PElement -> "element"
+    PLiteral -> "literal"
+  }
+}
+
+/// A formatted part: #(type, value), e.g. #(PInteger, "1"), #(PGroup, ",").
 pub type Part =
-  #(String, String)
+  #(PartType, String)
 
 pub fn parts_to_string(parts: List(Part)) -> String {
   parts |> list.map(fn(p) { p.1 }) |> string.join("")
@@ -46,9 +120,11 @@ pub fn format_range_combine(
   y_parts: List(Part),
 ) -> List(#(String, String, String)) {
   let key = loc_key(locale)
-  let start3 = fn(p: Part) { #(p.0, p.1, "startRange") }
-  let end3 = fn(p: Part) { #(p.0, p.1, "endRange") }
-  let shared3 = fn(p: Part) { #(p.0, p.1, "shared") }
+  let js = fn(p: Part, source) { #(part_type_to_js_string(p.0), p.1, source) }
+  let start3 = fn(p: Part) { js(p, "startRange") }
+  let end3 = fn(p: Part) { js(p, "endRange") }
+  let shared3 = fn(p: Part) { js(p, "shared") }
+  let sep3 = fn(spaced) { js(#(PLiteral, range_sep(key, spaced)), "shared") }
   case parts_to_string(x_parts) == parts_to_string(y_parts) {
     True -> [
       #("approximatelySign", "~", "shared"),
@@ -66,7 +142,7 @@ pub fn format_range_combine(
           list.flatten([
             list.map(x_pre, shared3),
             list.map(x_core, start3),
-            [#("literal", range_sep(key, False), "shared")],
+            [sep3(False)],
             list.map(y_core, end3),
             list.map(x_suf, shared3),
           ])
@@ -74,7 +150,7 @@ pub fn format_range_combine(
           let spaced = x_suf != [] || y_pre != []
           list.flatten([
             list.map(x_parts, start3),
-            [#("literal", range_sep(key, spaced), "shared")],
+            [sep3(spaced)],
             list.map(y_parts, end3),
           ])
         }
@@ -91,17 +167,34 @@ fn split_range_affixes(
 ) -> #(List(Part), List(Part), List(Part)) {
   let is_core = fn(p: Part) {
     case p.0 {
-      "integer"
-      | "group"
-      | "decimal"
-      | "fraction"
-      | "nan"
-      | "infinity"
-      | "exponentSeparator"
-      | "exponentMinusSign"
-      | "exponentInteger"
-      | "compact" -> True
-      _ -> False
+      PInteger
+      | PGroup
+      | PDecimal
+      | PFraction
+      | PNaN
+      | PInfinity
+      | PExponentSeparator
+      | PExponentMinusSign
+      | PExponentInteger
+      | PCompact -> True
+      PCurrency
+      | PPercentSign
+      | PPlusSign
+      | PMinusSign
+      | PUnit
+      | PLiteral
+      | PElement
+      | PWeekday
+      | PEra
+      | PYear
+      | PMonth
+      | PDay
+      | PHour
+      | PMinute
+      | PSecond
+      | PFractionalSecond
+      | PDayPeriod
+      | PTimeZoneName -> False
     }
   }
   let #(pre, rest) = list.split_while(parts, fn(p) { !is_core(p) })
@@ -131,11 +224,6 @@ pub type NumOpts {
   NumOpts(
     locale: String,
     style: NumStyle,
-    currency: Option(String),
-    currency_display: CurrencyDisplay,
-    currency_sign: CurrencySign,
-    unit: Option(String),
-    unit_display: UnitDisplay,
     min_int: Int,
     min_frac: Option(Int),
     max_frac: Option(Int),
@@ -143,7 +231,6 @@ pub type NumOpts {
     max_sig: Option(Int),
     use_grouping: IntlUseGrouping,
     notation: Notation,
-    compact_display: CompactDisplay,
     sign_display: SignDisplay,
     rounding_increment: Int,
     rounding_mode: RoundingMode,
@@ -156,11 +243,6 @@ pub fn default_num_opts() -> NumOpts {
   NumOpts(
     locale: "en",
     style: StyleDecimal,
-    currency: None,
-    currency_display: CurSymbol,
-    currency_sign: CurStandard,
-    unit: None,
-    unit_display: UnitShort,
     min_int: 1,
     min_frac: Some(0),
     max_frac: Some(3),
@@ -168,7 +250,6 @@ pub fn default_num_opts() -> NumOpts {
     max_sig: None,
     use_grouping: GroupingAuto,
     notation: NotationStandard,
-    compact_display: CompactShort,
     sign_display: SignAuto,
     rounding_increment: 1,
     rounding_mode: RoundHalfExpand,
@@ -251,13 +332,10 @@ fn accounting_parens(key: String) -> Bool {
   loc_lang(key) != "de"
 }
 
-@external(erlang, "arc_math_ffi", "is_neg_zero")
-fn is_neg_zero(x: Float) -> Bool
-
 /// Format a finite float per the options. `is_nan`/`is_inf` are handled by
 /// the caller. Returns the full part list including sign/affixes.
 pub fn format_number_parts(opts: NumOpts, x: Float) -> List(Part) {
-  let negative = x <. 0.0 || is_neg_zero(x)
+  let negative = operators.is_negative_float(x)
   let dec = decompose(float.absolute_value(x))
   format_dec_parts(opts, negative, dec)
 }
@@ -276,13 +354,14 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
   // Compact notation defaults useGrouping "auto" to the min2 behavior
   // (ECMA-402 §15.5.3 / CLDR compact patterns).
   let opts = case opts.notation, opts.use_grouping {
-    NotationCompact, GroupingAuto -> NumOpts(..opts, use_grouping: GroupingMin2)
+    NotationCompact(..), GroupingAuto ->
+      NumOpts(..opts, use_grouping: GroupingMin2)
     _, _ -> opts
   }
   // Percent scaling happens before rounding (ECMA-402 §15.5.1).
   let dec = case opts.style {
     StylePercent -> Dec(..dec, exp: dec.exp + 2)
-    StyleDecimal | StyleCurrency | StyleUnit -> dec
+    StyleDecimal | StyleCurrency(..) | StyleUnit(..) -> dec
   }
   let dec = normalize(dec)
   let key = loc_key(opts.locale)
@@ -300,12 +379,12 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
           #(Dec(..dec, exp: dec.exp - e), e, [], [])
         }
       }
-    NotationCompact ->
+    NotationCompact(display:) ->
       case dec.digits {
         "" -> #(dec, 0, [], [])
         _ -> {
           let #(div_exp, one_p, other_p) =
-            compact_entry(key, opts.compact_display, dec.exp - 1)
+            compact_entry(key, display, dec.exp - 1)
           #(Dec(..dec, exp: dec.exp - div_exp), 0, one_p, other_p)
         }
       }
@@ -316,18 +395,18 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
     NotationScientific | NotationEngineering -> {
       let exp_parts = case exponent < 0 {
         True -> [
-          #("exponentSeparator", "E"),
-          #("exponentMinusSign", "-"),
-          #("exponentInteger", int.to_string(-exponent)),
+          #(PExponentSeparator, "E"),
+          #(PExponentMinusSign, "-"),
+          #(PExponentInteger, int.to_string(-exponent)),
         ]
         False -> [
-          #("exponentSeparator", "E"),
-          #("exponentInteger", int.to_string(exponent)),
+          #(PExponentSeparator, "E"),
+          #(PExponentInteger, int.to_string(exponent)),
         ]
       }
       list.append(digit_parts, exp_parts)
     }
-    NotationCompact ->
+    NotationCompact(..) ->
       case compact_other {
         [] -> digit_parts
         _ ->
@@ -370,14 +449,14 @@ fn en_compact(
   use <- bool.guard(e < 3, #(0, [], []))
   let k = int.min(4, e / 3)
   let suffix = case k, display {
-    1, CompactShort -> [#("compact", "K")]
-    2, CompactShort -> [#("compact", "M")]
-    3, CompactShort -> [#("compact", "B")]
-    _, CompactShort -> [#("compact", "T")]
-    1, CompactLong -> [#("literal", " "), #("compact", "thousand")]
-    2, CompactLong -> [#("literal", " "), #("compact", "million")]
-    3, CompactLong -> [#("literal", " "), #("compact", "billion")]
-    _, CompactLong -> [#("literal", " "), #("compact", "trillion")]
+    1, CompactShort -> [#(PCompact, "K")]
+    2, CompactShort -> [#(PCompact, "M")]
+    3, CompactShort -> [#(PCompact, "B")]
+    _, CompactShort -> [#(PCompact, "T")]
+    1, CompactLong -> [#(PLiteral, " "), #(PCompact, "thousand")]
+    2, CompactLong -> [#(PLiteral, " "), #(PCompact, "million")]
+    3, CompactLong -> [#(PLiteral, " "), #(PCompact, "billion")]
+    _, CompactLong -> [#(PLiteral, " "), #(PCompact, "trillion")]
   }
   #(3 * k, suffix, suffix)
 }
@@ -389,8 +468,8 @@ fn in_compact(
 ) -> #(Int, List(Part), List(Part)) {
   let entry = fn(div: Int, short: String, long: String) {
     let suffix = case display {
-      CompactShort -> [#("compact", short)]
-      CompactLong -> [#("literal", " "), #("compact", long)]
+      CompactShort -> [#(PCompact, short)]
+      CompactLong -> [#(PLiteral, " "), #(PCompact, long)]
     }
     #(div, suffix, suffix)
   }
@@ -414,12 +493,12 @@ fn cjk_compact(
   case e {
     3 ->
       case m3 {
-        Some(s) -> #(3, [#("compact", s)], [#("compact", s)])
+        Some(s) -> #(3, [#(PCompact, s)], [#(PCompact, s)])
         None -> #(0, [], [])
       }
-    _ if e >= 4 && e <= 7 -> #(4, [#("compact", m4)], [#("compact", m4)])
-    _ if e >= 8 && e <= 11 -> #(8, [#("compact", m8)], [#("compact", m8)])
-    _ if e >= 12 -> #(12, [#("compact", m12)], [#("compact", m12)])
+    _ if e >= 4 && e <= 7 -> #(4, [#(PCompact, m4)], [#(PCompact, m4)])
+    _ if e >= 8 && e <= 11 -> #(8, [#(PCompact, m8)], [#(PCompact, m8)])
+    _ if e >= 12 -> #(12, [#(PCompact, m12)], [#(PCompact, m12)])
     _ -> #(0, [], [])
   }
 }
@@ -428,8 +507,8 @@ fn de_compact(
   e: Int,
   display: CompactDisplay,
 ) -> #(Int, List(Part), List(Part)) {
-  let short = fn(s: String) { [#("literal", "\u{00A0}"), #("compact", s)] }
-  let long = fn(s: String) { [#("literal", " "), #("compact", s)] }
+  let short = fn(s: String) { [#(PLiteral, "\u{00A0}"), #(PCompact, s)] }
+  let long = fn(s: String) { [#(PLiteral, " "), #(PCompact, s)] }
   case display {
     CompactShort ->
       // CLDR de short compact has no abbreviation below one million.
@@ -451,11 +530,11 @@ fn de_compact(
 }
 
 pub fn format_nan_parts(opts: NumOpts) -> List(Part) {
-  wrap_affixes(opts, [#("nan", nan_str(loc_key(opts.locale)))], False, True)
+  wrap_affixes(opts, [#(PNaN, nan_str(loc_key(opts.locale)))], False, True)
 }
 
 pub fn format_infinity_parts(opts: NumOpts, negative: Bool) -> List(Part) {
-  wrap_affixes(opts, [#("infinity", "∞")], negative, False)
+  wrap_affixes(opts, [#(PInfinity, "∞")], negative, False)
 }
 
 /// Add sign, currency/percent/unit affixes around the core digit parts.
@@ -483,55 +562,54 @@ fn wrap_affixes(
   }
   // Accounting parentheses replace the minus sign when it would be shown —
   // in locales whose accounting pattern uses parentheses at all (not de).
-  let accounting =
-    opts.style == StyleCurrency
-    && opts.currency_sign == CurAccounting
-    && show_minus
-    && accounting_parens(key)
+  let accounting = case opts.style {
+    StyleCurrency(sign: CurAccounting, ..) ->
+      show_minus && accounting_parens(key)
+    StyleCurrency(sign: CurStandard, ..)
+    | StyleDecimal
+    | StylePercent
+    | StyleUnit(..) -> False
+  }
   let sign_parts = case accounting {
     True -> []
     False ->
       case show_minus, show_plus {
-        True, _ -> [#("minusSign", "-")]
-        _, True -> [#("plusSign", "+")]
+        True, _ -> [#(PMinusSign, "-")]
+        _, True -> [#(PPlusSign, "+")]
         False, False -> []
       }
   }
   case opts.style {
-    StylePercent -> list.flatten([sign_parts, core, [#("percentSign", "%")]])
-    StyleCurrency -> {
-      let code = option.unwrap(opts.currency, "USD")
-      let #(text, spaced) = currency_text(key, code, opts.currency_display)
-      let with_cur = case opts.currency_display {
-        CurName -> list.append(core, [#("literal", " "), #("currency", text)])
+    StylePercent -> list.flatten([sign_parts, core, [#(PPercentSign, "%")]])
+    StyleCurrency(currency: code, display: cur_display, ..) -> {
+      let #(text, spaced) = currency_text(key, code, cur_display)
+      let with_cur = case cur_display {
+        CurName -> list.append(core, [#(PLiteral, " "), #(PCurrency, text)])
         CurCode | CurSymbol | CurNarrowSymbol ->
           case currency_suffixed(key) {
             True ->
               list.append(core, [
-                #("literal", "\u{00A0}"),
-                #("currency", text),
+                #(PLiteral, "\u{00A0}"),
+                #(PCurrency, text),
               ])
             False ->
               case spaced {
                 True ->
                   list.flatten([
-                    [#("currency", text), #("literal", " ")],
+                    [#(PCurrency, text), #(PLiteral, " ")],
                     core,
                   ])
-                False -> [#("currency", text), ..core]
+                False -> [#(PCurrency, text), ..core]
               }
           }
       }
       case accounting {
-        True ->
-          list.flatten([[#("literal", "(")], with_cur, [#("literal", ")")]])
+        True -> list.flatten([[#(PLiteral, "(")], with_cur, [#(PLiteral, ")")]])
         False -> list.append(sign_parts, with_cur)
       }
     }
-    StyleUnit -> {
-      let u = option.unwrap(opts.unit, "")
-      let #(u_pre, u_suf) =
-        unit_affixes(key, u, opts.unit_display, is_one_parts(core))
+    StyleUnit(unit: u, display: u_display) -> {
+      let #(u_pre, u_suf) = unit_affixes(key, u, u_display, is_one_parts(core))
       // The sign sits between a unit prefix and the number ("時速 -987 …").
       list.flatten([u_pre, sign_parts, core, u_suf])
     }
@@ -552,52 +630,86 @@ fn unit_affixes(
     // CLDR kilometer-per-hour patterns for the locales we carry data for.
     "kilometer-per-hour", "de" ->
       case display {
-        UnitLong -> #([], [#("literal", " "), #("unit", "Kilometer pro Stunde")])
-        UnitShort | UnitNarrow -> #([], [#("literal", " "), #("unit", "km/h")])
+        UnitLong -> #([], [#(PLiteral, " "), #(PUnit, "Kilometer pro Stunde")])
+        UnitShort | UnitNarrow -> #([], [#(PLiteral, " "), #(PUnit, "km/h")])
       }
     "kilometer-per-hour", "ja" ->
       case display {
-        UnitLong -> #([#("unit", "時速"), #("literal", " ")], [
-          #("literal", " "),
-          #("unit", "キロメートル"),
+        UnitLong -> #([#(PUnit, "時速"), #(PLiteral, " ")], [
+          #(PLiteral, " "),
+          #(PUnit, "キロメートル"),
         ])
-        UnitNarrow -> #([], [#("unit", "km/h")])
-        UnitShort -> #([], [#("literal", " "), #("unit", "km/h")])
+        UnitNarrow -> #([], [#(PUnit, "km/h")])
+        UnitShort -> #([], [#(PLiteral, " "), #(PUnit, "km/h")])
       }
     "kilometer-per-hour", "ko" ->
       case display {
-        UnitLong -> #([#("unit", "시속"), #("literal", " ")], [
-          #("unit", "킬로미터"),
+        UnitLong -> #([#(PUnit, "시속"), #(PLiteral, " ")], [
+          #(PUnit, "킬로미터"),
         ])
-        UnitShort | UnitNarrow -> #([], [#("unit", "km/h")])
+        UnitShort | UnitNarrow -> #([], [#(PUnit, "km/h")])
       }
     "kilometer-per-hour", "zh" if hant ->
       case display {
-        UnitLong -> #([#("unit", "每小時"), #("literal", " ")], [
-          #("literal", " "),
-          #("unit", "公里"),
+        UnitLong -> #([#(PUnit, "每小時"), #(PLiteral, " ")], [
+          #(PLiteral, " "),
+          #(PUnit, "公里"),
         ])
-        UnitNarrow -> #([], [#("unit", "公里/小時")])
-        UnitShort -> #([], [#("literal", " "), #("unit", "公里/小時")])
+        UnitNarrow -> #([], [#(PUnit, "公里/小時")])
+        UnitShort -> #([], [#(PLiteral, " "), #(PUnit, "公里/小時")])
       }
     // en/root fallback.
     "percent", _ ->
       case display {
-        UnitLong -> #([], [#("literal", " "), #("unit", "percent")])
-        UnitShort | UnitNarrow -> #([], [#("unit", "%")])
+        UnitLong -> #([], [#(PLiteral, " "), #(PUnit, "percent")])
+        UnitShort | UnitNarrow -> #([], [#(PUnit, "%")])
       }
     _, _ ->
       case display {
         UnitLong -> #([], [
-          #("literal", " "),
-          #("unit", unit_name_long(unit, one)),
+          #(PLiteral, " "),
+          #(PUnit, unit_name_long(unit, one)),
         ])
-        UnitNarrow -> #([], [#("unit", unit_name(unit, narrow: True))])
+        UnitNarrow -> #([], [#(PUnit, unit_name(unit, narrow: True))])
         UnitShort -> #([], [
-          #("literal", " "),
-          #("unit", unit_name(unit, narrow: False)),
+          #(PLiteral, " "),
+          #(PUnit, unit_name(unit, narrow: False)),
         ])
       }
+  }
+}
+
+/// Whether a part carries the value's decimal digits (as opposed to affixes,
+/// separators or date/list decoration).
+fn is_digit_part(t: PartType) -> Bool {
+  case t {
+    PInteger | PFraction -> True
+    PGroup
+    | PDecimal
+    | PCurrency
+    | PPercentSign
+    | PPlusSign
+    | PMinusSign
+    | PUnit
+    | PCompact
+    | PExponentSeparator
+    | PExponentMinusSign
+    | PExponentInteger
+    | PNaN
+    | PInfinity
+    | PLiteral
+    | PElement
+    | PWeekday
+    | PEra
+    | PYear
+    | PMonth
+    | PDay
+    | PHour
+    | PMinute
+    | PSecond
+    | PFractionalSecond
+    | PDayPeriod
+    | PTimeZoneName -> False
   }
 }
 
@@ -605,37 +717,24 @@ fn unit_affixes(
 fn is_one_parts(parts: List(Part)) -> Bool {
   let ints =
     parts
-    |> list.filter_map(fn(p) {
-      case p {
-        #("integer", v) -> Ok(v)
+    |> list.filter_map(fn(p: Part) {
+      case p.0 {
+        PInteger -> Ok(p.1)
         _ -> Error(Nil)
       }
     })
     |> string.join("")
-  let has_frac =
-    list.any(parts, fn(p) {
-      case p {
-        #("fraction", _) -> True
-        _ -> False
-      }
-    })
+  let has_frac = list.any(parts, fn(p: Part) { p.0 == PFraction })
   ints == "1" && !has_frac
 }
 
 fn is_zero_parts(parts: List(Part)) -> Bool {
-  let has_digits =
-    list.any(parts, fn(p) {
-      case p {
-        #("integer", _) | #("fraction", _) -> True
-        _ -> False
-      }
-    })
+  let has_digits = list.any(parts, fn(p: Part) { is_digit_part(p.0) })
   has_digits
-  && list.all(parts, fn(p) {
-    case p {
-      #("integer", v) | #("fraction", v) ->
-        string.to_graphemes(v) |> list.all(fn(c) { c == "0" })
-      _ -> True
+  && list.all(parts, fn(p: Part) {
+    case is_digit_part(p.0) {
+      True -> string.to_graphemes(p.1) |> list.all(fn(c) { c == "0" })
+      False -> True
     }
   })
 }
@@ -1273,8 +1372,8 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
     "" -> int_parts
     _ ->
       list.append(int_parts, [
-        #("decimal", decimal_sep(key)),
-        #("fraction", frac_str),
+        #(PDecimal, decimal_sep(key)),
+        #(PFraction, frac_str),
       ])
   }
 }
@@ -1305,7 +1404,7 @@ fn group_integer(opts: NumOpts, int_str: String) -> List(Part) {
     GroupingAuto -> n > 3
   }
   case grouped {
-    False -> [#("integer", int_str)]
+    False -> [#(PInteger, int_str)]
     True -> {
       let groups = case indian_grouping(key) {
         True -> split_groups_indian(int_str)
@@ -1313,7 +1412,7 @@ fn group_integer(opts: NumOpts, int_str: String) -> List(Part) {
       }
       let sep = group_sep(key)
       groups
-      |> list.map(fn(g) { [#("group", sep), #("integer", g)] })
+      |> list.map(fn(g) { [#(PGroup, sep), #(PInteger, g)] })
       |> list.flatten
       |> list.drop(1)
     }
@@ -1428,10 +1527,10 @@ pub fn list_format_parts(
 ) -> List(Part) {
   case items {
     [] -> []
-    [only] -> [#("element", only)]
+    [only] -> [#(PElement, only)]
     [a, b] -> {
       let sep = two_separator(type_, style)
-      [#("element", a), #("literal", sep), #("element", b)]
+      [#(PElement, a), #(PLiteral, sep), #(PElement, b)]
     }
     [first, ..rest] -> {
       let mid = case type_, style {
@@ -1439,7 +1538,7 @@ pub fn list_format_parts(
         _, _ -> ", "
       }
       let last_sep = end_separator(type_, style)
-      build_list_parts(rest, [#("element", first)], mid, last_sep)
+      build_list_parts(rest, [#(PElement, first)], mid, last_sep)
     }
   }
 }
@@ -1476,11 +1575,11 @@ fn build_list_parts(
 ) -> List(Part) {
   case remaining {
     [] -> list.reverse(acc)
-    [last] -> list.reverse([#("element", last), #("literal", last_sep), ..acc])
+    [last] -> list.reverse([#(PElement, last), #(PLiteral, last_sep), ..acc])
     [next, ..rest] ->
       build_list_parts(
         rest,
-        [#("element", next), #("literal", mid), ..acc],
+        [#(PElement, next), #(PLiteral, mid), ..acc],
         mid,
         last_sep,
       )
@@ -1501,35 +1600,33 @@ pub fn rtf_parts_en(
   value_parts: List(Part),
 ) -> List(#(String, String, String)) {
   let is_auto = numeric == "auto"
+  // The unit property is only attached to numeric parts (never literals).
+  let js3 = fn(p: Part, unit) { #(part_type_to_js_string(p.0), p.1, unit) }
+  let literal3 = fn(text) { js3(#(PLiteral, text), "") }
   case is_auto, rtf_auto_name(unit, value +. 0.0) {
-    True, Some(name) -> [#("literal", name, "")]
+    True, Some(name) -> [literal3(name)]
     _, _ -> {
       let plural = case float.absolute_value(value) {
         1.0 -> "one"
         _ -> "other"
       }
       let unit_text = rtf_unit_en(style, unit, plural)
-      let past = value <. 0.0 || is_neg_zero(value)
+      let past = operators.is_negative_float(value)
       // Numeric parts carry the unit for formatToParts.
       let tagged =
-        list.map(value_parts, fn(p) {
-          let #(t, v) = p
-          case t {
-            "literal" -> #(t, v, "")
-            _ -> #(t, v, unit)
+        list.map(value_parts, fn(p: Part) {
+          case p.0 {
+            PLiteral -> literal3(p.1)
+            _ -> js3(p, unit)
           }
         })
       case past {
-        True ->
-          list.flatten([
-            tagged,
-            [#("literal", " " <> unit_text <> " ago", "")],
-          ])
+        True -> list.flatten([tagged, [literal3(" " <> unit_text <> " ago")]])
         False ->
           list.flatten([
-            [#("literal", "in ", "")],
+            [literal3("in ")],
             tagged,
-            [#("literal", " " <> unit_text, "")],
+            [literal3(" " <> unit_text)],
           ])
       }
     }
@@ -1661,7 +1758,7 @@ fn civil_from_days(z: Int) -> #(Int, Int, Int) {
   #(y, m, d)
 }
 
-pub fn month_name(m: Int, width: String) -> String {
+pub fn month_name(m: Int, width: NameWidth) -> String {
   let long = case m {
     1 -> "January"
     2 -> "February"
@@ -1678,18 +1775,17 @@ pub fn month_name(m: Int, width: String) -> String {
     _ -> ""
   }
   case width {
-    "long" -> long
-    "short" ->
+    WLong -> long
+    WShort ->
       case m {
         9 -> "Sep"
         _ -> string.slice(long, 0, 3)
       }
-    "narrow" -> string.slice(long, 0, 1)
-    _ -> long
+    WNarrow -> string.slice(long, 0, 1)
   }
 }
 
-pub fn weekday_name(wd: Int, width: String) -> String {
+pub fn weekday_name(wd: Int, width: NameWidth) -> String {
   let long = case wd {
     0 -> "Sunday"
     1 -> "Monday"
@@ -1701,35 +1797,30 @@ pub fn weekday_name(wd: Int, width: String) -> String {
     _ -> ""
   }
   case width {
-    "long" -> long
-    "short" -> string.slice(long, 0, 3)
-    "narrow" ->
-      case wd {
-        2 | 4 -> string.slice(long, 0, 1)
-        _ -> string.slice(long, 0, 1)
-      }
-    _ -> long
+    WLong -> long
+    WShort -> string.slice(long, 0, 3)
+    WNarrow -> string.slice(long, 0, 1)
   }
 }
 
-pub fn era_name(year: Int, width: String) -> String {
+pub fn era_name(year: Int, width: NameWidth) -> String {
   let bc = year <= 0
   case width, bc {
-    "long", True -> "Before Christ"
-    "long", False -> "Anno Domini"
-    "narrow", True -> "B"
-    "narrow", False -> "A"
-    _, True -> "BC"
-    _, False -> "AD"
+    WLong, True -> "Before Christ"
+    WLong, False -> "Anno Domini"
+    WNarrow, True -> "B"
+    WNarrow, False -> "A"
+    WShort, True -> "BC"
+    WShort, False -> "AD"
   }
 }
 
 /// en flexible day periods (CLDR): used for the dayPeriod option.
-pub fn day_period_name(hour: Int, minute: Int, width: String) -> String {
+pub fn day_period_name(hour: Int, minute: Int, width: NameWidth) -> String {
   let mins = hour * 60 + minute
   let noon = case width {
-    "narrow" -> "n"
-    _ -> "noon"
+    WNarrow -> "n"
+    WLong | WShort -> "noon"
   }
   case mins == 720 {
     True -> noon
