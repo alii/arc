@@ -3331,6 +3331,9 @@ fn inspect_object(
           }
         value.DisposableStackObject(..) -> "DisposableStack {}"
         value.ShadowRealmObject(..) -> "ShadowRealm {}"
+        // The rawJSON box's only own property is "rawJSON", so render it as
+        // the source text it stands for.
+        value.RawJsonObject(raw:) -> "[RawJSON " <> raw <> "]"
         // Host objects have no own properties; they render via their
         // prototype's Symbol.toStringTag (e.g. `Pid {}`), exactly like a
         // tagged ordinary object.

@@ -721,10 +721,13 @@ pub type ConsoleNativeFn {
   ConsoleLogError
 }
 
-/// JSON methods — JSON.parse and JSON.stringify.
+/// JSON methods — JSON.parse, JSON.stringify, and the rawJSON statics from
+/// proposal-json-parse-with-source.
 pub type JsonNativeFn {
   JsonParse
   JsonStringify
+  JsonRawJson
+  JsonIsRawJson
 }
 
 /// Reflect static methods — ES2024 §28.1.
@@ -3255,6 +3258,14 @@ pub type ExoticKind(ctx, host) {
   /// [[ShadowRealm]] internal slot — a RealmSlot ref on the heap whose
   /// builtins are registered in state.ctx.realms.
   ShadowRealmObject(realm_ref: Ref)
+  /// Raw JSON box produced by `JSON.rawJSON(text)` (proposal-json-parse-with-
+  /// source). `raw` is the [[IsRawJSON]] internal slot's payload: the exact,
+  /// already-validated JSON source text, which `JSON.stringify` emits verbatim
+  /// with no re-quoting or escaping. The box itself is a null-prototype, frozen
+  /// object whose only own property is the data property `"rawJSON"` — the slot
+  /// is modelled here rather than as a hidden symbol property so that
+  /// `Object.getOwnPropertySymbols(box)` stays empty.
+  RawJsonObject(raw: String)
   /// Opaque, embedder-owned host value. `value` is the embedder's own typed
   /// type (`host`) — the engine never inspects it, only ferries it and renders
   /// it via the prototype's `@@toStringTag`. Minted with `host.alloc_host_object`
@@ -3539,6 +3550,24 @@ pub type ExoticKind(ctx, host) {
   /// iteration. Never exposed to JS: IteratorClose/CloseThrow/Rest/YieldStar
   /// unwrap to `iterated` before any dynamic .return/.throw lookup.
   IteratorRecordObject(iterated: JsValue, next_method: JsValue)
+}
+
+/// The [[IsRawJSON]] internal slot's payload — the verbatim JSON source text a
+/// `JSON.rawJSON` box carries — or `None` for every other kind of slot.
+/// `JSON.stringify` reads it to emit the text unquoted and unescaped.
+/// `heap.read` returns `Option(HeapSlot)`, so this takes an Option too and
+/// callers can hand it the read straight through.
+pub fn raw_json_text(slot: Option(HeapSlot(ctx, host))) -> Option(String) {
+  case slot {
+    Some(ObjectSlot(kind: RawJsonObject(raw:), ..)) -> Some(raw)
+    Some(_) | None -> None
+  }
+}
+
+/// Whether a heap slot is a `JSON.rawJSON` box (has [[IsRawJSON]]) — the
+/// predicate behind `JSON.isRawJSON`.
+pub fn is_raw_json(slot: Option(HeapSlot(ctx, host))) -> Bool {
+  option.is_some(raw_json_text(slot))
 }
 
 @external(erlang, "arc_vm_ffi", "unique_positive_integer")
@@ -4478,6 +4507,8 @@ fn do_refs_in_slot(
         | TemporalZonedDateTimeSlot(..)
         | RegExpObject(..)
         | ArrayBufferObject(..)
+        // The rawJSON box's [[IsRawJSON]] payload is a plain String.
+        | RawJsonObject(_)
         | StringIteratorObject(_) -> acc
         // DataView keeps its viewed ArrayBuffer alive.
         DataViewObject(buffer:, ..) -> [buffer, ..acc]
@@ -4849,7 +4880,7 @@ fn console_native_refs(f: ConsoleNativeFn, acc: List(Ref)) -> List(Ref) {
 
 fn json_native_refs(f: JsonNativeFn, acc: List(Ref)) -> List(Ref) {
   case f {
-    JsonParse | JsonStringify -> acc
+    JsonParse | JsonStringify | JsonRawJson | JsonIsRawJson -> acc
   }
 }
 
