@@ -17,12 +17,13 @@ import arc/vm/heap
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type DataViewNativeFn, type JsValue, type Ref, type ViewElementType,
-  ArrayBufferObject, BigInt, DataViewConstructor, DataViewGet, DataViewGetBuffer,
-  DataViewGetByteLength, DataViewGetByteOffset, DataViewNative, DataViewObject,
-  DataViewSet, Dispatch, Finite, Infinity, JsBigInt, JsNumber, JsObject,
-  JsUndefined, NaN, NegInfinity, ObjectSlot, VBigInt64, VBigUint64, VFloat16,
-  VFloat32, VFloat64, VInt16, VInt32, VInt8, VUint16, VUint32, VUint8,
+  type DataViewNativeFn, type JsValue, type Ref, type ViewBigElement,
+  type ViewElementType, type ViewNumElement, ArrayBufferObject, BigInt,
+  DataViewConstructor, DataViewGet, DataViewGetBuffer, DataViewGetByteLength,
+  DataViewGetByteOffset, DataViewNative, DataViewObject, DataViewSet, Dispatch,
+  Finite, Infinity, JsBigInt, JsNumber, JsObject, JsUndefined, NaN, NegInfinity,
+  ObjectSlot, VBig, VBigInt64, VBigUint64, VFloat16, VFloat32, VFloat64, VInt16,
+  VInt32, VInt8, VNum, VUint16, VUint32, VUint8,
 }
 import gleam/bit_array
 import gleam/float
@@ -44,28 +45,28 @@ pub fn init(
     ])
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
-      #("getInt8", DataViewNative(DataViewGet(VInt8)), 1),
-      #("getUint8", DataViewNative(DataViewGet(VUint8)), 1),
-      #("getInt16", DataViewNative(DataViewGet(VInt16)), 1),
-      #("getUint16", DataViewNative(DataViewGet(VUint16)), 1),
-      #("getInt32", DataViewNative(DataViewGet(VInt32)), 1),
-      #("getUint32", DataViewNative(DataViewGet(VUint32)), 1),
-      #("getFloat16", DataViewNative(DataViewGet(VFloat16)), 1),
-      #("getFloat32", DataViewNative(DataViewGet(VFloat32)), 1),
-      #("getFloat64", DataViewNative(DataViewGet(VFloat64)), 1),
-      #("getBigInt64", DataViewNative(DataViewGet(VBigInt64)), 1),
-      #("getBigUint64", DataViewNative(DataViewGet(VBigUint64)), 1),
-      #("setInt8", DataViewNative(DataViewSet(VInt8)), 2),
-      #("setUint8", DataViewNative(DataViewSet(VUint8)), 2),
-      #("setInt16", DataViewNative(DataViewSet(VInt16)), 2),
-      #("setUint16", DataViewNative(DataViewSet(VUint16)), 2),
-      #("setInt32", DataViewNative(DataViewSet(VInt32)), 2),
-      #("setUint32", DataViewNative(DataViewSet(VUint32)), 2),
-      #("setFloat16", DataViewNative(DataViewSet(VFloat16)), 2),
-      #("setFloat32", DataViewNative(DataViewSet(VFloat32)), 2),
-      #("setFloat64", DataViewNative(DataViewSet(VFloat64)), 2),
-      #("setBigInt64", DataViewNative(DataViewSet(VBigInt64)), 2),
-      #("setBigUint64", DataViewNative(DataViewSet(VBigUint64)), 2),
+      #("getInt8", DataViewNative(DataViewGet(VNum(VInt8))), 1),
+      #("getUint8", DataViewNative(DataViewGet(VNum(VUint8))), 1),
+      #("getInt16", DataViewNative(DataViewGet(VNum(VInt16))), 1),
+      #("getUint16", DataViewNative(DataViewGet(VNum(VUint16))), 1),
+      #("getInt32", DataViewNative(DataViewGet(VNum(VInt32))), 1),
+      #("getUint32", DataViewNative(DataViewGet(VNum(VUint32))), 1),
+      #("getFloat16", DataViewNative(DataViewGet(VNum(VFloat16))), 1),
+      #("getFloat32", DataViewNative(DataViewGet(VNum(VFloat32))), 1),
+      #("getFloat64", DataViewNative(DataViewGet(VNum(VFloat64))), 1),
+      #("getBigInt64", DataViewNative(DataViewGet(VBig(VBigInt64))), 1),
+      #("getBigUint64", DataViewNative(DataViewGet(VBig(VBigUint64))), 1),
+      #("setInt8", DataViewNative(DataViewSet(VNum(VInt8))), 2),
+      #("setUint8", DataViewNative(DataViewSet(VNum(VUint8))), 2),
+      #("setInt16", DataViewNative(DataViewSet(VNum(VInt16))), 2),
+      #("setUint16", DataViewNative(DataViewSet(VNum(VUint16))), 2),
+      #("setInt32", DataViewNative(DataViewSet(VNum(VInt32))), 2),
+      #("setUint32", DataViewNative(DataViewSet(VNum(VUint32))), 2),
+      #("setFloat16", DataViewNative(DataViewSet(VNum(VFloat16))), 2),
+      #("setFloat32", DataViewNative(DataViewSet(VNum(VFloat32))), 2),
+      #("setFloat64", DataViewNative(DataViewSet(VNum(VFloat64))), 2),
+      #("setBigInt64", DataViewNative(DataViewSet(VBig(VBigInt64))), 2),
+      #("setBigUint64", DataViewNative(DataViewSet(VBig(VBigUint64))), 2),
     ])
   let proto_props = list.append(getters, methods)
   let #(h, bt) =
@@ -531,10 +532,10 @@ fn range_check(
 /// Table 71 element sizes, in bytes.
 fn element_size(element: ViewElementType) -> Int {
   case element {
-    VInt8 | VUint8 -> 1
-    VInt16 | VUint16 | VFloat16 -> 2
-    VInt32 | VUint32 | VFloat32 -> 4
-    VFloat64 | VBigInt64 | VBigUint64 -> 8
+    VNum(VInt8) | VNum(VUint8) -> 1
+    VNum(VInt16) | VNum(VUint16) | VNum(VFloat16) -> 2
+    VNum(VInt32) | VNum(VUint32) | VNum(VFloat32) -> 4
+    VNum(VFloat64) | VBig(VBigInt64) | VBig(VBigUint64) -> 8
   }
 }
 
@@ -566,17 +567,31 @@ fn to_signed(u: Int, bits: Int) -> Int {
 fn decode(element: ViewElementType, chunk: BitArray, little: Bool) -> JsValue {
   let u = read_uint(chunk, little)
   case element {
+    VNum(e) -> decode_number(e, u)
+    VBig(e) -> decode_bigint(e, u)
+  }
+}
+
+/// RawBytesToNumeric for the Number-valued elements.
+fn decode_number(element: ViewNumElement, u: Int) -> JsValue {
+  case element {
     VUint8 -> value.from_int(u)
     VUint16 -> value.from_int(u)
     VUint32 -> value.from_int(u)
     VInt8 -> value.from_int(to_signed(u, 8))
     VInt16 -> value.from_int(to_signed(u, 16))
     VInt32 -> value.from_int(to_signed(u, 32))
-    VBigUint64 -> JsBigInt(BigInt(u))
-    VBigInt64 -> JsBigInt(BigInt(to_signed(u, 64)))
     VFloat16 -> JsNumber(f16_from_bits(u))
     VFloat32 -> JsNumber(f32_from_bits(u))
     VFloat64 -> JsNumber(f64_from_bits(u))
+  }
+}
+
+/// RawBytesToNumeric for the BigInt-valued elements.
+fn decode_bigint(element: ViewBigElement, u: Int) -> JsValue {
+  case element {
+    VBigUint64 -> JsBigInt(BigInt(u))
+    VBigInt64 -> JsBigInt(BigInt(to_signed(u, 64)))
   }
 }
 
@@ -656,21 +671,29 @@ fn encode_value(
   cont: fn(BitArray, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case element {
-    VBigInt64 | VBigUint64 -> {
+    VBig(e) -> {
       use n, state <- coerce.to_bigint_cps(state, val)
-      // Erlang bit construction wraps modulo 2^64 (two's complement).
-      cont(<<n:size(64)>>, state)
+      cont(encode_bigint(e, n), state)
     }
-    _ ->
+    VNum(e) ->
       case coerce.js_to_number(state, val) {
         Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(#(num, state)) -> cont(encode_number(element, num), state)
+        Ok(#(num, state)) -> cont(encode_number(e, num), state)
       }
   }
 }
 
-/// NumericToRawBytes (§25.1.2.14) for the non-BigInt types, big-endian.
-fn encode_number(element: ViewElementType, num: value.JsNum) -> BitArray {
+/// NumericToRawBytes (§25.1.2.14) for the BigInt types, big-endian.
+fn encode_bigint(element: ViewBigElement, n: Int) -> BitArray {
+  case element {
+    // ToBigInt64 and ToBigUint64 both reduce modulo 2^64, and Erlang bit
+    // construction wraps to that same 64-bit two's-complement pattern.
+    VBigInt64 | VBigUint64 -> <<n:size(64)>>
+  }
+}
+
+/// NumericToRawBytes (§25.1.2.14) for the Number types, big-endian.
+fn encode_number(element: ViewNumElement, num: value.JsNum) -> BitArray {
   case element {
     VInt8 | VUint8 -> <<to_int_wrap(num):size(8)>>
     VInt16 | VUint16 -> <<to_int_wrap(num):size(16)>>
@@ -691,8 +714,6 @@ fn encode_number(element: ViewElementType, num: value.JsNum) -> BitArray {
         NegInfinity -> <<0xFF800000:size(32)>>
       }
     VFloat16 -> <<f16_to_bits(num):size(16)>>
-    // Unreachable: BigInt elements take the to_bigint path in encode_value.
-    VBigInt64 | VBigUint64 -> <<0:size(64)>>
   }
 }
 
