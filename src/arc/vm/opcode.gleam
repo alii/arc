@@ -852,11 +852,26 @@ pub type UnaryOpKind {
 // IR Opcodes — emitted by the AST emitter, consumed by label resolution
 // ============================================================================
 
-/// Symbolic IR instruction. Variable references are emitted as concrete
-/// slot ops (GetLocal/GetBoxed/GetGlobal/IrWith*) by the emitter consulting
-/// the AST-level scope tree; jump targets use label IDs (resolved in Phase 3).
+/// Symbolic IR instruction — final bytecode with the three things that can
+/// only be decided in Phase 3 still left symbolic:
+///
+///   * jump targets are label ids, not absolute PCs;
+///   * static field keys are the raw source `String`, not a canonicalized
+///     `key.PropertyKey`;
+///   * `IrBinOp` carries the source-level `BinOpKind`, not the classified
+///     handler split.
+///
+/// EVERYTHING ELSE is already a final `Op` and travels through the pipeline
+/// wrapped in `IrFinal`. That is deliberate: `IrOp` used to be a hand-written
+/// twin of all ~200 `Op` variants, so adding an opcode meant editing three
+/// places, and forgetting the `resolve.gleam` arm was a silent miscompile.
+/// Now a new opcode is one `Op` variant and no `IrOp`/`resolve` change at all.
 pub type IrOp {
-  // -- Labels and jumps (resolved in Phase 3) --
+  /// Already-final instruction: nothing left to resolve. `resolve` unwraps it.
+  IrFinal(op: Op)
+
+  // -- Labels and jumps (label ids resolved to PCs in Phase 3) --
+  /// A jump target marker. Occupies no PC slot; dropped by `resolve`.
   IrLabel(id: Int)
   IrJump(label: Int)
   IrJumpIfFalse(label: Int)
@@ -864,29 +879,12 @@ pub type IrOp {
   IrJumpIfNullish(label: Int)
   IrPushTry(catch_label: Int, kind: TryKind)
   IrGosub(label: Int)
-  IrRet
+  /// See Op.AsyncYieldStarNext — `after_label` becomes `after_pc`.
+  IrAsyncYieldStarNext(after_label: Int)
+  /// See Op.AsyncYieldStarResume — `next_label` becomes `next_pc`.
+  IrAsyncYieldStarResume(next_label: Int)
 
-  // -- Resolved variable access (emitted directly from the scope tree) --
-  IrGetLocal(index: Int)
-  IrPutLocal(index: Int)
-  IrPutLocalCheckInit(index: Int)
-  IrGetGlobal(name: String)
-  IrPutGlobal(name: String)
-  /// Lowers 1:1 to DeleteGlobalVar. See Op.DeleteGlobalVar.
-  IrDeleteGlobalVar(name: String)
-  IrTypeofGlobal(name: String)
-  IrGetEvalVar(name: String)
-  IrPutEvalVar(name: String)
-  IrDeclareEvalVar(name: String)
-  IrTypeofEvalVar(name: String)
-
-  // -- `with` statement ops (object check emitted from the scope tree's
-  // with-chain; labels resolved in Phase 3) --
-  IrToObject
-  /// Lowers 1:1 to ToStringVal (template literal substitutions).
-  IrToStringVal
-  /// Lowers 1:1 to GetTemplateObject (tagged templates, §13.2.8.4).
-  IrGetTemplateObject(site: Int, quasis: List(TemplateQuasi))
+  // -- `with` statement probes: name + a fall-through label --
   IrWithGetVar(name: String, label: Int)
   IrWithGetVarThis(name: String, label: Int)
   IrWithPutVar(name: String, label: Int)
@@ -895,121 +893,23 @@ pub type IrOp {
   IrWithGetRefValue(name: String, label: Int)
   IrWithPutRefValue(name: String, label: Int)
 
-  // -- Everything else is the same as final Op --
-  /// Lowers 1:1 to SetLine. See Op.SetLine.
-  IrSetLine(line: Int)
-  IrPushConst(index: Int)
-  IrPop
-  IrDup
-  IrSwap
-  /// Lowers 1:1 to Rot3. See Op.Rot3.
-  IrRot3
-  /// Lowers 1:1 to Unrot4. See Op.Unrot4.
-  IrUnrot4
+  // -- Static property access: raw source name; `resolve` canonicalizes it
+  // once via key.canonical_key into the final ops' `key.PropertyKey`. --
   IrGetField(name: String)
   IrGetField2(name: String)
   IrPutField(name: String)
-  IrGetElem
-  IrGetElem2
-  IrPutElem
   IrDeleteField(name: String)
-  IrDeleteElem
-  IrGetPrivateField(name: String)
-  IrGetPrivateField2(name: String)
-  IrPutPrivateField(name: String)
-  IrPrivateIn(name: String)
-  IrNewPrivateName(name: String)
-  IrGetPrivateFieldDyn
-  IrGetPrivateFieldDyn2
-  IrPutPrivateFieldDyn
-  IrPrivateInDyn
-  IrDefinePrivateField
-  IrDefinePrivateMethod
-  IrDefinePrivateAccessor(kind: AccessorKind)
-  IrNewObject
   IrDefineField(name: String)
-  IrDefineFieldComputed
-  IrToPropertyKey
   IrDefineMethod(name: String)
-  IrDefineMethodComputed
   IrDefineAccessor(name: String, kind: AccessorKind, enumerable: Bool)
-  IrDefineAccessorComputed(kind: AccessorKind, enumerable: Bool)
-  IrMakeMethod
-  IrSetProto
-  IrObjectSpread
-  IrObjectRestCopy(excluded_count: Int)
-  IrArrayFrom(count: Int)
-  IrArrayFromWithHoles(count: Int, holes: List(Int))
-  IrArrayPush
-  IrArrayPushHole
-  IrArraySpread
-  IrCall(arity: Int)
-  IrCallEval(
-    arity: Int,
-    param_scope_names: List(String),
-    with_names: List(String),
-    private_names: List(String),
-  )
-  IrCallMethod(arity: Int)
-  IrCallConstructor(arity: Int)
-  IrCallApply
-  IrCallMethodApply
-  IrCallConstructorApply
-  IrReturn
-  IrThrow
-  IrThrowConstAssign(name: String)
-  IrThrowError(kind: ErrorKind, msg: String)
-  IrPopTry
-  IrMakeClosure(func_index: Int)
-  IrBoxLocal(index: Int)
-  IrGetBoxed(index: Int)
-  IrPutBoxed(index: Int)
-  IrPutBoxedCheckInit(index: Int)
-  IrBinOp(kind: BinOpKind)
-  IrUnaryOp(kind: UnaryOpKind)
-  IrTypeOf
 
-  // -- Fused superinstructions (produced by the resolver peephole; never
-  // emitted directly by the AST emitter). See the matching final Ops.
-  IrIncLocal(index: Int)
-  IrDecLocal(index: Int)
+  // -- Operators --
+  /// Source-level operator; `resolve` narrows it to `Op.BinOp(Classified)`
+  /// exactly once, via `bin_op`.
+  IrBinOp(kind: BinOpKind)
+
+  // -- Fused compare-and-branch superinstructions (produced by the resolver
+  // peephole; label targets, hence not `IrFinal`). See the matching Ops. --
   IrCmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, label: Int)
   IrCmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, label: Int)
-  IrForInStart
-  IrForInNext
-  IrGetIterator
-  IrGetAsyncIterator
-  IrIteratorRecord
-  IrIteratorNext
-  IrIteratorClose
-  IrIteratorCloseThrow
-  IrIteratorCheckObject
-  IrIteratorRest
-  IrSetupDerivedClass
-  IrGetPrototypeOf
-  IrGetSuperValue
-  IrGetSuperValue2
-  IrPutSuperValue
-  IrInitialYield
-  IrYield
-  IrYieldStar
-  IrAsyncYieldStarNext(after_label: Int)
-  IrAsyncYieldStarResume(next_label: Int)
-  IrAwait
-  IrCreateArguments(simple_params: Bool)
-  IrCreateRestArray(from_index: Int)
-  IrNewRegExp
-  IrDynamicImport
-  IrDynamicImportSource
-  IrDynamicImportDefer
-
-  // -- Global Environment Record --
-  /// Lowers 1:1 to DeclareGlobalVar. See Op.DeclareGlobalVar for `deletable`.
-  IrDeclareGlobalVar(name: String, deletable: Bool)
-  IrDeclareGlobalLex(name: String, is_const: Bool)
-  IrInitGlobalLex(name: String)
-
-  // -- Explicit Resource Management (using / await using desugar) --
-  IrGetDisposer(is_async: Bool)
-  IrMakeSuppressed
 }

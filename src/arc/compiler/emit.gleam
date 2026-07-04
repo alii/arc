@@ -14,26 +14,11 @@ import arc/compiler/scope.{
 }
 import arc/parser/ast
 import arc/vm/opcode.{
-  type IrOp, type TryKind, CatchOnly, Finally, IrArrayFrom, IrArrayFromWithHoles,
-  IrArrayPush, IrArrayPushHole, IrArraySpread, IrAsyncYieldStarNext,
-  IrAsyncYieldStarResume, IrAwait, IrBinOp, IrBoxLocal, IrCallApply,
-  IrCallConstructor, IrCallConstructorApply, IrCallMethod, IrCallMethodApply,
-  IrCreateArguments, IrCreateRestArray, IrDeclareGlobalLex, IrDeclareGlobalVar,
-  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
-  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed,
-  IrDefinePrivateAccessor, IrDefinePrivateField, IrDefinePrivateMethod,
-  IrDeleteElem, IrDeleteField, IrDup, IrForInNext, IrForInStart,
-  IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
-  IrGetIterator, IrGetLocal, IrGetPrivateFieldDyn, IrGetPrivateFieldDyn2,
-  IrGetPrototypeOf, IrGetSuperValue, IrGetSuperValue2, IrGosub, IrInitGlobalLex,
-  IrInitialYield, IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow,
-  IrIteratorNext, IrIteratorRecord, IrIteratorRest, IrJump, IrJumpIfFalse,
-  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure, IrMakeMethod,
-  IrNewObject, IrNewPrivateName, IrNewRegExp, IrObjectRestCopy, IrObjectSpread,
-  IrPop, IrPopTry, IrPrivateInDyn, IrPushConst, IrPushTry, IrPutBoxed, IrPutElem,
-  IrPutField, IrPutGlobal, IrPutLocal, IrPutPrivateFieldDyn, IrPutSuperValue,
-  IrRet, IrReturn, IrSetLine, IrSetProto, IrSetupDerivedClass, IrSwap, IrThrow,
-  IrThrowError, IrTypeOf, IrUnaryOp, IrYield, IrYieldStar, IterCloseGuard,
+  type IrOp, type TryKind, CatchOnly, Finally, IrAsyncYieldStarNext,
+  IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
+  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
+  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
+  IrPutField, IterCloseGuard,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -775,7 +760,7 @@ fn emit_using_resource(
   e
   |> init_lex(name)
   |> emit_var_get(name)
-  |> emit_ir(opcode.IrGetDisposer(disposer.is_async))
+  |> emit_op(opcode.GetDisposer(disposer.is_async))
   |> emit_scratch_put(disposer.slot)
 }
 
@@ -793,7 +778,7 @@ fn emit_using_merge_error(e: Emitter, scope: UsingScope) -> Emitter {
   // opcode reads the new error from under the suppressed one — stack
   // [suppressed, error, ..] → [SuppressedError, ..]).
   |> emit_scratch_get(scope.err)
-  |> emit_ir(opcode.IrMakeSuppressed)
+  |> emit_op(opcode.MakeSuppressed)
   |> emit_ir(IrLabel(skip))
   |> emit_scratch_put(scope.err)
   |> push_const(JsBool(True))
@@ -813,7 +798,7 @@ fn emit_using_try_merge(
   e
   |> emit_ir(IrPushTry(catch_label, CatchOnly))
   |> body
-  |> emit_ir(IrPopTry)
+  |> emit_op(opcode.PopTry)
   |> emit_ir(IrJump(end_label))
   |> emit_ir(IrLabel(catch_label))
   |> emit_using_merge_error(scope)
@@ -837,8 +822,8 @@ fn emit_using_flush_pending(
     |> emit_scratch_get(scope.has_awaited)
     |> emit_ir(IrJumpIfTrue(skip))
     |> push_const(JsUndefined)
-    |> emit_ir(IrAwait)
-    |> emit_ir(IrPop)
+    |> emit_op(opcode.Await)
+    |> emit_op(opcode.Pop)
   let e = case reset {
     False -> e
     True ->
@@ -884,8 +869,8 @@ fn emit_using_dispose_sync(
     use e <- emit_using_try_merge(e, scope)
     e
     |> emit_scratch_get(slot)
-    |> emit_ir(opcode.IrCall(0))
-    |> emit_ir(IrPop)
+    |> emit_op(opcode.Call(0))
+    |> emit_op(opcode.Pop)
   }
   emit_ir(e, IrLabel(skip))
 }
@@ -921,7 +906,7 @@ fn emit_using_dispose_async(
     use e <- emit_using_try_merge(e, scope)
     e
     |> emit_scratch_get(slot)
-    |> emit_ir(opcode.IrCall(0))
+    |> emit_op(opcode.Call(0))
     |> emit_scratch_put(scope.tmp)
     |> push_const(JsBool(True))
     |> emit_scratch_put(scope.ok)
@@ -934,8 +919,8 @@ fn emit_using_dispose_async(
     use e <- emit_using_try_merge(e, scope)
     e
     |> emit_scratch_get(scope.tmp)
-    |> emit_ir(IrAwait)
-    |> emit_ir(IrPop)
+    |> emit_op(opcode.Await)
+    |> emit_op(opcode.Pop)
   }
   e
   |> push_const(JsBool(True))
@@ -970,7 +955,7 @@ fn emit_using_dispose(e: Emitter, scope: UsingScope) -> Emitter {
   |> emit_scratch_get(scope.has_err)
   |> emit_ir(IrJumpIfFalse(end))
   |> emit_scratch_get(scope.err)
-  |> emit_ir(IrThrow)
+  |> emit_op(opcode.Throw)
   |> emit_ir(IrLabel(end))
 }
 
@@ -1048,7 +1033,7 @@ fn emit_for_of_using_body(
   let e = emit_using_prelude(e, scope)
   use e <- emit_using_try_wrap(e, scope)
   let e = emit_var_get(e, name)
-  let e = emit_ir(e, opcode.IrGetDisposer(is_async))
+  let e = emit_op(e, opcode.GetDisposer(is_async))
   let e = emit_scratch_put(e, slot)
   emit_stmt(e, body)
 }
@@ -1117,7 +1102,7 @@ fn emit_classic_loop(
   use e <- result.map(case update {
     Some(upd) -> {
       use e <- result.map(emit_expr(e, upd))
-      emit_ir(e, IrPop)
+      emit_op(e, opcode.Pop)
     }
     None -> Ok(e)
   })
@@ -1151,7 +1136,7 @@ fn emit_module_using_top(
   let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
   use e <- result.map(emit_using_body(e, items))
   let e = pop_frame(e)
-  let e = emit_ir(e, IrPopTry)
+  let e = emit_op(e, opcode.PopTry)
   let e = emit_ir(e, IrJump(dispose_label))
 
   // Handler: unwind_to_catch leaves stack = [thrown, ..base]. Store the
@@ -1225,7 +1210,7 @@ fn emit_top_level_body(
     LexGlobal ->
       list.fold(collect_top_lex_names(stmts), e, fn(e, lex) {
         let #(name, kind) = lex
-        emit_ir(e, IrDeclareGlobalLex(name, kind == ConstBinding))
+        emit_op(e, opcode.DeclareGlobalLex(name, kind == ConstBinding))
       })
   }
   use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
@@ -1460,7 +1445,7 @@ fn enter_root_scope(e: Emitter) -> Emitter {
     opcode.lexical_slot(info.lexical, ref),
     opcode.lexical_refs_get(info.lexical_boxed, ref)
   {
-    False, Some(slot), True -> emit_ir(e, IrBoxLocal(slot))
+    False, Some(slot), True -> emit_op(e, opcode.BoxLocal(slot))
     _, _, _ -> e
   }
 }
@@ -1494,26 +1479,26 @@ fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
   }
   case b.kind, b.is_boxed {
     CaptureBinding, _ -> e
-    _, True -> emit_ir(e, IrBoxLocal(b.slot))
+    _, True -> emit_op(e, opcode.BoxLocal(b.slot))
     _, False -> e
   }
 }
 
 fn seed_local(e: Emitter, slot: Int, val: JsValue) -> Emitter {
   let #(e, idx) = add_constant(e, val)
-  e |> emit_ir(IrPushConst(idx)) |> emit_ir(IrPutLocal(slot))
+  e |> emit_op(opcode.PushConst(idx)) |> emit_op(opcode.PutLocal(slot))
 }
 
 /// Read an anonymous scratch local slot (allocated via `fresh_slot`).
 /// Scratch slots are never boxed and never named, so this is a direct
 /// IrGetLocal — no scope resolution.
 fn emit_scratch_get(e: Emitter, slot: Int) -> Emitter {
-  emit_ir(e, IrGetLocal(slot))
+  emit_op(e, opcode.GetLocal(slot))
 }
 
 /// Store top-of-stack into an anonymous scratch local slot. Pops the value.
 fn emit_scratch_put(e: Emitter, slot: Int) -> Emitter {
-  emit_ir(e, IrPutLocal(slot))
+  emit_op(e, opcode.PutLocal(slot))
 }
 
 /// §B.3.2: is `name` blocked from Annex B var promotion at the current
@@ -1574,8 +1559,8 @@ fn emit_annexb_promote(e: Emitter, name: String) -> Emitter {
         AnnexBFallthrough -> {
           let e = emit_slot_get(e, source.slot, source.is_boxed)
           case fn_fallthrough(e) {
-            ToGlobal -> emit_ir(e, IrPutGlobal(name))
-            ToEvalEnv -> emit_ir(e, opcode.IrPutEvalVar(name))
+            ToGlobal -> emit_op(e, opcode.PutGlobal(name))
+            ToEvalEnv -> emit_op(e, opcode.PutEvalVar(name))
           }
         }
       }
@@ -1646,16 +1631,16 @@ fn annexb_find_target(
 /// Push the value held in local slot `slot` (boxed or unboxed).
 fn emit_slot_get(e: Emitter, slot: Int, is_boxed: Bool) -> Emitter {
   case is_boxed {
-    True -> emit_ir(e, IrGetBoxed(slot))
-    False -> emit_ir(e, IrGetLocal(slot))
+    True -> emit_op(e, opcode.GetBoxed(slot))
+    False -> emit_op(e, opcode.GetLocal(slot))
   }
 }
 
 /// Store top-of-stack into local slot `slot` (boxed or unboxed). Pops.
 fn emit_slot_put(e: Emitter, slot: Int, is_boxed: Bool) -> Emitter {
   case is_boxed {
-    True -> emit_ir(e, IrPutBoxed(slot))
-    False -> emit_ir(e, IrPutLocal(slot))
+    True -> emit_op(e, opcode.PutBoxed(slot))
+    False -> emit_op(e, opcode.PutLocal(slot))
   }
 }
 
@@ -1674,8 +1659,11 @@ fn emit_declare_var_global(e: Emitter, name: String) -> Emitter {
     // top-level var / hoisted function is false and the binding
     // survives), True for eval units, direct and indirect (§19.2.1.3).
     ToGlobal ->
-      emit_ir(e, IrDeclareGlobalVar(name, deletable: e.deletable_global_vars))
-    ToEvalEnv -> emit_ir(e, opcode.IrDeclareEvalVar(name))
+      emit_op(
+        e,
+        opcode.DeclareGlobalVar(name, deletable: e.deletable_global_vars),
+      )
+    ToEvalEnv -> emit_op(e, opcode.DeclareEvalVar(name))
   }
 }
 
@@ -1686,7 +1674,7 @@ fn emit_declare_var_global(e: Emitter, name: String) -> Emitter {
 /// to emit here.
 fn declare_lex(e: Emitter, name: String, is_const: Bool) -> Emitter {
   case at_global_lex(e) {
-    True -> emit_ir(e, IrDeclareGlobalLex(name, is_const))
+    True -> emit_op(e, opcode.DeclareGlobalLex(name, is_const))
     False -> e
   }
 }
@@ -1697,13 +1685,21 @@ fn declare_lex(e: Emitter, name: String, is_const: Bool) -> Emitter {
 /// TDZ check that emit_var_put applies). Mirrors QuickJS OP_scope_put_var_init.
 fn init_lex(e: Emitter, name: String) -> Emitter {
   case at_global_lex(e) {
-    True -> emit_ir(e, IrInitGlobalLex(name))
+    True -> emit_op(e, opcode.InitGlobalLex(name))
     False -> emit_var_init(e, name)
   }
 }
 
 fn emit_ir(e: Emitter, op: IrOp) -> Emitter {
   Emitter(..e, code: [op, ..e.code])
+}
+
+/// Emit an opcode that is already in final form (no label / key / operator
+/// left to resolve) — the overwhelmingly common case. `resolve` unwraps the
+/// `IrFinal` and copies it straight through, so a new pass-through opcode
+/// needs no `IrOp` variant and no `resolve` arm.
+fn emit_op(e: Emitter, op: opcode.Op) -> Emitter {
+  emit_ir(e, IrFinal(op))
 }
 
 // ============================================================================
@@ -1776,12 +1772,12 @@ fn emit_var_init(e: Emitter, name: String) -> Emitter {
   case fallback {
     scope.Local(slot:, boxed: True, ..) ->
       Emitter(..e, initialized: set.insert(e.initialized, slot))
-      |> emit_ir(IrPutBoxed(slot))
+      |> emit_op(opcode.PutBoxed(slot))
     scope.Local(slot:, boxed: False, ..) ->
       Emitter(..e, initialized: set.insert(e.initialized, slot))
-      |> emit_ir(IrPutLocal(slot))
-    scope.Global(name:) -> emit_ir(e, IrPutGlobal(name))
-    scope.EvalEnv(name:) -> emit_ir(e, opcode.IrPutEvalVar(name))
+      |> emit_op(opcode.PutLocal(slot))
+    scope.Global(name:) -> emit_op(e, opcode.PutGlobal(name))
+    scope.EvalEnv(name:) -> emit_op(e, opcode.PutEvalVar(name))
   }
 }
 
@@ -1794,9 +1790,9 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
   let static = fn(e: Emitter) {
     case fallback {
       scope.Local(slot:, boxed:, ..) ->
-        emit_slot_get(e, slot, boxed) |> emit_ir(IrTypeOf)
-      scope.Global(name:) -> emit_ir(e, opcode.IrTypeofGlobal(name))
-      scope.EvalEnv(name:) -> emit_ir(e, opcode.IrTypeofEvalVar(name))
+        emit_slot_get(e, slot, boxed) |> emit_op(opcode.TypeOf)
+      scope.Global(name:) -> emit_op(e, opcode.TypeofGlobal(name))
+      scope.EvalEnv(name:) -> emit_op(e, opcode.TypeofEvalVar(name))
     }
   }
   case crossed {
@@ -1816,7 +1812,7 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
       let e = static(e)
       let e = emit_ir(e, IrJump(end))
       let e = emit_ir(e, IrLabel(hit))
-      let e = emit_ir(e, IrTypeOf)
+      let e = emit_op(e, opcode.TypeOf)
       emit_ir(e, IrLabel(end))
     }
   }
@@ -1847,7 +1843,7 @@ fn emit_var_delete(e: Emitter, name: String) -> Emitter {
   use e <- emit_with_chain(e, crossed, opcode.IrWithDeleteVar(name, _))
   case fallback {
     scope.Local(..) -> push_const(e, JsBool(False))
-    scope.Global(name:) -> emit_ir(e, opcode.IrDeleteGlobalVar(name))
+    scope.Global(name:) -> emit_op(e, opcode.DeleteGlobalVar(name))
     scope.EvalEnv(name: _) -> push_const(e, JsBool(True))
   }
 }
@@ -1890,7 +1886,7 @@ fn emit_var_ref_make(e: Emitter, name: String) -> #(Emitter, VarRef) {
       let e = push_const(e, JsUndefined)
       let e = emit_ir(e, IrLabel(lref))
       #(
-        emit_ir(e, IrPutLocal(slot)),
+        emit_op(e, opcode.PutLocal(slot)),
         VarRef(name:, fallback:, base_slot: Some(slot)),
       )
     }
@@ -1903,7 +1899,7 @@ fn emit_var_ref_get(e: Emitter, ref: VarRef) -> Emitter {
     None -> emit_static_get(e, ref.fallback)
     Some(slot) -> {
       let #(e, lg) = fresh_label(e)
-      let e = emit_ir(e, IrGetLocal(slot))
+      let e = emit_op(e, opcode.GetLocal(slot))
       let e = emit_ir(e, opcode.IrWithGetRefValue(ref.name, lg))
       // Base was undefined (no with object matched at MakeRef time):
       // resolve statically.
@@ -1921,7 +1917,7 @@ fn emit_var_ref_put(e: Emitter, ref: VarRef) -> Emitter {
     Some(slot) -> {
       let e = Emitter(..e, ref_free: [slot, ..e.ref_free])
       let #(e, ld) = fresh_label(e)
-      let e = emit_ir(e, IrGetLocal(slot))
+      let e = emit_op(e, opcode.GetLocal(slot))
       let e = emit_ir(e, opcode.IrWithPutRefValue(ref.name, ld))
       let e = emit_static_put(e, ref.fallback, ref.name)
       emit_ir(e, IrLabel(ld))
@@ -1943,7 +1939,7 @@ fn with_identifier_lref(
 ) -> Result(Emitter, EmitError) {
   let #(e, ref) = emit_var_ref_make(e, name)
   use e <- result.map(body(e, ref))
-  e |> emit_ir(IrDup) |> emit_var_ref_put(ref)
+  e |> emit_op(opcode.Dup) |> emit_var_ref_put(ref)
 }
 
 /// §14.7.4.2 CreatePerIterationEnvironment: copy a for-let binding's current
@@ -1956,9 +1952,9 @@ fn emit_var_rebox(e: Emitter, name: String) -> Emitter {
   case fallback {
     scope.Local(slot:, boxed: True, ..) ->
       e
-      |> emit_ir(IrGetBoxed(slot))
-      |> emit_ir(IrPutLocal(slot))
-      |> emit_ir(IrBoxLocal(slot))
+      |> emit_op(opcode.GetBoxed(slot))
+      |> emit_op(opcode.PutLocal(slot))
+      |> emit_op(opcode.BoxLocal(slot))
     _ -> e
   }
 }
@@ -1996,8 +1992,8 @@ fn split_with_chain(
 fn emit_static_get(e: Emitter, res: scope.Direct) -> Emitter {
   case res {
     scope.Local(slot:, boxed:, ..) -> emit_slot_get(e, slot, boxed)
-    scope.Global(name:) -> emit_ir(e, opcode.IrGetGlobal(name))
-    scope.EvalEnv(name:) -> emit_ir(e, opcode.IrGetEvalVar(name))
+    scope.Global(name:) -> emit_op(e, opcode.GetGlobal(name))
+    scope.EvalEnv(name:) -> emit_op(e, opcode.GetEvalVar(name))
   }
 }
 
@@ -2015,11 +2011,11 @@ fn emit_static_put(e: Emitter, res: scope.Direct, name: String) -> Emitter {
     // step 4 throws only when the WRITE site is strict, else silently drops
     // the value to keep the stack balanced.
     scope.Local(origin_kind: ConstBinding, ..) ->
-      emit_ir(e, opcode.IrThrowConstAssign(name))
+      emit_op(e, opcode.ThrowConstAssign(name))
     scope.Local(origin_kind: FnNameBinding, ..) ->
       case e.strict {
-        True -> emit_ir(e, opcode.IrThrowConstAssign(name))
-        False -> emit_ir(e, IrPop)
+        True -> emit_op(e, opcode.ThrowConstAssign(name))
+        False -> emit_op(e, opcode.Pop)
       }
     // Any other capture (let/var/param/catch origin): the origin may be a
     // let still in TDZ when this closure runs (`(function(){x=1})(); let x`)
@@ -2038,8 +2034,8 @@ fn emit_static_put(e: Emitter, res: scope.Direct, name: String) -> Emitter {
         False -> emit_checked_put(e, slot, boxed)
       }
     scope.Local(slot:, boxed:, ..) -> emit_slot_put(e, slot, boxed)
-    scope.Global(name:) -> emit_ir(e, IrPutGlobal(name))
-    scope.EvalEnv(name:) -> emit_ir(e, opcode.IrPutEvalVar(name))
+    scope.Global(name:) -> emit_op(e, opcode.PutGlobal(name))
+    scope.EvalEnv(name:) -> emit_op(e, opcode.PutEvalVar(name))
   }
 }
 
@@ -2049,7 +2045,7 @@ fn emit_static_put(e: Emitter, res: scope.Direct, name: String) -> Emitter {
 fn emit_checked_put(e: Emitter, slot: Int, is_boxed: Bool) -> Emitter {
   e
   |> emit_slot_get(slot, is_boxed)
-  |> emit_ir(IrPop)
+  |> emit_op(opcode.Pop)
   |> emit_slot_put(slot, is_boxed)
 }
 
@@ -2109,7 +2105,7 @@ fn add_constant(e: Emitter, val: JsValue) -> #(Emitter, Int) {
 
 fn push_const(e: Emitter, val: JsValue) -> Emitter {
   let #(e, idx) = add_constant(e, val)
-  emit_ir(e, IrPushConst(idx))
+  emit_op(e, opcode.PushConst(idx))
 }
 
 /// Private names lex as Identifier tokens with the "#" prefix included
@@ -2128,7 +2124,7 @@ fn emit_get_field(e: Emitter, name: String) -> Emitter {
     "#" <> _ ->
       e
       |> emit_var_get(name)
-      |> emit_ir(IrGetPrivateFieldDyn)
+      |> emit_op(opcode.GetPrivateFieldDyn)
     _ -> emit_ir(e, IrGetField(name))
   }
 }
@@ -2139,7 +2135,7 @@ fn emit_get_field2(e: Emitter, name: String) -> Emitter {
     "#" <> _ ->
       e
       |> emit_var_get(name)
-      |> emit_ir(IrGetPrivateFieldDyn2)
+      |> emit_op(opcode.GetPrivateFieldDyn2)
     _ -> emit_ir(e, IrGetField2(name))
   }
 }
@@ -2150,7 +2146,7 @@ fn emit_put_field(e: Emitter, name: String) -> Emitter {
     "#" <> _ ->
       e
       |> emit_var_get(name)
-      |> emit_ir(IrPutPrivateFieldDyn)
+      |> emit_op(opcode.PutPrivateFieldDyn)
     _ -> emit_ir(e, IrPutField(name))
   }
 }
@@ -2254,7 +2250,7 @@ fn repeat_ir(e: Emitter, op: IrOp, n: Int) -> Emitter {
 fn repeat_nip(e: Emitter, n: Int) -> Emitter {
   case n <= 0 {
     True -> e
-    False -> repeat_nip(e |> emit_ir(IrSwap) |> emit_ir(IrPop), n - 1)
+    False -> repeat_nip(e |> emit_op(opcode.Swap) |> emit_op(opcode.Pop), n - 1)
   }
 }
 
@@ -2265,7 +2261,7 @@ fn emit_gosub_normal(e: Emitter, fin_label: Int) -> Emitter {
   e
   |> push_const(JsUndefined)
   |> emit_ir(IrGosub(fin_label))
-  |> emit_ir(IrPop)
+  |> emit_op(opcode.Pop)
 }
 
 /// Throw-entry + finally-subroutine, shared by try/finally and try/catch/finally.
@@ -2279,7 +2275,7 @@ fn emit_finally_subroutine(
 ) -> Result(Emitter, EmitError) {
   let e = emit_ir(e, IrLabel(throw_label))
   let e = emit_ir(e, IrGosub(fin_label))
-  let e = emit_ir(e, IrThrow)
+  let e = emit_op(e, opcode.Throw)
 
   let e = emit_ir(e, IrLabel(fin_label))
   let e = push_barrier(e, pop_try: 0, label_finally: None, drop: 2)
@@ -2288,7 +2284,7 @@ fn emit_finally_subroutine(
   use e <- result.try(emit_finally(e))
   let e = Emitter(..e, completion_var: saved_cv)
   let e = pop_frame(e)
-  Ok(emit_ir(e, IrRet))
+  Ok(emit_op(e, opcode.Ret))
 }
 
 /// Shared scaffold for try { body } catch { … } finally { … } with both
@@ -2314,8 +2310,8 @@ fn emit_try_catch_finally(
   let e = push_barrier(e, pop_try: 2, label_finally: Some(fin_label), drop: 0)
   use e <- result.try(emit_body(e))
   let e = pop_frame(e)
-  let e = emit_ir(e, IrPopTry)
-  let e = emit_ir(e, IrPopTry)
+  let e = emit_op(e, opcode.PopTry)
+  let e = emit_op(e, opcode.PopTry)
   let e = emit_gosub_normal(e, fin_label)
   let e = emit_ir(e, IrJump(end_label))
 
@@ -2323,7 +2319,7 @@ fn emit_try_catch_finally(
   // unwind popped inner try; outer (throw_label) still on try_stack.
   // stack = [thrown, ..base].
   use e <- result.try(emit_catch(e, catch_label, fin_label))
-  let e = emit_ir(e, IrPopTry)
+  let e = emit_op(e, opcode.PopTry)
   let e = emit_gosub_normal(e, fin_label)
   let e = emit_ir(e, IrJump(end_label))
 
@@ -2388,11 +2384,11 @@ fn frame_target(
 fn emit_cross_frame(e: Emitter, frame: Frame) -> Emitter {
   case frame {
     LoopFrame(iterator: True, ..) ->
-      e |> emit_ir(IrPopTry) |> emit_ir(IrIteratorClose)
+      e |> emit_op(opcode.PopTry) |> emit_op(opcode.IteratorClose)
     LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> e
     BarrierFrame(pop_try:, label_finally:, drop_count:) -> {
-      let e = repeat_ir(e, IrPopTry, pop_try)
-      let e = repeat_ir(e, IrPop, drop_count)
+      let e = repeat_ir(e, IrFinal(opcode.PopTry), pop_try)
+      let e = repeat_ir(e, IrFinal(opcode.Pop), drop_count)
       case label_finally {
         Some(lbl) -> emit_gosub_normal(e, lbl)
         None -> e
@@ -2410,10 +2406,13 @@ fn emit_cross_frame(e: Emitter, frame: Frame) -> Emitter {
 fn emit_return_cross_frame(e: Emitter, frame: Frame) -> Emitter {
   case frame {
     LoopFrame(iterator: True, ..) ->
-      e |> emit_ir(IrPopTry) |> emit_ir(IrSwap) |> emit_ir(IrIteratorClose)
+      e
+      |> emit_op(opcode.PopTry)
+      |> emit_op(opcode.Swap)
+      |> emit_op(opcode.IteratorClose)
     LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> e
     BarrierFrame(pop_try:, label_finally:, drop_count:) -> {
-      let e = repeat_ir(e, IrPopTry, pop_try)
+      let e = repeat_ir(e, IrFinal(opcode.PopTry), pop_try)
       let e = repeat_nip(e, drop_count)
       case label_finally {
         Some(lbl) -> emit_ir(e, IrGosub(lbl))
@@ -2521,8 +2520,8 @@ fn get_lexical(e: Emitter, ref: opcode.LexicalRef) -> Emitter {
   }
   let e = Emitter(..e, lexical_refs:)
   case resolve_lexical(e, ref) {
-    Some(#(slot, True)) -> emit_ir(e, IrGetBoxed(slot))
-    Some(#(slot, False)) -> emit_ir(e, IrGetLocal(slot))
+    Some(#(slot, True)) -> emit_op(e, opcode.GetBoxed(slot))
+    Some(#(slot, False)) -> emit_op(e, opcode.GetLocal(slot))
     // Script/Module root with no lexical slot — bit-for-bit match for the
     // old Phase-2 IrGetLexical Error(Nil) arm: push `undefined`.
     None -> push_const(e, JsUndefined)
@@ -2543,8 +2542,8 @@ fn set_this(e: Emitter) -> Emitter {
   let e =
     Emitter(..e, lexical_refs: opcode.LexicalRefs(..e.lexical_refs, this: True))
   case resolve_lexical(e, opcode.RefThis) {
-    Some(#(slot, True)) -> emit_ir(e, opcode.IrPutBoxedCheckInit(slot))
-    Some(#(slot, False)) -> emit_ir(e, opcode.IrPutLocalCheckInit(slot))
+    Some(#(slot, True)) -> emit_op(e, opcode.PutBoxedCheckInit(slot))
+    Some(#(slot, False)) -> emit_op(e, opcode.PutLocalCheckInit(slot))
     // Defensive only — set_this is reached solely from derived-ctor
     // `super(...)`, which always owns the slot. Matches the old Phase-2
     // IrSetThis Error(Nil) arm: no-op.
@@ -2559,7 +2558,7 @@ fn emit_super_base(e: Emitter) -> Emitter {
   e
   |> get_this
   |> get_lexical(opcode.RefHomeObject)
-  |> emit_ir(IrGetPrototypeOf)
+  |> emit_op(opcode.GetPrototypeOf)
 }
 
 /// As emit_super_base but Dup's the receiver so the stack after a following
@@ -2567,9 +2566,9 @@ fn emit_super_base(e: Emitter) -> Emitter {
 fn emit_super_base_keep_recv(e: Emitter) -> Emitter {
   e
   |> get_this
-  |> emit_ir(IrDup)
+  |> emit_op(opcode.Dup)
   |> get_lexical(opcode.RefHomeObject)
-  |> emit_ir(IrGetPrototypeOf)
+  |> emit_op(opcode.GetPrototypeOf)
 }
 
 /// Emit a `super.m` / `super[k]` callee reference (§13.3.7.3): read the super
@@ -2582,7 +2581,7 @@ fn emit_super_method_ref(
 ) -> Result(Emitter, EmitError) {
   let e = emit_super_base_keep_recv(e)
   use e <- result.map(emit_super_key(e, key, computed))
-  emit_ir(e, IrGetSuperValue)
+  emit_op(e, opcode.GetSuperValue)
 }
 
 /// Push the property key for a super reference. Dot form (`super.x`,
@@ -2620,7 +2619,7 @@ fn emit_lvalue_get2(
     ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
       let e = emit_super_base(e)
       use e <- result.map(emit_super_key(e, key, computed))
-      #(emit_ir(e, IrGetSuperValue2), LvSuper)
+      #(emit_op(e, opcode.GetSuperValue2), LvSuper)
     }
     ast.MemberExpression(_, obj, ast.Identifier(name: prop, ..), False) -> {
       use e <- result.map(emit_expr(e, obj))
@@ -2629,7 +2628,7 @@ fn emit_lvalue_get2(
     ast.MemberExpression(_, obj, key, True) -> {
       use e <- result.try(emit_expr(e, obj))
       use e <- result.map(emit_expr(e, key))
-      #(emit_ir(e, IrGetElem2), LvElem)
+      #(emit_op(e, opcode.GetElem2), LvElem)
     }
     // Only MemberExpressions reach here (update-expression / compound-
     // assignment callers match on `ast.MemberExpression(..) as member`), and
@@ -2641,9 +2640,9 @@ fn emit_lvalue_get2(
 /// Companion to `emit_lvalue_get2`. Stack: [new, …put-args] → [new].
 fn emit_lvalue_put(e: Emitter, shape: LvalueShape) -> Emitter {
   case shape {
-    LvSuper -> emit_ir(e, IrPutSuperValue)
+    LvSuper -> emit_op(e, opcode.PutSuperValue)
     LvField(prop) -> emit_put_field(e, prop)
-    LvElem -> emit_ir(e, IrPutElem)
+    LvElem -> emit_op(e, opcode.PutElem)
   }
 }
 
@@ -2656,13 +2655,13 @@ fn emit_field_init_call(e: Emitter) -> Emitter {
   let #(e, skip) = fresh_label(e)
   e
   |> emit_var_get(class_fields_init)
-  |> emit_ir(IrDup)
+  |> emit_op(opcode.Dup)
   |> emit_ir(IrJumpIfFalse(skip))
   |> get_this
-  |> emit_ir(IrSwap)
-  |> emit_ir(IrCallMethod(0))
+  |> emit_op(opcode.Swap)
+  |> emit_op(opcode.CallMethod(0))
   |> emit_ir(IrLabel(skip))
-  |> emit_ir(IrPop)
+  |> emit_op(opcode.Pop)
 }
 
 /// Extract final results from the emitter. `code` is already a plain
@@ -2709,7 +2708,7 @@ fn emit_stmt_tail(
 
           let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
           use e <- result.try(emit_block(e, block, tail: True))
-          let e = emit_ir(e, IrPopTry)
+          let e = emit_op(e, opcode.PopTry)
           let e = emit_ir(e, IrJump(end_label))
 
           use e <- result.map(
@@ -2785,12 +2784,12 @@ fn set_line(e: Emitter, line: Int) -> Emitter {
         // the two — so replace it instead of stacking markers. Statements
         // that compile to nothing (e.g. elided empty blocks) would otherwise
         // emit one IrSetLine each.
-        [IrSetLine(prev), ..rest] ->
+        [IrFinal(opcode.SetLine(prev)), ..rest] ->
           case prev == line {
             True -> e
-            False -> Emitter(..e, code: [IrSetLine(line), ..rest])
+            False -> Emitter(..e, code: [IrFinal(opcode.SetLine(line)), ..rest])
           }
-        _ -> emit_ir(e, IrSetLine(line))
+        _ -> emit_op(e, opcode.SetLine(line))
       }
   }
 }
@@ -2880,7 +2879,7 @@ fn emit_block_declarations(
   use #(e, funcs) <- result.map(collect_hoisted_funcs(e, body))
   list.fold(funcs, e, fn(e, hf) {
     let #(name, idx) = hf
-    let e = emit_ir(e, IrMakeClosure(idx))
+    let e = emit_op(e, opcode.MakeClosure(idx))
     emit_var_init(e, name)
   })
 }
@@ -2945,7 +2944,7 @@ fn emit_catch_clause(
       use e <- result.map(emit_body(e))
       leave_scope(e, save)
     }
-    None -> emit_body(emit_ir(e, IrPop))
+    None -> emit_body(emit_op(e, opcode.Pop))
   }
 }
 
@@ -3065,7 +3064,7 @@ fn emit_hoisted_funcs(
 ) -> Emitter {
   list.fold(hoisted_funcs, e, fn(e, hf) {
     let #(name, func_idx) = hf
-    e |> emit_ir(IrMakeClosure(func_idx)) |> emit_var_put(name)
+    e |> emit_op(opcode.MakeClosure(func_idx)) |> emit_var_put(name)
   })
 }
 
@@ -3357,7 +3356,7 @@ fn compile_function_body(
   use e <- result.try(case rest_param {
     None -> Ok(e)
     Some(rest_target) -> {
-      let e = emit_ir(e, IrCreateRestArray(arity))
+      let e = emit_op(e, opcode.CreateRestArray(arity))
       // Non-simple lists pre-declared the rest name(s) as TDZ lets above, so
       // bind via LetBinding (declare no-ops, init initializes). Simple-with-
       // rest lists keep the original ParamBinding path.
@@ -3412,7 +3411,7 @@ fn compile_function_body(
   let e =
     list.fold(hoisted_funcs, e, fn(e, hf) {
       let #(fname, func_idx) = hf
-      let e = emit_ir(e, IrMakeClosure(func_idx))
+      let e = emit_op(e, opcode.MakeClosure(func_idx))
       let e = emit_var_put(e, fname)
       e
     })
@@ -3423,7 +3422,7 @@ fn compile_function_body(
   // Async functions do NOT get InitialYield — they run eagerly until the first
   // await or completion.
   let e = case is_generator {
-    True -> emit_ir(e, IrInitialYield)
+    True -> emit_op(e, opcode.InitialYield)
     False -> e
   }
 
@@ -3462,7 +3461,7 @@ fn compile_function_body(
 
   // Implicit return undefined at end
   let e = push_const(e, JsUndefined)
-  let e = emit_ir(e, IrReturn)
+  let e = emit_op(e, opcode.Return)
 
   // Body and parameter-default emission is complete — `references_arguments`
   // now answers whether the function body references `arguments` (recursing
@@ -3480,11 +3479,13 @@ fn compile_function_body(
   // it, Global/EvalEnv as a fallthrough otherwise (degenerate but kept for
   // the type's sake).
   let put_args = case scope.lookup(e.scope_tree, e.fn_scope, "arguments") {
-    scope.Plain(scope.Local(slot:, boxed: True, ..)) -> IrPutBoxed(slot)
-    scope.Plain(scope.Local(slot:, boxed: False, ..)) -> IrPutLocal(slot)
+    scope.Plain(scope.Local(slot:, boxed: True, ..)) ->
+      IrFinal(opcode.PutBoxed(slot))
+    scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
+      IrFinal(opcode.PutLocal(slot))
     scope.Plain(scope.Global(_))
     | scope.Plain(scope.EvalEnv(_))
-    | scope.WithChain(..) -> IrPutGlobal("arguments")
+    | scope.WithChain(..) -> IrFinal(opcode.PutGlobal("arguments"))
   }
   // The `arguments` slot was already seeded (push undef + PutLocal +
   // optional BoxLocal) by `emit_binding_prologue` at `enter_root_scope` —
@@ -3494,7 +3495,9 @@ fn compile_function_body(
   let args_setup_rev = case uses_args {
     True -> [
       put_args,
-      IrCreateArguments(simple_params: !non_simple_fixed && rest_param == None),
+      IrFinal(opcode.CreateArguments(
+        simple_params: !non_simple_fixed && rest_param == None,
+      )),
     ]
     False -> []
   }
@@ -3614,19 +3617,19 @@ fn emit_stmt_inner(
           case init {
             ast.Identifier(name: "\u{0}pg:" <> _ as hidden, ..) -> {
               let e = emit_var_get(e, hidden)
-              Ok(emit_ir(e, IrDefinePrivateAccessor(opcode.Getter)))
+              Ok(emit_op(e, opcode.DefinePrivateAccessor(opcode.Getter)))
             }
             ast.Identifier(name: "\u{0}ps:" <> _ as hidden, ..) -> {
               let e = emit_var_get(e, hidden)
-              Ok(emit_ir(e, IrDefinePrivateAccessor(opcode.Setter)))
+              Ok(emit_op(e, opcode.DefinePrivateAccessor(opcode.Setter)))
             }
             ast.Identifier(name: "\u{0}pm:" <> _ as hidden, ..) -> {
               let e = emit_var_get(e, hidden)
-              Ok(emit_ir(e, IrDefinePrivateMethod))
+              Ok(emit_op(e, opcode.DefinePrivateMethod))
             }
             _ -> {
               use e <- result.map(emit_named_expr(e, init, name))
-              emit_ir(e, IrDefinePrivateField)
+              emit_op(e, opcode.DefinePrivateField)
             }
           }
         }
@@ -3641,7 +3644,7 @@ fn emit_stmt_inner(
         ast.NumberLiteral(value: n, ..), False -> {
           let e = push_const(e, JsNumber(literal_number(n)))
           use e <- result.map(emit_expr(e, init))
-          emit_ir(e, IrDefineFieldComputed)
+          emit_op(e, opcode.DefineFieldComputed)
         }
         // Computed field name, already evaluated + ToPropertyKey'd at
         // class-definition time into a hidden class-scope const (see
@@ -3650,17 +3653,17 @@ fn emit_stmt_inner(
         ast.Identifier(name: "\u{0}ck:" <> _ as hidden, ..), _ -> {
           let e = emit_var_get(e, hidden)
           use e <- result.map(emit_expr(e, init))
-          emit_ir(e, IrDefineFieldComputed)
+          emit_op(e, opcode.DefineFieldComputed)
         }
         _, _ -> {
           // Exotic non-computed key (shouldn't occur: computed keys are
           // rewritten to stash-const reads above) — evaluate inline.
           use e <- result.try(emit_expr(e, key))
           use e <- result.map(emit_expr(e, init))
-          emit_ir(e, IrDefineFieldComputed)
+          emit_op(e, opcode.DefineFieldComputed)
         }
       })
-      emit_ir(e, IrPop)
+      emit_op(e, opcode.Pop)
     }
 
     ast.ExpressionStatement(expression: expr, ..) -> {
@@ -3669,7 +3672,7 @@ fn emit_stmt_inner(
       // (IrPutLocal pops, so stack balance matches the IrPop path).
       case e.completion_var {
         Some(v) -> emit_scratch_put(e, v)
-        None -> emit_ir(e, IrPop)
+        None -> emit_op(e, opcode.Pop)
       }
     }
 
@@ -3787,7 +3790,7 @@ fn emit_stmt_inner(
       use #(e, per_iter) <- result.try(case init {
         Some(ast.ForInitExpression(expr)) -> {
           use e <- result.map(emit_expr(e, expr))
-          #(emit_ir(e, IrPop), [])
+          #(emit_op(e, opcode.Pop), [])
         }
         Some(ast.ForInitDeclaration(kind:, declarations:)) -> {
           use e <- result.map(emit_stmt(
@@ -3816,12 +3819,12 @@ fn emit_stmt_inner(
       })
       // A return crosses every frame — see emit_return_cross_frame.
       let e = list.fold(e.frame_stack, e, emit_return_cross_frame)
-      Ok(emit_ir(e, IrReturn))
+      Ok(emit_op(e, opcode.Return))
     }
 
     ast.ThrowStatement(arg) -> {
       use e <- result.map(emit_expr(e, arg))
-      emit_ir(e, IrThrow)
+      emit_op(e, opcode.Throw)
     }
 
     ast.TryStatement(block, handler, finalizer) -> {
@@ -3835,7 +3838,7 @@ fn emit_stmt_inner(
           let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
           use e <- result.try(emit_block(e, block, tail: False))
           let e = pop_frame(e)
-          let e = emit_ir(e, IrPopTry)
+          let e = emit_op(e, opcode.PopTry)
           let e = emit_ir(e, IrJump(end_label))
 
           use e <- result.map(
@@ -3861,7 +3864,7 @@ fn emit_stmt_inner(
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_block(e, block, tail: False))
           let e = pop_frame(e)
-          let e = emit_ir(e, IrPopTry)
+          let e = emit_op(e, opcode.PopTry)
           let e = emit_gosub_normal(e, fin_label)
           let e = emit_ir(e, IrJump(end_label))
 
@@ -4011,7 +4014,7 @@ fn emit_with(
   tail tail: Bool,
 ) -> Result(Emitter, EmitError) {
   use e <- result.try(emit_expr(e, object))
-  let e = emit_ir(e, opcode.IrToObject)
+  let e = emit_op(e, opcode.ToObject)
   // Enter the analyzer's With scope. ONE cursor move — the analyzer
   // creates a single With node that BOTH holds the `<withN_M>` binding
   // (so `enter_scope`'s prologue seeds its slot) and carries that holder's
@@ -4067,13 +4070,13 @@ fn emit_chain_root(
   let e = emit_ir(e, IrJump(end_label))
   // Depth-1 cleanup: [nullish] → [undefined]
   let e = emit_ir(e, IrLabel(l1))
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
   let e = push_const(e, JsUndefined)
   let e = emit_ir(e, IrJump(end_label))
   // Depth-2 cleanup: [f, receiver] → [undefined]
   let e = emit_ir(e, IrLabel(l2))
-  let e = emit_ir(e, IrPop)
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
+  let e = emit_op(e, opcode.Pop)
   let e = push_const(e, JsUndefined)
   emit_ir(e, IrLabel(end_label))
 }
@@ -4101,7 +4104,7 @@ fn emit_chain(
     | ast.OptionalMemberExpression(_, obj, prop, True) -> {
       use e <- result.try(chain_obj(e, expr, obj, l1, l2))
       use e <- result.map(emit_expr(e, prop))
-      emit_ir(e, IrGetElem)
+      emit_op(e, opcode.GetElem)
     }
     // Non-optional call AFTER an optional link, e.g. `a?.b.m(x)` /
     // `a?.b(x)` — `this` binding follows the method-reference shape.
@@ -4112,7 +4115,7 @@ fn emit_chain(
     // Optional call `f?.(x)`: additionally check the function value itself.
     ast.OptionalCallExpression(_, callee, args) -> {
       use #(e, is_method) <- result.try(emit_chain_callee(e, callee, l1, l2))
-      let e = emit_ir(e, IrDup)
+      let e = emit_op(e, opcode.Dup)
       let e = case is_method {
         True -> emit_ir(e, IrJumpIfNullish(l2))
         False -> emit_ir(e, IrJumpIfNullish(l1))
@@ -4138,7 +4141,7 @@ fn chain_obj(
   use e <- result.map(emit_chain(e, obj, l1, l2))
   case link {
     ast.OptionalMemberExpression(..) ->
-      e |> emit_ir(IrDup) |> emit_ir(IrJumpIfNullish(l1))
+      e |> emit_op(opcode.Dup) |> emit_ir(IrJumpIfNullish(l1))
     _ -> e
   }
 }
@@ -4168,7 +4171,13 @@ fn emit_chain_callee(
       use e <- result.try(chain_obj(e, callee, obj, l1, l2))
       use e <- result.map(emit_expr(e, key))
       // [f, key, receiver] → [f, receiver]
-      #(e |> emit_ir(IrGetElem2) |> emit_ir(IrSwap) |> emit_ir(IrPop), True)
+      #(
+        e
+          |> emit_op(opcode.GetElem2)
+          |> emit_op(opcode.Swap)
+          |> emit_op(opcode.Pop),
+        True,
+      )
     }
     other -> {
       use e <- result.map(emit_chain(e, other, l1, l2))
@@ -4185,8 +4194,20 @@ fn emit_chain_call_args(
   is_method: Bool,
 ) -> Result(Emitter, EmitError) {
   case is_method {
-    True -> emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
-    False -> emit_call_args(e, args, opcode.IrCall, IrCallApply)
+    True ->
+      emit_call_args(
+        e,
+        args,
+        fn(n) { IrFinal(opcode.CallMethod(n)) },
+        IrFinal(opcode.CallMethodApply),
+      )
+    False ->
+      emit_call_args(
+        e,
+        args,
+        fn(n) { IrFinal(opcode.Call(n)) },
+        IrFinal(opcode.CallApply),
+      )
   }
 }
 
@@ -4234,7 +4255,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       use e <- result.map(emit_expr(e, right))
       e
       |> emit_var_get("#" <> rest)
-      |> emit_ir(IrPrivateInDyn)
+      |> emit_op(opcode.PrivateInDyn)
     }
     ast.BinaryExpression(_, op, left, right) -> {
       use e <- result.try(emit_expr(e, left))
@@ -4247,7 +4268,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       let #(e, end_label) = fresh_label(e)
       use e <- result.try(emit_expr(e, left))
       let e = emit_short_circuit_test(e, op, end_label)
-      let e = emit_ir(e, IrPop)
+      let e = emit_op(e, opcode.Pop)
       use e <- result.map(emit_expr(e, right))
       emit_ir(e, IrLabel(end_label))
     }
@@ -4262,7 +4283,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
         _ -> {
           use e <- result.map(emit_expr(e, arg))
-          emit_ir(e, IrTypeOf)
+          emit_op(e, opcode.TypeOf)
         }
       }
 
@@ -4273,14 +4294,14 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         // unconditional ReferenceError. Evaluate `this` (TDZ check) and the
         // computed key for side effects per §13.3.7 ordering, then throw.
         ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
-          let e = get_this(e) |> emit_ir(IrPop)
+          let e = get_this(e) |> emit_op(opcode.Pop)
           use e <- result.map(case computed {
-            True -> result.map(emit_expr(e, key), emit_ir(_, IrPop))
+            True -> result.map(emit_expr(e, key), emit_op(_, opcode.Pop))
             False -> Ok(e)
           })
-          emit_ir(
+          emit_op(
             e,
-            IrThrowError(
+            opcode.ThrowError(
               opcode.ReferenceErrorKind,
               "Unsupported reference to 'super'",
             ),
@@ -4295,7 +4316,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           // delete obj[key] → emit obj, emit key, DeleteElem
           use e <- result.try(emit_expr(e, obj))
           use e <- result.map(emit_expr(e, key_expr))
-          emit_ir(e, IrDeleteElem)
+          emit_op(e, opcode.DeleteElem)
         }
         ast.Identifier(name:, ..) -> {
           // delete x — Phase 2 emits enclosing-with object checks (§9.1.1.2.7
@@ -4306,7 +4327,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         _ -> {
           // delete <other expr> → evaluate for side effects, discard, push true
           use e <- result.map(emit_expr(e, arg))
-          let e = emit_ir(e, IrPop)
+          let e = emit_op(e, opcode.Pop)
           push_const(e, JsBool(True))
         }
       }
@@ -4318,7 +4339,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         |> option.to_result(NonGenericUnaryOperator),
       )
       use e <- result.map(emit_expr(e, arg))
-      emit_ir(e, IrUnaryOp(kind))
+      emit_op(e, opcode.UnaryOp(kind))
     }
 
     // Update expressions (++/--) — unwrap parens because (x)++ === x++.
@@ -4336,10 +4357,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // the call, then throw ReferenceError (before ToNumeric).
     ast.UpdateExpression(_, _, _, ast.CallExpression(..) as call) -> {
       use e <- result.map(emit_expr(e, call))
-      let e = emit_ir(e, IrPop)
-      emit_ir(
+      let e = emit_op(e, opcode.Pop)
+      emit_op(
         e,
-        IrThrowError(
+        opcode.ThrowError(
           opcode.ReferenceErrorKind,
           "Invalid left-hand side expression in update operation",
         ),
@@ -4357,7 +4378,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           // result and stores to ref. Unary `+` is ToNumber.
           use e, ref <- with_identifier_lref(e, name)
           let e = emit_var_ref_get(e, ref)
-          let e = emit_ir(e, IrUnaryOp(opcode.Pos))
+          let e = emit_op(e, opcode.UnaryOp(opcode.Pos))
           let e = push_const(e, one)
           Ok(emit_ir(e, IrBinOp(bin_kind)))
         }
@@ -4366,8 +4387,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           // stays as result), add 1, store to ref. Unary `+` is ToNumber.
           let #(e, ref) = emit_var_ref_make(e, name)
           let e = emit_var_ref_get(e, ref)
-          let e = emit_ir(e, IrUnaryOp(opcode.Pos))
-          let e = emit_ir(e, IrDup)
+          let e = emit_op(e, opcode.UnaryOp(opcode.Pos))
+          let e = emit_op(e, opcode.Dup)
           let e = push_const(e, one)
           let e = emit_ir(e, IrBinOp(bin_kind))
           let e = emit_var_ref_put(e, ref)
@@ -4390,7 +4411,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
       use #(e, shape) <- result.map(emit_lvalue_get2(e, member))
       // Stack: [old, …put-args]
-      let e = emit_ir(e, IrUnaryOp(opcode.Pos))
+      let e = emit_op(e, opcode.UnaryOp(opcode.Pos))
       case prefix {
         True ->
           // [oldNum, …put-args] -> [new, …put-args] -> [new]
@@ -4403,12 +4424,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           // recover oldNum as the expression value.
           let #(e, tmp) = fresh_slot(e)
           e
-          |> emit_ir(IrDup)
+          |> emit_op(opcode.Dup)
           |> emit_scratch_put(tmp)
           |> push_const(one)
           |> emit_ir(IrBinOp(bin_kind))
           |> emit_lvalue_put(shape)
-          |> emit_ir(IrPop)
+          |> emit_op(opcode.Pop)
           |> emit_scratch_get(tmp)
         }
       }
@@ -4443,10 +4464,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // destructuring branches.
     ast.AssignmentExpression(_, _, ast.CallExpression(..) as call, _) -> {
       use e <- result.map(emit_expr(e, call))
-      let e = emit_ir(e, IrPop)
-      emit_ir(
+      let e = emit_op(e, opcode.Pop)
+      emit_op(
         e,
-        IrThrowError(
+        opcode.ThrowError(
           opcode.ReferenceErrorKind,
           "Invalid left-hand side in assignment",
         ),
@@ -4501,7 +4522,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       let e = emit_super_base(e)
       use e <- result.try(emit_super_key(e, key, computed))
       use e <- result.map(emit_expr(e, right))
-      emit_ir(e, IrPutSuperValue)
+      emit_op(e, opcode.PutSuperValue)
     }
 
     // Assignment to dot member expression (obj.prop = val)
@@ -4528,7 +4549,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       use e <- result.try(emit_expr(e, key))
       use e <- result.map(emit_expr(e, right))
       // Stack: [obj, key, val] — PutElem expects [val, key, obj]
-      emit_ir(e, IrPutElem)
+      emit_op(e, opcode.PutElem)
     }
 
     // Compound assignment to member (obj.prop op= v / obj[k] op= v /
@@ -4553,7 +4574,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // destructure since emit_destructuring_assign consumes its input.
     ast.AssignmentExpression(_, ast.Assign, lhs, right) -> {
       use e <- result.try(emit_expr(e, right))
-      let e = emit_ir(e, IrDup)
+      let e = emit_op(e, opcode.Dup)
       emit_destructuring_assign(e, lhs)
     }
     // Only compound assignment (`+=` …) reaches here, and only with a target
@@ -4575,7 +4596,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       let e =
         e
         |> get_lexical(opcode.RefActiveFunc)
-        |> emit_ir(IrGetPrototypeOf)
+        |> emit_op(opcode.GetPrototypeOf)
         |> get_lexical(opcode.RefNewTarget)
       use e <- result.map(case e.in_synth_default_ctor {
         // §15.7.14 ClassDefaultConstructor: a class with no source
@@ -4587,13 +4608,18 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         True ->
           Ok(
             e
-            |> emit_ir(IrCreateRestArray(0))
-            |> emit_ir(IrCallConstructorApply),
+            |> emit_op(opcode.CreateRestArray(0))
+            |> emit_op(opcode.CallConstructorApply),
           )
         False ->
-          emit_call_args(e, args, IrCallConstructor, IrCallConstructorApply)
+          emit_call_args(
+            e,
+            args,
+            fn(n) { IrFinal(opcode.CallConstructor(n)) },
+            IrFinal(opcode.CallConstructorApply),
+          )
       })
-      let e = e |> emit_ir(IrDup) |> set_this
+      let e = e |> emit_op(opcode.Dup) |> set_this
       case e.field_init {
         FieldInitAfterSuper -> emit_field_init_call(e)
         NoFieldInit | FieldInitAtStart -> e
@@ -4608,7 +4634,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       args,
     ) -> {
       use e <- result.try(emit_super_method_ref(e, key, computed))
-      emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
+      emit_call_args(
+        e,
+        args,
+        fn(n) { IrFinal(opcode.CallMethod(n)) },
+        IrFinal(opcode.CallMethodApply),
+      )
     }
 
     // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding.
@@ -4624,7 +4655,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         False -> {
           use e <- result.try(emit_expr(e, obj))
           let e = emit_get_field2(e, method_name)
-          emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
+          emit_call_args(
+            e,
+            args,
+            fn(n) { IrFinal(opcode.CallMethod(n)) },
+            IrFinal(opcode.CallMethodApply),
+          )
         }
       }
     // Computed method call: obj[key](args) — must bind `this` to obj.
@@ -4637,11 +4673,16 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         False -> {
           use e <- result.try(emit_expr(e, obj))
           use e <- result.try(emit_expr(e, key))
-          let e = emit_ir(e, IrGetElem2)
+          let e = emit_op(e, opcode.GetElem2)
           // [method, key, receiver] → Swap → [key, method, receiver] → Pop → [method, receiver]
-          let e = emit_ir(e, IrSwap)
-          let e = emit_ir(e, IrPop)
-          emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
+          let e = emit_op(e, opcode.Swap)
+          let e = emit_op(e, opcode.Pop)
+          emit_call_args(
+            e,
+            args,
+            fn(n) { IrFinal(opcode.CallMethod(n)) },
+            IrFinal(opcode.CallMethodApply),
+          )
         }
       }
     // Direct eval candidate: `eval(args)` with identifier callee.
@@ -4657,9 +4698,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           use e <- result.map(list.try_fold(args, e, emit_expr))
           // The parser already marked this scope's `contains_direct_eval`
           // on the ScopeBuilder — no emitter-side flag to maintain.
-          emit_ir(
+          emit_op(
             e,
-            opcode.IrCallEval(
+            opcode.CallEval(
               list.length(args),
               e.param_scope_names,
               e.with_stack,
@@ -4670,7 +4711,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         True -> {
           let e = emit_var_get(e, "eval")
           use e <- result.map(emit_args_array_with_spread(e, args))
-          emit_ir(e, IrCallApply)
+          emit_op(e, opcode.CallApply)
         }
       }
 
@@ -4691,11 +4732,21 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       case ast_util.unwrap_parens(callee), e.with_stack {
         ast.Identifier(name:, ..), [_, ..] -> {
           let e = emit_var_get_this(e, name)
-          emit_call_args(e, args, IrCallMethod, IrCallMethodApply)
+          emit_call_args(
+            e,
+            args,
+            fn(n) { IrFinal(opcode.CallMethod(n)) },
+            IrFinal(opcode.CallMethodApply),
+          )
         }
         _, _ -> {
           use e <- result.try(emit_expr(e, callee))
-          emit_call_args(e, args, opcode.IrCall, IrCallApply)
+          emit_call_args(
+            e,
+            args,
+            fn(n) { IrFinal(opcode.Call(n)) },
+            IrFinal(opcode.CallApply),
+          )
         }
       }
     }
@@ -4718,7 +4769,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Object literal
     ast.ObjectExpression(_, properties) -> {
-      let e = emit_ir(e, IrNewObject)
+      let e = emit_op(e, opcode.NewObject)
       list.try_fold(properties, e, emit_object_property)
     }
 
@@ -4728,7 +4779,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
       let e = emit_super_base(e)
       use e <- result.map(emit_super_key(e, key, computed))
-      emit_ir(e, IrGetSuperValue)
+      emit_op(e, opcode.GetSuperValue)
     }
 
     // Member expression (dot access). A `?.` link anywhere in the object
@@ -4750,7 +4801,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         False -> {
           use e <- result.try(emit_expr(e, object))
           use e <- result.map(emit_expr(e, property))
-          emit_ir(e, IrGetElem)
+          emit_op(e, opcode.GetElem)
         }
       }
     // A non-computed member (`o.x`) whose property is not an Identifier: the
@@ -4808,8 +4859,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // [args, new_target, ctor] — for plain `new`, newTarget == ctor, so Dup.
     ast.NewExpression(_, callee, args) -> {
       use e <- result.try(emit_expr(e, callee))
-      let e = emit_ir(e, IrDup)
-      emit_call_args(e, args, IrCallConstructor, IrCallConstructorApply)
+      let e = emit_op(e, opcode.Dup)
+      emit_call_args(
+        e,
+        args,
+        fn(n) { IrFinal(opcode.CallConstructor(n)) },
+        IrFinal(opcode.CallConstructorApply),
+      )
     }
 
     // Template literal: `text ${expr} more`
@@ -4837,8 +4893,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         // yield point. Sync generators yield the value as-is.
         False ->
           case e.is_async {
-            True -> Ok(emit_ir(emit_ir(e, IrAwait), IrYield))
-            False -> Ok(emit_ir(e, IrYield))
+            True -> Ok(emit_op(emit_ir(e, IrFinal(opcode.Await)), opcode.Yield))
+            False -> Ok(emit_op(e, opcode.Yield))
           }
         True ->
           case e.is_async {
@@ -4848,10 +4904,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
               // self-loop: Next calls iter.next(arg), Await settles result,
               // Resume checks done / yields and jumps back to Next via label.
               // Leaves final result.value on stack.
-              let e = emit_ir(e, IrGetAsyncIterator)
+              let e = emit_op(e, opcode.GetAsyncIterator)
               // Cache [[NextMethod]] once (GetIteratorFromMethod §7.4.4) so
               // the loop doesn't re-Get `next` per step.
-              let e = emit_ir(e, IrIteratorRecord)
+              let e = emit_op(e, opcode.IteratorRecord)
               let e = push_const(e, JsUndefined)
               let #(e, next_label) = fresh_label(e)
               // `after_label` marks the instruction the delegation falls out
@@ -4861,16 +4917,16 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
               let #(e, after_label) = fresh_label(e)
               let e = emit_ir(e, IrLabel(next_label))
               let e = emit_ir(e, IrAsyncYieldStarNext(after_label))
-              let e = emit_ir(e, IrAwait)
+              let e = emit_op(e, opcode.Await)
               let e = emit_ir(e, IrAsyncYieldStarResume(next_label))
               Ok(emit_ir(e, IrLabel(after_label)))
             }
             False -> {
               // Sync yield* — get iterator, seed undefined, self-looping
               // YieldStar handles the rest. Leaves final result.value on stack.
-              let e = emit_ir(e, IrGetIterator)
+              let e = emit_op(e, opcode.GetIterator)
               let e = push_const(e, JsUndefined)
-              Ok(emit_ir(e, IrYieldStar))
+              Ok(emit_op(e, opcode.YieldStar))
             }
           }
       }
@@ -4878,7 +4934,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     ast.AwaitExpression(_, argument) -> {
       use e <- result.map(emit_expr(e, argument))
-      emit_ir(e, IrAwait)
+      emit_op(e, opcode.Await)
     }
 
     // Parenthesized expression — transparent for evaluation, just unwrap
@@ -4888,7 +4944,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.RegExpLiteral(_, pattern, flags) -> {
       let e = push_const(e, JsString(pattern))
       let e = push_const(e, JsString(flags))
-      Ok(emit_ir(e, IrNewRegExp))
+      Ok(emit_op(e, opcode.NewRegExp))
     }
 
     // §13.3.10 ImportCall: import(specifier) / import(specifier, options).
@@ -4902,12 +4958,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
             Some(opts) -> emit_expr(e, opts)
             None -> Ok(push_const(e, JsUndefined))
           })
-          emit_ir(e, opcode.IrDynamicImport)
+          emit_op(e, opcode.DynamicImport)
         }
         // Phase forms (import.source/import.defer) take a single
         // AssignmentExpression — no options argument to push.
-        ast.PhaseSource -> Ok(emit_ir(e, opcode.IrDynamicImportSource))
-        ast.PhaseDefer -> Ok(emit_ir(e, opcode.IrDynamicImportDefer))
+        ast.PhaseSource -> Ok(emit_op(e, opcode.DynamicImportSource))
+        ast.PhaseDefer -> Ok(emit_op(e, opcode.DynamicImportDefer))
       }
     }
 
@@ -4940,7 +4996,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         list.map(quasis, fn(q) {
           opcode.TemplateQuasi(cooked: q.cooked, raw: q.raw)
         })
-      Ok(emit_ir(e, opcode.IrGetTemplateObject(site, quasis)))
+      Ok(emit_op(e, opcode.GetTemplateObject(site, quasis)))
     }
 
     // The two shapes the parser only ever produces INSIDE a construct that
@@ -4981,7 +5037,7 @@ fn emit_template_parts(
       // Emit expression, ToString it (§13.2.8.5 — string hint, NOT the Add
       // operator's default-hint ToPrimitive), then concat with accumulator.
       use e <- result.try(emit_expr(e, expr))
-      let e = emit_ir(e, opcode.IrToStringVal)
+      let e = emit_op(e, opcode.ToStringVal)
       let e = emit_ir(e, IrBinOp(opcode.Add))
       // Emit next quasi string, concat
       let e = push_const(e, JsString(quasi))
@@ -4991,7 +5047,7 @@ fn emit_template_parts(
     // If there are trailing expressions without quasis (shouldn't happen but safe)
     [expr, ..rest_exprs], [] -> {
       use e <- result.try(emit_expr(e, expr))
-      let e = emit_ir(e, opcode.IrToStringVal)
+      let e = emit_op(e, opcode.ToStringVal)
       let e = emit_ir(e, IrBinOp(opcode.Add))
       emit_template_parts(e, rest_exprs, [])
     }
@@ -5055,7 +5111,7 @@ fn emit_switch(
       let #(labels, _consequent) = entry
       case labels {
         TestCase(test_expr:, found:, ..) -> {
-          let e = emit_ir(e, IrDup)
+          let e = emit_op(e, opcode.Dup)
           use e <- result.map(emit_expr(e, test_expr))
           let e = emit_ir(e, IrBinOp(opcode.StrictEq))
           #(emit_ir(e, IrJumpIfTrue(found)), default_lbl)
@@ -5067,7 +5123,7 @@ fn emit_switch(
   )
 
   // No match: pop discriminant and jump to default body or end
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
   let e = emit_ir(e, IrJump(option.unwrap(default_body_label, end_label)))
 
   // Phase 2: Emit trampolines — each pops discriminant and jumps to body
@@ -5077,7 +5133,7 @@ fn emit_switch(
         TestCase(body:, found:, ..) ->
           e
           |> emit_ir(IrLabel(found))
-          |> emit_ir(IrPop)
+          |> emit_op(opcode.Pop)
           |> emit_ir(IrJump(body))
         TestlessCase(..) -> e
       }
@@ -5121,7 +5177,7 @@ fn emit_sequence(
     [only] -> emit_expr(e, only)
     [first, ..rest] -> {
       use e <- result.try(emit_expr(e, first))
-      let e = emit_ir(e, IrPop)
+      let e = emit_op(e, opcode.Pop)
       emit_sequence(e, rest)
     }
   }
@@ -5169,7 +5225,7 @@ fn register_closure(
 ) -> Result(Emitter, EmitError) {
   use #(e, child) <- result.map(compiled)
   let #(e, idx) = add_child_function(e, child)
-  emit_ir(e, IrMakeClosure(idx))
+  emit_op(e, opcode.MakeClosure(idx))
 }
 
 /// Compile a method / getter / setter body into a child function, register
@@ -5309,7 +5365,7 @@ fn emit_object_property(
         method: False,
       ) -> {
       use e <- result.map(emit_expr(e, value))
-      emit_ir(e, IrSetProto)
+      emit_op(e, opcode.SetProto)
     }
 
     // Static key: {name: value}, {"name": value}, or shorthand method {name(){}}
@@ -5337,7 +5393,7 @@ fn emit_object_property(
         // stays a plain (constructible) function value with no home object.
         True -> {
           use e <- result.map(emit_method_value(e, value, Some(name)))
-          let e = emit_ir(e, IrMakeMethod)
+          let e = emit_op(e, opcode.MakeMethod)
           emit_ir(e, IrDefineField(name))
         }
         False -> {
@@ -5376,7 +5432,7 @@ fn emit_object_property(
     // null/undefined sources are no-ops per CopyDataProperties spec.
     ast.SpreadProperty(argument:) -> {
       use e <- result.map(emit_expr(e, argument))
-      emit_ir(e, IrObjectSpread)
+      emit_op(e, opcode.ObjectSpread)
     }
 
     // Remaining non-computed Init with an exotic key expression (shouldn't
@@ -5414,7 +5470,7 @@ fn emit_object_property(
       let #(_, accessor) = property_accessor(kind)
       use e <- result.try(emit_expr(e, key))
       use e <- result.map(emit_method_value(e, value, None))
-      emit_ir(e, IrDefineAccessorComputed(accessor, True))
+      emit_op(e, opcode.DefineAccessorComputed(accessor, True))
     }
   }
 }
@@ -5447,13 +5503,13 @@ fn emit_computed_init_property(
     False -> {
       use e <- result.try(emit_key(e))
       use e <- result.map(emit_expr(e, value))
-      emit_ir(e, IrDefineFieldComputed)
+      emit_op(e, opcode.DefineFieldComputed)
     }
     True -> {
       use e <- result.try(emit_method_value(e, value, None))
-      let e = emit_ir(e, IrMakeMethod)
+      let e = emit_op(e, opcode.MakeMethod)
       use e <- result.map(emit_key(e))
-      emit_ir(emit_ir(e, IrSwap), IrDefineFieldComputed)
+      emit_op(emit_ir(e, IrFinal(opcode.Swap)), opcode.DefineFieldComputed)
     }
   }
 }
@@ -5487,8 +5543,8 @@ fn emit_array_no_spread(
     }),
   )
   case holes_rev {
-    [] -> emit_ir(e, IrArrayFrom(count))
-    _ -> emit_ir(e, IrArrayFromWithHoles(count, list.reverse(holes_rev)))
+    [] -> emit_op(e, opcode.ArrayFrom(count))
+    _ -> emit_op(e, opcode.ArrayFromWithHoles(count, list.reverse(holes_rev)))
   }
 }
 
@@ -5530,15 +5586,15 @@ fn emit_array_with_spread(
     case elem {
       Some(ast.SpreadElement(argument:, ..)) -> {
         use e <- result.map(emit_expr(e, argument))
-        emit_ir(e, IrArraySpread)
+        emit_op(e, opcode.ArraySpread)
       }
       Some(expr) -> {
         use e <- result.map(emit_expr(e, expr))
-        emit_ir(e, IrArrayPush)
+        emit_op(e, opcode.ArrayPush)
       }
       None ->
         // Hole after a spread — increment length without setting element.
-        Ok(emit_ir(e, IrArrayPushHole))
+        Ok(emit_op(e, opcode.ArrayPushHole))
     }
   })
 }
@@ -5652,13 +5708,13 @@ fn emit_for_in(
   // let/const ForDeclaration are in TDZ during this evaluation (§14.7.5.5).
   use e <- result.try(emit_for_head_expr(e, right))
   // ForInStart: pops object, pushes iterator ref
-  let e = emit_ir(e, IrForInStart)
+  let e = emit_op(e, opcode.ForInStart)
 
   let e = push_loop(e, loop_end, loop_continue)
   let e = emit_ir(e, IrLabel(loop_start))
 
   // ForInNext: peeks iterator, pushes key + done
-  let e = emit_ir(e, IrForInNext)
+  let e = emit_op(e, opcode.ForInNext)
   // If done, jump to cleanup (where we pop the unused key)
   let e = emit_ir(e, IrJumpIfTrue(cleanup))
 
@@ -5676,11 +5732,11 @@ fn emit_for_in(
 
   // cleanup: pop the key (done=true left it on stack)
   let e = emit_ir(e, IrLabel(cleanup))
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
 
   // loop_end: pop the iterator
   let e = emit_ir(e, IrLabel(loop_end))
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
 
   let e = pop_frame(e)
   Ok(leave_for_scope(e, save))
@@ -5794,11 +5850,11 @@ fn emit_for_of(
     e,
     left,
     right,
-    IrGetIterator,
+    IrFinal(opcode.GetIterator),
     IterCloseGuard,
   )
   let #(e, exhausted) = fresh_label(e)
-  let e = emit_ir(e, IrIteratorNext)
+  let e = emit_op(e, opcode.IteratorNext)
   // stack: [done, value, iter|undef, ..base], try=[F_body]
   let e = emit_ir(e, IrJumpIfTrue(exhausted))
 
@@ -5815,23 +5871,23 @@ fn emit_for_of(
   // sentinel). IteratorCloseThrow calls .return() iff iter is an object,
   // then rethrows the original — never falls through.
   let e = emit_ir(e, IrLabel(catch_body))
-  let e = emit_ir(e, IrIteratorCloseThrow)
+  let e = emit_op(e, opcode.IteratorCloseThrow)
 
   // exhausted: done=true, stack=[value, undef, ..base], try=[F_body, ..].
   // Spec does NOT close on natural exhaustion — slot is already undef so
   // a hypothetical close would no-op anyway, but we just drop and exit.
   let e = emit_ir(e, IrLabel(exhausted))
-  let e = emit_ir(e, IrPop)
-  let e = emit_ir(e, IrPopTry)
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
+  let e = emit_op(e, opcode.PopTry)
+  let e = emit_op(e, opcode.Pop)
   let e = emit_ir(e, IrJump(end))
 
   // break_target: stack=[iter, ..base], try=[F_body, ..].
   // Normal-completion close: propagates errors from .return() and
   // TypeErrors on non-object return values per §7.4.11.
   let e = emit_ir(e, IrLabel(break_target))
-  let e = emit_ir(e, IrPopTry)
-  let e = emit_ir(e, IrIteratorClose)
+  let e = emit_op(e, opcode.PopTry)
+  let e = emit_op(e, opcode.IteratorClose)
   emit_ir(e, IrJump(end))
 }
 
@@ -5865,7 +5921,7 @@ fn emit_for_await_of(
     e,
     left,
     right,
-    IrGetAsyncIterator,
+    IrFinal(opcode.GetAsyncIterator),
     // §7.4.12 AsyncIteratorClose Awaits the .return() result, which the
     // return-completion unwinder cannot do — so F_body is a plain catch here
     // and the close is open-coded in bytecode below.
@@ -5881,19 +5937,19 @@ fn emit_for_await_of(
   // depth (stack is [iter, ..base]). §14.7.5.6 step 6.a-f: errors here must
   // NOT close the iterator.
   let e = emit_ir(e, IrPushTry(catch_next, CatchOnly))
-  let e = emit_ir(e, IrDup)
+  let e = emit_op(e, opcode.Dup)
   let e = emit_ir(e, IrGetField2("next"))
-  let e = emit_ir(e, IrCallMethod(0))
-  let e = emit_ir(e, IrAwait)
+  let e = emit_op(e, opcode.CallMethod(0))
+  let e = emit_op(e, opcode.Await)
   // §14.7.5.6 step 6.c: awaited next() result must be an Object. Covered by
   // F_next so a non-object correctly does NOT trigger close.
-  let e = emit_ir(e, IrIteratorCheckObject)
+  let e = emit_op(e, opcode.IteratorCheckObject)
   // [result_obj, iter, ..base]
-  let e = emit_ir(e, IrDup)
+  let e = emit_op(e, opcode.Dup)
   let e = emit_ir(e, IrGetField("done"))
   let e = emit_ir(e, IrJumpIfTrue(exhausted))
   let e = emit_ir(e, IrGetField("value"))
-  let e = emit_ir(e, IrPopTry)
+  let e = emit_op(e, opcode.PopTry)
   // [value, iter, ..base], try=[F_body, ..]
   use e <- result.map(emit_for_of_iter_body(
     e,
@@ -5906,37 +5962,37 @@ fn emit_for_await_of(
   // catch_next: next()/Await(next)/.done/.value failed — do NOT close.
   // unwind: depth=B+1 → [thrown, iter, ..base], try=[F_body, ..].
   let e = emit_ir(e, IrLabel(catch_next))
-  let e = emit_ir(e, IrPopTry)
-  let e = emit_ir(e, IrSwap)
-  let e = emit_ir(e, IrPop)
-  let e = emit_ir(e, IrThrow)
+  let e = emit_op(e, opcode.PopTry)
+  let e = emit_op(e, opcode.Swap)
+  let e = emit_op(e, opcode.Pop)
+  let e = emit_op(e, opcode.Throw)
 
   // catch_body: bind/body threw — §7.4.12 throw-completion close.
   // [thrown, iter, ..base], try=[..outer]. F_swallow recorded at depth B+2
   // catches every error from get/call/await; original error always wins.
   let e = emit_ir(e, IrLabel(catch_body))
   let e = emit_ir(e, IrPushTry(rethrow, CatchOnly))
-  let e = emit_ir(e, IrSwap)
+  let e = emit_op(e, opcode.Swap)
   // [iter, thrown, ..base]
   let e = emit_ir(e, IrGetField2("return"))
-  let e = emit_ir(e, IrDup)
+  let e = emit_op(e, opcode.Dup)
   let e = emit_ir(e, IrJumpIfNullish(no_ret_thr))
   // [ret_fn, iter, thrown, ..base]
-  let e = emit_ir(e, IrCallMethod(0))
+  let e = emit_op(e, opcode.CallMethod(0))
   // [result, thrown, ..base] — pad so saved_stack after the Await pop has
   // length B+2 (== F_swallow depth). Reject-unwind then lands at
   // [inner_err, undef, thrown, ..base] = B+3, matching every other path.
   let e = push_const(e, JsUndefined)
-  let e = emit_ir(e, IrSwap)
+  let e = emit_op(e, opcode.Swap)
   // [result, undef, thrown, ..base]
-  let e = emit_ir(e, IrAwait)
+  let e = emit_op(e, opcode.Await)
   // fulfilled → [awaited, undef, thrown, ..base]
-  let e = emit_ir(e, IrPopTry)
+  let e = emit_op(e, opcode.PopTry)
   let e = emit_ir(e, IrJump(rethrow))
 
   let e = emit_ir(e, IrLabel(no_ret_thr))
   // [ret(nullish), iter, thrown, ..base], try=[F_swallow, ..]
-  let e = emit_ir(e, IrPopTry)
+  let e = emit_op(e, opcode.PopTry)
   // fall through
 
   // rethrow: F_swallow catch-target AND merge point. Stack is always
@@ -5944,37 +6000,37 @@ fn emit_for_await_of(
   // slot1 = iter|undef). Spec: original throw completion wins, no object
   // check on the throw path.
   let e = emit_ir(e, IrLabel(rethrow))
-  let e = emit_ir(e, IrPop)
-  let e = emit_ir(e, IrPop)
-  let e = emit_ir(e, IrThrow)
+  let e = emit_op(e, opcode.Pop)
+  let e = emit_op(e, opcode.Pop)
+  let e = emit_op(e, opcode.Throw)
 
   // exhausted: done=true. [result_obj, iter, ..base], try=[F_next, F_body, ..].
   // Spec does NOT close on natural exhaustion.
   let e = emit_ir(e, IrLabel(exhausted))
-  let e = emit_ir(e, IrPop)
-  let e = emit_ir(e, IrPopTry)
-  let e = emit_ir(e, IrPopTry)
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
+  let e = emit_op(e, opcode.PopTry)
+  let e = emit_op(e, opcode.PopTry)
+  let e = emit_op(e, opcode.Pop)
   let e = emit_ir(e, IrJump(end))
 
   // break_target: [iter, ..base], try=[F_body, ..]. §7.4.12 normal-completion
   // close — every error (getter throw, non-callable, call throw, await reject,
   // non-object result) propagates to the enclosing handler.
   let e = emit_ir(e, IrLabel(break_target))
-  let e = emit_ir(e, IrPopTry)
+  let e = emit_op(e, opcode.PopTry)
   let e = emit_ir(e, IrGetField2("return"))
-  let e = emit_ir(e, IrDup)
+  let e = emit_op(e, opcode.Dup)
   let e = emit_ir(e, IrJumpIfNullish(no_ret_brk))
-  let e = emit_ir(e, IrCallMethod(0))
-  let e = emit_ir(e, IrAwait)
-  let e = emit_ir(e, IrIteratorCheckObject)
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.CallMethod(0))
+  let e = emit_op(e, opcode.Await)
+  let e = emit_op(e, opcode.IteratorCheckObject)
+  let e = emit_op(e, opcode.Pop)
   let e = emit_ir(e, IrJump(end))
 
   let e = emit_ir(e, IrLabel(no_ret_brk))
   // [ret(nullish), iter, ..base] — no await per §7.4.12 step 5.b.
-  let e = emit_ir(e, IrPop)
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
+  let e = emit_op(e, opcode.Pop)
   emit_ir(e, IrJump(end))
 }
 
@@ -6098,11 +6154,11 @@ fn emit_default_if_undefined(
   target_name: Option(String),
 ) -> Result(Emitter, EmitError) {
   let #(e, has_val) = fresh_label(e)
-  let e = emit_ir(e, IrDup)
+  let e = emit_op(e, opcode.Dup)
   let e = push_const(e, JsUndefined)
   let e = emit_ir(e, IrBinOp(opcode.StrictEq))
   let e = emit_ir(e, IrJumpIfFalse(has_val))
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
   use e <- result.map(case target_name {
     Some(name) -> emit_named_expr(e, default_expr, name)
     None -> emit_expr(e, default_expr)
@@ -6132,7 +6188,7 @@ fn emit_object_pattern(
   has_rest: Bool,
   emit_prop: fn(Emitter, p, Bool, Int) -> Result(#(Emitter, Int), EmitError),
 ) -> Result(Emitter, EmitError) {
-  let e = emit_ir(e, opcode.IrToObject)
+  let e = emit_op(e, opcode.ToObject)
   use #(e, _n_excl) <- result.map(
     list.try_fold(properties, #(e, 0), fn(acc, prop) {
       let #(e, n) = acc
@@ -6143,7 +6199,7 @@ fn emit_object_pattern(
   // stashed keys. Otherwise src is still on top — drop it.
   case has_rest {
     True -> e
-    False -> emit_ir(e, IrPop)
+    False -> emit_op(e, opcode.Pop)
   }
 }
 
@@ -6172,7 +6228,7 @@ fn emit_single_object_prop(
         ..,
       ) -> {
       // [src,..] → Dup → [src,src,..] → GetField → [val,src,..] → bind → [src,..]
-      let e = emit_ir(e, IrDup)
+      let e = emit_op(e, opcode.Dup)
       let e = emit_ir(e, IrGetField(name))
       use e <- result.map(emit_destructuring_bind(e, value, binding_kind))
       // Stash key string beneath src for later exclusion.
@@ -6180,7 +6236,7 @@ fn emit_single_object_prop(
         False -> #(e, n_excl)
         True -> {
           let e = push_const(e, JsString(name))
-          #(emit_ir(e, IrSwap), n_excl + 1)
+          #(emit_op(e, opcode.Swap), n_excl + 1)
         }
       }
     }
@@ -6218,7 +6274,7 @@ fn emit_single_object_prop(
     // {a, b, ...rest} — §13.15.5.3 RestBindingInitialization.
     // Stack: [src, key_n,..,key_1] → ObjectRestCopy(n) → [rest_obj] → bind.
     ast.RestProperty(argument) -> {
-      let e = emit_ir(e, IrObjectRestCopy(n_excl))
+      let e = emit_op(e, opcode.ObjectRestCopy(n_excl))
       use e <- result.map(emit_destructuring_bind(e, argument, binding_kind))
       #(e, 0)
     }
@@ -6242,22 +6298,22 @@ fn emit_computed_key_prop(
   has_rest: Bool,
   n_excl: Int,
 ) -> Result(#(Emitter, Int), EmitError) {
-  let e = emit_ir(e, IrDup)
+  let e = emit_op(e, opcode.Dup)
   use e <- result.try(emit_key(e))
   case has_rest {
     False -> {
-      let e = emit_ir(e, IrGetElem)
+      let e = emit_op(e, opcode.GetElem)
       use e <- result.map(emit_destructuring_bind(e, inner, binding_kind))
       #(e, n_excl)
     }
     True -> {
-      let e = emit_ir(e, IrGetElem2)
+      let e = emit_op(e, opcode.GetElem2)
       use e <- result.map(emit_destructuring_bind(e, inner, binding_kind))
       // [k,src,src,..] → swap → [src,k,src,..] → pop → [k,src,..]
       // → swap → [src,k,..]
-      let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, IrPop)
-      #(emit_ir(e, IrSwap), n_excl + 1)
+      let e = emit_op(e, opcode.Swap)
+      let e = emit_op(e, opcode.Pop)
+      #(emit_op(e, opcode.Swap), n_excl + 1)
     }
   }
 }
@@ -6292,24 +6348,24 @@ fn emit_destructuring_assign(
       let e =
         e
         |> get_this
-        |> emit_ir(IrSwap)
+        |> emit_op(opcode.Swap)
         |> get_lexical(opcode.RefHomeObject)
-        |> emit_ir(IrGetPrototypeOf)
-        |> emit_ir(IrSwap)
+        |> emit_op(opcode.GetPrototypeOf)
+        |> emit_op(opcode.Swap)
       use e <- result.map(emit_super_key(e, key, computed))
       e
-      |> emit_ir(IrSwap)
-      |> emit_ir(IrPutSuperValue)
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.Swap)
+      |> emit_op(opcode.PutSuperValue)
+      |> emit_op(opcode.Pop)
     }
 
     // obj.prop — stack [val] → eval obj → [obj,val] → swap → [val,obj]
     // → PutField → [val] → Pop. (PutField pops [value,obj], leaves value.)
     Some(#(obj, prop)), _ -> {
       use e <- result.map(emit_expr(e, obj))
-      let e = emit_ir(e, IrSwap)
+      let e = emit_op(e, opcode.Swap)
       let e = emit_put_field(e, prop)
-      emit_ir(e, IrPop)
+      emit_op(e, opcode.Pop)
     }
 
     // obj[key] — PutElem wants [val,key,obj]. With only Dup/Swap (no rot3):
@@ -6317,11 +6373,11 @@ fn emit_destructuring_assign(
     // → swap → [val,key,obj] → PutElem → [val] → Pop.
     _, ast.MemberExpression(_, obj, key, True) -> {
       use e <- result.try(emit_expr(e, obj))
-      let e = emit_ir(e, IrSwap)
+      let e = emit_op(e, opcode.Swap)
       use e <- result.map(emit_expr(e, key))
-      let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, IrPutElem)
-      emit_ir(e, IrPop)
+      let e = emit_op(e, opcode.Swap)
+      let e = emit_op(e, opcode.PutElem)
+      emit_op(e, opcode.Pop)
     }
 
     // target = default  (AssignmentElement with Initializer, §13.15.5.3)
@@ -6362,16 +6418,16 @@ fn emit_destructuring_assign(
     // consumed-value invariant for static bookkeeping.
     _, ast.CallExpression(..) as call -> {
       use e <- result.map(emit_expr(e, call))
-      let e = emit_ir(e, IrPop)
+      let e = emit_op(e, opcode.Pop)
       let e =
-        emit_ir(
+        emit_op(
           e,
-          IrThrowError(
+          opcode.ThrowError(
             opcode.ReferenceErrorKind,
             "Invalid left-hand side in assignment",
           ),
         )
-      emit_ir(e, IrPop)
+      emit_op(e, opcode.Pop)
     }
 
     // §13.15.5 early error: DestructuringAssignmentTargetType must be
@@ -6422,8 +6478,8 @@ fn emit_array_assign_element(
     // arms below are shaped around a single evaluated base object). Only a
     // COMPUTED super key deviates from lref-before-step order.
     _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
-      let e = emit_ir(e, IrIteratorNext)
-      let e = emit_ir(e, IrPop)
+      let e = emit_op(e, opcode.IteratorNext)
+      let e = emit_op(e, opcode.Pop)
       emit_destructuring_assign(e, target)
     }
     // obj.prop — [iter] → obj → [obj,iter] → Swap → [iter,obj]
@@ -6433,13 +6489,13 @@ fn emit_array_assign_element(
     Some(#(obj, prop)), _ -> {
       use e <- result.map(emit_expr(e, obj))
       e
-      |> emit_ir(IrSwap)
-      |> emit_ir(IrIteratorNext)
-      |> emit_ir(IrPop)
-      |> emit_ir(opcode.IrRot3)
-      |> emit_ir(IrSwap)
+      |> emit_op(opcode.Swap)
+      |> emit_op(opcode.IteratorNext)
+      |> emit_op(opcode.Pop)
+      |> emit_op(opcode.Rot3)
+      |> emit_op(opcode.Swap)
       |> emit_put_field(prop)
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.Pop)
     }
     // obj[key] — the key's ToPropertyKey stays deferred to PutElem
     // (§13.15.5.6: PutValue runs after the iterator step). [iter] → obj
@@ -6450,19 +6506,19 @@ fn emit_array_assign_element(
       use e <- result.try(emit_expr(e, obj))
       use e <- result.map(emit_expr(e, key))
       e
-      |> emit_ir(opcode.IrRot3)
-      |> emit_ir(IrIteratorNext)
-      |> emit_ir(IrPop)
-      |> emit_ir(IrSwap)
-      |> emit_ir(opcode.IrUnrot4)
-      |> emit_ir(IrPutElem)
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.Rot3)
+      |> emit_op(opcode.IteratorNext)
+      |> emit_op(opcode.Pop)
+      |> emit_op(opcode.Swap)
+      |> emit_op(opcode.Unrot4)
+      |> emit_op(opcode.PutElem)
+      |> emit_op(opcode.Pop)
     }
     // Identifiers, nested patterns, defaults: step first, then assign.
     _, _ -> {
-      let e = emit_ir(e, IrIteratorNext)
+      let e = emit_op(e, opcode.IteratorNext)
       // [done, value, iter] — discard done, assign value.
-      let e = emit_ir(e, IrPop)
+      let e = emit_op(e, opcode.Pop)
       emit_destructuring_assign(e, target)
     }
   }
@@ -6489,8 +6545,8 @@ fn emit_array_assign_rest(
     // emit_array_assign_element: no observable lref evaluation, so drain
     // first and let emit_destructuring_assign build the super store.
     _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
-      let e = emit_ir(e, IrPopTry)
-      let e = emit_ir(e, IrIteratorRest)
+      let e = emit_op(e, opcode.PopTry)
+      let e = emit_op(e, opcode.IteratorRest)
       use e <- result.map(emit_destructuring_assign(e, target))
       #(e, True)
     }
@@ -6500,11 +6556,11 @@ fn emit_array_assign_rest(
     // → [arr,obj] → PutField → [arr] → Pop.
     Some(#(obj, prop)), _ -> {
       use e <- result.map(emit_expr(e, obj))
-      let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, IrPopTry)
-      let e = emit_ir(e, IrIteratorRest)
+      let e = emit_op(e, opcode.Swap)
+      let e = emit_op(e, opcode.PopTry)
+      let e = emit_op(e, opcode.IteratorRest)
       let e = emit_put_field(e, prop)
-      #(emit_ir(e, IrPop), True)
+      #(emit_op(e, opcode.Pop), True)
     }
     // obj[key] — obj AND key evaluate before draining. The key may throw, so
     // after tucking obj beneath iter the original F_body frame's recorded
@@ -6514,23 +6570,23 @@ fn emit_array_assign_rest(
     // → IteratorRest → [arr,key,obj] → PutElem → [arr] → Pop.
     _, ast.MemberExpression(_, obj, key, True) -> {
       use e <- result.try(emit_expr(e, obj))
-      let e = emit_ir(e, IrPopTry)
-      let e = emit_ir(e, IrSwap)
+      let e = emit_op(e, opcode.PopTry)
+      let e = emit_op(e, opcode.Swap)
       let e = emit_ir(e, IrPushTry(close_throw, IterCloseGuard))
       use e <- result.map(emit_expr(e, key))
-      let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, IrPopTry)
-      let e = emit_ir(e, IrIteratorRest)
-      let e = emit_ir(e, IrPutElem)
-      #(emit_ir(e, IrPop), True)
+      let e = emit_op(e, opcode.Swap)
+      let e = emit_op(e, opcode.PopTry)
+      let e = emit_op(e, opcode.IteratorRest)
+      let e = emit_op(e, opcode.PutElem)
+      #(emit_op(e, opcode.Pop), True)
     }
     // Identifier targets (no observable Reference side effects) and nested
     // array/object patterns (spec drains into A first, §13.15.5.5 step 4):
     // drain, then bind/destructure.
     _, other -> {
       // [iter], try=[F_body,..] → PopTry → IteratorRest → [arr]
-      let e = emit_ir(e, IrPopTry)
-      let e = emit_ir(e, IrIteratorRest)
+      let e = emit_op(e, opcode.PopTry)
+      let e = emit_op(e, opcode.IteratorRest)
       use e <- result.map(emit_destructuring_assign(e, other))
       #(e, True)
     }
@@ -6564,13 +6620,13 @@ fn emit_single_object_assign_prop(
             False -> #(e, n_excl)
             True -> {
               let e = push_const(e, JsString(name))
-              #(emit_ir(e, IrSwap), n_excl + 1)
+              #(emit_op(e, opcode.Swap), n_excl + 1)
             }
           }
         }
         Error(Nil) -> {
           // Non-stringifiable static key — fall through to computed-key path.
-          let e = emit_ir(e, IrDup)
+          let e = emit_op(e, opcode.Dup)
           use e <- result.try(emit_expr(e, key))
           emit_elem_key_assign(e, value, has_rest, n_excl)
         }
@@ -6585,12 +6641,12 @@ fn emit_single_object_assign_prop(
       method: False,
       ..,
     ) -> {
-      let e = emit_ir(e, IrDup)
+      let e = emit_op(e, opcode.Dup)
       use e <- result.try(emit_expr(e, key))
       // §13.2.5.4 ComputedPropertyName: ToPropertyKey fires eagerly at
       // PropertyName evaluation — observably BEFORE the target reference
       // is evaluated (keyed-destructuring evaluation-order tests).
-      let e = emit_ir(e, opcode.IrToPropertyKey)
+      let e = emit_op(e, opcode.ToPropertyKey)
       emit_elem_key_assign(e, value, has_rest, n_excl)
     }
 
@@ -6603,7 +6659,7 @@ fn emit_single_object_assign_prop(
     // {a, b, ...target} — §13.15.5.4 RestDestructuringAssignmentEvaluation.
     // Stack: [src, key_n,..,key_1] → ObjectRestCopy(n) → [rest_obj] → assign.
     ast.SpreadProperty(argument) -> {
-      let e = emit_ir(e, IrObjectRestCopy(n_excl))
+      let e = emit_op(e, opcode.ObjectRestCopy(n_excl))
       use e <- result.map(emit_destructuring_assign(e, argument))
       #(e, 0)
     }
@@ -6629,41 +6685,41 @@ fn emit_keyed_destructure_assign(
     // super.p / super[k] target: no observable lref evaluation, so GetV
     // first and let emit_destructuring_assign build the super store.
     _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
-      let e = emit_ir(e, IrDup)
+      let e = emit_op(e, opcode.Dup)
       let e = emit_ir(e, IrGetField(name))
       emit_destructuring_assign(e, target)
     }
     // [src] → Dup → [src,src] → obj → [obj,src,src] → Swap → [src,obj,src]
     // → GetField → [v,obj,src] → Put → [v,src] → Pop → [src].
     Some(#(obj, prop)), _ -> {
-      let e = emit_ir(e, IrDup)
+      let e = emit_op(e, opcode.Dup)
       use e <- result.map(emit_expr(e, obj))
       e
-      |> emit_ir(IrSwap)
+      |> emit_op(opcode.Swap)
       |> emit_ir(IrGetField(name))
       |> emit_put_field(prop)
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.Pop)
     }
     // obj[key]: [src] → Dup → [src,src] → obj → [obj,src,src] → Swap →
     // [src,obj,src] → key → [key,src,obj,src] → Swap → [src,key,obj,src] →
     // GetField → [v,key,obj,src] → PutElem → [v,src] → Pop → [src].
     // base→key→GetV order matches §13.3.2.1 + §13.15.5.6 step 1a.
     _, ast.MemberExpression(_, obj, key, True) -> {
-      let e = emit_ir(e, IrDup)
+      let e = emit_op(e, opcode.Dup)
       use e <- result.try(emit_expr(e, obj))
-      let e = emit_ir(e, IrSwap)
+      let e = emit_op(e, opcode.Swap)
       use e <- result.map(emit_expr(e, key))
       e
-      |> emit_ir(IrSwap)
+      |> emit_op(opcode.Swap)
       |> emit_ir(IrGetField(name))
-      |> emit_ir(IrPutElem)
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.PutElem)
+      |> emit_op(opcode.Pop)
     }
     // Identifier / nested pattern / default targets keep GetV-first — that's
     // spec-correct: step 1 only applies when target is NOT a pattern, and
     // Identifier lref evaluation has no observable effect ahead of GetV.
     _, _ -> {
-      let e = emit_ir(e, IrDup)
+      let e = emit_op(e, opcode.Dup)
       let e = emit_ir(e, IrGetField(name))
       emit_destructuring_assign(e, target)
     }
@@ -6688,11 +6744,11 @@ fn emit_elem_key_assign(
       #(e, n_excl)
     }
     True -> {
-      let e = emit_ir(e, IrGetElem2)
+      let e = emit_op(e, opcode.GetElem2)
       use e <- result.map(emit_destructuring_assign(e, value))
-      let e = emit_ir(e, IrSwap)
-      let e = emit_ir(e, IrPop)
-      #(emit_ir(e, IrSwap), n_excl + 1)
+      let e = emit_op(e, opcode.Swap)
+      let e = emit_op(e, opcode.Pop)
+      #(emit_op(e, opcode.Swap), n_excl + 1)
     }
   }
 }
@@ -6713,7 +6769,7 @@ fn emit_elem_keyed_target(
     // super.p / super[k] target: no observable lref evaluation — get the
     // source value and let emit_destructuring_assign build the super store.
     _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
-      let e = emit_ir(e, IrGetElem)
+      let e = emit_op(e, opcode.GetElem)
       emit_destructuring_assign(e, target)
     }
     // [key,srcd,src] → tobj → [tobj,key,srcd,src] → unrot3
@@ -6723,9 +6779,9 @@ fn emit_elem_keyed_target(
       use e <- result.map(emit_expr(e, tobj))
       e
       |> emit_unrot3
-      |> emit_ir(IrGetElem)
+      |> emit_op(opcode.GetElem)
       |> emit_put_field(prop)
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.Pop)
     }
     // [key,srcd,src] → tobj → unrot3 → [key,srcd,tobj,src] → tkey → unrot3
     // → [key,srcd,tkey,tobj,src] → GetElem → [v,tkey,tobj,src]
@@ -6736,9 +6792,9 @@ fn emit_elem_keyed_target(
       use e <- result.map(emit_expr(e, tkey))
       e
       |> emit_unrot3
-      |> emit_ir(IrGetElem)
-      |> emit_ir(IrPutElem)
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.GetElem)
+      |> emit_op(opcode.PutElem)
+      |> emit_op(opcode.Pop)
     }
     // target = default with a member target: lref first, get, then the
     // default check, then PutValue.
@@ -6747,7 +6803,7 @@ fn emit_elem_keyed_target(
         // Super member with a default: handled by the generic path (the
         // lref has no observable evaluation).
         ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
-          let e = emit_ir(e, IrGetElem)
+          let e = emit_op(e, opcode.GetElem)
           emit_destructuring_assign(e, assign)
         }
         ast.MemberExpression(..) as member -> {
@@ -6759,14 +6815,14 @@ fn emit_elem_keyed_target(
           Ok(e)
         }
         _ -> {
-          let e = emit_ir(e, IrGetElem)
+          let e = emit_op(e, opcode.GetElem)
           emit_destructuring_assign(e, assign)
         }
       }
     // Identifiers and nested patterns: get first (patterns skip step 1a;
     // identifier lrefs have no observable evaluation).
     _, other -> {
-      let e = emit_ir(e, IrGetElem)
+      let e = emit_op(e, opcode.GetElem)
       emit_destructuring_assign(e, other)
     }
   }
@@ -6786,21 +6842,21 @@ fn emit_elem_keyed_member_default(
     Some(#(tobj, prop)), _ -> {
       use e <- result.map(emit_expr(e, tobj))
       let e = emit_unrot3(e)
-      #(emit_ir(e, IrGetElem), emit_put_field(_, prop))
+      #(emit_op(e, opcode.GetElem), emit_put_field(_, prop))
     }
     _, ast.MemberExpression(_, tobj, tkey, True) -> {
       use e <- result.try(emit_expr(e, tobj))
       let e = emit_unrot3(e)
       use e <- result.map(emit_expr(e, tkey))
       let e = emit_unrot3(e)
-      #(emit_ir(e, IrGetElem), emit_ir(_, IrPutElem))
+      #(emit_op(e, opcode.GetElem), emit_op(_, opcode.PutElem))
     }
     // Only MemberExpression targets reach here, and the two arms above cover
     // static and computed keys.
     _, _ -> Error(NonMemberDefaultTarget)
   })
   use e <- result.map(emit_default_if_undefined(e, default_expr, None))
-  emit_ir(put(e), IrPop)
+  emit_op(put(e), opcode.Pop)
 }
 
 /// [a, b, c, ..] → [b, c, a, ..] — send the top element down two (Rot3
@@ -6808,8 +6864,8 @@ fn emit_elem_keyed_member_default(
 /// stack slots.
 fn emit_unrot3(e: Emitter) -> Emitter {
   e
-  |> emit_ir(opcode.IrRot3)
-  |> emit_ir(opcode.IrRot3)
+  |> emit_op(opcode.Rot3)
+  |> emit_op(opcode.Rot3)
 }
 
 /// Static property-key → string for non-computed object pattern keys.
@@ -6842,7 +6898,7 @@ fn with_iterator_scaffold(
   let #(e, done_label) = fresh_label(e)
   // [source] → [iter]. PushTry immediately after so the recorded stack_depth
   // has iter on top — unwind_to_catch will leave [thrown, iter, ..].
-  let e = emit_ir(e, IrGetIterator)
+  let e = emit_op(e, opcode.GetIterator)
   let e = emit_ir(e, IrPushTry(close_throw, IterCloseGuard))
   use #(e, rested) <- result.map(emit_elements(e, close_throw))
   let e = case rested {
@@ -6857,14 +6913,14 @@ fn with_iterator_scaffold(
       // exhausted iterators — a no-op for builtins, observable only on user
       // iters with .return.
       e
-      |> emit_ir(IrPopTry)
-      |> emit_ir(IrIteratorClose)
+      |> emit_op(opcode.PopTry)
+      |> emit_op(opcode.IteratorClose)
       |> emit_ir(IrJump(done_label))
   }
   // Abrupt: [thrown, iter, ..]. CloseThrow swallows .return() result/error
   // and rethrows the original (§7.4.11 step 5).
   let e = emit_ir(e, IrLabel(close_throw))
-  let e = emit_ir(e, IrIteratorCloseThrow)
+  let e = emit_op(e, opcode.IteratorCloseThrow)
   emit_ir(e, IrLabel(done_label))
 }
 
@@ -6883,7 +6939,11 @@ fn emit_array_pattern_elements(
     [] -> Ok(#(e, False))
     // Hole: step iterator, discard [done, value] → [iter].
     [None, ..rest] -> {
-      let e = e |> emit_ir(IrIteratorNext) |> emit_ir(IrPop) |> emit_ir(IrPop)
+      let e =
+        e
+        |> emit_op(opcode.IteratorNext)
+        |> emit_op(opcode.Pop)
+        |> emit_op(opcode.Pop)
       emit_array_pattern_elements(e, rest, emit_one)
     }
     [Some(el), ..rest] -> {
@@ -6908,13 +6968,13 @@ fn emit_array_elements(
     // first so those throws propagate directly past the close guard.
     // [iter], try=[F_body,..] → PopTry → IteratorRest → [arr] → bind.
     ast.RestElement(argument:) -> {
-      let e = e |> emit_ir(IrPopTry) |> emit_ir(IrIteratorRest)
+      let e = e |> emit_op(opcode.PopTry) |> emit_op(opcode.IteratorRest)
       use e <- result.map(emit_destructuring_bind(e, argument, binding_kind))
       #(e, True)
     }
     pattern -> {
       // [iter] → IteratorNext → [done, value, iter] → Pop → bind value.
-      let e = e |> emit_ir(IrIteratorNext) |> emit_ir(IrPop)
+      let e = e |> emit_op(opcode.IteratorNext) |> emit_op(opcode.Pop)
       use e <- result.map(emit_destructuring_bind(e, pattern, binding_kind))
       #(e, False)
     }
@@ -7007,7 +7067,7 @@ fn emit_logical_assign(
         let e = emit_var_ref_get(e, ref)
         let e = emit_short_circuit_test(e, op, end_label)
         // Test passed: drop the old value, evaluate RHS, write, leave RHS.
-        let e = emit_ir(e, IrPop)
+        let e = emit_op(e, opcode.Pop)
         emit_named_expr(e, right, name)
       })
       |> result.map(emit_ir(_, IrLabel(end_label)))
@@ -7024,8 +7084,8 @@ fn emit_logical_assign(
     _, ast.MemberExpression(_, obj, key, True) -> {
       use e <- result.try(emit_expr(e, obj))
       use e <- result.try(emit_expr(e, key))
-      let e = emit_ir(e, IrGetElem2)
-      emit_logical_assign_member(e, op, right, emit_ir(_, IrPutElem), 2)
+      let e = emit_op(e, opcode.GetElem2)
+      emit_logical_assign_member(e, op, right, emit_op(_, opcode.PutElem), 2)
     }
     // The parser rejects non-simple logical-assignment targets, so this
     // should only ever be a target shape the emitter can't lower yet.
@@ -7046,7 +7106,7 @@ fn emit_logical_assign_member(
   let #(e, short_label) = fresh_label(e)
   let #(e, end_label) = fresh_label(e)
   let e = emit_short_circuit_test(e, op, short_label)
-  let e = emit_ir(e, IrPop)
+  let e = emit_op(e, opcode.Pop)
   use e <- result.map(emit_expr(e, right))
   e
   |> put
@@ -7065,7 +7125,7 @@ fn emit_short_circuit_test(
   op: ast.LogicalOp,
   short_label: Int,
 ) -> Emitter {
-  let e = emit_ir(e, IrDup)
+  let e = emit_op(e, opcode.Dup)
   case op {
     ast.LogicalAnd -> emit_ir(e, IrJumpIfFalse(short_label))
     ast.LogicalOr -> emit_ir(e, IrJumpIfTrue(short_label))
@@ -7140,7 +7200,7 @@ fn compile_class(
   // InitializeBinding(classBinding, F)).
   let e =
     list.fold(private_names, e, fn(e, pname) {
-      e |> emit_ir(IrNewPrivateName(pname)) |> emit_var_init(pname)
+      e |> emit_op(opcode.NewPrivateName(pname)) |> emit_var_init(pname)
     })
   let element_keys = ast_util.computed_element_keys(body)
   let body = stash_computed_element_keys(body)
@@ -7155,7 +7215,7 @@ fn compile_class(
   // (computed keys above can't see it) but BEFORE static element evaluation,
   // so `class C { static x = C }` sees the constructor.
   let e = case binding_name {
-    Some(n) -> e |> emit_ir(IrDup) |> emit_var_init(n)
+    Some(n) -> e |> emit_op(opcode.Dup) |> emit_var_init(n)
     None -> e
   }
   let e = emit_call_static_init(e, static_init_idx)
@@ -7247,8 +7307,8 @@ fn compile_class_body(
       // SetupDerivedClass → [ctor] (wires prototype chain + [[HomeObject]]).
       use e <- result.map(emit_expr(e, parent_expr))
       e
-      |> emit_ir(IrMakeClosure(ctor_idx))
-      |> emit_ir(IrSetupDerivedClass)
+      |> emit_op(opcode.MakeClosure(ctor_idx))
+      |> emit_op(opcode.SetupDerivedClass)
     }
     None ->
       // MakeClosure (creates .prototype + .prototype.constructor) → [ctor].
@@ -7257,13 +7317,13 @@ fn compile_class_body(
       // (Object.prototype).
       Ok(
         e
-        |> emit_ir(IrMakeClosure(ctor_idx))
-        |> emit_ir(IrDup)
+        |> emit_op(opcode.MakeClosure(ctor_idx))
+        |> emit_op(opcode.Dup)
         |> emit_ir(IrGetField("prototype"))
-        |> emit_ir(IrSwap)
-        |> emit_ir(IrMakeMethod)
-        |> emit_ir(IrSwap)
-        |> emit_ir(IrPop),
+        |> emit_op(opcode.Swap)
+        |> emit_op(opcode.MakeMethod)
+        |> emit_op(opcode.Swap)
+        |> emit_op(opcode.Pop),
       )
   })
 
@@ -7279,7 +7339,7 @@ fn compile_class_body(
       let #(idx, key) = pair
       use e <- result.map(emit_expr(e, key))
       e
-      |> emit_ir(opcode.IrToPropertyKey)
+      |> emit_op(opcode.ToPropertyKey)
       |> emit_var_init(ast_util.computed_field_const(idx))
     }),
   )
@@ -7383,12 +7443,12 @@ fn emit_attach_field_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
     None -> push_const(e, JsUndefined)
     Some(idx) ->
       e
-      |> emit_ir(IrDup)
+      |> emit_op(opcode.Dup)
       |> emit_ir(IrGetField("prototype"))
-      |> emit_ir(IrMakeClosure(idx))
-      |> emit_ir(IrMakeMethod)
-      |> emit_ir(IrSwap)
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.MakeClosure(idx))
+      |> emit_op(opcode.MakeMethod)
+      |> emit_op(opcode.Swap)
+      |> emit_op(opcode.Pop)
   }
   |> emit_var_init(class_fields_init)
 }
@@ -7400,13 +7460,13 @@ fn with_method_target(
   on_prototype: Bool,
   body: fn(Emitter) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
-  let e = emit_ir(e, IrDup)
+  let e = emit_op(e, opcode.Dup)
   let e = case on_prototype {
     True -> emit_ir(e, IrGetField("prototype"))
     False -> e
   }
   use e <- result.map(body(e))
-  emit_ir(e, IrPop)
+  emit_op(e, opcode.Pop)
 }
 
 /// Define a list of class methods on the constructor (`on_prototype: False`)
@@ -7452,17 +7512,20 @@ fn emit_class_methods(
         is_gen,
         is_async,
       ))
-      let e = emit_ir(e, IrMakeMethod)
+      let e = emit_op(e, opcode.MakeMethod)
       let e = case on_prototype {
         True -> emit_var_init(e, ast_util.private_fn_const(kind, name))
         False -> {
           let define = case kind {
-            ast.MethodGet -> IrDefinePrivateAccessor(opcode.Getter)
-            ast.MethodSet -> IrDefinePrivateAccessor(opcode.Setter)
-            ast.MethodMethod | ast.MethodConstructor -> IrDefinePrivateMethod
+            ast.MethodGet ->
+              IrFinal(opcode.DefinePrivateAccessor(opcode.Getter))
+            ast.MethodSet ->
+              IrFinal(opcode.DefinePrivateAccessor(opcode.Setter))
+            ast.MethodMethod | ast.MethodConstructor ->
+              IrFinal(opcode.DefinePrivateMethod)
           }
           emit_var_get(e, name)
-          |> emit_ir(IrSwap)
+          |> emit_op(opcode.Swap)
           |> emit_ir(define)
         }
       }
@@ -7546,13 +7609,13 @@ fn emit_class_methods(
       ))
       case kind {
         ast.MethodGet ->
-          emit_ir(e, IrDefineAccessorComputed(opcode.Getter, False))
+          emit_op(e, opcode.DefineAccessorComputed(opcode.Getter, False))
         ast.MethodSet ->
-          emit_ir(e, IrDefineAccessorComputed(opcode.Setter, False))
+          emit_op(e, opcode.DefineAccessorComputed(opcode.Setter, False))
         // MethodConstructor is filtered out by classify_class_body before we
         // get here; treat as a plain method defensively rather than crashing.
         ast.MethodMethod | ast.MethodConstructor ->
-          emit_ir(e, IrDefineMethodComputed)
+          emit_op(e, opcode.DefineMethodComputed)
       }
     }
   }
@@ -7566,11 +7629,11 @@ fn emit_call_static_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
     None -> e
     Some(idx) ->
       e
-      |> emit_ir(IrDup)
-      |> emit_ir(IrMakeClosure(idx))
-      |> emit_ir(IrMakeMethod)
-      |> emit_ir(IrCallMethod(0))
-      |> emit_ir(IrPop)
+      |> emit_op(opcode.Dup)
+      |> emit_op(opcode.MakeClosure(idx))
+      |> emit_op(opcode.MakeMethod)
+      |> emit_op(opcode.CallMethod(0))
+      |> emit_op(opcode.Pop)
   }
 }
 

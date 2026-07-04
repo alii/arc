@@ -8,34 +8,12 @@ import arc/vm/binop
 import arc/vm/internal/tuple_array
 import arc/vm/key
 import arc/vm/opcode.{
-  type IrOp, type Op, IrArrayFrom, IrArrayFromWithHoles, IrArrayPush,
-  IrArrayPushHole, IrArraySpread, IrAsyncYieldStarNext, IrAsyncYieldStarResume,
-  IrAwait, IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor,
-  IrCallConstructorApply, IrCallEval, IrCallMethod, IrCallMethodApply,
-  IrCmpLocalConstJump, IrCmpLocalLocalJump, IrCreateArguments, IrCreateRestArray,
-  IrDecLocal, IrDeclareEvalVar, IrDeclareGlobalLex, IrDeclareGlobalVar,
-  IrDefineAccessor, IrDefineAccessorComputed, IrDefineField,
-  IrDefineFieldComputed, IrDefineMethod, IrDefineMethodComputed,
-  IrDefinePrivateAccessor, IrDefinePrivateField, IrDefinePrivateMethod,
-  IrDeleteElem, IrDeleteField, IrDeleteGlobalVar, IrDup, IrForInNext,
-  IrForInStart, IrGetAsyncIterator, IrGetBoxed, IrGetElem, IrGetElem2,
-  IrGetEvalVar, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator, IrGetLocal,
-  IrGetPrivateField, IrGetPrivateField2, IrGetPrivateFieldDyn,
-  IrGetPrivateFieldDyn2, IrGetPrototypeOf, IrGetSuperValue, IrGetSuperValue2,
-  IrGetTemplateObject, IrGosub, IrIncLocal, IrInitGlobalLex, IrInitialYield,
-  IrIteratorCheckObject, IrIteratorClose, IrIteratorCloseThrow, IrIteratorNext,
-  IrIteratorRecord, IrIteratorRest, IrJump, IrJumpIfFalse, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrMakeClosure, IrMakeMethod, IrNewObject,
-  IrNewPrivateName, IrNewRegExp, IrObjectRestCopy, IrObjectSpread, IrPop,
-  IrPopTry, IrPrivateIn, IrPrivateInDyn, IrPushConst, IrPushTry, IrPutBoxed,
-  IrPutBoxedCheckInit, IrPutElem, IrPutEvalVar, IrPutField, IrPutGlobal,
-  IrPutLocal, IrPutLocalCheckInit, IrPutPrivateField, IrPutPrivateFieldDyn,
-  IrPutSuperValue, IrRet, IrReturn, IrRot3, IrSetLine, IrSetProto,
-  IrSetupDerivedClass, IrSwap, IrThrow, IrThrowConstAssign, IrThrowError,
-  IrToObject, IrToPropertyKey, IrToStringVal, IrTypeOf, IrTypeofEvalVar,
-  IrTypeofGlobal, IrUnaryOp, IrUnrot4, IrWithDeleteVar, IrWithGetRefValue,
-  IrWithGetVar, IrWithGetVarThis, IrWithMakeRef, IrWithPutRefValue, IrWithPutVar,
-  IrYield, IrYieldStar,
+  type IrOp, type Op, IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrBinOp,
+  IrCmpLocalConstJump, IrCmpLocalLocalJump, IrDefineAccessor, IrDefineField,
+  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
+  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
+  IrPutField, IrWithDeleteVar, IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis,
+  IrWithMakeRef, IrWithPutRefValue, IrWithPutVar,
 }
 import arc/vm/value.{type JsValue}
 import gleam/dict.{type Dict}
@@ -94,20 +72,20 @@ fn peephole(
 
     // -- Pattern 1/2: postfix update statement on a plain local ----------
     [
-      IrGetLocal(i),
-      IrUnaryOp(opcode.Pos),
-      IrDup,
-      IrPushConst(c),
+      IrFinal(opcode.GetLocal(i)),
+      IrFinal(opcode.UnaryOp(opcode.Pos)),
+      IrFinal(opcode.Dup),
+      IrFinal(opcode.PushConst(c)),
       IrBinOp(kind),
-      IrPutLocal(j),
-      IrPop,
+      IrFinal(opcode.PutLocal(j)),
+      IrFinal(opcode.Pop),
       ..rest
     ]
       if i == j
     -> {
       let fused = case is_const_one(consts, c), kind {
-        True, opcode.Add -> Some(IrIncLocal(i))
-        True, opcode.Sub -> Some(IrDecLocal(i))
+        True, opcode.Add -> Some(IrFinal(opcode.IncLocal(i)))
+        True, opcode.Sub -> Some(IrFinal(opcode.DecLocal(i)))
         _, _ -> None
       }
       case fused {
@@ -115,11 +93,11 @@ fn peephole(
         // Non-±1 update: still drop the dead Dup/Pop pair.
         None ->
           peephole(rest, consts, [
-            IrPutLocal(j),
+            IrFinal(opcode.PutLocal(j)),
             IrBinOp(kind),
-            IrPushConst(c),
-            IrUnaryOp(opcode.Pos),
-            IrGetLocal(i),
+            IrFinal(opcode.PushConst(c)),
+            IrFinal(opcode.UnaryOp(opcode.Pos)),
+            IrFinal(opcode.GetLocal(i)),
             ..acc
           ])
       }
@@ -128,54 +106,84 @@ fn peephole(
     // -- Pattern 2: postfix update statement on a boxed local ------------
     // Same shape via GetBoxed/PutBoxed: drop the dead Dup/Pop pair.
     [
-      IrGetBoxed(i),
-      IrUnaryOp(opcode.Pos),
-      IrDup,
-      IrPushConst(c),
+      IrFinal(opcode.GetBoxed(i)),
+      IrFinal(opcode.UnaryOp(opcode.Pos)),
+      IrFinal(opcode.Dup),
+      IrFinal(opcode.PushConst(c)),
       IrBinOp(kind),
-      IrPutBoxed(j),
-      IrPop,
+      IrFinal(opcode.PutBoxed(j)),
+      IrFinal(opcode.Pop),
       ..rest
     ]
       if i == j
     ->
       peephole(rest, consts, [
-        IrPutBoxed(j),
+        IrFinal(opcode.PutBoxed(j)),
         IrBinOp(kind),
-        IrPushConst(c),
-        IrUnaryOp(opcode.Pos),
-        IrGetBoxed(i),
+        IrFinal(opcode.PushConst(c)),
+        IrFinal(opcode.UnaryOp(opcode.Pos)),
+        IrFinal(opcode.GetBoxed(i)),
         ..acc
       ])
 
     // -- Pattern 3: dead Dup under a store whose value is discarded ------
     // Dup; PutLocal(i); Pop ≡ PutLocal(i) (likewise PutBoxed).
-    [IrDup, IrPutLocal(i), IrPop, ..rest] ->
-      peephole(rest, consts, [IrPutLocal(i), ..acc])
-    [IrDup, IrPutBoxed(i), IrPop, ..rest] ->
-      peephole(rest, consts, [IrPutBoxed(i), ..acc])
+    [
+      IrFinal(opcode.Dup),
+      IrFinal(opcode.PutLocal(i)),
+      IrFinal(opcode.Pop),
+      ..rest
+    ] -> peephole(rest, consts, [IrFinal(opcode.PutLocal(i)), ..acc])
+    [
+      IrFinal(opcode.Dup),
+      IrFinal(opcode.PutBoxed(i)),
+      IrFinal(opcode.Pop),
+      ..rest
+    ] -> peephole(rest, consts, [IrFinal(opcode.PutBoxed(i)), ..acc])
 
     // -- Pattern 4: fused compare-and-branch loop conditions -------------
-    [IrGetLocal(a), IrGetLocal(b), IrBinOp(kind), IrJumpIfFalse(l), ..rest] ->
+    [
+      IrFinal(opcode.GetLocal(a)),
+      IrFinal(opcode.GetLocal(b)),
+      IrBinOp(kind),
+      IrJumpIfFalse(l),
+      ..rest
+    ] ->
       case fusable_cmp(kind) {
         Some(pure) ->
           peephole(rest, consts, [IrCmpLocalLocalJump(a, b, pure, l), ..acc])
         None ->
           peephole(
-            [IrGetLocal(b), IrBinOp(kind), IrJumpIfFalse(l), ..rest],
+            [
+              IrFinal(opcode.GetLocal(b)),
+              IrBinOp(kind),
+              IrJumpIfFalse(l),
+              ..rest
+            ],
             consts,
-            [IrGetLocal(a), ..acc],
+            [IrFinal(opcode.GetLocal(a)), ..acc],
           )
       }
-    [IrGetLocal(a), IrPushConst(c), IrBinOp(kind), IrJumpIfFalse(l), ..rest] ->
+    [
+      IrFinal(opcode.GetLocal(a)),
+      IrFinal(opcode.PushConst(c)),
+      IrBinOp(kind),
+      IrJumpIfFalse(l),
+      ..rest
+    ] ->
       case fusable_cmp(kind) {
         Some(pure) ->
           peephole(rest, consts, [IrCmpLocalConstJump(a, c, pure, l), ..acc])
         None ->
           peephole(
-            [IrPushConst(c), IrBinOp(kind), IrJumpIfFalse(l), ..rest],
+            [
+              IrFinal(opcode.PushConst(c)),
+              IrBinOp(kind),
+              IrJumpIfFalse(l),
+              ..rest
+            ],
             consts,
-            [IrGetLocal(a), ..acc],
+            [IrFinal(opcode.GetLocal(a)), ..acc],
           )
       }
 
@@ -241,6 +249,10 @@ fn resolve_try_kind(
 /// Appends a sentinel Return at the end so the interpreter's fetch loop
 /// can use unchecked element/2 — termination happens via normal Return
 /// dispatch instead of Option/None detection on every instruction.
+///
+/// Every opcode that needs no resolution rides through as `IrFinal(op)` and is
+/// simply unwrapped, so this pass only ever has to know about the handful of
+/// IR-only variants below.
 fn resolve_ops(
   code: List(IrOp),
   labels: Dict(Int, Int),
@@ -252,6 +264,9 @@ fn resolve_ops(
     // Labels are dropped (they were just markers)
     [IrLabel(_), ..rest] -> resolve_ops(rest, labels, acc)
 
+    // Already-final: nothing to resolve.
+    [IrFinal(op), ..rest] -> resolve_ops(rest, labels, [op, ..acc])
+
     // Jump ops: resolve label → PC
     [IrJump(l), ..rest] ->
       resolve_ops(rest, labels, [opcode.Jump(label_pc(labels, l)), ..acc])
@@ -259,10 +274,11 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.JumpIfFalse(label_pc(labels, l)), ..acc])
     [IrJumpIfTrue(l), ..rest] ->
       resolve_ops(rest, labels, [opcode.JumpIfTrue(label_pc(labels, l)), ..acc])
-    [IrJumpIfNullish(l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.JumpIfNullish(pc), ..acc])
-    }
+    [IrJumpIfNullish(l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.JumpIfNullish(label_pc(labels, l)),
+        ..acc
+      ])
     [IrPushTry(l, kind), ..rest] -> {
       let op =
         opcode.PushTry(label_pc(labels, l), resolve_try_kind(labels, kind))
@@ -270,80 +286,57 @@ fn resolve_ops(
     }
     [IrGosub(l), ..rest] ->
       resolve_ops(rest, labels, [opcode.Gosub(label_pc(labels, l)), ..acc])
+    [IrAsyncYieldStarNext(l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.AsyncYieldStarNext(label_pc(labels, l)),
+        ..acc
+      ])
+    [IrAsyncYieldStarResume(l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.AsyncYieldStarResume(label_pc(labels, l)),
+        ..acc
+      ])
 
     // `with`-object access: label-carrying, resolved like jumps
-    [IrWithGetVar(name, l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.WithGetVar(name, pc), ..acc])
-    }
-    [IrWithGetVarThis(name, l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.WithGetVarThis(name, pc), ..acc])
-    }
-    [IrWithPutVar(name, l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.WithPutVar(name, pc), ..acc])
-    }
-    [IrWithDeleteVar(name, l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.WithDeleteVar(name, pc), ..acc])
-    }
-    [IrWithMakeRef(name, l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.WithMakeRef(name, pc), ..acc])
-    }
-    [IrWithGetRefValue(name, l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.WithGetRefValue(name, pc), ..acc])
-    }
-    [IrWithPutRefValue(name, l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.WithPutRefValue(name, pc), ..acc])
-    }
-    [IrToObject, ..rest] -> resolve_ops(rest, labels, [opcode.ToObject, ..acc])
-    [IrToStringVal, ..rest] ->
-      resolve_ops(rest, labels, [opcode.ToStringVal, ..acc])
-    [IrGetTemplateObject(site, quasis), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetTemplateObject(site, quasis), ..acc])
+    [IrWithGetVar(name, l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.WithGetVar(name, label_pc(labels, l)),
+        ..acc
+      ])
+    [IrWithGetVarThis(name, l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.WithGetVarThis(name, label_pc(labels, l)),
+        ..acc
+      ])
+    [IrWithPutVar(name, l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.WithPutVar(name, label_pc(labels, l)),
+        ..acc
+      ])
+    [IrWithDeleteVar(name, l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.WithDeleteVar(name, label_pc(labels, l)),
+        ..acc
+      ])
+    [IrWithMakeRef(name, l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.WithMakeRef(name, label_pc(labels, l)),
+        ..acc
+      ])
+    [IrWithGetRefValue(name, l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.WithGetRefValue(name, label_pc(labels, l)),
+        ..acc
+      ])
+    [IrWithPutRefValue(name, l), ..rest] ->
+      resolve_ops(rest, labels, [
+        opcode.WithPutRefValue(name, label_pc(labels, l)),
+        ..acc
+      ])
 
-    // Resolved variable access (emitted directly from the scope tree)
-    [IrGetLocal(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetLocal(index), ..acc])
-    [IrPutLocal(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutLocal(index), ..acc])
-    [IrPutLocalCheckInit(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutLocalCheckInit(index), ..acc])
-    [IrGetGlobal(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetGlobal(name), ..acc])
-    [IrPutGlobal(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutGlobal(name), ..acc])
-    [IrDeleteGlobalVar(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.DeleteGlobalVar(name), ..acc])
-    [IrTypeofGlobal(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.TypeofGlobal(name), ..acc])
-    [IrGetEvalVar(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetEvalVar(name), ..acc])
-    [IrPutEvalVar(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutEvalVar(name), ..acc])
-    [IrDeclareEvalVar(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.DeclareEvalVar(name), ..acc])
-    [IrTypeofEvalVar(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.TypeofEvalVar(name), ..acc])
-
-    // 1:1 translations
-    [IrSetLine(line), ..rest] ->
-      resolve_ops(rest, labels, [opcode.SetLine(line), ..acc])
-    [IrPushConst(i), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PushConst(i), ..acc])
-    [IrPop, ..rest] -> resolve_ops(rest, labels, [opcode.Pop, ..acc])
-    [IrDup, ..rest] -> resolve_ops(rest, labels, [opcode.Dup, ..acc])
-    [IrSwap, ..rest] -> resolve_ops(rest, labels, [opcode.Swap, ..acc])
-    [IrRot3, ..rest] -> resolve_ops(rest, labels, [opcode.Rot3, ..acc])
-    [IrUnrot4, ..rest] -> resolve_ops(rest, labels, [opcode.Unrot4, ..acc])
-
-    // Property access — precompute canonical key once (key.canonical_key,
-    // THE canonicalizer shared with the runtime) so the interpreter never
-    // re-parses the constant string per dispatch.
+    // Static property access — precompute the canonical key once
+    // (key.canonical_key, THE canonicalizer shared with the runtime) so the
+    // interpreter never re-parses the constant string per dispatch.
     [IrGetField(name), ..rest] ->
       resolve_ops(rest, labels, [
         opcode.GetField(key.canonical_key(name)),
@@ -359,136 +352,33 @@ fn resolve_ops(
         opcode.PutField(key.canonical_key(name)),
         ..acc
       ])
-    [IrGetElem, ..rest] -> resolve_ops(rest, labels, [opcode.GetElem, ..acc])
-    [IrGetElem2, ..rest] -> resolve_ops(rest, labels, [opcode.GetElem2, ..acc])
-    [IrPutElem, ..rest] -> resolve_ops(rest, labels, [opcode.PutElem, ..acc])
     [IrDeleteField(name), ..rest] ->
       resolve_ops(rest, labels, [
         opcode.DeleteField(key.canonical_key(name)),
         ..acc
       ])
-    [IrDeleteElem, ..rest] ->
-      resolve_ops(rest, labels, [opcode.DeleteElem, ..acc])
-    // Private-element ops carry the RAW source name ("#x") — private names
-    // are never canonicalized (they live in a separate hidden namespace).
-    [IrGetPrivateField(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetPrivateField(name), ..acc])
-    [IrGetPrivateField2(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetPrivateField2(name), ..acc])
-    [IrPutPrivateField(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutPrivateField(name), ..acc])
-    [IrPrivateIn(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PrivateIn(name), ..acc])
-    [IrNewPrivateName(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.NewPrivateName(name), ..acc])
-    [IrGetPrivateFieldDyn, ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetPrivateFieldDyn, ..acc])
-    [IrGetPrivateFieldDyn2, ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetPrivateFieldDyn2, ..acc])
-    [IrPutPrivateFieldDyn, ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutPrivateFieldDyn, ..acc])
-    [IrPrivateInDyn, ..rest] ->
-      resolve_ops(rest, labels, [opcode.PrivateInDyn, ..acc])
-    [IrDefinePrivateField, ..rest] ->
-      resolve_ops(rest, labels, [opcode.DefinePrivateField, ..acc])
-    [IrDefinePrivateMethod, ..rest] ->
-      resolve_ops(rest, labels, [opcode.DefinePrivateMethod, ..acc])
-    [IrDefinePrivateAccessor(kind), ..rest] ->
-      resolve_ops(rest, labels, [opcode.DefinePrivateAccessor(kind), ..acc])
-
-    // Object/array construction
-    [IrNewObject, ..rest] ->
-      resolve_ops(rest, labels, [opcode.NewObject, ..acc])
     [IrDefineField(name), ..rest] ->
       resolve_ops(rest, labels, [
         opcode.DefineField(key.canonical_key(name)),
         ..acc
       ])
-    [IrDefineFieldComputed, ..rest] ->
-      resolve_ops(rest, labels, [opcode.DefineFieldComputed, ..acc])
-    [IrToPropertyKey, ..rest] ->
-      resolve_ops(rest, labels, [opcode.ToPropertyKey, ..acc])
     [IrDefineMethod(name), ..rest] ->
       resolve_ops(rest, labels, [
         opcode.DefineMethod(key.canonical_key(name)),
         ..acc
       ])
-    [IrDefineMethodComputed, ..rest] ->
-      resolve_ops(rest, labels, [opcode.DefineMethodComputed, ..acc])
     [IrDefineAccessor(name, kind, enumerable), ..rest] ->
       resolve_ops(rest, labels, [
         opcode.DefineAccessor(key.canonical_key(name), kind, enumerable),
         ..acc
       ])
-    [IrDefineAccessorComputed(kind, enumerable), ..rest] ->
-      resolve_ops(rest, labels, [
-        opcode.DefineAccessorComputed(kind, enumerable),
-        ..acc
-      ])
-    [IrMakeMethod, ..rest] ->
-      resolve_ops(rest, labels, [opcode.MakeMethod, ..acc])
-    [IrSetProto, ..rest] -> resolve_ops(rest, labels, [opcode.SetProto, ..acc])
-    [IrObjectSpread, ..rest] ->
-      resolve_ops(rest, labels, [opcode.ObjectSpread, ..acc])
-    [IrObjectRestCopy(n), ..rest] ->
-      resolve_ops(rest, labels, [opcode.ObjectRestCopy(n), ..acc])
-    [IrArrayFrom(count), ..rest] ->
-      resolve_ops(rest, labels, [opcode.ArrayFrom(count), ..acc])
-    [IrArrayFromWithHoles(count, holes), ..rest] ->
-      resolve_ops(rest, labels, [opcode.ArrayFromWithHoles(count, holes), ..acc])
-    [IrArrayPush, ..rest] ->
-      resolve_ops(rest, labels, [opcode.ArrayPush, ..acc])
-    [IrArrayPushHole, ..rest] ->
-      resolve_ops(rest, labels, [opcode.ArrayPushHole, ..acc])
-    [IrArraySpread, ..rest] ->
-      resolve_ops(rest, labels, [opcode.ArraySpread, ..acc])
 
-    // Calls
-    [IrCall(arity), ..rest] ->
-      resolve_ops(rest, labels, [opcode.Call(arity), ..acc])
-    [IrCallEval(arity, param_scope_names, with_names, private_names), ..rest] ->
-      resolve_ops(rest, labels, [
-        opcode.CallEval(arity, param_scope_names, with_names, private_names),
-        ..acc
-      ])
-    [IrCallMethod(arity), ..rest] ->
-      resolve_ops(rest, labels, [opcode.CallMethod(arity), ..acc])
-    [IrCallConstructor(arity), ..rest] ->
-      resolve_ops(rest, labels, [opcode.CallConstructor(arity), ..acc])
-    [IrCallApply, ..rest] ->
-      resolve_ops(rest, labels, [opcode.CallApply, ..acc])
-    [IrCallMethodApply, ..rest] ->
-      resolve_ops(rest, labels, [opcode.CallMethodApply, ..acc])
-    [IrCallConstructorApply, ..rest] ->
-      resolve_ops(rest, labels, [opcode.CallConstructorApply, ..acc])
-    [IrReturn, ..rest] -> resolve_ops(rest, labels, [opcode.Return, ..acc])
-
-    // Exception handling
-    [IrThrow, ..rest] -> resolve_ops(rest, labels, [opcode.Throw, ..acc])
-    [IrThrowConstAssign(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.ThrowConstAssign(name), ..acc])
-    [IrThrowError(kind, msg), ..rest] ->
-      resolve_ops(rest, labels, [opcode.ThrowError(kind, msg), ..acc])
-    [IrPopTry, ..rest] -> resolve_ops(rest, labels, [opcode.PopTry, ..acc])
-    [IrRet, ..rest] -> resolve_ops(rest, labels, [opcode.Ret, ..acc])
-
-    // Closures
-    [IrMakeClosure(func_index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.MakeClosure(func_index), ..acc])
-    [IrBoxLocal(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.BoxLocal(index), ..acc])
-    [IrGetBoxed(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetBoxed(index), ..acc])
-    [IrPutBoxed(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutBoxed(index), ..acc])
-    [IrPutBoxedCheckInit(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutBoxedCheckInit(index), ..acc])
+    // Narrow the operator to its handler HERE, once per instruction resolved,
+    // rather than once per instruction executed.
+    [IrBinOp(kind), ..rest] ->
+      resolve_ops(rest, labels, [opcode.bin_op(kind), ..acc])
 
     // Fused superinstructions (created by the peephole pass above)
-    [IrIncLocal(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.IncLocal(index), ..acc])
-    [IrDecLocal(index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.DecLocal(index), ..acc])
     [IrCmpLocalLocalJump(a, b, kind, l), ..rest] ->
       resolve_ops(rest, labels, [
         opcode.CmpLocalLocalJump(a, b, kind, label_pc(labels, l)),
@@ -499,102 +389,5 @@ fn resolve_ops(
         opcode.CmpLocalConstJump(a, c, kind, label_pc(labels, l)),
         ..acc
       ])
-
-    // Operators
-    // Narrow the operator to its handler HERE, once per instruction resolved,
-    // rather than once per instruction executed.
-    [IrBinOp(kind), ..rest] ->
-      resolve_ops(rest, labels, [opcode.bin_op(kind), ..acc])
-    [IrUnaryOp(kind), ..rest] ->
-      resolve_ops(rest, labels, [opcode.UnaryOp(kind), ..acc])
-    [IrTypeOf, ..rest] -> resolve_ops(rest, labels, [opcode.TypeOf, ..acc])
-
-    // Iteration
-    [IrForInStart, ..rest] ->
-      resolve_ops(rest, labels, [opcode.ForInStart, ..acc])
-    [IrForInNext, ..rest] ->
-      resolve_ops(rest, labels, [opcode.ForInNext, ..acc])
-    [IrGetIterator, ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetIterator, ..acc])
-    [IrGetAsyncIterator, ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetAsyncIterator, ..acc])
-    [IrIteratorRecord, ..rest] ->
-      resolve_ops(rest, labels, [opcode.IteratorRecord, ..acc])
-    [IrIteratorNext, ..rest] ->
-      resolve_ops(rest, labels, [opcode.IteratorNext, ..acc])
-    [IrIteratorClose, ..rest] ->
-      resolve_ops(rest, labels, [opcode.IteratorClose, ..acc])
-    [IrIteratorCloseThrow, ..rest] ->
-      resolve_ops(rest, labels, [opcode.IteratorCloseThrow, ..acc])
-    [IrIteratorCheckObject, ..rest] ->
-      resolve_ops(rest, labels, [opcode.IteratorCheckObject, ..acc])
-    [IrIteratorRest, ..rest] ->
-      resolve_ops(rest, labels, [opcode.IteratorRest, ..acc])
-
-    // Class inheritance / super
-    [IrSetupDerivedClass, ..rest] ->
-      resolve_ops(rest, labels, [opcode.SetupDerivedClass, ..acc])
-    [IrGetPrototypeOf, ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetPrototypeOf, ..acc])
-    [IrGetSuperValue, ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetSuperValue, ..acc])
-    [IrGetSuperValue2, ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetSuperValue2, ..acc])
-    [IrPutSuperValue, ..rest] ->
-      resolve_ops(rest, labels, [opcode.PutSuperValue, ..acc])
-
-    // Generator
-    [IrInitialYield, ..rest] ->
-      resolve_ops(rest, labels, [opcode.InitialYield, ..acc])
-    [IrYield, ..rest] -> resolve_ops(rest, labels, [opcode.Yield, ..acc])
-    [IrYieldStar, ..rest] ->
-      resolve_ops(rest, labels, [opcode.YieldStar, ..acc])
-    [IrAsyncYieldStarNext(l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.AsyncYieldStarNext(pc), ..acc])
-    }
-    [IrAsyncYieldStarResume(l), ..rest] -> {
-      let pc = label_pc(labels, l)
-      resolve_ops(rest, labels, [opcode.AsyncYieldStarResume(pc), ..acc])
-    }
-
-    // Async
-    [IrAwait, ..rest] -> resolve_ops(rest, labels, [opcode.Await, ..acc])
-
-    // Arguments object
-    [IrCreateArguments(simple_params:), ..rest] ->
-      resolve_ops(rest, labels, [opcode.CreateArguments(simple_params:), ..acc])
-
-    [IrCreateRestArray(from_index), ..rest] ->
-      resolve_ops(rest, labels, [opcode.CreateRestArray(from_index), ..acc])
-
-    // RegExp
-    [IrNewRegExp, ..rest] ->
-      resolve_ops(rest, labels, [opcode.NewRegExp, ..acc])
-
-    // Dynamic import
-    [opcode.IrDynamicImport, ..rest] ->
-      resolve_ops(rest, labels, [opcode.DynamicImport, ..acc])
-    [opcode.IrDynamicImportSource, ..rest] ->
-      resolve_ops(rest, labels, [opcode.DynamicImportSource, ..acc])
-    [opcode.IrDynamicImportDefer, ..rest] ->
-      resolve_ops(rest, labels, [opcode.DynamicImportDefer, ..acc])
-
-    // Global Environment Record
-    [IrDeclareGlobalVar(name, deletable), ..rest] ->
-      resolve_ops(rest, labels, [
-        opcode.DeclareGlobalVar(name, deletable),
-        ..acc
-      ])
-    [IrDeclareGlobalLex(name, is_const), ..rest] ->
-      resolve_ops(rest, labels, [opcode.DeclareGlobalLex(name, is_const), ..acc])
-    [IrInitGlobalLex(name), ..rest] ->
-      resolve_ops(rest, labels, [opcode.InitGlobalLex(name), ..acc])
-
-    // Explicit Resource Management (using / await using desugar)
-    [opcode.IrGetDisposer(is_async), ..rest] ->
-      resolve_ops(rest, labels, [opcode.GetDisposer(is_async), ..acc])
-    [opcode.IrMakeSuppressed, ..rest] ->
-      resolve_ops(rest, labels, [opcode.MakeSuppressed, ..acc])
   }
 }
