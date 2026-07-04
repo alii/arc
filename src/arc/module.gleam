@@ -41,32 +41,46 @@ import gleam/string
 
 /// A single compiled module — everything known at compile time.
 /// No AST, no source code, no runtime state.
+///
+/// The Raw/Resolved distinction is carried on the record itself: `specifier`
+/// and every `requested_modules` entry are module identities (`esm.Resolved`),
+/// while `import_bindings` is keyed by the specifier text this module's SOURCE
+/// wrote (`esm.Raw`), which only `esm.resolve` through `specifier_map` may turn
+/// into an identity. Handing one where the other belongs is a type error rather
+/// than a silent lookup miss. `ModuleBundle`'s dict keys stay plain `String` —
+/// that is the public, embedder-facing API — so identities are untagged with
+/// `esm.resolved_text` exactly where they index a bundle / `Linked` dict.
 pub type CompiledModule {
   CompiledModule(
-    specifier: String,
+    specifier: esm.Resolved,
     template: value.FuncTemplate,
-    import_bindings: List(#(String, List(esm.ImportBinding))),
+    /// (raw specifier text, bindings) — resolve through `specifier_map`.
+    import_bindings: List(#(esm.Raw, List(esm.ImportBinding))),
     export_entries: List(esm.ExportEntry),
     /// Module-root name → local-slot map (compiler.CompiledModuleBody.
     /// export_names): the linker looks exported local names up in it to
     /// find the slot whose BoxSlot importers share.
     export_names: Dict(String, Int),
-    specifier_map: Dict(String, String),
-    requested_modules: List(String),
+    /// This module's TOTAL raw → resolved projection: `esm.resolve` is the only
+    /// way to turn a specifier this module's source wrote into a bundle key.
+    specifier_map: esm.SpecifierMap,
+    /// [[RequestedModules]] in declaration order: each request's RESOLVED
+    /// specifier paired with its merged phase (exactly what `esm.analyze`'s
+    /// merge_requests computed — `Deferred` only when EVERY reference is
+    /// `import defer * as ns`, since a single eager reference forces
+    /// evaluation). One list, so "eager subset of requested" cannot drift:
+    /// InnerModuleEvaluation (§16.2.1.5.3.1) walks this list and skips the
+    /// `Deferred` entries.
+    requested_modules: List(#(esm.Resolved, esm.Phase)),
     /// Exported local name → value the linker seeds into its BoxSlot before the
     /// body runs: `uninitialized` (TDZ) for let/const/class/default, `undefined`
-    /// for var/function. See compiler.module_export_seeds.
+    /// for var/function. Computed by the compiler and carried on
+    /// `compiler.CompiledModuleBody.export_seeds`.
     export_seeds: Dict(String, JsValue),
     /// Top-level hoisted function declarations as (name, func_index) into
     /// template.functions. The linker instantiates the *exported* ones before
     /// any body runs, so cyclic function imports are callable (§16.2.1.6.4).
     hoisted_funcs: List(#(String, Int)),
-    /// Raw specifiers this module requests with phase ~evaluation~ at least
-    /// once: bare imports, named/default/eager-namespace imports, and every
-    /// re-export. Requests appearing ONLY as `import defer * as ns` are
-    /// excluded — InnerModuleEvaluation skips them (§16.2.1.5.3.1), deferring
-    /// the dependency's evaluation to first namespace access.
-    eager_requests: List(String),
     /// Whether the module body contains a top-level `await`
     /// ([[HasTLA]], §16.2.1.5) — ReadyForSyncExecution returns false for it,
     /// so touching a deferred namespace over it throws a TypeError.
@@ -84,40 +98,68 @@ pub type HostModule {
   HostModule(specifier: String, exports: List(#(String, JsValue)))
 }
 
+/// One entry of a `ModuleBundle`: the module a specifier names is EITHER
+/// compiled from JS source OR an embedder-provided host (synthetic) module —
+/// never both, and never neither. The two kinds share one key space, so a
+/// specifier cannot be registered as both and no lookup has to pick a winner.
+pub type BundleModule {
+  SourceModule(compiled: CompiledModule)
+  SyntheticModule(host: HostModule)
+}
+
 /// A complete compiled module graph — the output of AOT compilation.
-/// Pure Erlang term, serializable via term_to_binary. `host_modules` are
-/// embedder-provided native modules (see `HostModule`); they carry no source
-/// and live alongside the compiled source `modules`.
+/// Pure Erlang term, serializable via term_to_binary. `modules` holds both the
+/// compiled source modules and the embedder-provided host (synthetic) ones
+/// (see `BundleModule`), keyed by resolved specifier.
 pub type ModuleBundle {
-  ModuleBundle(
-    entry: String,
-    modules: Dict(String, CompiledModule),
-    host_modules: Dict(String, HostModule),
-  )
+  ModuleBundle(entry: String, modules: Dict(String, BundleModule))
+}
+
+/// Run `k` on the compiled module a bundle entry holds. A host (synthetic)
+/// module carries no source, no imports and no body, so every source-only pass
+/// (deferred-import scan, hoisted-function instantiation) skips it and keeps
+/// `default`.
+fn with_source_module(
+  bundle_module: BundleModule,
+  default: a,
+  k: fn(CompiledModule) -> a,
+) -> a {
+  case bundle_module {
+    SourceModule(compiled) -> k(compiled)
+    SyntheticModule(_) -> default
+  }
 }
 
 // =============================================================================
 // Errors
 // =============================================================================
 
-/// A failure anywhere in the module pipeline. Each pre-evaluation variant
-/// carries the structured cause from the layer that produced it (graph walk,
-/// bytecode compiler, bundle lookup) — dispatch on the variant, and render
-/// the user-facing prose with `error_message`.
+/// A failure of AOT compilation (`compile_bundle*`) — everything that can go
+/// wrong BEFORE any heap exists. Each variant carries the structured cause
+/// from the layer that produced it (graph walk, bytecode compiler); dispatch
+/// on the variant, and render the prose with `compile_bundle_error_message`.
 ///
-/// Link-time validation failures (§16.2.1.6.4, `link.LinkError`) have no
-/// variant of their own: `link_for_evaluation` allocates the JS SyntaxError
-/// in the heap right there (its identity and stack ARE the module's rejection
-/// value), so they surface as `EvaluationError`.
-pub type ModuleError(host) {
+/// Deliberately carries no `host` type parameter: compilation never allocates
+/// in a heap, so it can never produce a heap-carrying error, and its callers
+/// can no longer be forced to invent a phantom heap type for it.
+pub type CompileBundleError {
   /// The source-graph walk failed: a module failed to parse, a request failed
   /// to resolve or load, or a source-phase import was requested. Match the
   /// inner `graph.GraphError` to tell those apart.
   GraphError(error: graph.GraphError)
   /// Bytecode compilation of the module named `specifier` failed.
   CompileError(specifier: String, error: compiler.CompileError)
+}
+
+/// A failure of the LINK/EVALUATE half of the pipeline, where a heap exists.
+///
+/// Link-time validation failures (§16.2.1.6.4, `link.LinkError`) have no
+/// variant of their own: `link_for_evaluation` allocates the JS SyntaxError
+/// in the heap right there (its identity and stack ARE the module's rejection
+/// value), so they surface as `EvaluationError`.
+pub type ModuleError(host) {
   /// Evaluation asked for a resolved specifier the bundle does not contain.
-  ModuleNotInBundle(specifier: String)
+  NotInBundle(specifier: String)
   /// A module threw during evaluation. Carries both the thrown value and the
   /// heap it was allocated in — the value is a Ref into this heap, so callers
   /// must use it (not a pre-evaluation heap) to inspect the thrown object.
@@ -131,38 +173,95 @@ pub type ModuleError(host) {
   EvaluationPending(promise_data_ref: Ref, heap: Heap(host))
 }
 
-/// The single renderer of a `ModuleError`'s user-facing prose. Every layer's
-/// own message lives in that layer (`parser.parse_error_to_string`,
+/// The message a module parked forever on top-level await surfaces with (cf.
+/// Node's exit code 13). Shared by `error_message` and the static entry
+/// points, which turn `EvaluationPending` into a thrown TypeError.
+const tla_never_settled_message = "module evaluation never completed: top-level await promise never settled"
+
+/// The single renderer of a `CompileBundleError`'s user-facing prose. Every
+/// layer's own message lives in that layer (`parser.parse_error_to_string`,
 /// `compiler.error_message`); this adds the module-pipeline framing (which
 /// module, which phase) exactly once.
-pub fn error_message(err: ModuleError(host)) -> String {
+pub fn compile_bundle_error_message(err: CompileBundleError) -> String {
   case err {
     GraphError(error: graph.ParseFailed(specifier, parse_error)) ->
       "SyntaxError in '"
-      <> specifier
+      <> esm.resolved_text(specifier)
       <> "': "
       <> parser.parse_error_to_string(parse_error)
     GraphError(error: graph.ResolveFailed(raw, referrer, message)) ->
       "Cannot resolve module '"
-      <> raw
+      <> esm.raw_text(raw)
       <> "' from '"
-      <> referrer
+      <> esm.resolved_text(referrer)
       <> "': "
       <> message
     GraphError(error: graph.LoadFailed(specifier, message)) ->
-      "Cannot load module '" <> specifier <> "': " <> message
+      "Cannot load module '" <> esm.resolved_text(specifier) <> "': " <> message
     GraphError(error: graph.SourcePhaseUnsupported(specifier)) ->
       "'"
-      <> specifier
+      <> esm.resolved_text(specifier)
       <> "': source phase imports ('import source') are not supported"
     CompileError(specifier:, error:) ->
       compiler.error_message(error) <> " in '" <> specifier <> "'"
-    ModuleNotInBundle(specifier:) ->
+  }
+}
+
+/// The single renderer of a `ModuleError`'s user-facing prose. NOTHING may
+/// `string.inspect` a `ModuleError`: its Gleam debug repr structurally
+/// contains a whole `Heap`, and would leak Gleam constructor syntax into a
+/// guest-visible JS error message.
+pub fn error_message(err: ModuleError(host)) -> String {
+  case err {
+    NotInBundle(specifier:) ->
       "Module '" <> specifier <> "' not found in bundle"
     EvaluationError(value:, heap:) ->
       "Uncaught " <> object.format_error(value, heap)
-    EvaluationPending(promise_data_ref: _, heap: _) ->
-      "module evaluation never completed: top-level await promise never settled"
+    EvaluationPending(promise_data_ref: _, heap: _) -> tla_never_settled_message
+  }
+}
+
+/// A break in the LINKER's own invariants — never a guest-program error, and
+/// never something a host can trigger with a well-formed bundle. Every variant
+/// means `build_linked` and the seeding phase disagree about the shape of the
+/// graph they just built together.
+///
+/// These paths used to substitute a wrong-but-plausible value (`JsUndefined`,
+/// or a silently dropped map entry), so a linker bug surfaced as an
+/// `undefined` binding arbitrarily far away from its cause. They now fail
+/// loudly and by name (`assert_link_invariant`).
+pub type LinkInvariantBroken {
+  /// A module imports from a raw specifier its own `specifier_map` — which is
+  /// TOTAL over the module's requests — does not cover.
+  UnresolvedDependency(specifier: esm.Raw)
+  /// The dependency's export map has no live cell for a name that
+  /// `link.validate` already accepted.
+  MissingExportCell(dep: String, name: String)
+  /// `import * as ns from dep`, but `dep` has no reserved namespace box —
+  /// `reserve_ns_boxes` covers every module in the bundle.
+  MissingNamespaceBox(dep: String)
+  /// `import defer * as ns from dep`, but `dep` has no reserved deferred proxy
+  /// — `needed_deferred_specs` collects exactly these imports.
+  MissingDeferredBox(dep: String)
+  /// A specifier registered as already-instantiated whose namespace ref does
+  /// not read back as a Module Namespace Exotic Object. Reusing nothing here
+  /// would silently re-link the module to FRESH cells while its evaluated body
+  /// still holds the old ones.
+  PreexistingNotANamespace(specifier: String, ref: Ref)
+}
+
+/// Renders a `LinkInvariantBroken` for the panic message. Internal-error prose,
+/// never guest-visible (cf. compiler.gleam's `panic as "scope analyzer …"`).
+pub fn link_invariant_message(broken: LinkInvariantBroken) -> String {
+  "arc/module: linker invariant broken: " <> string.inspect(broken)
+}
+
+/// Unwrap a linker-internal result. There is no recovery: an invariant break
+/// means the linked graph is already inconsistent.
+fn assert_link_invariant(result: Result(a, LinkInvariantBroken)) -> a {
+  case result {
+    Ok(value) -> value
+    Error(broken) -> panic as { link_invariant_message(broken) }
   }
 }
 
@@ -173,7 +272,7 @@ pub fn error_message(err: ModuleError(host)) -> String {
 /// embedder's `GetModuleNamespace` handle (cf. V8 `Module::GetModuleNamespace`,
 /// QuickJS `JS_GetModuleNamespace`).
 pub type EvaluatedBundle(host) {
-  EvaluatedBundle(value: JsValue, heap: Heap(host), namespace: Option(JsValue))
+  EvaluatedBundle(value: JsValue, heap: Heap(host), namespace: Option(Ref))
 }
 
 // =============================================================================
@@ -194,7 +293,7 @@ pub fn compile_bundle(
   entry_source: String,
   resolve: fn(String, String) -> Result(String, String),
   load: fn(String) -> Result(String, String),
-) -> Result(ModuleBundle, ModuleError(host)) {
+) -> Result(ModuleBundle, CompileBundleError) {
   compile_bundle_with_hosts(
     entry_specifier,
     entry_source,
@@ -214,71 +313,82 @@ pub fn compile_bundle_with_hosts(
   resolve: fn(String, String) -> Result(String, String),
   load: fn(String) -> Result(String, String),
   host_modules: Dict(String, HostModule),
-) -> Result(ModuleBundle, ModuleError(host)) {
-  // Adapt the runtime's raw-specifier resolver to the graph layer's
-  // request-taking one.
+) -> Result(ModuleBundle, CompileBundleError) {
+  // The host talks in plain strings; the graph walk talks in `esm.Raw` /
+  // `esm.Resolved`. This is the boundary: whatever the host resolver returns is
+  // by definition a canonical module identity, and so is the entry specifier the
+  // embedder named. `esm.resolved_unchecked` records that assertion.
   let resolve_request = fn(request: esm.ModuleRequest, referrer) {
-    resolve(request.specifier, referrer)
+    resolve(esm.raw_text(request.specifier), esm.resolved_text(referrer))
+    |> result.map(esm.resolved_unchecked)
   }
+  let load_source = fn(spec) { load(esm.resolved_text(spec)) }
   use source_graph <- result.try(
-    graph.load(entry_specifier, entry_source, resolve_request, load, fn(spec) {
-      dict.has_key(host_modules, spec)
-    })
+    graph.load(
+      esm.resolved_unchecked(entry_specifier),
+      entry_source,
+      resolve_request,
+      load_source,
+      fn(spec) { dict.has_key(host_modules, esm.resolved_text(spec)) },
+    )
     |> result.map_error(GraphError),
   )
+  // Host modules first, then the compiled source graph on top: the graph walk
+  // treats a host specifier as a leaf, so the only way both could name the same
+  // specifier is the entry — whose source the embedder handed us, so it wins.
+  let with_hosts =
+    dict.map_values(host_modules, fn(_spec, hm) { SyntheticModule(hm) })
   use modules <- result.map(
-    dict.fold(source_graph.modules, Ok(dict.new()), fn(acc, specifier, node) {
+    dict.fold(source_graph.modules, Ok(with_hosts), fn(acc, specifier, node) {
       use modules <- result.try(acc)
       use compiled <- result.map(compile_source_module(node))
-      dict.insert(modules, specifier, compiled)
+      dict.insert(modules, esm.resolved_text(specifier), SourceModule(compiled))
     }),
   )
-  ModuleBundle(entry: entry_specifier, modules:, host_modules:)
+  ModuleBundle(entry: entry_specifier, modules:)
 }
 
 /// Compile one loaded module from the source graph — the import/export
 /// analysis is already done (`node.summary`); this adds the bytecode stage.
 fn compile_source_module(
   node: graph.SourceModule,
-) -> Result(CompiledModule, ModuleError(host)) {
+) -> Result(CompiledModule, CompileBundleError) {
   let graph.SourceModule(
-    specifier:,
-    source: _,
-    program:,
-    sb:,
-    summary:,
-    specifier_map:,
+    parsed: graph.ParsedModule(specifier:, source: _, items:, sb:, summary:),
+    resolved:,
   ) = node
   use body <- result.map(
-    compiler.compile_module(program, sb, summary)
-    |> result.map_error(fn(error) { CompileError(specifier:, error:) }),
+    compiler.compile_module(items, sb, summary)
+    |> result.map_error(fn(error) {
+      CompileError(specifier: esm.resolved_text(specifier), error:)
+    }),
   )
-  let compiler.CompiledModuleBody(template:, export_names:, hoisted_funcs:) =
-    body
+  let compiler.CompiledModuleBody(
+    template:,
+    export_names:,
+    hoisted_funcs:,
+    export_seeds:,
+  ) = body
 
-  // The bundle format keeps flat specifier lists; both project out of the
-  // summary's merged ModuleRequests.
+  // [[RequestedModules]] with the phase esm.analyze already merged, keyed by
+  // the specifier the host resolved each request to — evaluation never has to
+  // look a raw specifier back up.
   let requested_modules =
-    list.map(summary.requested, fn(request) { request.specifier })
-  let eager_requests =
-    list.filter_map(summary.requested, fn(request) {
-      case request.phase {
-        esm.Default -> Ok(request.specifier)
-        esm.Deferred -> Error(Nil)
-      }
+    list.map(resolved, fn(edge) {
+      let #(request, resolved_specifier) = edge
+      #(resolved_specifier, request.phase)
     })
 
   CompiledModule(
     specifier:,
     template:,
-    import_bindings: summary.imports,
+    import_bindings: list.map(summary.imports, fn(e) { #(esm.raw(e.0), e.1) }),
     export_entries: summary.exports,
     export_names:,
-    specifier_map:,
+    specifier_map: graph.specifier_map(node),
     requested_modules:,
-    export_seeds: compiler.module_export_seeds(program, summary),
+    export_seeds:,
     hoisted_funcs:,
-    eager_requests:,
     has_tla: module_has_tla(template),
   )
 }
@@ -301,38 +411,35 @@ fn module_has_tla(template: value.FuncTemplate) -> Bool {
 // `link.validate` / `link.resolve_export` / `link.exported_names`.
 
 /// Project a compiled bundle onto the shared `link.LinkableGraph` view: a
-/// trivial per-module field copy of the three string-level fields the resolver
-/// reads.
+/// trivial per-module field copy of the three fields the resolver reads.
+///
+/// A `ModuleBundle` is keyed by module identity — every key came out of a
+/// `graph.load` walk (or is a host module the embedder registered under one) —
+/// so re-tagging the keys as `esm.Resolved` restates a fact, it does not assume
+/// one.
 fn linkable_of_bundle(bundle: ModuleBundle) -> link.LinkableGraph {
-  let source =
-    dict.map_values(bundle.modules, fn(_specifier, m) {
+  use acc, specifier, bundle_module <- dict.fold(bundle.modules, dict.new())
+  let linkable = case bundle_module {
+    SourceModule(m) ->
       link.LinkableModule(
         import_bindings: m.import_bindings,
         export_entries: m.export_entries,
         specifier_map: m.specifier_map,
       )
-    })
-  // A host module projects as a module with no imports and a LocalExport per
-  // supplied name (its cells are pre-seeded with the host values at link time),
-  // so the resolver's import/re-export checks and `exported_names` see it.
-  use acc, specifier, hm <- dict.fold(bundle.host_modules, source)
-  dict.insert(
-    acc,
-    specifier,
-    link.LinkableModule(
-      import_bindings: [],
-      export_entries: list.map(hm.exports, fn(e) {
-        esm.LocalExport(export_name: e.0, local_name: e.0)
-      }),
-      specifier_map: dict.new(),
-    ),
-  )
-}
-
-/// The resolved specifier a raw specifier maps to within module `m` (VM-side;
-/// reads the per-module specifier_map, not the bundle).
-fn resolved_specifier(m: CompiledModule, raw: String) -> String {
-  dict.get(m.specifier_map, raw) |> result.unwrap(raw)
+    // A host module projects as a module with no imports and a LocalExport per
+    // supplied name (its cells are pre-seeded with the host values at link
+    // time), so the resolver's import/re-export checks and `exported_names`
+    // see it.
+    SyntheticModule(hm) ->
+      link.LinkableModule(
+        import_bindings: [],
+        export_entries: list.map(hm.exports, fn(e) {
+          esm.LocalExport(export_name: e.0, local_name: e.0)
+        }),
+        specifier_map: esm.new_specifier_map(),
+      )
+  }
+  dict.insert(acc, esm.resolved_unchecked(specifier), linkable)
 }
 
 // =============================================================================
@@ -373,20 +480,74 @@ pub type Linked {
   )
 }
 
+/// Where a module is in its per-DFS lifecycle. ONE state per module — the
+/// three flavours are mutually exclusive by construction, so "evaluated and
+/// still evaluating" or "errored but still evaluating" cannot be built.
+type ModuleEvalStatus {
+  /// The body is running (or a re-entrant trigger observed the cycle).
+  Evaluating
+  /// The body completed.
+  Evaluated
+  /// The body (or a dependency's) threw; the value is rethrown, never re-run.
+  Failed(value: JsValue)
+}
+
 /// Internal evaluation state threaded through the DFS.
 type EvalState(host) {
   EvalState(
     heap: Heap(host),
-    /// Specifiers whose body has finished successfully.
-    evaluated: Set(String),
-    /// Specifier → cached error for modules that threw during evaluation.
-    errors: Dict(String, JsValue),
-    /// Currently evaluating (cycle detection).
-    evaluating: Set(String),
+    /// Specifier → its lifecycle state, for the modules this DFS has touched.
+    /// The realm-wide heap registry (`arc/module/registry`) is the fallback
+    /// for modules an *outer* evaluation or a re-entrant deferred trigger
+    /// touched — see `module_eval_status`.
+    modules: Dict(String, ModuleEvalStatus),
     /// Promise jobs left queued by module bodies when the `finish` driver
     /// does not drain (dynamic import) — handed back to the host event loop.
     jobs: List(value.Job),
   )
+}
+
+/// Every specifier this DFS finished evaluating — what a registry-keeping
+/// host records so their bodies never re-run.
+fn evaluated_specifiers(state: EvalState(host)) -> Set(String) {
+  use acc, spec, status <- dict.fold(state.modules, set.new())
+  case status {
+    Evaluated -> set.insert(acc, spec)
+    Evaluating | Failed(_) -> acc
+  }
+}
+
+/// A module's lifecycle state: this DFS's own view first, else the realm's
+/// heap-resident registry (an outer evaluation, an earlier bundle, or a
+/// deferred-namespace trigger that fired mid-body). A cached ERROR wins over a
+/// stale ~evaluating~ mark: an async module rejected after parking on
+/// top-level await keeps its status but is `Failed`.
+fn module_eval_status(
+  state: EvalState(host),
+  global_object: Ref,
+  specifier: String,
+) -> Option(ModuleEvalStatus) {
+  use <- option.lazy_or(
+    dict.get(state.modules, specifier) |> option.from_result,
+  )
+  use <- option.lazy_or(
+    registry.read_module_error(state.heap, global_object, specifier)
+    |> option.map(Failed),
+  )
+  case registry.read_module_status(state.heap, global_object, specifier) {
+    Some(registry.Evaluated) -> Some(Evaluated)
+    Some(registry.Evaluating) -> Some(Evaluating)
+    None -> None
+  }
+}
+
+/// Record `specifier`'s new lifecycle state in this DFS's view.
+fn set_eval_status(
+  state: EvalState(host),
+  specifier: String,
+  status: ModuleEvalStatus,
+) -> EvalState(host) {
+  EvalState(..state, modules: dict.insert(state.modules, specifier, status))
 }
 
 /// Fold `items` while threading `state`, short-circuiting on the first Error.
@@ -411,7 +572,7 @@ fn try_fold_state(
 /// registry first and a re-entrant dynamic import of the evaluating module
 /// resolves to the same namespace instead of re-evaluating (§16.2.1.8).
 pub type LinkedBundle {
-  LinkedBundle(bundle: ModuleBundle, linked: Linked, namespace: Option(JsValue))
+  LinkedBundle(bundle: ModuleBundle, linked: Linked, namespace: Option(Ref))
 }
 
 /// Link phase of `evaluate_bundle` (§16.2.1.6.4): resolve every import and
@@ -454,13 +615,19 @@ pub fn link_for_evaluation_reusing(
     Ok(Nil) -> {
       // Expand each preexisting namespace ref into (ref, export-name → box):
       // the export map is final for an instantiated module and is exactly
-      // what importers link against.
+      // what importers link against. A ref that is not a namespace object
+      // cannot be silently skipped — that module would then get FRESH cells
+      // from `build_linked` while its already-evaluated body still holds the
+      // old ones, and every importer would read `undefined`.
       let pre =
         dict.fold(preexisting, dict.new(), fn(acc, spec, ns_ref) {
           case heap.read(heap, ns_ref) {
             Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
               dict.insert(acc, spec, #(ns_ref, exports))
-            _ -> acc
+            _ ->
+              assert_link_invariant(
+                Error(PreexistingNotANamespace(spec, ns_ref)),
+              )
           }
         })
       // Instantiate: pre-allocate every binding cell + namespace object, then
@@ -520,15 +687,18 @@ pub fn evaluate_linked(
     )
   // Static entry points drive a draining `finish`, so pending here means an
   // awaited promise can never settle — keep the historical "never completed"
-  // throw (cf. Node's exit code 13 for unsettled top-level await).
+  // throw (cf. Node's exit code 13 for unsettled top-level await), as a real
+  // JS TypeError object rather than a bare string.
   case result {
-    Error(EvaluationPending(promise_data_ref: _, heap: pending_heap)) ->
-      Error(EvaluationError(
-        value: JsString(
-          "module evaluation never completed: top-level await promise never settled",
-        ),
-        heap: pending_heap,
-      ))
+    Error(EvaluationPending(promise_data_ref: _, heap: pending_heap)) -> {
+      let #(pending_heap, err) =
+        common.make_type_error(
+          pending_heap,
+          builtins,
+          tla_never_settled_message,
+        )
+      Error(EvaluationError(value: err, heap: pending_heap))
+    }
     other -> other
   }
 }
@@ -553,14 +723,11 @@ pub fn evaluate_linked_tracking(
   Result(EvaluatedBundle(host), ModuleError(host)),
 ) {
   let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
-  let state =
-    EvalState(
-      heap:,
-      evaluated: already_evaluated,
-      errors: dict.new(),
-      evaluating: set.new(),
-      jobs: [],
-    )
+  let modules =
+    set.fold(already_evaluated, dict.new(), fn(acc, spec) {
+      dict.insert(acc, spec, Evaluated)
+    })
+  let state = EvalState(heap:, modules:, jobs: [])
   let #(state, result) =
     eval_module_inner(
       bundle,
@@ -582,17 +749,19 @@ pub fn evaluate_linked_tracking(
       namespace: entry_namespace(linked, bundle.entry, final_heap),
     )
   }
-  #(state.evaluated, state.jobs, result)
+  #(evaluated_specifiers(state), state.jobs, result)
 }
 
+/// Read every box in `boxes`, keeping only the ones holding an object — the
+/// namespace / deferred-namespace boxes always do.
 fn read_box_dict(
   boxes: Dict(String, Ref),
   heap: Heap(host),
-) -> List(#(String, JsValue)) {
+) -> List(#(String, Ref)) {
   use acc, spec, box <- dict.fold(boxes, [])
   case heap.read_box(heap, box) {
-    Some(ns) -> [#(spec, ns), ..acc]
-    None -> acc
+    Some(JsObject(ns_ref)) -> [#(spec, ns_ref), ..acc]
+    Some(_) | None -> acc
   }
 }
 
@@ -602,7 +771,7 @@ fn read_box_dict(
 pub fn linked_namespaces(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
-) -> List(#(String, JsValue)) {
+) -> List(#(String, Ref)) {
   read_box_dict(linked_bundle.linked.namespace_boxes, heap)
 }
 
@@ -612,30 +781,53 @@ pub fn linked_namespaces(
 pub fn linked_deferred_namespaces(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
-) -> List(#(String, JsValue)) {
+) -> List(#(String, Ref)) {
   read_box_dict(linked_bundle.linked.deferred_boxes, heap)
+}
+
+/// Why `get_or_create_deferred_namespace` could not hand back a Deferred
+/// Module Namespace. Distinguishing the two matters to the caller: the first
+/// is a guest-visible bad specifier, the second is an engine invariant break.
+pub type DeferredNamespaceError {
+  /// `spec` names neither a source nor a host module of the linked bundle.
+  DeferredSpecifierNotInBundle(specifier: String)
+  /// The bundle reserved a deferred-namespace box for `spec`, but it does not
+  /// hold an object — `fill_deferred_namespace` never ran, or the box was
+  /// clobbered.
+  DeferredNamespaceBoxCorrupt(specifier: String)
 }
 
 /// The Deferred Module Namespace for `spec`, creating one if no importer in
 /// the bundle deferred it statically (the dynamic `import.defer()` path).
+///
+/// Host (synthetic) modules qualify: they have export cells and namespace
+/// objects like any source module, and their `[[Evaluate]]` is a no-op, so a
+/// deferred namespace over one is a namespace whose trigger does nothing.
 pub fn get_or_create_deferred_namespace(
   heap: Heap(host),
   builtins: Builtins,
   linked_bundle: LinkedBundle,
   spec: String,
-) -> #(Heap(host), Option(JsValue)) {
+) -> #(Heap(host), Result(Ref, DeferredNamespaceError)) {
   let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
   use <- bool.lazy_guard(dict.has_key(bundle.modules, spec) == False, fn() {
-    #(heap, None)
+    #(heap, Error(DeferredSpecifierNotInBundle(specifier: spec)))
   })
   case dict.get(linked.deferred_boxes, spec) {
-    Ok(box) -> #(heap, heap.read_box(heap, box))
+    Ok(box) ->
+      case heap.read_box(heap, box) {
+        Some(JsObject(proxy_ref)) -> #(heap, Ok(proxy_ref))
+        Some(_) | None -> #(
+          heap,
+          Error(DeferredNamespaceBoxCorrupt(specifier: spec)),
+        )
+      }
     Error(Nil) -> {
       let #(heap, proxy_ref) = heap.reserve(heap)
       let heap = heap.root(heap, proxy_ref)
       let heap =
         fill_deferred_namespace(heap, builtins, bundle, linked, spec, proxy_ref)
-      #(heap, Some(JsObject(proxy_ref)))
+      #(heap, Ok(proxy_ref))
     }
   }
 }
@@ -695,15 +887,19 @@ pub fn evaluate_bundle_with_hooks(
 
 /// The entry module's Module Namespace Exotic Object, read out of the rooted
 /// box the linker reserved for it (`build_linked`). This is what `evaluate_bundle`
-/// hands back as `EvaluatedBundle.namespace`. Falls back to `undefined` only if
-/// the entry has no namespace box, which shouldn't happen for a linked bundle.
+/// hands back as `EvaluatedBundle.namespace`. `None` only if the entry has no
+/// namespace box, which shouldn't happen for a linked bundle.
 fn entry_namespace(
   linked: Linked,
   entry: String,
   heap: Heap(host),
-) -> Option(JsValue) {
+) -> Option(Ref) {
   case dict.get(linked.namespace_boxes, entry) {
-    Ok(box) -> heap.read_box(heap, box)
+    Ok(box) ->
+      case heap.read_box(heap, box) {
+        Some(JsObject(ns_ref)) -> Some(ns_ref)
+        Some(_) | None -> None
+      }
     Error(Nil) -> None
   }
 }
@@ -747,55 +943,43 @@ fn eval_module_inner(
   host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
-  // Already evaluated successfully — either in this DFS or recorded in the
-  // realm's heap-resident status registry (a deferred-namespace trigger may
-  // have evaluated it mid-DFS, re-entrantly). A host (synthetic) module has no
-  // body and ready exports, so its `[[Evaluate]]` is a no-op — always "done".
-  let already_evaluated =
-    dict.has_key(bundle.host_modules, specifier)
-    || set.contains(state.evaluated, specifier)
-    || registry.read_module_status(state.heap, global_object, specifier)
-    == Some(registry.Evaluated)
-  case already_evaluated {
-    True -> #(state, Ok(#(JsUndefined, state.heap)))
-    False ->
-      // Cached error — re-throw, never re-evaluate
-      case
-        dict.get(state.errors, specifier)
-        |> option.from_result
-        |> option.or(registry.read_module_error(
-          state.heap,
-          global_object,
-          specifier,
-        ))
-      {
-        Some(err_val) -> #(state, Error(EvaluationError(err_val, state.heap)))
+  case dict.get(bundle.modules, specifier) {
+    // A host (synthetic) module has no body and ready exports, so its
+    // `[[Evaluate]]` is a no-op — always "done".
+    Ok(SyntheticModule(_)) -> #(state, Ok(#(JsUndefined, state.heap)))
+    found ->
+      case module_eval_status(state, global_object, specifier) {
+        // Body already ran (in this DFS, or re-entrantly via a
+        // deferred-namespace trigger, or in an earlier bundle sharing this
+        // realm).
+        Some(Evaluated) -> #(state, Ok(#(JsUndefined, state.heap)))
+        // Cached error — re-throw, never re-evaluate.
+        Some(Failed(err_val)) -> #(
+          state,
+          Error(EvaluationError(err_val, state.heap)),
+        )
+        // Circular dependency (in this DFS, or in an outer evaluation a
+        // deferred-namespace trigger re-entered from) — return without
+        // re-entering.
+        Some(Evaluating) -> #(state, Ok(#(JsUndefined, state.heap)))
         None ->
-          // Circular dependency (in this DFS, or in an outer evaluation a
-          // deferred-namespace trigger re-entered from) — return without
-          // re-entering
-          case
-            set.contains(state.evaluating, specifier)
-            || registry.read_module_status(state.heap, global_object, specifier)
-            == Some(registry.Evaluating)
-          {
-            True -> #(state, Ok(#(JsUndefined, state.heap)))
-            False ->
-              case dict.get(bundle.modules, specifier) {
-                Error(Nil) -> #(state, Error(ModuleNotInBundle(specifier:)))
-                Ok(compiled) ->
-                  eval_module_body(
-                    bundle,
-                    linked,
-                    state,
-                    specifier,
-                    compiled,
-                    builtins,
-                    global_object,
-                    host_hooks,
-                    finish,
-                  )
-              }
+          case found {
+            Ok(SourceModule(compiled)) ->
+              eval_module_body(
+                bundle,
+                linked,
+                state,
+                specifier,
+                compiled,
+                builtins,
+                global_object,
+                host_hooks,
+                finish,
+              )
+            Ok(SyntheticModule(_)) | Error(Nil) -> #(
+              state,
+              Error(NotInBundle(specifier:)),
+            )
           }
       }
   }
@@ -814,8 +998,7 @@ fn eval_module_body(
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
   // Mark as evaluating
-  let state =
-    EvalState(..state, evaluating: set.insert(state.evaluating, specifier))
+  let state = set_eval_status(state, specifier, Evaluating)
 
   // Evaluate dependencies first (DFS post-order), following the
   // §16.2.1.5.3.1 InnerModuleEvaluation evaluationList: requests are visited
@@ -823,15 +1006,16 @@ fn eval_module_body(
   // itself, while a ~defer~-phase request only evaluates the module's
   // ASYNCHRONOUS transitive dependencies (its synchronous evaluation is
   // triggered later, by first access on the deferred namespace).
-  let requests = ordered_requests(compiled)
   let #(state, dep_result) = {
-    use state, Nil, #(raw_dep, eager) <- try_fold_state(requests, state, Nil)
-    let dep_specifier =
-      dict.get(compiled.specifier_map, raw_dep)
-      |> result.unwrap(raw_dep)
-    let to_evaluate = case eager {
-      True -> [dep_specifier]
-      False ->
+    use state, Nil, #(resolved_dep, phase) <- try_fold_state(
+      compiled.requested_modules,
+      state,
+      Nil,
+    )
+    let dep_specifier = esm.resolved_text(resolved_dep)
+    let to_evaluate = case phase {
+      esm.Evaluation -> [dep_specifier]
+      esm.Deferred ->
         gather_async_transitive_deps(
           bundle,
           state,
@@ -863,24 +1047,18 @@ fn eval_module_body(
       Error(err),
     )
     Error(err) -> {
-      // Dependency failed — cache the error on this module too
-      let error_val = case err {
-        EvaluationError(value: val, ..) -> val
-        _ -> JsString(string.inspect(err))
+      // Dependency failed — cache the error on this module too. A dependency
+      // that isn't in the bundle at all has no thrown value of its own, so
+      // allocate a real TypeError for it (never a Gleam debug repr).
+      let #(heap, error_val) = case err {
+        EvaluationError(value: val, ..) -> #(state.heap, val)
+        NotInBundle(..) | EvaluationPending(..) ->
+          common.make_type_error(state.heap, builtins, error_message(err))
       }
       let heap =
-        registry.write_module_error(
-          state.heap,
-          global_object,
-          specifier,
-          error_val,
-        )
-      let state =
-        EvalState(
-          ..state,
-          heap:,
-          errors: dict.insert(state.errors, specifier, error_val),
-        )
+        registry.write_module_error(heap, global_object, specifier, error_val)
+      let state = EvalState(..state, heap:)
+      let state = set_eval_status(state, specifier, Failed(error_val))
       #(state, Error(err))
     }
     Ok(Nil) -> {
@@ -890,6 +1068,7 @@ fn eval_module_body(
       // the body reads/writes through the shared boxes.
       let seeds =
         import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
+        |> assert_link_invariant
         |> list.append(own_export_seeds(linked, compiled))
 
       // Publish [[Status]] = ~evaluating~ in the realm's heap-resident status
@@ -915,8 +1094,12 @@ fn eval_module_body(
         )
       {
         entry.ModuleError(error: vm_err) -> {
-          let error_val =
-            JsString("InternalError: " <> vm_error_message(vm_err))
+          let #(heap, error_val) =
+            common.make_type_error(
+              heap,
+              builtins,
+              "InternalError: " <> vm_error_message(vm_err),
+            )
           let heap =
             registry.clear_module_status(heap, global_object, specifier)
           let heap =
@@ -926,12 +1109,8 @@ fn eval_module_body(
               specifier,
               error_val,
             )
-          let state =
-            EvalState(
-              ..state,
-              heap:,
-              errors: dict.insert(state.errors, specifier, error_val),
-            )
+          let state = EvalState(..state, heap:)
+          let state = set_eval_status(state, specifier, Failed(error_val))
           #(state, Error(EvaluationError(error_val, state.heap)))
         }
         entry.ModuleThrow(value: thrown_val, heap: new_heap, jobs:) -> {
@@ -948,9 +1127,9 @@ fn eval_module_body(
             EvalState(
               ..state,
               heap: new_heap,
-              errors: dict.insert(state.errors, specifier, thrown_val),
               jobs: list.append(state.jobs, jobs),
             )
+          let state = set_eval_status(state, specifier, Failed(thrown_val))
           #(state, Error(EvaluationError(thrown_val, new_heap)))
         }
         entry.ModuleOk(value: val, heap: new_heap, locals: _, jobs:) -> {
@@ -965,10 +1144,9 @@ fn eval_module_body(
             EvalState(
               ..state,
               heap: new_heap,
-              evaluated: set.insert(state.evaluated, specifier),
-              evaluating: set.delete(state.evaluating, specifier),
               jobs: list.append(state.jobs, jobs),
             )
+          let state = set_eval_status(state, specifier, Evaluated)
           #(state, Ok(#(val, new_heap)))
         }
         // Parked on top-level await (non-draining driver): not evaluated, not
@@ -1075,8 +1253,7 @@ fn build_linked(
   // Host (synthetic) modules join the source modules: they need namespace
   // objects (for `import * as ns`) and export maps built below, exactly like a
   // source module whose cells are already initialized.
-  let specs =
-    list.append(dict.keys(bundle.modules), dict.keys(bundle.host_modules))
+  let specs = dict.keys(bundle.modules)
   // Reserve a namespace object ref per module, then a rooted box wrapping it,
   // up front so cyclic / star-reached namespace re-exports resolve to a ref.
   // Preexisting modules reuse their registered namespace object instead.
@@ -1104,21 +1281,43 @@ fn build_linked(
       case dict.get(preexisting, spec) {
         Ok(#(_, existing_exports)) -> dict.insert(all, spec, existing_exports)
         Error(Nil) -> {
+          let key = esm.resolved_unchecked(spec)
           let map =
-            link.exported_names(lg, spec)
+            link.exported_names(lg, key)
             |> list.fold(dict.new(), fn(map, name) {
-              let found = case link.resolve_export(lg, spec, name) {
+              case link.resolve_export(lg, key, name) {
+                // §16.2.1.6.3 ResolveExport: a name reached only through
+                // `export *` that resolves ambiguously (or not at all) is NOT
+                // an exported name of the namespace — deliberately excluded, no
+                // cell. Importing it directly is a link error, already caught by
+                // `link.validate` above.
+                link.Unresolvable | link.Ambiguous -> map
+                // Resolved, so a cell MUST exist: every module has local boxes,
+                // a namespace box, and (if deferred-imported) a deferred proxy.
                 link.ResolvedTo(owner, binding) ->
-                  dict.get(local_boxes, owner)
+                  dict.get(local_boxes, esm.resolved_text(owner))
                   |> result.try(dict.get(_, binding))
+                  |> result.replace_error(MissingExportCell(
+                    esm.resolved_text(owner),
+                    binding,
+                  ))
+                  |> assert_link_invariant
+                  |> dict.insert(map, name, _)
                 link.ResolvedNamespace(target) ->
-                  dict.get(namespace_boxes, target)
+                  dict.get(namespace_boxes, esm.resolved_text(target))
+                  |> result.replace_error(
+                    MissingNamespaceBox(esm.resolved_text(target)),
+                  )
+                  |> assert_link_invariant
+                  |> dict.insert(map, name, _)
                 link.ResolvedDeferredNamespace(target) ->
-                  dict.get(deferred_boxes, target)
-                link.Unresolvable | link.Ambiguous -> Error(Nil)
+                  dict.get(deferred_boxes, esm.resolved_text(target))
+                  |> result.replace_error(
+                    MissingDeferredBox(esm.resolved_text(target)),
+                  )
+                  |> assert_link_invariant
+                  |> dict.insert(map, name, _)
               }
-              result.map(found, dict.insert(map, name, _))
-              |> result.unwrap(map)
             })
           dict.insert(all, spec, map)
         }
@@ -1139,18 +1338,6 @@ fn build_linked(
   )
 }
 
-/// A module's [[RequestedModules]] in declaration order as
-/// (raw specifier, eager?) pairs. Both halves were computed by esm.analyze's
-/// merge_requests at compile time: `requested_modules` is the unique
-/// specifiers in source order, `eager_requests` is the subset whose merged
-/// phase is ~evaluation~ (a specifier is Deferred only if EVERY reference
-/// is `import defer * as ns`).
-fn ordered_requests(compiled: CompiledModule) -> List(#(String, Bool)) {
-  let eager = set.from_list(compiled.eager_requests)
-  use specifier <- list.map(compiled.requested_modules)
-  #(specifier, set.contains(eager, specifier))
-}
-
 /// GatherAsynchronousTransitiveDependencies ( module ): the modules in
 /// `spec`'s whole dependency graph (following BOTH phases) that have
 /// top-level await and are not already evaluated/evaluating — a ~defer~
@@ -1165,25 +1352,31 @@ fn gather_async_transitive_deps(
 ) -> #(List(String), Set(String)) {
   use <- bool.guard(set.contains(seen, spec), #([], seen))
   let seen = set.insert(seen, spec)
-  let already_done =
-    set.contains(state.evaluated, spec)
-    || set.contains(state.evaluating, spec)
-    || registry.read_module_status(state.heap, global_object, spec) != None
-  use <- bool.guard(already_done, #([], seen))
+  // "Started" — this DFS's own view, or the realm's status registry. A module
+  // whose evaluation FAILED is not "started": its cached error is rethrown by
+  // whichever eval_module_inner reaches it.
+  let already_started = case dict.get(state.modules, spec) {
+    Ok(Evaluated) | Ok(Evaluating) -> True
+    Ok(Failed(_)) | Error(Nil) ->
+      registry.read_module_status(state.heap, global_object, spec) != None
+  }
+  use <- bool.guard(already_started, #([], seen))
   case dict.get(bundle.modules, spec) {
-    Error(Nil) -> #([], seen)
-    Ok(m) ->
+    // Not in this bundle, or a host module (no body, so no top-level await).
+    Error(Nil) | Ok(SyntheticModule(_)) -> #([], seen)
+    Ok(SourceModule(m)) ->
       case m.has_tla {
         True -> #([spec], seen)
         False ->
-          list.fold(m.requested_modules, #([], seen), fn(acc, raw) {
+          list.fold(m.requested_modules, #([], seen), fn(acc, request) {
             let #(found, seen) = acc
+            let #(dep_specifier, _phase) = request
             let #(more, seen) =
               gather_async_transitive_deps(
                 bundle,
                 state,
                 global_object,
-                resolved_specifier(m, raw),
+                esm.resolved_text(dep_specifier),
                 seen,
               )
             #(list.append(found, more), seen)
@@ -1216,14 +1409,7 @@ pub fn evaluate_async_transitive_deps(
   Result(List(#(String, Ref)), ModuleError(host)),
 ) {
   let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
-  let eval_state =
-    EvalState(
-      heap:,
-      evaluated: set.new(),
-      errors: dict.new(),
-      evaluating: set.new(),
-      jobs: [],
-    )
+  let eval_state = EvalState(heap:, modules: dict.new(), jobs: [])
   let #(to_evaluate, _seen) =
     gather_async_transitive_deps(
       bundle,
@@ -1264,7 +1450,9 @@ pub fn evaluate_async_transitive_deps(
 /// The resolved specifiers some module in the bundle imports with
 /// `import defer * as ns` — each needs a Deferred Module Namespace.
 fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
-  dict.fold(bundle.modules, [], fn(acc, _spec, m) {
+  dict.fold(bundle.modules, [], fn(acc, _spec, bundle_module) {
+    // A host module imports nothing, so it can never defer anything.
+    use m <- with_source_module(bundle_module, acc)
     list.fold(m.import_bindings, acc, fn(acc, entry) {
       let #(raw_dep, bindings) = entry
       let is_deferred =
@@ -1274,9 +1462,11 @@ fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
             _ -> False
           }
         })
-      case is_deferred {
-        True -> [resolved_specifier(m, raw_dep), ..acc]
-        False -> acc
+      // `specifier_map` is TOTAL over `m`'s own requests, so a deferred import
+      // always names a bundle key.
+      case is_deferred, esm.resolve(m.specifier_map, raw_dep) {
+        True, Some(dep) -> [esm.resolved_text(dep), ..acc]
+        True, None | False, _ -> acc
       }
     })
   })
@@ -1296,7 +1486,9 @@ fn instantiate_hoisted_functions(
   heap: Heap(host),
   already_evaluated: Set(String),
 ) -> Heap(host) {
-  dict.fold(bundle.modules, heap, fn(heap, spec, compiled) {
+  dict.fold(bundle.modules, heap, fn(heap, spec, bundle_module) {
+    // A host module has no body and no hoisted functions.
+    use compiled <- with_source_module(bundle_module, heap)
     // A preexisting module's export cells hold their final values — don't
     // overwrite them with link-time placeholder closures.
     use <- bool.guard(set.contains(already_evaluated, spec), heap)
@@ -1306,6 +1498,7 @@ fn instantiate_hoisted_functions(
     // a body run would (imports in slots 0..N-1, own exports in their slots).
     let seeds =
       import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
+      |> assert_link_invariant
       |> list.append(own_export_seeds(linked, compiled))
     let frame = interpreter.init_module_locals(compiled.template, seeds)
     list.fold(compiled.hoisted_funcs, heap, fn(heap, hf) {
@@ -1341,47 +1534,53 @@ fn preallocate_local_boxes(
   heap: Heap(host),
   preexisting: Dict(String, #(Ref, Dict(String, Ref))),
 ) -> #(Heap(host), Dict(String, Dict(String, Ref))) {
-  // Host modules first: one box per export, seeded with the host value itself
-  // (no body ever runs to fill it — the seed IS the final binding).
-  let #(heap, with_hosts) =
-    dict.fold(bundle.host_modules, #(heap, dict.new()), fn(acc, spec, hm) {
-      let #(heap, all) = acc
-      let #(heap, boxes) =
+  dict.fold(bundle.modules, #(heap, dict.new()), fn(acc, spec, bundle_module) {
+    let #(heap, all) = acc
+    let existing =
+      dict.get(preexisting, spec)
+      |> option.from_result
+      |> option.map(fn(p) { p.1 })
+    let #(heap, boxes) = case bundle_module, existing {
+      SourceModule(m), Some(existing_exports) -> #(
+        heap,
+        list.fold(m.export_entries, dict.new(), fn(boxes, e) {
+          case e {
+            esm.LocalExport(export_name:, local_name:) ->
+              case dict.get(existing_exports, export_name) {
+                Ok(box) -> dict.insert(boxes, local_name, box)
+                Error(Nil) -> boxes
+              }
+            _ -> boxes
+          }
+        }),
+      )
+      SourceModule(m), None ->
+        dict.fold(m.export_seeds, #(heap, dict.new()), fn(a, local, seed) {
+          let #(heap, boxes) = a
+          let #(heap, box) = alloc_box(heap, seed)
+          #(heap, dict.insert(boxes, local, box))
+        })
+      // A host module: one box per export, seeded with the host value itself
+      // (no body ever runs to fill it — the seed IS the final binding). Its
+      // local names ARE its export names, so a preexisting cell reuses direct.
+      SyntheticModule(hm), existing_exports ->
         list.fold(hm.exports, #(heap, dict.new()), fn(a, export) {
           let #(heap, boxes) = a
           let #(name, val) = export
-          let #(heap, box) = alloc_box(heap, val)
-          #(heap, dict.insert(boxes, name, box))
-        })
-      #(heap, dict.insert(all, spec, boxes))
-    })
-  dict.fold(bundle.modules, #(heap, with_hosts), fn(acc, spec, m) {
-    let #(heap, all) = acc
-    case dict.get(preexisting, spec) {
-      Ok(#(_, existing_exports)) -> {
-        let boxes =
-          list.fold(m.export_entries, dict.new(), fn(boxes, e) {
-            case e {
-              esm.LocalExport(export_name:, local_name:) ->
-                case dict.get(existing_exports, export_name) {
-                  Ok(box) -> dict.insert(boxes, local_name, box)
-                  Error(Nil) -> boxes
-                }
-              _ -> boxes
+          let reused =
+            option.then(existing_exports, fn(ex) {
+              dict.get(ex, name) |> option.from_result
+            })
+          case reused {
+            Some(box) -> #(heap, dict.insert(boxes, name, box))
+            None -> {
+              let #(heap, box) = alloc_box(heap, val)
+              #(heap, dict.insert(boxes, name, box))
             }
-          })
-        #(heap, dict.insert(all, spec, boxes))
-      }
-      Error(Nil) -> {
-        let #(heap, boxes) =
-          dict.fold(m.export_seeds, #(heap, dict.new()), fn(a, local, seed) {
-            let #(heap, boxes) = a
-            let #(heap, box) = alloc_box(heap, seed)
-            #(heap, dict.insert(boxes, local, box))
-          })
-        #(heap, dict.insert(all, spec, boxes))
-      }
+          }
+        })
     }
+    #(heap, dict.insert(all, spec, boxes))
   })
 }
 
@@ -1604,22 +1803,27 @@ fn ready_for_sync_execution(
     _ ->
       case dict.get(bundle.modules, spec) {
         // Not in this bundle (registry-shared module) — its body either ran
-        // already or will be loaded by its own bundle; treat as ready.
-        Error(Nil) -> #(True, seen)
-        Ok(m) ->
+        // already or will be loaded by its own bundle; treat as ready. A host
+        // module has no body at all, so it is always ready.
+        Error(Nil) | Ok(SyntheticModule(_)) -> #(True, seen)
+        Ok(SourceModule(m)) ->
           case m.has_tla {
             True -> #(False, seen)
             False ->
-              list.fold(m.eager_requests, #(True, seen), fn(acc, raw) {
+              // Only the ~evaluation~-phase requests: a ~defer~ request's
+              // module is not part of this module's synchronous subgraph.
+              list.fold(m.requested_modules, #(True, seen), fn(acc, request) {
                 let #(ok, seen) = acc
-                case ok {
-                  False -> #(False, seen)
-                  True ->
+                let #(dep_specifier, phase) = request
+                case ok, phase {
+                  False, _ -> #(False, seen)
+                  True, esm.Deferred -> #(True, seen)
+                  True, esm.Evaluation ->
                     ready_for_sync_execution(
                       bundle,
                       h,
                       global_object,
-                      resolved_specifier(m, raw),
+                      esm.resolved_text(dep_specifier),
                       seen,
                     )
                 }
@@ -1642,25 +1846,11 @@ fn evaluate_deferred_subgraph(
   builtins: Builtins,
 ) -> Result(State(host), #(JsValue, State(host))) {
   let global_object = state.ctx.global_object
-  let specs = dict.keys(bundle.modules)
-  let #(evaluated, evaluating) =
-    list.fold(specs, #(set.new(), set.new()), fn(acc, s) {
-      let #(done, running) = acc
-      case registry.read_module_status(state.heap, global_object, s) {
-        Some(registry.Evaluated) -> #(set.insert(done, s), running)
-        Some(registry.Evaluating) -> #(done, set.insert(running, s))
-        _ -> acc
-      }
-    })
-  let errors =
-    list.fold(specs, dict.new(), fn(acc, s) {
-      case registry.read_module_error(state.heap, global_object, s) {
-        Some(err) -> dict.insert(acc, s, err)
-        None -> acc
-      }
-    })
-  let st =
-    EvalState(heap: state.heap, evaluated:, errors:, evaluating:, jobs: [])
+  // Nothing to seed: `module_eval_status` reads the realm's heap-resident
+  // registry for any module this DFS has not itself touched, so bodies that
+  // already ran (in this bundle, an earlier bundle, or an earlier trigger)
+  // are recognized without copying the registry into Gleam data first.
+  let st = EvalState(heap: state.heap, modules: dict.new(), jobs: [])
   let #(st, result) =
     eval_module_inner(
       bundle,
@@ -1682,13 +1872,17 @@ fn evaluate_deferred_subgraph(
     Ok(_) -> Ok(state)
     Error(EvaluationError(value:, heap:)) ->
       Error(#(value, State(..state, heap:)))
-    Error(other) ->
+    // A deferred subgraph is only entered when ReadyForSyncExecution said yes,
+    // so no body in it can park on top-level await; and the specifier came out
+    // of this bundle, so it is in it. Both are unreachable — but rendered
+    // through `error_message`, never a Gleam debug repr.
+    Error(NotInBundle(..) as other) | Error(EvaluationPending(..) as other) ->
       Error(state.type_error_value(
         state,
         "Failed to evaluate deferred module '"
           <> spec
           <> "': "
-          <> string.inspect(other),
+          <> error_message(other),
       ))
   }
 }
@@ -1702,39 +1896,54 @@ fn evaluate_deferred_subgraph(
 /// exporting module's live cell; namespace imports get the shared namespace box.
 fn import_seeds(
   linked: Linked,
-  specifier_map: Dict(String, String),
-  import_bindings: List(#(String, List(esm.ImportBinding))),
-) -> List(#(Int, JsValue)) {
-  list.flat_map(import_bindings, fn(entry) {
-    let #(raw_dep, bindings) = entry
-    let dep = dict.get(specifier_map, raw_dep) |> result.unwrap(raw_dep)
-    let dep_exports = dict.get(linked.exports, dep) |> result.unwrap(dict.new())
-    list.map(bindings, fn(binding) {
-      case binding {
-        esm.NamedImport(imported:, ..) -> forward_box(dep_exports, imported)
-        esm.DefaultImport(..) -> forward_box(dep_exports, "default")
-        esm.NamespaceImport(phase: esm.Deferred, ..) ->
-          case dict.get(linked.deferred_boxes, dep) {
-            Ok(box) -> JsObject(box)
-            Error(Nil) -> JsUndefined
-          }
-        esm.NamespaceImport(phase: esm.Default, ..) ->
-          case dict.get(linked.namespace_boxes, dep) {
-            Ok(box) -> JsObject(box)
-            Error(Nil) -> JsUndefined
-          }
-      }
-    })
-  })
+  specifier_map: esm.SpecifierMap,
+  import_bindings: List(#(esm.Raw, List(esm.ImportBinding))),
+) -> Result(List(#(Int, JsValue)), LinkInvariantBroken) {
+  use per_dep <- result.map(
+    list.try_map(import_bindings, fn(entry) {
+      let #(raw_dep, bindings) = entry
+      // `specifier_map` is TOTAL over the module's own requests, so `None` is
+      // an invariant break — it means "no such dependency", never "the raw
+      // specifier happens to be a bundle key too".
+      use dep <- result.try(
+        esm.resolve(specifier_map, raw_dep)
+        |> option.to_result(UnresolvedDependency(raw_dep)),
+      )
+      let dep = esm.resolved_text(dep)
+      let dep_exports =
+        dict.get(linked.exports, dep) |> result.unwrap(dict.new())
+      // Every binding gets a slot: these are positional captures 0..N-1.
+      list.try_map(bindings, fn(binding) {
+        case binding {
+          esm.NamedImport(imported:, ..) ->
+            forward_box(dep_exports, dep, imported)
+          esm.DefaultImport(..) -> forward_box(dep_exports, dep, "default")
+          esm.NamespaceImport(phase: esm.Deferred, ..) ->
+            dict.get(linked.deferred_boxes, dep)
+            |> result.replace_error(MissingDeferredBox(dep))
+            |> result.map(JsObject)
+          esm.NamespaceImport(phase: esm.Evaluation, ..) ->
+            dict.get(linked.namespace_boxes, dep)
+            |> result.replace_error(MissingNamespaceBox(dep))
+            |> result.map(JsObject)
+        }
+      })
+    }),
+  )
+  per_dep
+  |> list.flatten
   |> list.index_map(fn(box, idx) { #(idx, box) })
 }
 
 /// The exporting module's live cell for `name` (link-checked to exist).
-fn forward_box(dep_exports: Dict(String, Ref), name: String) -> JsValue {
-  case dict.get(dep_exports, name) {
-    Ok(box) -> JsObject(box)
-    Error(Nil) -> JsUndefined
-  }
+fn forward_box(
+  dep_exports: Dict(String, Ref),
+  dep: String,
+  name: String,
+) -> Result(JsValue, LinkInvariantBroken) {
+  dict.get(dep_exports, name)
+  |> result.replace_error(MissingExportCell(dep, name))
+  |> result.map(JsObject)
 }
 
 /// This module's own export cells, placed into their declared local slots so
@@ -1748,8 +1957,10 @@ fn own_export_seeds(
   compiled: CompiledModule,
 ) -> List(#(Int, JsValue)) {
   let import_locals =
-    set.from_list(compiler.import_local_names(compiled.import_bindings))
-  dict.get(linked.local_boxes, compiled.specifier)
+    list.map(compiled.import_bindings, fn(e) { #(esm.raw_text(e.0), e.1) })
+    |> compiler.import_local_names
+    |> set.from_list
+  dict.get(linked.local_boxes, esm.resolved_text(compiled.specifier))
   |> result.unwrap(dict.new())
   |> dict.to_list
   |> list.filter_map(fn(pair) {
