@@ -34,7 +34,11 @@ flags_to_opts(<<_, Rest/binary>>, Acc) -> flags_to_opts(Rest, Acc).
 %% g, y, u, d, v are handled at the Gleam level, not PCRE options
 
 %% get_compiled(Pattern, Flags) -> {ok, {MP, GroupCount, Names}}
-%%                               | {error, {compile_failed, Reason}}
+%%                               | {error, {pattern_compile_failed, Reason}}
+%%
+%% The failure shape is one of the `regexp:ExecFailure` constructors the Gleam
+%% caller matches on — a pattern PCRE cannot compile is NOT the same thing as
+%% a pattern that failed to match, and neither side may confuse them.
 %%
 %% Get a compiled pattern, caching it in the process dictionary. re:run/3
 %% with a binary pattern recompiles the PCRE pattern on every call, and the
@@ -64,11 +68,19 @@ get_compiled(Pattern, Flags) ->
                     cache_put(Key, Entry),
                     {ok, Entry};
                 {error, Reason} ->
-                    {error, {compile_failed, Reason}}
+                    {error, {pattern_compile_failed, compile_reason(Reason)}}
             end;
         Entry ->
             {ok, Entry}
     end.
+
+%% re:compile's {ErrString, Position} (or anything else it may hand back)
+%% rendered as a binary the Gleam side can carry in
+%% PatternCompileFailed(reason: String).
+compile_reason({Msg, Pos}) when is_list(Msg), is_integer(Pos) ->
+    unicode:characters_to_binary(io_lib:format("~ts at ~b", [Msg, Pos]));
+compile_reason(Other) ->
+    unicode:characters_to_binary(io_lib:format("~tp", [Other])).
 
 %% Max compiled patterns cached per process before the cache is flushed.
 -define(CACHE_MAX, 512).
@@ -90,16 +102,6 @@ cache_put(Key, Entry) ->
             erlang:put(arc_re_mp_count, N + 1)
     end,
     erlang:put(Key, Entry).
-
-%% re:run/3 raises badarg for a byte offset that is out of range or lands in
-%% the middle of a UTF-8 character; JS semantics for both is a failed match.
-%% NOTHING else is caught here: a crash inside the translator (scan_pattern,
-%% translate_pat, vclass, ...) is a bug in this module and must surface as a
-%% crash rather than masquerade as "the regex didn't match".
-run_mp(String, MP, RunOpts) ->
-    try re:run(String, MP, RunOpts)
-    catch error:badarg -> nomatch
-    end.
 
 %% ---- One scan of the source pattern -------------------------------------
 %%
@@ -744,14 +746,24 @@ surrogate_sentinel(false) -> "(?!)";
 surrogate_sentinel(true) -> "\\x{FDD0}".
 
 %% regexp_exec_info(Pattern, Flags, String, Offset, Sticky)
-%%   -> {ok, {Captures, GroupCount, Names}} | {error, nil}
+%%   -> {ok, {Captures, GroupCount, Names}}
+%%    | {error, no_match}
+%%    | {error, offset_out_of_range}
+%%    | {error, {pattern_compile_failed, ReasonBinary}}
+%%
+%% The three failures are DISTINCT and the caller (regexp.gleam's ExecFailure)
+%% must treat them so: only no_match/offset_out_of_range are "the regex did not
+%% match"; a pattern PCRE cannot compile is an engine-level failure.
 %%
 %% Offset and the returned Start/Length are BYTE indices into the UTF-8
 %% binary — the Gleam caller slices with byte_slice/byte_drop_start and steps
 %% empty matches with next_char_boundary, so no grapheme conversion happens
-%% on either side. An offset past the end of the string is no-match (re:run
-%% raises badarg for it; JS semantics for lastIndex > length are a failed
-%% match). A negative Offset is clamped to 0 (ToLength, §7.1.20).
+%% on either side. re:run/3 raises badarg for the two offsets JS treats as a
+%% failed match — past the end of the string, or mid-UTF-8-character — so both
+%% are rejected by the guards below BEFORE re:run sees them, and no badarg is
+%% caught anywhere in this module: any other badarg is a bug here and must
+%% crash rather than masquerade as "the regex didn't match".
+%% A negative Offset is clamped to 0 (ToLength, §7.1.20).
 %% Additionally:
 %%   - Sticky=true anchors the match at Offset (JS `y` flag semantics),
 %%   - Captures is padded with {-1, 0} up to GroupCount + 1 entries (PCRE
@@ -762,24 +774,33 @@ regexp_exec_info(Pattern, Flags, String, Offset, Sticky) when Offset < 0 ->
     regexp_exec_info(Pattern, Flags, String, 0, Sticky);
 regexp_exec_info(_Pattern, _Flags, String, Offset, _Sticky)
   when Offset > byte_size(String) ->
-    {error, nil};
+    {error, offset_out_of_range};
+%% An offset landing on a UTF-8 continuation byte is mid-character; re:run
+%% would raise badarg. Same test as arc_bytes_ffi:next_char_boundary's.
+regexp_exec_info(Pattern, Flags, String, Offset, Sticky)
+  when Offset < byte_size(String) ->
+    case (binary:at(String, Offset) band 16#C0) =:= 16#80 of
+        true -> {error, no_match};
+        false -> exec_compiled(Pattern, Flags, String, Offset, Sticky)
+    end;
 regexp_exec_info(Pattern, Flags, String, Offset, Sticky) ->
+    exec_compiled(Pattern, Flags, String, Offset, Sticky).
+
+exec_compiled(Pattern, Flags, String, Offset, Sticky) ->
     Opts0 = [{offset, Offset}, {capture, all, index}],
     Opts = case Sticky of
                true -> [anchored | Opts0];
                false -> Opts0
            end,
     case get_compiled(Pattern, Flags) of
-        %% A pattern PCRE cannot express even after translation degrades to
-        %% "no match" rather than crashing the VM.
-        {error, {compile_failed, _Reason}} ->
-            {error, nil};
+        {error, {pattern_compile_failed, _Reason}} = Err ->
+            Err;
         {ok, {MP, GroupCount, Names}} ->
-            case run_mp(String, MP, Opts) of
+            case re:run(String, MP, Opts) of
                 {match, Captured} ->
                     Padded = pad_captures(Captured, GroupCount + 1),
                     {ok, {Padded, GroupCount, Names}};
-                _ -> {error, nil}
+                nomatch -> {error, no_match}
             end
     end.
 

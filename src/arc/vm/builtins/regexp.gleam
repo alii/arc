@@ -41,15 +41,32 @@ import gleam/bit_array
 import gleam/bool
 import gleam/dict
 import gleam/int
+import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
+/// Why a `regexp_exec_info` call produced no match. The three cases are NOT
+/// interchangeable: the first two are ordinary JS "the regex did not match
+/// here", the third is an engine failure — a pattern PCRE could not compile
+/// even after translation. Collapsing them (as a bare `Nil` error did) makes an
+/// uncompilable pattern silently behave like a pattern that matched nothing.
+type ExecFailure {
+  /// The compiled pattern ran and did not match at the offset.
+  NoMatch
+  /// lastIndex was past the end of the subject (§22.2.7.2 step 12.a).
+  OffsetOutOfRange
+  /// The translated pattern is not valid PCRE. Reason is re:compile's message.
+  PatternCompileFailed(reason: String)
+}
+
 /// FFI: execute pattern on string at byte offset. Returns the capture list
 /// padded to group_count+1 entries ({-1,0} = unset group), the total
 /// capturing-group count, and [(name, capture_index)] for named groups.
 /// `sticky` anchors the match exactly at `offset` (JS `y` semantics).
+/// The offset bounds/character-boundary checks live in the FFI: an out-of-range
+/// or mid-character offset comes back as a typed failure, never a crash.
 @external(erlang, "arc_regexp_ffi", "regexp_exec_info")
 fn ffi_regexp_exec_info(
   pattern: String,
@@ -57,7 +74,7 @@ fn ffi_regexp_exec_info(
   string: String,
   offset: Int,
   sticky: Bool,
-) -> Result(#(List(#(Int, Int)), Int, List(#(String, Int))), Nil)
+) -> Result(#(List(#(Int, Int)), Int, List(#(String, Int))), ExecFailure)
 
 /// FFI: O(1) sub-binary slice by byte offsets. regexp_exec_info returns byte
 /// indices (re:run), so all slicing of the subject string must be byte-based —
@@ -84,6 +101,80 @@ fn next_char_boundary(string: String, position: Int) -> Int
 // neither is a property, so nothing shows up in Reflect.ownKeys /
 // Object.getOwnPropertySymbols.
 
+// ---------------------------------------------------------------------------
+// The RegExp flag set (§22.2.6) — one table, three uses
+// ---------------------------------------------------------------------------
+
+/// A RegExp flag. Every fact about a flag (its letter, its accessor property
+/// name, its getter native) hangs off this type, so the getter registration in
+/// `init`, the `dispatch` arms and `get flags`'s letter concatenation cannot
+/// drift apart: adding a flag is a compile error until all of them are updated.
+type RegExpFlag {
+  HasIndices
+  Global
+  IgnoreCase
+  Multiline
+  DotAll
+  Unicode
+  UnicodeSets
+  Sticky
+}
+
+/// Every flag, in the canonical order `get flags` must emit them ("dgimsuvy")
+/// — which is also the order it must Get the properties in (observable).
+const all_flags: List(RegExpFlag) = [
+  HasIndices,
+  Global,
+  IgnoreCase,
+  Multiline,
+  DotAll,
+  Unicode,
+  UnicodeSets,
+  Sticky,
+]
+
+/// The letter this flag contributes to `flags` / to [[OriginalFlags]].
+fn flag_letter(flag: RegExpFlag) -> String {
+  case flag {
+    HasIndices -> "d"
+    Global -> "g"
+    IgnoreCase -> "i"
+    Multiline -> "m"
+    DotAll -> "s"
+    Unicode -> "u"
+    UnicodeSets -> "v"
+    Sticky -> "y"
+  }
+}
+
+/// The RegExp.prototype accessor property that exposes this flag.
+fn flag_property(flag: RegExpFlag) -> String {
+  case flag {
+    HasIndices -> "hasIndices"
+    Global -> "global"
+    IgnoreCase -> "ignoreCase"
+    Multiline -> "multiline"
+    DotAll -> "dotAll"
+    Unicode -> "unicode"
+    UnicodeSets -> "unicodeSets"
+    Sticky -> "sticky"
+  }
+}
+
+/// The native function backing that accessor; `dispatch` maps it back to a flag.
+fn flag_getter_native(flag: RegExpFlag) -> RegExpNativeFn {
+  case flag {
+    HasIndices -> RegExpGetHasIndices
+    Global -> RegExpGetGlobal
+    IgnoreCase -> RegExpGetIgnoreCase
+    Multiline -> RegExpGetMultiline
+    DotAll -> RegExpGetDotAll
+    Unicode -> RegExpGetUnicode
+    UnicodeSets -> RegExpGetUnicodeSets
+    Sticky -> RegExpGetSticky
+  }
+}
+
 /// Set up RegExp constructor + RegExp.prototype.
 pub fn init(
   h: Heap(host),
@@ -99,20 +190,21 @@ pub fn init(
       #("compile", RegExpNative(RegExpPrototypeCompile), 2),
     ])
 
-  // Allocate accessor getter functions for flag properties
+  // Allocate accessor getter functions: source, flags, and one per flag.
   let #(h, getters) =
-    common.alloc_getters(h, function_proto, [
-      #("source", RegExpNative(RegExpGetSource)),
-      #("flags", RegExpNative(RegExpGetFlags)),
-      #("global", RegExpNative(RegExpGetGlobal)),
-      #("ignoreCase", RegExpNative(RegExpGetIgnoreCase)),
-      #("multiline", RegExpNative(RegExpGetMultiline)),
-      #("dotAll", RegExpNative(RegExpGetDotAll)),
-      #("sticky", RegExpNative(RegExpGetSticky)),
-      #("unicode", RegExpNative(RegExpGetUnicode)),
-      #("unicodeSets", RegExpNative(RegExpGetUnicodeSets)),
-      #("hasIndices", RegExpNative(RegExpGetHasIndices)),
-    ])
+    common.alloc_getters(
+      h,
+      function_proto,
+      list.append(
+        [
+          #("source", RegExpNative(RegExpGetSource)),
+          #("flags", RegExpNative(RegExpGetFlags)),
+        ],
+        list.map(all_flags, fn(flag) {
+          #(flag_property(flag), RegExpNative(flag_getter_native(flag)))
+        }),
+      ),
+    )
 
   let proto_props = list.append(proto_methods, getters)
 
@@ -315,14 +407,14 @@ pub fn dispatch(
     RegExpPrototypeCompile -> regexp_compile(this, args, state)
     RegExpGetSource -> regexp_get_source(this, state)
     RegExpGetFlags -> regexp_get_flags(this, state)
-    RegExpGetGlobal -> regexp_flag_getter(this, "g", state)
-    RegExpGetIgnoreCase -> regexp_flag_getter(this, "i", state)
-    RegExpGetMultiline -> regexp_flag_getter(this, "m", state)
-    RegExpGetDotAll -> regexp_flag_getter(this, "s", state)
-    RegExpGetSticky -> regexp_flag_getter(this, "y", state)
-    RegExpGetUnicode -> regexp_flag_getter(this, "u", state)
-    RegExpGetUnicodeSets -> regexp_flag_getter(this, "v", state)
-    RegExpGetHasIndices -> regexp_flag_getter(this, "d", state)
+    RegExpGetGlobal -> regexp_flag_getter(this, Global, state)
+    RegExpGetIgnoreCase -> regexp_flag_getter(this, IgnoreCase, state)
+    RegExpGetMultiline -> regexp_flag_getter(this, Multiline, state)
+    RegExpGetDotAll -> regexp_flag_getter(this, DotAll, state)
+    RegExpGetSticky -> regexp_flag_getter(this, Sticky, state)
+    RegExpGetUnicode -> regexp_flag_getter(this, Unicode, state)
+    RegExpGetUnicodeSets -> regexp_flag_getter(this, UnicodeSets, state)
+    RegExpGetHasIndices -> regexp_flag_getter(this, HasIndices, state)
     RegExpSymbolMatch -> regexp_symbol_match(this, args, state)
     RegExpSymbolMatchAll -> regexp_symbol_match_all(this, args, state)
     RegExpSymbolReplace -> regexp_symbol_replace(this, args, state)
@@ -506,6 +598,18 @@ fn capture_to_legacy_string(s: String, cap: #(Int, Int)) -> String {
 // ---------------------------------------------------------------------------
 
 /// ES2024 §22.2.4.1 RegExp(pattern, flags)
+///
+///   1. Let patternIsRegExp be ? IsRegExp(pattern).
+///   2. If NewTarget is undefined:
+///      a. Let newTarget be the active function object (%RegExp%).
+///      b. If patternIsRegExp is true and flags is undefined:
+///         i.  Let patternConstructor be ? Get(pattern, "constructor").
+///         ii. If SameValue(newTarget, patternConstructor), return pattern.
+///   3. Else, let newTarget be NewTarget.
+///   4-6. Derive P and F from pattern/flags.
+///   7. Let O be ? RegExpAlloc(newTarget) — the instance's [[Prototype]] comes
+///      from newTarget, so `class R extends RegExp {}` yields R.prototype.
+///   8. Return ? RegExpInitialize(O, P, F).
 fn regexp_constructor(
   args: List(JsValue),
   state: State(host),
@@ -517,10 +621,32 @@ fn regexp_constructor(
   }
   // Step 1: Let patternIsRegExp be ? IsRegExp(pattern).
   use pattern_is_regexp, state <- try_is_regexp(state, pattern)
+  // Step 2: a plain `RegExp(re)` call with no flags returns `re` untouched
+  // when `re.constructor` is %RegExp% itself.
+  case state.new_target, pattern_is_regexp, flags_arg, pattern {
+    JsUndefined, True, JsUndefined, JsObject(ref) -> {
+      use ctor, state <- try_get(state, ref, "constructor")
+      case ctor == JsObject(state.builtins.regexp.constructor) {
+        True -> #(state, Ok(pattern))
+        False -> construct_regexp(state, pattern, pattern_is_regexp, flags_arg)
+      }
+    }
+    _, _, _, _ -> construct_regexp(state, pattern, pattern_is_regexp, flags_arg)
+  }
+}
+
+/// Steps 4-8: derive P and F, then allocate + initialize. `state.new_target`
+/// (undefined for a plain call) decides the instance's prototype.
+fn construct_regexp(
+  state: State(host),
+  pattern: JsValue,
+  pattern_is_regexp: Bool,
+  flags_arg: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
   case pattern {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        // Step 5: pattern has [[RegExpMatcher]] — reuse original source/flags.
+        // Step 4: pattern has [[RegExpMatcher]] — reuse original source/flags.
         Some(ObjectSlot(kind: RegExpObject(pattern: p, flags: f), ..)) -> {
           let f_val = case flags_arg {
             JsUndefined -> JsString(f)
@@ -528,7 +654,7 @@ fn regexp_constructor(
           }
           regexp_initialize(state, JsString(p), f_val)
         }
-        // Step 6: patternIsRegExp — read source/flags via Get.
+        // Step 5: patternIsRegExp — read source/flags via Get.
         _ ->
           case pattern_is_regexp {
             True -> {
@@ -548,25 +674,26 @@ fn regexp_constructor(
   }
 }
 
-/// §22.2.3.4 RegExpInitialize steps: coerce pattern/flags (undefined → ""),
-/// validate flags, allocate.
+/// §22.2.3.1 RegExpAlloc + §22.2.3.4 RegExpInitialize: resolve the prototype
+/// from newTarget (step 7 — the Get(newTarget, "prototype") is observable and
+/// happens AFTER the source/flags reads), coerce pattern/flags (undefined →
+/// ""), validate flags, allocate.
 fn regexp_initialize(
   state: State(host),
   p_val: JsValue,
   f_val: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  use proto, state <- ops_object.proto_from_new_target(
+    state,
+    state.new_target,
+    state.builtins.regexp.prototype,
+  )
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
     Error(err) -> state.syntax_error(state, regex.pattern_error_message(err))
     Ok(Nil) -> {
-      let #(heap, ref) =
-        alloc_regexp(
-          state.heap,
-          state.builtins.regexp.prototype,
-          pattern,
-          flags,
-        )
+      let #(heap, ref) = alloc_regexp(state.heap, proto, pattern, flags)
       #(State(..state, heap:), Ok(JsObject(ref)))
     }
   }
@@ -774,7 +901,6 @@ fn try_builtin_exec(
   s: String,
   cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let length = string.byte_size(s)
   // Step 2: lastIndex = ? ToLength(? Get(R, "lastIndex")) — always read.
   use li_val, state <- try_get(state, ref, "lastIndex")
   use last_index, state <- coerce.try_to_length(state, li_val)
@@ -787,13 +913,26 @@ fn try_builtin_exec(
     True -> last_index
     False -> 0
   }
-  let exec_result = case last_index > length {
-    True -> Error(Nil)
-    False -> ffi_regexp_exec_info(pattern, flags, s, last_index, sticky)
-  }
-  case exec_result {
+  // The lastIndex > length case (§22.2.7.2 step 12.a) is the FFI's
+  // OffsetOutOfRange — one place decides what a legal offset is.
+  case ffi_regexp_exec_info(pattern, flags, s, last_index, sticky) {
     // Match failure: reset lastIndex (observable Set) iff global or sticky.
-    Error(Nil) ->
+    // A pattern PCRE could not compile is an arc translator bug, NOT a
+    // no-match: it still yields null (throwing where the spec promises a
+    // result would be worse) but it is reported rather than swallowed.
+    Error(failure) -> {
+      case failure {
+        NoMatch | OffsetOutOfRange -> Nil
+        PatternCompileFailed(reason:) ->
+          io.println_error(
+            "arc internal error: RegExp /"
+            <> pattern
+            <> "/"
+            <> flags
+            <> " failed to compile: "
+            <> reason,
+          )
+      }
       case global || sticky {
         True -> {
           use state <-
@@ -802,6 +941,7 @@ fn try_builtin_exec(
         }
         False -> cont(JsNull, state)
       }
+    }
     Ok(#(captures, _group_count, names)) -> {
       let #(match_start, match_len) = case captures {
         [first, ..] -> first
@@ -1224,35 +1364,21 @@ fn regexp_get_flags(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_object(this, state, ".flags")
-  build_flags(
-    state,
-    ref,
-    [
-      #("hasIndices", "d"),
-      #("global", "g"),
-      #("ignoreCase", "i"),
-      #("multiline", "m"),
-      #("dotAll", "s"),
-      #("unicode", "u"),
-      #("unicodeSets", "v"),
-      #("sticky", "y"),
-    ],
-    "",
-  )
+  build_flags(state, ref, all_flags, "")
 }
 
 fn build_flags(
   state: State(host),
   ref: Ref,
-  pairs: List(#(String, String)),
+  remaining: List(RegExpFlag),
   acc: String,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case pairs {
+  case remaining {
     [] -> #(state, Ok(JsString(acc)))
-    [#(prop, ch), ..rest] -> {
-      use v, state <- try_get(state, ref, prop)
+    [flag, ..rest] -> {
+      use v, state <- try_get(state, ref, flag_property(flag))
       let acc = case value.is_truthy(v) {
-        True -> acc <> ch
+        True -> acc <> flag_letter(flag)
         False -> acc
       }
       build_flags(state, ref, rest, acc)
@@ -1264,7 +1390,7 @@ fn build_flags(
 /// %RegExp.prototype% itself → undefined; anything else → TypeError.
 fn regexp_flag_getter(
   this: JsValue,
-  flag: String,
+  flag: RegExpFlag,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case this {
@@ -1272,15 +1398,15 @@ fn regexp_flag_getter(
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(kind: RegExpObject(flags:, ..), ..)) -> #(
           state,
-          Ok(JsBool(string.contains(flags, flag))),
+          Ok(JsBool(string.contains(flags, flag_letter(flag)))),
         )
         _ ->
           case ref == state.builtins.regexp.prototype {
             True -> #(state, Ok(JsUndefined))
-            False -> not_regexp(state, "flag getter")
+            False -> not_regexp(state, "get " <> flag_property(flag))
           }
       }
-    _ -> not_regexp(state, "flag getter")
+    _ -> not_regexp(state, "get " <> flag_property(flag))
   }
 }
 
