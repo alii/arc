@@ -129,24 +129,45 @@ pub fn call_function(
         )
       case callee_template.is_generator, callee_template.is_async {
         True, True ->
-          call_async_generator_function(
+          call_coroutine_function(
             State(..state, heap:),
-            env_ref,
             callee_template,
             args,
             rest_stack,
             locals,
             execute_inner,
+            fn(frame) {
+              AsyncGeneratorSlot(
+                gen_state: value.AGSuspendedStart,
+                queue: #([], []),
+                func_template: callee_template,
+                env_ref:,
+                frame:,
+              )
+            },
+            AsyncGeneratorObject,
+            state.builtins.async_generator.prototype,
+            "call_async_generator_function",
           )
         True, False ->
-          call_generator_function(
+          call_coroutine_function(
             State(..state, heap:),
-            env_ref,
             callee_template,
             args,
             rest_stack,
             locals,
             execute_inner,
+            fn(frame) {
+              GeneratorSlot(
+                gen_state: value.SuspendedStart,
+                func_template: callee_template,
+                env_ref:,
+                frame:,
+              )
+            },
+            GeneratorObject,
+            state.builtins.generator.prototype,
+            "call_generator_function",
           )
         False, True ->
           call_async_function(
@@ -278,122 +299,53 @@ fn coroutine_resume_state(
   )
 }
 
-/// Allocate the suspended-at-InitialYield slot and wrap it in a generator
-/// object, returning to the caller with the object on the stack. Shared by
-/// the sync and async generator call paths.
-fn alloc_suspended_generator(
+/// Generator / async-generator call: run the body until InitialYield (the very
+/// first op, so the body proper never runs), stash the suspended frame in a
+/// slot, wrap it in a generator object and hand that back to the caller. The
+/// two flavours differ only in the slot they build, the exotic kind, the
+/// prototype and the InternalError label — everything else, including the
+/// "can't have completed or awaited yet" impossibility arms, is identical.
+///
+/// Called once per generator *creation*, never on resume, so the closure
+/// arguments cost nothing on the resume hot path.
+fn call_coroutine_function(
   state: State(host),
-  suspended: State(host),
+  callee_template: FuncTemplate,
+  args: List(JsValue),
   rest_stack: List(JsValue),
-  slot: HeapSlot(host),
+  locals: tuple_array.TupleArray(JsValue),
+  execute_inner: ExecuteInnerFn(host),
+  make_slot: fn(value.SuspendedFrame) -> HeapSlot(host),
   make_kind: fn(value.Ref) -> ExoticKind(host),
   prototype: value.Ref,
+  label: String,
 ) -> Result(State(host), StepExit(host)) {
-  let #(h, data_ref) = heap.alloc(suspended.heap, slot)
-  let #(h, gen_obj_ref) =
-    common.alloc_wrapper(h, make_kind(data_ref), prototype)
-  Ok(
-    State(
-      ..state.adopt_child(state, suspended),
-      heap: h,
-      stack: [JsObject(gen_obj_ref), ..rest_stack],
-      pc: state.pc + 1,
-    ),
-  )
-}
-
-/// Generator function call: execute until InitialYield, save state to
-/// GeneratorSlot, create GeneratorObject, return it to caller.
-fn call_generator_function(
-  state: State(host),
-  env_ref: value.Ref,
-  callee_template: FuncTemplate,
-  args: List(JsValue),
-  rest_stack: List(JsValue),
-  locals: tuple_array.TupleArray(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-) -> Result(State(host), StepExit(host)) {
-  // Execute until InitialYield (which fires immediately at the start)
   case
     execute_inner(coroutine_initial_state(state, callee_template, args, locals))
   {
-    Ok(#(Suspended(completion.Yield, _), suspended)) ->
-      alloc_suspended_generator(
-        state,
-        suspended,
-        rest_stack,
-        GeneratorSlot(
-          gen_state: value.SuspendedStart,
-          func_template: callee_template,
-          env_ref:,
-          frame: generators.suspended_frame(suspended),
+    Ok(#(Suspended(completion.Yield, _), suspended)) -> {
+      let #(h, data_ref) =
+        heap.alloc(suspended.heap, make_slot(generators.suspended_frame(
+          suspended,
+        )))
+      let #(h, gen_obj_ref) =
+        common.alloc_wrapper(h, make_kind(data_ref), prototype)
+      Ok(
+        State(
+          ..state.adopt_child(state, suspended),
+          heap: h,
+          stack: [JsObject(gen_obj_ref), ..rest_stack],
+          pc: state.pc + 1,
         ),
-        GeneratorObject,
-        state.builtins.generator.prototype,
       )
+    }
+    Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) ->
+      Error(Threw(thrown, State(..state, heap: thrown_state.heap)))
     // InitialYield is the first op — the body can neither complete nor await
     // before it. Either arriving here is a VM bug.
-    Ok(#(Completed(NormalCompletion(_)), _)) ->
-      Error(VmFailed(
-        InternalError(
-          "call_generator_function",
-          "completed before InitialYield",
-        ),
-        state,
-      ))
-    Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) ->
-      Error(Threw(thrown, State(..state, heap: thrown_state.heap)))
-    Ok(#(Suspended(completion.Await, _), _)) ->
-      Error(VmFailed(
-        InternalError("call_generator_function", "await in sync generator"),
-        state,
-      ))
-    Error(vm_err) -> Error(VmFailed(vm_err, state))
-  }
-}
-
-/// Async generator call: run to InitialYield, allocate AsyncGeneratorSlot with
-/// empty request queue, return AsyncGeneratorObject. Body doesn't actually
-/// execute until the first .next() — that's when the driver loop kicks in.
-fn call_async_generator_function(
-  state: State(host),
-  env_ref: value.Ref,
-  callee_template: FuncTemplate,
-  args: List(JsValue),
-  rest_stack: List(JsValue),
-  locals: tuple_array.TupleArray(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-) -> Result(State(host), StepExit(host)) {
-  case
-    execute_inner(coroutine_initial_state(state, callee_template, args, locals))
-  {
-    Ok(#(Suspended(completion.Yield, _), suspended)) ->
-      alloc_suspended_generator(
-        state,
-        suspended,
-        rest_stack,
-        AsyncGeneratorSlot(
-          gen_state: value.AGSuspendedStart,
-          queue: #([], []),
-          func_template: callee_template,
-          env_ref:,
-          frame: generators.suspended_frame(suspended),
-        ),
-        AsyncGeneratorObject,
-        state.builtins.async_generator.prototype,
-      )
-    Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) ->
-      Error(Threw(thrown, State(..state, heap: thrown_state.heap)))
     Ok(#(Completed(NormalCompletion(_)), _))
     | Ok(#(Suspended(completion.Await, _), _)) ->
-      // InitialYield is first op — body never runs before it. Unreachable.
-      Error(VmFailed(
-        InternalError(
-          "call_async_generator_function",
-          "didn't hit InitialYield",
-        ),
-        state,
-      ))
+      Error(VmFailed(InternalError(label, "didn't hit InitialYield"), state))
     Error(vm_err) -> Error(VmFailed(vm_err, state))
   }
 }
