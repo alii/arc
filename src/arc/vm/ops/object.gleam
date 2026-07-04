@@ -1348,42 +1348,9 @@ fn set_property_on_slot(
               }
             // §10.4.2.1 step 2: If P is an array index (ToUint32 is valid index):
             Index(idx) ->
-              case dict.get(properties, key) {
-                // Dict override (defineProperty-created attributes): honor
-                // its [[Writable]] and update the override in place so the
-                // attribute flags survive the write.
-                Ok(DataProperty(
-                  writable: True,
-                  enumerable:,
-                  configurable:,
-                  seq:,
-                  value: _,
-                )) -> #(
-                  heap.write(
-                    h,
-                    ref,
-                    ObjectSlot(
-                      ..slot,
-                      properties: dict.insert(
-                        properties,
-                        key,
-                        DataProperty(
-                          value: val,
-                          writable: True,
-                          enumerable:,
-                          configurable:,
-                          seq:,
-                        ),
-                      ),
-                    ),
-                  ),
-                  Defined,
-                )
-                Ok(DataProperty(writable: False, ..)) -> #(h, Rejected)
-                // Accessor overrides are routed to the setter by [[Set]]
-                // before [[DefineOwnProperty]] is reached; reject here.
-                Ok(value.AccessorProperty(..)) -> #(h, Rejected)
-                Error(Nil) ->
+              case write_index_override(h, ref, slot, key, val) {
+                Some(result) -> result
+                None ->
                   // §10.4.2.1 step 2.h: If index >= oldLen and the length is
                   // not writable (or A is not extensible), return false.
                   case idx >= length && { !extensible || !length_writable } {
@@ -1419,39 +1386,9 @@ fn set_property_on_slot(
         value.ArgumentsObject(_) ->
           case key {
             Index(idx) ->
-              case dict.get(properties, key) {
-                // Dict override (defineProperty-created attributes): honor
-                // its [[Writable]] and update the override in place.
-                Ok(DataProperty(
-                  writable: True,
-                  enumerable:,
-                  configurable:,
-                  seq:,
-                  value: _,
-                )) -> #(
-                  heap.write(
-                    h,
-                    ref,
-                    ObjectSlot(
-                      ..slot,
-                      properties: dict.insert(
-                        properties,
-                        key,
-                        DataProperty(
-                          value: val,
-                          writable: True,
-                          enumerable:,
-                          configurable:,
-                          seq:,
-                        ),
-                      ),
-                    ),
-                  ),
-                  Defined,
-                )
-                Ok(DataProperty(writable: False, ..)) -> #(h, Rejected)
-                Ok(value.AccessorProperty(..)) -> #(h, Rejected)
-                Error(Nil) ->
+              case write_index_override(h, ref, slot, key, val) {
+                Some(result) -> result
+                None ->
                   case !extensible && !elements.has(elements, idx) {
                     True -> #(h, Rejected)
                     False -> #(
@@ -1506,6 +1443,58 @@ fn set_property_on_slot(
         _ -> set_string_property(h, ref, key, val, slot)
       }
     _ -> #(h, Rejected)
+  }
+}
+
+/// Shared index arm of the array (§10.4.2.1) and arguments (§10.4.4.2) exotic
+/// [[DefineOwnProperty]] paths: a defineProperty-created override may live in
+/// the properties dict at an index that the dense element storage would
+/// otherwise own. Honor its [[Writable]] and update the override in place so
+/// the attribute flags survive the write.
+///
+/// `None` means no override exists at `key` — the caller takes its own dense
+/// element path.
+fn write_index_override(
+  h: Heap(host),
+  ref: Ref,
+  slot: HeapSlot(host),
+  key: PropertyKey,
+  val: JsValue,
+) -> Option(#(Heap(host), DefineOutcome)) {
+  case slot {
+    ObjectSlot(properties:, ..) ->
+      case dict.get(properties, key) {
+        Ok(DataProperty(
+          writable: True,
+          enumerable:,
+          configurable:,
+          seq:,
+          value: _,
+        )) -> {
+          let new_props =
+            dict.insert(
+              properties,
+              key,
+              DataProperty(
+                value: val,
+                writable: True,
+                enumerable:,
+                configurable:,
+                seq:,
+              ),
+            )
+          Some(#(
+            heap.write(h, ref, ObjectSlot(..slot, properties: new_props)),
+            Defined,
+          ))
+        }
+        Ok(DataProperty(writable: False, ..)) -> Some(#(h, Rejected))
+        // Accessor overrides are routed to the setter by [[Set]] before
+        // [[DefineOwnProperty]] is reached; reject here.
+        Ok(AccessorProperty(..)) -> Some(#(h, Rejected))
+        Error(Nil) -> None
+      }
+    _ -> None
   }
 }
 
