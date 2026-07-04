@@ -723,11 +723,19 @@ pub type ConsoleNativeFn {
 
 /// JSON methods — JSON.parse, JSON.stringify, and the rawJSON statics from
 /// proposal-json-parse-with-source.
+///
+/// Every variant carries `fn_proto`: the %Function.prototype% of the realm this
+/// method object belongs to, a unique per-realm marker (the same trick
+/// `ShadowRealmEvaluate` uses) that recovers the function's own realm at
+/// dispatch time. A built-in allocates and throws with the intrinsics of the
+/// realm it belongs to no matter how it is called, so the realm cannot be
+/// inferred from the receiver: `otherRealm.JSON.rawJSON.call(null, '')` still
+/// throws `otherRealm.SyntaxError`.
 pub type JsonNativeFn {
-  JsonParse
-  JsonStringify
-  JsonRawJson
-  JsonIsRawJson
+  JsonParse(fn_proto: Ref)
+  JsonStringify(fn_proto: Ref)
+  JsonRawJson(fn_proto: Ref)
+  JsonIsRawJson(fn_proto: Ref)
 }
 
 /// Reflect static methods — ES2024 §28.1.
@@ -4880,7 +4888,10 @@ fn console_native_refs(f: ConsoleNativeFn, acc: List(Ref)) -> List(Ref) {
 
 fn json_native_refs(f: JsonNativeFn, acc: List(Ref)) -> List(Ref) {
   case f {
-    JsonParse | JsonStringify | JsonRawJson | JsonIsRawJson -> acc
+    JsonParse(fn_proto:)
+    | JsonStringify(fn_proto:)
+    | JsonRawJson(fn_proto:)
+    | JsonIsRawJson(fn_proto:) -> [fn_proto, ..acc]
   }
 }
 

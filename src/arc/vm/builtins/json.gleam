@@ -39,10 +39,12 @@ pub fn init(
 ) -> #(Heap(host), Ref) {
   let #(h, methods) =
     common.alloc_methods(h, function_proto, [
-      #("parse", JsonNative(JsonParse), 2),
-      #("stringify", JsonNative(JsonStringify), 3),
-      #("rawJSON", JsonNative(JsonRawJson), 1),
-      #("isRawJSON", JsonNative(JsonIsRawJson), 1),
+      // Each native carries this realm's %Function.prototype% as its [[Realm]]
+      // marker — see `owner_realm_builtins`.
+      #("parse", JsonNative(JsonParse(function_proto)), 2),
+      #("stringify", JsonNative(JsonStringify(function_proto)), 3),
+      #("rawJSON", JsonNative(JsonRawJson(function_proto)), 1),
+      #("isRawJSON", JsonNative(JsonIsRawJson(function_proto)), 1),
     ])
 
   common.init_namespace(h, object_proto, "JSON", methods)
@@ -60,9 +62,12 @@ pub fn init(
 /// `otherRealm.JSON.rawJSON('')` throws `otherRealm.SyntaxError`, and
 /// `otherRealm.JSON.parse('{}')` yields an object whose prototype is
 /// `otherRealm.Object.prototype`. Arc never rebinds `state.builtins` on a
-/// cross-realm call, so resolve the owning realm from the receiver — the JSON
-/// namespace object these methods live on — run the body with that realm's
-/// builtins installed, and restore the caller's afterwards.
+/// cross-realm call, so resolve the owning realm from the *callee* — every JSON
+/// native token carries its realm's %Function.prototype% as a marker — run the
+/// body with that realm's builtins installed, and restore the caller's
+/// afterwards. Attribution never looks at the receiver: `JSON.parse.call(
+/// otherRealm.JSON, '{}')` is still this realm's parse, and a detached
+/// `otherRealm.JSON.rawJSON` still throws `otherRealm.SyntaxError`.
 ///
 /// The swap covers only what the JSON builtin itself allocates. User callbacks
 /// the builtin re-enters — a reviver, a replacer, a `toJSON` — must NOT run
@@ -73,16 +78,16 @@ pub fn init(
 pub fn dispatch(
   native: JsonNativeFn,
   args: List(JsValue),
-  this: JsValue,
+  _this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let caller_builtins = state.builtins
-  let state = State(..state, builtins: owner_realm_builtins(state, this))
+  let state = State(..state, builtins: owner_realm_builtins(state, native))
   let #(state, res) = case native {
-    JsonParse -> json_parse(args, caller_builtins, state)
-    JsonStringify -> json_stringify(args, caller_builtins, state)
-    JsonRawJson -> json_raw_json(args, state)
-    JsonIsRawJson -> json_is_raw_json(args, state)
+    JsonParse(_) -> json_parse(args, caller_builtins, state)
+    JsonStringify(_) -> json_stringify(args, caller_builtins, state)
+    JsonRawJson(_) -> json_raw_json(args, state)
+    JsonIsRawJson(_) -> json_is_raw_json(args, state)
   }
   #(State(..state, builtins: caller_builtins), res)
 }
@@ -215,22 +220,25 @@ fn alloc_raw_json(state: State(host), raw: String) -> #(State(host), Ref) {
   #(State(..state, heap:), ref)
 }
 
-/// The builtins of the realm whose `JSON` namespace object is `this`, or the
-/// running realm's when the receiver is not a JSON namespace (a detached
-/// `JSON.parse` invoked with some other receiver keeps the running realm's
-/// intrinsics — the receiver is the only realm handle a JSON native has).
-fn owner_realm_builtins(state: State(host), this: JsValue) -> common.Builtins {
-  case this {
-    JsObject(ref) ->
-      case ref.id == state.builtins.json.id {
-        True -> state.builtins
-        False ->
-          state.ctx.realms
-          |> dict.values
-          |> list.find(fn(b) { b.json.id == ref.id })
-          |> result.unwrap(state.builtins)
-      }
-    _ -> state.builtins
+/// The builtins of the realm the JSON native itself belongs to — its [[Realm]],
+/// recovered from the %Function.prototype% marker its token carries (unique per
+/// `Builtins`, exactly as `realm.realm_of_function_proto` does for the
+/// ShadowRealm methods). The receiver is irrelevant: a built-in runs in its own
+/// realm however it was reached. Falls back to the running realm when the marker
+/// realm was never reified in `ctx.realms` (only possible for the running realm
+/// itself, which the fast path already covers).
+fn owner_realm_builtins(
+  state: State(host),
+  native: JsonNativeFn,
+) -> common.Builtins {
+  let fn_proto = native.fn_proto
+  case state.builtins.function.prototype == fn_proto {
+    True -> state.builtins
+    False ->
+      state.ctx.realms
+      |> dict.values
+      |> list.find(fn(b) { b.function.prototype == fn_proto })
+      |> result.unwrap(state.builtins)
   }
 }
 
