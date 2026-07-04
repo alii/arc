@@ -255,7 +255,7 @@ pub fn is_raw_json(h: Heap(host), value: JsValue) -> Bool {
 ///   4-6. Materialize the parse result as `unfiltered`.
 ///   7-9. If IsCallable(reviver): root = OrdinaryObjectCreate(%Object.prototype%),
 ///        CreateDataPropertyOrThrow(root, "", unfiltered), then return
-///        ? InternalizeJSONProperty(root, "", reviver).
+///        ? InternalizeJSONProperty(root, "", reviver, the root parse node).
 ///   10. Otherwise return unfiltered.
 fn json_parse(
   args: List(JsValue),
@@ -296,6 +296,7 @@ fn json_parse(
                     root,
                     "",
                     reviver,
+                    Some(val),
                   ))
                   #(state, Ok(revived))
                 }
@@ -328,14 +329,50 @@ fn json_parse(
 /// through `state.call`, the same convention `serialize_property` uses to
 /// invoke `toJSON` and the replacer.
 ///
-/// NOT IMPLEMENTED: the ES2025 json-parse-with-source third argument — the
-/// reviver is called with `(key, value)` only, never a `context` object
-/// carrying `source`.
+/// The ES2025 json-parse-with-source amendment adds a third reviver argument
+/// and threads the parse tree alongside the walk (`node` here is the spec's
+/// JSON Parse Record for `holder[name]`, `empty` when there is none):
+///
+///   1. Let val be ? Get(holder, name).
+///   2. Let context be OrdinaryObjectCreate(%Object.prototype%).
+///   3. If node is not empty and node's [[Value]] is val (i.e. no earlier
+///      reviver call replaced it), then
+///      a. If val is a primitive that came from a literal, perform
+///         ! CreateDataPropertyOrThrow(context, "source", the literal's exact
+///         source text) — writable, enumerable, configurable.
+///      b. The child records of `node` are the ones handed to the recursion.
+///      Otherwise `context` gets NO own property and the children get no
+///      records: an object/array whose slot was overwritten no longer
+///      corresponds to the source text.
+///   4-5. Recurse over the elements/keys of `val` as before, passing each
+///        child's record (array children by index, object children by key,
+///        keys a reviver added get `empty`).
+///   6. Return ? Call(reviver, holder, « name, val, context »).
+///
+/// Everything else is unchanged §25.5.1.1: the walk is bottom-up, an
+/// `undefined` result deletes the child, any other result replaces it, and
+/// abrupt completions from any Get / Delete / CreateDataProperty / reviver
+/// call propagate out of JSON.parse.
+///
+/// Recursion here is ordinary Gleam recursion; the re-entrant JS calls go
+/// through `state.call`, the same convention `serialize_property` uses to
+/// invoke `toJSON` and the replacer.
+///
+/// The one deviation from the letter of the spec: "node's [[Value]] is val" is
+/// only checked for primitive literals (`unmodified_source`), because the
+/// intermediate `JsonValue` tree records source text, not the heap refs the
+/// arrays/objects were materialized into. The observable difference needs a
+/// reviver that overwrites an array/object slot with a *different* array or
+/// object before that slot is walked; the replacement's own children are then
+/// matched against the original literal's children before their sources are
+/// handed out, so a source can only survive if the child value is SameValue to
+/// what the literal produced.
 fn internalize_json_property(
   state: State(host),
   holder: Ref,
   name: String,
   reviver: JsValue,
+  node: Option(JsonValue),
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Step 1: val = ? Get(holder, name).
   use #(val, state) <- result.try(objops.get_value(
@@ -344,38 +381,60 @@ fn internalize_json_property(
     key.canonical_key(name),
     JsObject(holder),
   ))
-  // Step 2: if val is an Object, revive its children in place first.
+  // Steps 4-5: if val is an Object, revive its children in place first.
   use state <- result.try(case val {
     JsObject(ref) -> {
       use #(is_arr, state) <- result.try(objops.try_is_array(state, val))
       case is_arr {
-        // Step 2.b: indices 0..len-1, len from LengthOfArrayLike.
+        // Step 5.b: indices 0..len-1, len from LengthOfArrayLike.
         True -> {
           use #(len, state) <- result.try(length_of_array_like(state, ref))
-          internalize_elements(state, ref, 0, len, reviver)
+          internalize_elements(state, ref, 0, len, reviver, node)
         }
-        // Step 2.c: EnumerableOwnPropertyNames(val, key).
+        // Step 5.c: EnumerableOwnPropertyNames(val, key).
         False -> {
           use #(keys, state) <- result.try(
             object_builtins.enumerable_string_keys_stateful(state, ref),
           )
-          internalize_keys(state, ref, keys, reviver)
+          internalize_keys(state, ref, keys, reviver, node)
         }
       }
     }
     _ -> Ok(state)
   })
-  // Step 3: return ? Call(reviver, holder, « name, val »).
-  state.call(state, reviver, JsObject(holder), [JsString(name), val])
+  // Steps 2-3: the `context` object, carrying `source` only for an unmodified
+  // primitive literal.
+  let #(state, context) = alloc_context(state, unmodified_source(node, val))
+  // Step 6: return ? Call(reviver, holder, « name, val, context »).
+  state.call(state, reviver, JsObject(holder), [
+    JsString(name),
+    val,
+    JsObject(context),
+  ])
 }
 
-/// §25.5.1.1 step 2.b.ii: recurse over array indices 0..len-1 in order.
+/// Step 3.a: the literal's source text, but only while `val` is still the value
+/// that literal produced. A reviver that overwrote the slot before we got here
+/// (`reviver-call-args-after-forward-modification.js`) leaves the parse node
+/// stale, and a stale node must not leak a `source` describing a value that is
+/// no longer there.
+fn unmodified_source(node: Option(JsonValue), val: JsValue) -> Option(String) {
+  use #(parsed, source) <- option.then(option.then(node, json_node_primitive))
+  case value.same_value(parsed, val) {
+    True -> Some(source)
+    False -> None
+  }
+}
+
+/// §25.5.1.1 step 5.b.iii: recurse over array indices 0..len-1 in order,
+/// handing each element the parse node it was scanned from (if any).
 fn internalize_elements(
   state: State(host),
   ref: Ref,
   i: Int,
   len: Int,
   reviver: JsValue,
+  node: Option(JsonValue),
 ) -> Result(State(host), #(JsValue, State(host))) {
   case i >= len {
     True -> Ok(state)
@@ -386,19 +445,23 @@ fn internalize_elements(
         ref,
         name,
         reviver,
+        option.then(node, json_node_element(_, i)),
       ))
       use state <- result.try(replace_or_delete(state, ref, name, new_element))
-      internalize_elements(state, ref, i + 1, len, reviver)
+      internalize_elements(state, ref, i + 1, len, reviver, node)
     }
   }
 }
 
-/// §25.5.1.1 step 2.c.ii: recurse over the object's own enumerable string keys.
+/// §25.5.1.1 step 5.c.iii: recurse over the object's own enumerable string
+/// keys, handing each the parse node it was scanned from (a key a reviver added
+/// has none).
 fn internalize_keys(
   state: State(host),
   ref: Ref,
   keys: List(String),
   reviver: JsValue,
+  node: Option(JsonValue),
 ) -> Result(State(host), #(JsValue, State(host))) {
   case keys {
     [] -> Ok(state)
@@ -408,9 +471,10 @@ fn internalize_keys(
         ref,
         p,
         reviver,
+        option.then(node, json_node_member(_, p)),
       ))
       use state <- result.try(replace_or_delete(state, ref, p, new_element))
-      internalize_keys(state, ref, rest, reviver)
+      internalize_keys(state, ref, rest, reviver, node)
     }
   }
 }
@@ -462,6 +526,36 @@ fn alloc_holder(state: State(host), val: JsValue) -> #(State(host), Ref) {
         properties: dict.from_list([
           #(key.canonical_key(""), value.data_property(val)),
         ]),
+        elements: elements.new(),
+        prototype: Some(state.builtins.object.prototype),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  #(State(..state, heap:), ref)
+}
+
+/// InternalizeJSONProperty step 2 (+3.a): OrdinaryObjectCreate(%Object.prototype%),
+/// carrying a `source` own data property (writable, enumerable, configurable —
+/// what CreateDataPropertyOrThrow gives) when the value came from an unmodified
+/// primitive literal, and no own property at all otherwise.
+fn alloc_context(
+  state: State(host),
+  source: Option(String),
+) -> #(State(host), Ref) {
+  let properties = case source {
+    Some(text) ->
+      dict.from_list([
+        #(key.canonical_key("source"), value.data_property(JsString(text))),
+      ])
+    None -> dict.new()
+  }
+  let #(heap, ref) =
+    heap.alloc(
+      state.heap,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties:,
         elements: elements.new(),
         prototype: Some(state.builtins.object.prototype),
         symbol_properties: [],
