@@ -7,16 +7,22 @@
 import arc/parser/lexer
 import arc/parser/number
 import arc/parser/regex
+import gleam/option.{type Option, None, Some}
 
+/// EVERY variant carries `pos: Int` as its FIRST field, so `parse_error_pos`
+/// is a plain field access and a new variant cannot forget to be listed
+/// anywhere. (Same trick `parser/ast.Expression` plays with `span: Span`.)
+/// Keep it that way when adding a variant.
 pub type ParseError {
   /// A lexer error surfaced through the parser. Carries the lexer's own
-  /// typed error rather than a pre-formatted message.
-  LexError(error: lexer.LexError)
+  /// typed error rather than a pre-formatted message; `pos` is the lexer
+  /// error's own position (`lexer.lex_error_pos`).
+  LexError(pos: Int, error: lexer.LexError)
   /// A regular-expression literal failed scanning or ECMAScript Pattern
-  /// validation. Carries `parser/regex`'s own typed error; its message and
-  /// position come from `regex.pattern_error_message` / `pattern_error_pos`.
-  RegExpSyntaxError(error: regex.PatternError)
-  ExpectedToken(expected: String, got: String, pos: Int)
+  /// validation. Carries `parser/regex`'s own typed error; its message comes
+  /// from `regex.pattern_error_message` and `pos` from `regex.pattern_error_pos`.
+  RegExpSyntaxError(pos: Int, error: regex.PatternError)
+  ExpectedToken(pos: Int, expected: String, got: String)
   ExpectedIdentifier(pos: Int)
   ExpectedSemicolon(pos: Int)
   ExpectedBindingPattern(pos: Int)
@@ -28,26 +34,26 @@ pub type ParseError {
   UnexpectedExport(pos: Int)
   UnexpectedSuper(pos: Int)
   UnexpectedCloseParen(pos: Int)
-  UnexpectedToken(token: String, pos: Int)
+  UnexpectedToken(pos: Int, token: String)
   /// A `Number` token whose text `parser/number` refuses (a digit the radix
   /// does not admit, a radix prefix with no digits, …). The lexer should
   /// never emit such a token; carrying `number`'s own typed error keeps the
   /// message in one place.
-  MalformedNumericLiteral(error: number.NumberParseError, pos: Int)
+  MalformedNumericLiteral(pos: Int, error: number.NumberParseError)
   ReturnOutsideFunction(pos: Int)
   BreakOutsideLoopOrSwitch(pos: Int)
   ContinueOutsideLoop(pos: Int)
   /// `continue L` where L is in scope but does not label an
   /// IterationStatement (ES2024 §14.9.1 Early Errors).
-  ContinueToNonIterationLabel(name: String, pos: Int)
-  ReservedWordStrictMode(name: String, pos: Int)
+  ContinueToNonIterationLabel(pos: Int, name: String)
+  ReservedWordStrictMode(pos: Int, name: String)
   YieldReservedStrictMode(pos: Int)
   LetIdentifierStrictMode(pos: Int)
   StaticReservedStrictMode(pos: Int)
   WithNotAllowedStrictMode(pos: Int)
   DeleteUnqualifiedStrictMode(pos: Int)
   DeletePrivateName(pos: Int)
-  UndeclaredPrivateName(name: String, pos: Int)
+  UndeclaredPrivateName(pos: Int, name: String)
   SuperPrivateName(pos: Int)
   PrivateNameAsPropertyKey(pos: Int)
   OctalEscapeStrictMode(pos: Int)
@@ -60,16 +66,16 @@ pub type ParseError {
   ArgumentsInClassFieldInit(pos: Int)
   PrivateNameConstructor(pos: Int)
   FieldNamedConstructor(pos: Int)
-  DuplicatePrivateName(name: String, pos: Int)
+  DuplicatePrivateName(pos: Int, name: String)
   EnumReservedWord(pos: Int)
-  EscapedReservedWord(name: String, pos: Int)
-  DuplicateParameterName(name: String, pos: Int)
-  DuplicateBindingLexical(name: String, pos: Int)
-  DuplicateExport(name: String, pos: Int)
-  DuplicateImportBinding(name: String, pos: Int)
-  DuplicateLabel(label: String, pos: Int)
+  EscapedReservedWord(pos: Int, name: String)
+  DuplicateParameterName(pos: Int, name: String)
+  DuplicateBindingLexical(pos: Int, name: String)
+  DuplicateExport(pos: Int, name: String)
+  DuplicateImportBinding(pos: Int, name: String)
+  DuplicateLabel(pos: Int, label: String)
   DuplicateProtoProperty(pos: Int)
-  IdentifierAlreadyDeclared(name: String, pos: Int)
+  IdentifierAlreadyDeclared(pos: Int, name: String)
   LexicalDeclInSingleStatement(pos: Int)
   YieldInFormalParameter(pos: Int)
   InvalidLhsPrefixOp(pos: Int)
@@ -80,7 +86,7 @@ pub type ParseError {
   RestTrailingComma(pos: Int)
   ExpectedForHeadSeparator(pos: Int)
   MissingCatchOrFinally(pos: Int)
-  StrictModeModification(name: String, pos: Int)
+  StrictModeModification(pos: Int, name: String)
   ExpectedModuleSpecifier(pos: Int)
   DestructuringMissingInitializer(pos: Int)
   ExpectedCommaOrBracket(pos: Int)
@@ -93,7 +99,7 @@ pub type ParseError {
   InvalidForInLhs(pos: Int)
   InvalidForOfLhs(pos: Int)
   ExpectedForSeparator(pos: Int)
-  UndefinedLabel(label: String, pos: Int)
+  UndefinedLabel(pos: Int, label: String)
   ThrowLineBreak(pos: Int)
   GetterNoParams(pos: Int)
   SetterNoRest(pos: Int)
@@ -106,16 +112,18 @@ pub type ParseError {
   GeneratorDeclLabeled(pos: Int)
   InvalidDestructuringTarget(pos: Int)
   InvalidAssignmentLhs(pos: Int)
-  ExpectedNewTarget(pos: Int)
-  ExpectedImportMeta(pos: Int)
+  /// `new.` not followed by `target`. `got` names the offending token when
+  /// there is one to name.
+  ExpectedNewTarget(pos: Int, got: Option(String))
+  /// `import.` not followed by `meta`. `got` names the offending token when
+  /// there is one to name.
+  ExpectedImportMeta(pos: Int, got: Option(String))
   ExpectedCallOrDotAfterImport(pos: Int)
   ExpectedIdentifierAfterDot(pos: Int)
   ExpectedAfterOptionalChain(pos: Int)
   ExpectedCommaOrCloseParen(pos: Int)
-  ExpectedCommaOrBracketInArray(pos: Int)
   ExpectedCommaOrBracketInExpr(pos: Int)
   ExpectedCommaOrBraceInObject(pos: Int)
-  ExpectedCommaOrBraceInObjectLiteral(pos: Int)
   ExpectedBraceOrStarAfterComma(pos: Int)
   ExpectedFromOrComma(pos: Int)
   ExpectedImportSpecifier(pos: Int)
@@ -126,24 +134,21 @@ pub type ParseError {
   ExpectedCommaOrBraceInExport(pos: Int)
   ExpectedExportAlias(pos: Int)
   FunctionDeclInSingleStatement(pos: Int)
-  StrictModeBindingName(name: String, pos: Int)
+  StrictModeBindingName(pos: Int, name: String)
   LetBindingInLexicalDecl(pos: Int)
   ForInInitializer(pos: Int)
   ForOfInitializer(pos: Int)
-  StrictModeParamName(name: String, pos: Int)
+  StrictModeParamName(pos: Int, name: String)
   RestDefaultInitializer(pos: Int)
   FunctionDeclInLabelBody(pos: Int)
   ShorthandDefaultOutsideDestructuring(pos: Int)
-  StrictModeAssignment(name: String, pos: Int)
+  StrictModeAssignment(pos: Int, name: String)
   EvalArgsAssignStrictMode(pos: Int)
   InvalidPostfixLhs(pos: Int)
-  ExpectedNewTargetGot(got: String, pos: Int)
-  ExpectedImportMetaGot(got: String, pos: Int)
-  ExpectedIdentifierAsString(name: String, pos: Int)
-  DuplicateParamNameStrictMode(name: String, pos: Int)
-  ReservedWordImportBinding(name: String, pos: Int)
+  DuplicateParamNameStrictMode(pos: Int, name: String)
+  ReservedWordImportBinding(pos: Int, name: String)
   DuplicateDefaultCase(pos: Int)
-  UndeclaredExportBinding(name: String, pos: Int)
+  UndeclaredExportBinding(pos: Int, name: String)
   ImportNotTopLevel(pos: Int)
   ExportNotTopLevel(pos: Int)
   UnicodeEscapeInMetaProperty(pos: Int)
@@ -175,8 +180,8 @@ pub type ParseError {
 
 pub fn parse_error_to_string(error: ParseError) -> String {
   case error {
-    LexError(error:) -> lexer.lex_error_to_string(error)
-    RegExpSyntaxError(error:) -> regex.pattern_error_message(error)
+    LexError(error:, ..) -> lexer.lex_error_to_string(error)
+    RegExpSyntaxError(error:, ..) -> regex.pattern_error_message(error)
     ExpectedToken(expected:, got:, ..) ->
       "Expected " <> expected <> " but got " <> got
     ExpectedIdentifier(_) -> "Expected identifier"
@@ -209,7 +214,7 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     DeleteUnqualifiedStrictMode(_) ->
       "Cannot delete unqualified identifier in strict mode"
     DeletePrivateName(_) -> "Private fields cannot be deleted"
-    UndeclaredPrivateName(name, _) ->
+    UndeclaredPrivateName(name:, ..) ->
       "Private field '" <> name <> "' must be declared in an enclosing class"
     SuperPrivateName(_) ->
       "Unexpected private field: private members are not accessible on super"
@@ -293,18 +298,19 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     GeneratorDeclLabeled(_) -> "Generator declarations cannot be labeled"
     InvalidDestructuringTarget(_) -> "Invalid destructuring assignment target"
     InvalidAssignmentLhs(_) -> "Invalid left-hand side in assignment"
-    ExpectedNewTarget(_) -> "Expected 'target' after 'new.'"
-    ExpectedImportMeta(_) -> "Expected 'meta' after 'import.'"
+    ExpectedNewTarget(got: None, ..) -> "Expected 'target' after 'new.'"
+    ExpectedNewTarget(got: Some(got), ..) ->
+      "Expected 'target' after 'new.' but got '" <> got <> "'"
+    ExpectedImportMeta(got: None, ..) -> "Expected 'meta' after 'import.'"
+    ExpectedImportMeta(got: Some(got), ..) ->
+      "Expected 'meta' after 'import.' but got '" <> got <> "'"
     ExpectedCallOrDotAfterImport(_) -> "Expected '(' or '.' after 'import'"
     ExpectedIdentifierAfterDot(_) -> "Expected identifier after '.'"
     ExpectedAfterOptionalChain(_) ->
       "Expected identifier, '[', or '(' after '?.'"
     ExpectedCommaOrCloseParen(_) -> "Expected ',' or ')' in arguments"
-    ExpectedCommaOrBracketInArray(_) -> "Expected ',' or ']'"
     ExpectedCommaOrBracketInExpr(_) -> "Expected ',' or ']'"
-    ExpectedCommaOrBraceInObject(_) -> "Expected ',' or '}' in object"
-    ExpectedCommaOrBraceInObjectLiteral(_) ->
-      "Expected ',' or '}' in object literal"
+    ExpectedCommaOrBraceInObject(_) -> "Expected ',' or '}' in object literal"
     ExpectedBraceOrStarAfterComma(_) -> "Expected '{' or '*' after ','"
     ExpectedFromOrComma(_) -> "Expected 'from' or ','"
     ExpectedImportSpecifier(_) -> "Expected import specifier"
@@ -342,12 +348,6 @@ pub fn parse_error_to_string(error: ParseError) -> String {
       "'eval' or 'arguments' cannot be assigned to in strict mode"
     InvalidPostfixLhs(_) ->
       "Invalid left-hand side expression in postfix operation"
-    ExpectedNewTargetGot(got:, ..) ->
-      "Expected 'target' after 'new.' but got '" <> got <> "'"
-    ExpectedImportMetaGot(got:, ..) ->
-      "Expected 'meta' after 'import.' but got '" <> got <> "'"
-    ExpectedIdentifierAsString(name:, ..) ->
-      "'" <> name <> "' is a reserved word and cannot be used as an identifier"
     DuplicateParamNameStrictMode(name:, ..) ->
       "Duplicate parameter name '" <> name <> "' not allowed in strict mode"
     ReservedWordImportBinding(name:, ..) ->
@@ -381,145 +381,8 @@ pub fn parse_error_to_string(error: ParseError) -> String {
   }
 }
 
+/// The source byte offset the error is reported at. Every variant carries
+/// `pos` as its first field, so this cannot fall out of date.
 pub fn parse_error_pos(error: ParseError) -> Int {
-  case error {
-    // Every lexer.LexError variant carries its own `pos`.
-    LexError(error: lex_error) -> lexer.lex_error_pos(lex_error)
-    // Every regex.PatternError variant carries its own `pos`.
-    RegExpSyntaxError(error: pattern_error) ->
-      regex.pattern_error_pos(pattern_error)
-    ExpectedToken(pos:, ..)
-    | ExpectedIdentifier(pos:)
-    | ExpectedSemicolon(pos:)
-    | ExpectedBindingPattern(pos:)
-    | ExpectedPropertyName(pos:)
-    | ExpectedImportSpecifierName(pos:)
-    | ExpectedExportSpecifierName(pos:)
-    | ExpectedCaseDefaultOrBrace(pos:)
-    | UnexpectedCloseBrace(pos:)
-    | UnexpectedExport(pos:)
-    | UnexpectedSuper(pos:)
-    | UnexpectedCloseParen(pos:)
-    | UnexpectedToken(pos:, ..)
-    | MalformedNumericLiteral(pos:, ..)
-    | ReturnOutsideFunction(pos:)
-    | BreakOutsideLoopOrSwitch(pos:)
-    | ContinueOutsideLoop(pos:)
-    | ContinueToNonIterationLabel(pos:, ..)
-    | ReservedWordStrictMode(pos:, ..)
-    | EscapedReservedWord(pos:, ..)
-    | YieldReservedStrictMode(pos:)
-    | LetIdentifierStrictMode(pos:)
-    | StaticReservedStrictMode(pos:)
-    | WithNotAllowedStrictMode(pos:)
-    | DeleteUnqualifiedStrictMode(pos:)
-    | DeletePrivateName(pos:)
-    | UndeclaredPrivateName(pos:, ..)
-    | SuperPrivateName(pos:)
-    | PrivateNameAsPropertyKey(pos:)
-    | OctalEscapeStrictMode(pos:)
-    | OctalLiteralStrictMode(pos:)
-    | YieldInGenerator(pos:)
-    | AwaitInModule(pos:)
-    | AwaitInAsyncFunction(pos:)
-    | AwaitInStaticBlock(pos:)
-    | ArgumentsInStaticBlock(pos:)
-    | ArgumentsInClassFieldInit(pos:)
-    | PrivateNameConstructor(pos:)
-    | FieldNamedConstructor(pos:)
-    | DuplicatePrivateName(pos:, ..)
-    | EnumReservedWord(pos:)
-    | DuplicateParameterName(pos:, ..)
-    | DuplicateBindingLexical(pos:, ..)
-    | DuplicateExport(pos:, ..)
-    | DuplicateImportBinding(pos:, ..)
-    | DuplicateLabel(pos:, ..)
-    | DuplicateProtoProperty(pos:)
-    | IdentifierAlreadyDeclared(pos:, ..)
-    | LexicalDeclInSingleStatement(pos:)
-    | YieldInFormalParameter(pos:)
-    | InvalidLhsPrefixOp(pos:)
-    | SuperCallNotInDerivedConstructor(pos:)
-    | SuperPropertyNotInMethod(pos:)
-    | NewTargetOutsideFunction(pos:)
-    | MissingConstInitializer(pos:)
-    | RestTrailingComma(pos:)
-    | ExpectedForHeadSeparator(pos:)
-    | MissingCatchOrFinally(pos:)
-    | StrictModeModification(pos:, ..)
-    | ExpectedModuleSpecifier(pos:)
-    | DestructuringMissingInitializer(pos:)
-    | ExpectedCommaOrBracket(pos:)
-    | SetterExactlyOneParam(pos:)
-    | ClassConstructorNotGetter(pos:)
-    | ExpectedCommaOrObjectClose(pos:)
-    | ExpectedForDeclSeparator(pos:)
-    | ExpectedCloseAfterSetter(pos:)
-    | ClassConstructorNotSetter(pos:)
-    | InvalidForInLhs(pos:)
-    | InvalidForOfLhs(pos:)
-    | ExpectedForSeparator(pos:)
-    | UndefinedLabel(pos:, ..)
-    | ThrowLineBreak(pos:)
-    | GetterNoParams(pos:)
-    | SetterNoRest(pos:)
-    | RestMustBeLast(pos:)
-    | ClassConstructorGenerator(pos:)
-    | ClassConstructorAsync(pos:)
-    | ClassDuplicateConstructor(pos:)
-    | StaticPrototype(pos:)
-    | UsingAtScriptTopLevel(pos:)
-    | UsingInCaseClause(pos:)
-    | UsingMissingInitializer(pos:)
-    | UsingInForIn(pos:)
-    | UsingPatternBinding(pos:)
-    | LexicalDeclInLabel(pos:)
-    | GeneratorDeclLabeled(pos:)
-    | InvalidDestructuringTarget(pos:)
-    | InvalidAssignmentLhs(pos:)
-    | ExpectedNewTarget(pos:)
-    | ExpectedImportMeta(pos:)
-    | ExpectedCallOrDotAfterImport(pos:)
-    | ExpectedIdentifierAfterDot(pos:)
-    | ExpectedAfterOptionalChain(pos:)
-    | ExpectedCommaOrCloseParen(pos:)
-    | ExpectedCommaOrBracketInArray(pos:)
-    | ExpectedCommaOrBracketInExpr(pos:)
-    | ExpectedCommaOrBraceInObject(pos:)
-    | ExpectedCommaOrBraceInObjectLiteral(pos:)
-    | ExpectedBraceOrStarAfterComma(pos:)
-    | ExpectedFromOrComma(pos:)
-    | ExpectedImportSpecifier(pos:)
-    | ExpectedCommaOrBraceInImport(pos:)
-    | ExpectedFunctionAfterAsync(pos:)
-    | ExpectedAsOrFromAfterExportStar(pos:)
-    | UnexpectedAfterExport(pos:)
-    | ExpectedCommaOrBraceInExport(pos:)
-    | ExpectedExportAlias(pos:)
-    | FunctionDeclInSingleStatement(pos:)
-    | StrictModeBindingName(pos:, ..)
-    | LetBindingInLexicalDecl(pos:)
-    | ForInInitializer(pos:)
-    | ForOfInitializer(pos:)
-    | StrictModeParamName(pos:, ..)
-    | RestDefaultInitializer(pos:)
-    | FunctionDeclInLabelBody(pos:)
-    | ShorthandDefaultOutsideDestructuring(pos:)
-    | StrictModeAssignment(pos:, ..)
-    | EvalArgsAssignStrictMode(pos:)
-    | InvalidPostfixLhs(pos:)
-    | ExpectedNewTargetGot(pos:, ..)
-    | ExpectedImportMetaGot(pos:, ..)
-    | ExpectedIdentifierAsString(pos:, ..)
-    | DuplicateParamNameStrictMode(pos:, ..)
-    | ReservedWordImportBinding(pos:, ..)
-    | DuplicateDefaultCase(pos:)
-    | UndeclaredExportBinding(pos:, ..)
-    | ImportNotTopLevel(pos:)
-    | ExportNotTopLevel(pos:)
-    | UnicodeEscapeInMetaProperty(pos:)
-    | InvalidTemplateEscape(pos:)
-    | UnterminatedTemplateSubstitution(pos:)
-    | MisplacedUseStrictDirective(pos:) -> pos
-  }
+  error.pos
 }

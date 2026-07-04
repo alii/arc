@@ -34,16 +34,15 @@ import arc/parser/error.{
   ExpectedBraceOrStarAfterComma, ExpectedCallOrDotAfterImport,
   ExpectedCaseDefaultOrBrace, ExpectedCloseAfterSetter,
   ExpectedCommaOrBraceInExport, ExpectedCommaOrBraceInImport,
-  ExpectedCommaOrBraceInObject, ExpectedCommaOrBraceInObjectLiteral,
-  ExpectedCommaOrBracket, ExpectedCommaOrBracketInExpr,
-  ExpectedCommaOrCloseParen, ExpectedCommaOrObjectClose, ExpectedExportAlias,
-  ExpectedExportSpecifierName, ExpectedForDeclSeparator,
-  ExpectedForHeadSeparator, ExpectedForSeparator, ExpectedFromOrComma,
-  ExpectedFunctionAfterAsync, ExpectedIdentifier, ExpectedIdentifierAfterDot,
-  ExpectedImportMeta, ExpectedImportMetaGot, ExpectedImportSpecifier,
+  ExpectedCommaOrBraceInObject, ExpectedCommaOrBracket,
+  ExpectedCommaOrBracketInExpr, ExpectedCommaOrCloseParen,
+  ExpectedCommaOrObjectClose, ExpectedExportAlias, ExpectedExportSpecifierName,
+  ExpectedForDeclSeparator, ExpectedForHeadSeparator, ExpectedForSeparator,
+  ExpectedFromOrComma, ExpectedFunctionAfterAsync, ExpectedIdentifier,
+  ExpectedIdentifierAfterDot, ExpectedImportMeta, ExpectedImportSpecifier,
   ExpectedImportSpecifierName, ExpectedModuleSpecifier, ExpectedNewTarget,
-  ExpectedNewTargetGot, ExpectedPropertyName, ExpectedSemicolon, ExpectedToken,
-  ExportNotTopLevel, FieldNamedConstructor, ForInInitializer, ForOfInitializer,
+  ExpectedPropertyName, ExpectedSemicolon, ExpectedToken, ExportNotTopLevel,
+  FieldNamedConstructor, ForInInitializer, ForOfInitializer,
   FunctionDeclInLabelBody, FunctionDeclInSingleStatement, GeneratorDeclLabeled,
   GetterNoParams, IdentifierAlreadyDeclared, ImportNotTopLevel,
   InvalidAssignmentLhs, InvalidDestructuringTarget, InvalidForInLhs,
@@ -74,15 +73,16 @@ import arc/parser/lexer.{
   Export, Extends, Finally, For, From, Function, GreaterThanGreaterThanEqual,
   GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Illegal, Import, In,
   KFalse, KString, KTrue, LeftBrace, LeftBracket, LeftParen,
-  LessThanLessThanEqual, Let, Minus, MinusEqual, MinusMinus, New, Null, Number,
-  Of, PercentEqual, PipeEqual, PipePipeEqual, Plus, PlusEqual, PlusPlus,
-  Question, QuestionDot, QuestionQuestionEqual, Return, RightBrace, RightBracket,
-  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
-  StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral, This,
-  Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
+  LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual, MinusMinus, New,
+  Null, Number, Of, PercentEqual, PipeEqual, PipePipeEqual, Plus, PlusEqual,
+  PlusPlus, Question, QuestionDot, QuestionQuestionEqual, Return, RightBrace,
+  RightBracket, RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual,
+  StarStar, StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral,
+  This, Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
 }
 import arc/parser/number
 import arc/parser/regex
+import arc/parser/source_bytes
 import arc/parser/token.{
   Binary, BinaryOperator, Logical, assignment_op, binary_operator,
   is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
@@ -442,22 +442,37 @@ fn ok_lit(
   Ok(#(P(..advance(p), last_expr_assignable: False), expr))
 }
 
-/// Convert a declaration statement to an expression for export default.
-/// FunctionDeclaration -> FunctionExpression, ClassDeclaration -> ClassExpression.
-/// `default_span` is the span of the `default` keyword token — used for the
-/// (unreachable-in-practice) fallback so the synthetic `*default*` binding
-/// still points at real source instead of a sentinel. `decl_span` is the
-/// whole-declaration byte span (start at `function`/`async`/`class`, end at
-/// the closing `}`) supplied by the export-default caller — Statement
-/// variants do not carry a whole-node span themselves, so the caller threads
-/// it through here for the synthesized expression.
-fn statement_to_default_export_expr(
-  stmt: ast.Statement,
-  default_span: ast.Span,
+/// The two declaration forms `export default` admits (§16.2.3.1:
+/// HoistableDeclaration / ClassDeclaration, both with an OPTIONAL name).
+/// Narrower than `ast.Statement`, so `default_export_expr` /
+/// `default_export_name` below are total — the old `Statement`-shaped
+/// helpers each carried a `_ ->` fallback for statements the grammar can
+/// never put there.
+type DefaultExportDecl {
+  DefaultFn(function: ast.FunctionLiteral)
+  DefaultClass(
+    name: Option(ast.NamedBinding),
+    super_class: Option(ast.Expression),
+    body: List(ast.ClassElement),
+  )
+}
+
+/// The declaration re-expressed as the expression `ExportDefaultDeclaration`
+/// holds. `decl_span` is the whole-declaration byte span (start at
+/// `function`/`async`/`class`, end at the closing `}`) supplied by the caller
+/// — the parse helpers return the payload without a whole-node span.
+fn default_export_expr(
+  decl: DefaultExportDecl,
   decl_span: ast.Span,
 ) -> ast.Expression {
-  case stmt {
-    ast.FunctionDeclaration(name:, params:, body:, is_generator:, is_async:) ->
+  case decl {
+    DefaultFn(function: ast.FunctionLiteral(
+      name:,
+      params:,
+      body:,
+      is_generator:,
+      is_async:,
+    )) ->
       ast.FunctionExpression(
         name:,
         params:,
@@ -466,9 +481,16 @@ fn statement_to_default_export_expr(
         is_async:,
         span: decl_span,
       )
-    ast.ClassDeclaration(name:, super_class:, body:) ->
+    DefaultClass(name:, super_class:, body:) ->
       ast.ClassExpression(name:, super_class:, body:, span: decl_span)
-    _ -> ast.Identifier(name: "*default*", span: default_span)
+  }
+}
+
+/// The declaration's own binding name, `None` for the anonymous forms.
+fn default_export_name(decl: DefaultExportDecl) -> Option(ast.NamedBinding) {
+  case decl {
+    DefaultFn(function:) -> function.name
+    DefaultClass(name:, ..) -> name
   }
 }
 
@@ -712,7 +734,7 @@ fn validate_export_local_refs(p: P) -> Result(Nil, ParseError) {
     scope.sb_root_has(p.sb, name) || set.contains(p.import_bindings, name)
   case declared {
     True -> Ok(Nil)
-    False -> Error(UndeclaredExportBinding(name, pos))
+    False -> Error(UndeclaredExportBinding(pos, name))
   }
 }
 
@@ -739,7 +761,7 @@ fn parse_statement_list(
 
 fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   case peek(p) {
-    Illegal -> Error(illegal_token_error(p))
+    Illegal | LexFailure(_) -> Error(illegal_token_error(p))
     LeftBrace -> parse_block_statement(p)
     Var | Const -> parse_variable_declaration(p)
     Let -> {
@@ -764,7 +786,7 @@ fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     Throw -> parse_throw_statement(p)
     Try -> parse_try_statement(p)
     Switch -> parse_switch_statement(p)
-    Function -> parse_function_decl_impl(p, True, False)
+    Function -> parse_function_declaration(p, True, False)
     Class -> parse_class_declaration(p)
     Semicolon -> Ok(#(advance(p), ast.EmptyStatement))
     Debugger -> {
@@ -775,7 +797,7 @@ fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     With -> parse_with_statement(p)
     Async -> {
       case peek_at(p, 1) {
-        Function -> parse_function_decl_impl(p, True, True)
+        Function -> parse_function_declaration(p, True, True)
         Colon -> parse_labeled_statement(p)
         _ -> parse_expression_statement(p)
       }
@@ -1139,6 +1161,15 @@ fn parse_block_body_slow(
 }
 
 fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
+  use #(p2, decl) <- result.map(parse_variable_declaration_decl(p))
+  #(p2, ast.declaration_to_statement(decl))
+}
+
+/// A `var`/`let`/`const` declaration returned as an `ast.Declaration` — the
+/// shape `export <decl>` needs. Statement position wraps it back up above.
+fn parse_variable_declaration_decl(
+  p: P,
+) -> Result(#(P, ast.Declaration), ParseError) {
   // var/let/const
   let kind = peek(p)
   let p2 = advance(p)
@@ -1162,7 +1193,7 @@ fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
     Const -> ast.Const
     _ -> ast.Var
   }
-  Ok(#(p4, ast.VariableDeclaration(kind: ast_kind, declarations:)))
+  Ok(#(p4, ast.DeclVariable(kind: ast_kind, declarations:)))
 }
 
 fn parse_variable_declarator_list(
@@ -1294,7 +1325,7 @@ fn accumulate_param_name(p: P, name: String) -> Result(P, ParseError) {
             || p.ctx.in_method
             || p.ctx.has_non_simple_param
           {
-            True -> Error(DuplicateParameterName(name, pos_of(p)))
+            True -> Error(DuplicateParameterName(pos_of(p), name))
             // Sloppy non-arrow non-method: dups allowed for simple params.
             // We still accumulate for retroactive strict check.
             False -> bind()
@@ -1316,7 +1347,7 @@ fn check_not_escaped_reserved_word(
   name: String,
 ) -> Result(Nil, ParseError) {
   case is_reserved_word_kind(lexer.keyword_or_identifier(name)) {
-    True -> Error(EscapedReservedWord(name, pos_of(p)))
+    True -> Error(EscapedReservedWord(pos_of(p), name))
     False -> Ok(Nil)
   }
 }
@@ -1340,7 +1371,7 @@ fn check_reserved_identifier_common(
     | "public"
     | "static" ->
       case p.ctx.strict {
-        True -> Error(ReservedWordStrictMode(name, pos_of(p)))
+        True -> Error(ReservedWordStrictMode(pos_of(p), name))
         False -> Ok(Nil)
       }
     "yield" -> {
@@ -1364,7 +1395,7 @@ fn check_identifier_reference(p: P, name: String) -> Result(Nil, ParseError) {
   case name {
     "let" ->
       case p.ctx.strict {
-        True -> Error(ReservedWordStrictMode(name, pos_of(p)))
+        True -> Error(ReservedWordStrictMode(pos_of(p), name))
         False -> Ok(Nil)
       }
     "await" ->
@@ -1394,7 +1425,7 @@ fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
   case name {
     "eval" | "arguments" ->
       case p.ctx.strict {
-        True -> Error(StrictModeBindingName(name, pos_of(p)))
+        True -> Error(StrictModeBindingName(pos_of(p), name))
         False -> Ok(Nil)
       }
     "let" ->
@@ -1415,7 +1446,7 @@ fn check_duplicate_binding(p: P, name: String) -> Result(P, ParseError) {
   case p.ctx.binding_kind {
     BindingLexical(kind:, bound:) ->
       case set.contains(bound, name) {
-        True -> Error(DuplicateBindingLexical(name, pos_of(p)))
+        True -> Error(DuplicateBindingLexical(pos_of(p), name))
         False ->
           Ok(
             P(
@@ -1457,7 +1488,7 @@ fn register_lexical_name(
   use <- bool.guard(
     scope.sb_lexical_conflict(p.sb, name)
       && !scope.sb_only_implicit_arguments(p.sb, name),
-    Error(IdentifierAlreadyDeclared(name, pos)),
+    Error(IdentifierAlreadyDeclared(pos, name)),
   )
   Ok(P(..p, sb: scope.sb_declare(p.sb, name, kind, synthetic: False)))
 }
@@ -1489,7 +1520,7 @@ fn register_scope_binding(p: P, name: String) -> Result(P, ParseError) {
       use <- bool.guard(
         scope.sb_var_conflicts_lexical(p.sb, name)
           || scope.sb_var_conflicts_module_fn(p.sb, name),
-        Error(IdentifierAlreadyDeclared(name, pos_of(p))),
+        Error(IdentifierAlreadyDeclared(pos_of(p), name)),
       )
       // sb_declare_var: real VarBinding lands in current_fn AND each
       // intermediate block records `name` in its hoisted_vars so a
@@ -1539,7 +1570,7 @@ fn register_function_name(
       use <- bool.guard(
         scope.sb_lexical_conflict(p.sb, name)
           && !scope.sb_only_implicit_arguments(p.sb, name),
-        Error(IdentifierAlreadyDeclared(name, name_pos)),
+        Error(IdentifierAlreadyDeclared(name_pos, name)),
       )
       Ok(
         P(
@@ -1570,7 +1601,7 @@ fn register_function_name(
       use <- bool.guard(
         scope.sb_current_has_kind(p.sb, name, scope.LetBinding)
           || scope.sb_current_has_kind(p.sb, name, scope.ConstBinding),
-        Error(IdentifierAlreadyDeclared(name, name_pos)),
+        Error(IdentifierAlreadyDeclared(name_pos, name)),
       )
       Ok(P(..p, sb: scope.sb_declare_var(p.sb, name, synthetic: False)))
     }
@@ -1583,7 +1614,7 @@ fn check_duplicate_export(p: P, name: String) -> Result(P, ParseError) {
   case p.mode {
     Module ->
       case set.contains(p.export_names, name) {
-        True -> Error(DuplicateExport(name, pos_of(p)))
+        True -> Error(DuplicateExport(pos_of(p), name))
         False -> Ok(P(..p, export_names: set.insert(p.export_names, name)))
       }
     Script -> Ok(p)
@@ -1598,7 +1629,7 @@ fn check_duplicate_import_binding(p: P, name: String) -> Result(P, ParseError) {
   case p.mode {
     Module ->
       case set.contains(p.import_bindings, name) {
-        True -> Error(DuplicateImportBinding(name, pos_of(p)))
+        True -> Error(DuplicateImportBinding(pos_of(p), name))
         False -> {
           let p =
             P(
@@ -1627,7 +1658,7 @@ fn check_import_binding_name(
   binding_token_kind: TokenKind,
 ) -> Result(Nil, ParseError) {
   case is_reserved_word_kind(binding_token_kind) {
-    True -> Error(ReservedWordImportBinding(binding_name, pos_of(p)))
+    True -> Error(ReservedWordImportBinding(pos_of(p), binding_name))
     False -> check_binding_identifier(p, binding_name)
   }
 }
@@ -1779,7 +1810,7 @@ fn parse_object_binding_property(
       // shorthand binding (with optional default) — validate the name as a binding identifier
       case is_valid_shorthand {
         False ->
-          Error(UnexpectedToken(token_kind_to_string(prop_kind), pos_of(p)))
+          Error(UnexpectedToken(pos_of(p), token_kind_to_string(prop_kind)))
         True -> {
           use #(p3, _) <- result.try(validate_and_register_binding_no_advance(
             p,
@@ -1820,7 +1851,7 @@ fn numeric_literal(p: P) -> Result(ast.Expression, ParseError) {
   case number.parse_numeric_literal(peek_value(p)) {
     Ok(number.NumberValue(n)) -> Ok(ast.NumberLiteral(value: n, span:))
     Ok(number.BigIntValue(i)) -> Ok(ast.BigIntLiteral(value: i, span:))
-    Error(err) -> Error(MalformedNumericLiteral(err, pos_of(p)))
+    Error(err) -> Error(MalformedNumericLiteral(pos_of(p), err))
   }
 }
 
@@ -2544,11 +2575,11 @@ fn check_label_target(
   label_use: LabelUse,
 ) -> Result(Nil, ParseError) {
   case find_label(p.ctx.label_set, label), label_use {
-    None, _ -> Error(UndefinedLabel(label, pos_of(p)))
+    None, _ -> Error(UndefinedLabel(pos_of(p), label))
     Some(_), BreakLabel -> Ok(Nil)
     Some(LoopLabel), ContinueLabel -> Ok(Nil)
     Some(PlainLabel), ContinueLabel ->
-      Error(ContinueToNonIterationLabel(label, pos_of(p)))
+      Error(ContinueToNonIterationLabel(pos_of(p), label))
   }
 }
 
@@ -2850,11 +2881,27 @@ fn parse_function_head(
   #(p4, p3, is_generator, func_name)
 }
 
-fn parse_function_decl_impl(
+/// A `function` declaration in statement position. `parse_function_decl_impl`
+/// yields the bare `FunctionLiteral` because the two export forms
+/// (`export function f(){}`, `export default function(){}`) need it unwrapped.
+fn parse_function_declaration(
   p: P,
   name_required: Bool,
   is_async: Bool,
 ) -> Result(#(P, ast.Statement), ParseError) {
+  use #(p2, function) <- result.map(parse_function_decl_impl(
+    p,
+    name_required,
+    is_async,
+  ))
+  #(p2, ast.declaration_to_statement(ast.DeclFunction(function:)))
+}
+
+fn parse_function_decl_impl(
+  p: P,
+  name_required: Bool,
+  is_async: Bool,
+) -> Result(#(P, ast.FunctionLiteral), ParseError) {
   use #(p4, p3, is_generator, func_name) <- result.try(parse_function_head(
     p,
     is_async,
@@ -2912,7 +2959,7 @@ fn parse_function_decl_impl(
   let name_opt = optional_named_binding(func_name, span_of(p3))
   Ok(#(
     p7,
-    ast.FunctionDeclaration(
+    ast.FunctionLiteral(
       name: name_opt,
       params: params,
       body: body,
@@ -2977,7 +3024,7 @@ fn parse_function_params_and_body(
     )
   use #(p6, body) <- result.try(case !was_strict && p5.ctx.strict {
     True -> {
-      use Nil <- result.try(check_pending_strict_names(p5))
+      use Nil <- result.try(check_pending_strict_function_name(p5))
       use Nil <- result.try(check_param_names_for_dups(p5))
       parse_fn_body_maybe_var_boundary(p5, params)
     }
@@ -3094,16 +3141,17 @@ fn parse_fn_body_maybe_var_boundary(
   }
 }
 
-/// Retroactively check pending strict names (e.g. function name) when
-/// "use strict" is discovered in function body. Catches cases like
-/// `function eval() { 'use strict'; }`.
-fn check_pending_strict_names(p: P) -> Result(Nil, ParseError) {
+/// Retroactively check the FUNCTION NAME (`ctx.pending_strict_name`, set by
+/// `parse_function_head`) when "use strict" is discovered in the function
+/// body. Catches cases like `function eval() { 'use strict'; }` — that is a
+/// binding name, not a parameter name.
+fn check_pending_strict_function_name(p: P) -> Result(Nil, ParseError) {
   case p.ctx.pending_strict_name {
     None -> Ok(Nil)
     Some(name) ->
-      case is_strict_binding_error(name) {
-        True -> Error(StrictModeParamName(name, pos_of(p)))
-        False -> Ok(Nil)
+      case strict_binding_violation(name) {
+        Some(_) -> Error(StrictModeBindingName(pos_of(p), name))
+        None -> Ok(Nil)
       }
   }
 }
@@ -3124,12 +3172,12 @@ fn check_param_names_list(
     [] -> Ok(Nil)
     [name, ..rest] -> {
       // Check for strict-mode reserved binding names
-      case is_strict_binding_error(name) {
-        True -> Error(StrictModeParamName(name, pos_of(p)))
-        False ->
+      case strict_binding_violation(name) {
+        Some(kind) -> Error(strict_name_error(kind, name, pos_of(p)))
+        None ->
           // Check for duplicates
           case set.contains(seen, name) {
-            True -> Error(DuplicateParamNameStrictMode(name, pos_of(p)))
+            True -> Error(DuplicateParamNameStrictMode(pos_of(p), name))
             False -> check_param_names_list(p, rest, set.insert(seen, name))
           }
       }
@@ -3163,18 +3211,26 @@ fn check_names_for_dups_loop(
     [] -> Ok(Nil)
     [name, ..rest] ->
       case set.contains(seen, name) {
-        True -> Error(DuplicateParameterName(name, pos_of(p)))
+        True -> Error(DuplicateParameterName(pos_of(p), name))
         False -> check_names_for_dups_loop(p, rest, set.insert(seen, name))
       }
   }
 }
 
-/// Check if a name is forbidden as a binding in strict mode.
-fn is_strict_binding_error(name: String) -> Bool {
+/// The two ways a name can be forbidden as a strict-mode binding
+/// (§13.1.1 Early Errors) — they report different messages, so the
+/// classification travels with the answer.
+type StrictNameKind {
+  EvalOrArguments
+  ReservedWord
+}
+
+/// The ONE list of names forbidden as bindings in strict mode.
+/// `Some(kind)` when `name` is one of them.
+fn strict_binding_violation(name: String) -> Option(StrictNameKind) {
   case name {
-    "eval"
-    | "arguments"
-    | "yield"
+    "eval" | "arguments" -> Some(EvalOrArguments)
+    "yield"
     | "implements"
     | "interface"
     | "package"
@@ -3182,8 +3238,22 @@ fn is_strict_binding_error(name: String) -> Bool {
     | "protected"
     | "public"
     | "static"
-    | "let" -> True
-    _ -> False
+    | "let" -> Some(ReservedWord)
+    _ -> None
+  }
+}
+
+/// The error a forbidden name reports when it appears as a PARAMETER name.
+/// (A forbidden FUNCTION name reports `StrictModeBindingName` instead — see
+/// `check_pending_strict_function_name`.)
+fn strict_name_error(
+  kind: StrictNameKind,
+  name: String,
+  pos: Int,
+) -> ParseError {
+  case kind {
+    EvalOrArguments -> StrictModeParamName(pos, name)
+    ReservedWord -> ReservedWordStrictMode(pos, name)
   }
 }
 
@@ -3480,7 +3550,7 @@ fn check_duplicate_param(
     || p.ctx.has_non_simple_param
   use <- bool.guard(
     must_be_unique && set.contains(seen, name),
-    Error(DuplicateParameterName(name, pos_of(p))),
+    Error(DuplicateParameterName(pos_of(p), name)),
   )
   Ok(Nil)
 }
@@ -3498,32 +3568,27 @@ fn check_new_vars_vs_params(
 ) -> Result(Nil, ParseError) {
   use name <- list.try_each(head_names)
   case list.contains(catch_params, name) {
-    True -> Error(IdentifierAlreadyDeclared(name, pos))
+    True -> Error(IdentifierAlreadyDeclared(pos, name))
     False -> Ok(Nil)
   }
 }
 
 fn parse_class_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  parse_class_decl_impl(p, True)
+  use #(p2, decl) <- result.map(parse_class_decl_impl(p))
+  #(p2, ast.declaration_to_statement(decl))
 }
 
-fn parse_class_declaration_optional_name(
-  p: P,
-) -> Result(#(P, ast.Statement), ParseError) {
-  parse_class_decl_impl(p, False)
-}
-
-fn parse_class_decl_impl(
-  p: P,
-  name_required: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
+/// A named `class` declaration returned as an `ast.Declaration` — the shape
+/// `export class C {}` needs. The anonymous form is only reachable through
+/// `export default class {}`, which builds a `DefaultClass` instead.
+fn parse_class_decl_impl(p: P) -> Result(#(P, ast.Declaration), ParseError) {
   // Class declarations are always lexical bindings (like let/const).
   use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
     p,
-    name_required,
+    True,
     True,
   ))
-  #(p2, ast.ClassDeclaration(name:, super_class:, body:))
+  #(p2, ast.DeclClass(name:, super_class:, body:))
 }
 
 /// Shared core for class declarations and class expressions: starting at the
@@ -4020,7 +4085,7 @@ fn register_private_name(
           case prev_static == is_static, prev_kind, kind {
             True, PrivateGet, PrivateSet | True, PrivateSet, PrivateGet ->
               Ok(dict.insert(private_names, name, #(is_static, PrivateGetSet)))
-            _, _, _ -> Error(DuplicatePrivateName(name, pos_of(p)))
+            _, _, _ -> Error(DuplicatePrivateName(pos_of(p), name))
           }
       }
   }
@@ -4392,7 +4457,7 @@ fn parse_label_chain(
   let duplicate =
     option.is_some(find_label(p.ctx.label_set, label))
     || list.contains(collected, label)
-  use <- bool.guard(duplicate, Error(DuplicateLabel(label, pos_of(p))))
+  use <- bool.guard(duplicate, Error(DuplicateLabel(pos_of(p), label)))
   let p2 = advance(p)
   use p3 <- result.try(expect(p2, Colon))
   let collected = [label, ..collected]
@@ -4657,7 +4722,7 @@ fn parse_assignment_expression_inner(
                 "eval" | "arguments" -> {
                   let name = peek_value(p)
                   case option.is_some(assignment_op(peek_at(p, 1))) {
-                    True -> Error(StrictModeAssignment(name, pos_of(p)))
+                    True -> Error(StrictModeAssignment(pos_of(p), name))
                     False -> parse_assignment_rhs(p)
                   }
                 }
@@ -4785,7 +4850,7 @@ fn check_strict_restricted_target(
   case p.ctx.strict, ast_util.unwrap_parens(lhs) {
     True, ast.Identifier(name:, ..) ->
       case name {
-        "eval" | "arguments" -> Error(StrictModeAssignment(name, pos_of(p)))
+        "eval" | "arguments" -> Error(StrictModeAssignment(pos_of(p), name))
         _ -> Ok(Nil)
       }
     _, _ -> Ok(Nil)
@@ -5388,7 +5453,7 @@ fn resolve_private_refs(
     // (direct eval, §19.2.1.1 step 5) can still legitimize a reference.
     0 ->
       case unresolved_outside_eval_env(p, remaining) {
-        [#(name, _, pos), ..] -> Error(UndeclaredPrivateName(name, pos))
+        [#(name, _, pos), ..] -> Error(UndeclaredPrivateName(pos, name))
         [] -> Ok(P(..p, private_refs: []))
       }
     _ -> Ok(P(..p, private_refs: remaining))
@@ -5401,7 +5466,7 @@ fn resolve_private_refs(
 fn check_unresolved_private_refs(p: P) -> Result(Nil, ParseError) {
   case unresolved_outside_eval_env(p, p.private_refs) {
     [] -> Ok(Nil)
-    [#(name, _, pos), ..] -> Error(UndeclaredPrivateName(name, pos))
+    [#(name, _, pos), ..] -> Error(UndeclaredPrivateName(pos, name))
   }
 }
 
@@ -5449,7 +5514,7 @@ fn finish_update_expr(
     True, _ ->
       case p.ctx.strict, p.last_expr_name {
         True, Some("eval" as n) | True, Some("arguments" as n) ->
-          Error(StrictModeModification(n, err_pos))
+          Error(StrictModeModification(err_pos, n))
         _, _ ->
           Ok(#(
             P(..p, last_expr_assignable: False),
@@ -5504,10 +5569,10 @@ fn parse_new_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
                 }
                 False -> Error(NewTargetOutsideFunction(pos_of(p)))
               }
-            other, _ -> Error(ExpectedNewTargetGot(other, pos_of(p3)))
+            other, _ -> Error(ExpectedNewTarget(pos_of(p3), Some(other)))
           }
         }
-        _ -> Error(ExpectedNewTarget(pos_of(p3)))
+        _ -> Error(ExpectedNewTarget(pos_of(p3), None))
       }
     }
     New -> {
@@ -5677,18 +5742,18 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
               case peek_at(p3, 1) {
                 LeftParen ->
                   parse_phase_import_call(p3, import_start, ast.PhaseSource)
-                _ -> Error(ExpectedImportMetaGot("source", pos_of(p3)))
+                _ -> Error(ExpectedImportMeta(pos_of(p3), Some("source")))
               }
             // import . defer ( AssignmentExpression ,opt )
             Identifier, "defer", False ->
               case peek_at(p3, 1) {
                 LeftParen ->
                   parse_phase_import_call(p3, import_start, ast.PhaseDefer)
-                _ -> Error(ExpectedImportMetaGot("defer", pos_of(p3)))
+                _ -> Error(ExpectedImportMeta(pos_of(p3), Some("defer")))
               }
             Identifier, other, _ ->
-              Error(ExpectedImportMetaGot(other, pos_of(p3)))
-            _, _, _ -> Error(ExpectedImportMeta(pos_of(p3)))
+              Error(ExpectedImportMeta(pos_of(p3), Some(other)))
+            _, _, _ -> Error(ExpectedImportMeta(pos_of(p3), None))
           }
         }
         _ -> Error(ExpectedCallOrDotAfterImport(pos_of(p2)))
@@ -5993,9 +6058,9 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   // Default to no name — only the Identifier branch sets Some(name).
   let p = P(..p, last_expr_name: None)
   case peek(p) {
-    // A hard lexer error, materialised as a zero-length Illegal token
+    // A hard lexer error, materialised as a zero-length LexFailure token
     // (lexing is on demand — see ensure_current): report ITS message.
-    Illegal -> Error(illegal_token_error(p))
+    Illegal | LexFailure(_) -> Error(illegal_token_error(p))
     Identifier -> {
       let val = peek_value(p)
       // §13.1.1 IdentifierReference early errors: escaped always-reserved
@@ -6168,7 +6233,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
             _ -> contextual_ident_ok(p)
           }
         False ->
-          Error(UnexpectedToken(token_kind_to_string(peek(p)), pos_of(p)))
+          Error(UnexpectedToken(pos_of(p), token_kind_to_string(peek(p))))
       }
   }
 }
@@ -6330,7 +6395,7 @@ fn parse_object_properties(
             ..acc
           ])
         RightBrace -> Ok(#(advance(p2), [prop, ..acc]))
-        _ -> Error(ExpectedCommaOrBraceInObjectLiteral(pos_of(p2)))
+        _ -> Error(ExpectedCommaOrBraceInObject(pos_of(p2)))
       }
     }
   }
@@ -6424,7 +6489,7 @@ fn parse_object_property(p: P) -> Result(#(P, ast.Property), ParseError) {
   use Nil <- result.try(reject_private_property_key(p4, key_expr))
   // Generator shorthand (*name) must be a method — must have (
   case is_generator && peek(p5) != LeftParen {
-    True -> Error(UnexpectedToken(token_kind_to_string(peek(p5)), pos_of(p5)))
+    True -> Error(UnexpectedToken(pos_of(p5), token_kind_to_string(peek(p5))))
     False ->
       parse_object_property_value(
         p,
@@ -6522,8 +6587,8 @@ fn parse_object_property_value(
       case is_valid_shorthand {
         False ->
           Error(UnexpectedToken(
-            token_kind_to_string(prop_name_kind),
             pos_of(p5),
+            token_kind_to_string(prop_name_kind),
           ))
         True -> {
           // Shorthand is an IdentifierReference — apply §13.1.1 early
@@ -6658,18 +6723,21 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       // end_pos is past the closing /, now skip optional flags
       use #(flags_end, flags) <- result.try(
         regex.skip_regex_flags(p.bytes, end_pos)
-        |> result.map_error(RegExpSyntaxError),
+        |> result.map_error(regexp_syntax_error),
       )
       // Validate the body [body_start, end_pos - 1) against the ECMAScript
       // Pattern grammar (Annex B extended grammar without u/v, strict
       // grammar with it), reporting parse-time early errors.
       use Nil <- result.try(
         regex.validate_pattern(p.bytes, body_start, end_pos - 1, flags)
-        |> result.map_error(RegExpSyntaxError),
+        |> result.map_error(regexp_syntax_error),
       )
       // Extract pattern body and flags as strings
+      // The body was scanned from `p.bytes` at code-point boundaries, so the
+      // slice is always text.
       let pattern =
-        regex.byte_slice_source(p.bytes, body_start, end_pos - 1 - body_start)
+        source_bytes.slice(p.bytes, body_start, end_pos - 1 - body_start)
+        |> option.unwrap("")
       let flags_str = string.join(flags, "")
       // The token window at/past the `/` was lexed with no expression
       // context, so it is garbage (a quote, backtick or `/*` in the body
@@ -6681,7 +6749,7 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let span = ast.Span(start: start_pos, end: flags_end)
       Ok(#(p2, ast.RegExpLiteral(pattern: pattern, flags: flags_str, span:)))
     }
-    Error(e) -> Error(RegExpSyntaxError(e))
+    Error(e) -> Error(RegExpSyntaxError(regex.pattern_error_pos(e), e))
   }
 }
 
@@ -7007,7 +7075,7 @@ fn finish_import_named_specifier(
 fn parse_export_named_function(
   p: P,
   is_async: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
+) -> Result(#(P, ast.Declaration), ParseError) {
   // Skip past "async" and "function" keywords to find the name
   let name_offset = case is_async {
     True -> 2
@@ -7020,29 +7088,30 @@ fn parse_export_named_function(
   }
   // The name is optional (for export default), but here it should be present
   let export_name = peek_value_at(p, name_offset)
-  case export_name != "" {
-    True -> {
-      use p2 <- result.try(check_duplicate_export(p, export_name))
-      parse_function_decl_impl(p2, True, is_async)
-    }
-    False -> parse_function_decl_impl(p, True, is_async)
+  let checked = case export_name != "" {
+    True -> check_duplicate_export(p, export_name)
+    False -> Ok(p)
   }
+  use p2 <- result.try(checked)
+  use #(p3, function) <- result.map(parse_function_decl_impl(p2, True, is_async))
+  #(p3, ast.DeclFunction(function:))
 }
 
-/// Wrap a parsed declaration statement as an ExportNamedDeclaration module item.
+/// Wrap a parsed declaration as an ExportDeclaration module item.
 /// `before` is the parser state positioned at the `export` keyword, so the span
-/// starts there and ends just past the last token the declaration consumed.
+/// starts there and ends just past the last token the declaration consumed, and
+/// `line` is the line the `export` keyword sits on — the compiler tags the
+/// unwrapped declaration with it (see `ast.ExportDeclaration`).
 fn export_named_decl(
   before: P,
-  parsed: #(P, ast.Statement),
+  parsed: #(P, ast.Declaration),
 ) -> #(P, ast.ModuleItem) {
-  let #(p, stmt) = parsed
+  let #(p, declaration) = parsed
   #(
     p,
-    ast.ExportNamedDeclaration(
-      declaration: Some(stmt),
-      specifiers: [],
-      source: None,
+    ast.ExportDeclaration(
+      declaration:,
+      line: line_of(before),
       span: ast.Span(start: pos_of(before), end: consumed_end(before, p)),
     ),
   )
@@ -7050,40 +7119,60 @@ fn export_named_decl(
 
 /// Parse "export class name {}".
 /// Extracts the class name and registers it as an export name before parsing.
-fn parse_export_named_class(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_export_named_class(p: P) -> Result(#(P, ast.Declaration), ParseError) {
   // The name follows "class" keyword
   let export_name = peek_value_at(p, 1)
   case export_name != "" {
     True -> {
       use p2 <- result.try(check_duplicate_export(p, export_name))
-      parse_class_declaration(p2)
+      parse_class_decl_impl(p2)
     }
-    False -> parse_class_declaration(p)
+    False -> parse_class_decl_impl(p)
   }
 }
 
-// Shared tail for `export default <function|class|async function>` —
-// parses the declaration with `parse`, converts it to an expression via
-// statement_to_default_export_expr, and wraps it in ExportDefaultDeclaration.
+/// `export default function(){}` / `export default async function(){}` — the
+/// name is optional here and nowhere else.
+fn parse_default_fn(
+  p: P,
+  is_async: Bool,
+) -> Result(#(P, DefaultExportDecl), ParseError) {
+  use #(p2, function) <- result.map(parse_function_decl_impl(p, False, is_async))
+  #(p2, DefaultFn(function:))
+}
+
+/// `export default class {}` — the name is optional here and nowhere else.
+fn parse_default_class(p: P) -> Result(#(P, DefaultExportDecl), ParseError) {
+  use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
+    p,
+    False,
+    True,
+  ))
+  #(p2, DefaultClass(name:, super_class:, body:))
+}
+
+// Shared tail for `export default <function|class|async function>` — parses
+// the declaration with `parse`, converts it to the equivalent expression, and
+// wraps it in ExportDefaultDeclaration. `parse` returns a `DefaultExportDecl`,
+// not a `Statement`, so no arm here has to cope with a statement the grammar
+// cannot put after `export default`.
 fn finish_export_default_decl(
   p_export: P,
   p_decl: P,
-  default_span: ast.Span,
-  parse: fn(P) -> Result(#(P, ast.Statement), ParseError),
+  parse: fn(P) -> Result(#(P, DefaultExportDecl), ParseError),
 ) -> Result(#(P, ast.ModuleItem), ParseError) {
   let decl_start = pos_of(p_decl)
-  use #(p4, stmt) <- result.map(parse(p_decl))
+  use #(p4, decl) <- result.map(parse(p_decl))
   let decl_span = span_from(decl_start, p4)
   // §16.2.3.7 BoundNames: an anonymous `export default function/class {…}`
   // declares the synthetic `*default*` binding at module scope. Named
   // declarations already registered their own name via register_function_name
-  // / parse_class_declaration and that name IS the exported binding — no
+  // / parse_class_decl_impl and that name IS the exported binding — no
   // `*default*` for those. VarBinding (not ConstBinding) per the
   // emit.gleam:425-427 contract so the synthetic store is a plain assignment;
   // linker_seeded already lists `*default*` so the prologue skips its seed.
-  let p4 = case stmt {
-    ast.FunctionDeclaration(name: None, ..)
-    | ast.ClassDeclaration(name: None, ..) ->
+  let p4 = case default_export_name(decl) {
+    None ->
       P(
         ..p4,
         sb: scope.sb_declare(
@@ -7093,16 +7182,13 @@ fn finish_export_default_decl(
           synthetic: True,
         ),
       )
-    _ -> p4
+    Some(_) -> p4
   }
   #(
     p4,
     ast.ExportDefaultDeclaration(
-      declaration: statement_to_default_export_expr(
-        stmt,
-        default_span,
-        decl_span,
-      ),
+      declaration: default_export_expr(decl, decl_span),
+      line: line_of(p_export),
       span: ast.Span(start: pos_of(p_export), end: consumed_end(p_export, p4)),
     ),
   )
@@ -7134,6 +7220,7 @@ fn finish_export_default_expr(
     p5,
     ast.ExportDefaultDeclaration(
       declaration: expr,
+      line: line_of(p_export),
       span: ast.Span(start: pos_of(p_export), end: consumed_end(p_export, p5)),
     ),
   )
@@ -7170,35 +7257,15 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
   case peek(p2) {
     Default -> {
       use p2b <- result.try(check_duplicate_export(p2, "default"))
-      // Span of the `default` keyword token — threaded into
-      // statement_to_default_export_expr so its `*default*` fallback
-      // identifier carries a real source location.
-      let default_span = span_of(p2b)
       let p3 = advance(p2b)
       case peek(p3) {
         Function ->
-          finish_export_default_decl(
-            p,
-            p3,
-            default_span,
-            parse_function_decl_impl(_, False, False),
-          )
-        Class ->
-          finish_export_default_decl(
-            p,
-            p3,
-            default_span,
-            parse_class_declaration_optional_name,
-          )
+          finish_export_default_decl(p, p3, parse_default_fn(_, False))
+        Class -> finish_export_default_decl(p, p3, parse_default_class)
         Async ->
           case peek_at(p3, 1) {
             Function ->
-              finish_export_default_decl(
-                p,
-                p3,
-                default_span,
-                parse_function_decl_impl(_, False, True),
-              )
+              finish_export_default_decl(p, p3, parse_default_fn(_, True))
             _ -> finish_export_default_expr(p, p3)
           }
         _ -> finish_export_default_expr(p, p3)
@@ -7206,7 +7273,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     }
     Var | Let | Const ->
       result.map(
-        parse_variable_declaration(P(..p2, in_export_decl: True)),
+        parse_variable_declaration_decl(P(..p2, in_export_decl: True)),
         export_named_decl(p, _),
       )
     Function ->
@@ -7260,8 +7327,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
               use p6 <- result.map(eat_semicolon(advance(p5)))
               #(
                 p6,
-                ast.ExportNamedDeclaration(
-                  declaration: None,
+                ast.ExportNamed(
                   specifiers:,
                   source: Some(ast.StringLit(value:)),
                   span: ast.Span(start: pos_of(p), end: consumed_end(p, p6)),
@@ -7275,8 +7341,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           use p5 <- result.try(eat_semicolon(p4))
           Ok(#(
             p5,
-            ast.ExportNamedDeclaration(
-              declaration: None,
+            ast.ExportNamed(
               specifiers:,
               source: None,
               span: ast.Span(start: pos_of(p), end: consumed_end(p, p5)),
@@ -7507,18 +7572,9 @@ fn validate_retroactive_param_names(
   case names {
     [] -> Ok(p)
     [name, ..rest] ->
-      case name {
-        "eval" | "arguments" -> Error(StrictModeParamName(name, pos_of(p)))
-        "implements"
-        | "interface"
-        | "package"
-        | "private"
-        | "protected"
-        | "public"
-        | "static"
-        | "let"
-        | "yield" -> Error(ReservedWordStrictMode(name, pos_of(p)))
-        _ -> validate_retroactive_param_names(p, rest)
+      case strict_binding_violation(name) {
+        Some(kind) -> Error(strict_name_error(kind, name, pos_of(p)))
+        None -> validate_retroactive_param_names(p, rest)
       }
   }
 }
@@ -7835,7 +7891,7 @@ fn parse_template_substitutions(
     other ->
       Error(error_at_current(
         p,
-        ExpectedToken("}", token_kind_to_string(other), pos_of(p)),
+        ExpectedToken(pos_of(p), "}", token_kind_to_string(other)),
       ))
   }
 }
@@ -7853,7 +7909,7 @@ fn template_continuation(p: P) -> Result(P, ParseError) {
       line_of(p),
       p.scan.mode,
     )
-    |> result.map_error(LexError),
+    |> result.map_error(lex_error),
   )
   P(..p, tokens: [token], scan:)
 }
@@ -7864,11 +7920,8 @@ fn template_continuation(p: P) -> Result(P, ParseError) {
 /// the slice is byte-exact — with line-terminator sequences normalized
 /// (<CR><LF> and <CR> → <LF>).
 fn template_span_raw(p: P, trailing: Int) -> String {
-  regex.byte_slice_source(
-    p.bytes,
-    pos_of(p) + 1,
-    peek_raw_len(p) - 1 - trailing,
-  )
+  source_bytes.slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
+  |> option.unwrap("")
   |> string.replace("\r\n", "\n")
   |> string.replace("\r", "\n")
 }
@@ -8003,8 +8056,8 @@ fn advance(p: P) -> P {
 /// re-scan (regex literal, template continuation) discarded it.
 ///
 /// A hard lexer error is materialised by the lexer as a zero-length
-/// `Illegal` token (carrying the typed LexError) followed by Eof: no grammar
-/// production accepts `Illegal`, so the parse fails at exactly the lexer
+/// `LexFailure` token (carrying the typed LexError) followed by Eof: no
+/// grammar production accepts it, so the parse fails at exactly the lexer
 /// error's position with its message (see illegal_token_error) — and
 /// errors inside source the parser jumps over (a regex body) never
 /// surface at all.
@@ -8023,12 +8076,12 @@ fn expect(p: P, kind: TokenKind) -> Result(P, ParseError) {
     True -> Ok(advance(p))
     False ->
       case peek(p) {
-        Illegal -> Error(illegal_token_error(p))
+        Illegal | LexFailure(_) -> Error(illegal_token_error(p))
         found ->
           Error(ExpectedToken(
+            pos_of(p),
             token_kind_to_string(kind),
             token_kind_to_string(found),
-            pos_of(p),
           ))
       }
   }
@@ -8037,7 +8090,7 @@ fn expect(p: P, kind: TokenKind) -> Result(P, ParseError) {
 fn expect_identifier(p: P) -> Result(P, ParseError) {
   case peek(p) {
     Identifier -> Ok(advance(p))
-    Illegal -> Error(illegal_token_error(p))
+    Illegal | LexFailure(_) -> Error(illegal_token_error(p))
     _ ->
       case is_keyword_as_identifier(peek(p)) {
         True -> Ok(advance(p))
@@ -8046,17 +8099,27 @@ fn expect_identifier(p: P) -> Result(P, ParseError) {
   }
 }
 
-/// The error for the current token being `Illegal`. The on-demand lexer's
-/// hard-error sentinel (see ensure_current) carries the lexer's own typed
-/// `LexError` in `lex_error`, so it is reported exactly as the old
-/// whole-file lex pass reported it. A lenient Illegal token (a stray
-/// character the lexer tolerates because a regex body could have made it
-/// legal) has no error attached and keeps the generic unexpected-token
-/// report.
+/// The error for the current token being one of the two illegal-token kinds.
+/// The on-demand lexer's hard-error sentinel (see ensure_current) carries the
+/// lexer's own typed `LexError` on its KIND (`LexFailure`), so it is reported
+/// exactly as the old whole-file lex pass reported it. A lenient `Illegal`
+/// token (a stray character the lexer tolerates because a regex body could
+/// have made it legal) has no error to carry and keeps the generic
+/// unexpected-token report.
+/// A `regex`/`lexer` typed error lifted into a `ParseError`, at the position
+/// the error itself reports.
+fn regexp_syntax_error(err: regex.PatternError) -> ParseError {
+  RegExpSyntaxError(regex.pattern_error_pos(err), err)
+}
+
+fn lex_error(err: lexer.LexError) -> ParseError {
+  LexError(lexer.lex_error_pos(err), err)
+}
+
 fn illegal_token_error(p: P) -> ParseError {
-  case p.tokens {
-    [lexer.Token(lex_error: Some(err), ..), ..] -> LexError(err)
-    _ -> UnexpectedToken(token_kind_to_string(peek(p)), pos_of(p))
+  case peek(p) {
+    LexFailure(err) -> lex_error(err)
+    kind -> UnexpectedToken(pos_of(p), token_kind_to_string(kind))
   }
 }
 
@@ -8068,7 +8131,7 @@ fn illegal_token_error(p: P) -> ParseError {
 /// "expected X" report.
 fn error_at_current(p: P, otherwise: ParseError) -> ParseError {
   case peek(p) {
-    Illegal -> illegal_token_error(p)
+    Illegal | LexFailure(_) -> illegal_token_error(p)
     _ -> otherwise
   }
 }
@@ -8080,7 +8143,7 @@ fn eat_semicolon(p: P) -> Result(P, ParseError) {
     // A hard lexer error right after the statement (see ensure_current):
     // when ASI does not save it, report the LEXER's message, not a
     // misleading "Expected ';'" pointing at it.
-    Illegal ->
+    Illegal | LexFailure(_) ->
       case has_line_break_before(p) {
         True -> Ok(p)
         False -> Error(illegal_token_error(p))
