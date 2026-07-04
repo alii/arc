@@ -11,8 +11,8 @@
 /// `weak_collection`, parameterized by the `kind()` value below. This module
 /// keeps only the WeakSet-specific surface: `add`.
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/builtins/helpers.{can_be_held_weakly, first_arg_or_undefined}
-import arc/vm/builtins/iterator
+import arc/vm/builtins/helpers.{first_arg_or_undefined}
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/weak_collection.{type WeakKind, WeakKind}
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
@@ -20,7 +20,6 @@ import arc/vm/value.{
   WeakSetNative, WeakSetObject, WeakSetPrototypeAdd, WeakSetPrototypeDelete,
   WeakSetPrototypeHas,
 }
-import gleam/dict
 import gleam/option.{None, Some}
 
 /// The three things that make a WeakSet a WeakSet rather than a WeakMap.
@@ -34,6 +33,7 @@ fn kind() -> WeakKind(host, Nil) {
     },
     wrap: WeakSetObject,
     type_name: "WeakSet",
+    invalid_key_message: "Invalid value used in weak set",
   )
 }
 
@@ -93,7 +93,7 @@ fn construct(
     args,
     state,
     "add",
-    iterator.add_values_from_iterable,
+    iter_protocol.add_values_from_iterable,
   )
 }
 
@@ -107,12 +107,6 @@ fn weak_set_add(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- weak_collection.require(kind(), this, state, "add")
   let val = first_arg_or_undefined(args)
-  case can_be_held_weakly(state, val) {
-    True -> {
-      let state =
-        weak_collection.mutate(kind(), state, ref, dict.insert(_, val, Nil))
-      #(state, Ok(this))
-    }
-    False -> state.type_error(state, "Invalid value used in weak set")
-  }
+  use val, state <- weak_collection.require_weak_key(kind(), state, val)
+  #(weak_collection.insert(state, ref, val, Nil), Ok(this))
 }

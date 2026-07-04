@@ -19,7 +19,7 @@
 /// normalization, which the spec requires anyway (§24.1.3.9 step 4).
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
-import arc/vm/builtins/iterator
+import arc/vm/builtins/iter_protocol
 import arc/vm/heap
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/key.{Named}
@@ -156,7 +156,8 @@ fn map_constructor(
         False ->
           state.type_error(state, "'set' property of Map is not a function")
         // Step 7: ? AddEntriesFromIterable(map, iterable, adder).
-        True -> iterator.add_entries_from_iterable(state, map, iterable, adder)
+        True ->
+          iter_protocol.add_entries_from_iterable(state, map, iterable, adder)
       }
     }
   }

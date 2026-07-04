@@ -8,16 +8,19 @@
 /// each other — `builtins/iterator` already depends on `builtins/object` for
 /// the proxy-aware [[OwnPropertyKeys]] used by Iterator.zipKeyed.
 ///
-/// `builtins/iterator` re-exports the entry points below, so existing callers
-/// keep importing it; new consumers may import either module.
+/// Everything the protocol needs lives here — including the ops the interpreter
+/// (rest elements, yield*), the generator machinery and the Map/Set/WeakMap/
+/// WeakSet constructors drive. None of them import `builtins/iterator`, which
+/// only owns the `Iterator` builtin object itself.
 import arc/vm/builtins/helpers.{is_callable}
 import arc/vm/key.{Index, Named}
 import arc/vm/ops/object
-import arc/vm/state.{type State}
+import arc/vm/state.{type State, type StepExit}
 import arc/vm/value.{
   type IteratorRecord, type JsValue, IteratorRecord, JsNull, JsObject,
   JsUndefined,
 }
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
@@ -34,6 +37,34 @@ pub fn type_error_any(
 // ============================================================================
 // §7.4.2/§7.4.3/§7.4.4 — obtaining an Iterator Record
 // ============================================================================
+
+/// §7.4.9 GetIteratorDirect ( obj ): `obj` must be an Object, and its `next`
+/// method is read exactly ONCE and cached in the returned `IteratorRecord` —
+/// so monkey-patching `obj.next` mid-iteration has no effect.
+///
+/// This is the ONE place an already-obtained iterator object becomes an
+/// `IteratorRecord`. GetIterator / GetIteratorFromMethod /
+/// GetIteratorFlattenable below, the Iterator.prototype helpers,
+/// Iterator.concat's per-item open and the interpreter's rest-element drain
+/// all funnel through it, so no site can forget the Object check or re-Get
+/// `next` per step. `non_object_msg` names the value in the TypeError.
+pub fn get_iterator_direct(
+  state: State(host),
+  obj: JsValue,
+  non_object_msg: String,
+) -> Result(#(IteratorRecord, State(host)), #(JsValue, State(host))) {
+  case obj {
+    JsObject(_) -> {
+      use #(next, state) <- result.map(object.get_value_of(
+        state,
+        obj,
+        Named("next"),
+      ))
+      #(IteratorRecord(iterator: obj, next_method: next), state)
+    }
+    _ -> Error(state.type_error_value(state, non_object_msg))
+  }
+}
 
 /// §7.4.3 GetIterator(obj, sync): the @@iterator method must be callable and
 /// its result must be an Object; caches the next method (GetIteratorDirect).
@@ -75,21 +106,11 @@ pub fn get_iterator_from_method(
   method: JsValue,
 ) -> Result(#(IteratorRecord, State(host)), #(JsValue, State(host))) {
   use #(iter, state) <- result.try(state.call(state, method, obj, []))
-  case iter {
-    JsObject(_) -> {
-      use #(next, state) <- result.map(object.get_value_of(
-        state,
-        iter,
-        Named("next"),
-      ))
-      #(IteratorRecord(iterator: iter, next_method: next), state)
-    }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Result of the Symbol.iterator method is not an object",
-      ))
-  }
+  get_iterator_direct(
+    state,
+    iter,
+    "Result of the Symbol.iterator method is not an object",
+  )
 }
 
 /// §7.4.13 GetIteratorFlattenable's two call sites, as a type: `Iterator.from`
@@ -129,22 +150,19 @@ pub fn get_iterator_flattenable(
         obj,
         value.symbol_iterator,
       ))
+      // Step 2 is GetMethod (§7.3.10), whose step 3 rejects a non-callable
+      // @@iterator with a TypeError — same guard as `get_iterator_sync`.
       let iter_result = case method {
         JsUndefined | JsNull -> Ok(#(obj, state))
-        _ -> state.call(state, method, obj, [])
+        _ ->
+          case is_callable(state.heap, method) {
+            False ->
+              Error(state.type_error_value(state, what <> " is not iterable"))
+            True -> state.call(state, method, obj, [])
+          }
       }
       use #(iter, state) <- result.try(iter_result)
-      case iter {
-        JsObject(_) -> {
-          use #(inner_next, state) <- result.map(object.get_value_of(
-            state,
-            iter,
-            Named("next"),
-          ))
-          #(IteratorRecord(iterator: iter, next_method: inner_next), state)
-        }
-        _ -> Error(state.type_error_value(state, what <> " is not iterable"))
-      }
+      get_iterator_direct(state, iter, what <> " is not iterable")
     }
   }
 }
@@ -322,11 +340,14 @@ pub type EntrySink(host) =
   fn(State(host), JsValue, JsValue) ->
     Result(State(host), #(JsValue, State(host)))
 
-/// §24.1.1.2 AddEntriesFromIterable ( target, iterable, addEntry ) — full
-/// iterator protocol: GetIterator, then per entry Get "0"/"1" and run
-/// `add_entry`, closing the iterator on any abrupt completion inside the loop.
-/// Returns `target` on normal completion.
-pub fn add_entries_from_iterable(
+/// §24.1.1.2 AddEntriesFromIterable ( target, iterable, addEntry ) with a
+/// GLEAM-level `add_entry` sink — full iterator protocol: GetIterator, then per
+/// entry Get "0"/"1" and run `add_entry`, closing the iterator on any abrupt
+/// completion inside the loop. Returns `target` on normal completion.
+///
+/// `add_entries_from_iterable` below is the spec-named §24.1.1.2 op whose
+/// `adder` is a user-reachable JS function; this is its Gleam-sink cousin.
+pub fn add_entries_with_sink(
   state: State(host),
   target: JsValue,
   iterable: JsValue,
@@ -334,6 +355,124 @@ pub fn add_entries_from_iterable(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use rec, state <- state.try_op(get_iterator_sync(state, iterable))
   add_entries_loop(state, target, rec, add_entry)
+}
+
+/// §24.1.1.2 AddEntriesFromIterable ( target, iterable, adder ) — the Map
+/// (§24.1.1.1) / WeakMap (§24.3.1.1) constructors' entry drain. `adder` is the
+/// user-reachable `set` method, so it must be [[Call]]ed observably; the
+/// GetIterator + per-entry Get "0"/"1" + IteratorClose-on-abrupt loop is the
+/// shared one above (Object.fromEntries drives it too, with a
+/// CreateDataPropertyOrThrow sink instead of a JS call).
+pub fn add_entries_from_iterable(
+  state: State(host),
+  target: JsValue,
+  iterable: JsValue,
+  adder: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use state, k, v <- add_entries_with_sink(state, target, iterable)
+  state.call(state, adder, target, [k, v])
+  |> result.map(fn(pair) { pair.1 })
+}
+
+/// Value-iteration analogue of AddEntriesFromIterable — §24.2.1.1 Set steps
+/// 6-8 / §24.4.1.1 WeakSet steps 5-7: for each iterator value `v`, call
+/// `adder(target, [v])`, closing the iterator if the adder throws
+/// (IfAbruptCloseIterator). Returns `target` on normal completion.
+pub fn add_values_from_iterable(
+  state: State(host),
+  target: JsValue,
+  iterable: JsValue,
+  adder: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use rec, state <- state.try_op(get_iterator_sync(state, iterable))
+  add_values_loop(state, target, rec, adder)
+}
+
+/// One IteratorStepValue + adder call per iteration. Abrupt completions from
+/// next()/Get(done)/Get(value) propagate without close (§7.4.8); an abrupt
+/// completion from the adder call closes the iterator first.
+fn add_values_loop(
+  state: State(host),
+  target: JsValue,
+  rec: IteratorRecord,
+  adder: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use step, done, state <- iterator_step_result(state, rec)
+  case done {
+    True -> #(state, Ok(target))
+    False -> {
+      use v, state <- state.try_op(object.get_value_of(
+        state,
+        step,
+        Named("value"),
+      ))
+      use _add_result, state <- or_close(
+        state.call(state, adder, target, [v]),
+        rec.iterator,
+      )
+      add_values_loop(state, target, rec, adder)
+    }
+  }
+}
+
+// ============================================================================
+// Destructuring / yield* support — the two protocol ops the interpreter and
+// the generator machinery drive directly.
+// ============================================================================
+
+/// §13.15.5.3 / §14.3.3 BindingRestElement: drain an already-obtained
+/// iterator object into a fresh Array via repeated .next() — does NOT
+/// re-GetIterator, so works for bare {next} iterators that don't inherit
+/// %IteratorPrototype%. .next() throwing propagates without close (caller
+/// has already seated the [[Done]] sentinel).
+pub fn iterator_rest(
+  state: State(host),
+  iter: JsValue,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use rec, state <- state.try_op(get_iterator_direct(
+    state,
+    iter,
+    "Iterator rest element target is not an object",
+  ))
+  iterator_rest_loop(state, rec, [])
+}
+
+fn iterator_rest_loop(
+  state: State(host),
+  rec: IteratorRecord,
+  acc: List(JsValue),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let #(state, step) = iterator_step_value(state, rec)
+  case step {
+    Error(thrown) -> #(state, Error(thrown))
+    Ok(None) -> state.ok_array(state, list.reverse(acc))
+    Ok(Some(v)) -> iterator_rest_loop(state, rec, [v, ..acc])
+  }
+}
+
+/// §7.4.5 IteratorComplete + §7.4.6 IteratorValue: read {done, value} from an
+/// iterator result object; TypeError if it isn't an object. Both property reads
+/// can run user getters, so the returned State is threaded through and a getter
+/// throw propagates as a step-level Thrown. Shared by the interpreter's
+/// IteratorNext/yield* paths and the generator delegate-forwarding path.
+/// (§7.4.8 IteratorStep must NOT read `value` when done — that variant lives
+/// in interpreter.gleam as `read_iter_step_result`.)
+pub fn read_iter_result(
+  state: State(host),
+  res: JsValue,
+) -> Result(#(Bool, JsValue, State(host)), StepExit(host)) {
+  case res {
+    JsObject(rref) -> {
+      use #(done, state) <- result.try(
+        state.rethrow(object.get_value(state, rref, Named("done"), res)),
+      )
+      use #(val, state) <- result.map(
+        state.rethrow(object.get_value(state, rref, Named("value"), res)),
+      )
+      #(value.is_truthy(done), val, state)
+    }
+    _ -> state.throw_type_error(state, "Iterator result is not an object")
+  }
 }
 
 /// One IteratorStepValue + entry processing per iteration. Abrupt

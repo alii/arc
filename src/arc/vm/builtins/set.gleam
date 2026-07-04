@@ -13,7 +13,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/iter_protocol
-import arc/vm/builtins/iterator
 import arc/vm/heap
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/key.{Named}
@@ -141,7 +140,8 @@ fn construct(
           state.type_error(state, "'add' property of Set is not a function")
         // Step 8: iterate the iterable's values, calling adder(set, v) for
         // each one and closing the iterator on any abrupt completion.
-        True -> iterator.add_values_from_iterable(state, set, iterable, adder)
+        True ->
+          iter_protocol.add_values_from_iterable(state, set, iterable, adder)
       }
     }
   }

@@ -18,7 +18,7 @@ import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{
   can_be_held_weakly, first_arg_or_undefined, is_callable, list_at,
 }
-import arc/vm/builtins/iterator
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/weak_collection.{type WeakKind, WeakKind}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State}
@@ -42,6 +42,7 @@ fn kind() -> WeakKind(host, JsValue) {
     },
     wrap: WeakMapObject,
     type_name: "WeakMap",
+    invalid_key_message: "Invalid value used as weak map key",
   )
 }
 
@@ -112,7 +113,7 @@ fn construct(
     args,
     state,
     "set",
-    iterator.add_entries_from_iterable,
+    iter_protocol.add_entries_from_iterable,
   )
 }
 
@@ -126,7 +127,7 @@ fn weak_map_get(
   let key = first_arg_or_undefined(args)
   case can_be_held_weakly(state, key) {
     True ->
-      case dict.get(weak_collection.read_data(kind(), state, ref), key) {
+      case dict.get(weak_collection.read_data(state, ref), key) {
         Ok(val) -> #(state, Ok(val))
         Error(Nil) -> #(state, Ok(JsUndefined))
       }
@@ -142,15 +143,9 @@ fn weak_map_set(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- weak_collection.require(kind(), this, state, "set")
   let key = first_arg_or_undefined(args)
-  case can_be_held_weakly(state, key) {
-    True -> {
-      let val = list_at(args, 1) |> option.unwrap(JsUndefined)
-      let state =
-        weak_collection.mutate(kind(), state, ref, dict.insert(_, key, val))
-      #(state, Ok(this))
-    }
-    False -> state.type_error(state, "Invalid value used as weak map key")
-  }
+  use key, state <- weak_collection.require_weak_key(kind(), state, key)
+  let val = list_at(args, 1) |> option.unwrap(JsUndefined)
+  #(weak_collection.insert(state, ref, key, val), Ok(this))
 }
 
 /// Upsert proposal — WeakMap.prototype.getOrInsert ( key, value )
@@ -161,18 +156,13 @@ fn get_or_insert(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- weak_collection.require(kind(), this, state, "getOrInsert")
   let key = first_arg_or_undefined(args)
-  case can_be_held_weakly(state, key) {
-    False -> state.type_error(state, "Invalid value used as weak map key")
-    True ->
-      case dict.get(weak_collection.read_data(kind(), state, ref), key) {
-        Ok(existing) -> #(state, Ok(existing))
-        Error(Nil) -> {
-          let val = list_at(args, 1) |> option.unwrap(JsUndefined)
-          let state =
-            weak_collection.mutate(kind(), state, ref, dict.insert(_, key, val))
-          #(state, Ok(val))
-        }
-      }
+  use weak_key, state <- weak_collection.require_weak_key(kind(), state, key)
+  case dict.get(weak_collection.read_data(state, ref), key) {
+    Ok(existing) -> #(state, Ok(existing))
+    Error(Nil) -> {
+      let val = list_at(args, 1) |> option.unwrap(JsUndefined)
+      #(weak_collection.insert(state, ref, weak_key, val), Ok(val))
+    }
   }
 }
 
@@ -199,32 +189,24 @@ fn get_or_insert_computed(
         state,
         object.inspect(callback, state.heap) <> " is not a function",
       )
-    True ->
-      case can_be_held_weakly(state, key) {
-        False -> state.type_error(state, "Invalid value used as weak map key")
-        True ->
-          case dict.get(weak_collection.read_data(kind(), state, ref), key) {
-            Ok(existing) -> #(state, Ok(existing))
-            Error(Nil) -> {
-              use computed, state <- state.try_call(
-                state,
-                callback,
-                JsUndefined,
-                [key],
-              )
-              // The callback may have mutated the map — `mutate` re-reads the
-              // live entry dict, so an entry it inserted under this key is
-              // overwritten rather than the whole dict being reverted.
-              let state =
-                weak_collection.mutate(
-                  kind(),
-                  state,
-                  ref,
-                  dict.insert(_, key, computed),
-                )
-              #(state, Ok(computed))
-            }
-          }
+    True -> {
+      use weak_key, state <- weak_collection.require_weak_key(
+        kind(),
+        state,
+        key,
+      )
+      case dict.get(weak_collection.read_data(state, ref), key) {
+        Ok(existing) -> #(state, Ok(existing))
+        Error(Nil) -> {
+          use computed, state <- state.try_call(state, callback, JsUndefined, [
+            key,
+          ])
+          // The callback may have mutated the map — `insert` re-reads the live
+          // entry dict, so an entry it inserted under this key is overwritten
+          // rather than the whole dict being reverted.
+          #(weak_collection.insert(state, ref, weak_key, computed), Ok(computed))
+        }
       }
+    }
   }
 }

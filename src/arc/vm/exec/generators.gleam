@@ -1,7 +1,6 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
-import arc/vm/builtins/iterator as builtins_iterator
 import arc/vm/completion.{
   type Outcome, Completed, NormalCompletion, Suspended, ThrowCompletion,
 }
@@ -422,7 +421,7 @@ fn forward_delegate(
           // surrounding error arms.
           use #(done, val, state) <- result.try(
             result.map_error(
-              builtins_iterator.read_iter_result(state, res),
+              iter_protocol.read_iter_result(state, res),
               state.map_exit_state(_, fn(st) { complete(st, gen) }),
             ),
           )
