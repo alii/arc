@@ -2045,11 +2045,13 @@ fn char_at(bytes: BitArray, pos: Int) -> String {
 ///
 /// The source binary comes from an already-valid Gleam String and every
 /// offset the lexer produces is a char boundary, so the FFI skips the UTF-8
-/// re-validation that bit_array.to_string would perform on every token.
-/// Out-of-range slices return "".
-@external(erlang, "arc_parser_ffi", "unsafe_byte_slice")
+/// re-validation that bit_array.to_string would perform on every token
+/// (hence `unsafe_`). Out-of-range offsets are clamped into the binary; see
+/// arc_bytes_ffi for the one out-of-range policy shared with the regexp
+/// bridge.
+@external(erlang, "arc_bytes_ffi", "unsafe_slice")
 fn byte_slice(bytes: BitArray, start: Int, len: Int) -> String
 
-/// Tail of the byte array from byte offset `pos`. Out-of-range returns <<>>.
-@external(erlang, "arc_parser_ffi", "drop_bytes")
+/// Tail of the byte array from byte offset `pos` (clamped).
+@external(erlang, "arc_bytes_ffi", "drop_start")
 fn drop_bytes(bytes: BitArray, pos: Int) -> BitArray

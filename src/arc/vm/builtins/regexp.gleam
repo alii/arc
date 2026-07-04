@@ -76,21 +76,23 @@ fn ffi_regexp_exec_info(
   sticky: Bool,
 ) -> Result(#(List(#(Int, Int)), Int, List(#(String, Int))), ExecFailure)
 
-/// FFI: O(1) sub-binary slice by byte offsets. regexp_exec_info returns byte
-/// indices (re:run), so all slicing of the subject string must be byte-based —
-/// grapheme-based string.slice would be both wrong and O(offset+len).
-@external(erlang, "arc_regexp_ffi", "byte_slice")
+/// FFI: O(1) sub-binary slice by byte offsets, WITHOUT re-validating UTF-8
+/// (hence `unsafe_`). regexp_exec_info returns byte indices (re:run), so all
+/// slicing of the subject string must be byte-based — grapheme-based
+/// string.slice would be both wrong and O(offset+len). Offsets are clamped
+/// into the string; see arc_bytes_ffi for the one out-of-range policy.
+@external(erlang, "arc_bytes_ffi", "unsafe_slice")
 fn byte_slice(string: String, start: Int, len: Int) -> String
 
-/// FFI: O(1) suffix of the string from a byte offset.
-@external(erlang, "arc_regexp_ffi", "byte_drop_start")
+/// FFI: O(1) suffix of the string from a byte offset (clamped).
+@external(erlang, "arc_bytes_ffi", "drop_start")
 fn byte_drop_start(string: String, start: Int) -> String
 
 /// FFI: smallest UTF-8 character boundary strictly after a byte offset
 /// (AdvanceStringIndex). Stepping a byte offset by +1 can land mid-character,
 /// which makes re:run raise badarg. May return past the end of the
 /// string, which loops use as their termination signal.
-@external(erlang, "arc_regexp_ffi", "next_char_boundary")
+@external(erlang, "arc_bytes_ffi", "next_char_boundary")
 fn next_char_boundary(string: String, position: Int) -> Int
 
 // RegExp String Iterator internal state (§22.2.9) lives in the typed
