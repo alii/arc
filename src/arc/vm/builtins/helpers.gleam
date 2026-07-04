@@ -111,3 +111,25 @@ pub fn first_arg_or_undefined(args: List(JsValue)) -> JsValue {
     [] -> JsUndefined
   }
 }
+
+/// The first two arguments, each `undefined` when the caller passed fewer.
+/// One list match, no walk — the shape most two-parameter builtins want.
+pub fn two_args_or_undefined(args: List(JsValue)) -> #(JsValue, JsValue) {
+  case args {
+    [a, b, ..] -> #(a, b)
+    [a] -> #(a, JsUndefined)
+    [] -> #(JsUndefined, JsUndefined)
+  }
+}
+
+/// The first three arguments, each `undefined` when the caller passed fewer.
+pub fn three_args_or_undefined(
+  args: List(JsValue),
+) -> #(JsValue, JsValue, JsValue) {
+  case args {
+    [a, b, c, ..] -> #(a, b, c)
+    [a, b] -> #(a, b, JsUndefined)
+    [a] -> #(a, JsUndefined, JsUndefined)
+    [] -> #(JsUndefined, JsUndefined, JsUndefined)
+  }
+}

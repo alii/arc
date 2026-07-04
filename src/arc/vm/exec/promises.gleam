@@ -2105,12 +2105,7 @@ fn from_async_closure(
   resolve: JsValue,
   reject: JsValue,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  let #(items, map_fn, this_arg) = case args {
-    [i, m, t, ..] -> #(i, m, t)
-    [i, m] -> #(i, m, JsUndefined)
-    [i] -> #(i, JsUndefined, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined, JsUndefined)
-  }
+  let #(items, map_fn, this_arg) = helpers.three_args_or_undefined(args)
   // Steps 3.a-3.b: mapping check (inside the closure → rejects, not throws).
   use Nil <- result.try(case map_fn {
     JsUndefined -> Ok(Nil)

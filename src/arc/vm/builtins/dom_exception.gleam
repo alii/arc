@@ -53,11 +53,7 @@ pub fn construct(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use proto, state <- helpers.require_new_target(state, "DOMException", proto)
-  let #(msg_arg, name_arg) = case args {
-    [m, n, ..] -> #(m, n)
-    [m] -> #(m, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(msg_arg, name_arg) = helpers.two_args_or_undefined(args)
   use message, state <- arg_string(state, msg_arg, "")
   use name, state <- arg_string(state, name_arg, "Error")
   let #(heap, val) = alloc(state.heap, proto, name, message)

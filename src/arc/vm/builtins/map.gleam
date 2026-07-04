@@ -220,11 +220,7 @@ fn map_set(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(key_arg, val_arg) = case args {
-    [k, v, ..] -> #(k, v)
-    [k] -> #(k, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(key_arg, val_arg) = helpers.two_args_or_undefined(args)
   // Steps 1-2: RequireInternalSlot
   use store, ref, state <- require_map(this, state, "set")
 
@@ -345,11 +341,7 @@ fn map_for_each(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Extract callbackfn and thisArg
-  let #(cb, this_arg) = case args {
-    [c, t, ..] -> #(c, t)
-    [c] -> #(c, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(cb, this_arg) = helpers.two_args_or_undefined(args)
 
   // Step 3: If IsCallable(callbackfn) is false, throw TypeError
   case helpers.is_callable(state.heap, cb) {

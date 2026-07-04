@@ -1307,11 +1307,7 @@ fn require_callback(
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Extract callbackfn (args[0]) and thisArg (args[1], default undefined).
-  let #(cb, this_arg) = case args {
-    [c, t, ..] -> #(c, t)
-    [c] -> #(c, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(cb, this_arg) = helpers.two_args_or_undefined(args)
   // §7.2.3 IsCallable: check [[Call]] internal method.
   case helpers.is_callable(state.heap, cb) {
     True -> cont(cb, this_arg, state)

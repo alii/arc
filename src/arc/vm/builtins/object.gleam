@@ -340,11 +340,7 @@ fn get_own_property_descriptor(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let object_proto = state.builtins.object.prototype
-  let #(target, key_val) = case args {
-    [t, k, ..] -> #(t, k)
-    [t] -> #(t, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(target, key_val) = helpers.two_args_or_undefined(args)
   // Step 1 STRICTLY BEFORE step 2: ToPropertyKey(P) can run user code (a
   // `toString`/`valueOf`/`@@toPrimitive` on P), and ToObject(null) must throw
   // its TypeError first — `Object.getOwnPropertyDescriptor(null, {toString(){
@@ -2136,11 +2132,7 @@ fn create(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(proto_val, props_val) = case args {
-    [p, q, ..] -> #(p, q)
-    [p] -> #(p, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(proto_val, props_val) = helpers.two_args_or_undefined(args)
   // Step 1: If O is not an Object and O is not null, throw a TypeError.
   let proto = case proto_val {
     JsObject(ref) -> Ok(Some(ref))
@@ -2186,11 +2178,7 @@ fn define_properties(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(target, props_val) = case args {
-    [t, p, ..] -> #(t, p)
-    [t] -> #(t, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(target, props_val) = helpers.two_args_or_undefined(args)
   // Step 1: If O is not an Object, throw a TypeError exception.
   case target {
     // Step 2: Return ? ObjectDefineProperties(O, Properties).
@@ -2787,11 +2775,7 @@ fn is(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(a, b) = case args {
-    [x, y, ..] -> #(x, y)
-    [x] -> #(x, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(a, b) = helpers.two_args_or_undefined(args)
   // Step 1: Return SameValue(value1, value2).
   #(state, Ok(JsBool(value.same_value(a, b))))
 }
@@ -2817,11 +2801,7 @@ fn has_own(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(target, key_val) = case args {
-    [t, k, ..] -> #(t, k)
-    [t] -> #(t, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(target, key_val) = helpers.two_args_or_undefined(args)
   case target {
     JsObject(ref) -> {
       // Step 1: ToObject(O) — identity for objects.
@@ -2907,11 +2887,7 @@ fn set_prototype_of(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(target, proto_val) = case args {
-    [t, p, ..] -> #(t, p)
-    [t] -> #(t, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(target, proto_val) = helpers.two_args_or_undefined(args)
   // §20.1.2.21 step 2: If proto is not an Object and proto is not null, throw TypeError.
   let proto = case proto_val {
     JsObject(ref) -> Ok(Some(ref))
@@ -2995,11 +2971,7 @@ fn define_getter_setter(
   state: State(host),
   kind: AccessorKind,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(key_val, accessor) = case args {
-    [k, a, ..] -> #(k, a)
-    [k] -> #(k, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(key_val, accessor) = helpers.two_args_or_undefined(args)
   // Step 1: ToObject(this value) — null/undefined throw TypeError.
   case common.to_object(state.heap, state.builtins, this) {
     None -> state.type_error(state, cannot_convert)

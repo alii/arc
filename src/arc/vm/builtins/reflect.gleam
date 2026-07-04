@@ -111,12 +111,7 @@ fn reflect_apply(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(target, this_arg, args_list) = case args {
-    [t, th, a, ..] -> #(t, th, a)
-    [t, th] -> #(t, th, JsUndefined)
-    [t] -> #(t, JsUndefined, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined, JsUndefined)
-  }
+  let #(target, this_arg, args_list) = helpers.three_args_or_undefined(args)
   // Step 1: If IsCallable(target) is false, throw a TypeError.
   use <- bool.guard(
     !helpers.is_callable(state.heap, target),
@@ -187,22 +182,15 @@ fn reflect_define_property(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, rest, state <- require_object(args, state, "defineProperty")
-  let #(key_val, desc_val) = case rest {
-    [k, d, ..] -> #(k, d)
-    [k] -> #(k, JsUndefined)
-    [] -> #(JsUndefined, JsUndefined)
-  }
+  let #(key_val, desc_val) = helpers.two_args_or_undefined(rest)
   // Steps 2-4: ToPropertyKey, THEN ToPropertyDescriptor (which is what raises
   // the "not an object" TypeError, only after the key's user code has run),
   // then [[DefineOwnProperty]]. define_property_bool_value returns the raw
   // [[DefineOwnProperty]] boolean; proxy trap exceptions propagate, ordinary
   // validation failures → false.
-  case builtins_object.define_property_bool_value(
-    state,
-    ref,
-    key_val,
-    desc_val,
-  ) {
+  case
+    builtins_object.define_property_bool_value(state, ref, key_val, desc_val)
+  {
     Ok(#(state, ok)) -> #(state, Ok(JsBool(ok)))
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }
