@@ -2653,18 +2653,9 @@ fn plain_date_ctor(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use y, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 0),
-  ))
-  use m, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 1),
-  ))
-  use d, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 2),
-  ))
+  use y, state <- state.try_op(arg_trunc_int(state, args, 0))
+  use m, state <- state.try_op(arg_trunc_int(state, args, 1))
+  use d, state <- state.try_op(arg_trunc_int(state, args, 2))
   use cal <- terr(state, to_calendar_arg(helpers.arg_at(args, 3)))
   case is_valid_iso_date(y, m, d) {
     False -> state.range_error(state, "invalid ISO date")
@@ -2703,16 +2694,35 @@ fn plain_time_ctor(
   }
 }
 
+/// ToIntegerWithTruncation on the argument at `idx`.
+fn arg_trunc_int(
+  state: State(host),
+  args: List(JsValue),
+  idx: Int,
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
+  to_integer_with_truncation(state, helpers.arg_at(args, idx))
+}
+
+/// ToIntegerWithTruncation on the argument at `idx`, undefined → `default`.
+fn arg_trunc_int_or(
+  state: State(host),
+  args: List(JsValue),
+  idx: Int,
+  default: Int,
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
+  case helpers.arg_at(args, idx) {
+    JsUndefined -> Ok(#(default, state))
+    v -> to_integer_with_truncation(state, v)
+  }
+}
+
 /// Optional integer argument: undefined → 0, else ToIntegerWithTruncation.
 fn opt_int_arg(
   state: State(host),
   args: List(JsValue),
   idx: Int,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  case helpers.arg_at(args, idx) {
-    JsUndefined -> Ok(#(0, state))
-    v -> to_integer_with_truncation(state, v)
-  }
+  arg_trunc_int_or(state, args, idx, 0)
 }
 
 /// new Temporal.PlainDateTime(y, mo, d, h, mi, s, ms, us, ns [, calendar])
@@ -2721,18 +2731,9 @@ fn plain_date_time_ctor(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use y, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 0),
-  ))
-  use mo, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 1),
-  ))
-  use d, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 2),
-  ))
+  use y, state <- state.try_op(arg_trunc_int(state, args, 0))
+  use mo, state <- state.try_op(arg_trunc_int(state, args, 1))
+  use d, state <- state.try_op(arg_trunc_int(state, args, 2))
   use h, state <- state.try_op(opt_int_arg(state, args, 3))
   use mi, state <- state.try_op(opt_int_arg(state, args, 4))
   use s, state <- state.try_op(opt_int_arg(state, args, 5))
@@ -2763,19 +2764,10 @@ fn plain_year_month_ctor(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use y, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 0),
-  ))
-  use m, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 1),
-  ))
+  use y, state <- state.try_op(arg_trunc_int(state, args, 0))
+  use m, state <- state.try_op(arg_trunc_int(state, args, 1))
   use cal <- terr(state, to_calendar_arg(helpers.arg_at(args, 2)))
-  use d, state <- state.try_op(case helpers.arg_at(args, 3) {
-    JsUndefined -> Ok(#(1, state))
-    v -> to_integer_with_truncation(state, v)
-  })
+  use d, state <- state.try_op(arg_trunc_int_or(state, args, 3, 1))
   case is_valid_iso_date(y, m, d) {
     False -> state.range_error(state, "invalid ISO year-month")
     True ->
@@ -2796,19 +2788,10 @@ fn plain_month_day_ctor(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use m, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 0),
-  ))
-  use d, state <- state.try_op(to_integer_with_truncation(
-    state,
-    helpers.arg_at(args, 1),
-  ))
+  use m, state <- state.try_op(arg_trunc_int(state, args, 0))
+  use d, state <- state.try_op(arg_trunc_int(state, args, 1))
   use cal <- terr(state, to_calendar_arg(helpers.arg_at(args, 2)))
-  use y, state <- state.try_op(case helpers.arg_at(args, 3) {
-    JsUndefined -> Ok(#(1972, state))
-    v -> to_integer_with_truncation(state, v)
-  })
+  use y, state <- state.try_op(arg_trunc_int_or(state, args, 3, 1972))
   case is_valid_iso_date(y, m, d) {
     False -> state.range_error(state, "invalid ISO month-day")
     True -> {
@@ -6542,28 +6525,23 @@ fn plain_date_method(
           #(state, Ok(v))
         }
         PdWith -> {
-          use bag, state <- state.try_op(require_partial_bag(
-            state,
-            helpers.arg_at(args, 0),
-          ))
+          use bag, state <- with_partial_bag(state, args)
           use fields, state <- state.try_op(read_date_fields(state, bag, cal))
-          case fields == DateFields(None, None, None, None, None, None) {
-            True ->
-              state.type_error(state, "with() requires at least one field")
-            False -> {
-              use overflow, state <- state.try_op(validated_overflow(
-                state,
-                helpers.arg_at(args, 1),
-              ))
-              use date <- terr(
-                state,
-                calendar_with_fields(cal, d, fields, overflow),
-              )
-              use date <- terr(state, check_date_limits(date))
-              let #(state, v) = make_date_cal(state, protos, date, cal)
-              #(state, Ok(v))
-            }
-          }
+          use <- require_nonempty_fields(
+            state,
+            fields == DateFields(None, None, None, None, None, None),
+          )
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            helpers.arg_at(args, 1),
+          ))
+          use date <- terr(
+            state,
+            calendar_with_fields(cal, d, fields, overflow),
+          )
+          use date <- terr(state, check_date_limits(date))
+          let #(state, v) = make_date_cal(state, protos, date, cal)
+          #(state, Ok(v))
         }
         PdWithCalendar -> {
           use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
@@ -6733,6 +6711,27 @@ fn calendar_with_fields(
     None -> DateFields(..f, day: Some(cd.day))
   }
   resolve_calendar_date(cal, f, overflow)
+}
+
+/// CPS wrapper: read `with()`'s first argument as a partial property bag.
+fn with_partial_bag(
+  state: State(host),
+  args: List(JsValue),
+  cont: fn(Ref, State(host)) -> #(State(host), Result(a, JsValue)),
+) -> #(State(host), Result(a, JsValue)) {
+  state.try_op(require_partial_bag(state, helpers.arg_at(args, 0)), cont)
+}
+
+/// `with()` throws when the bag carries none of the recognized fields.
+fn require_nonempty_fields(
+  state: State(host),
+  is_empty: Bool,
+  cont: fn() -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case is_empty {
+    True -> state.type_error(state, "with() requires at least one field")
+    False -> cont()
+  }
 }
 
 /// `with()` argument: must be an object with no calendar/timeZone properties
@@ -7727,25 +7726,17 @@ fn plain_time_method(
           #(state, Ok(v))
         }
         PtWith -> {
-          use bag, state <- state.try_op(require_partial_bag(
-            state,
-            helpers.arg_at(args, 0),
-          ))
+          use bag, state <- with_partial_bag(state, args)
           use f, state <- state.try_op(read_time_fields(state, bag))
-          case f == no_time_fields {
-            True ->
-              state.type_error(state, "with() requires at least one field")
-            False -> {
-              use overflow, state <- state.try_op(validated_overflow(
-                state,
-                helpers.arg_at(args, 1),
-              ))
-              let t2 = time_fields_apply(f, t)
-              use t3 <- terr(state, regulate_time(t2, overflow))
-              let #(state, v) = make_time(state, protos, t3)
-              #(state, Ok(v))
-            }
-          }
+          use <- require_nonempty_fields(state, f == no_time_fields)
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            helpers.arg_at(args, 1),
+          ))
+          let t2 = time_fields_apply(f, t)
+          use t3 <- terr(state, regulate_time(t2, overflow))
+          let #(state, v) = make_time(state, protos, t3)
+          #(state, Ok(v))
         }
         PtRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
@@ -8152,10 +8143,7 @@ fn plain_date_time_method(
           #(state, Ok(v))
         }
         PdtWith -> {
-          use bag, state <- state.try_op(require_partial_bag(
-            state,
-            helpers.arg_at(args, 0),
-          ))
+          use bag, state <- with_partial_bag(state, args)
           use f, state <- state.try_op(read_date_time_fields(
             state,
             bag,
@@ -8163,29 +8151,23 @@ fn plain_date_time_method(
             read_offset: False,
             read_tz: False,
           ))
-          case date_time_fields_all_none(f) {
-            True ->
-              state.type_error(state, "with() requires at least one field")
-            False -> {
-              use overflow, state <- state.try_op(validated_overflow(
-                state,
-                helpers.arg_at(args, 1),
-              ))
-              use date <- terr(
-                state,
-                calendar_with_fields(cal, d, f.date, overflow),
-              )
-              let t0 = time_fields_apply(f.time, t)
-              use t2 <- terr(state, regulate_time(t0, overflow))
-              case iso_datetime_within_limits(date, t2) {
-                False ->
-                  state.range_error(state, "date-time outside supported range")
-                True -> {
-                  let #(state, v) =
-                    make_date_time_cal(state, protos, date, t2, cal)
-                  #(state, Ok(v))
-                }
-              }
+          use <- require_nonempty_fields(state, date_time_fields_all_none(f))
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            helpers.arg_at(args, 1),
+          ))
+          use date <- terr(
+            state,
+            calendar_with_fields(cal, d, f.date, overflow),
+          )
+          let t0 = time_fields_apply(f.time, t)
+          use t2 <- terr(state, regulate_time(t0, overflow))
+          case iso_datetime_within_limits(date, t2) {
+            False ->
+              state.range_error(state, "date-time outside supported range")
+            True -> {
+              let #(state, v) = make_date_time_cal(state, protos, date, t2, cal)
+              #(state, Ok(v))
             }
           }
         }
@@ -8542,10 +8524,7 @@ fn plain_year_month_method(
           }
         }
         PymWith -> {
-          use bag, state <- state.try_op(require_partial_bag(
-            state,
-            helpers.arg_at(args, 0),
-          ))
+          use bag, state <- with_partial_bag(state, args)
           use era, state <- state.try_op(case tcal.has_eras(cal) {
             True -> read_bag_era(state, bag)
             False -> Ok(#(None, state))
@@ -8561,55 +8540,42 @@ fn plain_year_month_method(
           ))
           use month_code, state <- state.try_op(read_month_code(state, bag))
           use year, state <- state.try_op(read_int_field(state, bag, "year"))
-          case
+          use <- require_nonempty_fields(
+            state,
             month == None
-            && month_code == None
-            && year == None
-            && era == None
-            && era_year == None
-          {
-            True ->
-              state.type_error(state, "with() requires at least one field")
+              && month_code == None
+              && year == None
+              && era == None
+              && era_year == None,
+          )
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            helpers.arg_at(args, 1),
+          ))
+          // Merge with existing calendar year/monthCode.
+          let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
+          let f =
+            DateFields(day: None, era:, era_year:, month:, month_code:, year:)
+          let has_year = year != None || era != None || era_year != None
+          let f = case has_year {
+            True -> f
+            False -> DateFields(..f, year: Some(cd.year))
+          }
+          let f = case month != None || month_code != None {
+            True -> f
             False -> {
-              use overflow, state <- state.try_op(validated_overflow(
-                state,
-                helpers.arg_at(args, 1),
-              ))
-              // Merge with existing calendar year/monthCode.
-              let cd =
-                tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
-              let f =
-                DateFields(
-                  day: None,
-                  era:,
-                  era_year:,
-                  month:,
-                  month_code:,
-                  year:,
-                )
-              let has_year = year != None || era != None || era_year != None
-              let f = case has_year {
-                True -> f
-                False -> DateFields(..f, year: Some(cd.year))
-              }
-              let f = case month != None || month_code != None {
-                True -> f
-                False -> {
-                  DateFields(
-                    ..f,
-                    month_code: Some(tcal.month_code_of(cal, cd.year, cd.month)),
-                  )
-                }
-              }
-              use #(y2, m2, rd2, _) <- terr(
-                state,
-                resolve_calendar_year_month(cal, f, overflow),
+              DateFields(
+                ..f,
+                month_code: Some(tcal.month_code_of(cal, cd.year, cd.month)),
               )
-              let #(state, v) =
-                make_year_month_cal(state, protos, y2, m2, rd2, cal)
-              #(state, Ok(v))
             }
           }
+          use #(y2, m2, rd2, _) <- terr(
+            state,
+            resolve_calendar_year_month(cal, f, overflow),
+          )
+          let #(state, v) = make_year_month_cal(state, protos, y2, m2, rd2, cal)
+          #(state, Ok(v))
         }
         PymToPlainDate -> {
           case helpers.arg_at(args, 0) {
@@ -8899,45 +8865,36 @@ fn plain_month_day_method(
           #(state, Ok(JsBool(#(m, d, ry, cal) == other)))
         }
         PmdWith -> {
-          use bag, state <- state.try_op(require_partial_bag(
-            state,
-            helpers.arg_at(args, 0),
-          ))
+          use bag, state <- with_partial_bag(state, args)
           use fields, state <- state.try_op(read_date_fields(state, bag, cal))
-          case fields == DateFields(None, None, None, None, None, None) {
-            True ->
-              state.type_error(state, "with() requires at least one field")
+          use <- require_nonempty_fields(
+            state,
+            fields == DateFields(None, None, None, None, None, None),
+          )
+          use overflow, state <- state.try_op(validated_overflow(
+            state,
+            helpers.arg_at(args, 1),
+          ))
+          // Merge with the existing month-day's calendar fields.
+          let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
+          let f = fields
+          let f = case f.month != None || f.month_code != None {
+            True -> f
             False -> {
-              use overflow, state <- state.try_op(validated_overflow(
-                state,
-                helpers.arg_at(args, 1),
-              ))
-              // Merge with the existing month-day's calendar fields.
-              let cd =
-                tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
-              let f = fields
-              let f = case f.month != None || f.month_code != None {
-                True -> f
-                False -> {
-                  DateFields(
-                    ..f,
-                    month_code: Some(tcal.month_code_of(cal, cd.year, cd.month)),
-                  )
-                }
-              }
-              let f = case f.day {
-                Some(_) -> f
-                None -> DateFields(..f, day: Some(cd.day))
-              }
-              use md <- terr(
-                state,
-                resolve_calendar_month_day(cal, f, overflow),
+              DateFields(
+                ..f,
+                month_code: Some(tcal.month_code_of(cal, cd.year, cd.month)),
               )
-              let #(state, v) =
-                make_month_day_cal(state, protos, md.0, md.1, md.2, md.3)
-              #(state, Ok(v))
             }
           }
+          let f = case f.day {
+            Some(_) -> f
+            None -> DateFields(..f, day: Some(cd.day))
+          }
+          use md <- terr(state, resolve_calendar_month_day(cal, f, overflow))
+          let #(state, v) =
+            make_month_day_cal(state, protos, md.0, md.1, md.2, md.3)
+          #(state, Ok(v))
         }
         PmdToPlainDate -> {
           case helpers.arg_at(args, 0) {
@@ -9145,26 +9102,24 @@ fn duration_method(
               let all = [
                 days, hours, us, ms, minutes, months, ns, seconds, weeks, years,
               ]
-              case list.all(all, fn(f) { f == None }) {
-                True ->
-                  state.type_error(state, "with() requires at least one field")
-                False -> {
-                  let d2 =
-                    DurRec(
-                      years: option.unwrap(years, d.years),
-                      months: option.unwrap(months, d.months),
-                      weeks: option.unwrap(weeks, d.weeks),
-                      days: option.unwrap(days, d.days),
-                      hours: option.unwrap(hours, d.hours),
-                      minutes: option.unwrap(minutes, d.minutes),
-                      seconds: option.unwrap(seconds, d.seconds),
-                      ms: option.unwrap(ms, d.ms),
-                      us: option.unwrap(us, d.us),
-                      ns: option.unwrap(ns, d.ns),
-                    )
-                  finish_duration(state, protos, d2)
-                }
-              }
+              use <- require_nonempty_fields(
+                state,
+                list.all(all, fn(f) { f == None }),
+              )
+              let d2 =
+                DurRec(
+                  years: option.unwrap(years, d.years),
+                  months: option.unwrap(months, d.months),
+                  weeks: option.unwrap(weeks, d.weeks),
+                  days: option.unwrap(days, d.days),
+                  hours: option.unwrap(hours, d.hours),
+                  minutes: option.unwrap(minutes, d.minutes),
+                  seconds: option.unwrap(seconds, d.seconds),
+                  ms: option.unwrap(ms, d.ms),
+                  us: option.unwrap(us, d.us),
+                  ns: option.unwrap(ns, d.ns),
+                )
+              finish_duration(state, protos, d2)
             }
             _ -> state.type_error(state, "argument must be an object")
           }
@@ -10457,10 +10412,7 @@ fn zoned_date_time_method(
           }
         }
         ZmWith -> {
-          use bag, state <- state.try_op(require_partial_bag(
-            state,
-            helpers.arg_at(args, 0),
-          ))
+          use bag, state <- with_partial_bag(state, args)
           use f, state <- state.try_op(read_date_time_fields(
             state,
             bag,
@@ -10468,49 +10420,41 @@ fn zoned_date_time_method(
             read_offset: True,
             read_tz: False,
           ))
-          case date_time_fields_all_none(f) {
-            True ->
-              state.type_error(state, "with() requires at least one field")
-            False -> {
-              use opts, state <- state.try_op(get_options_object(
-                state,
-                helpers.arg_at(args, 1),
-              ))
-              use dis_opt, state <- state.try_op(get_disambiguation_option(
-                state,
-                opts,
-              ))
-              use off_opt, state <- state.try_op(get_offset_option(
-                state,
-                opts,
-                PreferOffset,
-              ))
-              use overflow, state <- state.try_op(get_overflow_option(
-                state,
-                opts,
-              ))
-              use date <- terr(
-                state,
-                calendar_with_fields(zcal, d, f.date, overflow),
-              )
-              let t0 = time_fields_apply(f.time, t)
-              use t2 <- terr(state, regulate_time(t0, overflow))
-              use ns2 <- terr(
-                state,
-                interpret_offset(
-                  date,
-                  t2,
-                  OptionOffset(option.unwrap(f.offset, off)),
-                  tz,
-                  dis_opt,
-                  off_opt,
-                  False,
-                ),
-              )
-              let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
-              #(state, Ok(v))
-            }
-          }
+          use <- require_nonempty_fields(state, date_time_fields_all_none(f))
+          use opts, state <- state.try_op(get_options_object(
+            state,
+            helpers.arg_at(args, 1),
+          ))
+          use dis_opt, state <- state.try_op(get_disambiguation_option(
+            state,
+            opts,
+          ))
+          use off_opt, state <- state.try_op(get_offset_option(
+            state,
+            opts,
+            PreferOffset,
+          ))
+          use overflow, state <- state.try_op(get_overflow_option(state, opts))
+          use date <- terr(
+            state,
+            calendar_with_fields(zcal, d, f.date, overflow),
+          )
+          let t0 = time_fields_apply(f.time, t)
+          use t2 <- terr(state, regulate_time(t0, overflow))
+          use ns2 <- terr(
+            state,
+            interpret_offset(
+              date,
+              t2,
+              OptionOffset(option.unwrap(f.offset, off)),
+              tz,
+              dis_opt,
+              off_opt,
+              False,
+            ),
+          )
+          let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
+          #(state, Ok(v))
         }
         ZmWithCalendar -> {
           use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
