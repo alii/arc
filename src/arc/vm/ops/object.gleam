@@ -166,16 +166,8 @@ pub fn get_value(
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:),
           Index(idx)
         -> {
-          let length =
-            typed_array_view_length(
-              state.heap,
-              buffer,
-              elem_kind,
-              byte_offset,
-              length,
-            )
           case
-            typed_array_element(
+            typed_array_element_live(
               state.heap,
               buffer,
               elem_kind,
@@ -459,15 +451,14 @@ fn own_property_of_slot(
     value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) ->
       case key {
         Index(idx) -> {
-          let length =
-            typed_array_view_length(
-              heap,
-              buffer,
-              elem_kind,
-              byte_offset,
-              length,
-            )
-          typed_array_element(heap, buffer, elem_kind, byte_offset, length, idx)
+          typed_array_element_live(
+            heap,
+            buffer,
+            elem_kind,
+            byte_offset,
+            length,
+            idx,
+          )
           |> option.map(fn(v) {
             case typed_array_elements.buffer_is_immutable(heap, buffer) {
               True ->
@@ -699,17 +690,9 @@ pub fn set_value(
                 Some(idx),
                 val,
               )
-            False -> {
-              let length =
-                typed_array_view_length(
-                  state.heap,
-                  buffer,
-                  elem_kind,
-                  byte_offset,
-                  length,
-                )
+            False ->
               case
-                typed_array_element(
+                typed_array_element_live(
                   state.heap,
                   buffer,
                   elem_kind,
@@ -721,7 +704,6 @@ pub fn set_value(
                 None -> Ok(#(state, True))
                 Some(_) -> set_on_receiver(state, receiver, key, val)
               }
-            }
           }
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:),
           Named(s)
@@ -971,18 +953,12 @@ fn set_on_receiver(
           case key {
             Index(idx) ->
               case
-                typed_array_element(
+                typed_array_element_live(
                   state.heap,
                   buffer,
                   elem_kind,
                   byte_offset,
-                  typed_array_view_length(
-                    state.heap,
-                    buffer,
-                    elem_kind,
-                    byte_offset,
-                    length,
-                  ),
+                  length,
                   idx,
                 )
               {
@@ -2248,18 +2224,12 @@ pub fn delete_property(
           case key {
             Index(idx) ->
               case
-                typed_array_element(
+                typed_array_element_live(
                   h,
                   buffer,
                   elem_kind,
                   byte_offset,
-                  typed_array_view_length(
-                    h,
-                    buffer,
-                    elem_kind,
-                    byte_offset,
-                    length,
-                  ),
+                  length,
                   idx,
                 )
               {
@@ -2448,19 +2418,7 @@ pub fn own_string_keys_flagged(
           )
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) -> {
           let n =
-            typed_array_live_length(
-              heap,
-              buffer,
-              elem_kind,
-              byte_offset,
-              typed_array_view_length(
-                heap,
-                buffer,
-                elem_kind,
-                byte_offset,
-                length,
-              ),
-            )
+            typed_array_live_count(heap, buffer, elem_kind, byte_offset, length)
           int.range(from: n - 1, to: -1, with: [], run: fn(acc, i) {
             [i, ..acc]
           })
@@ -2889,14 +2847,14 @@ fn copy_typed_element_range(
   length: Option(Int),
   excluded_keys: set.Set(PropertyKey),
 ) -> Heap(host) {
-  let length =
-    typed_array_view_length(heap, buffer, elem_kind, byte_offset, length)
-  let n = typed_array_live_length(heap, buffer, elem_kind, byte_offset, length)
+  // `n` is either the resolved view length (view in bounds) or 0 (detached /
+  // out of bounds, loop never runs), so it doubles as the element bound below.
+  let n = typed_array_live_count(heap, buffer, elem_kind, byte_offset, length)
   use h, idx <- int.range(from: 0, to: n, with: heap)
   case set.contains(excluded_keys, Index(idx)) {
     True -> h
     False ->
-      case typed_array_element(h, buffer, elem_kind, byte_offset, length, idx) {
+      case typed_array_element(h, buffer, elem_kind, byte_offset, n, idx) {
         Some(v) -> define_own_property(h, target_ref, Index(idx), v)
         None -> h
       }
@@ -4366,6 +4324,28 @@ pub fn typed_array_element(
   }
 }
 
+/// §10.4.5.15 IntegerIndexedElementGet against the CURRENT view length: the
+/// declared `length` (None for a length-tracking view) is resolved through
+/// TypedArrayLength first. This is what every MOP element read wants — the
+/// declared length alone is stale the moment a resizable buffer changes size.
+pub fn typed_array_element_live(
+  h: Heap(host),
+  buffer: Ref,
+  elem_kind: value.TypedArrayKind,
+  byte_offset: Int,
+  length: Option(Int),
+  idx: Int,
+) -> Option(JsValue) {
+  typed_array_element(
+    h,
+    buffer,
+    elem_kind,
+    byte_offset,
+    typed_array_view_length(h, buffer, elem_kind, byte_offset, length),
+    idx,
+  )
+}
+
 /// §23.1.5.1 CreateArrayIterator buffer-witness check for typed-array
 /// sources: each `.next()` re-validates the view against the CURRENT buffer
 /// (MakeTypedArrayWithBufferWitnessRecord + IsTypedArrayOutOfBounds) and
@@ -4414,6 +4394,26 @@ pub fn typed_array_live_length(
       }
     }
   }
+}
+
+/// `typed_array_live_length` of the CURRENT view length: resolves the declared
+/// `length` (None for a length-tracking view) through TypedArrayLength first.
+/// The number of indices the view actually has right now — 0 when detached or
+/// out of bounds.
+pub fn typed_array_live_count(
+  h: Heap(host),
+  buffer: Ref,
+  elem_kind: value.TypedArrayKind,
+  byte_offset: Int,
+  length: Option(Int),
+) -> Int {
+  typed_array_live_length(
+    h,
+    buffer,
+    elem_kind,
+    byte_offset,
+    typed_array_view_length(h, buffer, elem_kind, byte_offset, length),
+  )
 }
 
 /// Decode one element from the backing store (§25.1.2.10 GetValueFromBuffer).

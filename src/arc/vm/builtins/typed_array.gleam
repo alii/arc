@@ -1744,18 +1744,12 @@ fn proto_set(
                 src_buf,
                 src_kind,
                 src_off,
-                object.typed_array_live_length(
+                object.typed_array_live_count(
                   state.heap,
                   src_buf,
                   src_kind,
                   src_off,
-                  object.typed_array_view_length(
-                    state.heap,
-                    src_buf,
-                    src_kind,
-                    src_off,
-                    src_len,
-                  ),
+                  src_len,
                 ),
               )
           }
@@ -1958,13 +1952,7 @@ fn do_subarray(
   // Steps 5-7: srcLength = 0 for an out-of-bounds view, else the CURRENT
   // length — snapshotted BEFORE the (observable) start/end coercions.
   let src_length =
-    object.typed_array_live_length(
-      state.heap,
-      buffer,
-      kind,
-      off,
-      object.typed_array_view_length(state.heap, buffer, kind, off, declared),
-    )
+    object.typed_array_live_count(state.heap, buffer, kind, off, declared)
   use b, state <- try_state(case b_arg {
     JsUndefined -> Ok(#(IInt(0), state))
     _ -> to_int_or_inf(state, b_arg)
@@ -2365,9 +2353,7 @@ fn require_cb(
 fn ta_read(h: Heap(host), ta_ref: Ref, k: Int) -> Option(JsValue) {
   use view <- option.then(ta_slot_of(h, ta_ref))
   let TaView(buffer:, kind:, byte_offset:, length:, ..) = view
-  let live_len =
-    object.typed_array_view_length(h, buffer, kind, byte_offset, length)
-  object.typed_array_element(h, buffer, kind, byte_offset, live_len, k)
+  object.typed_array_element_live(h, buffer, kind, byte_offset, length, k)
 }
 
 /// Read element `k` as the spec's Get(O, Pk) does: out-of-bounds (shrunk
@@ -2439,13 +2425,7 @@ fn ta_witness_error(h: Heap(host), this: JsValue) -> Option(WitnessError) {
 fn ta_live_length(h: Heap(host), this: JsValue) -> Int {
   case ta_slot(h, this) {
     Some(TaView(buffer:, kind:, byte_offset:, length:, ..)) ->
-      object.typed_array_live_length(
-        h,
-        buffer,
-        kind,
-        byte_offset,
-        object.typed_array_view_length(h, buffer, kind, byte_offset, length),
-      )
+      object.typed_array_live_count(h, buffer, kind, byte_offset, length)
     None -> 0
   }
 }
