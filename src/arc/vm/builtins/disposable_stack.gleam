@@ -946,23 +946,18 @@ fn async_dispose_loop(
         // Step 3.b with @@asyncDispose (or @@dispose on a sync resource
         // moved in from... always async here): Await the call result.
         SyncDispose(value: v, method:) ->
-          case state.call(state, method, v, []) {
-            // Step 3.b.ii: Await(result) — hasAwaited becomes true
-            Ok(#(result, state)) ->
-              attach_await(state, result, rest, pending, resolve, reject)
-            Error(#(thrown, state)) -> {
-              let #(state, pending) = fold_error(state, pending, thrown)
-              async_dispose_loop(
-                state,
-                rest,
-                pending:,
-                needs_await:,
-                has_awaited:,
-                resolve:,
-                reject:,
-              )
-            }
-          }
+          call_and_await(
+            state,
+            method,
+            v,
+            [],
+            rest,
+            pending,
+            needs_await,
+            has_awaited,
+            resolve,
+            reject,
+          )
         // @@dispose fallback wrapper: call, DISCARD result, Await(undefined).
         // GetDisposeMethod's closure performs IfAbruptRejectPromise, so a
         // synchronous throw becomes a REJECTED promise that the loop then
@@ -986,23 +981,52 @@ fn async_dispose_loop(
         // (an async onDispose's rejected promise must reject disposeAsync),
         // so Await the result like any other dispose method.
         DisposeCallback(callback:, args:) ->
-          case state.call(state, callback, JsUndefined, args) {
-            Ok(#(result, state)) ->
-              attach_await(state, result, rest, pending, resolve, reject)
-            Error(#(thrown, state)) -> {
-              let #(state, pending) = fold_error(state, pending, thrown)
-              async_dispose_loop(
-                state,
-                rest,
-                pending:,
-                needs_await:,
-                has_awaited:,
-                resolve:,
-                reject:,
-              )
-            }
-          }
+          call_and_await(
+            state,
+            callback,
+            JsUndefined,
+            args,
+            rest,
+            pending,
+            needs_await,
+            has_awaited,
+            resolve,
+            reject,
+          )
       }
+  }
+}
+
+/// Steps 3.b.i-iii for a resource whose disposer result is Awaited: call it,
+/// Await(result) on success (hasAwaited becomes true), or fold a synchronous
+/// throw into the pending completion and continue the loop unchanged.
+fn call_and_await(
+  state: State(host),
+  callee: JsValue,
+  this: JsValue,
+  args: List(JsValue),
+  rest: List(DisposeResource),
+  pending: Option(JsValue),
+  needs_await: Bool,
+  has_awaited: Bool,
+  resolve: JsValue,
+  reject: JsValue,
+) -> State(host) {
+  case state.call(state, callee, this, args) {
+    Ok(#(result, state)) ->
+      attach_await(state, result, rest, pending, resolve, reject)
+    Error(#(thrown, state)) -> {
+      let #(state, pending) = fold_error(state, pending, thrown)
+      async_dispose_loop(
+        state,
+        rest,
+        pending:,
+        needs_await:,
+        has_awaited:,
+        resolve:,
+        reject:,
+      )
+    }
   }
 }
 
