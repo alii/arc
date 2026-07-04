@@ -78,11 +78,11 @@ pub fn resume_generator_next(
           // For SuspendedYield, push the .next() arg onto the saved stack
           // (the Yield opcode left pc pointing past Yield, stack has value popped)
           let gen_stack = case gen.gen_state {
-            value.SuspendedYield -> [next_arg, ..gen.saved_stack]
-            _ -> gen.saved_stack
+            value.SuspendedYield -> [next_arg, ..gen.frame.stack]
+            _ -> gen.frame.stack
           }
           let gen_exec_state =
-            build_resumed_state(state, gen, gen_stack, gen.saved_pc)
+            build_resumed_state(state, gen, gen_stack, gen.frame.pc)
           run_to_completion(gen_exec_state, state, gen, execute_inner)
         }
       }
@@ -190,7 +190,7 @@ fn do_return_resume(
   unwind_to_catch: UnwindToCatchFn(host),
 ) -> Result(State(host), StepExit(host)) {
   let gen_exec_state =
-    build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
+    build_resumed_state(state, gen, gen.frame.stack, gen.frame.pc)
   unwind_return(gen_exec_state, return_val, execute_inner, unwind_to_catch)
   |> settle_completion(state, gen)
   |> alloc_iter_result(rest_stack)
@@ -250,7 +250,7 @@ pub fn call_native_generator_throw(
               )
             None -> {
               let gen_exec_state =
-                build_resumed_state(state, gen, gen.saved_stack, gen.saved_pc)
+                build_resumed_state(state, gen, gen.frame.stack, gen.frame.pc)
               // Try to unwind to a catch handler within the generator
               case unwind_to_catch(gen_exec_state, throw_val) {
                 Some(caught_state) ->
@@ -283,12 +283,7 @@ type GenData {
     gen_state: value.GeneratorState,
     func_template: FuncTemplate,
     env_ref: Ref,
-    saved_pc: Int,
-    saved_locals: tuple_array.TupleArray(JsValue),
-    saved_stack: List(JsValue),
-    saved_try_stack: List(value.SavedTryFrame),
-    saved_eval_env: Option(Ref),
-    saved_line: Int,
+    frame: value.SavedFrame,
   )
 }
 
@@ -298,28 +293,13 @@ fn get_generator_data(h: Heap(host), this: JsValue) -> Option(GenData) {
       case heap.read(h, obj_ref) {
         Some(ObjectSlot(kind: GeneratorObject(generator_data: data_ref), ..)) ->
           case heap.read(h, data_ref) {
-            Some(GeneratorSlot(
-              gen_state:,
-              func_template:,
-              env_ref:,
-              saved_pc:,
-              saved_locals:,
-              saved_stack:,
-              saved_try_stack:,
-              saved_eval_env:,
-              saved_line:,
-            )) ->
+            Some(GeneratorSlot(gen_state:, func_template:, env_ref:, frame:)) ->
               Some(GenData(
                 data_ref:,
                 gen_state:,
                 func_template:,
                 env_ref:,
-                saved_pc:,
-                saved_locals:,
-                saved_stack:,
-                saved_try_stack:,
-                saved_eval_env:,
-                saved_line:,
+                frame:,
               ))
             _ -> None
           }
@@ -338,12 +318,7 @@ fn gen_with_state(
     gen_state: new_state,
     func_template: gen.func_template,
     env_ref: gen.env_ref,
-    saved_pc: gen.saved_pc,
-    saved_locals: gen.saved_locals,
-    saved_stack: gen.saved_stack,
-    saved_try_stack: gen.saved_try_stack,
-    saved_eval_env: gen.saved_eval_env,
-    saved_line: gen.saved_line,
+    frame: gen.frame,
   )
 }
 
@@ -380,12 +355,12 @@ fn build_resumed_state(
 ) -> State(host) {
   let h =
     heap.write(outer.heap, gen.data_ref, gen_with_state(gen, value.Executing))
-  let restored_try = restore_stacks(gen.saved_try_stack)
+  let restored_try = restore_stacks(gen.frame.try_stack)
   State(
     ..outer,
     heap: h,
     stack:,
-    locals: gen.saved_locals,
+    locals: gen.frame.locals,
     func: gen.func_template,
     code: gen.func_template.bytecode,
     constants: gen.func_template.constants,
@@ -396,8 +371,8 @@ fn build_resumed_state(
     call_args: [],
     // Per-frame fields: without these the body would inherit the RESUMER's
     // eval_env (losing direct-eval `var`s across a yield) and its line number.
-    eval_env: gen.saved_eval_env,
-    current_line: gen.saved_line,
+    eval_env: gen.frame.eval_env,
+    current_line: gen.frame.line,
   )
 }
 
@@ -406,9 +381,9 @@ fn build_resumed_state(
 /// exact — no extra delegate slot needed.
 fn delegate_iterator(gen: GenData) -> Option(Ref) {
   // saved_pc was a valid dispatch target — always in bounds.
-  case tuple_array.unsafe_get(gen.saved_pc, gen.func_template.bytecode) {
+  case tuple_array.unsafe_get(gen.frame.pc, gen.func_template.bytecode) {
     YieldStar ->
-      case gen.saved_stack {
+      case gen.frame.stack {
         [JsObject(iter_ref), ..] -> Some(iter_ref)
         _ -> None
       }
@@ -524,12 +499,12 @@ fn resume_after_delegate(
     DelegateThrow -> {
       // .throw forwarded and inner is done — continue outer body past
       // YieldStar with val on stack (the yield* expression's value).
-      let stack_after = case gen.saved_stack {
+      let stack_after = case gen.frame.stack {
         [_iter, ..rest] -> [val, ..rest]
         _ -> [val]
       }
       let resumed =
-        build_resumed_state(state, gen, stack_after, gen.saved_pc + 1)
+        build_resumed_state(state, gen, stack_after, gen.frame.pc + 1)
       run_to_completion(resumed, state, gen, execute_inner)
       |> alloc_iter_result(rest_stack)
     }
@@ -561,7 +536,6 @@ fn settle_completion(
 ) -> Result(#(Bool, JsValue, State(host)), StepExit(host)) {
   case exec_result {
     Ok(#(Suspended(completion.Yield, yv), suspended)) -> {
-      let st = save_stacks(suspended.try_stack)
       let h =
         heap.write(
           suspended.heap,
@@ -570,12 +544,7 @@ fn settle_completion(
             gen_state: value.SuspendedYield,
             func_template: gen.func_template,
             env_ref: gen.env_ref,
-            saved_pc: suspended.pc,
-            saved_locals: suspended.locals,
-            saved_stack: suspended.stack,
-            saved_try_stack: st,
-            saved_eval_env: suspended.eval_env,
-            saved_line: suspended.current_line,
+            frame: saved_frame(suspended),
           ),
         )
       Ok(#(
@@ -812,6 +781,20 @@ fn replace_return_with_throw(
     Some(caught_state) -> execute_inner(caught_state)
     None -> Ok(#(Completed(ThrowCompletion(thrown)), gen_state))
   }
+}
+
+/// Snapshot a suspended body's execution context — the one place a
+/// `value.SavedFrame` is built from a live `State`, shared by every
+/// generator/async-generator suspension point.
+pub fn saved_frame(suspended: State(host)) -> value.SavedFrame {
+  value.SavedFrame(
+    pc: suspended.pc,
+    locals: suspended.locals,
+    stack: suspended.stack,
+    try_stack: save_stacks(suspended.try_stack),
+    eval_env: suspended.eval_env,
+    line: suspended.current_line,
+  )
 }
 
 /// Save try-stack to serializable form for generator suspension.

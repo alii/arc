@@ -227,11 +227,11 @@ fn run_body(
       case req.completion {
         AGNext -> {
           let gen_stack = case push_arg {
-            True -> [req.value, ..frame.saved_stack]
-            False -> frame.saved_stack
+            True -> [req.value, ..frame.saved.stack]
+            False -> frame.saved.stack
           }
           let exec_state =
-            build_exec_state(state, frame, gen_stack, frame.saved_pc)
+            build_exec_state(state, frame, gen_stack, frame.saved.pc)
           handle_exec_result(state, run, run.execute_inner(exec_state))
         }
         AGThrow -> throw_into_gen_body(state, run, req.value)
@@ -258,12 +258,12 @@ fn build_exec_state(
   stack: List(JsValue),
   pc: Int,
 ) -> State(host) {
-  let restored_try = generators.restore_stacks(frame.saved_try_stack)
+  let restored_try = generators.restore_stacks(frame.saved.try_stack)
   State(
     ..state,
     stack:,
     pc:,
-    locals: frame.saved_locals,
+    locals: frame.saved.locals,
     func: frame.func_template,
     code: frame.func_template.bytecode,
     constants: frame.func_template.constants,
@@ -273,8 +273,8 @@ fn build_exec_state(
     call_args: [],
     // Per-frame fields: without these the body would inherit the RESUMER's
     // eval_env (losing direct-eval `var`s across a yield) and its line number.
-    eval_env: frame.saved_eval_env,
-    current_line: frame.saved_line,
+    eval_env: frame.saved.eval_env,
+    current_line: frame.saved.line,
   )
 }
 
@@ -296,9 +296,9 @@ fn pair_delegate(
 /// instruction the delegation falls out to.
 /// saved_pc was a valid dispatch target — always in bounds.
 fn async_delegate_site(frame: AsyncGenFrame) -> Option(#(Ref, Int)) {
-  case tuple_array.unsafe_get(frame.saved_pc, frame.func_template.bytecode) {
+  case tuple_array.unsafe_get(frame.saved.pc, frame.func_template.bytecode) {
     AsyncYieldStarNext(after_pc:) ->
-      case frame.saved_stack {
+      case frame.saved.stack {
         [JsObject(iter_ref), ..] -> Some(#(iter_ref, after_pc))
         _ -> None
       }
@@ -426,8 +426,8 @@ fn throw_into_gen_body(
     build_exec_state(
       state,
       run.frame,
-      run.frame.saved_stack,
-      run.frame.saved_pc,
+      run.frame.saved.stack,
+      run.frame.saved.pc,
     )
   let exec_result = case run.unwind_to_catch(exec_state, thrown) {
     Some(caught) -> run.execute_inner(caught)
@@ -449,8 +449,8 @@ fn unwind_return_into_body(
     build_exec_state(
       state,
       run.frame,
-      run.frame.saved_stack,
-      run.frame.saved_pc,
+      run.frame.saved.stack,
+      run.frame.saved.pc,
     )
   handle_exec_result(
     state,
@@ -579,7 +579,7 @@ fn delegate_done(
             "not suspended at AsyncYieldStarNext",
           ))
         Some(#(_iter_ref, after_pc)) -> {
-          let stack_after = case frame.saved_stack {
+          let stack_after = case frame.saved.stack {
             [_iter, ..rest] -> [val, ..rest]
             [] -> [val]
           }
@@ -681,8 +681,8 @@ pub fn call_native_resume(
           case is_reject {
             True -> throw_into_gen_body(state, run, settled)
             False -> {
-              let stack = [settled, ..frame.saved_stack]
-              let es = build_exec_state(state, frame, stack, frame.saved_pc)
+              let stack = [settled, ..frame.saved.stack]
+              let es = build_exec_state(state, frame, stack, frame.saved.pc)
               handle_exec_result(state, run, execute_inner(es))
             }
           }
@@ -752,14 +752,8 @@ type AsyncGenFrame {
     gen_state: value.AsyncGeneratorState,
     func_template: value.FuncTemplate,
     env_ref: Ref,
-    saved_pc: Int,
-    saved_locals: tuple_array.TupleArray(JsValue),
-    saved_stack: List(JsValue),
-    saved_try_stack: List(value.SavedTryFrame),
-    /// See `value.GeneratorSlot.saved_eval_env` — per-frame State fields the
-    /// resume path must restore instead of inheriting the resumer's.
-    saved_eval_env: Option(Ref),
-    saved_line: Int,
+    /// The suspended body snapshot — the same record the heap slot stores.
+    saved: value.SavedFrame,
   )
 }
 
@@ -810,26 +804,11 @@ fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenLive) {
       queue:,
       func_template:,
       env_ref:,
-      saved_pc:,
-      saved_locals:,
-      saved_stack:,
-      saved_try_stack:,
-      saved_eval_env:,
-      saved_line:,
+      frame:,
     )) -> {
       let #(queue_front, queue_back) = queue
       Some(AsyncGenLive(
-        frame: AsyncGenFrame(
-          gen_state:,
-          func_template:,
-          env_ref:,
-          saved_pc:,
-          saved_locals:,
-          saved_stack:,
-          saved_try_stack:,
-          saved_eval_env:,
-          saved_line:,
-        ),
+        frame: AsyncGenFrame(gen_state:, func_template:, env_ref:, saved: frame),
         queue_front:,
         queue_back:,
       ))
@@ -861,12 +840,7 @@ fn encode_slot(live: AsyncGenLive) -> HeapSlot(host) {
     queue: #(queue_front, queue_back),
     func_template: frame.func_template,
     env_ref: frame.env_ref,
-    saved_pc: frame.saved_pc,
-    saved_locals: frame.saved_locals,
-    saved_stack: frame.saved_stack,
-    saved_try_stack: frame.saved_try_stack,
-    saved_eval_env: frame.saved_eval_env,
-    saved_line: frame.saved_line,
+    frame: frame.saved,
   )
 }
 
@@ -942,12 +916,7 @@ fn save_suspended(
     frame: AsyncGenFrame(
       ..live.frame,
       gen_state: new_state,
-      saved_pc: suspended.pc,
-      saved_locals: suspended.locals,
-      saved_stack: suspended.stack,
-      saved_try_stack: generators.save_stacks(suspended.try_stack),
-      saved_eval_env: suspended.eval_env,
-      saved_line: suspended.current_line,
+      saved: generators.saved_frame(suspended),
     ),
   )
 }

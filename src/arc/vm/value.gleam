@@ -3918,6 +3918,26 @@ pub type SavedTryFrame {
   SavedTryFrame(catch_target: Int, stack_depth: Int, kind: TryKind)
 }
 
+/// A suspended coroutine body: everything a resume must restore into a fresh
+/// execution `State`. Shared verbatim by `GeneratorSlot` and
+/// `AsyncGeneratorSlot` — the two suspend/resume paths save exactly the same
+/// snapshot, so they save it through the same record.
+pub type SavedFrame {
+  SavedFrame(
+    pc: Int,
+    locals: TupleArray(JsValue),
+    stack: List(JsValue),
+    try_stack: List(SavedTryFrame),
+    /// The body frame's own sloppy-direct-eval var dict and the line it
+    /// suspended on. Both are per-frame `State` fields, so a resume that fails
+    /// to restore them silently adopts the RESUMER's: `var`s a direct eval
+    /// introduced inside the body vanish across a yield, and the resumed frame
+    /// reports the resumer's line in stack traces.
+    eval_env: Option(Ref),
+    line: Int,
+  )
+}
+
 /// Generator internal lifecycle state.
 pub type GeneratorState {
   /// Created but body not yet entered (before first .next())
@@ -4049,17 +4069,7 @@ pub type HeapSlot(ctx, host) {
     gen_state: GeneratorState,
     func_template: FuncTemplate,
     env_ref: Ref,
-    saved_pc: Int,
-    saved_locals: TupleArray(JsValue),
-    saved_stack: List(JsValue),
-    saved_try_stack: List(SavedTryFrame),
-    /// The body frame's own sloppy-direct-eval var dict and the line it
-    /// suspended on. Both are per-frame `State` fields, so a resume that fails
-    /// to restore them silently adopts the RESUMER's: `var`s a direct eval
-    /// introduced inside the body vanish across a yield, and the resumed frame
-    /// reports the resumer's line in stack traces.
-    saved_eval_env: Option(Ref),
-    saved_line: Int,
+    frame: SavedFrame,
   )
   /// Engine-internal async function suspended state.
   /// Saves the full execution context so await can resume. There is no
@@ -4097,13 +4107,7 @@ pub type HeapSlot(ctx, host) {
     queue: #(List(AsyncGenRequest), List(AsyncGenRequest)),
     func_template: FuncTemplate,
     env_ref: Ref,
-    saved_pc: Int,
-    saved_locals: TupleArray(JsValue),
-    saved_stack: List(JsValue),
-    saved_try_stack: List(SavedTryFrame),
-    /// See `GeneratorSlot.saved_eval_env` / `saved_line`.
-    saved_eval_env: Option(Ref),
-    saved_line: Int,
+    frame: SavedFrame,
   )
   /// Stores realm context for $262 methods.
   /// evalScript and createRealm read this to know which realm to operate in.
@@ -4290,13 +4294,17 @@ fn push_dispose_resources(
   })
 }
 
+/// Root a suspended coroutine frame plus the function environment it resumes
+/// into: locals, operand stack, and the frame's own direct-eval var dict.
 fn push_saved_frame_refs(
   env_ref: Ref,
-  saved_locals: TupleArray(JsValue),
-  saved_stack: List(JsValue),
+  frame: SavedFrame,
   acc: List(Ref),
 ) -> List(Ref) {
-  push_saved_locals_stack_refs(saved_locals, saved_stack, [env_ref, ..acc])
+  push_saved_locals_stack_refs(frame.locals, frame.stack, [
+    env_ref,
+    ..push_opt_ref(frame.eval_env, acc)
+  ])
 }
 
 /// Root an optional ref (a suspended frame's sloppy-direct-eval var dict): the
@@ -4509,8 +4517,8 @@ fn do_refs_in_slot(
         | TemporalZonedDateTimeSlot(..)
         | RegExpObject(..)
         | ArrayBufferObject(..)
-        // The rawJSON box's [[IsRawJSON]] payload is a plain String.
-        | RawJsonObject(_)
+        | // The rawJSON box's [[IsRawJSON]] payload is a plain String.
+          RawJsonObject(_)
         | StringIteratorObject(_) -> acc
         // DataView keeps its viewed ArrayBuffer alive.
         DataViewObject(buffer:, ..) -> [buffer, ..acc]
@@ -4541,13 +4549,8 @@ fn do_refs_in_slot(
       }
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
     }
-    GeneratorSlot(env_ref:, saved_locals:, saved_stack:, saved_eval_env:, ..) ->
-      push_saved_frame_refs(
-        env_ref,
-        saved_locals,
-        saved_stack,
-        push_opt_ref(saved_eval_env, acc),
-      )
+    GeneratorSlot(env_ref:, frame:, ..) ->
+      push_saved_frame_refs(env_ref, frame, acc)
     AsyncFunctionSlot(
       promise_data_ref:,
       resolve:,
@@ -4562,14 +4565,7 @@ fn do_refs_in_slot(
         |> push_value_ref(reject, _)
       push_saved_locals_stack_refs(saved_locals, saved_stack, acc)
     }
-    AsyncGeneratorSlot(
-      queue: #(queue_front, queue_back),
-      env_ref:,
-      saved_locals:,
-      saved_stack:,
-      saved_eval_env:,
-      ..,
-    ) -> {
+    AsyncGeneratorSlot(queue: #(queue_front, queue_back), env_ref:, frame:, ..) -> {
       // Both halves of the two-list FIFO hold live requests — walk both.
       let push_request = fn(a, r: AsyncGenRequest) {
         a
@@ -4579,12 +4575,7 @@ fn do_refs_in_slot(
       }
       let acc = list.fold(queue_front, acc, push_request)
       let acc = list.fold(queue_back, acc, push_request)
-      push_saved_frame_refs(
-        env_ref,
-        saved_locals,
-        saved_stack,
-        push_opt_ref(saved_eval_env, acc),
-      )
+      push_saved_frame_refs(env_ref, frame, acc)
     }
     RealmSlot(global_object:, lexical_globals:, symbol_registry: _) ->
       dict.fold(lexical_globals, [global_object, ..acc], fn(a, _k, v) {
