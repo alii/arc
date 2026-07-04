@@ -540,12 +540,6 @@ pub type ScopeBuilder {
   )
 }
 
-/// What `parser.parse` returns alongside the AST — handed to
-/// `finalize(partial, opts)` which seeds the root from `AnalyzeOpts`,
-/// allocates slots, resolves refs, and runs `analyze_captures`.
-pub type PartialTree =
-  ScopeBuilder
-
 /// Fresh builder rooted at scope id 0 of `root_kind` (Module or Script).
 pub fn sb_init(root_kind: ScopeKind, strict: Bool) -> ScopeBuilder {
   let root =
@@ -578,6 +572,18 @@ fn sb_scope(sb: ScopeBuilder, id: ScopeId) -> RawScope {
   let assert Ok(s) = dict.get(sb.scopes, id)
     as "scope.sb_scope: unknown ScopeId"
   s
+}
+
+/// Look up the `RawFunctionInfo` of a FUNCTION-kind scope. Internal —
+/// `sb_init` seeds the root and `sb_push` seeds every function-kind scope
+/// it mints, so a miss means the caller passed a non-function scope id (or
+/// an id from another builder). Same rationale as `sb_scope`: fabricating a
+/// `blank_raw_fn_info` here would silently drop `is_arrow` /
+/// `annexb_candidates` and miscompile the body.
+fn sb_fn_info(sb: ScopeBuilder, fn_id: ScopeId) -> RawFunctionInfo {
+  let assert Ok(info) = dict.get(sb.functions, fn_id)
+    as "scope.sb_fn_info: unknown function scope"
+  info
 }
 
 /// Allocate and enter a fresh child scope of `kind` under `sb.current`.
@@ -1011,15 +1017,8 @@ pub fn sb_prune_empty_block(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
       // resolution-from-its-parent.
       let scopes =
         list.fold(own_children, sb.scopes, fn(acc, child_id) {
-          case dict.get(acc, child_id) {
-            Ok(child) ->
-              dict.insert(
-                acc,
-                child_id,
-                RawScope(..child, parent: Some(parent_id)),
-              )
-            Error(Nil) -> acc
-          }
+          let child = sb_scope(sb, child_id)
+          dict.insert(acc, child_id, RawScope(..child, parent: Some(parent_id)))
         })
       ScopeBuilder(
         ..sb,
@@ -1054,14 +1053,11 @@ pub fn sb_set_source_tag(
   id: ScopeId,
   tag: SourceTag,
 ) -> ScopeBuilder {
-  case dict.get(sb.scopes, id) {
-    Error(Nil) -> sb
-    Ok(scope) ->
-      ScopeBuilder(
-        ..sb,
-        scopes: dict.insert(sb.scopes, id, RawScope(..scope, source_tag: tag)),
-      )
-  }
+  let scope = sb_scope(sb, id)
+  ScopeBuilder(
+    ..sb,
+    scopes: dict.insert(sb.scopes, id, RawScope(..scope, source_tag: tag)),
+  )
 }
 
 /// Tag every DIRECT child of `parent_id` that was pushed since `marker`
@@ -1081,12 +1077,11 @@ pub fn sb_tag_children_since(
   list.fold(new_ids, sb, fn(sb, id) { sb_set_source_tag(sb, id, tag) })
 }
 
-/// `source_tag` of `id`, defaulting to `TagOther` for unknown ids.
+/// `source_tag` of `id`. Panics on an unknown id (see `sb_scope`) — a
+/// fabricated `TagOther` here would silently reorder `children_at` out of
+/// lockstep with emit.gleam's cursors.
 fn sb_tag_of(sb: ScopeBuilder, id: ScopeId) -> SourceTag {
-  case dict.get(sb.scopes, id) {
-    Ok(s) -> s.source_tag
-    Error(Nil) -> TagOther
-  }
+  sb_scope(sb, id).source_tag
 }
 
 /// Reorder `children_at[scope_id]` from reverse-source-order (as left by
@@ -1194,11 +1189,13 @@ pub fn sb_update_current_fn(
   sb: ScopeBuilder,
   f: fn(RawFunctionInfo) -> RawFunctionInfo,
 ) -> ScopeBuilder {
-  let info =
-    dict.get(sb.functions, sb.current_fn) |> result.unwrap(blank_raw_fn_info)
   ScopeBuilder(
     ..sb,
-    functions: dict.insert(sb.functions, sb.current_fn, f(info)),
+    functions: dict.insert(
+      sb.functions,
+      sb.current_fn,
+      f(sb_fn_info(sb, sb.current_fn)),
+    ),
   )
 }
 
@@ -1483,8 +1480,7 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
         origin_kind_for_capture: parent_origin,
       )
     })
-  let root_raw_fn =
-    dict.get(sb.functions, root_scope_id) |> result.unwrap(blank_raw_fn_info)
+  let root_raw_fn = sb_fn_info(sb, root_scope_id)
   // Root local_count starts past the seeded captures + inherited
   // with-stack holders + inherited lexical pseudo-slots — the
   // captures-first frame layout `do_lookup` / `child_parent_view` assume
@@ -1590,8 +1586,8 @@ fn finalize_scope(
   {
     False -> st
     True -> {
-      let raw_fn =
-        dict.get(sb.functions, scope_id) |> result.unwrap(blank_raw_fn_info)
+      // `is_function_kind` guarantees `sb_push` seeded a RawFunctionInfo.
+      let raw_fn = sb_fn_info(sb, scope_id)
       let info = blank_function_info(raw_fn, opts.fallthrough)
       FinSt(..st, functions: dict.insert(st.functions, scope_id, info))
     }
@@ -2593,8 +2589,11 @@ fn compute_down(
     captured_names
     |> set.to_list
     |> list.sort(string.compare)
-    |> list.filter_map(fn(name) {
-      use parent_slot <- result.map(dict.get(parent.names, name))
+    // `captured_names ⊆ keys(parent.names)` by construction above, so the
+    // lookup is total — dropping a name here would silently lose a capture.
+    |> list.map(fn(name) {
+      let assert Ok(parent_slot) = dict.get(parent.names, name)
+        as "scope.captures: captured name absent from parent view"
       #(name, parent_slot)
     })
   let const_captures = set.intersection(parent.consts, captured_names)
@@ -2797,7 +2796,7 @@ fn compute_down(
   // caller-supplied via `opts.fallthrough` (e.g. compile_eval_direct
   // passes ToEvalEnv even when the eval'd source has no nested eval) —
   // recomputing it here would clobber that with ToGlobal, so preserve it.
-  let child_fallthrough = case up.eval_in_subtree && !inp.is_strict {
+  let own_fallthrough = case up.eval_in_subtree && !inp.is_strict {
     True -> ToEvalEnv
     False -> ToGlobal
   }
@@ -2810,7 +2809,7 @@ fn compute_down(
     update_function_info(tree, fn_id, fn(info) {
       let fallthrough = case is_root {
         True -> info.fallthrough
-        False -> child_fallthrough
+        False -> own_fallthrough
       }
       // An OWNING Script root's `lexical` is authoritative from
       // finalize — already offset past parent_names/with_stack. For
@@ -2873,16 +2872,12 @@ fn insert_captures(
   // Shift every declared binding's slot in this function's scopes.
   let scopes =
     list.fold(own_scope_ids, tree.scopes, fn(scopes, sid) {
-      case dict.get(scopes, sid) {
-        Error(Nil) -> scopes
-        Ok(scope) -> {
-          let bindings =
-            dict.map_values(scope.bindings, fn(_name, b) {
-              Binding(..b, slot: b.slot + cap_count)
-            })
-          dict.insert(scopes, sid, Scope(..scope, bindings:))
-        }
-      }
+      let scope = scopes_get_or_panic(scopes, sid)
+      let bindings =
+        dict.map_values(scope.bindings, fn(_name, b) {
+          Binding(..b, slot: b.slot + cap_count)
+        })
+      dict.insert(scopes, sid, Scope(..scope, bindings:))
     })
   // A capture whose name is ALSO declared by this function (e.g. an
   // eval-poisoned body that declares `var x` while the parent has `x`)
@@ -2913,20 +2908,12 @@ fn insert_captures(
   // nested block, and a direct eval in a PARAMETER initializer naming a
   // body `var` (it now sees the body slot, not the capture). Both are
   // strictly rarer than the body-eval case this gate exists to get right.
-  let scope_bindings = fn(sid) {
-    dict.get(scopes, sid)
-    |> result.map(fn(s: Scope) { s.bindings })
-    |> result.unwrap(dict.new())
-  }
+  let scope_bindings = fn(sid) { scopes_get_or_panic(scopes, sid).bindings }
   let root_bindings = scope_bindings(fn_id)
   let root_shadowed = fn(name) { dict.has_key(root_bindings, name) }
   let var_boundary_names =
     own_scope_ids
-    |> list.filter(fn(sid) {
-      dict.get(scopes, sid)
-      |> result.map(fn(s: Scope) { s.is_var_boundary })
-      |> result.unwrap(False)
-    })
+    |> list.filter(fn(sid) { scopes_get_or_panic(scopes, sid).is_var_boundary })
     |> list.flat_map(fn(sid) { dict.keys(scope_bindings(sid)) })
     |> set.from_list
   let names_shadowed = fn(name) {
@@ -2938,34 +2925,32 @@ fn insert_captures(
   // always boxed (heap cells shared with the parent). Origin kind threads
   // const / FnName through the chain so a write to a captured-captured
   // const still throws TypeError (§9.1.1.1.5).
-  let scopes = case dict.get(scopes, fn_id) {
-    Error(Nil) -> scopes
-    Ok(root) -> {
-      let bindings =
-        list.index_fold(captures, root.bindings, fn(bs, cap, i) {
-          let #(name, _parent_slot) = cap
-          use <- bool.guard(root_shadowed(name), bs)
-          let origin = case
-            set.contains(const_captures, name),
-            set.contains(fn_name_captures, name)
-          {
-            True, _ -> ConstBinding
-            False, True -> FnNameBinding
-            False, False -> CaptureBinding
-          }
-          dict.insert(
-            bs,
-            name,
-            Binding(
-              slot: i,
-              kind: CaptureBinding,
-              is_boxed: True,
-              origin_kind_for_capture: origin,
-            ),
-          )
-        })
-      dict.insert(scopes, fn_id, Scope(..root, bindings:))
-    }
+  let root = scopes_get_or_panic(scopes, fn_id)
+  let scopes = {
+    let bindings =
+      list.index_fold(captures, root.bindings, fn(bs, cap, i) {
+        let #(name, _parent_slot) = cap
+        use <- bool.guard(root_shadowed(name), bs)
+        let origin = case
+          set.contains(const_captures, name),
+          set.contains(fn_name_captures, name)
+        {
+          True, _ -> ConstBinding
+          False, True -> FnNameBinding
+          False, False -> CaptureBinding
+        }
+        dict.insert(
+          bs,
+          name,
+          Binding(
+            slot: i,
+            kind: CaptureBinding,
+            is_boxed: True,
+            origin_kind_for_capture: origin,
+          ),
+        )
+      })
+    dict.insert(scopes, fn_id, Scope(..root, bindings:))
   }
   // Shift the per-function names map and bump local_count; record capture
   // names at their new slots so direct-eval `local_names` exposes them.
@@ -3050,21 +3035,29 @@ fn apply_boxing(
   use <- bool.guard(set.is_empty(vars_to_box), tree)
   let scopes =
     list.fold(own_scope_ids, tree.scopes, fn(scopes, sid) {
-      case dict.get(scopes, sid) {
-        Error(Nil) -> scopes
-        Ok(scope) -> {
-          let bindings =
-            dict.map_values(scope.bindings, fn(name, b) {
-              case set.contains(vars_to_box, name) {
-                True -> Binding(..b, is_boxed: True)
-                False -> b
-              }
-            })
-          dict.insert(scopes, sid, Scope(..scope, bindings:))
-        }
-      }
+      let scope = scopes_get_or_panic(scopes, sid)
+      let bindings =
+        dict.map_values(scope.bindings, fn(name, b) {
+          case set.contains(vars_to_box, name) {
+            True -> Binding(..b, is_boxed: True)
+            False -> b
+          }
+        })
+      dict.insert(scopes, sid, Scope(..scope, bindings:))
     })
   ScopeTree(..tree, scopes:)
+}
+
+/// `get_scope` for a bare `scopes` map mid-rewrite (the folds in
+/// `insert_captures` / `apply_boxing` thread an updated map that isn't in a
+/// `ScopeTree` yet). Every id they iterate came from `scopes_by_function`,
+/// which is built FROM this map, so a miss is a bug — swallowing it would
+/// leave a scope's slots unshifted / a var unboxed and silently miscompile
+/// the surrounding function.
+fn scopes_get_or_panic(scopes: Dict(ScopeId, Scope), sid: ScopeId) -> Scope {
+  let assert Ok(scope) = dict.get(scopes, sid)
+    as "scope.scopes_get_or_panic: unknown ScopeId"
+  scope
 }
 
 fn update_function_info(
