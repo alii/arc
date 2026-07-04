@@ -36,24 +36,24 @@ import arc/vm/value.{
   type Notation, type NumberFormatState, type NumericWidth,
   type PluralRulesState, type Ref, type RelativeTimeFormatState,
   type SegmentIteratorState, type SegmenterState, type SegmentsState,
-  type TimeStyle, type TimeZoneNameWidth, BsDigital, BsLong, BsNarrow, BsShort,
-  BigIntToLocaleString, CaseFirstFalse, CaseFirstLower, CaseFirstUpper,
-  CollatorData, CollatorState,
-  CompactLong, CompactShort, CurAccounting, CurCode, CurName, CurNarrowSymbol,
-  CurStandard, CurSymbol, DateTimeFormatData, DateTimeFormatState,
-  DateToLocaleDateString, DateToLocaleString, DateToLocaleTimeString, Dispatch,
-  DisplayAlways, DisplayAuto, DisplayNamesData, DisplayNamesState, DsFull,
-  DsLong, DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
-  DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
-  DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
-  DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
-  DurationUnitOptions, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever,
-  H11, H12, H23, H24, IntlBoundGetter, IntlBoundMethod, IntlCollator,
-  IntlConstructor, IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames,
-  IntlDurationFormat, IntlFormat, IntlFormatRange, IntlFormatRangeToParts,
-  IntlFormatToParts, IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat,
-  IntlLocale, IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative,
-  IntlNumberFormat, IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
+  type TimeStyle, type TimeZoneNameWidth, BigIntToLocaleString, BsDigital,
+  BsLong, BsNarrow, BsShort, CaseFirstFalse, CaseFirstLower, CaseFirstUpper,
+  CollatorData, CollatorState, CompactLong, CompactShort, CurAccounting, CurCode,
+  CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
+  DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
+  DateToLocaleTimeString, Dispatch, DisplayAlways, DisplayAuto, DisplayNamesData,
+  DisplayNamesState, DsFull, DsLong, DsMedium, DsShort, DtfComponents, DtfDay,
+  DtfDayPeriod, DtfEra, DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth,
+  DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong,
+  DurNarrow, DurNumeric, DurShort, DurTwoDigit, DurationFormatData,
+  DurationFormatState, DurationUnitOptions, GroupingAlways, GroupingAuto,
+  GroupingMin2, GroupingNever, H11, H12, H23, H24, IntlBoundGetter,
+  IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
+  IntlDigitOptions, IntlDisplayNames, IntlDurationFormat, IntlFormat,
+  IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
+  IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat, IntlLocale,
+  IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat,
+  IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
   IntlResolvedOptions, IntlSegmentIterator, IntlSegmentIteratorNext,
   IntlSegmenter, IntlSegmenterSegment, IntlSegments, IntlSegmentsContaining,
   IntlSegmentsIterator, IntlSelect, IntlSelectRange, IntlSupportedLocalesOf,
@@ -4149,38 +4149,19 @@ fn resolved_options(
             #("currencySign", currency_sign),
             #("unit", unit),
             #("unitDisplay", unit_display),
-            #(
-              "minimumIntegerDigits",
-              Some(value.from_int(dg.minimum_integer_digits)),
-            ),
-            #(
-              "minimumFractionDigits",
-              option.map(dg.minimum_fraction_digits, value.from_int),
-            ),
-            #(
-              "maximumFractionDigits",
-              option.map(dg.maximum_fraction_digits, value.from_int),
-            ),
-            #(
-              "minimumSignificantDigits",
-              option.map(dg.minimum_significant_digits, value.from_int),
-            ),
-            #(
-              "maximumSignificantDigits",
-              option.map(dg.maximum_significant_digits, value.from_int),
-            ),
-            #("useGrouping", Some(use_grouping_js(nf.use_grouping))),
-            #(
-              "notation",
-              Some(JsString(value.notation_to_js_string(nf.notation))),
-            ),
-            #("compactDisplay", compact_display_of(nf.notation)),
-            #(
-              "signDisplay",
-              Some(JsString(value.sign_display_to_js_string(nf.sign_display))),
-            ),
-            #("roundingIncrement", Some(value.from_int(dg.rounding_increment))),
-            ..digit_rounding_pairs(dg)
+            ..digit_option_pairs(dg, [
+              #("useGrouping", Some(use_grouping_js(nf.use_grouping))),
+              #(
+                "notation",
+                Some(JsString(value.notation_to_js_string(nf.notation))),
+              ),
+              #("compactDisplay", compact_display_of(nf.notation)),
+              #(
+                "signDisplay",
+                Some(JsString(value.sign_display_to_js_string(nf.sign_display))),
+              ),
+              ..digit_rounding_pairs(dg)
+            ])
           ]),
         )
       }
@@ -4251,29 +4232,10 @@ fn resolved_options(
               Some(JsString(value.notation_to_js_string(p.notation))),
             ),
             #("compactDisplay", compact_display_of(p.notation)),
-            #(
-              "minimumIntegerDigits",
-              Some(value.from_int(dg.minimum_integer_digits)),
-            ),
-            #(
-              "minimumFractionDigits",
-              option.map(dg.minimum_fraction_digits, value.from_int),
-            ),
-            #(
-              "maximumFractionDigits",
-              option.map(dg.maximum_fraction_digits, value.from_int),
-            ),
-            #(
-              "minimumSignificantDigits",
-              option.map(dg.minimum_significant_digits, value.from_int),
-            ),
-            #(
-              "maximumSignificantDigits",
-              option.map(dg.maximum_significant_digits, value.from_int),
-            ),
-            #("pluralCategories", Some(cats)),
-            #("roundingIncrement", Some(value.from_int(dg.rounding_increment))),
-            ..digit_rounding_pairs(dg)
+            ..digit_option_pairs(dg, [
+              #("pluralCategories", Some(cats)),
+              ..digit_rounding_pairs(dg)
+            ])
           ]),
         )
       }
@@ -4387,12 +4349,41 @@ fn tz_name_width_js(v: TimeZoneNameWidth) -> JsValue {
   JsString(value.time_zone_name_width_to_js_string(v))
 }
 
-/// The roundingMode/roundingPriority/trailingZeroDisplay resolvedOptions
-/// tail shared by NumberFormat and PluralRules.
+/// The integer/fraction/significant digit resolvedOptions pairs shared by
+/// NumberFormat and PluralRules, prepended to `rest`.
+fn digit_option_pairs(
+  dg: IntlDigitOptions,
+  rest: List(#(String, Option(JsValue))),
+) -> List(#(String, Option(JsValue))) {
+  [
+    #("minimumIntegerDigits", Some(value.from_int(dg.minimum_integer_digits))),
+    #(
+      "minimumFractionDigits",
+      option.map(dg.minimum_fraction_digits, value.from_int),
+    ),
+    #(
+      "maximumFractionDigits",
+      option.map(dg.maximum_fraction_digits, value.from_int),
+    ),
+    #(
+      "minimumSignificantDigits",
+      option.map(dg.minimum_significant_digits, value.from_int),
+    ),
+    #(
+      "maximumSignificantDigits",
+      option.map(dg.maximum_significant_digits, value.from_int),
+    ),
+    ..rest
+  ]
+}
+
+/// The roundingIncrement/roundingMode/roundingPriority/trailingZeroDisplay
+/// resolvedOptions tail shared by NumberFormat and PluralRules.
 fn digit_rounding_pairs(
   dg: IntlDigitOptions,
 ) -> List(#(String, Option(JsValue))) {
   [
+    #("roundingIncrement", Some(value.from_int(dg.rounding_increment))),
     #(
       "roundingMode",
       Some(JsString(value.rounding_mode_to_js_string(dg.rounding_mode))),
