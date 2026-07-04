@@ -14,6 +14,7 @@ import arc/vm/value.{
   JsUndefined, ObjectSlot,
 }
 import gleam/dict
+import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -212,9 +213,13 @@ fn target_header(h: Heap(host), ref: Ref) -> String {
 }
 
 /// Native error constructor — §20.5.1.1 Error ( message [ , options ] ):
-/// if (message !== undefined) this.message = ToString(message), then
-/// InstallErrorCause(O, options). Creates a new error object with the proto
-/// embedded in the NativeFn.
+///   1. Let O be ? OrdinaryCreateFromConstructor(newTarget,
+///      "%Error.prototype%") — the prototype comes from newTarget, so
+///      `class E extends Error {}` yields E.prototype.
+///   2. If message !== undefined, this.message = ToString(message).
+///   3. InstallErrorCause(O, options).
+/// The proto embedded in the NativeFn is the intrinsic fallback used when
+/// newTarget is undefined (a plain `Error("x")` call).
 /// Per §20.5.6.3: "message" is writable+configurable but NOT enumerable.
 fn call_native(
   proto: Ref,
@@ -226,6 +231,11 @@ fn call_native(
     [_, o, ..] -> o
     _ -> JsUndefined
   }
+  use proto, state <- object.proto_from_new_target(
+    state,
+    state.new_target,
+    proto,
+  )
   case args {
     [JsUndefined, ..] | [] ->
       alloc_error(state, proto, None, options) |> as_object
@@ -241,8 +251,9 @@ fn call_native(
 
 /// AggregateError ( errors, message [ , options ] ) — §20.5.7.1.1:
 ///
-///   1-2. (skipped/simplified as elsewhere in this module) allocate O with the
-///        intrinsic %AggregateError.prototype%.
+///   1-2. Let O be ? OrdinaryCreateFromConstructor(newTarget,
+///        "%AggregateError.prototype%") — falls back to the intrinsic when
+///        newTarget is undefined (a plain call).
 ///   3.   If message is not undefined, then
 ///        a. Let msg be ? ToString(message).
 ///        b. Perform CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
@@ -267,6 +278,12 @@ fn aggregate_error_native(
     [e, m] -> #(e, m, JsUndefined)
     [e, m, o, ..] -> #(e, m, o)
   }
+  // Steps 1-2: OrdinaryCreateFromConstructor(newTarget, ...).
+  use proto, state <- object.proto_from_new_target(
+    state,
+    state.new_target,
+    proto,
+  )
   // Steps 3-4: message + cause, exactly as for a plain Error.
   let #(state, created) = case message {
     JsUndefined -> alloc_error(state, proto, None, options)
@@ -336,9 +353,8 @@ fn as_object(
 /// SuppressedError ( error, suppressed, message ) — Explicit Resource
 /// Management proposal.
 ///
-///   1. (skipped) If NewTarget is undefined, let newTarget be the active
-///      function object. We allocate with the intrinsic prototype, matching
-///      the other NativeError constructors in this module.
+///   1. If NewTarget is undefined, let newTarget be the active function object
+///      — i.e. the intrinsic prototype baked into the native variant.
 ///   2. Let O be ? OrdinaryCreateFromConstructor(newTarget, "%SuppressedError.prototype%").
 ///   3. If message is not undefined, then
 ///      a. Let msg be ? ToString(message).
@@ -357,6 +373,12 @@ fn suppressed_error_native(
     [e, s] -> #(e, s, JsUndefined)
     [e, s, m, ..] -> #(e, s, m)
   }
+  // Steps 1-2: OrdinaryCreateFromConstructor(newTarget, ...).
+  use proto, state <- object.proto_from_new_target(
+    state,
+    state.new_target,
+    proto,
+  )
   case message {
     // Step 3: message is undefined — no "message" property
     JsUndefined -> {
@@ -615,11 +637,26 @@ fn set_stack_ignoring_prototype(
       // intrinsic — resolve the owning realm's builtins via its
       // %Error.prototype% so a cross-realm call throws that realm's
       // TypeError, not the calling realm's.
-      let realm_builtins =
-        state.ctx.realms
-        |> dict.values
-        |> list.find(fn(b) { b.error.prototype.id == proto.id })
-        |> result.unwrap(state.builtins)
+      let realm_builtins = case state.builtins.error.prototype.id == proto.id {
+        // The running realm owns this setter — no lookup needed.
+        True -> state.builtins
+        False ->
+          case state.builtins_of_error_proto(state, proto) {
+            Some(#(_realm_ref, owner)) -> owner
+            // `proto` is the setter's own home %Error.prototype%, so it belongs
+            // to SOME live realm; if it is neither the running realm's nor a
+            // registered one, the realm registry lost an entry. Falling back to
+            // the running realm's TypeError is wrong-but-recoverable, so say so
+            // rather than let an `unwrap` hide it.
+            None -> {
+              io.println_error(
+                "arc: Error.prototype stack setter could not resolve its owning"
+                <> " realm; falling back to the running realm's intrinsics",
+              )
+              state.builtins
+            }
+          }
+      }
       state.type_error_with_builtins(
         state,
         realm_builtins,
@@ -670,15 +707,26 @@ fn set_stack_ignoring_prototype(
 }
 
 /// Read the `name` data property off an error prototype (e.g. "TypeError"),
-/// for the first line of the stack trace. Defaults to "Error".
+/// for the first line of the stack trace. Walks the prototype chain: with a
+/// newTarget-derived prototype (`class E extends TypeError {}`) the instance's
+/// own prototype carries no `name`, so the base error's name is inherited.
+/// Defaults to "Error". `fuel` bounds a pathological chain.
 fn error_name(h: Heap(host), proto: Ref) -> String {
-  case heap.read(h, proto) {
-    Some(ObjectSlot(properties:, ..)) ->
-      case dict.get(properties, Named("name")) {
-        Ok(DataProperty(value: JsString(n), ..)) -> n
+  error_name_in_chain(h, Some(proto), 100)
+}
+
+fn error_name_in_chain(h: Heap(host), proto: Option(Ref), fuel: Int) -> String {
+  case proto, fuel > 0 {
+    Some(ref), True ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(properties:, prototype:, ..)) ->
+          case dict.get(properties, Named("name")) {
+            Ok(DataProperty(value: JsString(n), ..)) -> n
+            _ -> error_name_in_chain(h, prototype, fuel - 1)
+          }
         _ -> "Error"
       }
-    _ -> "Error"
+    _, _ -> "Error"
   }
 }
 
