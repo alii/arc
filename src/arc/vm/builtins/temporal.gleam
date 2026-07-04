@@ -7247,20 +7247,25 @@ fn get_difference_settings(
   cont(largest, smallest, inc, mode, state)
 }
 
-/// GetDifferenceSettings tail shared by every until/since: largestUnit must
-/// not be smaller than smallestUnit, else RangeError.
+const largest_smaller_msg = "largestUnit must not be smaller than smallestUnit"
+
+/// The GetDifferenceSettings ordering check itself: True when largestUnit is
+/// finer than smallestUnit, i.e. the RangeError case. Callers differ only in
+/// how they raise it (tuple-returning vs Result-returning).
+fn largest_smaller_than_smallest(largest: Unit, smallest: Unit) -> Bool {
+  unit_rank(largest) < unit_rank(smallest)
+}
+
+/// GetDifferenceSettings tail shared by the four tuple-returning until/since
+/// paths: largestUnit must not be smaller than smallestUnit, else RangeError.
 fn require_largest_ge_smallest(
   state: State(host),
   largest: Unit,
   smallest: Unit,
   cont: fn() -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case unit_rank(largest) < unit_rank(smallest) {
-    True ->
-      state.range_error(
-        state,
-        "largestUnit must not be smaller than smallestUnit",
-      )
+  case largest_smaller_than_smallest(largest, smallest) {
+    True -> state.range_error(state, largest_smaller_msg)
     False -> cont()
   }
 }
@@ -8031,12 +8036,8 @@ fn check_diff_setup(
   smallest: Unit,
   inc: Int,
 ) -> Result(#(Nil, State(host)), #(JsValue, State(host))) {
-  case unit_rank(largest) < unit_rank(smallest) {
-    True ->
-      range_error_result(
-        state,
-        "largestUnit must not be smaller than smallestUnit",
-      )
+  case largest_smaller_than_smallest(largest, smallest) {
+    True -> range_error_result(state, largest_smaller_msg)
     False -> {
       let ok = case smallest {
         Hour -> valid_time_increment(inc, 24)
@@ -9482,14 +9483,10 @@ fn duration_round_with(
   let date_inc_invalid =
     inc > 1 && unit_rank(smallest) >= unit_rank(Day) && largest != smallest
   case
-    unit_rank(largest) < unit_rank(smallest),
+    largest_smaller_than_smallest(largest, smallest),
     inc_invalid || date_inc_invalid
   {
-    True, _ ->
-      state.range_error(
-        state,
-        "largestUnit must not be smaller than smallestUnit",
-      )
+    True, _ -> state.range_error(state, largest_smaller_msg)
     _, True -> state.range_error(state, "invalid roundingIncrement")
     False, False ->
       case rel {
