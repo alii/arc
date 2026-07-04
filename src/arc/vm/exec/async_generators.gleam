@@ -223,38 +223,29 @@ fn run_body(
         method,
         unwrap_record_ref(state.heap, iter_ref),
       )
-    None -> {
-      let gen_stack = case push_arg, req.completion {
-        True, AGNext -> [req.value, ..frame.saved_stack]
-        _, _ -> frame.saved_stack
-      }
-      let exec_state = build_exec_state(state, frame, gen_stack, frame.saved_pc)
-      let exec_result = case req.completion {
-        AGNext -> run.execute_inner(exec_state)
-        AGThrow ->
-          case run.unwind_to_catch(exec_state, req.value) {
-            Some(caught) -> run.execute_inner(caught)
-            None -> Ok(#(Completed(ThrowCompletion(req.value)), exec_state))
+    None ->
+      case req.completion {
+        AGNext -> {
+          let gen_stack = case push_arg {
+            True -> [req.value, ..frame.saved_stack]
+            False -> frame.saved_stack
           }
+          let exec_state =
+            build_exec_state(state, frame, gen_stack, frame.saved_pc)
+          handle_exec_result(state, run, run.execute_inner(exec_state))
+        }
+        AGThrow -> throw_into_gen_body(state, run, req.value)
         AGReturn ->
-          // Inject a return completion at the suspended yield (§27.6.3.8):
-          // unwind through enclosing finally blocks / for-of iterator closes
-          // before completing. Shared with the sync driver
-          // (generators.unwind_return) so the two flavours cannot diverge.
-          // NOTE: the spec's Await of the resumption value (§27.6.3.8
-          // AsyncGeneratorUnwrapYieldResumption) is not performed on this
-          // NON-delegating path, so a thenable passed to .return() is not
-          // unwrapped here (test262 return-suspendedYield-promise.js). The
-          // delegating path (delegate_method_missing) does await it.
-          generators.unwind_return(
-            exec_state,
-            req.value,
-            run.execute_inner,
-            run.unwind_to_catch,
-          )
+          // §27.6.3.8 AsyncGeneratorUnwrapYieldResumption: a return completion
+          // injected at a suspended yield is Await(resumptionValue) FIRST, so a
+          // thenable handed to `.return()` is unwrapped before it becomes the
+          // generator's return value. The gen stays AGExecuting and the request
+          // stays at the queue head; the AGResumeReturnUnwind branch of
+          // `call_native_resume` performs the actual unwind (through enclosing
+          // finally blocks / for-of iterator closes) with the AWAITED value —
+          // exactly as the delegating path (`delegate_method_missing`) does.
+          Ok(setup_await(state, data_ref, req.value, AGResumeReturnUnwind))
       }
-      handle_exec_result(state, run, exec_result)
-    }
   }
 }
 
@@ -280,6 +271,10 @@ fn build_exec_state(
     try_stack: restored_try,
     new_target: JsUndefined,
     call_args: [],
+    // Per-frame fields: without these the body would inherit the RESUMER's
+    // eval_env (losing direct-eval `var`s across a yield) and its line number.
+    eval_env: frame.saved_eval_env,
+    current_line: frame.saved_line,
   )
 }
 
@@ -615,8 +610,7 @@ fn handle_exec_result(
   case result {
     Ok(#(Suspended(completion.Yield, value), suspended)) -> {
       // Body yielded — save suspended state, dequeue + resolve request, loop.
-      let state =
-        State(..state.merge_globals(outer, suspended, []), heap: suspended.heap)
+      let state = state.adopt_child(outer, suspended)
       let state = save_suspended(state, data_ref, suspended, AGSuspendedYield)
       let state = settle_head(state, data_ref)
       let state = fulfill_iter(state, req.resolve, value, False)
@@ -625,27 +619,18 @@ fn handle_exec_result(
     Ok(#(Suspended(completion.Await, value), suspended)) -> {
       // Body hit await — save state (still Executing), set up promise callback.
       // Do NOT dequeue — the same request stays at head until a yield/return/throw.
-      let state =
-        State(..state.merge_globals(outer, suspended, []), heap: suspended.heap)
+      let state = state.adopt_child(outer, suspended)
       let state = save_suspended(state, data_ref, suspended, AGExecuting)
       Ok(setup_await(state, data_ref, value, AGResumeBody))
     }
     Ok(#(Completed(NormalCompletion(value)), final_state)) -> {
-      let state =
-        State(
-          ..state.merge_globals(outer, final_state, []),
-          heap: final_state.heap,
-        )
+      let state = state.adopt_child(outer, final_state)
       let state = complete(state, data_ref)
       let state = fulfill_iter(state, req.resolve, value, True)
       resume_next(state, data_ref, execute_inner, unwind_to_catch)
     }
     Ok(#(Completed(ThrowCompletion(thrown)), final_state)) -> {
-      let state =
-        State(
-          ..state.merge_globals(outer, final_state, []),
-          heap: final_state.heap,
-        )
+      let state = state.adopt_child(outer, final_state)
       let state = complete(state, data_ref)
       let state = reject_with(state, req.reject, thrown)
       resume_next(state, data_ref, execute_inner, unwind_to_catch)
@@ -771,6 +756,10 @@ type AsyncGenFrame {
     saved_locals: tuple_array.TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(value.SavedTryFrame),
+    /// See `value.GeneratorSlot.saved_eval_env` — per-frame State fields the
+    /// resume path must restore instead of inheriting the resumer's.
+    saved_eval_env: Option(Ref),
+    saved_line: Int,
   )
 }
 
@@ -825,6 +814,8 @@ fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenLive) {
       saved_locals:,
       saved_stack:,
       saved_try_stack:,
+      saved_eval_env:,
+      saved_line:,
     )) -> {
       let #(queue_front, queue_back) = queue
       Some(AsyncGenLive(
@@ -836,6 +827,8 @@ fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenLive) {
           saved_locals:,
           saved_stack:,
           saved_try_stack:,
+          saved_eval_env:,
+          saved_line:,
         ),
         queue_front:,
         queue_back:,
@@ -872,6 +865,8 @@ fn encode_slot(live: AsyncGenLive) -> HeapSlot(host) {
     saved_locals: frame.saved_locals,
     saved_stack: frame.saved_stack,
     saved_try_stack: frame.saved_try_stack,
+    saved_eval_env: frame.saved_eval_env,
+    saved_line: frame.saved_line,
   )
 }
 
@@ -951,6 +946,8 @@ fn save_suspended(
       saved_locals: suspended.locals,
       saved_stack: suspended.stack,
       saved_try_stack: generators.save_stacks(suspended.try_stack),
+      saved_eval_env: suspended.eval_env,
+      saved_line: suspended.current_line,
     ),
   )
 }

@@ -286,6 +286,8 @@ type GenData {
     saved_locals: tuple_array.TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(value.SavedTryFrame),
+    saved_eval_env: Option(Ref),
+    saved_line: Int,
   )
 }
 
@@ -303,6 +305,8 @@ fn get_generator_data(h: Heap(host), this: JsValue) -> Option(GenData) {
               saved_locals:,
               saved_stack:,
               saved_try_stack:,
+              saved_eval_env:,
+              saved_line:,
             )) ->
               Some(GenData(
                 data_ref:,
@@ -313,6 +317,8 @@ fn get_generator_data(h: Heap(host), this: JsValue) -> Option(GenData) {
                 saved_locals:,
                 saved_stack:,
                 saved_try_stack:,
+                saved_eval_env:,
+                saved_line:,
               ))
             _ -> None
           }
@@ -335,6 +341,8 @@ fn gen_with_state(
     saved_locals: gen.saved_locals,
     saved_stack: gen.saved_stack,
     saved_try_stack: gen.saved_try_stack,
+    saved_eval_env: gen.saved_eval_env,
+    saved_line: gen.saved_line,
   )
 }
 
@@ -385,6 +393,10 @@ fn build_resumed_state(
     try_stack: restored_try,
     new_target: JsUndefined,
     call_args: [],
+    // Per-frame fields: without these the body would inherit the RESUMER's
+    // eval_env (losing direct-eval `var`s across a yield) and its line number.
+    eval_env: gen.saved_eval_env,
+    current_line: gen.saved_line,
   )
 }
 
@@ -561,16 +573,14 @@ fn settle_completion(
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
             saved_try_stack: st,
+            saved_eval_env: suspended.eval_env,
+            saved_line: suspended.current_line,
           ),
         )
       Ok(#(
         False,
         yv,
-        State(
-          ..state.merge_globals(outer, suspended, []),
-          heap: h,
-          pc: outer.pc + 1,
-        ),
+        State(..state.adopt_child(outer, suspended), heap: h, pc: outer.pc + 1),
       ))
     }
     Ok(#(Completed(NormalCompletion(rv)), final_state)) -> {
@@ -578,25 +588,14 @@ fn settle_completion(
       Ok(#(
         True,
         rv,
-        State(
-          ..state.merge_globals(outer, final_state, []),
-          heap: final_state.heap,
-          pc: outer.pc + 1,
-        ),
+        State(..state.adopt_child(outer, final_state), pc: outer.pc + 1),
       ))
     }
     Ok(#(Completed(ThrowCompletion(thrown)), thrown_state)) -> {
       let thrown_state = complete(thrown_state, gen)
-      // Merge globals from the throwing body, exactly like the Normal /
-      // Yield arms: jobs it enqueued and ctx mutations must survive the
-      // throw, not just its heap.
-      Error(Threw(
-        thrown,
-        State(
-          ..state.merge_globals(outer, thrown_state, []),
-          heap: thrown_state.heap,
-        ),
-      ))
+      // Adopt the throwing body, exactly like the Normal / Yield arms: jobs it
+      // enqueued and ctx mutations must survive the throw, not just its heap.
+      Error(Threw(thrown, state.adopt_child(outer, thrown_state)))
     }
     Ok(#(Suspended(completion.Await, _), _)) ->
       Error(VmFailed(
@@ -728,23 +727,23 @@ pub fn unwind_return(
           pc: fin_label,
         )
       case execute_inner(finally_state) {
-        Ok(#(Completed(NormalCompletion(_val)), final_state)) -> {
-          // Finally completed normally — Ret hit the -1 sentinel → Done(return_val).
-          // Continue processing any remaining outer finally blocks.
+        Ok(#(Completed(NormalCompletion(val)), final_state)) -> {
+          // Finally completed normally. `val` is what the frame completed
+          // with: the -1 sentinel makes Ret hand back the slot value, so a
+          // finally that just falls off the end yields `return_val` right
+          // back — but a `return x` INSIDE the finally overrides it
+          // (§14.15.3: the finally's own abrupt completion wins). Keep `val`,
+          // not `return_val`, and carry it into the outer finally blocks.
           let updated_gen_state =
             State(
-              ..state.merge_globals(gen_state, final_state, []),
-              heap: final_state.heap,
+              ..state.adopt_child(gen_state, final_state),
               try_stack: final_state.try_stack,
               stack: final_state.stack,
               locals: final_state.locals,
+              eval_env: final_state.eval_env,
+              current_line: final_state.current_line,
             )
-          unwind_return(
-            updated_gen_state,
-            return_val,
-            execute_inner,
-            unwind_to_catch,
-          )
+          unwind_return(updated_gen_state, val, execute_inner, unwind_to_catch)
         }
         // Yield / await inside the finally block (the body suspends there),
         // a throw out of it, or a VM error: that IS the body's outcome —

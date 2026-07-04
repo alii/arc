@@ -4528,6 +4528,8 @@ built-ins/AsyncGeneratorPrototype/return/return-promise.js
 built-ins/AsyncGeneratorPrototype/return/return-state-completed.js
 built-ins/AsyncGeneratorPrototype/return/return-suspendedStart-promise.js
 built-ins/AsyncGeneratorPrototype/return/return-suspendedStart.js
+built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-promise.js
+built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-try-finally-return.js
 built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-try-finally-throw.js
 built-ins/AsyncGeneratorPrototype/return/return-suspendedYield-try-finally.js
 built-ins/AsyncGeneratorPrototype/return/return-suspendedYield.js
@@ -6942,6 +6944,7 @@ built-ins/GeneratorPrototype/return/try-finally-nested-try-catch-within-finally.
 built-ins/GeneratorPrototype/return/try-finally-nested-try-catch-within-inner-try.js
 built-ins/GeneratorPrototype/return/try-finally-nested-try-catch-within-outer-try-after-nested.js
 built-ins/GeneratorPrototype/return/try-finally-nested-try-catch-within-outer-try-before-nested.js
+built-ins/GeneratorPrototype/return/try-finally-set-property-within-try.js
 built-ins/GeneratorPrototype/return/try-finally-within-finally.js
 built-ins/GeneratorPrototype/return/try-finally-within-try.js
 built-ins/GeneratorPrototype/throw/from-state-completed.js

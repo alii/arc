@@ -9,6 +9,7 @@ import arc/vm/opcode
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, JsNull, JsObject, JsUndefined,
+  JsUninitialized,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -41,13 +42,22 @@ pub fn bind_this(
             )
             // Step 6b: Objects pass through (ToObject is identity for objects).
             JsObject(_) -> #(state.heap, this_arg)
-            _ ->
-              // Step 6b: Primitives -> ToObject wrapper (boxing).
-              // to_object only errors on null/undefined which we handled above.
-              case common.to_object(state.heap, state.builtins, this_arg) {
-                Some(#(heap, ref)) -> #(heap, JsObject(ref))
-                None -> #(state.heap, this_arg)
-              }
+            // `JsUninitialized` is the TDZ sentinel, never a JS value: it is
+            // the OTHER input `common.to_object` rejects, and it must be
+            // matched here rather than falling into the `_` arm below — where
+            // the None branch would silently hand the sentinel back as `this`
+            // and let it escape into user code.
+            JsUninitialized ->
+              panic as "TDZ sentinel escaped as `this` in bind_this"
+            // Step 6b: Primitives -> ToObject wrapper (boxing). Every
+            // remaining variant (string/number/bool/symbol/bigint) boxes, so
+            // `to_object` cannot fail — a None here would be an engine bug.
+            _ -> {
+              let assert Some(#(heap, ref)) =
+                common.to_object(state.heap, state.builtins, this_arg)
+                as "to_object failed on a boxable primitive"
+              #(heap, JsObject(ref))
+            }
           }
       }
   }
