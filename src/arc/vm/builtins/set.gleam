@@ -539,26 +539,31 @@ fn set_is_subset_of(
   // Step 4: if thisSize > otherRec.size, return false
   case ordered_entries.size(read_set_store(state.heap, ref)) > rec.size {
     True -> #(state, Ok(JsBool(False)))
-    False -> subset_step_loop(state, ref, rec, 0)
+    False -> this_step_loop(state, ref, rec, 0, False)
   }
 }
 
-/// §24.2.3.9 steps 5-7: every live record of this must satisfy other.has().
-/// Each has() is user code, so this's store is re-read every step.
-fn subset_step_loop(
+/// Walk this's live records, calling other.has() on each: answer false as soon
+/// as one has() result equals `false_when`, true if none does. Shared by
+/// isSubsetOf (§24.2.3.9 steps 5-7, false_when: False — every element must be
+/// in other) and isDisjointFrom (§24.2.3.8 step 4.b, false_when: True — no
+/// element may be). Each has() is user code, so this's store is re-read every
+/// step. There is no iterator to close on the short-circuit exit.
+fn this_step_loop(
   state: State(host),
   ref: Ref,
   rec: SetRecord,
   cursor: Int,
+  false_when false_when: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let store = read_set_store(state.heap, ref)
   case ordered_entries.next_from(store, cursor) {
     None -> #(state, Ok(JsBool(True)))
     Some(#(next_cursor, _key, e)) -> {
       use in_other, state <- set_record_has(state, rec, e)
-      case in_other {
-        False -> #(state, Ok(JsBool(False)))
-        True -> subset_step_loop(state, ref, rec, next_cursor)
+      case in_other == false_when {
+        True -> #(state, Ok(JsBool(False)))
+        False -> this_step_loop(state, ref, rec, next_cursor, false_when)
       }
     }
   }
@@ -580,28 +585,32 @@ fn set_is_superset_of(
       // Draining the whole iterator first would never terminate on an
       // infinite iterator whose first value is already a non-member.
       use iter, next_fn, state <- with_keys_iterator(state, rec)
-      superset_step_loop(state, ref, iter, next_fn)
+      other_step_loop(state, ref, iter, next_fn, False)
     }
   }
 }
 
-/// §24.2.3.10 steps 7-8: return true once the keys iterator is exhausted;
-/// on the FIRST key absent from this, close the iterator (step 7.b.i.1) and
-/// return false. `next()` is user code, so this's store is re-read every step.
-fn superset_step_loop(
+/// Step other's keys iterator, testing each key against this: return true once
+/// the iterator is exhausted; on the FIRST key whose membership in this equals
+/// `false_when`, close the iterator and return false. Shared by isSupersetOf
+/// (§24.2.3.10 steps 7-8, false_when: False — every yielded key must be in
+/// this) and isDisjointFrom (§24.2.3.8 step 5, false_when: True — none may be).
+/// `next()` is user code, so this's store is re-read every step.
+fn other_step_loop(
   state: State(host),
   ref: Ref,
   iter: JsValue,
   next_fn: JsValue,
+  false_when false_when: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use next, state <- step_keys(state, iter, next_fn)
   case next {
     None -> #(state, Ok(JsBool(True)))
     Some(v) -> {
       let store = read_set_store(state.heap, ref)
-      case ordered_entries.has(store, value.js_to_map_key(v)) {
-        True -> superset_step_loop(state, ref, iter, next_fn)
-        False -> close_keys_iterator_and_answer_false(state, iter)
+      case ordered_entries.has(store, value.js_to_map_key(v)) == false_when {
+        True -> close_keys_iterator_and_answer_false(state, iter)
+        False -> other_step_loop(state, ref, iter, next_fn, false_when)
       }
     }
   }
@@ -619,50 +628,10 @@ fn set_is_disjoint_from(
   use ref, state <- require_set(this, state, "isDisjointFrom")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
   case ordered_entries.size(read_set_store(state.heap, ref)) <= rec.size {
-    True -> disjoint_this_loop(state, ref, rec, 0)
+    True -> this_step_loop(state, ref, rec, 0, True)
     False -> {
       use iter, next_fn, state <- with_keys_iterator(state, rec)
-      disjoint_other_loop(state, ref, iter, next_fn)
-    }
-  }
-}
-
-/// §24.2.3.8 step 4.b: no live record of this may satisfy other.has().
-fn disjoint_this_loop(
-  state: State(host),
-  ref: Ref,
-  rec: SetRecord,
-  cursor: Int,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let store = read_set_store(state.heap, ref)
-  case ordered_entries.next_from(store, cursor) {
-    None -> #(state, Ok(JsBool(True)))
-    Some(#(next_cursor, _key, e)) -> {
-      use in_other, state <- set_record_has(state, rec, e)
-      case in_other {
-        True -> #(state, Ok(JsBool(False)))
-        False -> disjoint_this_loop(state, ref, rec, next_cursor)
-      }
-    }
-  }
-}
-
-/// §24.2.3.8 step 5: no key other yields may be present in this.
-fn disjoint_other_loop(
-  state: State(host),
-  ref: Ref,
-  iter: JsValue,
-  next_fn: JsValue,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use next, state <- step_keys(state, iter, next_fn)
-  case next {
-    None -> #(state, Ok(JsBool(True)))
-    Some(v) -> {
-      let store = read_set_store(state.heap, ref)
-      case ordered_entries.has(store, value.js_to_map_key(v)) {
-        False -> disjoint_other_loop(state, ref, iter, next_fn)
-        True -> close_keys_iterator_and_answer_false(state, iter)
-      }
+      other_step_loop(state, ref, iter, next_fn, True)
     }
   }
 }
