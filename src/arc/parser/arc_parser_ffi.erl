@@ -1,8 +1,9 @@
 -module(arc_parser_ffi).
--export([
-    parse_float/1, decode_string_escapes/1, cook_template_string/1,
-    unsafe_byte_slice/3, drop_bytes/2
-]).
+-export([parse_float/1, decode_string_escapes/1, cook_template_string/1]).
+
+%% Byte-offset slicing of the lexer's source binary lives in arc_bytes_ffi
+%% (unsafe_slice/3, drop_start/2) — one implementation, one out-of-range
+%% policy, shared with the regexp bridge. lexer.gleam calls it directly.
 
 -define(IS_HEX1(C),
     ((C >= $0 andalso C =< $9) orelse
@@ -11,25 +12,6 @@
 -define(IS_HEX4(A, B, C, D),
     (?IS_HEX1(A) andalso ?IS_HEX1(B) andalso ?IS_HEX1(C) andalso ?IS_HEX1(D))).
 
-%% Slice [Start, Start+Len) out of the lexer's source binary and return it as
-%% a Gleam String WITHOUT re-validating UTF-8. The lexer's source binary comes
-%% from an already-valid Gleam String and every offset the lexer produces is a
-%% char boundary, so validation (bit_array:to_string's is_utf8 walk) is pure
-%% overhead. Out-of-range slices return <<>> to match bit_array.slice's
-%% previous checked behavior.
-unsafe_byte_slice(Bin, Start, Len)
-    when Start >= 0, Len >= 0, Start + Len =< byte_size(Bin) ->
-    binary:part(Bin, Start, Len);
-unsafe_byte_slice(_Bin, _Start, _Len) ->
-    <<>>.
-
-%% Tail of the source binary from byte offset Pos. Out-of-range returns <<>>,
-%% matching the previous bit_array.slice-based implementation.
-drop_bytes(Bin, Pos) when Pos >= 0, Pos < byte_size(Bin) ->
-    binary:part(Bin, Pos, byte_size(Bin) - Pos);
-drop_bytes(_Bin, _Pos) ->
-    <<>>.
-
 %% Convert a decimal float/exponent literal to a double.
 %% Returns {ok, Float};
 %%         {error, out_of_range} when the text is valid float syntax but its
@@ -37,20 +19,25 @@ drop_bytes(_Bin, _Pos) ->
 %%             badarg for overflow; underflow rounds to 0.0 and succeeds);
 %%         {error, invalid} for text binary_to_float cannot parse at all.
 %% The tags mirror number.gleam's `Result(Float, FloatParseError)`.
+%%
+%% A JS decimal literal is not quite what erlang:binary_to_float/1 accepts, so
+%% the text is normalized ONCE up front, and both binary_to_float and the
+%% out-of-range classifier see the same normalized text — the classifier's
+%% "does this look like a float?" question is only meaningful about the string
+%% binary_to_float actually rejected. (When they disagreed, ".5" and "1e400"
+%% classified as `invalid` rather than parsing / overflowing.)
 parse_float(S) ->
-    case try_binary_to_float(S) of
+    Norm = normalize(S),
+    case try_binary_to_float(Norm) of
         {ok, F} -> {ok, F};
+        %% binary_to_float raised badarg. If the text is nonetheless
+        %% well-formed float syntax, the only remaining cause is a magnitude
+        %% outside the double range — a valid JS literal (e.g. "1e400") the
+        %% caller must not zero out.
         error ->
-            %% Erlang's binary_to_float requires a decimal point. For inputs
-            %% like "1e10" or "1E20" we insert ".0" before the exponent so the
-            %% string becomes "1.0e10" / "1.0E20" which Erlang accepts.
-            case insert_dot_before_exp(S) of
-                {ok, S2} ->
-                    case try_binary_to_float(S2) of
-                        {ok, F} -> {ok, F};
-                        error -> classify_float_failure(S2)
-                    end;
-                error -> classify_float_failure(S)
+            case is_float_syntax(Norm) of
+                true -> {error, out_of_range};
+                false -> {error, invalid}
             end
     end.
 
@@ -61,13 +48,42 @@ try_binary_to_float(S) ->
         error:badarg -> error
     end.
 
-%% binary_to_float raised badarg. If the text is nonetheless well-formed
-%% float syntax, the only remaining cause is a magnitude outside the double
-%% range — a valid JS literal (e.g. "1.0e400") the caller must not zero out.
-classify_float_failure(S) ->
-    case is_float_syntax(S) of
-        true -> {error, out_of_range};
-        false -> {error, invalid}
+%% Pad a JS decimal literal into the shape binary_to_float accepts:
+%% [+-]?Digits "." Digits ([eE][+-]?Digits)?. JS lets the mantissa omit the
+%% integer part (".5"), the fraction ("1.", "1.e3") or the dot itself
+%% ("1e10"); Erlang requires a dot with a digit on each side. Anything else is
+%% left alone for is_float_syntax/1 to reject.
+normalize(S) ->
+    {Mantissa, Exponent} = split_exponent(S),
+    {Sign, Digits} = take_sign(Mantissa),
+    <<Sign/binary, (pad_mantissa(Digits))/binary, Exponent/binary>>.
+
+%% Split off the exponent at the first e/E, keeping the marker with it
+%% ("1.e3" -> {<<"1.">>, <<"e3">>}); the exponent is <<>> when absent.
+split_exponent(S) ->
+    case binary:match(S, [<<"e">>, <<"E">>]) of
+        {Pos, _Len} ->
+            <<Mantissa:Pos/binary, Exponent/binary>> = S,
+            {Mantissa, Exponent};
+        nomatch ->
+            {S, <<>>}
+    end.
+
+take_sign(<<C, Rest/binary>>) when C =:= $+; C =:= $- -> {<<C>>, Rest};
+take_sign(S) -> {<<>>, S}.
+
+pad_mantissa(<<>>) ->
+    <<>>;
+pad_mantissa(<<".", _/binary>> = M) ->
+    pad_mantissa(<<"0", M/binary>>);
+pad_mantissa(M) ->
+    case binary:match(M, <<".">>) of
+        nomatch -> <<M/binary, ".0">>;
+        _ ->
+            case binary:last(M) of
+                $. -> <<M/binary, "0">>;
+                _ -> M
+            end
     end.
 
 %% [+-]?Digits "." Digits ([eE][+-]?Digits)? — the shape binary_to_float
@@ -97,19 +113,6 @@ take_digits(<<D, Rest/binary>>, _) when D >= $0, D =< $9 ->
     take_digits(Rest, true);
 take_digits(S, Seen) ->
     {Seen, S}.
-
-%% Insert ".0" before the first 'e' or 'E' in a binary, if no '.' precedes it.
-%% Returns {ok, NewBinary} or `error` if no exponent or already has decimal.
-insert_dot_before_exp(S) ->
-    case binary:match(S, [<<"e">>, <<"E">>]) of
-        {Pos, _Len} ->
-            <<Mantissa:Pos/binary, Rest/binary>> = S,
-            case binary:match(Mantissa, <<".">>) of
-                nomatch -> {ok, <<Mantissa/binary, ".0", Rest/binary>>};
-                _ -> error
-            end;
-        nomatch -> error
-    end.
 
 %% ---------------------------------------------------------------------------
 %% Escape decoding: ONE loop, two modes.
@@ -161,9 +164,10 @@ escape_loop(<<>>, _Mode, Acc) ->
     lists:reverse(Acc);
 escape_loop(<<"\\", Rest/binary>>, Mode, Acc) ->
     case Rest of
-        %% Trailing backslash: unreachable in a string literal (it would have
-        %% escaped the closing quote); a NotEscapeSequence in a template.
-        <<>> when Mode =:= string -> lists:reverse(Acc);
+        %% Trailing backslash: a NotEscapeSequence in a template, and
+        %% unreachable in a string literal (it would have escaped the closing
+        %% quote) — so in string mode this is the lexer/decoder disagreement
+        %% decode_string_escapes/1 turns into a loud error, not a truncation.
         <<>> -> throw(invalid_escape);
         <<"b", T/binary>> -> escape_loop(T, Mode, [<<8>> | Acc]);
         <<"t", T/binary>> -> escape_loop(T, Mode, [<<9>> | Acc]);
@@ -204,15 +208,13 @@ escape_loop(<<"\\", Rest/binary>>, Mode, Acc) ->
         <<"0", T/binary>> ->
             case T of
                 <<D, _/binary>> when D >= $0, D =< $9 ->
-                    ok = require_legacy_octal(Mode),
-                    decode_octal(<<"0", T/binary>>, Acc);
+                    decode_octal(<<"0", T/binary>>, Mode, Acc);
                 _ ->
                     escape_loop(T, Mode, [<<0>> | Acc])
             end;
         %% LegacyOctalEscapeSequence \1..\7 — strings only
         <<D, _/binary>> when D >= $1, D =< $7 ->
-            ok = require_legacy_octal(Mode),
-            decode_octal(Rest, Acc);
+            decode_octal(Rest, Mode, Acc);
         %% NonOctalDecimalEscapeSequence \8, \9 — strings only ('\8' === '8')
         <<D, T/binary>> when D =:= $8; D =:= $9 ->
             ok = require_legacy_octal(Mode),
@@ -234,25 +236,29 @@ escape_loop(<<B, Rest/binary>>, Mode, Acc) ->
 require_legacy_octal(string) -> ok;
 require_legacy_octal(template) -> throw(invalid_escape).
 
-%% Read up to 3 octal digits for a legacy octal escape (string mode only). The
-%% resulting code point can be >= 0x80 (e.g. \251 -> U+00A9), so it must go
+%% Read up to 3 octal digits for a legacy octal escape. Only string mode may
+%% contain one, which is what require_legacy_octal/1 enforces on the way in —
+%% Mode is then threaded back into escape_loop rather than assumed, so the
+%% assumption cannot rot into a bug if a caller ever forgets the check.
+%% The resulting code point can be >= 0x80 (e.g. \251 -> U+00A9), so it must go
 %% through encode_codepoint — appending it as a raw byte would produce an
 %% invalid UTF-8 binary inside a value the rest of the engine treats as String.
-decode_octal(<<D1, Rest/binary>>, Acc) when D1 >= $0, D1 =< $7 ->
+decode_octal(<<D1, Rest/binary>>, Mode, Acc) when D1 >= $0, D1 =< $7 ->
+    ok = require_legacy_octal(Mode),
     case Rest of
         <<D2, T/binary>> when D2 >= $0, D2 =< $7 ->
             case T of
                 <<D3, T2/binary>> when D3 >= $0, D3 =< $7, D1 =< $3 ->
                     %% 3 octal digits, valid only if first is 0-3
                     CP = list_to_integer([D1, D2, D3], 8),
-                    escape_loop(T2, string, [encode_codepoint(CP) | Acc]);
+                    escape_loop(T2, Mode, [encode_codepoint(CP) | Acc]);
                 _ ->
                     CP = list_to_integer([D1, D2], 8),
-                    escape_loop(T, string, [encode_codepoint(CP) | Acc])
+                    escape_loop(T, Mode, [encode_codepoint(CP) | Acc])
             end;
         _ ->
             CP = list_to_integer([D1], 8),
-            escape_loop(Rest, string, [encode_codepoint(CP) | Acc])
+            escape_loop(Rest, Mode, [encode_codepoint(CP) | Acc])
     end.
 
 %% Read hex digits up to a closing brace for \u{...}. Requires at least one

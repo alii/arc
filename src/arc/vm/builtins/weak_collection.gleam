@@ -10,8 +10,13 @@
 /// back a *stale* entry dict over mutations that user code made re-entrantly
 /// (a `getOrInsertComputed` callback that `set`s the same key). `require`
 /// hands out only a `WeakRef` — no dict — and `WeakRef` is opaque, so the only
-/// way to reach the entries is `read_data`/`mutate` at the moment of use, both
+/// way to reach the entries is `read_data`/`insert` at the moment of use, both
 /// of which read the live heap slot.
+///
+/// Two proof-carrying tokens keep the discipline honest, both mintable only by
+/// the check that establishes them: a `WeakRef` (from `require`) carries the
+/// `WeakKind` it was proved against, and a `WeakKey` (from `require_weak_key`)
+/// carries a value proved to satisfy §9.13 CanBeHeldWeakly.
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable}
 import arc/vm/heap
@@ -29,21 +34,38 @@ import gleam/option.{type Option, Some}
 ///   - `unwrap` — recognise our own heap slot kind and read its entry dict.
 ///   - `wrap` — rebuild the slot kind around a new entry dict.
 ///   - `type_name` — "WeakMap" / "WeakSet", for TypeError messages.
+///   - `invalid_key_message` — the TypeError thrown when a key/value fails
+///     §9.13 CanBeHeldWeakly. Owned by the kind so `require_weak_key` is the
+///     single place that phrases it.
 pub type WeakKind(host, v) {
   WeakKind(
     unwrap: fn(state.ExoticKind(host)) -> Option(Dict(JsValue, v)),
     wrap: fn(Dict(JsValue, v)) -> state.ExoticKind(host),
     type_name: String,
+    invalid_key_message: String,
   )
 }
 
-/// A `Ref` that has been *proved* to point at a weak collection's heap slot.
+/// A `Ref` that has been *proved* to point at a weak collection's heap slot,
+/// carrying the very `WeakKind` it was proved against.
 ///
 /// Opaque, and constructible only by `require`, so "a ref that isn't a weak
-/// collection" cannot reach `read_data`/`mutate` — the assertions in those
-/// functions are unreachable by construction rather than a silent no-op.
-pub opaque type WeakRef {
-  WeakRef(Ref)
+/// collection" cannot reach `read_data`/`insert` — the assertions in those
+/// functions are unreachable by construction rather than a silent no-op. And
+/// because the kind travels *inside* the ref rather than alongside it as a
+/// second argument, "a WeakSet's ref read with `weak_map.kind()`" is not
+/// expressible either.
+pub opaque type WeakRef(host, v) {
+  WeakRef(ref: Ref, kind: WeakKind(host, v))
+}
+
+/// A `JsValue` that has been *proved* to satisfy §9.13 CanBeHeldWeakly.
+///
+/// Opaque, and constructible only by `require_weak_key`, so `insert` — the only
+/// way to add an entry — cannot be reached with an ungated key: forgetting the
+/// gate is a compile error, not a spec violation.
+pub opaque type WeakKey {
+  WeakKey(JsValue)
 }
 
 /// RequireInternalSlot(this, [[WeakMapData]] / [[WeakSetData]]) — proves `this`
@@ -60,7 +82,8 @@ pub fn require(
   this: JsValue,
   state: State(host),
   method: String,
-  cont: fn(WeakRef, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(WeakRef(host, v), State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use _data, ref, state <- helpers.require_brand(
     this,
@@ -74,19 +97,37 @@ pub fn require(
     },
     kind.unwrap,
   )
-  cont(WeakRef(ref), state)
+  cont(WeakRef(ref:, kind:), state)
+}
+
+/// ES2024 §9.13 CanBeHeldWeakly — proves `key` may be held weakly and hands
+/// over a `WeakKey`, or throws the kind's TypeError.
+///
+/// The only way to mint a `WeakKey`, and `insert` takes nothing else, so every
+/// insertion path is gated whether or not its author remembered to gate it.
+///
+/// CPS-style — `use key, state <- require_weak_key(kind, state, key)`.
+pub fn require_weak_key(
+  kind: WeakKind(host, v),
+  state: State(host),
+  key: JsValue,
+  cont: fn(WeakKey, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case helpers.can_be_held_weakly(state, key) {
+    True -> cont(WeakKey(key), state)
+    False -> state.type_error(state, kind.invalid_key_message)
+  }
 }
 
 /// The collection's *live* entry dict, read straight from the heap.
 ///
 /// Call this at the moment the entries are needed — never before running user
 /// code — so a re-entrant mutation is always visible.
-pub fn read_data(
-  kind: WeakKind(host, v),
-  state: State(host),
-  weak_ref: WeakRef,
-) -> Dict(JsValue, v) {
-  let WeakRef(ref) = weak_ref
+pub fn read_data(state: State(host), weak_ref: WeakRef(host, v)) -> Dict(
+  JsValue,
+  v,
+) {
+  let WeakRef(ref:, kind:) = weak_ref
   // A heap slot's kind never changes after allocation, and a `WeakRef` can only
   // come from `require`, so anything else here is a wiring bug — crash rather
   // than silently reporting an empty collection.
@@ -103,16 +144,30 @@ pub fn read_data(
 /// hand back a dict it captured before running user code, so a re-entrant
 /// mutation (a `getOrInsertComputed` callback that sets the same key) can never
 /// be silently reverted by a stale write.
-pub fn mutate(
-  kind: WeakKind(host, v),
+///
+/// Private: the only mutations a weak collection admits are `insert` (which
+/// demands a proved `WeakKey`) and `delete` below.
+fn mutate(
   state: State(host),
-  weak_ref: WeakRef,
+  weak_ref: WeakRef(host, v),
   update: fn(Dict(JsValue, v)) -> Dict(JsValue, v),
 ) -> State(host) {
-  let WeakRef(ref) = weak_ref
-  let data = read_data(kind, state, weak_ref)
+  let WeakRef(ref:, kind:) = weak_ref
+  let data = read_data(state, weak_ref)
   let heap = heap.update_kind(state.heap, ref, kind.wrap(update(data)))
   State(..state, heap:)
+}
+
+/// Add (or overwrite) an entry, re-reading the live entry dict at the moment of
+/// the write. Requires a `WeakKey`, so the CanBeHeldWeakly gate has provably run.
+pub fn insert(
+  state: State(host),
+  weak_ref: WeakRef(host, v),
+  key: WeakKey,
+  val: v,
+) -> State(host) {
+  let WeakKey(key) = key
+  mutate(state, weak_ref, dict.insert(_, key, val))
 }
 
 /// ES2024 §24.3.3.4 WeakMap.prototype.has / §24.4.3.3 WeakSet.prototype.has
@@ -127,7 +182,7 @@ pub fn has(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require(kind, this, state, "has")
   let key = first_arg_or_undefined(args)
-  #(state, Ok(JsBool(dict.has_key(read_data(kind, state, ref), key))))
+  #(state, Ok(JsBool(dict.has_key(read_data(state, ref), key))))
 }
 
 /// ES2024 §24.3.3.3 WeakMap.prototype.delete / §24.4.3.2 WeakSet.prototype.delete
@@ -139,8 +194,8 @@ pub fn delete(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require(kind, this, state, "delete")
   let key = first_arg_or_undefined(args)
-  case dict.has_key(read_data(kind, state, ref), key) {
-    True -> #(mutate(kind, state, ref, dict.delete(_, key)), Ok(JsBool(True)))
+  case dict.has_key(read_data(state, ref), key) {
+    True -> #(mutate(state, ref, dict.delete(_, key)), Ok(JsBool(True)))
     False -> #(state, Ok(JsBool(False)))
   }
 }

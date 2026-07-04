@@ -12,6 +12,16 @@
 %% Consumers: src/arc/vm/builtins/string.gleam and src/arc/vm/ops/object.gleam
 %% (StringGetOwnProperty / "length").
 %%
+%% INVALID UTF-8 POLICY (the one policy, for every walker below): a JS string
+%% is always well-formed UTF-8 — every construction path maps lone surrogates
+%% to U+FFFD (arc_parser_ffi:encode_codepoint, char_codes_to_string,
+%% from_code_point_loop) — so a bad byte reaching here means the boundary that
+%% produced the string is broken. Every walker therefore has NO per-byte
+%% fallback clause and crashes with function_clause on one, at the string it
+%% was handed, instead of quietly counting it as a codepoint (cp_length,
+%% cp_off, cp_explode used to) or reporting end-of-string (char_at_skip did) —
+%% three answers to the same question, none of them a bug report.
+%%
 %% TODO(Deviation): still not fully spec-correct — JS indexes by UTF-16
 %% code unit, so astral-plane chars (U+10000+) should count as 2 indices.
 %% A full fix needs UTF-16 string storage. Codepoint indexing matches
@@ -62,10 +72,12 @@ string_codepoint_at(_, _) -> none.
 
 %% Walk N codepoints forward, returning the integer codepoint there plus its
 %% byte offset (for the cursor cache). Off accumulates from the caller's base.
+%% Running out of string is `none` (an out-of-range index); an invalid byte is
+%% not a clause here — see the invalid-UTF-8 policy above.
 char_at_skip(<<C/utf8, _/binary>>, 0, Off) -> {C, Off};
 char_at_skip(<<C/utf8, Rest/binary>>, N, Off) ->
     char_at_skip(Rest, N - 1, Off + cp_byte_size(C));
-char_at_skip(_, _, _) -> none.
+char_at_skip(<<>>, _, _) -> none.
 
 %% UTF-8 encoded byte length of a codepoint.
 cp_byte_size(C) when C < 16#80 -> 1;
@@ -90,8 +102,7 @@ cp_length(<<W:56, Rest/binary>>, N)
     when W band 16#80808080808080 =:= 0 ->
     cp_length(Rest, N + 7);
 cp_length(<<>>, N) -> N;
-cp_length(<<_/utf8, Rest/binary>>, N) -> cp_length(Rest, N + 1);
-cp_length(<<_, Rest/binary>>, N) -> cp_length(Rest, N + 1).
+cp_length(<<_/utf8, Rest/binary>>, N) -> cp_length(Rest, N + 1).
 
 %% O(n) StringIndexOf: skip From codepoints to a byte offset, run
 %% binary:match (Boyer-Moore BIF) over the remaining scope, convert the
@@ -134,8 +145,7 @@ string_cp_drop(Bin, _) -> Bin.
 %% Split into single-codepoint binaries (String.prototype.split("")).
 string_cp_explode(Bin) -> cp_explode(Bin, []).
 cp_explode(<<>>, Acc) -> lists:reverse(Acc);
-cp_explode(<<C/utf8, Rest/binary>>, Acc) -> cp_explode(Rest, [<<C/utf8>> | Acc]);
-cp_explode(<<B, Rest/binary>>, Acc) -> cp_explode(Rest, [<<B>> | Acc]).
+cp_explode(<<C/utf8, Rest/binary>>, Acc) -> cp_explode(Rest, [<<C/utf8>> | Acc]).
 
 %% Byte offset after skipping N codepoints (clamps at end). Alloc-free.
 cp_byte_offset(Bin, N) -> cp_off(Bin, N, 0).
@@ -147,8 +157,10 @@ cp_byte_offset(Bin, N) -> cp_off(Bin, N, 0).
 %% The W:56 clause batches 7 ASCII bytes per step (high bit of every byte
 %% clear means 7 one-byte codepoints; 56 bits stays an immediate small
 %% int — 64 would allocate a bignum per step). Non-ASCII steps skip by
-%% UTF-8 lead byte class without decoding the codepoint. Invalid lead
-%% bytes advance one byte, matching cp_length's per-byte fallback.
+%% UTF-8 lead byte class without decoding the codepoint. An invalid lead byte
+%% (or a truncated multibyte sequence) matches no clause and crashes — see the
+%% invalid-UTF-8 policy at the top of the module. The two terminal clauses are
+%% "ran off the end" (clamp) and "skipped them all", nothing else.
 cp_off(<<W:56, R/binary>>, N, Off)
     when N >= 7, W band 16#80808080808080 =:= 0 ->
     cp_off(R, N - 7, Off + 7);
@@ -160,5 +172,5 @@ cp_off(<<C, _, _, R/binary>>, N, Off) when N >= 1, C >= 16#E0, C < 16#F0 ->
     cp_off(R, N - 1, Off + 3);
 cp_off(<<C, _, _, _, R/binary>>, N, Off) when N >= 1, C >= 16#F0 ->
     cp_off(R, N - 1, Off + 4);
-cp_off(<<_, R/binary>>, N, Off) when N >= 1 -> cp_off(R, N - 1, Off + 1);
-cp_off(_, _, Off) -> Off.
+cp_off(<<>>, _N, Off) -> Off;
+cp_off(_Bin, 0, Off) -> Off.

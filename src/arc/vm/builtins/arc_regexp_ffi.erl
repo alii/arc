@@ -7,20 +7,16 @@
 %%     complement over ranges), simple case folding, and rendering a set back
 %%     to a PCRE class. Pure, no `re` dependency.
 %%   arc_bytes_ffi     — byte-offset UTF-8 slicing, shared with the lexer.
+%%     re:run returns byte indices, so the Gleam caller slices byte-wise; it
+%%     calls arc_bytes_ffi directly (unsafe_slice/3, drop_start/2,
+%%     next_char_boundary/2) rather than through forwarders here, so there is
+%%     one name and one out-of-range policy for those three functions.
 -module(arc_regexp_ffi).
--export([regexp_exec_info/5,
-         byte_slice/3, byte_drop_start/2, next_char_boundary/2]).
+-export([regexp_exec_info/5]).
 
 %% The codepoint-set algebra module, abbreviated: it appears often enough in
 %% the v-mode class evaluator that spelling it out would hide the code.
 -define(CS, arc_regex_charset).
-
-%% Byte-offset helpers for the Gleam caller. re:run returns byte indices, so
-%% slicing must be byte-based (grapheme-based slicing would be both wrong and
-%% O(offset+len)). One implementation, one out-of-range policy: arc_bytes_ffi.
-byte_slice(Bin, Start, Len) -> arc_bytes_ffi:unsafe_slice(Bin, Start, Len).
-byte_drop_start(Bin, Start) -> arc_bytes_ffi:drop_start(Bin, Start).
-next_char_boundary(Bin, Pos) -> arc_bytes_ffi:next_char_boundary(Bin, Pos).
 
 %% Convert JS flags to re:compile options
 flags_to_opts(Flags) ->

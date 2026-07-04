@@ -1,8 +1,8 @@
 %% Byte-offset UTF-8 utilities, shared by everything that indexes into a
-%% source or subject binary by BYTE offset rather than by grapheme:
-%% arc_parser_ffi (the lexer's source binary) and arc_regexp_ffi (re:run's
-%% byte-index captures). Both used to carry their own copy of these three
-%% functions, with different out-of-range behaviour.
+%% source or subject binary by BYTE offset rather than by grapheme: the
+%% lexer (lexer.gleam, over the source binary) and the regexp bridge
+%% (regexp.gleam, over re:run's byte-index captures). Both call straight in
+%% here — no module in between renames or re-implements these functions.
 %%
 %% OUT-OF-RANGE POLICY (the one policy, for all callers): every offset and
 %% length is CLAMPED into [0, byte_size(Bin)] and never raises. Callers pass
@@ -35,9 +35,11 @@ drop_start(Bin, Start) ->
 %% the middle of a multibyte character, so byte-offset loops that step
 %% forward (AdvanceStringIndex, ES2026 22.2.7.3) must use this instead of
 %% Pos + 1. May return a value past byte_size(Bin) (e.g. Pos at the last
-%% character), which callers use as their loop-termination signal.
+%% character), which callers use as their loop-termination signal. A negative
+%% Pos is clamped to 0 like every other offset here — binary:at/2 would badarg
+%% on it, and the whole point of this module is that no offset raises.
 next_char_boundary(Bin, Pos) ->
-    next_boundary(Bin, Pos + 1, byte_size(Bin)).
+    next_boundary(Bin, max(Pos + 1, 0), byte_size(Bin)).
 
 next_boundary(_Bin, P, Size) when P >= Size -> P;
 next_boundary(Bin, P, Size) ->
