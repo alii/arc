@@ -11,9 +11,7 @@
 //// builtins + entry directly.
 
 import arc/compiler
-import arc/internal/erlang
 import arc/module
-import arc/module/graph
 import arc/module_host
 import arc/parser
 import arc/vm/builtins
@@ -459,13 +457,13 @@ pub fn eval_module_with(
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(
-    // The graph walk speaks in rendered messages; the embedder speaks in
-    // `module_host.ModuleLoadError` categories. Render exactly here.
+    // The embedder's typed `ModuleLoadError` categories flow straight into the
+    // graph walk — nothing along the way sees a rendered message.
     module.compile_bundle_with_hosts(
       specifier,
       source,
-      module_host.rendered_resolve(resolve),
-      module_host.rendered_load(load),
+      resolve,
+      load,
       engine.host_modules,
     )
     |> result.map_error(ModuleCompileError),
@@ -545,52 +543,62 @@ pub fn call_with(
 // Serialization
 // ----------------------------------------------------------------------------
 
-/// The `#(tag, version, …)` envelope every `serialize` payload is wrapped in.
-/// Bump `snapshot_version` whenever the shape of the serialized state changes;
-/// `deserialize` then rejects older snapshots as `IncompatibleSnapshot`
-/// instead of misreading them.
-const snapshot_tag = "arc-engine"
-
-// Version history:
-//   1 — initial versioned envelope.
-//   2 — `value.SymbolId`'s well-known variant carries a `WellKnown` sum
-//       member instead of an Int, changing the serialized term shape of
-//       every well-known symbol in the heap.
-const snapshot_version = 2
+/// The version stamped into the plain-bytes header `arc_snapshot_ffi` wraps
+/// every `serialize` payload in (`<<"arc-engine", Version:32, Term/binary>>`).
+/// Bump it whenever the shape of the serialized state changes; `deserialize`
+/// then rejects older snapshots as `IncompatibleSnapshot` — by matching the
+/// header, before the term is decoded — instead of misreading them.
+///
+/// Version history:
+///   1 — initial versioned envelope.
+///   2 — `value.SymbolId`'s well-known variant carries a `WellKnown` sum
+///       member instead of an Int, changing the serialized term shape of
+///       every well-known symbol in the heap.
+///   3 — the tag/version envelope moved OUT of the term into a plain-bytes
+///       header, so a foreign binary is rejected before it is decoded.
+const snapshot_version = 3
 
 /// Why `deserialize` rejected a binary.
 pub type DeserializeError {
-  /// The bytes are not an Erlang external-term payload at all (truncated,
-  /// corrupted, or never produced by `serialize`).
+  /// The bytes do not carry the snapshot header at all — random bytes, a bare
+  /// Erlang term, or an unaligned bit array. Nothing was decoded.
   MalformedBinary
-  /// The bytes decoded to a term, but not to a snapshot envelope this build
-  /// understands: wrong tag, unknown version, or a pre-versioned / foreign
-  /// shape.
+  /// The bytes ARE a snapshot container, but not one this build understands:
+  /// a different `snapshot_version`, or a corrupt/forged payload behind a
+  /// valid header.
   IncompatibleSnapshot
 }
 
-/// Decode a snapshot binary into its versioned envelope, or say why not.
-/// Implemented in Erlang so that both failure modes of `binary_to_term` —
-/// garbage bytes (badarg) and a well-formed term of the wrong shape — are
-/// caught there and can never surface in Gleam as a badmatch.
+/// Wrap a snapshot payload in the plain-bytes header. Monomorphic on the
+/// payload — Erlang's `term_to_binary` is not exposed to the rest of the tree.
+@external(erlang, "arc_snapshot_ffi", "encode")
+fn encode_snapshot(
+  version: Int,
+  snapshot: #(Heap(host), Builtins, Ref),
+) -> BitArray
+
+/// Unwrap a snapshot binary, or say why not. Implemented in Erlang so the
+/// header check happens on the RAW BYTES: `binary_to_term` only ever runs on a
+/// payload already proved to carry our tag and our exact version, and neither
+/// of its failure modes (badarg on garbage, a term of the wrong shape) can
+/// surface in Gleam as a badmatch.
 @external(erlang, "arc_snapshot_ffi", "decode")
 fn decode_snapshot(
+  version: Int,
   data: BitArray,
-) -> Result(#(String, Int, Heap(host), Builtins, Ref), DeserializeError)
+) -> Result(#(Heap(host), Builtins, Ref), DeserializeError)
 
 /// Serialize the entire engine state to a binary.
 ///
-/// The payload is wrapped in a versioned envelope so `deserialize` can tell a
-/// stale or foreign binary apart from a current one.
+/// The payload is wrapped in a versioned header so `deserialize` can tell a
+/// stale or foreign binary apart from a current one without decoding it.
 ///
 /// Host function closures stored in the heap will NOT survive — their Ref
 /// slots persist but the Erlang closure data is lost. Embedders must
 /// re-register host functions after `deserialize`. `host_hooks` are closures
 /// too and are deliberately NOT serialized.
 pub fn serialize(engine: Engine(host)) -> BitArray {
-  erlang.term_to_binary(#(
-    snapshot_tag,
-    snapshot_version,
+  encode_snapshot(snapshot_version, #(
     engine.heap,
     engine.builtins,
     engine.global,
@@ -599,30 +607,27 @@ pub fn serialize(engine: Engine(host)) -> BitArray {
 
 /// Restore an engine from a binary produced by `serialize`.
 ///
-/// Fails with `MalformedBinary` if the bytes aren't a serialized term at all,
-/// and with `IncompatibleSnapshot` if they decode to something other than a
-/// version-`snapshot_version` engine snapshot (e.g. a snapshot written by an
-/// older or newer build).
+/// Fails with `MalformedBinary` if the bytes carry no snapshot header, and with
+/// `IncompatibleSnapshot` if they do but name a different `snapshot_version`
+/// (e.g. a snapshot written by an older or newer build) or hide a corrupt
+/// payload behind it.
 ///
 /// The restored engine carries `state.default_host_hooks()` and no host modules
 /// — both hold embedder closures that cannot round-trip through `serialize`.
 /// Re-install hooks with `with_host_hooks` and host modules with
 /// `register_host_module`, alongside re-registering host functions.
 pub fn deserialize(data: BitArray) -> Result(Engine(host), DeserializeError) {
-  use #(tag, version, heap, builtins, global) <- result.try(decode_snapshot(
+  use #(heap, builtins, global) <- result.map(decode_snapshot(
+    snapshot_version,
     data,
   ))
-  case tag == snapshot_tag && version == snapshot_version {
-    True ->
-      Ok(Engine(
-        heap:,
-        builtins:,
-        global:,
-        host_hooks: state.default_host_hooks(),
-        host_modules: dict.new(),
-      ))
-    False -> Error(IncompatibleSnapshot)
-  }
+  Engine(
+    heap:,
+    builtins:,
+    global:,
+    host_hooks: state.default_host_hooks(),
+    host_modules: dict.new(),
+  )
 }
 
 // ----------------------------------------------------------------------------
@@ -692,15 +697,8 @@ fn outcome_of(settled: Result(JsValue, JsValue)) -> Outcome {
 /// Prefix `module.compile_bundle_error_message`'s prose with the pipeline
 /// phase that failed.
 fn module_compile_error_message(err: module.CompileBundleError) -> String {
-  let phase = case err {
-    module.GraphError(error: graph.ParseFailed(..)) -> "SyntaxError: "
-    module.GraphError(error: graph.ResolveFailed(..))
-    | module.GraphError(error: graph.LoadFailed(..)) -> "ResolutionError: "
-    // A source-phase import is a link-time SyntaxError (§16.2.1.7.2).
-    module.GraphError(error: graph.SourcePhaseUnsupported(..)) -> "LinkError: "
-    module.CompileError(..) -> "CompileError: "
-  }
-  phase <> module.compile_bundle_error_message(err)
+  module.compile_bundle_error_phase(err)
+  <> module.compile_bundle_error_message(err)
 }
 
 /// Prefix `module.error_message`'s prose with the pipeline phase that failed.

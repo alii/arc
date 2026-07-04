@@ -20,6 +20,7 @@ import arc/compiler
 import arc/host
 import arc/internal/path
 import arc/module
+import arc/module/load_error
 import arc/module_host
 import arc/parser
 import arc/vm/builtins
@@ -733,14 +734,7 @@ fn do_run_module(
   ))
   let global_object = env.global_object
 
-  case
-    module.compile_bundle(
-      path,
-      source,
-      module_host.rendered_resolve(test262_resolve),
-      module_host.rendered_load(test262_load),
-    )
-  {
+  case module.compile_bundle(path, source, test262_resolve, test262_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
     Ok(bundle) -> {
       // Evaluate through the realm-wide module registry so a dynamic
@@ -792,8 +786,7 @@ fn test262_resolve(
 ) -> Result(String, module_host.ModuleLoadError) {
   case path.resolve_specifier(raw_specifier, parent_specifier) {
     path.PathSpecifier(resolved) -> Ok(resolved)
-    path.BareSpecifier(bare) ->
-      Error(module_host.UnsupportedBareSpecifier(bare))
+    path.BareSpecifier(bare) -> Error(load_error.UnsupportedBareSpecifier(bare))
   }
 }
 
@@ -803,9 +796,9 @@ fn test262_load(
 ) -> Result(String, module_host.ModuleLoadError) {
   case simplifile.read(resolved) {
     Ok(source) -> Ok(source)
-    Error(simplifile.Enoent) -> Error(module_host.NotFound(resolved))
+    Error(simplifile.Enoent) -> Error(load_error.NotFound(resolved))
     Error(err) ->
-      Error(module_host.ReadFailed(resolved, simplifile.describe_error(err)))
+      Error(load_error.ReadFailed(resolved, simplifile.describe_error(err)))
   }
 }
 

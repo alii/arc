@@ -4,6 +4,7 @@
 import arc/esm
 import arc/link
 import arc/module/graph
+import arc/module/load_error
 import gleam/dict.{type Dict}
 import gleam/list
 
@@ -36,7 +37,7 @@ fn graph_of(
   let load = fn(specifier: esm.Resolved) {
     case dict.get(sources, esm.resolved_text(specifier)) {
       Ok(src) -> Ok(src)
-      Error(Nil) -> Error("no such module: " <> esm.resolved_text(specifier))
+      Error(Nil) -> Error(load_error.NotFound(esm.resolved_text(specifier)))
     }
   }
   let assert Ok(g) =

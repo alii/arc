@@ -12,8 +12,10 @@ set_extend_262(Hook) ->
     erlang:put(arc_extend_262, Hook),
     nil.
 
+%% An unregistered hook is a MISSING VALUE, not a failed operation, so this
+%% answers Gleam's `Option` (`{some, Hook} | none`) rather than a `Result`.
 get_extend_262() ->
     case erlang:get(arc_extend_262) of
-        undefined -> {error, nil};
-        Hook -> {ok, Hook}
+        undefined -> none;
+        Hook -> {some, Hook}
     end.

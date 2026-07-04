@@ -51,20 +51,29 @@ float_same_term(A, B) -> A =:= B.
 setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) ->
     list_to_tuple(locals_env(Env, Seeds, Args, Arity, LocalCount, Undef)).
 
-%% Non-arrow locals build: the emitter allocates owned lexical slots
-%% contiguously after the captures in canonical order
-%% [this, active_func, home_object, new_target]. Ordinary functions own all
-%% four, so the hot clause writes the seed values inline — no intermediate
-%% seeds list. Script/eval/module bodies own a subset (e.g. RefThis only);
-%% they fall through to the generic per-Some path. LexicalSlots arrives as
-%% the Gleam record {lexical_slots, This, ActiveFunc, HomeObject, NewTarget}
-%% with {some, SlotIdx} | none fields.
-setup_locals_seeded(Env, {lexical_slots, {some, _}, {some, _}, {some, _}, {some, _}},
+%% Non-arrow locals build. LexicalSlots arrives as one of the Gleam variants
+%% of arc/vm/opcode.LexicalSlots:
+%%   {owned_lexical_slots, Base}                       — all four owned,
+%%       contiguous, in canonical order [this, active_func, home_object,
+%%       new_target] starting at Base (== length(Env)). This is the ordinary
+%%       function case; the hot clause writes the seeds inline right after
+%%       the env values, no intermediate seeds list. The type — not a
+%%       convention — guarantees the layout this clause assumes.
+%%   {captured_lexical_slots, LT, LA, LH, LN}          — subset inherited via
+%%       captures ({some, SlotIdx} | none each).
+%%   no_lexical_slots                                  — none at all.
+%% The latter two fall through to the generic per-Some path.
+setup_locals_seeded(Env, {owned_lexical_slots, _Base},
                     This, FnObj, Home, NT, Args, Arity, LocalCount, Undef)
         when LocalCount >= 4 ->
     list_to_tuple(locals_env4(Env, This, FnObj, Home, NT, Args, Arity, LocalCount, Undef));
-setup_locals_seeded(Env, {lexical_slots, LT, LA, LH, LN},
+setup_locals_seeded(Env, Lexical,
                     This, FnObj, Home, NT, Args, Arity, LocalCount, Undef) ->
+    {LT, LA, LH, LN} = case Lexical of
+        {owned_lexical_slots, B} -> {{some, B}, {some, B + 1}, {some, B + 2}, {some, B + 3}};
+        {captured_lexical_slots, T, A, H, N} -> {T, A, H, N};
+        no_lexical_slots -> {none, none, none, none}
+    end,
     S0 = seed(LN, NT, []),
     S1 = seed(LH, Home, S0),
     S2 = seed(LA, FnObj, S1),
@@ -128,15 +137,16 @@ next_prop_seq() ->
 %% seq (ES §10.1.11 — an updated key keeps its enumeration position).
 %% Mirrors the Gleam representation: a properties Dict is a bare Erlang map
 %% and value.DataProperty is {data_property, Value, Writable, Enumerable,
-%% Configurable, Seq}. Returns {ok, NewProps}, or {error, nil} when the key
-%% is absent, non-writable, or an accessor — callers fall back to the full
-%% [[Set]] path.
+%% Configurable, Seq}. Returns {some, NewProps}, or `none` when the key is
+%% absent, non-writable, or an accessor — callers fall back to the full [[Set]]
+%% path. That is a MISSING VALUE, not a failed operation, so it speaks Gleam's
+%% `Option` (like heap_read/2), never a `Result(_, Nil)`.
 put_existing_writable_data(Props, Key, Val) ->
     case Props of
         #{Key := {data_property, _, true, E, C, S}} ->
-            {ok, Props#{Key := {data_property, Val, true, E, C, S}}};
+            {some, Props#{Key := {data_property, Val, true, E, C, S}}};
         _ ->
-            {error, nil}
+            none
     end.
 
 %% §7.3.5 CreateDataProperty on an ordinary property table: insert a

@@ -17,6 +17,7 @@
 
 import arc/module
 import arc/module/graph
+import arc/module/load_error
 import arc/module/registry
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
@@ -24,12 +25,11 @@ import arc/vm/exec/dynamic_import
 import arc/vm/heap
 import arc/vm/internal/job_queue
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/value.{type JsValue, type Ref, JsObject, JsString, JsUndefined}
+import arc/vm/value.{type JsValue, type Ref, JsObject, JsUndefined}
 import gleam/dict
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
-import gleam/result
 import gleam/set
 import gleam/string
 
@@ -39,43 +39,17 @@ import gleam/string
 // the module evaluator so a deferred-namespace trigger and a dynamic import
 // observe the same state.
 
-/// Why an embedder's loader could not produce a module. A CATEGORY, never a
-/// pre-worded message: the wording lives in `module_load_error_message`, and
-/// because failure has its own type a loader can no longer return its error
-/// text as an `Ok` value.
-pub type ModuleLoadError {
-  /// Nothing exists at this resolved specifier.
-  NotFound(specifier: String)
-  /// This graph is not allowed to import anything.
-  ImportsForbidden(specifier: String)
-  /// The module exists but its source could not be read (permissions, it is a
-  /// directory, an I/O error). `reason` is the host's own description.
-  ReadFailed(specifier: String, reason: String)
-  /// A raw specifier could not be mapped to a module identity.
-  ResolveFailed(raw: String, referrer: String)
-  /// A bare specifier ("fs", a URL) this loader gives no meaning to — NOT a
-  /// missing file: no path was ever probed.
-  UnsupportedBareSpecifier(specifier: String)
-}
+/// Why an embedder's loader could not produce a module — re-exported from
+/// `arc/module/load_error`, which the runtime-free graph walk and the AOT
+/// compiler share, so the SAME categories flow from a loader all the way to
+/// `module.compile_bundle_error_message` without ever passing through a
+/// rendered string.
+pub type ModuleLoadError =
+  load_error.ModuleLoadError
 
-/// The ONE place a `ModuleLoadError` is worded. Every JS-visible resolve/load
-/// rejection message is rendered here, so a loader can no longer invent a
-/// category — a self-contradicting "file not found: ./lib (is a directory)"
-/// is unrepresentable.
+/// The ONE place a `ModuleLoadError` becomes prose (see `load_error.message`).
 pub fn module_load_error_message(error: ModuleLoadError) -> String {
-  case error {
-    NotFound(specifier:) -> "Cannot find module '" <> specifier <> "'"
-    ImportsForbidden(specifier:) ->
-      "Cannot import '" <> specifier <> "': imports are not allowed here"
-    ReadFailed(specifier:, reason:) ->
-      "Cannot read module '" <> specifier <> "': " <> reason
-    ResolveFailed(raw:, referrer:) ->
-      "Cannot resolve module '" <> raw <> "' from '" <> referrer <> "'"
-    UnsupportedBareSpecifier(specifier:) ->
-      "Cannot resolve bare specifier '"
-      <> specifier
-      <> "': this loader resolves paths only"
-  }
+  load_error.message(error)
 }
 
 /// Resolve a raw specifier against its referrer to the module's canonical
@@ -86,25 +60,6 @@ pub type ResolveFn =
 /// Read the source of a resolved specifier.
 pub type LoadFn =
   fn(String) -> Result(String, ModuleLoadError)
-
-/// Adapt a typed resolver to the plain-string callback the graph walk takes:
-/// that `String` error is an ALREADY-RENDERED message (`graph.ResolveFailed`
-/// only ever carries text to print), never a category to re-inspect.
-pub fn rendered_resolve(
-  resolve: ResolveFn,
-) -> fn(String, String) -> Result(String, String) {
-  fn(raw, referrer) {
-    resolve(raw, referrer) |> result.map_error(module_load_error_message)
-  }
-}
-
-/// Adapt a typed loader to the plain-string callback the graph walk takes —
-/// see `rendered_resolve`.
-pub fn rendered_load(load: LoadFn) -> fn(String) -> Result(String, String) {
-  fn(specifier) {
-    load(specifier) |> result.map_error(module_load_error_message)
-  }
-}
 
 /// Build the dynamic-import host hook. `referrer` is the path of the entry
 /// script/module (relative specifiers resolve against it when no module body
@@ -142,71 +97,6 @@ pub fn install_import_hook(
   #(heap.root(h, hook_ref), JsObject(hook_ref))
 }
 
-/// One dynamic-import hook invocation, parsed EXACTLY once from the
-/// positional argument list the VM's DynamicImport / DynamicImportDefer
-/// opcodes build (see `arc/vm/exec/dynamic_import`). Existence of a value of
-/// this type means the call was well-formed: the specifier is a real string
-/// (never a silently-defaulted `""`), and a `Defer` phase always carries both
-/// resolving functions.
-type ImportCall {
-  ImportCall(specifier: String, referrer: String, phase: ImportPhase)
-}
-
-/// Which HostLoadImportedModule phase was requested.
-type ImportPhase {
-  /// `import(specifier)`: load, link and EVALUATE the graph. The hook's
-  /// return value (the namespace, or an in-flight namespace promise) settles
-  /// the import promise via the standard reaction machinery.
-  Eager
-  /// `import.defer(specifier)` (tc39/proposal-defer-import-eval): load and
-  /// LINK only. The hook OWNS the import promise's settlement through these
-  /// resolving functions (see `dynamic_import.DeferHookOutcome`) and its
-  /// return value carries nothing. The constructor requires BOTH functions:
-  /// a defer call without a capability is unrepresentable.
-  Defer(resolve_fn: JsValue, reject_fn: JsValue)
-}
-
-/// Parse the hook's positional argument list into an `ImportCall`, or the
-/// TypeError message to reject the import promise with. This is the ONLY
-/// place the arg-list encoding is read; a missing or non-string specifier,
-/// or a defer phase without its promise capability, is an immediate
-/// rejection — never a silent fallback.
-fn parse_import_call(
-  args: List(JsValue),
-  entry_referrer: String,
-) -> Result(ImportCall, String) {
-  let defer_marker = dynamic_import.defer_phase_marker
-  case args {
-    [] -> Error("import hook called without a specifier")
-    [JsString(specifier), ..rest] -> {
-      // The referencingScriptOrModule captured at the ImportCall site (the
-      // module whose body contained the import()); a script-level import()
-      // has no active module and falls back to the realm's entry referrer.
-      let referrer = case rest {
-        [JsString(referrer), ..] -> referrer
-        _ -> entry_referrer
-      }
-      case rest {
-        // Eager: at most the referrer follows the specifier.
-        [] | [_] -> Ok(ImportCall(specifier:, referrer:, phase: Eager))
-        // Defer: the phase marker AND both resolving functions, together.
-        [_, JsString(phase), resolve_fn, reject_fn] if phase == defer_marker ->
-          Ok(ImportCall(
-            specifier:,
-            referrer:,
-            phase: Defer(resolve_fn:, reject_fn:),
-          ))
-        [_, JsString(phase), ..] if phase == defer_marker ->
-          Error(
-            "import hook called with the defer phase but no promise capability",
-          )
-        _ -> Error("import hook called with unexpected arguments")
-      }
-    }
-    [_, ..] -> Error("import hook called with a non-string specifier")
-  }
-}
-
 /// The hook body: parse the call, then load, compile, link and evaluate (or,
 /// for `import.defer`, link) the requested module graph. For `Eager` the
 /// returned `Ok` value settles the import promise; for `Defer` the hook
@@ -220,16 +110,22 @@ fn import_module(
   resolve: ResolveFn,
   load: LoadFn,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case parse_import_call(args, entry_referrer) {
-    Error(message) -> state.type_error(state, message)
-    Ok(ImportCall(specifier:, referrer:, phase:)) ->
+  // The argument encoding is `arc/vm/exec/dynamic_import`'s — decoded there,
+  // beside the encoder that built it, so the two cannot drift.
+  case dynamic_import.parse_hook_args(args) {
+    Error(err) ->
+      state.type_error(state, dynamic_import.hook_arg_error_message(err))
+    Ok(dynamic_import.HookCall(specifier:, referrer:, phase:)) -> {
+      // A script-level import() has no active module: fall back to the realm's
+      // entry referrer.
+      let referrer = option.unwrap(referrer, entry_referrer)
       case resolve(specifier, referrer) {
-        Error(load_error) ->
+        Error(err) ->
           // Resolution failure → TypeError (host resolution error).
-          state.type_error(state, module_load_error_message(load_error))
+          state.type_error(state, module_load_error_message(err))
         Ok(resolved) ->
           case phase {
-            Defer(resolve_fn:, reject_fn:) ->
+            dynamic_import.DeferPhase(resolve_fn:, reject_fn:) ->
               defer_import_module(
                 state,
                 resolved,
@@ -238,9 +134,11 @@ fn import_module(
                 resolve_fn,
                 reject_fn,
               )
-            Eager -> eager_import_module(state, resolved, resolve, load)
+            dynamic_import.EagerPhase ->
+              eager_import_module(state, resolved, resolve, load)
           }
       }
+    }
   }
 }
 
@@ -305,14 +203,7 @@ fn evaluate_module(
   load: LoadFn,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use source <- with_loaded_source(state, resolved, load)
-  case
-    module.compile_bundle(
-      resolved,
-      source,
-      rendered_resolve(resolve),
-      rendered_load(load),
-    )
-  {
+  case module.compile_bundle(resolved, source, resolve, load) {
     Error(err) -> compile_bundle_rejection(state, err)
     Ok(bundle) -> {
       // Evaluate WITHOUT draining a nested event loop: this hook runs inside
@@ -409,14 +300,7 @@ fn defer_import_module(
           settle_defer_import(state, resolve_fn, JsObject(deferred_ns_ref))
         None -> {
           use source <- with_loaded_source(state, resolved, load)
-          case
-            module.compile_bundle(
-              resolved,
-              source,
-              rendered_resolve(resolve),
-              rendered_load(load),
-            )
-          {
+          case module.compile_bundle(resolved, source, resolve, load) {
             Error(err) -> compile_bundle_rejection(state, err)
             Ok(bundle) ->
               case
@@ -473,13 +357,6 @@ fn defer_import_module(
                       state.type_error(
                         state,
                         "Cannot find module '" <> specifier <> "'",
-                      )
-                    Error(module.DeferredNamespaceBoxCorrupt(specifier:)) ->
-                      state.type_error(
-                        state,
-                        "Module '"
-                          <> specifier
-                          <> "' produced no deferred namespace",
                       )
                   }
                 }

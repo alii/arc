@@ -9,7 +9,7 @@
 
 import arc/engine.{Returned, Threw}
 import arc/host
-import arc/module_host
+import arc/module/load_error
 import arc/vm/builtins/helpers
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
@@ -73,9 +73,9 @@ fn emit(args, _this, s) {
 
 /// Self-contained demo module — reject every import.
 fn reject_imports(raw: String, _parent: String) {
-  Error(module_host.ImportsForbidden(raw))
+  Error(load_error.ImportsForbidden(raw))
 }
 
 fn reject_loads(specifier: String) {
-  Error(module_host.ImportsForbidden(specifier))
+  Error(load_error.ImportsForbidden(specifier))
 }

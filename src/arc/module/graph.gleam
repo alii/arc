@@ -17,6 +17,7 @@
 
 import arc/compiler/scope
 import arc/esm.{type Raw, type Resolved}
+import arc/module/load_error.{type ModuleLoadError}
 import arc/parser
 import arc/parser/ast
 import gleam/bool
@@ -26,22 +27,31 @@ import gleam/result
 import gleam/set.{type Set}
 
 /// Resolve a module request against its referrer to the module's canonical
-/// specifier. The request carries the raw specifier as written
-/// (`request.specifier`) and its phase; future import attributes will live
-/// here too, since they're part of module identity. The resolved specifier
-/// IS the module's identity — two requests resolving to the same string are
-/// the same module. Called once per import edge, so keep it to specifier
-/// math and existence probing; reading source belongs in `Load`. Arc
-/// imposes no meaning on specifiers; paths, URLs, and synthetic names all
-/// work. Per HostLoadImportedModule, only successful resolutions need to be
-/// stable — a failed resolution may succeed on a later walk.
+/// specifier. Identity is the RESOLVED specifier and nothing else — two
+/// requests resolving to the same string are the same module, whatever their
+/// `ModuleRequest`s carry.
+///
+/// The request also carries the raw specifier as written (`request.specifier`)
+/// and its phase, but neither is part of that identity: the raw text is what
+/// error messages quote, and phase is metadata carried alongside the edge (a
+/// module deferred by one importer and evaluated by another is one module).
+/// Import attributes cannot affect resolution today either: the walk keys
+/// modules by `Resolved` and projects edges through `esm.SpecifierMap` (raw →
+/// resolved), so attributes could only participate once `SpecifierMap` is
+/// re-keyed on `ModuleRequest`.
+///
+/// Called once per import edge, so keep it to specifier math and existence
+/// probing; reading source belongs in `Load`. Arc imposes no meaning on
+/// specifiers; paths, URLs, and synthetic names all work. Per
+/// HostLoadImportedModule, only successful resolutions need to be stable — a
+/// failed resolution may succeed on a later walk.
 pub type Resolve =
-  fn(esm.ModuleRequest, Resolved) -> Result(Resolved, String)
+  fn(esm.ModuleRequest, Resolved) -> Result(Resolved, ModuleLoadError)
 
 /// Fetch the source text of a resolved specifier. Called exactly once per
 /// unique module per walk, however many edges point at it.
 pub type Load =
-  fn(Resolved) -> Result(String, String)
+  fn(Resolved) -> Result(String, ModuleLoadError)
 
 /// One parsed-and-analyzed module, BEFORE any of its requests are resolved.
 /// This is exactly what `prepare` can know from a single file: no edges yet.
@@ -104,10 +114,11 @@ pub type GraphError {
   /// render it with `parser.parse_error_to_string` / `parser.parse_error_pos`.
   ParseFailed(specifier: Resolved, error: parser.ParseError)
   /// The host resolver rejected a request. `raw` is quoted as the source wrote
-  /// it; `referrer` is the module that wrote it.
-  ResolveFailed(raw: Raw, referrer: Resolved, message: String)
+  /// it; `referrer` is the module that wrote it; `error` is the loader's own
+  /// typed reason, still a category (never a rendered string) at this point.
+  ResolveFailed(raw: Raw, referrer: Resolved, error: ModuleLoadError)
   /// The host loader could not read a resolved specifier's source.
-  LoadFailed(specifier: Resolved, message: String)
+  LoadFailed(specifier: Resolved, error: ModuleLoadError)
   /// The module contains a static source-phase import
   /// (`import source x from "m"`), which neither the runtime nor graph
   /// tooling supports yet. Checked after the module's requests resolve, so
@@ -133,10 +144,13 @@ pub fn prepare(
 
 type Walk {
   Walk(
-    /// Specifiers whose visit has STARTED — the cycle guard. A module lands
-    /// in `modules` only once every one of its edges is resolved, so no
-    /// half-resolved `SourceModule` is ever observable.
-    visiting: Set(Resolved),
+    /// Every specifier the walk has BEGUN visiting. Entries are never removed,
+    /// so this one set does both jobs: it stops a cycle from re-entering a
+    /// module still on the stack, and it stops a diamond from parsing a module
+    /// twice (each module is resolved/parsed/analyzed exactly once per walk).
+    /// A module lands in `modules` only once every one of its edges is
+    /// resolved, so no half-resolved `SourceModule` is ever observable.
+    started: Set(Resolved),
     modules: Dict(Resolved, SourceModule),
     order: List(Resolved),
   )
@@ -161,7 +175,7 @@ pub fn load(
     resolve,
     load_source,
     is_host,
-    Walk(visiting: set.new(), modules: dict.new(), order: []),
+    Walk(started: set.new(), modules: dict.new(), order: []),
   ))
   SourceGraph(
     entry: entry_specifier,
@@ -179,7 +193,7 @@ fn visit(
 ) -> Result(Walk, GraphError) {
   let specifier = node.specifier
   // Mark before walking dependencies so cycles terminate.
-  let walk = Walk(..walk, visiting: set.insert(walk.visiting, specifier))
+  let walk = Walk(..walk, started: set.insert(walk.started, specifier))
   use #(walk, edges) <- result.try(
     list.try_fold(node.summary.requested, #(walk, []), fn(acc, request) {
       let #(walk, edges) = acc
@@ -192,8 +206,10 @@ fn visit(
       // A host module is a leaf: the edge is recorded above, but there is no
       // source to load or dependencies to walk.
       use <- bool.guard(is_host(resolved), Ok(#(walk, edges)))
+      // Already begun (cycle back-edge, or a diamond's second edge) — its
+      // module record is either on the stack or already in `walk.modules`.
       use <- bool.guard(
-        set.contains(walk.visiting, resolved),
+        set.contains(walk.started, resolved),
         Ok(#(walk, edges)),
       )
       use source <- result.try(

@@ -51,7 +51,7 @@ import arc/vm/state.{type State, type StepExit, State}
 import arc/vm/value.{type JsValue, type Ref, JsObject, JsString, JsUndefined}
 import gleam/io
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
@@ -60,7 +60,118 @@ import gleam/string
 /// settle the import promise with the Deferred Module Namespace. This is a
 /// private VM↔host argument encoding — the hook is engine state that guest JS
 /// can never call, so the value is not forgeable from JS.
-pub const defer_phase_marker = "defer"
+const defer_phase_marker = "defer"
+
+/// Which HostLoadImportedModule phase a hook call requests.
+pub type HookPhase {
+  /// `import(specifier)`: load, link and EVALUATE the graph. The hook's return
+  /// value settles the import promise.
+  EagerPhase
+  /// `import.defer(specifier)`: load and LINK only. The hook OWNS the import
+  /// promise's settlement through these resolving functions (see
+  /// `DeferHookOutcome`) and its return value carries nothing. The constructor
+  /// requires BOTH functions: a defer call without a capability is
+  /// unrepresentable.
+  DeferPhase(resolve_fn: JsValue, reject_fn: JsValue)
+}
+
+/// One well-formed hook invocation. Existence of a value of this type means the
+/// argument list decoded cleanly: the specifier is a real string (never a
+/// silently-defaulted `""`), and a deferred call carries both resolving
+/// functions.
+pub type HookCall {
+  /// `referrer` is §16.2.1.8's referencingScriptOrModule — the module whose
+  /// body contained the `import()`. `None` for a script-level import, where the
+  /// host substitutes its own entry referrer.
+  HookCall(specifier: String, referrer: Option(String), phase: HookPhase)
+}
+
+/// Why a hook argument list did not decode. Every one of these means the VM and
+/// the host disagree about the encoding, which is a bug in one of them, so they
+/// all reject the import promise with a TypeError.
+pub type HookArgError {
+  MissingSpecifier
+  NonStringSpecifier(found: JsValue)
+  MissingResolve
+  MissingReject
+  BadPhase(found: JsValue)
+}
+
+/// The ONE place a `HookArgError` becomes prose.
+pub fn hook_arg_error_message(err: HookArgError) -> String {
+  case err {
+    MissingSpecifier -> "import hook called without a specifier"
+    NonStringSpecifier(_) -> "import hook called with a non-string specifier"
+    MissingResolve | MissingReject ->
+      "import hook called with the defer phase but no promise capability"
+    BadPhase(_) -> "import hook called with unexpected arguments"
+  }
+}
+
+/// Encode a hook invocation as the positional argument list the host hook
+/// receives. This and `parse_hook_args` are inverses and live side by side, so
+/// the VM's encoder and the host's decoder cannot drift apart.
+///
+/// The layout is `[specifier, referrer?, "defer", resolve, reject]`: the phase
+/// marker is positional, so a deferred call with no referrer pads with
+/// `undefined`, while an eager call simply omits it. This is a private VM↔host
+/// encoding — the hook is engine state guest JS can never call, so no value
+/// here is forgeable from JS.
+pub fn encode_hook_args(
+  specifier: String,
+  referrer: Option(String),
+  phase: HookPhase,
+) -> List(JsValue) {
+  case phase {
+    EagerPhase ->
+      case referrer {
+        Some(referrer) -> [JsString(specifier), JsString(referrer)]
+        None -> [JsString(specifier)]
+      }
+    DeferPhase(resolve_fn:, reject_fn:) -> [
+      JsString(specifier),
+      referrer |> option.map(JsString) |> option.unwrap(JsUndefined),
+      JsString(defer_phase_marker),
+      resolve_fn,
+      reject_fn,
+    ]
+  }
+}
+
+/// Decode a hook argument list. The inverse of `encode_hook_args`, and the ONLY
+/// place the encoding is read: a missing or non-string specifier, or a defer
+/// phase without its promise capability, is a typed rejection — never a silent
+/// fallback to `""` or a half-built capability.
+pub fn parse_hook_args(args: List(JsValue)) -> Result(HookCall, HookArgError) {
+  case args {
+    [] -> Error(MissingSpecifier)
+    [JsString(specifier), ..rest] -> {
+      let referrer = case rest {
+        [JsString(referrer), ..] -> Some(referrer)
+        _ -> None
+      }
+      case rest {
+        // Eager: at most the referrer follows the specifier.
+        [] | [_] -> Ok(HookCall(specifier:, referrer:, phase: EagerPhase))
+        // Defer: the phase marker AND both resolving functions, together.
+        [_, JsString(marker), ..capability] if marker == defer_phase_marker ->
+          case capability {
+            [resolve_fn, reject_fn] ->
+              Ok(HookCall(
+                specifier:,
+                referrer:,
+                phase: DeferPhase(resolve_fn:, reject_fn:),
+              ))
+            [] -> Error(MissingResolve)
+            [_] -> Error(MissingReject)
+            [_, _, ..] -> Error(BadPhase(JsString(marker)))
+          }
+        [_, phase, ..] -> Error(BadPhase(phase))
+      }
+    }
+    [other, ..] -> Error(NonStringSpecifier(other))
+  }
+}
 
 /// What the ~defer~ arm of the host hook did with the import promise's
 /// capability. The hook is handed the promise's resolving functions and — on
@@ -111,12 +222,10 @@ pub fn evaluate_import_call(
       // §16.2.1.8 referencingScriptOrModule, captured synchronously at
       // ImportCall time: the job may only run after the current module body
       // finishes and a differently-referred State is executing.
-      let referrer_args =
-        capture_referrer(state)
-        |> option.map(fn(referrer) { [JsString(referrer)] })
-        |> option.unwrap([])
+      let hook_args =
+        encode_hook_args(specifier_string, capture_referrer(state), EagerPhase)
       enqueue_import_job(state, promise_ref, data_ref, fn(state) {
-        call_host_hook(state, specifier_string, referrer_args)
+        call_host_hook(state, hook_args)
       })
     }
   }
@@ -158,20 +267,14 @@ pub fn evaluate_defer_import_call(
           data_ref,
         )
       let state = State(..state, heap:)
-      // The phase marker is positional (3rd argument), so a missing referrer
-      // is padded with undefined.
-      let referrer_arg =
-        capture_referrer(state)
-        |> option.map(JsString)
-        |> option.unwrap(JsUndefined)
-      let hook_args = [
-        referrer_arg,
-        JsString(defer_phase_marker),
-        resolve_fn,
-        reject_fn,
-      ]
+      let hook_args =
+        encode_hook_args(
+          specifier_string,
+          capture_referrer(state),
+          DeferPhase(resolve_fn:, reject_fn:),
+        )
       enqueue_defer_import_job(state, reject_fn, fn(state) {
-        call_defer_host_hook(state, specifier_string, hook_args)
+        call_defer_host_hook(state, hook_args)
       })
     }
   }
@@ -417,24 +520,17 @@ fn validate_attributes(
 
 /// Steps 9+ (HostLoadImportedModule): read the embedder's import hook off the
 /// realm's ENGINE state (`ctx.host_hooks.import_hook` — never a globalThis
-/// property, so guest JS can neither observe nor replace it) and invoke it
-/// with the specifier string followed by `extra_args` (the captured referrer,
-/// and for `import.defer` the phase marker plus resolving functions).
+/// property, so guest JS can neither observe nor replace it) and invoke it with
+/// `hook_args` (built by `encode_hook_args`, decoded by `parse_hook_args`).
 /// `Ok(returned)` is a normal hook return; `Error(thrown)` is either "no hook
 /// installed" (a TypeError) or the value the hook threw.
 fn call_host_hook(
   state: State(host),
-  specifier_string: String,
-  extra_args: List(JsValue),
+  hook_args: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case state.ctx.host_hooks.import_hook {
     Some(hook_fn) ->
-      case
-        state.call(state, hook_fn, JsUndefined, [
-          JsString(specifier_string),
-          ..extra_args
-        ])
-      {
+      case state.call(state, hook_fn, JsUndefined, hook_args) {
         Ok(#(namespace, state)) -> #(state, Ok(namespace))
         Error(#(thrown, state)) -> #(state, Error(thrown))
       }
@@ -452,10 +548,9 @@ fn call_host_hook(
 /// here.
 fn call_defer_host_hook(
   state: State(host),
-  specifier_string: String,
   hook_args: List(JsValue),
 ) -> #(State(host), DeferHookOutcome) {
-  case call_host_hook(state, specifier_string, hook_args) {
+  case call_host_hook(state, hook_args) {
     #(state, Ok(_)) -> #(state, DeferHookSettledCapability)
     #(state, Error(reason)) -> #(state, DeferHookRejected(reason))
   }

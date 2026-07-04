@@ -3,6 +3,7 @@ import arc/dis
 import arc/engine.{Threw}
 import arc/esm
 import arc/internal/path
+import arc/module/load_error
 import arc/module_host.{type ModuleLoadError}
 import arc/parser
 import arc/repl/examples
@@ -332,8 +333,7 @@ fn resolve_dep(
 ) -> Result(String, ModuleLoadError) {
   case path.resolve_specifier(raw_specifier, parent_specifier) {
     path.PathSpecifier(resolved) -> Ok(resolved)
-    path.BareSpecifier(bare) ->
-      Error(module_host.UnsupportedBareSpecifier(bare))
+    path.BareSpecifier(bare) -> Error(load_error.UnsupportedBareSpecifier(bare))
   }
 }
 
@@ -343,9 +343,9 @@ fn resolve_dep(
 fn load_dep(resolved: String) -> Result(String, ModuleLoadError) {
   case simplifile.read(resolved) {
     Ok(source) -> Ok(source)
-    Error(simplifile.Enoent) -> Error(module_host.NotFound(resolved))
+    Error(simplifile.Enoent) -> Error(load_error.NotFound(resolved))
     Error(err) ->
-      Error(module_host.ReadFailed(resolved, simplifile.describe_error(err)))
+      Error(load_error.ReadFailed(resolved, simplifile.describe_error(err)))
   }
 }
 

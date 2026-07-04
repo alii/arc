@@ -358,7 +358,7 @@ pub type State(host) {
     /// State copy doesn't pay for fields that almost never change.
     ctx: RealmCtx(host),
     /// §13.3.12 NewTarget for the current frame — `JsObject(ref)` when entered
-    /// via `[[Construct]]`, `JsUndefined` for `[[Call]]`. Read by setup_locals
+    /// via `[[Construct]]`, `JsUndefined` for `[[Call]]`. Read by setup_frame
     /// to seed the RefNewTarget lexical slot, and by native ctors directly.
     new_target: JsValue,
     /// Original arguments passed to the current function call. Consumed by
@@ -616,6 +616,52 @@ pub fn adopt_child(parent: State(host), child: State(host)) -> State(host) {
 /// Count of unsettled `host.suspend` promises. Embedder loops exit at 0.
 pub fn outstanding(s: State(host)) -> Int {
   s.outstanding
+}
+
+// ----------------------------------------------------------------------------
+// Realm lookup — `ctx.realms` lives here, so the search over it does too.
+// ----------------------------------------------------------------------------
+
+/// The realm whose intrinsics satisfy `matches`, as `#(realm slot ref, its
+/// Builtins)`. `None` means no REGISTERED realm matched — which for the
+/// running realm is normal (a realm is only entered into `ctx.realms` once it
+/// has been reified as a `RealmSlot`), so callers must decide for themselves
+/// whether falling back to `state.builtins` is right, instead of an
+/// `unwrap` quietly deciding it for them.
+fn find_realm(
+  state: State(host),
+  matches: fn(Builtins) -> Bool,
+) -> Option(#(Ref, Builtins)) {
+  use acc, realm_ref, b <- dict.fold(state.ctx.realms, option.None)
+  case acc {
+    option.Some(_) -> acc
+    option.None ->
+      case matches(b) {
+        True -> option.Some(#(realm_ref, b))
+        False -> option.None
+      }
+  }
+}
+
+/// Find a realm by its `%Function.prototype%` — the marker every
+/// realm-attributed native token carries, unique per `Builtins`. Used to
+/// attribute a builtin method to the realm it was DEFINED in rather than the
+/// realm that happens to be running (`otherRealm.JSON.parse('{')` throws
+/// `otherRealm.SyntaxError`).
+pub fn builtins_of_function_proto(
+  state: State(host),
+  fn_proto: Ref,
+) -> Option(#(Ref, Builtins)) {
+  find_realm(state, fn(b) { b.function.prototype == fn_proto })
+}
+
+/// Find a realm by its `%Error.prototype%` — the marker the `Error.prototype`
+/// stack accessor carries.
+pub fn builtins_of_error_proto(
+  state: State(host),
+  error_proto: Ref,
+) -> Option(#(Ref, Builtins)) {
+  find_realm(state, fn(b) { b.error.prototype.id == error_proto.id })
 }
 
 /// Call ctx.call_fn (re-entrant JS function call), handling the function field access.

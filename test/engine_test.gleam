@@ -1,6 +1,5 @@
 import arc/engine.{Returned}
-import arc/internal/erlang
-import arc/module_host
+import arc/module/load_error
 import arc/vm/builtins/console
 import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
 import gleam/option.{Some}
@@ -34,16 +33,26 @@ pub fn deserialize_rejects_unaligned_bits_test() {
 }
 
 pub fn deserialize_rejects_foreign_term_test() {
-  // A valid external term, but not the versioned engine envelope (this is
-  // also the shape of a pre-versioned snapshot).
+  // A valid Erlang external term (`term_to_binary({1, 2, 3})`), but with no
+  // snapshot header in front of it — this is also the shape of a pre-header
+  // snapshot. Rejected on the bytes; nothing is ever decoded.
   let result: Result(engine.Engine(Nil), _) =
-    engine.deserialize(erlang.term_to_binary(#(1, 2, 3)))
-  assert result == Error(engine.IncompatibleSnapshot)
+    engine.deserialize(<<131, 104, 3, 97, 1, 97, 2, 97, 3>>)
+  assert result == Error(engine.MalformedBinary)
 }
 
 pub fn deserialize_rejects_wrong_version_test() {
+  // Our tag, a version no build will ever carry.
   let result: Result(engine.Engine(Nil), _) =
-    engine.deserialize(erlang.term_to_binary(#("arc-engine", 999_999, 1, 2, 3)))
+    engine.deserialize(<<"arc-engine":utf8, 999_999:32, 131, 106>>)
+  assert result == Error(engine.IncompatibleSnapshot)
+}
+
+pub fn deserialize_rejects_corrupt_payload_behind_header_test() {
+  // A well-formed header whose payload is not an external term at all: the
+  // decoder must fail closed rather than crash out of `binary_to_term`.
+  let result: Result(engine.Engine(Nil), _) =
+    engine.deserialize(<<"arc-engine":utf8, 3:32, 1, 2, 3>>)
   assert result == Error(engine.IncompatibleSnapshot)
 }
 
@@ -359,11 +368,11 @@ pub fn host_fn_can_throw_test() {
 
 /// Single self-contained module — reject every import.
 fn reject_imports(raw: String, _parent: String) {
-  Error(module_host.ImportsForbidden(raw))
+  Error(load_error.ImportsForbidden(raw))
 }
 
 fn reject_loads(resolved: String) {
-  Error(module_host.ImportsForbidden(resolved))
+  Error(load_error.ImportsForbidden(resolved))
 }
 
 pub fn eval_module_reads_export_test() {
@@ -421,7 +430,7 @@ pub fn destructured_declaration_exports_test() {
   let load = fn(resolved: String) {
     case resolved {
       "dep" -> Ok(dep)
-      other -> Error(module_host.NotFound(other))
+      other -> Error(load_error.NotFound(other))
     }
   }
   let assert Ok(#(evaluated, eng)) =

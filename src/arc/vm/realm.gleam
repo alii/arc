@@ -26,7 +26,7 @@ import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
@@ -46,7 +46,7 @@ fn seed_top_level_locals(
   this_val: JsValue,
 ) -> tuple_array.TupleArray(JsValue) {
   let locals = tuple_array.repeat(JsUndefined, template.local_count)
-  case template.lexical.this {
+  case opcode.lexical_slot(template.lexical, opcode.RefThis) {
     Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
     None -> locals
   }
@@ -83,43 +83,32 @@ pub fn eval_script_native(
   }
   use source_str, state <- coerce.try_to_string(state, source)
 
-  // Read the __realm__ property from the $262 object to find the realm
+  // Read the __realm__ property from the $262 object to find the realm. The
+  // RealmSlot + ctx.realms walk is `read_realm`'s job — this only has to say
+  // which of ITS OWN preconditions ($262 is an object, it carries __realm__)
+  // failed.
   let realm_result = case this {
     JsObject(this_ref) ->
       case object.get_own_property(state.heap, this_ref, Named("__realm__")) {
         Some(DataProperty(value: JsObject(realm_ref), ..)) ->
-          case heap.read(state.heap, realm_ref) {
-            Some(value.RealmSlot(
-              global_object: realm_global,
-              lexical_globals:,
-              symbol_registry:,
-            )) ->
-              case dict.get(state.ctx.realms, realm_ref) {
-                Ok(realm_builtins) ->
-                  Ok(#(
-                    realm_builtins,
-                    realm_global,
-                    realm_ref,
-                    lexical_globals,
-                    symbol_registry,
-                  ))
-                Error(Nil) -> Error("evalScript: realm builtins not found")
-              }
-            _ -> Error("evalScript: __realm__ is not a RealmSlot")
-          }
-        _ -> Error("evalScript: $262 has no __realm__ property")
+          read_realm(state, realm_ref)
+          |> result.map(fn(record) { #(realm_ref, record) })
+        _ -> Error(NoRealmProperty)
       }
-    _ -> Error("evalScript: this is not an object")
+    _ -> Error(NotAnObject)
   }
 
   case realm_result {
-    Error(msg) -> state.type_error(state, msg)
+    Error(err) ->
+      state.type_error(state, "evalScript: " <> realm_lookup_message(err))
     Ok(#(
-      realm_builtins,
-      realm_global,
       realm_ref,
-      lexical_globals,
-      symbol_registry,
+      RealmRecord(
+        builtins: realm_builtins,
+        global: realm_global,
+        lexical_globals:,
+        symbol_registry:,
+      ),
     )) -> {
       use template <- compile_or_throw(
         state,
@@ -307,10 +296,10 @@ pub fn build_262(
   // the test262 harness installs its host-side `agent` object on the
   // initial $262, every $262.createRealm() child, and every realm a
   // spawned agent process boots.
-  let h = case get_extend_262() {
-    Ok(extend) -> extend(h, b, ref)
-    Error(Nil) -> h
-  }
+  let h =
+    get_extend_262()
+    |> option.map(fn(extend) { extend(h, b, ref) })
+    |> option.unwrap(h)
   #(h, ref)
 }
 
@@ -342,9 +331,11 @@ pub type Extend262(host) =
 @external(erlang, "arc_realm_ffi", "set_extend_262")
 pub fn set_extend_262(hook: Extend262(host)) -> Nil
 
-/// The registered hook, or Error(Nil) when this process never set one.
+/// The registered hook, or `None` when this process never set one: an absent
+/// hook is a MISSING VALUE, not a failed operation (see arc_realm_ffi.erl,
+/// which answers `{some, Hook} | none`).
 @external(erlang, "arc_realm_ffi", "get_extend_262")
-fn get_extend_262() -> Result(Extend262(host), Nil)
+fn get_extend_262() -> Option(Extend262(host))
 
 // ============================================================================
 // eval() and Function() constructor — runtime code evaluation
@@ -547,10 +538,10 @@ pub fn direct_eval_native(
             run_to_completion,
             new_state_fn,
           )
-        Some(name_table) ->
+        Some(names) ->
           run_direct_eval(
             source,
-            name_table,
+            names,
             param_scope_names,
             with_names,
             private_names,
@@ -567,7 +558,7 @@ pub fn direct_eval_native(
 
 fn run_direct_eval(
   source: String,
-  name_table: List(#(String, Int)),
+  names: value.EvalNameTable,
   param_scope_names: List(String),
   with_names: List(String),
   private_names: List(String),
@@ -575,28 +566,23 @@ fn run_direct_eval(
   run_to_completion: RunToCompletionFn(host),
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // A sentinel head entry marks the caller frame's VariableEnvironment as
+  // `names.var_env` says whether the caller frame's VariableEnvironment is
   // the GLOBAL environment (script/REPL top level) — sloppy eval'd `var`
   // declarations then target the global object, not an eval_env dict.
-  let #(var_env, name_table) = case name_table {
-    [#(sentinel, -1), ..rest] if sentinel == compiler.global_frame_sentinel -> #(
-      compiler.GlobalVarEnv,
-      rest,
-    )
-    _ -> #(compiler.FrameVarEnv, name_table)
-  }
+  let var_env = names.var_env
+  let name_table = names.names
   // Compile with caller's local names as pre-boxed captures. The eval'd
   // code's slot i corresponds to name_table[i]'s variable. The caller's
   // lexical `this` (if any) is threaded as one extra capture after the
   // named ones, so eval('this') aliases the caller's slot.
   let parent_slots = state.func.lexical
-  let perms = state.func.syntax_perms
+  let code_kind = state.func.code_kind
   let caller_strict = state.func.is_strict
   let caller =
     compiler.DirectEvalCaller(
       names: list.map(name_table, fn(pair) { pair.0 }),
       slots: parent_slots,
-      perms:,
+      code_kind:,
       strictness: case caller_strict {
         True -> compiler.Strict
         False -> compiler.Sloppy
@@ -612,10 +598,10 @@ fn run_direct_eval(
     source,
     parser.parse_direct_eval(
       _,
-      allow_new_target: perms.new_target_allowed,
-      allow_super_property: perms.super_prop_allowed,
-      allow_super_call: perms.super_call_allowed,
-      allow_arguments: perms.arguments_allowed,
+      allow_new_target: opcode.new_target_allowed(code_kind),
+      allow_super_property: opcode.super_prop_allowed(code_kind),
+      allow_super_call: opcode.super_call_allowed(code_kind),
+      allow_arguments: opcode.arguments_allowed(code_kind),
       outer_private_names: private_names,
     ),
     fn(body, sb) { compiler.compile_eval_direct(body, sb, caller) },
@@ -648,7 +634,7 @@ fn run_direct_eval(
   // eval body, so no eval_env needed. Global caller: vars go straight to
   // the global object (fallthrough ToGlobal), so no eval_env either.
   let #(h, eval_env) = case
-    caller_strict || var_env == compiler.GlobalVarEnv,
+    caller_strict || var_env == value.GlobalVarEnv,
     state.eval_env
   {
     True, _ -> #(state.heap, None)
@@ -792,6 +778,32 @@ type RealmRecord {
   )
 }
 
+/// Why a realm could not be resolved from a value the caller was holding.
+/// Every one of these is an internal invariant break, so they all surface as
+/// TypeErrors — but the CATEGORY survives to the message, instead of each call
+/// site inventing its own prose for "something about the realm was wrong".
+pub type RealmLookupError {
+  /// The receiver was not an object, so it can carry no `__realm__`.
+  NotAnObject
+  /// The receiver has no `__realm__` own data property holding an object.
+  NoRealmProperty
+  /// The ref is on the heap but is not a `RealmSlot`.
+  NotARealmSlot(realm_ref: Ref)
+  /// The `RealmSlot` exists but `ctx.realms` holds no `Builtins` for it.
+  BuiltinsUnregistered(realm_ref: Ref)
+}
+
+/// The ONE place a `RealmLookupError` becomes prose. Call sites prefix it with
+/// their own operation name (`"evalScript: " <> ...`).
+pub fn realm_lookup_message(err: RealmLookupError) -> String {
+  case err {
+    NotAnObject -> "receiver is not an object"
+    NoRealmProperty -> "receiver has no __realm__ property"
+    NotARealmSlot(_) -> "__realm__ does not point at a realm"
+    BuiltinsUnregistered(_) -> "realm builtins are not registered"
+  }
+}
+
 /// Route ShadowRealm natives. Called from dispatch_native.
 pub fn shadow_realm_dispatch(
   native: value.ShadowRealmNativeFn,
@@ -874,8 +886,14 @@ fn shadow_realm_of(state: State(host), this: JsValue) -> Result(Ref, Nil) {
   }
 }
 
-/// Resolve a realm ref into its record (RealmSlot fields + Builtins).
-fn read_realm(state: State(host), realm_ref: Ref) -> Result(RealmRecord, Nil) {
+/// Resolve a realm ref into its record (RealmSlot fields + Builtins). The two
+/// ways this fails are NOT the same bug — a ref that isn't a RealmSlot means
+/// the caller was handed the wrong object, an unregistered ref means the realm
+/// was allocated but never entered into `ctx.realms` — so it says which.
+fn read_realm(
+  state: State(host),
+  realm_ref: Ref,
+) -> Result(RealmRecord, RealmLookupError) {
   case heap.read(state.heap, realm_ref) {
     Some(value.RealmSlot(global_object:, lexical_globals:, symbol_registry:)) ->
       case dict.get(state.ctx.realms, realm_ref) {
@@ -886,9 +904,9 @@ fn read_realm(state: State(host), realm_ref: Ref) -> Result(RealmRecord, Nil) {
             lexical_globals:,
             symbol_registry:,
           ))
-        Error(Nil) -> Error(Nil)
+        Error(Nil) -> Error(BuiltinsUnregistered(realm_ref))
       }
-    _ -> Error(Nil)
+    _ -> Error(NotARealmSlot(realm_ref))
   }
 }
 
@@ -953,26 +971,14 @@ fn realm_of_function_proto(
       let #(state, rref) = ensure_current_realm(state)
       #(state, rref, state.builtins)
     }
-    False -> {
-      let found =
-        dict.fold(state.ctx.realms, None, fn(acc, rref, b) {
-          case acc {
-            Some(_) -> acc
-            None ->
-              case b.function.prototype == fn_proto {
-                True -> Some(#(rref, b))
-                False -> None
-              }
-          }
-        })
-      case found {
+    False ->
+      case state.builtins_of_function_proto(state, fn_proto) {
         Some(#(rref, b)) -> #(state, rref, b)
         None -> {
           let #(state, rref) = ensure_current_realm(state)
           #(state, rref, state.builtins)
         }
       }
-    }
   }
 }
 
@@ -986,11 +992,11 @@ fn with_realm(
   f: fn(State(host)) -> #(State(host), Result(a, JsValue)),
 ) -> #(State(host), Result(a, JsValue)) {
   case read_realm(state, realm_ref) {
-    Error(Nil) -> {
+    Error(err) -> {
       let #(err, state) =
         state.type_error_value(
           state,
-          "ShadowRealm: realm record missing for cross-realm call",
+          "ShadowRealm cross-realm call: " <> realm_lookup_message(err),
         )
       #(state, Error(err))
     }
@@ -1257,11 +1263,11 @@ fn do_shadow_realm_evaluate(
   new_state_fn: NewStateFn(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case read_realm(state, realm_ref) {
-    Error(Nil) ->
+    Error(err) ->
       state.type_error_with_builtins(
         state,
         caller_builtins,
-        "ShadowRealm: realm record missing for evaluate",
+        "ShadowRealm evaluate: " <> realm_lookup_message(err),
       )
     Ok(realm) -> {
       use template <- compile_or_throw(

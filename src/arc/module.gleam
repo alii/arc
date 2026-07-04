@@ -11,6 +11,7 @@ import arc/compiler
 import arc/esm
 import arc/link
 import arc/module/graph
+import arc/module/load_error.{type ModuleLoadError}
 import arc/module/registry
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
@@ -199,21 +200,40 @@ pub fn compile_bundle_error_message(err: CompileBundleError) -> String {
       <> esm.resolved_text(specifier)
       <> "': "
       <> parser.parse_error_to_string(parse_error)
-    GraphError(error: graph.ResolveFailed(raw, referrer, message)) ->
+    GraphError(error: graph.ResolveFailed(raw, referrer, error)) ->
       "Cannot resolve module '"
       <> esm.raw_text(raw)
       <> "' from '"
       <> esm.resolved_text(referrer)
       <> "': "
-      <> message
-    GraphError(error: graph.LoadFailed(specifier, message)) ->
-      "Cannot load module '" <> esm.resolved_text(specifier) <> "': " <> message
+      <> load_error.message(error)
+    GraphError(error: graph.LoadFailed(specifier, error)) ->
+      "Cannot load module '"
+      <> esm.resolved_text(specifier)
+      <> "': "
+      <> load_error.message(error)
     GraphError(error: graph.SourcePhaseUnsupported(specifier)) ->
       "'"
       <> esm.resolved_text(specifier)
       <> "': source phase imports ('import source') are not supported"
     CompileError(specifier:, error:) ->
       compiler.error_message(error) <> " in '" <> specifier <> "'"
+  }
+}
+
+/// Which pipeline PHASE a `CompileBundleError` failed in, as the prefix
+/// embedders print in front of `compile_bundle_error_message`. Lives here, next
+/// to the variants it maps over, so a new `CompileBundleError` variant is a
+/// compile error in exactly one place instead of silently inheriting whatever
+/// label a distant caller's `case` fell through to.
+pub fn compile_bundle_error_phase(err: CompileBundleError) -> String {
+  case err {
+    GraphError(error: graph.ParseFailed(..)) -> "SyntaxError: "
+    GraphError(error: graph.ResolveFailed(..))
+    | GraphError(error: graph.LoadFailed(..)) -> "ResolutionError: "
+    // A source-phase import is a link-time SyntaxError (§16.2.1.7.2).
+    GraphError(error: graph.SourcePhaseUnsupported(..)) -> "LinkError: "
+    CompileError(..) -> "CompileError: "
   }
 }
 
@@ -244,6 +264,14 @@ pub type LinkInvariantBroken {
   /// A module imports from a raw specifier its own `specifier_map` — which is
   /// TOTAL over the module's requests — does not cover.
   UnresolvedDependency(specifier: esm.Raw)
+  /// A module of the bundle has no export map. `build_linked` builds one per
+  /// `bundle.modules` key, so a miss is a linker bug — and the empty map that
+  /// used to stand in for it is the plausible lie "this module exports nothing".
+  MissingExportMap(specifier: String)
+  /// A module of the bundle has no local-binding map. `preallocate_local_boxes`
+  /// builds one per `bundle.modules` key; the empty map that used to stand in
+  /// silently unseeds every one of the module's own bindings.
+  MissingLocalBoxes(specifier: String)
   /// The dependency's export map has no live cell for a name that
   /// `link.validate` already accepted.
   MissingExportCell(dep: String, name: String)
@@ -306,8 +334,8 @@ pub type EvaluatedBundle(host) {
 pub fn compile_bundle(
   entry_specifier: String,
   entry_source: String,
-  resolve: fn(String, String) -> Result(String, String),
-  load: fn(String) -> Result(String, String),
+  resolve: fn(String, String) -> Result(String, ModuleLoadError),
+  load: fn(String) -> Result(String, ModuleLoadError),
 ) -> Result(ModuleBundle, CompileBundleError) {
   compile_bundle_with_hosts(
     entry_specifier,
@@ -325,8 +353,8 @@ pub fn compile_bundle(
 pub fn compile_bundle_with_hosts(
   entry_specifier: String,
   entry_source: String,
-  resolve: fn(String, String) -> Result(String, String),
-  load: fn(String) -> Result(String, String),
+  resolve: fn(String, String) -> Result(String, ModuleLoadError),
+  load: fn(String) -> Result(String, ModuleLoadError),
   host_modules: Dict(String, HostModule),
 ) -> Result(ModuleBundle, CompileBundleError) {
   // The host talks in plain strings; the graph walk talks in `esm.Raw` /
@@ -618,6 +646,11 @@ pub fn link_for_evaluation_reusing(
   preexisting_deferred: Dict(String, Ref),
 ) -> Result(#(Heap(host), LinkedBundle), ModuleError(host)) {
   case link.validate(linkable_of_bundle(bundle)) {
+    // Not a guest-visible link failure: the bundle's own specifier maps are
+    // TOTAL over its requests, so this is the same invariant `import_seeds`
+    // fails on — panic at its cause rather than throwing a bogus SyntaxError.
+    Error(link.UnresolvedDependency(requested_module:)) ->
+      assert_link_invariant(Error(UnresolvedDependency(requested_module)))
     Error(link_error) -> {
       let #(heap, err) =
         common.make_syntax_error(
@@ -767,20 +800,30 @@ pub fn evaluate_linked_tracking(
   #(evaluated_specifiers(state), state.jobs, result)
 }
 
-/// Read every box in `boxes` as the object it holds — the namespace /
-/// deferred-namespace boxes always do, and a box that doesn't is a linker
-/// invariant break (`NamespaceBoxCorrupt`), not an entry to skip.
+/// Read a reserved namespace / deferred-namespace box as the object it holds.
+/// Linking fills every box it reserves, so a box that holds anything else (or
+/// nothing) is a linker invariant break — the ONE reading of a reserved box, so
+/// no caller can decide for itself that a corrupt box merely means "no
+/// namespace here".
+fn read_namespace_box(
+  heap: Heap(host),
+  spec: String,
+  box: Ref,
+) -> Result(Ref, LinkInvariantBroken) {
+  case heap.read_box(heap, box) {
+    Some(JsObject(ns_ref)) -> Ok(ns_ref)
+    Some(_) | None -> Error(NamespaceBoxCorrupt(specifier: spec))
+  }
+}
+
+/// Read every box in `boxes` as the object it holds — a corrupt box is a linker
+/// invariant break, not an entry to skip.
 fn read_box_dict(
   boxes: Dict(String, Ref),
   heap: Heap(host),
 ) -> List(#(String, Ref)) {
   use acc, spec, box <- dict.fold(boxes, [])
-  let ns_ref =
-    case heap.read_box(heap, box) {
-      Some(JsObject(ns_ref)) -> Ok(ns_ref)
-      Some(_) | None -> Error(NamespaceBoxCorrupt(specifier: spec))
-    }
-    |> assert_link_invariant
+  let ns_ref = read_namespace_box(heap, spec, box) |> assert_link_invariant
   [#(spec, ns_ref), ..acc]
 }
 
@@ -805,15 +848,13 @@ pub fn linked_deferred_namespaces(
 }
 
 /// Why `get_or_create_deferred_namespace` could not hand back a Deferred
-/// Module Namespace. Distinguishing the two matters to the caller: the first
-/// is a guest-visible bad specifier, the second is an engine invariant break.
+/// Module Namespace: the caller named a specifier the bundle does not contain.
+/// That is the ONLY failure a caller can act on — a reserved box that does not
+/// hold its namespace is a linker bug, and is panicked on as
+/// `NamespaceBoxCorrupt` like every other reserved-box read.
 pub type DeferredNamespaceError {
   /// `spec` names neither a source nor a host module of the linked bundle.
   DeferredSpecifierNotInBundle(specifier: String)
-  /// The bundle reserved a deferred-namespace box for `spec`, but it does not
-  /// hold an object — `fill_deferred_namespace` never ran, or the box was
-  /// clobbered.
-  DeferredNamespaceBoxCorrupt(specifier: String)
 }
 
 /// The Deferred Module Namespace for `spec`, creating one if no importer in
@@ -833,14 +874,10 @@ pub fn get_or_create_deferred_namespace(
     #(heap, Error(DeferredSpecifierNotInBundle(specifier: spec)))
   })
   case dict.get(linked.deferred_boxes, spec) {
-    Ok(box) ->
-      case heap.read_box(heap, box) {
-        Some(JsObject(proxy_ref)) -> #(heap, Ok(proxy_ref))
-        Some(_) | None -> #(
-          heap,
-          Error(DeferredNamespaceBoxCorrupt(specifier: spec)),
-        )
-      }
+    Ok(box) -> #(
+      heap,
+      Ok(read_namespace_box(heap, spec, box) |> assert_link_invariant),
+    )
     Error(Nil) -> {
       let #(heap, proxy_ref) = heap.reserve(heap)
       let heap = heap.root(heap, proxy_ref)
@@ -905,22 +942,19 @@ pub fn evaluate_bundle_with_hooks(
 }
 
 /// The entry module's Module Namespace Exotic Object, read out of the rooted
-/// box the linker reserved for it (`build_linked`). This is what `evaluate_bundle`
-/// hands back as `EvaluatedBundle.namespace`. `None` only if the entry has no
-/// namespace box, which shouldn't happen for a linked bundle.
+/// box the linker reserved for it (`build_linked`). This is what
+/// `evaluate_bundle` hands back as `EvaluatedBundle.namespace`. `None` means
+/// exactly one thing — no box was reserved for the entry — since a reserved box
+/// that does not hold its namespace panics like every other reserved-box read.
 fn entry_namespace(
   linked: Linked,
   entry: String,
   heap: Heap(host),
 ) -> Option(Ref) {
-  case dict.get(linked.namespace_boxes, entry) {
-    Ok(box) ->
-      case heap.read_box(heap, box) {
-        Some(JsObject(ns_ref)) -> Some(ns_ref)
-        Some(_) | None -> None
-      }
-    Error(Nil) -> None
-  }
+  use box <- option.map(
+    dict.get(linked.namespace_boxes, entry) |> option.from_result,
+  )
+  read_namespace_box(heap, entry, box) |> assert_link_invariant
 }
 
 /// Read a named export off a Module Namespace Exotic Object (the `namespace`
@@ -962,11 +996,15 @@ fn eval_module_inner(
   host_hooks: state.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
+  // One lookup, three outcomes — the module is absent, has no body, or has one.
   case dict.get(bundle.modules, specifier) {
+    // Nothing to evaluate and no cells to reach: whatever the realm's status
+    // registry says about `specifier`, THIS bundle cannot run it.
+    Error(Nil) -> #(state, Error(NotInBundle(specifier:)))
     // A host (synthetic) module has no body and ready exports, so its
     // `[[Evaluate]]` is a no-op — always "done".
     Ok(SyntheticModule(_)) -> #(state, Ok(#(JsUndefined, state.heap)))
-    found ->
+    Ok(SourceModule(compiled)) ->
       case module_eval_status(state, global_object, specifier) {
         // Body already ran (in this DFS, or re-entrantly via a
         // deferred-namespace trigger, or in an earlier bundle sharing this
@@ -982,24 +1020,17 @@ fn eval_module_inner(
         // re-entering.
         Some(Evaluating) -> #(state, Ok(#(JsUndefined, state.heap)))
         None ->
-          case found {
-            Ok(SourceModule(compiled)) ->
-              eval_module_body(
-                bundle,
-                linked,
-                state,
-                specifier,
-                compiled,
-                builtins,
-                global_object,
-                host_hooks,
-                finish,
-              )
-            Ok(SyntheticModule(_)) | Error(Nil) -> #(
-              state,
-              Error(NotInBundle(specifier:)),
-            )
-          }
+          eval_module_body(
+            bundle,
+            linked,
+            state,
+            specifier,
+            compiled,
+            builtins,
+            global_object,
+            host_hooks,
+            finish,
+          )
       }
   }
 }
@@ -1347,7 +1378,12 @@ fn build_linked(
   let heap =
     list.fold(ns_to_fill, heap, fn(heap, entry) {
       let #(spec, obj) = entry
-      let exp = dict.get(exports, spec) |> result.unwrap(dict.new())
+      // `exports` was just folded over these very specifiers, so a miss is a
+      // linker bug — an empty namespace would read as "exports nothing".
+      let exp =
+        dict.get(exports, spec)
+        |> result.replace_error(MissingExportMap(spec))
+        |> assert_link_invariant
       heap.write(heap, obj, namespace_slot(exp))
     })
   #(
@@ -1515,7 +1551,9 @@ fn instantiate_hoisted_functions(
     // overwrite them with link-time placeholder closures.
     use <- bool.guard(set.contains(already_evaluated, spec), heap)
     let local_boxes =
-      dict.get(linked.local_boxes, spec) |> result.unwrap(dict.new())
+      dict.get(linked.local_boxes, spec)
+      |> result.replace_error(MissingLocalBoxes(spec))
+      |> assert_link_invariant
     // Reconstruct the module's seeded frame so closures capture the same cells
     // a body run would (imports in slots 0..N-1, own exports in their slots).
     let seeds =
@@ -1567,11 +1605,15 @@ fn preallocate_local_boxes(
         heap,
         list.fold(m.export_entries, dict.new(), fn(boxes, e) {
           case e {
+            // A preexisting module's export map is FINAL, so it holds a cell for
+            // every local export. Dropping the entry instead would leave
+            // `own_export_seeds` with nothing to seed, and this module's body
+            // would write its binding into a box no importer ever reads.
             esm.LocalExport(export_name:, local_name:) ->
-              case dict.get(existing_exports, export_name) {
-                Ok(box) -> dict.insert(boxes, local_name, box)
-                Error(Nil) -> boxes
-              }
+              dict.get(existing_exports, export_name)
+              |> result.replace_error(MissingExportCell(spec, export_name))
+              |> assert_link_invariant
+              |> dict.insert(boxes, local_name, _)
             _ -> boxes
           }
         }),
@@ -1659,7 +1701,12 @@ fn fill_deferred_namespace(
   spec: String,
   proxy_ref: Ref,
 ) -> Heap(host) {
-  let exports = dict.get(linked.exports, spec) |> result.unwrap(dict.new())
+  // Both callers only reach here for a `bundle.modules` key, and `build_linked`
+  // gives every one of those an export map.
+  let exports =
+    dict.get(linked.exports, spec)
+    |> result.replace_error(MissingExportMap(spec))
+    |> assert_link_invariant
   let #(h, target_ref) =
     heap.alloc(h, namespace_slot_tagged(exports, "Deferred Module"))
   let h = heap.root(h, target_ref)
@@ -1932,8 +1979,12 @@ fn import_seeds(
         |> option.to_result(UnresolvedDependency(raw_dep)),
       )
       let dep = esm.resolved_text(dep)
-      let dep_exports =
-        dict.get(linked.exports, dep) |> result.unwrap(dict.new())
+      // An empty export map here would turn every named import of `dep` into
+      // the far-away lie "no such export"; report the missing map instead.
+      use dep_exports <- result.try(
+        dict.get(linked.exports, dep)
+        |> result.replace_error(MissingExportMap(dep)),
+      )
       // Every binding gets a slot: these are positional captures 0..N-1.
       list.try_map(bindings, fn(binding) {
         case binding {
@@ -1982,8 +2033,10 @@ fn own_export_seeds(
     list.map(compiled.import_bindings, fn(e) { #(esm.raw_text(e.0), e.1) })
     |> compiler.import_local_names
     |> set.from_list
-  dict.get(linked.local_boxes, esm.resolved_text(compiled.specifier))
-  |> result.unwrap(dict.new())
+  let spec = esm.resolved_text(compiled.specifier)
+  dict.get(linked.local_boxes, spec)
+  |> result.replace_error(MissingLocalBoxes(spec))
+  |> assert_link_invariant
   |> dict.to_list
   |> list.filter_map(fn(pair) {
     let #(local_name, box) = pair

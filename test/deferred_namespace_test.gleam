@@ -1,5 +1,6 @@
 import arc/engine
 import arc/module
+import arc/module/load_error
 import arc/vm/state
 import arc/vm/value.{JsString}
 import gleam/dict
@@ -9,7 +10,7 @@ fn dance_resolve(raw: String, _ref: String) {
 }
 
 fn no_source_loads(resolved: String) {
-  Error("no source for " <> resolved)
+  Error(load_error.NotFound(resolved))
 }
 
 /// Link a bundle whose only dependency is an embedder host (synthetic) module,

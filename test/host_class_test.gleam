@@ -4,7 +4,7 @@
 //// work against a live `State` without installing a global shim.
 
 import arc/engine.{Returned}
-import arc/module_host
+import arc/module/load_error
 import arc/vm/builtins/common
 import arc/vm/key.{Named}
 import arc/vm/ops/object
@@ -167,7 +167,7 @@ fn dance_resolve(raw: String, _ref: String) {
 }
 
 fn no_source_loads(resolved: String) {
-  Error(module_host.ImportsForbidden(resolved))
+  Error(load_error.ImportsForbidden(resolved))
 }
 
 pub fn host_module_named_import_test() {
