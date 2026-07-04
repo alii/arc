@@ -277,15 +277,21 @@ pub fn clear_pending_promise(
 // Whole-module rollback
 // =============================================================================
 
-/// Un-register a module whose body never completed: every registration a
-/// bundle publishes for it (status, namespace, deferred namespace, in-flight
-/// promise) is dropped together, so a later import re-links and re-evaluates
-/// it from scratch. The single counterpart to registration — a partially
-/// rolled-back module (say, namespace cleared but the deferred namespace still
-/// live over uninitialized cells) is not expressible.
+/// Un-register a module whose body never completed: the registrations a bundle
+/// publishes for it (status, namespace, deferred namespace) are dropped
+/// together, so a later import re-links and re-evaluates it from scratch. The
+/// single counterpart to registration — a partially rolled-back module (say,
+/// namespace cleared but the deferred namespace still live over uninitialized
+/// cells) is not expressible.
 ///
 /// The error cache is deliberately untouched: an evaluation error is sticky
 /// (§16.2.1.5.3) and must be rethrown, not re-run.
+///
+/// The in-flight promise is deliberately untouched too: a module parked on top-
+/// level await must keep handing back the same promise (§16.2.1.8), and its
+/// %FinishDynamicImport% continuation owns the settle-time cleanup. Dropping it
+/// here would let a later `import()` re-link and re-run a body that is still
+/// running, executing its side effects twice.
 pub fn clear_module_registrations(
   h: Heap(host),
   global_object: Ref,
@@ -295,7 +301,6 @@ pub fn clear_module_registrations(
   |> clear_module_status(global_object, spec)
   |> clear_namespace(global_object, spec)
   |> clear_deferred_namespace(global_object, spec)
-  |> clear_pending_promise(global_object, spec)
 }
 
 // =============================================================================
