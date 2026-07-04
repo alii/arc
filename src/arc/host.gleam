@@ -33,6 +33,17 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option}
 
+// -- Argument access ----------------------------------------------------------
+
+/// The i-th argument a host function was called with, or `undefined` — JS's
+/// rule that a missing argument is undefined. Pair it with a validator to
+/// reject the wrong type instead of silently defaulting:
+///
+///     use text, s <- host.validate_string(s, host.arg_at(args, 0), "text")
+pub fn arg_at(args: List(JsValue), idx: Int) -> JsValue {
+  helpers.arg_at(args, idx)
+}
+
 // -- Validators --------------------------------------------------------------
 
 /// Reject unless `val` is a JS string. Unwraps to the Gleam `String`.
@@ -242,6 +253,11 @@ pub fn resume(
 //    `host_hooks.atomics` deliver_wake capability, which sends
 //    `Pid ! {arc_notify, Ref, Key, ByteIndex}` per claimed waiter.
 //    Same-process waitAsync settles stay in core (pure data, no message).
+//    Because a claim is a PROMISE to wake, take_waiters is only reachable
+//    from a notifier holding deliver_wake; a realm with no `atomics`
+//    capabilities takes only its OWN async tokens
+//    (arc_waiter_ffi:take_self_async_tokens) and leaves other agents'
+//    waiters registered rather than claiming waiters it cannot wake.
 //
 // 3. Wake injection. When an `{arc_notify, Ref, Key, ByteIndex}` message
 //    lands in an EMBEDDER's mailbox, the embedder injects it into core via
@@ -264,11 +280,13 @@ pub fn resume(
 //
 // 4. FFI module layout. arc_waiter_ffi.erl (under src/arc/vm/) is
 //    DATA-ONLY: insert_waiter, take_waiters (returning claims — no send),
-//    remove_async_token, local_buffer_key/shared_buffer_key, cancel_waiter
-//    (ETS delete only) and the table-owner sync-join handshake. Zero
-//    event-driven receives. The receive-based operations live in embedder
-//    FFI — test/test262_exec_ffi.erl for the test262 harness, the in-tree
-//    reference embedder:
+//    take_self_async_tokens, local_buffer_key/shared_buffer_key,
+//    cancel_waiter (ETS take only, reporting withdrew | already_claimed) and
+//    start_registry (the table-owner sync-join handshake, run once at realm
+//    boot from interpreter.new_state — no waiterlist operation creates the
+//    table lazily). Zero event-driven receives. The receive-based operations
+//    live in embedder FFI — test/test262_exec_ffi.erl for the test262
+//    harness, the in-tree reference embedder:
 //
 //        await_notify(Handle, TimeoutMs) -> <<"ok">> | <<"timed-out">>
 //            (blocking receive + the timeout-race resolution of clause 1;

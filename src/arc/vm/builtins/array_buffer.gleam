@@ -247,7 +247,7 @@ fn constructor(
         invalid_length_msg,
       )
       // Step 3: GetArrayBufferMaxByteLengthOption(options)
-      let options = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+      let options = helpers.arg_at(args, 1)
       use max, state <- try_max_byte_length_option(state, options)
       // Step 4: AllocateArrayBuffer / AllocateSharedArrayBuffer
       allocate(state, new_target, proto, byte_length, max, shared)
@@ -530,7 +530,7 @@ fn buffer_slice(
   // Steps 8-9: relativeEnd (undefined → len)
   use final, state <- coerce.try_relative_index(
     state,
-    helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+    helpers.arg_at(args, 1),
     len,
     len,
   )
@@ -653,7 +653,7 @@ fn slice_to_immutable(
   )
   use final, state <- coerce.try_relative_index(
     state,
-    helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+    helpers.arg_at(args, 1),
     len,
     len,
   )

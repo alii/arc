@@ -2694,10 +2694,6 @@ fn time_zone_equals(a: String, b: String) -> Bool {
 // Constructors
 // ============================================================================
 
-fn arg_at(args: List(JsValue), idx: Int) -> JsValue {
-  helpers.list_at(args, idx) |> option.unwrap(JsUndefined)
-}
-
 /// new Temporal.PlainDate(year, month, day [, calendar])
 fn plain_date_ctor(
   protos: TemporalProtos,
@@ -2706,17 +2702,17 @@ fn plain_date_ctor(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use y, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 0),
+    helpers.arg_at(args, 0),
   ))
   use m, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 1),
+    helpers.arg_at(args, 1),
   ))
   use d, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 2),
+    helpers.arg_at(args, 2),
   ))
-  use cal <- terr(state, to_calendar_arg(arg_at(args, 3)))
+  use cal <- terr(state, to_calendar_arg(helpers.arg_at(args, 3)))
   case is_valid_iso_date(y, m, d) {
     False -> state.range_error(state, "invalid ISO date")
     True -> {
@@ -2760,7 +2756,7 @@ fn opt_int_arg(
   args: List(JsValue),
   idx: Int,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  case arg_at(args, idx) {
+  case helpers.arg_at(args, idx) {
     JsUndefined -> Ok(#(0, state))
     v -> to_integer_with_truncation(state, v)
   }
@@ -2774,15 +2770,15 @@ fn plain_date_time_ctor(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use y, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 0),
+    helpers.arg_at(args, 0),
   ))
   use mo, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 1),
+    helpers.arg_at(args, 1),
   ))
   use d, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 2),
+    helpers.arg_at(args, 2),
   ))
   use h, state <- state.try_op(opt_int_arg(state, args, 3))
   use mi, state <- state.try_op(opt_int_arg(state, args, 4))
@@ -2790,7 +2786,7 @@ fn plain_date_time_ctor(
   use ms, state <- state.try_op(opt_int_arg(state, args, 6))
   use us, state <- state.try_op(opt_int_arg(state, args, 7))
   use ns, state <- state.try_op(opt_int_arg(state, args, 8))
-  use cal <- terr(state, to_calendar_arg(arg_at(args, 9)))
+  use cal <- terr(state, to_calendar_arg(helpers.arg_at(args, 9)))
   let t = TimeRec(h, mi, s, ms, us, ns)
   case is_valid_iso_date(y, mo, d) && is_valid_time(t) {
     False -> state.range_error(state, "invalid ISO date-time")
@@ -2816,14 +2812,14 @@ fn plain_year_month_ctor(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use y, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 0),
+    helpers.arg_at(args, 0),
   ))
   use m, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 1),
+    helpers.arg_at(args, 1),
   ))
-  use cal <- terr(state, to_calendar_arg(arg_at(args, 2)))
-  use d, state <- state.try_op(case arg_at(args, 3) {
+  use cal <- terr(state, to_calendar_arg(helpers.arg_at(args, 2)))
+  use d, state <- state.try_op(case helpers.arg_at(args, 3) {
     JsUndefined -> Ok(#(1, state))
     v -> to_integer_with_truncation(state, v)
   })
@@ -2849,14 +2845,14 @@ fn plain_month_day_ctor(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use m, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 0),
+    helpers.arg_at(args, 0),
   ))
   use d, state <- state.try_op(to_integer_with_truncation(
     state,
-    arg_at(args, 1),
+    helpers.arg_at(args, 1),
   ))
-  use cal <- terr(state, to_calendar_arg(arg_at(args, 2)))
-  use y, state <- state.try_op(case arg_at(args, 3) {
+  use cal <- terr(state, to_calendar_arg(helpers.arg_at(args, 2)))
+  use y, state <- state.try_op(case helpers.arg_at(args, 3) {
     JsUndefined -> Ok(#(1972, state))
     v -> to_integer_with_truncation(state, v)
   })
@@ -2900,7 +2896,7 @@ fn opt_integral_arg(
   args: List(JsValue),
   idx: Int,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  case arg_at(args, idx) {
+  case helpers.arg_at(args, idx) {
     JsUndefined -> Ok(#(0, state))
     v -> to_integer_if_integral(state, v)
   }
@@ -2986,7 +2982,7 @@ fn instant_ctor(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ns, state <- state.try_op(coerce.to_bigint(state, arg_at(args, 0)))
+  use ns, state <- state.try_op(coerce.to_bigint(state, helpers.arg_at(args, 0)))
   case int.absolute_value(ns) <= ns_max_instant {
     False -> state.range_error(state, "epoch nanoseconds out of range")
     True -> {
@@ -3002,8 +2998,8 @@ fn zoned_date_time_ctor(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use ns, state <- state.try_op(coerce.to_bigint(state, arg_at(args, 0)))
-  case arg_at(args, 1) {
+  use ns, state <- state.try_op(coerce.to_bigint(state, helpers.arg_at(args, 0)))
+  case helpers.arg_at(args, 1) {
     JsString(tz_str) -> {
       use tz <- terr(state, case parse_time_zone_id_strict(tz_str) {
         Ok(tz) -> Ok(tz)
@@ -3011,7 +3007,7 @@ fn zoned_date_time_ctor(
           Error(RangeE("invalid time zone identifier: " <> tz_str))
         Error(StrictInvalid(e)) -> Error(e)
       })
-      use cal <- terr(state, to_calendar_arg(arg_at(args, 2)))
+      use cal <- terr(state, to_calendar_arg(helpers.arg_at(args, 2)))
       case int.absolute_value(ns) <= ns_max_instant {
         False -> state.range_error(state, "epoch nanoseconds out of range")
         True -> {
@@ -4504,8 +4500,8 @@ fn static_dispatch(
     TemporalPlainDateKind, "from" -> {
       use #(d, cal), state <- state.try_op(to_temporal_date(
         state,
-        arg_at(args, 0),
-        arg_at(args, 1),
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
       ))
       let #(state, v) = make_date_cal(state, protos, d, cal)
       #(state, Ok(v))
@@ -4513,12 +4509,12 @@ fn static_dispatch(
     TemporalPlainDateKind, "compare" -> {
       use #(a, _), state <- state.try_op(to_temporal_date(
         state,
-        arg_at(args, 0),
+        helpers.arg_at(args, 0),
         JsUndefined,
       ))
       use #(b, _), state <- state.try_op(to_temporal_date(
         state,
-        arg_at(args, 1),
+        helpers.arg_at(args, 1),
         JsUndefined,
       ))
       #(state, Ok(value.from_int(compare_iso_date(a, b))))
@@ -4526,8 +4522,8 @@ fn static_dispatch(
     TemporalPlainTimeKind, "from" -> {
       use t, state <- state.try_op(to_temporal_time(
         state,
-        arg_at(args, 0),
-        arg_at(args, 1),
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
       ))
       let #(state, v) = make_time(state, protos, t)
       #(state, Ok(v))
@@ -4535,12 +4531,12 @@ fn static_dispatch(
     TemporalPlainTimeKind, "compare" -> {
       use a, state <- state.try_op(to_temporal_time(
         state,
-        arg_at(args, 0),
+        helpers.arg_at(args, 0),
         JsUndefined,
       ))
       use b, state <- state.try_op(to_temporal_time(
         state,
-        arg_at(args, 1),
+        helpers.arg_at(args, 1),
         JsUndefined,
       ))
       #(state, Ok(value.from_int(int_sign(time_to_ns(a) - time_to_ns(b)))))
@@ -4548,8 +4544,8 @@ fn static_dispatch(
     TemporalPlainDateTimeKind, "from" -> {
       use #(d, t, cal), state <- state.try_op(to_temporal_date_time(
         state,
-        arg_at(args, 0),
-        arg_at(args, 1),
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
       ))
       let #(state, v) = make_date_time_cal(state, protos, d, t, cal)
       #(state, Ok(v))
@@ -4557,12 +4553,12 @@ fn static_dispatch(
     TemporalPlainDateTimeKind, "compare" -> {
       use #(ad, at, _), state <- state.try_op(to_temporal_date_time(
         state,
-        arg_at(args, 0),
+        helpers.arg_at(args, 0),
         JsUndefined,
       ))
       use #(bd, bt, _), state <- state.try_op(to_temporal_date_time(
         state,
-        arg_at(args, 1),
+        helpers.arg_at(args, 1),
         JsUndefined,
       ))
       #(state, Ok(value.from_int(compare_iso_date_time(#(ad, at), #(bd, bt)))))
@@ -4570,8 +4566,8 @@ fn static_dispatch(
     TemporalPlainYearMonthKind, "from" -> {
       use #(y, m, rd, cal), state <- state.try_op(to_temporal_year_month(
         state,
-        arg_at(args, 0),
-        arg_at(args, 1),
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
       ))
       let #(state, v) = make_year_month_cal(state, protos, y, m, rd, cal)
       #(state, Ok(v))
@@ -4579,12 +4575,12 @@ fn static_dispatch(
     TemporalPlainYearMonthKind, "compare" -> {
       use a, state <- state.try_op(to_temporal_year_month(
         state,
-        arg_at(args, 0),
+        helpers.arg_at(args, 0),
         JsUndefined,
       ))
       use b, state <- state.try_op(to_temporal_year_month(
         state,
-        arg_at(args, 1),
+        helpers.arg_at(args, 1),
         JsUndefined,
       ))
       // CompareISODate including the reference day.
@@ -4594,25 +4590,25 @@ fn static_dispatch(
     TemporalPlainMonthDayKind, "from" -> {
       use #(m, d, ry, cal), state <- state.try_op(to_temporal_month_day(
         state,
-        arg_at(args, 0),
-        arg_at(args, 1),
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
       ))
       let #(state, v) = make_month_day_cal(state, protos, m, d, ry, cal)
       #(state, Ok(v))
     }
     TemporalDurationKind, "from" -> {
-      use d, state <- state.try_op(to_temporal_duration(state, arg_at(args, 0)))
+      use d, state <- state.try_op(to_temporal_duration(state, helpers.arg_at(args, 0)))
       let #(state, v) = make_duration(state, protos, d)
       #(state, Ok(v))
     }
     TemporalDurationKind, "compare" -> duration_compare(args, state)
     TemporalInstantKind, "from" -> {
-      use ns, state <- state.try_op(to_temporal_instant(state, arg_at(args, 0)))
+      use ns, state <- state.try_op(to_temporal_instant(state, helpers.arg_at(args, 0)))
       let #(state, v) = make_instant(state, protos, ns)
       #(state, Ok(v))
     }
     TemporalInstantKind, "fromEpochMilliseconds" -> {
-      use n, state <- state.try_op(coerce.js_to_number(state, arg_at(args, 0)))
+      use n, state <- state.try_op(coerce.js_to_number(state, helpers.arg_at(args, 0)))
       case n {
         Finite(f) -> {
           // -0 IS an integral Number, so this needs the ±0-safe predicate.
@@ -4635,7 +4631,7 @@ fn static_dispatch(
       }
     }
     TemporalInstantKind, "fromEpochNanoseconds" -> {
-      use ns, state <- state.try_op(coerce.to_bigint(state, arg_at(args, 0)))
+      use ns, state <- state.try_op(coerce.to_bigint(state, helpers.arg_at(args, 0)))
       case int.absolute_value(ns) <= ns_max_instant {
         False -> state.range_error(state, "epoch nanoseconds out of range")
         True -> {
@@ -4645,15 +4641,15 @@ fn static_dispatch(
       }
     }
     TemporalInstantKind, "compare" -> {
-      use a, state <- state.try_op(to_temporal_instant(state, arg_at(args, 0)))
-      use b, state <- state.try_op(to_temporal_instant(state, arg_at(args, 1)))
+      use a, state <- state.try_op(to_temporal_instant(state, helpers.arg_at(args, 0)))
+      use b, state <- state.try_op(to_temporal_instant(state, helpers.arg_at(args, 1)))
       #(state, Ok(value.from_int(int_sign(a - b))))
     }
     TemporalZonedDateTimeKind, "from" -> {
       use #(ns, tz, cal), state <- state.try_op(to_temporal_zoned(
         state,
-        arg_at(args, 0),
-        arg_at(args, 1),
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
       ))
       let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
       #(state, Ok(v))
@@ -4661,12 +4657,12 @@ fn static_dispatch(
     TemporalZonedDateTimeKind, "compare" -> {
       use #(a, _, _), state <- state.try_op(to_temporal_zoned(
         state,
-        arg_at(args, 0),
+        helpers.arg_at(args, 0),
         JsUndefined,
       ))
       use #(b, _, _), state <- state.try_op(to_temporal_zoned(
         state,
-        arg_at(args, 1),
+        helpers.arg_at(args, 1),
         JsUndefined,
       ))
       #(state, Ok(value.from_int(int_sign(a - b))))
@@ -5836,9 +5832,9 @@ fn duration_compare(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use a, state <- state.try_op(to_temporal_duration(state, arg_at(args, 0)))
-  use b, state <- state.try_op(to_temporal_duration(state, arg_at(args, 1)))
-  use opts, state <- state.try_op(get_options_object(state, arg_at(args, 2)))
+  use a, state <- state.try_op(to_temporal_duration(state, helpers.arg_at(args, 0)))
+  use b, state <- state.try_op(to_temporal_duration(state, helpers.arg_at(args, 1)))
+  use opts, state <- state.try_op(get_options_object(state, helpers.arg_at(args, 2)))
   use relative_to, state <- state.try_op(case opts {
     None -> Ok(#(JsUndefined, state))
     Some(oref) ->
@@ -6407,7 +6403,7 @@ fn now_tz_arg(
   state: State(host),
   args: List(JsValue),
 ) -> Result(#(String, State(host)), #(JsValue, State(host))) {
-  case arg_at(args, 0) {
+  case helpers.arg_at(args, 0) {
     JsUndefined -> Ok(#("UTC", state))
     JsString(s) ->
       case parse_time_zone_id(s) {
@@ -6625,7 +6621,7 @@ fn plain_date_method(
         PdToString -> {
           use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           let s = format_iso_date(d) <> calendar_suffix(cal_name, cal)
           #(state, Ok(JsString(s)))
@@ -6638,7 +6634,7 @@ fn plain_date_method(
         PdEquals -> {
           use #(other, other_cal), state <- state.try_op(to_temporal_date(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           #(state, Ok(JsBool(d == other && cal == other_cal)))
@@ -6646,11 +6642,11 @@ fn plain_date_method(
         PdAdd | PdSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use overflow, state <- state.try_op(validated_overflow(
             state,
-            arg_at(args, 1),
+            helpers.arg_at(args, 1),
           ))
           let dur = case m {
             PdSubtract -> negate_dur(dur)
@@ -6663,7 +6659,7 @@ fn plain_date_method(
         PdWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use fields, state <- state.try_op(read_date_fields(state, bag, cal))
           case fields == DateFields(None, None, None, None, None, None) {
@@ -6672,7 +6668,7 @@ fn plain_date_method(
             False -> {
               use overflow, state <- state.try_op(validated_overflow(
                 state,
-                arg_at(args, 1),
+                helpers.arg_at(args, 1),
               ))
               use date <- terr(
                 state,
@@ -6687,13 +6683,13 @@ fn plain_date_method(
         PdWithCalendar -> {
           use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           let #(state, v) = make_date_cal(state, protos, d, new_cal)
           #(state, Ok(v))
         }
         PdToPlainDateTime -> {
-          use t, state <- state.try_op(case arg_at(args, 0) {
+          use t, state <- state.try_op(case helpers.arg_at(args, 0) {
             JsUndefined -> Ok(#(midnight, state))
             v -> to_temporal_time(state, v, JsUndefined)
           })
@@ -6750,7 +6746,7 @@ fn plain_date_method(
         PdToZonedDateTime -> {
           // Argument: a time zone string, or an object with a timeZone
           // property (plus optional plainTime).
-          case arg_at(args, 0) {
+          case helpers.arg_at(args, 0) {
             JsString(tz_str) -> {
               use tz <- terr(state, parse_time_zone_id(tz_str))
               use ns <- terr(state, start_of_day_ns(tz, d))
@@ -6791,7 +6787,7 @@ fn plain_date_method(
         PdUntil | PdSince -> {
           use #(other, other_cal), state <- state.try_op(to_temporal_date(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           case other_cal == cal {
@@ -7221,7 +7217,7 @@ fn get_difference_settings(
   cont: fn(Option(Unit), Option(Unit), Int, RoundingMode, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use opts, state <- state.try_op(get_options_object(state, arg_at(args, 1)))
+  use opts, state <- state.try_op(get_options_object(state, helpers.arg_at(args, 1)))
   use largest, state <- state.try_op(get_unit_option(
     state,
     opts,
@@ -7751,7 +7747,7 @@ fn plain_time_method(
         PtToString -> {
           use opts, state <- state.try_op(get_options_object(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use #(prec, su, sinc, mode), state <- state.try_op(
             to_string_time_options(state, opts),
@@ -7774,7 +7770,7 @@ fn plain_time_method(
         PtEquals -> {
           use other, state <- state.try_op(to_temporal_time(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           #(state, Ok(JsBool(t == other)))
@@ -7782,7 +7778,7 @@ fn plain_time_method(
         PtAdd | PtSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           let dur = case m {
             PtSubtract -> negate_dur(dur)
@@ -7795,7 +7791,7 @@ fn plain_time_method(
         PtWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use f, state <- state.try_op(read_time_fields(state, bag))
           case f == no_time_fields {
@@ -7804,7 +7800,7 @@ fn plain_time_method(
             False -> {
               use overflow, state <- state.try_op(validated_overflow(
                 state,
-                arg_at(args, 1),
+                helpers.arg_at(args, 1),
               ))
               let t2 = time_fields_apply(f, t)
               use t3 <- terr(state, regulate_time(t2, overflow))
@@ -7816,7 +7812,7 @@ fn plain_time_method(
         PtRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             allow_day: False,
           ))
           let u_ns = unit_ns(su)
@@ -7834,7 +7830,7 @@ fn plain_time_method(
         PtUntil | PtSince -> {
           use other, state <- state.try_op(to_temporal_time(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           time_until_since(state, protos, t, other, args, m == PtSince)
@@ -8151,7 +8147,7 @@ fn plain_date_time_method(
         PdtToString -> {
           use #(cal_name, opts), state <- state.try_op(get_calendar_name_option(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use #(prec, su, sinc, mode), state <- state.try_op(
             to_string_time_options(state, opts),
@@ -8179,7 +8175,7 @@ fn plain_date_time_method(
         PdtEquals -> {
           use #(od, ot, ocal), state <- state.try_op(to_temporal_date_time(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           #(state, Ok(JsBool(#(d, t) == #(od, ot) && cal == ocal)))
@@ -8187,11 +8183,11 @@ fn plain_date_time_method(
         PdtAdd | PdtSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use overflow, state <- state.try_op(validated_overflow(
             state,
-            arg_at(args, 1),
+            helpers.arg_at(args, 1),
           ))
           let dur = case m {
             PdtSubtract -> negate_dur(dur)
@@ -8218,7 +8214,7 @@ fn plain_date_time_method(
           }
         }
         PdtWithPlainTime -> {
-          use t2, state <- state.try_op(case arg_at(args, 0) {
+          use t2, state <- state.try_op(case helpers.arg_at(args, 0) {
             JsUndefined -> Ok(#(midnight, state))
             v -> to_temporal_time(state, v, JsUndefined)
           })
@@ -8228,7 +8224,7 @@ fn plain_date_time_method(
         PdtWithCalendar -> {
           use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           let #(state, v) = make_date_time_cal(state, protos, d, t, new_cal)
           #(state, Ok(v))
@@ -8236,7 +8232,7 @@ fn plain_date_time_method(
         PdtWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use f, state <- state.try_op(read_date_time_fields(
             state,
@@ -8251,7 +8247,7 @@ fn plain_date_time_method(
             False -> {
               use overflow, state <- state.try_op(validated_overflow(
                 state,
-                arg_at(args, 1),
+                helpers.arg_at(args, 1),
               ))
               use date <- terr(
                 state,
@@ -8274,7 +8270,7 @@ fn plain_date_time_method(
         PdtRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             allow_day: True,
           ))
           let u_ns = unit_ns(su)
@@ -8309,12 +8305,12 @@ fn plain_date_time_method(
           #(state, Ok(v))
         }
         PdtToZonedDateTime -> {
-          case arg_at(args, 0) {
+          case helpers.arg_at(args, 0) {
             JsString(tz_str) -> {
               use tz <- terr(state, parse_time_zone_id(tz_str))
               use opts, state <- state.try_op(get_options_object(
                 state,
-                arg_at(args, 1),
+                helpers.arg_at(args, 1),
               ))
               use dis2, state <- state.try_op(get_disambiguation_option(
                 state,
@@ -8336,7 +8332,7 @@ fn plain_date_time_method(
         PdtUntil | PdtSince -> {
           use #(od, ot, ocal), state <- state.try_op(to_temporal_date_time(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           case ocal == cal {
@@ -8515,7 +8511,7 @@ fn plain_year_month_method(
         PymToString -> {
           use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           #(state, Ok(JsString(format_ym_cal(y, m, rd, cal, cal_name))))
         }
@@ -8527,7 +8523,7 @@ fn plain_year_month_method(
         PymEquals -> {
           use other, state <- state.try_op(to_temporal_year_month(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           #(state, Ok(JsBool(#(y, m, rd, cal) == other)))
@@ -8535,11 +8531,11 @@ fn plain_year_month_method(
         PymAdd | PymSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use overflow, state <- state.try_op(validated_overflow(
             state,
-            arg_at(args, 1),
+            helpers.arg_at(args, 1),
           ))
           let dur = case meth {
             PymSubtract -> negate_dur(dur)
@@ -8631,7 +8627,7 @@ fn plain_year_month_method(
         PymWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use era, state <- state.try_op(case tcal.has_eras(cal) {
             True -> read_bag_era(state, bag)
@@ -8672,7 +8668,7 @@ fn plain_year_month_method(
             False -> {
               use overflow, state <- state.try_op(validated_overflow(
                 state,
-                arg_at(args, 1),
+                helpers.arg_at(args, 1),
               ))
               // Merge with existing calendar year/monthCode.
               let cd =
@@ -8711,7 +8707,7 @@ fn plain_year_month_method(
           }
         }
         PymToPlainDate -> {
-          case arg_at(args, 0) {
+          case helpers.arg_at(args, 0) {
             JsObject(ref) -> {
               use day, state <- state.try_op(read_bag_int_field(
                 state,
@@ -8769,7 +8765,7 @@ fn plain_year_month_method(
         PymUntil | PymSince -> {
           use other, state <- state.try_op(to_temporal_year_month(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           case other.3 == cal {
@@ -8996,7 +8992,7 @@ fn plain_month_day_method(
         PmdToString -> {
           use #(cal_name, _), state <- state.try_op(get_calendar_name_option(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           #(state, Ok(JsString(format_md_cal(m, d, ry, cal, cal_name))))
         }
@@ -9008,7 +9004,7 @@ fn plain_month_day_method(
         PmdEquals -> {
           use other, state <- state.try_op(to_temporal_month_day(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           #(state, Ok(JsBool(#(m, d, ry, cal) == other)))
@@ -9016,7 +9012,7 @@ fn plain_month_day_method(
         PmdWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use fields, state <- state.try_op(read_date_fields(state, bag, cal))
           case fields == DateFields(None, None, None, None, None, None) {
@@ -9025,7 +9021,7 @@ fn plain_month_day_method(
             False -> {
               use overflow, state <- state.try_op(validated_overflow(
                 state,
-                arg_at(args, 1),
+                helpers.arg_at(args, 1),
               ))
               // Merge with the existing month-day's calendar fields.
               let cd =
@@ -9055,7 +9051,7 @@ fn plain_month_day_method(
           }
         }
         PmdToPlainDate -> {
-          case arg_at(args, 0) {
+          case helpers.arg_at(args, 0) {
             JsObject(ref) -> {
               use era, state <- state.try_op(case tcal.has_eras(cal) {
                 True -> read_bag_era(state, ref)
@@ -9174,7 +9170,7 @@ fn duration_method(
         DmToString -> {
           use opts, state <- state.try_op(get_options_object(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use digits, state <- state.try_op(get_fractional_digits(state, opts))
           use mode, state <- state.try_op(get_rounding_mode_option(
@@ -9216,7 +9212,7 @@ fn duration_method(
           #(state, Ok(v))
         }
         DmWith -> {
-          case arg_at(args, 0) {
+          case helpers.arg_at(args, 0) {
             JsObject(ref) -> {
               use days, state <- state.try_op(read_bag_int_field(
                 state,
@@ -9314,7 +9310,7 @@ fn duration_method(
         DmAdd | DmSubtract -> {
           use other, state <- state.try_op(to_temporal_duration(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           let other = case m {
             DmSubtract -> negate_dur(other)
@@ -9406,7 +9402,7 @@ fn duration_round(
   d: DurRec,
   args: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case arg_at(args, 0) {
+  case helpers.arg_at(args, 0) {
     JsUndefined -> state.type_error(state, "options parameter is required")
     JsString(su_str) ->
       case singular_unit(su_str) {
@@ -9805,7 +9801,7 @@ fn duration_total(
   d: DurRec,
   args: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case arg_at(args, 0) {
+  case helpers.arg_at(args, 0) {
     JsUndefined -> state.type_error(state, "totalOf is required")
     JsString(u_str) ->
       case singular_unit(u_str) {
@@ -10218,7 +10214,7 @@ fn instant_method(
         ImToString -> {
           use opts, state <- state.try_op(get_options_object(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           // Read options: fractionalSecondDigits, roundingMode, smallestUnit,
           // timeZone (alphabetical).
@@ -10268,14 +10264,14 @@ fn instant_method(
         ImEquals -> {
           use other, state <- state.try_op(to_temporal_instant(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           #(state, Ok(JsBool(ns == other)))
         }
         ImAdd | ImSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           case
             dur.years != 0 || dur.months != 0 || dur.weeks != 0 || dur.days != 0
@@ -10304,7 +10300,7 @@ fn instant_method(
         ImRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             allow_day: False,
           ))
           let u_ns = unit_ns(su)
@@ -10327,12 +10323,12 @@ fn instant_method(
         ImUntil | ImSince -> {
           use other, state <- state.try_op(to_temporal_instant(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           instant_until_since(state, protos, ns, other, args, m == ImSince)
         }
         ImToZonedDateTimeIso -> {
-          case arg_at(args, 0) {
+          case helpers.arg_at(args, 0) {
             JsString(tz_str) -> {
               use tz <- terr(state, parse_time_zone_id(tz_str))
               let #(state, v) = make_zoned(state, protos, ns, tz)
@@ -10417,7 +10413,7 @@ fn zoned_date_time_method(
           // roundingMode, smallestUnit, timeZoneName; validate after.
           use #(cal_name, opts), state <- state.try_op(get_calendar_name_option(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use digits, state <- state.try_op(get_fractional_digits(state, opts))
           use offset_mode, state <- state.try_op(get_show_offset_option(
@@ -10475,7 +10471,7 @@ fn zoned_date_time_method(
         ZmEquals -> {
           use #(ons, otz, ocal), state <- state.try_op(to_temporal_zoned(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           #(
@@ -10486,11 +10482,11 @@ fn zoned_date_time_method(
         ZmAdd | ZmSubtract -> {
           use dur, state <- state.try_op(to_temporal_duration(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use overflow, state <- state.try_op(validated_overflow(
             state,
-            arg_at(args, 1),
+            helpers.arg_at(args, 1),
           ))
           let dur = case m {
             ZmSubtract -> negate_dur(dur)
@@ -10536,7 +10532,7 @@ fn zoned_date_time_method(
           }
         }
         ZmWithTimeZone -> {
-          case arg_at(args, 0) {
+          case helpers.arg_at(args, 0) {
             JsString(tz_str) -> {
               use tz2 <- terr(state, parse_time_zone_id(tz_str))
               let #(state, v) = make_zoned_cal(state, protos, ns, tz2, zcal)
@@ -10548,7 +10544,7 @@ fn zoned_date_time_method(
         ZmUntil | ZmSince -> {
           use #(ons, otz, ocal), state <- state.try_op(to_temporal_zoned(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             JsUndefined,
           ))
           case ocal == zcal {
@@ -10574,7 +10570,7 @@ fn zoned_date_time_method(
         ZmRound -> {
           use #(su, inc, mode), state <- state.try_op(round_options(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
             allow_day: True,
           ))
           let u_ns = unit_ns(su)
@@ -10645,7 +10641,7 @@ fn zoned_date_time_method(
         ZmWith -> {
           use bag, state <- state.try_op(require_partial_bag(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           use f, state <- state.try_op(read_date_time_fields(
             state,
@@ -10660,7 +10656,7 @@ fn zoned_date_time_method(
             False -> {
               use opts, state <- state.try_op(get_options_object(
                 state,
-                arg_at(args, 1),
+                helpers.arg_at(args, 1),
               ))
               use dis_opt, state <- state.try_op(get_disambiguation_option(
                 state,
@@ -10701,7 +10697,7 @@ fn zoned_date_time_method(
         ZmWithCalendar -> {
           use new_cal, state <- state.try_op(to_temporal_calendar_identifier(
             state,
-            arg_at(args, 0),
+            helpers.arg_at(args, 0),
           ))
           let #(state, v) = make_zoned_cal(state, protos, ns, tz, new_cal)
           #(state, Ok(v))
@@ -10709,7 +10705,7 @@ fn zoned_date_time_method(
         ZmWithPlainTime -> {
           // Undefined → GetStartOfDay; an explicit time (even midnight) uses
           // compatible disambiguation. These differ when midnight is skipped.
-          case arg_at(args, 0) {
+          case helpers.arg_at(args, 0) {
             JsUndefined -> {
               use ns2 <- terr(state, start_of_day_ns(tz, d))
               let #(state, v) = make_zoned_cal(state, protos, ns2, tz, zcal)
@@ -10733,7 +10729,7 @@ fn zoned_date_time_method(
           #(state, Ok(v))
         }
         ZmGetTimeZoneTransition -> {
-          use dir, state <- state.try_op(case arg_at(args, 0) {
+          use dir, state <- state.try_op(case helpers.arg_at(args, 0) {
             JsUndefined ->
               type_error_result(state, "direction parameter is required")
             JsString("next") -> Ok(#(Next, state))

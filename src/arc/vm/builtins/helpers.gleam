@@ -93,6 +93,13 @@ pub fn list_at(lst: List(a), idx: Int) -> Option(a) {
   }
 }
 
+/// The i-th argument, or `undefined` — JS's rule that a missing argument is
+/// undefined, named once. Every builtin reads its positional arguments
+/// through this (or `first_arg_or_undefined`, its index-0 spelling).
+pub fn arg_at(args: List(JsValue), idx: Int) -> JsValue {
+  list_at(args, idx) |> option.unwrap(JsUndefined)
+}
+
 /// Get first arg or JsUndefined if the list is empty.
 /// Non-spec utility — JS functions default missing args to undefined.
 pub fn first_arg_or_undefined(args: List(JsValue)) -> JsValue {

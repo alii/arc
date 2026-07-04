@@ -418,7 +418,7 @@ fn with_ta_and_index(
   // §25.4.3.2 ValidateAtomicAccess: ToIndex then bounds check.
   use idx, state <- coerce.to_index_cps(
     state,
-    arg(args, 1),
+    helpers.arg_at(args, 1),
     "Invalid atomic access index",
   )
   use Nil <- require(idx < live, fn() {
@@ -619,10 +619,6 @@ fn revalidate_or_abort(
 // Value coercion
 // ============================================================================
 
-fn arg(args: List(JsValue), idx: Int) -> JsValue {
-  helpers.list_at(args, idx) |> option.unwrap(JsUndefined)
-}
-
 /// Coerce the operand for a read-modify-write/store per the array's content
 /// type: ToBigInt for BigInt64/BigUint64, ToIntegerOrInfinity for the
 /// integer kinds. ±∞ must be matched on the raw JsNum BEFORE the saturated
@@ -717,7 +713,7 @@ fn rmw(
     require_shared: False,
     write: True,
   )
-  use operand, state <- to_operand(state, info, arg(args, 2))
+  use operand, state <- to_operand(state, info, helpers.arg_at(args, 2))
   use buf, state <- revalidate(state, info, idx)
   case info.storage {
     // Shared storage: other agent processes may race this element — the
@@ -757,8 +753,8 @@ fn compare_exchange(
     require_shared: False,
     write: True,
   )
-  use expected, state <- to_operand(state, info, arg(args, 2))
-  use replacement, state <- to_operand(state, info, arg(args, 3))
+  use expected, state <- to_operand(state, info, helpers.arg_at(args, 2))
+  use replacement, state <- to_operand(state, info, helpers.arg_at(args, 3))
   use buf, state <- revalidate(state, info, idx)
   let wrapped_expected =
     wrap_to_kind(expected, int_elem_bits(info.elem), int_elem_signed(info.elem))
@@ -823,7 +819,7 @@ fn atomic_store(
   )
   case info.elem_kind {
     value.BigKind(_) -> {
-      use v, state <- coerce.to_bigint_cps(state, arg(args, 2))
+      use v, state <- coerce.to_bigint_cps(state, helpers.arg_at(args, 2))
       use buf, state <- revalidate(state, info, idx)
       let state = write_element(state, info, buf, idx, v)
       #(state, Ok(JsBigInt(BigInt(v))))
@@ -833,7 +829,7 @@ fn atomic_store(
       // is the return value, so ±∞ must survive the coercion (the STORED
       // element is ToIntN(±∞) = +0). Match on the raw JsNum rather than the
       // saturated Int to keep both.
-      use num, state <- coerce.try_to_number(state, arg(args, 2))
+      use num, state <- coerce.try_to_number(state, helpers.arg_at(args, 2))
       use buf, state <- revalidate(state, info, idx)
       let #(stored, ret) = case num {
         Infinity -> #(0, JsNumber(Infinity))
@@ -936,9 +932,9 @@ fn do_wait(
     write: False,
   )
   // Step 6/7: v = ToBigInt64(value) | ToInt32(value).
-  use v, state <- wait_value(state, info, arg(args, 2))
+  use v, state <- wait_value(state, info, helpers.arg_at(args, 2))
   // Step 8/9: t = ToNumber(timeout); NaN/undefined → +∞; clamp ≥ 0.
-  use timeout_ms, state <- wait_timeout(state, arg(args, 3))
+  use timeout_ms, state <- wait_timeout(state, helpers.arg_at(args, 3))
   // Step 10: if mode is sync and AgentCanSuspend() is false, throw a
   // TypeError. Sits after the value/timeout coercions (steps 6-9) per the
   // current spec text — the position is observable via valueOf side effects.
@@ -1217,7 +1213,7 @@ fn notify(
   )
   // Step 3: count — undefined → +∞, else ToIntegerOrInfinity clamped ≥ 0.
   // Coerced BEFORE the non-shared early return (observable, test262 checks).
-  use count, state <- notify_count(state, arg(args, 2))
+  use count, state <- notify_count(state, helpers.arg_at(args, 2))
   // Step 6: non-shared buffers can have no waiters → +0.
   case info.storage {
     None -> #(state, Ok(value.from_int(0)))

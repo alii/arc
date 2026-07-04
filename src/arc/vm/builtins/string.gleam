@@ -405,7 +405,7 @@ fn string_last_index_of(
   // Steps 4-6, 8: ToNumber(position), handle NaN => len, clamp
   use num, state <- coerce.try_to_number(
     state,
-    helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+    helpers.arg_at(args, 1),
   )
   let from = case num {
     // Step 6: NaN => +inf, clamped to len
@@ -469,7 +469,7 @@ fn string_search_bool(
       // ToIntegerOrInfinity(position), clamp, then test from that offset
       use pos, state <- coerce.try_to_integer_or_infinity(
         state,
-        helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+        helpers.arg_at(args, 1),
       )
       let from = int.clamp(pos, 0, object.string_length(s))
       let sub = object.string_drop_start(s, from)

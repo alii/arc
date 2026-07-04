@@ -475,8 +475,8 @@ fn ta_from(
     state.type_error(state, "%TypedArray%.from called on non-constructor")
   })
   let source = helpers.first_arg_or_undefined(args)
-  let mapfn = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
-  let this_arg = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
+  let mapfn = helpers.arg_at(args, 1)
+  let this_arg = helpers.arg_at(args, 2)
   // Step 3: mapping check.
   use mapping, state <- try_state(case mapfn {
     JsUndefined -> Ok(#(None, state))
@@ -1612,8 +1612,8 @@ fn proto_fill(
   let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
   use state <- require_mutable(state, buffer)
   let value_arg = helpers.first_arg_or_undefined(args)
-  let start_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
-  let end_arg = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
+  let start_arg = helpers.arg_at(args, 1)
+  let end_arg = helpers.arg_at(args, 2)
   // Step 3-4: convert the fill value per content type.
   use converted, state <- try_state(convert_for_kind(state, kind, value_arg))
   use s, state <- try_state(to_int_or_inf(state, start_arg))
@@ -1695,7 +1695,7 @@ fn proto_set(
   // before the offset/source coercions run any user code.
   use state <- require_mutable(state, view.buffer)
   let src = helpers.first_arg_or_undefined(args)
-  let off_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let off_arg = helpers.arg_at(args, 1)
   use off_i, state <- try_state(to_int_or_inf(state, off_arg))
   let offset = case off_i {
     IInt(n) -> n
@@ -1945,7 +1945,7 @@ fn do_subarray(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let TaView(buffer:, kind:, byte_offset: off, length: declared, ..) = view
   let b_arg = helpers.first_arg_or_undefined(args)
-  let e_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let e_arg = helpers.arg_at(args, 1)
   // Steps 5-7: srcLength = 0 for an out-of-bounds view, else the CURRENT
   // length — snapshotted BEFORE the (observable) start/end coercions.
   let src_length =
@@ -2017,7 +2017,7 @@ fn proto_slice(
   use view, state <- validate_ta(this, state)
   let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
   let s_arg = helpers.first_arg_or_undefined(args)
-  let e_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let e_arg = helpers.arg_at(args, 1)
   use s, state <- try_state(case s_arg {
     JsUndefined -> Ok(#(IInt(0), state))
     _ -> to_int_or_inf(state, s_arg)
@@ -2190,7 +2190,7 @@ fn join_parts(
       // Live read: ToString(separator) above may have shrunk the buffer;
       // indices past the CURRENT length read as undefined → "".
       let s = case ta_read(h, view.ref, i) {
-        Some(JsNumber(n)) -> value.format_number_radix(n, 10)
+        Some(JsNumber(n)) -> value.format_number(n)
         Some(value.JsBigInt(value.BigInt(b))) -> int.to_string(b)
         _ -> ""
       }
@@ -2232,7 +2232,7 @@ fn proto_search(
   let search = helpers.first_arg_or_undefined(args)
   use n, state <- try_state(to_int_or_inf(
     state,
-    helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+    helpers.arg_at(args, 1),
   ))
   let k = case n {
     INegInf -> 0
@@ -2344,7 +2344,7 @@ fn require_cb(
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let cb = helpers.first_arg_or_undefined(args)
-  let this_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let this_arg = helpers.arg_at(args, 1)
   case helpers.is_callable(state.heap, cb) {
     True -> cont(cb, this_arg, state)
     False -> state.type_error(state, string.inspect(cb) <> " is not a function")
@@ -2748,8 +2748,8 @@ fn proto_copy_within(
   let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
   use state <- require_mutable(state, buffer)
   let target_arg = helpers.first_arg_or_undefined(args)
-  let start_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
-  let end_arg = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
+  let start_arg = helpers.arg_at(args, 1)
+  let end_arg = helpers.arg_at(args, 2)
   use t, state <- try_state(to_int_or_inf(state, target_arg))
   use s, state <- try_state(to_int_or_inf(state, start_arg))
   use e, state <- try_state(case end_arg {
@@ -2903,7 +2903,7 @@ fn proto_with(
   use view, state <- validate_ta(this, state)
   let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
   let index_arg = helpers.first_arg_or_undefined(args)
-  let value_arg = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let value_arg = helpers.arg_at(args, 1)
   use rel, state <- try_state(to_int_or_inf(state, index_arg))
   let actual = case rel {
     IInt(i) ->
@@ -3732,7 +3732,7 @@ fn u8_set_from_base64(
     ))
     use #(alphabet, handling, state) <- result.try(read_b64_options(
       state,
-      helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+      helpers.arg_at(args, 1),
     ))
     use #(buffer, data, off, len) <- result.try(u8_live_view(state, this))
     let res = from_base64(s, alphabet, handling, len)
@@ -3815,7 +3815,7 @@ fn u8_from_base64(
     ))
     use #(alphabet, handling, state) <- result.try(read_b64_options(
       state,
-      helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+      helpers.arg_at(args, 1),
     ))
     let res = from_base64(s, alphabet, handling, max_safe_integer)
     decode_to_new_u8(state, res, Base64Codec)
