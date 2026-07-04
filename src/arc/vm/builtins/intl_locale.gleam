@@ -400,43 +400,20 @@ fn parse_t_fields(
 // Canonicalization — UTS 35 §3.2.1
 // ============================================================================
 
-/// CLDR languageAlias subset, pre-parsed. Both sides of every row are parsed
-/// exactly once here: the key is re-rendered in the same canonical lookup form
-/// `apply_language_alias` builds its candidates in (variants sorted), and the
-/// replacement is stored as a `LocaleId` so a lookup never re-parses. A row
-/// that does not parse is a data bug, and panics loudly at construction rather
-/// than degrading into "alias silently never applied".
+/// CLDR languageAlias subset. Keys are already written in the exact lookup form
+/// `apply_language_alias` builds its candidates in — lowercase, subtags in
+/// language-script-region-variant order, variants sorted — so a lookup is a
+/// plain dict hit and only the replacement of the row that actually matched is
+/// ever parsed. This runs on every canonicalization (every `Intl.*`
+/// construction, every `localeCompare(x, locale)`), so nothing here may parse a
+/// tag it does not need.
 ///
 /// Rows whose key cannot be produced by the lookup at all — legacy tags whose
 /// subtags are not valid script/region/variant subtags, e.g. `zh-min-nan`,
 /// `zh-gan`, `no-bok` — are therefore not listed: `parse` rejects those tags
 /// outright, so no locale could ever match them.
-fn language_aliases() -> dict.Dict(String, LocaleId) {
-  language_alias_rows()
-  |> list.map(fn(row) {
-    let #(key, replacement) = row
-    #(alias_lookup_key(key), parse_alias(replacement))
-  })
-  |> dict.from_list
-}
-
-/// Parse an alias-table tag; a malformed row is a bug in the table above.
-fn parse_alias(tag: String) -> LocaleId {
-  case parse(tag) {
-    Ok(lid) -> lid
-    Error(Nil) -> panic as { "malformed languageAlias row: " <> tag }
-  }
-}
-
-/// The exact key form `apply_language_alias` looks up with.
-fn alias_lookup_key(tag: String) -> String {
-  let lid = parse_alias(tag)
-  key_join(
-    [lid.language],
-    lid.script,
-    lid.region,
-    list.sort(lid.variants, string.compare),
-  )
+fn language_aliases() -> dict.Dict(String, String) {
+  dict.from_list(language_alias_rows())
 }
 
 fn language_alias_rows() -> List(#(String, String)) {
@@ -1028,13 +1005,15 @@ fn key_join(
 
 fn find_language_alias(
   lid: LocaleId,
-  aliases: dict.Dict(String, LocaleId),
+  aliases: dict.Dict(String, String),
   candidates: List(AliasCandidate),
 ) -> LocaleId {
   case candidates {
     [] -> lid
     [candidate, ..rest] ->
-      case dict.get(aliases, candidate.key) {
+      // Only the matched row's replacement is parsed; a row that fails to parse
+      // is a data bug in the table and simply does not alias.
+      case dict.get(aliases, candidate.key) |> result.try(parse) {
         Error(Nil) -> find_language_alias(lid, aliases, rest)
         Ok(rep) -> {
           // Replacement components fill in; original components are kept only
