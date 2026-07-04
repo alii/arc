@@ -22,15 +22,17 @@ import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type HostFn, type State, State}
 import arc/vm/value.{
-  type JsValue, type Ref, Finite, HostObject, JsBool, JsNumber, JsObject,
-  JsString, ObjectSlot,
+  type JsValue, type Ref, Finite, HostObject, Infinity, JsBool, JsNumber,
+  JsObject, JsString, NaN, NegInfinity, ObjectSlot,
 }
 import gleam/dict
 import gleam/int
+import gleam/io
 import gleam/list
 import gleam/option.{type Option}
 
@@ -83,8 +85,17 @@ pub fn try_call(
 }
 
 /// Reject unless `val` is an integer-valued JS number within `[min, max]`.
-/// Unwraps to `Int`. Throws RangeError if out of bounds, TypeError if not
-/// a number.
+/// Unwraps to `Int`. Three rejections, and they are NOT the same error:
+///
+///   * not a number at all (`"3"`, `{}`, `undefined`) → **TypeError**, "must
+///     be of type integer. Received type <typeof>";
+///   * a number, but not an integer (`1.5`, `NaN`, `Infinity`) →
+///     **RangeError**, "must be an integer";
+///   * an integer outside `[min, max]` → **RangeError**, "must be >= min and
+///     <= max".
+///
+/// A non-integral number IS of type number, so calling that a type error
+/// (as this used to) told the embedder's user the wrong thing.
 pub fn validate_integer(
   s: State(host),
   val: JsValue,
@@ -97,7 +108,7 @@ pub fn validate_integer(
     JsNumber(Finite(n)) -> {
       let i = value.float_to_int(n)
       case int.to_float(i) == n {
-        False -> invalid_arg_type(s, name, "integer", val)
+        False -> not_an_integer(s, name, value.js_format_number(n))
         True ->
           case i >= min && i <= max {
             True -> cont(i, s)
@@ -116,6 +127,11 @@ pub fn validate_integer(
           }
       }
     }
+    // A number, just not an integral one — out of the integer domain, not
+    // out of the type.
+    JsNumber(NaN) -> not_an_integer(s, name, "NaN")
+    JsNumber(Infinity) -> not_an_integer(s, name, "Infinity")
+    JsNumber(NegInfinity) -> not_an_integer(s, name, "-Infinity")
     _ -> invalid_arg_type(s, name, "integer", val)
   }
 }
@@ -189,190 +205,134 @@ pub fn suspend(s: State(host)) -> #(State(host), JsValue, Ticket) {
 /// Promise stays as first settled and `outstanding` is NOT decremented
 /// again, so the counter can never go negative and the embedder's
 /// `outstanding(s) == 0` drain condition stays honest.
+///
+/// Resuming a ticket whose promise slot no longer exists (it was dropped by
+/// `shrink_for_handoff`) settles nothing and cannot be silently confused with
+/// a double resume: it is reported on stderr as the embedder bug it is.
 pub fn resume(
   s: State(host),
   ticket: Ticket,
   outcome: Result(JsValue, JsValue),
 ) -> State(host) {
   let Ticket(data_ref:) = ticket
-  let #(s, did_settle) = builtins_promise.settle_outcome(s, data_ref, outcome)
-  case did_settle {
-    True -> state.State(..s, outstanding: s.outstanding - 1)
-    False -> s
+  let #(s, settle_outcome) =
+    builtins_promise.settle_outcome(s, data_ref, outcome)
+  case settle_outcome {
+    // The one settle per suspend: balance the counter.
+    builtins_promise.Transitioned(_) ->
+      state.State(..s, outstanding: s.outstanding - 1)
+    // A double resume of the same ticket: legitimately does nothing.
+    builtins_promise.AlreadySettled -> s
+    // A stale ticket: the promise it named is gone, so nothing was settled
+    // and `outstanding` still counts a suspend that can never complete.
+    builtins_promise.NotAPromiseSlot -> {
+      io.println_error(
+        "arc: host.resume called with a stale ticket — its promise no longer "
+        <> "exists (dropped by shrink_for_handoff?); nothing was settled",
+      )
+      s
+    }
   }
 }
 
 // -- Atomics host capabilities -----------------------------------------------
 //
-// The blocking-wait / wake-delivery contract for Atomics.wait, waitAsync
-// and notify. Same inversion of control as suspend/resume above: core owns
-// the data (the ETS waiterlist registry, the SAB cells, State's FIFO of
-// waitAsync waiters), the EMBEDDER owns every mailbox interaction. Core
-// never executes a `receive` and never sends a wake message; instead it
-// calls the capability functions the embedder supplied once at engine/
-// realm construction in the realm's `HostHooks` record.
+// Same inversion of control as suspend/resume above: core owns the data (the
+// ETS waiterlist registry, the SAB cells, State's FIFO of waitAsync waiters),
+// the EMBEDDER owns every mailbox interaction — core never executes a
+// `receive` and never sends a wake message. Mirrors V8's split between the
+// engine and the v8::Platform/d8 layer.
 //
-// The concrete types live in arc/vm/state (RealmCtx's `host_hooks` record
-// references them); they are re-exported here as aliases so embedders can
-// build against arc/host alone. Mirrors V8's split between the engine and
-// the v8::Platform/d8 layer: d8 implements the actual futex park/unpark,
-// the engine only asks for it.
+// What an embedder must know to use the aliases below:
 //
-// THE CONTRACT (five clauses; the numbered units of the Atomics refactor
-// implement against exactly these):
+//   * BOTH capabilities or neither. `sync_wait` (block this agent) and
+//     `deliver_wake` (send the wakes core has claimed for you) come as one
+//     `AtomicsCapabilities` record under a single `Option`, because a host
+//     that can block but not deliver wakes — or vice versa — deadlocks its
+//     peers.
+//   * Install ONCE, at construction. Compose them onto your `HostHooks` with
+//     `with_atomics` and pass that record to the engine/realm constructor —
+//     never to an already-running State. Every derived State (eval/Function
+//     realms, $262 children, ShadowRealms, module bodies) inherits it, so a
+//     forgotten install site is a compile error, not a silent "cannot block".
+//     A host with neither passes `state.default_host_hooks()`, which means
+//     "cannot block": sync `Atomics.wait` throws instead of hanging.
+//   * `can_block` is NOT in here. Agent [[CanBlock]] (§9.7) is per-agent spec
+//     policy, set before realm boot via `arc/vm/agent` — see that module.
+//   * Wakes come back in through `event_loop.inject_notify(state, key,
+//     byte_index)` when an `{arc_notify, Ref, Key, ByteIndex}` message lands
+//     in your mailbox.
 //
-// 1. Sync wait (Atomics.wait, DoWait steps 11-27). Core registers the
-//    waiterlist entry (data-only ETS insert via arc_waiter_ffi), re-reads
-//    the cell ("not-equal" short-circuits, cancelling the entry), then
-//    calls the realm's `host_hooks.atomics` sync_wait capability with a
-//    `WaitRequest`. The
-//    capability blocks IN THE EMBEDDER until notified or timed out and returns
-//    `WaitOk` / `WaitTimedOut` (JS "ok" / "timed-out"). The CanBlock
-//    TypeError check (DoWait step 10) stays first and unchanged; a missing
-//    capability is treated identically to `can_block == False`.
-//    The notify-vs-timeout race is resolved by the embedder exactly as the
-//    old arc_waiter_ffi:await_notify did: on timeout, ets:take your own
-//    entry — got it = nobody claimed you = TimedOut; gone = a notifier
-//    claimed you and its message is in flight = bounded flush-receive,
-//    then Ok.
-//
-// 2. Wake delivery (Atomics.notify). Core's waiterlist take
-//    (arc_waiter_ffi:take_waiters) atomically CLAIMS up to `count` waiters
-//    FIFO and RETURNS the claimed remote waiters instead of messaging
-//    them. Claiming is the spec's "woken" count; delivery is the realm's
-//    `host_hooks.atomics` deliver_wake capability, which sends
-//    `Pid ! {arc_notify, Ref, Key, ByteIndex}` per claimed waiter.
-//    Same-process waitAsync settles stay in core (pure data, no message).
-//    Because a claim is a PROMISE to wake, take_waiters is only reachable
-//    from a notifier holding deliver_wake; a realm with no `atomics`
-//    capabilities takes only its OWN async tokens
-//    (arc_waiter_ffi:take_self_async_tokens) and leaves other agents'
-//    waiters registered rather than claiming waiters it cannot wake.
-//
-// 3. Wake injection. When an `{arc_notify, Ref, Key, ByteIndex}` message
-//    lands in an EMBEDDER's mailbox, the embedder injects it into core via
-//    the public entry point in arc/vm/exec/event_loop:
-//
-//        event_loop.inject_notify(state: State, key: WaiterKey,
-//                                 byte_index: Int) -> State
-//
-//    which wraps builtins_atomics.settle_notified_waiter (settles this
-//    agent's first matching State waitAsync waiter with "ok"; a wake whose
-//    waiter already expired finds no match and settles nothing). Wakes for
-//    cancelled SYNC entries never get here — clause 1's zero-timeout flush
-//    consumes them — leaving only the documented accepted race in
-//    arc_waiter_ffi's module doc (async timeout vs. cross-process claim).
-//    Embedder receive loops bound their blocking
-//    receive with `event_loop.next_deadline_timeout` so host timers and
-//    waitAsync deadlines still fire on time, and re-drain after injecting
-//    (see `wait_settle_step` / `settle_pending_wakes` in the test262
-//    harness, the canonical bounded wait-settle-drain loop).
-//
-// 4. FFI module layout. arc_waiter_ffi.erl (under src/arc/vm/) is
-//    DATA-ONLY: insert_waiter, take_waiters (returning claims — no send),
-//    take_self_async_tokens, local_buffer_key/shared_buffer_key,
-//    cancel_waiter (ETS take only, reporting withdrew | already_claimed) and
-//    start_registry (the table-owner sync-join handshake, run once at realm
-//    boot from interpreter.new_state — no waiterlist operation creates the
-//    table lazily). Zero event-driven receives. The receive-based operations
-//    live in embedder FFI — test/test262_exec_ffi.erl for the test262
-//    harness, the in-tree reference embedder:
-//
-//        await_notify(Handle, TimeoutMs) -> <<"ok">> | <<"timed-out">>
-//            (blocking receive + the timeout-race resolution of clause 1;
-//             TimeoutMs < 0 = infinity, clamped to the BEAM receive cap.
-//             TimeoutMs = 0 doubles as the post-cancel flush: core's
-//             "not-equal" arm calls the sync_wait capability with a zero timeout
-//             when its data-only cancel found the entry already claimed,
-//             and the claimed branch consumes the in-flight wake — bounded
-//             by a safety timeout — so it can't pollute a later receive)
-//        deliver_wakes(Claimed) -> nil
-//            (clause 2's sends, one per claimed remote waiter)
-//        wait_for_notify(Ms) -> {some, {Key, ByteIndex}} | none
-//            (bounded dry-queue receive for embedder loops; feeds
-//             clause 3's inject_notify)
-//
-// 5. Construction. Both capabilities live in ONE `AtomicsCapabilities`
-//    record, stored as a single `Option` on the `HostHooks` record
-//    (re-exported below) carried on the per-realm `RealmCtx`. Embedders
-//    build it ONCE with `atomics_capabilities` below and hand it to the
-//    engine/realm constructor (the `host_hooks` argument of the entry/
-//    module/engine boot APIs) — never to an already-running State. Every
-//    State derived from that realm — eval/Function realms,
-//    $262.createRealm and $262.agent children, ShadowRealms, module
-//    bodies including dynamic import — inherits the record, so a
-//    forgotten install site is a COMPILE error, not a silent "cannot
-//    block". Both capabilities come together, since a host that can
-//    block but not deliver wakes (or vice versa) deadlocks its peers; a
-//    host with neither passes `state.default_host_hooks()` (the default
-//    the convenience entry points already use), which means "cannot
-//    block". `State.can_block` remains separate per-agent embedder
-//    config OUTSIDE the record: it is spec policy ([[CanBlock]]), not
-//    capability presence.
+// The full contract lives next to its implementation: the capability
+// semantics on `arc/vm/host_hooks.AtomicsCapabilities`, the claim/settle
+// accounting in `arc/vm/builtins/atomics`, and the registry's ordering rules
+// in `arc/vm/builtins/arc_waiter_ffi.erl`.
 
 /// Re-export: one blocking sync Atomics.wait handed to the embedder.
-/// See arc/vm/state.WaitRequest for field semantics.
+/// See arc/vm/host_hooks.WaitRequest for field semantics.
 pub type WaitRequest =
-  state.WaitRequest
+  host_hooks.WaitRequest
 
 /// Re-export: result of an embedder blocking wait — `WaitOk` (notified)
 /// or `WaitTimedOut`.
 pub type WaitOutcome =
-  state.WaitOutcome
+  host_hooks.WaitOutcome
 
 /// Re-export: the blocking-wait capability, `fn(WaitRequest) -> WaitOutcome`.
 pub type SyncWaitFn =
-  state.SyncWaitFn
+  host_hooks.SyncWaitFn
 
 /// Re-export: the wake-delivery capability for claimed remote waiters.
 pub type DeliverWakeFn =
-  state.DeliverWakeFn
+  host_hooks.DeliverWakeFn
 
 /// Re-export: opaque claimed-waiter term (pid + ref + key + byte index).
 pub type ClaimedWaiter =
-  state.ClaimedWaiter
+  host_hooks.ClaimedWaiter
 
 /// Re-export: opaque cross-process WaiterList identity.
 pub type WaiterKey =
-  state.WaiterKey
+  host_hooks.WaiterKey
 
 /// Re-export: opaque handle to one registered waiterlist entry.
 pub type WaiterHandle =
-  state.WaiterHandle
+  host_hooks.WaiterHandle
 
 /// Re-export: the bundled blocking-wait + wake-delivery capability pair.
 /// `HostHooks.atomics` holds `Option(AtomicsCapabilities)` — both
 /// capabilities or neither, never one without the other.
 pub type AtomicsCapabilities =
-  state.AtomicsCapabilities
+  host_hooks.AtomicsCapabilities
 
 /// Re-export: the embedder host-capability record carried on every realm's
-/// `RealmCtx`. Build one with `atomics_capabilities` below (or
-/// `state.default_host_hooks()` for "no capabilities") and hand it to the
-/// engine/realm constructor; every derived State inherits it.
+/// `RealmCtx`. Start from `state.default_host_hooks()` (or your own record),
+/// add capabilities, and hand it to the engine/realm constructor; every
+/// derived State inherits it.
 pub type HostHooks =
-  state.HostHooks
+  host_hooks.HostHooks
 
-/// Build the Atomics blocking-wait + wake-delivery capability record
-/// (contract clause 5). Both together, always: a host that blocks but
-/// cannot deliver wakes (or vice versa) deadlocks its peer agents. This
-/// is enforced by construction — `HostHooks.atomics` is one
-/// `Option(AtomicsCapabilities)`, so the half-configured embedder is not
-/// representable.
+/// Install the Atomics blocking-wait + wake-delivery capabilities on `hooks`,
+/// leaving every OTHER hook (`monotonic_now`, `sleep_ms`, `import_hook`, …)
+/// exactly as the caller configured it. Both capabilities together, always: a
+/// host that blocks but cannot deliver wakes (or vice versa) deadlocks its
+/// peer agents, and `HostHooks.atomics` is one `Option(AtomicsCapabilities)`
+/// so the half-configured embedder is not representable.
 ///
-/// Hand the result to the engine/realm constructor ONCE — it is a value,
-/// not a State mutation — and every State derived from that realm
-/// (eval/Function realms, $262.createRealm / $262.agent children,
-/// ShadowRealms, module bodies including dynamic import) inherits it.
-/// Says nothing about `State.can_block` — that stays per-agent spec
-/// policy ([[CanBlock]]), not capability presence.
-pub fn atomics_capabilities(
-  sync_wait sync_wait: state.SyncWaitFn,
-  deliver_wake deliver_wake: state.DeliverWakeFn,
+/// Hand the result to the engine/realm constructor ONCE — it is a value, not
+/// a State mutation — and every State derived from that realm inherits it.
+/// Says nothing about the agent's [[CanBlock]] (`arc/vm/agent`), which is
+/// spec policy, not capability presence.
+pub fn with_atomics(
+  hooks: HostHooks,
+  sync_wait sync_wait: SyncWaitFn,
+  deliver_wake deliver_wake: DeliverWakeFn,
 ) -> HostHooks {
-  state.HostHooks(
-    ..state.default_host_hooks(),
-    atomics: option.Some(state.AtomicsCapabilities(sync_wait:, deliver_wake:)),
+  host_hooks.HostHooks(
+    ..hooks,
+    atomics: option.Some(host_hooks.AtomicsCapabilities(
+      sync_wait:,
+      deliver_wake:,
+    )),
   )
 }
 
@@ -458,6 +418,22 @@ pub fn function(
 }
 
 // -- Internal ----------------------------------------------------------------
+
+/// A number that is not an integer (1.5, NaN, ±Infinity): the VALUE is out of
+/// range, the type is fine — RangeError, mirroring the out-of-bounds message.
+fn not_an_integer(
+  s: State(host),
+  name: String,
+  received: String,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  state.range_error(
+    s,
+    "The value of \""
+      <> name
+      <> "\" is out of range. It must be an integer. Received "
+      <> received,
+  )
+}
 
 fn invalid_arg_type(
   s: State(host),

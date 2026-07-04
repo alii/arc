@@ -1,3 +1,4 @@
+import arc/vm/agent
 import arc/vm/binop
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/disposable_stack
@@ -399,18 +400,10 @@ pub fn new_state(
     eval_env: None,
     current_line: 0,
     // Agent [[CanBlock]]: read once at state init from the process-local
-    // flag (defaults to True). The test262 runner clears the flag in the
-    // test's worker process before booting a realm for CanBlockIsFalse
-    // tests; fresh agent processes start with it unset, i.e. True.
-    can_block: host_can_block(),
+    // flag (defaults to True) — see arc/vm/agent for the full contract.
+    can_block: agent.can_block(),
   )
 }
-
-/// Agent Record [[CanBlock]] for the booting agent — process-local, default
-/// True. See arc_agent_ffi.erl; cleared by the test262 runner for tests
-/// flagged CanBlockIsFalse.
-@external(erlang, "arc_agent_ffi", "can_block")
-fn host_can_block() -> Bool
 
 /// Create the node-wide Atomics WaiterList registry (§25.4.3.6 GetWaiterList)
 /// if it does not exist yet: a public named ETS table owned by a dedicated

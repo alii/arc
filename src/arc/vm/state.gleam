@@ -1,6 +1,7 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/completion.{type SuspendKind}
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/internal/job_queue.{type JobQueue}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/key.{Named}
@@ -142,202 +143,55 @@ pub type RealmCtx(host) {
 }
 
 // ============================================================================
-// Host Atomics capabilities — the blocking-wait / wake-delivery contract.
+// Host capability contract — re-exported from arc/vm/host_hooks.
 //
-// Core never blocks on the BEAM mailbox and never sends wake messages
-// itself. Both event-driven sides of Atomics.wait/notify are inverted into
-// embedder-supplied capability functions, bundled into the `HostHooks`
-// record carried on `RealmCtx.host_hooks` (the same inversion as
-// `host.suspend`/`host.resume` for promises). The types live here (not in
-// arc/host.gleam, which re-exports them) because RealmCtx's field
-// references them and host.gleam imports state.
-//
-// The opaque terms (WaiterKey, WaiterHandle, ClaimedWaiter) are produced
-// exclusively by the data-only ETS registry arc_waiter_ffi.erl and are
-// safe to send between processes. See arc/host.gleam for the full written
-// contract, including the FFI module-layout rules and the wake-injection
-// entry point.
+// The types (and the capability-free `default_host_hooks()`) live in
+// `arc/vm/host_hooks`, a tiny module BELOW this one; `RealmCtx.host_hooks`
+// stores a `HostHooks`. They are aliased here so the many modules that
+// already speak `state.HostHooks` keep working — build values with the
+// `host_hooks` module (or `arc/host`, which re-exports it for embedders).
 // ============================================================================
 
-/// Opaque cross-process identity of a buffer's WaiterList (an Erlang term:
-/// the SAB's atomics ref for shared storage, a pid-scoped heap id
-/// otherwise — see arc_waiter_ffi:shared_buffer_key/local_buffer_key).
-/// Compared structurally; safe to send between processes.
-///
-/// Alias of `value.WaiterKey`: `value.AtomicsWaiter` stores one, so the type
-/// has to be declared where the waiter record can see it. Named here as well
-/// because it is part of the host-capability contract (`WaitRequest.key`).
+/// See `host_hooks.WaiterKey` — opaque cross-process WaiterList identity.
 pub type WaiterKey =
   value.WaiterKey
 
-/// Opaque handle to one registered waiterlist entry (its ETS key plus the
-/// unique message ref a notifier will address). Produced by
-/// arc_waiter_ffi:insert_waiter; consumed by the embedder's blocking wait.
-pub type WaiterHandle
+/// See `host_hooks.WaiterHandle` — opaque registered-waiterlist-entry handle.
+pub type WaiterHandle =
+  host_hooks.WaiterHandle
 
-/// A remote waiter atomically claimed by Atomics.notify's waiterlist take
-/// (opaque Erlang term: the waiter's pid, message ref, WaiterKey and byte
-/// index). Claiming is what counts the waiter as woken; DELIVERING the
-/// wake message is the embedder's job via the `deliver_wake` hook.
-pub type ClaimedWaiter
+/// See `host_hooks.ClaimedWaiter` — opaque claimed remote waiter.
+pub type ClaimedWaiter =
+  host_hooks.ClaimedWaiter
 
-/// One blocking sync Atomics.wait, handed to the embedder's `SyncWaitFn`
-/// after core has registered the waiterlist entry and re-read the cell
-/// (so no wakeup can be lost — see arc_waiter_ffi.erl's module doc for
-/// the lock-free insert/re-read/block ordering).
-pub type WaitRequest {
-  WaitRequest(
-    /// The waiterlist entry to block on. The embedder resolves the
-    /// notify-vs-timeout race by ets:take of this entry on timeout
-    /// (took it ourselves = TimedOut; gone = a notifier claimed us and
-    /// its message is in flight = Ok).
-    handle: WaiterHandle,
-    /// WaiterList identity, for diagnostics and embedder-side policy.
-    key: WaiterKey,
-    /// Byte offset within the buffer (matches the notify side).
-    byte_index: Int,
-    /// Milliseconds to block; `None` = infinite (the embedder may clamp —
-    /// e.g. the BEAM `receive after` 2^32-1 ms ceiling).
-    timeout_ms: Option(Int),
-  )
-}
+/// See `host_hooks.WaitRequest` — one blocking sync Atomics.wait.
+pub type WaitRequest =
+  host_hooks.WaitRequest
 
-/// Result of an embedder blocking wait: woken by a notify, or deadline
-/// elapsed with no claim. Maps 1:1 to the JS "ok"/"timed-out" strings
-/// ("not-equal" is decided by core before the capability is called).
-pub type WaitOutcome {
-  WaitOk
-  WaitTimedOut
-}
+/// See `host_hooks.WaitOutcome` — `WaitOk` / `WaitTimedOut`.
+pub type WaitOutcome =
+  host_hooks.WaitOutcome
 
-/// Embedder capability: block the calling agent until the waiterlist entry
-/// in the request is notified or the timeout elapses. The BLOCKING happens
-/// in the embedder (BEAM selective receive in arc/beam, the harness's
-/// worker mailbox in test262) — never in core.
+/// See `host_hooks.SyncWaitFn` — the blocking-wait capability.
 pub type SyncWaitFn =
-  fn(WaitRequest) -> WaitOutcome
+  host_hooks.SyncWaitFn
 
-/// Embedder capability: deliver wake messages to remote waiters claimed by
-/// Atomics.notify. Core claims atomically (data-only ETS take) and counts;
-/// the embedder owns the actual `Pid ! {arc_notify, Ref, Key, ByteIndex}`
-/// sends.
+/// See `host_hooks.DeliverWakeFn` — the wake-delivery capability.
 pub type DeliverWakeFn =
-  fn(List(ClaimedWaiter)) -> Nil
+  host_hooks.DeliverWakeFn
 
-/// The two Atomics embedder capabilities, bundled. Both together, always
-/// (arc/host contract clause 5): a host that can block an agent but cannot
-/// deliver wakes — or vice versa — deadlocks its peer agents. Making them
-/// one record under a single `Option` makes that half-configured embedder
-/// unrepresentable: `HostHooks.atomics` is either BOTH capabilities or
-/// neither.
-pub type AtomicsCapabilities {
-  AtomicsCapabilities(
-    /// Blocking-wait capability for sync Atomics.wait (§25.4.3.14 DoWait
-    /// steps 11-27). Core registers the waiterlist entry and re-reads the
-    /// cell, then calls this to block IN THE EMBEDDER.
-    sync_wait: SyncWaitFn,
-    /// Wake delivery for Atomics.notify. Core's waiterlist take CLAIMS
-    /// remote waiters atomically (so they count as woken, §25.4.11 step 10)
-    /// and hands them here for actual message delivery.
-    deliver_wake: DeliverWakeFn,
-  )
-}
+/// See `host_hooks.AtomicsCapabilities` — both Atomics capabilities, bundled.
+pub type AtomicsCapabilities =
+  host_hooks.AtomicsCapabilities
 
-/// The embedder's host capabilities, bundled into one record carried on
-/// `RealmCtx.host_hooks`. Supplied exactly once at engine/realm construction
-/// (an explicit argument to `interpreter.new_state`) and inherited by every
-/// derived State via the `RealmCtx(..spread)`s, replacing the old pair of
-/// loose, post-boot-installed `State.host_sync_wait` / `State.host_deliver_wake`
-/// fields. NOT generic over `host`: no field mentions the embedder's
-/// heap-value type.
-///
-/// `can_block` (Agent Record [[CanBlock]], §9.7) is deliberately NOT in here —
-/// it is per-agent spec POLICY, not an embedder capability, and stays a
-/// separate field on `State`. AgentCanSuspend() remains
-/// `can_block && option.is_some(host_hooks.atomics)`.
-pub type HostHooks {
-  HostHooks(
-    /// The Atomics blocking-wait + wake-delivery capability pair
-    /// (`AtomicsCapabilities`), installed as one unit or not at all.
-    /// `None` = this host cannot suspend the agent: sync Atomics.wait is
-    /// treated exactly like `can_block == False` (DoWait step 10
-    /// TypeError) — there is no bounded fallback, because a wait that
-    /// silently can't be woken is worse than an eager error — and claimed
-    /// remote wakes have nobody to deliver to (with no capability nothing
-    /// remote can be blocked on this agent anyway).
-    atomics: Option(AtomicsCapabilities),
-    /// Monotonic clock in milliseconds. Used for Atomics waitAsync deadline
-    /// bookkeeping and the event loop's timer wheel. NOT optional — every
-    /// host has a clock — so it defaults to the BEAM monotonic clock
-    /// (`arc_clock_ffi:monotonic_now/0`). An embedder overrides it to
-    /// virtualise time (deterministic / mocked clocks).
-    monotonic_now: fn() -> Int,
-    /// Blocking sleep for the given number of milliseconds (ms <= 0 returns
-    /// immediately). Used by the event loop to idle until the next timer /
-    /// waitAsync deadline. Defaults to `timer:sleep/1`
-    /// (`arc_clock_ffi:sleep/1`); an embedder overrides it alongside
-    /// `monotonic_now` for a virtual clock, or to yield to its own scheduler
-    /// instead of blocking the OS thread.
-    sleep_ms: fn(Int) -> Nil,
-    /// §16.2.1.8 HostLoadImportedModule: the embedder's dynamic-import host
-    /// hook — a host function (see `arc/module_host.install_import_hook`)
-    /// called with `(specifier, referrer?, phase?, resolve?, reject?)` that
-    /// loads/links/evaluates the requested module graph. `None` = this host
-    /// does not support dynamic import: `import()` rejects with a TypeError.
-    ///
-    /// For the eager phase the hook's return value settles the import
-    /// promise. For the `defer` phase the hook is handed the promise's
-    /// resolving functions and MUST settle through them itself — its return
-    /// value is ignored (see `arc/vm/exec/dynamic_import.DeferHookOutcome`
-    /// for the full contract, and `throw` to reject in either phase).
-    ///
-    /// This is ENGINE state, not a globalThis property: guest JS can neither
-    /// read nor replace it. The `Ref` inside the `JsValue` is pinned with
-    /// `heap.root` at install time (like `RealmCtx.template_objects` entries),
-    /// because nothing else in the heap reaches it.
-    import_hook: Option(JsValue),
-    /// §16.2.1.8 referencingScriptOrModule: the resolved specifier of the
-    /// module whose body is currently executing, set by the module evaluator
-    /// on each body's freshly booted State (`arc/module.run_module_with_referrer`)
-    /// and read at ImportCall time so a nested `import()` resolves relative to
-    /// the importing MODULE. `None` = script code: the host hook falls back to
-    /// its install-time entry referrer.
-    ///
-    /// ENGINE state, never a globalThis property — guest JS cannot forge a
-    /// referrer to escape the module loader's resolution root.
-    import_referrer: Option(String),
-  )
-}
+/// See `host_hooks.HostHooks` — the embedder capability record every realm
+/// carries.
+pub type HostHooks =
+  host_hooks.HostHooks
 
-/// Default `monotonic_now` capability: the BEAM monotonic clock in
-/// milliseconds — the same `arc_clock_ffi:monotonic_now/0` external the
-/// event loop and the Atomics builtin use, so a default-hooks host is
-/// behaviourally identical to one that never thinks about clocks.
-@external(erlang, "arc_clock_ffi", "monotonic_now")
-fn host_monotonic_now() -> Int
-
-/// Default `sleep_ms` capability: `timer:sleep/1`, clamped to a no-op for
-/// ms <= 0 — the same `arc_clock_ffi:sleep/1` external the event loop uses.
-/// Always a BOUNDED idle: an untimed sync Atomics.wait blocks through
-/// `HostHooks.atomics`'s embedder capability, never through this.
-@external(erlang, "arc_clock_ffi", "sleep")
-fn host_sleep_ms(ms: Int) -> Nil
-
-/// The capability-free default: a host that can neither block an agent nor
-/// deliver wakes, and that has no dynamic-import hook (so `import()` rejects
-/// with a TypeError). "No capabilities" is the safe baseline — sync
-/// Atomics.wait throws (AgentCanSuspend is false) rather than hanging. The
-/// clock and sleep hooks are NOT capability-gated: they default to the real
-/// `arc_clock_ffi` monotonic clock and `timer:sleep`, which is what every
-/// host wants unless it is virtualising time.
+/// See `host_hooks.default_host_hooks` — the capability-free default.
 pub fn default_host_hooks() -> HostHooks {
-  HostHooks(
-    atomics: option.None,
-    monotonic_now: host_monotonic_now,
-    sleep_ms: host_sleep_ms,
-    import_hook: option.None,
-    import_referrer: option.None,
-  )
+  host_hooks.default_host_hooks()
 }
 
 /// The internal VM executor state. Public so builtins can receive and return it,

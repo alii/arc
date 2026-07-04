@@ -1,8 +1,7 @@
 %% Cross-process waiterlist for Atomics.wait / Atomics.notify / waitAsync
 %% (ES2024 §25.4.3.14 DoWait, §25.4.11 Atomics.notify).
 %%
-%% DATA-ONLY MODULE (host-capability contract clause 4, see arc/host.gleam):
-%% this is the shared waiterlist REGISTRY — pure ETS operations, zero
+%% DATA-ONLY MODULE — this is the shared waiterlist REGISTRY — pure ETS operations, zero
 %% event-driven mailbox interaction. It never executes a `receive` for
 %% wake messages and never sends one. (Its ONLY receive is the boot-time
 %% sync-join handshake in start_registry/0, plus the table owner's own idle

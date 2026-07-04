@@ -118,8 +118,34 @@ pub fn validate_integer_rejects_float_test() {
       use _, s <- host.validate_integer(s, v, "n", 0, 100)
       #(s, Ok(JsUndefined))
     })
+  // A number that isn't an integer is a RANGE error, not a type error: the
+  // type (number) is exactly right, the value isn't in the integer domain.
   assert extract_error_message(eng, "f(3.14)")
-    == "The \"n\" argument must be of type integer. Received type number"
+    == "The value of \"n\" is out of range. It must be an integer. Received 3.14"
+  assert extract_error_message(eng, "f(NaN)")
+    == "The value of \"n\" is out of range. It must be an integer. Received NaN"
+  assert extract_error_message(eng, "f(Infinity)")
+    == "The value of \"n\" is out of range. It must be an integer. Received Infinity"
+  assert eval_value(
+      eng,
+      "try { f(3.14) } catch (e) { e instanceof RangeError ? 'range' : 'other' }",
+    )
+    == JsString("range")
+}
+
+pub fn validate_integer_rejects_non_number_test() {
+  let eng =
+    engine_with_validator("f", fn(v, s) {
+      use _, s <- host.validate_integer(s, v, "n", 0, 100)
+      #(s, Ok(JsUndefined))
+    })
+  assert extract_error_message(eng, "f('3')")
+    == "The \"n\" argument must be of type integer. Received type string"
+  assert eval_value(
+      eng,
+      "try { f('3') } catch (e) { e instanceof TypeError ? 'type' : 'other' }",
+    )
+    == JsString("type")
 }
 
 pub fn validate_integer_range_error_is_rangeerror_test() {

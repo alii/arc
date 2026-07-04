@@ -19,6 +19,7 @@ import arc/vm/builtins/reflect
 import arc/vm/exec/entry
 import arc/vm/exec/interpreter
 import arc/vm/heap
+import arc/vm/host_hooks as host_hooks_mod
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
@@ -1245,7 +1246,7 @@ fn run_module_with_referrer(
     builtins,
     global_object,
     seeds,
-    state.HostHooks(..host_hooks, import_referrer: Some(specifier)),
+    host_hooks_mod.HostHooks(..host_hooks, import_referrer: Some(specifier)),
     finish,
   )
 }

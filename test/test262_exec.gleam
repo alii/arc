@@ -23,14 +23,16 @@ import arc/module
 import arc/module/load_error
 import arc/module_host
 import arc/parser
+import arc/vm/agent
 import arc/vm/builtins
-import arc/vm/builtins/atomics as builtins_atomics
 import arc/vm/builtins/common
 import arc/vm/completion.{ThrowCompletion}
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
 import arc/vm/heap
+import arc/vm/host_hooks
+import arc/vm/internal/clock_ffi
 import arc/vm/internal/elements
 import arc/vm/key.{Named}
 import arc/vm/ops/coerce
@@ -508,7 +510,7 @@ fn run_test_completion(
       case
         test_runner.run_with_timeout(
           fn() {
-            let Nil = builtins_atomics.set_can_block(can_block)
+            let Nil = agent.set_can_block(can_block)
             let Nil = install_agent_hook()
             do_run_module(metadata, source, path, is_async)
           },
@@ -527,7 +529,7 @@ fn run_test_completion(
       case
         test_runner.run_with_timeout(
           fn() {
-            let Nil = builtins_atomics.set_can_block(can_block)
+            let Nil = agent.set_can_block(can_block)
             let Nil = install_agent_hook()
             do_run_script_with_harness(
               metadata,
@@ -893,7 +895,10 @@ fn eval_harness(
           test262_load,
         )
       let test_hooks =
-        state.HostHooks(..harness_host_hooks(), import_hook: Some(import_hook))
+        host_hooks.HostHooks(
+          ..harness_host_hooks(),
+          import_hook: Some(import_hook),
+        )
       // Install native $262 object on the global
       let #(h, realm_ref) =
         heap.alloc(
@@ -1501,7 +1506,7 @@ fn agent_sleep_native(
         value.Finite(f) -> value.float_to_int(f)
         _ -> 0
       }
-      let Nil = builtins_atomics.sleep_ms(ms)
+      let Nil = clock_ffi.sleep_ms(ms)
       #(st, Ok(value.JsUndefined))
     }
   }
@@ -1514,7 +1519,7 @@ fn agent_monotonic_now_native(
   _this: value.JsValue,
   st: State(host),
 ) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  #(st, Ok(value.from_int(builtins_atomics.monotonic_now())))
+  #(st, Ok(value.from_int(clock_ffi.monotonic_now())))
 }
 
 /// $262.agent.leaving() — agent termination hint. The child process exits
@@ -1639,20 +1644,23 @@ fn ffi_take_report() -> Result(String, Nil) {
 /// with the notify-vs-timeout race resolved by ets:take of our own entry
 /// (negative timeout = infinity). Returns the JS "ok" / "timed-out".
 @external(erlang, "test262_exec_ffi", "await_notify")
-fn ffi_await_notify(_handle: state.WaiterHandle, _timeout_ms: Int) -> String {
+fn ffi_await_notify(
+  _handle: host_hooks.WaiterHandle,
+  _timeout_ms: Int,
+) -> String {
   panic as beam_only_test
 }
 
 /// Clause 2's wake delivery: send `{arc_notify, Ref, Key, ByteIndex}` to
 /// each remote waiter claimed by Atomics.notify's waiterlist take.
 @external(erlang, "test262_exec_ffi", "deliver_wakes")
-fn ffi_deliver_wakes(_claimed: List(state.ClaimedWaiter)) -> Nil {
+fn ffi_deliver_wakes(_claimed: List(host_hooks.ClaimedWaiter)) -> Nil {
   panic as beam_only_test
 }
 
 /// Clause 4's bounded dry-queue receive for arc_notify messages.
 @external(erlang, "test262_exec_ffi", "wait_for_notify")
-fn ffi_wait_for_notify(_ms: Int) -> Option(#(state.WaiterKey, Int)) {
+fn ffi_wait_for_notify(_ms: Int) -> Option(#(host_hooks.WaiterKey, Int)) {
   panic as beam_only_test
 }
 
@@ -1662,11 +1670,11 @@ fn ffi_wait_for_notify(_ms: Int) -> Option(#(state.WaiterKey, Int)) {
 /// waiterlist entry is woken or the timeout elapses. `timeout_ms: None` =
 /// wait forever (the FFI clamps to the BEAM receive ceiling). A `Some(0)`
 /// timeout doubles as the cancel flush — see await_notify's doc.
-fn atomics_sync_wait(req: state.WaitRequest) -> state.WaitOutcome {
-  let state.WaitRequest(handle:, timeout_ms:, key: _, byte_index: _) = req
+fn atomics_sync_wait(req: host_hooks.WaitRequest) -> host_hooks.WaitOutcome {
+  let host_hooks.WaitRequest(handle:, timeout_ms:, key: _, byte_index: _) = req
   case ffi_await_notify(handle, option.unwrap(timeout_ms, -1)) {
-    "timed-out" -> state.WaitTimedOut
-    _ -> state.WaitOk
+    "timed-out" -> host_hooks.WaitTimedOut
+    _ -> host_hooks.WaitOk
   }
 }
 
@@ -1679,7 +1687,8 @@ fn atomics_sync_wait(req: state.WaitRequest) -> state.WaitOutcome {
 /// Leaves `State.can_block` untouched — that is per-agent spec policy (the
 /// CanBlockIsFalse flag), not capability presence.
 fn harness_host_hooks() -> host.HostHooks {
-  host.atomics_capabilities(
+  host.with_atomics(
+    state.default_host_hooks(),
     sync_wait: atomics_sync_wait,
     deliver_wake: ffi_deliver_wakes,
   )
