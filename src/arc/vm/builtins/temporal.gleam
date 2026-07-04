@@ -1430,6 +1430,21 @@ fn make_duration(
   )
 }
 
+/// Validate then allocate a Temporal.Duration, or throw a RangeError.
+fn finish_duration(
+  state: State(host),
+  protos: TemporalProtos,
+  dur: DurRec,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case is_valid_duration(dur) {
+    False -> state.range_error(state, "invalid duration")
+    True -> {
+      let #(state, v) = make_duration(state, protos, dur)
+      #(state, Ok(v))
+    }
+  }
+}
+
 fn make_instant(
   state: State(host),
   protos: TemporalProtos,
@@ -2848,13 +2863,7 @@ fn duration_ctor(
   use us, state <- state.try_op(opt_integral_arg(state, args, 8))
   use ns, state <- state.try_op(opt_integral_arg(state, args, 9))
   let dur = DurRec(y, mo, w, d, h, mi, s, ms, us, ns)
-  case is_valid_duration(dur) {
-    False -> state.range_error(state, "invalid duration")
-    True -> {
-      let #(state, v) = make_duration(state, protos, dur)
-      #(state, Ok(v))
-    }
-  }
+  finish_duration(state, protos, dur)
 }
 
 fn opt_integral_arg(
@@ -9316,13 +9325,7 @@ fn duration_method(
                       us: option.unwrap(us, d.us),
                       ns: option.unwrap(ns, d.ns),
                     )
-                  case is_valid_duration(d2) {
-                    False -> state.range_error(state, "invalid duration")
-                    True -> {
-                      let #(state, v) = make_duration(state, protos, d2)
-                      #(state, Ok(v))
-                    }
-                  }
+                  finish_duration(state, protos, d2)
                 }
               }
             }
@@ -9355,13 +9358,7 @@ fn duration_method(
               let total = time_duration_ns(d) + time_duration_ns(other)
               let largest = larger_time_unit(d, other)
               let sum = balance_time_ns(total, largest)
-              case is_valid_duration(sum) {
-                False -> state.range_error(state, "invalid duration")
-                True -> {
-                  let #(state, v) = make_duration(state, protos, sum)
-                  #(state, Ok(v))
-                }
-              }
+              finish_duration(state, protos, sum)
             }
           }
         }
@@ -9547,13 +9544,7 @@ fn duration_round_with(
               let rounded =
                 round_to_increment(total, inc * time_unit_ns(su), mode)
               let result = balance_time_ns(rounded, largest)
-              case is_valid_duration(result) {
-                False -> state.range_error(state, "invalid duration")
-                True -> {
-                  let #(state, v) = make_duration(state, protos, result)
-                  #(state, Ok(v))
-                }
-              }
+              finish_duration(state, protos, result)
             }
           }
         }
@@ -9568,13 +9559,7 @@ fn duration_round_with(
               let rounded =
                 round_to_increment(diff, inc * time_unit_ns(su), mode)
               let result = balance_time_ns(rounded, largest)
-              case is_valid_duration(result) {
-                False -> state.range_error(state, "invalid duration")
-                True -> {
-                  let #(state, v) = make_duration(state, protos, result)
-                  #(state, Ok(v))
-                }
-              }
+              finish_duration(state, protos, result)
             }
             False -> {
               use result <- terr(
@@ -9612,13 +9597,7 @@ fn duration_round_with(
                     )
                 },
               )
-              case is_valid_duration(result) {
-                False -> state.range_error(state, "invalid duration")
-                True -> {
-                  let #(state, v) = make_duration(state, protos, result)
-                  #(state, Ok(v))
-                }
-              }
+              finish_duration(state, protos, result)
             }
           }
         }
@@ -9649,13 +9628,7 @@ fn duration_round_with(
                   False,
                 ),
               )
-              case is_valid_duration(result) {
-                False -> state.range_error(state, "invalid duration")
-                True -> {
-                  let #(state, v) = make_duration(state, protos, result)
-                  #(state, Ok(v))
-                }
-              }
+              finish_duration(state, protos, result)
             }
           }
         }
