@@ -339,16 +339,12 @@ fn math_cbrt(
   use x <- math_unary(args, state)
   case x {
     Finite(n) ->
-      case is_neg_zero(n) {
-        True -> Finite(-0.0)
-        False ->
-          case n <. 0.0 {
-            // |n|^(1/3) never overflows for a finite n, but pow_total is
-            // total so we get a JsNum back: negate it structurally.
-            True -> num_negate(pow_total(float.absolute_value(n), 1.0 /. 3.0))
-            False -> pow_total(n, 1.0 /. 3.0)
-          }
-      }
+      keep_neg_zero(n, case n <. 0.0 {
+        // |n|^(1/3) never overflows for a finite n, but pow_total is
+        // total so we get a JsNum back: negate it structurally.
+        True -> num_negate(pow_total(float.absolute_value(n), 1.0 /. 3.0))
+        False -> pow_total(n, 1.0 /. 3.0)
+      })
     NaN -> NaN
     Infinity -> Infinity
     NegInfinity -> NegInfinity
@@ -419,11 +415,7 @@ fn math_expm1(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) ->
-      case is_neg_zero(n) {
-        True -> Finite(-0.0)
-        False -> expm1_finite(n)
-      }
+    Finite(n) -> keep_neg_zero(n, expm1_finite(n))
     NaN -> NaN
     Infinity -> Infinity
     NegInfinity -> Finite(-1.0)
@@ -473,11 +465,7 @@ fn math_log1p(
   case x {
     Finite(n) if n <. -1.0 -> NaN
     Finite(-1.0) -> NegInfinity
-    Finite(n) ->
-      case is_neg_zero(n) {
-        True -> Finite(-0.0)
-        False -> log1p_finite(n)
-      }
+    Finite(n) -> keep_neg_zero(n, log1p_finite(n))
     NaN | NegInfinity -> NaN
     Infinity -> Infinity
   }
@@ -530,13 +518,9 @@ fn math_sinh(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) ->
-      case is_neg_zero(n) {
-        True -> Finite(-0.0)
-        // sinh_total yields ±Infinity (matching n's sign) once sinh(n)
-        // overflows a 64-bit float.
-        False -> sinh_total(n)
-      }
+    // sinh_total yields ±Infinity (matching n's sign) once sinh(n)
+    // overflows a 64-bit float.
+    Finite(n) -> keep_neg_zero(n, sinh_total(n))
     other -> other
   }
 }
@@ -562,11 +546,7 @@ fn math_tanh(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) ->
-      case is_neg_zero(n) {
-        True -> Finite(-0.0)
-        False -> Finite(ffi_math_tanh(n))
-      }
+    Finite(n) -> keep_neg_zero(n, Finite(ffi_math_tanh(n)))
     NaN -> NaN
     Infinity -> Finite(1.0)
     NegInfinity -> Finite(-1.0)
@@ -600,11 +580,7 @@ fn math_atanh(
     Finite(n) if n <. -1.0 || n >. 1.0 -> NaN
     Finite(-1.0) -> NegInfinity
     Finite(1.0) -> Infinity
-    Finite(n) ->
-      case is_neg_zero(n) {
-        True -> Finite(-0.0)
-        False -> Finite(ffi_math_atanh(n))
-      }
+    Finite(n) -> keep_neg_zero(n, Finite(ffi_math_atanh(n)))
     _ -> NaN
   }
 }
@@ -681,6 +657,17 @@ fn coerce_args_loop(
   }
 }
 
+/// -0 in, -0 out: the odd Math functions (cbrt, expm1, log1p, sinh, tanh,
+/// asinh, atanh) must return -0 for a -0 argument. `result` is taken eagerly
+/// — every caller passes pure float math that is well-defined at -0, so
+/// there is nothing to defer.
+fn keep_neg_zero(n: Float, result: value.JsNum) -> value.JsNum {
+  case is_neg_zero(n) {
+    True -> Finite(-0.0)
+    False -> result
+  }
+}
+
 /// Like finite_passthrough but preserves -0.0 (for asinh; sinh needs its
 /// own `math_sinh` because its FFI must be total over overflow).
 fn neg_zero_preserving(
@@ -690,11 +677,7 @@ fn neg_zero_preserving(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   case x {
-    Finite(n) ->
-      case is_neg_zero(n) {
-        True -> Finite(-0.0)
-        False -> Finite(f(n))
-      }
+    Finite(n) -> keep_neg_zero(n, Finite(f(n)))
     other -> other
   }
 }
