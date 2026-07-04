@@ -10,7 +10,7 @@ import arc/vm/builtins/helpers.{can_be_held_weakly}
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/ops/object
-import arc/vm/state.{type State, State}
+import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type FinalizationRegistryNativeFn, type JsValue, type Ref, Dispatch,
   FinRegCell, FinalizationRegistryConstructor, FinalizationRegistryNative,
@@ -143,7 +143,7 @@ fn register(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use cells, callback, ref, state <- require_registry(this, state, "register")
+  use cells, ref, state <- require_registry(this, state, "register")
   let target = helpers.first_arg_or_undefined(args)
   let held = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   let token_arg = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
@@ -158,19 +158,11 @@ fn register(
           // Step 5
           case can_be_held_weakly(state, token_arg), token_arg {
             False, JsUndefined ->
-              do_register(state, cells, callback, ref, target, held, None)
+              do_register(state, cells, ref, target, held, None)
             False, _ ->
               state.type_error(state, "Invalid value used as unregister token")
             True, _ ->
-              do_register(
-                state,
-                cells,
-                callback,
-                ref,
-                target,
-                held,
-                Some(token_arg),
-              )
+              do_register(state, cells, ref, target, held, Some(token_arg))
           }
       }
   }
@@ -180,7 +172,6 @@ fn register(
 fn do_register(
   state: State(host),
   cells: List(value.FinRegCell),
-  callback: JsValue,
   ref: Ref,
   target: JsValue,
   held: JsValue,
@@ -189,9 +180,22 @@ fn do_register(
   let cell = FinRegCell(target:, held:, token:)
   // [[Cells]] is append-ordered in the spec; order is unobservable here
   // (no iteration, cleanup never fires), so prepend for O(1).
-  let kind = FinalizationRegistryObject(cells: [cell, ..cells], callback:)
-  let heap = heap.update_kind(state.heap, ref, kind)
+  let heap = set_cells(state.heap, ref, [cell, ..cells])
   #(State(..state, heap:), Ok(JsUndefined))
+}
+
+/// Replace [[Cells]] on the registry at `ref`, preserving [[CleanupCallback]]
+/// structurally. `require_registry` has already proved the brand, so a slot of
+/// any other kind is a wiring bug — crash rather than dropping the write.
+fn set_cells(
+  h: Heap(host),
+  ref: Ref,
+  cells: List(value.FinRegCell),
+) -> Heap(host) {
+  use slot <- heap.update(h, ref)
+  let assert ObjectSlot(kind: FinalizationRegistryObject(..) as k, ..) = slot
+    as "finalization_registry: ref is not a FinalizationRegistry slot"
+  ObjectSlot(..slot, kind: FinalizationRegistryObject(..k, cells:))
 }
 
 /// §26.2.3.3 FinalizationRegistry.prototype.unregister ( unregisterToken )
@@ -206,7 +210,7 @@ fn unregister(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use cells, callback, ref, state <- require_registry(this, state, "unregister")
+  use cells, ref, state <- require_registry(this, state, "unregister")
   let token = helpers.first_arg_or_undefined(args)
   case can_be_held_weakly(state, token) {
     False -> state.type_error(state, "Invalid value used as unregister token")
@@ -218,8 +222,7 @@ fn unregister(
             None -> False
           }
         })
-      let kind = FinalizationRegistryObject(cells: kept, callback:)
-      let heap = heap.update_kind(state.heap, ref, kind)
+      let heap = set_cells(state.heap, ref, kept)
       #(State(..state, heap:), Ok(JsBool(removed != [])))
     }
   }
@@ -231,20 +234,20 @@ fn require_registry(
   this: JsValue,
   state: State(host),
   method: String,
-  cont: fn(List(value.FinRegCell), JsValue, Ref, State(host)) ->
+  cont: fn(List(value.FinRegCell), Ref, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let found = case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: FinalizationRegistryObject(cells:, callback:), ..)) ->
-          Some(#(cells, callback, ref))
+        Some(ObjectSlot(kind: FinalizationRegistryObject(cells:, ..), ..)) ->
+          Some(#(cells, ref))
         _ -> None
       }
     _ -> None
   }
   case found {
-    Some(#(cells, callback, ref)) -> cont(cells, callback, ref, state)
+    Some(#(cells, ref)) -> cont(cells, ref, state)
     None ->
       state.type_error(
         state,

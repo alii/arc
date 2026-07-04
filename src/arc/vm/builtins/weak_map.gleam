@@ -292,13 +292,13 @@ fn mutate(
   ref: Ref,
   update: fn(Dict(JsValue, JsValue)) -> Dict(JsValue, JsValue),
 ) -> State(host) {
-  case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: WeakMapObject(data:), ..)) -> {
-      let heap =
-        heap.update_kind(state.heap, ref, WeakMapObject(data: update(data)))
-      State(..state, heap:)
-    }
-    // Unreachable: a heap slot's kind never changes after allocation.
-    _ -> state
-  }
+  // A heap slot's kind never changes after allocation, so `require_weak_map`
+  // having passed makes anything else a wiring bug — crash rather than
+  // silently dropping the mutation.
+  let assert Some(ObjectSlot(kind: WeakMapObject(data:), ..)) =
+    heap.read(state.heap, ref)
+    as "weak_map: ref is not a WeakMap slot"
+  let heap =
+    heap.update_kind(state.heap, ref, WeakMapObject(data: update(data)))
+  State(..state, heap:)
 }

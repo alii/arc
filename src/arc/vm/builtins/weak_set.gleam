@@ -196,13 +196,13 @@ fn mutate(
   ref: Ref,
   update: fn(Dict(JsValue, Nil)) -> Dict(JsValue, Nil),
 ) -> State(host) {
-  case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: WeakSetObject(data:), ..)) -> {
-      let heap =
-        heap.update_kind(state.heap, ref, WeakSetObject(data: update(data)))
-      State(..state, heap:)
-    }
-    // Unreachable: a heap slot's kind never changes after allocation.
-    _ -> state
-  }
+  // A heap slot's kind never changes after allocation, so `require_weak_set`
+  // having passed makes anything else a wiring bug — crash rather than
+  // silently dropping the mutation.
+  let assert Some(ObjectSlot(kind: WeakSetObject(data:), ..)) =
+    heap.read(state.heap, ref)
+    as "weak_set: ref is not a WeakSet slot"
+  let heap =
+    heap.update_kind(state.heap, ref, WeakSetObject(data: update(data)))
+  State(..state, heap:)
 }

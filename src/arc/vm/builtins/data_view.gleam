@@ -282,33 +282,41 @@ fn set_view_value(
   case written {
     Some(new_data) -> {
       let heap =
-        heap.update(state.heap, view.buffer, fn(slot) {
-          case slot {
-            ObjectSlot(kind: ArrayBufferObject(data: Some(old), ..) as k, ..) ->
-              // Shared storage: persist only the element's bytes — other
-              // regions may be concurrently written by other agents.
-              ObjectSlot(
-                ..slot,
-                kind: ArrayBufferObject(
-                  ..k,
-                  data: Some(value.buffer_store_region(
-                    old,
-                    new_data,
-                    pos,
-                    elem_size,
-                  )),
-                ),
-              )
-            // Detached (`data: None`) or not a buffer: nothing to write into.
-            other -> other
-          }
-        })
+        write_buffer_bytes(state.heap, view.buffer, new_data, pos, elem_size)
       #(State(..state, heap:), Ok(JsUndefined))
     }
     None ->
       // Unreachable: bounds were validated above against the live buffer.
       state.range_error(state, "Offset is outside the bounds of the DataView")
   }
+}
+
+/// Store `new_bits` (a whole new image of the buffer's bytes) into `buffer`,
+/// persisting only the `count` bytes at `byte_offset` — other regions of a
+/// shared buffer may be concurrently written by other agents.
+///
+/// `checked_view_bytes` has already proved the buffer is a live (non-detached)
+/// ArrayBuffer, so anything else here is a wiring bug: crash rather than
+/// silently dropping the store while still reporting success to JS. The
+/// `..k` update preserves `max_byte_length` / `immutable` structurally.
+fn write_buffer_bytes(
+  h: Heap(host),
+  buffer: Ref,
+  new_bits: BitArray,
+  byte_offset: Int,
+  count: Int,
+) -> Heap(host) {
+  use slot <- heap.update(h, buffer)
+  let assert ObjectSlot(kind: ArrayBufferObject(data: Some(old), ..) as k, ..) =
+    slot
+    as "data_view: buffer slot is not a live ArrayBuffer"
+  ObjectSlot(
+    ..slot,
+    kind: ArrayBufferObject(
+      ..k,
+      data: Some(value.buffer_store_region(old, new_bits, byte_offset, count)),
+    ),
+  )
 }
 
 // ============================================================================

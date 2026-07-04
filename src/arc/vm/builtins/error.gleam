@@ -89,17 +89,7 @@ pub fn init(
       ErrorNative(value.ErrorStackSetter(proto: error.prototype)),
       "stack",
     )
-  let h =
-    heap.update(h, error.prototype, fn(slot) {
-      case slot {
-        ObjectSlot(properties:, ..) ->
-          ObjectSlot(
-            ..slot,
-            properties: dict.insert(properties, Named("stack"), stack_accessor),
-          )
-        other -> other
-      }
-    })
+  let h = common.add_named_property(h, error.prototype, "stack", stack_accessor)
 
   // Error subclasses — the prototype inherits from %Error.prototype% and,
   // per §20.5.6.2, the CONSTRUCTOR's [[Prototype]] is %Error% (not
@@ -481,20 +471,12 @@ fn install_error_cause(
           ))
           // Step 1b: non-enumerable {W:T, E:F, C:T} data property.
           let heap =
-            heap.update(state.heap, ref, fn(slot) {
-              case slot {
-                ObjectSlot(properties:, ..) ->
-                  ObjectSlot(
-                    ..slot,
-                    properties: dict.insert(
-                      properties,
-                      Named("cause"),
-                      value.builtin_property(cause),
-                    ),
-                  )
-                other -> other
-              }
-            })
+            common.add_named_property(
+              state.heap,
+              ref,
+              "cause",
+              value.builtin_property(cause),
+            )
           #(State(..state, heap:), Ok(ref))
         }
       }
