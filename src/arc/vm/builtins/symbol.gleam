@@ -11,9 +11,7 @@ import arc/vm/value.{
   SymbolDescriptionGetter, SymbolFor, SymbolKeyFor, SymbolPrototypeToPrimitive,
   SymbolPrototypeToString, SymbolPrototypeValueOf,
 }
-import gleam/dict
 import gleam/option.{type Option, None, Some}
-import gleam/result
 
 /// Set up the Symbol constructor (with well-known symbol properties) and a
 /// dedicated %Symbol.prototype% (§20.4.3) carrying toString/valueOf, the
@@ -166,9 +164,10 @@ pub fn init(
 @external(erlang, "erlang", "make_ref")
 fn make_ref() -> value.ErlangRef
 
-/// Create a new unique symbol reference (exposed for Symbol.for).
-pub fn new_symbol_ref() -> value.ErlangRef {
-  make_ref()
+/// Mint a new user symbol with the given [[Description]] (exposed for
+/// Symbol.for, which stores the registry key as the description).
+pub fn new_symbol(description: Option(String)) -> value.SymbolId {
+  value.UserSymbol(make_ref(), description)
 }
 
 /// Symbol() call implementation. Creates a new unique symbol backed by
@@ -178,31 +177,13 @@ pub fn new_symbol_ref() -> value.ErlangRef {
 /// argument, which can run user code and throw — so the caller (the
 /// SymbolConstructor dispatch arm) performs the coercion and hands us the
 /// already-stringified description here.
-pub fn call_symbol(
-  description: Option(String),
-  symbol_descriptions: dict.Dict(value.SymbolId, String),
-) -> #(dict.Dict(value.SymbolId, String), JsValue) {
-  let id = value.UserSymbol(make_ref())
-
-  let new_descriptions = case description {
-    Some(desc) -> dict.insert(symbol_descriptions, id, desc)
-    None -> symbol_descriptions
-  }
-
-  #(new_descriptions, JsSymbol(id))
+pub fn call_symbol(description: Option(String)) -> JsValue {
+  JsSymbol(new_symbol(description))
 }
 
 /// §20.4.3.3.1 SymbolDescriptiveString — "Symbol(" + description + ")".
 /// Used by String(sym) and Symbol.prototype.toString. Unlike ToString(sym),
 /// this never throws.
-pub fn descriptive_string(
-  id: value.SymbolId,
-  symbol_descriptions: dict.Dict(value.SymbolId, String),
-) -> String {
-  let desc =
-    value.well_known_symbol_description(id)
-    |> option.lazy_unwrap(fn() {
-      dict.get(symbol_descriptions, id) |> result.unwrap("")
-    })
-  "Symbol(" <> desc <> ")"
+pub fn descriptive_string(id: value.SymbolId) -> String {
+  "Symbol(" <> option.unwrap(value.symbol_description(id), "") <> ")"
 }

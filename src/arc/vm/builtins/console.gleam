@@ -153,13 +153,7 @@ fn spec(
     // Symbol). Match Symbols BEFORE the coercing arms below so the only
     // throws that propagate are the user's own toString/valueOf.
     "s", [JsSymbol(id), ..rest] ->
-      Ok(
-        Some(#(
-          builtins_symbol.descriptive_string(id, state.ctx.symbol_descriptions),
-          rest,
-          state,
-        )),
-      )
+      Ok(Some(#(builtins_symbol.descriptive_string(id), rest, state)))
     "d", [JsSymbol(_), ..rest]
     | "i", [JsSymbol(_), ..rest]
     | "f", [JsSymbol(_), ..rest]

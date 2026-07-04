@@ -60,7 +60,6 @@ pub type NewStateFn(host) =
     Builtins,
     Ref,
     dict.Dict(String, value.LexicalGlobal),
-    dict.Dict(value.SymbolId, String),
     dict.Dict(String, value.SymbolId),
     state.HostHooks,
   ) -> State(host)
@@ -93,7 +92,6 @@ pub fn eval_script_native(
             Some(value.RealmSlot(
               global_object: realm_global,
               lexical_globals:,
-              symbol_descriptions:,
               symbol_registry:,
             )) ->
               case dict.get(state.ctx.realms, realm_ref) {
@@ -103,7 +101,6 @@ pub fn eval_script_native(
                     realm_global,
                     realm_ref,
                     lexical_globals,
-                    symbol_descriptions,
                     symbol_registry,
                   ))
                 Error(Nil) -> Error("evalScript: realm builtins not found")
@@ -122,7 +119,6 @@ pub fn eval_script_native(
       realm_global,
       realm_ref,
       lexical_globals,
-      symbol_descriptions,
       symbol_registry,
     )) -> {
       use template <- compile_or_throw(
@@ -153,7 +149,6 @@ pub fn eval_script_native(
             realm_builtins,
             realm_global,
             lexical_globals,
-            symbol_descriptions,
             symbol_registry,
             // Child realm inherits the parent's embedder host capabilities.
             state.ctx.host_hooks,
@@ -174,7 +169,6 @@ pub fn eval_script_native(
             value.RealmSlot(
               global_object: realm_global,
               lexical_globals: drained.ctx.lexical_globals,
-              symbol_descriptions: drained.ctx.symbol_descriptions,
               symbol_registry: drained.ctx.symbol_registry,
             )
           let h = heap.write(drained.heap, realm_ref, updated_realm)
@@ -210,7 +204,6 @@ pub fn create_realm_native(
       value.RealmSlot(
         global_object: new_global_ref,
         lexical_globals: dict.new(),
-        symbol_descriptions: dict.new(),
         symbol_registry: dict.new(),
       ),
     )
@@ -437,7 +430,6 @@ fn run_eval(
           state.builtins,
           state.ctx.global_object,
           state.ctx.lexical_globals,
-          state.ctx.symbol_descriptions,
           state.ctx.symbol_registry,
           // The eval realm inherits the caller's embedder host capabilities.
           state.ctx.host_hooks,
@@ -796,7 +788,6 @@ type RealmRecord {
     builtins: Builtins,
     global: Ref,
     lexical_globals: dict.Dict(String, value.LexicalGlobal),
-    symbol_descriptions: dict.Dict(value.SymbolId, String),
     symbol_registry: dict.Dict(String, value.SymbolId),
   )
 }
@@ -857,7 +848,6 @@ fn shadow_realm_constructor(
       value.RealmSlot(
         global_object: new_global,
         lexical_globals: dict.new(),
-        symbol_descriptions: dict.new(),
         symbol_registry: dict.new(),
       ),
     )
@@ -887,19 +877,13 @@ fn shadow_realm_of(state: State(host), this: JsValue) -> Result(Ref, Nil) {
 /// Resolve a realm ref into its record (RealmSlot fields + Builtins).
 fn read_realm(state: State(host), realm_ref: Ref) -> Result(RealmRecord, Nil) {
   case heap.read(state.heap, realm_ref) {
-    Some(value.RealmSlot(
-      global_object:,
-      lexical_globals:,
-      symbol_descriptions:,
-      symbol_registry:,
-    )) ->
+    Some(value.RealmSlot(global_object:, lexical_globals:, symbol_registry:)) ->
       case dict.get(state.ctx.realms, realm_ref) {
         Ok(b) ->
           Ok(RealmRecord(
             builtins: b,
             global: global_object,
             lexical_globals:,
-            symbol_descriptions:,
             symbol_registry:,
           ))
         Error(Nil) -> Error(Nil)
@@ -913,7 +897,6 @@ fn current_realm_slot(state: State(host)) -> state.HeapSlot(host) {
   value.RealmSlot(
     global_object: state.ctx.global_object,
     lexical_globals: state.ctx.lexical_globals,
-    symbol_descriptions: state.ctx.symbol_descriptions,
     symbol_registry: state.ctx.symbol_registry,
   )
 }
@@ -1017,8 +1000,8 @@ fn with_realm(
         False -> {
           let #(state, origin_ref) = ensure_current_realm(state)
           let origin_builtins = state.builtins
-          // Symbol registry/descriptions are agent-wide — enter with the
-          // union so registered symbols keep their identity across realms.
+          // The Symbol.for registry is agent-wide — enter with the union so
+          // registered symbols keep their identity across realms.
           let entered =
             State(
               ..state,
@@ -1027,10 +1010,6 @@ fn with_realm(
                 ..state.ctx,
                 global_object: target.global,
                 lexical_globals: target.lexical_globals,
-                symbol_descriptions: dict.merge(
-                  state.ctx.symbol_descriptions,
-                  target.symbol_descriptions,
-                ),
                 symbol_registry: dict.merge(
                   state.ctx.symbol_registry,
                   target.symbol_registry,
@@ -1041,13 +1020,12 @@ fn with_realm(
           // Persist the target realm's (possibly mutated) globals.
           let after = sync_realm_slot(after, realm_ref)
           // Restore the origin realm, re-reading its slot — nested calls
-          // back into the origin may have mutated it. Symbol tables adopt
+          // back into the origin may have mutated it. The registry adopts
           // the after-state's union.
           let restored = case heap.read(after.heap, origin_ref) {
             Some(value.RealmSlot(
               global_object:,
               lexical_globals:,
-              symbol_descriptions:,
               symbol_registry:,
             )) ->
               State(
@@ -1057,10 +1035,6 @@ fn with_realm(
                   ..after.ctx,
                   global_object:,
                   lexical_globals:,
-                  symbol_descriptions: dict.merge(
-                    symbol_descriptions,
-                    after.ctx.symbol_descriptions,
-                  ),
                   symbol_registry: dict.merge(
                     symbol_registry,
                     after.ctx.symbol_registry,
@@ -1302,11 +1276,9 @@ fn do_shadow_realm_evaluate(
       let #(state, _running_realm_ref) = ensure_current_realm(state)
       // Script `this` is the shadow realm's global object (§16.1.6).
       let locals = seed_top_level_locals(template, JsObject(realm.global))
-      // The Symbol registry (§20.4.2.2 Symbol.for) and descriptions are
-      // agent-wide, not per-realm — seed the shadow realm with the union so
-      // symbols round-trip across the boundary with identity and description.
-      let merged_descriptions =
-        dict.merge(state.ctx.symbol_descriptions, realm.symbol_descriptions)
+      // The Symbol registry (§20.4.2.2 Symbol.for) is agent-wide, not
+      // per-realm — seed the shadow realm with the union so registered
+      // symbols round-trip across the boundary with identity.
       let merged_registry =
         dict.merge(state.ctx.symbol_registry, realm.symbol_registry)
       // Seed the agent-wide state (job queue, outstanding host-promise count,
@@ -1323,7 +1295,6 @@ fn do_shadow_realm_evaluate(
             realm.builtins,
             realm.global,
             realm.lexical_globals,
-            merged_descriptions,
             merged_registry,
             // The shadow realm inherits the caller's embedder host
             // capabilities.
@@ -1345,16 +1316,14 @@ fn do_shadow_realm_evaluate(
             value.RealmSlot(
               global_object: realm.global,
               lexical_globals: drained.ctx.lexical_globals,
-              symbol_descriptions: drained.ctx.symbol_descriptions,
               symbol_registry: drained.ctx.symbol_registry,
             )
           let h = heap.write(drained.heap, realm_ref, updated_realm)
           // Propagate the event-loop queues, agent-wide ctx tables and heap
           // back to the caller. NOT merge_globals: the shadow realm's lexical
           // globals belong in its RealmSlot (written above), not in the
-          // caller's ctx. The drained symbol tables are a superset of the
-          // caller's (the eval was seeded with the union) — adopt them
-          // agent-wide.
+          // caller's ctx. The drained registry is a superset of the caller's
+          // (the eval was seeded with the union) — adopt it agent-wide.
           let merged = state.merge_draining_child(state, drained)
           let state =
             State(
@@ -1362,7 +1331,6 @@ fn do_shadow_realm_evaluate(
               heap: h,
               ctx: state.RealmCtx(
                 ..merged.ctx,
-                symbol_descriptions: drained.ctx.symbol_descriptions,
                 symbol_registry: drained.ctx.symbol_registry,
               ),
             )

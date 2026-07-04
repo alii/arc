@@ -1965,7 +1965,6 @@ fn proxy_create(
   }
 }
 
-
 /// Allocate a {value, done} iterator-result object, push it, advance pc.
 fn push_iter_result(
   state: State(host),

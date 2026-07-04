@@ -57,7 +57,6 @@ pub type ReplEnv {
   ReplEnv(
     global_object: Ref,
     lexical_globals: dict.Dict(String, value.LexicalGlobal),
-    symbol_descriptions: dict.Dict(value.SymbolId, String),
     symbol_registry: dict.Dict(String, value.SymbolId),
     /// Realm builtins registry, keyed by RealmSlot ref.
     /// Persisted so $262.evalScript/createRealm work across REPL evaluations.
@@ -70,7 +69,6 @@ pub fn new_repl_env(global_object: Ref) -> ReplEnv {
   ReplEnv(
     global_object:,
     lexical_globals: dict.new(),
-    symbol_descriptions: dict.new(),
     symbol_registry: dict.new(),
     realms: dict.new(),
   )
@@ -176,7 +174,6 @@ pub fn run_module(
       heap,
       builtins,
       global_object,
-      dict.new(),
       dict.new(),
       dict.new(),
       host_hooks,
@@ -366,7 +363,6 @@ pub fn run_and_drain_repl_with(
       builtins,
       env.global_object,
       env.lexical_globals,
-      env.symbol_descriptions,
       env.symbol_registry,
       host_hooks,
     )
@@ -379,7 +375,6 @@ pub fn run_and_drain_repl_with(
     ReplEnv(
       global_object: drained.ctx.global_object,
       lexical_globals: drained.ctx.lexical_globals,
-      symbol_descriptions: drained.ctx.symbol_descriptions,
       symbol_registry: drained.ctx.symbol_registry,
       realms: drained.ctx.realms,
     )
