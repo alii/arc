@@ -4040,16 +4040,11 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
         Some(#(elements, rest)) -> {
           // elements are in order [first, ..., last]
           let #(heap, ref) =
-            heap.alloc(
+            common.alloc_array_from_elements(
               state.heap,
-              ObjectSlot(
-                kind: ArrayObject(count),
-                properties: dict.new(),
-                elements: elements.from_list(elements),
-                prototype: Some(state.builtins.array.prototype),
-                symbol_properties: [],
-                extensible: True,
-              ),
+              elements.from_list(elements),
+              count,
+              state.builtins.array.prototype,
             )
           Ok(
             State(
@@ -4075,16 +4070,11 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           // values are in order [first_non_hole, ..., last_non_hole]
           let indexed = array_ops.assign_non_hole_indices(values, holes, 0, [])
           let #(heap, ref) =
-            heap.alloc(
+            common.alloc_array_from_elements(
               state.heap,
-              ObjectSlot(
-                kind: ArrayObject(count),
-                properties: dict.new(),
-                elements: elements.from_indexed(indexed),
-                prototype: Some(state.builtins.array.prototype),
-                symbol_properties: [],
-                extensible: True,
-              ),
+              elements.from_indexed(indexed),
+              count,
+              state.builtins.array.prototype,
             )
           Ok(
             State(
