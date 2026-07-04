@@ -2515,104 +2515,16 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     // §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against a with
     // object. Found: replace obj with the value and jump. Not found
     // (or @@unscopables-blocked): pop obj, fall through.
-    opcode.WithGetVar(name, target) -> {
-      case state.stack {
-        [JsObject(ref) as obj, ..rest] -> {
-          use #(bound, state) <- result.try(with_has_binding(state, ref, name))
-          case bound {
-            False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-            True -> {
-              // GetBindingValue re-checks HasProperty: the @@unscopables
-              // getter may have deleted the property. Strict referencing
-              // code (a strict closure resolving through a sloppy with)
-              // throws ReferenceError; sloppy reads undefined.
-              use #(still, state) <- result.try(
-                state.rethrow(object.has_property_stateful(
-                  state,
-                  ref,
-                  object.PkString(Named(name)),
-                )),
-              )
-              case still {
-                False ->
-                  case state.func.is_strict {
-                    True ->
-                      state.throw_reference_error(
-                        state,
-                        name <> " is not defined",
-                      )
-                    False ->
-                      Ok(
-                        State(..state, stack: [JsUndefined, ..rest], pc: target),
-                      )
-                  }
-                True -> {
-                  use #(val, state) <- result.map(
-                    state.rethrow(object.get_value_of(state, obj, Named(name))),
-                  )
-                  State(..state, stack: [val, ..rest], pc: target)
-                }
-              }
-            }
-          }
-        }
-        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-        [] -> underflow(state, "WithGetVar")
-      }
-    }
+    opcode.WithGetVar(name, target) ->
+      with_get_var(state, name, target, keep_this: False, op: "WithGetVar")
 
     // Like WithGetVar, but keeps the with object beneath the value as the
     // call receiver (§13.3.6.2 EvaluateCall step 1.b.ii — thisValue is the
     // env record's WithBaseObject). Found: [obj, ..] → [value, obj, ..],
     // jump. Not found (or @@unscopables-blocked): pop obj, fall through to
     // the static path (which pushes undefined as receiver).
-    opcode.WithGetVarThis(name, target) -> {
-      case state.stack {
-        [JsObject(ref) as obj, ..rest] -> {
-          use #(bound, state) <- result.try(with_has_binding(state, ref, name))
-          case bound {
-            False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-            True -> {
-              // Same HasProperty re-check as WithGetVar: the @@unscopables
-              // getter may have deleted the property.
-              use #(still, state) <- result.try(
-                state.rethrow(object.has_property_stateful(
-                  state,
-                  ref,
-                  object.PkString(Named(name)),
-                )),
-              )
-              case still {
-                False ->
-                  case state.func.is_strict {
-                    True ->
-                      state.throw_reference_error(
-                        state,
-                        name <> " is not defined",
-                      )
-                    False ->
-                      Ok(
-                        State(
-                          ..state,
-                          stack: [JsUndefined, obj, ..rest],
-                          pc: target,
-                        ),
-                      )
-                  }
-                True -> {
-                  use #(val, state) <- result.map(
-                    state.rethrow(object.get_value_of(state, obj, Named(name))),
-                  )
-                  State(..state, stack: [val, obj, ..rest], pc: target)
-                }
-              }
-            }
-          }
-        }
-        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-        [] -> underflow(state, "WithGetVarThis")
-      }
-    }
+    opcode.WithGetVarThis(name, target) ->
+      with_get_var(state, name, target, keep_this: True, op: "WithGetVarThis")
 
     // §9.1.1.2.5 SetMutableBinding against a with object. Stack:
     // [obj, value, ..]. Found: Set(obj, name, value), pop both, jump.
@@ -5363,6 +5275,61 @@ fn declare_global_var_property(
     ObjectSlot(properties:, extensible: True, ..) ->
       ObjectSlot(..slot, properties: dict.insert(properties, key, prop))
     _ -> slot
+  }
+}
+
+/// §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against a with object,
+/// shared by WithGetVar and WithGetVarThis. Found: replace obj with the value
+/// (keeping obj beneath as the call receiver when `keep_this`) and jump. Not
+/// found (or @@unscopables-blocked): pop obj, fall through.
+fn with_get_var(
+  state: State(host),
+  name: String,
+  target: Int,
+  keep_this keep_this: Bool,
+  op op: String,
+) -> Result(State(host), StepExit(host)) {
+  case state.stack {
+    [JsObject(ref) as obj, ..rest] -> {
+      use #(bound, state) <- result.try(with_has_binding(state, ref, name))
+      case bound {
+        False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+        True -> {
+          // GetBindingValue re-checks HasProperty: the @@unscopables getter
+          // may have deleted the property. Strict referencing code (a strict
+          // closure resolving through a sloppy with) throws ReferenceError;
+          // sloppy reads undefined.
+          use #(still, state) <- result.try(
+            state.rethrow(object.has_property_stateful(
+              state,
+              ref,
+              object.PkString(Named(name)),
+            )),
+          )
+          let below = case keep_this {
+            True -> [obj, ..rest]
+            False -> rest
+          }
+          case still {
+            False ->
+              case state.func.is_strict {
+                True ->
+                  state.throw_reference_error(state, name <> " is not defined")
+                False ->
+                  Ok(State(..state, stack: [JsUndefined, ..below], pc: target))
+              }
+            True -> {
+              use #(val, state) <- result.map(
+                state.rethrow(object.get_value_of(state, obj, Named(name))),
+              )
+              State(..state, stack: [val, ..below], pc: target)
+            }
+          }
+        }
+      }
+    }
+    [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+    [] -> underflow(state, op)
   }
 }
 
