@@ -276,9 +276,11 @@ fn exported_names_with(
 // Validation (§16.2.1.6.4) — the VM's link path; exact SyntaxError strings
 // =============================================================================
 
-/// A link-time validation failure (§16.2.1.6.4). Both variants surface to JS
-/// as a SyntaxError whose message is `link_error_message`; callers that need
-/// to distinguish the two cases match the variant instead of the prose.
+/// A link-time validation failure (§16.2.1.6.4). The two guest-visible
+/// variants surface to JS as a SyntaxError whose message is
+/// `link_error_message`; callers that need to distinguish the cases match the
+/// variant instead of the prose. `UnresolvedDependency` is NOT guest-visible —
+/// it reports a broken caller invariant, and `arc/module` panics on it.
 pub type LinkError {
   /// An import or indirect re-export names an export the requested module does
   /// not provide. `requested_module` is the specifier as WRITTEN in the failing
@@ -290,12 +292,21 @@ pub type LinkError {
   /// Two distinct `export *` sources provide `export_name` (§16.2.1.6.3
   /// step 7) — the binding is ambiguous.
   AmbiguousExport(requested_module: Raw, export_name: String)
+  /// A module imports/re-exports from `requested_module`, but its own
+  /// `specifier_map` — which is TOTAL over its requests — does not cover it.
+  /// Never a guest program's fault: whoever built the `LinkableGraph` built a
+  /// module whose specifier map disagrees with its import/export entries. Not
+  /// a SyntaxError; `arc/module` treats it as the linker-invariant break it is.
+  UnresolvedDependency(requested_module: Raw)
 }
 
 /// The exact JS-visible SyntaxError message for a link failure. This is the
 /// only place the prose lives — the runtime, tests, and any tooling all render
 /// through it. The specifier is quoted exactly as the source wrote it (`./m`,
 /// never the resolved `m`), which the `Raw` type guarantees.
+///
+/// `UnresolvedDependency` renders too, but as internal-error prose: no
+/// well-formed graph produces it, and its consumer panics rather than throwing.
 pub fn link_error_message(e: LinkError) -> String {
   case e {
     UnresolvedExport(requested_module:, export_name:) ->
@@ -309,6 +320,10 @@ pub fn link_error_message(e: LinkError) -> String {
       <> esm.raw_text(requested_module)
       <> "' provides an ambiguous export named '"
       <> export_name
+      <> "'"
+    UnresolvedDependency(requested_module:) ->
+      "arc/link: specifier map does not cover the requested module '"
+      <> esm.raw_text(requested_module)
       <> "'"
   }
 }
@@ -360,8 +375,8 @@ fn check_indirect_exports(
 
 /// Check that the dependency `raw_dep` names within `m` provides
 /// `imported_name`. `specifier_map` is TOTAL over `m`'s own requests, so `None`
-/// is unreachable — and it would mean `raw_dep` names no module at all, which is
-/// exactly an unresolved export.
+/// means the graph's builder — not the guest source — is broken; report that as
+/// itself rather than dressing it up as a guest-visible unresolved export.
 fn check_dep(
   graph: LinkableGraph,
   m: LinkableModule,
@@ -370,11 +385,7 @@ fn check_dep(
 ) -> Result(Nil, LinkError) {
   case esm.resolve(m.specifier_map, raw_dep) {
     Some(dep) -> check_resolves(graph, dep, raw_dep, imported_name)
-    None ->
-      Error(UnresolvedExport(
-        requested_module: raw_dep,
-        export_name: imported_name,
-      ))
+    None -> Error(UnresolvedDependency(requested_module: raw_dep))
   }
 }
 

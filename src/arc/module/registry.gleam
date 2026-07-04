@@ -31,8 +31,8 @@ import arc/vm/key.{type PropertyKey, Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
-  type JsValue, type Ref, DataProperty, JsObject, JsString, JsUndefined,
-  ObjectSlot, OrdinaryObject,
+  type JsValue, type Ref, DataProperty, JsObject, JsString, ObjectSlot,
+  OrdinaryObject,
 }
 import gleam/dict
 import gleam/option.{type Option, None, Some}
@@ -87,8 +87,9 @@ pub type ModuleStatus {
 }
 
 // The JsString encoding of `ModuleStatus` is private to the next two
-// functions: `write_module_status` is the only writer, so `read_module_status`
-// maps any other heap value (including a cleared entry) to `None`.
+// functions: `write_module_status` is the only writer, and a cleared status is
+// a DELETED key, so the catch-all arm of `read_module_status` is unreachable —
+// it is there to keep the match total.
 
 /// The module's evaluation status: `Some(Evaluated)` once its body completed,
 /// `Some(Evaluating)` while it runs (or is parked on top-level await), `None`
@@ -126,7 +127,7 @@ pub fn clear_module_status(
   global_object: Ref,
   spec: String,
 ) -> Heap(host) {
-  write_entry(h, global_object, status_property(), spec, JsUndefined)
+  clear_entry(h, global_object, status_property(), spec)
 }
 
 // =============================================================================
@@ -193,7 +194,7 @@ pub fn clear_namespace(
   global_object: Ref,
   spec: String,
 ) -> Heap(host) {
-  write_entry(h, global_object, namespace_cache_property(), spec, JsUndefined)
+  clear_entry(h, global_object, namespace_cache_property(), spec)
 }
 
 /// The module's registered Deferred Module Namespace, if any.
@@ -230,7 +231,7 @@ pub fn clear_deferred_namespace(
   global_object: Ref,
   spec: String,
 ) -> Heap(host) {
-  write_entry(h, global_object, deferred_cache_property(), spec, JsUndefined)
+  clear_entry(h, global_object, deferred_cache_property(), spec)
 }
 
 // =============================================================================
@@ -270,7 +271,7 @@ pub fn clear_pending_promise(
   global_object: Ref,
   spec: String,
 ) -> Heap(host) {
-  write_entry(h, global_object, pending_cache_property(), spec, JsUndefined)
+  clear_entry(h, global_object, pending_cache_property(), spec)
 }
 
 // =============================================================================
@@ -308,7 +309,9 @@ pub fn clear_module_registrations(
 // =============================================================================
 
 /// Read `key` off the hidden cache object `property` on the global. `Some` iff
-/// the cache object exists AND owns the key (whatever value it holds).
+/// the cache object exists AND owns the key (whatever value it holds) — which
+/// is exactly "registered", because `clear_entry` DELETES the key rather than
+/// overwriting it with a sentinel.
 fn read_entry(
   h: Heap(host),
   global_object: Ref,
@@ -326,8 +329,9 @@ fn read_entry(
 }
 
 /// `read_entry` narrowed to entries holding an object — the shape of the
-/// namespace / deferred / pending caches, whose entries are cleared by
-/// overwriting with `JsUndefined` (which this correctly reads as absent).
+/// namespace / deferred / pending caches. Only `write_*` fills these caches and
+/// each writes a `JsObject`, so the non-object arm is unreachable; it exists to
+/// keep the match total, not to tolerate a sentinel.
 fn read_object_entry(
   h: Heap(host),
   global_object: Ref,
@@ -382,4 +386,31 @@ fn write_entry(
     }
   }
   object.define_method_property(h, cache_ref, Named(key), val)
+}
+
+/// Un-register `key` from the hidden cache object `property` on the global.
+///
+/// Every cache clears the SAME way — by deleting the key — so "absent" has one
+/// meaning (`read_entry` returns `None`) rather than two, and no reader has to
+/// recognise a sentinel value as secretly meaning "not registered". `write_entry`
+/// defines cache entries as configurable data properties on an ordinary object,
+/// so [[Delete]] cannot refuse: a `False` here is a broken invariant, not a case
+/// to swallow.
+fn clear_entry(
+  h: Heap(host),
+  global_object: Ref,
+  property: PropertyKey,
+  key: String,
+) -> Heap(host) {
+  case object.get_own_property(h, global_object, property) {
+    Some(DataProperty(value: JsObject(cache_ref), ..)) -> {
+      let #(h, deleted) = object.delete_property(h, cache_ref, Named(key))
+      case deleted {
+        True -> h
+        False -> panic as "arc/module/registry: cache entry refused deletion"
+      }
+    }
+    // The cache object does not exist yet, so nothing is registered under it.
+    _ -> h
+  }
 }
