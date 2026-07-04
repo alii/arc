@@ -2232,12 +2232,9 @@ fn define_properties_on(
       use keys, state <- state.try_op(own_property_keys(state, props_ref))
       // Step 4: read + parse EVERY descriptor first — nothing is defined on
       // the target until all of them validate.
-      use descriptors, state <- state.try_op(collect_descriptors(
-        state,
-        props_ref,
-        keys,
-        [],
-      ))
+      use descriptors, state <- state.try_op(
+        collect_descriptors(state, props_ref, keys, []),
+      )
       // Step 5: only now apply them, in key order.
       apply_descriptors(state, target_ref, descriptors)
     }

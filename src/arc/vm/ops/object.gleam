@@ -2,7 +2,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/typed_array_ffi.{ta_get_float, ta_get_int}
-import arc/vm/key.{type PropertyKey, Index, Named}
+import arc/vm/key.{type PropertyKey, Index, Named, Private}
 import arc/vm/opcode
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type HeapSlot, type State, State}
@@ -62,7 +62,9 @@ pub fn get_value_of(
             None -> get_value(state, state.builtins.string.prototype, key, val)
           }
         // Not an own property — delegate to String.prototype via [[Get]]
-        Named(_) -> get_value(state, state.builtins.string.prototype, key, val)
+        // (a private key on a string primitive throws before reaching here).
+        Named(_) | Private(_) ->
+          get_value(state, state.builtins.string.prototype, key, val)
       }
     // Primitive→prototype delegation (ToObject would wrap, we skip the wrapper)
     JsNumber(_) -> get_value(state, state.builtins.number.prototype, key, val)
@@ -532,6 +534,8 @@ fn own_property_of_slot(
             True -> None
             False -> dict_get_option(properties, key)
           }
+        // Private elements are ordinary dict entries.
+        Private(_) -> dict_get_option(properties, key)
       }
     // --- Array exotic [[GetOwnProperty]] (§10.4.2) ---
     // Per spec this IS OrdinaryGetOwnProperty — arrays only override
@@ -578,7 +582,7 @@ fn own_property_of_slot(
                 value.data_property,
               )
           }
-        Named(_) -> dict_get_option(properties, key)
+        Named(_) | Private(_) -> dict_get_option(properties, key)
       }
     // --- Arguments exotic [[GetOwnProperty]] (§10.4.4.1) ---
     // Spec layers a [[ParameterMap]] over OrdinaryGetOwnProperty; our
@@ -594,7 +598,7 @@ fn own_property_of_slot(
                 value.data_property,
               )
           }
-        Named(_) -> dict_get_option(properties, key)
+        Named(_) | Private(_) -> dict_get_option(properties, key)
       }
     // --- String exotic [[GetOwnProperty]] (§10.4.3.1) ---
     value.StringObject(value: s) ->
@@ -631,7 +635,7 @@ fn own_property_of_slot(
         // §10.4.3.1 step 1: OrdinaryGetOwnProperty is called first for ALL
         // keys; for non-index keys StringGetOwnProperty (step 3) yields
         // undefined, so the ordinary result is the only answer.
-        Named(_) -> dict_get_option(properties, key)
+        Named(_) | Private(_) -> dict_get_option(properties, key)
       }
     // --- Ordinary [[GetOwnProperty]] (§10.1.5.1) ---
     _ -> dict_get_option(properties, key)
@@ -834,7 +838,7 @@ pub fn set_value(
             Index(_), _ -> False
             Named("length"), ArrayObject(_) -> False
             Named("length"), value.StringObject(_) -> False
-            Named(_), _ -> True
+            Named(_), _ | Private(_), _ -> True
           }
           case fusable, receiver, own, prototype {
             // Fused update (§10.1.9.2 steps 2.b-2.h with Receiver == O):
@@ -1052,6 +1056,11 @@ fn set_on_receiver(
                   define_outcome_to_bool(State(..state, heap: h), outcome)
                 }
               }
+            // Private elements bypass the integer-indexed exotic behaviour.
+            Private(_) -> {
+              let #(h, outcome) = set_property(state.heap, recv_ref, key, val)
+              define_outcome_to_bool(State(..state, heap: h), outcome)
+            }
           }
         // §10.1.9.2 steps 2.c-2.h: ordinary object — define/update own property.
         _ -> {
@@ -1448,7 +1457,7 @@ fn set_property_on_slot(
               }
             // §10.4.2.1 step 3: Not "length" and not array index —
             // OrdinaryDefineOwnProperty(A, P, Desc).
-            Named(_) -> set_string_property(h, ref, key, val, slot)
+            Named(_) | Private(_) -> set_string_property(h, ref, key, val, slot)
           }
         }
         // --- §10.4.4.2 Arguments exotic [[DefineOwnProperty]] ---
@@ -1505,7 +1514,7 @@ fn set_property_on_slot(
                     )
                   }
               }
-            Named(_) -> set_string_property(h, ref, key, val, slot)
+            Named(_) | Private(_) -> set_string_property(h, ref, key, val, slot)
           }
         // --- §10.4.3.2 String exotic [[DefineOwnProperty]] ---
         value.StringObject(value: s) -> {
@@ -1518,7 +1527,7 @@ fn set_property_on_slot(
           let is_guarded = case key {
             Named("length") -> True
             Index(idx) -> idx < len
-            Named(_) -> False
+            Named(_) | Private(_) -> False
           }
           case is_guarded {
             // §10.4.3.2 step 2b: returns IsCompatiblePropertyDescriptor(ext,
@@ -1621,7 +1630,7 @@ fn array_set_length(
             dict.filter(properties, fn(k, _prop) {
               case k {
                 Index(i) -> i < final_len
-                Named(_) -> True
+                Named(_) | Private(_) -> True
               }
             })
           #(
@@ -1871,7 +1880,7 @@ pub fn define_method_property(
   val: JsValue,
 ) -> Heap(host) {
   // §7.3.32 PrivateSet: writing to a private METHOD throws TypeError. Arc
-  // stores private methods as marker-keyed properties (key.private_key), so
+  // stores private methods as Private-keyed properties (key.private_key), so
   // mark them non-writable — set_found_value then reports failure and
   // PutPrivateField turns that into the spec'd TypeError.
   let prop = case value.is_private_name(key) {
@@ -2156,7 +2165,7 @@ pub fn has_index_overrides(
   dict.fold(properties, False, fn(acc, key, _prop) {
     case key {
       Index(_) -> True
-      Named(_) -> acc
+      Named(_) | Private(_) -> acc
     }
   })
 }
@@ -2337,6 +2346,7 @@ pub fn delete_property(
                 True -> #(h, True)
                 False -> delete_string_property(h, ref, key, slot)
               }
+            Private(_) -> delete_string_property(h, ref, key, slot)
           }
         // Array/Arguments exotic: check if key is an array index
         ArrayObject(_) | value.ArgumentsObject(_) ->
@@ -2388,7 +2398,7 @@ pub fn delete_property(
                 ArrayObject(_) -> #(h, False)
                 _ -> delete_string_property(h, ref, key, slot)
               }
-            Named(_) -> delete_string_property(h, ref, key, slot)
+            Named(_) | Private(_) -> delete_string_property(h, ref, key, slot)
           }
         // String exotic: "length" and in-range indices are synthesized
         // non-configurable properties (§10.4.3) — never deletable.
@@ -2400,7 +2410,7 @@ pub fn delete_property(
                 Some(_) -> #(h, False)
                 None -> delete_string_property(h, ref, key, slot)
               }
-            Named(_) -> delete_string_property(h, ref, key, slot)
+            Named(_) | Private(_) -> delete_string_property(h, ref, key, slot)
           }
         _ -> delete_string_property(h, ref, key, slot)
       }
@@ -2541,14 +2551,12 @@ pub fn own_string_keys_flagged(
           case key {
             Index(i) -> #([#(i, value.prop_enumerable(prop)), ..idx], named)
             Named("length") if is_array -> acc
-            Named(n) -> {
-              // Private names ("#x") never appear in [[OwnPropertyKeys]].
-              use <- bool.guard(key.is_private_key(key), acc)
-              #(idx, [
-                #(value.prop_seq(prop), n, value.prop_enumerable(prop)),
-                ..named
-              ])
-            }
+            // Private names ("#x") never appear in [[OwnPropertyKeys]].
+            Private(_) -> acc
+            Named(n) -> #(idx, [
+              #(value.prop_seq(prop), n, value.prop_enumerable(prop)),
+              ..named
+            ])
           }
         })
       // Step 1: array-index keys in ascending numeric order. An index lives
@@ -3242,9 +3250,7 @@ fn inspect_inner(
     value.JsNumber(value.NegInfinity) -> "-Infinity"
     value.JsString(s) -> "'" <> escape_string(s) <> "'"
     value.JsSymbol(id) ->
-      value.well_known_symbol_description(id)
-      |> option.map(fn(desc) { "Symbol(" <> desc <> ")" })
-      |> option.unwrap("Symbol()")
+      "Symbol(" <> option.unwrap(value.symbol_description(id), "") <> ")"
     value.JsBigInt(value.BigInt(n)) -> int.to_string(n) <> "n"
     value.JsUninitialized -> "<uninitialized>"
     value.JsObject(value.Ref(id:) as ref) ->
@@ -3674,16 +3680,6 @@ fn pk_label(pk: PropKey) -> String {
   }
 }
 
-/// Allocate a TypeError in the ops-level #(thrown, state) error shape.
-fn proxy_error(state: State(host), msg: String) -> #(JsValue, State(host)) {
-  let #(state, res) = state.type_error(state, msg)
-  case res {
-    Error(err) -> #(err, state)
-    // Unreachable — state.type_error always returns Error.
-    Ok(val) -> #(val, state)
-  }
-}
-
 /// §7.2.3 IsCallable, including proxies (callable iff target was callable at
 /// creation — §10.5.15 step 7.a).
 pub fn value_is_callable(h: Heap(host), val: JsValue) -> Bool {
@@ -3712,7 +3708,7 @@ pub fn try_is_array(
     Ok(b) -> Ok(#(b, state))
     // Step 3.a: If proxy.[[ProxyHandler]] is null, throw a TypeError.
     Error(Nil) ->
-      Error(proxy_error(
+      Error(state.type_error_value(
         state,
         "Cannot perform 'IsArray' on a proxy that has been revoked",
       ))
@@ -3788,7 +3784,7 @@ pub fn proxy_trap(
           case value_is_callable(state.heap, trap) {
             True -> Ok(#(t, h, Some(trap), state))
             False ->
-              Error(proxy_error(
+              Error(state.type_error_value(
                 state,
                 "'" <> name <> "' trap of proxy handler is not a function",
               ))
@@ -3796,7 +3792,7 @@ pub fn proxy_trap(
       }
     }
     _, _ ->
-      Error(proxy_error(
+      Error(state.type_error_value(
         state,
         "Cannot perform '" <> name <> "' on a proxy that has been revoked",
       ))
@@ -3850,7 +3846,7 @@ pub fn proxy_get(
           case value.same_value(res, tv) {
             True -> Ok(#(res, state))
             False ->
-              Error(proxy_error(
+              Error(state.type_error_value(
                 state,
                 "'get' on proxy: property "
                   <> pk_label(pk)
@@ -3861,7 +3857,7 @@ pub fn proxy_get(
           case res {
             value.JsUndefined -> Ok(#(res, state))
             _ ->
-              Error(proxy_error(
+              Error(state.type_error_value(
                 state,
                 "'get' on proxy: property "
                   <> pk_label(pk)
@@ -3921,7 +3917,7 @@ pub fn proxy_set(
               case value.same_value(val, tv) {
                 True -> Ok(#(state, True))
                 False ->
-                  Error(proxy_error(
+                  Error(state.type_error_value(
                     state,
                     "'set' on proxy: trap returned truish for property "
                       <> pk_label(pk)
@@ -3929,7 +3925,7 @@ pub fn proxy_set(
                   ))
               }
             Some(AccessorProperty(set: None, configurable: False, ..)) ->
-              Error(proxy_error(
+              Error(state.type_error_value(
                 state,
                 "'set' on proxy: trap returned truish for property "
                   <> pk_label(pk)
@@ -4049,7 +4045,7 @@ pub fn proxy_has(
             Some(prop) ->
               case value.prop_configurable(prop) {
                 False ->
-                  Error(proxy_error(
+                  Error(state.type_error_value(
                     state,
                     "'has' on proxy: trap returned falsish for property "
                       <> pk_label(pk)
@@ -4064,7 +4060,7 @@ pub fn proxy_has(
                   ))
                   case ext {
                     False ->
-                      Error(proxy_error(
+                      Error(state.type_error_value(
                         state,
                         "'has' on proxy: trap returned falsish for property "
                           <> pk_label(pk)
@@ -4136,7 +4132,7 @@ pub fn proxy_delete(
             Some(prop) ->
               case value.prop_configurable(prop) {
                 False ->
-                  Error(proxy_error(
+                  Error(state.type_error_value(
                     state,
                     "'deleteProperty' on proxy: trap returned truish for property "
                       <> pk_label(pk)
@@ -4150,7 +4146,7 @@ pub fn proxy_delete(
                   ))
                   case ext {
                     False ->
-                      Error(proxy_error(
+                      Error(state.type_error_value(
                         state,
                         "'deleteProperty' on proxy: trap returned truish but the proxy target is not extensible",
                       ))
@@ -4210,7 +4206,7 @@ fn proxy_get_prototype_of(
               case value.same_value(res, target_proto) {
                 True -> Ok(#(res, state))
                 False ->
-                  Error(proxy_error(
+                  Error(state.type_error_value(
                     state,
                     "'getPrototypeOf' on proxy: proxy target is non-extensible but the trap did not return its actual prototype",
                   ))
@@ -4219,7 +4215,7 @@ fn proxy_get_prototype_of(
           }
         }
         _ ->
-          Error(proxy_error(
+          Error(state.type_error_value(
             state,
             "'getPrototypeOf' on proxy: trap returned neither object nor null",
           ))
@@ -4266,7 +4262,7 @@ pub fn proxy_set_prototype_of(
               case value.same_value(proto_val, target_proto) {
                 True -> Ok(#(state, None, True))
                 False ->
-                  Error(proxy_error(
+                  Error(state.type_error_value(
                     state,
                     "'setPrototypeOf' on proxy: trap returned truish for setting a new prototype on the non-extensible proxy target",
                   ))
@@ -4307,7 +4303,7 @@ pub fn is_extensible_stateful(
           case b == target_ext {
             True -> Ok(#(b, state))
             False ->
-              Error(proxy_error(
+              Error(state.type_error_value(
                 state,
                 "'isExtensible' on proxy: trap result does not reflect extensibility of proxy target (which is '"
                   <> bool.to_string(target_ext)
@@ -4351,7 +4347,7 @@ pub fn prevent_extensions_stateful(
               ))
               case target_ext {
                 True ->
-                  Error(proxy_error(
+                  Error(state.type_error_value(
                     state,
                     "'preventExtensions' on proxy: trap returned truish but the proxy target is extensible",
                   ))

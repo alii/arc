@@ -17,7 +17,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
-import arc/vm/key.{Index, Named, max_array_index}
+import arc/vm/key.{Index, Named, max_array_index, private_key_from_text}
 import arc/vm/opcode.{
   type Op, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread,
   AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
@@ -41,6 +41,7 @@ import arc/vm/opcode.{
   TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
+import arc/vm/ops/array_iterator
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/ops/operators
@@ -333,7 +334,7 @@ fn construct_fn_callback(
 
 /// Create a fresh VM state from a function template.
 /// Most callers can use this directly; override fields with `State(..new_state(...), ...)`
-/// for cases that need non-default symbol_descriptions.
+/// for cases that need a non-default ctx (e.g. a pre-populated realms table).
 pub fn new_state(
   func: FuncTemplate,
   locals: tuple_array.TupleArray(JsValue),
@@ -341,7 +342,6 @@ pub fn new_state(
   builtins: Builtins,
   global_object: Ref,
   lexical_globals: dict.Dict(String, value.LexicalGlobal),
-  symbol_descriptions: dict.Dict(value.SymbolId, String),
   symbol_registry: dict.Dict(String, value.SymbolId),
   hooks: state.HostHooks,
 ) -> State(host) {
@@ -366,7 +366,6 @@ pub fn new_state(
     ctx: state.RealmCtx(
       lexical_globals:,
       global_object:,
-      symbol_descriptions:,
       symbol_registry:,
       template_objects: dict.new(),
       realms: dict.new(),
@@ -441,7 +440,6 @@ pub fn init_state(
     heap,
     builtins,
     global_object,
-    dict.new(),
     dict.new(),
     dict.new(),
     hooks,
@@ -3400,7 +3398,13 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // spec [[PrivateElements]] never inherit through the prototype chain.
       case state.stack {
         [JsString(key_text), JsObject(ref) as receiver, ..rest] ->
-          case object.get_own_property(state.heap, ref, Named(key_text)) {
+          case
+            object.get_own_property(
+              state.heap,
+              ref,
+              private_key_from_text(key_text),
+            )
+          {
             Some(value.AccessorProperty(get: None, ..)) ->
               state.throw_type_error(
                 state,
@@ -3437,7 +3441,13 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // Like GetPrivateFieldDyn but keeps obj: [key, obj, ..] → [val, obj, ..]
       case state.stack {
         [JsString(key_text), JsObject(ref) as receiver, ..rest] ->
-          case object.get_own_property(state.heap, ref, Named(key_text)) {
+          case
+            object.get_own_property(
+              state.heap,
+              ref,
+              private_key_from_text(key_text),
+            )
+          {
             Some(value.AccessorProperty(get: None, ..)) ->
               state.throw_type_error(
                 state,
@@ -3474,7 +3484,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // §7.3.31 PrivateSet. [key, val, obj, ..] → [val, ..]. Own-only.
       case state.stack {
         [JsString(key_text), val, JsObject(ref) as receiver, ..rest] -> {
-          let key = Named(key_text)
+          let key = private_key_from_text(key_text)
           case object.get_own_property(state.heap, ref, key) {
             Some(prop) -> {
               use #(state, ok) <- result.try(
@@ -3529,7 +3539,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             option.is_some(object.get_own_property(
               state.heap,
               ref,
-              Named(key_text),
+              private_key_from_text(key_text),
             ))
           Ok(State(..state, stack: [JsBool(found), ..rest], pc: state.pc + 1))
         }
@@ -3548,7 +3558,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // §7.3.28 PrivateFieldAdd. [val, key, obj, ..] → [obj, ..].
       case state.stack {
         [val, JsString(key_text), JsObject(ref) as obj, ..rest] -> {
-          let key = Named(key_text)
+          let key = private_key_from_text(key_text)
           use Nil <- result.try(check_private_add(state, ref, key_text))
           let heap = object.define_private_data(state.heap, ref, key, val, True)
           Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
@@ -3563,7 +3573,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // [obj, ..]. Non-writable so PrivateSet's method check trips.
       case state.stack {
         [func, JsString(key_text), JsObject(ref) as obj, ..rest] -> {
-          let key = Named(key_text)
+          let key = private_key_from_text(key_text)
           use Nil <- result.try(check_private_add(state, ref, key_text))
           let heap =
             object.define_private_data(state.heap, ref, key, func, False)
@@ -3580,7 +3590,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // present means double initialization → TypeError.
       case state.stack {
         [func, JsString(key_text), JsObject(ref) as obj, ..rest] -> {
-          let key = Named(key_text)
+          let key = private_key_from_text(key_text)
           let existing = object.get_own_property(state.heap, ref, key)
           let half_present = case existing, kind {
             Some(value.AccessorProperty(get: Some(_), ..)), opcode.Getter ->
@@ -3691,12 +3701,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           case pk {
             object.PkSymbol(sym) -> {
               let heap =
-                set_computed_fn_name(
-                  state.heap,
-                  func,
-                  "",
-                  symbol_fn_name(state, sym),
-                )
+                set_computed_fn_name(state.heap, func, "", symbol_fn_name(sym))
               let heap = make_method(heap, func, ref)
               let heap =
                 object.define_symbol_property(
@@ -3761,7 +3766,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                   state.heap,
                   func,
                   accessor_name_prefix(kind),
-                  symbol_fn_name(state, sym),
+                  symbol_fn_name(sym),
                 )
               let heap = make_method(heap, func, ref)
               let heap =
@@ -4907,136 +4912,28 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           )
         [JsObject(iter_ref), ..rest] ->
           case heap.read(state.heap, iter_ref) {
-            // index < 0 latches exhaustion: once the iterator reported done
-            // it stays done even if the source later grows or its buffer is
-            // resized — no witness re-validation (spec sets
-            // [[IteratedObject]] to undefined, "generator already returned").
-            Some(ObjectSlot(kind: ArrayIteratorObject(index:, ..), ..))
-              if index < 0
-            ->
-              Ok(
-                State(
-                  ..state,
-                  stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
-                  pc: state.pc + 1,
-                ),
+            // Array iterator (plain array / arguments / typed array /
+            // array-like / proxy source): stepped in-VM by ops/array_iterator
+            // — the very same `step` %ArrayIteratorPrototype%.next() runs, so
+            // the two paths cannot drift. A throw from the step itself
+            // (detached buffer, proxy trap, index accessor) must NOT close the
+            // iterator (§14.7.5.6 step 6.a) — mark the iter slot done so
+            // IteratorCloseThrow no-ops.
+            Some(ObjectSlot(kind: ArrayIteratorObject(..), ..)) -> {
+              use #(step, state) <- result.map(
+                array_iterator.step(state, iter_ref)
+                |> result.map_error(mark_done(rest)),
               )
-            Some(
-              ObjectSlot(
-                kind: ArrayIteratorObject(source:, index:, iter_kind:),
-                ..,
-              ) as slot,
-            ) ->
-              case heap.read(state.heap, source) {
-                // Typed-array source — §23.1.5.1: re-validate the buffer
-                // witness and re-read the element through the live backing
-                // store each step, so mutation during iteration is observed
-                // and detached/out-of-bounds views throw TypeError.
-                Some(ObjectSlot(
-                  kind: value.TypedArrayObject(
-                    buffer:,
-                    elem_kind:,
-                    byte_offset:,
-                    length:,
-                  ),
-                  ..,
-                )) ->
-                  case
-                    object.typed_array_iter_length(
-                      state.heap,
-                      buffer,
-                      elem_kind,
-                      byte_offset,
-                      length,
-                    )
-                  {
-                    // The throw comes from `.next()` itself — ForIn/Of body
-                    // evaluation must NOT close the iterator (§14.7.5.6
-                    // step 6.a), so mark the iter slot done.
-                    Error(msg) ->
-                      state.throw_type_error(state, msg)
-                      |> result.map_error(mark_done(rest))
-                    Ok(len) ->
-                      case index >= len {
-                        True -> {
-                          let heap =
-                            advance_array_iter(state.heap, iter_ref, source, -1)
-                          Ok(
-                            State(
-                              ..state,
-                              stack: [
-                                JsBool(True),
-                                JsUndefined,
-                                JsUndefined,
-                                ..rest
-                              ],
-                              heap:,
-                              pc: state.pc + 1,
-                            ),
-                          )
-                        }
-                        False -> {
-                          let elem =
-                            object.typed_array_element(
-                              state.heap,
-                              buffer,
-                              elem_kind,
-                              byte_offset,
-                              len,
-                              index,
-                            )
-                            |> option.unwrap(JsUndefined)
-                          let heap =
-                            heap.write(
-                              state.heap,
-                              iter_ref,
-                              ObjectSlot(
-                                ..slot,
-                                kind: ArrayIteratorObject(
-                                  source:,
-                                  index: index + 1,
-                                  iter_kind:,
-                                ),
-                              ),
-                            )
-                          let #(heap, val) =
-                            array_iter_shape(
-                              heap,
-                              state,
-                              iter_kind,
-                              index,
-                              elem,
-                            )
-                          Ok(
-                            State(
-                              ..state,
-                              stack: [
-                                JsBool(False),
-                                val,
-                                JsObject(iter_ref),
-                                ..rest
-                              ],
-                              heap:,
-                              pc: state.pc + 1,
-                            ),
-                          )
-                        }
-                      }
-                  }
-                // A throw from `.next()` itself (proxy trap / index accessor)
-                // must NOT close the iterator (§14.7.5.6 step 6.a) — mark
-                // the iter slot done so IteratorCloseThrow no-ops.
-                _ ->
-                  step_array_iterator_source(
-                    state,
-                    iter_ref,
-                    source,
-                    index,
-                    iter_kind,
-                    rest,
-                  )
-                  |> result.map_error(mark_done(rest))
+              let #(done, val, iter_slot) = case step {
+                array_iterator.Exhausted -> #(True, JsUndefined, JsUndefined)
+                array_iterator.Yielded(v) -> #(False, v, JsObject(iter_ref))
               }
+              State(
+                ..state,
+                stack: [JsBool(done), val, iter_slot, ..rest],
+                pc: state.pc + 1,
+              )
+            }
             Some(
               ObjectSlot(kind: value.StringIteratorObject(remaining:), ..) as slot,
             ) ->
@@ -5561,6 +5458,10 @@ fn prop_key_value(pk: object.PropKey) -> JsValue {
     object.PkSymbol(sym) -> value.JsSymbol(sym)
     object.PkString(Index(n)) -> value.from_int(n)
     object.PkString(Named(s)) -> JsString(s)
+    // Unreachable: PropKeys come from to_prop_key, which canonicalizes JS
+    // values and so can only produce Index/Named. Rendering the storage text
+    // keeps this total without a panic.
+    object.PkString(key.Private(text)) -> JsString(text)
   }
 }
 
@@ -5787,7 +5688,9 @@ fn check_private_add(
   ref: value.Ref,
   key_text: String,
 ) -> Result(Nil, state.StepExit(host)) {
-  case object.get_own_property(state.heap, ref, Named(key_text)) {
+  case
+    object.get_own_property(state.heap, ref, private_key_from_text(key_text))
+  {
     Some(_) ->
       state.throw_type_error(
         state,
@@ -5867,14 +5770,10 @@ fn set_computed_fn_name(
 
 /// SetFunctionName step 4: a Symbol key names the function "[description]",
 /// or "" when the symbol has no description.
-fn symbol_fn_name(state: State(host), sym: value.SymbolId) -> String {
-  let desc = case value.well_known_symbol_description(sym) {
-    Some(d) -> Ok(d)
-    None -> dict.get(state.ctx.symbol_descriptions, sym)
-  }
-  case desc {
-    Ok(d) -> "[" <> d <> "]"
-    Error(Nil) -> ""
+fn symbol_fn_name(sym: value.SymbolId) -> String {
+  case value.symbol_description(sym) {
+    Some(d) -> "[" <> d <> "]"
+    None -> ""
   }
 }
 
@@ -6521,217 +6420,6 @@ fn unwrap_iterator_record(state: State(host), v: JsValue) -> JsValue {
 /// IteratorNext for an internal Iterator Record: call the `next_method`
 /// cached at GetIterator (§7.4.1) with the real iterator as `this`. Same
 /// stack contract as step_generic_iterator.
-/// IteratorNext step for an ArrayIteratorObject whose source is a plain
-/// array/arguments object or a Proxy. Pushes [done, value, iter|undef]
-/// like the inline IteratorNext paths.
-fn step_array_iterator_source(
-  state: State(host),
-  iter_ref: value.Ref,
-  source: value.Ref,
-  index: Int,
-  iter_kind: value.ArrayIterKind,
-  rest: List(JsValue),
-) -> Result(State(host), StepExit(host)) {
-  case object.as_proxy(state.heap, source) {
-    // Proxy source — §23.1.5.1 generic path: ? Get(array,
-    // "length") / ? Get(array, ToString(index)) fire get traps.
-    Some(_) -> {
-      use #(len_val, state) <- result.try(
-        state.rethrow(object.get_value(
-          state,
-          source,
-          Named("length"),
-          JsObject(source),
-        )),
-      )
-      // §7.1.20 LengthOfArrayLike: ? ToLength(len_val). The trap result may
-      // be an object — ToNumber must run ToPrimitive on it (user valueOf,
-      // which can throw), so go through coerce.js_to_number.
-      use #(len_num, state) <- result.try(
-        state.rethrow(coerce.js_to_number(state, len_val)),
-      )
-      let length = case len_num {
-        value.Finite(f) -> int.max(0, value.float_to_int(f))
-        _ -> 0
-      }
-      case index >= length {
-        True -> {
-          let heap = advance_array_iter(state.heap, iter_ref, source, -1)
-          Ok(
-            State(
-              ..state,
-              stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
-              heap:,
-              pc: state.pc + 1,
-            ),
-          )
-        }
-        False -> {
-          // §23.1.5.1 step 8.b.iii: "key" iterators yield the index WITHOUT
-          // Get(array, elementKey) — no get trap fires.
-          use #(val, state) <- result.try(case iter_kind {
-            value.ArrayIterKeys -> Ok(#(value.from_int(index), state))
-            _ -> {
-              use #(elem, state) <- result.try(
-                state.rethrow(object.get_value(
-                  state,
-                  source,
-                  Index(index),
-                  JsObject(source),
-                )),
-              )
-              let #(h, out) =
-                array_iter_shape(state.heap, state, iter_kind, index, elem)
-              Ok(#(out, State(..state, heap: h)))
-            }
-          })
-          let heap = advance_array_iter(state.heap, iter_ref, source, index + 1)
-          Ok(
-            State(
-              ..state,
-              stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
-              heap:,
-              pc: state.pc + 1,
-            ),
-          )
-        }
-      }
-    }
-    None -> {
-      // Re-read the source length each time (handles mutations
-      // during iteration)
-      let #(length, elements) =
-        heap.read_array_like(state.heap, source)
-        |> option.unwrap(#(0, elements.new()))
-      case index >= length {
-        True -> {
-          let heap = advance_array_iter(state.heap, iter_ref, source, -1)
-          Ok(
-            State(
-              ..state,
-              stack: [JsBool(True), JsUndefined, JsUndefined, ..rest],
-              heap:,
-              pc: state.pc + 1,
-            ),
-          )
-        }
-        False -> {
-          // §23.1.5.1: Let elementValue be ? Get(array, elementKey). The
-          // elements store is only a fast path for plain data values —
-          // defineProperty can install accessor/attribute overrides at an
-          // index (kept in the properties dict), and holes consult the
-          // prototype chain, so fall back to the generic [[Get]] when the
-          // element store has no entry or an override exists. "key"
-          // iterators skip the Get entirely (§23.1.5.1 step 8.b.iii).
-          use #(val, state) <- result.try(case iter_kind {
-            value.ArrayIterKeys -> Ok(#(value.from_int(index), state))
-            _ -> {
-              use #(elem, state) <- result.try(
-                case
-                  array_elem_without_override(
-                    state.heap,
-                    source,
-                    elements,
-                    index,
-                  )
-                {
-                  Some(v) -> Ok(#(v, state))
-                  None ->
-                    state.rethrow(object.get_value(
-                      state,
-                      source,
-                      Index(index),
-                      JsObject(source),
-                    ))
-                },
-              )
-              let #(h, out) =
-                array_iter_shape(state.heap, state, iter_kind, index, elem)
-              Ok(#(out, State(..state, heap: h)))
-            }
-          })
-          let heap = advance_array_iter(state.heap, iter_ref, source, index + 1)
-          Ok(
-            State(
-              ..state,
-              stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
-              heap:,
-              pc: state.pc + 1,
-            ),
-          )
-        }
-      }
-    }
-  }
-}
-
-/// §23.1.5.1: shape one iteration result for the iterator's kind — the
-/// index ("key"), the element ("value"), or a fresh [index, element] pair
-/// array ("key+value").
-fn array_iter_shape(
-  h: state.Heap(host),
-  state: State(host),
-  iter_kind: value.ArrayIterKind,
-  index: Int,
-  elem: JsValue,
-) -> #(state.Heap(host), JsValue) {
-  case iter_kind {
-    value.ArrayIterKeys -> #(h, value.from_int(index))
-    value.ArrayIterValues -> #(h, elem)
-    value.ArrayIterEntries -> {
-      let #(h, pair_ref) =
-        common.alloc_array(
-          h,
-          [value.from_int(index), elem],
-          state.builtins.array.prototype,
-        )
-      #(h, JsObject(pair_ref))
-    }
-  }
-}
-
-/// Fast-path element read for the array iterator: Some(value) only when the
-/// index is a plain data value in the element store with no properties-dict
-/// override (defineProperty can install accessor/attribute overrides at an
-/// index). None → caller takes the generic [[Get]] path.
-fn array_elem_without_override(
-  h: state.Heap(host),
-  source: value.Ref,
-  elems: value.JsElements,
-  index: Int,
-) -> Option(JsValue) {
-  case heap.read(h, source) {
-    Some(ObjectSlot(properties:, ..)) ->
-      case dict.has_key(properties, Index(index)) {
-        True -> None
-        False -> elements.get_option(elems, index)
-      }
-    _ -> None
-  }
-}
-
-/// Bump an ArrayIteratorObject's index in place (preserving the iteration
-/// kind). No-op if the ref no longer holds an array-iterator slot.
-fn advance_array_iter(
-  h: state.Heap(host),
-  iter_ref: value.Ref,
-  source: value.Ref,
-  index: Int,
-) -> state.Heap(host) {
-  case heap.read(h, iter_ref) {
-    Some(ObjectSlot(kind: ArrayIteratorObject(iter_kind:, ..), ..) as slot) ->
-      heap.write(
-        h,
-        iter_ref,
-        ObjectSlot(
-          ..slot,
-          kind: ArrayIteratorObject(source:, index:, iter_kind:),
-        ),
-      )
-    _ -> h
-  }
-}
-
 fn step_iterator_record(
   state: State(host),
   rec_ref: Ref,

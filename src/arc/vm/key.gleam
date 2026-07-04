@@ -17,7 +17,15 @@ import gleam/string
 /// Largest valid array index (§6.1.7): an array index is an integer in
 /// [0, 2^32-1), i.e. at most 2^32 - 2. Anything larger is an ordinary
 /// string-named property even when it looks numeric.
+///
+/// Deliberately one less than `max_array_length`: an array of the maximum
+/// length 2^32 - 1 has its last element at index 2^32 - 2.
 pub const max_array_index = 4_294_967_294
+
+/// Largest valid array length (§10.4.2.4 ArraySetLength): an Array's `length`
+/// is a uint32, so it is at most 2^32 - 1 and a larger length throws
+/// RangeError. Exactly one more than `max_array_index` — see above.
+pub const max_array_length = 4_294_967_295
 
 /// Canonical property key. Per spec, property keys are String | Symbol, but
 /// we distinguish array-index strings (canonical numeric strings in [0, 2^32-1))
@@ -29,11 +37,20 @@ pub type PropertyKey {
   Index(n: Int)
   /// Any other string key.
   Named(name: String)
+  /// A class private element ("#x"). Structurally distinct from `Named("#x")`,
+  /// so a private element and an ordinary property of the same source text
+  /// coexist in the same property dict without colliding, and no string a
+  /// program can produce is ever mistaken for a private key. Only the
+  /// `private_key*` constructors below can build one.
+  Private(text: String)
 }
 
 /// Canonicalize a string key. Implements CanonicalNumericIndexString (§7.1.21)
 /// combined with the array-index range check: if `s` parses to a non-negative
 /// int and `int.to_string(n) == s`, it's `Index(n)`; otherwise `Named(s)`.
+///
+/// Returns only `Index | Named` — no user text can ever canonicalize into a
+/// `Private` key, which is what keeps the private-element namespace unforgeable.
 ///
 /// HOT-PATH NOTE: this does an int.parse + int.to_string + string-compare.
 /// The interpreter must NOT call it for compile-time-constant property names —
@@ -85,13 +102,14 @@ pub fn index_key(n: Int) -> PropertyKey {
 /// Render a PropertyKey the way a human should see it (error messages,
 /// `inspect` output, function names). This is a *renderer*, not the inverse
 /// of `canonical_key`: it deliberately mangles private-element keys down to
-/// their source text ("#x"), dropping the internal NUL marker and the
-/// per-evaluation uid. When you need the exact property-name text — a proxy
-/// trap argument, `Object.keys`, for-in — use `key_to_text`.
+/// their source text ("#x"), dropping the per-evaluation uid. When you need
+/// the exact property-name text — a proxy trap argument, `Object.keys`,
+/// for-in — use `key_to_text`.
 pub fn key_display_string(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
-    Named(name) -> private_display_name(name)
+    Named(name) -> name
+    Private(text) -> private_display_name(text)
   }
 }
 
@@ -101,10 +119,14 @@ pub fn key_display_string(key: PropertyKey) -> String {
 /// proxy trap arguments, `Object.keys` / [[OwnPropertyKeys]] results, for-in
 /// bindings, module-namespace export lookups. For human-facing text use
 /// `key_display_string`.
+///
+/// Private keys never reach ordinary reflection (callers filter them with
+/// `is_private_key`), so their storage text is what comes back here.
 pub fn key_to_text(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
     Named(s) -> s
+    Private(text) -> text
   }
 }
 
@@ -115,53 +137,56 @@ pub fn key_to_text(key: PropertyKey) -> String {
 // to ALL ordinary property reflection (hasOwnProperty, ownKeys, for-in, `in`,
 // spread, JSON, freeze, ...) — AND a plain string property named "#x" (created
 // via o["#x"], computed keys, defineProperty, JSON.parse, ...) is a perfectly
-// ordinary, fully reflectable property. So privates are keyed with a NUL-byte
-// marker prefix ("\u{0}#x") that string-to-key conversion of source-level
-// identifiers/literals never produces, keeping the two namespaces apart.
+// ordinary, fully reflectable property. So privates get their own PropertyKey
+// variant, `Private(_)`: dict keys are structural, so `Private("#x")` and
+// `Named("#x")` are different slots, and — because `canonical_key` can only
+// ever return `Index | Named` — no string a program can produce ever lands in
+// the private namespace.
 //
-// The four pieces of that convention live here and nowhere else: the marker
-// itself, the constructor (`private_key` / `private_key_text`), the predicate
-// (`is_private_key`) and the renderer (`private_display_name`).
+// The three pieces of that convention live here and nowhere else: the
+// constructors (`private_key` / `private_key_from_text` / `private_key_text`),
+// the predicate (`is_private_key`) and the renderer (`private_display_name`).
 
-/// The marker prefix that puts a key in the hidden private-element namespace.
-/// Never write this literal outside this module.
-const private_marker = "\u{0}"
+/// Separator between a minted PrivateName's source text and its uid inside the
+/// storage text. Purely internal — nothing outside this module needs it.
+const uid_separator = "\u{0}"
 
 /// Build the storage key for a class private element ("#x").
 pub fn private_key(name: String) -> PropertyKey {
-  Named(private_marker <> name)
+  Private(name)
+}
+
+/// Wrap a minted PrivateName's storage text (see `private_key_text`) back into
+/// a key — the only way a runtime-carried private-name string re-enters the
+/// private namespace.
+pub fn private_key_from_text(text: String) -> PropertyKey {
+  Private(text)
 }
 
 /// Storage-key *text* for a freshly minted PrivateName (§15.7.14
-/// ClassDefinitionEvaluation step 5/6): marker <> source text <> marker <>
-/// uid. The uid makes each class evaluation's names distinct (spec PrivateName
-/// identity); the key text is carried at runtime as a JsString and wrapped in
-/// `Named(_)` at the access sites. See `value.mint_private_key`.
+/// ClassDefinitionEvaluation step 5/6): source text <> separator <> uid. The
+/// uid makes each class evaluation's names distinct (spec PrivateName
+/// identity); the key text is carried at runtime as a JsString and wrapped
+/// with `private_key_from_text` at the access sites. See
+/// `value.mint_private_key`.
 pub fn private_key_text(name: String, uid: Int) -> String {
-  private_marker <> name <> private_marker <> int.to_string(uid)
+  name <> uid_separator <> int.to_string(uid)
 }
 
 /// Whether a PropertyKey lives in the private-element namespace. Reflection
 /// sites call this to skip private keys.
 pub fn is_private_key(key: PropertyKey) -> Bool {
   case key {
-    // Pattern prefixes must be literals, so `private_marker` can't be spelled
-    // here — this is the one place the literal is repeated, next to its
-    // definition.
-    Named("\u{0}" <> _) -> True
-    _ -> False
+    Private(_) -> True
+    Index(_) | Named(_) -> False
   }
 }
 
-/// Source-text name ("#x") of a private storage-key text — the marker prefix
-/// and any uid suffix stripped. A non-private text is returned unchanged.
+/// Source-text name ("#x") of a private storage-key text — any uid suffix
+/// stripped. A non-minted text (a bare "#x") is returned unchanged.
 pub fn private_display_name(key_text: String) -> String {
-  case key_text {
-    "\u{0}" <> rest ->
-      case string.split_once(rest, "\u{0}") {
-        Ok(#(name, _uid)) -> name
-        Error(Nil) -> rest
-      }
-    _ -> key_text
+  case string.split_once(key_text, uid_separator) {
+    Ok(#(name, _uid)) -> name
+    Error(Nil) -> key_text
   }
 }

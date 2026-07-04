@@ -4,7 +4,7 @@ import arc/vm/builtins/iterator
 import arc/vm/builtins/object as object_builtin
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Index, Named, max_array_index}
+import arc/vm/key.{Index, Named, max_array_index, max_array_length}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
@@ -270,7 +270,7 @@ fn construct(
       case num {
         Finite(n) -> {
           case value.integral_int(n) {
-            Some(len) if len >= 0 && len <= 4_294_967_295 ->
+            Some(len) if len >= 0 && len <= max_array_length ->
               alloc_array(state, len, elements.new(), array_proto)
             // intLen ≠ len → RangeError (spec step 6b)
             _ -> state.range_error(state, "Invalid array length")
@@ -541,7 +541,7 @@ fn array_push(
     // dict as named properties and must not land in element storage, and
     // the final length Set throws RangeError (§10.4.2.4). Generic path only.
     _ ->
-      case length + list.length(args) > 4_294_967_295 {
+      case length + list.length(args) > max_array_length {
         True -> None
         False -> try_push_fast_path(state, ref, length, args)
       }
@@ -579,7 +579,7 @@ fn push_generic(
         Some(ObjectSlot(kind: ArrayObject(..), ..)) -> True
         _ -> False
       }
-      let exceeds_uint32 = is_real_array && length > 4_294_967_295
+      let exceeds_uint32 = is_real_array && length > max_array_length
       use <- bool.lazy_guard(exceeds_uint32, fn() {
         range_error_op(state, "Invalid array length")
       })
@@ -923,7 +923,7 @@ fn properties_have_index_keys(
   && list.any(dict.keys(properties), fn(key) {
     case key {
       Index(_) -> True
-      Named(_) -> False
+      Named(_) | key.Private(_) -> False
     }
   })
 }
@@ -2969,7 +2969,7 @@ fn array_at(
 /// 10. Return -1𝔽.
 ///
 /// Steps 1-2 combined via require_array. Step 9 loop delegated to
-/// search_forward with skip_holes=True (step 9a HasProperty check).
+/// search_forward with SkipHoles (step 9a HasProperty check).
 fn array_index_of(
   this: JsValue,
   args: List(JsValue),
@@ -2980,7 +2980,7 @@ fn array_index_of(
     args,
     state,
     value.strict_equal,
-    True,
+    SkipHoles,
     value.from_int,
   )
 }
@@ -2995,7 +2995,7 @@ fn forward_search_driver(
   args: List(JsValue),
   state: State(host),
   eq: fn(JsValue, JsValue) -> Bool,
-  skip_holes: Bool,
+  hole_mode: HoleMode,
   wrap: fn(Int) -> JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Steps 1-2: ToObject(this), LengthOfArrayLike(O)
@@ -3025,7 +3025,7 @@ fn forward_search_driver(
     length,
     search,
     eq,
-    skip_holes,
+    hole_mode,
     limits.max_iteration,
   ))
   #(state, Ok(wrap(found)))
@@ -3117,7 +3117,7 @@ fn array_last_index_of(
 ///
 /// Steps 1-2 combined via require_array. Step 9a does NOT have a HasProperty
 /// check (unlike indexOf) — holes are visited and treated as undefined per the
-/// spec. Delegated to search_forward with skip_holes=False and SameValueZero.
+/// spec. Delegated to search_forward with VisitHoles and SameValueZero.
 fn array_includes(
   this: JsValue,
   args: List(JsValue),
@@ -3128,7 +3128,7 @@ fn array_includes(
     args,
     state,
     value.same_value_zero,
-    False,
+    VisitHoles,
     fn(found) { JsBool(found >= 0) },
   )
 }
@@ -3143,8 +3143,8 @@ fn array_includes(
 ///      ii. If IsStrictlyEqual(...), return k
 ///   c. k = k + 1
 ///
-/// skip_holes=True → indexOf semantics (step 9a HasProperty check).
-/// skip_holes=False → includes semantics (no HasProperty, holes read as undefined).
+/// SkipHoles → indexOf semantics (step 9a HasProperty check).
+/// VisitHoles → includes semantics (no HasProperty, holes read as undefined).
 /// eq → IsStrictlyEqual for indexOf, SameValueZero for includes.
 fn search_forward(
   state: State(host),
@@ -3153,7 +3153,7 @@ fn search_forward(
   length: Int,
   search: JsValue,
   eq: fn(JsValue, JsValue) -> Bool,
-  skip_holes: Bool,
+  hole_mode: HoleMode,
   fuel: Int,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   // Pragmatic step budget — see iteration_budget_msg.
@@ -3164,68 +3164,38 @@ fn search_forward(
   case idx >= length {
     // Step 10: return -1 (indexOf) / return false (includes; caller converts)
     True -> Ok(#(-1, state))
-    False ->
-      case skip_holes {
-        True -> {
-          // indexOf step 9a-9b.i: kPresent = HasProperty(O, k); if true,
-          // elementK = Get(O, k) — fused into one heap lookup.
-          use #(maybe_val, state) <- result.try(get_index_if_present(
+    False -> {
+      // SkipHoles (indexOf step 9a-9b.i): kPresent = HasProperty(O, k); if
+      // true, elementK = Get(O, k) — fused into one heap lookup. A hole comes
+      // back as None and is skipped.
+      // VisitHoles (includes step 9a): plain Get, so a hole reads as undefined.
+      use #(maybe_val, state) <- result.try(case hole_mode {
+        SkipHoles -> get_index_if_present(state, this, idx)
+        VisitHoles ->
+          get_index(state, this, idx)
+          |> result.map(fn(got) { #(Some(got.0), got.1) })
+      })
+      // Step 9b.ii / 9b: comparison (a skipped hole never matches).
+      let matched = case maybe_val {
+        Some(val) -> eq(val, search)
+        None -> False
+      }
+      case matched {
+        True -> Ok(#(idx, state))
+        // Step 9c: k = k + 1
+        False ->
+          search_forward(
             state,
             this,
-            idx,
-          ))
-          case maybe_val {
-            None ->
-              // indexOf step 9c: k = k + 1 (hole skipped)
-              search_forward(
-                state,
-                this,
-                idx + 1,
-                length,
-                search,
-                eq,
-                skip_holes,
-                fuel - 1,
-              )
-            Some(val) ->
-              // indexOf step 9b.ii: comparison
-              case eq(val, search) {
-                True -> Ok(#(idx, state))
-                False ->
-                  // Step 9c: k = k + 1
-                  search_forward(
-                    state,
-                    this,
-                    idx + 1,
-                    length,
-                    search,
-                    eq,
-                    skip_holes,
-                    fuel - 1,
-                  )
-              }
-          }
-        }
-        False -> {
-          // includes step 9a-b: Get + compare (holes read as undefined)
-          use #(val, state) <- result.try(get_index(state, this, idx))
-          case eq(val, search) {
-            True -> Ok(#(idx, state))
-            False ->
-              // Step 9c: k = k + 1
-              search_forward(
-                state,
-                this,
-                idx + 1,
-                length,
-                search,
-                eq,
-                skip_holes,
-                fuel - 1,
-              )
-          }
-        }
+            idx + 1,
+            length,
+            search,
+            eq,
+            hole_mode,
+            fuel - 1,
+          )
       }
+    }
   }
 }
 
@@ -3285,11 +3255,51 @@ fn search_backward(
 // Iteration methods (forEach / map / filter / every / some / find / findIndex)
 // ============================================================================
 
-/// Iteration mode — whether to skip holes (HasProperty check before Get).
-/// find/findIndex do NOT skip holes; all other iteration methods do.
-type HoleMode {
+/// How a scan treats holes. `SkipHoles` = the spec's HasProperty check before
+/// Get (indexOf, forEach, every, some, sort); `VisitHoles` = plain Get, so a
+/// hole is visited as `undefined` (includes, find/findIndex, toSorted).
+///
+/// Shared by every hole-sensitive scan in this module — iterate_loop,
+/// search_forward and collect_sort_elements — so the choice can never be
+/// spelled as a bare boolean whose polarity you have to remember.
+pub type HoleMode {
   SkipHoles
   VisitHoles
+}
+
+/// Which way a bidirectional array loop runs. Replaces the old "step is 1 or
+/// -1" convention: `bounds` below is the ONLY place a start/end/step triple is
+/// built, so a caller cannot transpose them or invent a third step value.
+pub type Direction {
+  Ascending
+  Descending
+}
+
+/// The (start, end, step) triple for a loop over `[0, length)` in `dir`.
+/// `end` is the exclusive terminal index — `length` ascending, `-1` descending
+/// — and loops terminate on `idx == end` in both directions.
+fn bounds(dir: Direction, length: Int) -> #(Int, Int, Int) {
+  case dir {
+    Ascending -> #(0, length, 1)
+    Descending -> #(length - 1, -1, -1)
+  }
+}
+
+/// The per-iteration index delta for `dir` (the `step` of `bounds`).
+fn step_of(dir: Direction) -> Int {
+  case dir {
+    Ascending -> 1
+    Descending -> -1
+  }
+}
+
+/// Outcome of a predicate-driven scan: either the element that stopped the
+/// loop and its index, or nothing. Replaces the old direction-dependent
+/// "not found" index sentinel (`length` ascending, `-1` descending), which a
+/// caller could compare against the wrong way and read a miss as a hit.
+pub type FoundAt {
+  Found(element: JsValue, index: Int)
+  NotFound
 }
 
 /// Array.prototype.forEach (ES2024 §23.1.3.13)
@@ -3327,10 +3337,11 @@ fn array_for_each(
   use cb, this_arg, state <- require_callback(args, state)
   // Steps 4-5: k = 0; Repeat while k < len (iterate_array handles the loop,
   // HasProperty check via SkipHoles, and Call(callbackfn, thisArg, «kValue, k, O»))
-  use _final_elem, _final_idx, state <- iterate_array(
+  use _found, state <- iterate_array(
     state,
     this,
     length,
+    Ascending,
     cb,
     this_arg,
     SkipHoles,
@@ -3579,7 +3590,7 @@ fn array_every(
 /// Steps 4-5: k = 0, repeat while k < len — iterate_array handles the loop,
 /// SkipHoles implements step 5b (HasProperty), and the stop predicate
 /// implements step 5c.iii (stop when ToBoolean(testResult) == match_on).
-/// Step 6: stopped early (idx < length) means a match_on result was found.
+/// Step 6: a Found means a match_on result stopped the loop.
 fn every_some(
   this: JsValue,
   args: List(JsValue),
@@ -3588,16 +3599,21 @@ fn every_some(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use this, _ref, length, state <- require_array(this, state)
   use cb, this_arg, state <- require_callback(args, state)
-  use _elem, idx, state <- iterate_array(
+  use found, state <- iterate_array(
     state,
     this,
     length,
+    Ascending,
     cb,
     this_arg,
     SkipHoles,
     fn(r) { value.is_truthy(r) == match_on },
   )
-  #(state, Ok(JsBool({ idx < length } == match_on)))
+  let stopped_early = case found {
+    Found(_, _) -> True
+    NotFound -> False
+  }
+  #(state, Ok(JsBool(stopped_early == match_on)))
 }
 
 /// Array.prototype.some (ES2024 §23.1.3.27)
@@ -3647,32 +3663,28 @@ fn array_some(
 ///
 /// FindViaPredicate (§23.1.3.9.1) shared driver for find / findIndex /
 /// findLast / findLastIndex. ToObject + LengthOfArrayLike + IsCallable, then
-/// iterate with VisitHoles + is_truthy. cont gets (elem, idx, length, state);
-/// not-found ⇒ idx==length (forward) or idx==-1 (reverse).
+/// iterate in `dir` with VisitHoles + is_truthy. cont gets the FoundAt result
+/// (step 4d's Record on a match, step 5's miss otherwise) and state.
 fn find_via_predicate(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
-  reverse: Bool,
-  cont: fn(JsValue, Int, Int, State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
+  dir: Direction,
+  cont: fn(FoundAt, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use this, _ref, length, state <- require_array(this, state)
   use cb, this_arg, state <- require_callback(args, state)
-  let iter = case reverse {
-    True -> iterate_array_rev
-    False -> iterate_array
-  }
-  use elem, idx, state <- iter(
+  use found, state <- iterate_array(
     state,
     this,
     length,
+    dir,
     cb,
     this_arg,
     VisitHoles,
     value.is_truthy,
   )
-  cont(elem, idx, length, state)
+  cont(found, state)
 }
 
 fn array_find(
@@ -3680,10 +3692,10 @@ fn array_find(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use elem, idx, length, state <- find_via_predicate(this, args, state, False)
-  case idx < length {
-    True -> #(state, Ok(elem))
-    False -> #(state, Ok(JsUndefined))
+  use found, state <- find_via_predicate(this, args, state, Ascending)
+  case found {
+    Found(elem, _) -> #(state, Ok(elem))
+    NotFound -> #(state, Ok(JsUndefined))
   }
 }
 
@@ -3703,10 +3715,10 @@ fn array_find_index(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _elem, idx, length, state <- find_via_predicate(this, args, state, False)
-  case idx < length {
-    True -> #(state, Ok(value.from_int(idx)))
-    False -> #(state, Ok(value.from_int(-1)))
+  use found, state <- find_via_predicate(this, args, state, Ascending)
+  case found {
+    Found(_, idx) -> #(state, Ok(value.from_int(idx)))
+    NotFound -> #(state, Ok(value.from_int(-1)))
   }
 }
 
@@ -3784,7 +3796,7 @@ fn sort_default(
     0,
     [],
     0,
-    False,
+    SkipHoles,
   ))
   // Convert each defined element to string for comparison via ToString.
   use pairs, state <- state.try_op(stringify_elements(state, defined, []))
@@ -3798,15 +3810,16 @@ fn sort_default(
 
 /// Collect defined elements from the array for sorting.
 /// Returns #(defined_values, undefined_count).
-/// Holes are skipped entirely (not counted). Undefineds are counted separately.
+/// Undefineds are counted separately (they sort to the tail).
 ///
 /// Plain arrays with no index overrides take collect_sort_elements_snapshot
 /// (one heap read for the whole loop); everything else takes the generic
 /// per-element path.
-/// `holes_as_undefined` selects the spec's hole treatment: sort() uses
-/// SKIP-HOLES (§23.1.3.30 — holes are neither sorted nor counted, they stay
-/// holes at the tail), toSorted() uses READ-THROUGH-HOLES (§23.1.3.34 —
-/// holes read as undefined and the result array is dense).
+///
+/// `hole_mode` selects the spec's hole treatment: sort() passes SkipHoles
+/// (§23.1.3.30 — holes are neither sorted nor counted, they stay holes at the
+/// tail), toSorted() passes VisitHoles (§23.1.3.34 — a hole reads as undefined,
+/// so it joins the trailing undefineds and the result array is dense).
 fn collect_sort_elements(
   state: State(host),
   this: JsValue,
@@ -3814,7 +3827,7 @@ fn collect_sort_elements(
   idx: Int,
   acc: List(JsValue),
   undefs: Int,
-  holes_as_undefined: Bool,
+  hole_mode: HoleMode,
 ) -> Result(#(#(List(JsValue), Int), State(host)), #(JsValue, State(host))) {
   case dense_snapshot(state, this) {
     Some(#(els, proto)) ->
@@ -3827,7 +3840,7 @@ fn collect_sort_elements(
         idx,
         acc,
         undefs,
-        holes_as_undefined,
+        hole_mode,
       )
     None ->
       collect_sort_elements_generic(
@@ -3837,7 +3850,7 @@ fn collect_sort_elements(
         idx,
         acc,
         undefs,
-        holes_as_undefined,
+        hole_mode,
       )
   }
 }
@@ -3856,7 +3869,7 @@ fn collect_sort_elements_snapshot(
   idx: Int,
   acc: List(JsValue),
   undefs: Int,
-  holes_as_undefined: Bool,
+  hole_mode: HoleMode,
 ) -> Result(#(#(List(JsValue), Int), State(host)), #(JsValue, State(host))) {
   case idx >= length {
     True -> Ok(#(#(list.reverse(acc), undefs), state))
@@ -3873,7 +3886,7 @@ fn collect_sort_elements_snapshot(
             idx + 1,
             acc,
             undefs + 1,
-            holes_as_undefined,
+            hole_mode,
           )
         Some(val) ->
           collect_sort_elements_snapshot(
@@ -3885,7 +3898,7 @@ fn collect_sort_elements_snapshot(
             idx + 1,
             [val, ..acc],
             undefs,
-            holes_as_undefined,
+            hole_mode,
           )
         None ->
           case hole_is_inherited(state, proto, idx) {
@@ -3900,11 +3913,11 @@ fn collect_sort_elements_snapshot(
                 length,
                 idx + 1,
                 acc,
-                case holes_as_undefined {
-                  True -> undefs + 1
-                  False -> undefs
+                case hole_mode {
+                  VisitHoles -> undefs + 1
+                  SkipHoles -> undefs
                 },
-                holes_as_undefined,
+                hole_mode,
               )
             // Inherited property — Get may invoke a getter (user code).
             True ->
@@ -3915,7 +3928,7 @@ fn collect_sort_elements_snapshot(
                 idx,
                 acc,
                 undefs,
-                holes_as_undefined,
+                hole_mode,
               )
           }
       }
@@ -3932,7 +3945,7 @@ fn collect_sort_elements_generic(
   idx: Int,
   acc: List(JsValue),
   undefs: Int,
-  holes_as_undefined: Bool,
+  hole_mode: HoleMode,
 ) -> Result(#(#(List(JsValue), Int), State(host)), #(JsValue, State(host))) {
   case idx >= length {
     True -> Ok(#(#(list.reverse(acc), undefs), state))
@@ -3952,11 +3965,11 @@ fn collect_sort_elements_generic(
             length,
             idx + 1,
             acc,
-            case holes_as_undefined {
-              True -> undefs + 1
-              False -> undefs
+            case hole_mode {
+              VisitHoles -> undefs + 1
+              SkipHoles -> undefs
             },
-            holes_as_undefined,
+            hole_mode,
           )
         Some(val) ->
           case val {
@@ -3969,7 +3982,7 @@ fn collect_sort_elements_generic(
                 idx + 1,
                 acc,
                 undefs + 1,
-                holes_as_undefined,
+                hole_mode,
               )
             _ ->
               collect_sort_elements_generic(
@@ -3979,7 +3992,7 @@ fn collect_sort_elements_generic(
                 idx + 1,
                 [val, ..acc],
                 undefs,
-                holes_as_undefined,
+                hole_mode,
               )
           }
       }
@@ -4021,7 +4034,7 @@ fn sort_with_comparefn(
     0,
     [],
     0,
-    False,
+    SkipHoles,
   ))
   use sorted, state <- state.try_op(merge_sort(state, defined, comparefn))
   let all_values = list.append(sorted, list.repeat(JsUndefined, undefs))
@@ -4198,27 +4211,33 @@ fn delete_trailing(
 ///   - some/find/findIndex: stop_on = is_truthy (step 5c.iii/4d: testResult is true → return)
 ///   - forEach: stop_on = fn(_) { False } (never stops early)
 ///
-/// Returns via `cont(element, idx, state)`:
-///   - If stopped early: cont(kValue, k, state) — the element and index that triggered stop.
-///   - If loop completed: cont(JsUndefined, length, state) — sentinel idx=length signals completion.
+/// `dir` picks the iteration order: Ascending for forEach/every/some/find/
+/// findIndex, Descending for findLast/findLastIndex (FindViaPredicate
+/// §23.1.3.9.1 with direction = descending).
+///
+/// Returns via `cont(found, state)`:
+///   - Stopped early: `Found(kValue, k)` — the element and index that stopped it.
+///   - Loop completed: `NotFound` — in BOTH directions, so the caller never
+///     compares an index against a direction-dependent sentinel.
 fn iterate_array(
   state: State(host),
   arr: JsValue,
   length: Int,
+  dir: Direction,
   cb: JsValue,
   this_arg: JsValue,
   hole_mode: HoleMode,
   stop_on: fn(JsValue) -> Bool,
-  cont: fn(JsValue, Int, State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
+  cont: fn(FoundAt, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Step 4 (Pattern A/B): k = 0, begin loop ascending.
+  // Step 4 (Pattern A/B): k = 0 (ascending) or len - 1 (descending).
+  let #(start, end, step) = bounds(dir, length)
   iterate_loop(
     state,
     arr,
-    0,
-    length,
-    1,
+    start,
+    end,
+    step,
     limits.max_iteration,
     cb,
     this_arg,
@@ -4228,46 +4247,12 @@ fn iterate_array(
   )
 }
 
-/// Like iterate_array but iterates [len-1..0] descending — for findLast /
-/// findLastIndex, which delegate to FindViaPredicate (§23.1.3.9.1) with
-/// direction = descending.
+/// Inner loop of iterate_array. Each recursive call corresponds to one
+/// iteration of the spec's "Repeat, while k < len" (Pattern A) or "For each
+/// integer k of indices" (Pattern B).
 ///
-/// Returns via `cont(element, idx, state)`:
-///   - If stopped early: cont(kValue, k, state) — the element and index that triggered stop.
-///   - If loop completed: cont(JsUndefined, -1, state) — sentinel idx=-1 signals completion.
-fn iterate_array_rev(
-  state: State(host),
-  arr: JsValue,
-  length: Int,
-  cb: JsValue,
-  this_arg: JsValue,
-  hole_mode: HoleMode,
-  stop_on: fn(JsValue) -> Bool,
-  cont: fn(JsValue, Int, State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  // k = len - 1, begin loop descending (end = -1, step = -1).
-  iterate_loop(
-    state,
-    arr,
-    length - 1,
-    -1,
-    -1,
-    limits.max_iteration,
-    cb,
-    this_arg,
-    hole_mode,
-    stop_on,
-    cont,
-  )
-}
-
-/// Inner loop of iterate_array / iterate_array_rev. Each recursive call
-/// corresponds to one iteration of the spec's "Repeat, while k < len"
-/// (Pattern A) or "For each integer k of indices" (Pattern B).
-///
-/// Bidirectional: `step` is +1 (ascending) or -1 (descending), and `end` is
-/// the exclusive terminal index (`length` for ascending, `-1` for descending).
+/// Bidirectional: `end`/`step` come from `bounds` — `end` is the exclusive
+/// terminal index and the loop stops on `idx == end` either way.
 ///
 /// `fuel` is the pragmatic step budget (see iteration_budget_msg) — methods
 /// with early exits (every/some/find) on huge array-likes stop long before
@@ -4283,8 +4268,7 @@ fn iterate_loop(
   this_arg: JsValue,
   hole_mode: HoleMode,
   stop_on: fn(JsValue) -> Bool,
-  cont: fn(JsValue, Int, State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
+  cont: fn(FoundAt, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use <- bool.lazy_guard(fuel <= 0 && idx != end, fn() {
     state.range_error(state, iteration_budget_msg)
@@ -4292,7 +4276,7 @@ fn iterate_loop(
   // Loop termination: k == end → completed without early exit.
   // Pattern A step 6 / Pattern B step 5.
   case idx == end {
-    True -> cont(JsUndefined, end, state)
+    True -> cont(NotFound, state)
     False -> {
       // Pattern A step 5b-5c.i: kPresent = HasProperty(O, Pk); if true,
       //   kValue = Get(O, Pk) — fused into one heap lookup.
@@ -4334,7 +4318,7 @@ fn iterate_loop(
           // Pattern A step 5c.iii / Pattern B step 4d:
           // If testResult matches stop condition, return early.
           case stop_on(result) {
-            True -> cont(elem, idx, state)
+            True -> cont(Found(elem, idx), state)
             // Step 5d / continue to next k.
             False ->
               iterate_loop(
@@ -4481,7 +4465,7 @@ fn array_reduce(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  reduce_impl(this, args, state, 1)
+  reduce_impl(this, args, state, Ascending)
 }
 
 /// Array.prototype.reduceRight ( callbackfn [ , initialValue ] )
@@ -4518,17 +4502,17 @@ fn array_reduce_right(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  reduce_impl(this, args, state, -1)
+  reduce_impl(this, args, state, Descending)
 }
 
-/// Shared implementation of reduce/reduceRight. `step` controls direction:
-/// 1 = reduce (forward, start=0, end=len), -1 = reduceRight (backward,
-/// start=len-1, end=-1).
+/// Shared implementation of reduce/reduceRight. `dir` controls direction:
+/// Ascending = reduce, Descending = reduceRight; `bounds` turns it into the
+/// start/end/step triple.
 fn reduce_impl(
   this: JsValue,
   args: List(JsValue),
   state: State(host),
-  step: Int,
+  dir: Direction,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Steps 1-2: Let O be ? ToObject(this value). Let len be ? LengthOfArrayLike(O).
   use this, _ref, length, state <- require_array(this, state)
@@ -4543,10 +4527,7 @@ fn reduce_impl(
     ),
   )
   // Step 5: k = 0 (reduce) or len - 1 (reduceRight); loop bound is exclusive.
-  let #(start, end) = case step {
-    1 -> #(0, length)
-    _ -> #(length - 1, -1)
-  }
+  let #(start, end, step) = bounds(dir, length)
   // Step 7: If initialValue is present, set accumulator to initialValue.
   // Presence checked by arg count (args.length >= 2).
   let #(has_init, init) = case args {
@@ -4556,7 +4537,7 @@ fn reduce_impl(
   case has_init {
     // Steps 5, 7a, 9: accumulator=initialValue, enter main loop
     True ->
-      reduce_loop(state, this, start, end, cb, init, step, limits.max_iteration)
+      reduce_loop(state, this, start, end, cb, init, dir, limits.max_iteration)
     False -> {
       // Steps 8a-8c: Find first present element (in iteration order) as
       // initial accumulator. find_present implements step 8b's loop.
@@ -4565,7 +4546,7 @@ fn reduce_impl(
         this,
         start,
         end,
-        step,
+        dir,
         limits.max_iteration,
       ))
       case found {
@@ -4582,7 +4563,7 @@ fn reduce_impl(
             end,
             cb,
             first_val,
-            step,
+            dir,
             limits.max_iteration,
           )
       }
@@ -4594,9 +4575,9 @@ fn reduce_impl(
 /// When no initialValue is provided, scan for the first present (non-hole) element
 /// to use as the initial accumulator.
 ///
-/// For reduce (step=1): step 8b says "Repeat, while kPresent is false and k < len"
+/// For reduce (Ascending): step 8b says "Repeat, while kPresent is false and k < len"
 ///   — scans forward from index 0, checking HasProperty at each k.
-/// For reduceRight (step=-1): step 8b says "Repeat, while kPresent is false and k ≥ 0"
+/// For reduceRight (Descending): step 8b says "Repeat, while kPresent is false and k ≥ 0"
 ///   — scans backward from index len-1.
 ///
 /// Step 8b.ii-iii.1: kPresent = HasProperty(O, Pk); if true, accumulator =
@@ -4610,7 +4591,7 @@ fn find_present(
   this: JsValue,
   idx: Int,
   end: Int,
-  step: Int,
+  dir: Direction,
   fuel: Int,
 ) -> Result(#(Option(#(Int, JsValue)), State(host)), #(JsValue, State(host))) {
   // Loop termination: k < len (forward) or k ≥ 0 (backward)
@@ -4633,7 +4614,8 @@ fn find_present(
         // Step 8b.iii: kPresent is true
         Some(val) -> Ok(#(Some(#(idx, val)), state))
         // Step 8b.iv: Set k to k + 1 (or k - 1 for reduceRight)
-        None -> find_present(state, this, idx + step, end, step, fuel - 1)
+        None ->
+          find_present(state, this, idx + step_of(dir), end, dir, fuel - 1)
       }
     }
   }
@@ -4642,12 +4624,13 @@ fn find_present(
 /// Implements §23.1.3.23 step 9 / §23.1.3.24 step 9:
 /// The main iteration loop for both reduce and reduceRight.
 ///
-/// For reduce (step=1, end=len): step 9 says "Repeat, while k < len"
-/// For reduceRight (step=-1, end=-1): step 9 says "Repeat, while k ≥ 0"
+/// For reduce (Ascending, end=len): step 9 says "Repeat, while k < len"
+/// For reduceRight (Descending, end=-1): step 9 says "Repeat, while k ≥ 0"
 ///
-/// This is a unified bidirectional implementation — step controls direction,
-/// end is the exclusive termination bound. Both directions share the same
-/// algorithm structure (steps 9a-9d are identical between the two specs).
+/// This is a unified bidirectional implementation — `dir` controls direction,
+/// end is the exclusive termination bound (both from `bounds`). Both
+/// directions share the same algorithm structure (steps 9a-9d are identical
+/// between the two specs).
 ///
 /// Per-index reads via get_index (which uses object.get_value_of — walks
 /// prototype chain and invokes getters).
@@ -4658,9 +4641,10 @@ fn reduce_loop(
   end: Int,
   cb: JsValue,
   acc: JsValue,
-  step: Int,
+  dir: Direction,
   fuel: Int,
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  let step = step_of(dir)
   // Step 9 loop condition: k < len (forward) or k ≥ 0 (backward)
   case idx == end {
     // Step 10: Return accumulator.
@@ -4680,8 +4664,7 @@ fn reduce_loop(
       case maybe_elem {
         // kPresent is false — skip this index (hole).
         // Step 9d: Set k to k + 1 (or k - 1 for reduceRight).
-        None ->
-          reduce_loop(state, arr, idx + step, end, cb, acc, step, fuel - 1)
+        None -> reduce_loop(state, arr, idx + step, end, cb, acc, dir, fuel - 1)
         // Step 9c: If kPresent is true, then
         Some(elem) -> {
           // Step 9c.ii: Set accumulator to ? Call(callbackfn, undefined, « accumulator, kValue, 𝔽(k), O »).
@@ -4693,7 +4676,7 @@ fn reduce_loop(
             arr,
           ])
           // Step 9d: Set k to k + 1 (or k - 1 for reduceRight).
-          reduce_loop(state, arr, idx + step, end, cb, result, step, fuel - 1)
+          reduce_loop(state, arr, idx + step, end, cb, result, dir, fuel - 1)
         }
       }
     }
@@ -4899,10 +4882,10 @@ fn array_find_last(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use elem, idx, _len, state <- find_via_predicate(this, args, state, True)
-  case idx >= 0 {
-    True -> #(state, Ok(elem))
-    False -> #(state, Ok(JsUndefined))
+  use found, state <- find_via_predicate(this, args, state, Descending)
+  case found {
+    Found(elem, _) -> #(state, Ok(elem))
+    NotFound -> #(state, Ok(JsUndefined))
   }
 }
 
@@ -4915,9 +4898,11 @@ fn array_find_last_index(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _elem, idx, _len, state <- find_via_predicate(this, args, state, True)
-  // idx is already -1 when not found (descending sentinel).
-  #(state, Ok(value.from_int(idx)))
+  use found, state <- find_via_predicate(this, args, state, Descending)
+  case found {
+    Found(_, idx) -> #(state, Ok(value.from_int(idx)))
+    NotFound -> #(state, Ok(value.from_int(-1)))
+  }
 }
 
 // ============================================================================
@@ -5704,7 +5689,7 @@ fn array_with(
   // Step 6: bounds check — throw RangeError if out of bounds
   // Step 7: ArrayCreate(len) throws RangeError when len > 2^32 - 1, before
   // any element Get (test262: with/length-exceeding-array-length-limit).
-  use <- bool.lazy_guard(length > 4_294_967_295, fn() {
+  use <- bool.lazy_guard(length > max_array_length, fn() {
     state.range_error(state, "Invalid array length")
   })
   case actual_index < 0 || actual_index >= length {
@@ -5802,7 +5787,7 @@ fn to_sorted_impl(
     0,
     [],
     0,
-    True,
+    VisitHoles,
   ))
   use sorted, state <- state.try_op(sort(state, defined))
   let all_values = list.append(sorted, list.repeat(JsUndefined, undefs))
@@ -6049,7 +6034,7 @@ fn array_keys(
       state.heap,
       value.ArrayIteratorObject(
         source: ref,
-        index: 0,
+        cursor: Some(0),
         iter_kind: value.ArrayIterKeys,
       ),
       state.builtins.array_iterator_proto,
@@ -6074,7 +6059,7 @@ fn array_values(
       state.heap,
       value.ArrayIteratorObject(
         source: ref,
-        index: 0,
+        cursor: Some(0),
         iter_kind: value.ArrayIterValues,
       ),
       state.builtins.array_iterator_proto,
@@ -6100,7 +6085,7 @@ fn array_entries(
       state.heap,
       value.ArrayIteratorObject(
         source: ref,
-        index: 0,
+        cursor: Some(0),
         iter_kind: value.ArrayIterEntries,
       ),
       state.builtins.array_iterator_proto,

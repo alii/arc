@@ -296,7 +296,7 @@ pub type Op {
   DeleteField(key: PropertyKey)
   DeleteElem
   // The four static private-element ops carry the RAW private name ("#x").
-  // Private names live in a hidden NUL-marker namespace (key.private_key)
+  // Private names live in their own PropertyKey variant (key.private_key)
   // and are never canonicalized to array indices — carrying a String makes a
   // private→public Index leak unrepresentable.
   /// §7.3.31 PrivateGet. Stack: [obj, ..] → [val, ..]. Throws TypeError if
@@ -318,7 +318,7 @@ pub type Op {
   // -- Spec-shaped PrivateName ops (per-class-evaluation unique names) --
   /// §15.7.14 ClassDefinitionEvaluation step 5/6: mint a fresh PrivateName for
   /// `name` ("#m"). Pushes a JsString carrying the unique storage-key text
-  /// ("\u{0}#m\u{0}<uid>" — see value.mint_private_key). The emitter binds it
+  /// ("#m\u{0}<uid>" — see value.mint_private_key). The emitter binds it
   /// to a class-scope const named after the source text ("#m"), so nested
   /// classes shadow and closures capture exactly like the spec's
   /// PrivateEnvironment chain.

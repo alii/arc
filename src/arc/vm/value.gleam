@@ -57,9 +57,15 @@ pub type WellKnown {
 /// Symbol identity. Well-known symbols are members of the closed `WellKnown`
 /// sum. User-created symbols use Erlang references for global uniqueness
 /// across processes — no shared counter needed.
+///
+/// A `UserSymbol` carries its own `[[Description]]`: it is fixed at creation
+/// (`Symbol(desc)` / `Symbol.for(key)`) and never changes, so it is a pure
+/// function of `ref` and term equality / dict-key semantics still hinge on
+/// `ref` alone. Keeping it here means a symbol cannot reach a realm, a
+/// ShadowRealm or a serialized state that has "forgotten" its description.
 pub type SymbolId {
   WellKnownSymbol(which: WellKnown)
-  UserSymbol(ref: ErlangRef)
+  UserSymbol(ref: ErlangRef, description: Option(String))
 }
 
 // Well-known symbol constants.
@@ -116,12 +122,20 @@ pub fn well_known_description(which: WellKnown) -> String {
   }
 }
 
-/// Get the description string for a well-known symbol. `None` for `UserSymbol`
-/// (whose description, if any, lives on its `SymbolObject`).
+/// Get the description string for a well-known symbol. `None` for `UserSymbol`.
 pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
   case id {
     WellKnownSymbol(which) -> Some(well_known_description(which))
-    UserSymbol(_) -> None
+    UserSymbol(..) -> None
+  }
+}
+
+/// §20.4 [[Description]] of any symbol: the canonical name for a well-known
+/// symbol, or the (optional) description a user symbol was created with.
+pub fn symbol_description(id: SymbolId) -> Option(String) {
+  case id {
+    WellKnownSymbol(which) -> Some(well_known_description(which))
+    UserSymbol(description:, ..) -> description
   }
 }
 
@@ -3232,7 +3246,15 @@ pub type ExoticKind(ctx, host) {
   /// Lazy — re-reads source length each .next() to handle mutation.
   /// `iter_kind` is the [[ArrayIterationKind]] internal slot: what each
   /// .next() yields (index, element, or a fresh [index, element] pair).
-  ArrayIteratorObject(source: Ref, index: Int, iter_kind: ArrayIterKind)
+  /// `cursor` is the next index to yield; `None` latches exhaustion — the
+  /// spec's [[IteratedObject]] = undefined "already returned" state — so a
+  /// done iterator stays done even if the source later grows or its buffer
+  /// is resized.
+  ArrayIteratorObject(
+    source: Ref,
+    cursor: Option(Int),
+    iter_kind: ArrayIterKind,
+  )
   /// String iterator — ES2024 §22.1.5 String Iterator Objects.
   /// Snapshots the string's code points at creation (strings are immutable,
   /// so unlike arrays there's no mutation to observe). O(1) per .next()
@@ -3349,8 +3371,9 @@ fn unique_positive_integer() -> Int
 /// §15.7.14 ClassDefinitionEvaluation step 5/6: mint the storage-key text for
 /// a fresh per-class-evaluation PrivateName. The text is carried at runtime as
 /// a JsString bound to a class-scope const named after the source text ("#m");
-/// access ops wrap it in Named(_) directly. The format and the hidden
-/// namespace it belongs to are owned by `key.private_key_text`.
+/// access ops wrap it back into a key with `key.private_key_from_text`. The
+/// format and the hidden namespace it belongs to are owned by
+/// `key.private_key_text`.
 pub fn mint_private_key(name: String) -> String {
   key.private_key_text(name, unique_positive_integer())
 }
@@ -3552,7 +3575,7 @@ pub fn ordered_property_pairs(
       let #(idx, named) = acc
       case key {
         Index(i) -> #([#(i, prop), ..idx], named)
-        Named(_) -> #(idx, [#(key, prop), ..named])
+        Named(_) | key.Private(_) -> #(idx, [#(key, prop), ..named])
       }
     })
   let idx =
@@ -3823,6 +3846,13 @@ pub type HeapSlot(ctx, host) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
+    /// The body frame's own sloppy-direct-eval var dict and the line it
+    /// suspended on. Both are per-frame `State` fields, so a resume that fails
+    /// to restore them silently adopts the RESUMER's: `var`s a direct eval
+    /// introduced inside the body vanish across a yield, and the resumed frame
+    /// reports the resumer's line in stack traces.
+    saved_eval_env: Option(Ref),
+    saved_line: Int,
   )
   /// Engine-internal async function suspended state.
   /// Saves the full execution context so await can resume. There is no
@@ -3864,6 +3894,9 @@ pub type HeapSlot(ctx, host) {
     saved_locals: TupleArray(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
+    /// See `GeneratorSlot.saved_eval_env` / `saved_line`.
+    saved_eval_env: Option(Ref),
+    saved_line: Int,
   )
   /// Stores realm context for $262 methods.
   /// evalScript and createRealm read this to know which realm to operate in.
@@ -3872,7 +3905,6 @@ pub type HeapSlot(ctx, host) {
   RealmSlot(
     global_object: Ref,
     lexical_globals: Dict(String, LexicalGlobal),
-    symbol_descriptions: Dict(SymbolId, String),
     symbol_registry: Dict(String, SymbolId),
   )
 }
@@ -4058,6 +4090,17 @@ fn push_saved_frame_refs(
   acc: List(Ref),
 ) -> List(Ref) {
   push_saved_locals_stack_refs(saved_locals, saved_stack, [env_ref, ..acc])
+}
+
+/// Root an optional ref (a suspended frame's sloppy-direct-eval var dict): the
+/// EnvSlot is reachable ONLY from the frame that owns it, so a suspended
+/// generator's copy has to be walked or GC would free it out from under a
+/// later resume.
+fn push_opt_ref(ref: Option(Ref), acc: List(Ref)) -> List(Ref) {
+  case ref {
+    Some(r) -> [r, ..acc]
+    None -> acc
+  }
 }
 
 /// Same, for a suspended frame that owns no environment ref (an async
@@ -4269,8 +4312,13 @@ fn do_refs_in_slot(
       }
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
     }
-    GeneratorSlot(env_ref:, saved_locals:, saved_stack:, ..) ->
-      push_saved_frame_refs(env_ref, saved_locals, saved_stack, acc)
+    GeneratorSlot(env_ref:, saved_locals:, saved_stack:, saved_eval_env:, ..) ->
+      push_saved_frame_refs(
+        env_ref,
+        saved_locals,
+        saved_stack,
+        push_opt_ref(saved_eval_env, acc),
+      )
     AsyncFunctionSlot(
       promise_data_ref:,
       resolve:,
@@ -4290,6 +4338,7 @@ fn do_refs_in_slot(
       env_ref:,
       saved_locals:,
       saved_stack:,
+      saved_eval_env:,
       ..,
     ) -> {
       // Both halves of the two-list FIFO hold live requests — walk both.
@@ -4301,14 +4350,14 @@ fn do_refs_in_slot(
       }
       let acc = list.fold(queue_front, acc, push_request)
       let acc = list.fold(queue_back, acc, push_request)
-      push_saved_frame_refs(env_ref, saved_locals, saved_stack, acc)
+      push_saved_frame_refs(
+        env_ref,
+        saved_locals,
+        saved_stack,
+        push_opt_ref(saved_eval_env, acc),
+      )
     }
-    RealmSlot(
-      global_object:,
-      lexical_globals:,
-      symbol_descriptions: _,
-      symbol_registry: _,
-    ) ->
+    RealmSlot(global_object:, lexical_globals:, symbol_registry: _) ->
       dict.fold(lexical_globals, [global_object, ..acc], fn(a, _k, v) {
         push_value_ref(lexical_global_value(v), a)
       })
