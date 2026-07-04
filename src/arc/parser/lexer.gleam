@@ -12,6 +12,13 @@ pub type Token {
   /// `had_escape` is True when the token's source contained a unicode escape
   /// (only set for identifiers). A contextual keyword written with an escape
   /// (e.g. `get`) is not treated as that keyword by the grammar.
+  ///
+  /// `lex_error` is `Some(err)` on exactly one kind of token: the zero-length
+  /// `Illegal` sentinel a HARD lexer error is materialised into (see
+  /// `hard_error_token`). It carries the lexer's typed `LexError` straight
+  /// through to the parser — no rendered prose in `value` to re-parse. Every
+  /// other token, including a LENIENT `Illegal` (a stray character a regex
+  /// body could have made legal), has `None`.
   Token(
     kind: TokenKind,
     value: String,
@@ -19,6 +26,7 @@ pub type Token {
     line: Int,
     raw_len: Int,
     had_escape: Bool,
+    lex_error: Option(LexError),
   )
 }
 
@@ -252,7 +260,7 @@ pub fn scanner_at(
 ///
 /// A hard lexer error (unterminated block comment, invalid escape, …) is
 /// materialised INTO the stream as a zero-length `Illegal` token carrying
-/// its message: no grammar production accepts `Illegal`, so the parser
+/// the typed `LexError`: no grammar production accepts `Illegal`, so the parser
 /// reports a SyntaxError at exactly the error's position — and hard errors
 /// inside source the parser never reaches (or jumps over, e.g. a regex
 /// body) are never raised at all.
@@ -267,13 +275,13 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
       let token_line = line + ws_newlines
       case read_fast_punct(rest) {
         Some(#(kind, value)) -> #(
-          Token(kind, value, new_pos, token_line, 1, False),
+          Token(kind, value, new_pos, token_line, 1, False, None),
           Scanner(bytes:, pos: new_pos + 1, line: token_line, mode:),
         )
         None ->
           case char_at(bytes, new_pos) {
             "" -> #(
-              Token(Eof, "", new_pos, token_line, 0, False),
+              Token(Eof, "", new_pos, token_line, 0, False, None),
               Scanner(bytes:, pos: new_pos, line: token_line, mode:),
             )
             _ ->
@@ -301,8 +309,9 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
 }
 
 /// A hard lexer error materialised into the token stream: a zero-length
-/// Illegal token carrying its message, and a scanner parked at end of input
-/// so the next `scan_next` yields Eof and the stream stops there.
+/// Illegal token carrying the typed `LexError` itself, and a scanner parked
+/// at end of input so the next `scan_next` yields Eof and the stream stops
+/// there.
 ///
 /// `from`/`line` are where the failed token step started; the error may sit
 /// lines further down (an unterminated `/*` reports at the `/*`, past any
@@ -318,7 +327,7 @@ fn hard_error_token(
   let epos = lex_error_pos(err)
   let err_line = line + count_newlines_in(byte_slice(bytes, from, epos - from))
   #(
-    Token(Illegal, lex_error_to_string(err), epos, err_line, 0, False),
+    Token(Illegal, "", epos, err_line, 0, False, Some(err)),
     Scanner(bytes:, pos: bit_array.byte_size(bytes), line: err_line, mode:),
   )
 }
@@ -510,7 +519,15 @@ fn skip_block_inner(
 
 /// Create a token with explicit raw_len (in bytes).
 fn tokn(kind: TokenKind, value: String, pos: Int, raw_len: Int) -> Token {
-  Token(kind:, value:, pos:, line: 0, raw_len:, had_escape: False)
+  Token(
+    kind:,
+    value:,
+    pos:,
+    line: 0,
+    raw_len:,
+    had_escape: False,
+    lex_error: None,
+  )
 }
 
 fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
@@ -577,6 +594,7 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
                 line: 0,
                 raw_len: escape_span,
                 had_escape: True,
+                lex_error: None,
               ))
             }
           }
@@ -1421,7 +1439,15 @@ fn make_identifier_token(bytes: BitArray, start: Int, end: Int) -> Token {
   case string.contains(raw, "\\") {
     False -> {
       let kind = keyword_or_identifier(raw)
-      Token(kind:, value: raw, pos: start, line: 0, raw_len:, had_escape: False)
+      Token(
+        kind:,
+        value: raw,
+        pos: start,
+        line: 0,
+        raw_len:,
+        had_escape: False,
+        lex_error: None,
+      )
     }
     True -> {
       // Decode unicode escapes to canonical form.
@@ -1434,6 +1460,7 @@ fn make_identifier_token(bytes: BitArray, start: Int, end: Int) -> Token {
         line: 0,
         raw_len:,
         had_escape: True,
+        lex_error: None,
       )
     }
   }

@@ -46,21 +46,21 @@ import arc/parser/error.{
   ExpectedNewTargetGot, ExpectedPropertyName, ExpectedSemicolon, ExpectedToken,
   ExportNotTopLevel, FieldNamedConstructor, ForInInitializer, ForOfInitializer,
   FunctionDeclInLabelBody, FunctionDeclInSingleStatement, GeneratorDeclLabeled,
-  GetterNoParams, IdentifierAlreadyDeclared, IllegalToken, ImportNotTopLevel,
+  GetterNoParams, IdentifierAlreadyDeclared, ImportNotTopLevel,
   InvalidAssignmentLhs, InvalidDestructuringTarget, InvalidForInLhs,
   InvalidForOfLhs, InvalidLhsPrefixOp, InvalidPostfixLhs, InvalidTemplateEscape,
   LetBindingInLexicalDecl, LetIdentifierStrictMode, LexError, LexicalDeclInLabel,
-  LexicalDeclInSingleStatement, MisplacedUseStrictDirective,
-  MissingCatchOrFinally, MissingConstInitializer, NewTargetOutsideFunction,
-  OctalEscapeStrictMode, OctalLiteralStrictMode, PrivateNameAsPropertyKey,
-  PrivateNameConstructor, RegExpSyntaxError, ReservedWordImportBinding,
-  ReservedWordStrictMode, RestDefaultInitializer, RestMustBeLast,
-  RestTrailingComma, ReturnOutsideFunction, SetterExactlyOneParam, SetterNoRest,
-  ShorthandDefaultOutsideDestructuring, StaticPrototype,
-  StaticReservedStrictMode, StrictModeAssignment, StrictModeBindingName,
-  StrictModeModification, StrictModeParamName, SuperCallNotInDerivedConstructor,
-  SuperPrivateName, SuperPropertyNotInMethod, ThrowLineBreak,
-  UndeclaredExportBinding, UndeclaredPrivateName, UndefinedLabel,
+  LexicalDeclInSingleStatement, MalformedNumericLiteral,
+  MisplacedUseStrictDirective, MissingCatchOrFinally, MissingConstInitializer,
+  NewTargetOutsideFunction, OctalEscapeStrictMode, OctalLiteralStrictMode,
+  PrivateNameAsPropertyKey, PrivateNameConstructor, RegExpSyntaxError,
+  ReservedWordImportBinding, ReservedWordStrictMode, RestDefaultInitializer,
+  RestMustBeLast, RestTrailingComma, ReturnOutsideFunction,
+  SetterExactlyOneParam, SetterNoRest, ShorthandDefaultOutsideDestructuring,
+  StaticPrototype, StaticReservedStrictMode, StrictModeAssignment,
+  StrictModeBindingName, StrictModeModification, StrictModeParamName,
+  SuperCallNotInDerivedConstructor, SuperPrivateName, SuperPropertyNotInMethod,
+  ThrowLineBreak, UndeclaredExportBinding, UndeclaredPrivateName, UndefinedLabel,
   UnexpectedAfterExport, UnexpectedCloseBrace, UnexpectedCloseParen,
   UnexpectedExport, UnexpectedSuper, UnexpectedToken,
   UnicodeEscapeInMetaProperty, UnterminatedTemplateSubstitution,
@@ -215,6 +215,15 @@ type AccessorPrefix {
 type Ctx {
   Ctx(
     strict: Bool,
+    // The grammar's [In] parameter: False only inside a `for` head's
+    // initializer, where `in` must read as the for-in keyword rather than a
+    // relational operator. Nesting-sensitive: a function/method boundary is
+    // always [+In] (params and body), and a `for` head nested inside one
+    // must not leak its restriction back out — hence a Ctx field, restored
+    // wholesale by `restore_outer_context`. Expression brackets that
+    // re-enable it (`[…]`, `(…)`, arguments, literals) go through
+    // `with_allow_in`.
+    allow_in: Bool,
     // Context tracking for semantic validation
     function_depth: Int,
     loop_depth: Int,
@@ -319,7 +328,6 @@ type P {
     // (pos + raw_len). Used to close a `Span` whose start was captured
     // before parsing, in O(1) without re-measuring the token stream.
     prev_end: Int,
-    allow_in: Bool,
     source: String,
     bytes: BitArray,
     // The nesting-sensitive context, saved/restored WHOLE at function
@@ -396,6 +404,30 @@ type P {
   )
 }
 
+/// Parse `then` with the grammar's [In] parameter forced to `value`, then put
+/// the CALLER's value back on the returned parser.
+///
+/// This is the ONE place `ctx.allow_in` is restored, so no call site can pick
+/// a slightly different restore point (a bracketed sub-expression that forgot
+/// to restore would silently re-enable `in` for the rest of a `for` head, or
+/// vice-versa). Function/arrow boundaries do NOT need it — `allow_in` lives on
+/// `Ctx`, which `restore_outer_context` puts back wholesale.
+///
+/// `value: True` at every expression bracket that reintroduces [+In] inside a
+/// `for` head (`[…]`, `(…)`, call/`import(…)` arguments, array/object
+/// literals, template substitutions); `value: False` at the `for` head itself.
+fn with_allow_in(
+  p: P,
+  value: Bool,
+  then: fn(P) -> Result(#(P, a), ParseError),
+) -> Result(#(P, a), ParseError) {
+  let saved = p.ctx.allow_in
+  use #(p, parsed) <- result.map(then(
+    P(..p, ctx: Ctx(..p.ctx, allow_in: value)),
+  ))
+  #(P(..p, ctx: Ctx(..p.ctx, allow_in: saved)), parsed)
+}
+
 /// Helper: set last_expr_assignable to False on Ok results.
 fn set_not_assignable(
   res: Result(#(P, ast.Expression), ParseError),
@@ -470,11 +502,11 @@ fn init_parser(
         mode: mode,
         prev_line: 1,
         prev_end: 0,
-        allow_in: True,
         source: source,
         bytes:,
         ctx: Ctx(
           strict: mode == Module,
+          allow_in: True,
           function_depth: 0,
           loop_depth: 0,
           switch_depth: 0,
@@ -1792,8 +1824,7 @@ fn numeric_literal(p: P) -> Result(ast.Expression, ParseError) {
   case number.parse_numeric_literal(peek_value(p)) {
     Ok(number.NumberValue(n)) -> Ok(ast.NumberLiteral(value: n, span:))
     Ok(number.BigIntValue(i)) -> Ok(ast.BigIntLiteral(value: i, span:))
-    Error(err) ->
-      Error(IllegalToken(number.parse_error_message(err), pos_of(p)))
+    Error(err) -> Error(MalformedNumericLiteral(err, pos_of(p)))
   }
 }
 
@@ -1856,11 +1887,13 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
     LeftBracket -> {
       // ComputedPropertyName : [ AssignmentExpression[+In] ] - brackets reset
       // the for-head no-in restriction: `for (C = class { get ['x' in o]()...`.
-      let saved_allow_in = p.allow_in
-      let p2 = P(..advance(p), allow_in: True)
-      use #(p3, expr) <- result.try(parse_assignment_expression(p2))
-      use p4 <- result.try(expect(p3, RightBracket))
-      Ok(#(P(..p4, allow_in: saved_allow_in), expr, True))
+      use #(p4, expr) <- result.map({
+        use p2 <- with_allow_in(advance(p), True)
+        use #(p3, expr) <- result.try(parse_assignment_expression(p2))
+        use p4 <- result.map(expect(p3, RightBracket))
+        #(p4, expr)
+      })
+      #(p4, expr, True)
     }
     // Keywords that can be used as property names
     _ ->
@@ -2058,12 +2091,16 @@ fn parse_for_using_declaration(
     }
     Equal -> {
       // Classic for head: `for (using x = a[, y = b]*; cond; update)`.
-      let p4 = P(..advance(p3), allow_in: False)
-      use #(p5, init_expr) <- result.try(parse_assignment_expression(p4))
-      let first = ast.VariableDeclarator(id: pattern, init: Some(init_expr))
-      use #(p6, rest) <- result.try(parse_using_remaining_declarators(p5, []))
-      let p6 = P(..p6, allow_in: p.allow_in)
-      let decl = ast.ForInitDeclaration(kind:, declarations: [first, ..rest])
+      // The declarator list is [~In] so `for (using x = a in b;;)` never
+      // reads as a relational expression.
+      use #(p6, declarators) <- result.try({
+        use p4 <- with_allow_in(advance(p3), False)
+        use #(p5, init_expr) <- result.try(parse_assignment_expression(p4))
+        let first = ast.VariableDeclarator(id: pattern, init: Some(init_expr))
+        use #(p6, rest) <- result.map(parse_using_remaining_declarators(p5, []))
+        #(p6, [first, ..rest])
+      })
+      let decl = ast.ForInitDeclaration(kind:, declarations: declarators)
       use p7 <- result.try(expect(p6, Semicolon))
       parse_for_classic_rest(exit_for_decl_context(p7, p), Some(decl))
     }
@@ -2170,12 +2207,13 @@ fn parse_for_declaration(
           }
       }
     Equal -> {
-      let p4 = advance(p3)
       // Disable 'in' as binary op in initializer so for(var x = a in b)
       // is for-in, not a binary expression
-      let p4_no_in = P(..p4, allow_in: False)
-      use #(p5, init_expr) <- result.try(parse_assignment_expression(p4_no_in))
-      let p5 = P(..p5, allow_in: p.allow_in)
+      use #(p5, init_expr) <- result.try(with_allow_in(
+        advance(p3),
+        False,
+        parse_assignment_expression,
+      ))
       case peek(p5) {
         In ->
           // for-in with initializer: always forbidden
@@ -2283,12 +2321,10 @@ fn parse_for_expression(
   // Save starting token to detect bare destructuring patterns
   let start_token = peek(p)
   // Disable 'in' as binary operator inside for-head so that
-  // for (x in obj) is parsed as for-in, not binary expression
-  let p_no_in = P(..p, allow_in: False)
-  use #(p2, expr) <- result.try(parse_expression(p_no_in))
+  // for (x in obj) is parsed as for-in, not binary expression;
+  // `with_allow_in` puts it back for the rest of the for statement.
+  use #(p2, expr) <- result.try(with_allow_in(p, False, parse_expression))
   {
-    // Restore allow_in for the rest of the for statement
-    let p2 = P(..p2, allow_in: p.allow_in)
     case peek(p2) {
       Semicolon ->
         // A `for(;;)` init is an ordinary expression, never a destructuring
@@ -4886,6 +4922,11 @@ fn try_paren_arrow(
         in_async: p_params.ctx.in_async || is_async,
         in_static_block: p_params.ctx.in_static_block,
         in_class_field_init: p_params.ctx.in_class_field_init,
+        // FormalParameters take no [In] parameter — a default initializer is
+        // always [+In], even inside a `for` head:
+        // `for (let f = (a = 'a' in {}) => a;;) …`. The BODY reverts to the
+        // arrow's inherited [In] below.
+        allow_in: True,
       ),
     )
   case parse_formal_parameters(p_arrow) {
@@ -4931,6 +4972,7 @@ fn try_paren_arrow(
                         in_async: p_ctx.ctx.in_async,
                         in_static_block: p_ctx.ctx.in_static_block,
                         in_class_field_init: p_ctx.ctx.in_class_field_init,
+                        allow_in: p_ctx.ctx.allow_in,
                       ),
                     )
                   finish_arrow(
@@ -5000,6 +5042,10 @@ fn parse_arrow_body(
   // `finish_arrow`'s `restore_outer_context` will hand straight back.
   case peek(p) {
     LeftBrace -> {
+      // §14.2 ConciseBody : { FunctionBody } — a BLOCK body takes no [In]
+      // parameter, so it is [+In] even inside a `for` head (only the
+      // ExpressionBody arm below inherits the arrow's [In]).
+      let p = P(..p, ctx: Ctx(..p.ctx, allow_in: True))
       // Check for "use strict" directive in arrow body.
       // A simple param list shares the arrow's Function scope with the
       // body (parse_function_body_block); a non-simple one gets the
@@ -5126,7 +5172,7 @@ fn parse_binary_rhs(
   min_prec: Int,
 ) -> Result(#(P, ast.Expression), ParseError) {
   let tok = peek(p)
-  case binary_operator(tok, p.allow_in) {
+  case binary_operator(tok, p.ctx.allow_in) {
     // Not a binary/logical operator (or `in` while `allow_in` is off).
     None -> Ok(#(p, left))
     Some(BinaryOperator(precedence:, op:)) ->
@@ -5556,8 +5602,7 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
         LeftParen -> {
           // ImportCall arguments are AssignmentExpression[+In] — re-enable
           // `in` even inside a for-statement init (restored after `)`).
-          let saved_allow_in = p.allow_in
-          let p3 = P(..advance(p2), allow_in: True)
+          use p3 <- with_allow_in(advance(p2), True)
           use #(p4, source_expr) <- result.try(parse_assignment_expression(p3))
           // Optional second argument (import attributes)
           use #(p5, options) <- result.try(case peek(p4) {
@@ -5583,16 +5628,16 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
               }
             _ -> Ok(#(p4, None))
           })
-          use p6 <- result.try(expect(p5, RightParen))
-          Ok(#(
-            P(..p6, allow_in: saved_allow_in),
+          use p6 <- result.map(expect(p5, RightParen))
+          #(
+            p6,
             ast.ImportExpression(
               source: source_expr,
               options:,
               phase: ast.PhaseEvaluation,
               span: span_from(import_start, p6),
             ),
-          ))
+          )
         }
         Dot -> {
           // import.meta / import.source(...) / import.defer(...)
@@ -5653,8 +5698,7 @@ fn parse_phase_import_call(
 ) -> Result(#(P, ast.Expression), ParseError) {
   // Skip the phase identifier and the '('. The argument is
   // AssignmentExpression[+In] — re-enable `in` (restored after `)`).
-  let saved_allow_in = p.allow_in
-  let p2 = P(..advance(advance(p)), allow_in: True)
+  use p2 <- with_allow_in(advance(advance(p)), True)
   use #(p3, source_expr) <- result.try(parse_assignment_expression(p2))
   // Optional trailing comma: import.source(x,)
   let p4 = case peek(p3) {
@@ -5665,16 +5709,16 @@ fn parse_phase_import_call(
       }
     _ -> p3
   }
-  use p5 <- result.try(expect(p4, RightParen))
-  Ok(#(
-    P(..p5, allow_in: saved_allow_in),
+  use p5 <- result.map(expect(p4, RightParen))
+  #(
+    p5,
     ast.ImportExpression(
       source: source_expr,
       options: None,
       phase:,
       span: span_from(import_start, p5),
     ),
-  ))
+  )
 }
 
 fn parse_call_chain(
@@ -5791,10 +5835,9 @@ fn parse_bracket_member(
   start: Int,
   optional: Bool,
 ) -> Result(#(P, ast.Expression), ParseError) {
-  let saved_allow_in = p.allow_in
-  let p2 = P(..advance(p), allow_in: True)
+  use p2 <- with_allow_in(advance(p), True)
   use #(p3, property) <- result.try(parse_expression(p2))
-  use p4 <- result.map(expect(P(..p3, allow_in: saved_allow_in), RightBracket))
+  use p4 <- result.map(expect(p3, RightBracket))
   let span = span_from(start, p4)
   case optional {
     False -> #(
@@ -5919,22 +5962,16 @@ fn parse_arguments(p: P) -> Result(#(P, List(ast.Expression)), ParseError) {
 }
 
 fn parse_argument(p: P) -> Result(#(P, ast.Expression), ParseError) {
-  // Restore allow_in inside function arguments, then put it back
-  let saved_allow_in = p.allow_in
-  let p = P(..p, allow_in: True)
+  // Arguments are AssignmentExpression[+In]; with_allow_in puts the caller's
+  // (possibly for-head) [In] back afterwards.
+  use p <- with_allow_in(p, True)
   case peek(p) {
     DotDotDot -> {
       let start = pos_of(p)
-      use #(p2, arg_expr) <- result.try(parse_assignment_expression(advance(p)))
-      Ok(#(
-        P(..p2, allow_in: saved_allow_in),
-        ast.SpreadElement(argument: arg_expr, span: span_from(start, p2)),
-      ))
+      use #(p2, arg_expr) <- result.map(parse_assignment_expression(advance(p)))
+      #(p2, ast.SpreadElement(argument: arg_expr, span: span_from(start, p2)))
     }
-    _ -> {
-      use #(p2, arg_expr) <- result.try(parse_assignment_expression(p))
-      Ok(#(P(..p2, allow_in: saved_allow_in), arg_expr))
-    }
+    _ -> parse_assignment_expression(p)
   }
 }
 
@@ -6045,24 +6082,20 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
           Error(UnexpectedCloseParen(pos_of(p)))
         }
         _ -> {
-          // Restore allow_in inside parenthesized expressions,
-          // then put it back when we leave
-          let saved_allow_in = p2.allow_in
-          let p2 = P(..p2, allow_in: True)
+          // A parenthesized Expression is [+In] regardless of the enclosing
+          // for-head; with_allow_in puts the caller's [In] back on the way out.
+          use p2 <- with_allow_in(p2, True)
           use #(p3, expr) <- result.try(parse_expression(p2))
-          use p4 <- result.try(expect(
-            P(..p3, allow_in: saved_allow_in),
-            RightParen,
-          ))
+          use p4 <- result.map(expect(p3, RightParen))
           // Preserve parenthesization in the AST so the compiler can
           // distinguish `x` from `(x)` for IsIdentifierRef (§13.15.2).
-          Ok(#(
+          #(
             p4,
             ast.ParenthesizedExpression(
               expression: expr,
               span: span_from(start, p4),
             ),
-          ))
+          )
         }
       }
     }
@@ -6139,20 +6172,20 @@ fn contextual_ident_ok(p: P) -> Result(#(P, ast.Expression), ParseError) {
 fn parse_array_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let start = pos_of(p)
   let p2 = advance(p)
-  // Restore allow_in inside array literals
-  let saved_allow_in = p.allow_in
+  // An array literal's elements are [+In] even inside a for-head.
+  use p2 <- with_allow_in(p2, True)
   // Cover-grammar pattern-validity flags are scoped per literal: reset so
   // a previous `[4]` or `{m(){}}` doesn't poison this literal's check.
   // parse_array_elements then accumulates per-element validity fresh.
-  let p2 = P(..p2, allow_in: True, has_invalid_pattern: False)
-  use #(p3, elems) <- result.try(parse_array_elements(p2, []))
-  Ok(#(
-    P(..p3, allow_in: saved_allow_in),
+  let p2 = P(..p2, has_invalid_pattern: False)
+  use #(p3, elems) <- result.map(parse_array_elements(p2, []))
+  #(
+    p3,
     ast.ArrayExpression(
       elements: list.reverse(elems),
       span: span_from(start, p3),
     ),
-  ))
+  )
 }
 
 /// Cover-grammar: does a just-parsed array/object element make the enclosing
@@ -6226,19 +6259,19 @@ fn parse_array_elements(
 fn parse_object_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let start = pos_of(p)
   let p2 = advance(p)
-  // Restore allow_in inside object literals
-  let saved_allow_in = p.allow_in
+  // An object literal's property values are [+In] even inside a for-head.
+  use p2 <- with_allow_in(p2, True)
   // Cover-grammar pattern-validity flags are scoped per literal: reset so
   // a sibling literal's invalidity doesn't poison this one's check.
-  let p2 = P(..p2, allow_in: True, has_invalid_pattern: False)
-  use #(p3, props) <- result.try(parse_object_properties(p2, False, []))
-  Ok(#(
-    P(..p3, allow_in: saved_allow_in),
+  let p2 = P(..p2, has_invalid_pattern: False)
+  use #(p3, props) <- result.map(parse_object_properties(p2, False, []))
+  #(
+    p3,
     ast.ObjectExpression(
       properties: list.reverse(props),
       span: span_from(start, p3),
     ),
-  ))
+  )
 }
 
 fn parse_object_properties(
@@ -7500,6 +7533,12 @@ fn enter_function_context(
     ..p,
     ctx: Ctx(
       strict: p.ctx.strict,
+      // A function's parameters and body are always [+In] — an enclosing
+      // `for` head's no-`in` restriction stops at the boundary
+      // (`for (let x = function(){ return 'a' in {} };;) …` is legal).
+      // Arrows override this: their ConciseBody is [?In] (see
+      // `enter_arrow_context`).
+      allow_in: True,
       function_depth: p.ctx.function_depth + 1,
       loop_depth: 0,
       switch_depth: 0,
@@ -7570,6 +7609,11 @@ fn enter_arrow_context(p: P, is_async: Bool, param_names: List(String)) -> P {
       allow_super_property: p.ctx.allow_super_property,
       allow_new_target: p.ctx.allow_new_target,
       in_class_field_init: p.ctx.in_class_field_init || p.ctx.in_static_block,
+      // §15.3 ArrowFunction[?In]: the ConciseBody inherits [In] from the
+      // enclosing expression, so `for (let f = a => 'a' in {};;)` is a
+      // SyntaxError just as `for (let x = 'a' in {};;)` is. (Arrow PARAMS
+      // are still [+In] — `try_paren_arrow` sets that for their duration.)
+      allow_in: p.ctx.allow_in,
     ),
   )
 }
@@ -7713,16 +7757,20 @@ fn parse_template_spans(
     // and the enclosing [In] context are none of the substitutions'
     // business: restore them once the whole template is consumed.
     _ -> {
-      let saved_allow_in = p.allow_in
       let saved_assignable = p.last_expr_assignable
       let saved_is_assignment = p.last_expr_is_assignment
-      use #(p, rev_quasis, rev_exprs) <- result.map(
-        parse_template_substitutions(advance(p), [template_span_raw(p, 2)], []),
-      )
+      let head = template_span_raw(p, 2)
+      use #(p, spans) <- result.map({
+        use p <- with_allow_in(advance(p), True)
+        use #(p, rev_quasis, rev_exprs) <- result.map(
+          parse_template_substitutions(p, [head], []),
+        )
+        #(p, #(rev_quasis, rev_exprs))
+      })
+      let #(rev_quasis, rev_exprs) = spans
       #(
         P(
           ..p,
-          allow_in: saved_allow_in,
           last_expr_assignable: saved_assignable,
           last_expr_is_assignment: saved_is_assignment,
         ),
@@ -7741,13 +7789,10 @@ fn parse_template_substitutions(
   rev_quasis: List(String),
   rev_exprs: List(ast.Expression),
 ) -> Result(#(P, List(String), List(ast.Expression)), ParseError) {
+  // [In] is already forced on for the whole template by the `with_allow_in`
+  // in `parse_template_spans`.
   use #(p, expr) <- result.try(parse_expression(
-    P(
-      ..p,
-      allow_in: True,
-      last_expr_assignable: False,
-      last_expr_is_assignment: False,
-    ),
+    P(..p, last_expr_assignable: False, last_expr_is_assignment: False),
   ))
   case peek(p) {
     RightBrace -> {
@@ -7932,7 +7977,7 @@ fn advance(p: P) -> P {
 /// re-scan (regex literal, template continuation) discarded it.
 ///
 /// A hard lexer error is materialised by the lexer as a zero-length
-/// `Illegal` token (carrying the message) followed by Eof: no grammar
+/// `Illegal` token (carrying the typed LexError) followed by Eof: no grammar
 /// production accepts `Illegal`, so the parse fails at exactly the lexer
 /// error's position with its message (see illegal_token_error) — and
 /// errors inside source the parser jumps over (a regex body) never
@@ -7975,17 +8020,16 @@ fn expect_identifier(p: P) -> Result(P, ParseError) {
   }
 }
 
-/// The error for the current token being `Illegal`. A ZERO-length Illegal
-/// token is the on-demand lexer's hard-error sentinel (see ensure_current):
-/// its `value` carries the lexer's message and its position the error's,
-/// so it is reported exactly as the old whole-file lex pass reported the
-/// LexError. A lenient Illegal token (a stray character the lexer
-/// tolerates because a regex body could have made it legal) keeps the
-/// generic unexpected-token report.
+/// The error for the current token being `Illegal`. The on-demand lexer's
+/// hard-error sentinel (see ensure_current) carries the lexer's own typed
+/// `LexError` in `lex_error`, so it is reported exactly as the old
+/// whole-file lex pass reported it. A lenient Illegal token (a stray
+/// character the lexer tolerates because a regex body could have made it
+/// legal) has no error attached and keeps the generic unexpected-token
+/// report.
 fn illegal_token_error(p: P) -> ParseError {
   case p.tokens {
-    [lexer.Token(kind: Illegal, raw_len: 0, value: message, pos: pos, ..), ..] ->
-      IllegalToken(message, pos)
+    [lexer.Token(lex_error: Some(err), ..), ..] -> LexError(err)
     _ -> UnexpectedToken(token_kind_to_string(peek(p)), pos_of(p))
   }
 }
