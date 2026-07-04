@@ -4282,7 +4282,13 @@ fn parse_class_element_body(
                 in_class_field_init: True,
               ),
             )
-          use #(p8, init) <- result.map(parse_assignment_expression(p7))
+          // §15.7: FieldDefinition's Initializer is [+In] — a class inside a
+          // `for` head must not leak the head's [~In] into a field initializer.
+          use #(p8, init) <- result.map(with_allow_in(
+            p7,
+            True,
+            parse_assignment_expression,
+          ))
           #(
             P(
               ..p8,
