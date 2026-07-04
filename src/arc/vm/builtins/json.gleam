@@ -65,17 +65,17 @@ pub fn dispatch(
 // JSON.parse(text)
 // ============================================================================
 
-/// ES2024 S25.5.1 JSON.parse ( text [ , reviver ] )
-///
-/// DEVIATION from the spec: the optional `reviver` argument (steps 7-10,
-/// InternalizeJSONProperty) is accepted but ignored — implementing it is a
-/// separate feature.
+/// ES2024 §25.5.1 JSON.parse ( text [ , reviver ] )
 ///
 /// Steps:
 ///   1. Let jsonString be ? ToString(text).
 ///   2. Parse jsonString as a JSON text as specified in ECMA-404.
 ///   3. If the parse fails, throw a SyntaxError exception.
-///   4. Return the parsed value.
+///   4-6. Materialize the parse result as `unfiltered`.
+///   7-9. If IsCallable(reviver): root = OrdinaryObjectCreate(%Object.prototype%),
+///        CreateDataPropertyOrThrow(root, "", unfiltered), then return
+///        ? InternalizeJSONProperty(root, "", reviver).
+///   10. Otherwise return unfiltered.
 fn json_parse(
   args: List(JsValue),
   state: State(host),
@@ -101,8 +101,26 @@ fn json_parse(
       case rest {
         <<>> -> {
           // Successfully parsed — materialize the value on the heap
-          let #(heap, js_val) = materialize(state.heap, state.builtins, val)
-          #(State(..state, heap:), Ok(js_val))
+          let #(heap, unfiltered) = materialize(state.heap, state.builtins, val)
+          let state = State(..state, heap:)
+          // Steps 7-10: run the reviver, if one was supplied and is callable.
+          case helpers.list_at(args, 1) {
+            Some(reviver) ->
+              case helpers.is_callable(state.heap, reviver) {
+                False -> #(state, Ok(unfiltered))
+                True -> {
+                  let #(state, root) = alloc_holder(state, unfiltered)
+                  use revived, state <- state.try_op(internalize_json_property(
+                    state,
+                    root,
+                    "",
+                    reviver,
+                  ))
+                  #(state, Ok(revived))
+                }
+              }
+            None -> #(state, Ok(unfiltered))
+          }
         }
         _ ->
           state.syntax_error(
@@ -114,6 +132,151 @@ fn json_parse(
     // Step 2: If parse fails, throw SyntaxError
     Error(e) -> state.syntax_error(state, json_error_message(e))
   }
+}
+
+/// InternalizeJSONProperty (§25.5.1.1) — the JSON.parse reviver walk.
+///
+/// Bottom-up, exactly as the spec: when `holder[name]` is an object its
+/// children are revived first (an `undefined` result deletes the child, any
+/// other result replaces it), and only then is the reviver called for
+/// `holder[name]` itself, with `holder` as `this`. Abrupt completions from any
+/// Get / Delete / CreateDataProperty / reviver call propagate out of
+/// JSON.parse.
+///
+/// Recursion here is ordinary Gleam recursion; the re-entrant JS calls go
+/// through `state.call`, the same convention `serialize_property` uses to
+/// invoke `toJSON` and the replacer.
+fn internalize_json_property(
+  state: State(host),
+  holder: Ref,
+  name: String,
+  reviver: JsValue,
+) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  // Step 1: val = ? Get(holder, name).
+  use #(val, state) <- result.try(objops.get_value(
+    state,
+    holder,
+    key.canonical_key(name),
+    JsObject(holder),
+  ))
+  // Step 2: if val is an Object, revive its children in place first.
+  use state <- result.try(case val {
+    JsObject(ref) -> {
+      use #(is_arr, state) <- result.try(objops.try_is_array(state, val))
+      case is_arr {
+        // Step 2.b: indices 0..len-1, len from LengthOfArrayLike.
+        True -> {
+          use #(len, state) <- result.try(length_of_array_like(state, ref))
+          internalize_elements(state, ref, 0, len, reviver)
+        }
+        // Step 2.c: EnumerableOwnPropertyNames(val, key).
+        False -> {
+          use #(keys, state) <- result.try(
+            object_builtins.enumerable_string_keys_stateful(state, ref),
+          )
+          internalize_keys(state, ref, keys, reviver)
+        }
+      }
+    }
+    _ -> Ok(state)
+  })
+  // Step 3: return ? Call(reviver, holder, « name, val »).
+  state.call(state, reviver, JsObject(holder), [JsString(name), val])
+}
+
+/// §25.5.1.1 step 2.b.ii: recurse over array indices 0..len-1 in order.
+fn internalize_elements(
+  state: State(host),
+  ref: Ref,
+  i: Int,
+  len: Int,
+  reviver: JsValue,
+) -> Result(State(host), #(JsValue, State(host))) {
+  case i >= len {
+    True -> Ok(state)
+    False -> {
+      let name = int.to_string(i)
+      use #(new_element, state) <- result.try(internalize_json_property(
+        state,
+        ref,
+        name,
+        reviver,
+      ))
+      use state <- result.try(replace_or_delete(state, ref, name, new_element))
+      internalize_elements(state, ref, i + 1, len, reviver)
+    }
+  }
+}
+
+/// §25.5.1.1 step 2.c.ii: recurse over the object's own enumerable string keys.
+fn internalize_keys(
+  state: State(host),
+  ref: Ref,
+  keys: List(String),
+  reviver: JsValue,
+) -> Result(State(host), #(JsValue, State(host))) {
+  case keys {
+    [] -> Ok(state)
+    [p, ..rest] -> {
+      use #(new_element, state) <- result.try(internalize_json_property(
+        state,
+        ref,
+        p,
+        reviver,
+      ))
+      use state <- result.try(replace_or_delete(state, ref, p, new_element))
+      internalize_keys(state, ref, rest, reviver)
+    }
+  }
+}
+
+/// §25.5.1.1 steps 2.b.ii.2-3 / 2.c.ii.2-3: an `undefined` result from the
+/// reviver deletes the child (a `false` [[Delete]] result is ignored — the
+/// spec writes a bare `Perform ?`); anything else is CreateDataProperty'd back.
+fn replace_or_delete(
+  state: State(host),
+  ref: Ref,
+  name: String,
+  new_element: JsValue,
+) -> Result(State(host), #(JsValue, State(host))) {
+  case new_element {
+    JsUndefined -> {
+      use #(state, _deleted) <- result.map(objops.delete_property_stateful(
+        state,
+        ref,
+        objops.PkString(key.canonical_key(name)),
+      ))
+      state
+    }
+    _ ->
+      object_builtins.create_data_property(
+        state,
+        ref,
+        JsString(name),
+        new_element,
+      )
+  }
+}
+
+/// The spec's root holder object: OrdinaryObjectCreate(%Object.prototype%)
+/// with CreateDataPropertyOrThrow(holder, "", val). Both JSON.parse
+/// (§25.5.1 steps 7-8) and JSON.stringify (§25.5.2 steps 9-11) start from one.
+fn alloc_holder(state: State(host), val: JsValue) -> #(State(host), Ref) {
+  let #(heap, ref) =
+    heap.alloc(
+      state.heap,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: dict.from_list([
+          #(key.canonical_key(""), value.data_property(val)),
+        ]),
+        elements: elements.new(),
+        prototype: Some(state.builtins.object.prototype),
+        symbol_properties: [],
+        extensible: True,
+      ),
+    )
+  #(State(..state, heap:), ref)
 }
 
 /// Intermediate parsed JSON value — not yet materialized onto the JS heap.
@@ -750,8 +913,8 @@ fn json_stringify(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let val = helpers.first_arg_or_undefined(args)
-  let replacer = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
-  let space = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
+  let replacer = helpers.arg_at(args, 1)
+  let space = helpers.arg_at(args, 2)
 
   let result = {
     // Step 4: ReplacerFunction / PropertyList.
@@ -763,21 +926,7 @@ fn json_stringify(
     use #(gap, state) <- result.try(compute_gap(state, space))
     // Steps 9-11: wrapper = OrdinaryObjectCreate(%Object.prototype%) with
     // CreateDataPropertyOrThrow(wrapper, "", value).
-    let #(heap, wrapper) =
-      heap.alloc(
-        state.heap,
-        ObjectSlot(
-          kind: OrdinaryObject,
-          properties: dict.from_list([
-            #(key.canonical_key(""), value.data_property(val)),
-          ]),
-          elements: elements.new(),
-          prototype: Some(state.builtins.object.prototype),
-          symbol_properties: [],
-          extensible: True,
-        ),
-      )
-    let state = State(..state, heap:)
+    let #(state, wrapper) = alloc_holder(state, val)
     let ctx = StringifyCtx(replacer_fn:, property_list:, gap:)
     // Step 12.
     serialize_property(state, ctx, [], "", "", wrapper)
