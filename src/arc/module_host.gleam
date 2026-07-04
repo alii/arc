@@ -929,9 +929,13 @@ pub fn evaluate_bundle_with_registry(
           // Roll back nodes whose bodies never completed — every registration
           // `link_bundle_with_registry` published for them, not just the
           // namespace (a surviving deferred namespace would hand out
-          // uninitialized cells to a later `import defer`).
+          // uninitialized cells to a later `import defer`). Host (synthetic)
+          // modules have no body to leave half-done and their cells are
+          // permanently initialized: clearing them would strand this bundle's
+          // surviving `import * as ns` bindings on a namespace object a later
+          // link would no longer reuse.
           let h =
-            list.fold(specs, heap, fn(h, spec) {
+            list.fold(module.source_specifiers(bundle), heap, fn(h, spec) {
               case
                 dict.has_key(preexisting, spec) || set.contains(evaluated, spec)
               {

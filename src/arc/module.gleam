@@ -130,6 +130,16 @@ fn with_source_module(
   }
 }
 
+/// The specifiers of the bundle's SOURCE modules only — the ones that have a
+/// body to run, and so the only ones an evaluation phase can leave half-done.
+/// A host (synthetic) module's cells are permanently initialized at link time,
+/// so a caller rolling back a failed evaluation must not touch it.
+pub fn source_specifiers(bundle: ModuleBundle) -> List(String) {
+  use acc, spec, bundle_module <- dict.fold(bundle.modules, [])
+  use _compiled <- with_source_module(bundle_module, acc)
+  [spec, ..acc]
+}
+
 // =============================================================================
 // Errors
 // =============================================================================
@@ -248,6 +258,11 @@ pub type LinkInvariantBroken {
   /// would silently re-link the module to FRESH cells while its evaluated body
   /// still holds the old ones.
   PreexistingNotANamespace(specifier: String, ref: Ref)
+  /// A reserved namespace / deferred-namespace box that does not hold an
+  /// object — linking fills every box it reserves, so this is a linker bug.
+  /// Dropping the entry would silently deny a registry-keeping host the
+  /// module record it needs to reuse on a later import.
+  NamespaceBoxCorrupt(specifier: String)
 }
 
 /// Renders a `LinkInvariantBroken` for the panic message. Internal-error prose,
@@ -752,17 +767,21 @@ pub fn evaluate_linked_tracking(
   #(evaluated_specifiers(state), state.jobs, result)
 }
 
-/// Read every box in `boxes`, keeping only the ones holding an object — the
-/// namespace / deferred-namespace boxes always do.
+/// Read every box in `boxes` as the object it holds — the namespace /
+/// deferred-namespace boxes always do, and a box that doesn't is a linker
+/// invariant break (`NamespaceBoxCorrupt`), not an entry to skip.
 fn read_box_dict(
   boxes: Dict(String, Ref),
   heap: Heap(host),
 ) -> List(#(String, Ref)) {
   use acc, spec, box <- dict.fold(boxes, [])
-  case heap.read_box(heap, box) {
-    Some(JsObject(ns_ref)) -> [#(spec, ns_ref), ..acc]
-    Some(_) | None -> acc
-  }
+  let ns_ref =
+    case heap.read_box(heap, box) {
+      Some(JsObject(ns_ref)) -> Ok(ns_ref)
+      Some(_) | None -> Error(NamespaceBoxCorrupt(specifier: spec))
+    }
+    |> assert_link_invariant
+  [#(spec, ns_ref), ..acc]
 }
 
 /// Every module in a linked bundle paired with its Module Namespace Exotic
@@ -1462,12 +1481,15 @@ fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
             _ -> False
           }
         })
-      // `specifier_map` is TOTAL over `m`'s own requests, so a deferred import
-      // always names a bundle key.
-      case is_deferred, esm.resolve(m.specifier_map, raw_dep) {
-        True, Some(dep) -> [esm.resolved_text(dep), ..acc]
-        True, None | False, _ -> acc
-      }
+      use <- bool.guard(!is_deferred, acc)
+      // `specifier_map` is TOTAL over `m`'s own requests, so an unresolvable
+      // deferred import is the same invariant break `import_seeds` fails on —
+      // fail here, at its cause, rather than one phase downstream.
+      let dep =
+        esm.resolve(m.specifier_map, raw_dep)
+        |> option.to_result(UnresolvedDependency(raw_dep))
+        |> assert_link_invariant
+      [esm.resolved_text(dep), ..acc]
     })
   })
   |> list.unique
