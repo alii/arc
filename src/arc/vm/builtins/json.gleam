@@ -266,14 +266,7 @@ fn json_is_raw_json(
 /// i.e. a box produced by `JSON.rawJSON`. Used by `JSON.isRawJSON` and by
 /// `JSON.stringify` to emit the raw text verbatim.
 pub fn is_raw_json(h: Heap(host), value: JsValue) -> Bool {
-  case value {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: value.RawJsonObject(_), ..)) -> True
-        _ -> False
-      }
-    _ -> False
-  }
+  option.is_some(raw_json_text(h, value))
 }
 
 // ============================================================================
@@ -1743,13 +1736,9 @@ fn serialize_property(
 /// already-validated JSON source text, which is exactly what
 /// `Get(value, "rawJSON")` would return (the box is frozen with a null
 /// prototype, so no getter or proxy trap can observe the lookup).
-fn raw_json_text(h: Heap(host), value: JsValue) -> Option(String) {
-  case value {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: value.RawJsonObject(raw), ..)) -> Some(raw)
-        _ -> None
-      }
+fn raw_json_text(h: Heap(host), val: JsValue) -> Option(String) {
+  case val {
+    JsObject(ref) -> value.raw_json_text(heap.read(h, ref))
     _ -> None
   }
 }

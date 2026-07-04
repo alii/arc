@@ -3572,12 +3572,6 @@ pub fn raw_json_text(slot: Option(HeapSlot(ctx, host))) -> Option(String) {
   }
 }
 
-/// Whether a heap slot is a `JSON.rawJSON` box (has [[IsRawJSON]]) — the
-/// predicate behind `JSON.isRawJSON`.
-pub fn is_raw_json(slot: Option(HeapSlot(ctx, host))) -> Bool {
-  option.is_some(raw_json_text(slot))
-}
-
 @external(erlang, "arc_vm_ffi", "unique_positive_integer")
 fn unique_positive_integer() -> Int
 
