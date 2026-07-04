@@ -108,37 +108,47 @@ pub type CompiledChild {
   )
 }
 
-/// Break/continue/return target frame. Also pushed for try-bodies (with
-/// break/continue = -1) so cross-boundary jumps emit the right PopTry count.
-/// Mirrors QuickJS BlockEnv (quickjs.c:21320).
-pub type LoopContext {
-  LoopContext(
-    /// -1 if not a break target (try-body barrier frames).
-    break_label: Int,
-    /// -1 if not a continue target (switch, labeled-block, try-body).
-    continue_label: Int,
+/// A frame on the emitter's break/continue/return unwind stack. Mirrors
+/// QuickJS BlockEnv (quickjs.c:21320). A frame is either a *target* (some
+/// break/continue jumps to it) or a *barrier* (jumps only ever cross it,
+/// emitting cleanup on the way out). Each variant carries only the fields
+/// its kind actually uses — a barrier has no break target, a labeled block
+/// has no continue target, and there are no `-1` sentinels anywhere.
+type Frame {
+  /// Iteration statement: both a break and a continue target.
+  ///
+  /// `iterator: True` (for-of / for-await-of) means the body runs under one
+  /// try frame (F_body) with the iterator on the value stack, so crossing
+  /// this frame emits IrPopTry followed by IrIteratorClose (with an IrSwap
+  /// first when a return value sits above iter). Everything else about a
+  /// loop frame is transparent to a jump that crosses it.
+  LoopFrame(
+    break_target: Int,
+    continue_target: Int,
     label: Option(String),
-    /// True for labeled non-loop blocks. Unlabeled `break` skips these
-    /// (§14.8: targets nearest IterationStatement or SwitchStatement only).
-    is_regular: Bool,
-    /// IrPopTry ops to emit when break/continue/return *crosses* (does not
-    /// target) this frame. for-of: 1 (F_body). try-body: 1 or 2.
-    cross_pop_try: Int,
-    /// After cross_pop_try, emit IrIteratorClose (or IrSwap+IrIteratorClose
-    /// when a return value sits above iter). Exactly one stack slot (iter).
-    has_iterator: Bool,
-    /// If Some(L): when break/continue/return *crosses* this frame, after
-    /// dropping try frames, emit `push undef; Gosub(L); Pop` so the finally
-    /// subroutine runs before the jump proceeds. Mirrors QuickJS
-    /// BlockEnv.label_finally (quickjs.c:21326).
-    label_finally: Option(Int),
-    /// Raw IrPop count when *crossed*. Non-zero only on the finally-body
-    /// barrier, where it discards [slot, gosub_retpc] so a break/continue/
-    /// return inside finally never reaches IrRet — spec-correct completion
-    /// replacement (§14.15.3). Mirrors QuickJS BlockEnv.drop_count
-    /// (quickjs.c:21325).
-    drop_count: Int,
+    iterator: Bool,
   )
+  /// Switch statement: a break target (labeled or unlabeled) but never a
+  /// continue target — `continue` walks straight past it to the enclosing
+  /// loop. Transparent when crossed.
+  SwitchFrame(break_target: Int, label: Option(String))
+  /// `foo: { … }` — a labeled non-loop block. Only a *labeled* break targets
+  /// it; unlabeled `break` skips it (§14.8: targets the nearest
+  /// IterationStatement or SwitchStatement only). Transparent when crossed.
+  LabeledBlockFrame(break_target: Int, label: String)
+  /// try / catch / finally body: never a target, only ever crossed. Makes
+  /// break/continue/return that jump out emit the right cleanup:
+  /// - `pop_try`: IrPopTry ops to keep try_stack balanced (QuickJS
+  ///   push_break_entry, quickjs.c:28826-28828).
+  /// - `label_finally`: if Some(L), after dropping try frames emit
+  ///   `push undef; Gosub(L); Pop` so the finally subroutine runs before the
+  ///   jump proceeds. Mirrors BlockEnv.label_finally (quickjs.c:21326).
+  /// - `drop_count`: value-stack slots to discard when crossed. Non-zero
+  ///   only on the finally-body barrier, where it drops [slot, gosub_retpc]
+  ///   so a break/continue/return inside finally never reaches IrRet —
+  ///   spec-correct completion replacement (§14.15.3). Mirrors
+  ///   BlockEnv.drop_count (quickjs.c:21325).
+  BarrierFrame(pop_try: Int, label_finally: Option(Int), drop_count: Int)
 }
 
 /// The emitter state, threaded through all emit functions.
@@ -149,11 +159,11 @@ pub opaque type Emitter {
     constants_list: List(JsValue),
     next_const: Int,
     next_label: Int,
-    loop_stack: List(LoopContext),
+    frame_stack: List(Frame),
     functions: List(CompiledChild),
     next_func: Int,
     /// Set by LabeledStatement before emitting a loop body.
-    /// Consumed by push_loop to attach the label to the LoopContext.
+    /// Consumed by push_loop / push_switch to attach the label to the frame.
     pending_label: Option(String),
     /// True if the current compilation unit is strict. Inherited by child
     /// functions; can be upgraded (never downgraded) by a "use strict"
@@ -737,9 +747,10 @@ fn emit_using_body(
         }
         // Non-using statements emit normally (real source spans intact).
         PlainItem(located) -> {
-          use e <- result.map(
-            emit_stmt(set_line(e, located.line), located.statement),
-          )
+          use e <- result.map(emit_stmt(
+            set_line(e, located.line),
+            located.statement,
+          ))
           #(e, 0)
         }
       }
@@ -1112,7 +1123,7 @@ fn emit_classic_loop(
   })
   let e = emit_ir(e, IrJump(loop_start))
   let e = emit_ir(e, IrLabel(loop_end))
-  pop_loop(e)
+  pop_frame(e)
 }
 
 /// Module body containing top-level using declarations: emit the body
@@ -1139,7 +1150,7 @@ fn emit_module_using_top(
   let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
   let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
   use e <- result.map(emit_using_body(e, items))
-  let e = pop_loop(e)
+  let e = pop_frame(e)
   let e = emit_ir(e, IrPopTry)
   let e = emit_ir(e, IrJump(dispose_label))
 
@@ -1245,7 +1256,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     constants_list: [],
     next_const: 0,
     next_label: 0,
-    loop_stack: [],
+    frame_stack: [],
     functions: [],
     next_func: 0,
     pending_label: None,
@@ -2165,61 +2176,51 @@ fn fresh_slot(e: Emitter) -> #(Emitter, Int) {
   #(Emitter(..e, scope_tree: tree), slot)
 }
 
-/// Prepend a frame to the loop/barrier stack and consume any pending label.
-fn push_loop_ctx(e: Emitter, ctx: LoopContext) -> Emitter {
-  Emitter(..e, loop_stack: [ctx, ..e.loop_stack], pending_label: None)
+/// Prepend a target frame to the frame stack and consume any pending label.
+fn push_frame(e: Emitter, frame: Frame) -> Emitter {
+  Emitter(..e, frame_stack: [frame, ..e.frame_stack], pending_label: None)
 }
 
-fn push_loop(e: Emitter, break_label: Int, continue_label: Int) -> Emitter {
-  push_loop_ctx(
+fn push_loop(e: Emitter, break_target: Int, continue_target: Int) -> Emitter {
+  push_frame(
     e,
-    LoopContext(
-      break_label:,
-      continue_label:,
+    LoopFrame(
+      break_target:,
+      continue_target:,
       label: e.pending_label,
-      is_regular: False,
-      cross_pop_try: 0,
-      has_iterator: False,
-      label_finally: None,
-      drop_count: 0,
+      iterator: False,
     ),
   )
 }
 
 /// for-of loop: body runs under one try frame (F_body) with iter on stack.
-/// NB: must be called AFTER the F_body PushTry so cross_pop_try=1 lines up.
+/// NB: must be called AFTER the F_body PushTry so the crossing PopTry lines up.
 fn push_loop_iter(
   e: Emitter,
-  break_label: Int,
-  continue_label: Int,
+  break_target: Int,
+  continue_target: Int,
 ) -> Emitter {
-  push_loop_ctx(
+  push_frame(
     e,
-    LoopContext(
-      break_label:,
-      continue_label:,
+    LoopFrame(
+      break_target:,
+      continue_target:,
       label: e.pending_label,
-      is_regular: False,
-      cross_pop_try: 1,
-      has_iterator: True,
-      label_finally: None,
-      drop_count: 0,
+      iterator: True,
     ),
   )
 }
 
+/// switch: a break target only. `continue` walks past it to the outer loop.
+fn push_switch(e: Emitter, break_target: Int) -> Emitter {
+  push_frame(e, SwitchFrame(break_target:, label: e.pending_label))
+}
+
 /// Barrier frame for try/catch/finally bodies — never a target, only crossed.
-/// Makes break/continue/return that jump out emit the right cleanup:
-/// - `pop_try`: PopTry ops to keep try_stack balanced (QuickJS:
-///   push_break_entry, quickjs.c:28826-28828).
-/// - `label_finally`: if Some, emit_goto_loop / ReturnStatement walk emits
-///   `push undef; Gosub(fin_label); Pop` after the PopTrys (quickjs.c:28889).
-/// - `drop`: value-stack slots to drop when crossing a finally body itself —
-///   the [slot, gosub_retpc] pair pushed by caller+Gosub — so the abrupt
-///   completion inside finally replaces the saved one (never reaches IrRet).
-///   QuickJS: push_break_entry(..., -1, -1, 2) at quickjs.c:28934-28935.
+/// See BarrierFrame for what each field emits when crossed. QuickJS:
+/// push_break_entry(..., -1, -1, drop) at quickjs.c:28934-28935.
 ///
-/// NB: NOT routed through push_loop_ctx — barriers are transparent to label
+/// NB: NOT routed through push_frame — barriers are transparent to label
 /// flow. pending_label must survive a barrier so e.g. emit_for_using_classic
 /// can let the inner push_loop (inside emit_using_try_wrap's barrier) consume
 /// the LabeledStatement's label.
@@ -2229,28 +2230,19 @@ fn push_barrier(
   label_finally label_finally: Option(Int),
   drop drop: Int,
 ) -> Emitter {
-  Emitter(..e, loop_stack: [
-    LoopContext(
-      break_label: -1,
-      continue_label: -1,
-      label: None,
-      is_regular: False,
-      cross_pop_try: pop_try,
-      has_iterator: False,
-      label_finally:,
-      drop_count: drop,
-    ),
-    ..e.loop_stack
+  Emitter(..e, frame_stack: [
+    BarrierFrame(pop_try:, label_finally:, drop_count: drop),
+    ..e.frame_stack
   ])
 }
 
-/// Pop the innermost `loop_stack` entry. Every pop is paired with a
-/// push_loop/push_loop_ctx/push_barrier in the same emit function, so an
+/// Pop the innermost `frame_stack` entry. Every pop is paired with a
+/// push_loop/push_frame/push_barrier in the same emit function, so an
 /// empty stack here is a push/pop desync — crash at the desync instead of
 /// silently leaving the (now stale) outer context in place.
-fn pop_loop(e: Emitter) -> Emitter {
-  let assert [_, ..rest] = e.loop_stack
-  Emitter(..e, loop_stack: rest)
+fn pop_frame(e: Emitter) -> Emitter {
+  let assert [_, ..rest] = e.frame_stack
+  Emitter(..e, frame_stack: rest)
 }
 
 fn repeat_ir(e: Emitter, op: IrOp, n: Int) -> Emitter {
@@ -2299,7 +2291,7 @@ fn emit_finally_subroutine(
   let e = Emitter(..e, completion_var: None)
   use e <- result.try(emit_finally(e))
   let e = Emitter(..e, completion_var: saved_cv)
-  let e = pop_loop(e)
+  let e = pop_frame(e)
   Ok(emit_ir(e, IrRet))
 }
 
@@ -2325,7 +2317,7 @@ fn emit_try_catch_finally(
   let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
   let e = push_barrier(e, pop_try: 2, label_finally: Some(fin_label), drop: 0)
   use e <- result.try(emit_body(e))
-  let e = pop_loop(e)
+  let e = pop_frame(e)
   let e = emit_ir(e, IrPopTry)
   let e = emit_ir(e, IrPopTry)
   let e = emit_gosub_normal(e, fin_label)
@@ -2348,7 +2340,94 @@ fn emit_try_catch_finally(
   emit_ir(e, IrLabel(end_label))
 }
 
-/// Shared body of break/continue. Walks loop_stack emitting PopTry and
+/// The label a `break`/`continue` named `name` jumps to when `frame` is its
+/// target, or None when the frame must instead be *crossed*. Encodes §14.8:
+/// an unlabeled break skips labeled non-loop blocks; a continue only ever
+/// targets a loop, so switch/labeled-block/barrier frames can never answer.
+fn frame_target(
+  frame: Frame,
+  name: Option(String),
+  is_cont: Bool,
+) -> Option(Int) {
+  case frame {
+    LoopFrame(break_target:, continue_target:, label:, ..) -> {
+      let target = case is_cont {
+        True -> continue_target
+        False -> break_target
+      }
+      case name {
+        None -> Some(target)
+        Some(_) ->
+          case label == name {
+            True -> Some(target)
+            False -> None
+          }
+      }
+    }
+    SwitchFrame(break_target:, label:) ->
+      case is_cont {
+        True -> None
+        False ->
+          case name {
+            None -> Some(break_target)
+            Some(_) ->
+              case label == name {
+                True -> Some(break_target)
+                False -> None
+              }
+          }
+      }
+    LabeledBlockFrame(break_target:, label:) ->
+      case is_cont, name {
+        False, Some(n) if n == label -> Some(break_target)
+        _, _ -> None
+      }
+    BarrierFrame(..) -> None
+  }
+}
+
+/// Cleanup emitted when a break/continue *crosses* (does not target) a frame:
+/// balance try_stack, discard saved gosub slots, close the iterator, then run
+/// any pending finally as a subroutine. QuickJS emit_break (quickjs.c:27794).
+fn emit_cross_frame(e: Emitter, frame: Frame) -> Emitter {
+  case frame {
+    LoopFrame(iterator: True, ..) ->
+      e |> emit_ir(IrPopTry) |> emit_ir(IrIteratorClose)
+    LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> e
+    BarrierFrame(pop_try:, label_finally:, drop_count:) -> {
+      let e = repeat_ir(e, IrPopTry, pop_try)
+      let e = repeat_ir(e, IrPop, drop_count)
+      case label_finally {
+        Some(lbl) -> emit_gosub_normal(e, lbl)
+        None -> e
+      }
+    }
+  }
+}
+
+/// Cleanup emitted when a `return` crosses a frame — a return crosses *every*
+/// frame on the way out. Same shape as emit_cross_frame, but the return value
+/// sits on top of the value stack throughout: IrPopTry doesn't touch it,
+/// drop_count slots sit *under* it → nip, the iterator sits under it → swap
+/// before close, and the retval IS the gosub slot so no push/pop around Gosub
+/// (QuickJS emit_return, quickjs.c:27876).
+fn emit_return_cross_frame(e: Emitter, frame: Frame) -> Emitter {
+  case frame {
+    LoopFrame(iterator: True, ..) ->
+      e |> emit_ir(IrPopTry) |> emit_ir(IrSwap) |> emit_ir(IrIteratorClose)
+    LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> e
+    BarrierFrame(pop_try:, label_finally:, drop_count:) -> {
+      let e = repeat_ir(e, IrPopTry, pop_try)
+      let e = repeat_nip(e, drop_count)
+      case label_finally {
+        Some(lbl) -> emit_ir(e, IrGosub(lbl))
+        None -> e
+      }
+    }
+  }
+}
+
+/// Shared body of break/continue. Walks frame_stack emitting PopTry and
 /// IteratorClose for each frame *crossed* (not targeted), then jumps to the
 /// target's break/continue label. Mirrors QuickJS emit_break (quickjs.c:27770).
 fn emit_goto_loop(
@@ -2356,12 +2435,12 @@ fn emit_goto_loop(
   name: Option(String),
   is_cont: Bool,
 ) -> Result(Emitter, EmitError) {
-  emit_goto_loop_walk(e, e.loop_stack, name, is_cont)
+  emit_goto_loop_walk(e, e.frame_stack, name, is_cont)
 }
 
 fn emit_goto_loop_walk(
   e: Emitter,
-  stack: List(LoopContext),
+  stack: List(Frame),
   name: Option(String),
   is_cont: Bool,
 ) -> Result(Emitter, EmitError) {
@@ -2371,42 +2450,12 @@ fn emit_goto_loop_walk(
         True -> Error(ContinueOutsideLoop)
         False -> Error(BreakOutsideLoop)
       }
-    [ctx, ..rest] -> {
-      let target_label = case is_cont {
-        True -> ctx.continue_label
-        False -> ctx.break_label
-      }
-      // Is this the target? Unlabeled: first frame with a valid slot of the
-      // right kind, skipping is_regular for break. Labeled: exact label match.
-      let is_target = case name {
-        Some(n) -> ctx.label == Some(n) && target_label != -1
+    [frame, ..rest] ->
+      case frame_target(frame, name, is_cont) {
+        Some(target) -> Ok(emit_ir(e, IrJump(target)))
         None ->
-          case is_cont, ctx.is_regular {
-            // unlabeled break must skip labeled-block frames (§14.8)
-            False, True -> False
-            _, _ -> target_label != -1
-          }
+          emit_goto_loop_walk(emit_cross_frame(e, frame), rest, name, is_cont)
       }
-      case is_target {
-        True -> Ok(emit_ir(e, IrJump(target_label)))
-        False -> {
-          // Crossing this frame: balance try_stack, discard saved gosub slots,
-          // close iterator, then run any pending finally as a subroutine.
-          // QuickJS emit_break (quickjs.c:27794-27806).
-          let e = repeat_ir(e, IrPopTry, ctx.cross_pop_try)
-          let e = repeat_ir(e, IrPop, ctx.drop_count)
-          let e = case ctx.has_iterator {
-            True -> emit_ir(e, IrIteratorClose)
-            False -> e
-          }
-          let e = case ctx.label_finally {
-            Some(lbl) -> emit_gosub_normal(e, lbl)
-            None -> e
-          }
-          emit_goto_loop_walk(e, rest, name, is_cont)
-        }
-      }
-    }
   }
 }
 
@@ -3695,7 +3744,7 @@ fn emit_stmt_inner(
       use e <- result.try(emit_stmt(e, body))
       let e = emit_ir(e, IrJump(loop_start))
       let e = emit_ir(e, IrLabel(loop_end))
-      let e = pop_loop(e)
+      let e = pop_frame(e)
       Ok(e)
     }
 
@@ -3710,7 +3759,7 @@ fn emit_stmt_inner(
       use e <- result.try(emit_expr(e, condition))
       let e = emit_ir(e, IrJumpIfTrue(loop_start))
       let e = emit_ir(e, IrLabel(loop_end))
-      let e = pop_loop(e)
+      let e = pop_frame(e)
       Ok(e)
     }
 
@@ -3769,22 +3818,8 @@ fn emit_stmt_inner(
         Some(expr) -> emit_expr(e, expr)
         None -> Ok(push_const(e, JsUndefined))
       })
-      // retval on top throughout. PopTry doesn't touch value stack. drop_count
-      // slots sit *under* retval → nip. has_iterator: iter under retval → swap+close.
-      // label_finally: retval IS the gosub slot (QuickJS emit_return quickjs.c:27876).
-      let e =
-        list.fold(e.loop_stack, e, fn(e, ctx) {
-          let e = repeat_ir(e, IrPopTry, ctx.cross_pop_try)
-          let e = repeat_nip(e, ctx.drop_count)
-          let e = case ctx.has_iterator {
-            True -> e |> emit_ir(IrSwap) |> emit_ir(IrIteratorClose)
-            False -> e
-          }
-          case ctx.label_finally {
-            Some(lbl) -> emit_ir(e, IrGosub(lbl))
-            None -> e
-          }
-        })
+      // A return crosses every frame — see emit_return_cross_frame.
+      let e = list.fold(e.frame_stack, e, emit_return_cross_frame)
       Ok(emit_ir(e, IrReturn))
     }
 
@@ -3803,7 +3838,7 @@ fn emit_stmt_inner(
           let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
           let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
           use e <- result.try(emit_block(e, block, tail: False))
-          let e = pop_loop(e)
+          let e = pop_frame(e)
           let e = emit_ir(e, IrPopTry)
           let e = emit_ir(e, IrJump(end_label))
 
@@ -3829,7 +3864,7 @@ fn emit_stmt_inner(
           let e =
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_block(e, block, tail: False))
-          let e = pop_loop(e)
+          let e = pop_frame(e)
           let e = emit_ir(e, IrPopTry)
           let e = emit_gosub_normal(e, fin_label)
           let e = emit_ir(e, IrJump(end_label))
@@ -3858,7 +3893,7 @@ fn emit_stmt_inner(
           let e =
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.map(emit_block(e, catch_body, tail: False))
-          pop_loop(e)
+          pop_frame(e)
         }
 
         // try with neither catch nor finally (shouldn't happen per spec, but handle gracefully)
@@ -3888,22 +3923,9 @@ fn emit_stmt_inner(
         // Labeled non-loop: create a break-only target
         _ -> {
           let #(e, break_target) = fresh_label(e)
-          let e =
-            push_loop_ctx(
-              e,
-              LoopContext(
-                break_label: break_target,
-                continue_label: -1,
-                label: Some(label),
-                is_regular: True,
-                cross_pop_try: 0,
-                has_iterator: False,
-                label_finally: None,
-                drop_count: 0,
-              ),
-            )
+          let e = push_frame(e, LabeledBlockFrame(break_target:, label:))
           use e <- result.map(emit_stmt(e, body))
-          let e = pop_loop(e)
+          let e = pop_frame(e)
           emit_ir(e, IrLabel(break_target))
         }
       }
@@ -4991,7 +5013,7 @@ fn emit_switch(
 
   // Push break context for switch (break; exits the switch). Switch is not a
   // continue target — emit_goto_loop walks past it to the enclosing loop.
-  let e = push_loop(e, end_label, -1)
+  let e = push_switch(e, end_label)
 
   // Emit discriminant — stays on stack through comparison phase.
   // Evaluated OUTSIDE the CaseBlock scope (§14.12.4 step 1).
@@ -5006,56 +5028,44 @@ fn emit_switch(
   let #(e, save) = enter_scope(e, in_block: True)
   use e <- result.try(emit_block_declarations(e, case_stmts))
 
-  // Allocate labels: each non-default case gets a "found" trampoline label
-  // and a "body" label. Default cases only get a "body" label.
-  // The trampoline pops the discriminant then jumps to the body label.
-  // This ensures the discriminant is off the stack for all body code,
-  // allowing fall-through between case bodies to work correctly.
-  let #(e, body_labels_rev) =
-    list.fold(cases, #(e, []), fn(acc, _case) {
-      let #(e, labels) = acc
-      let #(e, label) = fresh_label(e)
-      #(e, [label, ..labels])
-    })
-  let body_labels = list.reverse(body_labels_rev)
-
-  // Allocate found (trampoline) labels for non-default cases
-  let #(e, found_labels_rev) =
+  // Allocate labels: each case gets a "body" label; a case *with a test* also
+  // gets a "found" trampoline label, which pops the discriminant then jumps to
+  // the body label. This ensures the discriminant is off the stack for all body
+  // code, allowing fall-through between case bodies to work correctly. One fold
+  // pairs each case's statements with its labels, so the three emission phases
+  // below are single O(c) folds that just match on CaseLabels.
+  let #(e, labelled_rev) =
     list.fold(cases, #(e, []), fn(acc, c) {
-      let #(e, labels) = acc
+      let #(e, out) = acc
+      let #(e, body) = fresh_label(e)
       case c {
-        ast.SwitchCase(Some(_), _) -> {
-          let #(e, label) = fresh_label(e)
-          #(e, [Some(label), ..labels])
+        ast.SwitchCase(Some(test_expr), consequent) -> {
+          let #(e, found) = fresh_label(e)
+          #(e, [#(TestCase(test_expr:, body:, found:), consequent), ..out])
         }
-        ast.SwitchCase(None, _) -> #(e, [None, ..labels])
+        ast.SwitchCase(None, consequent) -> #(e, [
+          #(TestlessCase(body:), consequent),
+          ..out
+        ])
       }
     })
-  let found_labels = list.reverse(found_labels_rev)
-
-  // Pair each case with its body label and optional found label so the three
-  // emission phases below are single O(c) folds (no per-index list.drop).
-  let labelled_cases = list.zip(cases, list.zip(body_labels, found_labels))
+  let labelled_cases = list.reverse(labelled_rev)
 
   // Phase 1: Emit comparison jumps
   // For each case with a test: Dup discriminant, emit test, StrictEq, JumpIfTrue(found_N)
   use #(e, default_body_label) <- result.try(
     list.try_fold(labelled_cases, #(e, option.None), fn(acc, entry) {
       let #(e, default_lbl) = acc
-      let #(c, #(body_lbl, found_lbl)) = entry
-      case c {
-        ast.SwitchCase(Some(test_expr), _) -> {
+      let #(labels, _consequent) = entry
+      case labels {
+        TestCase(test_expr:, found:, ..) -> {
           let e = emit_ir(e, IrDup)
           use e <- result.map(emit_expr(e, test_expr))
           let e = emit_ir(e, IrBinOp(opcode.StrictEq))
-          let found_lbl = option.unwrap(found_lbl, end_label)
-          let e = emit_ir(e, IrJumpIfTrue(found_lbl))
-          #(e, default_lbl)
+          #(emit_ir(e, IrJumpIfTrue(found)), default_lbl)
         }
-        ast.SwitchCase(None, _) -> {
-          // Default case — record its body label
-          Ok(#(e, Some(body_lbl)))
-        }
+        // Default case — record its body label
+        TestlessCase(body:) -> Ok(#(e, Some(body)))
       }
     }),
   )
@@ -5067,32 +5077,43 @@ fn emit_switch(
   // Phase 2: Emit trampolines — each pops discriminant and jumps to body
   let e =
     list.fold(labelled_cases, e, fn(e, entry) {
-      let #(_c, #(body_lbl, found_lbl)) = entry
-      case found_lbl {
-        Some(found_lbl) -> {
-          let e = emit_ir(e, IrLabel(found_lbl))
-          let e = emit_ir(e, IrPop)
-          emit_ir(e, IrJump(body_lbl))
-        }
-        None -> e
+      case entry.0 {
+        TestCase(body:, found:, ..) ->
+          e
+          |> emit_ir(IrLabel(found))
+          |> emit_ir(IrPop)
+          |> emit_ir(IrJump(body))
+        TestlessCase(..) -> e
       }
     })
 
   // Phase 3: Emit case bodies (fall-through between them)
   use e <- result.try(
     list.try_fold(labelled_cases, e, fn(e, entry) {
-      let #(c, #(body_lbl, _found_lbl)) = entry
-      let e = emit_ir(e, IrLabel(body_lbl))
-      case c {
-        ast.SwitchCase(_, consequent) -> emit_stmts(e, consequent)
-      }
+      let #(labels, consequent) = entry
+      emit_stmts(emit_ir(e, IrLabel(case_body_label(labels))), consequent)
     }),
   )
 
   let e = emit_ir(e, IrLabel(end_label))
   let e = leave_scope(e, save)
-  let e = pop_loop(e)
+  let e = pop_frame(e)
   Ok(e)
+}
+
+/// Labels allocated for one `switch` case. A case with a test always has a
+/// `found` trampoline label; a `default:` case never does — the pairing can't
+/// come apart.
+type CaseLabels {
+  TestCase(test_expr: ast.Expression, body: Int, found: Int)
+  TestlessCase(body: Int)
+}
+
+fn case_body_label(labels: CaseLabels) -> Int {
+  case labels {
+    TestCase(body:, ..) -> body
+    TestlessCase(body:) -> body
+  }
 }
 
 fn emit_sequence(
@@ -5665,7 +5686,7 @@ fn emit_for_in(
   let e = emit_ir(e, IrLabel(loop_end))
   let e = emit_ir(e, IrPop)
 
-  let e = pop_loop(e)
+  let e = pop_frame(e)
   Ok(leave_for_scope(e, save))
 }
 
@@ -5755,7 +5776,7 @@ fn emit_for_of_common(
     catch_body,
     end,
   ))
-  e |> emit_ir(IrLabel(end)) |> pop_loop |> leave_for_scope(save)
+  e |> emit_ir(IrLabel(end)) |> pop_frame |> leave_for_scope(save)
 }
 
 /// Emit a for-of loop: `for (lhs of rhs) body`
