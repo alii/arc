@@ -3934,6 +3934,30 @@ fn validated_overflow(
   get_overflow_option(st, opts)
 }
 
+/// Shared preamble for the `add`/`subtract` instance methods: read the duration
+/// argument, validate the options bag's `overflow`, and negate the duration
+/// when the method is `subtract`.
+fn add_sub_args(
+  state: State(host),
+  args: List(JsValue),
+  is_subtract: Bool,
+  k: fn(DurRec, Overflow, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  use dur, state <- state.try_op(to_temporal_duration(
+    state,
+    helpers.arg_at(args, 0),
+  ))
+  use overflow, state <- state.try_op(validated_overflow(
+    state,
+    helpers.arg_at(args, 1),
+  ))
+  let dur = case is_subtract {
+    True -> negate_dur(dur)
+    False -> dur
+  }
+  k(dur, overflow, state)
+}
+
 /// Property-bag → ISO date + calendar. Field read order: calendar, then
 /// alphabetical (day, era, eraYear, month, monthCode, year).
 fn date_from_bag(
@@ -6642,18 +6666,7 @@ fn plain_date_method(
           #(state, Ok(JsBool(d == other && cal == other_cal)))
         }
         PdAdd | PdSubtract -> {
-          use dur, state <- state.try_op(to_temporal_duration(
-            state,
-            helpers.arg_at(args, 0),
-          ))
-          use overflow, state <- state.try_op(validated_overflow(
-            state,
-            helpers.arg_at(args, 1),
-          ))
-          let dur = case m {
-            PdSubtract -> negate_dur(dur)
-            _ -> dur
-          }
+          use dur, overflow, state <- add_sub_args(state, args, m == PdSubtract)
           use d2 <- terr(state, calendar_date_add(cal, d, dur, overflow))
           let #(state, v) = make_date_cal(state, protos, d2, cal)
           #(state, Ok(v))
@@ -8210,18 +8223,11 @@ fn plain_date_time_method(
           #(state, Ok(JsBool(#(d, t) == #(od, ot) && cal == ocal)))
         }
         PdtAdd | PdtSubtract -> {
-          use dur, state <- state.try_op(to_temporal_duration(
+          use dur, overflow, state <- add_sub_args(
             state,
-            helpers.arg_at(args, 0),
-          ))
-          use overflow, state <- state.try_op(validated_overflow(
-            state,
-            helpers.arg_at(args, 1),
-          ))
-          let dur = case m {
-            PdtSubtract -> negate_dur(dur)
-            _ -> dur
-          }
+            args,
+            m == PdtSubtract,
+          )
           // Time first, carry days into the date addition.
           let #(carry, t2) = add_time(t, time_only_ns(dur))
           let date_dur =
@@ -8560,18 +8566,11 @@ fn plain_year_month_method(
           #(state, Ok(JsBool(#(y, m, rd, cal) == other)))
         }
         PymAdd | PymSubtract -> {
-          use dur, state <- state.try_op(to_temporal_duration(
+          use dur, overflow, state <- add_sub_args(
             state,
-            helpers.arg_at(args, 0),
-          ))
-          use overflow, state <- state.try_op(validated_overflow(
-            state,
-            helpers.arg_at(args, 1),
-          ))
-          let dur = case meth {
-            PymSubtract -> negate_dur(dur)
-            _ -> dur
-          }
+            args,
+            meth == PymSubtract,
+          )
           // AddDurationToYearMonth: only years and months are allowed
           // (weeks/days/time throw RangeError); the calculation always
           // starts from day 1 of the calendar month, so day overflow never
@@ -10483,18 +10482,7 @@ fn zoned_date_time_method(
           )
         }
         ZmAdd | ZmSubtract -> {
-          use dur, state <- state.try_op(to_temporal_duration(
-            state,
-            helpers.arg_at(args, 0),
-          ))
-          use overflow, state <- state.try_op(validated_overflow(
-            state,
-            helpers.arg_at(args, 1),
-          ))
-          let dur = case m {
-            ZmSubtract -> negate_dur(dur)
-            _ -> dur
-          }
+          use dur, overflow, state <- add_sub_args(state, args, m == ZmSubtract)
           // Add date part in local wall-clock space, then exact time. Pure
           // time-unit durations add directly to the epoch (AddZonedDateTime).
           let date_dur =
