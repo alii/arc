@@ -5,18 +5,15 @@
 //// [[ByteLength]] internal slots; all get*/set* methods funnel through
 //// GetViewValue / SetViewValue (§25.3.1.1 / §25.3.1.2).
 ////
-//// Numeric encode/decode reuses the typed-array element codecs
-//// (`internal/typed_array_ffi`), which are little-endian; a big-endian
-//// request byte-swaps the element chunk first (`to_endian`). Float16 is the
-//// one element with no TypedArray counterpart, so it is decoded/encoded here
-//// manually (sign/exp/mantissa).
+//// Numeric encode/decode uses BEAM bit syntax. Erlang float segments only
+//// match *finite* values, so NaN/Infinity decoding falls through to integer
+//// bit-pattern inspection; encoding writes the canonical bit patterns.
+//// Float16 is decoded/encoded manually (sign/exp/mantissa) because Gleam bit
+//// arrays don't support 16-bit float segments.
 
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, list_at}
 import arc/vm/heap
-import arc/vm/internal/typed_array_ffi.{
-  type FloatElem, type IntElem, F32, F64, I8, I16, I32, I64, U8, U16, U32, U64,
-} as ta
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -542,23 +539,92 @@ fn element_size(element: ViewElementType) -> Int {
   }
 }
 
-/// RawBytesToNumeric (§25.1.2.13): decode element bytes to a JsValue. The
-/// typed-array codecs read little-endian, so a big-endian chunk is byte-swapped
-/// first (`to_endian` is a byte reversal, hence its own inverse).
+/// Read the chunk's bytes as an unsigned big/little-endian integer.
+fn read_uint(chunk: BitArray, little: Bool) -> Int {
+  case little, chunk {
+    _, <<v:size(8)>> -> v
+    True, <<v:size(16)-little>> -> v
+    False, <<v:size(16)>> -> v
+    True, <<v:size(32)-little>> -> v
+    False, <<v:size(32)>> -> v
+    True, <<v:size(64)-little>> -> v
+    False, <<v:size(64)>> -> v
+    // Unreachable: chunk width always matches element_size.
+    _, _ -> 0
+  }
+}
+
+/// Reinterpret an unsigned integer of `bits` width as two's-complement.
+fn to_signed(u: Int, bits: Int) -> Int {
+  let half = int.bitwise_shift_left(1, bits - 1)
+  case u >= half {
+    True -> u - int.bitwise_shift_left(half, 1)
+    False -> u
+  }
+}
+
+/// RawBytesToNumeric (§25.1.2.13): decode element bytes to a JsValue.
 fn decode(element: ViewElementType, chunk: BitArray, little: Bool) -> JsValue {
-  let le = to_endian(chunk, little, bit_array.byte_size(chunk))
+  let u = read_uint(chunk, little)
   case element {
-    VNum(VInt8) -> value.from_int(ta.ta_get_int(le, 0, I8))
-    VNum(VUint8) -> value.from_int(ta.ta_get_int(le, 0, U8))
-    VNum(VInt16) -> value.from_int(ta.ta_get_int(le, 0, I16))
-    VNum(VUint16) -> value.from_int(ta.ta_get_int(le, 0, U16))
-    VNum(VInt32) -> value.from_int(ta.ta_get_int(le, 0, I32))
-    VNum(VUint32) -> value.from_int(ta.ta_get_int(le, 0, U32))
-    VNum(VFloat16) -> JsNumber(f16_from_bits(ta.ta_get_int(le, 0, U16)))
-    VNum(VFloat32) -> JsNumber(ta.ta_get_float(le, 0, F32))
-    VNum(VFloat64) -> JsNumber(ta.ta_get_float(le, 0, F64))
-    VBig(VBigInt64) -> JsBigInt(BigInt(ta.ta_get_int(le, 0, I64)))
-    VBig(VBigUint64) -> JsBigInt(BigInt(ta.ta_get_int(le, 0, U64)))
+    VNum(e) -> decode_number(e, u)
+    VBig(e) -> decode_bigint(e, u)
+  }
+}
+
+/// RawBytesToNumeric for the Number-valued elements.
+fn decode_number(element: ViewNumElement, u: Int) -> JsValue {
+  case element {
+    VUint8 -> value.from_int(u)
+    VUint16 -> value.from_int(u)
+    VUint32 -> value.from_int(u)
+    VInt8 -> value.from_int(to_signed(u, 8))
+    VInt16 -> value.from_int(to_signed(u, 16))
+    VInt32 -> value.from_int(to_signed(u, 32))
+    VFloat16 -> JsNumber(f16_from_bits(u))
+    VFloat32 -> JsNumber(f32_from_bits(u))
+    VFloat64 -> JsNumber(f64_from_bits(u))
+  }
+}
+
+/// RawBytesToNumeric for the BigInt-valued elements.
+fn decode_bigint(element: ViewBigElement, u: Int) -> JsValue {
+  case element {
+    VBigUint64 -> JsBigInt(BigInt(u))
+    VBigInt64 -> JsBigInt(BigInt(to_signed(u, 64)))
+  }
+}
+
+/// Decode IEEE 754 binary32 bits. Erlang float segments only match finite
+/// values, so NaN/±Infinity fall through to bit inspection.
+fn f32_from_bits(u: Int) -> value.JsNum {
+  case <<u:size(32)>> {
+    <<f:float-size(32)>> -> Finite(f)
+    _ ->
+      case int.bitwise_and(u, 0x7FFFFF) == 0 {
+        True ->
+          case int.bitwise_and(u, 0x80000000) == 0 {
+            True -> Infinity
+            False -> NegInfinity
+          }
+        False -> NaN
+      }
+  }
+}
+
+/// Decode IEEE 754 binary64 bits — same fall-through strategy as binary32.
+fn f64_from_bits(u: Int) -> value.JsNum {
+  case <<u:size(64)>> {
+    <<f:float-size(64)>> -> Finite(f)
+    _ ->
+      case int.bitwise_and(u, 0xFFFFFFFFFFFFF) == 0 {
+        True ->
+          case int.bitwise_shift_right(u, 63) == 0 {
+            True -> Infinity
+            False -> NegInfinity
+          }
+        False -> NaN
+      }
   }
 }
 
@@ -597,7 +663,7 @@ fn pow2(e: Int) -> Float {
 }
 
 /// Coerce + encode the value for SetViewValue. Produces the element's raw
-/// bytes in LITTLE-endian order (to_endian flips later if needed). CPS.
+/// bytes in BIG-endian order (to_endian flips later if needed). CPS.
 fn encode_value(
   state: State(host),
   element: ViewElementType,
@@ -617,42 +683,38 @@ fn encode_value(
   }
 }
 
-/// NumericToRawBytes (§25.1.2.14) for the BigInt types, little-endian.
-/// ToBigInt64 and ToBigUint64 both reduce modulo 2^64, which is exactly the
-/// wrap `ta_set_int` applies — so both elements share one clause.
+/// NumericToRawBytes (§25.1.2.14) for the BigInt types, big-endian.
 fn encode_bigint(element: ViewBigElement, n: Int) -> BitArray {
   case element {
-    VBigInt64 | VBigUint64 -> int_bytes(I64, n)
+    // ToBigInt64 and ToBigUint64 both reduce modulo 2^64, and Erlang bit
+    // construction wraps to that same 64-bit two's-complement pattern.
+    VBigInt64 | VBigUint64 -> <<n:size(64)>>
   }
 }
 
-/// NumericToRawBytes (§25.1.2.14) for the Number types, little-endian.
+/// NumericToRawBytes (§25.1.2.14) for the Number types, big-endian.
 fn encode_number(element: ViewNumElement, num: value.JsNum) -> BitArray {
   case element {
-    VInt8 | VUint8 -> int_bytes(I8, to_int_wrap(num))
-    VInt16 | VUint16 -> int_bytes(I16, to_int_wrap(num))
-    VInt32 | VUint32 -> int_bytes(I32, to_int_wrap(num))
-    VFloat32 -> float_bytes(F32, num)
-    VFloat64 -> float_bytes(F64, num)
-    VFloat16 -> <<f16_to_bits(num):size(16)-little>>
+    VInt8 | VUint8 -> <<to_int_wrap(num):size(8)>>
+    VInt16 | VUint16 -> <<to_int_wrap(num):size(16)>>
+    VInt32 | VUint32 -> <<to_int_wrap(num):size(32)>>
+    VFloat64 ->
+      case num {
+        Finite(f) -> <<f:float-size(64)>>
+        NaN -> <<0x7FF8000000000000:size(64)>>
+        Infinity -> <<0x7FF0000000000000:size(64)>>
+        NegInfinity -> <<0xFFF0000000000000:size(64)>>
+      }
+    VFloat32 ->
+      case num {
+        // Erlang rounds double→single (ties to even) and overflows to ±inf.
+        Finite(f) -> <<f:float-size(32)>>
+        NaN -> <<0x7FC00000:size(32)>>
+        Infinity -> <<0x7F800000:size(32)>>
+        NegInfinity -> <<0xFF800000:size(32)>>
+      }
+    VFloat16 -> <<f16_to_bits(num):size(16)>>
   }
-}
-
-/// Encode one integer element into a fresh little-endian chunk. `ta_set_int`
-/// wraps modulo 2^bits, which is the ToIntN/ToUintN modulo step.
-fn int_bytes(elem: IntElem, val: Int) -> BitArray {
-  ta.ta_set_int(ta.ta_zeroed(ta.int_elem_size(elem)), 0, elem, val)
-}
-
-/// Encode one float element into a fresh little-endian chunk. `ta_set_float`
-/// owns the canonical NaN/±Infinity bit patterns and the double→single
-/// rounding (ties to even, overflow to ±inf).
-fn float_bytes(elem: FloatElem, num: value.JsNum) -> BitArray {
-  let size = case elem {
-    F32 -> 4
-    F64 -> 8
-  }
-  ta.ta_set_float(ta.ta_zeroed(size), 0, elem, num)
 }
 
 /// ToIntN/ToUintN truncation step: NaN/±Infinity → 0, else truncate toward
@@ -736,14 +798,12 @@ fn f16_to_bits(num: value.JsNum) -> Int {
   }
 }
 
-/// Convert an element chunk between little-endian (the byte order the codecs
-/// speak) and the requested byte order — a byte reversal, so it serves both
-/// directions: LE→requested when writing, requested→LE when reading.
+/// Flip a big-endian element chunk to the requested endianness.
 fn to_endian(chunk: BitArray, little: Bool, size: Int) -> BitArray {
   case little, size {
-    True, _ -> chunk
-    False, 1 -> chunk
-    False, _ ->
+    False, _ -> chunk
+    True, 1 -> chunk
+    True, _ ->
       case chunk {
         <<v:size(16)>> -> <<v:size(16)-little>>
         <<v:size(32)>> -> <<v:size(32)-little>>
