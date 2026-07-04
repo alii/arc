@@ -5,8 +5,8 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
 import arc/vm/key.{Index, Named}
-import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/ops/property
 import arc/vm/state.{
   type Heap, type State, type StepExit, type VmError, State, Threw,
 }
@@ -658,21 +658,13 @@ fn spread_array_generic(
   }
 }
 
-/// §7.1.20 LengthOfArrayLike(O) — ? ToLength(? Get(O, "length")). The Get can
-/// run a getter (and throw); ToNumber can run a user `valueOf`. ToLength then
-/// clamps to [0, 2^53 - 1] — NaN and -Infinity give 0, +Infinity gives
-/// 2^53 - 1 (`coerce.jsnum_to_length`).
+/// §7.1.20 LengthOfArrayLike(O), in this module's StepExit error shape — the
+/// implementation itself is `property.length_of_array_like`.
 fn array_like_length(
   state: State(host),
   ref: Ref,
 ) -> Result(#(Int, State(host)), StepExit(host)) {
-  use #(len_val, state) <- result.try(
-    state.rethrow(object.get_value_of(state, JsObject(ref), Named("length"))),
-  )
-  use #(len_num, state) <- result.map(
-    state.rethrow(coerce.js_to_number(state, len_val)),
-  )
-  #(coerce.jsnum_to_length(len_num), state)
+  state.rethrow(property.length_of_array_like(state, ref, JsObject(ref)))
 }
 
 /// Raw drain of an ArrayIteratorObject whose @@iterator and `next` are still
@@ -707,7 +699,7 @@ fn spread_array_iterator(
           length,
         )
       {
-        Error(msg) -> state.throw_type_error(state, msg)
+        Error(err) -> object.throw_view_witness_error(state, err)
         Ok(len) -> {
           // `cursor: None` is the exhaustion latch — nothing to drain.
           let values = case cursor {

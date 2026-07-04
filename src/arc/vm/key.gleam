@@ -11,7 +11,9 @@
 //// and `arc/vm/value` can depend on it without a cycle.
 
 import gleam/bit_array
+import gleam/float
 import gleam/int
+import gleam/option.{type Option, None, Some}
 import gleam/string
 
 /// Largest valid array index (§6.1.7): an array index is an integer in
@@ -96,6 +98,31 @@ pub fn index_key(n: Int) -> PropertyKey {
   case n >= 0 && n <= max_array_index {
     True -> Index(n)
     False -> Named(int.to_string(n))
+  }
+}
+
+/// Canonical array index of a *number* key — the Float-side sibling of
+/// `canonical_key`, and the ONLY sanctioned way to ask "does this JS number
+/// name an array index?".
+///
+/// Returns `Some(i)` iff `f` is a canonical array index (§6.1.7): an integral
+/// value in [0, 2^32-2] whose ToString form is `int.to_string(i)`. Everything
+/// else — fractions, negatives (including -0.0's sibling -1.0), values past
+/// the index cap, non-integral round-trip failures — is `None`, meaning the
+/// key must be stringified (`Named(js_format_number(f))`) so that the numeric
+/// and string forms of the same key land in the same dict slot.
+///
+/// -0.0 is normalized to +0.0 first (`0.0 == -0.0` in JS, but BEAM's `=:=`
+/// distinguishes them), so `a[-0]` is `a[0]`.
+///
+/// HOT PATH: the interpreter's GetElem/PutElem fast paths call this per
+/// element access. Keep it allocation-light and free of stringification.
+pub fn array_index_of_float(f: Float) -> Option(Int) {
+  let n = f +. 0.0
+  let i = float.truncate(n)
+  case int.to_float(i) == n && i >= 0 && i <= max_array_index {
+    True -> Some(i)
+    False -> None
   }
 }
 

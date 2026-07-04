@@ -604,120 +604,69 @@ fn push_generic(
 /// V8's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
 
-/// Combined ToObject (ES2024 §7.1.18) + LengthOfArrayLike (§7.3.18).
+/// ToObject (ES2024 §7.1.18) — the primitive-wrapper half of `require_array`,
+/// on its own. Hands `cont` the normalized `this` (the spec's O) and its ref.
 ///
-/// Captures `length` once, passes `(ref, length, state)` to `cont`. Per-index
+///   - Undefined / Null → throw TypeError
+///   - String → String exotic object (§10.4.3)
+///   - Boolean / Number / Symbol / BigInt → wrapper object
+///   - Object → return argument unchanged
+///
+/// A real wrapper IS allocated and handed back as O, so observable uses of it
+/// — the callback's third argument (`obj instanceof String`), concat's E,
+/// fill/copyWithin's return value — see the wrapper object, and mutators
+/// succeed unobservably (`pop.call(true)` Sets length on the wrapper) instead
+/// of throwing on a sentinel.
+///
+/// Reads NO properties: an operation whose spec text is only ToObject (e.g.
+/// §23.1.5.1 CreateArrayIterator) must not fire an observable Get("length").
+fn to_object_ref(
+  this: JsValue,
+  state: State(host),
+  cont: fn(JsValue, Ref, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case common.to_object(state.heap, state.builtins, this) {
+    Some(#(heap, ref)) -> cont(JsObject(ref), ref, State(..state, heap:))
+    // §7.1.18: Undefined / Null → throw a TypeError exception.
+    None -> state.type_error(state, cannot_convert)
+  }
+}
+
+/// LengthOfArrayLike (§7.3.18) — the length half of `require_array`, on its
+/// own: `? ToLength(? Get(O, "length"))`, clamped to [0, 2^53 - 1]. The Get may
+/// invoke a getter or a proxy trap and the ToLength a `valueOf` — both can
+/// throw, and their side effects are kept (state is threaded through).
+fn length_of_array_like(
+  ref: Ref,
+  state: State(host),
+  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case object_length(state, ref) {
+    Ok(#(length, state)) -> cont(length, state)
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+/// ToObject (§7.1.18) then LengthOfArrayLike (§7.3.18) — the prologue shared by
+/// every "intentionally generic" Array.prototype method (ES2024 §23.1.3), which
+/// works on any object with a `.length` and indexed elements.
+///
+/// Captures `length` once, passes `(O, ref, length, state)` to `cont`. Per-index
 /// reads during iteration go through `get_index`/`get_index_if_present`
 /// (HasProperty+Get via object.get_value_of) — no eager snapshot.
 ///
-/// Per spec (ES2024 §23.1.3), Array.prototype methods are "intentionally
-/// generic" — they work on any object with a `.length` property and indexed
-/// elements. This function fuses the two abstract operations:
-///
-///   ToObject (§7.1.18):
-///     - Undefined / Null → throw TypeError
-///     - String → create a String exotic object (§10.4.3)
-///     - Boolean / Number / Symbol / BigInt → create wrapper object
-///     - Object → return argument unchanged
-///
-///   LengthOfArrayLike (§7.3.18):
-///     1. Assert: Type(obj) is Object.
-///     2. Return ? ToLength(? Get(obj, "length")).
-///       where ToLength (§7.1.17) clamps to [0, 2^53 - 1].
-///
-/// For String primitives/wrappers, ref is the wrapper ref or heap.sentinel_ref;
-/// iteration helpers use `get_index(state, this, idx)` which delegates to
-/// `object.get_value_of` — handles both objects and string primitives.
+/// Callers that need only ONE of the two abstract operations must call it
+/// directly, not this: fusing them makes an unwanted `Get("length")` invisible.
 fn require_array(
   this: JsValue,
   state: State(host),
   cont: fn(JsValue, Ref, Int, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case this {
-    // §7.1.18: Object → return argument unchanged.
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        // Real array — length from [[ArrayLength]].
-        Some(ObjectSlot(kind: ArrayObject(length:), ..)) ->
-          cont(this, ref, length, state)
-        // NOTE: Arguments objects deliberately take the generic path below —
-        // their "length" is an ordinary writable/configurable data property
-        // in the dict (§10.4.4.6), so overrides via defineProperty/assignment
-        // must be honored (the slot kind's length only drives element-key
-        // enumeration).
-        // §7.1.18 String row / §10.4.3: String exotic object.
-        Some(ObjectSlot(kind: value.StringObject(value: s), ..)) ->
-          cont(this, ref, js_string.length(s), state)
-        // Generic object: LengthOfArrayLike (§7.3.18) — Get(obj, "length"),
-        // then ToLength (§7.1.17). The Get may invoke a getter (user code)
-        // and the ToLength may invoke valueOf — both can throw, and their
-        // side effects must be kept (state is threaded through).
-        Some(ObjectSlot(properties:, ..)) ->
-          case length_of_properties(state, ref, properties) {
-            Ok(#(length, state)) -> cont(this, ref, length, state)
-            Error(#(thrown, state)) -> #(state, Error(thrown))
-          }
-        // Non-object heap slot under a ref shouldn't happen, but fall through.
-        _ -> cont(this, ref, 0, state)
-      }
-    // §7.1.18: Undefined / Null → throw a TypeError exception.
-    JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // §7.1.18 String row: ToObject creates a String exotic object (§10.4.3).
-    // A real wrapper is allocated and handed back as the normalized `this`
-    // (the spec's O) so observable uses — the callback's third argument
-    // (`obj instanceof String`), concat's E — see the wrapper. Index reads go
-    // through StringGetOwnProperty (§10.4.3.5) on the wrapper slot; mutators
-    // throw TypeError via [[Set]] on the non-writable length/indices, which
-    // matches the spec's `Set(O, ..., true)` on a String exotic object.
-    JsString(s) -> {
-      let #(h, wrapper_ref) =
-        common.alloc_wrapper(
-          state.heap,
-          value.StringObject(s),
-          state.builtins.string.prototype,
-        )
-      cont(
-        JsObject(wrapper_ref),
-        wrapper_ref,
-        js_string.length(s),
-        State(..state, heap: h),
-      )
-    }
-    // §7.1.18 Boolean/Number/Symbol/BigInt rows: ToObject creates a wrapper
-    // object whose prototype chain (e.g. Boolean.prototype) may carry a
-    // "length" property — Get(O, "length") must consult it. get_value_of
-    // delegates primitives to their prototype without allocating a wrapper.
-    // A real wrapper IS allocated and handed back as the normalized `this`
-    // (the spec's O), so observable uses of O — the callback's third argument
-    // (`obj instanceof Boolean`), concat's E, fill/copyWithin's return value —
-    // see the wrapper object, and mutators succeed unobservably (e.g.
-    // `pop.call(true)` Sets length on the wrapper and returns undefined)
-    // instead of throwing on a sentinel.
-    _ ->
-      case object.get_value_of(state, this, Named("length")) {
-        Ok(#(len_val, state)) ->
-          case to_length_value(state, len_val) {
-            Ok(#(length, state)) ->
-              // §7.1.18 ToObject — common.to_object covers every primitive
-              // row (Boolean/Number/Symbol/BigInt) so `instanceof` on the
-              // normalized O sees the right wrapper kind and prototype
-              // (e.g. `[].sort.call(Symbol()) instanceof Symbol`).
-              case common.to_object(state.heap, state.builtins, this) {
-                Some(#(h, wrapper_ref)) ->
-                  cont(
-                    JsObject(wrapper_ref),
-                    wrapper_ref,
-                    length,
-                    State(..state, heap: h),
-                  )
-                None -> state.type_error(state, cannot_convert)
-              }
-            Error(#(thrown, state)) -> #(state, Error(thrown))
-          }
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
-  }
+  use obj, ref, state <- to_object_ref(this, state)
+  use length, state <- length_of_array_like(ref, state)
+  cont(obj, ref, length, state)
 }
 
 /// Get (ES2024 §7.3.2) on an array-like by integer index.
@@ -1194,14 +1143,15 @@ fn hole_is_inherited(state: State(host), proto: Option(Ref), idx: Int) -> Bool {
   }
 }
 
-/// LengthOfArrayLike (ES2024 §7.3.18) — ℝ(? ToLength(? Get(obj, "length"))).
-/// Goes through the property lookup, so an accessor-valued "length" and
-/// prototype-chain lookups are honored.
+/// LengthOfArrayLike (ES2024 §7.3.18) — ℝ(? ToLength(? Get(obj, "length"))) —
+/// in Result shape. THIS is the implementation the CPS `length_of_array_like`
+/// wraps; concat's spread path calls it directly because its spread target is
+/// an argument rather than the receiver.
 ///
-/// LengthOfArrayLike (§7.3.18) for an arbitrary object ref — dispatches on
-/// the slot kind the same way require_array does, without the ToObject /
-/// TypeError prologue. Used by concat's spread path, where the spread target
-/// is an argument rather than the receiver.
+/// The Array / String slot kinds answer from their [[ArrayLength]] /
+/// [[StringData]] (a non-configurable, non-writable "length" — no user code can
+/// observe the shortcut); everything else goes through the property lookup, so
+/// an accessor-valued "length" and prototype-chain lookups are honored.
 fn object_length(
   state: State(host),
   ref: value.Ref,
@@ -6020,12 +5970,11 @@ fn create_array_iterator(
   state: State(host),
   kind: value.ArrayIterKind,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _this, ref, length, state <- require_array(this, state)
-  // Pragmatic bound: consuming the iterator visits all length indices
-  // (see iteration_budget_msg); fail at creation like the other guards.
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    state.range_error(state, iteration_budget_msg)
-  })
+  // §23.1.5.1 is ToObject and nothing else — it must NOT read `length`. The
+  // iterator re-reads it lazily on every step (see ops/array_iterator), so a
+  // Get("length") here would be an observable, spec-forbidden trap/getter call
+  // on the receiver.
+  use _this, ref, state <- to_object_ref(this, state)
   let #(heap, iter_ref) =
     common.alloc_wrapper(
       state.heap,

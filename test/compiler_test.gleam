@@ -1,5 +1,6 @@
 import arc/compiler
 import arc/module
+import arc/module/load_error
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common
@@ -696,16 +697,34 @@ pub fn huge_sparse_fill_throws_test() -> Nil {
   assert_thrown("Array(100000000).fill(0)")
 }
 
-pub fn huge_sparse_keys_throws_test() -> Nil {
-  assert_thrown("Array(100000000).keys()")
+// keys/values/entries are the exception: §23.1.5.1 CreateArrayIterator is
+// lazy — it materializes nothing and doesn't even read `length` — so a huge
+// length must NOT throw at creation. (Draining the iterator is what costs
+// O(length), and each step re-reads the live length itself.)
+pub fn huge_sparse_keys_creates_lazily_test() -> Nil {
+  assert_normal("typeof Array(100000000).keys()", JsString("object"))
 }
 
-pub fn huge_sparse_values_throws_test() -> Nil {
-  assert_thrown("Array(100000000).values()")
+pub fn huge_sparse_values_creates_lazily_test() -> Nil {
+  assert_normal("typeof Array(100000000).values()", JsString("object"))
 }
 
-pub fn huge_sparse_entries_throws_test() -> Nil {
-  assert_thrown("Array(100000000).entries()")
+pub fn huge_sparse_entries_creates_lazily_test() -> Nil {
+  assert_normal("typeof Array(100000000).entries()", JsString("object"))
+}
+
+/// §23.1.5.1 performs ToObject and nothing else — creating the iterator must
+/// not fire an observable Get("length") on the receiver.
+pub fn create_array_iterator_reads_no_length_test() -> Nil {
+  assert_normal_number(
+    "const seen = [];
+     const p = new Proxy({length: 0}, {
+       get(t, k) { seen.push(String(k)); return Reflect.get(t, k); },
+     });
+     Array.prototype.values.call(p);
+     seen.length",
+    0.0,
+  )
 }
 
 pub fn huge_sparse_toreversed_throws_test() -> Nil {
@@ -7875,8 +7894,8 @@ fn run_module(
     module.compile_bundle(
       specifier,
       source,
-      fn(_dep, _parent) { Error("no module loader in tests") },
-      fn(_resolved) { Error("no module loader in tests") },
+      fn(dep, _parent) { Error(load_error.ImportsForbidden(dep)) },
+      fn(resolved) { Error(load_error.ImportsForbidden(resolved)) },
     )
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
@@ -7972,7 +7991,7 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
       "./c.js" -> Ok("/c.js")
       "./d.js" -> Ok("/d.js")
       "./e.js" -> Ok("/e.js")
-      other -> Error("unknown: " <> other)
+      other -> Error(load_error.ResolveFailed(other, "/a.js"))
     }
   }
   let load = fn(resolved: String) {
@@ -7982,7 +8001,7 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
       "/c.js" -> Ok("import './d.js';")
       "/d.js" -> Ok("import './e.js';")
       "/e.js" -> Ok("export const e = 1;")
-      other -> Error("unknown: " <> other)
+      other -> Error(load_error.NotFound(other))
     }
   }
   let entry = "import './b.js'; import './c.js';"
@@ -8034,8 +8053,8 @@ pub fn module_repl_harness_globals_test() -> Nil {
     module.compile_bundle(
       specifier,
       module_source,
-      fn(_dep, _parent) { Error("no module loader") },
-      fn(_resolved) { Error("no module loader") },
+      fn(dep, _parent) { Error(load_error.ImportsForbidden(dep)) },
+      fn(resolved) { Error(load_error.ImportsForbidden(resolved)) },
     )
 
   // Evaluate the module, passing in REPL globals
@@ -8072,8 +8091,8 @@ pub fn run_export_namespace_call_test() -> Nil {
     module.compile_bundle(
       "<run_export-test>",
       source,
-      fn(_d, _p) { Error("no module loader") },
-      fn(_resolved) { Error("no module loader") },
+      fn(d, _p) { Error(load_error.ImportsForbidden(d)) },
+      fn(resolved) { Error(load_error.ImportsForbidden(resolved)) },
     )
   let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(ns_ref), ..)) =
     module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
@@ -8442,5 +8461,52 @@ pub fn template_quasi_combining_mark_after_substitution_test() -> Nil {
     tag`a${0}\u{0301}e`;
     ",
     value.JsString("22"),
+  )
+}
+
+/// A `with` holder is one of the caller's own local slots, so a direct eval
+/// inside a `with` inherits it as an ordinary capture — the frame reserves no
+/// extra slot for it. Regression: `scope.finalize` used to size the eval
+/// frame with `+ list.length(with_stack)`, double-counting the holders.
+pub fn direct_eval_inside_with_reads_holder_test() -> Nil {
+  assert_normal(
+    "
+    var o = { x: 41 };
+    var out;
+    with (o) { out = eval('x + 1'); }
+    out;
+    ",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+/// Same, one level down: the with-holder AND an ordinary local both have to
+/// resolve from inside the eval'd source.
+pub fn direct_eval_inside_with_in_function_test() -> Nil {
+  assert_normal(
+    "
+    function f() {
+      var q = 7;
+      var p = { y: 5 };
+      with (p) { return eval('y + q'); }
+    }
+    f();
+    ",
+    JsNumber(Finite(12.0)),
+  )
+}
+
+/// A sloppy direct eval at SCRIPT top level has the global environment as its
+/// VariableEnvironment, so its `var` lands on the global object (and, per
+/// §19.2.1.3, is deletable). Regression: this used to be smuggled to the
+/// runtime as a `#("<global>", -1)` sentinel head entry in the name table.
+pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
+  assert_normal(
+    "
+    eval('var gg = 9');
+    var ok = (gg === 9) && (delete gg === true) && (typeof gg === 'undefined');
+    ok;
+    ",
+    value.JsBool(True),
   )
 }

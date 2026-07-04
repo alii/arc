@@ -1,4 +1,4 @@
-import arc/vm/key.{Index, Named, max_array_index}
+import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object.{type PropKey, PkString, PkSymbol}
@@ -6,9 +6,8 @@ import arc/vm/state.{type State}
 import arc/vm/value.{
   type JsValue, Finite, JsNumber, JsObject, JsString, JsSymbol,
 }
-import gleam/float
-import gleam/int
 import gleam/list
+import gleam/option.{None, Some}
 import gleam/result
 
 // ============================================================================
@@ -57,20 +56,16 @@ fn primitive_to_prop_key(
   case key {
     // Step 2: If key is a Symbol, return key.
     JsSymbol(sym) -> Ok(#(PkSymbol(sym), state))
-    JsNumber(Finite(n)) -> {
-      // +. 0.0 normalizes -0.0 → +0.0 (BEAM =:= distinguishes them)
-      let n = n +. 0.0
-      let i = float.truncate(n)
-      // Same [0, 2^32-1) array-index cap as key.canonical_key — numbers
-      // beyond it (e.g. 4294967296) must stringify to Named so the numeric
-      // and string forms of the same key land in the same dict slot.
-      case int.to_float(i) == n && i >= 0 && i <= max_array_index {
+    JsNumber(Finite(n)) ->
+      // The one canonical-array-index test lives in key.gleam, so the numeric
+      // and string forms of the same key can never disagree about which dict
+      // slot they name.
+      case key.array_index_of_float(n) {
         // Valid array index — skip stringification entirely.
-        True -> Ok(#(PkString(Index(i)), state))
+        Some(i) -> Ok(#(PkString(Index(i)), state))
         // Non-index number — stringify (e.g. 1.5 → "1.5", -1 → "-1").
-        False -> Ok(#(PkString(Named(value.js_format_number(n))), state))
+        None -> Ok(#(PkString(Named(value.js_format_number(n))), state))
       }
-    }
     JsNumber(value.NaN) -> Ok(#(PkString(Named("NaN")), state))
     JsNumber(value.Infinity) -> Ok(#(PkString(Named("Infinity")), state))
     JsNumber(value.NegInfinity) -> Ok(#(PkString(Named("-Infinity")), state))
@@ -115,6 +110,39 @@ pub fn put_elem_value(
 }
 
 // ============================================================================
+// LengthOfArrayLike — ES2024 §7.1.20 / §7.3.18
+// ============================================================================
+
+/// LengthOfArrayLike ( obj ) — `ℝ(? ToLength(? Get(obj, "length")))`. THE
+/// canonical implementation: every array-like iteration in the runtime
+/// (spread, for-of over an array-like, Array Iterator steps, JSON.stringify,
+/// Function.prototype.apply) derives its bound from here, so they cannot
+/// disagree about what a hostile `length` means.
+///
+/// Both halves are observable and can throw: the Get runs a getter or a proxy
+/// trap, and ToNumber can run a user `valueOf` — hence the threaded state.
+/// ToLength then clamps to [0, 2^53 - 1]: NaN / -Infinity / negatives → 0,
+/// +Infinity and anything past 2^53-1 → 2^53-1. Never a raw truncation — an
+/// unclamped `float_to_int` on `{length: 1e300}` yields a bound no loop can
+/// ever reach.
+///
+/// `receiver` is the [[Get]] receiver (the spec's O — normally `JsObject(ref)`).
+pub fn length_of_array_like(
+  state: State(host),
+  ref: value.Ref,
+  receiver: JsValue,
+) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
+  use #(len_val, state) <- result.try(object.get_value(
+    state,
+    ref,
+    Named("length"),
+    receiver,
+  ))
+  use #(len_num, state) <- result.map(coerce.js_to_number(state, len_val))
+  #(coerce.jsnum_to_length(len_num), state)
+}
+
+// ============================================================================
 // CreateListFromArrayLike — ES2024 §7.3.19
 // ============================================================================
 
@@ -137,16 +165,8 @@ pub fn create_list_from_array_like(
 ) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
   case arg {
     JsObject(ref) -> {
-      // Step 3: Let len be ? LengthOfArrayLike(obj) = ToLength(? Get(obj, "length")).
-      use #(len_val, state) <- result.try(object.get_value(
-        state,
-        ref,
-        Named("length"),
-        arg,
-      ))
-      use #(len_num, state) <- result.try(coerce.js_to_number(state, len_val))
-      // §7.1.20 ToLength: clamp to [0, 2^53-1].
-      let len = coerce.jsnum_to_length(len_num)
+      // Step 3: Let len be ? LengthOfArrayLike(obj).
+      use #(len, state) <- result.try(length_of_array_like(state, ref, arg))
       case len > limits.max_iteration {
         True ->
           Error(state.range_error_value(

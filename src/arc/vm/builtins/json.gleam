@@ -7,6 +7,7 @@ import arc/vm/js_string
 import arc/vm/key
 import arc/vm/ops/coerce
 import arc/vm/ops/object as objops
+import arc/vm/ops/property
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type JsonNativeFn, type Ref, Finite, JsBool, JsNull, JsNumber,
@@ -140,7 +141,7 @@ fn json_raw_json(
 
   // Steps 2-3: validate the text.
   case validate_raw_json_text(bit_array.from_string(json_str)) {
-    Error(msg) -> state.syntax_error(state, msg)
+    Error(e) -> state.syntax_error(state, json_error_message(e))
     Ok(Nil) -> {
       // Steps 4-8: the frozen, null-prototype [[IsRawJSON]] box.
       let #(state, ref) = alloc_raw_json(state, json_str)
@@ -151,34 +152,39 @@ fn json_raw_json(
 
 /// Steps 2-3 of JSON.rawJSON: the text must be non-empty, must not begin or
 /// end with JSON whitespace, and must be a complete JSON *primitive* literal.
-/// Returns the SyntaxError message on rejection.
-fn validate_raw_json_text(bytes: BitArray) -> Result(Nil, String) {
-  use Nil <- result.try(case bytes {
-    <<>> -> Error("JSON.rawJSON text must not be empty")
-    <<first, _:bits>> ->
-      case is_json_whitespace_byte(first) || last_byte_is_whitespace(bytes) {
-        True -> Error("JSON.rawJSON text must not start or end with whitespace")
+/// Rejects with a `JsonParseError` category — the wording is `json_error_message`'s
+/// job, exactly like the scanner's own failures.
+fn validate_raw_json_text(bytes: BitArray) -> Result(Nil, JsonParseError) {
+  use Nil <- result.try(case bit_array.byte_size(bytes) {
+    0 -> Error(RawJsonEmpty)
+    _ ->
+      case first_byte_is_whitespace(bytes) || last_byte_is_whitespace(bytes) {
+        True -> Error(RawJsonSurroundingWhitespace)
         False -> Ok(Nil)
       }
-    _ -> Error("Invalid UTF-8 in JSON input")
   })
 
-  use #(parsed, rest) <- result.try(
-    parse_value(bytes) |> result.map_error(json_error_message),
-  )
+  use #(parsed, rest) <- result.try(parse_value(bytes))
   use Nil <- result.try(case skip_whitespace(rest) {
     <<>> -> Ok(Nil)
-    _ -> Error("Unexpected non-whitespace character after JSON")
+    _ -> Error(TrailingContent)
   })
   case parsed {
-    JsonArray(_) | JsonObject(_) ->
-      Error("JSON.rawJSON text must not be an object or an array")
+    JsonArray(_) | JsonObject(_) -> Error(RawJsonNotPrimitive)
     _ -> Ok(Nil)
   }
 }
 
 fn is_json_whitespace_byte(byte: Int) -> Bool {
   byte == 0x09 || byte == 0x0a || byte == 0x0d || byte == 0x20
+}
+
+fn first_byte_is_whitespace(bytes: BitArray) -> Bool {
+  case bit_array.slice(bytes, 0, 1) {
+    Ok(<<first>>) -> is_json_whitespace_byte(first)
+    Ok(_) -> False
+    Error(Nil) -> False
+  }
 }
 
 fn last_byte_is_whitespace(bytes: BitArray) -> Bool {
@@ -235,10 +241,12 @@ fn owner_realm_builtins(
   case state.builtins.function.prototype == fn_proto {
     True -> state.builtins
     False ->
-      state.ctx.realms
-      |> dict.values
-      |> list.find(fn(b) { b.function.prototype == fn_proto })
-      |> result.unwrap(state.builtins)
+      // Not the running realm; ask the realm registry. A miss means the owning
+      // realm was never reified as a RealmSlot, in which case it IS the running
+      // realm and `state.builtins` is the right answer.
+      state.builtins_of_function_proto(state, fn_proto)
+      |> option.map(fn(realm) { realm.1 })
+      |> option.unwrap(state.builtins)
   }
 }
 
@@ -334,11 +342,7 @@ fn json_parse(
             None -> #(state, Ok(unfiltered))
           }
         }
-        _ ->
-          state.syntax_error(
-            state,
-            "Unexpected non-whitespace character after JSON",
-          )
+        _ -> state.syntax_error(state, json_error_message(TrailingContent))
       }
     }
     // Step 2: If parse fails, throw SyntaxError
@@ -748,6 +752,14 @@ type JsonParseError {
   Expected(what: String, in_: String)
   /// The input bytes are not valid UTF-8.
   InvalidUtf8
+  /// A complete JSON value was scanned but non-whitespace bytes follow it.
+  TrailingContent
+  /// `JSON.rawJSON("")` — the text is empty.
+  RawJsonEmpty
+  /// `JSON.rawJSON` text starts or ends with JSON whitespace.
+  RawJsonSurroundingWhitespace
+  /// `JSON.rawJSON` text parses, but to an object or an array.
+  RawJsonNotPrimitive
 }
 
 /// Render a `JsonParseError` as the SyntaxError message users see.
@@ -768,6 +780,11 @@ fn json_error_message(e: JsonParseError) -> String {
     InvalidNumber(raw:) -> "Invalid number '" <> raw <> "' in JSON"
     Expected(what:, in_:) -> "Expected " <> what <> " in " <> in_
     InvalidUtf8 -> "Invalid UTF-8 in JSON input"
+    TrailingContent -> "Unexpected non-whitespace character after JSON"
+    RawJsonEmpty -> "JSON.rawJSON text must not be empty"
+    RawJsonSurroundingWhitespace ->
+      "JSON.rawJSON text must not start or end with whitespace"
+    RawJsonNotPrimitive -> "JSON.rawJSON text must not be an object or an array"
   }
 }
 
@@ -1577,28 +1594,13 @@ fn space_to_integer(n: value.JsNum) -> Int {
   }
 }
 
-/// 2^53 - 1, the ToLength (§7.1.17) upper clamp.
-const max_safe_length = 9_007_199_254_740_991
-
-/// LengthOfArrayLike (§7.3.18): ToLength(? Get(obj, "length")). The Get goes
-/// through full [[Get]] (proxy traps, getters), ToNumber can re-enter valueOf.
+/// LengthOfArrayLike (§7.3.18) — `property.length_of_array_like` is THE
+/// implementation; this only supplies the receiver.
 fn length_of_array_like(
   state: State(host),
   ref: Ref,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  use #(len_val, state) <- result.try(objops.get_value(
-    state,
-    ref,
-    key.canonical_key("length"),
-    JsObject(ref),
-  ))
-  use #(n, state) <- result.map(coerce.js_to_number(state, len_val))
-  let len = case n {
-    Finite(f) -> int.clamp(float.truncate(f), 0, max_safe_length)
-    value.Infinity -> max_safe_length
-    NaN | NegInfinity -> 0
-  }
-  #(len, state)
+  property.length_of_array_like(state, ref, JsObject(ref))
 }
 
 /// SerializeJSONProperty (§25.5.2.1).
