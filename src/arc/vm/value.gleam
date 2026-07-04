@@ -217,43 +217,162 @@ pub type JsNum {
   NegInfinity
 }
 
-/// Number::toString(x, radixMV) helper — ES2024 §6.1.6.1.20.
-///
-/// Per spec, NaN/+Infinity/-Infinity always use their canonical string forms
-/// regardless of radix. For finite values:
-///   - Radix 10: use standard Number::toString (decimal formatting).
-///   - Other radix: convert the integer part to the specified base using
-///     lowercase digits (a-z for 10-35).
-///
-/// Note: Non-integer values with non-10 radix fall back to decimal.
-/// The spec requires proper fractional digit conversion (e.g. 3.5 in base 16
-/// should produce "3.8"), but this is rarely used and complex to implement.
-pub fn format_number_radix(n: JsNum, radix: Int) -> String {
+/// A validated `toString` radix: an integer in the inclusive range 2..36
+/// (Number.prototype.toString §21.1.3.6 step 4, BigInt.prototype.toString
+/// §21.2.3.3 step 3). Minted only by `radix`, so the range check lives in
+/// exactly one place and the digit-conversion helpers below cannot be handed
+/// a base they can't render.
+pub opaque type Radix {
+  Radix(base: Int)
+}
+
+/// Validate a radix (2..36). `Error(Nil)` is the caller's cue to throw a
+/// RangeError.
+pub fn radix(base: Int) -> Result(Radix, Nil) {
+  case base >= 2 && base <= 36 {
+    True -> Ok(Radix(base))
+    False -> Error(Nil)
+  }
+}
+
+/// Base 10 — the default radix, and the one that routes to the FFI's
+/// JS-compatible decimal formatting.
+pub fn decimal_radix() -> Radix {
+  Radix(10)
+}
+
+/// The digit alphabet: 0-9 then lowercase a-z for digit values 10..35.
+const radix_alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+fn radix_digit(d: Int) -> String {
+  string.slice(radix_alphabet, d, 1)
+}
+
+/// Number::toString(x) — ES2024 §6.1.6.1.20 with radix 10.
+pub fn format_number(n: JsNum) -> String {
   case n {
     NaN -> "NaN"
     Infinity -> "Infinity"
     NegInfinity -> "-Infinity"
-    Finite(f) ->
-      case radix {
-        10 -> js_format_number(f)
-        _ -> {
-          let truncated = float.truncate(f)
-          case int.to_float(truncated) == f {
-            // Integer value — use radix conversion. int.to_base_string
-            // returns uppercase (via erlang integer_to_binary/2); JS wants
-            // lowercase. The function handles sign ("-ff" for -255) which
-            // matches JS semantics.
-            True ->
-              int.to_base_string(truncated, radix)
-              |> result.map(string.lowercase)
-              // radix already validated as 2-36 by caller
-              |> result.unwrap(js_format_number(f))
-            // Non-integer with non-10 radix — fall back to decimal.
-            False -> js_format_number(f)
-          }
-        }
+    Finite(f) -> js_format_number(f)
+  }
+}
+
+/// Number::toString(x, radixMV) — ES2024 §6.1.6.1.20.
+///
+/// NaN/±Infinity always use their canonical string forms regardless of radix.
+/// Radix 10 uses standard decimal formatting; other radices render the integer
+/// part with lowercase digits and, for non-integers, the fractional part digit
+/// by digit until the emitted digits round-trip back to `f` (the same
+/// shortest-representation criterion V8's DoubleToRadixCString and QuickJS's
+/// js_dtoa_radix use), so `(3.5).toString(16)` is `"3.8"`.
+pub fn format_number_radix(n: JsNum, r: Radix) -> String {
+  case n, r.base {
+    _, 10 -> format_number(n)
+    NaN, _ -> "NaN"
+    Infinity, _ -> "Infinity"
+    NegInfinity, _ -> "-Infinity"
+    Finite(f), base -> format_float_radix(f, base)
+  }
+}
+
+/// BigInt::toString(x, radixMV) — ES2024 §6.1.6.2.24. Integers only, so no
+/// fractional part and no rounding.
+pub fn format_bigint_radix(n: Int, r: Radix) -> String {
+  case r.base {
+    10 -> int.to_string(n)
+    // int.to_base_string only rejects bases outside 2..36, which `Radix`
+    // already excludes — the Ok is total.
+    base -> {
+      let assert Ok(s) = int.to_base_string(n, base)
+      string.lowercase(s)
+    }
+  }
+}
+
+/// The digits of a finite float in `base` (2..36, never 10 here).
+fn format_float_radix(f: Float, base: Int) -> String {
+  let sign = case f <. 0.0 {
+    True -> "-"
+    False -> ""
+  }
+  let value = float.absolute_value(f)
+  let integer = float.floor(value)
+  let fraction = value -. integer
+  let #(fraction_digits, carry) = case fraction >. 0.0 {
+    False -> #([], False)
+    True -> {
+      // delta = half a ULP: the point past which extra digits no longer
+      // distinguish `value` from its neighbouring double.
+      let delta =
+        float.max(0.5 *. { next_double(value) -. value }, next_double(0.0))
+      case fraction >=. delta {
+        False -> #([], False)
+        True -> fraction_loop(fraction, delta, base, [])
+      }
+    }
+  }
+  let integer_part = case carry {
+    True -> float.truncate(integer) + 1
+    False -> float.truncate(integer)
+  }
+  let assert Ok(integer_str) = int.to_base_string(integer_part, base)
+  let fraction_str = case fraction_digits {
+    [] -> ""
+    ds -> "." <> string.concat(list.map(ds, radix_digit))
+  }
+  sign <> string.lowercase(integer_str) <> fraction_str
+}
+
+/// Emit fractional digits (most-significant first, accumulated reversed) until
+/// they pin down `value` to within half a ULP, rounding the last digit up when
+/// the remainder demands it. Returns the digits plus a carry into the integer
+/// part (`(0.9999…).toString(2)` rounds up to "1").
+fn fraction_loop(
+  fraction: Float,
+  delta: Float,
+  base: Int,
+  acc: List(Int),
+) -> #(List(Int), Bool) {
+  let base_f = int.to_float(base)
+  let scaled = fraction *. base_f
+  let delta = delta *. base_f
+  let digit = float.truncate(scaled)
+  let fraction = scaled -. int.to_float(digit)
+  let acc = [digit, ..acc]
+  let round_up = fraction >. 0.5 || { fraction == 0.5 && int.is_odd(digit) }
+  case round_up && fraction +. delta >. 1.0 {
+    True -> propagate_carry(acc, base)
+    False ->
+      case fraction >=. delta {
+        True -> fraction_loop(fraction, delta, base, acc)
+        False -> #(list.reverse(acc), False)
       }
   }
+}
+
+/// Round the last emitted digit up, dropping digits that overflow the base
+/// (…,base-1 becomes …+1 with the trailing digit gone). An empty list means
+/// the carry escapes into the integer part.
+fn propagate_carry(rev_digits: List(Int), base: Int) -> #(List(Int), Bool) {
+  case rev_digits {
+    [] -> #([], True)
+    [d, ..rest] ->
+      case d + 1 < base {
+        True -> #(list.reverse([d + 1, ..rest]), False)
+        False -> propagate_carry(rest, base)
+      }
+  }
+}
+
+/// The next representable double above `f` (f >= 0). Used to size the
+/// half-ULP termination threshold; never called on values large enough for
+/// the successor to be Infinity, since those have no fractional part.
+fn next_double(f: Float) -> Float {
+  let assert <<bits:size(64)>> = <<f:float-size(64)>>
+  let successor_bits = bits + 1
+  let assert <<next:float-size(64)>> = <<successor_bits:size(64)>>
+  next
 }
 
 /// Stack values — the things that live on the VM stack or inside object properties.
@@ -1033,6 +1152,20 @@ pub type DisposableStackNativeFn {
   UsingDisposer(method: JsValue, value: JsValue, discard: Bool)
 }
 
+/// A stack's [[DisposableState]] / [[AsyncDisposableState]] together with its
+/// [[DisposeCapability]] — the two are only ever meaningful in tandem, so they
+/// live in one sum type. A disposed stack has its [[DisposeCapability]]
+/// emptied by construction: `Disposed` carries no resources, so "disposed but
+/// still holding disposers" is unrepresentable.
+pub type DisposableState {
+  /// State is pending: `resources` is the [[DisposableResourceStack]], stored
+  /// NEWEST-FIRST (O(1) prepend on add); dispose() walks it head-first, which
+  /// is the spec's reverse list order.
+  Pending(resources: List(DisposeResource))
+  /// State is disposed: the resource stack has been taken (dispose/move).
+  Disposed
+}
+
 /// One entry of a [[DisposableResourceStack]] — a DisposableResource Record
 /// (Explicit Resource Management proposal §3.1).
 pub type DisposeResource {
@@ -1191,9 +1324,9 @@ pub type AtomicsWaiter {
   )
 }
 
-/// Element type read/written by DataView.prototype get*/set* methods.
-/// Table "The TypedArray Constructors" element sizes apply (1/2/4/8 bytes).
-pub type ViewElementType {
+/// DataView element types whose JS value is a Number: SetViewValue coerces
+/// with ToNumber, GetViewValue produces a JsNumber.
+pub type ViewNumElement {
   VInt8
   VUint8
   VInt16
@@ -1203,8 +1336,24 @@ pub type ViewElementType {
   VFloat16
   VFloat32
   VFloat64
+}
+
+/// DataView element types whose JS value is a BigInt: SetViewValue coerces
+/// with ToBigInt, GetViewValue produces a JsBigInt.
+pub type ViewBigElement {
   VBigInt64
   VBigUint64
+}
+
+/// Element type read/written by DataView.prototype get*/set* methods.
+/// Table "The TypedArray Constructors" element sizes apply (1/2/4/8 bytes).
+///
+/// The Number/BigInt split lives in the type rather than a comment: it decides
+/// which coercion (ToNumber vs ToBigInt) and which encoder each get*/set* uses,
+/// so a bigint element cannot reach the number encoder.
+pub type ViewElementType {
+  VNum(ViewNumElement)
+  VBig(ViewBigElement)
 }
 
 /// DataView methods — ES2024 Section 25.3. Constructor, accessor getters,
@@ -1936,9 +2085,37 @@ pub type CollatorState {
     ignore_punctuation: Bool,
     collation: String,
     numeric: Bool,
-    case_first: String,
+    case_first: CaseFirst,
     bound_compare: Option(Ref),
   )
+}
+
+/// `[[CaseFirst]]` (§10.1.2 InitializeCollator, UTS 35 `kf`). Parsed once at
+/// construction so the collator's tertiary (case) level can dispatch on it
+/// exhaustively — an unrecognised spelling cannot reach the comparator and be
+/// silently treated as the default.
+pub type CaseFirst {
+  CaseFirstUpper
+  CaseFirstLower
+  CaseFirstFalse
+}
+
+pub fn case_first_to_js_string(v: CaseFirst) -> String {
+  case v {
+    CaseFirstUpper -> "upper"
+    CaseFirstLower -> "lower"
+    CaseFirstFalse -> "false"
+  }
+}
+
+/// The `kf` u-extension / `caseFirst` option spellings.
+pub fn case_first_from_js_string(s: String) -> Option(CaseFirst) {
+  case s {
+    "upper" -> Some(CaseFirstUpper)
+    "lower" -> Some(CaseFirstLower)
+    "false" -> Some(CaseFirstFalse)
+    _ -> None
+  }
 }
 
 // --- Intl.NumberFormat closed option sets (§15.1) -------------------------
@@ -2877,6 +3054,9 @@ pub type VmNativeFn {
   BigIntGlobal
   /// BigInt.prototype.toString ( [ radix ] ) — §21.2.3.3.
   BigIntPrototypeToString
+  /// BigInt.prototype.toLocaleString ( [ reserved1 [ , reserved2 ] ] ) —
+  /// §21.2.3.2. NOT toString: its first argument is `locales`, not a radix.
+  BigIntPrototypeToLocaleString
   /// BigInt.prototype.valueOf ( ) — §21.2.3.4.
   BigIntPrototypeValueOf
   /// %ThrowTypeError% (§10.2.4.1) — the poison-pill accessor installed for
@@ -3120,14 +3300,9 @@ pub type ExoticKind(ctx, host) {
   /// DisposableStack / AsyncDisposableStack object — Explicit Resource
   /// Management proposal §12.3 / §12.4. `async` distinguishes the two brands
   /// ([[DisposableState]] vs [[AsyncDisposableState]] internal slots).
-  /// `disposed` is the state (True = disposed). `resources` is the
-  /// [[DisposableResourceStack]] stored NEWEST-FIRST (O(1) prepend on add);
-  /// dispose() walks it head-first, which is the spec's reverse list order.
-  DisposableStackObject(
-    async: Bool,
-    disposed: Bool,
-    resources: List(DisposeResource),
-  )
+  /// `state` is that slot's value plus the [[DisposeCapability]] it governs
+  /// (see `DisposableState`).
+  DisposableStackObject(async: Bool, state: DisposableState)
   /// ArrayBuffer / SharedArrayBuffer — ES2024 §25.1/§25.2.
   /// [[ArrayBufferData]] is `data`: `None` is the spec's null (a DETACHED
   /// buffer — there is no separate `detached` flag, so "detached but still
@@ -4241,13 +4416,16 @@ fn do_refs_in_slot(
               None -> a
             }
           })
-        DisposableStackObject(resources:, ..) ->
+        DisposableStackObject(state: Pending(resources:), ..) ->
           push_dispose_resources(resources, acc)
+        DisposableStackObject(state: Disposed, ..) -> acc
         // The namespace's live bindings are BoxSlot refs reachable via exports.
         ModuleNamespace(exports:) ->
           dict.fold(exports, acc, fn(a, _name, box_ref) { [box_ref, ..a] })
         // The only heap refs an Intl instance can hold are the cached bound
         // `format`/`compare` function objects; everything else is scalar.
+        // Exhaustive on purpose — a new IntlData variant that carries a Ref
+        // MUST be added here or its target can be collected while reachable.
         IntlObject(data:) ->
           case data {
             CollatorData(CollatorState(bound_compare: Some(r), ..))
@@ -4256,7 +4434,19 @@ fn do_refs_in_slot(
               r,
               ..acc
             ]
-            _ -> acc
+            // Ref-free: no cached bound function, or no heap slot at all.
+            CollatorData(CollatorState(bound_compare: None, ..))
+            | NumberFormatData(NumberFormatState(bound_format: None, ..))
+            | DateTimeFormatData(DateTimeFormatState(bound_format: None, ..))
+            | LocaleData(_)
+            | PluralRulesData(_)
+            | ListFormatData(_)
+            | RelativeTimeFormatData(_)
+            | SegmenterData(_)
+            | DisplayNamesData(_)
+            | DurationFormatData(_)
+            | SegmentsData(_)
+            | SegmentIteratorData(_) -> acc
           }
         // Ask the embedder for any engine refs reachable from the opaque
         // host value, so GC traces host objects that point back into the JS
@@ -5106,6 +5296,7 @@ fn vm_native_refs(f: VmNativeFn, acc: List(Ref)) -> List(Ref) {
     | Gc
     | BigIntGlobal
     | BigIntPrototypeToString
+    | BigIntPrototypeToLocaleString
     | BigIntPrototypeValueOf
     | ThrowTypeErrorFn
     | FunctionHasInstance
