@@ -14,15 +14,13 @@ import arc/vm/heap
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
-  type JsValue, type Ref, BigIntGlobal, BigIntPrototypeToString,
-  BigIntPrototypeValueOf, Dispatch, Finite, JsNumber, JsObject, JsString,
-  JsUndefined, ObjectSlot, VmNative,
+  type JsValue, type Ref, BigIntGlobal, BigIntPrototypeToLocaleString,
+  BigIntPrototypeToString, BigIntPrototypeValueOf, Dispatch, Finite, JsNumber,
+  JsObject, JsString, JsUndefined, ObjectSlot, VmNative,
 }
-import gleam/bool
 import gleam/int
 import gleam/option.{None, Some}
 import gleam/result
-import gleam/string
 
 // ============================================================================
 // Init — the BigInt global function and %BigInt.prototype%
@@ -42,7 +40,7 @@ pub fn init(
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
       #("toString", VmNative(BigIntPrototypeToString), 0),
-      #("toLocaleString", VmNative(BigIntPrototypeToString), 0),
+      #("toLocaleString", VmNative(BigIntPrototypeToLocaleString), 0),
       #("valueOf", VmNative(BigIntPrototypeValueOf), 0),
     ])
   // §21.2.3.5 %BigInt.prototype%[@@toStringTag] = "BigInt".
@@ -159,28 +157,33 @@ pub fn bigint_proto_to_string(
         #(coerce.jsnum_to_integer_or_infinity(num), state)
       }
     })
-    // Step 3: radixMV < 2 or > 36 → RangeError.
-    use <- bool.lazy_guard(radix < 2 || radix > 36, fn() {
-      Error(state.range_error_value(
-        state,
-        "toString() radix must be between 2 and 36",
-      ))
-    })
-    // Steps 4-5: BigInt::toString(x, radix) — lowercase digits, no suffix.
-    case radix {
-      10 -> Ok(#(JsString(int.to_string(n)), state))
-      _ ->
-        case int.to_base_string(n, radix) {
-          Ok(s) -> Ok(#(JsString(string.lowercase(s)), state))
-          Error(err) ->
-            Error(state.range_error_value(
-              state,
-              "toString() radix must be between 2 and 36 ("
-                <> string.inspect(err)
-                <> ")",
-            ))
-        }
+    // Step 3: radixMV outside 2..36 → RangeError. Steps 4-5:
+    // BigInt::toString(x, radix) — lowercase digits, no suffix.
+    case value.radix(radix) {
+      Ok(r) -> Ok(#(JsString(value.format_bigint_radix(n, r)), state))
+      Error(Nil) ->
+        Error(state.range_error_value(
+          state,
+          "toString() radix must be between 2 and 36",
+        ))
     }
+  })
+}
+
+/// §21.2.3.2 BigInt.prototype.toLocaleString ( [ reserved1 [ , reserved2 ] ] )
+///
+/// NOT an alias of toString: its first argument is `locales` (ECMA-402
+/// §18.3.1), never a radix. With no ECMA-402 BigInt.NumberFormat host hook the
+/// spec fallback applies — both arguments are ignored and the value is
+/// rendered in decimal.
+pub fn bigint_proto_to_locale_string(
+  this: JsValue,
+  _args: List(JsValue),
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  wrap({
+    use #(n, state) <- result.map(this_bigint_value(state, this))
+    #(JsString(int.to_string(n)), state)
   })
 }
 

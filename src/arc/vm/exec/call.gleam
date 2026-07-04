@@ -2462,6 +2462,9 @@ pub fn dispatch_native(
     // §21.2.3.3 BigInt.prototype.toString ( [ radix ] )
     value.VmNative(value.BigIntPrototypeToString) ->
       builtins_bigint.bigint_proto_to_string(this, args, state)
+    // §21.2.3.2 BigInt.prototype.toLocaleString ( [ reserved1 [, reserved2 ] ] )
+    value.VmNative(value.BigIntPrototypeToLocaleString) ->
+      builtins_bigint.bigint_proto_to_locale_string(this, args, state)
     // §21.2.3.4 BigInt.prototype.valueOf ( )
     value.VmNative(value.BigIntPrototypeValueOf) ->
       builtins_bigint.bigint_proto_value_of(this, args, state)

@@ -1,12 +1,9 @@
 /// Numeric-literal and string-escape cooking tests.
 import arc/engine.{Returned}
-import arc/parser/number
+import arc/parser/ast.{FiniteNumber, InfiniteNumber}
+import arc/parser/number.{BigIntValue, NumberValue}
 import arc/vm/value.{Finite, Infinity, JsNumber, JsString, NaN, NegInfinity}
-
-/// Largest finite IEEE double — the value an overflowing literal currently
-/// clamps to. This is a KNOWN SPEC DEVIATION, not the correct value: see
-/// number_exponent_overflow_clamps_test.
-const max_double = 1.7976931348623157e308
+import gleam/string
 
 /// Helper: eval source on a fresh engine, assert normal completion, return
 /// the completion value.
@@ -15,62 +12,98 @@ fn eval(source: String) -> value.JsValue {
   value
 }
 
+/// Helper: the Float a numeric literal denotes, asserting it is finite.
+fn num(raw: String) -> Float {
+  let assert Ok(NumberValue(FiniteNumber(f))) =
+    number.parse_numeric_literal(raw)
+  f
+}
+
 // ----------------------------------------------------------------------------
-// parse_js_number — dot/exponent normalization
+// parse_numeric_literal — dot/exponent normalization
 // ----------------------------------------------------------------------------
 
 pub fn number_dot_before_exponent_test() {
-  assert number.parse_js_number("1.e3") == 1000.0
-  assert number.parse_js_number("2.E5") == 200_000.0
-  assert number.parse_js_number("1_0.e2") == 1000.0
+  assert num("1.e3") == 1000.0
+  assert num("2.E5") == 200_000.0
+  assert num("1_0.e2") == 1000.0
 }
 
 pub fn number_bare_dot_forms_test() {
-  assert number.parse_js_number("1.") == 1.0
-  assert number.parse_js_number(".5") == 0.5
-  assert number.parse_js_number(".5e2") == 50.0
-  assert number.parse_js_number("1.5e2") == 150.0
+  assert num("1.") == 1.0
+  assert num(".5") == 0.5
+  assert num(".5e2") == 50.0
+  assert num("1.5e2") == 150.0
 }
 
 // ----------------------------------------------------------------------------
-// parse_js_number — out-of-range exponents
+// parse_numeric_literal — out-of-range exponents
 // ----------------------------------------------------------------------------
 
-pub fn number_exponent_overflow_clamps_test() {
-  // KNOWN SPEC DEVIATION — this pins the current WRONG value, it is not the
-  // fixed behaviour. Per ES2024 the value of `1e400` is +Infinity, and the VM
-  // can express it (value.JsNum has Infinity; value.num_from_int already
-  // returns it for the same overflow). We clamp only because
-  // ast.NumberLiteral stores a plain Float, which on BEAM has no infinity.
-  // The clamp is still strictly better than the prior behaviour (0.0), and
-  // this test exists so a regression back to 0.0 is caught. Once
-  // NumberLiteral carries a value.JsNum through emit's push_const, these
-  // must become Infinity.
-  assert number.parse_js_number("1e400") == max_double
-  assert number.parse_js_number("1.5e400") == max_double
+pub fn number_exponent_overflow_is_infinity_test() {
+  // §12.9.3: the mathematical value of a beyond-double literal is +Infinity.
+  // A literal never carries a sign, so it is never -Infinity.
+  assert number.parse_numeric_literal("1e400")
+    == Ok(NumberValue(InfiniteNumber))
+  assert number.parse_numeric_literal("1.5e400")
+    == Ok(NumberValue(InfiniteNumber))
+  // The integer path overflows too: 10^400 written out in full.
+  assert number.parse_numeric_literal("1" <> string.repeat("0", 400))
+    == Ok(NumberValue(InfiniteNumber))
 }
 
 pub fn number_exponent_underflow_is_zero_test() {
-  assert number.parse_js_number("1e-400") == 0.0
+  assert num("1e-400") == 0.0
 }
 
 // ----------------------------------------------------------------------------
-// parse_js_number — radix prefixes and separators
+// parse_numeric_literal — radix prefixes and separators
 // ----------------------------------------------------------------------------
 
 pub fn number_radix_prefix_test() {
-  assert number.parse_js_number("0xFF") == 255.0
-  assert number.parse_js_number("0XF_F") == 255.0
-  assert number.parse_js_number("0o17") == 15.0
-  assert number.parse_js_number("0b1_01") == 5.0
-  assert number.parse_js_number("0") == 0.0
-  assert number.parse_js_number("1_000") == 1000.0
+  assert num("0xFF") == 255.0
+  assert num("0XF_F") == 255.0
+  assert num("0o17") == 15.0
+  assert num("0b1_01") == 5.0
+  assert num("0") == 0.0
+  assert num("1_000") == 1000.0
 }
 
-pub fn bigint_radix_prefix_test() {
-  assert number.parse_js_bigint("0xffn") == 255
-  assert number.parse_js_bigint("0B101n") == 5
-  assert number.parse_js_bigint("1_000n") == 1000
+// ----------------------------------------------------------------------------
+// parse_numeric_literal — Annex B §B.1.1 leading-zero forms
+// ----------------------------------------------------------------------------
+
+pub fn number_legacy_octal_is_base_eight_test() {
+  assert num("010") == 8.0
+  assert num("0777") == 511.0
+  assert num("00") == 0.0
+}
+
+pub fn number_non_octal_decimal_is_base_ten_test() {
+  // 08/09 cannot be octal, so Annex B makes them base 10.
+  assert num("08") == 8.0
+  assert num("09") == 9.0
+  // 08 admits a fraction/exponent (LegacyOctalIntegerLiteral does not).
+  assert num("08.5") == 8.5
+}
+
+pub fn number_bigint_test() {
+  assert number.parse_numeric_literal("0xffn") == Ok(BigIntValue(255))
+  assert number.parse_numeric_literal("0B101n") == Ok(BigIntValue(5))
+  assert number.parse_numeric_literal("1_000n") == Ok(BigIntValue(1000))
+  assert number.parse_numeric_literal("0n") == Ok(BigIntValue(0))
+}
+
+// ----------------------------------------------------------------------------
+// parse_numeric_literal — malformed text is a typed error, never a silent 0
+// ----------------------------------------------------------------------------
+
+pub fn number_malformed_is_typed_error_test() {
+  assert number.parse_numeric_literal("0x") == Error(number.EmptyDigits)
+  assert number.parse_numeric_literal("0xZZ")
+    == Error(number.NotANumericLiteral("ZZ"))
+  assert number.parse_numeric_literal("0b12")
+    == Error(number.NotANumericLiteral("12"))
 }
 
 // ----------------------------------------------------------------------------
@@ -83,14 +116,38 @@ pub fn eval_dot_exponent_literal_test() {
 }
 
 pub fn eval_overflowing_literal_test() {
-  // KNOWN SPEC DEVIATION — pins the current WRONG value so the pre-existing
-  // bug (`1e400` cooking to 0) cannot come back; it is NOT the fixed
-  // behaviour. Per spec this must be JsNumber(Infinity): today
-  // `1e400 === Number.MAX_VALUE` is true, `1/1e400` is nonzero, and
-  // `(1e400).toString()` is not "Infinity". Blocked on ast.NumberLiteral
-  // carrying a value.JsNum instead of a bare Float (see
-  // number.overflow_clamp).
-  assert eval("1e400") == JsNumber(Finite(max_double))
+  // §12.9.3: `1e400` IS Infinity — not Number.MAX_VALUE, and not 0.
+  assert eval("1e400") == JsNumber(Infinity)
+  assert eval("1e400 === Number.MAX_VALUE") == value.JsBool(False)
+  assert eval("(1e400).toString()") == JsString("Infinity")
+}
+
+// ----------------------------------------------------------------------------
+// End to end: Annex B legacy forms
+// ----------------------------------------------------------------------------
+
+pub fn eval_legacy_octal_number_test() {
+  assert eval("010") == JsNumber(Finite(8.0))
+  assert eval("0777") == JsNumber(Finite(511.0))
+  assert eval("08") == JsNumber(Finite(8.0))
+}
+
+pub fn eval_legacy_octal_number_strict_is_syntax_error_test() {
+  assert eval("try { eval('\"use strict\"; 010') } catch (e) { e.name }")
+    == JsString("SyntaxError")
+}
+
+pub fn eval_non_octal_decimal_escape_test() {
+  // §12.9.4 NonOctalDecimalEscapeSequence: sloppy mode cooks to the digit.
+  assert eval("'\\8'") == JsString("8")
+  assert eval("'\\9'") == JsString("9")
+}
+
+pub fn eval_non_octal_decimal_escape_strict_is_syntax_error_test() {
+  assert eval("try { eval('\"use strict\"; \"\\\\8\"') } catch (e) { e.name }")
+    == JsString("SyntaxError")
+  assert eval("try { eval('\"use strict\"; \"\\\\9\"') } catch (e) { e.name }")
+    == JsString("SyntaxError")
 }
 
 // ----------------------------------------------------------------------------
@@ -229,4 +286,39 @@ pub fn eval_legacy_octal_escape_above_7f_test() {
   assert eval("'\\251'") == JsString("©")
   assert eval("'\\251'.charCodeAt(0)") == JsNumber(Finite(169.0))
   assert eval("'\\251'.length") == JsNumber(Finite(1.0))
+}
+
+// ----------------------------------------------------------------------------
+// toString(radix) — §6.1.6.1.20 / §6.1.6.2.24
+// ----------------------------------------------------------------------------
+
+pub fn eval_number_to_string_fractional_radix_test() {
+  // Non-integers get real fractional digit conversion, not a decimal fallback.
+  assert eval("(3.5).toString(16)") == JsString("3.8")
+  assert eval("(-255.5).toString(16)") == JsString("-ff.8")
+  assert eval("(0.1).toString(2)")
+    == JsString("0.0001100110011001100110011001100110011001100110011001101")
+  assert eval("(0.1).toString(3)")
+    == JsString("0.0022002200220022002200220022002201")
+  assert eval("(1234.5678).toString(36)") == JsString("ya.kfv9yqdpm")
+  // Integers and non-finite values keep their canonical forms.
+  assert eval("(255).toString(16)") == JsString("ff")
+  assert eval("(NaN).toString(2)") == JsString("NaN")
+  assert eval("(-0).toString(2)") == JsString("0")
+}
+
+pub fn eval_to_string_radix_range_test() {
+  assert eval("try { (3).toString(1) } catch (e) { e.name }")
+    == JsString("RangeError")
+  assert eval("try { (3n).toString(37) } catch (e) { e.name }")
+    == JsString("RangeError")
+}
+
+pub fn eval_bigint_to_locale_string_ignores_locale_test() {
+  // §21.2.3.2's first argument is `locales`, NOT a radix: it must not be
+  // coerced to a number and used as a base.
+  assert eval("(255n).toLocaleString('de-DE')") == JsString("255")
+  assert eval("(255n).toLocaleString(16)") == JsString("255")
+  assert eval("(255n).toLocaleString()") == JsString("255")
+  assert eval("(255n).toString(16)") == JsString("ff")
 }

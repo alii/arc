@@ -596,9 +596,6 @@ fn number_value_of(
 ///   - Else, return the String representation of x using the specified radix.
 ///     NaN, +Infinity, -Infinity ignore the radix and use their canonical
 ///     string forms.
-///
-/// Note: Non-integer values with non-10 radix fall back to decimal
-/// formatting. Proper fractional radix conversion is not implemented.
 fn number_to_string(
   this: JsValue,
   args: List(JsValue),
@@ -615,11 +612,11 @@ fn number_to_string(
   // ±(2^53 - 1) and NaN → 0, so step 4's range check sees them.
   use radix, state <- coerce.try_to_integer_or_infinity(state, radix_arg)
   // Step 4: If radixMV not in [2, 36], throw RangeError.
-  case radix >= 2 && radix <= 36 {
-    False ->
+  case value.radix(radix) {
+    Error(Nil) ->
       state.range_error(state, "toString() radix must be between 2 and 36")
     // Step 5: Return Number::toString(x, radixMV).
-    True -> #(state, Ok(JsString(value.format_number_radix(n, radix))))
+    Ok(r) -> #(state, Ok(JsString(value.format_number_radix(n, r))))
   }
 }
 
@@ -691,7 +688,7 @@ fn number_to_fixed(
       // FFI only ever sees fixed-notation magnitudes.
       let format = fn(x) {
         case float.absolute_value(x) >=. 1.0e21 {
-          True -> value.format_number_radix(Finite(x), 10)
+          True -> value.format_number(Finite(x))
           False -> format_to_fixed(x, f)
         }
       }
@@ -736,7 +733,7 @@ fn number_to_exponential(
           }
         NaN | Infinity | NegInfinity -> #(
           state,
-          Ok(JsString(value.format_number_radix(n, 10))),
+          Ok(JsString(value.format_number(n))),
         )
       }
     }
@@ -752,10 +749,7 @@ fn number_to_precision(
   use n, state <- require_number(this, state, "toPrecision")
   case args {
     // If precision is undefined, behave as toString.
-    [JsUndefined, ..] | [] -> #(
-      state,
-      Ok(JsString(value.format_number_radix(n, 10))),
-    )
+    [JsUndefined, ..] | [] -> #(state, Ok(JsString(value.format_number(n))))
     [v, ..] -> {
       // Step 3: p = ToIntegerOrInfinity(precision); ±∞ saturate out of
       // [1, 100] so step 5's RangeError fires.
@@ -778,7 +772,7 @@ fn number_to_precision(
           }
         NaN | Infinity | NegInfinity -> #(
           state,
-          Ok(JsString(value.format_number_radix(n, 10))),
+          Ok(JsString(value.format_number(n))),
         )
       }
     }

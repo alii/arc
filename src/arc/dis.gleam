@@ -141,7 +141,7 @@ fn constant(template: FuncTemplate, index: Int) -> String {
 fn constant_to_string(constant: JsValue) -> String {
   case constant {
     value.JsString(text) -> string.inspect(text)
-    value.JsNumber(number) -> value.format_number_radix(number, 10)
+    value.JsNumber(number) -> value.format_number(number)
     value.JsBool(True) -> "true"
     value.JsBool(False) -> "false"
     value.JsNull -> "null"
