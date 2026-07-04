@@ -23,13 +23,20 @@
 %% The DOWN arm therefore only fires for a death the worker itself could not
 %% observe — killed by an exit signal, or heap/OOM.
 %%
-%% LIFETIME. The worker is spawned with `link` as well as `monitor`: the
-%% caller sits blocked in the receive below for the whole compile, so if the
-%% caller dies (killed test worker, embedder shutdown) the worker must die
-%% with it rather than run a multi-second parse for a result nobody will
-%% ever read. The link's own exit signal to the caller is irrelevant — the
-%% caller is already gone — and the worker's crash never propagates over the
-%% link because it never crashes: it catches everything.
+%% LIFETIME: MONITOR, NOT LINK. The worker is spawned with `monitor` only.
+%% Linking as well would have given the caller two conflicting notifications
+%% for one abnormal worker death, and neither of them is the DOWN arm below:
+%% a caller that does not trap exits is KILLED by the link's exit signal
+%% before it can run the DOWN arm (so `erlang:exit(Reason)` there is dead
+%% code, and the death is uncatchable — the exact opposite of the crash
+%% fidelity this module exists to provide), while a caller that DOES trap
+%% exits gets an `{'EXIT', Pid, Reason}` message that the receive below never
+%% matches, left to sit in its mailbox forever.
+%%
+%% What the link bought — a worker dying with a caller that was killed
+%% mid-compile — is only wasted CPU when it is missing: the worker's reply
+%% goes to a dead pid and the process then exits on its own. That is not
+%% worth an uncatchable kill and a leaked message.
 -module(arc_compile_task_ffi).
 -export([run_compile_task/2]).
 
@@ -51,7 +58,7 @@ run_compile_task(SourceBytes, Task) ->
                     end,
             Self ! {Ref, Reply}
         end,
-        [link, monitor, {min_heap_size, Heap}]),
+        [monitor, {min_heap_size, Heap}]),
     receive
         {Ref, {ok, Result}} ->
             erlang:demonitor(MRef, [flush]),

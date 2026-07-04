@@ -78,6 +78,7 @@
          take_self_async_tokens/3]).
 
 -define(TAB, arc_atomics_waiterlist).
+-define(OWNER, arc_atomics_waiterlist_owner).
 
 %% Process-local buffer identity fallback: the heap ref id scoped by the
 %% owning process. Used for buffers without process-independent shared
@@ -262,23 +263,43 @@ spawn_owner() ->
                            {write_concurrency, true},
                            {read_concurrency, true}]) of
             ?TAB ->
+                register(?OWNER, self()),
                 Caller ! {Tag, ready},
                 owner_loop()
         catch
             error:badarg ->
-                %% Another owner created the table first — it exists NOW.
-                Caller ! {Tag, ready}
+                %% badarg means "the name is taken" — USUALLY because another
+                %% owner won the creation race, in which case the table exists
+                %% NOW and we may ack. But badarg is also what a bad option or
+                %% an exhausted ETS table limit raises, and acking THOSE would
+                %% hand every caller a table that does not exist. So look
+                %% before acking: only the racing-owner reading of badarg
+                %% leaves ?TAB alive.
+                case ets:whereis(?TAB) of
+                    undefined -> Caller ! {Tag, {failed, badarg}};
+                    _Tid -> Caller ! {Tag, ready}
+                end
         end
     end),
     receive
         {Tag, ready} ->
             true = erlang:demonitor(Mon, [flush]),
             nil;
+        {Tag, {failed, Reason}} ->
+            true = erlang:demonitor(Mon, [flush]),
+            erlang:error({arc_atomics_waiterlist_unavailable, Reason});
         {'DOWN', Mon, process, Pid, Reason} ->
             erlang:error({arc_atomics_waiterlist_unavailable, Reason})
     end.
 
+%% The owner exists to hold the table, nothing more. It is REGISTERED (so it
+%% is findable, and so a second owner cannot silently start), and it matches
+%% only the messages it defines: `stop` (tears the table down with the
+%% process) and nothing else. The old bare `receive _ -> loop end` swallowed
+%% every message sent to it, including exit signals from a trapping parent
+%% and any future protocol we might add — a message going missing here is a
+%% bug that would never be seen.
 owner_loop() ->
     receive
-        _ -> owner_loop()
+        stop -> ok
     end.

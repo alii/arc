@@ -37,32 +37,57 @@ loop() ->
     end.
 
 %% Both promise_resolve/2 and promise_reject/2 are inside the protected part
-%% (no `of` section), so an AtomVM crash in either — or in the
-%% characters_to_binary normalisation above them — still ends in a rejection
-%% rather than an unsettled promise. The nested try guards the last resort:
-%% if the reject itself is what crashed, there is nothing left to do but log.
+%% (no `of` section), so an AtomVM crash in either — or in the source
+%% normalisation above them — still ends in a rejection rather than an
+%% unsettled promise. reject_quietly/2 takes a THUNK, not a reason: building
+%% the reason string (io_lib:format over an arbitrary crash term) is itself
+%% code that can crash, and doing it eagerly inside the catch handler would
+%% leave the promise unsettled — the one outcome this module forbids.
 handle_call(Promise, Src0) ->
     try
-        Src = normalise_source(Src0),
-        case arc@wasm@playground:eval(Src) of
-            {ok, Out} -> emscripten:promise_resolve(Promise, Out);
-            {error, Msg} -> emscripten:promise_reject(Promise, Msg)
+        case normalise_source(Src0) of
+            {ok, Src} ->
+                case arc@wasm@playground:eval(Src) of
+                    {ok, Out} -> emscripten:promise_resolve(Promise, Out);
+                    {error, Msg} -> emscripten:promise_reject(Promise, Msg)
+                end;
+            {error, Reason} ->
+                emscripten:promise_reject(Promise, Reason)
         end
     catch
         C:R:St ->
-            reject_quietly(Promise, format_crash(C, R, St))
+            reject_quietly(Promise, fun() -> format_crash(C, R, St) end)
     end.
 
-normalise_source(Src) when is_binary(Src) -> Src;
-normalise_source(Src) -> unicode:characters_to_binary(Src).
+%% The request payload as it arrives from JS. `unicode:characters_to_binary/1`
+%% is not total — ill-formed input answers `{error, _, _}` / `{incomplete, _, _}`
+%% and a non-iodata term (atom, integer) raises badarg — so its result is
+%% CHECKED here rather than assumed to be a binary and passed on to the
+%% evaluator as one.
+normalise_source(Src) when is_binary(Src) ->
+    {ok, Src};
+normalise_source(Src) ->
+    try unicode:characters_to_binary(Src) of
+        Bin when is_binary(Bin) -> {ok, Bin};
+        _NotUnicode -> {error, <<"arc: request payload is not valid unicode">>}
+    catch
+        _:_ -> {error, <<"arc: request payload is not valid unicode">>}
+    end.
 
 reject_malformed(Promise, Msg) ->
-    reject_quietly(
-        Promise,
-        unicode:characters_to_binary(
-            io_lib:format("arc: malformed request ~p", [Msg]))).
+    reject_quietly(Promise, fun() -> format_malformed(Msg) end).
 
-reject_quietly(Promise, Reason) ->
+format_malformed(Msg) ->
+    to_binary(io_lib:format("arc: malformed request ~p", [Msg])).
+
+%% Settle the promise with `ReasonFun()`, and settle it even if ReasonFun
+%% itself blows up: an unsettled promise is a JS caller hung forever, which is
+%% strictly worse than a vague error message. The outer try guards the last
+%% resort — if the reject is what crashed, there is nothing left to do but log.
+reject_quietly(Promise, ReasonFun) ->
+    Reason = try ReasonFun()
+             catch _:_ -> <<"arc: internal error">>
+             end,
     try emscripten:promise_reject(Promise, Reason)
     catch
         C:R ->
@@ -78,5 +103,13 @@ format_crash(Class, Reason, Stack) ->
             io_lib:format(" at ~p:~p/~p", [M, F, length(A)]);
         _ -> ""
     end,
-    unicode:characters_to_binary(
-        io_lib:format("BEAM ~p: ~p~s", [Class, Reason, Top])).
+    to_binary(io_lib:format("BEAM ~p: ~p~s", [Class, Reason, Top])).
+
+%% io_lib:format output is well-formed chardata, but characters_to_binary/1
+%% still HAS an error-tuple return type — pin it to a binary rather than
+%% handing emscripten a 3-tuple where it expects a rejection reason.
+to_binary(Chars) ->
+    case unicode:characters_to_binary(Chars) of
+        Bin when is_binary(Bin) -> Bin;
+        _NotUnicode -> <<"arc: internal error">>
+    end.

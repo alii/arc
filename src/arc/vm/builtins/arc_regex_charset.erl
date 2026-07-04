@@ -154,24 +154,30 @@ scf(CP) ->
         _ -> CP
     end.
 
-%% The scf domain — codepoints with scf(c) =/= c — as normalized ranges,
-%% cached per process. Derived from Changes_When_Casefolded (a superset:
-%% it also contains the F-only codepoints, which scf fixes; filter those
-%% out by applying scf).
+%% The scf domain — codepoints with scf(c) =/= c — as normalized ranges.
+%% Derived from Changes_When_Casefolded (a superset: it also contains the
+%% F-only codepoints, which scf fixes; filter those out by applying scf).
+%%
+%% Cached in persistent_term, not the process dictionary: the table is derived
+%% from immutable generated data, so it is the same in every process, and the
+%% sibling cache of the same shape (arc_unicode_ffi's id_ranges/1) already
+%% lives there. A per-process cache re-derived the whole thing — a full
+%% lists:seq over every Changes_When_Casefolded range — once per agent process.
 %%
 %% The table carrying Changes_When_Casefolded is a hard invariant of this
 %% module: without it every case-insensitive class silently evaluates against
 %% an EMPTY fold domain and matches the wrong characters. Crash on a missing
 %% table rather than degrade forever.
 scf_domain() ->
-    case erlang:get(arc_scf_domain) of
+    Key = {?MODULE, scf_domain},
+    case persistent_term:get(Key, undefined) of
         undefined ->
             {ok, Cwcf} =
                 arc_regex_props_ffi:char_set(<<"Changes_When_Casefolded">>),
             Dom = vnorm([{C, C} || {Lo, Hi} <- Cwcf,
                                    C <- lists:seq(Lo, Hi),
                                    scf(C) =/= C]),
-            erlang:put(arc_scf_domain, Dom),
+            persistent_term:put(Key, Dom),
             Dom;
         Dom ->
             Dom

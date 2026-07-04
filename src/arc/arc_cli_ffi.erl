@@ -18,11 +18,34 @@ read_line(Prompt) ->
         %% Normalize here so `{line, binary()}` holds unconditionally
         %% instead of depending on that cross-module precondition.
         Line when is_binary(Line) -> {line, Line};
-        Line when is_list(Line) -> {line, unicode:characters_to_binary(Line)}
+        Line when is_list(Line) -> encode_line(Line)
+    end.
+
+%% unicode:characters_to_binary/1 is NOT total: on ill-formed input it returns
+%% `{error, Encoded, Rest}` or `{incomplete, Encoded, Rest}`. Handing either of
+%% those to Gleam would put a 3-tuple where the `ReadLine` type promises a
+%% binary. A terminal that hands us bytes we cannot decode is an input failure,
+%% so it becomes the `read_error` variant the REPL already prints.
+encode_line(Line) ->
+    case unicode:characters_to_binary(Line) of
+        Bin when is_binary(Bin) -> {line, Bin};
+        {error, _Encoded, Rest} -> {read_error, {invalid_unicode, Rest}};
+        {incomplete, _Encoded, Rest} -> {read_error, {incomplete_unicode, Rest}}
     end.
 
 %% argv arrives as lists of Unicode CODEPOINTS. `list_to_binary/1` would
 %% badarg on any codepoint > 255 (e.g. `arc café.js`) and silently emit
 %% latin-1 (not UTF-8) bytes for codepoints 128-255, so encode properly.
+%%
+%% As in encode_line/1, characters_to_binary/1 can answer with an error tuple.
+%% There is no `String` value that could honestly represent an argument we
+%% cannot decode, and the return type here IS `List(String)` — so crash loudly
+%% at the boundary rather than smuggle a 3-tuple into Gleam.
 get_script_args() ->
-    [unicode:characters_to_binary(A) || A <- init:get_plain_arguments()].
+    [encode_arg(A) || A <- init:get_plain_arguments()].
+
+encode_arg(A) ->
+    case unicode:characters_to_binary(A) of
+        Bin when is_binary(Bin) -> Bin;
+        _Error -> erlang:error({bad_argv_encoding, A})
+    end.

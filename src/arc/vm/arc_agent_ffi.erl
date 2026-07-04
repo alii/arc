@@ -15,9 +15,20 @@
 -module(arc_agent_ffi).
 -export([set_can_block/1, can_block/0]).
 
-set_can_block(Bool) ->
+%% Guarded so the dictionary can only ever hold a boolean: without the guard a
+%% mis-declared `@external` (or an FFI caller passing anything at all) could
+%% store a non-boolean, and the old `=/= false` reading of it silently meant
+%% "may block".
+set_can_block(Bool) when is_boolean(Bool) ->
     put(arc_can_block, Bool),
     nil.
 
+%% Total: `undefined` (unset key) is the documented default of true, and the
+%% only other reachable values are the booleans set_can_block/1 admits. Any
+%% other term is a bug in this module and crashes here rather than being
+%% coerced into "true".
 can_block() ->
-    get(arc_can_block) =/= false.
+    case get(arc_can_block) of
+        undefined -> true;
+        Bool when is_boolean(Bool) -> Bool
+    end.

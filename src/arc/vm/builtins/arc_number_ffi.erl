@@ -51,9 +51,7 @@ js_number_to_string(N) when is_float(N) ->
         true -> <<"0">>;
         false when N < 0.0 -> <<"-", (js_positive_to_string(-N))/binary>>;
         false -> js_positive_to_string(N)
-    end;
-js_number_to_string(N) when is_integer(N) ->
-    integer_to_binary(N).
+    end.
 
 %% ---------------------------------------------------------------------------
 %% Shared sign prelude
@@ -62,12 +60,15 @@ js_number_to_string(N) when is_integer(N) ->
 %% The three Number.prototype formatters all set x to ℝ(x) and then emit a
 %% "-" prefix only "if x < 0" (§21.1.3.2/3/5). ℝ(-0) = 0 is not < 0, so -0
 %% formats unsigned — hence the numeric `<`, NOT the IEEE sign bit.
-%% Fmt may therefore receive -0.0 and must format it as +0 (the exponential/
-%% precision zero guards use `== 0.0`, which matches -0.0; decimals_exact/2
-%% collapses "-0" to 0 when it parses the digits). Fmt returns a binary.
+%%
+%% -0.0 is neither `< 0.0` nor distinguishable from 0.0 by `==`, so it would
+%% otherwise fall straight through to Fmt UNNORMALIZED and every formatter
+%% downstream would need its own -0 handling. Normalize it here, once: Fmt is
+%% guaranteed a value that is either strictly positive or exactly +0.0.
 with_abs(X, Fmt) ->
     case X < 0.0 of
         true -> <<"-", (Fmt(-X))/binary>>;
+        false when X == 0.0 -> Fmt(0.0);
         false -> Fmt(X)
     end.
 
