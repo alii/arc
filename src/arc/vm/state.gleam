@@ -605,15 +605,10 @@ pub fn merge_globals(
 }
 
 /// Resume the parent after a same-realm child execution finished: everything
-/// `merge_globals` threads back, PLUS the child's heap.
-///
-/// This is what every coroutine driver (generators, async generators, plain
-/// calls) actually wants when a nested body returns control. `merge_globals`
-/// alone deliberately leaves the heap alone — which made
-/// `State(..merge_globals(parent, child, []), heap: child.heap)` the idiom, and
-/// "forgot the `heap:` re-attach" (silently reverting every object the child
-/// allocated or mutated) a one-token typo away. Going through this function
-/// makes that omission unrepresentable.
+/// `merge_globals` threads back, PLUS the child's heap. `merge_globals` alone
+/// deliberately leaves the heap alone, so forgetting the `heap:` re-attach
+/// silently reverts every object the child allocated — this makes it
+/// unrepresentable.
 pub fn adopt_child(parent: State(host), child: State(host)) -> State(host) {
   State(..merge_globals(parent, child, []), heap: child.heap)
 }
