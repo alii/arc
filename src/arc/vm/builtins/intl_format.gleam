@@ -8,17 +8,21 @@
 import arc/internal/gregorian.{civil_from_days, floor_div}
 import arc/vm/ops/operators
 import arc/vm/value.{
-  type CompactDisplay, type CurrencyDisplay, type IntlUseGrouping,
-  type NameWidth, type Notation, type NumStyle, type RoundingMode,
-  type RoundingPriority, type SignDisplay, type TrailingZeroDisplay,
-  type UnitDisplay, CompactLong, CompactShort, CurAccounting, CurCode, CurName,
-  CurNarrowSymbol, CurStandard, CurSymbol, GroupingAlways, GroupingAuto,
-  GroupingMin2, GroupingNever, NotationCompact, NotationEngineering,
-  NotationScientific, NotationStandard, PriorityAuto, PriorityLessPrecision,
+  type CompactDisplay, type CurrencyDisplay, type Granularity,
+  type IntlUseGrouping, type ListFormatStyle, type ListFormatType,
+  type NameWidth, type Notation, type NumStyle, type PluralType,
+  type RoundingMode, type RoundingPriority, type RtfNumeric, type RtfStyle,
+  type SignDisplay, type TrailingZeroDisplay, type UnitDisplay, Cardinal,
+  CompactLong, CompactShort, Conjunction, CurAccounting, CurCode, CurName,
+  CurNarrowSymbol, CurStandard, CurSymbol, Disjunction, GGrapheme, GSentence,
+  GWord, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, LLong,
+  LNarrow, LShort, NotationCompact, NotationEngineering, NotationScientific,
+  NotationStandard, Ordinal, PriorityAuto, PriorityLessPrecision,
   PriorityMorePrecision, RoundCeil, RoundExpand, RoundFloor, RoundHalfCeil,
   RoundHalfEven, RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
-  SignAlways, SignAuto, SignExceptZero, SignNegative, SignNever, StyleCurrency,
-  StyleDecimal, StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitLong,
+  RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort, SignAlways, SignAuto,
+  SignExceptZero, SignNegative, SignNever, StyleCurrency, StyleDecimal,
+  StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitList, UnitLong,
   UnitNarrow, UnitShort, WLong, WNarrow, WShort,
 }
 import gleam/bool
@@ -49,6 +53,8 @@ pub type PartType {
   PExponentInteger
   PNaN
   PInfinity
+  /// The "~" emitted by formatRange when the two endpoints collapse (§15.5.6).
+  PApproximatelySign
   // Date-time parts (§11.5.x)
   PWeekday
   PEra
@@ -86,6 +92,7 @@ pub fn part_type_to_js_string(t: PartType) -> String {
     PExponentInteger -> "exponentInteger"
     PNaN -> "nan"
     PInfinity -> "infinity"
+    PApproximatelySign -> "approximatelySign"
     PWeekday -> "weekday"
     PEra -> "era"
     PYear -> "year"
@@ -133,7 +140,12 @@ pub fn part_class(t: PartType) -> PartClass {
     | PInfinity
     | PExponentSeparator
     | PExponentMinusSign -> NumberCore
-    PCurrency | PPercentSign | PPlusSign | PMinusSign | PUnit -> NumberAffix
+    PCurrency
+    | PPercentSign
+    | PPlusSign
+    | PMinusSign
+    | PUnit
+    | PApproximatelySign -> NumberAffix
     PYear | PMonth | PDay | PHour | PMinute | PSecond | PFractionalSecond ->
       DateNumeric
     PWeekday | PEra | PDayPeriod | PTimeZoneName -> DateText
@@ -168,29 +180,61 @@ pub fn is_date_numeric(t: PartType) -> Bool {
 pub type Part =
   #(PartType, String)
 
+/// Which endpoint of a formatted range a part came from — the `source`
+/// property of `formatRangeToParts` (§15.5.6 / §11.5.7).
+pub type PartSource {
+  SourceStart
+  SourceEnd
+  SourceShared
+}
+
+pub fn part_source_to_js_string(s: PartSource) -> String {
+  case s {
+    SourceStart -> "startRange"
+    SourceEnd -> "endRange"
+    SourceShared -> "shared"
+  }
+}
+
+/// A part of a formatted *range*: `{ type, value, source }`.
+pub type RangePart {
+  RangePart(type_: PartType, value: String, source: PartSource)
+}
+
+/// A part of a formatted relative time / duration: `{ type, value, unit? }`.
+/// An empty `unit` means the part carries no `unit` property.
+pub type UnitPart {
+  UnitPart(type_: PartType, value: String, unit: String)
+}
+
 pub fn parts_to_string(parts: List(Part)) -> String {
   parts |> list.map(fn(p) { p.1 }) |> string.join("")
 }
 
-/// Combine two formatted endpoints into range parts (#(type, value, source)).
-/// Implements the ICU collapse heuristic: identical affixes are emitted once
-/// when they amount to more than one code point ("+$2.90–3.10"), and the
-/// range separator is padded with spaces when an uncollapsed affix sits next
-/// to it ("$3 – $5" vs "987–988").
+pub fn unit_parts_to_string(parts: List(UnitPart)) -> String {
+  parts |> list.map(fn(p) { p.value }) |> string.join("")
+}
+
+/// Combine two formatted endpoints into range parts. Implements the ICU
+/// collapse heuristic: identical affixes are emitted once when they amount to
+/// more than one code point ("+$2.90–3.10"), and the range separator is padded
+/// with spaces when an uncollapsed affix sits next to it ("$3 – $5" vs
+/// "987–988").
 pub fn format_range_combine(
-  locale: String,
+  key: LocaleKey,
   x_parts: List(Part),
   y_parts: List(Part),
-) -> List(#(String, String, String)) {
-  let key = loc_key(locale)
-  let js = fn(p: Part, source) { #(part_type_to_js_string(p.0), p.1, source) }
-  let start3 = fn(p: Part) { js(p, "startRange") }
-  let end3 = fn(p: Part) { js(p, "endRange") }
-  let shared3 = fn(p: Part) { js(p, "shared") }
-  let sep3 = fn(spaced) { js(#(PLiteral, range_sep(key, spaced)), "shared") }
+) -> List(RangePart) {
+  let js = fn(p: Part, source) { RangePart(p.0, p.1, source) }
+  let start3 = fn(p: Part) { js(p, SourceStart) }
+  let end3 = fn(p: Part) { js(p, SourceEnd) }
+  let shared3 = fn(p: Part) { js(p, SourceShared) }
+  let sep3 = fn(spaced) {
+    js(#(PLiteral, range_sep(key, spaced)), SourceShared)
+  }
   case parts_to_string(x_parts) == parts_to_string(y_parts) {
     True -> [
-      #("approximatelySign", "~", "shared"),
+      RangePart(PApproximatelySign, "~", SourceShared),
       ..list.map(x_parts, shared3)
     ]
     False -> {
@@ -242,7 +286,7 @@ fn split_range_affixes(
 
 /// Locale range separator. `spaced` requests the space-padded variant used
 /// when an affix is adjacent to the separator.
-fn range_sep(key: String, spaced: Bool) -> String {
+fn range_sep(key: LocaleKey, spaced: Bool) -> String {
   case loc_lang(key) {
     "pt" -> " - "
     _ ->
@@ -259,7 +303,7 @@ fn range_sep(key: String, spaced: Bool) -> String {
 
 pub type NumOpts {
   NumOpts(
-    locale: String,
+    locale: LocaleKey,
     style: NumStyle,
     min_int: Int,
     min_frac: Option(Int),
@@ -278,7 +322,7 @@ pub type NumOpts {
 
 pub fn default_num_opts() -> NumOpts {
   NumOpts(
-    locale: "en",
+    locale: locale_key("en"),
     style: StyleDecimal,
     min_int: 1,
     min_frac: Some(0),
@@ -301,35 +345,43 @@ pub fn default_num_opts() -> NumOpts {
 // fall back to the en/root patterns, preserving the historical behavior.
 // ============================================================================
 
+/// A resolved locale tag with its "-u-…"/"-x-…" extension stripped — the shape
+/// every locale-data table below is keyed by. Opaque and constructible only
+/// through `locale_key`, so an unstripped tag ("de-u-nu-latn", which matches
+/// no table row) cannot reach a lookup.
+pub opaque type LocaleKey {
+  LocaleKey(key: String)
+}
+
 /// Strip a "-u-…" (or any singleton) extension from a resolved locale tag.
-fn loc_key(tag: String) -> String {
+pub fn locale_key(tag: String) -> LocaleKey {
   case string.split_once(tag, "-u-") {
-    Ok(#(base, _)) -> base
+    Ok(#(base, _)) -> LocaleKey(base)
     Error(Nil) ->
       case string.split_once(tag, "-x-") {
-        Ok(#(base, _)) -> base
-        Error(Nil) -> tag
+        Ok(#(base, _)) -> LocaleKey(base)
+        Error(Nil) -> LocaleKey(tag)
       }
   }
 }
 
 /// Primary language subtag ("de-AT" → "de").
-fn loc_lang(key: String) -> String {
-  case string.split_once(key, "-") {
+fn loc_lang(key: LocaleKey) -> String {
+  case string.split_once(key.key, "-") {
     Ok(#(lang, _)) -> lang
-    Error(Nil) -> key
+    Error(Nil) -> key.key
   }
 }
 
-fn decimal_sep(key: String) -> String {
+fn decimal_sep(key: LocaleKey) -> String {
   case loc_lang(key) {
     "de" | "pt" | "it" | "nl" -> ","
     _ -> "."
   }
 }
 
-fn group_sep(key: String) -> String {
-  case key {
+fn group_sep(key: LocaleKey) -> String {
+  case key.key {
     "pt-PT" -> "\u{00A0}"
     _ ->
       case loc_lang(key) {
@@ -339,16 +391,16 @@ fn group_sep(key: String) -> String {
   }
 }
 
-fn nan_str(key: String) -> String {
-  case key {
+fn nan_str(key: LocaleKey) -> String {
+  case key.key {
     "zh-TW" | "zh-Hant" -> "非數值"
     _ -> "NaN"
   }
 }
 
 /// Indian digit grouping (last 3, then 2s): 1,00,000.
-fn indian_grouping(key: String) -> Bool {
-  case key {
+fn indian_grouping(key: LocaleKey) -> Bool {
+  case key.key {
     "en-IN" -> True
     _ -> loc_lang(key) == "hi"
   }
@@ -356,7 +408,7 @@ fn indian_grouping(key: String) -> Bool {
 
 /// Currency placement: True → symbol suffixed after a NBSP ("987,00 $"),
 /// False → symbol prefixed ("$987.00").
-fn currency_suffixed(key: String) -> Bool {
+fn currency_suffixed(key: LocaleKey) -> Bool {
   case loc_lang(key) {
     "de" | "pt" -> True
     _ -> False
@@ -365,7 +417,7 @@ fn currency_suffixed(key: String) -> Bool {
 
 /// Whether currencySign:"accounting" wraps negatives in parentheses.
 /// CLDR de accounting pattern equals the standard pattern (minus sign).
-fn accounting_parens(key: String) -> Bool {
+fn accounting_parens(key: LocaleKey) -> Bool {
   loc_lang(key) != "de"
 }
 
@@ -401,7 +453,7 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
     StyleDecimal | StyleCurrency(..) | StyleUnit(..) -> dec
   }
   let dec = normalize(dec)
-  let key = loc_key(opts.locale)
+  let key = opts.locale
   let #(mantissa, exponent, compact_one, compact_other) = case opts.notation {
     NotationScientific ->
       case dec.digits {
@@ -461,16 +513,16 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
 /// exponent of the value (floor(log10 |x|)). Returns
 /// #(divisor_exponent, suffix parts for plural "one", suffix parts otherwise).
 fn compact_entry(
-  key: String,
+  key: LocaleKey,
   display: CompactDisplay,
   e: Int,
 ) -> #(Int, List(Part), List(Part)) {
-  use <- bool.lazy_guard(key == "en-IN", fn() { in_compact(e, display) })
+  use <- bool.lazy_guard(key.key == "en-IN", fn() { in_compact(e, display) })
   case loc_lang(key) {
     "ja" -> cjk_compact(e, "万", "億", "兆", None)
     "ko" -> cjk_compact(e, "만", "억", "조", Some("천"))
     "zh" ->
-      case key {
+      case key.key {
         "zh-TW" | "zh-Hant" -> cjk_compact(e, "萬", "億", "兆", None)
         _ -> en_compact(e, display)
       }
@@ -567,7 +619,7 @@ fn de_compact(
 }
 
 pub fn format_nan_parts(opts: NumOpts) -> List(Part) {
-  wrap_affixes(opts, [#(PNaN, nan_str(loc_key(opts.locale)))], False, True)
+  wrap_affixes(opts, [#(PNaN, nan_str(opts.locale))], False, True)
 }
 
 pub fn format_infinity_parts(opts: NumOpts, negative: Bool) -> List(Part) {
@@ -581,7 +633,7 @@ fn wrap_affixes(
   negative: Bool,
   is_nan: Bool,
 ) -> List(Part) {
-  let key = loc_key(opts.locale)
+  let key = opts.locale
   let zero = !is_nan && !negative && is_zero_parts(core)
   let neg_zero = negative && is_zero_parts(core)
   let show_minus = case opts.sign_display {
@@ -656,13 +708,13 @@ fn wrap_affixes(
 
 /// Unit pattern as prefix/suffix part lists around the (signed) number.
 fn unit_affixes(
-  key: String,
+  key: LocaleKey,
   unit: String,
   display: UnitDisplay,
   one: Bool,
 ) -> #(List(Part), List(Part)) {
   let lang = loc_lang(key)
-  let hant = key == "zh-TW" || key == "zh-Hant"
+  let hant = key.key == "zh-TW" || key.key == "zh-Hant"
   case unit, lang {
     // CLDR kilometer-per-hour patterns for the locales we carry data for.
     "kilometer-per-hour", "de" ->
@@ -759,11 +811,11 @@ fn is_zero_parts(parts: List(Part)) -> Bool {
 /// Currency display text. Mostly the en symbols; a handful of locales use a
 /// disambiguated USD symbol ("US$").
 fn currency_text(
-  key: String,
+  key: LocaleKey,
   code: String,
   display: CurrencyDisplay,
 ) -> #(String, Bool) {
-  let usd_prefixed = case key {
+  let usd_prefixed = case key.key {
     "ko" | "ko-KR" | "zh-TW" | "zh-Hant" -> True
     _ -> False
   }
@@ -1374,7 +1426,7 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
     TzdAuto -> frac_str
   }
   // Pad to minimumIntegerDigits.
-  let key = loc_key(opts.locale)
+  let key = opts.locale
   let int_str = string.pad_start(int_str, opts.min_int, "0")
   let int_parts = group_integer(opts, int_str)
   case frac_str {
@@ -1403,7 +1455,7 @@ fn strip_frac_to_min(frac: String, min: Int) -> String {
 
 /// Insert group separators (en: every 3 digits, ","; de: "."; en-IN: 3-then-2).
 fn group_integer(opts: NumOpts, int_str: String) -> List(Part) {
-  let key = loc_key(opts.locale)
+  let key = opts.locale
   let n = string.length(int_str)
   let grouped = case opts.use_grouping {
     GroupingNever -> False
@@ -1489,14 +1541,14 @@ fn split_pairs_loop(s: String, acc: List(String)) -> List(String) {
 /// Select the plural category for English. `int_digits`/`frac_digits` are the
 /// formatted digit strings (so digit options affect the operands, per spec).
 pub fn plural_select_en(
-  type_: String,
+  type_: PluralType,
   int_digits: String,
   frac_digits: String,
   negative: Bool,
 ) -> String {
   let _ = negative
   case type_ {
-    "ordinal" -> {
+    Ordinal -> {
       let n = int.parse(int_digits) |> option.from_result |> option.unwrap(0)
       let n = int.absolute_value(n)
       let r10 = n % 10
@@ -1509,7 +1561,7 @@ pub fn plural_select_en(
       }
     }
     // cardinal: one iff i = 1 and v = 0
-    _ ->
+    Cardinal ->
       case int_digits == "1" && frac_digits == "" {
         True -> "one"
         False -> "other"
@@ -1517,10 +1569,10 @@ pub fn plural_select_en(
   }
 }
 
-pub fn plural_categories_en(type_: String) -> List(String) {
+pub fn plural_categories_en(type_: PluralType) -> List(String) {
   case type_ {
-    "ordinal" -> ["few", "one", "other", "two"]
-    _ -> ["one", "other"]
+    Ordinal -> ["few", "one", "other", "two"]
+    Cardinal -> ["one", "other"]
   }
 }
 
@@ -1530,8 +1582,8 @@ pub fn plural_categories_en(type_: String) -> List(String) {
 
 /// CreatePartsFromList (§13.5.2) with en patterns.
 pub fn list_format_parts(
-  type_: String,
-  style: String,
+  type_: ListFormatType,
+  style: ListFormatStyle,
   items: List(String),
 ) -> List(Part) {
   case items {
@@ -1543,8 +1595,9 @@ pub fn list_format_parts(
     }
     [first, ..rest] -> {
       let mid = case type_, style {
-        "unit", "narrow" -> " "
-        _, _ -> ", "
+        UnitList, LNarrow -> " "
+        UnitList, LLong | UnitList, LShort -> ", "
+        Conjunction, _ | Disjunction, _ -> ", "
       }
       let last_sep = end_separator(type_, style)
       build_list_parts(rest, [#(PElement, first)], mid, last_sep)
@@ -1552,27 +1605,25 @@ pub fn list_format_parts(
   }
 }
 
-fn two_separator(type_: String, style: String) -> String {
+fn two_separator(type_: ListFormatType, style: ListFormatStyle) -> String {
   case type_, style {
-    "conjunction", "narrow" -> ", "
-    "conjunction", "short" -> " & "
-    "conjunction", _ -> " and "
-    "disjunction", _ -> " or "
-    "unit", "narrow" -> " "
-    "unit", _ -> ", "
-    _, _ -> " and "
+    Conjunction, LNarrow -> ", "
+    Conjunction, LShort -> " & "
+    Conjunction, LLong -> " and "
+    Disjunction, _ -> " or "
+    UnitList, LNarrow -> " "
+    UnitList, LLong | UnitList, LShort -> ", "
   }
 }
 
-fn end_separator(type_: String, style: String) -> String {
+fn end_separator(type_: ListFormatType, style: ListFormatStyle) -> String {
   case type_, style {
-    "conjunction", "long" -> ", and "
-    "conjunction", "short" -> ", & "
-    "conjunction", "narrow" -> ", "
-    "disjunction", _ -> ", or "
-    "unit", "narrow" -> " "
-    "unit", _ -> ", "
-    _, _ -> ", and "
+    Conjunction, LLong -> ", and "
+    Conjunction, LShort -> ", & "
+    Conjunction, LNarrow -> ", "
+    Disjunction, _ -> ", or "
+    UnitList, LNarrow -> " "
+    UnitList, LLong | UnitList, LShort -> ", "
   }
 }
 
@@ -1602,15 +1653,18 @@ fn build_list_parts(
 /// en relative-time formatting. `value_parts` is the pre-formatted absolute
 /// value (so digit/numbering options apply); `value` selects plural/special.
 pub fn rtf_parts_en(
-  style: String,
-  numeric: String,
+  style: RtfStyle,
+  numeric: RtfNumeric,
   value: Float,
   unit: String,
   value_parts: List(Part),
-) -> List(#(String, String, String)) {
-  let is_auto = numeric == "auto"
+) -> List(UnitPart) {
+  let is_auto = case numeric {
+    RtfAuto -> True
+    RtfAlways -> False
+  }
   // The unit property is only attached to numeric parts (never literals).
-  let js3 = fn(p: Part, unit) { #(part_type_to_js_string(p.0), p.1, unit) }
+  let js3 = fn(p: Part, unit) { UnitPart(p.0, p.1, unit) }
   let literal3 = fn(text) { js3(#(PLiteral, text), "") }
   case is_auto, rtf_auto_name(unit, value +. 0.0) {
     True, Some(name) -> [literal3(name)]
@@ -1664,15 +1718,15 @@ fn rtf_auto_name(unit: String, value: Float) -> Option(String) {
   }
 }
 
-fn rtf_unit_en(style: String, unit: String, plural: String) -> String {
+fn rtf_unit_en(style: RtfStyle, unit: String, plural: String) -> String {
   let single = plural == "one"
   case style {
-    "long" ->
+    RtfLong ->
       case single {
         True -> unit
         False -> unit <> "s"
       }
-    "short" | "narrow" ->
+    RtfShort | RtfNarrow ->
       case unit, single {
         "second", _ -> "sec."
         "minute", _ -> "min."
@@ -1686,7 +1740,6 @@ fn rtf_unit_en(style: String, unit: String, plural: String) -> String {
         "year", _ -> "yr."
         _, _ -> unit
       }
-    _ -> unit
   }
 }
 
@@ -1831,12 +1884,12 @@ pub fn pad2(n: Int) -> String {
 /// Returns (segment, startIndex, isWordLike) triples covering the string.
 pub fn segment_string(
   s: String,
-  granularity: String,
+  granularity: Granularity,
 ) -> List(#(String, Int, Bool)) {
   case granularity {
-    "word" -> segment_words(s)
-    "sentence" -> segment_sentences(s)
-    _ -> segment_graphemes(s)
+    GWord -> segment_words(s)
+    GSentence -> segment_sentences(s)
+    GGrapheme -> segment_graphemes(s)
   }
 }
 
