@@ -342,7 +342,12 @@ pub fn write_list(
 }
 
 /// Remove all elements at indices >= new_len. O(log n).
+///
+/// `new_len` is an index-space bound, so it goes through `assert_index` too:
+/// a negative bound would crash inside the tree_array FFI when dense but
+/// silently wipe the whole store when sparse.
 pub fn truncate(elements: JsElements, new_len: Int) -> JsElements {
+  assert_index(new_len, "elements.truncate: negative length")
   case elements {
     NoElements -> NoElements
     DenseElements(data) ->
