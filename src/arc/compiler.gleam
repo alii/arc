@@ -203,26 +203,9 @@ pub fn compile_module(
   sb: scope.ScopeBuilder,
   summary: esm.ModuleSummary,
 ) -> Result(CompiledModuleBody, CompileError) {
-  let import_locals = import_local_names(summary.imports)
+  let import_locals = esm.import_local_names(summary)
   let forced_box = local_export_names(summary.exports)
   compile_module_with_scope(items, sb, import_locals, forced_box, summary)
-}
-
-/// The local binding names introduced by a module's import declarations, in
-/// declaration order. This is the canonical order of capture slots 0..N-1;
-/// link-time import seeding must produce box refs in exactly this order.
-pub fn import_local_names(
-  import_bindings: List(#(String, List(esm.ImportBinding))),
-) -> List(String) {
-  list.flat_map(import_bindings, fn(entry) {
-    list.map(entry.1, fn(binding) {
-      case binding {
-        esm.NamedImport(local:, ..) -> local
-        esm.DefaultImport(local:) -> local
-        esm.NamespaceImport(local:, ..) -> local
-      }
-    })
-  })
 }
 
 /// Local binding names that a module exports (LocalExport only). These must be
@@ -472,7 +455,7 @@ pub fn compile_eval_direct(
   use Nil <- result.try(
     case
       caller_is_strict
-      && list.any(dict.values(tree.scopes), fn(s) { s.kind == scope.With })
+      && list.any(dict.values(tree.scopes), fn(s) { scope.is_with_kind(s.kind) })
     {
       True -> Error(emit.EarlySyntaxError("'with' not allowed in strict mode"))
       False -> Ok(Nil)

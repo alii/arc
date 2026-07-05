@@ -95,15 +95,36 @@ pub const root_scope_id: ScopeId = 0
 /// `ScopeType` (SCRIPT/MODULE/FUNCTION/BLOCK/CATCH/WITH/CLASS) plus
 /// ClassStaticBlock for §15.7.14 static-initialization blocks (which own
 /// their own `this`/lexical environment).
+///
+/// `With(holder)` carries the NAME of the synthetic `<withN_M>` binding
+/// (declared IN that scope, minted by `sb_push_with`) holding the
+/// (ToObject'd) with-target — deliberately NOT a copied-out slot number,
+/// so `do_lookup` reads the holder's slot AND boxedness from the one
+/// authoritative `scope.bindings` entry (a derived slot copy would have to
+/// be shifted in lockstep by `insert_captures` and could silently drift).
+/// Any lookup that walks PAST a With scope must emit a runtime check
+/// against that slot (IrWith*). Living on the kind makes "a With scope
+/// with no holder" and "a non-With scope with a holder" both
+/// unrepresentable.
 pub type ScopeKind {
   Module
   Script
   Function
   Block
   Catch
-  With
+  With(holder: String)
   ClassBody
   ClassStaticBlock
+}
+
+/// True for the `With` kind — for callers that only need the discriminant
+/// and would otherwise have to spell out a `case` (the payload makes `==`
+/// against a bare `With` impossible).
+pub fn is_with_kind(kind: ScopeKind) -> Bool {
+  case kind {
+    With(_) -> True
+    _ -> False
+  }
 }
 
 /// True for scope kinds that own a `FunctionInfo` (their own local-slot
@@ -112,7 +133,7 @@ pub type ScopeKind {
 pub fn is_function_kind(kind: ScopeKind) -> Bool {
   case kind {
     Module | Script | Function | ClassStaticBlock -> True
-    Block | Catch | With | ClassBody -> False
+    Block | Catch | With(_) | ClassBody -> False
   }
 }
 
@@ -151,15 +172,8 @@ pub type Binding {
 ///
 /// `function_scope` is the nearest enclosing scope (possibly self) whose kind
 /// satisfies `is_function_kind` — the owner of this scope's local-slot space.
-/// `with_object` is Some for With scopes only: the NAME of the synthetic
-/// `<withN_M>` binding (declared IN this scope) holding the (ToObject'd)
-/// with-target. Carried straight through from `RawScope.with_object_name`
-/// — deliberately NOT a copied-out slot number, so `do_lookup` reads the
-/// holder's slot AND boxedness from the one authoritative
-/// `scope.bindings` entry (a derived slot copy would have to be shifted
-/// in lockstep by `insert_captures` and could silently drift). Any lookup
-/// that walks PAST this scope must emit a runtime check against that
-/// slot (IrWith*).
+/// A `With(holder)` kind names the synthetic `<withN_M>` binding declared in
+/// this scope's own `bindings` (see `ScopeKind`).
 /// `contains_direct_eval` is true when this scope's own statement list (not a
 /// nested function) contains a `CallExpression` whose callee is the
 /// identifier `eval` — used to propagate eval-poisoning to ancestor function
@@ -171,7 +185,6 @@ pub type Scope {
     function_scope: ScopeId,
     kind: ScopeKind,
     bindings: Dict(String, Binding),
-    with_object: Option(String),
     contains_direct_eval: Bool,
     /// §B.3.2: names of FunctionDeclarations directly in this Block scope
     /// that are BLOCKED from Annex B var promotion — an intermediate
@@ -220,8 +233,6 @@ pub type Scope {
 /// `names` is every name ever allocated a slot in this body (cumulative
 /// across closed block scopes) — used for module-export slot lookup and
 /// direct-eval `local_names`.
-/// `with_stack` lists the slot indices of with-objects active at this
-/// function's definition site (innermost first), inherited as captures.
 /// `contains_direct_eval` is true when this function's OWN body (not a
 /// nested function) contains a syntactic `eval(...)` call — drives the
 /// `local_names` table on the top-level template so run_direct_eval can
@@ -244,7 +255,6 @@ pub type FunctionInfo {
     lexical_captures: Dict(LexicalRef, Int),
     names: Dict(String, Int),
     fallthrough: GlobalFallthrough,
-    with_stack: List(Int),
     contains_direct_eval: Bool,
     eval_in_subtree: Bool,
     /// §B.3.2/.3/.6: names of plain (non-generator, non-async)
@@ -290,6 +300,14 @@ pub type ScopeTree {
     /// SKIPS these — their slot is reserved and boxed, but the linker
     /// owns the initial cell. Threaded from `AnalyzeOpts.linker_seeded`.
     linker_seeded: Set(String),
+    /// With-object holders active at the CALLER's site (direct-eval), as
+    /// slot indices into this unit's root frame (every holder is seeded as
+    /// a capture, so it already has a root slot), innermost first. A
+    /// per-unit datum — the enclosing `with`s of a nested function are
+    /// derived from the tree itself (`fold_enclosing_withs`), so only the
+    /// root's inherited stack has to be carried in. Threaded from
+    /// `AnalyzeOpts.with_stack`; empty for everything but direct-eval.
+    inherited_with_stack: List(Int),
   )
 }
 
@@ -309,18 +327,26 @@ pub type Direct {
   EvalEnv(name: String)
 }
 
+/// A local frame slot plus how it must be read: `boxed` slots go through
+/// GetBoxed/PutBoxed, plain ones through GetLocal/PutLocal. The pair travels
+/// together everywhere the emitter touches a slot, so it gets a name — a
+/// bare `#(Int, Bool)` lets a swapped or mismatched pair type-check.
+pub type SlotRef {
+  SlotRef(slot: Int, boxed: Bool)
+}
+
 /// Result of `lookup(tree, scope_id, name)` — what the emitter should emit
 /// for a variable reference.
 ///
 /// `Plain`: no `with` scope was crossed — emit `direct` as-is.
 /// `WithChain`: the lookup crossed one or more `with` scopes BEFORE reaching
-/// `fallback`. `crossed_slots` lists the with-object slots (innermost first)
-/// as `#(slot, is_boxed)`; the emitter must emit one IrWith* probe per entry,
-/// then `fallback` for the miss case. `fallback` being a `Direct` (not a
-/// `Resolution`) makes a nested WithChain unrepresentable by construction.
+/// `fallback`. `crossed_slots` lists the with-object slots (innermost first);
+/// the emitter must emit one IrWith* probe per entry, then `fallback` for the
+/// miss case. `fallback` being a `Direct` (not a `Resolution`) makes a nested
+/// WithChain unrepresentable by construction.
 pub type Resolution {
   Plain(direct: Direct)
-  WithChain(crossed_slots: List(#(Int, Bool)), fallback: Direct)
+  WithChain(crossed_slots: List(SlotRef), fallback: Direct)
 }
 
 /// Inputs to `finalize` that come from OUTSIDE the parse — the calling
@@ -417,8 +443,7 @@ pub type SourceTag {
 }
 
 /// A scope node as recorded by the parser — mirrors `Scope` but with
-/// slot-free `RawBinding`s and a name marker (not a slot) for the
-/// with-object holder.
+/// slot-free `RawBinding`s.
 pub type RawScope {
   RawScope(
     id: ScopeId,
@@ -427,7 +452,6 @@ pub type RawScope {
     kind: ScopeKind,
     bindings: Dict(String, RawBinding),
     next_binding_index: Int,
-    with_object_name: Option(String),
     contains_direct_eval: Bool,
     annexb_blocked: Set(String),
     is_strict: Bool,
@@ -491,7 +515,7 @@ const blank_raw_fn_info = RawFunctionInfo(
   annexb_candidates: [],
 )
 
-/// A fresh `RawScope` with the 9 always-default fields filled in. The 5
+/// A fresh `RawScope` with the 8 always-default fields filled in. The 5
 /// per-site fields (id / parent / function_scope / kind / is_strict) are
 /// arguments. Shared by `sb_init` and `sb_push` so the default-field
 /// list lives in exactly one place.
@@ -509,7 +533,6 @@ fn new_raw_scope(
     kind:,
     bindings: dict.new(),
     next_binding_index: 0,
-    with_object_name: None,
     contains_direct_eval: False,
     annexb_blocked: set.new(),
     is_strict:,
@@ -604,7 +627,7 @@ pub fn sb_push(sb: ScopeBuilder, kind: ScopeKind) -> #(ScopeBuilder, ScopeId) {
   }
   let is_strict = case kind {
     Module | ClassBody | ClassStaticBlock -> True
-    Script | Function | Block | Catch | With -> parent.is_strict
+    Script | Function | Block | Catch | With(_) -> parent.is_strict
   }
   let node =
     new_raw_scope(id, Some(sb.current), function_scope, kind, is_strict)
@@ -632,6 +655,24 @@ pub fn sb_push(sb: ScopeBuilder, kind: ScopeKind) -> #(ScopeBuilder, ScopeId) {
     ),
     id,
   )
+}
+
+/// §14.11: allocate and enter the `With` scope of a `with (o) …` statement,
+/// minting its `<withN_M>` holder name and declaring the holder binding IN
+/// the new scope. The ONLY way to build a `With` scope — the holder name
+/// travels on the kind (`With(holder)`) and its binding is declared here, so
+/// `do_lookup` / `inherited_with_slots` can never face a With scope whose
+/// holder is missing.
+///
+/// The holder is a LetBinding so it lands in the With scope itself
+/// (`sb_declare` routes VarBinding to `current_fn`, which would leave the
+/// With scope's own bindings empty). Depth is counted BEFORE the push, so
+/// the outermost `with` gets 0; the id is `sb.next_id`, the id `sb_push` is
+/// about to mint.
+pub fn sb_push_with(sb: ScopeBuilder) -> #(ScopeBuilder, ScopeId) {
+  let holder = with_object_name(sb_with_depth(sb), sb.next_id)
+  let #(sb, id) = sb_push(sb, With(holder:))
+  #(sb_declare(sb, holder, LetBinding, synthetic: True), id)
 }
 
 /// §10.2.11 step 28: allocate and enter the var-boundary BODY scope of a
@@ -1387,7 +1428,7 @@ pub fn sb_nearest_catch_params(sb: ScopeBuilder) -> List(String) {
 pub fn sb_with_depth(sb: ScopeBuilder) -> Int {
   use _id, scope, acc <- sb_fold_up(sb, sb.current, False, 0)
   list.Continue(case scope.kind {
-    With -> acc + 1
+    With(_) -> acc + 1
     _ -> acc
   })
 }
@@ -1441,7 +1482,6 @@ fn blank_function_info(
     lexical_captures: dict.new(),
     names: dict.new(),
     fallthrough:,
-    with_stack: [],
     contains_direct_eval: False,
     eval_in_subtree: False,
     // Filled (filtered) by `hoist_annexb_block_functions` AFTER
@@ -1469,10 +1509,13 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   // the eval'd body can read AND write them via PutBoxed.
   let #(parent_kind, parent_origin) = case root_raw.kind {
     Module -> #(CaptureBinding, ConstBinding)
-    Script | Function | Block | Catch | With | ClassBody | ClassStaticBlock -> #(
-      CaptureBinding,
-      CaptureBinding,
-    )
+    Script
+    | Function
+    | Block
+    | Catch
+    | With(_)
+    | ClassBody
+    | ClassStaticBlock -> #(CaptureBinding, CaptureBinding)
   }
   let parent_bindings =
     dict.map_values(opts.parent_names, fn(_name, slot) {
@@ -1521,7 +1564,6 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       lexical: root_lexical,
       lexical_captures: opts.lexical_captures,
       names: opts.parent_names,
-      with_stack: opts.with_stack,
     )
   // --- (b) pre-order slot allocation: RawScope → Scope --------------------
   let st =
@@ -1546,6 +1588,7 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       children_at: sb.children_at,
       top_lex: opts.top_lex,
       linker_seeded: opts.linker_seeded,
+      inherited_with_stack: opts.with_stack,
     )
   // --- (c) resolve raw_refs → per-function free-name set ------------------
   let captured = resolve_raw_refs(tree, sb)
@@ -1682,12 +1725,6 @@ fn finalize_scope(
       function_scope: raw.function_scope,
       kind: raw.kind,
       bindings:,
-      // The synthetic `<withN_M>` holder NAME, carried as-is. It is
-      // declared IN this With scope by the parser
-      // (`parse_with_statement_body` sb_declares it as a LetBinding), so
-      // `do_lookup` resolves its slot + boxedness from `bindings` — no
-      // derived slot copy to keep in sync.
-      with_object: raw.with_object_name,
       contains_direct_eval: raw.contains_direct_eval,
       annexb_blocked: raw.annexb_blocked,
       is_strict:,
@@ -1738,8 +1775,13 @@ fn root_binding_is_local(
         LetBinding | ConstBinding -> opts.top_lex == LexLocal
         ParamBinding | CatchBinding | CaptureBinding | FnNameBinding -> True
       }
-    Module | Function | Block | Catch | With | ClassBody | ClassStaticBlock ->
-      True
+    Module
+    | Function
+    | Block
+    | Catch
+    | With(_)
+    | ClassBody
+    | ClassStaticBlock -> True
   }
 }
 
@@ -1889,7 +1931,7 @@ fn annexb_check_chain(
         | Script
         | Function
         | Block
-        | With
+        | With(_)
         | ClassBody
         | ClassStaticBlock ->
           case rb.kind {
@@ -2022,7 +2064,7 @@ pub const default_export = "*default*"
 /// is the count of enclosing `with` statements (monotonically increasing
 /// along any lexical chain); `with_id` is the `With` scope's id (unique
 /// across siblings).
-pub fn with_object_name(depth: Int, with_id: ScopeId) -> String {
+fn with_object_name(depth: Int, with_id: ScopeId) -> String {
   "<with" <> int.to_string(depth) <> "_" <> int.to_string(with_id) <> ">"
 }
 
@@ -2054,7 +2096,7 @@ fn do_lookup(
   tree: ScopeTree,
   scope_id: ScopeId,
   name: String,
-  crossed: List(#(Int, Bool)),
+  crossed: List(SlotRef),
 ) -> Resolution {
   let scope = get_scope(tree, scope_id)
   case dict.get(scope.bindings, name) {
@@ -2092,18 +2134,14 @@ fn do_lookup(
     Error(Nil) -> {
       // Crossing a `with` scope adds its object-slot to the runtime probe
       // chain BEFORE consulting the next outer scope. The `<withN_M>`
-      // holder binding is declared IN the With scope itself (the
-      // parser's `parse_with_statement_body`), so both its slot and its
-      // `is_boxed` flag — set by `analyze_captures` like any other
-      // binding, when a child closure defined inside the `with` body
+      // holder binding is declared IN the With scope itself (by
+      // `sb_push_with`, which also mints the name on the kind), so both its
+      // slot and its `is_boxed` flag — set by `analyze_captures` like any
+      // other binding, when a child closure defined inside the `with` body
       // captures it — come from this scope's own `bindings` entry.
-      let crossed = case scope.with_object {
-        Some(holder) -> {
-          let assert Ok(b) = dict.get(scope.bindings, holder)
-            as "scope.do_lookup: with-object holder binding missing from its With scope"
-          [#(b.slot, b.is_boxed), ..crossed]
-        }
-        None -> crossed
+      let crossed = case scope.kind {
+        With(holder:) -> [own_holder_ref(scope, holder), ..crossed]
+        _ -> crossed
       }
       // STOP at function boundaries. A name not found anywhere in this
       // function's own scope chain falls through to Global/EvalEnv —
@@ -2133,10 +2171,16 @@ fn do_lookup(
   }
 }
 
-fn wrap_with_chain(
-  crossed: List(#(Int, Bool)),
-  fallback: Direct,
-) -> Resolution {
+/// The `<withN_M>` holder's own slot in the With scope that declares it.
+/// `sb_push_with` is the only constructor of a `With` kind and it declares
+/// the binding in the same breath, so the lookup is total.
+fn own_holder_ref(with_scope: Scope, holder: String) -> SlotRef {
+  let assert Ok(b) = dict.get(with_scope.bindings, holder)
+    as "scope: With(holder) whose holder binding is not in its own scope"
+  SlotRef(slot: b.slot, boxed: b.is_boxed)
+}
+
+fn wrap_with_chain(crossed: List(SlotRef), fallback: Direct) -> Resolution {
   case crossed {
     [] -> Plain(fallback)
     _ -> WithChain(crossed_slots: list.reverse(crossed), fallback:)
@@ -2159,46 +2203,45 @@ fn wrap_with_chain(
 /// reverse yield innermost-first probe order: own withs → inherited withs
 /// → fallback. Inherited with-objects are always boxed (heap-shared with
 /// the parent frame). For the root scope (parent = None) the inherited
-/// stack comes from caller-supplied `FunctionInfo.with_stack` instead.
-fn inherited_with_slots(tree: ScopeTree, fn_root: Scope) -> List(#(Int, Bool)) {
+/// stack comes from the caller-supplied `ScopeTree.inherited_with_stack`
+/// (direct-eval) instead.
+fn inherited_with_slots(tree: ScopeTree, fn_root: Scope) -> List(SlotRef) {
   case fn_root.parent {
     None ->
-      function_info(tree, fn_root.function_scope).with_stack
-      |> list.map(fn(s) { #(s, True) })
+      tree.inherited_with_stack
+      |> list.map(SlotRef(slot: _, boxed: True))
       |> list.reverse
     Some(_) -> {
-      use acc, scope <- fold_enclosing_withs(tree, fn_root.parent, [])
-      // The With scope's holder is its sole binding (declared by the
-      // parser's `parse_with_statement_body`). Look its NAME up in the
-      // function root's
-      // bindings — `fn_with_stack_free` adds every enclosing
-      // with-holder to this function's free set, so `insert_captures`
-      // placed a CaptureBinding for it. Skip if absent (matches the
-      // legacy `list.filter_map(with_stack, …)`).
-      use a, holder_name, _b <- dict.fold(scope.bindings, acc)
-      case dict.get(fn_root.bindings, holder_name) {
-        Ok(b) -> [#(b.slot, True), ..a]
-        Error(Nil) -> a
+      use acc, holder <- fold_enclosing_withs(tree, fn_root.parent, [])
+      // Look the enclosing With's holder NAME up in the function root's
+      // bindings — `fn_with_stack_free` adds every enclosing with-holder to
+      // this function's free set, so `insert_captures` placed a
+      // CaptureBinding for it. Skip if absent (matches the legacy
+      // `list.filter_map(with_stack, …)`).
+      case dict.get(fn_root.bindings, holder) {
+        Ok(b) -> [SlotRef(slot: b.slot, boxed: True), ..acc]
+        Error(Nil) -> acc
       }
     }
   }
 }
 
-/// Walk the parent chain from `scope_id` to the root, calling `f` once
-/// per `With` scope encountered (innermost visited first). Shared spine
-/// for `inherited_with_slots` and `fn_with_stack_free`.
+/// Walk the parent chain from `scope_id` to the root, calling `f` once per
+/// `With` scope encountered (innermost visited first) with that scope's
+/// `<withN_M>` holder name. Shared spine for `inherited_with_slots` and
+/// `fn_with_stack_free`.
 fn fold_enclosing_withs(
   tree: ScopeTree,
   scope_id: Option(ScopeId),
   acc: a,
-  f: fn(a, Scope) -> a,
+  f: fn(a, String) -> a,
 ) -> a {
   case scope_id {
     None -> acc
     Some(id) -> {
       let scope = get_scope(tree, id)
       let acc = case scope.kind {
-        With -> f(acc, scope)
+        With(holder:) -> f(acc, holder)
         _ -> acc
       }
       fold_enclosing_withs(tree, scope.parent, acc, f)
@@ -2214,17 +2257,18 @@ pub fn lookup_lexical(
   tree: ScopeTree,
   scope_id: ScopeId,
   ref: LexicalRef,
-) -> #(Int, Bool) {
+) -> SlotRef {
   let scope = get_scope(tree, scope_id)
   let info = function_info(tree, scope.function_scope)
   case opcode.lexical_slot(info.lexical, ref) {
     // Owned slot: boxed only when an inner arrow / direct-eval captures it
     // (FunctionInfo.lexical_boxed, populated by analyze_captures). A
     // non-captured `this` is a plain GetLocal, not a box deref.
-    Some(slot) -> #(slot, opcode.lexical_refs_get(info.lexical_boxed, ref))
+    Some(slot) ->
+      SlotRef(slot:, boxed: opcode.lexical_refs_get(info.lexical_boxed, ref))
     None ->
       case dict.get(info.lexical_captures, ref) {
-        Ok(slot) -> #(slot, True)
+        Ok(slot) -> SlotRef(slot:, boxed: True)
         // No owned slot and no inherited capture: unreachable by
         // construction — every site that calls lookup_lexical is inside a
         // function the analyzer has populated. Returning a sentinel slot
@@ -2669,7 +2713,7 @@ fn compute_down(
     Function -> !inp.is_arrow
     ClassStaticBlock -> True
     Script -> script_root_owns
-    Module | Block | Catch | With | ClassBody -> False
+    Module | Block | Catch | With(_) | ClassBody -> False
   }
   let #(lexical, own_lexical_count) = case owns_lexical {
     // Non-owners (arrows; Module/Script root) have no OWN lexical
@@ -2852,9 +2896,9 @@ fn compute_down(
 /// `resolve_with_captures`, which received captures FIRST and allocated own
 /// bindings AFTER them. Also shifts `FunctionInfo.names` (slot-keyed for
 /// module-export / direct-eval lookup) and bumps `local_count` so
-/// `alloc_scratch` allocates past the captures. `Scope.with_object` is a
-/// NAME, not a slot, so it needs no shift — `do_lookup` reads the holder's
-/// (already-shifted) slot out of `scope.bindings`.
+/// `alloc_scratch` allocates past the captures. `ScopeKind.With(holder)`
+/// carries a NAME, not a slot, so it needs no shift — `do_lookup` reads the
+/// holder's (already-shifted) slot out of `scope.bindings`.
 fn insert_captures(
   tree: ScopeTree,
   fn_id: ScopeId,
@@ -3109,30 +3153,17 @@ fn declared_in(scopes: List(Scope)) -> Set(String) {
 }
 
 /// With-object holder synthetics (`<withN_M>`) active at `fn_id`'s
-/// creation site that this body must capture as free names. Walks the
-/// scope chain from `fn_id`'s parent to the root, collecting every `With`
-/// scope's holder binding name (the sole binding in a With scope —
-/// declared by the parser's `parse_with_statement_body`).
-///
-/// `FunctionInfo.with_stack` is NOT consulted: `finalize` initializes it
-/// to `[]` for every non-root function and nothing repopulates it (only
-/// the ROOT's with_stack — `opts.with_stack`, direct-eval's inherited
-/// holders — is ever non-empty), so it is empty by construction here.
-/// This tree walk derives the with-holder set directly from scope
-/// structure instead.
+/// creation site that this body must capture as free names — every one of
+/// them is a name the body needs to do its IrWith* probe. Walks the scope
+/// chain from `fn_id`'s parent to the root, collecting each `With` scope's
+/// holder name off its kind.
 fn fn_with_stack_free(
   tree: ScopeTree,
   fn_id: ScopeId,
   declared: Set(String),
 ) -> Set(String) {
   let start = { get_scope(tree, fn_id) }.parent
-  {
-    use acc, scope <- fold_enclosing_withs(tree, start, set.new())
-    // The With scope's holder is its sole binding. Defensive fold in
-    // case a future change adds more — every name here is a synthetic
-    // the body must capture to do its IrWith* probe.
-    dict.fold(scope.bindings, acc, fn(s, name, _b) { set.insert(s, name) })
-  }
+  { fold_enclosing_withs(tree, start, set.new(), set.insert) }
   |> set.difference(declared)
 }
 
