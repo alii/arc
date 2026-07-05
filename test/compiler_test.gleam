@@ -8320,6 +8320,16 @@ pub fn direct_eval_var_write_then_read_test() -> Nil {
   )
 }
 
+pub fn direct_eval_var_survives_await_test() -> Nil {
+  // Regression: AsyncFunctionSlot used to save pc/locals/stack/try_stack but
+  // NOT eval_env, so a sloppy direct-eval `var` introduced before an await
+  // vanished on resume (the resumed frame adopted the resumer's eval_env=None).
+  assert_promise_resolves(
+    "async function f(){eval('var x=1');await 0;return x;} f()",
+    JsNumber(Finite(1.0)),
+  )
+}
+
 pub fn direct_eval_var_typeof_test() -> Nil {
   // typeof must check eval_env, not just globals.
   assert_normal(

@@ -180,22 +180,12 @@ fn push_suspended_frame_refs(
     eval_env:,
     line: _,
   ) = frame
-  let acc = push_opt_ref(eval_env, acc)
+  let acc = push_option_ref(eval_env, acc)
   let acc =
     list.fold(tuple_array.to_list(locals), acc, fn(a, v) {
       push_value_ref(v, a)
     })
   list.fold(stack, acc, fn(a, v) { push_value_ref(v, a) })
-}
-
-fn push_opt_ref(
-  ref: Option(value.Ref),
-  acc: List(value.Ref),
-) -> List(value.Ref) {
-  case ref {
-    Some(r) -> [r, ..acc]
-    None -> acc
-  }
 }
 
 /// Prepend all refs reachable from a heap slot onto `acc`. 

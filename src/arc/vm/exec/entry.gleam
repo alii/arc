@@ -252,10 +252,7 @@ fn drive_top_level_await(
         resolve:,
         reject:,
         func_template: func,
-        saved_pc: suspended.pc,
-        saved_locals: suspended.locals,
-        saved_stack: suspended.stack,
-        saved_try_stack: generators.save_stacks(suspended.try_stack),
+        frame: generators.suspended_frame(suspended),
       ),
     )
   let wait_state = {

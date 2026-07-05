@@ -3858,19 +3858,15 @@ pub type ExoticKind(ctx, host) {
   /// symbol key is @@toStringTag = "Module" (in `symbol_properties`). The
   /// object has a null prototype, is non-extensible, and is read-only.
   ModuleNamespace(exports: Dict(String, Ref))
-  /// Proxy exotic object — ES2024 §10.5. `target`/`handler` are the
-  /// [[ProxyTarget]]/[[ProxyHandler]] internal slots; both become None when
-  /// the proxy is revoked (Proxy.revocable's revoke function). `callable` and
-  /// `constructable` record whether the proxy has [[Call]]/[[Construct]] —
-  /// fixed at creation time from the target (§10.5.15 ProxyCreate steps 4-7)
-  /// and still meaningful after revocation (typeof of a revoked function
-  /// proxy stays "function").
-  ProxyObject(
-    target: Option(Ref),
-    handler: Option(Ref),
-    callable: Bool,
-    constructable: Bool,
-  )
+  /// Proxy exotic object — ES2024 §10.5. `slots` carries the paired
+  /// [[ProxyTarget]]/[[ProxyHandler]] internal slots; §10.5.15 creates them
+  /// together and Proxy.revocable's revoke function nulls them together, so
+  /// they are structurally paired and `slots: None` is the only revoked state.
+  /// `callable` and `constructable` record whether the proxy has
+  /// [[Call]]/[[Construct]] — fixed at creation time from the target
+  /// (§10.5.15 ProxyCreate steps 4-7) and still meaningful after revocation
+  /// (typeof of a revoked function proxy stays "function").
+  ProxyObject(slots: Option(ProxySlots), callable: Bool, constructable: Bool)
   /// Internal Iterator Record — ES2024 §7.4.1 GetIterator builds
   /// {Iterator, NextMethod, Done} with `next` fetched ONCE. The GetIterator
   /// opcode wraps user-defined iterators in this so IteratorNext calls the
@@ -3878,6 +3874,14 @@ pub type ExoticKind(ctx, host) {
   /// iteration. Never exposed to JS: IteratorClose/CloseThrow/Rest/YieldStar
   /// unwrap to `iterated` before any dynamic .return/.throw lookup.
   IteratorRecordObject(iterated: JsValue, next_method: JsValue)
+}
+
+/// A live proxy's paired [[ProxyTarget]]/[[ProxyHandler]] internal slots
+/// (§10.5). ProxyCreate assigns both together and revocation nulls both
+/// together (§28.2.2.1.1 steps 4-5), so a half-revoked proxy is not a state
+/// the spec admits — pairing them makes it unrepresentable.
+pub type ProxySlots {
+  ProxySlots(target: Ref, handler: Ref)
 }
 
 /// The [[IsRawJSON]] internal slot's payload — the verbatim JSON source text a
@@ -4212,21 +4216,26 @@ pub type PromiseReaction {
   )
 }
 
-/// Saved try-frame for generator suspension (mirrors TryFrame from state.gleam).
-pub type SavedTryFrame {
-  SavedTryFrame(catch_target: Int, stack_depth: Int, kind: TryKind(Pc))
+/// Exception handler frame, pushed by PushTry. `kind` is copied straight off
+/// the opcode: it says whether unwinding a *return* completion past this frame
+/// must run a finally subroutine, close a live iterator, or just skip it
+/// (see `opcode.TryKind` and `generators.find_next_return_handler`). Defined
+/// here (not in state.gleam) so `SuspendedFrame` can carry the live try-stack
+/// verbatim — no field-identical mirror type, no identity-copy on suspend.
+pub type TryFrame {
+  TryFrame(catch_target: Int, stack_depth: Int, kind: TryKind(Pc))
 }
 
 /// A suspended coroutine body: everything a resume must restore into a fresh
-/// execution `State`. Shared verbatim by `GeneratorSlot` and
-/// `AsyncGeneratorSlot` — the two suspend/resume paths save exactly the same
-/// snapshot, so they save it through the same record.
+/// execution `State`. Shared verbatim by `GeneratorSlot`, `AsyncGeneratorSlot`
+/// and `AsyncFunctionSlot` — the three suspend/resume paths save exactly the
+/// same snapshot, so they save it through the same record.
 pub type SuspendedFrame {
   SuspendedFrame(
     pc: Int,
     locals: TupleArray(JsValue),
     stack: List(JsValue),
-    try_stack: List(SavedTryFrame),
+    try_stack: List(TryFrame),
     /// The body frame's own sloppy-direct-eval var dict and the line it
     /// suspended on. Both are per-frame `State` fields, so a resume that fails
     /// to restore them silently adopts the RESUMER's: `var`s a direct eval
@@ -4406,7 +4415,7 @@ pub type HeapSlot(ctx, host) {
   /// Engine-internal async function suspended state.
   /// Saves the full execution context so await can resume. There is no
   /// `env_ref`: the closure environment is read once at frame setup (its
-  /// captures are copied into `saved_locals`) and never again, so a
+  /// captures are copied into `frame.locals`) and never again, so a
   /// suspended body has no function environment to carry — module bodies,
   /// which suspend here on top-level await, have none at all.
   AsyncFunctionSlot(
@@ -4414,10 +4423,7 @@ pub type HeapSlot(ctx, host) {
     resolve: JsValue,
     reject: JsValue,
     func_template: FuncTemplate,
-    saved_pc: Int,
-    saved_locals: TupleArray(JsValue),
-    saved_stack: List(JsValue),
-    saved_try_stack: List(SavedTryFrame),
+    frame: SuspendedFrame,
   )
   /// Engine-internal async generator state. The ObjectSlot has
   /// `kind: AsyncGeneratorObject(generator_data: Ref)` pointing here.

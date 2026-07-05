@@ -233,22 +233,38 @@ fn coroutine_initial_state(
   args: List(JsValue),
   locals: tuple_array.TupleArray(JsValue),
 ) -> State(host) {
-  coroutine_resume_state(state, callee_template, locals, [], 0, [])
-  |> fn(s) { State(..s, call_args: args) }
+  State(
+    ..state,
+    stack: [],
+    locals:,
+    func: callee_template,
+    code: callee_template.bytecode,
+    constants: callee_template.constants,
+    pc: 0,
+    call_stack: [],
+    try_stack: [],
+    new_target: JsUndefined,
+    call_args: args,
+    // A coroutine body is its OWN frame: it must not inherit the caller's
+    // sloppy-direct-eval var dict (`call_regular_function` resets it too).
+    eval_env: None,
+  )
 }
 
-/// Set up an isolated execution state to RESUME a coroutine body from a saved
-/// suspension point. Same isolation as `coroutine_initial_state` (no caller
-/// frames, no new.target, no call_args — the arguments object was built before
-/// the first suspension), but with the saved stack/pc/try_stack restored.
+/// Set up an isolated execution state to RESUME an async-function body from a
+/// saved suspension point. Same isolation as `coroutine_initial_state` (no
+/// caller frames, no new.target, no call_args — the arguments object was built
+/// before the first suspension), but with the saved frame restored. Exhaustive
+/// destructure so a new `SuspendedFrame` field is a compile error here, not a
+/// silently-unrestored value on resume.
 fn coroutine_resume_state(
   state: State(host),
   func_template: FuncTemplate,
-  locals: tuple_array.TupleArray(JsValue),
+  frame: value.SuspendedFrame,
   stack: List(JsValue),
-  pc: Int,
-  try_stack: List(state.TryFrame),
 ) -> State(host) {
+  let value.SuspendedFrame(pc:, locals:, stack: _, try_stack:, eval_env:, line:) =
+    frame
   State(
     ..state,
     stack:,
@@ -261,10 +277,8 @@ fn coroutine_resume_state(
     try_stack:,
     new_target: JsUndefined,
     call_args: [],
-    // A coroutine body is its OWN frame: it must not inherit the caller's
-    // sloppy-direct-eval var dict (`call_regular_function` resets it too).
-    // Resumes overwrite this with the frame's saved eval_env.
-    eval_env: None,
+    eval_env:,
+    current_line: line,
   )
 }
 
@@ -435,17 +449,13 @@ fn finish_async_execution(
     Ok(#(Suspended(completion.Await, awaited_value), suspended)) -> {
       // Body hit `await` -- save state, set up promise resolution
       let h2 = suspended.heap
-      let saved_try = generators.save_stacks(suspended.try_stack)
       let slot =
         AsyncFunctionSlot(
           promise_data_ref:,
           resolve:,
           reject:,
           func_template:,
-          saved_pc: suspended.pc,
-          saved_locals: suspended.locals,
-          saved_stack: suspended.stack,
-          saved_try_stack: saved_try,
+          frame: generators.suspended_frame(suspended),
         )
       let #(h2, async_data_ref) = case entry {
         Resumed(slot_ref) -> #(heap.write(h2, slot_ref, slot), slot_ref)
@@ -522,25 +532,15 @@ pub fn call_native_async_resume(
       resolve: slot_resolve,
       reject: slot_reject,
       func_template:,
-      saved_pc:,
-      saved_locals:,
-      saved_stack:,
-      saved_try_stack:,
+      frame:,
     )) -> {
       // Build the resume stack: push resolved value for fulfillment
       let resume_stack = case is_reject {
-        False -> [settled_value, ..saved_stack]
-        True -> saved_stack
+        False -> [settled_value, ..frame.stack]
+        True -> frame.stack
       }
       let exec_state =
-        coroutine_resume_state(
-          state,
-          func_template,
-          saved_locals,
-          resume_stack,
-          saved_pc,
-          generators.restore_stacks(saved_try_stack),
-        )
+        coroutine_resume_state(state, func_template, frame, resume_stack)
       // For rejection, throw the value so try/catch inside async fn can handle it
       let exec_result = case is_reject {
         False -> execute_inner(exec_state)
@@ -1160,12 +1160,7 @@ pub fn call_native(
           ObjectSlot(kind: value.ProxyObject(callable:, constructable:, ..), ..) ->
             ObjectSlot(
               ..slot,
-              kind: value.ProxyObject(
-                target: None,
-                handler: None,
-                callable:,
-                constructable:,
-              ),
+              kind: value.ProxyObject(slots: None, callable:, constructable:),
             )
           _ -> slot
         }
@@ -1543,10 +1538,10 @@ pub fn do_construct(
           )
       }
     // §10.5.13 Proxy [[Construct]] ( argumentsList, newTarget ).
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) -> {
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) -> {
       // Steps 1-5: revocation check + GetMethod(handler, "construct").
       use #(t, h, trap, state) <- result.try(
-        state.rethrow(object.proxy_trap(state, target, handler, "construct")),
+        state.rethrow(object.proxy_trap(state, slots, "construct")),
       )
       case trap {
         // Step 7: no trap → Construct(target, argumentsList, newTarget).
@@ -1817,10 +1812,7 @@ pub fn call_value(
             dispatch_fn,
           )
         // §10.5.12 Proxy [[Call]] ( thisArgument, argumentsList ).
-        Some(ObjectSlot(
-          kind: value.ProxyObject(target:, handler:, callable:, ..),
-          ..,
-        )) ->
+        Some(ObjectSlot(kind: value.ProxyObject(slots:, callable:, ..), ..)) ->
           case callable {
             False ->
               state.throw_type_error(
@@ -1830,7 +1822,7 @@ pub fn call_value(
             True -> {
               // Steps 1-5: revocation check + GetMethod(handler, "apply").
               use #(t, h, trap, state) <- result.try(
-                state.rethrow(object.proxy_trap(state, target, handler, "apply")),
+                state.rethrow(object.proxy_trap(state, slots, "apply")),
               )
               case trap {
                 // Step 7: no trap → Call(target, thisArgument, argumentsList).
@@ -1894,8 +1886,7 @@ fn proxy_create(
         state.heap,
         ObjectSlot(
           kind: value.ProxyObject(
-            target: Some(t),
-            handler: Some(handler_ref),
+            slots: Some(value.ProxySlots(target: t, handler: handler_ref)),
             callable:,
             constructable:,
           ),

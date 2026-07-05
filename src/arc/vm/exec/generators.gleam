@@ -10,13 +10,13 @@ import arc/vm/key.{Named}
 import arc/vm/opcode.{CatchOnly, Finally, IterCloseGuard, Pc, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
-  type Heap, type HeapSlot, type State, type StepExit, type TryFrame,
-  InternalError, State, Threw, TryFrame, VmFailed,
+  type Heap, type HeapSlot, type State, type StepExit, InternalError, State,
+  Threw, VmFailed,
 }
 import arc/vm/value.{
-  type DelegateMethod, type FuncTemplate, type JsValue, type Ref, DelegateReturn,
-  DelegateThrow, GeneratorObject, GeneratorSlot, JsObject, JsUndefined,
-  ObjectSlot,
+  type DelegateMethod, type FuncTemplate, type JsValue, type Ref, type TryFrame,
+  DelegateReturn, DelegateThrow, GeneratorObject, GeneratorSlot, JsObject,
+  JsUndefined, ObjectSlot, TryFrame,
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -365,7 +365,6 @@ fn build_resumed_state(
       gen.data_ref,
       gen_with_state(gen, value.GenExecuting(frame)),
     )
-  let restored_try = restore_stacks(frame.try_stack)
   State(
     ..outer,
     heap: h,
@@ -384,7 +383,7 @@ fn build_resumed_state(
     // an empty `call_stack` at depth 0 would let a collection inside the body
     // free everything only the resumer holds.
     call_depth: outer.call_depth + 1,
-    try_stack: restored_try,
+    try_stack: frame.try_stack,
     new_target: JsUndefined,
     call_args: [],
     // Per-frame fields: without these the body would inherit the RESUMER's
@@ -804,37 +803,15 @@ fn replace_return_with_throw(
 
 /// Snapshot a suspended body's execution context — the one place a
 /// `value.SuspendedFrame` is built from a live `State`, shared by every
-/// generator/async-generator suspension point.
+/// generator / async-generator / async-function suspension point.
 pub fn suspended_frame(suspended: State(host)) -> value.SuspendedFrame {
   value.SuspendedFrame(
     pc: suspended.pc,
     locals: suspended.locals,
     stack: suspended.stack,
-    try_stack: save_stacks(suspended.try_stack),
+    try_stack: suspended.try_stack,
     eval_env: suspended.eval_env,
     line: suspended.current_line,
-  )
-}
-
-/// Save try-stack to serializable form for generator suspension.
-pub fn save_stacks(try_stack: List(TryFrame)) -> List(value.SavedTryFrame) {
-  use tf <- list.map(try_stack)
-  value.SavedTryFrame(
-    catch_target: tf.catch_target,
-    stack_depth: tf.stack_depth,
-    kind: tf.kind,
-  )
-}
-
-/// Restore saved try-stack back to frame types for generator resumption.
-pub fn restore_stacks(
-  saved_try_stack: List(value.SavedTryFrame),
-) -> List(TryFrame) {
-  use stf <- list.map(saved_try_stack)
-  TryFrame(
-    catch_target: stf.catch_target,
-    stack_depth: stf.stack_depth,
-    kind: stf.kind,
   )
 }
 

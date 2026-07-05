@@ -259,7 +259,6 @@ fn build_exec_state(
   stack: List(JsValue),
   pc: Int,
 ) -> State(host) {
-  let restored_try = generators.restore_stacks(frame.saved.try_stack)
   State(
     ..state,
     stack:,
@@ -269,7 +268,7 @@ fn build_exec_state(
     code: frame.func_template.bytecode,
     constants: frame.func_template.constants,
     call_stack: [],
-    try_stack: restored_try,
+    try_stack: frame.saved.try_stack,
     new_target: JsUndefined,
     call_args: [],
     // Per-frame fields: without these the body would inherit the RESUMER's

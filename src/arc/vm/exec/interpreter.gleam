@@ -53,13 +53,13 @@ import arc/vm/state.{
   type Heap, type NativeFnSlot, type State, type StepExit, type VmError,
   AsyncDelegateResume, Awaited, DelegateYield, InitialSuspend, InternalError,
   PlainYield, Returned, SavedFrame, StackUnderflow, State, SuspensionLeak, Threw,
-  TryFrame, VmFailed, Yielded,
+  VmFailed, Yielded,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
   DataProperty, EvalEnvSlot, ForInIteratorSlot, FunctionObject, GeneratorObject,
   JsBool, JsNull, JsObject, JsString, JsUndefined, JsUninitialized,
-  NativeFunction, ObjectSlot, OrdinaryObject,
+  NativeFunction, ObjectSlot, OrdinaryObject, TryFrame,
 }
 import gleam/dict
 import gleam/float
