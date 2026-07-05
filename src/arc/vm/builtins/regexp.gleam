@@ -43,7 +43,6 @@ import gleam/bit_array
 import gleam/bool
 import gleam/dict
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -59,7 +58,10 @@ type ExecFailure {
   NoMatch
   /// lastIndex was past the end of the subject (§22.2.7.2 step 12.a).
   OffsetOutOfRange
-  /// The translated pattern is not valid PCRE. Reason is re:compile's message.
+  /// The translated pattern is not valid PCRE — either an arc translation gap
+  /// or a construct PCRE simply cannot express (an unbounded-length lookbehind
+  /// like `(?<=^\w+)` is legal ECMAScript, but PCRE caps lookbehind length).
+  /// Reason is re:compile's message.
   PatternCompileFailed(reason: String)
 }
 
@@ -891,22 +893,15 @@ fn try_builtin_exec(
   // OffsetOutOfRange — one place decides what a legal offset is.
   case ffi_regexp_exec_info(pattern, flags, s, last_index, sticky) {
     // Match failure: reset lastIndex (observable Set) iff global or sticky.
-    // A pattern PCRE could not compile is an arc translator bug, NOT a
-    // no-match: it still yields null (throwing where the spec promises a
-    // result would be worse) but it is reported rather than swallowed.
-    Error(failure) -> {
-      case failure {
-        NoMatch | OffsetOutOfRange -> Nil
-        PatternCompileFailed(reason:) ->
-          io.println_error(
-            "arc internal error: RegExp /"
-            <> pattern
-            <> "/"
-            <> flags
-            <> " failed to compile: "
-            <> reason,
-          )
-      }
+    // PatternCompileFailed is a pattern PCRE cannot express (e.g. an
+    // unbounded-length lookbehind, which is valid ECMAScript) — the exec then
+    // yields null, since throwing where the spec promises a result would be
+    // worse. It stays a DISTINCT constructor so no caller can mistake it for
+    // "the regex ran and did not match", but it is not an internal error and
+    // must not print: a script looping over such a regexp would flood stderr.
+    // Listed constructor-by-constructor so a new ExecFailure has to be
+    // considered here rather than falling into "no match" by default.
+    Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> {
       case global || sticky {
         True -> {
           use state <-

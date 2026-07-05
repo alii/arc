@@ -34,7 +34,11 @@ flags_to_opts(<<_, Rest/binary>>, Acc) -> flags_to_opts(Rest, Acc).
 %%
 %% The failure shape is one of the `regexp:ExecFailure` constructors the Gleam
 %% caller matches on — a pattern PCRE cannot compile is NOT the same thing as
-%% a pattern that failed to match, and neither side may confuse them.
+%% a pattern that failed to match, and neither side may confuse them. A compile
+%% failure is not necessarily an arc bug: PCRE rejects constructs that are legal
+%% ECMAScript, e.g. an unbounded-length lookbehind like `(?<=^\w+)`. It is
+%% cached like a success, so a script exec'ing such a regexp in a loop pays the
+%% translation + compile once, not once per call.
 %%
 %% Get a compiled pattern, caching it in the process dictionary. re:run/3
 %% with a binary pattern recompiles the PCRE pattern on every call, and the
@@ -58,16 +62,17 @@ get_compiled(Pattern, Flags) ->
             {Stripped, GroupCount, Names} = scan_pattern(Pattern),
             Translated = unicode:characters_to_binary(
                            translate_pat(Stripped, false, Mode, Caseless)),
-            case re:compile(Translated, Opts) of
-                {ok, MP} ->
-                    Entry = {MP, GroupCount, Names},
-                    cache_put(Key, Entry),
-                    {ok, Entry};
-                {error, Reason} ->
-                    {error, {pattern_compile_failed, compile_reason(Reason)}}
-            end;
-        Entry ->
-            {ok, Entry}
+            Result = case re:compile(Translated, Opts) of
+                         {ok, MP} ->
+                             {ok, {MP, GroupCount, Names}};
+                         {error, Reason} ->
+                             {error,
+                              {pattern_compile_failed, compile_reason(Reason)}}
+                     end,
+            cache_put(Key, Result),
+            Result;
+        Result ->
+            Result
     end.
 
 %% re:compile's {ErrString, Position} (or anything else it may hand back)
@@ -85,7 +90,9 @@ compile_reason(Other) ->
 %% have a small, fixed set of patterns; the cap only triggers for
 %% pathological dynamically-generated patterns, where recompiling matches
 %% the old behavior anyway.
-cache_put(Key, Entry) ->
+%% Value cached is get_compiled's whole result — {ok, Entry} or the
+%% pattern_compile_failed error — so failures cost one compile too.
+cache_put(Key, Result) ->
     N = case erlang:get(arc_re_mp_count) of
             undefined -> 0;
             C -> C
@@ -97,7 +104,7 @@ cache_put(Key, Entry) ->
         false ->
             erlang:put(arc_re_mp_count, N + 1)
     end,
-    erlang:put(Key, Entry).
+    erlang:put(Key, Result).
 
 %% ---- One scan of the source pattern -------------------------------------
 %%
