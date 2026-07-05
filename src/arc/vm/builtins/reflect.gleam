@@ -1,6 +1,6 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
-import arc/vm/ops/define_own
+import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/ops/property
 import arc/vm/state.{type Heap, type State, State}
@@ -188,7 +188,7 @@ fn reflect_define_property(
   // then [[DefineOwnProperty]]. define_property_bool_value returns the raw
   // [[DefineOwnProperty]] boolean; proxy trap exceptions propagate, ordinary
   // validation failures → false.
-  case define_own.define_property_bool_value(state, ref, key_val, desc_val) {
+  case mop.define_property_bool_value(state, ref, key_val, desc_val) {
     Ok(#(state, ok)) -> #(state, Ok(JsBool(ok)))
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }
@@ -256,7 +256,7 @@ fn reflect_get_own_property_descriptor(
   // and are filtered on the ordinary lookup path (never for proxy traps).
   use pk, state <- state.try_op(property.to_prop_key(state, key_val))
   // Step 3: Let desc be ? target.[[GetOwnProperty]](key) — trap-aware.
-  use own_prop, state <- state.try_op(define_own.get_own_property_stateful(
+  use own_prop, state <- state.try_op(mop.get_own_property_stateful(
     state,
     ref,
     object.prop_key_value(pk),
@@ -265,7 +265,7 @@ fn reflect_get_own_property_descriptor(
   case own_prop {
     Some(prop) -> {
       let #(heap, desc_ref) =
-        define_own.make_descriptor_object(state.heap, prop, object_proto)
+        mop.make_descriptor_object(state.heap, prop, object_proto)
       #(State(..state, heap:), Ok(JsObject(desc_ref)))
     }
     None -> #(state, Ok(JsUndefined))
@@ -333,7 +333,7 @@ fn reflect_own_keys(
   use ref, _rest, state <- require_object(args, state, "ownKeys")
   // Step 2: trap-aware [[OwnPropertyKeys]] — indices ascending, then named
   // keys, then symbols (or the proxy trap's order).
-  use all_keys, state <- state.try_op(define_own.own_keys_stateful(state, ref))
+  use all_keys, state <- state.try_op(mop.own_keys_stateful(state, ref))
   state.ok_array(state, all_keys)
 }
 
@@ -409,9 +409,9 @@ fn reflect_set_prototype_of(
     Error(Nil) ->
       state.type_error(state, "Object prototype may only be an Object or null")
     // Step 3: ? target.[[SetPrototypeOf]](proto) — the proxy-vs-ordinary
-    // dispatch lives in ops/define_own; every refusal is just `false` here.
+    // dispatch lives in ops/mop; every refusal is just `false` here.
     Ok(new_proto) ->
-      case define_own.set_prototype_of_stateful(state, ref, new_proto) {
+      case mop.set_prototype_of_stateful(state, ref, new_proto) {
         Ok(#(state, status)) -> #(state, Ok(JsBool(result.is_ok(status))))
         Error(#(thrown, state)) -> #(state, Error(thrown))
       }

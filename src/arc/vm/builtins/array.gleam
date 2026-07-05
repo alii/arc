@@ -8,6 +8,7 @@ import arc/vm/js_string
 import arc/vm/key.{Index, Named, max_array_index, max_array_length}
 import arc/vm/limits
 import arc/vm/ops/coerce
+import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/ops/operators
 import arc/vm/ops/property
@@ -2375,7 +2376,7 @@ fn write_species_element(
           #("configurable", value.data_property(JsBool(True))),
         ])
       let state = State(..state, heap:)
-      use #(state, ok) <- result.try(object_builtin.define_property_bool(
+      use #(state, ok) <- result.try(mop.define_property_bool(
         state,
         target,
         JsString(int.to_string(idx)),

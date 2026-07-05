@@ -5,7 +5,6 @@ import arc/parser/ast
 import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
-import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/compile_task
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
@@ -18,6 +17,7 @@ import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
 import arc/vm/opcode
 import arc/vm/ops/coerce
+import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, type VmError, State}
 import arc/vm/value.{
@@ -1193,7 +1193,7 @@ fn copy_name_and_length(
       // via [[GetOwnProperty]] so proxy getOwnPropertyDescriptor traps
       // (and revoked proxies) are observable.
       use len_desc, state <- state.try_op(
-        builtins_object.get_own_property_stateful(
+        mop.get_own_property_stateful(
           state,
           tref,
           JsString("length"),

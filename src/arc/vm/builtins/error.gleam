@@ -2,10 +2,10 @@ import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/dom_exception
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
-import arc/vm/builtins/object as builtins_object
 import arc/vm/heap
 import arc/vm/key.{Named}
 import arc/vm/ops/coerce
+import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -601,7 +601,7 @@ fn set_stack_ignoring_prototype(
     }
     False -> {
       // Step 3: desc = ? this.[[GetOwnProperty]]("stack") — proxy-aware.
-      use own, state <- state.try_op(builtins_object.get_own_property_stateful(
+      use own, state <- state.try_op(mop.get_own_property_stateful(
         state,
         ref,
         JsString("stack"),
@@ -610,7 +610,7 @@ fn set_stack_ignoring_prototype(
         // Step 4: CreateDataPropertyOrThrow(this, "stack", v) — defines a
         // writable/enumerable/configurable data property; false → TypeError.
         None -> {
-          use state <- builtins_object.create_data_property_or_throw(
+          use state <- mop.create_data_property_or_throw(
             state,
             ref,
             JsString("stack"),

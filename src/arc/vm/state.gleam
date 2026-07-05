@@ -144,7 +144,7 @@ pub type RealmCtx(host) {
     /// Canonical, TRAP-AWARE `O.[[GetOwnProperty]](P)`: §10.1.5.1 for ordinary
     /// objects, §10.5.5 for proxies (so a proxy target's own
     /// getOwnPropertyDescriptor trap fires, and its invariants are enforced).
-    /// Set by the VM executor to `builtins/object.own_property_keyed`.
+    /// Set by the VM executor to `ops/mop.own_property_keyed`.
     ///
     /// Same layering inversion as `to_number_fn`: §10.5.5 needs descriptor
     /// parsing (ToPropertyDescriptor), which lives ABOVE the MOP in

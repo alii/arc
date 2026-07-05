@@ -44,6 +44,7 @@ import arc/vm/key.{Named}
 import arc/vm/limits
 import arc/vm/ops/array_iterator
 import arc/vm/ops/coerce
+import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/ops/property
 import arc/vm/realm
@@ -657,7 +658,7 @@ pub fn call_native(
           // (test262: bind/instance-length-* , bind/get-fn-length-error,
           // proxy/bind: `getOwnPropertyDescriptor` fires before `get`).
           use #(has_length, state) <- result.try(
-            state.rethrow(builtins_object.get_own_property_stateful(
+            state.rethrow(mop.get_own_property_stateful(
               state,
               target_ref,
               JsString("length"),

@@ -45,7 +45,7 @@ import arc/vm/opcode.{
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/array_iterator
 import arc/vm/ops/coerce
-import arc/vm/ops/define_own
+import arc/vm/ops/mop
 import arc/vm/ops/numeric
 import arc/vm/ops/object
 import arc/vm/ops/operators
@@ -420,9 +420,9 @@ pub fn new_state(
       // Canonical trap-aware [[GetOwnProperty]] (§10.1.5.1 / §10.5.5). The
       // proxy invariant checks in ops/object are specified against
       // `? target.[[GetOwnProperty]](P)`, but §10.5.5 needs descriptor
-      // parsing from ops/define_own — above ops/object in the module graph.
+      // parsing from ops/mop — above ops/object in the module graph.
       // Same inversion as to_number_fn.
-      get_own_property_fn: define_own.own_property_keyed,
+      get_own_property_fn: mop.own_property_keyed,
       callback_sentinel: value.FuncTemplate(
         ..empty_template(),
         bytecode: tuple_array.from_list([Return, Return]),
@@ -4591,7 +4591,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 case object.as_proxy(state.heap, ref) {
                   // Proxy: EnumerateObjectProperties via the ownKeys /
                   // getOwnPropertyDescriptor / getPrototypeOf traps.
-                  Some(_) -> define_own.enumerate_keys_stateful(state, ref)
+                  Some(_) -> mop.enumerate_keys_stateful(state, ref)
                   None -> Ok(#(object.enumerate_keys(state.heap, ref), state))
                 }
               // for-in on null/undefined produces no iterations
@@ -5553,7 +5553,7 @@ fn define_field_full(
     ])
   let state = State(..state, heap:)
   use #(state, ok) <- result.try(
-    state.rethrow(define_own.define_property_bool(state, ref, key, desc_ref)),
+    state.rethrow(mop.define_property_bool(state, ref, key, desc_ref)),
   )
   case ok {
     True -> Ok(state)

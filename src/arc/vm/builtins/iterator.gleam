@@ -6,12 +6,12 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable}
 import arc/vm/builtins/iter_protocol.{IterateStrings, RejectPrimitives}
-import arc/vm/builtins/object as builtins_object
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/key.{Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
+import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -980,7 +980,7 @@ fn ignore_proto_setter(
             IgnoreSetCtor -> JsString("constructor")
             IgnoreSetTag -> value.JsSymbol(value.symbol_to_string_tag)
           }
-          use state <- builtins_object.create_data_property_or_throw(
+          use state <- mop.create_data_property_or_throw(
             state,
             ref,
             key_val,
@@ -1280,7 +1280,7 @@ fn zip_keyed(
   )
   use mode, state <- state.try_op(zip_options(state, args, "zipKeyed"))
   // Step 10: allKeys = iterables.[[OwnPropertyKeys]]().
-  use all_keys, state <- state.try_op(builtins_object.own_property_keys(
+  use all_keys, state <- state.try_op(mop.own_property_keys(
     state,
     iterables_ref,
   ))
@@ -1486,7 +1486,7 @@ fn zip_keyed_collect(
   case keys_left {
     [] -> Ok(#(#(list.reverse(keys_acc), list.reverse(iters_acc)), state))
     [key, ..rest] ->
-      case builtins_object.own_property_keyed(state, iterables_ref, key) {
+      case mop.own_property_keyed(state, iterables_ref, key) {
         Error(#(thrown, state)) ->
           Error(close_all_and_throw(state, collected_iters(iters_acc), thrown))
         Ok(#(desc, state)) -> {

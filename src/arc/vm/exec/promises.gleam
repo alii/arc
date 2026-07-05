@@ -1,7 +1,6 @@
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
-import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/job_call
 import arc/vm/heap
@@ -9,6 +8,7 @@ import arc/vm/internal/elements
 import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
+import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State, type StepExit, State, Threw}
@@ -1170,7 +1170,7 @@ fn perform_promise_all_keyed(
   case promises {
     JsObject(promises_ref) -> {
       // Step 1: Let allKeys be ? promises.[[OwnPropertyKeys]]() — trap-aware.
-      use #(all_keys, state) <- result.try(builtins_object.own_property_keys(
+      use #(all_keys, state) <- result.try(mop.own_property_keys(
         state,
         promises_ref,
       ))
@@ -1251,7 +1251,7 @@ fn perform_keyed_loop(
     }
     [key, ..rest] -> {
       // Step 6.a: Let propertyDesc be ? promises.[[GetOwnProperty]](key).
-      use #(desc, state) <- result.try(builtins_object.own_property_keyed(
+      use #(desc, state) <- result.try(mop.own_property_keyed(
         state,
         loop.promises_ref,
         key,
@@ -1275,7 +1275,7 @@ fn perform_keyed_loop(
               state.heap,
               loop.keys_ref,
               index,
-              builtins_object.object_key_value(key),
+              mop.object_key_value(key),
             )
           let h = set_array_element(h, loop.values_ref, index, JsUndefined)
           // Step 6.b.iv: nextPromise = ? Call(promiseResolve, ctor,
@@ -2670,7 +2670,7 @@ fn from_async_define_own(
             extensible: True,
           ),
         )
-      use #(state, ok) <- result.try(builtins_object.define_property_bool(
+      use #(state, ok) <- result.try(mop.define_property_bool(
         State(..state, heap: h),
         ref,
         JsString(int.to_string(k)),

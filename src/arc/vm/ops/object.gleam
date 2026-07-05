@@ -1336,7 +1336,7 @@ fn set_property_on_slot(
         // whose ToNumber/ToBigInt is observable — it needs a `State` and can
         // throw, neither of which this heap-only entry point can express. The
         // real MOP entry points do it: `set_value`'s TypedArray [[Set]] arm,
-        // `set_on_receiver`'s TypedArray receiver arm, and ops/define_own's
+        // `set_on_receiver`'s TypedArray receiver arm, and ops/mop's
         // §10.4.5.3 [[DefineOwnProperty]] all route numeric indices to
         // `typed_array_elements.typed_array_store` before reaching here.
         _ -> set_string_property(h, ref, key, val, slot)
@@ -2319,7 +2319,7 @@ fn ordinary_delete_outcome(
 /// This is THE single funnel for own string-key enumeration order: for-in
 /// (enumerate_keys), Object.keys/values/entries/assign, getOwnPropertyNames,
 /// Reflect.ownKeys, JSON.stringify and spread/rest all route through it
-/// (directly or via collect_own_keys in ops/define_own).
+/// (directly or via collect_own_keys in ops/mop).
 pub fn own_string_keys_flagged(
   heap: Heap(host),
   ref: Ref,
@@ -3690,7 +3690,7 @@ fn proxy_get_prototype_of(
 }
 
 /// §10.5.2 Proxy [[SetPrototypeOf]] ( V ) — trap path only; the ordinary
-/// path (cycle detection etc.) lives in ops/define_own and calls back in
+/// path (cycle detection etc.) lives in ops/mop and calls back in
 /// for proxy refs. `proto_val` is JsObject(p) or JsNull.
 pub fn proxy_set_prototype_of(
   state: State(host),

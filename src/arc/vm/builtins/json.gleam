@@ -1,12 +1,12 @@
 import arc/internal/utf16
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
-import arc/vm/builtins/object as object_builtins
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/js_string
 import arc/vm/key
 import arc/vm/ops/coerce
+import arc/vm/ops/mop
 import arc/vm/ops/object as objops
 import arc/vm/ops/property
 import arc/vm/state.{type Heap, type State, State}
@@ -425,7 +425,7 @@ fn internalize_json_property(
         // Step 5.c: EnumerableOwnPropertyNames(val, key).
         False -> {
           use #(keys, state) <- result.try(
-            object_builtins.enumerable_string_keys_stateful(state, ref),
+            mop.enumerable_string_keys_stateful(state, ref),
           )
           internalize_keys(state, ctx, ref, keys, record_members(node))
         }
@@ -560,7 +560,7 @@ fn replace_or_delete(
     }
     _ -> {
       use #(state, _defined) <- result.map(
-        object_builtins.create_data_property_bool(
+        mop.create_data_property_bool(
           state,
           ref,
           JsString(name),
@@ -1789,7 +1789,7 @@ fn serialize_object(
       use #(keys, state) <- result.try(case ctx.replacer {
         PropertyList(names) -> Ok(#(names, state))
         NoReplacer | ReplacerFn(_) ->
-          object_builtins.enumerable_string_keys_stateful(state, ref)
+          mop.enumerable_string_keys_stateful(state, ref)
       })
       // Step 8: partial = members serialized in order.
       use #(partial, state) <- result.map(

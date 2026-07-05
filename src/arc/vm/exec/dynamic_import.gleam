@@ -40,13 +40,13 @@
 //// `RealmCtx.import_referrer`) and a typed job outcome (`DeferHookOutcome`).
 
 import arc/vm/builtins/common
-import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/job_call
 import arc/vm/exec/promises
 import arc/vm/internal/job_queue
 import arc/vm/key.{Named}
 import arc/vm/ops/coerce
+import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/state.{type State, type StepExit, State}
 import arc/vm/value.{type JsValue, type Ref, JsObject, JsString, JsUndefined}
@@ -458,7 +458,7 @@ fn validate_attributes(
   // Trap-aware EnumerableOwnProperties: a Proxy attributes object's ownKeys /
   // getOwnPropertyDescriptor traps run (and their throws reject the promise).
   use #(keys, state) <- result.try(
-    builtins_object.enumerable_string_keys_stateful(state, attributes_ref),
+    mop.enumerable_string_keys_stateful(state, attributes_ref),
   )
   // Step 8.d.ii-iv: Get each value (getters can throw → reject); every value
   // must be a String.
