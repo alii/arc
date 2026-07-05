@@ -55,9 +55,10 @@ pub fn raw_text(r: Raw) -> String {
 }
 
 /// Assert `text` is already a canonical module identity. The only way to mint
-/// a `Resolved` outside `resolve/2`, and deliberately named so its two callers
-/// stand out: the value a host resolver returned, and the entry specifier the
-/// embedder named (which `arc/internal/path.canonicalize` normalizes first).
+/// a `Resolved` outside `resolve/2`, and deliberately named so its callers
+/// stand out: the value a host resolver returned, the entry specifier the
+/// embedder named, and `arc/internal/path.resolve_specifier`'s normalized path
+/// (which is what such a resolver returns).
 pub fn resolved_unchecked(text: String) -> Resolved {
   Resolved(text)
 }
@@ -161,12 +162,13 @@ pub type ModuleRequest {
 /// Everything statically knowable about a module's imports and exports.
 pub type ModuleSummary {
   ModuleSummary(
-    /// Import declarations in source order: (raw specifier text, bindings).
+    /// Import declarations in source order: (specifier as written, bindings).
     /// A bare `import "m"` contributes an entry with no bindings. Un-merged:
     /// the same specifier may appear in several declarations. The specifier is
-    /// source text; consumers that resolve it tag it with `raw` first (see
-    /// `link.LinkableModule`).
-    imports: List(#(String, List(ImportBinding))),
+    /// `Raw` — meaningless without a referrer, so a consumer must `resolve` it
+    /// through the module's `SpecifierMap` before it can index a graph with it
+    /// (see `link.project_module`).
+    imports: List(#(Raw, List(ImportBinding))),
     exports: List(ExportEntry),
     /// [[RequestedModules]]: the unique specifiers this module references
     /// via import or re-export, in source order, with merged phases.
@@ -180,9 +182,34 @@ pub type ModuleSummary {
   )
 }
 
+/// The local binding names introduced by a module's import declarations, in
+/// declaration order. This is the canonical order of the compiler's capture
+/// slots 0..N-1; link-time import seeding must produce box refs in exactly this
+/// order.
+pub fn import_local_names(summary: ModuleSummary) -> List(String) {
+  binding_local_names(summary.imports)
+}
+
+/// `import_local_names` off any per-declaration binding list — the compiled
+/// module's `import_bindings` carries the same declarations in the same order,
+/// keyed by whatever the consumer keyed them by.
+pub fn binding_local_names(
+  imports: List(#(a, List(ImportBinding))),
+) -> List(String) {
+  list.flat_map(imports, fn(entry) {
+    list.map(entry.1, fn(binding) {
+      case binding {
+        NamedImport(local:, ..) -> local
+        DefaultImport(local:) -> local
+        NamespaceImport(local:, ..) -> local
+      }
+    })
+  })
+}
+
 type Analysis {
   Analysis(
-    imports: List(#(String, List(ImportBinding))),
+    imports: List(#(Raw, List(ImportBinding))),
     exports: List(ExportEntry),
     requests: List(ModuleRequest),
     has_source_phase: Bool,
@@ -224,7 +251,7 @@ fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
       }
       Analysis(
         imports: [
-          #(source, declaration_bindings(specifiers, phase)),
+          #(Raw(source), declaration_bindings(specifiers, phase)),
           ..acc.imports
         ],
         exports: acc.exports,

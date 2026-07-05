@@ -1,3 +1,4 @@
+import arc/esm
 import arc/internal/path
 
 // ----------------------------------------------------------------------------
@@ -68,30 +69,36 @@ pub fn normalize_empty_path_is_current_directory_test() {
 // of thing, and the type says so.
 // ----------------------------------------------------------------------------
 
+/// A resolved specifier is a module identity, a raw one is source text.
+fn resolve(raw: String, parent: String) -> path.Specifier {
+  path.resolve_specifier(esm.raw(raw), esm.resolved_unchecked(parent))
+}
+
+fn a_path(identity: String) -> path.Specifier {
+  path.PathSpecifier(esm.resolved_unchecked(identity))
+}
+
 pub fn resolve_specifier_relative_is_a_path_test() {
-  assert path.resolve_specifier("./b.js", "dir/a.js")
-    == path.PathSpecifier("dir/b.js")
+  assert resolve("./b.js", "dir/a.js") == a_path("dir/b.js")
 }
 
 pub fn resolve_specifier_parent_relative_is_a_path_test() {
-  assert path.resolve_specifier("../b.js", "dir/sub/a.js")
-    == path.PathSpecifier("dir/b.js")
+  assert resolve("../b.js", "dir/sub/a.js") == a_path("dir/b.js")
 }
 
 pub fn resolve_specifier_absolute_is_a_normalized_path_test() {
-  assert path.resolve_specifier("/x/../b.js", "a.js")
-    == path.PathSpecifier("/b.js")
+  assert resolve("/x/../b.js", "a.js") == a_path("/b.js")
 }
 
 pub fn resolve_specifier_relative_directory_is_current_directory_test() {
-  assert path.resolve_specifier("./dir/../", "a.js") == path.PathSpecifier(".")
+  assert resolve("./dir/../", "a.js") == a_path(".")
 }
 
 pub fn resolve_specifier_bare_is_not_a_path_test() {
-  assert path.resolve_specifier("fs", "dir/a.js") == path.BareSpecifier("fs")
+  assert resolve("fs", "dir/a.js") == path.BareSpecifier(esm.raw("fs"))
 }
 
 pub fn resolve_specifier_url_is_bare_test() {
-  assert path.resolve_specifier("https://x/y.js", "a.js")
-    == path.BareSpecifier("https://x/y.js")
+  assert resolve("https://x/y.js", "a.js")
+    == path.BareSpecifier(esm.raw("https://x/y.js"))
 }

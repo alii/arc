@@ -367,12 +367,17 @@ fn run_module_file(
 /// the parent module's directory. The CLI is a filesystem loader, so a bare
 /// specifier ("fs", a URL) has no path meaning here — it is rejected as such,
 /// never probed as if it were a file.
+///
+/// `module_host.ResolveFn` is a stringly host boundary; the Raw/Resolved
+/// distinction is put back on at this edge and taken off again on the way out.
 fn resolve_dep(
   raw_specifier: String,
   parent_specifier: String,
 ) -> Result(String, ResolveError) {
-  case path.resolve_specifier(raw_specifier, parent_specifier) {
-    path.PathSpecifier(resolved) -> Ok(resolved)
+  let raw = esm.raw(raw_specifier)
+  let parent = esm.resolved_unchecked(parent_specifier)
+  case path.resolve_specifier(raw, parent) {
+    path.PathSpecifier(resolved) -> Ok(esm.resolved_text(resolved))
     path.BareSpecifier(_bare) -> Error(load_error.UnsupportedBareSpecifier)
   }
 }

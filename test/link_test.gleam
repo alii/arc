@@ -48,19 +48,20 @@ fn graph_of(
 /// Project parsed sources straight onto the `LinkableGraph` view that the
 /// runtime resolve core consumes — the same projection `arc/module` does for
 /// `CompiledModule`s, done here from `graph.SourceModule`s for test brevity.
+/// A `graph.load` walk resolves every request, so `project_module` never fails.
 fn linkable_of(
   entry: String,
   files: List(#(String, String)),
 ) -> link.LinkableGraph {
   let g = graph_of(entry, files)
   dict.map_values(g.modules, fn(_specifier, m) {
-    link.LinkableModule(
-      import_bindings: list.map(m.parsed.summary.imports, fn(e) {
-        #(esm.raw(e.0), e.1)
-      }),
-      export_entries: m.parsed.summary.exports,
-      specifier_map: graph.specifier_map(m),
-    )
+    let assert Ok(linkable) =
+      link.project_module(
+        m.parsed.summary.imports,
+        m.parsed.summary.exports,
+        graph.specifier_map(m),
+      )
+    linkable
   })
 }
 

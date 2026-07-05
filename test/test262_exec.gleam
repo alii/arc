@@ -17,6 +17,7 @@
 /// to just that subset — fine for CI shards (the merge job reassembles them),
 /// wrong to commit from a local partial run.
 import arc/compiler
+import arc/esm
 import arc/host
 import arc/internal/path
 import arc/module
@@ -782,12 +783,17 @@ fn do_run_module(
 
 /// Resolve a test262 dependency specifier relative to its parent's directory.
 /// The runner is a filesystem loader: a bare specifier is not a path.
+///
+/// `module_host.ResolveFn` is a stringly host boundary; the Raw/Resolved
+/// distinction is put back on at this edge and taken off again on the way out.
 fn test262_resolve(
   raw_specifier: String,
   parent_specifier: String,
 ) -> Result(String, module_host.ResolveError) {
-  case path.resolve_specifier(raw_specifier, parent_specifier) {
-    path.PathSpecifier(resolved) -> Ok(resolved)
+  let raw = esm.raw(raw_specifier)
+  let parent = esm.resolved_unchecked(parent_specifier)
+  case path.resolve_specifier(raw, parent) {
+    path.PathSpecifier(resolved) -> Ok(esm.resolved_text(resolved))
     path.BareSpecifier(_bare) -> Error(load_error.UnsupportedBareSpecifier)
   }
 }

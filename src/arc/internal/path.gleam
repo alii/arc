@@ -1,6 +1,7 @@
 //// Pure path utilities shared by the CLI module loader and the test262
 //// runner.
 
+import arc/esm
 import gleam/list
 import gleam/string
 
@@ -8,8 +9,10 @@ import gleam/string
 /// referrer. The two arms are categorically different things and a loader has
 /// to handle them differently, so they cannot be one `String`:
 ///
-///  - `PathSpecifier` — a canonical, normalized path a loader may read.
+///  - `PathSpecifier` — a canonical, normalized path a loader may read. It is
+///    an `esm.Resolved`: a module IDENTITY, not source text.
 ///  - `BareSpecifier` — a builtin/package/URL name (`"fs"`, `"https://…"`).
+///    Still the `esm.Raw` the source wrote — nothing has been resolved.
 ///    Arc imposes NO path meaning on it; a filesystem loader must reject it
 ///    rather than treat it as a relative path. An embedder that registers host
 ///    modules under bare names (`engine.register_host_module("dance", …)`) must
@@ -18,30 +21,35 @@ import gleam/string
 ///    is a host module, so rejecting every `BareSpecifier` outright makes such
 ///    imports unreachable.
 pub type Specifier {
-  PathSpecifier(path: String)
-  BareSpecifier(text: String)
+  PathSpecifier(path: esm.Resolved)
+  BareSpecifier(text: esm.Raw)
 }
 
-/// Resolve a module specifier relative to the parent module's path.
+/// Resolve a module specifier relative to the parent module's identity.
 /// - Relative paths (./foo, ../bar) are resolved against the parent's directory
 /// - Absolute paths (/foo) are normalized
 /// - Bare specifiers (no ./, ../ or / prefix) come back as `BareSpecifier`
 ///   (builtin/package/URL — Arc imposes no path meaning on them)
 ///
-/// The result is a module IDENTITY, so every path-shaped specifier goes through
-/// `normalize`: `./a.js`, `a.js` and `x/../a.js` must not become three
-/// modules for one file.
-pub fn resolve_specifier(raw: String, parent: String) -> Specifier {
+/// `raw` and `parent` are the two flavours of specifier and cannot be
+/// transposed: only source text can be resolved, and only against a module
+/// identity. The result is itself an identity, so every path-shaped specifier
+/// goes through `normalize`: `./a.js`, `a.js` and `x/../a.js` must not become
+/// three modules for one file.
+pub fn resolve_specifier(raw: esm.Raw, parent: esm.Resolved) -> Specifier {
+  let text = esm.raw_text(raw)
   case
-    string.starts_with(raw, "./"),
-    string.starts_with(raw, "../"),
-    string.starts_with(raw, "/")
+    string.starts_with(text, "./"),
+    string.starts_with(text, "../"),
+    string.starts_with(text, "/")
   {
     True, _, _ | _, True, _ -> {
-      let parent_dir = dirname(parent)
-      PathSpecifier(normalize(parent_dir <> "/" <> raw))
+      let parent_dir = dirname(esm.resolved_text(parent))
+      PathSpecifier(
+        esm.resolved_unchecked(normalize(parent_dir <> "/" <> text)),
+      )
     }
-    _, _, True -> PathSpecifier(normalize(raw))
+    _, _, True -> PathSpecifier(esm.resolved_unchecked(normalize(text)))
     _, _, _ -> BareSpecifier(raw)
   }
 }

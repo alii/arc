@@ -1,8 +1,8 @@
 //// The shared ESM ResolveExport core (§16.2.1.6.3).
 ////
 //// A `ResolveExport` operating on a minimal `LinkableModule` view — just the
-//// three fields the algorithm reads (`import_bindings`, `export_entries`,
-//// `specifier_map`); a module's identity is its `LinkableGraph` key, so the
+//// fields the algorithm reads (`import_bindings`, `export_entries`,
+//// `star_exports`); a module's identity is its `LinkableGraph` key, so the
 //// record carries no specifier of its own. The runtime (`arc/module`) projects
 //// each `CompiledModule` onto a `LinkableModule`, builds a `LinkableGraph`, and
 //// calls `resolve_export`/`exported_names`/`validate` — so there is one source
@@ -12,6 +12,9 @@
 //// mentions it) or an `esm.Resolved` (a graph key). They are distinct types, so
 //// the two can never be swapped: the graph is only ever indexed by `Resolved`,
 //// error messages only ever quote a `Raw`, and `esm.resolve` is the sole bridge.
+//// That bridge is crossed exactly ONCE, in `project_module` — every dependency
+//// a linkable module names arrives already resolved, so nothing downstream can
+//// meet an unresolvable specifier and have to invent an answer for it.
 ////
 //// This module is runtime-free: it consumes only the linkable projection, so
 //// any caller that can build a `LinkableGraph` (the VM, a bundler, a linter)
@@ -20,7 +23,7 @@
 import arc/esm.{type Raw, type Resolved}
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option
 import gleam/result
 import gleam/set.{type Set}
 
@@ -28,24 +31,110 @@ import gleam/set.{type Set}
 // The minimal linkable view
 // =============================================================================
 
-/// The projection of a module that ResolveExport needs: exactly the three
-/// fields the algorithm reads. The module's own resolved specifier is the
-/// `LinkableGraph` key it is stored under, not a field. The VM projects each
-/// `CompiledModule` onto this so the resolve body is decoupled from
-/// bytecode/heap state.
+/// The projection of a module that ResolveExport needs: exactly the fields the
+/// algorithm reads, with every dependency ALREADY resolved. The module's own
+/// resolved specifier is the `LinkableGraph` key it is stored under, not a
+/// field. The VM projects each `CompiledModule` onto this so the resolve body is
+/// decoupled from bytecode/heap state.
+///
+/// Each dependency appears as a `#(Raw, Resolved)` pair: the `Resolved` is what
+/// every lookup uses, the `Raw` is retained only so an error message can quote
+/// the specifier the source actually wrote. Build one with `project_module`.
 pub type LinkableModule {
   LinkableModule(
-    import_bindings: List(#(Raw, List(esm.ImportBinding))),
-    export_entries: List(esm.ExportEntry),
-    /// This module's TOTAL raw → resolved projection: the only way to turn a
-    /// specifier its source wrote into a graph key.
-    specifier_map: esm.SpecifierMap,
+    /// One entry per import declaration: (as written, resolved, its bindings).
+    import_bindings: List(#(Raw, Resolved, List(esm.ImportBinding))),
+    /// Every export entry that names an export: local, `export {x} from`,
+    /// `export * as ns from`. `export *` lives in `star_exports` — it names no
+    /// export, so it cannot appear where a name is looked up.
+    export_entries: List(LinkableExport),
+    /// `export * from 'm'` sources (§16.2.1.6.3 step 7).
+    star_exports: List(Resolved),
   )
+}
+
+/// `esm.ExportEntry` with the source specifier resolved. `esm.ReExportAll` has
+/// no counterpart: it becomes a `star_exports` entry, so the "does this export
+/// entry provide a name?" question no longer has an arm that answers "no".
+pub type LinkableExport {
+  /// `export let x` / `export { x }` — may still be an import binding, see
+  /// `resolve_local_export`.
+  LocalExport(export_name: String, local_name: String)
+  /// `export { imported_name as export_name } from source` (resolving to `dep`).
+  ReExport(
+    export_name: String,
+    imported_name: String,
+    source: Raw,
+    dep: Resolved,
+  )
+  /// `export * as export_name from` the module `dep`.
+  ReExportNamespace(export_name: String, dep: Resolved)
 }
 
 /// A module graph reduced to the linkable view, keyed by resolved specifier.
 pub type LinkableGraph =
   Dict(Resolved, LinkableModule)
+
+/// Project one module's raw import/export entries onto the linkable view,
+/// resolving every specifier it mentions through its own (TOTAL) `SpecifierMap`.
+/// This is the ONLY `esm.resolve` on the linking path.
+///
+/// `Error(raw)` means that map does not cover `raw` — never a guest program's
+/// fault, always a broken builder (a module whose specifier map disagrees with
+/// its own import/export entries). Reporting it here rather than downstream is
+/// what lets every consumer of a `LinkableModule` take resolution for granted.
+pub fn project_module(
+  import_bindings: List(#(Raw, List(esm.ImportBinding))),
+  export_entries: List(esm.ExportEntry),
+  specifier_map: esm.SpecifierMap,
+) -> Result(LinkableModule, Raw) {
+  let resolve = fn(raw: Raw) {
+    esm.resolve(specifier_map, raw) |> option.to_result(raw)
+  }
+  use imports <- result.try(
+    list.try_map(import_bindings, fn(entry) {
+      let #(raw_dep, bindings) = entry
+      use dep <- result.map(resolve(raw_dep))
+      #(raw_dep, dep, bindings)
+    }),
+  )
+  // One pass over the export entries: each becomes either an export the
+  // resolver can look a name up in, or an `export *` source. Lists build
+  // reversed.
+  use #(exports, stars) <- result.map(
+    list.try_fold(export_entries, #([], []), fn(acc, e) {
+      let #(exports, stars) = acc
+      case e {
+        esm.LocalExport(export_name:, local_name:) ->
+          Ok(#([LocalExport(export_name:, local_name:), ..exports], stars))
+        esm.ReExport(export_name:, imported_name:, source_specifier:) -> {
+          use dep <- result.map(resolve(source_specifier))
+          let entry =
+            ReExport(
+              export_name:,
+              imported_name:,
+              source: source_specifier,
+              dep:,
+            )
+          #([entry, ..exports], stars)
+        }
+        esm.ReExportNamespace(export_name:, source_specifier:) -> {
+          use dep <- result.map(resolve(source_specifier))
+          #([ReExportNamespace(export_name:, dep:), ..exports], stars)
+        }
+        esm.ReExportAll(source_specifier:) -> {
+          use dep <- result.map(resolve(source_specifier))
+          #(exports, [dep, ..stars])
+        }
+      }
+    }),
+  )
+  LinkableModule(
+    import_bindings: imports,
+    export_entries: list.reverse(exports),
+    star_exports: list.reverse(stars),
+  )
+}
 
 // =============================================================================
 // ResolveExport (§16.2.1.6.3) — the shared string-level core
@@ -115,26 +204,13 @@ fn resolve_export_in(
   let direct =
     list.find_map(m.export_entries, fn(e) {
       case e {
-        esm.LocalExport(export_name:, local_name:) if export_name == name ->
+        LocalExport(export_name:, local_name:) if export_name == name ->
           Ok(resolve_local_export(graph, m, specifier, local_name, resolve_set))
-        esm.ReExport(export_name:, imported_name:, source_specifier:)
+        ReExport(export_name:, imported_name:, dep:, ..)
           if export_name == name
-        ->
-          Ok(case esm.resolve(m.specifier_map, source_specifier) {
-            Some(src) ->
-              resolve_export_set(graph, src, imported_name, resolve_set)
-            // Unreachable for a graph `validate` accepted: it proves the
-            // specifier map covers every specifier the module mentions.
-            None -> Unresolvable
-          })
-        esm.ReExportNamespace(export_name:, source_specifier:)
-          if export_name == name
-        ->
-          Ok(case esm.resolve(m.specifier_map, source_specifier) {
-            Some(src) -> ResolvedNamespace(src)
-            // Unreachable post-`validate` (see `check_covered`).
-            None -> Unresolvable
-          })
+        -> Ok(resolve_export_set(graph, dep, imported_name, resolve_set))
+        ReExportNamespace(export_name:, dep:) if export_name == name ->
+          Ok(ResolvedNamespace(dep))
         _ -> Error(Nil)
       }
     })
@@ -163,37 +239,30 @@ fn resolve_local_export(
 ) -> ExportResolution {
   let import_binding =
     list.find_map(m.import_bindings, fn(entry) {
-      let #(raw_dep, bindings) = entry
+      let #(_raw_dep, dep, bindings) = entry
       list.find_map(bindings, fn(binding) {
         case binding {
           esm.NamedImport(local:, ..) if local == local_name ->
-            Ok(#(raw_dep, binding))
+            Ok(#(dep, binding))
           esm.DefaultImport(local:) if local == local_name ->
-            Ok(#(raw_dep, binding))
+            Ok(#(dep, binding))
           esm.NamespaceImport(local:, ..) if local == local_name ->
-            Ok(#(raw_dep, binding))
+            Ok(#(dep, binding))
           _ -> Error(Nil)
         }
       })
     })
   case import_binding {
     Error(Nil) -> ResolvedTo(specifier, local_name)
-    Ok(#(raw_dep, binding)) ->
-      case esm.resolve(m.specifier_map, raw_dep) {
-        // Unreachable post-`validate`: `check_imports` covers every import
-        // binding's dependency, including namespace imports.
-        None -> Unresolvable
-        Some(dep) ->
-          case binding {
-            esm.NamedImport(imported:, ..) ->
-              resolve_export_set(graph, dep, imported, resolve_set)
-            esm.DefaultImport(..) ->
-              resolve_export_set(graph, dep, "default", resolve_set)
-            esm.NamespaceImport(phase: esm.Deferred, ..) ->
-              ResolvedDeferredNamespace(dep)
-            esm.NamespaceImport(phase: esm.Evaluation, ..) ->
-              ResolvedNamespace(dep)
-          }
+    Ok(#(dep, binding)) ->
+      case binding {
+        esm.NamedImport(imported:, ..) ->
+          resolve_export_set(graph, dep, imported, resolve_set)
+        esm.DefaultImport(..) ->
+          resolve_export_set(graph, dep, "default", resolve_set)
+        esm.NamespaceImport(phase: esm.Deferred, ..) ->
+          ResolvedDeferredNamespace(dep)
+        esm.NamespaceImport(phase: esm.Evaluation, ..) -> ResolvedNamespace(dep)
       }
   }
 }
@@ -205,8 +274,7 @@ fn resolve_star_exports(
   name: String,
   resolve_set: Set(#(Resolved, String)),
 ) -> ExportResolution {
-  let star_sources = star_sources(m)
-  list.fold(star_sources, Unresolvable, fn(acc, src) {
+  list.fold(m.star_exports, Unresolvable, fn(acc, src) {
     case acc {
       Ambiguous -> Ambiguous
       _ ->
@@ -220,19 +288,6 @@ fn resolve_star_exports(
               False -> Ambiguous
             }
         }
-    }
-  })
-}
-
-/// Resolved specifiers of every `export *` source of `m`. An uncovered source
-/// would be silently dropped from the star set here — `validate`'s
-/// `check_covered` rejects such a graph before any of this runs.
-fn star_sources(m: LinkableModule) -> List(Resolved) {
-  list.filter_map(m.export_entries, fn(e) {
-    case e {
-      esm.ReExportAll(source_specifier:) ->
-        esm.resolve(m.specifier_map, source_specifier) |> option.to_result(Nil)
-      _ -> Error(Nil)
     }
   })
 }
@@ -260,17 +315,11 @@ fn exported_names_with(
     True, _ | _, Error(Nil) -> []
     False, Ok(m) -> {
       let star_set = set.insert(star_set, spec)
-      let direct =
-        list.filter_map(m.export_entries, fn(e) {
-          case e {
-            esm.LocalExport(export_name:, ..) -> Ok(export_name)
-            esm.ReExport(export_name:, ..) -> Ok(export_name)
-            esm.ReExportNamespace(export_name:, ..) -> Ok(export_name)
-            esm.ReExportAll(..) -> Error(Nil)
-          }
-        })
+      // Every `LinkableExport` names an export (`export *` is not one of them),
+      // so this is a total map — no entry can be silently skipped.
+      let direct = list.map(m.export_entries, fn(e) { e.export_name })
       let star =
-        list.flat_map(star_sources(m), fn(src) {
+        list.flat_map(m.star_exports, fn(src) {
           exported_names_with(graph, src, star_set)
           |> list.filter(fn(n) { n != "default" })
         })
@@ -299,21 +348,12 @@ pub type LinkError {
   /// Two distinct `export *` sources provide `export_name` (§16.2.1.6.3
   /// step 7) — the binding is ambiguous.
   AmbiguousExport(requested_module: Raw, export_name: String)
-  /// A module imports/re-exports from `requested_module`, but its own
-  /// `specifier_map` — which is TOTAL over its requests — does not cover it.
-  /// Never a guest program's fault: whoever built the `LinkableGraph` built a
-  /// module whose specifier map disagrees with its import/export entries. Not
-  /// a SyntaxError; `arc/module` treats it as the linker-invariant break it is.
-  UnresolvedDependency(requested_module: Raw)
 }
 
 /// The exact JS-visible SyntaxError message for a link failure. This is the
 /// only place the prose lives — the runtime, tests, and any tooling all render
 /// through it. The specifier is quoted exactly as the source wrote it (`./m`,
 /// never the resolved `m`), which the `Raw` type guarantees.
-///
-/// `UnresolvedDependency` renders too, but as internal-error prose: no
-/// well-formed graph produces it, and its consumer panics rather than throwing.
 pub fn link_error_message(e: LinkError) -> String {
   case e {
     UnresolvedExport(requested_module:, export_name:) ->
@@ -327,10 +367,6 @@ pub fn link_error_message(e: LinkError) -> String {
       <> esm.raw_text(requested_module)
       <> "' provides an ambiguous export named '"
       <> export_name
-      <> "'"
-    UnresolvedDependency(requested_module:) ->
-      "arc/link: specifier map does not cover the requested module '"
-      <> esm.raw_text(requested_module)
       <> "'"
   }
 }
@@ -349,14 +385,15 @@ fn check_imports(
   m: LinkableModule,
 ) -> Result(Nil, LinkError) {
   list.try_each(m.import_bindings, fn(entry) {
-    let #(raw_dep, bindings) = entry
+    let #(raw_dep, dep, bindings) = entry
     list.try_each(bindings, fn(binding) {
       case binding {
         // `import * as ns` requests no particular export name — the namespace
-        // gathers whatever the source provides — so only coverage can fail.
-        esm.NamespaceImport(..) -> check_covered(m, raw_dep)
-        esm.NamedImport(imported:, ..) -> check_dep(graph, m, raw_dep, imported)
-        esm.DefaultImport(..) -> check_dep(graph, m, raw_dep, "default")
+        // gathers whatever the source provides — so nothing can fail.
+        esm.NamespaceImport(..) -> Ok(Nil)
+        esm.NamedImport(imported:, ..) ->
+          check_dep(graph, dep, raw_dep, imported)
+        esm.DefaultImport(..) -> check_dep(graph, dep, raw_dep, "default")
       }
     })
   })
@@ -369,8 +406,8 @@ fn check_imports(
 /// module, exactly as `check_imports` does; the reported name is then the one
 /// that actually failed.
 ///
-/// `export *` and `export * as ns` name no export, so only their coverage is
-/// checked. A `LocalExport` names no dependency at all — and if its local name
+/// `export *` and `export * as ns` name no export, so there is nothing to
+/// check. A `LocalExport` names no dependency at all — and if its local name
 /// is an import binding, `check_imports` already covered that dependency.
 fn check_indirect_exports(
   graph: LinkableGraph,
@@ -378,52 +415,19 @@ fn check_indirect_exports(
 ) -> Result(Nil, LinkError) {
   list.try_each(m.export_entries, fn(e) {
     case e {
-      esm.ReExport(export_name: _, imported_name:, source_specifier:) ->
-        check_dep(graph, m, source_specifier, imported_name)
-      esm.ReExportAll(source_specifier:) -> check_covered(m, source_specifier)
-      esm.ReExportNamespace(source_specifier:, ..) ->
-        check_covered(m, source_specifier)
-      esm.LocalExport(..) -> Ok(Nil)
+      ReExport(export_name: _, imported_name:, source:, dep:) ->
+        check_dep(graph, dep, source, imported_name)
+      LocalExport(..) | ReExportNamespace(..) -> Ok(Nil)
     }
   })
 }
 
-/// Check only that `m`'s specifier map covers `raw_dep` — the whole of what
-/// `import * as ns` / `export *` / `export * as ns` can get wrong, since none
-/// of them requests a particular export name.
+/// Check that the dependency `dep` provides `imported_name`.
 ///
-/// Together with `check_dep`, this makes `validate` cover EVERY raw specifier
-/// a module mentions. That is what lets `resolve_local_export`, `star_sources`
-/// and `resolve_export_in`'s `ReExportNamespace` arm treat an uncovered
-/// specifier as impossible rather than silently dropping the source or
-/// reporting a guest-visible "does not provide an export named" lie.
-fn check_covered(m: LinkableModule, raw_dep: Raw) -> Result(Nil, LinkError) {
-  case esm.resolve(m.specifier_map, raw_dep) {
-    Some(_) -> Ok(Nil)
-    None -> Error(UnresolvedDependency(requested_module: raw_dep))
-  }
-}
-
-/// Check that the dependency `raw_dep` names within `m` provides
-/// `imported_name`. `specifier_map` is TOTAL over `m`'s own requests, so `None`
-/// means the graph's builder — not the guest source — is broken; report that as
-/// itself rather than dressing it up as a guest-visible unresolved export.
-fn check_dep(
-  graph: LinkableGraph,
-  m: LinkableModule,
-  raw_dep: Raw,
-  imported_name: String,
-) -> Result(Nil, LinkError) {
-  case esm.resolve(m.specifier_map, raw_dep) {
-    Some(dep) -> check_resolves(graph, dep, raw_dep, imported_name)
-    None -> Error(UnresolvedDependency(requested_module: raw_dep))
-  }
-}
-
 /// `raw_dep` and `dep` are the same dependency in its two flavours: the text
 /// the source wrote (for the message) and the graph key (for the lookup). They
 /// are different types, so they cannot be transposed.
-fn check_resolves(
+fn check_dep(
   graph: LinkableGraph,
   dep: Resolved,
   raw_dep: Raw,
