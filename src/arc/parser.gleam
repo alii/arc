@@ -4268,8 +4268,10 @@ fn parse_class_element_body(
   let key_scopes = class_new_children(p6.sb, ctx.class_id, key_before)
   // §15.7.1 ClassElementName : PrivateIdentifier — it is a Syntax Error if
   // StringValue is "#constructor". Applies to methods and fields alike.
+  // A string-literal key `"#constructor"` is rejected too, matching V8/JSC.
   let is_private_constructor = case key {
-    ast.KeyPrivate(name: "#constructor", ..) -> True
+    ast.KeyPrivate(name: "#constructor", ..)
+    | ast.KeyString(value: "#constructor", ..) -> True
     _ -> False
   }
   use <- bool.guard(
