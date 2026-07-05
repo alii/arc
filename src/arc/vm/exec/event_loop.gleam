@@ -20,7 +20,6 @@ import arc/vm/ops/object
 import arc/vm/state.{type State, State}
 import arc/vm/value.{type JsValue, JsUndefined}
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -36,7 +35,7 @@ fn report_unhandled_rejections(state: State(host)) -> Nil {
   list.each(state.unhandled_rejections, fn(data_ref) {
     case heap.read_promise_state(state.heap, data_ref) {
       Some(value.PromiseRejected(reason)) ->
-        io.println_error(
+        state.ctx.host_hooks.report_uncaught(
           "Uncaught (in promise) " <> object.format_error(reason, state.heap),
         )
       _ -> Nil

@@ -19,6 +19,7 @@
 
 import arc/vm/internal/clock_ffi
 import arc/vm/value.{type JsValue}
+import gleam/io
 import gleam/option.{type Option}
 
 /// Opaque cross-process identity of a buffer's WaiterList (an Erlang term:
@@ -158,6 +159,13 @@ pub type HostHooks {
     /// embedder overrides it alongside `monotonic_now` for a virtual clock,
     /// or to yield to its own scheduler instead of blocking the OS thread.
     sleep_ms: fn(Int) -> Nil,
+    /// Sink for uncaught job-level errors — an unhandled promise rejection
+    /// after the microtask drain, or a throw from a user-supplied
+    /// resolve/reject during a reaction job. Core has no caller to propagate
+    /// these to, so it hands the formatted message here. Defaults to
+    /// `io.println_error`; an embedder overrides it to capture reports (test
+    /// harness assertions, structured logging) instead of writing to stderr.
+    report_uncaught: fn(String) -> Nil,
     /// §16.2.1.8 HostLoadImportedModule: the embedder's dynamic-import host
     /// hook — a host function (see `arc/module_host.install_import_hook`)
     /// called with `(specifier, referrer?, phase?, resolve?, reject?)` that
@@ -190,6 +198,7 @@ pub fn default_host_hooks() -> HostHooks {
     atomics: option.None,
     monotonic_now: clock_ffi.monotonic_now,
     sleep_ms: clock_ffi.sleep_ms,
+    report_uncaught: io.println_error,
     import_hook: option.None,
   )
 }

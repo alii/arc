@@ -15,7 +15,6 @@
 import arc/vm/ops/object
 import arc/vm/state.{type State}
 import arc/vm/value.{type JsValue, JsUndefined}
-import gleam/io
 
 /// Call a function during job execution, fire-and-forget: the return value is
 /// discarded (a job has no continuation to hand it to) and an abrupt
@@ -37,10 +36,10 @@ pub fn call_settlement_fn(
     // this report a throwing user `resolve`/`reject` vanishes silently.
     // There is no promise ref to blame it on (the throw happened AFTER the
     // reaction settled, outside any promise), so `unhandled_rejections` —
-    // a list of promise data refs — can't carry it; report it on the same
-    // stderr channel `report_unhandled_rejections` uses.
+    // a list of promise data refs — can't carry it; report it through the
+    // same host sink `report_unhandled_rejections` uses.
     Error(#(thrown, new_state)) -> {
-      io.println_error(
+      new_state.ctx.host_hooks.report_uncaught(
         "Uncaught (in promise job) "
         <> object.format_error(thrown, new_state.heap),
       )
