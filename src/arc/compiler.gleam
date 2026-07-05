@@ -316,15 +316,16 @@ fn compile_module_with_scope(
     )
   let tree = scope.finalize(sb, opts)
   // Phase 2: emit consulting the tree (concrete slot ops, no IrScope*).
-  // The emitter returns the post-emission tree — `fresh_slot` allocates
-  // anonymous scratch locals (try/finally completion stash, with-ref base,
-  // using-emission temps) by bumping FunctionInfo.local_count, so reading
-  // `function_info` from the PRE-emission tree under-sizes the runtime
-  // locals tuple and IrPutLocal on a scratch slot crashes with `badarg
-  // setelement`. Shadow `tree` with the emitter's copy.
-  use #(code, constants, children, is_strict, hoisted_funcs, tree) <- result.map(
-    emit.emit_module(items, tree),
-  )
+  use
+    emit.EmitOutput(
+      code:,
+      constants:,
+      children:,
+      is_strict:,
+      tree:,
+      hoisted_funcs:,
+    )
+  <- result.map(emit.emit_module(items, tree))
   let info = scope.function_info(tree, scope.root_scope_id)
   let child_templates = compile_children(children, tree, scope.root_scope_id)
   let template =
@@ -471,17 +472,22 @@ pub fn compile_eval_direct(
   //     through nested direct eval)
   //   - DeclareLexical(RefThis) skipped — lexical pseudo-slots arrive
   //     via the caller's boxed slots (lexical_captures above)
-  // Shadow `tree` with the emitter's post-emission copy — scratch
-  // slots (alloc_scratch) bumped local_count there.
-  use #(code, constants, children, strict, tree) <- result.try(
-    emit.emit_eval_direct(
-      body,
-      tree,
-      caller_is_strict,
-      caller.param_scope_names,
-      caller.private_names,
-    ),
-  )
+  use
+    emit.EmitOutput(
+      code:,
+      constants:,
+      children:,
+      is_strict: strict,
+      tree:,
+      hoisted_funcs: _,
+    )
+  <- result.try(emit.emit_eval_direct(
+    body,
+    tree,
+    caller_is_strict,
+    caller.param_scope_names,
+    caller.private_names,
+  ))
   // §19.2.1.1 PerformEval → EvalDeclarationInstantiation step 3.d:
   // when this direct eval happens inside a formal-parameter initializer
   // (param_scope_names non-empty), sloppy eval code must not var-declare
@@ -546,15 +552,17 @@ fn compile_script(
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
   let tree = scope.finalize(sb, opts)
   // Phase 2: emit IR from AST, consulting the tree for every name reference
-  // — no symbolic IrScope* ops, no second resolution pass. The emitter
-  // returns the post-emission tree: `fresh_slot` mints scratch locals
-  // (try/finally completion stash, with-ref base, using-emission temps)
-  // by bumping FunctionInfo.local_count on its copy, so reading
-  // `function_info` from the analyzer's tree would under-size the
-  // runtime locals tuple. Shadow `tree`.
-  use #(code, constants, children, is_strict, tree) <- result.map(
-    emit.emit_program(stmts, tree, deletable_global_vars:),
-  )
+  // — no symbolic IrScope* ops, no second resolution pass.
+  use
+    emit.EmitOutput(
+      code:,
+      constants:,
+      children:,
+      is_strict:,
+      tree:,
+      hoisted_funcs: _,
+    )
+  <- result.map(emit.emit_program(stmts, tree, deletable_global_vars:))
   let info = scope.function_info(tree, scope.root_scope_id)
   // Phase 2 already produced concrete IrOps for every nested function;
   // recursing here just builds env_descriptors and runs Phase 3 per child.

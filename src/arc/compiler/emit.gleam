@@ -93,6 +93,28 @@ pub type CompiledChild {
   )
 }
 
+/// Result of a top-level emit (`emit_program` / `emit_eval_direct` /
+/// `emit_module`). Labelled record so field order is irrelevant and adding a
+/// field is a compile error at every construction site — the previous bare
+/// 5/6-tuple carried an unlabelled `Bool` for strictness.
+pub type EmitOutput {
+  EmitOutput(
+    code: List(IrOp),
+    constants: List(JsValue),
+    children: List(CompiledChild),
+    is_strict: Bool,
+    /// Post-emission scope tree — MUST replace the caller's pre-emission
+    /// copy. `fresh_slot` mints scratch locals by bumping
+    /// `FunctionInfo.local_count` here; reading `function_info` from the
+    /// input tree under-sizes the runtime locals tuple (IrPutLocal on a
+    /// scratch slot → `badarg setelement`).
+    tree: scope.ScopeTree,
+    /// Top-level function declarations as (name, func_index) pairs, for
+    /// module cyclic-function hoisting. Empty for non-module units.
+    hoisted_funcs: List(#(String, Int)),
+  )
+}
+
 /// A frame on the emitter's break/continue/return unwind stack. Mirrors
 /// QuickJS BlockEnv (quickjs.c:21320). A frame is either a *target* (some
 /// break/continue jumps to it) or a *barrier* (jumps only ever cross it,
@@ -430,10 +452,7 @@ pub fn emit_program(
   stmts: List(ast.StmtWithLine),
   tree: scope.ScopeTree,
   deletable_global_vars deletable_global_vars: Bool,
-) -> Result(
-  #(List(IrOp), List(JsValue), List(CompiledChild), Bool, scope.ScopeTree),
-  EmitError,
-) {
+) -> Result(EmitOutput, EmitError) {
   let script_strict = ast_util.has_use_strict_directive(stmts)
   let e =
     Emitter(
@@ -474,10 +493,7 @@ pub fn emit_eval_direct(
   caller_is_strict: Bool,
   inherit_param_scope: List(String),
   inherit_private_env: List(String),
-) -> Result(
-  #(List(IrOp), List(JsValue), List(CompiledChild), Bool, scope.ScopeTree),
-  EmitError,
-) {
+) -> Result(EmitOutput, EmitError) {
   let script_strict =
     caller_is_strict || ast_util.has_use_strict_directive(stmts)
   let e =
@@ -516,17 +532,7 @@ pub fn emit_eval_direct(
 pub fn emit_module(
   items: List(ast.ModuleItem),
   tree: scope.ScopeTree,
-) -> Result(
-  #(
-    List(IrOp),
-    List(JsValue),
-    List(CompiledChild),
-    Bool,
-    List(#(String, Int)),
-    scope.ScopeTree,
-  ),
-  EmitError,
-) {
+) -> Result(EmitOutput, EmitError) {
   // Only ANONYMOUS defaults need the synthetic *default* binding —
   // `export default function fn() {}` / `class fn {}` declare `fn` itself
   // (§16.2.3.7 BoundNames) and are lowered to ordinary declarations below.
@@ -568,7 +574,14 @@ pub fn emit_module(
   })
 
   let #(code, constants, children) = finish(e)
-  Ok(#(code, constants, children, True, hoisted_funcs, e.scope_tree))
+  Ok(EmitOutput(
+    code:,
+    constants:,
+    children:,
+    is_strict: True,
+    tree: e.scope_tree,
+    hoisted_funcs:,
+  ))
 }
 
 // ============================================================================
@@ -1204,7 +1217,7 @@ fn emit_module_using_top(
 /// Shared top-level emission trunk for emit_program / emit_eval_direct:
 /// wires the analyzer tree, enters the root scope, emits the var / Annex-B
 /// / global-lexical declaration prologue, hoists top-level function decls,
-/// emits the body in tail position, and packs the return tuple.
+/// emits the body in tail position, and packs the `EmitOutput`.
 ///
 /// `e` arrives pre-configured (strict set; eval also seeds
 /// param_scope_names / private_env). `vars_to_global` routes hoisted var +
@@ -1218,10 +1231,7 @@ fn emit_top_level_body(
   stmts: List(ast.StmtWithLine),
   script_strict: Bool,
   vars_to_global: Bool,
-) -> Result(
-  #(List(IrOp), List(JsValue), List(CompiledChild), Bool, scope.ScopeTree),
-  EmitError,
-) {
+) -> Result(EmitOutput, EmitError) {
   // Position at the root function scope and emit its binding prologue.
   let e = enter_root_scope(e)
   // Hoisting pre-pass: top-level `var` + function-declaration names.
@@ -1261,12 +1271,16 @@ fn emit_top_level_body(
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   use e <- result.try(emit_stmts_tail(e, stmts))
   let #(code, constants, children) = finish(e)
-  // Return the post-emission scope tree: `fresh_slot` allocated scratch
-  // slots by bumping FunctionInfo.local_count on the emitter's copy. The
-  // caller must read local_count from THIS tree, not the pre-emission
-  // input — otherwise the runtime locals tuple is undersized and IrPutLocal
-  // on a scratch slot crashes with `badarg setelement`.
-  Ok(#(code, constants, children, script_strict, e.scope_tree))
+  Ok(
+    EmitOutput(
+      code:,
+      constants:,
+      children:,
+      is_strict: script_strict,
+      tree: e.scope_tree,
+      hoisted_funcs: [],
+    ),
+  )
 }
 
 // ============================================================================
@@ -3088,13 +3102,13 @@ fn collect_hoisted_funcs(
             None,
             params,
             StmtsBody(body),
-            False,
-            is_gen,
-            is_async,
+            is_arrow: False,
+            is_generator: is_gen,
+            is_async:,
             // Function declaration: a constructor unless gen/async.
-            !is_gen && !is_async,
-            opcode.FunctionCode,
-            NoFieldInit,
+            is_constructor: !is_gen && !is_async,
+            code_kind: opcode.FunctionCode,
+            field_init: NoFieldInit,
           ))
           let #(e, idx) = add_child_function(e, child)
           #(e, [#(name, idx), ..funcs])
@@ -3190,12 +3204,12 @@ fn compile_function_body(
   self_name: Option(String),
   params: List(ast.Pattern),
   body: FnBody,
-  is_arrow: Bool,
-  is_generator: Bool,
-  is_async: Bool,
-  is_constructor: Bool,
-  code_kind_if_not_arrow: opcode.CodeKind,
-  field_init: FieldInitMode,
+  is_arrow is_arrow: Bool,
+  is_generator is_generator: Bool,
+  is_async is_async: Bool,
+  is_constructor is_constructor: Bool,
+  code_kind code_kind_if_not_arrow: opcode.CodeKind,
+  field_init field_init: FieldInitMode,
 ) -> Result(#(Emitter, CompiledChild), EmitError) {
   // Consume the next child-function scope id. The analyzer's
   // `declare_stmts_hoist_order` walks each statement list with direct
@@ -5212,12 +5226,12 @@ fn make_method_closure(
     None,
     params,
     StmtsBody(body),
-    False,
-    is_gen,
-    is_async,
-    False,
-    opcode.MethodCode,
-    NoFieldInit,
+    is_arrow: False,
+    is_generator: is_gen,
+    is_async:,
+    is_constructor: False,
+    code_kind: opcode.MethodCode,
+    field_init: NoFieldInit,
   )
   |> register_closure
 }
@@ -5246,12 +5260,12 @@ fn emit_function_closure(
     self_name,
     params,
     StmtsBody(body),
-    False,
-    is_gen,
-    is_async,
-    !is_gen && !is_async,
-    opcode.FunctionCode,
-    NoFieldInit,
+    is_arrow: False,
+    is_generator: is_gen,
+    is_async:,
+    is_constructor: !is_gen && !is_async,
+    code_kind: opcode.FunctionCode,
+    field_init: NoFieldInit,
   )
   |> register_closure
 }
@@ -5278,12 +5292,12 @@ fn emit_arrow_closure(
     None,
     params,
     StmtsBody(body_stmts),
-    True,
-    False,
-    is_async,
-    False,
-    opcode.FunctionCode,
-    NoFieldInit,
+    is_arrow: True,
+    is_generator: False,
+    is_async:,
+    is_constructor: False,
+    code_kind: opcode.FunctionCode,
+    field_init: NoFieldInit,
   )
   |> register_closure
 }
@@ -7173,13 +7187,13 @@ fn compile_class_body(
     None,
     ctor_params,
     StmtsBody(ctor_body),
-    False,
-    False,
-    False,
+    is_arrow: False,
+    is_generator: False,
+    is_async: False,
     // Class constructor — IS a constructor.
-    True,
-    ctor_kind,
-    option.map(init_idx, fn(_) { field_init })
+    is_constructor: True,
+    code_kind: ctor_kind,
+    field_init: option.map(init_idx, fn(_) { field_init })
       |> option.unwrap(NoFieldInit),
   ))
   let e = Emitter(..e, in_synth_default_ctor: False)
@@ -7307,13 +7321,13 @@ fn compile_class_init_fn(
         None,
         [],
         FieldInitsBody(inits),
-        False,
-        False,
-        False,
+        is_arrow: False,
+        is_generator: False,
+        is_async: False,
         // Synthetic field initializer — never directly constructible.
-        False,
-        opcode.FieldInitCode,
-        NoFieldInit,
+        is_constructor: False,
+        code_kind: opcode.FieldInitCode,
+        field_init: NoFieldInit,
       ))
       let #(e, idx) = add_child_function(e, child)
       #(e, Some(idx))
