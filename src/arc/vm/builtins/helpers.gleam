@@ -111,14 +111,11 @@ pub fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
 /// 2. If argument has a [[Call]] internal method, return true.
 /// 3. Return false.
 ///
-/// The set of callable ObjectKinds lives in `heap.ref_is_callable` — the
-/// single source of truth so this, `ops_object.value_is_callable`, and
-/// `typeof` cannot drift.
+/// Delegates to `ops_object.value_is_callable` — the ONE §7.2.3 IsCallable
+/// implementation — kept as a builtins-layer re-export so ~50 callers don't
+/// each pull in `ops/object`.
 pub fn is_callable(h: state.Heap(host), val: JsValue) -> Bool {
-  case val {
-    JsObject(ref) -> heap.ref_is_callable(h, ref)
-    _ -> False
-  }
+  ops_object.value_is_callable(h, val)
 }
 
 /// §7.2.3 IsCallable gate — TypeError with `msg()` when `val` isn't callable,

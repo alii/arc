@@ -265,20 +265,15 @@ fn from(
     IterateStrings,
     "Iterator.from argument",
   ))
-  // OrdinaryHasInstance(%Iterator%, iterator) — §7.3.22 step 4 walks the
-  // chain starting from O's [[Prototype]], NOT from O itself. Starting at
-  // O would wrongly treat %Iterator.prototype% ITSELF as an instance.
-  // GetIteratorFlattenable guarantees `iter` is an Object.
-  let target = state.builtins.iterator.prototype
-  let start = case rec.iterator {
-    JsObject(iter_ref) ->
-      case heap.read(state.heap, iter_ref) {
-        Some(ObjectSlot(prototype: proto, ..)) -> proto
-        _ -> None
-      }
-    _ -> None
-  }
-  case proto_chain_contains(state.heap, start, target) {
+  // §27.1.2.1 step 2: ? OrdinaryHasInstance(%Iterator%, iterator). The
+  // canonical §7.3.22 op walks via [[GetPrototypeOf]] (proxy-aware) — a
+  // hand-rolled heap-field walk would wrongly bypass a proxy trap here.
+  use is_iter, state <- state.try_op(coerce.ordinary_has_instance(
+    state,
+    state.builtins.iterator.constructor,
+    rec.iterator,
+  ))
+  case is_iter {
     True -> #(state, Ok(rec.iterator))
     False -> {
       let #(heap, ref) =
@@ -292,29 +287,6 @@ fn from(
         )
       #(State(..state, heap:), Ok(JsObject(ref)))
     }
-  }
-}
-
-/// §7.3.22 OrdinaryHasInstance step 4: walk the prototype chain starting at
-/// `start` (already the object's [[Prototype]], NOT the object itself)
-/// looking for `target`.
-fn proto_chain_contains(
-  h: Heap(host),
-  start: Option(Ref),
-  target: Ref,
-) -> Bool {
-  case start {
-    None -> False
-    Some(obj) ->
-      case obj.id == target.id {
-        True -> True
-        False ->
-          case heap.read(h, obj) {
-            Some(ObjectSlot(prototype: proto, ..)) ->
-              proto_chain_contains(h, proto, target)
-            _ -> False
-          }
-      }
   }
 }
 
@@ -1531,7 +1503,7 @@ fn zip_keyed_collect(
                 iters_acc,
               )
             True ->
-              case get_keyed(state, iterables, key) {
+              case object.get_keyed_value_of(state, iterables, key) {
                 Error(#(thrown, state)) ->
                   Error(close_all_and_throw(
                     state,
@@ -1579,18 +1551,6 @@ fn zip_keyed_collect(
   }
 }
 
-/// [[Get]] keyed by an [[OwnPropertyKeys]] element.
-fn get_keyed(
-  state: State(host),
-  obj: JsValue,
-  key: ObjectKey,
-) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  case key {
-    SymbolPropKey(sym) -> object.get_symbol_value_of(state, obj, sym)
-    StringPropKey(pkey:, ..) -> object.get_value_of(state, obj, pkey)
-  }
-}
-
 /// Iterator.zipKeyed step 14: the "longest" padding values are read per key
 /// from the padding object.
 fn zip_keyed_padding(
@@ -1618,7 +1578,7 @@ fn zip_keyed_padding_loop(
   case keys_left {
     [] -> Ok(#(list.reverse(acc), state))
     [key, ..rest] ->
-      case get_keyed(state, padding_option, key) {
+      case object.get_keyed_value_of(state, padding_option, key) {
         Error(#(thrown, state)) ->
           Error(close_all_and_throw(state, opened, thrown))
         Ok(#(v, state)) ->
