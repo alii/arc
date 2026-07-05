@@ -336,6 +336,9 @@ fn map_clear(
 ///   6. Return undefined.
 ///
 /// Note: The callback receives (value, key, map) — value first, key second.
+///
+/// Step order matters and is observable: `Map.prototype.forEach.call({}, 1)`
+/// throws the brand TypeError (step 2), not the callback TypeError (step 3).
 fn map_for_each(
   this: JsValue,
   args: List(JsValue),
@@ -344,6 +347,8 @@ fn map_for_each(
   // Extract callbackfn and thisArg
   let #(cb, this_arg) = helpers.two_args_or_undefined(args)
 
+  // Steps 1-2: RequireInternalSlot — before the IsCallable check.
+  use _store, ref, state <- require_map(this, state, "forEach")
   // Step 3: If IsCallable(callbackfn) is false, throw TypeError
   case helpers.is_callable(state.heap, cb) {
     False ->
@@ -351,15 +356,12 @@ fn map_for_each(
         state,
         operators.typeof(state.heap, cb) <> " is not a function",
       )
-    True -> {
-      // Steps 1-2: RequireInternalSlot
-      use _store, ref, state <- require_map(this, state, "forEach")
+    True ->
       // Steps 4-5: LIVE iteration by seq cursor — the source is re-read from
       // the heap each step, so entries the callback deletes before being
       // reached are skipped and entries it adds (including delete + re-add)
       // are visited, per the spec's index-based [[MapData]] walk.
       for_each_loop(state, ref, 0, cb, this_arg, this)
-    }
   }
 }
 

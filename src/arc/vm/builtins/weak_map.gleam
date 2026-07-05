@@ -167,9 +167,12 @@ fn get_or_insert(
 }
 
 /// Upsert proposal — WeakMap.prototype.getOrInsertComputed ( key, callbackfn )
-/// Validation order per spec: receiver, then IsCallable(callbackfn), then
-/// CanBeHeldWeakly(key). After the callback runs the map is re-read so an
-/// insert made by the callback for the same key is overwritten.
+/// Validation order per spec: RequireInternalSlot(receiver), then
+/// CanBeHeldWeakly(key), then IsCallable(callbackfn). Observable:
+/// `new WeakMap().getOrInsertComputed(1, 1)` throws the "invalid value used
+/// as weak map key" TypeError, not "1 is not a function". After the callback
+/// runs the map is re-read so an insert made by the callback for the same key
+/// is overwritten.
 fn get_or_insert_computed(
   this: JsValue,
   args: List(JsValue),
@@ -182,6 +185,7 @@ fn get_or_insert_computed(
     "getOrInsertComputed",
   )
   let key = first_arg_or_undefined(args)
+  use weak_key, state <- weak_collection.require_weak_key(kind(), state, key)
   let callback = list_at(args, 1) |> option.unwrap(JsUndefined)
   case is_callable(state.heap, callback) {
     False ->
@@ -190,11 +194,6 @@ fn get_or_insert_computed(
         object.inspect(callback, state.heap) <> " is not a function",
       )
     True -> {
-      use weak_key, state <- weak_collection.require_weak_key(
-        kind(),
-        state,
-        key,
-      )
       case dict.get(weak_collection.read_data(state, ref), key) {
         Ok(existing) -> #(state, Ok(existing))
         Error(Nil) -> {

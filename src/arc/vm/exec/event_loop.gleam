@@ -61,8 +61,8 @@ pub fn drain_jobs(state: State(host)) -> State(host) {
 /// (arc/beam.run): when an embedder-visible wake source is pending —
 /// outstanding `host.suspend` promises, or pending Atomics.waitAsync
 /// waiters whose cross-process notify wakes arrive in the EMBEDDER's
-/// mailbox — and only future deadlines remain, return instead of
-/// sleeping. Sleeping here would starve the embedder's mailbox (IO,
+/// mailbox — and the job queue is dry, return instead of sleeping (or
+/// exiting). Sleeping here would starve the embedder's mailbox (IO,
 /// process messages, arc_notify wakes) until the deadline. The embedder
 /// bounds its blocking receive with `next_deadline_timeout`, injects
 /// notify wakes via `inject_notify`, and re-drains so waitAsync
@@ -102,17 +102,23 @@ fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
       // whenever either is pending.
       let embedder_wake_pending =
         state.outstanding > 0 || state.atomics_waiters != []
+      // The hand-back is decided BEFORE the deadline dispatch: a pending
+      // embedder wake with no waiter deadline (an outstanding `host.suspend`
+      // promise, say) still means this drain is not done — falling through to
+      // `finish_drain` there would terminally exit and report rejections the
+      // resumed job may still handle.
+      //
+      // NOT a drain exit: control comes back here (the embedder consumes
+      // its wake and re-drains), so this return deliberately does NOT run
+      // `finish_drain`. INVARIANT: unhandled-rejection reporting happens
+      // only where the drain is done for good, because a wake-driven job
+      // that runs after this hand-back can still attach a handler to a
+      // promise sitting in `unhandled_rejections` — reporting (and
+      // clearing) it here would print a rejection that ends up handled.
+      // The list is threaded through untouched and reported by whichever
+      // later drain reaches `finish_drain`.
+      use <- hand_back_if(yield_to_embedder && embedder_wake_pending, state)
       case earliest_deadline(state) {
-        // NOT a drain exit: control comes back here (the embedder consumes
-        // its wake and re-drains), so this return deliberately does NOT run
-        // `finish_drain`. INVARIANT: unhandled-rejection reporting happens
-        // only where the drain is done for good, because a wake-driven job
-        // that runs after this hand-back can still attach a handler to a
-        // promise sitting in `unhandled_rejections` — reporting (and
-        // clearing) it here would print a rejection that ends up handled.
-        // The list is threaded through untouched and reported by whichever
-        // later drain reaches `finish_drain`.
-        Some(_) if yield_to_embedder && embedder_wake_pending -> state
         Some(deadline) -> {
           let wait_ms =
             int.max(deadline - state.ctx.host_hooks.monotonic_now(), 0) + 1
@@ -143,6 +149,19 @@ fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
       let state = execute_job(state, job)
       do_drain_jobs(state, yield_to_embedder)
     }
+  }
+}
+
+/// The yielding drain's non-terminal hand-back: `state` as-is (no
+/// `finish_drain`) when the embedder has a wake pending, otherwise carry on.
+fn hand_back_if(
+  pending: Bool,
+  state: State(host),
+  otherwise: fn() -> State(host),
+) -> State(host) {
+  case pending {
+    True -> state
+    False -> otherwise()
   }
 }
 

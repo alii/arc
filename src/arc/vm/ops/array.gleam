@@ -663,6 +663,7 @@ fn spread_array_iterator(
   cursor: option.Option(Int),
   iter_kind: value.ArrayIterKind,
 ) -> Result(State(host), StepExit(host)) {
+  use <- exhausted_iterator_is_done(cursor, state)
   case heap.read(state.heap, source) {
     // Typed-array source — §23.1.5.1: validate the buffer witness,
     // then drain the remaining elements from the live backing store.
@@ -681,7 +682,7 @@ fn spread_array_iterator(
       {
         Error(err) -> object.throw_view_witness_error(state, err)
         Ok(len) -> {
-          // `cursor: None` is the exhaustion latch — nothing to drain.
+          // `cursor` is Some here — the None (exhausted) case returned above.
           let values = case cursor {
             None -> []
             Some(index) ->
@@ -755,6 +756,27 @@ fn spread_array_iterator(
           Ok(State(..state, heap:))
         }
       }
+  }
+}
+
+/// The exhaustion latch, checked BEFORE anything touches the source
+/// (§23.5.3.1 %ArrayIteratorPrototype%.next step 3: `[[IteratedArrayLike]]` is
+/// undefined → return done, without validating the buffer witness). Order is
+/// observable on a typed array whose buffer was detached after the iterator
+/// drained:
+///
+///     const it = new Uint8Array(sab_or_ab)[Symbol.iterator]();
+///     [...it];        // drains, latches done
+///     detach(buffer);
+///     [...it];        // spec: [] — validating the witness first would throw
+fn exhausted_iterator_is_done(
+  cursor: option.Option(Int),
+  state: State(host),
+  drain: fn() -> Result(State(host), StepExit(host)),
+) -> Result(State(host), StepExit(host)) {
+  case cursor {
+    None -> Ok(state)
+    Some(_) -> drain()
   }
 }
 

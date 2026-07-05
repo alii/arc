@@ -957,7 +957,10 @@ pub fn js_to_map_key(val: JsValue) -> MapKey {
     JsObject(ref) -> ObjectKey(ref)
     JsSymbol(id) -> SymbolKey(id)
     JsBigInt(bi) -> BigIntKey(bi)
-    JsUninitialized -> UndefinedKey
+    // The TDZ sentinel is not a JS value: a hole reaching Map/Set as a key is
+    // an engine bug, and folding it into UndefinedKey would collide it with a
+    // legitimate `undefined` key. Loud, exactly like `to_number`.
+    JsUninitialized -> panic as "js_to_map_key on the TDZ sentinel"
   }
 }
 
@@ -4825,12 +4828,11 @@ fn trim_string_ws(bytes: BitArray) -> BitArray {
   let keep = content_length(bytes, 0, 0)
   case keep == bit_array.byte_size(bytes) {
     True -> bytes
-    False ->
-      case bit_array.slice(bytes, 0, keep) {
-        Ok(trimmed) -> trimmed
-        // Unreachable: keep is always <= byte_size.
-        Error(Nil) -> bytes
-      }
+    False -> {
+      let assert Ok(trimmed) = bit_array.slice(bytes, 0, keep)
+        as "keep is always <= byte_size"
+      trimmed
+    }
   }
 }
 
@@ -4842,11 +4844,10 @@ fn trim_string_ws(bytes: BitArray) -> BitArray {
 /// White_Space set, which both misses U+FEFF ZWNBSP and wrongly includes
 /// U+0085 NEL.
 pub fn trim_leading_js_whitespace(s: String) -> String {
-  case drop_leading_string_ws(bit_array.from_string(s)) |> bit_array.to_string {
-    Ok(trimmed) -> trimmed
-    // Unreachable: whole codepoints are dropped, so the rest is valid UTF-8.
-    Error(Nil) -> s
-  }
+  let assert Ok(trimmed) =
+    drop_leading_string_ws(bit_array.from_string(s)) |> bit_array.to_string
+    as "whole codepoints are dropped, so the rest is valid UTF-8"
+  trimmed
 }
 
 /// §22.1.3.32.1 TrimString with `where` = end. The trailing twin of
@@ -4856,12 +4857,12 @@ pub fn trim_trailing_js_whitespace(s: String) -> String {
   let keep = content_length(bytes, 0, 0)
   case keep == bit_array.byte_size(bytes) {
     True -> s
-    False ->
-      case bit_array.slice(bytes, 0, keep) |> result.try(bit_array.to_string) {
-        Ok(trimmed) -> trimmed
-        // Unreachable: keep is a codepoint boundary <= byte_size.
-        Error(Nil) -> s
-      }
+    False -> {
+      let assert Ok(trimmed) =
+        bit_array.slice(bytes, 0, keep) |> result.try(bit_array.to_string)
+        as "keep is a codepoint boundary <= byte_size"
+      trimmed
+    }
   }
 }
 
@@ -4917,8 +4918,7 @@ fn content_length(bytes: BitArray, idx: Int, last: Int) -> Int {
     <<0xe3, 0x80, 0x80, rest:bytes>> -> content_length(rest, idx + 3, last)
     <<0xef, 0xbb, 0xbf, rest:bytes>> -> content_length(rest, idx + 3, last)
     <<_, rest:bytes>> -> content_length(rest, idx + 1, idx + 1)
-    // Unreachable: input is a UTF-8 string, always byte-aligned.
-    _ -> last
+    _ -> panic as "content_length: input is a UTF-8 string, always byte-aligned"
   }
 }
 

@@ -7,10 +7,12 @@
 //// (see intl_format.gleam); tag parsing/canonicalization is in
 //// intl_locale.gleam.
 
-import arc/internal/gregorian.{days_from_civil}
+import arc/internal/digits
+import arc/internal/gregorian.{days_from_civil, floor_div}
+import arc/internal/host_time
 import arc/vm/builtins/common
-import arc/vm/builtins/date
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
+import arc/vm/builtins/intl_collate.{collator_compare}
 import arc/vm/builtins/intl_format.{
   PDay, PDayPeriod, PElement, PEra, PFractionalSecond, PHour, PLiteral, PMinute,
   PMonth, PSecond, PTimeZoneName, PWeekday, PYear,
@@ -25,35 +27,37 @@ import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/unicode_case
 import arc/vm/value.{
-  type CaseFirst, type CollatorSensitivity, type CollatorState, type DateStyle,
-  type DateTimeFormatState, type DisplayNamesState, type DtfComponent,
-  type DtfComponents, type DtfTimeZone, type DurationBaseStyle,
-  type DurationFormatState, type DurationUnitOptions, type DurationUnitStyle,
-  type Granularity, type HostOverride, type HourCycle, type IntlData,
-  type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
+  type BoundGetterService, type CollatorState, type ConstructibleService,
+  type DateStyle, type DateTimeFormatState, type DisplayNamesState,
+  type DtfComponent, type DtfComponents, type DtfTimeZone,
+  type DurationBaseStyle, type DurationFormatState, type DurationUnitOptions,
+  type DurationUnitStyle, type Granularity, type HostOverride, type HourCycle,
+  type IntlData, type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
   type IntlService, type JsValue, type ListFormatState, type ListFormatStyle,
   type LocaleGetterName, type LocaleMethodName, type LocaleState,
   type MonthWidth, type NameWidth, type Notation, type NumberFormatState,
   type NumericWidth, type PluralRulesState, type Ref,
   type RelativeTimeFormatState, type SegmentIteratorState, type SegmenterState,
-  type SegmentsState, type TimeStyle, type TimeZoneNameWidth,
-  BigIntToLocaleString, BsDigital, BsLong, BsNarrow, BsShort, Cardinal,
-  CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CollatorData, CollatorState,
-  CompactLong, CompactShort, Conjunction, CurAccounting, CurCode, CurName,
-  CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
-  DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
-  DateToLocaleTimeString, Disjunction, Dispatch, DisplayAlways, DisplayAuto,
-  DisplayNamesData, DisplayNamesState, DnCalendar, DnCurrency, DnDateTimeField,
-  DnLanguage, DnRegion, DnScript, DsFull, DsLong, DsMedium, DsShort,
-  DtfComponents, DtfDay, DtfDayPeriod, DtfEra, DtfFractionalSecondDigits,
-  DtfHour, DtfMinute, DtfMonth, DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear,
-  DurFractional, DurLong, DurNarrow, DurNumeric, DurShort, DurTwoDigit,
-  DurationFormatData, DurationFormatState, DurationUnitOptions, FbCode, FbNone,
-  FixedZone, GGrapheme, GSentence, GWord, GroupingAlways, GroupingAuto,
-  GroupingMin2, GroupingNever, H11, H12, H23, H24, HostZone, IntlBoundGetter,
-  IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
-  IntlDigitOptions, IntlDisplayNames, IntlDurationFormat, IntlFormat,
-  IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
+  type SegmentsState, type TimeStyle, type TimeZoneNameWidth, BgCollator,
+  BgDateTimeFormat, BgNumberFormat, BigIntToLocaleString, BsDigital, BsLong,
+  BsNarrow, BsShort, Cardinal, CaseFirstFalse, CaseFirstLower, CaseFirstUpper,
+  CollatorData, CollatorState, CompactLong, CompactShort, Conjunction,
+  CsCollator, CsDateTimeFormat, CsDisplayNames, CsDurationFormat, CsListFormat,
+  CsLocale, CsNumberFormat, CsPluralRules, CsRelativeTimeFormat, CsSegmenter,
+  CurAccounting, CurCode, CurName, CurNarrowSymbol, CurStandard, CurSymbol,
+  DateTimeFormatData, DateTimeFormatState, DateToLocaleDateString,
+  DateToLocaleString, DateToLocaleTimeString, Disjunction, Dispatch,
+  DisplayAlways, DisplayAuto, DisplayNamesData, DisplayNamesState, DnCalendar,
+  DnCurrency, DnDateTimeField, DnLanguage, DnRegion, DnScript, DsFull, DsLong,
+  DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
+  DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
+  DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
+  DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
+  DurationUnitOptions, FbCode, FbNone, FixedZone, GGrapheme, GSentence, GWord,
+  GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, H11, H12, H23, H24,
+  HostZone, IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
+  IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
+  IntlFormat, IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
   IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat, IntlLocale,
   IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat,
   IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
@@ -97,7 +101,6 @@ import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/order
 import gleam/result
 import gleam/string
 
@@ -145,7 +148,7 @@ pub fn init(
       object_proto,
       function_proto,
       locale_getters,
-      fn(proto) { Dispatch(IntlNative(IntlConstructor(IntlLocale, proto))) },
+      fn(proto) { Dispatch(IntlNative(IntlConstructor(CsLocale, proto))) },
       "Locale",
       1,
       [],
@@ -175,43 +178,43 @@ pub fn init(
 
   // --- Simple formatter services ---
   let #(h, collator) =
-    init_service(h, object_proto, function_proto, IntlCollator, "Collator", [], [
-      #("compare", IntlNative(IntlBoundGetter(IntlCollator))),
+    init_service(h, object_proto, function_proto, CsCollator, "Collator", [], [
+      #("compare", IntlNative(IntlBoundGetter(BgCollator))),
     ])
   let #(h, number_format) =
     init_service(
       h,
       object_proto,
       function_proto,
-      IntlNumberFormat,
+      CsNumberFormat,
       "NumberFormat",
       [
         service_method(IntlNumberFormat, IntlFormatToParts, 1),
         service_method(IntlNumberFormat, IntlFormatRange, 2),
         service_method(IntlNumberFormat, IntlFormatRangeToParts, 2),
       ],
-      [#("format", IntlNative(IntlBoundGetter(IntlNumberFormat)))],
+      [#("format", IntlNative(IntlBoundGetter(BgNumberFormat)))],
     )
   let #(h, date_time_format) =
     init_service(
       h,
       object_proto,
       function_proto,
-      IntlDateTimeFormat,
+      CsDateTimeFormat,
       "DateTimeFormat",
       [
         service_method(IntlDateTimeFormat, IntlFormatToParts, 1),
         service_method(IntlDateTimeFormat, IntlFormatRange, 2),
         service_method(IntlDateTimeFormat, IntlFormatRangeToParts, 2),
       ],
-      [#("format", IntlNative(IntlBoundGetter(IntlDateTimeFormat)))],
+      [#("format", IntlNative(IntlBoundGetter(BgDateTimeFormat)))],
     )
   let #(h, plural_rules) =
     init_service(
       h,
       object_proto,
       function_proto,
-      IntlPluralRules,
+      CsPluralRules,
       "PluralRules",
       [
         service_method(IntlPluralRules, IntlSelect, 1),
@@ -224,7 +227,7 @@ pub fn init(
       h,
       object_proto,
       function_proto,
-      IntlListFormat,
+      CsListFormat,
       "ListFormat",
       [
         service_method(IntlListFormat, IntlFormat, 1),
@@ -237,7 +240,7 @@ pub fn init(
       h,
       object_proto,
       function_proto,
-      IntlRelativeTimeFormat,
+      CsRelativeTimeFormat,
       "RelativeTimeFormat",
       [
         service_method(IntlRelativeTimeFormat, IntlFormat, 2),
@@ -250,7 +253,7 @@ pub fn init(
       h,
       object_proto,
       function_proto,
-      IntlDisplayNames,
+      CsDisplayNames,
       "DisplayNames",
       [service_method(IntlDisplayNames, IntlOf, 1)],
       [],
@@ -260,7 +263,7 @@ pub fn init(
       h,
       object_proto,
       function_proto,
-      IntlDurationFormat,
+      CsDurationFormat,
       "DurationFormat",
       [
         service_method(IntlDurationFormat, IntlFormat, 1),
@@ -312,7 +315,7 @@ pub fn init(
       h,
       object_proto,
       function_proto,
-      IntlSegmenter,
+      CsSegmenter,
       "Segmenter",
       [],
       [],
@@ -424,24 +427,27 @@ fn init_service(
   h: Heap(host),
   object_proto: Ref,
   function_proto: Ref,
-  service: IntlService,
+  service: ConstructibleService,
   name: String,
   methods: List(#(String, value.NativeFn, Int)),
   accessors: List(#(String, value.NativeFn)),
 ) -> #(Heap(host), common.BuiltinType) {
   let arity = case service {
-    IntlDisplayNames -> 2
+    CsDisplayNames -> 2
     _ -> 0
   }
+  // The brand instances of this service carry: `resolvedOptions` and
+  // `supportedLocalesOf` are shared by every service, constructible or not.
+  let brand = value.constructible_service(service)
   let #(h, proto_methods) =
     common.alloc_methods(h, function_proto, [
-      #("resolvedOptions", IntlNative(IntlResolvedOptions(service)), 0),
+      #("resolvedOptions", IntlNative(IntlResolvedOptions(brand)), 0),
       ..methods
     ])
   let #(h, proto_accessors) = common.alloc_getters(h, function_proto, accessors)
   let #(h, slo) =
     common.alloc_methods(h, function_proto, [
-      #("supportedLocalesOf", IntlNative(IntlSupportedLocalesOf(service)), 1),
+      #("supportedLocalesOf", IntlNative(IntlSupportedLocalesOf(brand)), 1),
     ])
   let #(h, bt) =
     common.init_type(
@@ -668,6 +674,42 @@ fn branded_segments(
   use data <- branded_of(state, this, method)
   case data {
     SegmentsData(s) -> Some(s)
+    _other -> None
+  }
+}
+
+fn branded_collator(
+  state: State(host),
+  this: JsValue,
+  method: String,
+) -> Result(#(Ref, CollatorState), Thrown(host)) {
+  use data <- branded_of(state, this, method)
+  case data {
+    CollatorData(c) -> Some(c)
+    _other -> None
+  }
+}
+
+fn branded_number_format(
+  state: State(host),
+  this: JsValue,
+  method: String,
+) -> Result(#(Ref, NumberFormatState), Thrown(host)) {
+  use data <- branded_of(state, this, method)
+  case data {
+    NumberFormatData(nf) -> Some(nf)
+    _other -> None
+  }
+}
+
+fn branded_date_time_format(
+  state: State(host),
+  this: JsValue,
+  method: String,
+) -> Result(#(Ref, DateTimeFormatState), Thrown(host)) {
+  use data <- branded_of(state, this, method)
+  case data {
+    DateTimeFormatData(d) -> Some(d)
     _other -> None
   }
 }
@@ -1032,15 +1074,13 @@ fn is_type_sequence(s: String) -> Bool {
   })
 }
 
+fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
+  string.to_utf_codepoints(s)
+  |> list.all(fn(cp) { pred(string.utf_codepoint_to_int(cp)) })
+}
+
 fn is_alnum(s: String) -> Bool {
-  s != ""
-  && string.to_utf_codepoints(s)
-  |> list.all(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
-    { c >= 0x30 && c <= 0x39 }
-    || { c >= 0x41 && c <= 0x5a }
-    || { c >= 0x61 && c <= 0x7a }
-  })
+  s != "" && all_codepoints(s, digits.is_ascii_alnum_code)
 }
 
 // ============================================================================
@@ -1195,7 +1235,7 @@ fn supported_values_of(
           "AUD", "BRL", "CAD", "CHF", "CNY", "EUR", "GBP", "INR", "JPY", "KRW",
           "MXN", "RUB", "SEK", "USD",
         ])
-      "numberingSystem" -> Some(numbering_systems())
+      "numberingSystem" -> Some(fmt.numbering_systems())
       "timeZone" -> Some(supported_time_zones())
       "unit" -> Some(fmt.sanctioned_units())
       _ -> None
@@ -1255,168 +1295,6 @@ fn supported_time_zones() -> List(String) {
     ]),
     string.compare,
   )
-}
-
-/// Numbering systems we can render digits for (sorted).
-fn numbering_systems() -> List(String) {
-  [
-    "adlm", "ahom", "arab", "arabext", "bali", "beng", "bhks", "brah", "cakm",
-    "cham", "deva", "diak", "fullwide", "gara", "gong", "gonm", "gujr", "gukh",
-    "guru", "hanidec", "hmng", "hmnp", "java", "kali", "kawi", "khmr", "knda",
-    "krai", "lana", "lanatham", "laoo", "latn", "lepc", "limb", "mathbold",
-    "mathdbl", "mathmono", "mathsanb", "mathsans", "mlym", "modi", "mong",
-    "mroo", "mtei", "mymr", "mymrepka", "mymrpao", "mymrshan", "mymrtlng",
-    "nagm", "newa", "nkoo", "olck", "onao", "orya", "osma", "outlined", "rohg",
-    "saur", "segment", "shrd", "sind", "sinh", "sora", "sund", "sunu", "takr",
-    "talu", "tamldec", "telu", "thai", "tibt", "tirh", "tnsa", "tols", "vaii",
-    "wara", "wcho",
-  ]
-}
-
-fn is_numbering_system(s: String) -> Bool {
-  list.contains(numbering_systems(), s)
-}
-
-/// Transliterate latn digits to the numbering system, in the parts selected by
-/// `translits` (`fmt.is_number_digit` for numbers, `fmt.is_date_numeric` for
-/// date-times).
-fn apply_numbering_system(
-  parts: List(fmt.Part),
-  nu: String,
-  translits: fn(fmt.PartType) -> Bool,
-) -> List(fmt.Part) {
-  case nu {
-    "latn" -> parts
-    _ ->
-      list.map(parts, fn(part: fmt.Part) {
-        case translits(part.0) {
-          True -> #(part.0, translit_digits(part.1, nu))
-          False -> part
-        }
-      })
-  }
-}
-
-fn translit_digits(s: String, nu: String) -> String {
-  case nu {
-    "hanidec" ->
-      string.to_graphemes(s)
-      |> list.map(fn(c) {
-        case c {
-          "0" -> "〇"
-          "1" -> "一"
-          "2" -> "二"
-          "3" -> "三"
-          "4" -> "四"
-          "5" -> "五"
-          "6" -> "六"
-          "7" -> "七"
-          "8" -> "八"
-          "9" -> "九"
-          _ -> c
-        }
-      })
-      |> string.join("")
-    _ ->
-      case numbering_base(nu) {
-        None -> s
-        Some(base) ->
-          string.to_graphemes(s)
-          |> list.map(fn(c) {
-            case int.parse(c) {
-              Ok(d) ->
-                case string.utf_codepoint(base + d) {
-                  Ok(cp) -> string.from_utf_codepoints([cp])
-                  Error(Nil) -> c
-                }
-              Error(Nil) -> c
-            }
-          })
-          |> string.join("")
-      }
-  }
-}
-
-fn numbering_base(nu: String) -> Option(Int) {
-  case nu {
-    "adlm" -> Some(0x1e950)
-    "ahom" -> Some(0x11730)
-    "bhks" -> Some(0x11c50)
-    "brah" -> Some(0x11066)
-    "cakm" -> Some(0x11136)
-    "cham" -> Some(0xaa50)
-    "diak" -> Some(0x11950)
-    "gara" -> Some(0x10d40)
-    "gukh" -> Some(0x16130)
-    "krai" -> Some(0x16d70)
-    "onao" -> Some(0x1e5f1)
-    "tols" -> Some(0x11de0)
-    "sunu" -> Some(0x11bf0)
-    "mymrepka" -> Some(0x116da)
-    "mymrpao" -> Some(0x116d0)
-    "outlined" -> Some(0x1ccf0)
-    "gong" -> Some(0x11da0)
-    "gonm" -> Some(0x11d50)
-    "hmng" -> Some(0x16b50)
-    "hmnp" -> Some(0x1e140)
-    "java" -> Some(0xa9d0)
-    "kali" -> Some(0xa900)
-    "kawi" -> Some(0x11f50)
-    "lana" -> Some(0x1a80)
-    "lanatham" -> Some(0x1a90)
-    "lepc" -> Some(0x1c40)
-    "mathbold" -> Some(0x1d7ce)
-    "mathdbl" -> Some(0x1d7d8)
-    "mathmono" -> Some(0x1d7f6)
-    "mathsanb" -> Some(0x1d7ec)
-    "mathsans" -> Some(0x1d7e2)
-    "modi" -> Some(0x11650)
-    "mroo" -> Some(0x16a60)
-    "mtei" -> Some(0xabf0)
-    "mymrshan" -> Some(0x1090)
-    "mymrtlng" -> Some(0xa9f0)
-    "nagm" -> Some(0x1e4f0)
-    "newa" -> Some(0x11450)
-    "nkoo" -> Some(0x07c0)
-    "olck" -> Some(0x1c50)
-    "osma" -> Some(0x104a0)
-    "rohg" -> Some(0x10d30)
-    "saur" -> Some(0xa8d0)
-    "segment" -> Some(0x1fbf0)
-    "shrd" -> Some(0x111d0)
-    "sind" -> Some(0x112f0)
-    "sinh" -> Some(0x0de6)
-    "sora" -> Some(0x110f0)
-    "sund" -> Some(0x1bb0)
-    "takr" -> Some(0x116c0)
-    "talu" -> Some(0x19d0)
-    "tirh" -> Some(0x114d0)
-    "tnsa" -> Some(0x16ac0)
-    "vaii" -> Some(0xa620)
-    "wara" -> Some(0x118e0)
-    "wcho" -> Some(0x1e2f0)
-    "arab" -> Some(0x0660)
-    "arabext" -> Some(0x06f0)
-    "bali" -> Some(0x1b50)
-    "beng" -> Some(0x09e6)
-    "deva" -> Some(0x0966)
-    "fullwide" -> Some(0xff10)
-    "gujr" -> Some(0x0ae6)
-    "guru" -> Some(0x0a66)
-    "khmr" -> Some(0x17e0)
-    "knda" -> Some(0x0ce6)
-    "laoo" -> Some(0x0ed0)
-    "limb" -> Some(0x1946)
-    "mlym" -> Some(0x0d66)
-    "mong" -> Some(0x1810)
-    "mymr" -> Some(0x1040)
-    "orya" -> Some(0x0b66)
-    "tamldec" -> Some(0x0be6)
-    "telu" -> Some(0x0c66)
-    "thai" -> Some(0x0e50)
-    "tibt" -> Some(0x0f20)
-    _ -> None
-  }
 }
 
 // ============================================================================
@@ -1544,39 +1422,41 @@ fn service_name(service: IntlService) -> String {
 }
 
 fn construct_service(
-  service: IntlService,
+  service: ConstructibleService,
   proto: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let callable_without_new = case service {
-    IntlCollator | IntlNumberFormat | IntlDateTimeFormat -> True
+    CsCollator | CsNumberFormat | CsDateTimeFormat -> True
     _ -> False
   }
   case !callable_without_new && state.new_target == JsUndefined {
     True ->
       state.type_error(
         state,
-        "Constructor Intl." <> service_name(service) <> " requires 'new'",
+        "Constructor Intl."
+          <> service_name(value.constructible_service(service))
+          <> " requires 'new'",
       )
     False -> {
       let arg0 = first_arg_or_undefined(args)
       let arg1 = helpers.arg_at(args, 1)
       run({
         use #(data, state) <- result.try(case service {
-          IntlLocale -> {
+          CsLocale -> {
             use #(s, state) <- result.map(locale_state(state, arg0, arg1))
             #(LocaleData(s), state)
           }
-          IntlCollator -> {
+          CsCollator -> {
             use #(s, state) <- result.map(collator_state(state, arg0, arg1))
             #(CollatorData(s), state)
           }
-          IntlNumberFormat -> {
+          CsNumberFormat -> {
             use #(s, state) <- result.map(number_format_state(state, arg0, arg1))
             #(NumberFormatData(s), state)
           }
-          IntlDateTimeFormat -> {
+          CsDateTimeFormat -> {
             use #(s, state) <- result.map(date_time_format_state(
               state,
               arg0,
@@ -1584,27 +1464,27 @@ fn construct_service(
             ))
             #(DateTimeFormatData(s), state)
           }
-          IntlPluralRules -> {
+          CsPluralRules -> {
             use #(s, state) <- result.map(plural_rules_state(state, arg0, arg1))
             #(PluralRulesData(s), state)
           }
-          IntlListFormat -> {
+          CsListFormat -> {
             use #(s, state) <- result.map(list_format_state(state, arg0, arg1))
             #(ListFormatData(s), state)
           }
-          IntlRelativeTimeFormat -> {
+          CsRelativeTimeFormat -> {
             use #(s, state) <- result.map(rtf_state(state, arg0, arg1))
             #(RelativeTimeFormatData(s), state)
           }
-          IntlSegmenter -> {
+          CsSegmenter -> {
             use #(s, state) <- result.map(segmenter_state(state, arg0, arg1))
             #(SegmenterData(s), state)
           }
-          IntlDisplayNames -> {
+          CsDisplayNames -> {
             use #(s, state) <- result.map(display_names_state(state, arg0, arg1))
             #(DisplayNamesData(s), state)
           }
-          IntlDurationFormat -> {
+          CsDurationFormat -> {
             use #(s, state) <- result.map(duration_format_state(
               state,
               arg0,
@@ -1612,8 +1492,6 @@ fn construct_service(
             ))
             #(DurationFormatData(s), state)
           }
-          IntlSegments | IntlSegmentIterator ->
-            throw_type(state, "Illegal constructor")
         })
         let #(heap, ref) =
           common.alloc_wrapper(state.heap, IntlObject(data:), proto)
@@ -1863,21 +1741,11 @@ fn is_region_subtag(s: String) -> Bool {
 }
 
 fn is_alpha_str(s: String) -> Bool {
-  s != ""
-  && string.to_utf_codepoints(s)
-  |> list.all(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
-    { c >= 0x41 && c <= 0x5a } || { c >= 0x61 && c <= 0x7a }
-  })
+  s != "" && all_codepoints(s, digits.is_ascii_alpha_code)
 }
 
 fn is_digit_str(s: String) -> Bool {
-  s != ""
-  && string.to_utf_codepoints(s)
-  |> list.all(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
-    c >= 0x30 && c <= 0x39
-  })
+  s != "" && all_codepoints(s, digits.is_decimal_code)
 }
 
 fn require_type_seq(
@@ -2034,7 +1902,7 @@ fn resolve_nu_locale(
   use Nil <- result.map(require_type_seq(state, nu_opt, "numberingSystem"))
   let #(_locale, data_locale, ext_kws) = resolve_locale(requested)
   let #(nu, nu_from_ext) =
-    resolve_keyword(ext_kws, "nu", nu_opt, is_numbering_system, "latn")
+    resolve_keyword(ext_kws, "nu", nu_opt, fmt.is_numbering_system, "latn")
   let locale = build_resolved_locale(data_locale, [#("nu", nu_from_ext, nu)])
   #(nu, locale, state)
 }
@@ -2766,7 +2634,7 @@ fn dtf_state_required(
       "gregory",
     )
   let #(nu, nu_from_ext) =
-    resolve_keyword(ext_kws, "nu", nu_opt, is_numbering_system, "latn")
+    resolve_keyword(ext_kws, "nu", nu_opt, fmt.is_numbering_system, "latn")
   let lang = case tags.parse(data_locale) {
     Ok(lid) -> lid.language
     Error(Nil) -> "en"
@@ -3237,7 +3105,7 @@ fn canonical_time_zone(s: String) -> Option(DtfTimeZone) {
 /// only place a DateTimeFormat offset ever comes from.
 fn zone_offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
   case tz {
-    HostZone -> date.offset_at_utc_ms(instant_ms)
+    HostZone -> host_time.offset_at_utc_ms(instant_ms)
     FixedZone(offset_minutes:, ..) -> offset_minutes
     NamedZone(zone:) -> {
       // `temporal_tz.lookup` already loaded this zone's TZif to mint the
@@ -3331,15 +3199,8 @@ fn tzdata_zone(lower: String) -> Option(DtfTimeZone) {
 }
 
 fn is_zone_word(p: String) -> Bool {
-  string.to_utf_codepoints(p)
-  |> list.all(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
-    { c >= 0x61 && c <= 0x7a }
-    || { c >= 0x41 && c <= 0x5a }
-    || { c >= 0x30 && c <= 0x39 }
-    || c == 0x5f
-    || c == 0x2b
-    || c == 0x2d
+  all_codepoints(p, fn(c) {
+    digits.is_ascii_alnum_code(c) || c == 0x5f || c == 0x2b || c == 0x2d
   })
 }
 
@@ -4351,108 +4212,122 @@ fn digit_rounding_pairs(
 // Bound method getters (format / compare)
 // ============================================================================
 
+/// The `format` / `compare` accessor getters (§10.3.3, §15.3.3, §11.3.3): the
+/// bound function is created once and cached in the receiver's own state, so
+/// the getter is idempotent. `BoundGetterService` has exactly the three
+/// services with such a cache slot — no "service without a slot" arm.
 fn bound_getter(
-  service: IntlService,
+  service: BoundGetterService,
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  run({
-    use #(ref, data) <- result.try(branded(
-      state,
-      this,
-      service,
-      "Intl." <> service_name(service) <> " bound method getter",
-    ))
-    let #(cached, arity) = case data {
-      CollatorData(c) -> #(c.bound_compare, 2)
-      NumberFormatData(nf) -> #(nf.bound_format, 1)
-      DateTimeFormatData(d) -> #(d.bound_format, 1)
-      _ -> #(None, 1)
+  let method =
+    "Intl."
+    <> service_name(value.bound_getter_service(service))
+    <> " bound method getter"
+  run(case service {
+    BgCollator -> {
+      use #(ref, c) <- result.try(branded_collator(state, this, method))
+      cached_bound_fn(state, service, ref, c.bound_compare, 2, fn(heap, fn_ref) {
+        write_intl_data(
+          heap,
+          ref,
+          CollatorData(CollatorState(..c, bound_compare: Some(fn_ref))),
+        )
+      })
     }
-    case cached {
-      Some(fn_ref) -> Ok(#(JsObject(fn_ref), state))
-      None -> {
-        let #(heap, fn_ref) =
-          common.alloc_native_fn(
-            state.heap,
-            state.builtins.function.prototype,
-            IntlNative(IntlBoundMethod(service:, target: ref)),
-            "",
-            arity,
-          )
-        let heap = case data {
-          CollatorData(c) ->
-            write_intl_data(
-              heap,
-              ref,
-              CollatorData(CollatorState(..c, bound_compare: Some(fn_ref))),
-            )
-          NumberFormatData(nf) ->
-            write_intl_data(
-              heap,
-              ref,
-              NumberFormatData(
-                NumberFormatState(..nf, bound_format: Some(fn_ref)),
-              ),
-            )
-          DateTimeFormatData(d) ->
-            write_intl_data(
-              heap,
-              ref,
-              DateTimeFormatData(
-                DateTimeFormatState(..d, bound_format: Some(fn_ref)),
-              ),
-            )
-          _ -> heap
-        }
-        Ok(#(JsObject(fn_ref), State(..state, heap:)))
-      }
+    BgNumberFormat -> {
+      use #(ref, nf) <- result.try(branded_number_format(state, this, method))
+      cached_bound_fn(state, service, ref, nf.bound_format, 1, fn(heap, fn_ref) {
+        write_intl_data(
+          heap,
+          ref,
+          NumberFormatData(NumberFormatState(..nf, bound_format: Some(fn_ref))),
+        )
+      })
+    }
+    BgDateTimeFormat -> {
+      use #(ref, d) <- result.try(branded_date_time_format(state, this, method))
+      cached_bound_fn(state, service, ref, d.bound_format, 1, fn(heap, fn_ref) {
+        write_intl_data(
+          heap,
+          ref,
+          DateTimeFormatData(
+            DateTimeFormatState(..d, bound_format: Some(fn_ref)),
+          ),
+        )
+      })
     }
   })
 }
 
+/// Return the already-cached bound function, or allocate one and hand it to
+/// `store` (which writes it into the receiver's cache slot).
+fn cached_bound_fn(
+  state: State(host),
+  service: BoundGetterService,
+  target: Ref,
+  cached: Option(Ref),
+  arity: Int,
+  store: fn(Heap(host), Ref) -> Heap(host),
+) -> Result(#(JsValue, State(host)), Thrown(host)) {
+  case cached {
+    Some(fn_ref) -> Ok(#(JsObject(fn_ref), state))
+    None -> {
+      let #(heap, fn_ref) =
+        common.alloc_native_fn(
+          state.heap,
+          state.builtins.function.prototype,
+          IntlNative(IntlBoundMethod(service:, target:)),
+          "",
+          arity,
+        )
+      Ok(#(JsObject(fn_ref), State(..state, heap: store(heap, fn_ref))))
+    }
+  }
+}
+
+/// The bound `format` / `compare` function itself: `target` is the receiver
+/// captured by `bound_getter`, and its brand is re-checked (the instance's
+/// state can only have been swapped by another Intl object of the same shape).
 fn bound_method(
-  service: IntlService,
+  service: BoundGetterService,
   target: Ref,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  run({
-    use #(_ref, data) <- result.try(branded(
-      state,
-      JsObject(target),
-      service,
-      "bound Intl method",
-    ))
-    case data {
-      NumberFormatData(nf) -> {
-        use #(parts, state) <- result.try(nf_format_parts(
-          state,
-          nf,
-          first_arg_or_undefined(args),
-        ))
-        Ok(#(JsString(fmt.parts_to_string(parts)), state))
-      }
-      DateTimeFormatData(d) -> {
-        use #(parts, state) <- result.try(dtf_format_parts(
-          state,
-          d,
-          first_arg_or_undefined(args),
-        ))
-        Ok(#(JsString(fmt.parts_to_string(parts)), state))
-      }
-      CollatorData(c) -> {
-        use #(a, state) <- result.try(coerce.js_to_string(
-          state,
-          first_arg_or_undefined(args),
-        ))
-        use #(b, state) <- result.try(coerce.js_to_string(
-          state,
-          helpers.arg_at(args, 1),
-        ))
-        Ok(#(value.from_int(collator_compare(c, a, b)), state))
-      }
-      _ -> throw_type(state, "Unsupported bound method")
+  let this = JsObject(target)
+  let method = "bound Intl method"
+  run(case service {
+    BgNumberFormat -> {
+      use #(_ref, nf) <- result.try(branded_number_format(state, this, method))
+      use #(parts, state) <- result.map(nf_format_parts(
+        state,
+        nf,
+        first_arg_or_undefined(args),
+      ))
+      #(JsString(fmt.parts_to_string(parts)), state)
+    }
+    BgDateTimeFormat -> {
+      use #(_ref, d) <- result.try(branded_date_time_format(state, this, method))
+      use #(parts, state) <- result.map(dtf_format_parts(
+        state,
+        d,
+        first_arg_or_undefined(args),
+      ))
+      #(JsString(fmt.parts_to_string(parts)), state)
+    }
+    BgCollator -> {
+      use #(_ref, c) <- result.try(branded_collator(state, this, method))
+      use #(a, state) <- result.try(coerce.js_to_string(
+        state,
+        first_arg_or_undefined(args),
+      ))
+      use #(b, state) <- result.map(coerce.js_to_string(
+        state,
+        helpers.arg_at(args, 1),
+      ))
+      #(value.from_int(collator_compare(c, a, b)), state)
     }
   })
 }
@@ -4513,7 +4388,7 @@ fn nf_format_parts(
       case is_plain_decimal(string.trim(str)) {
         True ->
           Ok(#(
-            apply_numbering_system(
+            fmt.apply_numbering_system(
               fmt.format_decimal_string_parts(opts, string.trim(str)),
               nu,
               fmt.is_number_digit,
@@ -4564,7 +4439,7 @@ fn nf_format_number(
     value.NegInfinity -> fmt.format_infinity_parts(opts, True)
     value.Finite(f) -> fmt.format_number_parts(opts, f)
   }
-  Ok(#(apply_numbering_system(parts, nu, fmt.is_number_digit), state))
+  Ok(#(fmt.apply_numbering_system(parts, nu, fmt.is_number_digit), state))
 }
 
 fn nf_range_parts(
@@ -4609,11 +4484,25 @@ fn nf_range_parts(
 
 /// A Temporal object as seen by DateTimeFormat (ECMA-402 HandleDateTimeValue).
 type TemporalFormattable {
-  TfDate(year: Int, month: Int, day: Int, calendar: String)
-  TfYearMonth(year: Int, month: Int, day: Int, calendar: String)
-  TfMonthDay(month: Int, day: Int, ref_year: Int, calendar: String)
-  TfTime(hour: Int, minute: Int, second: Int, millisecond: Int)
-  TfDateTime(
+  /// A wall-clock Temporal type: its fields ARE the fields to format.
+  TfPlain(PlainTemporal)
+  /// Temporal.Instant — an exact time, rendered through the formatter's zone.
+  TfInstant(epoch_ns: Int)
+  /// Temporal.ZonedDateTime — always a TypeError (`toLocaleString` instead).
+  TfZoned
+}
+
+/// The Temporal types with no instant behind them, split out of
+/// `TemporalFormattable` so `plain_temporal_fields` / `plain_component_rules`
+/// are total: neither can be reached with an Instant or a ZonedDateTime, so
+/// neither needs a "cannot happen" fallback that would silently format the
+/// epoch.
+type PlainTemporal {
+  PDate(year: Int, month: Int, day: Int, calendar: String)
+  PYearMonth(year: Int, month: Int, day: Int, calendar: String)
+  PMonthDay(month: Int, day: Int, ref_year: Int, calendar: String)
+  PTime(hour: Int, minute: Int, second: Int, millisecond: Int)
+  PDateTime(
     year: Int,
     month: Int,
     day: Int,
@@ -4623,8 +4512,32 @@ type TemporalFormattable {
     millisecond: Int,
     calendar: String,
   )
-  TfInstant(epoch_ns: Int)
-  TfZoned
+}
+
+/// A Temporal value that DateTimeFormat accepted: ZonedDateTime has already
+/// thrown, so field extraction sees only these two shapes.
+type AcceptedTemporal {
+  AtInstant(epoch_ns: Int)
+  AtPlain(PlainTemporal)
+}
+
+/// HandleDateTimeValue's ZonedDateTime rejection.
+fn throw_zoned(state: State(host)) -> Result(a, Thrown(host)) {
+  throw_type(
+    state,
+    "Temporal.ZonedDateTime cannot be formatted with Intl.DateTimeFormat; use Temporal.ZonedDateTime.prototype.toLocaleString instead",
+  )
+}
+
+fn accept_temporal(
+  state: State(host),
+  t: TemporalFormattable,
+) -> Result(AcceptedTemporal, Thrown(host)) {
+  case t {
+    TfInstant(epoch_ns:) -> Ok(AtInstant(epoch_ns:))
+    TfPlain(p) -> Ok(AtPlain(p))
+    TfZoned -> throw_zoned(state)
+  }
 }
 
 /// IsTemporalObject — recognize Temporal values handed to format methods.
@@ -4639,27 +4552,38 @@ fn dtf_temporal_value(
           kind: TemporalDateSlot(year:, month:, day:, calendar:),
           ..,
         )) ->
-          Some(TfDate(year:, month:, day:, calendar: tcal.identifier(calendar)))
+          Some(
+            TfPlain(PDate(
+              year:,
+              month:,
+              day:,
+              calendar: tcal.identifier(calendar),
+            )),
+          )
         Some(ObjectSlot(
           kind: TemporalYearMonthSlot(year:, month:, day:, calendar:),
           ..,
         )) ->
-          Some(TfYearMonth(
-            year:,
-            month:,
-            day:,
-            calendar: tcal.identifier(calendar),
-          ))
+          Some(
+            TfPlain(PYearMonth(
+              year:,
+              month:,
+              day:,
+              calendar: tcal.identifier(calendar),
+            )),
+          )
         Some(ObjectSlot(
           kind: TemporalMonthDaySlot(month:, day:, ref_year:, calendar:),
           ..,
         )) ->
-          Some(TfMonthDay(
-            month:,
-            day:,
-            ref_year:,
-            calendar: tcal.identifier(calendar),
-          ))
+          Some(
+            TfPlain(PMonthDay(
+              month:,
+              day:,
+              ref_year:,
+              calendar: tcal.identifier(calendar),
+            )),
+          )
         Some(ObjectSlot(
           kind: TemporalTimeSlot(
             hour:,
@@ -4670,7 +4594,7 @@ fn dtf_temporal_value(
             nanosecond: _,
           ),
           ..,
-        )) -> Some(TfTime(hour:, minute:, second:, millisecond:))
+        )) -> Some(TfPlain(PTime(hour:, minute:, second:, millisecond:)))
         Some(ObjectSlot(
           kind: TemporalDateTimeSlot(
             year:,
@@ -4686,16 +4610,18 @@ fn dtf_temporal_value(
           ),
           ..,
         )) ->
-          Some(TfDateTime(
-            year:,
-            month:,
-            day:,
-            hour:,
-            minute:,
-            second:,
-            millisecond:,
-            calendar: tcal.identifier(calendar),
-          ))
+          Some(
+            TfPlain(PDateTime(
+              year:,
+              month:,
+              day:,
+              hour:,
+              minute:,
+              second:,
+              millisecond:,
+              calendar: tcal.identifier(calendar),
+            )),
+          )
         Some(ObjectSlot(kind: TemporalInstantSlot(epoch_ns:), ..)) ->
           Some(TfInstant(epoch_ns:))
         Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(..), ..)) ->
@@ -4709,13 +4635,20 @@ fn dtf_temporal_value(
 /// SameTemporalType — both values are the same Temporal type.
 fn same_temporal_kind(a: TemporalFormattable, b: TemporalFormattable) -> Bool {
   case a, b {
-    TfDate(..), TfDate(..) -> True
-    TfYearMonth(..), TfYearMonth(..) -> True
-    TfMonthDay(..), TfMonthDay(..) -> True
-    TfTime(..), TfTime(..) -> True
-    TfDateTime(..), TfDateTime(..) -> True
+    TfPlain(a), TfPlain(b) -> same_plain_kind(a, b)
     TfInstant(..), TfInstant(..) -> True
     TfZoned, TfZoned -> True
+    _, _ -> False
+  }
+}
+
+fn same_plain_kind(a: PlainTemporal, b: PlainTemporal) -> Bool {
+  case a, b {
+    PDate(..), PDate(..) -> True
+    PYearMonth(..), PYearMonth(..) -> True
+    PMonthDay(..), PMonthDay(..) -> True
+    PTime(..), PTime(..) -> True
+    PDateTime(..), PDateTime(..) -> True
     _, _ -> False
   }
 }
@@ -4723,17 +4656,17 @@ fn same_temporal_kind(a: TemporalFormattable, b: TemporalFormattable) -> Bool {
 /// Allowed / required / default components per Temporal type, plus
 /// whether `era` / hour-cycle options carry over (GetDateTimeFormat's
 /// ~relevant~ inheritance).
-fn tf_component_rules(
-  t: TemporalFormattable,
+fn plain_component_rules(
+  t: PlainTemporal,
 ) -> #(List(DtfComponent), List(DtfComponent), DtfComponents, Bool) {
   case t {
-    TfDate(..) -> #(
+    PDate(..) -> #(
       [DtfWeekday, DtfEra, DtfYear, DtfMonth, DtfDay],
       [DtfWeekday, DtfYear, DtfMonth, DtfDay],
       date_defaults(),
       True,
     )
-    TfYearMonth(..) -> #(
+    PYearMonth(..) -> #(
       [DtfEra, DtfYear, DtfMonth],
       [DtfYear, DtfMonth],
       DtfComponents(
@@ -4743,7 +4676,7 @@ fn tf_component_rules(
       ),
       True,
     )
-    TfMonthDay(..) -> #(
+    PMonthDay(..) -> #(
       [DtfMonth, DtfDay],
       [DtfMonth, DtfDay],
       DtfComponents(
@@ -4753,13 +4686,13 @@ fn tf_component_rules(
       ),
       False,
     )
-    TfTime(..) -> #(
+    PTime(..) -> #(
       [DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits],
       [DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits],
       time_defaults(),
       False,
     )
-    TfDateTime(..) -> #(
+    PDateTime(..) -> #(
       [
         DtfWeekday, DtfEra, DtfYear, DtfMonth, DtfDay, DtfDayPeriod, DtfHour,
         DtfMinute, DtfSecond, DtfFractionalSecondDigits,
@@ -4771,7 +4704,6 @@ fn tf_component_rules(
       merge_components(date_defaults(), time_defaults()),
       True,
     )
-    TfInstant(..) | TfZoned -> #([], [], value.empty_dtf_components, False)
   }
 }
 
@@ -4784,19 +4716,34 @@ fn dtf_temporal_state(
   t: TemporalFormattable,
 ) -> Result(#(DateTimeFormatState, State(host)), Thrown(host)) {
   case t {
-    TfZoned ->
-      throw_type(
-        state,
-        "Temporal.ZonedDateTime cannot be formatted with Intl.DateTimeFormat; use Temporal.ZonedDateTime.prototype.toLocaleString instead",
-      )
-    TfInstant(..) -> Ok(#(d, state))
-    _ -> {
-      let cal_ok = case t {
-        TfDate(calendar:, ..) | TfDateTime(calendar:, ..) ->
+    TfZoned -> throw_zoned(state)
+    // [[TemporalInstantFormat]] is GetDateTimeFormat(..., required = ~any~,
+    // defaults = ~all~): with no style and no explicit date/time component,
+    // an Instant defaults to date AND time — the constructor only defaulted
+    // the date half (defaults = ~date~). Repro:
+    //   new Intl.DateTimeFormat("en", { era: "narrow" })
+    //     .format(new Temporal.Instant(0n))
+    //     === new Date(0).toLocaleString("en", { era: "narrow" })
+    TfInstant(..) ->
+      case
+        d.explicit != []
+        || option.is_some(d.date_style)
+        || option.is_some(d.time_style)
+      {
+        True -> Ok(#(d, state))
+        False ->
+          Ok(#(
+            with_components(d, merge_components(d.components, time_defaults())),
+            state,
+          ))
+      }
+    TfPlain(p) -> {
+      let cal_ok = case p {
+        PDate(calendar:, ..) | PDateTime(calendar:, ..) ->
           calendar == "iso8601" || calendar == d.calendar
-        TfYearMonth(calendar:, ..) | TfMonthDay(calendar:, ..) ->
+        PYearMonth(calendar:, ..) | PMonthDay(calendar:, ..) ->
           calendar == d.calendar
-        _ -> True
+        PTime(..) -> True
       }
       use Nil <- result.try(case cal_ok {
         True -> Ok(Nil)
@@ -4806,18 +4753,18 @@ fn dtf_temporal_state(
             "Temporal object calendar does not match DateTimeFormat calendar",
           )
       })
-      let #(allowed, required, defaults, copy_era) = tf_component_rules(t)
+      let #(allowed, required, defaults, copy_era) = plain_component_rules(p)
       let has_styles =
         option.is_some(d.date_style) || option.is_some(d.time_style)
       case has_styles {
         True -> {
           // AdjustDateTimeStyleFormat: per-type formats exist only when the
           // matching style was given; keep only the allowed components.
-          let style_ok = case t {
-            TfDate(..) | TfYearMonth(..) | TfMonthDay(..) ->
+          let style_ok = case p {
+            PDate(..) | PYearMonth(..) | PMonthDay(..) ->
               option.is_some(d.date_style)
-            TfTime(..) -> option.is_some(d.time_style)
-            _ -> True
+            PTime(..) -> option.is_some(d.time_style)
+            PDateTime(..) -> True
           }
           use Nil <- result.try(case style_ok {
             True -> Ok(Nil)
@@ -4890,23 +4837,26 @@ fn civil_week_day(year: Int, month: Int, day: Int) -> Int {
 /// through the formatter's zone like a Number time value.
 fn dtf_temporal_fields(
   d: DateTimeFormatState,
-  t: TemporalFormattable,
+  t: AcceptedTemporal,
 ) -> #(fmt.DateFields, Int) {
   case t {
-    TfInstant(epoch_ns:) -> {
+    AtInstant(epoch_ns:) -> {
       let ms = floor_div(epoch_ns, 1_000_000)
       let offset = zone_offset_at(d.time_zone, ms)
       #(fmt.fields_from_epoch_ms(int.to_float(ms), offset), offset)
     }
     // Plain types carry no instant, so a requested timeZoneName can only show
     // the zone's offset now.
-    _ -> #(plain_temporal_fields(t), zone_offset_at(d.time_zone, date.now_ms()))
+    AtPlain(p) -> #(
+      plain_temporal_fields(p),
+      zone_offset_at(d.time_zone, host_time.now_ms()),
+    )
   }
 }
 
-fn plain_temporal_fields(t: TemporalFormattable) -> fmt.DateFields {
+fn plain_temporal_fields(t: PlainTemporal) -> fmt.DateFields {
   case t {
-    TfDate(year:, month:, day:, ..) | TfYearMonth(year:, month:, day:, ..) ->
+    PDate(year:, month:, day:, ..) | PYearMonth(year:, month:, day:, ..) ->
       fmt.DateFields(
         year:,
         month:,
@@ -4917,7 +4867,7 @@ fn plain_temporal_fields(t: TemporalFormattable) -> fmt.DateFields {
         millisecond: 0,
         week_day: civil_week_day(year, month, day),
       )
-    TfMonthDay(month:, day:, ref_year:, ..) ->
+    PMonthDay(month:, day:, ref_year:, ..) ->
       fmt.DateFields(
         year: ref_year,
         month:,
@@ -4928,7 +4878,7 @@ fn plain_temporal_fields(t: TemporalFormattable) -> fmt.DateFields {
         millisecond: 0,
         week_day: civil_week_day(ref_year, month, day),
       )
-    TfTime(hour:, minute:, second:, millisecond:) ->
+    PTime(hour:, minute:, second:, millisecond:) ->
       fmt.DateFields(
         year: 1970,
         month: 1,
@@ -4939,7 +4889,7 @@ fn plain_temporal_fields(t: TemporalFormattable) -> fmt.DateFields {
         millisecond:,
         week_day: 4,
       )
-    TfDateTime(year:, month:, day:, hour:, minute:, second:, millisecond:, ..) ->
+    PDateTime(year:, month:, day:, hour:, minute:, second:, millisecond:, ..) ->
       fmt.DateFields(
         year:,
         month:,
@@ -4950,17 +4900,6 @@ fn plain_temporal_fields(t: TemporalFormattable) -> fmt.DateFields {
         millisecond:,
         week_day: civil_week_day(year, month, day),
       )
-    TfInstant(..) | TfZoned ->
-      // TfInstant is handled by the caller; dtf_temporal_state throws for
-      // ZonedDateTime before we get here.
-      fmt.fields_from_epoch_ms(0.0, 0)
-  }
-}
-
-fn floor_div(a: Int, b: Int) -> Int {
-  case a < 0 && a % b != 0 {
-    True -> a / b - 1
-    False -> a / b
   }
 }
 
@@ -4972,10 +4911,15 @@ fn dtf_format_parts(
   case dtf_temporal_value(state, date_v) {
     Some(t) -> {
       use #(d, state) <- result.try(dtf_temporal_state(state, d, t))
-      let #(fields, offset) = dtf_temporal_fields(d, t)
+      use accepted <- result.try(accept_temporal(state, t))
+      let #(fields, offset) = dtf_temporal_fields(d, accepted)
       let parts = build_dtf_parts(d, fields, offset)
       Ok(#(
-        apply_numbering_system(parts, d.numbering_system, fmt.is_date_numeric),
+        fmt.apply_numbering_system(
+          parts,
+          d.numbering_system,
+          fmt.is_date_numeric,
+        ),
         state,
       ))
     }
@@ -4991,7 +4935,7 @@ fn dtf_format_parts_number(
   use #(fields, offset, state) <- result.try(dtf_fields_number(state, d, date_v))
   let parts = build_dtf_parts(d, fields, offset)
   Ok(#(
-    apply_numbering_system(parts, d.numbering_system, fmt.is_date_numeric),
+    fmt.apply_numbering_system(parts, d.numbering_system, fmt.is_date_numeric),
     state,
   ))
 }
@@ -5433,8 +5377,9 @@ fn dtf_fields(
 ) -> Result(#(fmt.DateFields, State(host)), Thrown(host)) {
   case dtf_temporal_value(state, date_v) {
     Some(t) -> {
-      let #(fields, _offset) = dtf_temporal_fields(d, t)
-      Ok(#(fields, state))
+      use accepted <- result.map(accept_temporal(state, t))
+      let #(fields, _offset) = dtf_temporal_fields(d, accepted)
+      #(fields, state)
     }
     None -> {
       use #(fields, _offset, state) <- result.map(dtf_fields_number(
@@ -5454,7 +5399,7 @@ fn dtf_fields_number(
   date_v: JsValue,
 ) -> Result(#(fmt.DateFields, Int, State(host)), Thrown(host)) {
   use #(tv, state) <- result.try(case date_v {
-    JsUndefined -> Ok(#(value.Finite(int.to_float(date.now_ms())), state))
+    JsUndefined -> Ok(#(value.Finite(int.to_float(host_time.now_ms())), state))
     _ -> coerce.js_to_number(state, date_v)
   })
   use tv_f <- result.try(case tv {
@@ -5470,278 +5415,6 @@ fn dtf_fields_number(
   })
   let offset = zone_offset_at(d.time_zone, float.truncate(tv_f))
   Ok(#(fmt.fields_from_epoch_ms(tv_f, offset), offset, state))
-}
-
-// ============================================================================
-// Collator compare
-// ============================================================================
-
-fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
-  let sensitivity = c.sensitivity
-  let numeric = c.numeric
-  let ignore_punct = c.ignore_punctuation
-  let prep = fn(s: String) {
-    case ignore_punct {
-      True -> strip_punctuation(s)
-      False -> s
-    }
-  }
-  let a = prep(a)
-  let b = prep(b)
-  // Primary: base letters (case- and accent-folded).
-  let pa = collation_primary(a)
-  let pb = collation_primary(b)
-  let levels = fn() { collator_levels(sensitivity, c.case_first, a, b) }
-  case numeric {
-    True ->
-      case numeric_compare(string.to_graphemes(pa), string.to_graphemes(pb)) {
-        0 -> levels()
-        n -> n
-      }
-    False ->
-      case simple_compare(pa, pb) {
-        0 -> levels()
-        n -> n
-      }
-  }
-}
-
-/// Secondary (accents) and tertiary (case) comparisons per sensitivity.
-/// The tertiary (case) level honours `[[CaseFirst]]` (§10.1.2 `kf`).
-fn collator_levels(
-  sensitivity: CollatorSensitivity,
-  case_first: CaseFirst,
-  a: String,
-  b: String,
-) -> Int {
-  let secondary = fn() {
-    simple_compare(
-      string.lowercase(fold_combining(a)),
-      string.lowercase(fold_combining(b)),
-    )
-  }
-  let tertiary = fn() {
-    case case_first {
-      // Uppercase first: compare as-is, so "A" (0x41) precedes "a" (0x61).
-      CaseFirstUpper -> simple_compare(fold_combining(a), fold_combining(b))
-      // Lowercase first — also the `false` (en locale default) order.
-      CaseFirstLower | CaseFirstFalse ->
-        simple_compare(
-          swap_case(fold_combining(a)),
-          swap_case(fold_combining(b)),
-        )
-    }
-  }
-  case sensitivity {
-    SensBase -> 0
-    SensAccent -> secondary()
-    SensCase ->
-      case tertiary() {
-        0 -> 0
-        n -> n
-      }
-    SensVariant ->
-      case secondary() {
-        0 -> tertiary()
-        n -> n
-      }
-  }
-}
-
-fn strip_punctuation(s: String) -> String {
-  string.to_utf_codepoints(s)
-  |> list.filter(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
-    !{
-      c == 0x20
-      || { c >= 0x21 && c <= 0x2f }
-      || { c >= 0x3a && c <= 0x40 }
-      || { c >= 0x5b && c <= 0x60 }
-      || { c >= 0x7b && c <= 0x7e }
-    }
-  })
-  |> string.from_utf_codepoints
-}
-
-/// Case-fold + strip accents to the primary collation key.
-fn collation_primary(s: String) -> String {
-  string.lowercase(s)
-  |> string.to_graphemes
-  |> list.map(deaccent)
-  |> string.join("")
-}
-
-/// Normalize combining sequences to precomposed forms (rough NFC for the
-/// Latin-1 accents the tests exercise), keeping accents.
-fn fold_combining(s: String) -> String {
-  string.to_graphemes(s)
-  |> list.map(compose_grapheme)
-  |> string.join("")
-}
-
-fn compose_grapheme(g: String) -> String {
-  case string.to_utf_codepoints(g) {
-    [base, mark] -> {
-      let b = string.utf_codepoint_to_int(base)
-      let m = string.utf_codepoint_to_int(mark)
-      case precomposed(b, m) {
-        Some(ch) -> ch
-        None -> g
-      }
-    }
-    _ -> g
-  }
-}
-
-/// base codepoint + combining mark → precomposed character (Latin-1 subset).
-fn precomposed(base: Int, mark: Int) -> Option(String) {
-  let b = case string.utf_codepoint(base) {
-    Ok(cp) -> string.from_utf_codepoints([cp])
-    Error(Nil) -> ""
-  }
-  case b, mark {
-    "a", 0x300 -> Some("à")
-    "a", 0x301 -> Some("á")
-    "a", 0x302 -> Some("â")
-    "a", 0x303 -> Some("ã")
-    "a", 0x308 -> Some("ä")
-    "a", 0x30a -> Some("å")
-    "e", 0x300 -> Some("è")
-    "e", 0x301 -> Some("é")
-    "e", 0x302 -> Some("ê")
-    "e", 0x308 -> Some("ë")
-    "i", 0x300 -> Some("ì")
-    "i", 0x301 -> Some("í")
-    "i", 0x302 -> Some("î")
-    "i", 0x308 -> Some("ï")
-    "o", 0x300 -> Some("ò")
-    "o", 0x301 -> Some("ó")
-    "o", 0x302 -> Some("ô")
-    "o", 0x303 -> Some("õ")
-    "o", 0x308 -> Some("ö")
-    "u", 0x300 -> Some("ù")
-    "u", 0x301 -> Some("ú")
-    "u", 0x302 -> Some("û")
-    "u", 0x308 -> Some("ü")
-    "n", 0x303 -> Some("ñ")
-    "c", 0x327 -> Some("ç")
-    "y", 0x301 -> Some("ý")
-    "y", 0x308 -> Some("ÿ")
-    "A", 0x300 -> Some("À")
-    "A", 0x301 -> Some("Á")
-    "A", 0x302 -> Some("Â")
-    "A", 0x303 -> Some("Ã")
-    "A", 0x308 -> Some("Ä")
-    "A", 0x30a -> Some("Å")
-    "E", 0x301 -> Some("É")
-    "I", 0x301 -> Some("Í")
-    "O", 0x301 -> Some("Ó")
-    "O", 0x303 -> Some("Õ")
-    "O", 0x308 -> Some("Ö")
-    "U", 0x301 -> Some("Ú")
-    "U", 0x308 -> Some("Ü")
-    "N", 0x303 -> Some("Ñ")
-    "C", 0x327 -> Some("Ç")
-    _, _ -> None
-  }
-}
-
-fn deaccent(g: String) -> String {
-  // Graphemes may be base+combining; drop combining marks (U+0300-036F).
-  let cps =
-    string.to_utf_codepoints(g)
-    |> list.filter(fn(cp) {
-      let c = string.utf_codepoint_to_int(cp)
-      !{ c >= 0x300 && c <= 0x36f }
-    })
-  let base = string.from_utf_codepoints(cps)
-  case base {
-    "à" | "á" | "â" | "ã" | "ä" | "å" | "ā" -> "a"
-    "è" | "é" | "ê" | "ë" | "ē" -> "e"
-    "ì" | "í" | "î" | "ï" -> "i"
-    "ò" | "ó" | "ô" | "õ" | "ö" | "ø" -> "o"
-    "ù" | "ú" | "û" | "ü" -> "u"
-    "ý" | "ÿ" -> "y"
-    "ñ" -> "n"
-    "ç" -> "c"
-    "ß" -> "ss"
-    "æ" -> "ae"
-    "œ" -> "oe"
-    _ -> base
-  }
-}
-
-/// Swap case so that lowercase sorts before uppercase under byte compare.
-fn swap_case(s: String) -> String {
-  string.to_utf_codepoints(s)
-  |> list.map(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
-    let swapped = case c {
-      _ if c >= 0x41 && c <= 0x5a -> c + 32
-      _ if c >= 0x61 && c <= 0x7a -> c - 32
-      _ -> c
-    }
-    case string.utf_codepoint(swapped) {
-      Ok(v) -> v
-      Error(Nil) -> cp
-    }
-  })
-  |> string.from_utf_codepoints
-}
-
-fn simple_compare(a: String, b: String) -> Int {
-  case string.compare(a, b) {
-    order.Lt -> -1
-    order.Eq -> 0
-    order.Gt -> 1
-  }
-}
-
-fn numeric_compare(a: List(String), b: List(String)) -> Int {
-  case a, b {
-    [], [] -> 0
-    [], _ -> -1
-    _, [] -> 1
-    [ca, ..], [cb, ..] -> {
-      let da = is_digit_str(ca)
-      let db = is_digit_str(cb)
-      case da, db {
-        True, True -> {
-          let #(na, rest_a) = take_digits(a, "")
-          let #(nb, rest_b) = take_digits(b, "")
-          let ia = int.parse(na) |> result.unwrap(0)
-          let ib = int.parse(nb) |> result.unwrap(0)
-          case int.compare(ia, ib) {
-            order.Eq -> numeric_compare(rest_a, rest_b)
-            order.Lt -> -1
-            order.Gt -> 1
-          }
-        }
-        _, _ ->
-          case
-            string.compare(
-              option.unwrap(list.first(a) |> option.from_result, ""),
-              option.unwrap(list.first(b) |> option.from_result, ""),
-            )
-          {
-            order.Eq -> numeric_compare(list.drop(a, 1), list.drop(b, 1))
-            order.Lt -> -1
-            order.Gt -> 1
-          }
-      }
-    }
-  }
-}
-
-fn take_digits(gs: List(String), acc: String) -> #(String, List(String)) {
-  case gs {
-    [g, ..rest] ->
-      case is_digit_str(g) {
-        True -> take_digits(rest, acc <> g)
-        False -> #(acc, gs)
-      }
-    [] -> #(acc, [])
-  }
 }
 
 // ============================================================================
@@ -6198,7 +5871,11 @@ fn rtf_method_parts(
   let abs_opts = fmt.NumOpts(..fmt.default_num_opts(), sign_display: SignNever)
   let value_parts = fmt.format_number_parts(abs_opts, float.absolute_value(f))
   let value_parts =
-    apply_numbering_system(value_parts, r.numbering_system, fmt.is_number_digit)
+    fmt.apply_numbering_system(
+      value_parts,
+      r.numbering_system,
+      fmt.is_number_digit,
+    )
   Ok(#(fmt.rtf_parts_en(r.style, r.numeric, f, unit, value_parts), state))
 }
 
@@ -6799,7 +6476,7 @@ fn build_duration_parts(
               }
               let unit_tag = duration_unit_singular(unit)
               let parts =
-                apply_numbering_system(parts, nu, fmt.is_number_digit)
+                fmt.apply_numbering_system(parts, nu, fmt.is_number_digit)
                 |> list.map(fn(part: fmt.Part) {
                   case part.0 {
                     PLiteral -> fmt.UnitPart(part.0, part.1, None)
