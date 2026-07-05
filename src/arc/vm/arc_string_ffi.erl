@@ -104,27 +104,56 @@ cp_length(<<W:56, Rest/binary>>, N)
 cp_length(<<>>, N) -> N;
 cp_length(<<_/utf8, Rest/binary>>, N) -> cp_length(Rest, N + 1).
 
-%% O(n) StringIndexOf: skip From codepoints to a byte offset, run
-%% binary:match (Boyer-Moore BIF) over the remaining scope, convert the
-%% match's byte position back to a codepoint index. Caller handles the
-%% empty-needle case (binary:match badargs on <<>>).
+%% StringIndexOf (§7.1.18) and its reverse. Both return `none | {some, Idx}`
+%% (an Option(Int) on the Gleam side) — no -1 sentinel to forget to test.
+%%
+%% Both search at the BYTE level with binary:match, so forward and reverse
+%% agree by construction: they see the same occurrences of the same needle.
+%% (`string:find/3` would not — it is grapheme-cluster aware, so it misses a
+%% needle that ends inside a cluster, e.g. "e" in "e\x{301}", which the
+%% forward byte search finds.)
+%%
+%% The empty needle is the spec's step-2 special case (`return fromIndex` when
+%% fromIndex =< len) and lives here rather than in a caller: binary:match
+%% badargs on <<>>, and an uncatchable BEAM crash is not something a total
+%% Gleam signature may hide behind a hand-written wrapper.
+
+%% Skip From codepoints to a byte offset, run binary:match (Boyer-Moore BIF)
+%% over the remaining scope, convert the match's byte position back to a
+%% codepoint index.
+string_index_of(Hay, <<>>, From) ->
+    {some, clamp_cp(Hay, From)};
 string_index_of(Hay, Needle, From) ->
     Start = cp_byte_offset(Hay, max(From, 0)),
     case binary:match(Hay, Needle, [{scope, {Start, byte_size(Hay) - Start}}]) of
-        nomatch -> -1;
-        {BytePos, _} -> cp_length(binary:part(Hay, 0, BytePos), 0)
+        nomatch -> none;
+        {BytePos, _} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
     end.
 
-%% O(n) reverse StringIndexOf: restrict to the first (From + |Needle|_cp)
-%% codepoints, ask string:find/3 for the trailing (last) occurrence —
-%% handles overlapping needles — then count codepoints before the match.
+%% Reverse StringIndexOf: the last occurrence starting at or before codepoint
+%% index From. Walks matches forward (advancing one byte past each match start,
+%% so overlapping needles are all seen) and keeps the last one whose byte
+%% offset is =< the byte offset of codepoint index From.
+string_last_index_of(Hay, <<>>, From) ->
+    {some, clamp_cp(Hay, From)};
 string_last_index_of(Hay, Needle, From) ->
-    Limit = cp_byte_offset(Hay, max(From, 0) + cp_length(Needle, 0)),
-    Prefix = binary:part(Hay, 0, Limit),
-    case string:find(Prefix, Needle, trailing) of
-        nomatch -> -1;
-        Suffix -> cp_length(binary:part(Hay, 0, byte_size(Prefix) - byte_size(Suffix)), 0)
+    Limit = cp_byte_offset(Hay, max(From, 0)),
+    case last_match(Hay, Needle, 0, Limit, none) of
+        none -> none;
+        {some, BytePos} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
     end.
+
+last_match(Hay, Needle, Pos, Limit, Best) when Pos =< byte_size(Hay) ->
+    case binary:match(Hay, Needle, [{scope, {Pos, byte_size(Hay) - Pos}}]) of
+        nomatch -> Best;
+        {BytePos, _} when BytePos > Limit -> Best;
+        {BytePos, _} -> last_match(Hay, Needle, BytePos + 1, Limit, {some, BytePos})
+    end;
+last_match(_Hay, _Needle, _Pos, _Limit, Best) -> Best.
+
+%% The empty needle matches at From, clamped into [0, len] (spec step 2 read
+%% together with the callers' step-7/step-8 clamp).
+clamp_cp(Hay, From) -> min(max(From, 0), string_codepoint_length(Hay)).
 
 %% Codepoint-based substring: Len codepoints starting at codepoint Start.
 %% Plain UTF-8 byte walk + binary:part — returns a sub-binary referencing

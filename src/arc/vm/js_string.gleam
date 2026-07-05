@@ -53,15 +53,21 @@ pub fn explode(s: String) -> List(String)
 @external(erlang, "arc_string_ffi", "string_codepoint_at")
 pub fn codepoint_at(s: String, pos: Int) -> Option(Int)
 
-/// StringIndexOf (§6.1.4.1) below the empty-needle special case: the codepoint
-/// index of the first occurrence of `needle` at or after `from`, else -1.
+/// StringIndexOf (§7.1.18): the codepoint index of the first occurrence of
+/// `needle` at or after `from`, or None when there is none. Total — an empty
+/// `needle` matches at `from` (clamped into `[0, length(haystack)]`), per the
+/// operation's step 2.
+///
+/// The JS boundary (`String.prototype.indexOf` and friends) is where None
+/// becomes -1; nothing else may treat -1 as an index.
 @external(erlang, "arc_string_ffi", "string_index_of")
-pub fn index_of(haystack: String, needle: String, from: Int) -> Int
+pub fn index_of(haystack: String, needle: String, from: Int) -> Option(Int)
 
 /// The reverse of `index_of`: the codepoint index of the last occurrence of
-/// `needle` at or before `from`, else -1.
+/// `needle` starting at or before `from`, or None. Same byte-level search as
+/// `index_of`, so the two always agree on which occurrences exist.
 @external(erlang, "arc_string_ffi", "string_last_index_of")
-pub fn last_index_of(haystack: String, needle: String, from: Int) -> Int
+pub fn last_index_of(haystack: String, needle: String, from: Int) -> Option(Int)
 
 /// U+FFFD REPLACEMENT CHARACTER. FFI because UtfCodepoint has no public
 /// constructor — on Erlang it's just an Int, so this is a constant-pool load

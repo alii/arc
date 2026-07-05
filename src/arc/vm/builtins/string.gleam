@@ -339,8 +339,9 @@ fn string_index_of(
   }
   use pos, state <- coerce.try_to_integer_or_infinity(state, pos_val)
   let from = int.clamp(pos, 0, js_string.length(s))
-  // Step 8: StringIndexOf(S, searchStr, start)
-  let result = index_of_from(s, search, from)
+  // Step 8: StringIndexOf(S, searchStr, start). None (not found) is where the
+  // JS -1 sentinel is minted — see js_string.index_of.
+  let result = js_string.index_of(s, search, from) |> option.unwrap(-1)
   #(state, Ok(value.from_int(result)))
 }
 
@@ -384,8 +385,8 @@ fn string_last_index_of(
     NaN -> len
     _ -> int.clamp(coerce.jsnum_to_integer_or_infinity(num), 0, len)
   }
-  // Steps 10-11: search backwards from start
-  let result = last_index_of_from(s, search, from)
+  // Steps 10-11: search backwards from start; None => -1 (step 11).
+  let result = js_string.last_index_of(s, search, from) |> option.unwrap(-1)
   #(state, Ok(value.from_int(result)))
 }
 
@@ -979,7 +980,7 @@ fn replace_string_search(
         search_str,
         search_len,
         0,
-        "",
+        [],
         replace_val,
         all,
       )
@@ -987,25 +988,40 @@ fn replace_string_search(
       // Step 6: replaceValue = ToString(replaceValue) — runs even when
       // there is no match.
       use template, state <- coerce.try_to_string(state, replace_val)
-      // Tokenize once, not once per match. `named_mode: False`: a string
-      // search has no capture groups, so "$<" is always the literal "$<".
-      let segments = substitution.tokenize_template(template, False)
-      // GetSubstitution only inspects `before`/`after` when the template
-      // contains '$' — skip building them otherwise.
-      let has_dollar = string.contains(template, "$")
-      let result =
+      // Tokenize once, not once per match. A string search has no capture
+      // groups, so "$<" is always the literal "$<": plain mode.
+      let segments = substitution.tokenize_plain(template)
+      // `before` is a slice of the consumed prefix rebuilt at every match —
+      // only accumulate it when a segment actually asks for it.
+      let needs_before = list.contains(segments, substitution.BeforeSeg)
+      let parts =
         replace_loop_template(
           s,
           search_str,
           search_len,
           segments,
-          has_dollar,
+          needs_before,
           "",
-          "",
+          [],
           all,
         )
-      #(state, Ok(JsString(result)))
+      concat_within_limit(state, parts)
     }
+  }
+}
+
+/// Concatenate a replace loop's reversed accumulator, honouring the
+/// engine-wide invariant (see `arc/vm/limits`) that no builtin materialises a
+/// string longer than `limits.max_string_bytes`.
+fn concat_within_limit(
+  state: State(host),
+  parts_rev: List(String),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let parts = list.reverse(parts_rev)
+  let total = list.fold(parts, 0, fn(sum, part) { sum + string.byte_size(part) })
+  case total > limits.max_string_bytes {
+    True -> state.range_error(state, "Invalid string length")
+    False -> #(state, Ok(JsString(string.concat(parts))))
   }
 }
 
@@ -1013,7 +1029,8 @@ fn replace_string_search(
 /// ToString(? Call(replaceValue, undefined, « searched, position, string »)).
 /// Searches within the remaining `tail` of the subject (tracking the
 /// absolute codepoint offset in `abs_pos`) so each segment is walked once —
-/// O(n) total instead of O(n^2) with absolute indices into `s`.
+/// O(n) total instead of O(n^2) with absolute indices into `s`. `acc` holds
+/// the output pieces in reverse; `concat_within_limit` joins them.
 fn replace_loop_functional(
   state: State(host),
   tail: String,
@@ -1021,13 +1038,13 @@ fn replace_loop_functional(
   search_str: String,
   search_len: Int,
   abs_pos: Int,
-  acc: String,
+  acc: List(String),
   replace_fn: JsValue,
   all: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case index_of_from(tail, search_str, 0) {
-    -1 -> #(state, Ok(JsString(acc <> tail)))
-    rel -> {
+  case js_string.index_of(tail, search_str, 0) {
+    None -> concat_within_limit(state, [tail, ..acc])
+    Some(rel) -> {
       let preserved = js_string.slice(tail, 0, rel)
       let after = js_string.drop_start(tail, rel + search_len)
       let p = abs_pos + rel
@@ -1037,14 +1054,14 @@ fn replace_loop_functional(
         JsString(s),
       ])
       use replacement, state <- coerce.try_to_string(state, result)
-      let acc = acc <> preserved <> replacement
+      let acc = [replacement, preserved, ..acc]
       case all, search_len {
-        False, _ -> #(state, Ok(JsString(acc <> after)))
+        False, _ -> concat_within_limit(state, [after, ..acc])
         // Empty search matches at every index including the end: emit one
         // codepoint and continue, or stop once the end-of-string match ran.
         True, 0 ->
           case after {
-            "" -> #(state, Ok(JsString(acc)))
+            "" -> concat_within_limit(state, acc)
             _ ->
               replace_loop_functional(
                 state,
@@ -1053,7 +1070,7 @@ fn replace_loop_functional(
                 search_str,
                 search_len,
                 p + 1,
-                acc <> js_string.slice(after, 0, 1),
+                [js_string.slice(after, 0, 1), ..acc],
                 replace_fn,
                 all,
               )
@@ -1077,28 +1094,29 @@ fn replace_loop_functional(
 
 /// String replaceValue: replacement = GetSubstitution per match.
 /// Same suffix-walking scheme as replace_loop_functional; `before` is the
-/// already-consumed prefix of the subject, accumulated incrementally (and
-/// only when the template actually contains '$').
+/// already-consumed prefix of the subject, accumulated incrementally and only
+/// when `needs_before` (i.e. some segment is a `BeforeSeg`). Returns the
+/// output pieces in reverse for `concat_within_limit`.
 fn replace_loop_template(
   tail: String,
   search_str: String,
   search_len: Int,
-  segments: List(substitution.ReplaceSegment),
-  has_dollar: Bool,
+  segments: List(substitution.PlainSegment),
+  needs_before: Bool,
   before: String,
-  acc: String,
+  acc: List(String),
   all: Bool,
-) -> String {
-  case index_of_from(tail, search_str, 0) {
-    -1 -> acc <> tail
-    rel -> {
+) -> List(String) {
+  case js_string.index_of(tail, search_str, 0) {
+    None -> [tail, ..acc]
+    Some(rel) -> {
       let preserved = js_string.slice(tail, 0, rel)
       let after = js_string.drop_start(tail, rel + search_len)
-      // No '$' in the template means every segment is the one LiteralSeg —
-      // skip building the Ctx (and its `before` slice) entirely.
-      let replacement = case has_dollar, segments {
-        False, [substitution.LiteralSeg(text)] -> text
-        _, _ ->
+      // A template that is one literal (the '$'-free case, and "$$"-only)
+      // needs no Ctx — skip building it, and its `before`/`after` slices.
+      let replacement = case segments {
+        [substitution.LiteralSeg(text)] -> text
+        _ ->
           substitution.resolve_without_named(
             segments,
             substitution.Ctx(
@@ -1112,9 +1130,9 @@ fn replace_loop_template(
             ),
           )
       }
-      let acc = acc <> preserved <> replacement
+      let acc = [replacement, preserved, ..acc]
       case all, search_len {
-        False, _ -> acc <> after
+        False, _ -> [after, ..acc]
         // Empty search matches at every index including the end: emit one
         // codepoint and continue, or stop once the end-of-string match ran.
         True, 0 ->
@@ -1122,7 +1140,7 @@ fn replace_loop_template(
             "" -> acc
             _ -> {
               let cp = js_string.slice(after, 0, 1)
-              let before = case has_dollar {
+              let before = case needs_before {
                 True -> before <> cp
                 False -> ""
               }
@@ -1131,15 +1149,15 @@ fn replace_loop_template(
                 search_str,
                 search_len,
                 segments,
-                has_dollar,
+                needs_before,
                 before,
-                acc <> cp,
+                [cp, ..acc],
                 all,
               )
             }
           }
         True, _ -> {
-          let before = case has_dollar {
+          let before = case needs_before {
             True -> before <> preserved <> search_str
             False -> ""
           }
@@ -1148,7 +1166,7 @@ fn replace_loop_template(
             search_str,
             search_len,
             segments,
-            has_dollar,
+            needs_before,
             before,
             acc,
             all,
@@ -2139,34 +2157,11 @@ fn string_transform(
   #(state, Ok(JsString(transform(s))))
 }
 
-/// Implements the StringIndexOf abstract operation.
-/// ES2024 7.1.18 — StringIndexOf ( string, searchValue, fromIndex )
-///   1. Let len be the length of string.
-///   2. If searchValue is the empty String and fromIndex <= len, return
-///      fromIndex.
-///   3. Let searchLen be the length of searchValue.
-///   4. For each integer i such that fromIndex <= i <= len - searchLen, in
-///      ascending order, do
-///     a. Let candidate be the substring of string from i to i + searchLen.
-///     b. If candidate is searchValue, return i.
-///   5. Return -1 (not found).
-fn index_of_from(s: String, search: String, from: Int) -> Int {
-  case search {
-    "" -> int.clamp(from, 0, js_string.length(s))
-    _ -> js_string.index_of(s, search, from)
-  }
-}
-
-/// Reverse StringIndexOf: find last occurrence of `search` in `s`
-/// searching backwards from index `from`.
-/// Used by String.prototype.lastIndexOf (ES2024 22.1.3.11, steps 10-11).
-fn last_index_of_from(s: String, search: String, from: Int) -> Int {
-  case search {
-    "" -> int.clamp(from, 0, js_string.length(s))
-    _ -> js_string.last_index_of(s, search, from)
-  }
-}
-
+// StringIndexOf (ES2024 7.1.18) and its reverse (22.1.3.11 steps 10-11) are
+// `js_string.index_of` / `js_string.last_index_of` — total, Option-returning,
+// empty needle and all. Only the two spec-facing builtins above turn a None
+// into the JS -1.
+//
 // The codepoint string primitives (`js_string.slice`,
 // `js_string.drop_start`, `js_string.explode`, `js_string.length`,
 // `js_string.char_at`) all live in `arc/vm/js_string` — one place that
