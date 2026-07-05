@@ -1,6 +1,7 @@
-//// Frame-setup helpers shared by `call.gleam` and `event_loop.gleam`.
-//// Lives in its own leaf module so both can import it without creating an
-//// import cycle (call → realm → event_loop).
+//// Frame-setup helpers: building the locals tuple for a template about to
+//// run. Leaf module — sits below `interpreter`, `realm`, `call`, and
+//// `event_loop` so any of them can seed a frame without pulling in the
+//// interpreter (and the import cycle that would cause).
 
 import arc/vm/builtins/common
 import arc/vm/heap
@@ -11,7 +12,39 @@ import arc/vm/value.{
   type FuncTemplate, type JsValue, JsNull, JsObject, JsUndefined,
   JsUninitialized,
 }
+import gleam/list
 import gleam/option.{type Option, None, Some}
+
+/// Build the locals array for a top-level (script/module/eval/REPL) template:
+/// JsUndefined everywhere, then seed the lexical-`this` slot if present.
+/// Function bodies use `setup_frame` instead — this is only for entries
+/// that don't go through the call protocol.
+pub fn init_top_level_locals(
+  func: FuncTemplate,
+  this_val: JsValue,
+) -> tuple_array.TupleArray(JsValue) {
+  let locals = tuple_array.repeat(JsUndefined, func.local_count)
+  case opcode.lexical_slot(func.lexical, opcode.RefThis) {
+    Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
+    None -> locals
+  }
+}
+
+/// Build the locals array for a module body. Module `this` is undefined
+/// (§16.2.1.5.2). `seeds` places pre-allocated BoxSlot refs into specific local
+/// slots: import bindings into capture slots 0..N-1 (each the exporting
+/// module's live cell), plus this module's own export cells into their declared
+/// slots. The body reads/writes both through GetBoxed/PutBoxed.
+pub fn init_module_locals(
+  func: FuncTemplate,
+  seeds: List(#(Int, JsValue)),
+) -> tuple_array.TupleArray(JsValue) {
+  let locals = tuple_array.repeat(JsUndefined, func.local_count)
+  list.fold(seeds, locals, fn(acc, seed) {
+    let #(index, box) = seed
+    tuple_array.set_unchecked(index, box, acc)
+  })
+}
 
 /// Build the callee's frame: bind `this` per ES2024 §10.2.1.2
 /// OrdinaryCallBindThis, then lay out its locals tuple

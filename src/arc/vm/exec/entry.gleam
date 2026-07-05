@@ -8,6 +8,7 @@ import arc/vm/completion.{
   type Completion, Completed, NormalCompletion, Suspended, ThrowCompletion,
 }
 import arc/vm/exec/event_loop
+import arc/vm/exec/frame
 import arc/vm/exec/generators
 import arc/vm/exec/interpreter
 import arc/vm/exec/promises
@@ -172,7 +173,7 @@ pub fn run_module(
   extend_262: Option(state.Extend262(host)),
   finish: fn(State(host)) -> State(host),
 ) -> ModuleResult(host) {
-  let locals = interpreter.init_module_locals(func, seeds)
+  let locals = frame.init_module_locals(func, seeds)
   let base =
     interpreter.new_state(
       func,
@@ -366,7 +367,7 @@ pub fn run_and_drain_repl_with(
 ) -> Result(#(Result(JsValue, JsValue), Heap(host), ReplEnv), VmError) {
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
   let this_val = JsObject(env.global_object)
-  let locals = interpreter.init_top_level_locals(func, this_val)
+  let locals = frame.init_top_level_locals(func, this_val)
   let base =
     interpreter.new_state(
       func,

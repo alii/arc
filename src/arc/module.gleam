@@ -17,6 +17,7 @@ import arc/parser
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/reflect
 import arc/vm/exec/entry
+import arc/vm/exec/frame
 import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/host_hooks
@@ -1540,7 +1541,7 @@ fn instantiate_hoisted_functions(
       import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
       |> assert_link_invariant
       |> list.append(own_export_seeds(linked, compiled))
-    let frame = interpreter.init_module_locals(compiled.template, seeds)
+    let locals = frame.init_module_locals(compiled.template, seeds)
     list.fold(compiled.hoisted_funcs, heap, fn(heap, hf) {
       let #(name, func_idx) = hf
       // Only exported functions have a shared cell; the rest are body-local.
@@ -1551,7 +1552,7 @@ fn instantiate_hoisted_functions(
             tuple_array.unsafe_get(func_idx, compiled.template.functions)
           let captures =
             list.map(child.env_descriptors, fn(desc) {
-              tuple_array.unsafe_get(desc.parent_index, frame)
+              tuple_array.unsafe_get(desc.parent_index, locals)
             })
           let #(heap, closure) =
             interpreter.make_closure(heap, builtins, child, captures)

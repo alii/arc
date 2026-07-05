@@ -10,6 +10,7 @@ import arc/vm/builtins/promise as builtins_promise
 import arc/vm/compile_task
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/event_loop
+import arc/vm/exec/frame
 import arc/vm/heap
 import arc/vm/host_hooks
 import arc/vm/internal/elements
@@ -39,19 +40,6 @@ import gleam/string
 /// terminal `Completion` (a leaked yield/await surfaces as a `VmError`).
 pub type RunToCompletionFn(host) =
   fn(State(host)) -> Result(#(completion.Completion, State(host)), VmError)
-
-/// Inline of interpreter.init_top_level_locals (realm.gleam can't import
-/// interpreter — cycle). JsUndefined everywhere, then seed the `this` slot.
-fn seed_top_level_locals(
-  template: FuncTemplate,
-  this_val: JsValue,
-) -> tuple_array.TupleArray(JsValue) {
-  let locals = tuple_array.repeat(JsUndefined, template.local_count)
-  case opcode.lexical_slot(template.lexical, opcode.RefThis) {
-    Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
-    None -> locals
-  }
-}
 
 pub type NewStateFn(host) =
   fn(
@@ -126,7 +114,7 @@ pub fn eval_script_native(
         compiler.compile,
       )
       // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
-      let locals = seed_top_level_locals(template, JsObject(realm_global))
+      let locals = frame.init_top_level_locals(template, JsObject(realm_global))
       // Seed the agent-wide state (job queue, outstanding host-promise count,
       // realm registry, tagged-template cache) from the caller. NOT
       // `seed_child`: this child ends in a nested, non-yielding `drain_jobs`,
@@ -461,7 +449,7 @@ fn run_source_in_current_realm(
   // §19.2.1.1 PerformEval: indirect eval runs in global scope,
   // so its `this` is the global object.
   let locals =
-    seed_top_level_locals(template, JsObject(state.ctx.global_object))
+    frame.init_top_level_locals(template, JsObject(state.ctx.global_object))
   run_eval(
     template,
     locals,
@@ -1300,7 +1288,7 @@ fn do_shadow_realm_evaluate(
       // realm see fresh lexical globals.
       let #(state, _running_realm_ref) = ensure_current_realm(state)
       // Script `this` is the shadow realm's global object (§16.1.6).
-      let locals = seed_top_level_locals(template, JsObject(realm.global))
+      let locals = frame.init_top_level_locals(template, JsObject(realm.global))
       // The Symbol registry (§20.4.2.2 Symbol.for) is agent-wide, not
       // per-realm — seed the shadow realm with the union so registered
       // symbols round-trip across the boundary with identity.

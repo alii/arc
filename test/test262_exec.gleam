@@ -29,6 +29,7 @@ import arc/vm/builtins/common
 import arc/vm/completion.{ThrowCompletion}
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
+import arc/vm/exec/frame
 import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/host_hooks
@@ -1290,7 +1291,7 @@ fn run_agent_child(source: String) -> Nil {
       )
     Ok(template) -> {
       let locals =
-        interpreter.init_top_level_locals(template, value.JsObject(global_ref))
+        frame.init_top_level_locals(template, value.JsObject(global_ref))
       // The agent child is an embedder-driven State of its own: it blocks
       // in sync Atomics.wait and delivers notify wakes from THIS process,
       // so its realm is constructed with the harness host capabilities.
