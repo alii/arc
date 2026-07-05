@@ -4,6 +4,11 @@
 -export([string_index_of/3, string_last_index_of/3]).
 -export([string_cp_slice/3, string_cp_drop/2, string_cp_explode/1]).
 
+%% Bytes of match-start window string_last_index_of scans per backward step.
+%% Big enough that a whole small string is one window; small enough that a
+%% dense haystack never builds a huge match list.
+-define(LAST_INDEX_CHUNK, 65536).
+
 %% Fast string indexing by codepoint (not grapheme cluster). Gleam's
 %% string.slice/string.length do grapheme segmentation via unicode_util:gc
 %% which is ~20x slower and spec-incorrect for JS (which uses UTF-16 code
@@ -131,25 +136,60 @@ string_index_of(Hay, Needle, From) ->
     end.
 
 %% Reverse StringIndexOf: the last occurrence starting at or before codepoint
-%% index From. Walks matches forward (advancing one byte past each match start,
-%% so overlapping needles are all seen) and keeps the last one whose byte
-%% offset is =< the byte offset of codepoint index From.
+%% index From.
+%%
+%% A winning match starts at =< Limit, so it lies wholly inside the first
+%% `Limit + byte_size(Needle)` bytes: search only that prefix. That bound is
+%% both the spec's fromIndex filter (no separate `BytePos > Limit` guard is
+%% needed) and an early exit — `hugeString.lastIndexOf(x, 0)` must not scan
+%% the whole haystack.
 string_last_index_of(Hay, <<>>, From) ->
     {some, clamp_cp(Hay, From)};
 string_last_index_of(Hay, Needle, From) ->
     Limit = cp_byte_offset(Hay, max(From, 0)),
-    case last_match(Hay, Needle, 0, Limit, none) of
+    last_index_of(Hay, Needle, min(Limit + byte_size(Needle), byte_size(Hay))).
+
+%% End is the exclusive byte bound of the searchable prefix; below one needle
+%% length there is no room for a match starting at or before Limit.
+last_index_of(_Hay, Needle, End) when End < byte_size(Needle) -> none;
+last_index_of(Hay, Needle, End) ->
+    HighestStart = End - byte_size(Needle),
+    Chunk = max(?LAST_INDEX_CHUNK, 2 * byte_size(Needle)),
+    case scan_back(Hay, Needle, max(0, HighestStart - Chunk + 1), HighestStart, Chunk) of
         none -> none;
         {some, BytePos} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
     end.
 
-last_match(Hay, Needle, Pos, Limit, Best) when Pos =< byte_size(Hay) ->
-    case binary:match(Hay, Needle, [{scope, {Pos, byte_size(Hay) - Pos}}]) of
-        nomatch -> Best;
-        {BytePos, _} when BytePos > Limit -> Best;
-        {BytePos, _} -> last_match(Hay, Needle, BytePos + 1, Limit, {some, BytePos})
-    end;
-last_match(_Hay, _Needle, _Pos, _Limit, Best) -> Best.
+%% Highest match start in the window of starts [Lo, Hi], else the next window
+%% down, else none.
+%%
+%% Chunking backwards keeps this O(1) windows for the common case where the
+%% last occurrence is near the end, and — unlike one binary:matches over the
+%% whole prefix — never materialises a match list proportional to the haystack
+%% ("x".repeat(5.0e6) has 2.5M matches of "xx"; that list is ~100 MB).
+scan_back(Hay, Needle, Lo, Hi, Chunk) ->
+    M = byte_size(Needle),
+    %% Scope spans the window's starts plus one needle, so a match starting at
+    %% Hi still fits inside it.
+    case binary:matches(Hay, Needle, [{scope, {Lo, Hi + M - Lo}}]) of
+        [] when Lo =:= 0 -> none;
+        [] -> scan_back(Hay, Needle, max(0, Lo - Chunk), Lo - 1, Chunk);
+        Matches ->
+            %% binary:matches yields the leftmost NON-overlapping matches, so
+            %% its last hit L can be beaten by an overlapping one ("xx" in
+            %% "xxxxxxx": matches stops at 4, the answer is 5). Nothing starts
+            %% at or after L + M (matches resumed there and found none), so the
+            %% true last start is in [L, L + M - 1] — at most M positions.
+            {L, _} = lists:last(Matches),
+            {some, latest_overlap(Hay, Needle, L, min(L + M - 1, Hi))}
+    end.
+
+latest_overlap(_Hay, _Needle, L, Pos) when Pos =< L -> L;
+latest_overlap(Hay, Needle, L, Pos) ->
+    case binary:part(Hay, Pos, byte_size(Needle)) of
+        Needle -> Pos;
+        _Other -> latest_overlap(Hay, Needle, L, Pos - 1)
+    end.
 
 %% The empty needle matches at From, clamped into [0, len] (spec step 2 read
 %% together with the callers' step-7/step-8 clamp).
