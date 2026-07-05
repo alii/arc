@@ -92,18 +92,10 @@ pub fn eval_script_native(
   case realm_result {
     Error(err) ->
       state.type_error(state, "evalScript: " <> realm_lookup_message(err))
-    Ok(#(
-      realm_ref,
-      RealmRecord(
-        builtins: realm_builtins,
-        global: realm_global,
-        lexical_globals:,
-        symbol_registry:,
-      ),
-    )) -> {
+    Ok(#(realm_ref, realm)) -> {
       use template <- compile_or_throw(
         state,
-        realm_builtins,
+        realm.builtins,
         source_str,
         parser.parse_script,
         // $262.evalScript runs the source "as if by ScriptEvaluation"
@@ -113,61 +105,53 @@ pub fn eval_script_native(
         // not `compiler.compile_eval`.
         compiler.compile,
       )
-      // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
-      let locals = frame.init_top_level_locals(template, JsObject(realm_global))
-      // Seed the agent-wide state (job queue, outstanding host-promise count,
-      // realm registry, tagged-template cache) from the caller. NOT
-      // `seed_child`: this child ends in a nested, non-yielding `drain_jobs`,
-      // so the caller's Atomics waiters and pending unhandled-rejection
-      // reports must stay behind (see `state.seed_draining_child`).
-      let eval_state =
-        state.seed_draining_child(
-          new_state_fn(
-            template,
-            locals,
-            state.heap,
-            realm_builtins,
-            realm_global,
-            lexical_globals,
-            symbol_registry,
-            // Child realm inherits the parent's embedder host capabilities.
-            state.ctx.host_hooks,
-            state.can_block,
-            state.ctx.extend_262,
-          ),
+      let #(state, result) =
+        run_script_in_realm(
           state,
+          realm_ref,
+          realm,
+          template,
+          run_to_completion,
+          new_state_fn,
         )
-      case run_to_completion(eval_state) {
+      case result {
         Error(vm_err) ->
           state.type_error(
             state,
             "evalScript: VM error: " <> state.vm_error_message(vm_err),
           )
-        Ok(#(completion, final_eval_state)) -> {
-          // Drain microtasks in the eval realm
-          let drained = event_loop.drain_jobs(final_eval_state)
-          // Update the realm slot with potentially modified lexical globals
-          let updated_realm =
-            value.RealmSlot(
-              global_object: realm_global,
-              lexical_globals: drained.ctx.lexical_globals,
-              symbol_registry: drained.ctx.symbol_registry,
-            )
-          let h = heap.write(drained.heap, realm_ref, updated_realm)
-          // Propagate the event-loop queues, agent-wide ctx tables and heap
-          // back to the caller. NOT merge_globals: the child realm's lexical
-          // globals belong in its RealmSlot (written above), not in the
-          // caller's ctx.
-          let state =
-            State(..state.merge_draining_child(state, drained), heap: h)
-          case completion {
-            NormalCompletion(val) -> #(state, Ok(val))
-            ThrowCompletion(thrown) -> #(state, Error(thrown))
-          }
-        }
+        Ok(#(NormalCompletion(val), _)) -> #(state, Ok(val))
+        Ok(#(ThrowCompletion(thrown), _)) -> #(state, Error(thrown))
       }
     }
   }
+}
+
+/// CreateRealm + SetRealmGlobalObject + SetDefaultGlobalBindings, then
+/// register the realm's Builtins in `ctx.realms`. Shared allocation
+/// sequence for $262.createRealm and `new ShadowRealm()`; callers apply
+/// their own tail ($262 wiring vs ShadowRealmObject wrapper). Returns
+/// `#(state, realm_ref, global_ref, builtins)`.
+fn alloc_fresh_realm(state: State(host)) -> #(State(host), Ref, Ref, Builtins) {
+  let #(h, new_builtins) = builtins.init(state.heap)
+  let #(h, global_ref) = builtins.globals(new_builtins, h)
+  let #(h, realm_ref) =
+    heap.alloc(
+      h,
+      value.RealmSlot(
+        global_object: global_ref,
+        lexical_globals: dict.new(),
+        symbol_registry: dict.new(),
+      ),
+    )
+  let h = heap.root(h, realm_ref)
+  let realms = dict.insert(state.ctx.realms, realm_ref, new_builtins)
+  #(
+    State(..state, heap: h, ctx: state.RealmCtx(..state.ctx, realms:)),
+    realm_ref,
+    global_ref,
+    new_builtins,
+  )
 }
 
 /// $262.createRealm() — create a fresh realm and return its $262 object.
@@ -175,42 +159,19 @@ pub fn create_realm_native(
   _this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Initialize fresh builtins and global object for the new realm
-  let #(h, new_builtins) = builtins.init(state.heap)
-  let #(h, new_global_ref) = builtins.globals(new_builtins, h)
-
-  // Allocate a RealmSlot for the new realm
-  let #(h, realm_ref) =
-    heap.alloc(
-      h,
-      value.RealmSlot(
-        global_object: new_global_ref,
-        lexical_globals: dict.new(),
-        symbol_registry: dict.new(),
-      ),
-    )
-  let h = heap.root(h, realm_ref)
-
-  // Build the $262 object for the new realm
+  let #(state, realm_ref, global_ref, new_builtins) = alloc_fresh_realm(state)
+  // Build the $262 object for the new realm and install it on its global.
   let #(h, dollar_262_ref) =
-    build_262(h, new_builtins, new_global_ref, realm_ref, state.ctx.extend_262)
-
-  // Install $262 on the new realm's global object
-  let #(h, _) =
-    object.set_property(
-      h,
-      new_global_ref,
-      Named("$262"),
-      JsObject(dollar_262_ref),
+    build_262(
+      state.heap,
+      new_builtins,
+      global_ref,
+      realm_ref,
+      state.ctx.extend_262,
     )
-
-  // Register the realm's builtins
-  let realms = dict.insert(state.ctx.realms, realm_ref, new_builtins)
-
-  #(
-    State(..state, heap: h, ctx: state.RealmCtx(..state.ctx, realms:)),
-    Ok(JsObject(dollar_262_ref)),
-  )
+  let #(h, _) =
+    object.set_property(h, global_ref, Named("$262"), JsObject(dollar_262_ref))
+  #(State(..state, heap: h), Ok(JsObject(dollar_262_ref)))
 }
 
 /// Build a $262 object with evalScript, createRealm, gc methods and a global
@@ -859,25 +820,14 @@ fn shadow_realm_constructor(
     proto,
   )
   // Steps 3-12: CreateRealm + SetRealmGlobalObject + SetDefaultGlobalBindings.
-  let #(h, new_builtins) = builtins.init(state.heap)
-  let #(h, new_global) = builtins.globals(new_builtins, h)
-  let #(h, realm_ref) =
-    heap.alloc(
-      h,
-      value.RealmSlot(
-        global_object: new_global,
-        lexical_globals: dict.new(),
-        symbol_registry: dict.new(),
-      ),
-    )
-  let h = heap.root(h, realm_ref)
+  let #(state, realm_ref, _global, _builtins) = alloc_fresh_realm(state)
   let #(h, instance_ref) =
-    common.alloc_wrapper(h, value.ShadowRealmObject(realm_ref:), proto_ref)
-  let realms = dict.insert(state.ctx.realms, realm_ref, new_builtins)
-  #(
-    State(..state, heap: h, ctx: state.RealmCtx(..state.ctx, realms:)),
-    Ok(JsObject(instance_ref)),
-  )
+    common.alloc_wrapper(
+      state.heap,
+      value.ShadowRealmObject(realm_ref:),
+      proto_ref,
+    )
+  #(State(..state, heap: h), Ok(JsObject(instance_ref)))
 }
 
 /// Brand check: read the [[ShadowRealm]] slot off `this`.
@@ -914,6 +864,75 @@ fn read_realm(
         Error(Nil) -> Error(BuiltinsUnregistered(realm_ref))
       }
     _ -> Error(NotARealmSlot(realm_ref))
+  }
+}
+
+/// Execute a compiled script `template` in `realm`, drain its microtasks,
+/// persist the drained lexical-globals + symbol-registry to `realm_ref`'s
+/// RealmSlot, and merge the agent-wide event-loop state back into the
+/// caller. Shared body of $262.evalScript and ShadowRealm.prototype.evaluate.
+///
+/// The child is seeded with `realm.symbol_registry` — pass a pre-merged
+/// record when the caller's registry must union in (ShadowRealm does; $262
+/// does not). Returns the drained registry so a caller that seeded with a
+/// union can adopt it back agent-wide.
+fn run_script_in_realm(
+  state: State(host),
+  realm_ref: Ref,
+  realm: RealmRecord,
+  template: FuncTemplate,
+  run_to_completion: RunToCompletionFn(host),
+  new_state_fn: NewStateFn(host),
+) -> #(
+  State(host),
+  Result(#(completion.Completion, dict.Dict(String, value.SymbolId)), VmError),
+) {
+  // §16.1.6 ScriptEvaluation: script `this` is the realm's global object.
+  let locals = frame.init_top_level_locals(template, JsObject(realm.global))
+  // Seed the agent-wide state (job queue, outstanding host-promise count,
+  // realm registry, tagged-template cache) from the caller. NOT
+  // `seed_child`: this child ends in a nested, non-yielding `drain_jobs`,
+  // so the caller's Atomics waiters and pending unhandled-rejection
+  // reports must stay behind (see `state.seed_draining_child`).
+  let eval_state =
+    state.seed_draining_child(
+      new_state_fn(
+        template,
+        locals,
+        state.heap,
+        realm.builtins,
+        realm.global,
+        realm.lexical_globals,
+        realm.symbol_registry,
+        // Child realm inherits the caller's embedder host capabilities.
+        state.ctx.host_hooks,
+        state.can_block,
+        state.ctx.extend_262,
+      ),
+      state,
+    )
+  case run_to_completion(eval_state) {
+    Error(vm_err) -> #(state, Error(vm_err))
+    Ok(#(completion, final_eval_state)) -> {
+      let drained = event_loop.drain_jobs(final_eval_state)
+      // Persist the realm's (possibly mutated) lexical globals + registry.
+      let h =
+        heap.write(
+          drained.heap,
+          realm_ref,
+          value.RealmSlot(
+            global_object: realm.global,
+            lexical_globals: drained.ctx.lexical_globals,
+            symbol_registry: drained.ctx.symbol_registry,
+          ),
+        )
+      // Propagate the event-loop queues, agent-wide ctx tables and heap
+      // back to the caller. NOT merge_globals: the child realm's lexical
+      // globals belong in its RealmSlot (written above), not in the
+      // caller's ctx.
+      let state = State(..state.merge_draining_child(state, drained), heap: h)
+      #(state, Ok(#(completion, drained.ctx.symbol_registry)))
+    }
   }
 }
 
@@ -1287,66 +1306,42 @@ fn do_shadow_realm_evaluate(
       // Sync the running realm's slot so re-entrant calls from the shadow
       // realm see fresh lexical globals.
       let #(state, _running_realm_ref) = ensure_current_realm(state)
-      // Script `this` is the shadow realm's global object (§16.1.6).
-      let locals = frame.init_top_level_locals(template, JsObject(realm.global))
       // The Symbol registry (§20.4.2.2 Symbol.for) is agent-wide, not
       // per-realm — seed the shadow realm with the union so registered
       // symbols round-trip across the boundary with identity.
-      let merged_registry =
-        dict.merge(state.ctx.symbol_registry, realm.symbol_registry)
-      // Seed the agent-wide state (job queue, outstanding host-promise count,
-      // realm registry, tagged-template cache) from the caller. NOT
-      // `seed_child`: this child ends in a nested, non-yielding `drain_jobs`,
-      // so the caller's Atomics waiters and pending unhandled-rejection
-      // reports must stay behind (see `state.seed_draining_child`).
-      let eval_state =
-        state.seed_draining_child(
-          new_state_fn(
-            template,
-            locals,
-            state.heap,
-            realm.builtins,
-            realm.global,
-            realm.lexical_globals,
-            merged_registry,
-            // The shadow realm inherits the caller's embedder host
-            // capabilities.
-            state.ctx.host_hooks,
-            state.can_block,
-            state.ctx.extend_262,
+      let seeded =
+        RealmRecord(
+          ..realm,
+          symbol_registry: dict.merge(
+            state.ctx.symbol_registry,
+            realm.symbol_registry,
           ),
-          state,
         )
-      case run_to_completion(eval_state) {
+      let #(state, result) =
+        run_script_in_realm(
+          state,
+          realm_ref,
+          seeded,
+          template,
+          run_to_completion,
+          new_state_fn,
+        )
+      case result {
         Error(vm_err) ->
           state.type_error(
             state,
             "ShadowRealm.prototype.evaluate: VM error: "
               <> state.vm_error_message(vm_err),
           )
-        Ok(#(completion, final_eval_state)) -> {
-          // Drain microtasks in the shadow realm.
-          let drained = event_loop.drain_jobs(final_eval_state)
-          let updated_realm =
-            value.RealmSlot(
-              global_object: realm.global,
-              lexical_globals: drained.ctx.lexical_globals,
-              symbol_registry: drained.ctx.symbol_registry,
-            )
-          let h = heap.write(drained.heap, realm_ref, updated_realm)
-          // Propagate the event-loop queues, agent-wide ctx tables and heap
-          // back to the caller. NOT merge_globals: the shadow realm's lexical
-          // globals belong in its RealmSlot (written above), not in the
-          // caller's ctx. The drained registry is a superset of the caller's
-          // (the eval was seeded with the union) — adopt it agent-wide.
-          let merged = state.merge_draining_child(state, drained)
+        Ok(#(completion, drained_registry)) -> {
+          // The drained registry is a superset of the caller's (the eval
+          // was seeded with the union) — adopt it agent-wide.
           let state =
             State(
-              ..merged,
-              heap: h,
+              ..state,
               ctx: state.RealmCtx(
-                ..merged.ctx,
-                symbol_registry: drained.ctx.symbol_registry,
+                ..state.ctx,
+                symbol_registry: drained_registry,
               ),
             )
           case completion {
