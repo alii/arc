@@ -558,15 +558,20 @@ load_zone(Id) ->
                         logger:warning(
                           "arc_tz_ffi: cannot parse TZif ~ts: ~p:~p~n~p",
                           [Path, Class, Reason, Stack]),
+                        %% Reason is often {badmatch, <<the whole file>>}: it
+                        %% ends up in a JS RangeError message, so bound it with
+                        %% ~P. The log above keeps the full term.
                         {error, {unparseable,
-                                 detail("~ts: ~p:~p", [Path, Class, Reason])}}
+                                 detail("~ts: ~p:~P",
+                                        [Path, Class, Reason, 8])}}
                     end;
                 {error, enoent} ->
                     {error, {unreadable, detail("~ts: enoent", [Path])}};
                 {error, Reason} ->
                     logger:warning("arc_tz_ffi: cannot read ~ts: ~p",
                                    [Path, Reason]),
-                    {error, {unreadable, detail("~ts: ~p", [Path, Reason])}}
+                    {error, {unreadable,
+                             detail("~ts: ~P", [Path, Reason, 8])}}
             end
     end.
 
