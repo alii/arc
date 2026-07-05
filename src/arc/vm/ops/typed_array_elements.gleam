@@ -155,11 +155,44 @@ pub fn resolve_view(
   length: Option(Int),
 ) -> ResolvedView {
   let elem_size = typed_array_ffi.elem_size(elem_kind)
-  let len = case length {
+  ResolvedView(
+    byte_size:,
+    elem_size:,
+    byte_offset:,
+    len: resolve_len(byte_size, elem_size, byte_offset, length),
+  )
+}
+
+/// `resolve_view` for a view whose [[ArrayLength]] is already a plain Int
+/// (never AUTO). Same record, but the caller does not have to wrap the length
+/// in a `Some` the resolver would immediately unwrap — the element read path
+/// runs once per element and must not allocate to ask a bounds question.
+pub fn fixed_view(
+  byte_size: Int,
+  elem_kind: value.TypedArrayKind,
+  byte_offset: Int,
+  len: Int,
+) -> ResolvedView {
+  ResolvedView(
+    byte_size:,
+    elem_size: typed_array_ffi.elem_size(elem_kind),
+    byte_offset:,
+    len:,
+  )
+}
+
+/// The TypedArrayLength arithmetic on its own, for the callers that only want
+/// the number and would throw a whole `ResolvedView` away.
+fn resolve_len(
+  byte_size: Int,
+  elem_size: Int,
+  byte_offset: Int,
+  length: Option(Int),
+) -> Int {
+  case length {
     Some(n) -> n
     None -> int.max(0, { byte_size - byte_offset } / elem_size)
   }
-  ResolvedView(byte_size:, elem_size:, byte_offset:, len:)
 }
 
 /// The resolved TypedArrayLength of the view.
@@ -181,7 +214,10 @@ pub fn view_in_bounds(view: ResolvedView) -> Bool {
   view.byte_offset + view.len * view.elem_size <= view.byte_size
 }
 
-/// §10.4.5.13 TypedArrayLength against the buffer currently in the heap.
+/// §10.4.5.13 TypedArrayLength against the buffer currently in the heap. A
+/// detached buffer reads as zero bytes, so a length-tracking view over one
+/// resolves to 0 (a fixed view keeps its declared [[ArrayLength]] — the
+/// bounds check, not the length, is what rejects its indices).
 pub fn view_length(
   h: Heap(host),
   buffer: Ref,
@@ -189,24 +225,40 @@ pub fn view_length(
   byte_offset: Int,
   length: Option(Int),
 ) -> Int {
-  live_view(h, buffer, elem_kind, byte_offset, length) |> view_len
+  resolve_len(
+    live_byte_size(h, buffer),
+    typed_array_ffi.elem_size(elem_kind),
+    byte_offset,
+    length,
+  )
 }
 
-/// `resolve_view` against the buffer currently in the heap. A detached buffer
-/// (or a ref that isn't a buffer at all) reads as zero bytes, so every view
-/// over it resolves out of bounds.
+/// `resolve_view` against the buffer currently in the heap. None when the
+/// buffer is DETACHED (or the ref isn't a buffer at all): per §10.4.5.14 a
+/// detached buffer has no valid indices at all, so there is no live view to
+/// resolve — and no `ResolvedView` a caller could mistake for an in-bounds
+/// one. Every `ResolvedView` therefore describes bytes that really exist.
 pub fn live_view(
   h: Heap(host),
   buffer: Ref,
   elem_kind: value.TypedArrayKind,
   byte_offset: Int,
   length: Option(Int),
-) -> ResolvedView {
-  let byte_size =
-    buffer_bytes(h, buffer)
-    |> option.map(bit_array.byte_size)
-    |> option.unwrap(0)
-  resolve_view(byte_size, elem_kind, byte_offset, length)
+) -> Option(ResolvedView) {
+  use data <- option.map(buffer_bytes(h, buffer))
+  resolve_view(bit_array.byte_size(data), elem_kind, byte_offset, length)
+}
+
+/// Byte size of the buffer currently in the heap; 0 for a detached buffer or
+/// a ref that isn't a buffer. Asks the storage for its size rather than going
+/// through `buffer_bytes`, which for a SharedArrayBuffer would copy every byte
+/// out of the atomics cells just to measure them.
+fn live_byte_size(h: Heap(host), buffer: Ref) -> Int {
+  case heap.read(h, buffer) {
+    Some(ObjectSlot(kind: value.ArrayBufferObject(storage:), ..)) ->
+      value.buffer_byte_size(storage)
+    _ -> 0
+  }
 }
 
 /// §10.4.5.14 IsValidIntegerIndex, against the byte size the view was resolved
@@ -246,38 +298,39 @@ fn do_typed_store(
               length,
             )
           let off = view_element_offset(view, i)
-          case value.buffer_bits(storage), valid_integer_index(view, i) {
-            // Detached (no bytes) or out of bounds: silent no-op per
-            // §10.4.5.16 step 2.
-            None, _ | _, False -> #(state, True)
-            Some(data), True ->
-              case value.buffer_is_immutable(storage) {
-                // Immutable ArrayBuffer proposal: typed_array_store already
-                // reported [[Set]] failure (False) before value coercion, and
-                // a live buffer ref can never become immutable in place
-                // (transferToImmutable detaches the source and allocates a
-                // fresh ref), so this arm is unreachable. Kept as a defensive
-                // failure — immutable writes report False, never a silent
-                // success like detached/out-of-bounds.
-                True -> #(state, False)
-                False -> {
-                  let new_bits = write(data, off)
-                  // Shared storage: persist only the element's bytes — other
-                  // regions may be concurrently written by other agents.
-                  let new_storage =
-                    value.buffer_store_region(storage, new_bits, off, size)
-                  let h =
-                    heap.write(
-                      state.heap,
-                      buffer,
-                      ObjectSlot(
-                        ..slot,
-                        kind: value.ArrayBufferObject(storage: new_storage),
-                      ),
-                    )
-                  #(State(..state, heap: h), True)
-                }
-              }
+          // Bounds FIRST, bytes second: `buffer_bits` on shared storage copies
+          // the whole buffer out of its atomics cells, and a store that isn't
+          // going to happen must not pay for it. A detached buffer measures 0
+          // bytes, so it fails this check too — the silent no-op of
+          // §10.4.5.16 step 2 covers both.
+          use <- bool.guard(!valid_integer_index(view, i), #(state, True))
+          // Immutable ArrayBuffer proposal: typed_array_store already reported
+          // [[Set]] failure (False) before value coercion, and a live buffer
+          // ref can never become immutable in place (transferToImmutable
+          // detaches the source and allocates a fresh ref), so this guard is
+          // unreachable. Kept as a defensive failure — immutable writes report
+          // False, never a silent success like detached/out-of-bounds.
+          use <- bool.guard(value.buffer_is_immutable(storage), #(state, False))
+          case value.buffer_bits(storage) {
+            // Unreachable: detached storage has no in-bounds indices.
+            None -> #(state, True)
+            Some(data) -> {
+              let new_bits = write(data, off)
+              // Shared storage: persist only the element's bytes — other
+              // regions may be concurrently written by other agents.
+              let new_storage =
+                value.buffer_store_region(storage, new_bits, off, size)
+              let h =
+                heap.write(
+                  state.heap,
+                  buffer,
+                  ObjectSlot(
+                    ..slot,
+                    kind: value.ArrayBufferObject(storage: new_storage),
+                  ),
+                )
+              #(State(..state, heap: h), True)
+            }
           }
         }
         // Detached (or not a buffer): silent no-op per §10.4.5.16 step 2.

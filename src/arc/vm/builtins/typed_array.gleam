@@ -1512,18 +1512,15 @@ fn get_buffer(
 /// True when the view is fully backed by the LIVE buffer — detached buffers
 /// and views past the end of a shrunk resizable buffer are "out of bounds",
 /// and the byteLength/byteOffset/length accessors all answer 0 for them.
-fn view_in_bounds(
-  h: Heap(host),
-  buffer: Ref,
-  kind: TypedArrayKind,
-  off: Int,
-  len: Int,
-) -> Bool {
-  case object.typed_array_buffer_data(h, buffer) {
-    None -> False
-    Some(data) ->
-      off + len * typed_array_ffi.elem_size(kind) <= bit_array.byte_size(data)
-  }
+/// Delegates to the ONE bounds check the engine has (§10.4.5.14, owned by
+/// ops/typed_array_elements): a detached buffer resolves to no live view at
+/// all, and the surviving `ResolvedView` cannot mix `byte_offset` and `length`
+/// up because it is not two adjacent bare Ints.
+fn witness_in_bounds(h: Heap(host), witness: TaWitness) -> Bool {
+  let TaWitness(buffer:, kind:, byte_offset:, length:, ..) = witness
+  typed_array_elements.live_view(h, buffer, kind, byte_offset, Some(length))
+  |> option.map(typed_array_elements.view_in_bounds)
+  |> option.unwrap(False)
 }
 
 fn get_byte_length(
@@ -1531,9 +1528,8 @@ fn get_byte_length(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- require_ta(this, state)
-  let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
-  let n = case view_in_bounds(state.heap, buffer, kind, off, len) {
-    True -> len * typed_array_ffi.elem_size(kind)
+  let n = case witness_in_bounds(state.heap, view) {
+    True -> view.length * typed_array_ffi.elem_size(view.kind)
     False -> 0
   }
   #(state, Ok(value.from_int(n)))
@@ -1544,9 +1540,8 @@ fn get_byte_offset(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- require_ta(this, state)
-  let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
-  let n = case view_in_bounds(state.heap, buffer, kind, off, len) {
-    True -> off
+  let n = case witness_in_bounds(state.heap, view) {
+    True -> view.byte_offset
     False -> 0
   }
   #(state, Ok(value.from_int(n)))
@@ -1557,9 +1552,8 @@ fn get_length(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- require_ta(this, state)
-  let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
-  let n = case view_in_bounds(state.heap, buffer, kind, off, len) {
-    True -> len
+  let n = case witness_in_bounds(state.heap, view) {
+    True -> view.length
     False -> 0
   }
   #(state, Ok(value.from_int(n)))
@@ -3499,6 +3493,13 @@ type U8LiveView {
 /// the LIVE view right now (option getters may have detached/shrunk the
 /// buffer). The bounds proof is `view_witness_bytes` — the same one every
 /// other %TypedArray% method uses.
+///
+/// TypedArrayLength is resolved against the very bytes `view_witness_bytes`
+/// returned, NEVER by re-reading the buffer: for a length-tracking view over a
+/// growable SharedArrayBuffer, a second read can see a longer buffer than the
+/// snapshot in `data`, and `length` would then run past the bytes it is
+/// supposed to describe. Resolving both from one read is what makes
+/// `byte_offset + length <= byte_size(data)` an invariant of this record.
 fn u8_live_view(
   state: State(host),
   this: JsValue,
@@ -3509,17 +3510,18 @@ fn u8_live_view(
         view_witness_bytes(state.heap, view)
         |> result.map_error(witness_error_value(state, _)),
       )
+      let resolved =
+        typed_array_elements.resolve_view(
+          bit_array.byte_size(data),
+          kind,
+          byte_offset,
+          length,
+        )
       U8LiveView(
         buffer:,
         data:,
         byte_offset:,
-        length: object.typed_array_view_length(
-          state.heap,
-          buffer,
-          kind,
-          byte_offset,
-          length,
-        ),
+        length: typed_array_elements.view_len(resolved),
       )
     }
     None ->
