@@ -923,14 +923,15 @@ fn intrinsic_iterator_guard(
 ) -> Bool {
   is_intrinsic_data_property(
     h,
-    find_symbol_property(h, src_ref, value.symbol_iterator),
+    object.find_symbol_property(h, src_ref, value.symbol_iterator)
+      // A proxy on the chain is by definition not the intrinsic descriptor →
+      // decline the fast path and let the real protocol fire its traps.
+      |> object.or_when_proxy(None),
     expected_iter,
   )
   && is_intrinsic_data_property(
     h,
     object.find_property(h, next_ref, Named("next"))
-      // A proxy on the chain is by definition not the intrinsic descriptor →
-      // decline the fast path and let the real protocol fire its traps.
       |> object.or_when_proxy(None),
     expected_next,
   )
@@ -965,24 +966,6 @@ const map_iterator_next = CallFn(value.MapIteratorNext)
 const string_symbol_iterator = DispatchFn(
   value.StringNative(value.StringPrototypeSymbolIterator),
 )
-
-/// Resolve a symbol-keyed property along the prototype chain WITHOUT running
-/// any getter — the symbol analogue of `object.find_property`. Used only as
-/// a protector read, never as an observable [[Get]].
-fn find_symbol_property(
-  h: Heap(host),
-  ref: Ref,
-  sym: value.SymbolId,
-) -> option.Option(value.Property) {
-  case heap.read(h, ref) {
-    Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
-      case list.key_find(symbol_properties, sym) {
-        Ok(prop) -> Some(prop)
-        Error(Nil) -> option.then(prototype, find_symbol_property(h, _, sym))
-      }
-    _ -> None
-  }
-}
 
 /// The `length` the spec's array iterator would OBSERVE, when the raw element
 /// block can stand in for it — `None` means "deopt to per-index [[Get]]".

@@ -3568,12 +3568,11 @@ pub fn as_proxy(h: Heap(host), ref: Ref) -> Option(Option(value.ProxySlots)) {
 /// handler doesn't define it). TypeError on revoked proxy or non-callable trap.
 pub fn proxy_trap(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   name: String,
 ) -> Result(#(Ref, Ref, Option(JsValue), State(host)), #(JsValue, State(host))) {
-  case target, handler {
-    Some(t), Some(h) -> {
+  case slots {
+    Some(value.ProxySlots(target: t, handler: h)) -> {
       // GetMethod step 1: Let func be ? GetV(V, P).
       use #(trap, state) <- result.try(get_value(
         state,
@@ -3596,7 +3595,7 @@ pub fn proxy_trap(
           }
       }
     }
-    _, _ ->
+    None ->
       Error(state.type_error_value(
         state,
         "Cannot perform '" <> name <> "' on a proxy that has been revoked",
@@ -3633,18 +3632,12 @@ fn target_own_property(
 /// §10.5.8 Proxy [[Get]] ( P, Receiver ).
 pub fn proxy_get(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   pk: PropKey,
   receiver: JsValue,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Steps 1-5: revocation check + GetMethod(handler, "get").
-  use #(t, h, trap, state) <- result.try(proxy_trap(
-    state,
-    target,
-    handler,
-    "get",
-  ))
+  use #(t, h, trap, state) <- result.try(proxy_trap(state, slots, "get"))
   case trap {
     // Step 6: trap undefined → target.[[Get]](P, Receiver).
     None ->
@@ -3695,18 +3688,12 @@ pub fn proxy_get(
 /// §10.5.9 Proxy [[Set]] ( P, V, Receiver ).
 pub fn proxy_set(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   pk: PropKey,
   val: JsValue,
   receiver: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
-  use #(t, h, trap, state) <- result.try(proxy_trap(
-    state,
-    target,
-    handler,
-    "set",
-  ))
+  use #(t, h, trap, state) <- result.try(proxy_trap(state, slots, "set"))
   case trap {
     // Step 6: trap undefined → target.[[Set]](P, V, Receiver).
     None ->
@@ -3775,8 +3762,8 @@ pub fn has_property_stateful(
   pk: PropKey,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-      proxy_has(state, target, handler, pk)
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+      proxy_has(state, slots, pk)
     Some(ObjectSlot(
       kind: value.ModuleNamespace(exports:),
       symbol_properties:,
@@ -3843,16 +3830,10 @@ pub fn has_property_stateful(
 /// §10.5.7 Proxy [[HasProperty]] ( P ).
 pub fn proxy_has(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   pk: PropKey,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
-  use #(t, h, trap, state) <- result.try(proxy_trap(
-    state,
-    target,
-    handler,
-    "has",
-  ))
+  use #(t, h, trap, state) <- result.try(proxy_trap(state, slots, "has"))
   case trap {
     // Step 6: trap undefined → target.[[HasProperty]](P).
     None -> has_property_stateful(state, t, pk)
@@ -3919,8 +3900,8 @@ pub fn delete_property_stateful(
   pk: PropKey,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-      proxy_delete(state, target, handler, pk)
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+      proxy_delete(state, slots, pk)
     _ ->
       case pk {
         PkString(key) -> {
@@ -3938,14 +3919,12 @@ pub fn delete_property_stateful(
 /// §10.5.10 Proxy [[Delete]] ( P ).
 pub fn proxy_delete(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   pk: PropKey,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
-    target,
-    handler,
+    slots,
     "deleteProperty",
   ))
   case trap {
@@ -4008,8 +3987,8 @@ pub fn get_prototype_of_stateful(
   ref: Ref,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-      proxy_get_prototype_of(state, target, handler)
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+      proxy_get_prototype_of(state, slots)
     Some(ObjectSlot(prototype: Some(p), ..)) -> Ok(#(JsObject(p), state))
     _ -> Ok(#(value.JsNull, state))
   }

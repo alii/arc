@@ -786,12 +786,19 @@ fn get_index_if_present(
     value.JsSymbol(_) ->
       inherited_index(
         state,
-        state.builtins.object.prototype,
+        state.builtins.symbol_proto,
         key.index_key(idx),
         this,
       )
-    // null/undefined (already rejected by require_array) and other values:
-    // no indexed properties.
+    value.JsBigInt(_) ->
+      inherited_index(
+        state,
+        state.builtins.bigint.prototype,
+        key.index_key(idx),
+        this,
+      )
+    // JsNull/JsUndefined only — already rejected by require_array before
+    // this dispatch is reached.
     _ -> Ok(#(None, state))
   }
 }
@@ -894,6 +901,11 @@ fn proto_chain_has_index_keys(heap: Heap(host), proto: Option(Ref)) -> Bool {
     None -> False
     Some(proto_ref) ->
       case heap.read(heap, proto_ref) {
+        // A Proxy's `has`/`get` traps are user code; its own dicts are empty,
+        // so the generic arm below would walk straight through it. Bail
+        // conservatively — the caller takes the per-element path where traps
+        // fire (mirrors hole_is_inherited).
+        Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> True
         // String exotic objects (§10.4.3.5) expose own index properties
         // virtually from [[StringData]] — stored in neither `elements` nor
         // the properties dict — so a non-empty boxed String anywhere on the
@@ -1098,6 +1110,10 @@ fn proto_chain_has_index_in_range(
     None -> False
     Some(proto_ref) ->
       case heap.read(heap, proto_ref) {
+        // A Proxy's traps are user code — bail conservatively so the caller
+        // takes the per-element path where they fire (mirrors
+        // proto_chain_has_index_keys / hole_is_inherited).
+        Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> True
         // String exotic objects (§10.4.3.5) expose own index properties
         // virtually from [[StringData]] — conservatively bail like
         // proto_chain_has_index_keys does.
@@ -1259,14 +1275,6 @@ fn require_callback(
         state,
         operators.typeof(state.heap, cb) <> " is not a function",
       )
-  }
-}
-
-/// args[n], or undefined when absent — for optional trailing arguments.
-fn arg_or_undefined(args: List(JsValue), n: Int) -> JsValue {
-  case list.drop(args, n) {
-    [v, ..] -> v
-    [] -> JsUndefined
   }
 }
 
@@ -1810,14 +1818,14 @@ fn array_slice(
   // Steps 3-6: relativeStart → k (clamped). Default 0 if no arg.
   use start, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 0),
+    helpers.arg_at(args,0),
     length,
     0,
   )
   // Steps 7-10: relativeEnd → final (clamped). Default len if no end arg.
   use end, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 1),
+    helpers.arg_at(args,1),
     length,
     length,
   )
@@ -2794,7 +2802,7 @@ fn array_fill(
   // default 0 when absent. The coercion can run user code or throw.
   use start, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 1),
+    helpers.arg_at(args,1),
     length,
     0,
   )
@@ -2802,7 +2810,7 @@ fn array_fill(
   // (step 7: if end is undefined, relativeEnd = len)
   use end, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 2),
+    helpers.arg_at(args,2),
     length,
     length,
   )
@@ -2865,7 +2873,7 @@ fn array_at(
   // coercion: valueOf/toString run, Symbol/BigInt throw TypeError.
   use raw, state <- coerce.try_to_integer_or_infinity(
     state,
-    arg_or_undefined(args, 0),
+    helpers.arg_at(args,0),
   )
   // Steps 4-5: resolve negative index
   let idx = case raw < 0 {
@@ -2948,7 +2956,7 @@ fn forward_search_driver(
   //   Step 6 (n = -∞ → 0): max(length + n, 0) = 0.
   use from, state <- coerce.try_to_integer_or_infinity(
     state,
-    arg_or_undefined(args, 1),
+    helpers.arg_at(args,1),
   )
   // Steps 7-8: resolve start index (negative → max(len + n, 0))
   let start = case from < 0 {
@@ -4650,7 +4658,7 @@ fn array_splice(
   // Steps 3-6: actualStart
   use actual_start, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 0),
+    helpers.arg_at(args,0),
     length,
     0,
   )
@@ -5138,21 +5146,21 @@ fn array_copy_within(
   // Steps 3-5: target (observable ToIntegerOrInfinity, in argument order)
   use target, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 0),
+    helpers.arg_at(args,0),
     length,
     0,
   )
   // Steps 6-8: start (from)
   use from, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 1),
+    helpers.arg_at(args,1),
     length,
     0,
   )
   // Steps 9-11: end (final)
   use final, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 2),
+    helpers.arg_at(args,2),
     length,
     length,
   )
@@ -5538,7 +5546,7 @@ fn array_to_spliced(
   // Steps 3-6: actualStart
   use actual_start, state <- coerce.try_relative_index(
     state,
-    arg_or_undefined(args, 0),
+    helpers.arg_at(args,0),
     length,
     0,
   )
@@ -5617,7 +5625,7 @@ fn array_with(
   // Step 3: relativeIndex = ToIntegerOrInfinity(index) — observable coercion
   use raw, state <- coerce.try_to_integer_or_infinity(
     state,
-    arg_or_undefined(args, 0),
+    helpers.arg_at(args,0),
   )
   // Steps 4-5: resolve relative index (without clamping — out of bounds throws)
   let actual_index = case raw < 0 {
@@ -5880,7 +5888,7 @@ fn array_to_locale_string(
     0,
     length,
     helpers.first_arg_or_undefined(args),
-    helpers.list_at(args, 1) |> option.unwrap(JsUndefined),
+    helpers.arg_at(args, 1),
     [],
   )
 }
