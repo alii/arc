@@ -143,7 +143,7 @@ fn register(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use cells, ref, state <- require_registry(this, state, "register")
+  use cells, registry, state <- require_registry(this, state, "register")
   let target = helpers.first_arg_or_undefined(args)
   let held = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
   let token_arg = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
@@ -158,11 +158,11 @@ fn register(
           // Step 5
           case can_be_held_weakly(state, token_arg), token_arg {
             False, JsUndefined ->
-              do_register(state, cells, ref, target, held, None)
+              do_register(state, cells, registry, target, held, None)
             False, _ ->
               state.type_error(state, "Invalid value used as unregister token")
             True, _ ->
-              do_register(state, cells, ref, target, held, Some(token_arg))
+              do_register(state, cells, registry, target, held, Some(token_arg))
           }
       }
   }
@@ -172,7 +172,7 @@ fn register(
 fn do_register(
   state: State(host),
   cells: List(value.FinRegCell),
-  ref: Ref,
+  registry: RegistryRef,
   target: JsValue,
   held: JsValue,
   token: option.Option(JsValue),
@@ -180,22 +180,20 @@ fn do_register(
   let cell = FinRegCell(target:, held:, token:)
   // [[Cells]] is append-ordered in the spec; order is unobservable here
   // (no iteration, cleanup never fires), so prepend for O(1).
-  let heap = set_cells(state.heap, ref, [cell, ..cells])
+  let heap = set_cells(state.heap, registry, [cell, ..cells])
   #(State(..state, heap:), Ok(JsUndefined))
 }
 
-/// Replace [[Cells]] on the registry at `ref`, preserving [[CleanupCallback]]
-/// structurally. `require_registry` has already proved the brand, so a slot of
-/// any other kind is a wiring bug — crash rather than dropping the write.
+/// Replace [[Cells]] on a proved registry, carrying its [[CleanupCallback]]
+/// straight out of the `RegistryRef` — the brand travels with the ref, so
+/// there is no slot to re-inspect and no way to reach here with a non-registry.
 fn set_cells(
   h: Heap(host),
-  ref: Ref,
+  registry: RegistryRef,
   cells: List(value.FinRegCell),
 ) -> Heap(host) {
-  use slot <- heap.update(h, ref)
-  let assert ObjectSlot(kind: FinalizationRegistryObject(..) as k, ..) = slot
-    as "finalization_registry: ref is not a FinalizationRegistry slot"
-  ObjectSlot(..slot, kind: FinalizationRegistryObject(..k, cells:))
+  let RegistryRef(ref:, callback:) = registry
+  heap.update_kind(h, ref, FinalizationRegistryObject(cells:, callback:))
 }
 
 /// §26.2.3.3 FinalizationRegistry.prototype.unregister ( unregisterToken )
@@ -210,7 +208,7 @@ fn unregister(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use cells, ref, state <- require_registry(this, state, "unregister")
+  use cells, registry, state <- require_registry(this, state, "unregister")
   let token = helpers.first_arg_or_undefined(args)
   case can_be_held_weakly(state, token) {
     False -> state.type_error(state, "Invalid value used as unregister token")
@@ -222,10 +220,20 @@ fn unregister(
             None -> False
           }
         })
-      let heap = set_cells(state.heap, ref, kept)
+      let heap = set_cells(state.heap, registry, kept)
       #(State(..state, heap:), Ok(JsBool(removed != [])))
     }
   }
+}
+
+/// A `Ref` that has been *proved* to point at a FinalizationRegistry's heap
+/// slot, carrying that slot's [[CleanupCallback]] with it.
+///
+/// Constructible only by `require_registry`, so `set_cells` cannot be
+/// reached with a ref of any other kind — the old `let assert` on the slot's
+/// shape is gone because the shape is now carried in the type.
+type RegistryRef {
+  RegistryRef(ref: Ref, callback: JsValue)
 }
 
 /// RequireInternalSlot(this, [[Cells]]) — this must be an object with the
@@ -234,10 +242,10 @@ fn require_registry(
   this: JsValue,
   state: State(host),
   method: String,
-  cont: fn(List(value.FinRegCell), Ref, State(host)) ->
+  cont: fn(List(value.FinRegCell), RegistryRef, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  helpers.require_brand(
+  use #(cells, callback), ref, state <- helpers.require_brand(
     this,
     state,
     fn() {
@@ -245,18 +253,20 @@ fn require_registry(
       <> method
       <> " called on incompatible receiver"
     },
-    registry_cells_of,
-    cont,
+    registry_slots_of,
   )
+  cont(cells, RegistryRef(ref:, callback:), state)
 }
 
-/// The [[Cells]] extractor handed to `require_brand` — a named function (not
-/// an inline lambda) so the brand check builds no closure per call.
-fn registry_cells_of(
+/// The [[Cells]]/[[CleanupCallback]] extractor handed to `require_brand` — a
+/// named function (not an inline lambda) so the brand check builds no closure
+/// per call. Both slots come out together so `RegistryRef` can carry the
+/// callback and `set_cells` never has to re-read the slot.
+fn registry_slots_of(
   kind: state.ExoticKind(host),
-) -> option.Option(List(value.FinRegCell)) {
+) -> option.Option(#(List(value.FinRegCell), JsValue)) {
   case kind {
-    FinalizationRegistryObject(cells:, ..) -> Some(cells)
+    FinalizationRegistryObject(cells:, callback:) -> Some(#(cells, callback))
     _ -> None
   }
 }

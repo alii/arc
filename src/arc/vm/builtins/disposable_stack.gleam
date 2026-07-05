@@ -351,6 +351,40 @@ fn alloc_stack(
   )
 }
 
+/// The single [[DisposableState]]/[[AsyncDisposableState]] slot read: `Some`
+/// only when `this` is a DisposableStackObject with the matching `async` brand.
+///
+/// Both entry points go through it — `require_stack` turns a `None` into a
+/// thrown TypeError, `dispose_async` into a rejected promise — so the brand
+/// check itself is written once.
+fn read_stack(
+  state: State(host),
+  this: JsValue,
+  async: Bool,
+) -> Option(#(Ref, DisposableState)) {
+  case this {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(
+          kind: DisposableStackObject(async: a, state: disposable_state),
+          ..,
+        ))
+          if a == async
+        -> Some(#(ref, disposable_state))
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// "DisposableStack" / "AsyncDisposableStack", for TypeError messages.
+fn stack_type_name(async: Bool) -> String {
+  case async {
+    True -> "AsyncDisposableStack"
+    False -> "DisposableStack"
+  }
+}
+
 /// RequireInternalSlot(this, [[DisposableState]] / [[AsyncDisposableState]])
 /// — this must be a DisposableStackObject with the matching brand, else
 /// TypeError.
@@ -362,30 +396,18 @@ fn require_stack(
   cont: fn(Ref, DisposableState, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use disposable_state, ref, state <- helpers.require_brand(
-    this,
-    state,
-    fn() {
-      let type_name = case async {
-        True -> "AsyncDisposableStack"
-        False -> "DisposableStack"
-      }
-      "Method "
-      <> type_name
-      <> ".prototype."
-      <> method
-      <> " called on incompatible receiver"
-    },
-    fn(kind) {
-      case kind {
-        DisposableStackObject(async: a, state: disposable_state)
-          if a == async
-        -> Some(disposable_state)
-        _ -> None
-      }
-    },
-  )
-  cont(ref, disposable_state, state)
+  case read_stack(state, this, async) {
+    Some(#(ref, disposable_state)) -> cont(ref, disposable_state, state)
+    None ->
+      state.type_error(
+        state,
+        "Method "
+          <> stack_type_name(async)
+          <> ".prototype."
+          <> method
+          <> " called on incompatible receiver",
+      )
+  }
 }
 
 /// Write back a stack's disposable state (which carries the
@@ -837,24 +859,16 @@ fn dispose_async(
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   let state = State(..state, heap: h)
   let promise = JsObject(cap.promise)
-  let stack = case this {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(
-          kind: DisposableStackObject(async: True, state: disposable_state),
-          ..,
-        )) -> Some(#(ref, disposable_state))
-        _ -> None
-      }
-    _ -> None
-  }
-  case stack {
-    // Step 3: wrong brand → reject with TypeError
+  // Step 3: same RequireInternalSlot as `require_stack`, but a failure must
+  // REJECT the promise rather than throw — hence the shared `read_stack`.
+  case read_stack(state, this, True) {
     None -> {
       let #(err, state) =
         state.type_error_value(
           state,
-          "Method AsyncDisposableStack.prototype.disposeAsync called on incompatible receiver",
+          "Method "
+            <> stack_type_name(True)
+            <> ".prototype.disposeAsync called on incompatible receiver",
         )
       let state = settle_capability(state, cap.reject, err)
       #(state, Ok(promise))
@@ -923,44 +937,43 @@ fn async_dispose_loop(
           }
       }
     [resource, ..rest] -> {
-      // Kinds whose disposer result is Awaited (step 3.b.ii) share one
-      // call/await/fold tail; the other two kinds are handled below.
-      //   - SyncDispose: @@asyncDispose (or a sync @@dispose moved in here).
-      //   - DisposeCallback: adopt/defer closure. The spec closure RETURNS
-      //     the Call result, so an async onDispose's rejected promise must
-      //     reject disposeAsync — Await it like any other dispose method.
-      let awaited_call = case resource {
-        SyncDispose(value: v, method:) -> Some(#(method, v, []))
-        DisposeCallback(callback:, args:) ->
-          Some(#(callback, JsUndefined, args))
-        NullDispose | AsyncFallbackDispose(..) -> None
-      }
-      case awaited_call, resource {
-        Some(#(callee, this, args)), _ ->
-          case state.call(state, callee, this, args) {
-            // Step 3.b.ii: Await(result) — hasAwaited becomes true
-            Ok(#(result, state)) ->
-              attach_await(state, result, rest, pending, resolve, reject)
-            // Step 3.b.iii: fold the throw in and continue synchronously
-            Error(#(thrown, state)) -> {
-              let #(state, pending) = fold_error(state, pending, thrown)
-              async_dispose_loop(
-                state,
-                rest,
-                pending:,
-                needs_await:,
-                has_awaited:,
-                resolve:,
-                reject:,
-              )
-            }
+      // Steps 3.b.i-iii for the kinds whose disposer result is Awaited: call
+      // it, Await a normal result, fold a throw into `pending` and continue
+      // synchronously.
+      let call_then_await = fn(callee, this, args) {
+        case state.call(state, callee, this, args) {
+          // Step 3.b.ii: Await(result) — hasAwaited becomes true
+          Ok(#(result, state)) ->
+            attach_await(state, result, rest, pending, resolve, reject)
+          // Step 3.b.iii: fold the throw in and continue synchronously
+          Error(#(thrown, state)) -> {
+            let #(state, pending) = fold_error(state, pending, thrown)
+            async_dispose_loop(
+              state,
+              rest,
+              pending:,
+              needs_await:,
+              has_awaited:,
+              resolve:,
+              reject:,
+            )
           }
+        }
+      }
+      case resource {
+        // @@asyncDispose (or a sync @@dispose moved in here by move()).
+        SyncDispose(value: v, method:) -> call_then_await(method, v, [])
+        // adopt/defer closure. The spec closure RETURNS the Call result, so an
+        // async onDispose's rejected promise must reject disposeAsync — Await
+        // it like any other dispose method.
+        DisposeCallback(callback:, args:) ->
+          call_then_await(callback, JsUndefined, args)
         // @@dispose fallback wrapper: call, DISCARD result, Await(undefined).
         // GetDisposeMethod's closure performs IfAbruptRejectPromise, so a
         // synchronous throw becomes a REJECTED promise that the loop then
         // Awaits (hasAwaited := true, error folded after a microtask hop) —
         // it is never folded synchronously.
-        None, AsyncFallbackDispose(value: v, method:) ->
+        AsyncFallbackDispose(value: v, method:) ->
           case state.call(state, method, v, []) {
             Ok(#(_discarded, state)) ->
               attach_await(state, JsUndefined, rest, pending, resolve, reject)
@@ -975,7 +988,7 @@ fn async_dispose_loop(
               )
           }
         // Step 3.f: method-less resource (use(null/undefined)) — needsAwait
-        None, _ ->
+        NullDispose ->
           async_dispose_loop(
             state,
             rest,

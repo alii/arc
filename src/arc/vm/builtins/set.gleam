@@ -147,29 +147,49 @@ fn construct(
   }
 }
 
+/// A `Ref` that has been *proved* to point at a Set's heap slot.
+///
+/// Constructible only by `require_set`, so a Map ref, a SetIterator ref
+/// or `Set.prototype` itself cannot reach `read_set_store` / `update_set` —
+/// passing one is a compile error rather than a silent read of an empty set.
+type SetRef {
+  SetRef(Ref)
+}
+
+/// The raw `Ref` inside a proved `SetRef`, for the few places that need it
+/// (allocating a SetIterator over the source Set).
+fn set_ref_value(set_ref: SetRef) -> Ref {
+  let SetRef(ref) = set_ref
+  ref
+}
+
 /// Helper to update a SetObject's data on the heap.
 fn update_set(
   h: Heap(host),
-  ref: Ref,
+  set_ref: SetRef,
   store: OrderedEntries(MapKey, JsValue),
 ) -> Heap(host) {
-  heap.update_kind(h, ref, SetObject(store:))
+  heap.update_kind(h, set_ref_value(set_ref), SetObject(store:))
 }
 
-/// Read `ref`'s [[SetData]] out of the heap. `ref` must have been proved a Set
-/// by `require_set`, which is why this can't fail.
+/// Read a proved Set's [[SetData]] out of the heap.
 ///
 /// This is the ONLY way to get at a Set's store: `require_set` hands out a
-/// bare `Ref`, never a snapshot. Every op re-reads at the exact spec point at
+/// `SetRef`, never a snapshot. Every op re-reads at the exact spec point at
 /// which the spec inspects [[SetData]], because the set-relation methods call
 /// arbitrary user code (`other.size`, `other.has`, `other.keys`, `next`) that
 /// can add to or delete from the receiver mid-operation.
-fn read_set_store(h: Heap(host), ref: Ref) -> OrderedEntries(MapKey, JsValue) {
-  case heap.read(h, ref) {
-    Some(ObjectSlot(kind: SetObject(store:), ..)) -> store
-    // Unreachable: a heap slot's kind never changes after allocation.
-    _ -> ordered_entries.new()
-  }
+fn read_set_store(
+  h: Heap(host),
+  set_ref: SetRef,
+) -> OrderedEntries(MapKey, JsValue) {
+  // A heap slot's kind never changes after allocation and a `SetRef` can only
+  // come from `require_set`, so anything else here is a wiring bug — crash
+  // rather than silently reporting an empty set.
+  let assert Some(ObjectSlot(kind: SetObject(store:), ..)) =
+    heap.read(h, set_ref_value(set_ref))
+    as "set: SetRef does not point at a Set slot"
+  store
 }
 
 /// SetDataAppend — the ONE place a value enters a [[SetData]] store.
@@ -289,7 +309,7 @@ fn set_for_each(
 /// and entries it adds (including delete + re-add) are visited.
 fn for_each_loop(
   state: State(host),
-  ref: Ref,
+  ref: SetRef,
   cursor: Int,
   callback: JsValue,
   this_arg: JsValue,
@@ -373,7 +393,7 @@ fn set_intersection(
 /// step (the spec re-reads `O.[[SetData]][index]` and refreshes `thisSize`).
 fn intersection_this_loop(
   state: State(host),
-  ref: Ref,
+  ref: SetRef,
   rec: SetRecord,
   cursor: Int,
   result: OrderedEntries(MapKey, JsValue),
@@ -396,7 +416,7 @@ fn intersection_this_loop(
 /// `next()` is user code, so this's store is re-read on every step.
 fn intersection_other_loop(
   state: State(host),
-  ref: Ref,
+  ref: SetRef,
   iter: JsValue,
   next_fn: JsValue,
   result: OrderedEntries(MapKey, JsValue),
@@ -505,7 +525,7 @@ fn set_symmetric_difference(
 
 fn symmetric_difference_loop(
   state: State(host),
-  ref: Ref,
+  ref: SetRef,
   iter: JsValue,
   next_fn: JsValue,
   result: OrderedEntries(MapKey, JsValue),
@@ -551,7 +571,7 @@ fn set_is_subset_of(
 /// step. There is no iterator to close on the short-circuit exit.
 fn this_step_loop(
   state: State(host),
-  ref: Ref,
+  ref: SetRef,
   rec: SetRecord,
   cursor: Int,
   false_when false_when: Bool,
@@ -598,7 +618,7 @@ fn set_is_superset_of(
 /// `next()` is user code, so this's store is re-read every step.
 fn other_step_loop(
   state: State(host),
-  ref: Ref,
+  ref: SetRef,
   iter: JsValue,
   next_fn: JsValue,
   false_when false_when: Bool,
@@ -672,13 +692,18 @@ fn set_entries(
 /// entries added during iteration are visited.
 fn alloc_set_iterator(
   state: State(host),
-  source: Ref,
+  source: SetRef,
   kind: value.SetIterKind,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, ref) =
     common.alloc_wrapper(
       state.heap,
-      value.SetIteratorObject(source:, cursor: 0, done: False, kind:),
+      value.SetIteratorObject(
+        source: set_ref_value(source),
+        cursor: 0,
+        done: False,
+        kind:,
+      ),
       state.builtins.set_iterator_proto,
     )
   #(State(..state, heap:), Ok(JsObject(ref)))
@@ -861,10 +886,10 @@ fn set_record_has(
 
 // ---- helpers ----
 
-/// RequireInternalSlot(this, [[SetData]]) — proves `this` is a Set, or throws
-/// a TypeError naming `method`.
+/// RequireInternalSlot(this, [[SetData]]) — proves `this` is a Set and hands
+/// over a `SetRef`, or throws a TypeError naming `method`.
 ///
-/// Deliberately hands the continuation only a `Ref`, never the [[SetData]]
+/// Deliberately hands the continuation only a `SetRef`, never the [[SetData]]
 /// store: a store read at method entry is stale the moment any user code runs,
 /// and every set-relation method runs user code. Read the store with
 /// `read_set_store` at the point the spec reads it.
@@ -874,7 +899,7 @@ fn require_set(
   this: JsValue,
   state: State(host),
   method: String,
-  cont: fn(Ref, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(SetRef, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use Nil, ref, state <- helpers.require_brand(
     this,
@@ -884,7 +909,7 @@ fn require_set(
     },
     set_brand_of,
   )
-  cont(ref, state)
+  cont(SetRef(ref), state)
 }
 
 /// The [[SetData]] brand check handed to `require_brand` — a named function
