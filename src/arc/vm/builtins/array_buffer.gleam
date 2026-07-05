@@ -534,9 +534,9 @@ fn buffer_slice(
   use buf, state <- require_buffer(this, state, "slice")
   use buf, state <- require_family(buf, state, "slice", shared)
   // Step 4 (AB only): detached → TypeError
-  use bits, buf, state <- require_live(buf, state, "slice")
+  use storage, buf, state <- require_live(buf, state, "slice")
   // Step 5
-  let len = bit_array.byte_size(bits)
+  let len = value.buffer_byte_size(storage)
   // Steps 6-7: relativeStart
   use first, state <- coerce.try_relative_index(
     state,
@@ -572,7 +572,7 @@ fn buffer_slice(
   // Steps 13-15: validate the constructed buffer
   use new_buf, state <- require_buffer(new_val, state, "slice")
   use new_buf, state <- require_family(new_buf, state, "slice", shared)
-  use new_bits, new_buf, state <- require_live(new_buf, state, "slice")
+  use new_storage, new_buf, state <- require_live(new_buf, state, "slice")
   // Immutable ArrayBuffer proposal: a species constructor returning an
   // immutable buffer is a TypeError — slice must write into the result.
   use new_buf, state <- require_not_immutable(new_buf, state, "slice")
@@ -585,7 +585,7 @@ fn buffer_slice(
       )
     False ->
       // Step 17
-      case bit_array.byte_size(new_bits) < new_len {
+      case value.buffer_byte_size(new_storage) < new_len {
         True ->
           state.type_error(
             state,
@@ -594,22 +594,37 @@ fn buffer_slice(
         False -> {
           // Steps 18-19: species ctor may have detached O — re-read.
           use buf, state <- require_buffer(JsObject(buf.ref), state, "slice")
-          use bits, _buf, state <- require_live(buf, state, "slice")
-          let current_len = bit_array.byte_size(bits)
+          use storage, buf, state <- require_live(buf, state, "slice")
+          let current_len = value.buffer_byte_size(storage)
           // Copy min(newLen, currentLen - first) bytes from offset `first`.
-          let heap = case first < current_len {
+          // Snapshotting the bytes is O(n) for shared storage, so only do it
+          // once we know there is something to copy.
+          case first < current_len {
+            False -> #(state, Ok(new_val))
             True -> {
+              use bits, _buf, state <- require_live_bits(buf, state, "slice")
+              use new_bits, new_buf, state <- require_live_bits(
+                new_buf,
+                state,
+                "slice",
+              )
               let count = int.min(new_len, current_len - first)
               let copied = copy_into(bits, first, count, new_bits)
               // §6.2.9.3 CopyDataBlockBytes writes exactly [0, count) of the
               // destination — anything past `count` in a SHARED destination
               // belongs to whatever agent last wrote it, so the write range
               // must be the copied region, not the whole snapshot image.
-              ops_buffer.store_region(state.heap, new_buf.ref, copied, 0, count)
+              let heap =
+                ops_buffer.store_region(
+                  state.heap,
+                  new_buf.ref,
+                  copied,
+                  0,
+                  count,
+                )
+              #(State(..state, heap:), Ok(new_val))
             }
-            False -> state.heap
           }
-          #(State(..state, heap:), Ok(new_val))
         }
       }
   }
@@ -1021,10 +1036,27 @@ fn require_family(
 }
 
 /// IsDetachedBuffer(O) must be false, else TypeError. Hands the continuation
-/// a snapshot of the live bytes — a detached buffer has none. (Shared buffers
-/// are never detached, so this always succeeds for them; the snapshot is a
-/// copy of the atomics cells as of right now.)
+/// the live storage — cheap, so byte-length reads stay O(1) even for `Shared`
+/// storage. Use `require_live_bits` when the bytes themselves are needed.
+/// (Shared buffers are never detached, so this always succeeds for them.)
 fn require_live(
+  buf: Buf,
+  state: State(host),
+  method: String,
+  cont: fn(value.BufferStorage, Buf, State(host)) ->
+    #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case buf.storage {
+    value.Detached(..) -> detached_error(state, method)
+    live -> cont(live, buf, state)
+  }
+}
+
+/// `require_live`, but hands the continuation a snapshot of the live bytes —
+/// a detached buffer has none. For `Shared` storage the snapshot COPIES the
+/// atomics cells (O(byte length)), so only reach for this gate where the
+/// bytes are actually consumed; use `require_live` for length checks.
+fn require_live_bits(
   buf: Buf,
   state: State(host),
   method: String,
