@@ -3,7 +3,7 @@ import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
-import arc/vm/exec/event_loop
+import arc/vm/exec/job_call
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/key.{Index, Named}
@@ -705,7 +705,7 @@ fn finally_chain(
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   // Call resolve(resolve_value)
   let state1 =
-    event_loop.call_settlement_fn(State(..state, heap: h), cap.resolve, [
+    job_call.call_settlement_fn(State(..state, heap: h), cap.resolve, [
       resolve_value,
     ])
   // Create the handler
@@ -2244,7 +2244,7 @@ pub fn call_native_from_async_on_next(
     Ok(state) -> state
     // Plain rejection — these abrupt completions do NOT close the iterator.
     Error(#(thrown, state)) ->
-      event_loop.call_settlement_fn(state, ctx.reject, [thrown])
+      job_call.call_settlement_fn(state, ctx.reject, [thrown])
   }
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }
@@ -2270,7 +2270,7 @@ fn from_async_next_steps(
     // Step 3.j.ii.7: done — Set(A, "length", k, true), resolve with A.
     True -> {
       use state <- result.map(from_async_set_length(state, ctx.target, ctx.k))
-      event_loop.call_settlement_fn(state, ctx.resolve, [ctx.target])
+      job_call.call_settlement_fn(state, ctx.resolve, [ctx.target])
     }
     False -> {
       // Step 3.j.ii.8: nextValue = ? IteratorValue(nextResult).
@@ -2333,7 +2333,7 @@ pub fn call_native_from_async_on_mapped(
   let state = case from_async_define_and_continue(state, ctx, mapped) {
     Ok(state) -> state
     Error(#(thrown, state)) ->
-      event_loop.call_settlement_fn(state, ctx.reject, [thrown])
+      job_call.call_settlement_fn(state, ctx.reject, [thrown])
   }
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }
@@ -2374,7 +2374,7 @@ pub fn call_native_from_async_reject_with(
   reject: JsValue,
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  let state = event_loop.call_settlement_fn(state, reject, [error])
+  let state = job_call.call_settlement_fn(state, reject, [error])
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }
 
@@ -2393,15 +2393,15 @@ fn from_async_close_then_reject(
       case object.get_value(state, iter_ref, Named("return"), iter) {
         // GetMethod threw — original error wins (§7.4.13 step 4).
         Error(#(_inner_thrown, state)) ->
-          event_loop.call_settlement_fn(state, reject, [err])
+          job_call.call_settlement_fn(state, reject, [err])
         Ok(#(ret_fn, state)) ->
           case helpers.is_callable(state.heap, ret_fn) {
-            False -> event_loop.call_settlement_fn(state, reject, [err])
+            False -> job_call.call_settlement_fn(state, reject, [err])
             True ->
               case state.call(state, ret_fn, iter, []) {
                 // return() threw — original error wins (§7.4.13 step 4).
                 Error(#(_inner_thrown, state)) ->
-                  event_loop.call_settlement_fn(state, reject, [err])
+                  job_call.call_settlement_fn(state, reject, [err])
                 Ok(#(inner, state)) -> {
                   // Await(innerResult), then reject with the original error
                   // whichever way it settles.
@@ -2423,7 +2423,7 @@ fn from_async_close_then_reject(
               }
           }
       }
-    _ -> event_loop.call_settlement_fn(state, reject, [err])
+    _ -> job_call.call_settlement_fn(state, reject, [err])
   }
 }
 
@@ -2476,7 +2476,7 @@ fn from_async_like_step(
   case ctx.k < ctx.len {
     False -> {
       use state <- result.map(from_async_set_length(state, ctx.target, ctx.len))
-      event_loop.call_settlement_fn(state, ctx.resolve, [ctx.target])
+      job_call.call_settlement_fn(state, ctx.resolve, [ctx.target])
     }
     True -> {
       use #(k_val, state) <- result.try(object.get_value_of(
@@ -2505,7 +2505,7 @@ pub fn call_native_from_async_like_on_value(
   let state = case from_async_like_value_steps(state, ctx, v) {
     Ok(state) -> state
     Error(#(thrown, state)) ->
-      event_loop.call_settlement_fn(state, ctx.reject, [thrown])
+      job_call.call_settlement_fn(state, ctx.reject, [thrown])
   }
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }
@@ -2545,7 +2545,7 @@ pub fn call_native_from_async_like_on_mapped(
   let state = case from_async_like_define_and_continue(state, ctx, mapped) {
     Ok(state) -> state
     Error(#(thrown, state)) ->
-      event_loop.call_settlement_fn(state, ctx.reject, [thrown])
+      job_call.call_settlement_fn(state, ctx.reject, [thrown])
   }
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }

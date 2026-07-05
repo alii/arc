@@ -42,7 +42,7 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
-import arc/vm/exec/event_loop
+import arc/vm/exec/job_call
 import arc/vm/exec/promises
 import arc/vm/internal/job_queue
 import arc/vm/key.{Named}
@@ -402,7 +402,7 @@ fn enqueue_defer_import_job(
         let state = case outcome {
           DeferHookSettledCapability -> state
           DeferHookRejected(reason) ->
-            event_loop.call_settlement_fn(state, reject_fn, [reason])
+            job_call.call_settlement_fn(state, reject_fn, [reason])
         }
         #(state, Ok(JsUndefined))
       },

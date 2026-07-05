@@ -12,7 +12,9 @@
 // ============================================================================
 
 import arc/vm/builtins/atomics as builtins_atomics
+import arc/vm/exec/job_call
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/internal/job_queue
 import arc/vm/ops/object
 import arc/vm/state.{type State, State}
@@ -70,7 +72,7 @@ pub fn drain_jobs_yielding(state: State(host)) -> State(host) {
 }
 
 /// Wake injection — the embedder side of a cross-process Atomics.notify
-/// (host contract clause 3, arc/host.gleam). When an
+/// (the wake-injection side of `host_hooks.AtomicsCapabilities`). When an
 /// `{arc_notify, Ref, Key, ByteIndex}` message lands in the EMBEDDER's
 /// mailbox (core owns no receive), the embedder hands the wake to core
 /// here: settles this agent's first pending waitAsync waiter on
@@ -79,7 +81,7 @@ pub fn drain_jobs_yielding(state: State(host)) -> State(host) {
 /// (`drain_jobs` / `drain_jobs_yielding`) so the reaction jobs run.
 pub fn inject_notify(
   state: State(host),
-  key: builtins_atomics.WaiterKey,
+  key: host_hooks.WaiterKey,
   byte_index: Int,
 ) -> State(host) {
   builtins_atomics.settle_notified_waiter(state, key, byte_index)
@@ -186,39 +188,7 @@ fn execute_job(state: State(host), job: value.Job) -> State(host) {
 /// it is discarded, and an abrupt completion is reported like any other
 /// job-level throw.
 fn execute_host_job(state: State(host), run: JsValue) -> State(host) {
-  call_settlement_fn(state, run, [])
-}
-
-/// Call a function during job execution, fire-and-forget: the return value is
-/// discarded (a job has no continuation to hand it to) and an abrupt
-/// completion is reported on stderr rather than propagated (a job has no
-/// caller to propagate to). Used for the resolve/reject of a child promise
-/// after a reaction runs, and by any host that must call into JS from a job.
-pub fn call_settlement_fn(
-  state: State(host),
-  target: JsValue,
-  args: List(JsValue),
-) -> State(host) {
-  case state.call(state, target, JsUndefined, args) {
-    Ok(#(_, new_state)) -> new_state
-    // `target` is a promise-capability resolve/reject function. The native
-    // ones never throw, but `Promise.prototype.then` builds the child
-    // capability with NewPromiseCapability(SpeciesConstructor(this)), so a
-    // user species constructor hands us arbitrary user callables here. A
-    // job has no caller to propagate an abrupt completion to, so without
-    // this report a throwing user `resolve`/`reject` vanishes silently.
-    // There is no promise ref to blame it on (the throw happened AFTER the
-    // reaction settled, outside any promise), so `unhandled_rejections` —
-    // a list of promise data refs — can't carry it; report it on the same
-    // stderr channel `report_unhandled_rejections` uses.
-    Error(#(thrown, new_state)) -> {
-      io.println_error(
-        "Uncaught (in promise job) "
-        <> object.format_error(thrown, new_state.heap),
-      )
-      new_state
-    }
-  }
+  job_call.call_settlement_fn(state, run, [])
 }
 
 /// Execute a promise reaction job (ES2024 §27.2.2.1 NewPromiseReactionJob):
@@ -234,17 +204,19 @@ fn execute_reaction_job(
   reject: JsValue,
 ) -> State(host) {
   case handler {
-    value.IdentityPassThrough -> call_settlement_fn(state, resolve, [arg])
-    value.ThrowerPassThrough -> call_settlement_fn(state, reject, [arg])
+    value.IdentityPassThrough ->
+      job_call.call_settlement_fn(state, resolve, [arg])
+    value.ThrowerPassThrough ->
+      job_call.call_settlement_fn(state, reject, [arg])
     value.Handler(fun) -> {
       // Call handler(arg)
       case state.call(state, fun, JsUndefined, [arg]) {
         Ok(#(return_val, new_state)) ->
           // Resolve child with handler's return value
-          call_settlement_fn(new_state, resolve, [return_val])
+          job_call.call_settlement_fn(new_state, resolve, [return_val])
         Error(#(thrown, new_state)) ->
           // Handler threw — reject child
-          call_settlement_fn(new_state, reject, [thrown])
+          job_call.call_settlement_fn(new_state, reject, [thrown])
       }
     }
   }
@@ -263,6 +235,6 @@ fn execute_thenable_job(
     Ok(#(_return_val, new_state)) -> new_state
     Error(#(thrown, new_state)) ->
       // then() threw — reject the promise
-      call_settlement_fn(new_state, reject, [thrown])
+      job_call.call_settlement_fn(new_state, reject, [thrown])
   }
 }
