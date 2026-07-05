@@ -205,7 +205,7 @@ fn constructor(
       state.type_error(state, "Constructor " <> name <> " requires 'new'")
     new_target -> {
       // Step 2: ToIndex(length)
-      use byte_length, state <- coerce.to_index_cps(
+      use byte_length, state <- coerce.try_to_index(
         state,
         helpers.first_arg_or_undefined(args),
         invalid_length_msg,
@@ -307,7 +307,7 @@ fn try_max_byte_length_option(
       case max_val {
         JsUndefined -> cont(None, state)
         _ -> {
-          use max, state <- coerce.to_index_cps(
+          use max, state <- coerce.try_to_index(
             state,
             max_val,
             invalid_length_msg,
@@ -438,7 +438,7 @@ fn ab_resize(
       // Step 2
       use buf, state <- require_unshared(buf, state, "resize")
       // Step 3: ToIndex may run user code (valueOf) — re-read O after.
-      use new_len, state <- coerce.to_index_cps(
+      use new_len, state <- coerce.try_to_index(
         state,
         helpers.first_arg_or_undefined(args),
         invalid_length_msg,
@@ -772,7 +772,7 @@ fn try_transfer_length(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case len_arg {
     JsUndefined -> cont(live_byte_size(buf), state)
-    _ -> coerce.to_index_cps(state, len_arg, invalid_length_msg, cont)
+    _ -> coerce.try_to_index(state, len_arg, invalid_length_msg, cont)
   }
 }
 
@@ -841,7 +841,7 @@ fn sab_grow(
       // The gate proves the storage is shared and hands us its atomics ref —
       // there is no "grow a byte-array SharedArrayBuffer" branch to write.
       use ref, _len, _buf, state <- require_shared(buf, state, "grow")
-      use new_len, state <- coerce.to_index_cps(
+      use new_len, state <- coerce.try_to_index(
         state,
         helpers.first_arg_or_undefined(args),
         invalid_length_msg,

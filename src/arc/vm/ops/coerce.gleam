@@ -204,10 +204,7 @@ pub fn try_to_string(
   val: JsValue,
   cont: fn(String, State(host)) -> #(State(host), Result(b, JsValue)),
 ) -> #(State(host), Result(b, JsValue)) {
-  case js_to_string(state, val) {
-    Ok(#(str, state)) -> cont(str, state)
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-  }
+  state.try_op(js_to_string(state, val), cont)
 }
 
 /// ES2024 §7.1.4 ToNumber with VM re-entry for ToPrimitive.
@@ -241,10 +238,7 @@ pub fn try_to_number(
   val: JsValue,
   cont: fn(value.JsNum, State(host)) -> #(State(host), Result(b, JsValue)),
 ) -> #(State(host), Result(b, JsValue)) {
-  case js_to_number(state, val) {
-    Ok(#(n, state)) -> cont(n, state)
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-  }
+  state.try_op(js_to_number(state, val), cont)
 }
 
 // ============================================================================
@@ -607,16 +601,13 @@ pub fn to_bigint(
 }
 
 /// CPS wrapper for to_bigint. Use with `use` syntax:
-///   use n, state <- coerce.to_bigint_cps(state, val)
-pub fn to_bigint_cps(
+///   use n, state <- coerce.try_to_bigint(state, val)
+pub fn try_to_bigint(
   state: State(host),
   val: JsValue,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case to_bigint(state, val) {
-    Ok(#(n, state)) -> cont(n, state)
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-  }
+  cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  state.try_op(to_bigint(state, val), cont)
 }
 
 /// §7.1.22 ToIndex ( value ):
@@ -651,15 +642,12 @@ pub fn to_index(
 }
 
 /// CPS wrapper for `to_index` (§7.1.22). Use with `use` syntax:
-///   use i, state <- coerce.to_index_cps(state, val, "Invalid ... length")
-pub fn to_index_cps(
+///   use i, state <- coerce.try_to_index(state, val, "Invalid ... length")
+pub fn try_to_index(
   state: State(host),
   val: JsValue,
   err_msg: String,
   cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
 ) -> #(State(host), Result(b, JsValue)) {
-  case to_index(state, val, err_msg) {
-    Ok(#(i, state)) -> cont(i, state)
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-  }
+  state.try_op(to_index(state, val, err_msg), cont)
 }

@@ -130,7 +130,7 @@ fn construct(
     },
   )
   // Step 3: offset = ToIndex(byteOffset)
-  use offset, state <- coerce.to_index_cps(
+  use offset, state <- coerce.try_to_index(
     state,
     arg_at(args, 1),
     "Invalid DataView offset",
@@ -179,7 +179,7 @@ fn construct(
         True -> resolve(None, state)
       }
     _ -> {
-      use view_len, state <- coerce.to_index_cps(
+      use view_len, state <- coerce.try_to_index(
         state,
         len_arg,
         "Invalid DataView length",
@@ -338,7 +338,7 @@ fn view_and_index(
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use view, state <- require_data_view(this, state)
-  use get_index, state <- coerce.to_index_cps(
+  use get_index, state <- coerce.try_to_index(
     state,
     first_arg_or_undefined(args),
     "Invalid DataView offset",
@@ -603,7 +603,7 @@ fn encode_value(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case element {
     VBig(e) -> {
-      use n, state <- coerce.to_bigint_cps(state, val)
+      use n, state <- coerce.try_to_bigint(state, val)
       cont(encode_bigint(e, n), state)
     }
     VNum(e) ->
