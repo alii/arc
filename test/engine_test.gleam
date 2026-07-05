@@ -911,6 +911,36 @@ pub fn sync_generator_return_runs_finally_test() {
   assert log == JsString("n:1,false|sfin|r:7,true")
 }
 
+pub fn sync_yield_star_delegated_return_runs_outer_finally_test() {
+  // Sync counterpart of the async test above: inner iterator HAS a .return
+  // that reports {done:true}; the yield* evaluates to a return completion,
+  // so the outer generator's own finally must run before it completes
+  // (§27.5.3.8 7.c.viii — regression: the sync driver used to short-circuit
+  // straight to Completed and skip the finally).
+  let log =
+    eval_then_read_log(
+      "var log = [];
+       var inner = {};
+       inner[Symbol.iterator] = function () {
+         return {
+           next: function () { return { value: 'i', done: false }; },
+           return: function (v) {
+             log.push('inner-return:' + v);
+             return { value: v, done: true };
+           }
+         };
+       };
+       function* g() {
+         try { yield* inner; } finally { log.push('outer-fin'); }
+       }
+       var it = g();
+       it.next();
+       var r = it.return('z');
+       log.push('r:' + r.value + ',' + r.done);",
+    )
+  assert log == JsString("inner-return:z|outer-fin|r:z,true")
+}
+
 // ----------------------------------------------------------------------------
 // Agent-wide symbol tables survive child executions (state.merge_globals).
 // Symbol descriptions and the Symbol.for registry are agent-wide: a Symbol

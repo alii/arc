@@ -41,22 +41,22 @@ import arc/vm/value.{
   type TemporalInstantGetter, type TemporalKind, type TemporalMethodName,
   type TemporalMonthDayGetter, type TemporalNativeFn, type TemporalProtos,
   type TemporalTimeGetter, type TemporalYearMonthGetter,
-  type TemporalZonedGetter, type ZonedDateTimeMethod, DgCalendarId, DgDay,
-  DgDayOfWeek, DgDayOfYear, DgDaysInMonth, DgDaysInWeek, DgDaysInYear, DgEra,
-  DgEraYear, DgInLeapYear, DgMonth, DgMonthCode, DgMonthsInYear, DgWeekOfYear,
-  DgYear, DgYearOfWeek, Dispatch, DmAbs, DmAdd, DmNegated, DmRound, DmSubtract,
-  DmToJson, DmToLocaleString, DmToString, DmTotal, DmValueOf, DmWith, DrBlank,
-  DrDays, DrHours, DrMicroseconds, DrMilliseconds, DrMinutes, DrMonths,
-  DrNanoseconds, DrSeconds, DrSign, DrWeeks, DrYears, DtDate, DtTime,
-  DurationGetter, DurationMethodName, Finite, ImAdd, ImEquals, ImRound, ImSince,
-  ImSubtract, ImToJson, ImToLocaleString, ImToString, ImToZonedDateTimeIso,
-  ImUntil, ImValueOf, InEpochMilliseconds, InEpochNanoseconds, InstantGetter,
-  InstantMethodName, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString,
-  JsUndefined, MdCalendarId, MdDay, MdMonthCode, NativeFunction, ObjectSlot,
-  OrdinaryObject, PdAdd, PdEquals, PdSince, PdSubtract, PdToJson,
-  PdToLocaleString, PdToPlainDateTime, PdToPlainMonthDay, PdToPlainYearMonth,
-  PdToString, PdToZonedDateTime, PdUntil, PdValueOf, PdWith, PdWithCalendar,
-  PdtAdd, PdtEquals, PdtRound, PdtSince, PdtSubtract, PdtToJson,
+  type TemporalZonedGetter, type TimeZone, type ZonedDateTimeMethod,
+  DgCalendarId, DgDay, DgDayOfWeek, DgDayOfYear, DgDaysInMonth, DgDaysInWeek,
+  DgDaysInYear, DgEra, DgEraYear, DgInLeapYear, DgMonth, DgMonthCode,
+  DgMonthsInYear, DgWeekOfYear, DgYear, DgYearOfWeek, Dispatch, DmAbs, DmAdd,
+  DmNegated, DmRound, DmSubtract, DmToJson, DmToLocaleString, DmToString,
+  DmTotal, DmValueOf, DmWith, DrBlank, DrDays, DrHours, DrMicroseconds,
+  DrMilliseconds, DrMinutes, DrMonths, DrNanoseconds, DrSeconds, DrSign, DrWeeks,
+  DrYears, DtDate, DtTime, DurationGetter, DurationMethodName, Finite, ImAdd,
+  ImEquals, ImRound, ImSince, ImSubtract, ImToJson, ImToLocaleString, ImToString,
+  ImToZonedDateTimeIso, ImUntil, ImValueOf, InEpochMilliseconds,
+  InEpochNanoseconds, InstantGetter, InstantMethodName, JsBigInt, JsBool, JsNull,
+  JsNumber, JsObject, JsString, JsUndefined, MdCalendarId, MdDay, MdMonthCode,
+  NativeFunction, ObjectSlot, OrdinaryObject, PdAdd, PdEquals, PdSince,
+  PdSubtract, PdToJson, PdToLocaleString, PdToPlainDateTime, PdToPlainMonthDay,
+  PdToPlainYearMonth, PdToString, PdToZonedDateTime, PdUntil, PdValueOf, PdWith,
+  PdWithCalendar, PdtAdd, PdtEquals, PdtRound, PdtSince, PdtSubtract, PdtToJson,
   PdtToLocaleString, PdtToPlainDate, PdtToPlainTime, PdtToString,
   PdtToZonedDateTime, PdtUntil, PdtValueOf, PdtWith, PdtWithCalendar,
   PdtWithPlainTime, PlainDateGetter, PlainDateMethodName, PlainDateTimeGetter,
@@ -74,14 +74,15 @@ import arc/vm/value.{
   TemporalPlainMonthDayKind, TemporalPlainTimeKind, TemporalPlainYearMonthKind,
   TemporalProtos, TemporalStatic, TemporalTimeSlot, TemporalYearMonthSlot,
   TemporalZonedDateTimeKind, TemporalZonedDateTimeSlot, TgHour, TgMicrosecond,
-  TgMillisecond, TgMinute, TgNanosecond, TgSecond, YmCalendarId, YmDaysInMonth,
-  YmDaysInYear, YmEra, YmEraYear, YmInLeapYear, YmMonth, YmMonthCode,
-  YmMonthsInYear, YmYear, ZgDate, ZgEpochMilliseconds, ZgEpochNanoseconds,
-  ZgHoursInDay, ZgOffset, ZgOffsetNanoseconds, ZgTime, ZgTimeZoneId, ZmAdd,
-  ZmEquals, ZmGetTimeZoneTransition, ZmRound, ZmSince, ZmStartOfDay, ZmSubtract,
-  ZmToInstant, ZmToJson, ZmToLocaleString, ZmToPlainDate, ZmToPlainDateTime,
-  ZmToPlainTime, ZmToString, ZmUntil, ZmValueOf, ZmWith, ZmWithCalendar,
-  ZmWithPlainTime, ZmWithTimeZone, ZonedDateTimeGetter, ZonedDateTimeMethodName,
+  TgMillisecond, TgMinute, TgNanosecond, TgSecond, TzNamed, TzOffset, TzUtc,
+  YmCalendarId, YmDaysInMonth, YmDaysInYear, YmEra, YmEraYear, YmInLeapYear,
+  YmMonth, YmMonthCode, YmMonthsInYear, YmYear, ZgDate, ZgEpochMilliseconds,
+  ZgEpochNanoseconds, ZgHoursInDay, ZgOffset, ZgOffsetNanoseconds, ZgTime,
+  ZgTimeZoneId, ZmAdd, ZmEquals, ZmGetTimeZoneTransition, ZmRound, ZmSince,
+  ZmStartOfDay, ZmSubtract, ZmToInstant, ZmToJson, ZmToLocaleString,
+  ZmToPlainDate, ZmToPlainDateTime, ZmToPlainTime, ZmToString, ZmUntil,
+  ZmValueOf, ZmWith, ZmWithCalendar, ZmWithPlainTime, ZmWithTimeZone,
+  ZonedDateTimeGetter, ZonedDateTimeMethodName,
 }
 import gleam/float
 import gleam/int
@@ -1180,7 +1181,7 @@ fn this_instant(state: State(host), this: JsValue) -> Option(Int) {
 fn this_zoned(
   state: State(host),
   this: JsValue,
-) -> Option(#(Int, String, tcal.Calendar)) {
+) -> Option(#(Int, TimeZone, tcal.Calendar)) {
   case read_kind(state, this) {
     Some(TemporalZonedDateTimeSlot(epoch_ns:, time_zone:, calendar:)) ->
       Some(#(epoch_ns, time_zone, calendar))
@@ -1398,7 +1399,7 @@ fn make_zoned(
   state: State(host),
   protos: TemporalProtos,
   ns: Int,
-  tz: String,
+  tz: TimeZone,
 ) -> #(State(host), JsValue) {
   make_zoned_cal(state, protos, ns, tz, tcal.Iso8601)
 }
@@ -1407,7 +1408,7 @@ fn make_zoned_cal(
   state: State(host),
   protos: TemporalProtos,
   ns: Int,
-  tz: String,
+  tz: TimeZone,
   cal: tcal.Calendar,
 ) -> #(State(host), JsValue) {
   alloc_value(
@@ -2240,11 +2241,12 @@ fn parse_plain_datetime_string(s: String) -> Result(ParsedIso, TErr) {
 // "UTC", and fixed numeric offsets
 // ============================================================================
 
-/// Parse + canonicalize a time zone identifier. Returns the canonical id.
+/// Parse + validate a time zone identifier into a resolved `TimeZone`.
 /// Accepts bare identifiers ("UTC", "+05:30") and ISO date-time strings that
 /// carry a [TimeZone] annotation, a Z designator, or a numeric offset
-/// (ParseTemporalTimeZoneString).
-fn parse_time_zone_id(id: String) -> Result(String, TErr) {
+/// (ParseTemporalTimeZoneString). An unrecognised identifier is a RangeError
+/// here — no unresolved zone ever escapes.
+fn parse_time_zone_id(id: String) -> Result(TimeZone, TErr) {
   case parse_time_zone_id_strict(id) {
     Ok(tz) -> Ok(tz)
     Error(StrictUnknown) -> tz_from_datetime_string(id)
@@ -2260,15 +2262,15 @@ type StrictTzError {
 
 /// ParseTimeZoneIdentifier: bare identifiers only (UTC, offsets, IANA names);
 /// ISO date-time strings are not identifiers (the constructor rejects them).
-fn parse_time_zone_id_strict(id: String) -> Result(String, StrictTzError) {
+fn parse_time_zone_id_strict(id: String) -> Result(TimeZone, StrictTzError) {
   case string.uppercase(id) == "UTC" {
-    True -> Ok("UTC")
+    True -> Ok(TzUtc)
     False ->
       case parse_offset_tz_id(id) {
-        Some(canonical) -> Ok(canonical)
+        Some(ns) -> Ok(TzOffset(ns:))
         None ->
           case temporal_tz.lookup(id) {
-            Ok(zone) -> Ok(temporal_tz.zone_id(zone))
+            Ok(zone) -> Ok(TzNamed(zone:))
             Error(Nil) ->
               case is_tz_annotation(id) {
                 True -> Error(StrictInvalid(unsupported_tz(id)))
@@ -2281,32 +2283,32 @@ fn parse_time_zone_id_strict(id: String) -> Result(String, StrictTzError) {
 
 /// Extract a time zone from an ISO date-time string: annotation wins, then
 /// the Z designator (-> "UTC"), then a minute-precision numeric offset.
-fn tz_from_datetime_string(s: String) -> Result(String, TErr) {
+fn tz_from_datetime_string(s: String) -> Result(TimeZone, TErr) {
   case parse_iso_datetime_string(s) {
     None -> Error(RangeE("invalid time zone: " <> s))
     Some(p) ->
       case p.tz {
         Some(tz_str) ->
           case string.uppercase(tz_str) == "UTC" {
-            True -> Ok("UTC")
+            True -> Ok(TzUtc)
             False ->
               case parse_offset_tz_id(tz_str) {
-                Some(canonical) -> Ok(canonical)
+                Some(ns) -> Ok(TzOffset(ns:))
                 None ->
                   case temporal_tz.lookup(tz_str) {
-                    Ok(zone) -> Ok(temporal_tz.zone_id(zone))
+                    Ok(zone) -> Ok(TzNamed(zone:))
                     Error(Nil) -> Error(unsupported_tz(tz_str))
                   }
               }
           }
         None ->
           case p.offset {
-            Zulu -> Ok("UTC")
+            Zulu -> Ok(TzUtc)
             NumericOffset(off, sub_minute) ->
               // The offset must be syntactically minute-precision: a
               // seconds component (even ":00") is not a valid zone.
               case !sub_minute && off % ns_per_minute == 0 {
-                True -> Ok(format_offset_minutes(off))
+                True -> Ok(TzOffset(ns: off))
                 False ->
                   Error(RangeE("sub-minute offset not valid as a time zone"))
               }
@@ -2317,8 +2319,8 @@ fn tz_from_datetime_string(s: String) -> Result(String, TErr) {
 }
 
 /// Offset time zone identifier: ±HH[:MM] (minute precision only).
-/// Canonical form is ±HH:MM.
-fn parse_offset_tz_id(id: String) -> Option(String) {
+/// Returns the offset in nanoseconds.
+fn parse_offset_tz_id(id: String) -> Option(Int) {
   let sign = case id {
     "+" <> _ -> 1
     "-" <> _ -> -1
@@ -2332,7 +2334,7 @@ fn parse_offset_tz_id(id: String) -> Option(String) {
         // offset time zone identifier, even when it is ":00".
         Some(#(NumericOffset(ns, False), "")) ->
           case ns % ns_per_minute == 0 && int.absolute_value(ns) < ns_per_day {
-            True -> Some(format_offset_minutes(ns))
+            True -> Some(ns)
             False -> None
           }
         _ -> None
@@ -2340,33 +2342,13 @@ fn parse_offset_tz_id(id: String) -> Option(String) {
   }
 }
 
-/// Zone id classification: "UTC", fixed offset, or named IANA zone. A
-/// `NamedZone` carries the *validated* `temporal_tz.Zone`, so classification
-/// is the single place a raw id is checked against the tzdata name table.
-type TzKind {
-  UtcZone
-  OffsetZone(Int)
-  NamedZone(temporal_tz.Zone)
-  /// Not "UTC", not a numeric offset, and not in the tzdata name table.
-  UnknownZone
-}
-
-fn tz_kind(tz: String) -> TzKind {
+/// The identifier for a resolved time zone — the `.timeZoneId` getter and
+/// the bracket annotation in ISO strings.
+fn time_zone_id(tz: TimeZone) -> String {
   case tz {
-    "UTC" -> UtcZone
-    "+" <> _ | "-" <> _ ->
-      case parse_offset_part(tz) {
-        Some(#(NumericOffset(ns, _), "")) -> OffsetZone(ns)
-        _ -> named_or_unknown(tz)
-      }
-    _ -> named_or_unknown(tz)
-  }
-}
-
-fn named_or_unknown(tz: String) -> TzKind {
-  case temporal_tz.lookup(tz) {
-    Ok(zone) -> NamedZone(zone)
-    Error(Nil) -> UnknownZone
+    TzUtc -> "UTC"
+    TzOffset(ns:) -> format_offset_minutes(ns)
+    TzNamed(zone:) -> temporal_tz.zone_id(zone)
   }
 }
 
@@ -2376,21 +2358,22 @@ fn unsupported_tz(tz: String) -> TErr {
 
 /// A zone whose name we accepted but whose tzdata will not load is a broken
 /// install, not an unknown identifier: same RangeError, but the reason says so.
-fn unloadable_tz(tz: String, error: temporal_tz.TzError) -> TErr {
+fn unloadable_tz(tz: TimeZone, error: temporal_tz.TzError) -> TErr {
   RangeE(
-    "time zone " <> tz <> " cannot be loaded: " <> temporal_tz.describe(error),
+    "time zone "
+    <> time_zone_id(tz)
+    <> " cannot be loaded: "
+    <> temporal_tz.describe(error),
   )
 }
 
 /// GetOffsetNanosecondsFor — UTC offset of `tz` at an exact instant.
-/// RangeError when a named zone's TZif data cannot be loaded (same error as
-/// an unsupported time zone identifier).
-fn tz_offset_ns_at(tz: String, epoch_ns: Int) -> Result(Int, TErr) {
-  case tz_kind(tz) {
-    UtcZone -> Ok(0)
-    OffsetZone(off) -> Ok(off)
-    UnknownZone -> Error(unsupported_tz(tz))
-    NamedZone(zone) ->
+/// RangeError when a named zone's TZif data cannot be loaded.
+fn tz_offset_ns_at(tz: TimeZone, epoch_ns: Int) -> Result(Int, TErr) {
+  case tz {
+    TzUtc -> Ok(0)
+    TzOffset(ns:) -> Ok(ns)
+    TzNamed(zone:) ->
       temporal_tz.offset_ns_at(zone, epoch_ns)
       |> result.map_error(unloadable_tz(tz, _))
   }
@@ -2399,7 +2382,7 @@ fn tz_offset_ns_at(tz: String, epoch_ns: Int) -> Result(Int, TErr) {
 /// Wall-clock date/time of `epoch_ns` in `tz`.
 /// RangeError when a named zone's TZif data cannot be loaded.
 fn epoch_ns_to_iso_in(
-  tz: String,
+  tz: TimeZone,
   epoch_ns: Int,
 ) -> Result(#(IsoDate, TimeRec), TErr) {
   use off <- result.map(tz_offset_ns_at(tz, epoch_ns))
@@ -2426,18 +2409,18 @@ fn check_iso_days_range(d: IsoDate) -> Result(Nil, TErr) {
 /// by an offset transition; two entries for repeated times.
 /// RangeError when the (offset-shifted) date is outside the supported range.
 fn get_possible_epoch_ns(
-  tz: String,
+  tz: TimeZone,
   d: IsoDate,
   t: TimeRec,
 ) -> Result(List(Int), TErr) {
   let utc = utc_epoch_ns(d, t)
-  case tz_kind(tz) {
-    UtcZone -> {
+  case tz {
+    TzUtc -> {
       use Nil <- result.try(check_iso_days_range(d))
       use ns <- result.map(validate_epoch_ns(utc))
       [ns]
     }
-    OffsetZone(off) -> {
+    TzOffset(ns: off) -> {
       let shifted_day = floor_div(utc - off, ns_per_day)
       use Nil <- result.try(
         check_iso_days_range(iso_date_from_epoch_days(shifted_day)),
@@ -2445,11 +2428,14 @@ fn get_possible_epoch_ns(
       use ns <- result.map(validate_epoch_ns(utc - off))
       [ns]
     }
-    UnknownZone -> Error(unsupported_tz(tz))
-    NamedZone(zone) -> {
+    TzNamed(zone:) -> {
       use Nil <- result.try(check_iso_days_range(d))
-      use before <- result.try(tz_offset_ns_at(tz, utc - ns_per_day))
-      use after <- result.try(tz_offset_ns_at(tz, utc + ns_per_day))
+      let named_offset = fn(at) {
+        temporal_tz.offset_ns_at(zone, at)
+        |> result.map_error(unloadable_tz(tz, _))
+      }
+      use before <- result.try(named_offset(utc - ns_per_day))
+      use after <- result.try(named_offset(utc + ns_per_day))
       let candidates = case before == after {
         True -> [before]
         False -> [before, after]
@@ -2470,7 +2456,7 @@ fn get_possible_epoch_ns(
 /// DisambiguatePossibleEpochNanoseconds.
 fn disambiguate_epoch_ns(
   possible: List(Int),
-  tz: String,
+  tz: TimeZone,
   d: IsoDate,
   t: TimeRec,
   dis: Disambiguation,
@@ -2518,7 +2504,7 @@ fn disambiguate_epoch_ns(
 
 /// GetEpochNanosecondsFor.
 fn get_epoch_ns_for(
-  tz: String,
+  tz: TimeZone,
   d: IsoDate,
   t: TimeRec,
   dis: Disambiguation,
@@ -2528,27 +2514,29 @@ fn get_epoch_ns_for(
 }
 
 /// GetStartOfDay.
-fn start_of_day_ns(tz: String, d: IsoDate) -> Result(Int, TErr) {
+fn start_of_day_ns(tz: TimeZone, d: IsoDate) -> Result(Int, TErr) {
   use possible <- result.try(get_possible_epoch_ns(tz, d, midnight))
   case possible {
     [first, ..] -> validate_epoch_ns(first)
-    [] -> {
+    [] ->
       // Midnight lies in a DST gap; only named zones can reach here. The day
       // starts at the instant the gap ends: the next transition after a
       // point guaranteed to be before it (one day earlier).
-      use day_before <- result.try(validate_epoch_ns(
-        utc_epoch_ns(d, midnight) - ns_per_day,
-      ))
-      use zone <- result.try(case tz_kind(tz) {
-        NamedZone(zone) -> Ok(zone)
-        UtcZone | OffsetZone(_) | UnknownZone -> Error(unsupported_tz(tz))
-      })
-      case temporal_tz.next_transition_ns(zone, day_before) {
-        Ok(Some(transition)) -> validate_epoch_ns(transition)
-        Ok(None) -> Error(RangeE("no start of day for skipped midnight"))
-        Error(err) -> Error(unloadable_tz(tz, err))
+      case tz {
+        TzUtc | TzOffset(_) ->
+          // Unreachable: fixed-offset zones never skip a wall-clock time.
+          Error(RangeE("no start of day for skipped midnight"))
+        TzNamed(zone:) -> {
+          use day_before <- result.try(validate_epoch_ns(
+            utc_epoch_ns(d, midnight) - ns_per_day,
+          ))
+          case temporal_tz.next_transition_ns(zone, day_before) {
+            Ok(Some(transition)) -> validate_epoch_ns(transition)
+            Ok(None) -> Error(RangeE("no start of day for skipped midnight"))
+            Error(err) -> Error(unloadable_tz(tz, err))
+          }
+        }
       }
-    }
   }
 }
 
@@ -2566,7 +2554,7 @@ fn interpret_offset(
   d: IsoDate,
   t: TimeRec,
   behaviour: OffsetBehaviour,
-  tz: String,
+  tz: TimeZone,
   dis: Disambiguation,
   offset_opt: OffsetOption,
   match_minutes: Bool,
@@ -2628,18 +2616,16 @@ fn format_offset_rounded(offset_ns: Int) -> String {
   format_offset_minutes(round_to_increment(offset_ns, ns_per_minute, HalfExpand))
 }
 
-/// TimeZoneEquals — identical ids, or named ids resolving to the same
-/// canonical zone (links like Asia/Calcutta -> Asia/Kolkata). Etc/UTC and its
+/// TimeZoneEquals — identical zones, or named zones resolving to the same
+/// canonical id (links like Asia/Calcutta -> Asia/Kolkata). Etc/UTC and its
 /// links canonicalize to "UTC", so a named zone can equal the UTC zone.
-fn time_zone_equals(a: String, b: String) -> Bool {
+fn time_zone_equals(a: TimeZone, b: TimeZone) -> Bool {
   a == b
-  || case tz_kind(a), tz_kind(b) {
-    OffsetZone(_), _ | _, OffsetZone(_) -> False
-    UnknownZone, _ | _, UnknownZone -> False
-    UtcZone, UtcZone -> True
-    UtcZone, NamedZone(z) | NamedZone(z), UtcZone ->
-      temporal_tz.canonical(z) == "UTC"
-    NamedZone(za), NamedZone(zb) ->
+  || case a, b {
+    TzOffset(_), _ | _, TzOffset(_) -> False
+    TzUtc, TzUtc -> True
+    TzUtc, TzNamed(z) | TzNamed(z), TzUtc -> temporal_tz.canonical(z) == "UTC"
+    TzNamed(za), TzNamed(zb) ->
       temporal_tz.canonical(za) == temporal_tz.canonical(zb)
   }
 }
@@ -3287,21 +3273,11 @@ fn read_date_time_fields(
     False -> Ok(#(None, state))
   })
   use #(second, state) <- result.try(read_int_field(state, ref, "second"))
-  use #(tz_raw, state) <- result.try(case read_tz {
+  use #(tz, state) <- result.try(case read_tz {
     True -> ops_object.get_value(state, ref, Named("timeZone"), JsObject(ref))
     False -> Ok(#(JsUndefined, state))
   })
   use #(year, state) <- result.map(read_int_field(state, ref, "year"))
-  // ToTemporalTimeZoneIdentifier: a ZonedDateTime contributes its time zone.
-  let tz = case tz_raw {
-    JsObject(tz_ref) ->
-      case heap.read(state.heap, tz_ref) {
-        Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(time_zone:, ..), ..)) ->
-          JsString(time_zone)
-        _ -> tz_raw
-      }
-    _ -> tz_raw
-  }
   #(
     DateTimeFields(
       date: DateFields(day:, era:, era_year:, month:, month_code:, year:),
@@ -3311,6 +3287,24 @@ fn read_date_time_fields(
     ),
     state,
   )
+}
+
+/// ToTemporalTimeZoneIdentifier — a string is parsed; a ZonedDateTime
+/// contributes its own resolved time zone; anything else is a TypeError.
+fn to_temporal_time_zone(
+  state: State(host),
+  v: JsValue,
+) -> Result(#(TimeZone, State(host)), #(JsValue, State(host))) {
+  case v {
+    JsString(s) -> terr_op(state, parse_time_zone_id(s))
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(time_zone:, ..), ..)) ->
+          Ok(#(time_zone, state))
+        _ -> type_error_result(state, "timeZone must be a string")
+      }
+    _ -> type_error_result(state, "timeZone must be a string")
+  }
 }
 
 /// Resolve the arithmetic year from year/era/eraYear fields. The fields must
@@ -5280,7 +5274,7 @@ fn to_temporal_zoned(
   item: JsValue,
   options: JsValue,
 ) -> Result(
-  #(#(Int, String, tcal.Calendar), State(host)),
+  #(#(Int, TimeZone, tcal.Calendar), State(host)),
   #(JsValue, State(host)),
 ) {
   case item {
@@ -5332,7 +5326,7 @@ fn validated_zdt_options(
 
 fn parse_zoned_string(
   s: String,
-) -> Result(#(IsoDate, Option(TimeRec), ParsedOffset, String), TErr) {
+) -> Result(#(IsoDate, Option(TimeRec), ParsedOffset, TimeZone), TErr) {
   case parse_iso_datetime_string(s) {
     None -> Error(RangeE("invalid ZonedDateTime string: " <> s))
     Some(p) -> {
@@ -5358,7 +5352,7 @@ fn zoned_string_epoch_ns(
   d: IsoDate,
   t_opt: Option(TimeRec),
   offset: ParsedOffset,
-  tz: String,
+  tz: TimeZone,
   dis: Disambiguation,
   offset_opt: OffsetOption,
 ) -> Result(Int, TErr) {
@@ -5414,7 +5408,7 @@ fn zoned_from_bag(
   ref: Ref,
   options: JsValue,
 ) -> Result(
-  #(#(Int, String, tcal.Calendar), State(host)),
+  #(#(Int, TimeZone, tcal.Calendar), State(host)),
   #(JsValue, State(host)),
 ) {
   use #(cal, state) <- result.try(read_bag_calendar(state, ref))
@@ -5428,8 +5422,8 @@ fn zoned_from_bag(
   // timeZone is required.
   case f.tz {
     JsUndefined -> type_error_result(state, "timeZone is required")
-    JsString(tz_str) -> {
-      use tz <- terr_r(state, parse_time_zone_id(tz_str))
+    tz_val -> {
+      use #(tz, state) <- result.try(to_temporal_time_zone(state, tz_val))
       use #(#(dis, offset_opt, ov), state) <- result.try(validated_zdt_options(
         state,
         options,
@@ -5447,7 +5441,6 @@ fn zoned_from_bag(
       )
       Ok(#(#(ens, tz, cal), state))
     }
-    _ -> type_error_result(state, "timeZone must be a string")
   }
 }
 
@@ -5486,7 +5479,7 @@ fn read_bag_offset(
 type RelTo {
   RelNone
   RelPlain(date: IsoDate, cal: tcal.Calendar)
-  RelZoned(epoch_ns: Int, tz: String, cal: tcal.Calendar)
+  RelZoned(epoch_ns: Int, tz: TimeZone, cal: tcal.Calendar)
 }
 
 /// GetTemporalRelativeToOption, after the `relativeTo` value itself has been
@@ -5588,8 +5581,8 @@ fn relative_from_bag(
         True -> Ok(#(RelPlain(date, cal), state))
         False -> range_error_result(state, "date outside of supported range")
       }
-    JsString(tz_str) -> {
-      use tz <- terr_r(state, parse_time_zone_id(tz_str))
+    tz_val -> {
+      use #(tz, state) <- result.try(to_temporal_time_zone(state, tz_val))
       let behaviour = case f.offset {
         Some(o) -> OptionOffset(o)
         None -> WallOffset
@@ -5608,7 +5601,6 @@ fn relative_from_bag(
       )
       Ok(#(RelZoned(ens, tz, cal), state))
     }
-    _ -> type_error_result(state, "timeZone must be a string")
   }
 }
 
@@ -5616,7 +5608,7 @@ fn relative_from_bag(
 /// added exactly to the epoch instant.
 fn add_zoned_ns(
   ns: Int,
-  tz: String,
+  tz: TimeZone,
   cal: tcal.Calendar,
   dur: DurRec,
 ) -> Result(Int, TErr) {
@@ -6172,14 +6164,14 @@ fn instant_field(ns: Int, g: TemporalInstantGetter) -> JsValue {
 fn zoned_field(
   state: State(host),
   ns: Int,
-  tz: String,
+  tz: TimeZone,
   zcal: tcal.Calendar,
   g: TemporalZonedGetter,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use offset <- terr(state, tz_offset_ns_at(tz, ns))
   let #(d, t) = epoch_ns_to_iso(ns, offset)
   case g {
-    ZgTimeZoneId -> #(state, Ok(JsString(tz)))
+    ZgTimeZoneId -> #(state, Ok(JsString(time_zone_id(tz))))
     ZgEpochMilliseconds -> #(
       state,
       Ok(value.from_int(floor_div(ns, ns_per_ms))),
@@ -6251,9 +6243,9 @@ fn now_dispatch(
 fn now_tz_arg(
   state: State(host),
   args: List(JsValue),
-) -> Result(#(String, State(host)), #(JsValue, State(host))) {
+) -> Result(#(TimeZone, State(host)), #(JsValue, State(host))) {
   case helpers.arg_at(args, 0) {
-    JsUndefined -> Ok(#("UTC", state))
+    JsUndefined -> Ok(#(TzUtc, state))
     JsString(s) -> terr_op(state, parse_time_zone_id(s))
     _ -> type_error_result(state, "time zone must be a string")
   }
@@ -9386,7 +9378,7 @@ fn duration_round_with(
 /// final day and carries into it when it overflows.
 fn zoned_diff_round_time(
   cal: tcal.Calendar,
-  tz: String,
+  tz: TimeZone,
   a_ns: Int,
   b_ns: Int,
   largest: Unit,
@@ -9467,7 +9459,7 @@ fn zoned_diff_round_time(
 /// NudgeToZonedTime: round the time remainder within the (variable-length)
 /// final day, carrying into it on overflow and bubbling into larger units.
 fn zoned_nudge_time(
-  tz: String,
+  tz: TimeZone,
   a_dt: #(IsoDate, TimeRec),
   start_date: IsoDate,
   start_ns: Int,
@@ -10197,8 +10189,8 @@ fn zoned_date_time_method(
           }
           let with_tz = case tz_mode {
             TzNever -> with_offset
-            TzCritical -> with_offset <> "[!" <> tz <> "]"
-            TzAuto -> with_offset <> "[" <> tz <> "]"
+            TzCritical -> with_offset <> "[!" <> time_zone_id(tz) <> "]"
+            TzAuto -> with_offset <> "[" <> time_zone_id(tz) <> "]"
           }
           let s = with_tz <> calendar_suffix(cal_name, zcal)
           #(state, Ok(JsString(s)))
@@ -10470,8 +10462,9 @@ fn zoned_date_time_method(
             _ -> type_error_result(state, "invalid direction")
           })
           // UTC and offset zones have no transitions.
-          case tz_kind(tz) {
-            NamedZone(zone) -> {
+          case tz {
+            TzUtc | TzOffset(_) -> #(state, Ok(JsNull))
+            TzNamed(zone:) -> {
               let found = case dir {
                 Next -> temporal_tz.next_transition_ns(zone, ns)
                 Previous -> temporal_tz.prev_transition_ns(zone, ns)
@@ -10492,7 +10485,6 @@ fn zoned_date_time_method(
                 Error(err) -> throw_terr(state, unloadable_tz(tz, err))
               }
             }
-            UtcZone | OffsetZone(_) | UnknownZone -> #(state, Ok(JsNull))
           }
         }
         ZmToInstant -> {
@@ -10521,9 +10513,9 @@ fn zoned_until_since(
   protos: TemporalProtos,
   cal: tcal.Calendar,
   a_ns: Int,
-  a_tz: String,
+  a_tz: TimeZone,
   b_ns: Int,
-  b_tz: String,
+  b_tz: TimeZone,
   args: List(JsValue),
   is_since: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
@@ -10579,7 +10571,11 @@ fn zoned_until_since(
   }
 }
 
-fn format_zoned(ns: Int, tz: String, prec: Precision) -> Result(String, TErr) {
+fn format_zoned(
+  ns: Int,
+  tz: TimeZone,
+  prec: Precision,
+) -> Result(String, TErr) {
   use off <- result.map(tz_offset_ns_at(tz, ns))
   let #(d, t) = epoch_ns_to_iso(ns, off)
   format_iso_date(d)
@@ -10587,6 +10583,6 @@ fn format_zoned(ns: Int, tz: String, prec: Precision) -> Result(String, TErr) {
   <> format_iso_time(t, prec)
   <> format_offset_rounded(off)
   <> "["
-  <> tz
+  <> time_zone_id(tz)
   <> "]"
 }
