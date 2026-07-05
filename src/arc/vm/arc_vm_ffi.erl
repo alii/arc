@@ -59,10 +59,14 @@ setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) ->
 %%       function case; the hot clause writes the seeds inline right after
 %%       the env values, no intermediate seeds list. The type — not a
 %%       convention — guarantees the layout this clause assumes.
-%%   {captured_lexical_slots, LT, LA, LH, LN}          — subset inherited via
-%%       captures ({some, SlotIdx} | none each).
 %%   no_lexical_slots                                  — none at all.
-%% The latter two fall through to the generic per-Some path.
+%% The Gleam type also has a `captured_lexical_slots` variant, but that is
+%% assigned only to arrows (scope.gleam owns_lexical), and setup_frame calls
+%% setup_locals_tuple/6 for those — so it never reaches here. Left unmatched
+%% on purpose: seeding call-time This/FnObj/Home/NT into captured slots (which
+%% already hold parent box refs from Env, at non-contiguous indices) would be
+%% silently wrong; a case_clause crash is the right answer if the compiler-side
+%% invariant is ever broken.
 setup_locals_seeded(Env, {owned_lexical_slots, _Base},
                     This, FnObj, Home, NT, Args, Arity, LocalCount, Undef)
         when LocalCount >= 4 ->
@@ -71,7 +75,6 @@ setup_locals_seeded(Env, Lexical,
                     This, FnObj, Home, NT, Args, Arity, LocalCount, Undef) ->
     {LT, LA, LH, LN} = case Lexical of
         {owned_lexical_slots, B} -> {{some, B}, {some, B + 1}, {some, B + 2}, {some, B + 3}};
-        {captured_lexical_slots, T, A, H, N} -> {T, A, H, N};
         no_lexical_slots -> {none, none, none, none}
     end,
     S0 = seed(LN, NT, []),
