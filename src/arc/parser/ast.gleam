@@ -2,6 +2,7 @@
 /// Based on the ESTree specification, adapted for Gleam's type system.
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 
 pub type Program {
   Script(body: List(StmtWithLine))
@@ -34,6 +35,56 @@ pub type NamedBinding {
 /// makes a cooked/raw length mismatch unrepresentable.
 pub type TemplateQuasi {
   TemplateQuasi(cooked: Option(String), raw: String)
+}
+
+/// The interleaved shape of a template: `` `head ${e0} q0 ${e1} q1` `` — a
+/// leading quasi followed by zero or more `${expression} quasi` pairs. Storing
+/// the alternation itself (rather than two parallel lists) makes the grammar's
+/// "exactly one more quasi than expressions" invariant hold by construction:
+/// a quasi/expression count mismatch is unrepresentable, so consumers fold
+/// over `tail` with no empty-list or trailing-expression special cases.
+///
+/// Generic in the quasi payload: a plain `TemplateLiteral` carries cooked
+/// `String`s, a `TaggedTemplateExpression` carries `TemplateQuasi` (cooked+raw).
+pub type TemplateParts(quasi) {
+  TemplateParts(head: quasi, tail: List(#(Expression, quasi)))
+}
+
+/// Every quasi of a template, in source order (always `expressions + 1` of them).
+pub fn template_quasis(parts: TemplateParts(a)) -> List(a) {
+  [parts.head, ..list.map(parts.tail, fn(part) { part.1 })]
+}
+
+/// Every substitution expression of a template, in source order.
+pub fn template_expressions(parts: TemplateParts(a)) -> List(Expression) {
+  list.map(parts.tail, fn(part) { part.0 })
+}
+
+/// Rewrite each quasi, keeping the interleaving (used to cook raw quasis).
+pub fn map_template_quasis(
+  parts: TemplateParts(a),
+  with f: fn(a) -> b,
+) -> TemplateParts(b) {
+  TemplateParts(
+    head: f(parts.head),
+    tail: list.map(parts.tail, fn(part) { #(part.0, f(part.1)) }),
+  )
+}
+
+/// Like `map_template_quasis`, but the rewrite can fail (an invalid escape in
+/// an untagged template is a SyntaxError, §12.9.6).
+pub fn try_map_template_quasis(
+  parts: TemplateParts(a),
+  with f: fn(a) -> Result(b, e),
+) -> Result(TemplateParts(b), e) {
+  use head <- result.try(f(parts.head))
+  use tail <- result.map(
+    list.try_map(parts.tail, fn(part) {
+      use quasi <- result.map(f(part.1))
+      #(part.0, quasi)
+    }),
+  )
+  TemplateParts(head:, tail:)
 }
 
 /// Which meta property a `MetaProperty` expression is. The grammar only has
@@ -183,14 +234,11 @@ pub type Statement {
     is_await: Bool,
   )
   SwitchStatement(discriminant: Expression, cases: List(SwitchCase))
-  /// `block` and `finalizer` are the raw statement lists of the `{...}`
-  /// Blocks the grammar requires (§14.15) — not `Statement`s. A `try` whose
-  /// block "wasn't a Block" is unspellable, so no consumer needs a fallback.
-  TryStatement(
-    block: List(StmtWithLine),
-    handler: Option(CatchClause),
-    finalizer: Option(List(StmtWithLine)),
-  )
+  /// `block` and the tail's `finalizer` are the raw statement lists of the
+  /// `{...}` Blocks the grammar requires (§14.15) — not `Statement`s. A `try`
+  /// whose block "wasn't a Block" is unspellable, so no consumer needs a
+  /// fallback.
+  TryStatement(block: List(StmtWithLine), tail: TryTail)
   BreakStatement(label: Option(String))
   ContinueStatement(label: Option(String))
   DebuggerStatement
@@ -232,6 +280,15 @@ pub type SwitchCase {
 /// grammar admits nothing else there.
 pub type CatchClause {
   CatchClause(param: Option(Pattern), body: List(StmtWithLine))
+}
+
+/// What follows a `try` block. The grammar (§14.15) requires at least one of
+/// `catch` / `finally`, so a bare `try {}` is unrepresentable — every consumer
+/// matches exactly these three shapes and none needs a "neither" fallback.
+pub type TryTail {
+  TryCatch(handler: CatchClause)
+  TryFinally(finalizer: List(StmtWithLine))
+  TryCatchFinally(handler: CatchClause, finalizer: List(StmtWithLine))
 }
 
 /// The function a method definition (§15.4) or a `function`/`class` element
@@ -402,19 +459,14 @@ pub type Expression {
   AwaitExpression(span: Span, argument: Expression)
   SequenceExpression(span: Span, expressions: List(Expression))
   SpreadElement(span: Span, argument: Expression)
-  TemplateLiteral(
-    span: Span,
-    quasis: List(String),
-    expressions: List(Expression),
-  )
+  TemplateLiteral(span: Span, parts: TemplateParts(String))
   /// Tagged template: tag`raw0 ${e0} raw1`. Each quasi carries its cooked
   /// value (None for an invalid escape sequence — legal in tagged templates,
   /// the entry becomes undefined) alongside its verbatim raw text.
   TaggedTemplateExpression(
     span: Span,
     tag: Expression,
-    quasis: List(TemplateQuasi),
-    expressions: List(Expression),
+    parts: TemplateParts(TemplateQuasi),
   )
   /// `new.target` / `import.meta` (§13.3.12, §13.3.13).
   MetaProperty(span: Span, kind: MetaPropertyKind)

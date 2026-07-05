@@ -111,14 +111,14 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
       }
       list.append(init_vars, collect_vars_stmt(body))
     }
-    ast.TryStatement(block, handler, finalizer) -> {
-      let handler_vars = case handler {
-        Some(ast.CatchClause(_, body)) -> collect_vars_stmts(body)
-        None -> []
+    ast.TryStatement(block, tail) -> {
+      let tail_vars = case tail {
+        ast.TryCatch(ast.CatchClause(_, body)) -> collect_vars_stmts(body)
+        ast.TryFinally(finalizer) -> collect_vars_stmts(finalizer)
+        ast.TryCatchFinally(ast.CatchClause(_, body), finalizer) ->
+          list.append(collect_vars_stmts(body), collect_vars_stmts(finalizer))
       }
-      let finally_vars =
-        finalizer |> option.map(collect_vars_stmts) |> option.unwrap([])
-      list.flatten([collect_vars_stmts(block), handler_vars, finally_vars])
+      list.append(collect_vars_stmts(block), tail_vars)
     }
     ast.ForInStatement(left, _, body) | ast.ForOfStatement(left, _, body, ..) -> {
       let left_vars = case left {

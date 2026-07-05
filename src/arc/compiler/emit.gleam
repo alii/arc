@@ -2751,30 +2751,27 @@ fn emit_stmt_tail(
     // runs the finalizer via Gosub), tracking the completion value in a
     // synthetic binding (the finalizer body is excluded — §14.15.3: a
     // normally-completing Finally never supplies the completion value).
-    ast.TryStatement(_, _, Some(_)) -> emit_stmt_tail_completion(e, stmt)
+    ast.TryStatement(_, ast.TryFinally(..))
+    | ast.TryStatement(_, ast.TryCatchFinally(..)) ->
+      emit_stmt_tail_completion(e, stmt)
 
-    ast.TryStatement(block, handler, None) -> {
-      case handler {
-        Some(ast.CatchClause(param, catch_body)) -> {
-          let #(e, catch_label) = fresh_label(e)
-          let #(e, end_label) = fresh_label(e)
+    ast.TryStatement(block, ast.TryCatch(ast.CatchClause(param, catch_body))) -> {
+      let #(e, catch_label) = fresh_label(e)
+      let #(e, end_label) = fresh_label(e)
 
-          let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
-          use e <- result.try(emit_block(e, block, tail: True))
-          let e = emit_op(e, opcode.PopTry)
-          let e = emit_ir(e, IrJump(end_label))
+      let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
+      use e <- result.try(emit_block(e, block, tail: True))
+      let e = emit_op(e, opcode.PopTry)
+      let e = emit_ir(e, IrJump(end_label))
 
-          use e <- result.map(
-            emit_catch_clause(e, catch_label, param, emit_block(
-              _,
-              catch_body,
-              tail: True,
-            )),
-          )
-          emit_ir(e, IrLabel(end_label))
-        }
-        None -> emit_block(e, block, tail: True)
-      }
+      use e <- result.map(
+        emit_catch_clause(e, catch_label, param, emit_block(
+          _,
+          catch_body,
+          tail: True,
+        )),
+      )
+      emit_ir(e, IrLabel(end_label))
     }
 
     ast.WithStatement(object, body) -> emit_with(e, object, body, tail: True)
@@ -3818,10 +3815,10 @@ fn emit_stmt_inner(
       emit_op(e, opcode.Throw)
     }
 
-    ast.TryStatement(block, handler, finalizer) -> {
-      case handler, finalizer {
+    ast.TryStatement(block, tail) -> {
+      case tail {
         // try/catch (no finally)
-        Some(ast.CatchClause(param, catch_body)), None -> {
+        ast.TryCatch(ast.CatchClause(param, catch_body)) -> {
           let #(e, catch_label) = fresh_label(e)
           let #(e, end_label) = fresh_label(e)
 
@@ -3844,7 +3841,7 @@ fn emit_stmt_inner(
 
         // try/finally (no catch). QuickJS js_parse_try TOK_FINALLY-only path
         // (quickjs.c:28917-28922 + 28926-28962).
-        None, Some(finally_body) -> {
+        ast.TryFinally(finally_body) -> {
           let #(e, throw_label) = fresh_label(e)
           let #(e, fin_label) = fresh_label(e)
           let #(e, end_label) = fresh_label(e)
@@ -3873,7 +3870,7 @@ fn emit_stmt_inner(
         // (quickjs.c:28824-28912 + 28926-28962). Arc keeps the existing
         // two-PushTry-upfront structure (vs QuickJS's catch2-inside-handler) so
         // throws during catch-param destructuring are also wrapped by finally.
-        Some(ast.CatchClause(param, catch_body)), Some(finally_body) -> {
+        ast.TryCatchFinally(ast.CatchClause(param, catch_body), finally_body) -> {
           use e, catch_label, fin_label <- emit_try_catch_finally(
             e,
             emit_block(_, block, tail: False),
@@ -3885,9 +3882,6 @@ fn emit_stmt_inner(
           use e <- result.map(emit_block(e, catch_body, tail: False))
           pop_frame(e)
         }
-
-        // try with neither catch nor finally (shouldn't happen per spec, but handle gracefully)
-        None, None -> emit_block(e, block, tail: False)
       }
     }
 
@@ -4864,8 +4858,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Template literal: `text ${expr} more`
     // Desugar to string concatenation: "" + "text " + expr + " more"
-    ast.TemplateLiteral(_, quasis, expressions) ->
-      emit_template_literal(e, quasis, expressions)
+    ast.TemplateLiteral(_, parts) -> emit_template_literal(e, parts)
 
     // Class expression
     ast.ClassExpression(_, name, super_class, body) -> {
@@ -4965,9 +4958,14 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // the per-site template object as the first argument, reusing the
     // regular CallExpression paths so this-binding works (obj.tag`x` calls
     // tag with this = obj, §13.3.6.2 EvaluateCall).
-    ast.TaggedTemplateExpression(tag:, quasis:, expressions:, span:) -> {
+    ast.TaggedTemplateExpression(tag:, parts:, span:) -> {
       let site = unique_positive_integer()
-      let template = ast.IntrinsicTemplateObject(site:, quasis:, span:)
+      let template =
+        ast.IntrinsicTemplateObject(
+          site:,
+          quasis: ast.template_quasis(parts),
+          span:,
+        )
       // §13.3.11.1 step 1 note: a tagged template is never a direct eval —
       // wrap a bare `eval` tag in parens to dodge the IrCallEval path.
       let tag = case tag {
@@ -4979,7 +4977,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         e,
         ast.CallExpression(span:, callee: tag, arguments: [
           template,
-          ..expressions
+          ..ast.template_expressions(parts)
         ]),
       )
     }
@@ -5005,49 +5003,23 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
 fn emit_template_literal(
   e: Emitter,
-  quasis: List(String),
-  expressions: List(ast.Expression),
+  parts: ast.TemplateParts(String),
 ) -> Result(Emitter, EmitError) {
-  // Template literal `a${x}b${y}c` has quasis=["a","b","c"], expressions=[x,y]
-  // Desugar to: "a" + x + "b" + y + "c"
-  case quasis {
-    [] -> Ok(push_const(e, JsString("")))
-    [first, ..rest_quasis] -> {
-      // Start with the first quasi string
-      let e = push_const(e, JsString(first))
-      // Interleave: for each expression, Add it, then Add the next quasi
-      emit_template_parts(e, expressions, rest_quasis)
-    }
-  }
-}
-
-fn emit_template_parts(
-  e: Emitter,
-  expressions: List(ast.Expression),
-  quasis: List(String),
-) -> Result(Emitter, EmitError) {
-  case expressions, quasis {
-    [expr, ..rest_exprs], [quasi, ..rest_quasis] -> {
-      // Emit expression, ToString it (§13.2.8.5 — string hint, NOT the Add
-      // operator's default-hint ToPrimitive), then concat with accumulator.
-      use e <- result.try(emit_expr(e, expr))
-      let e = emit_op(e, opcode.ToStringVal)
-      let e = emit_ir(e, IrBinOp(opcode.Add))
-      // Emit next quasi string, concat
-      let e = push_const(e, JsString(quasi))
-      let e = emit_ir(e, IrBinOp(opcode.Add))
-      emit_template_parts(e, rest_exprs, rest_quasis)
-    }
-    // If there are trailing expressions without quasis (shouldn't happen but safe)
-    [expr, ..rest_exprs], [] -> {
-      use e <- result.try(emit_expr(e, expr))
-      let e = emit_op(e, opcode.ToStringVal)
-      let e = emit_ir(e, IrBinOp(opcode.Add))
-      emit_template_parts(e, rest_exprs, [])
-    }
-    // Done
-    [], _ -> Ok(e)
-  }
+  // `a${x}b${y}c` is TemplateParts(head: "a", tail: [#(x, "b"), #(y, "c")]).
+  // Desugar to: "a" + x + "b" + y + "c". The alternation is total by
+  // construction — no empty-quasis or trailing-expression case exists.
+  let e = push_const(e, JsString(parts.head))
+  list.try_fold(parts.tail, e, fn(e, part) {
+    let #(expr, quasi) = part
+    // Emit expression, ToString it (§13.2.8.5 — string hint, NOT the Add
+    // operator's default-hint ToPrimitive), then concat with accumulator.
+    use e <- result.map(emit_expr(e, expr))
+    let e = emit_op(e, opcode.ToStringVal)
+    let e = emit_ir(e, IrBinOp(opcode.Add))
+    // Emit the following quasi string, concat.
+    let e = push_const(e, JsString(quasi))
+    emit_ir(e, IrBinOp(opcode.Add))
+  })
 }
 
 fn emit_switch(

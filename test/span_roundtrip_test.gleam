@@ -407,9 +407,10 @@ pub fn template_substitution_expression_span_roundtrip_test() {
   let assert [_, ast.StmtWithLine(statement: stmt, ..)] =
     script_statements(source)
   let assert ast.ExpressionStatement(
-    expression: ast.TemplateLiteral(expressions: [first, second, ..], ..),
+    expression: ast.TemplateLiteral(parts:, ..),
     ..,
   ) = stmt
+  let assert [first, second, ..] = ast.template_expressions(parts)
   assert slice_span(source, first.span) == "foo(π) + 1"
   assert slice_span(source, second.span) == "bar"
 }
