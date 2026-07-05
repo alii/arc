@@ -557,6 +557,49 @@ pub fn direct_eval_native(
   }
 }
 
+/// Read one of the caller frame's locals; the index (not `Nil`) is the error,
+/// so the thrower can name the slot that was missing.
+fn read_local_slot(state: State(host), idx: Int) -> Result(JsValue, Int) {
+  tuple_array.get(idx, state.locals) |> option.to_result(idx)
+}
+
+/// The caller's boxed captures for a direct eval: first one per name-table
+/// entry (in table order), then the caller's lexical slots in
+/// `all_lexical_refs` order — exactly the order `compile_eval_direct` allocates
+/// capture slots in.
+///
+/// A slot index the caller's locals don't have is a name-table/locals desync,
+/// i.e. an engine bug; it throws instead of seeding `undefined` into a boxed
+/// capture, where it would silently read back as an `undefined` variable.
+fn with_caller_box_refs(
+  state: State(host),
+  name_table: List(#(String, Int)),
+  parent_slots: opcode.LexicalSlots,
+  k: fn(List(JsValue)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let box_refs = {
+    use named <- result.try(
+      list.try_map(name_table, fn(pair) { read_local_slot(state, pair.1) }),
+    )
+    use lexical <- result.map(
+      opcode.all_lexical_refs
+      |> list.filter_map(fn(ref) {
+        opcode.lexical_slot(parent_slots, ref) |> option.to_result(Nil)
+      })
+      |> list.try_map(read_local_slot(state, _)),
+    )
+    list.append(named, lexical)
+  }
+  case box_refs {
+    Error(idx) ->
+      state.type_error(
+        state,
+        "direct eval: local slot " <> int.to_string(idx) <> " missing",
+      )
+    Ok(box_refs) -> k(box_refs)
+  }
+}
+
 fn run_direct_eval(
   source: String,
   names: value.EvalNameTable,
@@ -612,19 +655,7 @@ fn run_direct_eval(
   // in canonical order (one per Some entry in parent_slots — same order
   // compile_eval_direct allocates capture slots). Remaining slots default to
   // undefined.
-  let caller_box_refs =
-    list.map(name_table, fn(pair) {
-      tuple_array.get(pair.1, state.locals)
-      |> option.unwrap(JsUndefined)
-    })
-  let lexical_box_refs =
-    list.filter_map(opcode.all_lexical_refs, fn(ref) {
-      use idx <- result.map(
-        opcode.lexical_slot(parent_slots, ref) |> option.to_result(Nil),
-      )
-      tuple_array.get(idx, state.locals) |> option.unwrap(JsUndefined)
-    })
-  let caller_box_refs = list.append(caller_box_refs, lexical_box_refs)
+  use caller_box_refs <- with_caller_box_refs(state, name_table, parent_slots)
   let remaining = template.local_count - list.length(caller_box_refs)
   let locals =
     list.append(caller_box_refs, list.repeat(JsUndefined, remaining))
@@ -1367,6 +1398,29 @@ fn do_shadow_realm_evaluate(
   }
 }
 
+/// Resolve the two realms a wrapped function bridges into their intrinsics.
+/// A ref that isn't a registered realm means the wrapper outlived (or never
+/// saw) its realm's registration — an engine bug — so it throws instead of
+/// silently substituting whatever realm happens to be running.
+fn with_wrapped_realms(
+  state: State(host),
+  caller_realm: Ref,
+  target_realm: Ref,
+  k: fn(Builtins, Builtins) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let realms = {
+    use caller <- result.try(read_realm(state, caller_realm))
+    use target <- result.map(read_realm(state, target_realm))
+    #(caller.builtins, target.builtins)
+  }
+  case realms {
+    Error(err) ->
+      state.type_error(state, "wrapped function: " <> realm_lookup_message(err))
+    Ok(#(caller_builtins, target_builtins)) ->
+      k(caller_builtins, target_builtins)
+  }
+}
+
 /// Wrapped function exotic object [[Call]] — proposal §2.1.
 fn wrapped_function_call(
   target: JsValue,
@@ -1377,14 +1431,11 @@ fn wrapped_function_call(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Every TypeError thrown here belongs to F.[[Realm]] (the caller realm).
-  let caller_builtins = case dict.get(state.ctx.realms, caller_realm) {
-    Ok(b) -> b
-    Error(Nil) -> state.builtins
-  }
-  let target_builtins = case dict.get(state.ctx.realms, target_realm) {
-    Ok(b) -> b
-    Error(Nil) -> state.builtins
-  }
+  use caller_builtins, target_builtins <- with_wrapped_realms(
+    state,
+    caller_realm,
+    target_realm,
+  )
   // Steps 6-7: wrap thisArgument and every argument into the target realm.
   let #(state, wrapped_this_res) =
     get_wrapped_value(

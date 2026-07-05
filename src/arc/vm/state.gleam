@@ -618,16 +618,21 @@ fn format_frame(frame: #(Option(String), Int)) -> String {
 }
 
 /// Read Error.stackTraceLimit off the Error constructor. Non-numbers fall back
-/// to the default; Infinity means "no limit"; negatives clamp to 0 (no frames).
+/// to the default; Infinity means "no limit"; negatives and NaN clamp to 0 (no
+/// frames). Every JsNum variant is matched, so a number can never fall through
+/// to the "not a number" default.
 fn stack_trace_limit(state: State(host)) -> Int {
   case heap.read(state.heap, state.builtins.error.constructor) {
     option.Some(value.ObjectSlot(properties:, ..)) ->
       case dict.get(properties, Named("stackTraceLimit")) {
-        Ok(value.DataProperty(value: value.JsNumber(value.Finite(n)), ..)) ->
-          int.max(0, float.truncate(n))
-        Ok(value.DataProperty(value: value.JsNumber(value.Infinity), ..)) ->
-          // Effectively unbounded — far above any real call depth.
-          1_000_000
+        Ok(value.DataProperty(value: value.JsNumber(n), ..)) ->
+          case n {
+            value.Finite(f) -> int.max(0, float.truncate(f))
+            // Effectively unbounded — far above any real call depth.
+            value.Infinity -> 1_000_000
+            // -Infinity is a negative limit; NaN's ToIntegerOrInfinity is 0.
+            value.NegInfinity | value.NaN -> 0
+          }
         _ -> default_stack_limit
       }
     _ -> default_stack_limit
