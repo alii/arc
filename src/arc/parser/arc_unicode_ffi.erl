@@ -22,16 +22,30 @@ is_id_continue(CP) -> in_ranges(CP, table(id_continue)).
 %% -- range tables ---------------------------------------------------------
 
 %% Tuple of {Lo, Hi} pairs (inclusive, sorted, disjoint) so lookups are a pure
-%% O(log n) binary search. arc_unicode_tables decodes and caches it.
+%% O(log n) binary search. arc_unicode_tables decodes it (once per node).
 %%
+%% These predicates run once per source character, so the fetch is memoized
+%% here too, under a FLAT atom-only persistent_term key. Reaching through
+%% arc_unicode_tables:range_tuple/1 on every call would re-hash the nested
+%% `{arc_unicode_tables, {range_tuple, <<"bin:ID_Start">>}}` key each time —
+%% about twice the cost of looking up `{?MODULE, id_start}`.
+table(Which) ->
+    case persistent_term:get({?MODULE, Which}, undefined) of
+        undefined -> load_table(Which);
+        Ranges -> Ranges
+    end.
+
 %% The generated table carrying these two properties is a hard build
 %% invariant: without it every identifier in every source file would be
 %% rejected. Crash on a missing key rather than answer `false` forever.
-table(Which) ->
+load_table(Which) ->
     Key = table_key(Which),
     case arc_unicode_tables:range_tuple(Key) of
-        none -> erlang:error({missing_unicode_table, Key});
-        Ranges -> Ranges
+        none ->
+            erlang:error({missing_unicode_table, Key});
+        Ranges ->
+            persistent_term:put({?MODULE, Which}, Ranges),
+            Ranges
     end.
 
 table_key(id_start) -> <<"bin:ID_Start">>;
