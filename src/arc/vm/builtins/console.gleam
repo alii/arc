@@ -4,8 +4,8 @@ import arc/vm/builtins/common
 import arc/vm/builtins/number
 import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/ops/coerce
+import arc/vm/ops/numeric
 import arc/vm/ops/object
-import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type ConsoleNativeFn, type JsValue, type Ref, ConsoleLog, ConsoleLogError,
@@ -182,25 +182,18 @@ fn spec(
     // and Node prints "NaN". Do not "simplify" this into the %d arm.
     "i", [head, ..rest] -> {
       let radix = JsNumber(value.Finite(10.0))
-      let #(state, res) =
-        number.dispatch(value.GlobalParseInt, [head, radix], JsUndefined, state)
-      case res {
-        Ok(JsNumber(n)) -> Ok(Some(#(number_substitution(n), rest, state)))
-        Ok(other) -> Ok(Some(#(object.inspect(other, state.heap), rest, state)))
-        Error(thrown) -> Error(#(thrown, state))
+      case number.parse_int_value(state, head, radix) {
+        #(state, Ok(n)) -> Ok(Some(#(number_substitution(n), rest, state)))
+        #(state, Error(thrown)) -> Error(#(thrown, state))
       }
     }
     // §2.2.1 step 4.3: "%f shall be converted by Call(%parseFloat%,
     // undefined, « current »)". Same ToString-only coercion note as %i.
-    "f", [head, ..rest] -> {
-      let #(state, res) =
-        number.dispatch(value.GlobalParseFloat, [head], JsUndefined, state)
-      case res {
-        Ok(JsNumber(n)) -> Ok(Some(#(number_substitution(n), rest, state)))
-        Ok(other) -> Ok(Some(#(object.inspect(other, state.heap), rest, state)))
-        Error(thrown) -> Error(#(thrown, state))
+    "f", [head, ..rest] ->
+      case number.parse_float_value(state, head) {
+        #(state, Ok(n)) -> Ok(Some(#(number_substitution(n), rest, state)))
+        #(state, Error(thrown)) -> Error(#(thrown, state))
       }
-    }
     "o", [head, ..rest] | "O", [head, ..rest] ->
       Ok(Some(#(object.inspect(head, state.heap), rest, state)))
     // %c is CSS styling — meaningless on a terminal, so it consumes its arg
@@ -222,7 +215,7 @@ fn spec(
 fn number_substitution(n: value.JsNum) -> String {
   case n {
     value.Finite(f) ->
-      case operators.is_neg_zero(f) {
+      case numeric.is_neg_zero(f) {
         True -> "-0"
         False -> value.js_format_number(f)
       }

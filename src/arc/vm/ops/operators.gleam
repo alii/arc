@@ -7,6 +7,14 @@ import arc/vm/binop.{
 }
 import arc/vm/heap.{type Heap}
 import arc/vm/opcode.{type UnaryOpKind, BitNot, LogicalNot, Neg, Pos, Void}
+
+// The Number primitive library. `ops/operators` is the operator DISPATCHER;
+// the IEEE 754 arithmetic and the ToInt32/ToUint32 reductions it applies live
+// in `ops/numeric`, where `builtins/math` and `ops/coerce` also reach for them.
+import arc/vm/ops/numeric.{
+  num_div, num_exp, num_mod, num_mul, num_negate, num_sub, num_to_int32,
+  num_to_uint32, wrap_int32, wrap_uint32,
+}
 import arc/vm/value.{
   type JsNum, type JsValue, BigInt, Finite, Infinity, JsBigInt, JsBool, JsNumber,
   JsString, NaN, NegInfinity,
@@ -106,7 +114,11 @@ fn arith_num_op(op: ArithOp) -> fn(JsNum, JsNum) -> JsNum {
 }
 
 /// Bitwise / shifts — BigInt×BigInt operates on arbitrary precision
-/// (§6.1.6.2), mixed types throw, Number path converts to i32.
+/// (§6.1.6.2), mixed types throw, Number path converts to i32/u32.
+///
+/// Every Number arm goes through `int32_binop`/`uint32_binop`, which own the
+/// wrap: an operator implementation here can only describe the raw Int
+/// operation, never whether its result is re-wrapped.
 fn exec_bitwise(
   op: BitwiseOp,
   left: JsValue,
@@ -117,27 +129,26 @@ fn exec_bitwise(
     JsBigInt(_), _ | _, JsBigInt(_) -> Error(bigint_mix_error)
     _, _ ->
       case op {
-        AndOp -> bitwise_binop(left, right, int.bitwise_and)
-        OrOp -> bitwise_binop(left, right, int.bitwise_or)
-        XorOp -> bitwise_binop(left, right, int.bitwise_exclusive_or)
+        AndOp -> int32_binop(left, right, int.bitwise_and)
+        OrOp -> int32_binop(left, right, int.bitwise_or)
+        XorOp -> int32_binop(left, right, int.bitwise_exclusive_or)
         // §6.1.6.1.9 Number::leftShift: the raw shift of an int32 by up
-        // to 31 bits needs up to 62 bits on the BEAM's unbounded Ints, so
-        // the result MUST be re-wrapped to int32 (`(1<<31)|0` is
-        // -2147483648, not 2147483648).
+        // to 31 bits needs up to 62 bits on the BEAM's unbounded Ints —
+        // `int32_binop`'s wrap is what makes `(1<<31)|0` -2147483648
+        // rather than 2147483648.
         ShlOp -> {
-          use a, b <- bitwise_binop(left, right)
-          wrap_int32(int.bitwise_shift_left(a, int.bitwise_and(b, 31)))
+          use a, b <- int32_binop(left, right)
+          int.bitwise_shift_left(a, int.bitwise_and(b, 31))
         }
         ShrOp -> {
-          use a, b <- bitwise_binop(left, right)
+          use a, b <- int32_binop(left, right)
           int.bitwise_shift_right(a, int.bitwise_and(b, 31))
         }
+        // §6.1.6.1.11 Number::unsignedRightShift is the ONE bitwise op whose
+        // operand and result are unsigned — hence its own combinator.
         UShrOp -> {
-          use a, b <- bitwise_binop(left, right)
-          int.bitwise_shift_right(
-            int.bitwise_and(a, 0xFFFFFFFF),
-            int.bitwise_and(b, 31),
-          )
+          use a, b <- uint32_binop(left, right)
+          int.bitwise_shift_right(a, int.bitwise_and(b, 31))
         }
       }
   }
@@ -339,11 +350,11 @@ pub fn loose_equal(left: JsValue, right: JsValue) -> Bool {
     // Step 12: BigInt × Number — equal mathematical values only.
     JsBigInt(BigInt(a)), JsNumber(n) -> bigint_equals_number(a, n)
     JsNumber(n), JsBigInt(BigInt(b)) -> bigint_equals_number(b, n)
-    // Steps 5/8/9: Number × String → ToNumber(String).
+    // Steps 5/8/9: Number × String → ToNumber(String), which is total on a
+    // String (an unparseable one is NaN, and NaN is strictly-equal to
+    // nothing) — no Result to unwrap, no error class to swallow.
     JsNumber(_), JsString(s) ->
-      value.to_number(JsString(s))
-      |> result.map(fn(n) { value.strict_equal(left, JsNumber(n)) })
-      |> result.unwrap(False)
+      value.strict_equal(left, JsNumber(value.string_to_number(s)))
     JsString(_), JsNumber(_) -> loose_equal(right, left)
     _, _ -> False
   }
@@ -363,278 +374,8 @@ fn bigint_equals_number(a: Int, n: JsNum) -> Bool {
 }
 
 // ============================================================================
-// JsNum arithmetic — IEEE 754 semantics without BEAM floats for special values
+// Coercing combinators — the operand ToNumber/ToInt32/ToUint32 wrappers
 // ============================================================================
-
-pub fn num_add(a: JsNum, b: JsNum) -> JsNum {
-  case a, b {
-    NaN, _ | _, NaN -> NaN
-    Infinity, NegInfinity | NegInfinity, Infinity -> NaN
-    Infinity, _ | _, Infinity -> Infinity
-    NegInfinity, _ | _, NegInfinity -> NegInfinity
-    Finite(x), Finite(y) -> Finite(x +. y)
-  }
-}
-
-fn num_sub(a: JsNum, b: JsNum) -> JsNum {
-  num_add(a, num_negate(b))
-}
-
-fn num_mul(a: JsNum, b: JsNum) -> JsNum {
-  case a, b {
-    NaN, _ | _, NaN -> NaN
-    // ±0 * ±Infinity -> NaN. Never pattern-match a `0.0` literal: on
-    // OTP >= 27 it does not match -0.0, so use a guard that catches both.
-    Infinity, Finite(x) | Finite(x), Infinity if x >=. 0.0 && x <=. 0.0 -> NaN
-    NegInfinity, Finite(x) | Finite(x), NegInfinity if x >=. 0.0 && x <=. 0.0 ->
-      NaN
-    Infinity, Finite(x) | Finite(x), Infinity ->
-      case x >. 0.0 {
-        True -> Infinity
-        False -> NegInfinity
-      }
-    NegInfinity, Finite(x) | Finite(x), NegInfinity ->
-      case x >. 0.0 {
-        True -> NegInfinity
-        False -> Infinity
-      }
-    Infinity, Infinity | NegInfinity, NegInfinity -> Infinity
-    Infinity, NegInfinity | NegInfinity, Infinity -> NegInfinity
-    Finite(x), Finite(y) -> Finite(x *. y)
-  }
-}
-
-fn num_div(a: JsNum, b: JsNum) -> JsNum {
-  case a, b {
-    NaN, _ | _, NaN -> NaN
-    Infinity, Infinity
-    | Infinity, NegInfinity
-    | NegInfinity, Infinity
-    | NegInfinity, NegInfinity
-    -> NaN
-    Infinity, Finite(x) ->
-      case is_negative_float(x) {
-        True -> NegInfinity
-        False -> Infinity
-      }
-    NegInfinity, Finite(x) ->
-      case is_negative_float(x) {
-        True -> Infinity
-        False -> NegInfinity
-      }
-    Finite(x), Infinity ->
-      case is_negative_float(x) {
-        True -> Finite(-0.0)
-        False -> Finite(0.0)
-      }
-    Finite(x), NegInfinity ->
-      case is_negative_float(x) {
-        True -> Finite(0.0)
-        False -> Finite(-0.0)
-      }
-    // 0 / 0 = NaN (covers both ±0 / ±0)
-    Finite(0.0), Finite(0.0)
-    | Finite(-0.0), Finite(0.0)
-    | Finite(0.0), Finite(-0.0)
-    | Finite(-0.0), Finite(-0.0)
-    -> NaN
-    // x / ±0 = ±Infinity (sign depends on both operands)
-    Finite(x), Finite(0.0) ->
-      case x >. 0.0 {
-        True -> Infinity
-        False -> NegInfinity
-      }
-    Finite(x), Finite(-0.0) ->
-      case x >. 0.0 {
-        True -> NegInfinity
-        False -> Infinity
-      }
-    Finite(x), Finite(y) -> Finite(x /. y)
-  }
-}
-
-/// Check if a float is negative (including -0.0) — i.e. its IEEE sign bit is
-/// set. THE test to use whenever a sign decision must treat -0 as negative:
-/// a bare `x <. 0.0` (or its inverse `x >=. 0.0`) is False for -0.0 and
-/// silently picks the +0 branch.
-pub fn is_negative_float(x: Float) -> Bool {
-  x <. 0.0 || is_neg_zero(x)
-}
-
-fn num_mod(a: JsNum, b: JsNum) -> JsNum {
-  case a, b {
-    NaN, _ | _, NaN -> NaN
-    Infinity, _ | NegInfinity, _ -> NaN
-    _, Infinity | _, NegInfinity -> a
-    Finite(x), Finite(y) ->
-      // +. 0.0 normalizes -0.0 so the zero-divisor check catches both zeros
-      // (BEAM == on floats is =:=, which distinguishes them).
-      case y +. 0.0 == 0.0 {
-        True -> NaN
-        // §6.1.6.1.6 Number::remainder is C fmod: result is exact and takes
-        // the SIGN OF THE DIVIDEND — -1 % -1 is -0, -0 % 5 is -0. The old
-        // truncate-based formula returned +0 for all zero results and lost
-        // precision for |x/y| beyond Int->Float range.
-        False -> Finite(fmod(x, y))
-      }
-  }
-}
-
-@external(erlang, "math", "fmod")
-fn fmod(x: Float, y: Float) -> Float
-
-/// Exponentiation per ES2024 §6.1.6.1.3 Number::exponentiate. This is THE
-/// implementation — the `**` operator and `Math.pow` both route here.
-pub fn num_exp(base: JsNum, exp: JsNum) -> JsNum {
-  case base, exp {
-    // 1. If exponent is NaN, return NaN
-    _, NaN -> NaN
-    // 2. If exponent is +0 or -0, return 1 (even for NaN/Infinity base).
-    // Guard, not a `Finite(0.0)` literal pattern: on OTP >= 27 the literal
-    // only matches +0.0, so a -0.0 exponent would fall through to the
-    // finite/infinite arms below and produce the wrong answer.
-    _, Finite(e) if e >=. 0.0 && e <=. 0.0 -> Finite(1.0)
-    // 3. If base is NaN, return NaN
-    NaN, _ -> NaN
-    // 4-5. ±Infinity base with ±Infinity exponent
-    Infinity, Infinity -> Infinity
-    Infinity, NegInfinity -> Finite(0.0)
-    NegInfinity, Infinity -> Infinity
-    NegInfinity, NegInfinity -> Finite(0.0)
-    // abs(base) vs 1 with ±Infinity exponent
-    Finite(x), Infinity -> num_exp_finite_inf(x)
-    Finite(x), NegInfinity -> num_exp_finite_neginf(x)
-    // 6-7. Base is +Infinity
-    Infinity, Finite(y) ->
-      case y >. 0.0 {
-        True -> Infinity
-        False -> Finite(0.0)
-      }
-    // 8-11. Base is -Infinity
-    NegInfinity, Finite(y) ->
-      case y >. 0.0 {
-        True ->
-          case is_odd_integer(y) {
-            True -> NegInfinity
-            False -> Infinity
-          }
-        False ->
-          case is_odd_integer(y) {
-            True -> Finite(-0.0)
-            False -> Finite(0.0)
-          }
-      }
-    // 12-17. Base is ±0
-    Finite(x), Finite(y) -> num_exp_finite(x, y)
-  }
-}
-
-fn num_exp_finite_inf(x: Float) -> JsNum {
-  let abs_x = float.absolute_value(x)
-  case abs_x >. 1.0 {
-    True -> Infinity
-    False ->
-      case abs_x <. 1.0 {
-        True -> Finite(0.0)
-        // abs == 1
-        False -> NaN
-      }
-  }
-}
-
-fn num_exp_finite_neginf(x: Float) -> JsNum {
-  let abs_x = float.absolute_value(x)
-  case abs_x >. 1.0 {
-    True -> Finite(0.0)
-    False ->
-      case abs_x <. 1.0 {
-        True -> Infinity
-        // abs == 1
-        False -> NaN
-      }
-  }
-}
-
-fn num_exp_finite(x: Float, y: Float) -> JsNum {
-  case is_neg_zero(x) {
-    // Base is -0
-    True ->
-      case y >. 0.0 {
-        True ->
-          case is_odd_integer(y) {
-            True -> Finite(-0.0)
-            False -> Finite(0.0)
-          }
-        False ->
-          case is_odd_integer(y) {
-            True -> NegInfinity
-            False -> Infinity
-          }
-      }
-    False ->
-      case x == 0.0 {
-        // Base is +0
-        True ->
-          case y >. 0.0 {
-            True -> Finite(0.0)
-            False -> Infinity
-          }
-        // Normal finite case
-        False ->
-          case x <. 0.0 {
-            True ->
-              case value.integral_int(y) {
-                // pow_total returns ±Infinity (sign from the odd/even
-                // integer exponent) when |x^y| overflows a 64-bit float.
-                Some(_) -> pow_total(x, y)
-                // Non-integer exponent with negative base
-                None -> NaN
-              }
-            // pow_total returns +Infinity when x^y overflows.
-            False -> pow_total(x, y)
-          }
-      }
-  }
-}
-
-/// Check if a float is an odd integer.
-fn is_odd_integer(f: Float) -> Bool {
-  value.integral_int(f)
-  |> option.map(int.is_odd)
-  |> option.unwrap(False)
-}
-
-/// `math:pow/2` made total: Erlang raises `badarith` when the true result
-/// overflows a 64-bit float (or the base is negative with a non-integer
-/// exponent), so the FFI catches it and returns the JsNum the spec requires
-/// instead of crashing the VM.
-@external(erlang, "arc_math_ffi", "pow")
-fn pow_total(base: Float, exp: Float) -> JsNum
-
-/// True for both +0.0 and -0.0 (companion to `is_neg_zero`).
-///
-/// Always use this instead of a `0.0` literal in a case pattern or an
-/// `x == 0.0` comparison: on OTP >= 27 both of those compile to `=:=`
-/// semantics and are True/matched only for +0.0, silently missing -0.0.
-/// The `>=.`/`<=.` pair is an arithmetic comparison, which treats the two
-/// zeros as equal. Usable anywhere; in a guard position (where function
-/// calls are not allowed) inline the same expression:
-/// `Finite(n) if n >=. 0.0 && n <=. 0.0 -> ...`
-pub fn is_zero(x: Float) -> Bool {
-  x >=. 0.0 && x <=. 0.0
-}
-
-@external(erlang, "arc_math_ffi", "is_neg_zero")
-pub fn is_neg_zero(x: Float) -> Bool
-
-pub fn num_negate(n: JsNum) -> JsNum {
-  case n {
-    Finite(x) -> Finite(float.negate(x))
-    NaN -> NaN
-    Infinity -> NegInfinity
-    NegInfinity -> Infinity
-  }
-}
 
 /// Apply a JsNum binary operation after coercing both operands to numbers.
 pub fn num_binop(
@@ -653,6 +394,40 @@ pub fn num_binop(
     }
   }
 }
+
+/// Apply a signed 32-bit bitwise operation: ToInt32 both operands, run `op` on
+/// the exact BEAM Ints, then wrap the RESULT back to int32.
+///
+/// The wrap belongs to the combinator, not to `op`: the BEAM's Ints are
+/// unbounded, so a `<<` (or any future op) whose raw result overflows 32 bits
+/// would otherwise leak a value no int32 can hold — `(1 << 31) | 0` must be
+/// -2147483648. `op` therefore only ever describes the raw operation, and a
+/// new i32 operator cannot forget the wrap.
+fn int32_binop(
+  left: JsValue,
+  right: JsValue,
+  op: fn(Int, Int) -> Int,
+) -> Result(JsValue, OpError) {
+  use a <- result.try(to_number(left))
+  use b <- result.map(to_number(right))
+  value.from_int(wrap_int32(op(num_to_int32(a), num_to_int32(b))))
+}
+
+/// `int32_binop`'s unsigned twin, for §6.1.6.1.11 Number::unsignedRightShift:
+/// operands are ToUint32'd and the result is wrapped back to uint32.
+fn uint32_binop(
+  left: JsValue,
+  right: JsValue,
+  op: fn(Int, Int) -> Int,
+) -> Result(JsValue, OpError) {
+  use a <- result.try(to_number(left))
+  use b <- result.map(to_number(right))
+  value.from_int(wrap_uint32(op(num_to_uint32(a), num_to_uint32(b))))
+}
+
+// ============================================================================
+// Comparison
+// ============================================================================
 
 // Relational fast paths for Number × Number (§7.2.13 IsLessThan with both
 // operands Numbers): NaN on either side is unordered (`compare_nums` returns
@@ -680,21 +455,6 @@ fn num_gt_eq(a: JsNum, b: JsNum) -> Bool {
     LtOrd | UnorderedOrd -> False
   }
 }
-
-/// Apply a bitwise binary operation (convert to i32, operate, convert back).
-fn bitwise_binop(
-  left: JsValue,
-  right: JsValue,
-  op: fn(Int, Int) -> Int,
-) -> Result(JsValue, OpError) {
-  use a <- result.try(to_number(left))
-  use b <- result.map(to_number(right))
-  value.from_int(op(num_to_int32(a), num_to_int32(b)))
-}
-
-// ============================================================================
-// Comparison
-// ============================================================================
 
 /// Comparison order for relational ops. `UnorderedOrd` is the NaN case: it is
 /// a variant rather than an `Option` wrapper so the hot `compare_nums` path
@@ -832,47 +592,8 @@ fn compare_nums(a: JsNum, b: JsNum) -> CompareOrd {
 }
 
 // ============================================================================
-// Helpers
+// typeof
 // ============================================================================
-
-/// §7.1.6 ToInt32 of an already-ToNumber'd value: NaN/±∞ → 0, finite →
-/// truncate toward zero then wrap modulo 2^32 with sign extension. This is
-/// THE ToInt32 — coerce.gleam's `try_to_int32` and every builtin route here.
-pub fn num_to_int32(n: JsNum) -> Int {
-  case n {
-    NaN | Infinity | NegInfinity -> 0
-    Finite(f) -> wrap_int32(float.truncate(f))
-  }
-}
-
-/// §7.1.7 ToUint32 of an already-ToNumber'd value: NaN/±∞ → 0, finite →
-/// truncate toward zero then reduce modulo 2^32 (result in [0, 2^32)).
-pub fn num_to_uint32(n: JsNum) -> Int {
-  case n {
-    NaN | Infinity | NegInfinity -> 0
-    Finite(f) -> wrap_uint32(float.truncate(f))
-  }
-}
-
-/// Wrap an exact Int to a signed 32-bit value: reduce modulo 2^32, then sign
-/// extend. Work on Ints stays on Ints — never round-trip an intermediate
-/// (e.g. a `<<` result or Math.imul's product) through a Float first, or the
-/// low 32 bits get rounded away once the magnitude passes 2^53.
-pub fn wrap_int32(i: Int) -> Int {
-  let wrapped = wrap_uint32(i)
-  // Sign extend if needed
-  case wrapped > 0x7FFFFFFF {
-    True -> wrapped - 0x100000000
-    False -> wrapped
-  }
-}
-
-/// Wrap an exact Int to an unsigned 32-bit value (see `wrap_int32`).
-/// Erlang's `band` on negatives uses infinite two's complement, so this is
-/// a true modulo-2^32 reduction for any sign.
-pub fn wrap_uint32(i: Int) -> Int {
-  int.bitwise_and(i, 0xFFFFFFFF)
-}
 
 /// ES2024 §13.5.3 The typeof Operator
 ///

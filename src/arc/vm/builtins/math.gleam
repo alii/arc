@@ -3,10 +3,10 @@ import arc/vm/builtins/helpers
 import arc/vm/ops/coerce
 
 // `num_exp` (§6.1.6.1.3 Number::exponentiate), the ToInt32/ToUint32
-// reductions and the ±0 float helpers live in the ops layer with the rest of
+// reductions and the ±0 float helpers live in `ops/numeric` with the rest of
 // the JsNum arithmetic — Math.pow/imul/clz32 are just callers. Builtins may
 // depend on ops, never the reverse.
-import arc/vm/ops/operators.{
+import arc/vm/ops/numeric.{
   is_neg_zero, is_negative_float, is_zero, num_exp, num_negate,
 }
 import arc/vm/state.{type Heap, type State}
@@ -387,7 +387,7 @@ fn math_clz32(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use x <- math_unary(args, state)
   // §7.1.7 ToUint32 (NaN/±∞ → 0).
-  let n = operators.num_to_uint32(x)
+  let n = numeric.num_to_uint32(x)
   Finite(int.to_float(count_leading_zeros_32(n)))
 }
 
@@ -398,14 +398,14 @@ fn math_imul(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use a, b <- math_binary(args, state)
   // §7.1.6 ToInt32 (NaN/±∞ → 0) on each operand.
-  let a32 = operators.num_to_int32(a)
-  let b32 = operators.num_to_int32(b)
-  // Wrap the exact Int product with operators.wrap_int32. It must NOT be
+  let a32 = numeric.num_to_int32(a)
+  let b32 = numeric.num_to_int32(b)
+  // Wrap the exact Int product with numeric.wrap_int32. It must NOT be
   // routed through a Float (e.g. `num_to_int32` of `int.to_float(a32 * b32)`):
   // the product can need up to 62 bits, so the low 32 bits — the only ones
   // imul keeps — get rounded away by the f64 conversion whenever
   // |product| > 2^53.
-  Finite(int.to_float(operators.wrap_int32(a32 * b32)))
+  Finite(int.to_float(numeric.wrap_int32(a32 * b32)))
 }
 
 /// Math.expm1(x) — e^x - 1 (more precise for small x)

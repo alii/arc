@@ -1,3 +1,4 @@
+import arc/internal/digits
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
@@ -166,8 +167,23 @@ pub fn dispatch(
     NumberIsInteger -> number_is_integer(args, state)
     NumberPrototypeValueOf -> number_value_of(this, args, state)
     NumberPrototypeToString -> number_to_string(this, args, state)
-    GlobalParseInt -> parse_int(args, state)
-    GlobalParseFloat -> parse_float(args, state)
+    GlobalParseInt -> {
+      let #(val, radix) = case args {
+        [] -> #(JsUndefined, JsUndefined)
+        [val] -> #(val, JsUndefined)
+        [val, radix, ..] -> #(val, radix)
+      }
+      let #(state, res) = parse_int_value(state, val, radix)
+      #(state, result.map(res, JsNumber))
+    }
+    GlobalParseFloat -> {
+      let val = case args {
+        [] -> JsUndefined
+        [val, ..] -> val
+      }
+      let #(state, res) = parse_float_value(state, val)
+      #(state, result.map(res, JsNumber))
+    }
     GlobalIsNaN -> js_is_nan(args, state)
     GlobalIsFinite -> js_is_finite(args, state)
     NumberIsSafeInteger -> number_is_safe_integer(args, state)
@@ -245,19 +261,24 @@ fn bigint_to_float(n: Int) -> JsNum {
 ///  15. If mathInt = 0 and S[0] was -, return -0.
 ///  16. Return sign * mathInt.
 ///
-fn parse_int(
-  args: List(JsValue),
+/// `parseInt` as a plain function on JsValues — no synthesized call frame
+/// needed. `%parseInt%` (`number.dispatch`) and Console's `%i` format
+/// specifier (WHATWG Console §2.2.1 step 4.2, "Call(%parseInt%, undefined,
+/// « current, 10 »)") are both callers. Returns the JsNum, so a caller
+/// rendering it cannot mistake a non-Number for a parse result.
+pub fn parse_int_value(
   state: State(host),
-) -> #(State(host), Result(JsValue, JsValue)) {
+  val: JsValue,
+  radix_val: JsValue,
+) -> #(State(host), Result(value.JsNum, JsValue)) {
   // Step 1: Let inputString be ? ToString(string).
   // Step 2: Let S be TrimString(inputString, START).
-  let str_result = case args {
-    [val, ..] -> {
-      use #(s, state) <- result.map(coerce.js_to_string(state, val))
-      // Step 2: TrimString(inputString, START) — leading whitespace only
-      #(string.trim_start(s), state)
-    }
-    [] -> Ok(#("", state))
+  let str_result = {
+    use #(s, state) <- result.map(coerce.js_to_string(state, val))
+    // Step 2: TrimString(inputString, START) — leading whitespace only.
+    // NOT `string.trim_start`: that is Erlang's Unicode White_Space set,
+    // not the spec's StrWhiteSpace set (NBSP, ZWNBSP, U+2000..200A, ...).
+    #(value.trim_leading_js_whitespace(s), state)
   }
   use str, state <- state.try_op(str_result)
   // Steps 6-9: Determine radix R via ToInt32(radix).
@@ -266,10 +287,6 @@ fn parse_int(
   // wraps a finite radix modulo 2^32 with sign extension — so
   // `parseInt("f", 2**32 + 16)` is 15, not NaN. The full ToNumber runs
   // first (ToPrimitive on objects, honoring an overridden valueOf).
-  let radix_val = case args {
-    [_, r, ..] -> r
-    _ -> JsUndefined
-  }
   use radix_num, state <- coerce.try_to_number(state, radix_val)
   let radix_int = coerce.jsnum_to_int32(radix_num)
   // Steps 3-5: Strip the sign BEFORE the prefix check so "-0x10" still
@@ -297,11 +314,10 @@ fn parse_int(
   }
   // Step 8a: If R < 2 or R > 36, return NaN.
   case radix >= 2 && radix <= 36 {
-    False -> #(state, Ok(JsNumber(NaN)))
+    False -> #(state, Ok(NaN))
     True -> {
       // Steps 11-16: Parse the longest digit prefix and apply the sign.
-      let result = parse_int_digits(str, radix, negative)
-      #(state, Ok(JsNumber(result)))
+      #(state, Ok(parse_int_digits(str, radix, negative)))
     }
   }
 }
@@ -320,23 +336,23 @@ fn parse_int(
 /// StrDecimalLiteral includes: "Infinity", decimal literals with optional
 /// sign, integer literals. Does NOT include "0x" hex, "0o" octal, "0b"
 /// binary, or BigInt "n" suffix.
-fn parse_float(
-  args: List(JsValue),
+/// `parseFloat` as a plain function on JsValues — see `parse_int_value`.
+pub fn parse_float_value(
   state: State(host),
-) -> #(State(host), Result(JsValue, JsValue)) {
+  val: JsValue,
+) -> #(State(host), Result(value.JsNum, JsValue)) {
   // Step 1: Let inputString be ? ToString(string).
   // Step 2: Let trimmedString be TrimString(inputString, START).
-  let str_result = case args {
-    [val, ..] -> {
-      use #(s, state) <- result.map(coerce.js_to_string(state, val))
-      // Step 2: TrimString(inputString, START) — leading whitespace only
-      #(string.trim_start(s), state)
-    }
-    [] -> Ok(#("", state))
+  let str_result = {
+    use #(s, state) <- result.map(coerce.js_to_string(state, val))
+    // Step 2: TrimString(inputString, START) — leading whitespace only.
+    // NOT `string.trim_start`: that is Erlang's Unicode White_Space set,
+    // not the spec's StrWhiteSpace set (NBSP, ZWNBSP, U+2000..200A, ...).
+    #(value.trim_leading_js_whitespace(s), state)
   }
   use str, state <- state.try_op(str_result)
   // Steps 3-6: Take the longest StrDecimalLiteral prefix and convert it.
-  #(state, Ok(JsNumber(parse_decimal_string(str))))
+  #(state, Ok(parse_decimal_string(str)))
 }
 
 /// parseFloat steps 3-6: find the longest prefix of the (already trimmed)
@@ -426,17 +442,12 @@ fn scan_unsigned_decimal(gs: List(String)) -> Int {
 /// Consume a run of ASCII decimal digits; returns #(count, remainder).
 fn scan_digit_run(gs: List(String), count: Int) -> #(Int, List(String)) {
   case gs {
-    ["0", ..rest]
-    | ["1", ..rest]
-    | ["2", ..rest]
-    | ["3", ..rest]
-    | ["4", ..rest]
-    | ["5", ..rest]
-    | ["6", ..rest]
-    | ["7", ..rest]
-    | ["8", ..rest]
-    | ["9", ..rest] -> scan_digit_run(rest, count + 1)
-    _ -> #(count, gs)
+    [ch, ..rest] ->
+      case digits.digit_value(ch) {
+        Some(_) -> scan_digit_run(rest, count + 1)
+        None -> #(count, gs)
+      }
+    [] -> #(count, gs)
   }
 }
 
@@ -856,7 +867,7 @@ fn parse_digits_loop(
         False -> None
       }
     [ch, ..rest] ->
-      case digit_value(ch) {
+      case digits.alnum_value(ch) {
         Some(d) if d < radix ->
           parse_digits_loop(rest, radix, acc * radix + d, True)
         _ ->
@@ -865,52 +876,6 @@ fn parse_digits_loop(
             False -> None
           }
       }
-  }
-}
-
-/// Map a character to its digit value for parseInt radix conversion.
-/// Supports 0-9 (values 0-9) and a-z/A-Z (values 10-35), covering
-/// all radixes from 2 to 36. The caller checks `d < radix` to reject
-/// digits outside the current radix.
-fn digit_value(ch: String) -> Option(Int) {
-  case ch {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    "a" | "A" -> Some(10)
-    "b" | "B" -> Some(11)
-    "c" | "C" -> Some(12)
-    "d" | "D" -> Some(13)
-    "e" | "E" -> Some(14)
-    "f" | "F" -> Some(15)
-    "g" | "G" -> Some(16)
-    "h" | "H" -> Some(17)
-    "i" | "I" -> Some(18)
-    "j" | "J" -> Some(19)
-    "k" | "K" -> Some(20)
-    "l" | "L" -> Some(21)
-    "m" | "M" -> Some(22)
-    "n" | "N" -> Some(23)
-    "o" | "O" -> Some(24)
-    "p" | "P" -> Some(25)
-    "q" | "Q" -> Some(26)
-    "r" | "R" -> Some(27)
-    "s" | "S" -> Some(28)
-    "t" | "T" -> Some(29)
-    "u" | "U" -> Some(30)
-    "v" | "V" -> Some(31)
-    "w" | "W" -> Some(32)
-    "x" | "X" -> Some(33)
-    "y" | "Y" -> Some(34)
-    "z" | "Z" -> Some(35)
-    _ -> None
   }
 }
 

@@ -6,7 +6,7 @@
 //// builtins layer turns parts into strings or {type, value} part objects.
 
 import arc/internal/gregorian.{civil_from_days, floor_div}
-import arc/vm/ops/operators
+import arc/vm/ops/numeric
 import arc/vm/value.{
   type CompactDisplay, type CurrencyDisplay, type Granularity,
   type IntlUseGrouping, type ListFormatStyle, type ListFormatType,
@@ -424,7 +424,7 @@ fn accounting_parens(key: LocaleKey) -> Bool {
 /// Format a finite float per the options. `is_nan`/`is_inf` are handled by
 /// the caller. Returns the full part list including sign/affixes.
 pub fn format_number_parts(opts: NumOpts, x: Float) -> List(Part) {
-  let negative = operators.is_negative_float(x)
+  let negative = numeric.is_negative_float(x)
   let dec = decompose(float.absolute_value(x))
   format_dec_parts(opts, negative, dec)
 }
@@ -1674,7 +1674,7 @@ pub fn rtf_parts_en(
         _ -> "other"
       }
       let unit_text = rtf_unit_en(style, unit, plural)
-      let past = operators.is_negative_float(value)
+      let past = numeric.is_negative_float(value)
       // Numeric parts carry the unit for formatToParts.
       let tagged =
         list.map(value_parts, fn(p: Part) {
@@ -1769,7 +1769,7 @@ pub fn fields_from_epoch_ms(ms: Float, offset_minutes: Int) -> DateFields {
   let second = total_seconds % 60
   let minute = { total_seconds / 60 } % 60
   let hour = total_seconds / 3600
-  let week_day = { { days % 7 } + 11 } % 7
+  let week_day = gregorian.weekday_from_days(days)
   // days → civil date (proleptic Gregorian), epoch = 1970-01-01.
   let #(year, month, day) = civil_from_days(days)
   DateFields(

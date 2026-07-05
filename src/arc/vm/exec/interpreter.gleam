@@ -44,6 +44,7 @@ import arc/vm/opcode.{
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/array_iterator
 import arc/vm/ops/coerce
+import arc/vm/ops/numeric
 import arc/vm/ops/object
 import arc/vm/ops/operators
 import arc/vm/ops/property
@@ -226,12 +227,15 @@ fn frozen_array_slot(
   )
 }
 
-/// Single-record-update equivalent of
-/// `State(..state.merge_globals(parent, child, []), heap:)` — thread VM-global
-/// state (lexical globals, job queue, event-loop counters) from a child
-/// execution back to the parent plus the child's heap in ONE State copy
-/// instead of two. Hot: runs once per re-entrant callback (Array.prototype.map
-/// element calls, promise jobs, ...).
+/// `state.adopt_child(parent, child)` — thread the same-realm child's VM-global
+/// state (lexical globals, symbol registry, agent-wide ctx tables, job queue,
+/// event-loop counters) plus its heap back to the parent — with a fast path
+/// for the common re-entrant callback that changed none of them.
+///
+/// The slow branch DELEGATES to `state.adopt_child` rather than re-listing the
+/// merged fields: `state.merge_globals` is the single authoritative list, so a
+/// field added there can never be silently dropped here (as `symbol_registry`
+/// once was).
 fn merge_back(parent: State(host), child: State(host)) -> State(host) {
   let heap = child.heap
   // Fast path: the typical callback (Array.prototype.map element call, ...)
@@ -247,41 +251,54 @@ fn merge_back(parent: State(host), child: State(host)) -> State(host) {
     && child.unhandled_rejections == parent.unhandled_rejections
   {
     True -> State(..parent, heap:)
-    False ->
-      State(
-        ..parent,
-        heap:,
-        ctx: state.RealmCtx(
-          ..parent.ctx,
-          lexical_globals: child.ctx.lexical_globals,
-          template_objects: child.ctx.template_objects,
-          // Realms registered during the re-entrant call (ShadowRealm /
-          // $262.createRealm constructors) must survive the merge.
-          realms: child.ctx.realms,
-        ),
-        job_queue: child.job_queue,
-        outstanding: child.outstanding,
-        atomics_waiters: child.atomics_waiters,
-        unhandled_rejections: child.unhandled_rejections,
-      )
+    False -> state.adopt_child(parent, child)
   }
 }
 
-/// The construct_fn callback that gets stored in State.
-/// Wraps do_construct for re-entrant `new target(...args)` from native code
-/// (e.g. Reflect.construct).
-///
-/// Sets up an isolated frame with a sentinel empty-bytecode func so that when
-/// the constructor body returns, execute_inner hits end-of-code and yields
-/// NormalCompletion with the constructed object on top of stack. The sentinel
-/// func is required because Return restores `code` from SavedFrame.func.bytecode,
-/// not from the state's code field directly.
+/// The construct_fn callback stored in State, backing `state.construct` — the
+/// re-entrant `new target(...args)` made from native code (e.g.
+/// Reflect.construct). Drives the lossless `construct_value_to_completion` and
+/// narrows it to the host-fn `Ok(value)`/`Error(thrown)` contract; a `VmError`
+/// (which is also how a stray suspension surfaces) is an engine bug here (no
+/// channel to surface it through, mid-execution) → panic. Exact mirror of
+/// `call_fn_callback`.
 fn construct_fn_callback(
   state: State(host),
   target: JsValue,
   args: List(JsValue),
   new_target: JsValue,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  case construct_value_to_completion(state, target, args, new_target) {
+    Ok(#(NormalCompletion(val), s)) -> Ok(#(val, s))
+    Ok(#(ThrowCompletion(thrown), s)) -> Error(#(thrown, s))
+    Error(vm_err) ->
+      panic as {
+        "VM error in re-entrant construct: " <> string.inspect(vm_err)
+      }
+  }
+}
+
+/// Drive one `new target(...args)` to completion from outside the normal frame
+/// flow (native re-entry: Reflect.construct, Array species construction, ...).
+/// The [[Construct]] mirror of `call_value_to_completion`, down to the typed
+/// `SuspensionLeak` / `InternalError` for a completion that cannot occur here
+/// — a stray suspension is an engine bug the caller can surface, not a `panic`
+/// that takes the process down.
+///
+/// A non-constructor target is a guest TypeError, returned as a
+/// `ThrowCompletion` (never a `VmError`).
+///
+/// Runs on an isolated frame with a sentinel empty-bytecode func so that when
+/// the constructor body returns, `execute_inner` hits end-of-code and yields
+/// NormalCompletion with the constructed object on top of the isolated stack.
+/// The sentinel func is required because Return restores `code` from
+/// `SavedFrame.func.bytecode`, not from the state's `code` field directly.
+fn construct_value_to_completion(
+  state: State(host),
+  target: JsValue,
+  args: List(JsValue),
+  new_target: JsValue,
+) -> Result(#(Completion, State(host)), VmError) {
   case target, new_target {
     JsObject(ref), JsObject(nt_ref) -> {
       // Sentinel bytecode: do_construct saves pc+1 into the SavedFrame (or
@@ -304,33 +321,44 @@ fn construct_fn_callback(
       //    (regular function path), or
       //  - runs synchronously and leaves the result on stack at pc+1
       //    (native constructor path).
-      // Either way, execute_inner drives to completion.
+      // Either way, execute_to_completion drives it to completion.
       case do_construct(isolated, ref, args, [], nt_ref) {
         Ok(entered) ->
-          case execute_to_completion(entered, "construct_fn_callback") {
-            Ok(#(NormalCompletion(val), final_state)) ->
-              Ok(#(val, merge_back(state, final_state)))
-            Ok(#(ThrowCompletion(thrown), final_state)) ->
-              Error(#(thrown, merge_back(state, final_state)))
-            Error(vm_err) ->
-              panic as {
-                "VM error during construct: " <> string.inspect(vm_err)
-              }
+          case execute_to_completion(entered, "construct_value_to_completion") {
+            Ok(#(comp, final_state)) ->
+              Ok(#(comp, merge_back(state, final_state)))
+            Error(vm_err) -> Error(vm_err)
           }
-        Error(Threw(thrown, post)) -> Error(#(thrown, merge_back(state, post)))
-        Error(VmFailed(vm_err, _)) ->
-          panic as { "VM error in do_construct: " <> string.inspect(vm_err) }
-        // `do_construct` only pushes the frame — it can neither suspend nor
-        // return before `execute_to_completion` above drives the body.
-        Error(Yielded(..)) | Error(Awaited(..)) | Error(Returned(..)) ->
-          panic as "Unexpected step exit from do_construct"
+        Error(Threw(thrown, post)) ->
+          Ok(#(ThrowCompletion(thrown), merge_back(state, post)))
+        Error(VmFailed(vm_err, _)) -> Error(vm_err)
+        // A re-entrant construct cannot suspend or return here: `do_construct`
+        // only pushes the frame; the body runs under `execute_to_completion`.
+        Error(Yielded(..)) ->
+          Error(SuspensionLeak(
+            site: "construct_value_to_completion",
+            kind: completion.Yield,
+          ))
+        Error(Awaited(..)) ->
+          Error(SuspensionLeak(
+            site: "construct_value_to_completion",
+            kind: completion.Await,
+          ))
+        Error(Returned(..)) ->
+          Error(InternalError(
+            "construct_value_to_completion",
+            "frame returned while entering a re-entrant construct",
+          ))
       }
     }
-    _, _ ->
-      coerce.thrown_type_error(
-        state,
-        object.inspect(target, state.heap) <> " is not a constructor",
-      )
+    _, _ -> {
+      let #(err, state) =
+        state.type_error_value(
+          state,
+          object.inspect(target, state.heap) <> " is not a constructor",
+        )
+      Ok(#(ThrowCompletion(err), state))
+    }
   }
 }
 
@@ -952,7 +980,7 @@ fn fast_loop(
                 | _, value.JsBigInt(_)
                 -> dispatch_slow(state, pc, stack, locals, hp, line)
                 _, _ ->
-                  case operators.num_binop(left, right, operators.num_add) {
+                  case operators.num_binop(left, right, numeric.num_add) {
                     Ok(result) ->
                       fast_loop(
                         state,
@@ -1050,7 +1078,7 @@ fn fast_loop(
     IncLocal(index) ->
       case tuple_array.unsafe_get(index, locals) {
         value.JsNumber(_) as v ->
-          case operators.num_binop(v, number_one, operators.num_add) {
+          case operators.num_binop(v, number_one, numeric.num_add) {
             Ok(result) ->
               fast_loop(
                 state,
@@ -1894,8 +1922,10 @@ fn get_super_value(
 // Step — single instruction dispatch
 // ============================================================================
 
-/// Execute a single instruction. Returns Ok(new_state) to continue,
-/// or Error(#(signal, value, heap)) to stop.
+/// Execute a single instruction. `Ok(new_state)` continues the loop; a
+/// `StepExit` leaves it — a thrown value (`Threw`), a frame's normal completion
+/// (`Returned`), a suspension (`Yielded` / `Awaited`), or a broken engine
+/// invariant (`VmFailed`). Every exit carries the state to resume/unwind from.
 fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
   case op {
     // ---- Source mapping ----------------------------------------------
@@ -5753,9 +5783,9 @@ fn dispatch_native(
   )
 }
 
-/// Get the Ref of a named property's JsObject value from a heap object.
-/// Returns Error(Nil) if the object doesn't exist, the property is missing,
-/// or the property value is not a JsObject.
+/// Get the Ref of a named OWN data property's JsObject value from a heap
+/// object. `None` when the object doesn't exist, the property is missing (no
+/// prototype walk), it's an accessor, or its value is not a JsObject.
 fn get_field_ref(
   h: Heap(host),
   obj_ref: value.Ref,
@@ -5890,8 +5920,10 @@ fn pop_n_loop(
   }
 }
 
-/// BinOp Add with ToPrimitive for object operands.
-/// ES2024 §13.15.3: ToPrimitive(default) both sides, then string-concat or numeric-add.
+/// A `PureBinOp` on operands that need no coercion hook: `operators.exec_binop`
+/// computes it directly, an operator error is thrown as the guest error it maps
+/// to. (`Add` with an object operand does NOT come here — see
+/// `binop_add_with_to_primitive`.)
 fn binop_direct(
   state: State(host),
   kind: binop.PureBinOp,
@@ -6186,7 +6218,7 @@ fn add_primitives(
         "Cannot mix BigInt and other types, use explicit conversions",
       )
     _, _ ->
-      case operators.num_binop(lprim, rprim, operators.num_add) {
+      case operators.num_binop(lprim, rprim, numeric.num_add) {
         Ok(result) ->
           Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
         Error(err) -> throw_operator_error(state, err)
@@ -6194,6 +6226,9 @@ fn add_primitives(
   }
 }
 
+/// BinOp Add with ToPrimitive for object operands.
+/// ES2024 §13.15.3: ToPrimitive(default) both sides, then string-concat or
+/// numeric-add (`add_primitives`).
 fn binop_add_with_to_primitive(
   state: State(host),
   left: JsValue,
@@ -6439,12 +6474,18 @@ fn get_async_iterator_via_symbol(
     JsUndefined | JsNull ->
       get_async_from_sync_fallback(state, ref, iterable, rest_stack)
     _ -> {
-      use #(iter, state) <- result.try(call_iterator_method(
+      use #(iter_ref, state) <- result.try(call_iterator_method(
         state,
         method,
         iterable,
       ))
-      Ok(State(..state, stack: [iter, ..rest_stack], pc: state.pc + 1))
+      Ok(
+        State(
+          ..state,
+          stack: [JsObject(iter_ref), ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
     }
   }
 }
@@ -6472,12 +6513,11 @@ fn get_async_from_sync_fallback(
         object.inspect(iterable, state.heap) <> " is not async iterable",
       )
     _ -> {
-      use #(sync_iter_val, state) <- result.try(call_iterator_method(
+      use #(sync_iter, state) <- result.try(call_iterator_method(
         state,
         sync_method,
         iterable,
       ))
-      let assert JsObject(sync_iter) = sync_iter_val
       // GetIteratorFromMethod step 4: cache the sync iterator record's
       // [[NextMethod]] now — observable Get, abrupt propagates. The wrapper's
       // .next() reuses it instead of re-Getting per call (§27.1.6.2.1).
@@ -6486,7 +6526,7 @@ fn get_async_from_sync_fallback(
           state,
           sync_iter,
           Named("next"),
-          sync_iter_val,
+          JsObject(sync_iter),
         )),
       )
       let #(h, wrapped) =
@@ -6509,12 +6549,13 @@ fn get_async_from_sync_fallback(
 
 /// GetMethod step 3 + GetIteratorFromMethod steps 1-2: the looked-up method
 /// must be callable, its call result must be an object; both call abrupt
-/// completions propagate.
+/// completions propagate. Returns the PROVEN object ref, so no caller has to
+/// re-assert what this function already checked.
 fn call_iterator_method(
   state: State(host),
   method: JsValue,
   iterable: JsValue,
-) -> Result(#(JsValue, State(host)), StepExit(host)) {
+) -> Result(#(Ref, State(host)), StepExit(host)) {
   case helpers.is_callable(state.heap, method) {
     False ->
       state.throw_type_error(
@@ -6526,7 +6567,7 @@ fn call_iterator_method(
         state.rethrow(state.call(state, method, iterable, [])),
       )
       case iter {
-        JsObject(_) -> Ok(#(iter, state))
+        JsObject(iter_ref) -> Ok(#(iter_ref, state))
         _ -> state.throw_type_error(state, "Iterator result is not an object")
       }
     }

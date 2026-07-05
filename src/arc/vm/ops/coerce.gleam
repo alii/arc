@@ -2,8 +2,8 @@ import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/key.{Named}
 import arc/vm/limits
+import arc/vm/ops/numeric
 import arc/vm/ops/object
-import arc/vm/ops/operators
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, BigInt, Finite, Infinity, JsBigInt, JsBool, JsNull, JsNumber,
@@ -301,7 +301,7 @@ pub fn try_to_integer_or_infinity(
 /// single modular-reduction implementation in `operators` (which the bitwise
 /// operators use directly on the hot path).
 pub fn jsnum_to_int32(num: value.JsNum) -> Int {
-  operators.num_to_int32(num)
+  numeric.num_to_int32(num)
 }
 
 /// CPS ToInt32 (ES2024 §7.1.6): full ToNumber (ToPrimitive on objects,
@@ -313,7 +313,7 @@ pub fn try_to_int32(
   cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
 ) -> #(State(host), Result(b, JsValue)) {
   use num, state <- try_to_number(state, val)
-  cont(operators.num_to_int32(num), state)
+  cont(numeric.num_to_int32(num), state)
 }
 
 /// CPS ToUint32 (ES2024 §7.1.7): full ToNumber, then modular reduction to
@@ -325,7 +325,7 @@ pub fn try_to_uint32(
   cont: fn(Int, State(host)) -> #(State(host), Result(b, JsValue)),
 ) -> #(State(host), Result(b, JsValue)) {
   use num, state <- try_to_number(state, val)
-  cont(operators.num_to_uint32(num), state)
+  cont(numeric.num_to_uint32(num), state)
 }
 
 // ============================================================================
@@ -663,4 +663,3 @@ pub fn to_index_cps(
     Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
-
