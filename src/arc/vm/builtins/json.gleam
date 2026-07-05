@@ -1398,16 +1398,13 @@ fn json_stringify(
 
   let result = {
     // Step 4: ReplacerFunction / PropertyList.
-    use #(#(replacer_fn, property_list), state) <- result.try(build_replacer(
-      state,
-      replacer,
-    ))
+    use #(replacer, state) <- result.try(build_replacer(state, replacer))
     // Steps 5-8: gap.
     use #(gap, state) <- result.try(compute_gap(state, space))
     // Steps 9-11: wrapper = OrdinaryObjectCreate(%Object.prototype%) with
     // CreateDataPropertyOrThrow(wrapper, "", value).
     let #(state, wrapper) = alloc_holder(state, val)
-    let ctx = StringifyCtx(replacer_fn:, property_list:, gap:, caller_builtins:)
+    let ctx = StringifyCtx(replacer:, gap:, caller_builtins:)
     // Step 12.
     serialize_property(state, ctx, [], "", "", wrapper)
   }
@@ -1418,14 +1415,26 @@ fn json_stringify(
   }
 }
 
-/// Immutable parts of the spec's JSON Serialization Record: ReplacerFunction,
-/// PropertyList and Gap. (Stack and Indent are threaded as parameters.)
-/// `caller_builtins` is not the spec's — it is the realm the replacer and any
-/// `toJSON` must run in, see `dispatch`.
+/// §25.5.2 step 4 makes ReplacerFunction and PropertyList mutually exclusive:
+/// a callable replacer sets the first and leaves the second undefined, an
+/// array replacer the reverse. One sum type instead of two Options, so
+/// "function AND property list" cannot be built.
+type Replacer {
+  /// The replacer argument was neither callable nor an array.
+  NoReplacer
+  /// Step 4.a: IsCallable(replacer) → ReplacerFunction.
+  ReplacerFn(f: JsValue)
+  /// Step 4.b: IsArray(replacer) → PropertyList (deduplicated key names).
+  PropertyList(names: List(String))
+}
+
+/// Immutable parts of the spec's JSON Serialization Record: the replacer
+/// (ReplacerFunction xor PropertyList) and Gap. (Stack and Indent are threaded
+/// as parameters.) `caller_builtins` is not the spec's — it is the realm the
+/// replacer and any `toJSON` must run in, see `dispatch`.
 type StringifyCtx {
   StringifyCtx(
-    replacer_fn: Option(JsValue),
-    property_list: Option(List(String)),
+    replacer: Replacer,
     gap: String,
     caller_builtins: common.Builtins,
   )
@@ -1438,15 +1447,12 @@ const circular_msg = "Converting circular structure to JSON"
 fn build_replacer(
   state: State(host),
   replacer: JsValue,
-) -> Result(
-  #(#(Option(JsValue), Option(List(String))), State(host)),
-  #(JsValue, State(host)),
-) {
+) -> Result(#(Replacer, State(host)), #(JsValue, State(host))) {
   case replacer {
     JsObject(ref) ->
       case helpers.is_callable(state.heap, replacer) {
         // Step 4.a: IsCallable → ReplacerFunction.
-        True -> Ok(#(#(Some(replacer), None), state))
+        True -> Ok(#(ReplacerFn(replacer), state))
         False -> {
           // Step 4.b.i: isArray = ? IsArray(replacer) — a revoked proxy
           // makes IsArray throw a TypeError.
@@ -1455,19 +1461,19 @@ fn build_replacer(
             replacer,
           ))
           case is_arr {
-            False -> Ok(#(#(None, None), state))
+            False -> Ok(#(NoReplacer, state))
             // Step 4.b.iii: build PropertyList from the array elements.
             True -> {
               use #(len, state) <- result.try(length_of_array_like(state, ref))
               use #(items, state) <- result.map(
                 collect_property_list(state, ref, 0, len, set.new(), []),
               )
-              #(#(None, Some(items)), state)
+              #(PropertyList(items), state)
             }
           }
         }
       }
-    _ -> Ok(#(#(None, None), state))
+    _ -> Ok(#(NoReplacer, state))
   }
 }
 
@@ -1643,13 +1649,13 @@ fn serialize_property(
     _ -> Ok(#(val, state))
   })
   // Step 3: ReplacerFunction — called with the holder as `this`.
-  use #(val, state) <- result.try(case ctx.replacer_fn {
-    Some(rf) ->
+  use #(val, state) <- result.try(case ctx.replacer {
+    ReplacerFn(rf) ->
       call_in_caller_realm(state, ctx.caller_builtins, rf, JsObject(holder), [
         JsString(key),
         val,
       ])
-    None -> Ok(#(val, state))
+    NoReplacer | PropertyList(_) -> Ok(#(val, state))
   })
   // Step 4.e (json-parse-with-source): a [[IsRawJSON]] box is emitted verbatim.
   // The check runs AFTER the toJSON call (step 2) and the replacer call (step
@@ -1776,9 +1782,10 @@ fn serialize_object(
       let stack = [ref.id, ..stack]
       let step_indent = indent <> ctx.gap
       // Steps 5-6: K = PropertyList or EnumerableOwnPropertyNames(value, key).
-      use #(keys, state) <- result.try(case ctx.property_list {
-        Some(pl) -> Ok(#(pl, state))
-        None -> object_builtins.enumerable_string_keys_stateful(state, ref)
+      use #(keys, state) <- result.try(case ctx.replacer {
+        PropertyList(names) -> Ok(#(names, state))
+        NoReplacer | ReplacerFn(_) ->
+          object_builtins.enumerable_string_keys_stateful(state, ref)
       })
       // Step 8: partial = members serialized in order.
       use #(partial, state) <- result.map(
