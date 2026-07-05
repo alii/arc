@@ -245,8 +245,26 @@ fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
         list.fold(entries, acc.exports, fn(exports, entry) {
           [entry, ..exports]
         })
+      // §16.2.1.3 ModuleRequests: a `from` clause requests its module even
+      // when it re-exports NOTHING (`export {} from "m"` — the module is
+      // still fetched, linked and evaluated for its side effects). That case
+      // yields zero export entries, so the request cannot be derived from
+      // them; record it off the declaration itself. `merge_requests` dedups
+      // it against the per-specifier requests below.
+      let requests = case item {
+        ast.ExportNamed(source: Some(ast.StringLit(source)), ..) -> [
+          ModuleRequest(specifier: Raw(source), phase: Evaluation),
+          ..acc.requests
+        ]
+        ast.ExportNamed(source: None, ..)
+        | ast.ExportDeclaration(..)
+        | ast.ExportDefaultDeclaration(..)
+        | ast.ExportAllDeclaration(..)
+        | ast.ImportDeclaration(..)
+        | ast.StatementItem(_) -> acc.requests
+      }
       let requests =
-        list.fold(entries, acc.requests, fn(requests, entry) {
+        list.fold(entries, requests, fn(requests, entry) {
           case request_of_entry(entry) {
             Ok(request) -> [request, ..requests]
             Error(Nil) -> requests
