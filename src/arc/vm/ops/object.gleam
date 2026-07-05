@@ -935,7 +935,13 @@ fn set_on_receiver(
         // proxy receiver, or [[Set]] forwarded through a trapless proxy):
         // the GetOwnProperty/DefineOwnProperty pair must go through traps.
         Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
-          set_on_proxy_receiver(state, recv_ref, slots, string_object_key(key), val)
+          set_on_proxy_receiver(
+            state,
+            recv_ref,
+            slots,
+            string_object_key(key),
+            val,
+          )
         // Receiver is itself an Integer-Indexed object: the receiver half of
         // OrdinarySet routes numeric index keys through the receiver's
         // [[DefineOwnProperty]] (§10.4.5.3) → IntegerIndexedElementSet for a
@@ -1039,7 +1045,8 @@ fn set_on_proxy_receiver(
     // Step 2.d.i-ii: accessor or non-writable existing → false.
     Some(AccessorProperty(..)) -> Ok(#(state, False))
     Some(DataProperty(writable: False, ..)) -> Ok(#(state, False))
-    Some(DataProperty(..)) -> proxy_receiver_define(state, slots, pk, val, False)
+    Some(DataProperty(..)) ->
+      proxy_receiver_define(state, slots, pk, val, False)
     None -> proxy_receiver_define(state, slots, pk, val, True)
   }
 }
@@ -1064,7 +1071,8 @@ fn proxy_receiver_define(
     // write on the (possibly nested-proxy) target.
     None ->
       case pk {
-        StringPropKey(pkey:, ..) -> set_on_receiver(state, JsObject(t), pkey, val)
+        StringPropKey(pkey:, ..) ->
+          set_on_receiver(state, JsObject(t), pkey, val)
         SymbolPropKey(sym) ->
           define_symbol_data_on_receiver(state, JsObject(t), sym, val)
       }
@@ -1328,7 +1336,7 @@ fn set_property_on_slot(
         // whose ToNumber/ToBigInt is observable — it needs a `State` and can
         // throw, neither of which this heap-only entry point can express. The
         // real MOP entry points do it: `set_value`'s TypedArray [[Set]] arm,
-        // `set_on_receiver`'s TypedArray receiver arm, and builtins/object's
+        // `set_on_receiver`'s TypedArray receiver arm, and ops/define_own's
         // §10.4.5.3 [[DefineOwnProperty]] all route numeric indices to
         // `typed_array_elements.typed_array_store` before reaching here.
         _ -> set_string_property(h, ref, key, val, slot)
@@ -2311,7 +2319,7 @@ fn ordinary_delete_outcome(
 /// This is THE single funnel for own string-key enumeration order: for-in
 /// (enumerate_keys), Object.keys/values/entries/assign, getOwnPropertyNames,
 /// Reflect.ownKeys, JSON.stringify and spread/rest all route through it
-/// (directly or via collect_own_keys in builtins/object).
+/// (directly or via collect_own_keys in ops/define_own).
 pub fn own_string_keys_flagged(
   heap: Heap(host),
   ref: Ref,
@@ -3438,7 +3446,8 @@ pub fn has_property_stateful(
             elements,
             pkey,
           ))
-        SymbolPropKey(sym) -> result.is_ok(list.key_find(symbol_properties, sym))
+        SymbolPropKey(sym) ->
+          result.is_ok(list.key_find(symbol_properties, sym))
       }
       case own {
         True -> Ok(#(True, state))
@@ -3681,7 +3690,7 @@ fn proxy_get_prototype_of(
 }
 
 /// §10.5.2 Proxy [[SetPrototypeOf]] ( V ) — trap path only; the ordinary
-/// path (cycle detection etc.) lives in builtins/object and calls back in
+/// path (cycle detection etc.) lives in ops/define_own and calls back in
 /// for proxy refs. `proto_val` is JsObject(p) or JsNull.
 pub fn proxy_set_prototype_of(
   state: State(host),
