@@ -33,7 +33,7 @@ import arc/vm/value.{
   MapPrototypeGetSize, MapPrototypeHas, MapPrototypeKeys, MapPrototypeSet,
   MapPrototypeValues, ObjectSlot,
 }
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 
 // ============================================================================
 // Init — set up Map constructor + Map.prototype
@@ -191,10 +191,12 @@ fn map_get(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
   // Steps 1-2: RequireInternalSlot
-  use store, _ref, state <- require_map(this, state, "get")
+  use ref, state <- require_map(this, state, "get")
   // Steps 3-4: Look up key
   let map_key = value.js_to_map_key(key_arg)
-  let result = ordered_entries.get(store, map_key) |> option.unwrap(JsUndefined)
+  let result =
+    ordered_entries.get(read_map_store(state.heap, ref), map_key)
+    |> option.unwrap(JsUndefined)
   #(state, Ok(result))
 }
 
@@ -223,7 +225,8 @@ fn map_set(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let #(key_arg, val_arg) = helpers.two_args_or_undefined(args)
   // Steps 1-2: RequireInternalSlot
-  use store, ref, state <- require_map(this, state, "set")
+  use ref, state <- require_map(this, state, "set")
+  let store = read_map_store(state.heap, ref)
 
   // Step 4 (-0 → +0) happens inside js_to_map_key
   let map_key = value.js_to_map_key(key_arg)
@@ -257,9 +260,12 @@ fn map_has(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
-  use store, _ref, state <- require_map(this, state, "has")
+  use ref, state <- require_map(this, state, "has")
   let map_key = value.js_to_map_key(key_arg)
-  #(state, Ok(JsBool(ordered_entries.has(store, map_key))))
+  #(
+    state,
+    Ok(JsBool(ordered_entries.has(read_map_store(state.heap, ref), map_key))),
+  )
 }
 
 // ============================================================================
@@ -285,7 +291,8 @@ fn map_delete(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let key_arg = helpers.first_arg_or_undefined(args)
-  use store, ref, state <- require_map(this, state, "delete")
+  use ref, state <- require_map(this, state, "delete")
+  let store = read_map_store(state.heap, ref)
   let map_key = value.js_to_map_key(key_arg)
   case ordered_entries.delete(store, map_key) {
     #(_store, False) -> #(state, Ok(JsBool(False)))
@@ -312,7 +319,8 @@ fn map_clear(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, ref, state <- require_map(this, state, "clear")
+  use ref, state <- require_map(this, state, "clear")
+  let store = read_map_store(state.heap, ref)
   // next_seq is preserved by clear(): the spec's records are emptied but
   // appends still land past in-flight iterator cursors, so they remain
   // visited.
@@ -348,7 +356,7 @@ fn map_for_each(
   let #(cb, this_arg) = helpers.two_args_or_undefined(args)
 
   // Steps 1-2: RequireInternalSlot — before the IsCallable check.
-  use _store, ref, state <- require_map(this, state, "forEach")
+  use ref, state <- require_map(this, state, "forEach")
   // Step 3: If IsCallable(callbackfn) is false, throw TypeError
   case helpers.is_callable(state.heap, cb) {
     False ->
@@ -369,18 +377,14 @@ fn map_for_each(
 /// source Map's live records, re-reading the source each step.
 fn for_each_loop(
   state: State(host),
-  ref: Ref,
+  ref: MapRef,
   cursor: Int,
   cb: JsValue,
   this_arg: JsValue,
   map_this: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let next = case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: MapObject(store:), ..)) ->
-      ordered_entries.next_from(store, cursor)
-    _ -> None
-  }
-  case next {
+  let store = read_map_store(state.heap, ref)
+  case ordered_entries.next_from(store, cursor) {
     None -> #(state, Ok(JsUndefined))
     Some(#(next_cursor, map_key, val)) -> {
       // Reconstruct original JS key. map_key_to_js is lossless (-0 already
@@ -413,8 +417,11 @@ fn map_get_size(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use store, _ref, state <- require_map(this, state, "size")
-  #(state, Ok(value.from_int(ordered_entries.size(store))))
+  use ref, state <- require_map(this, state, "size")
+  #(
+    state,
+    Ok(value.from_int(ordered_entries.size(read_map_store(state.heap, ref)))),
+  )
 }
 
 // ============================================================================
@@ -430,11 +437,16 @@ fn map_iterator(
   method: String,
   kind: value.MapIterKind,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use _store, ref, state <- require_map(this, state, method)
+  use ref, state <- require_map(this, state, method)
   let #(heap, iter_ref) =
     common.alloc_wrapper(
       state.heap,
-      value.MapIteratorObject(source: ref, cursor: 0, done: False, kind:),
+      value.MapIteratorObject(
+        source: map_ref_value(ref),
+        cursor: 0,
+        done: False,
+        kind:,
+      ),
       state.builtins.map_iterator_proto,
     )
   #(State(..state, heap:), Ok(JsObject(iter_ref)))
@@ -444,49 +456,81 @@ fn map_iterator(
 // Helpers
 // ============================================================================
 
-/// RequireInternalSlot(M, [[MapData]]) — validates that `this` is a Map object
-/// and extracts its internal data, or throws a TypeError naming `method`.
+/// A `Ref` that has been *proved* to point at a Map's heap slot.
 ///
-/// The store handed to `cont` is only safe to keep because no Map method
-/// re-enters user code between the check and the store's use. `forEach` — the
-/// one method that does — ignores it and re-reads the source from `ref` on
-/// every step (see `for_each_loop`).
-///
-/// CPS-style — `use store, ref, state <- require_map(this, state, "get")`.
-fn require_map(
-  this: JsValue,
-  state: State(host),
-  method: String,
-  cont: fn(OrderedEntries(MapKey, JsValue), Ref, State(host)) ->
-    #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  helpers.require_brand(
-    this,
-    state,
-    fn() {
-      "Method Map.prototype." <> method <> " called on incompatible receiver"
-    },
-    map_store_of,
-    cont,
-  )
+/// Constructible only by `require_map`, so a Set ref, a MapIterator ref
+/// or `Map.prototype` itself cannot reach `read_map_store` / `update_map_data`
+/// — passing one is a compile error rather than a silent read of an empty map.
+type MapRef {
+  MapRef(Ref)
 }
 
-/// The [[MapData]] extractor handed to `require_brand`. A named function (not
-/// an inline lambda) so the hot brand check doesn't build a closure per call.
-fn map_store_of(
-  kind: state.ExoticKind(host),
-) -> option.Option(OrderedEntries(MapKey, JsValue)) {
-  case kind {
-    MapObject(store:) -> Some(store)
-    _ -> None
-  }
+/// The raw `Ref` inside a proved `MapRef`, for the few places that need it
+/// (allocating a MapIterator over the source Map).
+fn map_ref_value(map_ref: MapRef) -> Ref {
+  let MapRef(ref) = map_ref
+  ref
+}
+
+/// Read a proved Map's [[MapData]] out of the heap.
+///
+/// This is the ONLY way to get at a Map's store: `require_map` hands out a
+/// `MapRef`, never a snapshot. Every op re-reads at the exact spec point at
+/// which the spec inspects [[MapData]] — the forEach callback runs arbitrary
+/// user code that can add to or delete from the receiver mid-iteration.
+fn read_map_store(
+  h: Heap(host),
+  map_ref: MapRef,
+) -> OrderedEntries(MapKey, JsValue) {
+  // A heap slot's kind never changes after allocation and a `MapRef` can only
+  // come from `require_map`, so anything else here is a wiring bug — crash
+  // rather than silently reporting an empty map.
+  let assert Some(ObjectSlot(kind: MapObject(store:), ..)) =
+    heap.read(h, map_ref_value(map_ref))
+    as "map: MapRef does not point at a Map slot"
+  store
 }
 
 /// Update the MapObject data on an existing heap slot.
 fn update_map_data(
   h: Heap(host),
-  ref: Ref,
+  map_ref: MapRef,
   store: OrderedEntries(MapKey, JsValue),
 ) -> Heap(host) {
-  heap.update_kind(h, ref, MapObject(store:))
+  heap.update_kind(h, map_ref_value(map_ref), MapObject(store:))
+}
+
+/// RequireInternalSlot(M, [[MapData]]) — proves `this` is a Map and hands
+/// over a `MapRef`, or throws a TypeError naming `method`.
+///
+/// Deliberately hands the continuation only a `MapRef`, never the [[MapData]]
+/// store: a store read at method entry is stale the moment any user code runs
+/// (forEach's callback). Read the store with `read_map_store` at the point
+/// the spec reads it.
+///
+/// CPS-style — `use ref, state <- require_map(this, state, "get")`.
+fn require_map(
+  this: JsValue,
+  state: State(host),
+  method: String,
+  cont: fn(MapRef, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use Nil, ref, state <- helpers.require_brand(
+    this,
+    state,
+    fn() {
+      "Method Map.prototype." <> method <> " called on incompatible receiver"
+    },
+    map_brand_of,
+  )
+  cont(MapRef(ref), state)
+}
+
+/// The [[MapData]] brand check handed to `require_brand` — a named function
+/// (not an inline lambda) so the hot brand check builds no closure per call.
+fn map_brand_of(kind: state.ExoticKind(host)) -> Option(Nil) {
+  case kind {
+    MapObject(..) -> Some(Nil)
+    _ -> None
+  }
 }
