@@ -1,5 +1,6 @@
 import arc/vm/gc_trace
 import arc/vm/internal/elements
+import arc/vm/internal/lazy_proto.{LazyProto}
 import arc/vm/key.{Named}
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
@@ -45,14 +46,8 @@ pub opaque type Heap(ctx, host) {
 
 /// Lazily-materialised function `.prototype` objects (QuickJS-style autoinit),
 /// encoded entirely in the Ref id — no heap entry at all until first write.
-///
-/// A lazy proto ref has a negative id `-2 - payload` (so it can never collide
-/// with real slots `>= 0` or `sentinel_ref` = -1), where
-/// `payload = (fn_id * 2^30 + object_proto_id) * 2 + has_constructor`.
-/// `fn_id` is the owning closure (the `.constructor` backref and the identity
-/// discriminator — distinct closures get distinct proto refs), and
-/// `object_proto_id` is the realm's %Object.prototype% (or the generator
-/// prototype) captured at closure creation.
+/// The id encoding (and the three regions of the id number line) lives in
+/// `arc/vm/internal/lazy_proto`.
 ///
 /// `read` synthesises the `{constructor: fn}` ObjectSlot on demand (pure —
 /// structurally the slot eager allocation would have produced); the first
@@ -60,26 +55,20 @@ pub opaque type Heap(ctx, host) {
 /// shadows synthesis from then on. The GC marks through tagged ids and pins
 /// the owning fn id so it is never recycled while the proto ref is live
 /// (which would let a new closure mint the same tagged id).
-const lazy_proto_shift = 1_073_741_824
-
-/// Decode a tagged lazy-proto id into #(fn_id, object_proto_id, has_constructor).
-fn decode_lazy_proto(id: Int) -> #(Int, Int, Bool) {
-  let payload = -2 - id
-  let rest = payload / 2
-  #(rest / lazy_proto_shift, rest % lazy_proto_shift, payload % 2 == 1)
-}
-
-/// Build the ObjectSlot a tagged lazy-proto id stands for — structurally
-/// identical to what eager allocation in make_closure used to produce.
-fn synth_lazy_proto(id: Int) -> HeapSlot(ctx, host) {
-  let #(fn_id, object_proto_id, has_constructor) = decode_lazy_proto(id)
+///
+/// The one builder for a function `.prototype` object: both the on-demand
+/// synthesis of a tagged id and the eager fallback in `alloc_lazy_proto` go
+/// through it, so a lazily-materialised prototype cannot drift from an eagerly
+/// allocated one.
+fn proto_slot(
+  fn_ref: Ref,
+  has_constructor: Bool,
+  object_proto: Ref,
+) -> HeapSlot(ctx, host) {
   let properties = case has_constructor {
     True ->
       dict.from_list([
-        #(
-          Named("constructor"),
-          value.builtin_property(value.JsObject(Ref(fn_id))),
-        ),
+        #(Named("constructor"), value.builtin_property(value.JsObject(fn_ref))),
       ])
     False -> dict.new()
   }
@@ -87,10 +76,17 @@ fn synth_lazy_proto(id: Int) -> HeapSlot(ctx, host) {
     kind: value.OrdinaryObject,
     properties:,
     elements: value.NoElements,
-    prototype: Some(Ref(object_proto_id)),
+    prototype: Some(object_proto),
     symbol_properties: [],
     extensible: True,
   )
+}
+
+/// Build the ObjectSlot a tagged lazy-proto id stands for.
+fn synth_lazy_proto(id: Int) -> HeapSlot(ctx, host) {
+  let LazyProto(fn_id:, object_proto_id:, has_constructor:) =
+    lazy_proto.decode_lazy_proto(id)
+  proto_slot(Ref(fn_id), has_constructor, Ref(object_proto_id))
 }
 
 /// Create an empty heap. Host values are assumed to hold no engine refs
@@ -149,40 +145,12 @@ pub fn alloc_lazy_proto(
   has_constructor: Bool,
   object_proto: Ref,
 ) -> #(Heap(ctx, host), Ref) {
-  case object_proto.id >= 0 && object_proto.id < lazy_proto_shift {
-    True -> {
-      let flag = case has_constructor {
-        True -> 1
-        False -> 0
-      }
-      let payload = { fn_ref.id * lazy_proto_shift + object_proto.id } * 2
-      #(heap, Ref(-2 - { payload + flag }))
-    }
-    False -> {
-      // Out-of-range parent proto id: allocate the real slot eagerly.
-      let constructor = case has_constructor {
-        True -> Some(fn_ref)
-        False -> None
-      }
-      let properties = case constructor {
-        Some(f) ->
-          dict.from_list([
-            #(Named("constructor"), value.builtin_property(value.JsObject(f))),
-          ])
-        None -> dict.new()
-      }
-      alloc(
-        heap,
-        value.ObjectSlot(
-          kind: value.OrdinaryObject,
-          properties:,
-          elements: value.NoElements,
-          prototype: Some(object_proto),
-          symbol_properties: [],
-          extensible: True,
-        ),
-      )
-    }
+  case
+    lazy_proto.encode_lazy_proto(fn_ref.id, object_proto.id, has_constructor)
+  {
+    Some(id) -> #(heap, Ref(id))
+    // Out-of-range parent proto id: allocate the real slot eagerly.
+    None -> alloc(heap, proto_slot(fn_ref, has_constructor, object_proto))
   }
 }
 
@@ -237,7 +205,7 @@ pub fn read(heap: Heap(ctx, host), ref: Ref) -> Option(HeapSlot(ctx, host)) {
   case ffi_heap_read(heap.data, ref.id) {
     Some(_) as found -> found
     None ->
-      case ref.id < -1 {
+      case lazy_proto.is_lazy_proto(ref.id) {
         True -> Some(synth_lazy_proto(ref.id))
         False -> None
       }
@@ -423,7 +391,7 @@ pub fn read_bigint_object(
 /// Sentinel ref with no backing slot. `read` returns Error, `write`/`update`
 /// no-op. Used when array generics are called with a primitive `this` so
 /// mutating methods drop their writes without allocating a wrapper.
-pub const sentinel_ref = Ref(-1)
+pub const sentinel_ref = Ref(lazy_proto.sentinel_id)
 
 /// Overwrite a slot. No-op on `sentinel_ref`. All other refs are assumed
 /// live — callers obtain them only via alloc/reserve (or a tagged lazy-proto
@@ -433,9 +401,9 @@ pub fn write(
   ref: Ref,
   slot: HeapSlot(ctx, host),
 ) -> Heap(ctx, host) {
-  case ref.id != -1 {
-    True -> Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
-    False -> heap
+  case lazy_proto.is_sentinel(ref.id) {
+    True -> heap
+    False -> Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
   }
 }
 
@@ -453,7 +421,7 @@ pub fn update(
   case dict.get(heap.data, ref.id) {
     Ok(slot) -> Heap(..heap, data: dict.insert(heap.data, ref.id, f(slot)))
     Error(Nil) ->
-      case ref.id < -1 {
+      case lazy_proto.is_lazy_proto(ref.id) {
         True ->
           Heap(
             ..heap,
@@ -569,9 +537,10 @@ fn mark_loop(
               // (tagged id — keep its constructor fn and parent prototype
               // alive, exactly as the materialised slot's props/prototype
               // fields would) or a genuinely dangling ref (skip).
-              case id < -1 {
+              case lazy_proto.is_lazy_proto(id) {
                 True -> {
-                  let #(fn_id, object_proto_id, _) = decode_lazy_proto(id)
+                  let LazyProto(fn_id:, object_proto_id:, ..) =
+                    lazy_proto.decode_lazy_proto(id)
                   mark_loop(heap, [fn_id, object_proto_id, ..rest], visited)
                 }
                 False -> mark_loop(heap, rest, visited)
@@ -585,11 +554,8 @@ fn mark_loop(
               // owning fn id: if the fn were collected and its id recycled, a
               // new closure could mint this same tagged id and alias the
               // stale materialised slot.
-              let frontier = case id < -1 {
-                True -> {
-                  let #(fn_id, _, _) = decode_lazy_proto(id)
-                  [fn_id, ..frontier]
-                }
+              let frontier = case lazy_proto.is_lazy_proto(id) {
+                True -> [lazy_proto.decode_lazy_proto(id).fn_id, ..frontier]
                 False -> frontier
               }
               mark_loop(heap, frontier, visited)
@@ -618,7 +584,7 @@ fn sweep(heap: Heap(ctx, host), live: Set(Int)) -> Heap(ctx, host) {
   // list.
   let new_free =
     dict.fold(heap.data, heap.free, fn(free, id, _) {
-      case id < 0 || set.contains(live, id) {
+      case !lazy_proto.is_real_slot(id) || set.contains(live, id) {
         True -> free
         False -> [id, ..free]
       }
