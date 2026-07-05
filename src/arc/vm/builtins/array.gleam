@@ -1584,7 +1584,7 @@ fn array_shift(
             ref,
             1,
             length,
-            1,
+            Ascending,
             -1,
             limits.max_iteration,
           ))
@@ -1606,9 +1606,9 @@ fn array_shift(
 /// Generic slow-path element-move loop shared by shift (§23.1.3.25 steps
 /// 5-6), unshift (§23.1.3.33 steps 4b-4c), and splice (§23.1.3.31).
 ///
-/// Moves each element from index k to k + delta, stepping k by `step` (+1 or
-/// -1) until the bound is passed: ascending stops when k >= stop, descending
-/// stops when k < stop. Each iteration follows the spec pattern:
+/// Moves each element from index k to k + delta, stepping k by `dir` until
+/// the bound is passed: Ascending stops when k >= stop, Descending stops
+/// when k < stop. Each iteration follows the spec pattern:
 ///   - If HasProperty(O, from): Set(O, to, Get(O, from), true)
 ///   - Else: DeletePropertyOrThrow(O, to)
 fn move_range(
@@ -1616,13 +1616,13 @@ fn move_range(
   ref: Ref,
   k: Int,
   stop: Int,
-  step: Int,
+  dir: Direction,
   delta: Int,
   fuel: Int,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  let done = case step > 0 {
-    True -> k >= stop
-    False -> k < stop
+  let done = case dir {
+    Ascending -> k >= stop
+    Descending -> k < stop
   }
   case done {
     True -> Ok(state)
@@ -1633,17 +1633,18 @@ fn move_range(
       use <- bool.lazy_guard(fuel <= 0, fn() {
         range_error_op(state, iteration_budget_msg)
       })
+      let step = step_of(dir)
       let to = k + delta
       use #(has_k, state) <- result.try(generic_has_op(state, ref, k))
       case has_k {
         True -> {
           use #(val, state) <- result.try(generic_get(state, ref, k))
           use state <- result.try(generic_set_index(state, ref, to, val))
-          move_range(state, ref, k + step, stop, step, delta, fuel - 1)
+          move_range(state, ref, k + step, stop, dir, delta, fuel - 1)
         }
         False -> {
           use state <- result.try(generic_delete_index(state, ref, to))
-          move_range(state, ref, k + step, stop, step, delta, fuel - 1)
+          move_range(state, ref, k + step, stop, dir, delta, fuel - 1)
         }
       }
     }
@@ -1715,7 +1716,7 @@ fn array_unshift(
         ref,
         length - 1,
         0,
-        -1,
+        Descending,
         arg_count,
         limits.max_iteration,
       ))
@@ -4780,7 +4781,7 @@ fn splice_shift(
         ref,
         length - 1,
         from_start,
-        -1,
+        Descending,
         shift,
         limits.max_iteration,
       )
@@ -4793,7 +4794,7 @@ fn splice_shift(
             ref,
             from_start,
             length,
-            1,
+            Ascending,
             shift,
             limits.max_iteration,
           ))
@@ -5184,33 +5185,37 @@ fn array_copy_within(
                   ref,
                   from + count - 1,
                   target + count - 1,
-                  -1,
+                  Descending,
                   count,
                 ),
                 this,
               )
             // No overlap issue, copy forwards
             False ->
-              wrap(copy_within_step(state, ref, from, target, 1, count), this)
+              wrap(
+                copy_within_step(state, ref, from, target, Ascending, count),
+                this,
+              )
           }
       }
     }
   }
 }
 
-/// Copy `remaining` elements one at a time, advancing `from`/`to` by `step`
-/// (+1 forward; -1 backward for overlapping regions).
+/// Copy `remaining` elements one at a time, advancing `from`/`to` in `dir`
+/// (Ascending forward; Descending backward for overlapping regions).
 fn copy_within_step(
   state: State(host),
   ref: Ref,
   from: Int,
   to: Int,
-  step: Int,
+  dir: Direction,
   remaining: Int,
 ) -> Result(State(host), #(JsValue, State(host))) {
   case remaining <= 0 {
     True -> Ok(state)
     False -> {
+      let step = step_of(dir)
       // §23.1.3.4 step 17c: fromPresent = ? HasProperty(O, fromKey) —
       // trap-aware (a proxy "has" trap can throw; return-abrupt-from-has-*).
       use #(has_from, state) <- result.try(generic_has_op(state, ref, from))
@@ -5221,7 +5226,7 @@ fn copy_within_step(
         }
         False -> generic_delete_index(state, ref, to)
       })
-      copy_within_step(state, ref, from + step, to + step, step, remaining - 1)
+      copy_within_step(state, ref, from + step, to + step, dir, remaining - 1)
     }
   }
 }
