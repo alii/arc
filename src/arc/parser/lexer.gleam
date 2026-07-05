@@ -225,21 +225,7 @@ pub fn lex_error_to_string(error: LexError) -> String {
 }
 
 pub fn lex_error_pos(error: LexError) -> Int {
-  case error {
-    UnterminatedBlockComment(pos:) -> pos
-    InvalidEscapeSequence(pos:) -> pos
-    InvalidHexEscapeSequence(pos:) -> pos
-    InvalidUnicodeEscapeSequence(pos:) -> pos
-    ExpectedExponentDigits(pos:) -> pos
-    ExpectedHexDigits(pos:) -> pos
-    ExpectedOctalDigits(pos:) -> pos
-    ExpectedBinaryDigits(pos:) -> pos
-    ConsecutiveNumericSeparator(pos:) -> pos
-    LeadingNumericSeparator(pos:) -> pos
-    TrailingNumericSeparator(pos:) -> pos
-    InvalidBigIntLiteral(pos:) -> pos
-    HtmlCommentInModule(pos:) -> pos
-  }
+  error.pos
 }
 
 /// Script vs Module lexical goal: modules reject HTML-like comments.

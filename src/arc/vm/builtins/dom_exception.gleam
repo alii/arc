@@ -98,17 +98,6 @@ fn alloc(
   #(h, JsObject(ref))
 }
 
-/// Allocate a DOMException for engine-internal throws (e.g. structuredClone
-/// rejecting an uncloneable value with name "DataCloneError").
-pub fn make(
-  h: Heap(host),
-  builtins: common.Builtins,
-  name: String,
-  message: String,
-) -> #(Heap(host), JsValue) {
-  alloc(h, builtins.dom_exception.prototype, name, message)
-}
-
 /// get DOMException.prototype.code — reads `this.name` and maps it through
 /// the WebIDL legacy code table; unknown names yield 0.
 pub fn get_code(

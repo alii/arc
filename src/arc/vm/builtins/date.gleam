@@ -15,7 +15,7 @@
 /// in `arc/internal/host_time`.
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{
-  days_from_year, floor_div, floor_mod as math_mod, year_from_days,
+  civil_from_days, days_from_year, floor_div, floor_mod as math_mod,
 }
 import arc/internal/host_time.{now_ms, offset_at_local_ms, offset_at_utc_ms}
 import arc/vm/builtins/common.{type BuiltinType}
@@ -450,11 +450,10 @@ fn get_date_fields(tv: Int, time_ref: TimeRef) -> DateFields {
   let minutes = math_mod(h, 60)
   let hours = { h - minutes } / 60
   let weekday = gregorian.weekday_from_days(days)
-  let #(year, day_in_year) = year_from_days(days)
-  let #(month, date) = month_from_day_in_year(year, day_in_year, 0)
+  let #(year, month1, date) = civil_from_days(days)
   DateFields(
     year:,
-    month:,
+    month: month1 - 1,
     date:,
     hours:,
     minutes:,
@@ -463,14 +462,6 @@ fn get_date_fields(tv: Int, time_ref: TimeRef) -> DateFields {
     weekday:,
     tz:,
   )
-}
-
-fn month_from_day_in_year(y: Int, d: Int, m: Int) -> #(Int, Int) {
-  let md = days_in_month(y, m)
-  case d < md {
-    True -> #(m, d + 1)
-    False -> month_from_day_in_year(y, d - md, m + 1)
-  }
 }
 
 /// ES2024 §21.4.1.28 / §21.4.1.29 MakeDay+MakeDate+MakeTime combined.

@@ -42,26 +42,6 @@ pub fn days_from_year(y: Int) -> Int {
   + floor_div(y - 1601, 400)
 }
 
-/// `#(year, day_within_year)` for a day count since 1970-01-01, where
-/// `day_within_year` is 0-based (Jan 1 = 0). Initial guess from average
-/// year length, then correct ±1 (QuickJS algorithm).
-pub fn year_from_days(days: Int) -> #(Int, Int) {
-  let y = floor_div(days * 10_000, 3_652_425) + 1970
-  year_from_days_loop(y, days)
-}
-
-fn year_from_days_loop(y: Int, days: Int) -> #(Int, Int) {
-  let d = days - days_from_year(y)
-  case d < 0 {
-    True -> year_from_days_loop(y - 1, days)
-    False ->
-      case d >= days_in_year(y) {
-        True -> year_from_days_loop(y + 1, days)
-        False -> #(y, d)
-      }
-  }
-}
-
 /// Length of 1-based month `m` in year `y`.
 ///
 /// Callers are expected to have already constrained `m` to 1..12; anything

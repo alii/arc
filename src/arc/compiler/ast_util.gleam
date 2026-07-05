@@ -545,18 +545,6 @@ pub fn class_element_bucket(el: ast.ClassElement) -> ClassElementBucket {
   }
 }
 
-pub fn is_class_ctor(el: ast.ClassElement) -> Bool {
-  class_element_bucket(el) == CeCtor
-}
-
-pub fn is_instance_method(el: ast.ClassElement) -> Bool {
-  class_element_bucket(el) == CeInstanceMethod
-}
-
-pub fn is_static_method(el: ast.ClassElement) -> Bool {
-  class_element_bucket(el) == CeStaticMethod
-}
-
 pub fn is_instance_field(el: ast.ClassElement) -> Bool {
   class_element_bucket(el) == CeInstanceField
 }

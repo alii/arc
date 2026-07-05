@@ -5491,15 +5491,6 @@ fn call_native(
   )
 }
 
-/// §15.4.4 MakeMethod(F, homeObject): if `func` is a JS closure, set its
-/// [[HomeObject]] = `target` so `super.x` inside it resolves via the
-/// home object's prototype. No-op for non-closures (native, bound, etc.).
-/// DefinePropertyOrThrow guard for class element definition: §10.1.6.3
-/// ValidateAndApplyPropertyDescriptor rejects redefining an existing
-/// non-configurable own property (the descriptors class bodies produce
-/// always differ from it — fresh closure values / accessor-vs-data). The
-/// only collision reachable from a class body is the constructor's own
-/// "prototype" via a computed key.
 /// DefineField receivers that need the full [[DefineOwnProperty]] path:
 /// proxies (defineProperty trap, §10.5.6) and non-extensible/frozen objects
 /// (CreateDataPropertyOrThrow → TypeError). Private-namespace keys never go
@@ -5576,6 +5567,12 @@ fn define_field_full(
   }
 }
 
+/// DefinePropertyOrThrow guard for class element definition: §10.1.6.3
+/// ValidateAndApplyPropertyDescriptor rejects redefining an existing
+/// non-configurable own property (the descriptors class bodies produce
+/// always differ from it — fresh closure values / accessor-vs-data). The
+/// only collision reachable from a class body is the constructor's own
+/// "prototype" via a computed key.
 fn check_define_nonconfigurable(
   state: State(host),
   ref: value.Ref,
@@ -5629,6 +5626,9 @@ fn check_private_add(
   }
 }
 
+/// §15.4.4 MakeMethod(F, homeObject): if `func` is a JS closure, set its
+/// [[HomeObject]] = `target` so `super.x` inside it resolves via the
+/// home object's prototype. No-op for non-closures (native, bound, etc.).
 fn make_method(h: Heap(host), func: JsValue, target: Ref) -> Heap(host) {
   case func {
     JsObject(fn_ref) -> {

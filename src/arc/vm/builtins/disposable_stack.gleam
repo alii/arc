@@ -501,7 +501,7 @@ fn dispose(
 ///            6. Set completion to ThrowCompletion(error).
 ///         ii. Else, set completion to result.
 ///   2. Return ? completion.
-pub fn dispose_resources(
+fn dispose_resources(
   state: State(host),
   resources: List(DisposeResource),
   completion: Result(JsValue, JsValue),
@@ -661,7 +661,7 @@ fn try_get_method(
 
 /// The outcome of GetDisposeMethod(V, hint) — which method was found and
 /// therefore how it must be invoked at dispose time.
-pub type DisposeMethod {
+type DisposeMethod {
   /// The hint's own method: @@dispose for sync-dispose, @@asyncDispose for
   /// async-dispose. Its result is used as-is (awaited on an async stack).
   DirectDispose(method: JsValue)

@@ -332,11 +332,9 @@ fn exported_names_with(
 // Validation (§16.2.1.6.4) — the VM's link path; exact SyntaxError strings
 // =============================================================================
 
-/// A link-time validation failure (§16.2.1.6.4). The two guest-visible
-/// variants surface to JS as a SyntaxError whose message is
-/// `link_error_message`; callers that need to distinguish the cases match the
-/// variant instead of the prose. `UnresolvedDependency` is NOT guest-visible —
-/// it reports a broken caller invariant, and `arc/module` panics on it.
+/// A link-time validation failure (§16.2.1.6.4). Both variants surface to JS
+/// as a SyntaxError whose message is `link_error_message`; callers that need
+/// to distinguish the cases match the variant instead of the prose.
 pub type LinkError {
   /// An import or indirect re-export names an export the requested module does
   /// not provide. `requested_module` is the specifier as WRITTEN in the failing

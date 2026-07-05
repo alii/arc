@@ -2202,13 +2202,6 @@ fn concat_items(
   }
 }
 
-/// Concat a single item E into the accumulating elements.
-///
-/// Implements the per-item logic of §23.1.3.1 step 5:
-///   a. Let spreadable be ? IsConcatSpreadable(E).
-///   b. If spreadable is true, spread E's elements via copy_range.
-///   c. Else, append E as a single element.
-///
 /// ArraySpeciesCreate (ES2024 §9.4.2.3).
 ///
 ///   2. Let isArray be ? IsArray(originalArray); if false → ArrayCreate(length).
@@ -3208,7 +3201,7 @@ fn search_backward(
 /// Shared by every hole-sensitive scan in this module — iterate_loop,
 /// search_forward and collect_sort_elements — so the choice can never be
 /// spelled as a bare boolean whose polarity you have to remember.
-pub type HoleMode {
+type HoleMode {
   SkipHoles
   VisitHoles
 }
@@ -3216,7 +3209,7 @@ pub type HoleMode {
 /// Which way a bidirectional array loop runs. Replaces the old "step is 1 or
 /// -1" convention: `bounds` below is the ONLY place a start/end/step triple is
 /// built, so a caller cannot transpose them or invent a third step value.
-pub type Direction {
+type Direction {
   Ascending
   Descending
 }
@@ -3243,7 +3236,7 @@ fn step_of(dir: Direction) -> Int {
 /// loop and its index, or nothing. Replaces the old direction-dependent
 /// "not found" index sentinel (`length` ascending, `-1` descending), which a
 /// caller could compare against the wrong way and read a miss as a hit.
-pub type FoundAt {
+type FoundAt {
   Found(element: JsValue, index: Int)
   NotFound
 }

@@ -310,7 +310,7 @@ pub opaque type Emitter {
 }
 
 /// Where the synthetic field-initializer call is emitted.
-pub type FieldInitMode {
+type FieldInitMode {
   /// No instance fields (or not in a constructor body).
   NoFieldInit
   /// Base-class ctor: call init fn at start of body, after lexical declares.
@@ -592,8 +592,9 @@ pub fn emit_module(
 // over the body, with a DisposeResources sequence (proposal §2.1.4) running
 // on both normal and abrupt completion. The lowering is emitted as raw IR
 // here — no synthetic AST nodes — so user bindings keep their REAL source
-// spans (used by error messages and source maps) and the only names
-// introduced are emitter-internal `%u:` scratch locals.
+// spans (used by error messages and source maps) and the only slots
+// introduced are anonymous scratch slots from fresh_slot — never named,
+// never in the scope tree.
 
 /// Scratch-slot indices for one DisposeResources lowering — minted by
 /// `build_using_scope`, seeded by `emit_using_prelude`, consumed by
@@ -732,8 +733,9 @@ fn make_using_scope(
 
 /// Declare and initialise the scratch locals for one UsingScope. Each is a
 /// LetBinding so IrScopePutVar in the body/handler/dispose may reassign it.
-/// The `%u:` names cannot be referenced by user code, so declaration order
-/// relative to hoisted functions is irrelevant (never captured).
+/// These are anonymous scratch slots from fresh_slot — never named, never in
+/// the scope tree — so declaration order relative to hoisted functions is
+/// irrelevant (never captured).
 fn emit_using_prelude(e: Emitter, scope: UsingScope) -> Emitter {
   let e = declare_scratch(e, scope.err, JsUndefined)
   let e = declare_scratch(e, scope.has_err, JsBool(False))
@@ -1386,7 +1388,7 @@ fn scope_parent_in_fn(e: Emitter, id: ScopeId) -> Option(ScopeId) {
 /// Saved scope position — the parent scope id, its remaining unconsumed
 /// child-scope ids, and the `in_block` flag — captured at `enter_scope`
 /// and restored by `leave_scope`.
-pub type ScopeSave {
+type ScopeSave {
   ScopeSave(scope: ScopeId, cursor: List(ScopeId), in_block: Bool)
 }
 
@@ -1922,7 +1924,7 @@ fn emit_var_delete(e: Emitter, name: String) -> Emitter {
 /// `base_slot` is `Some(slot)` exactly when the resolution crossed a `with`
 /// scope: the scratch local holds the matched with object (or undefined =
 /// take the static fallback), captured before the RHS could mutate it.
-pub opaque type VarRef {
+type VarRef {
   VarRef(name: String, fallback: scope.Direct, base_slot: Option(Int))
 }
 

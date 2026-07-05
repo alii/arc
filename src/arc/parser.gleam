@@ -820,12 +820,8 @@ fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
         Dot | LeftParen -> parse_expression_statement(p)
         _ -> {
           case p.mode {
-            Module ->
-              case p.ctx.module_top_level {
-                // Top-level imports handled by parse_module_body
-                True -> Error(ImportNotTopLevel(pos_of(p)))
-                False -> Error(ImportNotTopLevel(pos_of(p)))
-              }
+            // Top-level imports handled by parse_module_body
+            Module -> Error(ImportNotTopLevel(pos_of(p)))
             Script -> parse_expression_statement(p)
           }
         }
@@ -833,12 +829,8 @@ fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     }
     Export -> {
       case p.mode {
-        Module ->
-          case p.ctx.module_top_level {
-            // Top-level exports handled by parse_module_body
-            True -> Error(ExportNotTopLevel(pos_of(p)))
-            False -> Error(ExportNotTopLevel(pos_of(p)))
-          }
+        // Top-level exports handled by parse_module_body
+        Module -> Error(ExportNotTopLevel(pos_of(p)))
         Script -> Error(UnexpectedExport(pos_of(p)))
       }
     }

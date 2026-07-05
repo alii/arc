@@ -19,8 +19,8 @@
 /// ISODateTimeWithinLimits, IsValidDuration, ParseISODateTime).
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{
-  days_from_year, days_in_month, days_in_year as days_in_iso_year, floor_div,
-  floor_mod as math_mod, is_leap_year, year_from_days,
+  civil_from_days, days_from_year, days_in_month, days_in_year as days_in_iso_year,
+  floor_div, floor_mod as math_mod, is_leap_year,
 }
 import arc/internal/host_time
 import arc/vm/builtins/common
@@ -807,17 +807,8 @@ fn epoch_days(d: IsoDate) -> Int {
 }
 
 fn iso_date_from_epoch_days(days: Int) -> IsoDate {
-  let #(year, day_in_year) = year_from_days(days)
-  let #(month, day) = month_day_from_doy(year, day_in_year, 1)
+  let #(year, month, day) = civil_from_days(days)
   IsoDate(year:, month:, day:)
-}
-
-fn month_day_from_doy(y: Int, d: Int, m: Int) -> #(Int, Int) {
-  let md = days_in_month(y, m)
-  case d < md {
-    True -> #(m, d + 1)
-    False -> month_day_from_doy(y, d - md, m + 1)
-  }
 }
 
 /// ISO day of week: Monday = 1 .. Sunday = 7. Epoch day 0 = Thursday.

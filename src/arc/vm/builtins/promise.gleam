@@ -587,7 +587,7 @@ pub fn get_data_ref(h: Heap(host), promise_ref: Ref) -> Option(Ref) {
 /// if found. The caller handles steps 8a/10a/12a (fulfill or reject) and
 /// step 13 (enqueue thenable job). Most callers should just use
 /// `resolve_promise`, which performs those steps.
-pub fn get_thenable_then(
+fn get_thenable_then(
   state: state.State(host),
   val: JsValue,
 ) -> #(ThenLookup, state.State(host)) {
@@ -613,7 +613,7 @@ pub fn get_thenable_then(
 /// Functions §27.2.1.3.2 steps 8-12). The three cases lead to OPPOSITE
 /// promise outcomes, so they are distinct variants — a caller must decide
 /// each one explicitly.
-pub type ThenLookup {
+type ThenLookup {
   /// Step 13 path: the value is an object with a callable `then`.
   /// The caller must enqueue a PromiseResolveThenableJob.
   Thenable(then_fn: JsValue)

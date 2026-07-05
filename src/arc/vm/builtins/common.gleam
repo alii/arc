@@ -1087,9 +1087,6 @@ pub fn make_error(
 /// because they need access to the Builtins to allocate the error object,
 /// and this function already receives Builtins. `None` has exactly one
 /// meaning: the argument was undefined or null (Table 15 rows 1-2).
-///
-/// TODO(Deviation): SymbolObject uses Object.prototype instead of Symbol.prototype
-///   (no dedicated Symbol.prototype with toString/valueOf/description yet).
 pub fn to_object(
   h: Heap(ctx, host),
   b: Builtins,

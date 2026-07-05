@@ -13,8 +13,8 @@
 ////
 //// The threshold is invisible from the outside: a task that crashes raises
 //// the SAME exception (class, reason and stack) whether it ran inline or in
-//// the scratch process, and the scratch process is linked to its caller so
-//// it cannot outlive a caller that dies mid-compile.
+//// the scratch process, and the scratch process reverse-monitors its caller
+//// so it cannot outlive a caller that dies mid-compile.
 
 /// Run a parse/compile `task`, in a heap-pre-sized scratch process when
 /// `source_bytes` is large, inline otherwise. The task's result is copied

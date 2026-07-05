@@ -19,7 +19,7 @@
 %% `function_clause` crash, never a wrong-width read of an adjacent element.
 -module(arc_typed_array_ffi).
 -export([ta_zeroed/1, ta_get_int/3, ta_set_int/4, ta_get_float/3,
-         ta_set_float/4, ta_clamp_uint8/1, ta_splice/3, ta_fill_region/4]).
+         ta_set_float/4, ta_clamp_uint8/1, ta_splice/3]).
 
 %% Allocate an all-zero binary of N bytes (ArrayBuffer backing store).
 ta_zeroed(N) when N =< 0 -> <<>>;
@@ -32,12 +32,6 @@ ta_splice(Bin, Off, Region) ->
     Len = byte_size(Region),
     <<Before:Off/binary, _:Len/binary, After/bits>> = Bin,
     <<Before/binary, Region/binary, After/bits>>.
-
-%% Write Count copies of the encoded element ElemBin at byte offset Off.
-%% O(byte_size(Bin) + Count*elem) — one rebuild for the whole fill.
-ta_fill_region(Bin, _Off, Count, _ElemBin) when Count =< 0 -> Bin;
-ta_fill_region(Bin, Off, Count, ElemBin) ->
-    ta_splice(Bin, Off, binary:copy(ElemBin, Count)).
 
 %% Read a little-endian integer element, one clause per IntElem.
 ta_get_int(Bin, Off, i8)  -> get_int(Bin, Off, 8, signed);
