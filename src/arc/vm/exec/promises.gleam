@@ -718,10 +718,15 @@ fn call_native_finally(
   }
 }
 
-/// Create PromiseResolve(C, resolve_value).then(handler) where handler is the
-/// given native call (a value thunk or a re-thrower). `C` is the species
+/// Chain `handler` onto PromiseResolve(C, resolve_value), where `handler` is
+/// the given native call (a value thunk or a re-thrower). `C` is the species
 /// constructor captured by `Promise.prototype.finally` (§27.2.5.3 step 3), so
 /// a subclass's `then` sees a promise built by the subclass.
+///
+/// Only PromiseResolve steps 2-4 (NewPromiseCapability + Call(resolve, x)) are
+/// applied — step 1's `IsPromise(x) && SameValue(Get(x, "constructor"), C)`
+/// short-circuit is not, so a promise that is already `C`-constructed still
+/// takes one extra microtask tick versus spec.
 fn finally_chain(
   state: State(host),
   constructor: JsValue,
@@ -745,13 +750,20 @@ fn finally_chain(
       value.NativeFunction(value.Call(native_call), constructible: False),
       state.builtins.function.prototype,
     )
-  // Chain .then(handler) on the resolved promise
-  call_native_promise_then(
-    State(..state, heap: h2),
-    cap.promise,
-    [JsObject(handler_ref), JsUndefined],
-    rest_stack,
+  let state = State(..state, heap: h2)
+  // §27.2.5.3.1/§27.2.5.3.2 step 4: Return ? Invoke(promise, "then", «handler»).
+  // A generic Invoke — Get "then", then Call it — never a direct jump into
+  // Promise.prototype.then: with a species constructor, `cap.promise` is
+  // whatever `new C(executor)` returned and need not be a promise at all.
+  use #(then_fn, state) <- result.try(
+    state.rethrow(object.get_value_of(state, cap.promise, Named("then"))),
   )
+  use #(then_result, state) <- result.try(
+    state.rethrow(state.call(state, then_fn, cap.promise, [
+      JsObject(handler_ref),
+    ])),
+  )
+  Ok(State(..state, stack: [then_result, ..rest_stack], pc: state.pc + 1))
 }
 
 /// Promise.resolve(value) — if value is already a promise with same constructor,
