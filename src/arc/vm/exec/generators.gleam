@@ -7,7 +7,7 @@ import arc/vm/completion.{
 import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
-import arc/vm/opcode.{CatchOnly, Finally, IterCloseGuard, YieldStar}
+import arc/vm/opcode.{CatchOnly, Finally, IterCloseGuard, Pc, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
   type Heap, type HeapSlot, type State, type StepExit, type TryFrame,
@@ -67,21 +67,21 @@ pub fn resume_generator_next(
   case get_generator_data(state.heap, this) {
     Some(gen) ->
       case gen.gen_state {
-        value.Completed ->
+        value.GenCompleted ->
           // Already done -- {value: undefined, done: true} without alloc.
           Ok(#(True, JsUndefined, State(..state, pc: state.pc + 1)))
-        value.Executing -> {
+        value.GenExecuting -> {
           state.throw_type_error(state, "Generator is already running")
         }
-        value.SuspendedStart | value.SuspendedYield -> {
-          // For SuspendedYield, push the .next() arg onto the saved stack
-          // (the Yield opcode left pc pointing past Yield, stack has value popped)
-          let gen_stack = case gen.gen_state {
-            value.SuspendedYield -> [next_arg, ..gen.frame.stack]
-            _ -> gen.frame.stack
+        value.GenSuspended(at:, frame:) -> {
+          // When suspended at a yield, push the .next() arg onto the saved
+          // stack (the Yield opcode left pc past Yield, stack has value popped)
+          let gen_stack = case at {
+            value.AtYield -> [next_arg, ..frame.stack]
+            value.AtStart -> frame.stack
           }
           let gen_exec_state =
-            build_resumed_state(state, gen, gen_stack, gen.frame.pc)
+            build_resumed_state(state, gen, frame, gen_stack, frame.pc)
           run_to_completion(gen_exec_state, state, gen, execute_inner)
         }
       }
@@ -115,7 +115,7 @@ pub fn call_native_generator_return(
   case get_generator_data(state.heap, this) {
     Some(gen) ->
       case gen.gen_state {
-        value.Completed | value.SuspendedStart -> {
+        value.GenCompleted | value.GenSuspended(at: value.AtStart, ..) -> {
           // Mark completed and return {value, done: true}
           let state = complete(state, gen)
           let #(h, result) =
@@ -134,15 +134,16 @@ pub fn call_native_generator_return(
             ),
           )
         }
-        value.Executing -> {
+        value.GenExecuting -> {
           state.throw_type_error(state, "Generator is already running")
         }
-        value.SuspendedYield ->
-          case delegate_iterator(gen) {
+        value.GenSuspended(at: value.AtYield, frame:) ->
+          case delegate_iterator(gen, frame) {
             Some(iter_ref) ->
               forward_delegate(
                 state,
                 gen,
+                frame,
                 iter_ref,
                 DelegateReturn,
                 return_val,
@@ -154,6 +155,7 @@ pub fn call_native_generator_return(
                   do_return_resume(
                     state,
                     gen,
+                    frame,
                     return_val,
                     rest_stack,
                     execute_inner,
@@ -165,6 +167,7 @@ pub fn call_native_generator_return(
               do_return_resume(
                 state,
                 gen,
+                frame,
                 return_val,
                 rest_stack,
                 execute_inner,
@@ -183,13 +186,14 @@ pub fn call_native_generator_return(
 fn do_return_resume(
   state: State(host),
   gen: GenData,
+  frame: value.SuspendedFrame,
   return_val: JsValue,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
   unwind_to_catch: UnwindToCatchFn(host),
 ) -> Result(State(host), StepExit(host)) {
   let gen_exec_state =
-    build_resumed_state(state, gen, gen.frame.stack, gen.frame.pc)
+    build_resumed_state(state, gen, frame, frame.stack, frame.pc)
   unwind_return(gen_exec_state, return_val, execute_inner, unwind_to_catch)
   |> settle_completion(state, gen)
   |> alloc_iter_result(rest_stack)
@@ -208,18 +212,19 @@ pub fn call_native_generator_throw(
   case get_generator_data(state.heap, this) {
     Some(gen) ->
       case gen.gen_state {
-        value.Completed | value.SuspendedStart ->
+        value.GenCompleted | value.GenSuspended(at: value.AtStart, ..) ->
           // Mark completed and throw the exception
           complete_and_throw(state, gen, throw_val)
-        value.Executing -> {
+        value.GenExecuting -> {
           state.throw_type_error(state, "Generator is already running")
         }
-        value.SuspendedYield ->
-          case delegate_iterator(gen) {
+        value.GenSuspended(at: value.AtYield, frame:) ->
+          case delegate_iterator(gen, frame) {
             Some(iter_ref) ->
               forward_delegate(
                 state,
                 gen,
+                frame,
                 iter_ref,
                 DelegateThrow,
                 throw_val,
@@ -249,7 +254,7 @@ pub fn call_native_generator_throw(
               )
             None -> {
               let gen_exec_state =
-                build_resumed_state(state, gen, gen.frame.stack, gen.frame.pc)
+                build_resumed_state(state, gen, frame, frame.stack, frame.pc)
               // Try to unwind to a catch handler within the generator
               case unwind_to_catch(gen_exec_state, throw_val) {
                 Some(caught_state) ->
@@ -279,10 +284,9 @@ pub fn call_native_generator_throw(
 type GenData {
   GenData(
     data_ref: Ref,
-    gen_state: value.GeneratorState,
+    gen_state: value.GeneratorSlotState,
     func_template: FuncTemplate,
     env_ref: Ref,
-    frame: value.SuspendedFrame,
   )
 }
 
@@ -292,14 +296,8 @@ fn get_generator_data(h: Heap(host), this: JsValue) -> Option(GenData) {
       case heap.read(h, obj_ref) {
         Some(ObjectSlot(kind: GeneratorObject(generator_data: data_ref), ..)) ->
           case heap.read(h, data_ref) {
-            Some(GeneratorSlot(gen_state:, func_template:, env_ref:, frame:)) ->
-              Some(GenData(
-                data_ref:,
-                gen_state:,
-                func_template:,
-                env_ref:,
-                frame:,
-              ))
+            Some(GeneratorSlot(gen_state:, func_template:, env_ref:)) ->
+              Some(GenData(data_ref:, gen_state:, func_template:, env_ref:))
             _ -> None
           }
         _ -> None
@@ -308,29 +306,32 @@ fn get_generator_data(h: Heap(host), this: JsValue) -> Option(GenData) {
   }
 }
 
-/// Create a GeneratorSlot with only the gen_state changed.
+/// Create a GeneratorSlot with only the gen_state changed. `new_state` carries
+/// the suspended frame when (and only when) there is one to keep, so a
+/// Completed/Executing generator cannot leave a stale body behind on the heap.
 fn gen_with_state(
   gen: GenData,
-  new_state: value.GeneratorState,
+  new_state: value.GeneratorSlotState,
 ) -> HeapSlot(host) {
   GeneratorSlot(
     gen_state: new_state,
     func_template: gen.func_template,
     env_ref: gen.env_ref,
-    frame: gen.frame,
   )
 }
 
 /// Mark the generator Completed in `state`'s heap. The ONLY way this module
 /// completes a generator — "marked done but forgot to write the heap" (or
-/// wrote it to the wrong ref) is not expressible through it.
+/// wrote it to the wrong ref) is not expressible through it. Completing also
+/// drops the suspended frame (it lives in `GenSuspended`), so a finished
+/// generator stops rooting its locals and operand stack.
 fn complete(state: State(host), gen: GenData) -> State(host) {
   State(
     ..state,
     heap: heap.write(
       state.heap,
       gen.data_ref,
-      gen_with_state(gen, value.Completed),
+      gen_with_state(gen, value.GenCompleted),
     ),
   )
 }
@@ -349,17 +350,22 @@ fn complete_and_throw(
 fn build_resumed_state(
   outer: State(host),
   gen: GenData,
+  frame: value.SuspendedFrame,
   stack: List(JsValue),
   pc: Int,
 ) -> State(host) {
   let h =
-    heap.write(outer.heap, gen.data_ref, gen_with_state(gen, value.Executing))
-  let restored_try = restore_stacks(gen.frame.try_stack)
+    heap.write(
+      outer.heap,
+      gen.data_ref,
+      gen_with_state(gen, value.GenExecuting),
+    )
+  let restored_try = restore_stacks(frame.try_stack)
   State(
     ..outer,
     heap: h,
     stack:,
-    locals: gen.frame.locals,
+    locals: frame.locals,
     func: gen.func_template,
     code: gen.func_template.bytecode,
     constants: gen.func_template.constants,
@@ -370,19 +376,19 @@ fn build_resumed_state(
     call_args: [],
     // Per-frame fields: without these the body would inherit the RESUMER's
     // eval_env (losing direct-eval `var`s across a yield) and its line number.
-    eval_env: gen.frame.eval_env,
-    current_line: gen.frame.line,
+    eval_env: frame.eval_env,
+    current_line: frame.line,
   )
 }
 
 /// If suspended at a YieldStar opcode, return the delegated iterator (top of
 /// saved_stack). YieldStar keeps pc unchanged on yield, so this check is
 /// exact — no extra delegate slot needed.
-fn delegate_iterator(gen: GenData) -> Option(Ref) {
+fn delegate_iterator(gen: GenData, frame: value.SuspendedFrame) -> Option(Ref) {
   // saved_pc was a valid dispatch target — always in bounds.
-  case tuple_array.unsafe_get(gen.frame.pc, gen.func_template.bytecode) {
+  case tuple_array.unsafe_get(frame.pc, gen.func_template.bytecode) {
     YieldStar ->
-      case gen.frame.stack {
+      case frame.stack {
         [JsObject(iter_ref), ..] -> Some(iter_ref)
         _ -> None
       }
@@ -399,6 +405,7 @@ fn delegate_iterator(gen: GenData) -> Option(Ref) {
 fn forward_delegate(
   state: State(host),
   gen: GenData,
+  frame: value.SuspendedFrame,
   iter_ref: Ref,
   method: DelegateMethod,
   arg: JsValue,
@@ -433,7 +440,7 @@ fn forward_delegate(
                 heap.write(
                   state.heap,
                   gen.data_ref,
-                  gen_with_state(gen, value.SuspendedYield),
+                  gen_with_state(gen, value.GenSuspended(value.AtYield, frame)),
                 )
               let #(h, result) =
                 common.create_iter_result(h, state.builtins, val, False)
@@ -454,6 +461,7 @@ fn forward_delegate(
               resume_after_delegate(
                 state,
                 gen,
+                frame,
                 val,
                 method,
                 rest_stack,
@@ -479,6 +487,7 @@ fn delegate_key(method: DelegateMethod) -> key.PropertyKey {
 fn resume_after_delegate(
   state: State(host),
   gen: GenData,
+  frame: value.SuspendedFrame,
   val: JsValue,
   method: DelegateMethod,
   rest_stack: List(JsValue),
@@ -498,12 +507,12 @@ fn resume_after_delegate(
     DelegateThrow -> {
       // .throw forwarded and inner is done — continue outer body past
       // YieldStar with val on stack (the yield* expression's value).
-      let stack_after = case gen.frame.stack {
+      let stack_after = case frame.stack {
         [_iter, ..rest] -> [val, ..rest]
         _ -> [val]
       }
       let resumed =
-        build_resumed_state(state, gen, stack_after, gen.frame.pc + 1)
+        build_resumed_state(state, gen, frame, stack_after, frame.pc + 1)
       run_to_completion(resumed, state, gen, execute_inner)
       |> alloc_iter_result(rest_stack)
     }
@@ -539,11 +548,9 @@ fn settle_completion(
         heap.write(
           suspended.heap,
           gen.data_ref,
-          GeneratorSlot(
-            gen_state: value.SuspendedYield,
-            func_template: gen.func_template,
-            env_ref: gen.env_ref,
-            frame: suspended_frame(suspended),
+          gen_with_state(
+            gen,
+            value.GenSuspended(value.AtYield, suspended_frame(suspended)),
           ),
         )
       Ok(#(
@@ -599,8 +606,8 @@ fn find_next_return_handler(
 ) -> Option(ReturnHandler) {
   case try_stack {
     [] -> None
-    [TryFrame(kind: Finally(fin_label:), stack_depth:, ..), ..rest] ->
-      Some(FinallyHandler(fin_label, stack_depth, rest))
+    [TryFrame(kind: Finally(fin_label: Pc(fin_pc)), stack_depth:, ..), ..rest] ->
+      Some(FinallyHandler(fin_pc, stack_depth, rest))
     [TryFrame(kind: IterCloseGuard, stack_depth:, ..), ..rest] ->
       Some(IterCloseHandler(stack_depth, rest))
     [TryFrame(kind: CatchOnly, ..), ..rest] -> find_next_return_handler(rest)

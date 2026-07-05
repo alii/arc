@@ -302,10 +302,9 @@ fn call_coroutine_function(
           )
         False ->
           GeneratorSlot(
-            gen_state: value.SuspendedStart,
+            gen_state: value.GenSuspended(value.AtStart, frame),
             func_template: callee_template,
             env_ref:,
-            frame:,
           )
       }
       let #(h, data_ref) = heap.alloc(suspended.heap, slot)
@@ -941,10 +940,22 @@ pub fn call_native(
         reject,
       )
     // Promise.prototype.finally wrapper functions
-    value.Call(value.PromiseFinallyFulfill(on_finally:)) ->
-      promises.call_native_finally_fulfill(state, on_finally, args, rest_stack)
-    value.Call(value.PromiseFinallyReject(on_finally:)) ->
-      promises.call_native_finally_reject(state, on_finally, args, rest_stack)
+    value.Call(value.PromiseFinallyFulfill(on_finally:, constructor:)) ->
+      promises.call_native_finally_fulfill(
+        state,
+        on_finally,
+        constructor,
+        args,
+        rest_stack,
+      )
+    value.Call(value.PromiseFinallyReject(on_finally:, constructor:)) ->
+      promises.call_native_finally_reject(
+        state,
+        on_finally,
+        constructor,
+        args,
+        rest_stack,
+      )
     value.Call(value.PromiseFinallyValueThunk(value: captured_value)) -> {
       // Ignore argument, return the captured value
       Ok(

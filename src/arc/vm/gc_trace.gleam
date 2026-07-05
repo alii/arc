@@ -32,7 +32,10 @@ fn push_reaction_handler_ref(
 }
 
 /// GC root tracing: prepend heap refs reachable from a Property onto `acc`.
-fn push_property_refs(prop: value.Property, acc: List(value.Ref)) -> List(value.Ref) {
+fn push_property_refs(
+  prop: value.Property,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case prop {
     value.DataProperty(value: v, ..) -> push_value_ref(v, acc)
     value.AccessorProperty(get:, set:, ..) -> {
@@ -64,7 +67,10 @@ fn push_value_ref(val: value.JsValue, acc: List(value.Ref)) -> List(value.Ref) {
   }
 }
 
-fn push_option_ref(r: Option(value.Ref), acc: List(value.Ref)) -> List(value.Ref) {
+fn push_option_ref(
+  r: Option(value.Ref),
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case r {
     Some(ref) -> [ref, ..acc]
     None -> acc
@@ -74,13 +80,19 @@ fn push_option_ref(r: Option(value.Ref), acc: List(value.Ref)) -> List(value.Ref
 /// Both halves of an Iterator Record are heap-reachable: the iterator object
 /// itself and its cached [[NextMethod]] (a bound function keeps its target and
 /// receiver alive).
-fn push_iter_record(rec: value.IteratorRecord, acc: List(value.Ref)) -> List(value.Ref) {
+fn push_iter_record(
+  rec: value.IteratorRecord,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   push_value_ref(rec.next_method, push_value_ref(rec.iterator, acc))
 }
 
 /// Every heap reference reachable from an %IteratorHelper%'s body. Exhaustive
 /// per variant, so a new helper flavour cannot silently escape the GC.
-fn helper_body_refs(body: value.HelperBody, acc: List(value.Ref)) -> List(value.Ref) {
+fn helper_body_refs(
+  body: value.HelperBody,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case body {
     value.ClassicHelper(kind:, underlying:, counter: _) -> {
       let acc = push_iter_record(underlying, acc)
@@ -116,7 +128,10 @@ fn helper_body_refs(body: value.HelperBody, acc: List(value.Ref)) -> List(value.
   }
 }
 
-fn push_option_value(v: Option(value.JsValue), acc: List(value.Ref)) -> List(value.Ref) {
+fn push_option_value(
+  v: Option(value.JsValue),
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case v {
     Some(val) -> push_value_ref(val, acc)
     None -> acc
@@ -160,7 +175,10 @@ fn push_suspended_frame_refs(
 /// EnvSlot is reachable ONLY from the frame that owns it, so a suspended
 /// generator's copy has to be walked or GC would free it out from under a
 /// later resume.
-fn push_opt_ref(ref: Option(value.Ref), acc: List(value.Ref)) -> List(value.Ref) {
+fn push_opt_ref(
+  ref: Option(value.Ref),
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case ref {
     Some(r) -> [r, ..acc]
     None -> acc
@@ -242,10 +260,8 @@ fn do_refs_in_slot(
         // The iterated matcher is the only heap reference the RegExp String
         // Iterator's internal state can hold; the rest is scalar.
         value.RegExpStringIteratorObject(matcher:, ..) -> [matcher, ..acc]
-        value.SetIteratorObject(source:, ..) | value.MapIteratorObject(source:, ..) -> [
-          source,
-          ..acc
-        ]
+        value.SetIteratorObject(source:, ..)
+        | value.MapIteratorObject(source:, ..) -> [source, ..acc]
         value.AsyncFromSyncIteratorObject(sync_iter:, sync_next:) ->
           push_value_ref(sync_next, [sync_iter, ..acc])
         value.IteratorHelperObject(body:, ..) -> helper_body_refs(body, acc)
@@ -293,15 +309,24 @@ fn do_refs_in_slot(
         value.IntlObject(data:) ->
           case data {
             value.CollatorData(value.CollatorState(bound_compare: Some(r), ..))
-            | value.NumberFormatData(value.NumberFormatState(bound_format: Some(r), ..))
-            | value.DateTimeFormatData(value.DateTimeFormatState(bound_format: Some(r), ..)) -> [
-              r,
-              ..acc
-            ]
+            | value.NumberFormatData(value.NumberFormatState(
+                bound_format: Some(r),
+                ..,
+              ))
+            | value.DateTimeFormatData(value.DateTimeFormatState(
+                bound_format: Some(r),
+                ..,
+              )) -> [r, ..acc]
             // Ref-free: no cached bound function, or no heap slot at all.
             value.CollatorData(value.CollatorState(bound_compare: None, ..))
-            | value.NumberFormatData(value.NumberFormatState(bound_format: None, ..))
-            | value.DateTimeFormatData(value.DateTimeFormatState(bound_format: None, ..))
+            | value.NumberFormatData(value.NumberFormatState(
+                bound_format: None,
+                ..,
+              ))
+            | value.DateTimeFormatData(value.DateTimeFormatState(
+                bound_format: None,
+                ..,
+              ))
             | value.LocaleData(_)
             | value.PluralRulesData(_)
             | value.ListFormatData(_)
@@ -344,7 +369,8 @@ fn do_refs_in_slot(
         value.TypedArrayObject(buffer:, ..) -> [buffer, ..acc]
       }
     }
-    value.EnvSlot(slots:) -> list.fold(slots, acc, fn(a, v) { push_value_ref(v, a) })
+    value.EnvSlot(slots:) ->
+      list.fold(slots, acc, fn(a, v) { push_value_ref(v, a) })
     value.BoxSlot(value: v) -> push_value_ref(v, acc)
     // A plain Int — no reachable refs.
     value.CounterSlot(count: _) -> acc
@@ -368,8 +394,14 @@ fn do_refs_in_slot(
       }
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
     }
-    value.GeneratorSlot(env_ref:, frame:, ..) ->
-      push_suspended_frame_refs(env_ref, frame, acc)
+    // A completed (or currently-executing) generator holds no frame at all —
+    // its locals / operand stack stopped being roots the moment it finished.
+    value.GeneratorSlot(gen_state:, env_ref:, ..) ->
+      case gen_state {
+        value.GenSuspended(frame:, ..) ->
+          push_suspended_frame_refs(env_ref, frame, acc)
+        value.GenExecuting | value.GenCompleted -> [env_ref, ..acc]
+      }
     value.AsyncFunctionSlot(
       promise_data_ref:,
       resolve:,
@@ -384,7 +416,12 @@ fn do_refs_in_slot(
         |> push_value_ref(reject, _)
       push_saved_locals_stack_refs(saved_locals, saved_stack, acc)
     }
-    value.AsyncGeneratorSlot(queue: #(queue_front, queue_back), env_ref:, frame:, ..) -> {
+    value.AsyncGeneratorSlot(
+      queue: #(queue_front, queue_back),
+      env_ref:,
+      frame:,
+      ..,
+    ) -> {
       // Both halves of the two-list FIFO hold live requests — walk both.
       let push_request = fn(a, r: value.AsyncGenRequest) {
         a
@@ -413,7 +450,10 @@ fn do_refs_in_slot(
 /// is traced (or the variant is explicitly listed as carrying no refs), so a
 /// payload can never be silently dropped by the mark phase and collected out
 /// from under a live built-in.
-fn native_fn_refs(native: value.NativeFnSlot(ctx), acc: List(value.Ref)) -> List(value.Ref) {
+fn native_fn_refs(
+  native: value.NativeFnSlot(ctx),
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case native {
     value.Dispatch(d) -> dispatch_native_fn_refs(d, acc)
     value.Call(c) -> call_native_fn_refs(c, acc)
@@ -426,7 +466,10 @@ fn native_fn_refs(native: value.NativeFnSlot(ctx), acc: List(value.Ref)) -> List
 
 /// One arm per dispatch module, each delegating to that module's exhaustive
 /// per-variant tracer.
-fn dispatch_native_fn_refs(native: value.NativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn dispatch_native_fn_refs(
+  native: value.NativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case native {
     value.MathNative(f) -> math_native_refs(f, acc)
     value.BooleanNative(f) -> boolean_native_refs(f, acc)
@@ -442,7 +485,8 @@ fn dispatch_native_fn_refs(native: value.NativeFn, acc: List(value.Ref)) -> List
     value.SetNative(f) -> set_native_refs(f, acc)
     value.WeakMapNative(f) -> weak_map_native_refs(f, acc)
     value.WeakSetNative(f) -> weak_set_native_refs(f, acc)
-    value.FinalizationRegistryNative(f) -> finalization_registry_native_refs(f, acc)
+    value.FinalizationRegistryNative(f) ->
+      finalization_registry_native_refs(f, acc)
     value.DisposableStackNative(f) -> disposable_stack_native_refs(f, acc)
     value.IteratorNative(f) -> iterator_native_refs(f, acc)
     value.RegExpNative(f) -> regexp_native_refs(f, acc)
@@ -458,7 +502,10 @@ fn dispatch_native_fn_refs(native: value.NativeFn, acc: List(value.Ref)) -> List
   }
 }
 
-fn math_native_refs(f: value.MathNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn math_native_refs(
+  f: value.MathNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.MathPow
     | value.MathAbs
@@ -498,14 +545,21 @@ fn math_native_refs(f: value.MathNativeFn, acc: List(value.Ref)) -> List(value.R
   }
 }
 
-fn boolean_native_refs(f: value.BooleanNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn boolean_native_refs(
+  f: value.BooleanNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
-    value.BooleanConstructor | value.BooleanPrototypeValueOf | value.BooleanPrototypeToString ->
-      acc
+    value.BooleanConstructor
+    | value.BooleanPrototypeValueOf
+    | value.BooleanPrototypeToString -> acc
   }
 }
 
-fn number_native_refs(f: value.NumberNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn number_native_refs(
+  f: value.NumberNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.NumberConstructor
     | value.NumberIsNaN
@@ -524,7 +578,10 @@ fn number_native_refs(f: value.NumberNativeFn, acc: List(value.Ref)) -> List(val
   }
 }
 
-fn string_native_refs(f: value.StringNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn string_native_refs(
+  f: value.StringNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.StringPrototypeSymbolIterator
     | value.StringPrototypeCharAt
@@ -581,7 +638,10 @@ fn string_native_refs(f: value.StringNativeFn, acc: List(value.Ref)) -> List(val
   }
 }
 
-fn error_native_refs(f: value.ErrorNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn error_native_refs(
+  f: value.ErrorNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.ErrorConstructor(proto:)
     | value.AggregateErrorConstructor(proto:)
@@ -596,7 +656,10 @@ fn error_native_refs(f: value.ErrorNativeFn, acc: List(value.Ref)) -> List(value
   }
 }
 
-fn array_native_refs(f: value.ArrayNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn array_native_refs(
+  f: value.ArrayNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.ArrayConstructor
     | value.ArrayIsArray
@@ -643,7 +706,10 @@ fn array_native_refs(f: value.ArrayNativeFn, acc: List(value.Ref)) -> List(value
   }
 }
 
-fn object_native_refs(f: value.ObjectNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn object_native_refs(
+  f: value.ObjectNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.ObjectConstructor
     | value.ObjectGetOwnPropertyDescriptor
@@ -684,13 +750,19 @@ fn object_native_refs(f: value.ObjectNativeFn, acc: List(value.Ref)) -> List(val
   }
 }
 
-fn console_native_refs(f: value.ConsoleNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn console_native_refs(
+  f: value.ConsoleNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.ConsoleLog | value.ConsoleLogError -> acc
   }
 }
 
-fn json_native_refs(f: value.JsonNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn json_native_refs(
+  f: value.JsonNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.JsonParse(fn_proto:)
     | value.JsonStringify(fn_proto:)
@@ -699,7 +771,10 @@ fn json_native_refs(f: value.JsonNativeFn, acc: List(value.Ref)) -> List(value.R
   }
 }
 
-fn reflect_native_refs(f: value.ReflectNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn reflect_native_refs(
+  f: value.ReflectNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.ReflectApply
     | value.ReflectConstruct
@@ -717,7 +792,10 @@ fn reflect_native_refs(f: value.ReflectNativeFn, acc: List(value.Ref)) -> List(v
   }
 }
 
-fn map_native_refs(f: value.MapNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn map_native_refs(
+  f: value.MapNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.MapConstructor(proto:) -> [proto, ..acc]
     value.MapPrototypeGet
@@ -733,7 +811,10 @@ fn map_native_refs(f: value.MapNativeFn, acc: List(value.Ref)) -> List(value.Ref
   }
 }
 
-fn set_native_refs(f: value.SetNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn set_native_refs(
+  f: value.SetNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.SetConstructor(proto:) -> [proto, ..acc]
     value.SetPrototypeAdd
@@ -754,7 +835,10 @@ fn set_native_refs(f: value.SetNativeFn, acc: List(value.Ref)) -> List(value.Ref
   }
 }
 
-fn weak_map_native_refs(f: value.WeakMapNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn weak_map_native_refs(
+  f: value.WeakMapNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.WeakMapConstructor(proto:) -> [proto, ..acc]
     value.WeakMapPrototypeGet
@@ -766,10 +850,15 @@ fn weak_map_native_refs(f: value.WeakMapNativeFn, acc: List(value.Ref)) -> List(
   }
 }
 
-fn weak_set_native_refs(f: value.WeakSetNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn weak_set_native_refs(
+  f: value.WeakSetNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.WeakSetConstructor(proto:) -> [proto, ..acc]
-    value.WeakSetPrototypeAdd | value.WeakSetPrototypeHas | value.WeakSetPrototypeDelete -> acc
+    value.WeakSetPrototypeAdd
+    | value.WeakSetPrototypeHas
+    | value.WeakSetPrototypeDelete -> acc
   }
 }
 
@@ -795,7 +884,13 @@ fn disposable_stack_native_refs(
     | value.AsyncDisposableStackPrototypeMove(proto:) -> [proto, ..acc]
     // disposeAsync continuation handlers keep the remaining resources,
     // pending error, and the capability's resolve/reject alive.
-    value.AsyncDisposeContinue(remaining:, pending:, resolve:, reject:, is_reject: _) ->
+    value.AsyncDisposeContinue(
+      remaining:,
+      pending:,
+      resolve:,
+      reject:,
+      is_reject: _,
+    ) ->
       push_dispose_resources(
         remaining,
         push_value_ref(
@@ -819,7 +914,10 @@ fn disposable_stack_native_refs(
   }
 }
 
-fn iterator_native_refs(f: value.IteratorNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn iterator_native_refs(
+  f: value.IteratorNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.IteratorConstructor
     | value.IteratorFrom
@@ -848,13 +946,14 @@ fn iterator_native_refs(f: value.IteratorNativeFn, acc: List(value.Ref)) -> List
   }
 }
 
-fn regexp_native_refs(f: value.RegExpNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn regexp_native_refs(
+  f: value.RegExpNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     // Legacy static accessors keep their owning realm's %RegExp% alive.
-    value.RegExpLegacyGetter(ctor:, slot: _) | value.RegExpLegacyInputSetter(ctor:) -> [
-      ctor,
-      ..acc
-    ]
+    value.RegExpLegacyGetter(ctor:, slot: _)
+    | value.RegExpLegacyInputSetter(ctor:) -> [ctor, ..acc]
     // The constructor's legacy state is all Strings — no heap edges.
     value.RegExpConstructor(legacy: _)
     | value.RegExpPrototypeTest
@@ -880,7 +979,10 @@ fn regexp_native_refs(f: value.RegExpNativeFn, acc: List(value.Ref)) -> List(val
   }
 }
 
-fn date_native_refs(f: value.DateNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn date_native_refs(
+  f: value.DateNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.DateConstructor(proto:) -> [proto, ..acc]
     value.DateNow
@@ -935,12 +1037,13 @@ fn date_native_refs(f: value.DateNativeFn, acc: List(value.Ref)) -> List(value.R
   }
 }
 
-fn intl_native_refs(f: value.IntlNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn intl_native_refs(
+  f: value.IntlNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
-    value.IntlConstructor(service: _, proto:) | value.IntlLocaleMethod(method: _, proto:) -> [
-      proto,
-      ..acc
-    ]
+    value.IntlConstructor(service: _, proto:)
+    | value.IntlLocaleMethod(method: _, proto:) -> [proto, ..acc]
     // Bound Intl methods keep their target instance alive.
     value.IntlBoundMethod(service: _, target:) -> [target, ..acc]
     // %SegmentsPrototype% and %SegmentIteratorPrototype% have no other
@@ -966,10 +1069,8 @@ fn array_buffer_native_refs(
   acc: List(value.Ref),
 ) -> List(value.Ref) {
   case f {
-    value.ArrayBufferConstructor(proto:) | value.SharedArrayBufferConstructor(proto:) -> [
-      proto,
-      ..acc
-    ]
+    value.ArrayBufferConstructor(proto:)
+    | value.SharedArrayBufferConstructor(proto:) -> [proto, ..acc]
     value.ArrayBufferIsView
     | value.ArrayBufferGetSpecies
     | value.ArrayBufferGetByteLength
@@ -993,7 +1094,10 @@ fn array_buffer_native_refs(
   }
 }
 
-fn atomics_native_refs(f: value.AtomicsNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn atomics_native_refs(
+  f: value.AtomicsNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.AtomicsAdd
     | value.AtomicsAnd
@@ -1012,7 +1116,10 @@ fn atomics_native_refs(f: value.AtomicsNativeFn, acc: List(value.Ref)) -> List(v
   }
 }
 
-fn typed_array_native_refs(f: value.TypedArrayNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn typed_array_native_refs(
+  f: value.TypedArrayNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.TypedArrayConstructor(kind: _, proto:) -> [proto, ..acc]
     value.TypedArrayIntrinsicConstructor
@@ -1064,7 +1171,10 @@ fn typed_array_native_refs(f: value.TypedArrayNativeFn, acc: List(value.Ref)) ->
   }
 }
 
-fn data_view_native_refs(f: value.DataViewNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn data_view_native_refs(
+  f: value.DataViewNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.DataViewConstructor(proto:) -> [proto, ..acc]
     value.DataViewGetBuffer
@@ -1075,7 +1185,10 @@ fn data_view_native_refs(f: value.DataViewNativeFn, acc: List(value.Ref)) -> Lis
   }
 }
 
-fn temporal_native_refs(f: value.TemporalNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn temporal_native_refs(
+  f: value.TemporalNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     // Every Temporal native carries the eight sibling type prototypes.
     value.TemporalCtor(kind: _, protos:)
@@ -1086,7 +1199,10 @@ fn temporal_native_refs(f: value.TemporalNativeFn, acc: List(value.Ref)) -> List
   }
 }
 
-fn temporal_protos_refs(protos: value.TemporalProtos, acc: List(value.Ref)) -> List(value.Ref) {
+fn temporal_protos_refs(
+  protos: value.TemporalProtos,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   let value.TemporalProtos(
     plain_date:,
     plain_time:,
@@ -1118,17 +1234,18 @@ fn shadow_realm_native_refs(
     value.ShadowRealmConstructor(proto:) -> [proto, ..acc]
     // The prototype methods keep their own realm's %Function.prototype%
     // alive — it's the marker used to recover the caller realm at dispatch.
-    value.ShadowRealmEvaluate(fn_proto:) | value.ShadowRealmImportValue(fn_proto:) -> [
-      fn_proto,
-      ..acc
-    ]
+    value.ShadowRealmEvaluate(fn_proto:)
+    | value.ShadowRealmImportValue(fn_proto:) -> [fn_proto, ..acc]
     // Wrapped functions keep their target and both realm records alive.
     value.WrappedFunctionCall(target:, caller_realm:, target_realm:) ->
       push_value_ref(target, [caller_realm, target_realm, ..acc])
   }
 }
 
-fn vm_native_refs(f: value.VmNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn vm_native_refs(
+  f: value.VmNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.FunctionConstructor
     | value.GeneratorFunctionConstructor
@@ -1159,7 +1276,10 @@ fn vm_native_refs(f: value.VmNativeFn, acc: List(value.Ref)) -> List(value.Ref) 
 /// Exhaustive tracer for call-level natives (bound functions, promise
 /// reaction closures, async continuations, …). Same no-wildcard rule as
 /// dispatch_native_fn_refs.
-fn call_native_fn_refs(f: value.CallNativeFn, acc: List(value.Ref)) -> List(value.Ref) {
+fn call_native_fn_refs(
+  f: value.CallNativeFn,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   case f {
     value.BoundFunction(target:, bound_this:, bound_args:) ->
       list.fold(
@@ -1168,14 +1288,14 @@ fn call_native_fn_refs(f: value.CallNativeFn, acc: List(value.Ref)) -> List(valu
         fn(a, v) { push_value_ref(v, a) },
       )
     value.PromiseResolveFunction(promise_ref:, data_ref:, already_resolved_ref:)
-    | value.PromiseRejectFunction(promise_ref:, data_ref:, already_resolved_ref:) -> [
-      promise_ref,
-      data_ref,
-      already_resolved_ref,
-      ..acc
-    ]
-    value.PromiseFinallyFulfill(on_finally:) | value.PromiseFinallyReject(on_finally:) ->
-      push_value_ref(on_finally, acc)
+    | value.PromiseRejectFunction(
+        promise_ref:,
+        data_ref:,
+        already_resolved_ref:,
+      ) -> [promise_ref, data_ref, already_resolved_ref, ..acc]
+    value.PromiseFinallyFulfill(on_finally:, constructor:)
+    | value.PromiseFinallyReject(on_finally:, constructor:) ->
+      push_value_ref(on_finally, push_value_ref(constructor, acc))
     value.PromiseCapabilityExecutor(resolve_box:, reject_box:) -> [
       resolve_box,
       reject_box,
@@ -1254,11 +1374,15 @@ fn call_native_fn_refs(f: value.CallNativeFn, acc: List(value.Ref)) -> List(valu
     value.PromiseFinallyValueThunk(value: v) -> push_value_ref(v, acc)
     value.PromiseFinallyThrower(reason:) -> push_value_ref(reason, acc)
     value.AsyncResume(async_data_ref:, is_reject: _) -> [async_data_ref, ..acc]
-    value.AsyncGeneratorResume(data_ref:, is_reject: _, kind: _) -> [data_ref, ..acc]
+    value.AsyncGeneratorResume(data_ref:, is_reject: _, kind: _) -> [
+      data_ref,
+      ..acc
+    ]
     value.AsyncFromSyncClose(sync_iter:) -> [sync_iter, ..acc]
     value.ArrayFromAsyncOnNext(ctx:) | value.ArrayFromAsyncOnMapped(ctx:) ->
       from_async_ctx_refs(ctx, acc)
-    value.ArrayFromAsyncLikeOnValue(ctx:) | value.ArrayFromAsyncLikeOnMapped(ctx:) ->
+    value.ArrayFromAsyncLikeOnValue(ctx:)
+    | value.ArrayFromAsyncLikeOnMapped(ctx:) ->
       from_async_like_ctx_refs(ctx, acc)
     value.ArrayFromAsyncCloseReject(iter:, reject:) ->
       acc
@@ -1314,7 +1438,10 @@ fn call_native_fn_refs(f: value.CallNativeFn, acc: List(value.Ref)) -> List(valu
 /// Refs held by Array.fromAsync's async-iterator continuation context.
 /// Destructured (rather than field-accessed) so a new JsValue field in
 /// FromAsyncCtx is a compile error here until it is traced.
-fn from_async_ctx_refs(ctx: value.FromAsyncCtx, acc: List(value.Ref)) -> List(value.Ref) {
+fn from_async_ctx_refs(
+  ctx: value.FromAsyncCtx,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
   let value.FromAsyncCtx(
     iter:,
     next_method:,
@@ -1358,4 +1485,3 @@ fn from_async_like_ctx_refs(
   |> push_value_ref(resolve, _)
   |> push_value_ref(reject, _)
 }
-
