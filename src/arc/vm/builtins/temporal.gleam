@@ -2401,6 +2401,14 @@ fn unsupported_tz(tz: String) -> TErr {
   RangeE("time zone " <> tz <> " is not supported")
 }
 
+/// A zone whose name we accepted but whose tzdata will not load is a broken
+/// install, not an unknown identifier: same RangeError, but the reason says so.
+fn unloadable_tz(tz: String, error: temporal_tz.TzError) -> TErr {
+  RangeE(
+    "time zone " <> tz <> " cannot be loaded: " <> temporal_tz.describe(error),
+  )
+}
+
 /// GetOffsetNanosecondsFor — UTC offset of `tz` at an exact instant.
 /// RangeError when a named zone's TZif data cannot be loaded (same error as
 /// an unsupported time zone identifier).
@@ -2411,7 +2419,7 @@ fn tz_offset_ns_at(tz: String, epoch_ns: Int) -> Result(Int, TErr) {
     UnknownZone -> Error(unsupported_tz(tz))
     NamedZone(zone) ->
       temporal_tz.offset_ns_at(zone, epoch_ns)
-      |> result.replace_error(unsupported_tz(tz))
+      |> result.map_error(unloadable_tz(tz, _))
   }
 }
 
@@ -2565,7 +2573,7 @@ fn start_of_day_ns(tz: String, d: IsoDate) -> Result(Int, TErr) {
       case temporal_tz.next_transition_ns(zone, day_before) {
         Ok(Some(transition)) -> validate_epoch_ns(transition)
         Ok(None) -> Error(RangeE("no start of day for skipped midnight"))
-        Error(Nil) -> Error(unsupported_tz(tz))
+        Error(err) -> Error(unloadable_tz(tz, err))
       }
     }
   }
@@ -10528,7 +10536,7 @@ fn zoned_date_time_method(
                     False -> #(state, Ok(JsNull))
                   }
                 // Broken zoneinfo is not "no transition" — report it.
-                Error(Nil) -> throw_terr(state, unsupported_tz(tz))
+                Error(err) -> throw_terr(state, unloadable_tz(tz, err))
               }
             }
             UtcZone | OffsetZone(_) | UnknownZone -> #(state, Ok(JsNull))

@@ -47,15 +47,34 @@ pub fn canonical(zone: Zone) -> String {
   }
 }
 
+/// Why a zone's tzdata would not load. A host with no zoneinfo database at all
+/// (`NoZoneinfo`) is an expected slim-container setup; the other two mean the
+/// database that *is* installed is broken, and say which file and how.
+/// Mirrors `arc_tz_ffi`'s `tz_error()`.
+pub type TzError {
+  NoZoneinfo
+  Unreadable(detail: String)
+  Unparseable(detail: String)
+}
+
+/// A one-line rendering of a load failure, for a JS error message.
+pub fn describe(error: TzError) -> String {
+  case error {
+    NoZoneinfo -> "no time zone database on this host"
+    Unreadable(detail:) -> "unreadable time zone data (" <> detail <> ")"
+    Unparseable(detail:) -> "corrupt time zone data (" <> detail <> ")"
+  }
+}
+
 @external(erlang, "arc_tz_ffi", "offset_at")
-fn ffi_offset_at(id: String, epoch_seconds: Int) -> Result(Int, Nil)
+fn ffi_offset_at(id: String, epoch_seconds: Int) -> Result(Int, TzError)
 
 /// The three distinct answers the transition FFI can give. On the Erlang side
-/// these are `{found, Sec}`, `no_transition`, and `unloadable`.
+/// these are `{found, Sec}`, `no_transition`, and `{load_failed, Reason}`.
 type FfiTransition {
   Found(Int)
   NoTransition
-  Unloadable
+  LoadFailed(TzError)
 }
 
 @external(erlang, "arc_tz_ffi", "next_transition")
@@ -67,8 +86,9 @@ fn ffi_previous_transition(id: String, epoch_seconds: Int) -> FfiTransition
 const ns_per_second = 1_000_000_000
 
 /// UTC offset of a named zone, in nanoseconds, at the given epoch instant.
-/// `Error(Nil)` when the zone's TZif data cannot be read/parsed.
-pub fn offset_ns_at(zone: Zone, epoch_ns: Int) -> Result(Int, Nil) {
+/// `Error(TzError)` when the zone's TZif data cannot be read/parsed — the
+/// error says whether the host simply has no tzdata or has a corrupt one.
+pub fn offset_ns_at(zone: Zone, epoch_ns: Int) -> Result(Int, TzError) {
   use offset_s <- result.map(ffi_offset_at(
     zone.id,
     floor_div(epoch_ns, ns_per_second),
@@ -76,14 +96,14 @@ pub fn offset_ns_at(zone: Zone, epoch_ns: Int) -> Result(Int, Nil) {
   offset_s * ns_per_second
 }
 
-/// `Ok(None)` (no further transition) and `Error(Nil)` (zone data unloadable)
+/// `Ok(None)` (no further transition) and `Error(_)` (zone data unloadable)
 /// are different answers: the first is a `null` result for JS, the second is
 /// a broken zoneinfo install and must be reported as an error.
-fn transition_ns(t: FfiTransition) -> Result(Option(Int), Nil) {
+fn transition_ns(t: FfiTransition) -> Result(Option(Int), TzError) {
   case t {
     Found(sec) -> Ok(Some(sec * ns_per_second))
     NoTransition -> Ok(None)
-    Unloadable -> Error(Nil)
+    LoadFailed(error) -> Error(error)
   }
 }
 
@@ -91,7 +111,7 @@ fn transition_ns(t: FfiTransition) -> Result(Option(Int), Nil) {
 pub fn next_transition_ns(
   zone: Zone,
   epoch_ns: Int,
-) -> Result(Option(Int), Nil) {
+) -> Result(Option(Int), TzError) {
   // Transitions are integral seconds; T*1e9 > epoch_ns iff T > floor(ns/1e9).
   transition_ns(ffi_next_transition(zone.id, floor_div(epoch_ns, ns_per_second)))
 }
@@ -100,7 +120,7 @@ pub fn next_transition_ns(
 pub fn prev_transition_ns(
   zone: Zone,
   epoch_ns: Int,
-) -> Result(Option(Int), Nil) {
+) -> Result(Option(Int), TzError) {
   let sec = floor_div(epoch_ns, ns_per_second)
   // T*1e9 < epoch_ns iff T < sec (exact second) or T <= sec (mid-second).
   let arg = case epoch_ns % ns_per_second == 0 {
