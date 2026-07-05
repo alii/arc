@@ -1,6 +1,7 @@
 /// JavaScript lexer for Arc.
 /// Converts source text into a stream of tokens.
 /// Operates on raw bytes (UTF-8) for O(1) character access.
+import arc/internal/digits
 import gleam/bit_array
 import gleam/bool
 import gleam/int
@@ -12,13 +13,6 @@ pub type Token {
   /// `had_escape` is True when the token's source contained a unicode escape
   /// (only set for identifiers). A contextual keyword written with an escape
   /// (e.g. `get`) is not treated as that keyword by the grammar.
-  ///
-  /// `lex_error` is `Some(err)` on exactly one kind of token: the zero-length
-  /// `Illegal` sentinel a HARD lexer error is materialised into (see
-  /// `hard_error_token`). It carries the lexer's typed `LexError` straight
-  /// through to the parser — no rendered prose in `value` to re-parse. Every
-  /// other token, including a LENIENT `Illegal` (a stray character a regex
-  /// body could have made legal), has `None`.
   ///
   /// `annex_b_legacy` records that this token's source used one of the Annex B
   /// legacy forms that strict code rejects as an early SyntaxError, decided by
@@ -38,7 +32,6 @@ pub type Token {
     line: Int,
     raw_len: Int,
     had_escape: Bool,
-    lex_error: Option(LexError),
     annex_b_legacy: Bool,
   )
 }
@@ -173,7 +166,17 @@ pub type TokenKind {
 
   // Special
   Eof
+  /// The LENIENT sentinel: source the token grammar cannot classify but a
+  /// regex body could legally contain (a stray character, an unterminated
+  /// quote, `9A`, …). Carries no error — the parser rejects any it actually
+  /// reaches with a generic unexpected-token report.
   Illegal
+  /// The HARD-error sentinel: a zero-length token materialising a lexer
+  /// error into the stream (see `hard_error_token`). It carries the typed
+  /// `LexError` on the KIND, so only this variant can have one — no other
+  /// token can claim to be a lex failure, and this one cannot forget its
+  /// error.
+  LexFailure(error: LexError)
 }
 
 /// The failures the lexer treats as hard errors — every variant here aborts
@@ -288,13 +291,13 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
       let token_line = line + ws_newlines
       case read_fast_punct(rest) {
         Some(#(kind, value)) -> #(
-          Token(kind, value, new_pos, token_line, 1, False, None, False),
+          Token(kind, value, new_pos, token_line, 1, False, False),
           Scanner(bytes:, pos: new_pos + 1, line: token_line, mode:),
         )
         None ->
           case char_at(bytes, new_pos) {
             "" -> #(
-              Token(Eof, "", new_pos, token_line, 0, False, None, False),
+              Token(Eof, "", new_pos, token_line, 0, False, False),
               Scanner(bytes:, pos: new_pos, line: token_line, mode:),
             )
             _ ->
@@ -322,7 +325,7 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
 }
 
 /// A hard lexer error materialised into the token stream: a zero-length
-/// Illegal token carrying the typed `LexError` itself, and a scanner parked
+/// `LexFailure` token carrying the typed `LexError` itself, and a scanner parked
 /// at end of input so the next `scan_next` yields Eof and the stream stops
 /// there.
 ///
@@ -340,26 +343,44 @@ fn hard_error_token(
   let epos = lex_error_pos(err)
   let err_line = line + count_newlines_in(byte_slice(bytes, from, epos - from))
   #(
-    Token(Illegal, "", epos, err_line, 0, False, Some(err), False),
+    Token(LexFailure(err), "", epos, err_line, 0, False, False),
     Scanner(bytes:, pos: bit_array.byte_size(bytes), line: err_line, mode:),
   )
 }
 
-/// Tokens recognizable from their first byte alone, with no multi-char
-/// variants. Mirrors the single-char punctuation arm of read_token.
+/// The single-byte punctuation table: tokens recognizable from their first
+/// byte alone, with no multi-char variants. THE table — both the fast path
+/// (`read_fast_punct`, which runs first) and `read_token` consult it, so the
+/// two can never disagree about what `(` lexes to.
+fn single_char_punct(byte: Int) -> Option(#(TokenKind, String)) {
+  case byte {
+    0x28 -> Some(#(LeftParen, "("))
+    0x29 -> Some(#(RightParen, ")"))
+    0x7B -> Some(#(LeftBrace, "{"))
+    0x7D -> Some(#(RightBrace, "}"))
+    0x5B -> Some(#(LeftBracket, "["))
+    0x5D -> Some(#(RightBracket, "]"))
+    0x3B -> Some(#(Semicolon, ";"))
+    0x2C -> Some(#(Comma, ","))
+    0x7E -> Some(#(Tilde, "~"))
+    0x3A -> Some(#(Colon, ":"))
+    _ -> None
+  }
+}
+
+/// `single_char_punct` at the front of `rest` — the scanner's fast path.
 fn read_fast_punct(rest: BitArray) -> Option(#(TokenKind, String)) {
   case rest {
-    <<0x28, _:bytes>> -> Some(#(LeftParen, "("))
-    <<0x29, _:bytes>> -> Some(#(RightParen, ")"))
-    <<0x7B, _:bytes>> -> Some(#(LeftBrace, "{"))
-    <<0x7D, _:bytes>> -> Some(#(RightBrace, "}"))
-    <<0x5B, _:bytes>> -> Some(#(LeftBracket, "["))
-    <<0x5D, _:bytes>> -> Some(#(RightBracket, "]"))
-    <<0x3B, _:bytes>> -> Some(#(Semicolon, ";"))
-    <<0x2C, _:bytes>> -> Some(#(Comma, ","))
-    <<0x7E, _:bytes>> -> Some(#(Tilde, "~"))
-    <<0x3A, _:bytes>> -> Some(#(Colon, ":"))
+    <<b, _:bytes>> -> single_char_punct(b)
     _ -> None
+  }
+}
+
+/// `single_char_punct` at byte position `pos`.
+fn punct_at(bytes: BitArray, pos: Int) -> Option(#(TokenKind, String)) {
+  case bit_array.slice(bytes, pos, 1) {
+    Ok(<<b>>) -> single_char_punct(b)
+    Ok(_) | Error(Nil) -> None
   }
 }
 
@@ -539,26 +560,21 @@ fn tokn(kind: TokenKind, value: String, pos: Int, raw_len: Int) -> Token {
     line: 0,
     raw_len:,
     had_escape: False,
-    lex_error: None,
     annex_b_legacy: False,
   )
 }
 
 fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case punct_at(bytes, pos) {
+    // Single-char punctuation (the same table the fast path uses)
+    Some(#(kind, value)) -> Ok(tokn(kind, value, pos, 1))
+    None -> read_non_punct_token(bytes, pos)
+  }
+}
+
+fn read_non_punct_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
   let ch = char_at(bytes, pos)
   case ch {
-    // Single-char punctuation
-    "(" -> Ok(tokn(LeftParen, "(", pos, 1))
-    ")" -> Ok(tokn(RightParen, ")", pos, 1))
-    "{" -> Ok(tokn(LeftBrace, "{", pos, 1))
-    "}" -> Ok(tokn(RightBrace, "}", pos, 1))
-    "[" -> Ok(tokn(LeftBracket, "[", pos, 1))
-    "]" -> Ok(tokn(RightBracket, "]", pos, 1))
-    ";" -> Ok(tokn(Semicolon, ";", pos, 1))
-    "," -> Ok(tokn(Comma, ",", pos, 1))
-    "~" -> Ok(tokn(Tilde, "~", pos, 1))
-    ":" -> Ok(tokn(Colon, ":", pos, 1))
-
     // Dot / spread
     "." -> read_dot(bytes, pos)
 
@@ -578,8 +594,8 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
     "?" -> read_question(bytes, pos)
 
     // String literals
-    "\"" -> read_string(bytes, pos, "\"")
-    "'" -> read_string(bytes, pos, "'")
+    "\"" -> read_string(bytes, pos, 0x22)
+    "'" -> read_string(bytes, pos, 0x27)
 
     // Template literals
     "`" -> read_template_literal(bytes, pos)
@@ -599,19 +615,7 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
           // regex bodies keep lexing.
           case read_identifier(bytes, pos) {
             Ok(token) -> Ok(token)
-            Error(_) -> {
-              let escape_span = unicode_escape_span(bytes, pos)
-              Ok(Token(
-                kind: Illegal,
-                value: byte_slice(bytes, pos, escape_span),
-                pos: pos,
-                line: 0,
-                raw_len: escape_span,
-                had_escape: True,
-                lex_error: None,
-                annex_b_legacy: False,
-              ))
-            }
+            Error(_) -> Ok(bad_escape_token(bytes, pos, pos))
           }
         // Backslash not followed by 'u' — not a valid identifier escape.
         // Produce an Illegal token so the lexer can continue past
@@ -619,7 +623,7 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
         _ -> Ok(tokn(Illegal, "\\", pos, 1))
       }
     _ ->
-      case is_identifier_start(ch) {
+      case may_start_identifier_token(ch) {
         True -> read_identifier(bytes, pos)
         False -> {
           let width = char_width_at(bytes, pos)
@@ -793,36 +797,6 @@ fn read_question(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
   }
 }
 
-// --- Escape validation helpers ---
-
-fn is_hex_digit(ch: String) -> Bool {
-  case ch {
-    "0"
-    | "1"
-    | "2"
-    | "3"
-    | "4"
-    | "5"
-    | "6"
-    | "7"
-    | "8"
-    | "9"
-    | "a"
-    | "b"
-    | "c"
-    | "d"
-    | "e"
-    | "f"
-    | "A"
-    | "B"
-    | "C"
-    | "D"
-    | "E"
-    | "F" -> True
-    _ -> False
-  }
-}
-
 /// A validated escape sequence: how many bytes it spans (backslash included),
 /// and whether it is one of the Annex B legacy forms strict code forbids —
 /// §B.1.2 LegacyOctalEscapeSequence (`\7`, `\012`, `\0` + a decimal digit) or
@@ -864,7 +838,7 @@ fn validate_escape(
           // In templates, only \0 NOT followed by a digit is valid (null char)
           case ch {
             "0" ->
-              case is_decimal_digit(char_at(bytes, pos + 1)) {
+              case digits.is_decimal(char_at(bytes, pos + 1)) {
                 True -> Error(InvalidEscapeSequence(backslash_pos))
                 False -> Ok(Escape(2, False))
               }
@@ -874,7 +848,7 @@ fn validate_escape(
           case ch {
             // `\0` alone is the NUL escape, legal in strict code; `\0` followed
             // by any decimal digit is a LegacyOctalEscapeSequence.
-            "0" -> Ok(Escape(2, is_decimal_digit(char_at(bytes, pos + 1))))
+            "0" -> Ok(Escape(2, digits.is_decimal(char_at(bytes, pos + 1))))
             _ -> Ok(Escape(2, True))
           }
       }
@@ -883,7 +857,7 @@ fn validate_escape(
     "x" -> {
       let h1 = char_at(bytes, pos + 1)
       let h2 = char_at(bytes, pos + 2)
-      case is_hex_digit(h1) && is_hex_digit(h2) {
+      case digits.is_hex(h1) && digits.is_hex(h2) {
         True -> Ok(Escape(4, False))
         False -> Error(InvalidHexEscapeSequence(backslash_pos))
       }
@@ -892,9 +866,14 @@ fn validate_escape(
     // \u must be followed by 4 hex digits or {hex_digits} with value <= 0x10FFFF
     "u" -> validate_unicode_escape(bytes, pos + 1, backslash_pos)
 
-    // Line continuations — \r\n is 3 bytes total (\=1, \r\n=2), others are 2
-    "\r\n" -> Ok(Escape(3, False))
-    "\r" | "\n" -> Ok(Escape(2, False))
+    // Line continuations. <CR><LF> is ONE line terminator sequence, so the
+    // escape spans 3 bytes (\ + CR + LF); every other terminator spans 2.
+    "\r" ->
+      case char_at(bytes, pos + 1) {
+        "\n" -> Ok(Escape(3, False))
+        _ -> Ok(Escape(2, False))
+      }
+    "\n" -> Ok(Escape(2, False))
 
     // Standard escapes and all other single-char escapes
     _ -> Ok(Escape(1 + char_width_at(bytes, pos), False))
@@ -942,10 +921,10 @@ fn validate_unicode_escape(
       let h3 = char_at(bytes, pos + 2)
       let h4 = char_at(bytes, pos + 3)
       case
-        is_hex_digit(h1)
-        && is_hex_digit(h2)
-        && is_hex_digit(h3)
-        && is_hex_digit(h4)
+        digits.is_hex(h1)
+        && digits.is_hex(h2)
+        && digits.is_hex(h3)
+        && digits.is_hex(h4)
       {
         True -> Ok(Escape(6, False))
         False -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
@@ -956,7 +935,7 @@ fn validate_unicode_escape(
 
 /// Skip consecutive hex digits (no underscores). Used for \u{} validation.
 fn skip_hex_run(bytes: BitArray, pos: Int) -> Int {
-  case is_hex_digit(char_at(bytes, pos)) {
+  case digits.is_hex(char_at(bytes, pos)) {
     True -> skip_hex_run(bytes, pos + 1)
     False -> pos
   }
@@ -978,10 +957,10 @@ fn unicode_escape_span(bytes: BitArray, pos: Int) -> Int {
     _ -> {
       // \uXXXX — 4 hex digits
       case
-        is_hex_digit(char_at(bytes, pos + 2))
-        && is_hex_digit(char_at(bytes, pos + 3))
-        && is_hex_digit(char_at(bytes, pos + 4))
-        && is_hex_digit(char_at(bytes, pos + 5))
+        digits.is_hex(char_at(bytes, pos + 2))
+        && digits.is_hex(char_at(bytes, pos + 3))
+        && digits.is_hex(char_at(bytes, pos + 4))
+        && digits.is_hex(char_at(bytes, pos + 5))
       {
         True -> 6
         False -> 2
@@ -990,18 +969,30 @@ fn unicode_escape_span(bytes: BitArray, pos: Int) -> Int {
   }
 }
 
+/// A `\u…` escape that does not decode to a legal identifier character,
+/// materialised as a LENIENT `Illegal` token spanning `[start, escape_end)`
+/// (`start` may precede the backslash — a private name's `#`). Such an
+/// escape is legal inside a regex body (`/\u{1ffff}/u`), which the parser
+/// re-scans from source, so it must never abort the whole lex.
+fn bad_escape_token(bytes: BitArray, start: Int, escape_pos: Int) -> Token {
+  let len = escape_pos + unicode_escape_span(bytes, escape_pos) - start
+  Token(
+    ..tokn(Illegal, byte_slice(bytes, start, len), start, len),
+    had_escape: True,
+  )
+}
+
 // --- String reader ---
 
+/// `quote` is the delimiter's BYTE (0x22 or 0x27), passed by the caller that
+/// already matched it — nothing here re-derives it, so a `` ` `` can never
+/// silently be treated as a `'`.
 fn read_string(
   bytes: BitArray,
   start: Int,
-  quote: String,
+  quote: Int,
 ) -> Result(Token, LexError) {
-  let q = case quote {
-    "\"" -> 0x22
-    _ -> 0x27
-  }
-  read_string_body(bytes, start + 1, start, q, False)
+  read_string_body(bytes, start + 1, start, quote, False)
 }
 
 /// `annex_b_legacy` accumulates over the escapes already scanned: True once
@@ -1415,40 +1406,22 @@ fn number_token(bytes: BitArray, start: Int, end: Int) -> Token {
 /// Skip decimal digits with numeric separator validation.
 /// Returns Ok(end_pos) or Error if separator rules violated.
 fn skip_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False, is_decimal_digit)
+  skip_digits_loop(bytes, pos, pos, False, digits.is_decimal)
 }
 
 /// Skip hex digits with numeric separator validation.
 fn skip_hex_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False, is_hex_digit)
+  skip_digits_loop(bytes, pos, pos, False, digits.is_hex)
 }
 
 /// Skip octal digits with numeric separator validation.
 fn skip_octal_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False, is_octal_digit)
+  skip_digits_loop(bytes, pos, pos, False, digits.is_octal)
 }
 
 /// Skip binary digits with numeric separator validation.
 fn skip_binary_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False, is_binary_digit)
-}
-
-fn is_decimal_digit(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
-    _ -> False
-  }
-}
-
-fn is_octal_digit(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
-    _ -> False
-  }
-}
-
-fn is_binary_digit(ch: String) -> Bool {
-  ch == "0" || ch == "1"
+  skip_digits_loop(bytes, pos, pos, False, digits.is_binary)
 }
 
 /// Shared scan loop: consume digits accepted by `is_digit`, validating
@@ -1508,7 +1481,6 @@ fn identifier_token(
     line: 0,
     raw_len: end - start,
     had_escape:,
-    lex_error: None,
     annex_b_legacy: False,
   )
 }
@@ -1528,18 +1500,21 @@ fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
     "#" -> {
       // Private field: # followed by identifier char
       case char_at(bytes, start + 1) {
-        "\\" -> {
-          use #(first_end, head) <- result.try(read_identifier_escape(
-            bytes,
-            start + 1,
-            True,
-          ))
-          let tail = scan_identifier_tail(bytes, first_end)
-          Ok(escaped_head_token(bytes, start, first_end, "#" <> head, tail))
-        }
+        "\\" ->
+          // A `#\uZZZZ` whose escape doesn't decode to an ID_Start character
+          // must degrade to a lenient Illegal token, exactly like a bare
+          // `\uZZZZ` does — a regex body may contain it, and the parser
+          // re-scans regex bodies from source.
+          case read_identifier_escape(bytes, start + 1, True) {
+            Ok(#(first_end, head)) -> {
+              let tail = scan_identifier_tail(bytes, first_end)
+              Ok(escaped_head_token(bytes, start, first_end, "#" <> head, tail))
+            }
+            Error(_) -> Ok(bad_escape_token(bytes, start, start + 1))
+          }
         ch2 -> {
           // The char after # must be a valid identifier start (not # or \)
-          case is_identifier_start_simple(ch2) {
+          case is_identifier_start(ch2) {
             True -> {
               // # is 1 byte, then skip the first identifier char
               let first_end = start + 1 + char_width_at(bytes, start + 1)
@@ -1656,10 +1631,10 @@ fn read_identifier_escape(
           let h3 = char_at(bytes, pos + 4)
           let h4 = char_at(bytes, pos + 5)
           case
-            is_hex_digit(h1)
-            && is_hex_digit(h2)
-            && is_hex_digit(h3)
-            && is_hex_digit(h4)
+            digits.is_hex(h1)
+            && digits.is_hex(h2)
+            && digits.is_hex(h3)
+            && digits.is_hex(h4)
           {
             True -> {
               let hex_str = byte_slice(bytes, pos + 2, 4)
@@ -1845,16 +1820,20 @@ fn skip_ident_unicode(rest: BitArray, n: Int) -> IdScan {
   }
 }
 
-fn is_identifier_start(ch: String) -> Bool {
+/// True for characters `read_token` hands to `read_identifier`: a real
+/// IdentifierStart, plus the two characters that only *introduce* one — `\`
+/// (a unicode escape, which read_identifier still has to decode and check)
+/// and `#` (a private name). Neither is itself an IdentifierStart, so anything
+/// asking "is this an IdentifierStart?" wants `is_identifier_start`.
+fn may_start_identifier_token(ch: String) -> Bool {
   case ch {
     "\\" | "#" -> True
-    _ -> is_identifier_start_simple(ch)
+    _ -> is_identifier_start(ch)
   }
 }
 
-/// Like is_identifier_start but excludes # and \ (which need special handling).
-/// Used to validate the character after # in private field names.
-fn is_identifier_start_simple(ch: String) -> Bool {
+/// True iff `ch` is an ECMAScript IdentifierStart character.
+fn is_identifier_start(ch: String) -> Bool {
   case ch {
     "a"
     | "b"
@@ -2007,19 +1986,14 @@ pub fn keyword_or_identifier(word: String) -> TokenKind {
 
 // --- Character utilities (BitArray-based, O(1) access) ---
 
-/// Get the byte width of the UTF-8 character at byte position `pos`.
-/// Returns 0 if pos is past the end.
-/// Returns 2 for \r\n (treated as single line ending).
+/// Get the byte width of the single UTF-8 character at byte position `pos`.
+/// Returns 0 if pos is past the end. Never spans two characters: `\r\n` is
+/// two characters and `char_width_at` at the `\r` is 1.
 fn char_width_at(bytes: BitArray, pos: Int) -> Int {
   case bit_array.slice(bytes, pos, 1) {
     Error(Nil) -> 0
     Ok(<<byte>>) ->
       case byte {
-        0x0D ->
-          case bit_array.slice(bytes, pos + 1, 1) {
-            Ok(<<0x0A>>) -> 2
-            _ -> 1
-          }
         b if b < 0x80 -> 1
         b if b >= 0xC0 && b < 0xE0 -> 2
         b if b >= 0xE0 && b < 0xF0 -> 3
@@ -2030,9 +2004,10 @@ fn char_width_at(bytes: BitArray, pos: Int) -> Int {
   }
 }
 
-/// Get a single character at byte position `pos` in the UTF-8 byte array.
-/// Returns "" if pos is past the end.
-/// For \r followed by \n, returns "\r\n" (preserving existing comparison patterns).
+/// Get the single character (one code point) at byte position `pos` in the
+/// UTF-8 byte array. Returns "" if pos is past the end. A `\r` is one
+/// character even when a `\n` follows: callers that care about the `\r\n`
+/// pair peek at the next byte themselves.
 fn char_at(bytes: BitArray, pos: Int) -> String {
   let width = char_width_at(bytes, pos)
   case width {

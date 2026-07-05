@@ -12,13 +12,13 @@ import arc/parser/lexer.{
   GreaterThanGreaterThanGreaterThan, GreaterThanGreaterThanGreaterThanEqual,
   Identifier, If, Illegal, Import, In, Instanceof, KFalse, KString, KTrue,
   LeftBrace, LeftBracket, LeftParen, LessThan, LessThanEqual, LessThanLessThan,
-  LessThanLessThanEqual, Let, Minus, MinusEqual, MinusMinus, New, Null, Number,
-  Of, Percent, PercentEqual, Pipe, PipeEqual, PipePipe, PipePipeEqual, Plus,
-  PlusEqual, PlusPlus, Question, QuestionDot, QuestionQuestion,
-  QuestionQuestionEqual, Return, RightBrace, RightBracket, RightParen, Semicolon,
-  Slash, SlashEqual, Star, StarEqual, StarStar, StarStarEqual, Static, Super,
-  Switch, TemplateHead, TemplateLiteral, This, Throw, Tilde, Try, Typeof,
-  Undefined, Var, Void, While, With, Yield,
+  LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual, MinusMinus, New,
+  Null, Number, Of, Percent, PercentEqual, Pipe, PipeEqual, PipePipe,
+  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
+  QuestionQuestion, QuestionQuestionEqual, Return, RightBrace, RightBracket,
+  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
+  StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral, This,
+  Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -276,6 +276,6 @@ pub fn token_kind_to_string(kind: TokenKind) -> String {
     MinusMinus -> "'--'"
     Question -> "'?'"
     Eof -> "end of file"
-    Illegal -> "illegal token"
+    Illegal | LexFailure(_) -> "illegal token"
   }
 }
