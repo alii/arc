@@ -1,4 +1,5 @@
 import arc/internal/digits
+import arc/internal/utf16
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -100,9 +101,7 @@ fn escape_code_point(code: Int) -> String {
     _ if code < 0x100 -> "%" <> to_hex_upper(code, 2)
     _ if code < 0x10000 -> "%u" <> to_hex_upper(code, 4)
     _ -> {
-      let offset = code - 0x10000
-      let high = 0xd800 + offset / 0x400
-      let low = 0xdc00 + offset % 0x400
+      let #(high, low) = utf16.split(code)
       "%u" <> to_hex_upper(high, 4) <> "%u" <> to_hex_upper(low, 4)
     }
   }
@@ -154,17 +153,14 @@ fn take_unicode_escape(after_percent: List(Int)) -> Option(#(Int, List(Int))) {
     // 'u'
     [0x75, a, b, c, d, ..rest] -> {
       use unit <- option.map(hex4(a, b, c, d))
-      case is_high_surrogate(unit) {
+      case utf16.is_high(unit) {
         True ->
           case take_low_surrogate_escape(rest) {
-            Some(#(low, after_pair)) -> #(
-              combine_surrogates(unit, low),
-              after_pair,
-            )
+            Some(#(low, after_pair)) -> #(utf16.combine(unit, low), after_pair)
             None -> #(replacement_character, rest)
           }
         False ->
-          case is_low_surrogate(unit) {
+          case utf16.is_low(unit) {
             True -> #(replacement_character, rest)
             False -> #(unit, rest)
           }
@@ -180,7 +176,7 @@ fn take_low_surrogate_escape(input: List(Int)) -> Option(#(Int, List(Int))) {
     // "%u"
     [0x25, 0x75, a, b, c, d, ..rest] -> {
       use unit <- option.then(hex4(a, b, c, d))
-      case is_low_surrogate(unit) {
+      case utf16.is_low(unit) {
         True -> Some(#(unit, rest))
         False -> None
       }
@@ -211,19 +207,6 @@ const replacement_character = 0xfffd
 fn scalar_to_codepoint(code: Int) -> UtfCodepoint {
   let assert Ok(cp) = string.utf_codepoint(code)
   cp
-}
-
-fn is_high_surrogate(unit: Int) -> Bool {
-  unit >= 0xd800 && unit <= 0xdbff
-}
-
-fn is_low_surrogate(unit: Int) -> Bool {
-  unit >= 0xdc00 && unit <= 0xdfff
-}
-
-/// UTF16Decode: the supplementary-plane code point named by a surrogate pair.
-fn combine_surrogates(high: Int, low: Int) -> Int {
-  0x10000 + { high - 0xd800 } * 0x400 + { low - 0xdc00 }
 }
 
 /// Combine two hex digits; `None` if either is not a hex digit.

@@ -1,3 +1,4 @@
+import arc/internal/utf16
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/object as object_builtins
@@ -975,21 +976,20 @@ fn decode_unicode_escape(
   bytes: BitArray,
 ) -> Result(#(String, BitArray), JsonParseError) {
   use #(cp, rest) <- result.try(parse_unicode_escape(bytes))
-  case cp {
+  case utf16.is_high(cp), utf16.is_low(cp) {
     // High surrogate — look for a trailing \uXXXX low surrogate
-    high if high >= 0xD800 && high <= 0xDBFF ->
+    True, _ ->
       case parse_low_surrogate(rest) {
-        Some(#(low, rest)) -> {
-          let combined = { high - 0xD800 } * 0x400 + { low - 0xDC00 } + 0x10000
-          codepoint_to_string(combined) |> result.map(fn(s) { #(s, rest) })
-        }
+        Some(#(low, rest)) ->
+          codepoint_to_string(utf16.combine(cp, low))
+          |> result.map(fn(s) { #(s, rest) })
         // Lone/unpaired high surrogate → U+FFFD replacement char
         None -> Ok(#("\u{FFFD}", rest))
       }
     // Lone LOW surrogate (never valid on its own) → U+FFFD as well, rather
     // than a parse error: JSON.parse('"\\udc62"') must succeed.
-    low if low >= 0xDC00 && low <= 0xDFFF -> Ok(#("\u{FFFD}", rest))
-    _ -> codepoint_to_string(cp) |> result.map(fn(s) { #(s, rest) })
+    _, True -> Ok(#("\u{FFFD}", rest))
+    False, False -> codepoint_to_string(cp) |> result.map(fn(s) { #(s, rest) })
   }
 }
 
@@ -1000,8 +1000,12 @@ fn parse_low_surrogate(bytes: BitArray) -> Option(#(Int, BitArray)) {
     // "\\u"
     <<0x5C, 0x75, rest:bytes>> ->
       case parse_unicode_escape(rest) {
-        Ok(#(low, rest)) if low >= 0xDC00 && low <= 0xDFFF -> Some(#(low, rest))
-        _ -> None
+        Ok(#(low, rest)) ->
+          case utf16.is_low(low) {
+            True -> Some(#(low, rest))
+            False -> None
+          }
+        Error(_not_hex) -> None
       }
     _ -> None
   }

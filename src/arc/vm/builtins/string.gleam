@@ -1,3 +1,4 @@
+import arc/internal/utf16
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/regexp_ops
@@ -907,7 +908,12 @@ fn string_replace_all(
   // Step 2a: if IsRegExp(searchValue), Get(searchValue, "flags") must be
   // object-coercible and its string must contain "g".
   use is_re, state <- regexp_ops.is_regexp(state, search_val)
-  use Nil, state <- require_global_when_regexp(state, search_val, is_re, "replaceAll")
+  use Nil, state <- require_global_when_regexp(
+    state,
+    search_val,
+    is_re,
+    "replaceAll",
+  )
   // Step 2b: replacer = ? GetMethod(searchValue, @@replace); delegate if set.
   use method_opt, state <- state.try_op(get_method(
     state,
@@ -1018,7 +1024,8 @@ fn concat_within_limit(
   parts_rev: List(String),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let parts = list.reverse(parts_rev)
-  let total = list.fold(parts, 0, fn(sum, part) { sum + string.byte_size(part) })
+  let total =
+    list.fold(parts, 0, fn(sum, part) { sum + string.byte_size(part) })
   case total > limits.max_string_bytes {
     True -> state.range_error(state, "Invalid string length")
     False -> #(state, Ok(JsString(string.concat(parts))))
@@ -1787,20 +1794,21 @@ fn from_char_code_coerce(
 }
 
 /// Convert a list of UTF-16 code units to a string.
-/// Handles surrogate pairs: if a high surrogate (0xD800-0xDBFF) is followed by
-/// a low surrogate (0xDC00-0xDFFF), combine them into a single codepoint.
+/// Handles surrogate pairs: a high surrogate followed by a low surrogate is
+/// combined into the supplementary-plane code point they encode.
 fn char_codes_to_string(codes: List(Int), acc: List(UtfCodepoint)) -> String {
   case codes {
     [] -> string.from_utf_codepoints(list.reverse(acc))
-    [high, low, ..rest]
-      if high >= 0xD800 && high <= 0xDBFF && low >= 0xDC00 && low <= 0xDFFF
-    -> {
-      // Combine surrogate pair into a full codepoint
-      let codepoint = { high - 0xD800 } * 0x400 + { low - 0xDC00 } + 0x10000
-      char_codes_to_string(rest, [codepoint_or_replacement(codepoint), ..acc])
-    }
     [code, ..rest] -> {
-      char_codes_to_string(rest, [codepoint_or_replacement(code), ..acc])
+      let #(cp, remaining) = case utf16.is_high(code), rest {
+        True, [low, ..after] ->
+          case utf16.is_low(low) {
+            True -> #(utf16.combine(code, low), after)
+            False -> #(code, rest)
+          }
+        _, _ -> #(code, rest)
+      }
+      char_codes_to_string(remaining, [codepoint_or_replacement(cp), ..acc])
     }
   }
 }
@@ -2156,7 +2164,6 @@ fn string_transform(
   use s, state <- with_this_string(this, state)
   #(state, Ok(JsString(transform(s))))
 }
-
 // StringIndexOf (ES2024 7.1.18) and its reverse (22.1.3.11 steps 10-11) are
 // `js_string.index_of` / `js_string.last_index_of` — total, Option-returning,
 // empty needle and all. Only the two spec-facing builtins above turn a None

@@ -3,6 +3,7 @@
 /// The parser re-lexes regex literals from source bytes since the lexer
 /// can't always distinguish / (divide) from / (regex start).
 import arc/internal/digits
+import arc/internal/utf16
 import arc/parser/lexer
 import arc/parser/source_bytes.{ascii_at}
 import gleam/bit_array
@@ -1014,23 +1015,27 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
 /// then guess at what character it denotes.
 fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Int), PatternError) {
   case ctx_hex4(ctx, pos + 2) {
-    // In Unicode mode a lead surrogate followed by `\u` + a trail surrogate is
-    // ONE RegExpUnicodeEscapeSequence denoting the combined code point.
-    Some(lead) if lead >= 0xD800 && lead <= 0xDBFF ->
-      case ctx.mode, ctx_ascii(ctx, pos + 6), ctx_ascii(ctx, pos + 7) {
-        Legacy, _, _ -> Ok(#(pos + 6, lead))
-        _, Some("\\"), Some("u") if pos + 12 <= ctx.end ->
-          case ctx_hex4(ctx, pos + 8) {
-            Some(trail) if trail >= 0xDC00 && trail <= 0xDFFF ->
-              Ok(#(
-                pos + 12,
-                0x10000 + { lead - 0xD800 } * 0x400 + { trail - 0xDC00 },
-              ))
-            _ -> Ok(#(pos + 6, lead))
+    Some(lead) -> {
+      // In Unicode mode a lead surrogate followed by `\u` + a trail surrogate
+      // is ONE RegExpUnicodeEscapeSequence denoting the combined code point.
+      let lone = Ok(#(pos + 6, lead))
+      case utf16.is_high(lead), ctx.mode {
+        False, _ | True, Legacy -> lone
+        True, _ ->
+          case ctx_ascii(ctx, pos + 6), ctx_ascii(ctx, pos + 7) {
+            Some("\\"), Some("u") if pos + 12 <= ctx.end ->
+              case ctx_hex4(ctx, pos + 8) {
+                Some(trail) ->
+                  case utf16.is_low(trail) {
+                    True -> Ok(#(pos + 12, utf16.combine(lead, trail)))
+                    False -> lone
+                  }
+                None -> lone
+              }
+            _, _ -> lone
           }
-        _, _, _ -> Ok(#(pos + 6, lead))
       }
-    Some(value) -> Ok(#(pos + 6, value))
+    }
     None ->
       case ctx.mode {
         // Identity escape: the `u` itself.
@@ -1540,16 +1545,17 @@ fn group_name_loop(
     _, Some("\\") -> {
       use #(cp0, next0) <- result.try(decode_name_escape(bytes, pos, end))
       // Combine a surrogate pair written as two \uXXXX escapes.
-      let #(cp, next) = case cp0 >= 0xD800 && cp0 <= 0xDBFF {
+      let #(cp, next) = case utf16.is_high(cp0) {
+        False -> #(cp0, next0)
         True ->
           case decode_name_escape(bytes, next0, end) {
-            Ok(#(trail, next1)) if trail >= 0xDC00 && trail <= 0xDFFF -> #(
-              0x10000 + { cp0 - 0xD800 } * 1024 + trail - 0xDC00,
-              next1,
-            )
-            _ -> #(cp0, next0)
+            Ok(#(trail, next1)) ->
+              case utf16.is_low(trail) {
+                True -> #(utf16.combine(cp0, trail), next1)
+                False -> #(cp0, next0)
+              }
+            Error(_not_escape) -> #(cp0, next0)
           }
-        False -> #(cp0, next0)
       }
       case lexer.validate_identifier_codepoint(cp, is_first) {
         True -> {
