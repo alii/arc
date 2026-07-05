@@ -515,51 +515,54 @@ pub type ClassBodyParts {
   )
 }
 
-/// The five bucket predicates. Every class element belongs to exactly one.
-/// `classify_class_body` (emit's view) and parser.gleam's class-body scope
-/// fold BOTH partition through these — that is what keeps the parser's child
-/// scopes and emit's positional `child_fn_cursor` in the same order.
-pub fn is_class_ctor(el: ast.ClassElement) -> Bool {
+/// The five buckets §15.7.14 evaluates a class body in. Every class element
+/// belongs to exactly one — enforced by the single exhaustive `case` in
+/// `class_element_bucket` below, so a new `ast.ClassElement` variant is a
+/// compile error there until it's placed. `classify_class_body` (emit's
+/// view) and parser.gleam's class-body scope fold BOTH partition through
+/// this one function — that is what keeps the parser's child scopes and
+/// emit's positional `child_fn_cursor` in the same order.
+pub type ClassElementBucket {
+  CeCtor
+  CeInstanceMethod
+  CeStaticMethod
+  CeInstanceField
+  /// Static field OR static initialization block — §15.7.14 step 31 runs
+  /// them interleaved in source order, so they share one bucket.
+  CeStaticElement
+}
+
+/// Map a class element to its bucket. THE partition function: the five
+/// `is_*` predicates below and `classify_class_body` all delegate here so
+/// they cannot drift apart or leave a gap.
+pub fn class_element_bucket(el: ast.ClassElement) -> ClassElementBucket {
   case el {
-    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> True
-    ast.ClassMethod(..) | ast.ClassField(..) | ast.StaticBlock(..) -> False
+    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> CeCtor
+    ast.ClassMethod(is_static: False, ..) -> CeInstanceMethod
+    ast.ClassMethod(is_static: True, ..) -> CeStaticMethod
+    ast.ClassField(is_static: False, ..) -> CeInstanceField
+    ast.ClassField(is_static: True, ..) | ast.StaticBlock(..) -> CeStaticElement
   }
+}
+
+pub fn is_class_ctor(el: ast.ClassElement) -> Bool {
+  class_element_bucket(el) == CeCtor
 }
 
 pub fn is_instance_method(el: ast.ClassElement) -> Bool {
-  case el {
-    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> False
-    ast.ClassMethod(is_static: False, ..) -> True
-    ast.ClassMethod(is_static: True, ..)
-    | ast.ClassField(..)
-    | ast.StaticBlock(..) -> False
-  }
+  class_element_bucket(el) == CeInstanceMethod
 }
 
 pub fn is_static_method(el: ast.ClassElement) -> Bool {
-  case el {
-    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> False
-    ast.ClassMethod(is_static: True, ..) -> True
-    ast.ClassMethod(is_static: False, ..)
-    | ast.ClassField(..)
-    | ast.StaticBlock(..) -> False
-  }
+  class_element_bucket(el) == CeStaticMethod
 }
 
 pub fn is_instance_field(el: ast.ClassElement) -> Bool {
-  case el {
-    ast.ClassField(is_static: False, ..) -> True
-    ast.ClassField(is_static: True, ..)
-    | ast.ClassMethod(..)
-    | ast.StaticBlock(..) -> False
-  }
+  class_element_bucket(el) == CeInstanceField
 }
 
 pub fn is_static_element(el: ast.ClassElement) -> Bool {
-  case el {
-    ast.ClassField(is_static: True, ..) | ast.StaticBlock(..) -> True
-    ast.ClassField(is_static: False, ..) | ast.ClassMethod(..) -> False
-  }
+  class_element_bucket(el) == CeStaticElement
 }
 
 /// Narrow an indexed `ClassMethod` element to its `ClassMethodEl`. Only ever
@@ -605,18 +608,19 @@ pub fn classify_class_body(body: List(ast.ClassElement)) -> ClassBodyParts {
   // Elements are indexed BEFORE bucketing so each narrowed element remembers
   // its body position — that index names its computed-key stash const.
   let indexed = list.index_map(body, fn(el, idx) { #(idx, el) })
-  let of_kind = fn(pred: fn(ast.ClassElement) -> Bool) {
-    list.filter(indexed, fn(entry) { pred(entry.1) })
+  let of_bucket = fn(bucket: ClassElementBucket) {
+    list.filter(indexed, fn(entry) { class_element_bucket(entry.1) == bucket })
   }
   ClassBodyParts(
-    constructor: list.find(indexed, fn(entry) { is_class_ctor(entry.1) })
+    constructor: of_bucket(CeCtor)
+      |> list.first
       |> result.try(as_method_el)
       |> option.from_result,
-    instance_methods: of_kind(is_instance_method)
+    instance_methods: of_bucket(CeInstanceMethod)
       |> list.filter_map(as_method_el),
-    static_methods: of_kind(is_static_method) |> list.filter_map(as_method_el),
-    instance_fields: of_kind(is_instance_field) |> list.filter_map(as_field_el),
-    static_elements: of_kind(is_static_element) |> list.filter_map(as_static_el),
+    static_methods: of_bucket(CeStaticMethod) |> list.filter_map(as_method_el),
+    instance_fields: of_bucket(CeInstanceField) |> list.filter_map(as_field_el),
+    static_elements: of_bucket(CeStaticElement) |> list.filter_map(as_static_el),
   )
 }
 

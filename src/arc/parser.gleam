@@ -3809,15 +3809,13 @@ fn class_scope_finalize(
       case scopes {
         NonMethodScopes(..) -> acc
         MethodScopes(method_fn_id: id, ..) ->
-          case
-            ast_util.is_class_ctor(element),
-            ast_util.is_instance_method(element),
-            ast_util.is_static_method(element)
-          {
-            True, _, _ -> #(Some(id), im, sm)
-            _, True, _ -> #(ctor, [id, ..im], sm)
-            _, _, True -> #(ctor, im, [id, ..sm])
-            _, _, _ -> acc
+          case ast_util.class_element_bucket(element) {
+            ast_util.CeCtor -> #(Some(id), im, sm)
+            ast_util.CeInstanceMethod -> #(ctor, [id, ..im], sm)
+            ast_util.CeStaticMethod -> #(ctor, im, [id, ..sm])
+            // MethodScopes tags only ClassMethod elements, so these arms are
+            // unreachable in practice — listed for exhaustiveness.
+            ast_util.CeInstanceField | ast_util.CeStaticElement -> acc
           }
       }
     })
