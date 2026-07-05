@@ -402,7 +402,7 @@ translate_pat([$\\, P, ${ | Rest], InClass, Mode, CI, MS)
 %% over- and under-shoots. \w, \W -> the explicit sets under u/v only; see
 %% word_atom/1. Outside a class the negated forms are their own negated bracket
 %% class; inside a class they must become class ITEMS (classes cannot nest), so
-%% the negated forms splice their complement — see class_complement/2.
+%% the negated forms splice their complement — see emit_complement/2.
 translate_pat([$\\, $s | Rest], false, Mode, CI, MS) ->
     "[" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI, MS);
 translate_pat([$\\, $S | Rest], false, Mode, CI, MS) ->
@@ -414,7 +414,7 @@ translate_pat([$\\, $W | Rest], false, Mode, CI, MS) ->
 translate_pat([$\\, $s | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
     splice_in_class(?JSS_CHARS, Rest, Mode, CI, MS);
 translate_pat([$\\, $S | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
-    splice_in_class(?CS:class_complement(?CS:vspace(), CI), Rest, Mode, CI, MS);
+    splice_in_class(?CS:emit_complement(?CS:vspace(), CI), Rest, Mode, CI, MS);
 translate_pat([$\\, $w | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
     splice_in_class(word_items(Mode), Rest, Mode, CI, MS);
 translate_pat([$\\, $W | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
@@ -674,7 +674,7 @@ word_items(none) -> "\\w";
 word_items(_UOrV) -> ?WORD_BODY.
 
 nword_items(none, _CI) -> "\\W";
-nword_items(_UOrV, CI) -> ?CS:class_complement(?CS:vword(), CI).
+nword_items(_UOrV, CI) -> ?CS:emit_complement(?CS:vword(), CI).
 
 %% Collect a property-escape payload up to the closing }. Only property
 %% name/value characters and a single = are expected; anything else means
@@ -713,7 +713,7 @@ prop_translation(Payload, Negated, InClass, Mode) ->
 vclass([$^ | Rest], CI) ->
     case vexpr(Rest, CI) of
         {ok, Ranges, [], Rest2} ->
-            {ok, ?CS:vcomp(Ranges, CI), [], Rest2};
+            {ok, ?CS:character_complement(Ranges, CI), [], Rest2};
         %% A negated class may not contain strings (MayContainStrings).
         {ok, _Ranges, [_ | _], _Rest2} -> error;
         error -> error
@@ -763,7 +763,7 @@ vapply(inter, R, S, R2, S2) ->
     {?CS:vinter(?CS:vnorm(R), ?CS:vnorm(R2)),
      ordsets:intersection(ordsets:from_list(S), ordsets:from_list(S2))};
 vapply(subtract, R, S, R2, S2) ->
-    {?CS:vinter(?CS:vnorm(R), ?CS:vcomplement(?CS:vnorm(R2))),
+    {?CS:vsubtract(R, R2),
      ordsets:subtract(ordsets:from_list(S), ordsets:from_list(S2))}.
 
 %% One ClassSetOperand, possibly extended to a ClassSetRange (`a-z`).
@@ -811,11 +811,11 @@ vitem([], _CI) ->
 %% Set-producing escapes fold their set here; {char, ...} results are raw
 %% (range endpoints must stay raw) and are folded by vsingle/vrange_or_item.
 vescape([$d | R], CI) -> {set, ?CS:vfold(?CS:vdigit(), CI), [], R};
-vescape([$D | R], CI) -> {set, ?CS:vcomp(?CS:vfold(?CS:vdigit(), CI), CI), [], R};
+vescape([$D | R], CI) -> {set, ?CS:character_complement(?CS:vdigit(), CI), [], R};
 vescape([$w | R], CI) -> {set, ?CS:vfold(?CS:vword(), CI), [], R};
-vescape([$W | R], CI) -> {set, ?CS:vcomp(?CS:vfold(?CS:vword(), CI), CI), [], R};
+vescape([$W | R], CI) -> {set, ?CS:character_complement(?CS:vword(), CI), [], R};
 vescape([$s | R], CI) -> {set, ?CS:vfold(?CS:vspace(), CI), [], R};
-vescape([$S | R], CI) -> {set, ?CS:vcomp(?CS:vfold(?CS:vspace(), CI), CI), [], R};
+vescape([$S | R], CI) -> {set, ?CS:character_complement(?CS:vspace(), CI), [], R};
 vescape([$b | R], _CI) -> {char, 16#08, R};
 vescape([$t | R], _CI) -> {char, $\t, R};
 vescape([$n | R], _CI) -> {char, $\n, R};
@@ -927,7 +927,7 @@ vprop(Negated, L, CI) ->
             PayloadBin = list_to_binary(Payload),
             case arc_regex_props_ffi:char_set(PayloadBin) of
                 {ok, Ranges} when Negated ->
-                    {set, ?CS:vcomp(?CS:vfold(Ranges, CI), CI), [], Rest};
+                    {set, ?CS:character_complement(Ranges, CI), [], Rest};
                 {ok, Ranges} ->
                     {set, ?CS:vfold(Ranges, CI), [], Rest};
                 %% Only a property OF STRINGS has a string list, and only \p

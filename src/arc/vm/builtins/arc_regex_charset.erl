@@ -25,9 +25,9 @@
 -module(arc_regex_charset).
 
 -export([vdigit/0, vword/0, vspace/0]).
--export([vnorm/1, vcomplement/1, vinter/2, vmember/2]).
--export([vfold/2, vfold_str/2, vclose/1, vcomp/2, vsplit_singles/2]).
--export([class_complement/2, emit_vclass/2]).
+-export([vnorm/1, vinter/2, vsubtract/2, vmember/2]).
+-export([vfold/2, vfold_str/2, vclose/1, character_complement/2, vsplit_singles/2]).
+-export([emit_complement/2, emit_vclass/2]).
 
 %% ---- The JS class-escape base sets --------------------------------------
 
@@ -74,6 +74,9 @@ vinter([{ALo, AHi} | AR] = A, [{BLo, BHi} | BR] = B) ->
                 false -> vinter(A, BR)
             end.
 
+%% Subtraction A -- B (normalizes both sides).
+vsubtract(A, B) -> vinter(vnorm(A), vcomplement(vnorm(B))).
+
 %% Membership test on normalized (sorted, disjoint) ranges.
 vmember(_CP, []) -> false;
 vmember(CP, [{Lo, Hi} | _]) when CP >= Lo, CP =< Hi -> true;
@@ -83,9 +86,12 @@ vmember(_CP, _Ranges) -> false.
 %% CharacterComplement (§22.2.2.5) over AllCharacters (§22.2.2.6): with the
 %% i flag in v mode the universe is the scf FIXED POINTS, not 0..10FFFF —
 %% complement happens after case folding, so a folded-away codepoint (e.g.
-%% "K", which folds to "k") is never re-admitted by [^k].
-vcomp(Ranges, false) -> vcomplement(vnorm(Ranges));
-vcomp(Ranges, true) -> vcomplement(vnorm(Ranges ++ scf_domain())).
+%% "K", which folds to "k") is never re-admitted by [^k]. The operand set is
+%% folded HERE (idempotent on already-folded input), so an unfolded caller
+%% cannot silently miscompute the complement.
+character_complement(Ranges, false) -> vcomplement(vnorm(Ranges));
+character_complement(Ranges, true) ->
+    vcomplement(vnorm(vfold(Ranges, true) ++ scf_domain())).
 
 %% ---- Case folding --------------------------------------------------------
 
@@ -211,7 +217,7 @@ vstrip_surrogates([{Lo, Hi} | Rest]) ->
 %% (they fold to word characters), exactly like the out-of-class /\W/i, which
 %% PCRE renders as [^0-9A-Za-z_] and folds for us. Surrogates are dropped:
 %% PCRE2 rejects them in UTF patterns and valid subjects cannot contain them.
-class_complement(Set, CI) ->
+emit_complement(Set, CI) ->
     Closed = case CI of
                  true -> vclose(Set);
                  false -> vnorm(Set)
