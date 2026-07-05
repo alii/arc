@@ -15,6 +15,8 @@
 import arc/parser/regex
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
+import arc/vm/builtins/regexp_ops
+import arc/vm/builtins/substitution
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/key.{Index, Named}
@@ -622,7 +624,7 @@ fn regexp_constructor(
     _ -> JsUndefined
   }
   // Step 1: Let patternIsRegExp be ? IsRegExp(pattern).
-  use pattern_is_regexp, state <- try_is_regexp(state, pattern)
+  use pattern_is_regexp, state <- regexp_ops.is_regexp(state, pattern)
   // Step 2: a plain `RegExp(re)` call with no flags returns `re` untouched
   // when `re.constructor` is %RegExp% itself.
   case state.new_target, pattern_is_regexp, flags_arg, pattern {
@@ -725,36 +727,6 @@ fn to_string_or_empty(
   case val {
     JsUndefined -> cont("", state)
     _ -> coerce.try_to_string(state, val, cont)
-  }
-}
-
-/// §7.2.6 IsRegExp ( argument )
-fn try_is_regexp(
-  state: State(host),
-  val: JsValue,
-  cont: fn(Bool, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case val {
-    JsObject(ref) -> {
-      use matcher, state <- state.try_op(ops_object.get_symbol_value(
-        state,
-        ref,
-        value.symbol_match,
-        val,
-      ))
-      case matcher {
-        JsUndefined -> cont(has_regexp_slot(state, ref), state)
-        _ -> cont(value.is_truthy(matcher), state)
-      }
-    }
-    _ -> cont(False, state)
-  }
-}
-
-fn has_regexp_slot(state: State(host), ref: Ref) -> Bool {
-  case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: RegExpObject(..), ..)) -> True
-    _ -> False
   }
 }
 
@@ -1794,11 +1766,15 @@ fn compute_replacement(
       resolve_segments(
         state,
         segments,
-        matched,
-        s,
-        position,
-        captures,
-        n_captures,
+        substitution.Ctx(
+          matched:,
+          before: fn() { byte_slice(s, 0, position) },
+          after: fn() {
+            byte_drop_start(s, position + string.byte_size(matched))
+          },
+          capture: fn(idx) { capture_or_empty(captures, idx) },
+          m: n_captures,
+        ),
         named,
         [],
         cont,
@@ -1829,8 +1805,8 @@ fn to_named_captures_object(
 type Replacer {
   FunctionalReplacer(fun: JsValue)
   TemplateReplacer(
-    with_named: List(ReplaceSegment),
-    without_named: List(ReplaceSegment),
+    with_named: List(substitution.ReplaceSegment),
+    without_named: List(substitution.ReplaceSegment),
   )
 }
 
@@ -1848,8 +1824,8 @@ fn with_replacer(
       use template, state <- coerce.try_to_string(state, replace_value)
       cont(
         TemplateReplacer(
-          tokenize_template(template, True),
-          tokenize_template(template, False),
+          substitution.tokenize_template(template, True),
+          substitution.tokenize_template(template, False),
         ),
         state,
       )
@@ -1857,177 +1833,13 @@ fn with_replacer(
   }
 }
 
-/// One pre-tokenized piece of a replacement template (GetSubstitution,
-/// ES2024 §22.1.3.19.1). The template is tokenized once per replace call so
-/// each match only resolves segments. The common no-dollar template is a
-/// single LiteralSeg.
-type ReplaceSegment {
-  /// Literal text — also covers "$$" → "$".
-  LiteralSeg(text: String)
-  /// "$&" — the matched substring.
-  MatchedSeg
-  /// "$`" — the portion of the string before the match.
-  BeforeSeg
-  /// "$'" — the portion of the string after the match.
-  AfterSeg
-  /// "$N" (N in 1-9) — capture group N if N ≤ m, else the literal "$N".
-  CaptureSeg(idx: Int)
-  /// "$NN" (first digit 1-9): group NN if NN ≤ m; else group N (first digit)
-  /// followed by the literal second digit if N ≤ m; else literal.
-  TwoDigitSeg(two_idx: Int, one_idx: Int, suffix: String)
-  /// "$0d" (d in 1-9): group d if d ≤ m, else the literal "$0d".
-  ZeroDigitSeg(two_idx: Int, literal: String)
-  /// "$<name>" — named capture: Get(namedCaptures, name) then ToString
-  /// (undefined → ""). When namedCaptures is undefined the whole "$<name>"
-  /// is literal text.
-  NamedSeg(name: String)
-}
-
-/// Tokenize a replacement template into segments. Called once per replace
-/// call; templates without "$" skip grapheme segmentation entirely.
-/// `named_mode` selects the "$<" interpretation (see Replacer).
-fn tokenize_template(
-  template: String,
-  named_mode: Bool,
-) -> List(ReplaceSegment) {
-  case string.contains(template, "$") {
-    False -> [LiteralSeg(template)]
-    True -> tokenize_loop(string.to_graphemes(template), named_mode, "", [])
-  }
-}
-
-fn flush_literal(
-  lit: String,
-  segs: List(ReplaceSegment),
-) -> List(ReplaceSegment) {
-  case lit {
-    "" -> segs
-    _ -> [LiteralSeg(lit), ..segs]
-  }
-}
-
-fn tokenize_loop(
-  chars: List(String),
-  named_mode: Bool,
-  lit: String,
-  segs: List(ReplaceSegment),
-) -> List(ReplaceSegment) {
-  case chars {
-    [] -> list.reverse(flush_literal(lit, segs))
-    ["$", "$", ..rest] -> tokenize_loop(rest, named_mode, lit <> "$", segs)
-    ["$", "&", ..rest] ->
-      tokenize_loop(rest, named_mode, "", [
-        MatchedSeg,
-        ..flush_literal(lit, segs)
-      ])
-    ["$", "`", ..rest] ->
-      tokenize_loop(rest, named_mode, "", [
-        BeforeSeg,
-        ..flush_literal(lit, segs)
-      ])
-    ["$", "'", ..rest] ->
-      tokenize_loop(rest, named_mode, "", [AfterSeg, ..flush_literal(lit, segs)])
-    // "$<": named reference in named mode (scanned to ">"); otherwise the
-    // 2-char literal "$<" with scanning resumed right after it.
-    ["$", "<", ..rest] ->
-      case named_mode {
-        True ->
-          case take_group_name(rest, "") {
-            Some(#(name, rest2)) ->
-              tokenize_loop(rest2, named_mode, "", [
-                NamedSeg(name),
-                ..flush_literal(lit, segs)
-              ])
-            None -> tokenize_loop(rest, named_mode, lit <> "$<", segs)
-          }
-        False -> tokenize_loop(rest, named_mode, lit <> "$<", segs)
-      }
-    ["$", d1, d2, ..rest] ->
-      case is_digit(d1), is_digit(d2) {
-        True, True -> tokenize_two_digit(d1, d2, rest, named_mode, lit, segs)
-        // "$N" followed by a non-digit — d2 is rescanned (it may start "$&").
-        True, False ->
-          tokenize_one_digit(d1, [d2, ..rest], named_mode, lit, segs)
-        // Not a reference — "$" is literal, rescan from d1.
-        False, _ ->
-          tokenize_loop([d1, d2, ..rest], named_mode, lit <> "$", segs)
-      }
-    ["$", d1] ->
-      case is_digit(d1) {
-        True -> tokenize_one_digit(d1, [], named_mode, lit, segs)
-        False -> tokenize_loop([d1], named_mode, lit <> "$", segs)
-      }
-    [ch, ..rest] -> tokenize_loop(rest, named_mode, lit <> ch, segs)
-  }
-}
-
-/// Scan a "$<name>" group name up to the closing ">". None if unterminated.
-fn take_group_name(
-  chars: List(String),
-  acc: String,
-) -> Option(#(String, List(String))) {
-  case chars {
-    [] -> None
-    [">", ..rest] -> Some(#(acc, rest))
-    [ch, ..rest] -> take_group_name(rest, acc <> ch)
-  }
-}
-
-/// "$N": a CaptureSeg for $1-$9; "$0" stays literal.
-fn tokenize_one_digit(
-  d1: String,
-  rest: List(String),
-  named_mode: Bool,
-  lit: String,
-  segs: List(ReplaceSegment),
-) -> List(ReplaceSegment) {
-  case digit_value(d1) {
-    0 -> tokenize_loop(rest, named_mode, lit <> "$0", segs)
-    idx ->
-      tokenize_loop(rest, named_mode, "", [
-        CaptureSeg(idx),
-        ..flush_literal(lit, segs)
-      ])
-  }
-}
-
-/// "$NN": prefer the two-digit group, falling back to the single-digit group
-/// + literal second digit, or the literal "$0d" when the first digit is 0.
-fn tokenize_two_digit(
-  d1: String,
-  d2: String,
-  rest: List(String),
-  named_mode: Bool,
-  lit: String,
-  segs: List(ReplaceSegment),
-) -> List(ReplaceSegment) {
-  let two_idx = digit_value(d1) * 10 + digit_value(d2)
-  case digit_value(d1), two_idx {
-    // "$00" can never resolve to a group — always literal.
-    0, 0 -> tokenize_loop(rest, named_mode, lit <> "$00", segs)
-    0, _ ->
-      tokenize_loop(rest, named_mode, "", [
-        ZeroDigitSeg(two_idx, "$0" <> d2),
-        ..flush_literal(lit, segs)
-      ])
-    one_idx, _ ->
-      tokenize_loop(rest, named_mode, "", [
-        TwoDigitSeg(two_idx, one_idx, d2),
-        ..flush_literal(lit, segs)
-      ])
-  }
-}
-
-/// §22.1.3.19.1 GetSubstitution over a pre-tokenized template, CPS because
-/// "$<name>" performs an observable Get + ToString per occurrence.
+/// §22.1.3.19.1 GetSubstitution over a pre-tokenized template. `substitution`
+/// resolves each segment purely; the loop only exists because `$<name>` needs
+/// an observable Get + ToString, so it stays CPS.
 fn resolve_segments(
   state: State(host),
-  segments: List(ReplaceSegment),
-  matched: String,
-  s: String,
-  position: Int,
-  captures: List(JsValue),
-  m: Int,
+  segments: List(substitution.ReplaceSegment),
+  ctx: substitution.Ctx,
   named: Option(JsValue),
   acc: List(String),
   cont: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
@@ -2044,44 +1856,14 @@ fn resolve_segments(
     }
     [seg, ..rest] -> {
       let plain = fn(text: String, state: State(host)) {
-        resolve_segments(
-          state,
-          rest,
-          matched,
-          s,
-          position,
-          captures,
-          m,
-          named,
-          [text, ..acc],
-          cont,
-        )
+        resolve_segments(state, rest, ctx, named, [text, ..acc], cont)
       }
-      case seg {
-        LiteralSeg(text) -> plain(text, state)
-        MatchedSeg -> plain(matched, state)
-        BeforeSeg -> plain(byte_slice(s, 0, position), state)
-        AfterSeg ->
-          plain(byte_drop_start(s, position + string.byte_size(matched)), state)
-        CaptureSeg(idx) ->
-          case idx <= m {
-            True -> plain(capture_or_empty(captures, idx), state)
-            False -> plain("$" <> int.to_string(idx), state)
-          }
-        TwoDigitSeg(two_idx, one_idx, suffix) ->
-          case two_idx <= m, one_idx <= m {
-            True, _ -> plain(capture_or_empty(captures, two_idx), state)
-            False, True ->
-              plain(capture_or_empty(captures, one_idx) <> suffix, state)
-            False, False ->
-              plain("$" <> int.to_string(one_idx) <> suffix, state)
-          }
-        ZeroDigitSeg(two_idx, literal) ->
-          case two_idx <= m && two_idx >= 1 {
-            True -> plain(capture_or_empty(captures, two_idx), state)
-            False -> plain(literal, state)
-          }
-        NamedSeg(name) ->
+      case substitution.resolve(seg, ctx) {
+        substitution.Text(text) -> plain(text, state)
+        // A NamedSeg is only ever tokenized when namedCaptures is present
+        // (see `Replacer`), so `named` is Some here; the None arm is the
+        // spec's own "keep $<name> literal" answer, kept for totality.
+        substitution.NamedRef(name) ->
           case named {
             None -> plain("$<" <> name <> ">", state)
             Some(nc) -> {
@@ -2106,28 +1888,6 @@ fn capture_or_empty(captures: List(JsValue), idx: Int) -> String {
   case helpers.list_at(captures, idx - 1) {
     Some(JsString(s)) -> s
     _ -> ""
-  }
-}
-
-fn digit_value(ch: String) -> Int {
-  case ch {
-    "1" -> 1
-    "2" -> 2
-    "3" -> 3
-    "4" -> 4
-    "5" -> 5
-    "6" -> 6
-    "7" -> 7
-    "8" -> 8
-    "9" -> 9
-    _ -> 0
-  }
-}
-
-fn is_digit(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
-    _ -> False
   }
 }
 

@@ -46,3 +46,25 @@ pub fn drop_start(s: String, n: Int) -> String
 /// so `list.length(explode(s)) == length(s)` always holds.
 @external(erlang, "arc_string_ffi", "string_cp_explode")
 pub fn explode(s: String) -> List(String)
+
+/// Integer codepoint at codepoint index `pos`, or None when out of bounds.
+/// Shares the cursor cache with `char_at`, so sequential scans resume from
+/// the previous position instead of re-walking from byte 0.
+@external(erlang, "arc_string_ffi", "string_codepoint_at")
+pub fn codepoint_at(s: String, pos: Int) -> Option(Int)
+
+/// StringIndexOf (§6.1.4.1) below the empty-needle special case: the codepoint
+/// index of the first occurrence of `needle` at or after `from`, else -1.
+@external(erlang, "arc_string_ffi", "string_index_of")
+pub fn index_of(haystack: String, needle: String, from: Int) -> Int
+
+/// The reverse of `index_of`: the codepoint index of the last occurrence of
+/// `needle` at or before `from`, else -1.
+@external(erlang, "arc_string_ffi", "string_last_index_of")
+pub fn last_index_of(haystack: String, needle: String, from: Int) -> Int
+
+/// U+FFFD REPLACEMENT CHARACTER. FFI because UtfCodepoint has no public
+/// constructor — on Erlang it's just an Int, so this is a constant-pool load
+/// instead of a `string.utf_codepoint` call + Result unwrap + assert.
+@external(erlang, "arc_string_ffi", "replacement_codepoint")
+pub fn replacement_codepoint() -> UtfCodepoint

@@ -7,6 +7,7 @@
 //// (see intl_format.gleam); tag parsing/canonicalization is in
 //// intl_locale.gleam.
 
+import arc/internal/gregorian.{days_from_civil}
 import arc/vm/builtins/common
 import arc/vm/builtins/date
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
@@ -4849,29 +4850,8 @@ fn with_components(
   DateTimeFormatState(..d, components:)
 }
 
-/// Howard Hinnant's days_from_civil: civil date -> days since 1970-01-01.
-fn days_from_civil(year: Int, month: Int, day: Int) -> Int {
-  let y = case month <= 2 {
-    True -> year - 1
-    False -> year
-  }
-  let era = case y >= 0 {
-    True -> y / 400
-    False -> { y - 399 } / 400
-  }
-  let yoe = y - era * 400
-  let mp = case month > 2 {
-    True -> month - 3
-    False -> month + 9
-  }
-  let doy = { 153 * mp + 2 } / 5 + day - 1
-  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
-  era * 146_097 + doe - 719_468
-}
-
 fn civil_week_day(year: Int, month: Int, day: Int) -> Int {
-  let days = days_from_civil(year, month, day)
-  { { days % 7 } + 11 } % 7
+  gregorian.weekday_from_days(days_from_civil(year, month, day))
 }
 
 /// Wall-clock fields for a Temporal value, and the zone offset that produced

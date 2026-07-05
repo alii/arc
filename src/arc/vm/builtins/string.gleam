@@ -1,12 +1,15 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
+import arc/vm/builtins/regexp_ops
+import arc/vm/builtins/substitution
 import arc/vm/heap
 import arc/vm/js_string
-import arc/vm/key.{Named}
+import arc/vm/key
 import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
+import arc/vm/unicode_case
 import arc/vm/value.{
   type JsValue, type Ref, type StringNativeFn, Finite, JsNull, JsNumber,
   JsObject, JsString, JsUndefined, NaN, StringFromCharCode, StringFromCodePoint,
@@ -341,35 +344,6 @@ fn string_index_of(
   #(state, Ok(value.from_int(result)))
 }
 
-/// ES2024 §7.2.6 IsRegExp ( argument )
-///   1. If argument is not an Object, return false.
-///   2. Let matcher be ? Get(argument, @@match).
-///   3. If matcher is not undefined, return ToBoolean(matcher).
-///   4. If argument has a [[RegExpMatcher]] internal slot, return true.
-///   5. Return false.
-fn try_is_regexp(
-  state: State(host),
-  val: JsValue,
-  cont: fn(Bool, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case val {
-    JsObject(ref) -> {
-      use matcher, state <- state.try_op(object.get_symbol_value(
-        state,
-        ref,
-        value.symbol_match,
-        val,
-      ))
-      case matcher {
-        JsUndefined ->
-          cont(option.is_some(heap.read_regexp(state.heap, ref)), state)
-        other -> cont(value.is_truthy(other), state)
-      }
-    }
-    _ -> cont(False, state)
-  }
-}
-
 /// ES2024 22.1.3.11 — String.prototype.lastIndexOf ( searchString [ , position ] )
 ///   1. Let O be ? RequireObjectCoercible(this value).
 ///   2. Let S be ? ToString(O).
@@ -429,7 +403,7 @@ fn string_last_index_of(
 ///  11. If index is not -1, return true.
 ///  12. Return false.
 ///
-/// Steps 3-4 (IsRegExp check → TypeError) are handled by try_is_regexp in
+/// Steps 3-4 (IsRegExp check → TypeError) are handled by regexp_ops.is_regexp in
 /// string_search_bool.
 fn string_includes(
   this: JsValue,
@@ -452,7 +426,7 @@ fn string_search_bool(
   use s, state <- with_this_string(this, state)
   let search_val = helpers.first_arg_or_undefined(args)
   // Steps 3-4: If IsRegExp(searchString), throw TypeError
-  use is_re, state <- try_is_regexp(state, search_val)
+  use is_re, state <- regexp_ops.is_regexp(state, search_val)
   case is_re {
     True ->
       state.type_error(
@@ -492,7 +466,7 @@ fn string_search_bool(
 ///      searchStr, return true.
 ///  12. Return false.
 ///
-/// Steps 3-4 (IsRegExp check → TypeError) are handled by try_is_regexp in
+/// Steps 3-4 (IsRegExp check → TypeError) are handled by regexp_ops.is_regexp in
 /// string_search_bool.
 fn string_starts_with(
   this: JsValue,
@@ -526,7 +500,7 @@ fn string_ends_with(
   use s, state <- with_this_string(this, state)
   let search_val = helpers.first_arg_or_undefined(args)
   // Steps 3-4: If IsRegExp(searchString), throw TypeError
-  use is_re, state <- try_is_regexp(state, search_val)
+  use is_re, state <- regexp_ops.is_regexp(state, search_val)
   case is_re {
     True ->
       state.type_error(
@@ -681,203 +655,7 @@ fn string_to_lower_case(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  string_transform(this, state, js_lowercase)
-}
-
-/// Unicode Default Case Conversion toLowercase, including the SpecialCasing
-/// Final_Sigma rule: GREEK CAPITAL LETTER SIGMA (U+03A3) lowercases to FINAL
-/// SIGMA (U+03C2) when preceded by a cased character (skipping
-/// case-ignorable characters) and not followed by one.
-fn js_lowercase(s: String) -> String {
-  // Codepoint-based scan: Gleam's string functions are grapheme-aware, so a
-  // Σ followed by a combining mark would be invisible to string.split.
-  let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
-  case list.contains(cps, 0x03A3) {
-    False -> string.lowercase(s)
-    True -> sigma_assemble(split_cps_on_sigma(cps, [], []), True)
-  }
-}
-
-/// Split a codepoint list on U+03A3 boundaries.
-fn split_cps_on_sigma(
-  cps: List(Int),
-  cur: List(Int),
-  acc: List(List(Int)),
-) -> List(List(Int)) {
-  case cps {
-    [] -> list.reverse([list.reverse(cur), ..acc])
-    [0x03A3, ..rest] -> split_cps_on_sigma(rest, [], [list.reverse(cur), ..acc])
-    [cp, ..rest] -> split_cps_on_sigma(rest, [cp, ..cur], acc)
-  }
-}
-
-/// Lowercase the parts of a Σ-split codepoint list, joining with σ or ς per
-/// the Final_Sigma context rule. `is_first` is True for the leading part (no
-/// Σ before it).
-fn sigma_assemble(parts: List(List(Int)), is_first: Bool) -> String {
-  case parts {
-    [] -> ""
-    [last] -> lowercase_cps(last)
-    [part, ..rest] -> {
-      // Before-context: nearest non-case-ignorable char at the end of this
-      // part; if the part is entirely ignorable, the preceding boundary char
-      // (another Σ, which is cased) decides.
-      let preceded = case first_non_ignorable_cased(list.reverse(part)) {
-        Some(cased) -> cased
-        None -> !is_first
-      }
-      // After-context: nearest non-case-ignorable char at the start of the
-      // next part; if that part is entirely ignorable, a following boundary
-      // (another Σ) counts as cased, end-of-string does not.
-      let followed = case rest {
-        [next, ..more] ->
-          case first_non_ignorable_cased(next) {
-            Some(cased) -> cased
-            None -> more != []
-          }
-        [] -> False
-      }
-      let sigma = case preceded && !followed {
-        True -> "\u{03C2}"
-        False -> "\u{03C3}"
-      }
-      lowercase_cps(part) <> sigma <> sigma_assemble(rest, False)
-    }
-  }
-}
-
-/// Codepoint ints back to a lowercased string. The ints all came from
-/// string.to_utf_codepoints, so utf_codepoint cannot fail here.
-fn lowercase_cps(cps: List(Int)) -> String {
-  cps
-  |> list.filter_map(string.utf_codepoint)
-  |> string.from_utf_codepoints
-  |> string.lowercase
-}
-
-fn first_non_ignorable_cased(cps: List(Int)) -> option.Option(Bool) {
-  case cps {
-    [] -> None
-    [cp, ..rest] ->
-      case is_case_ignorable_cp(cp) {
-        True -> first_non_ignorable_cased(rest)
-        False -> Some(is_cased_cp(cp))
-      }
-  }
-}
-
-/// Approximation of the Unicode Cased property (Lu/Ll/Lt plus cased Nl/So
-/// ranges). Holes inside ranges are unassigned codepoints, so over-matching
-/// them is harmless.
-fn is_cased_cp(cp: Int) -> Bool {
-  case cp {
-    _ if cp >= 0x41 && cp <= 0x5A -> True
-    _ if cp >= 0x61 && cp <= 0x7A -> True
-    0xAA | 0xB5 | 0xBA -> True
-    _ if cp >= 0xC0 && cp <= 0xD6 -> True
-    _ if cp >= 0xD8 && cp <= 0xF6 -> True
-    _ if cp >= 0xF8 && cp <= 0x2AF -> True
-    _ if cp >= 0x370 && cp <= 0x373 -> True
-    0x376 | 0x377 | 0x37F | 0x386 -> True
-    _ if cp >= 0x37B && cp <= 0x37D -> True
-    _ if cp >= 0x388 && cp <= 0x481 -> True
-    _ if cp >= 0x48A && cp <= 0x52F -> True
-    _ if cp >= 0x531 && cp <= 0x556 -> True
-    _ if cp >= 0x560 && cp <= 0x588 -> True
-    _ if cp >= 0x10A0 && cp <= 0x10CD -> True
-    _ if cp >= 0x13A0 && cp <= 0x13FD -> True
-    _ if cp >= 0x1C80 && cp <= 0x1C88 -> True
-    _ if cp >= 0x1C90 && cp <= 0x1CBF -> True
-    _ if cp >= 0x1E00 && cp <= 0x1FFC -> True
-    _ if cp >= 0x2126 && cp <= 0x212B -> True
-    _ if cp >= 0x2160 && cp <= 0x217F -> True
-    0x2183 | 0x2184 -> True
-    _ if cp >= 0x24B6 && cp <= 0x24E9 -> True
-    _ if cp >= 0x2C00 && cp <= 0x2D2D -> True
-    _ if cp >= 0xA640 && cp <= 0xA66D -> True
-    _ if cp >= 0xA680 && cp <= 0xA69B -> True
-    _ if cp >= 0xA722 && cp <= 0xA787 -> True
-    _ if cp >= 0xA78B && cp <= 0xA7CA -> True
-    _ if cp >= 0xAB70 && cp <= 0xABBF -> True
-    _ if cp >= 0xFB00 && cp <= 0xFB17 -> True
-    _ if cp >= 0xFF21 && cp <= 0xFF3A -> True
-    _ if cp >= 0xFF41 && cp <= 0xFF5A -> True
-    _ if cp >= 0x10400 && cp <= 0x104FB -> True
-    _ if cp >= 0x10C80 && cp <= 0x10CFF -> True
-    _ if cp >= 0x118A0 && cp <= 0x118DF -> True
-    _ if cp >= 0x16E40 && cp <= 0x16E7F -> True
-    _ if cp >= 0x1D400 && cp <= 0x1D7CB -> True
-    _ if cp >= 0x1E900 && cp <= 0x1E943 -> True
-    _ -> False
-  }
-}
-
-/// Approximation of the Unicode Case_Ignorable property: Mn/Me/Cf/Lm/Sk
-/// blocks plus the Word_Break MidLetter/MidNumLet/Single_Quote punctuation.
-fn is_case_ignorable_cp(cp: Int) -> Bool {
-  case cp {
-    0x27
-    | 0x2E
-    | 0x3A
-    | 0x5E
-    | 0x60
-    | 0xA8
-    | 0xAD
-    | 0xAF
-    | 0xB4
-    | 0xB7
-    | 0xB8 -> True
-    _ if cp >= 0x2B0 && cp <= 0x36F -> True
-    0x374 | 0x375 | 0x37A | 0x384 | 0x385 | 0x387 -> True
-    _ if cp >= 0x483 && cp <= 0x489 -> True
-    _ if cp >= 0x559 && cp <= 0x55F -> True
-    _ if cp >= 0x591 && cp <= 0x5C7 -> True
-    0x5F3 | 0x5F4 -> True
-    _ if cp >= 0x600 && cp <= 0x605 -> True
-    _ if cp >= 0x610 && cp <= 0x61A -> True
-    0x61C | 0x640 | 0x670 | 0x6DD | 0x70F | 0x711 -> True
-    _ if cp >= 0x64B && cp <= 0x65F -> True
-    _ if cp >= 0x6D6 && cp <= 0x6DC -> True
-    _ if cp >= 0x6DF && cp <= 0x6E8 -> True
-    _ if cp >= 0x6EA && cp <= 0x6ED -> True
-    _ if cp >= 0x730 && cp <= 0x74A -> True
-    _ if cp >= 0x7A6 && cp <= 0x7B0 -> True
-    _ if cp >= 0x7EB && cp <= 0x7F5 -> True
-    _ if cp >= 0x816 && cp <= 0x82D -> True
-    _ if cp >= 0x180B && cp <= 0x180E -> True
-    _ if cp >= 0x1AB0 && cp <= 0x1AFF -> True
-    _ if cp >= 0x1C78 && cp <= 0x1C7D -> True
-    _ if cp >= 0x1DC0 && cp <= 0x1DFF -> True
-    0x1FBD -> True
-    _ if cp >= 0x1FBF && cp <= 0x1FC1 -> True
-    _ if cp >= 0x1FCD && cp <= 0x1FCF -> True
-    _ if cp >= 0x1FDD && cp <= 0x1FDF -> True
-    _ if cp >= 0x1FED && cp <= 0x1FEF -> True
-    0x1FFD | 0x1FFE -> True
-    0x2018 | 0x2019 | 0x2024 | 0x2027 -> True
-    _ if cp >= 0x200B && cp <= 0x200F -> True
-    _ if cp >= 0x202A && cp <= 0x202E -> True
-    _ if cp >= 0x2060 && cp <= 0x2064 -> True
-    _ if cp >= 0x2066 && cp <= 0x206F -> True
-    0x2071 | 0x207F -> True
-    _ if cp >= 0x2090 && cp <= 0x209C -> True
-    _ if cp >= 0x20D0 && cp <= 0x20F0 -> True
-    0x2C7C | 0x2C7D | 0x2D6F | 0x2D7F | 0x2E2F -> True
-    _ if cp >= 0x2DE0 && cp <= 0x2DFF -> True
-    0x3005 | 0x303B | 0x309B | 0x309C | 0xFB1E -> True
-    _ if cp >= 0xA66F && cp <= 0xA672 -> True
-    _ if cp >= 0xA674 && cp <= 0xA67D -> True
-    0xA67F | 0xA69C | 0xA69D | 0xA69E | 0xA69F -> True
-    _ if cp >= 0xA700 && cp <= 0xA721 -> True
-    0xA770 | 0xA788 | 0xA789 | 0xA78A | 0xA7F8 | 0xA7F9 -> True
-    _ if cp >= 0xFE00 && cp <= 0xFE0F -> True
-    _ if cp >= 0xFE20 && cp <= 0xFE2F -> True
-    0xFE13 | 0xFE52 | 0xFE55 | 0xFEFF | 0xFF07 | 0xFF0E | 0xFF1A -> True
-    0xFF3E | 0xFF40 | 0xFF70 | 0xFF9E | 0xFF9F | 0xFFE3 -> True
-    _ if cp >= 0x1D165 && cp <= 0x1D244 -> True
-    _ if cp >= 0xE0001 && cp <= 0xE01EF -> True
-    _ -> False
-  }
+  string_transform(this, state, unicode_case.to_lower_case)
 }
 
 /// ES2024 22.1.3.28 — String.prototype.toUpperCase ( )
@@ -896,7 +674,7 @@ fn string_to_upper_case(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  string_transform(this, state, string.uppercase)
+  string_transform(this, state, unicode_case.to_upper_case)
 }
 
 /// ES2024 22.1.3.29 — String.prototype.trim ( )
@@ -914,7 +692,9 @@ fn string_trim(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  string_transform(this, state, fn(s) { js_trim_start(js_trim_end(s)) })
+  string_transform(this, state, fn(s) {
+    value.trim_leading_js_whitespace(value.trim_trailing_js_whitespace(s))
+  })
 }
 
 /// ES2024 22.1.3.30 — String.prototype.trimStart ( )
@@ -927,7 +707,7 @@ fn string_trim_start(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  string_transform(this, state, js_trim_start)
+  string_transform(this, state, value.trim_leading_js_whitespace)
 }
 
 /// ES2024 22.1.3.31 — String.prototype.trimEnd ( )
@@ -940,62 +720,7 @@ fn string_trim_end(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  string_transform(this, state, js_trim_end)
-}
-
-/// ES2024 §22.1.3.32.1 TrimString whitespace set: WhiteSpace (TAB, VT, FF,
-/// SP, NBSP, ZWNBSP, and Unicode Zs) plus LineTerminator (LF, CR, LS, PS).
-/// Note U+180E (Mongolian vowel separator) is NOT whitespace since
-/// Unicode 6.3.
-fn is_js_whitespace(cp: Int) -> Bool {
-  case cp {
-    0x09 | 0x0A | 0x0B | 0x0C | 0x0D | 0x20 | 0xA0 | 0x1680 -> True
-    0x2000
-    | 0x2001
-    | 0x2002
-    | 0x2003
-    | 0x2004
-    | 0x2005
-    | 0x2006
-    | 0x2007
-    | 0x2008
-    | 0x2009
-    | 0x200A -> True
-    0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF -> True
-    _ -> False
-  }
-}
-
-/// Remove leading JS whitespace (TrimString with where = start).
-fn js_trim_start(s: String) -> String {
-  case ffi_codepoint_at(s, 0) {
-    Some(cp) ->
-      case is_js_whitespace(cp) {
-        True -> js_trim_start(js_string.drop_start(s, 1))
-        False -> s
-      }
-    None -> s
-  }
-}
-
-/// Remove trailing JS whitespace (TrimString with where = end).
-/// Single pass: count trailing whitespace codepoints in one reverse scan,
-/// then slice once. Stripping one codepoint per recursion would re-walk the
-/// string from byte 0 on every step (accidentally quadratic).
-fn js_trim_end(s: String) -> String {
-  let codepoints = string.to_utf_codepoints(s)
-  let len = list.length(codepoints)
-  let trailing =
-    codepoints
-    |> list.reverse
-    |> list.take_while(fn(cp) {
-      is_js_whitespace(string.utf_codepoint_to_int(cp))
-    })
-    |> list.length
-  case trailing {
-    0 -> s
-    _ -> js_string.slice(s, 0, len - trailing)
-  }
+  string_transform(this, state, value.trim_trailing_js_whitespace)
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,8 +905,8 @@ fn string_replace_all(
   }
   // Step 2a: if IsRegExp(searchValue), Get(searchValue, "flags") must be
   // object-coercible and its string must contain "g".
-  use is_re, state <- try_is_regexp(state, search_val)
-  use Nil, state <- replace_all_global_check(state, search_val, is_re)
+  use is_re, state <- regexp_ops.is_regexp(state, search_val)
+  use Nil, state <- require_global_when_regexp(state, search_val, is_re, "replaceAll")
   // Step 2b: replacer = ? GetMethod(searchValue, @@replace); delegate if set.
   use method_opt, state <- state.try_op(get_method(
     state,
@@ -1219,42 +944,18 @@ fn require_object_coercible(
   }
 }
 
-/// replaceAll step 2a: a RegExp searchValue must have object-coercible flags
-/// containing "g".
-fn replace_all_global_check(
+/// `matchAll` step 2.b / `replaceAll` step 2.a: the "must be a global RegExp"
+/// guard, but only when the argument IsRegExp.
+fn require_global_when_regexp(
   state: State(host),
-  search_val: JsValue,
+  val: JsValue,
   is_re: Bool,
+  method: String,
   cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case is_re, search_val {
-    True, JsObject(ref) -> {
-      use flags_val, state <- state.try_op(object.get_value(
-        state,
-        ref,
-        Named("flags"),
-        search_val,
-      ))
-      case flags_val {
-        JsUndefined | JsNull ->
-          state.type_error(
-            state,
-            "The .flags property of the searchValue argument must not be undefined or null",
-          )
-        _ -> {
-          use flags_str, state <- coerce.try_to_string(state, flags_val)
-          case string.contains(flags_str, "g") {
-            True -> cont(Nil, state)
-            False ->
-              state.type_error(
-                state,
-                "String.prototype.replaceAll called with a non-global RegExp argument",
-              )
-          }
-        }
-      }
-    }
-    _, _ -> cont(Nil, state)
+  case is_re {
+    True -> regexp_ops.require_global_flags(state, val, method, cont)
+    False -> cont(Nil, state)
   }
 }
 
@@ -1286,6 +987,9 @@ fn replace_string_search(
       // Step 6: replaceValue = ToString(replaceValue) — runs even when
       // there is no match.
       use template, state <- coerce.try_to_string(state, replace_val)
+      // Tokenize once, not once per match. `named_mode: False`: a string
+      // search has no capture groups, so "$<" is always the literal "$<".
+      let segments = substitution.tokenize_template(template, False)
       // GetSubstitution only inspects `before`/`after` when the template
       // contains '$' — skip building them otherwise.
       let has_dollar = string.contains(template, "$")
@@ -1294,7 +998,7 @@ fn replace_string_search(
           s,
           search_str,
           search_len,
-          template,
+          segments,
           has_dollar,
           "",
           "",
@@ -1379,7 +1083,7 @@ fn replace_loop_template(
   tail: String,
   search_str: String,
   search_len: Int,
-  template: String,
+  segments: List(substitution.ReplaceSegment),
   has_dollar: Bool,
   before: String,
   acc: String,
@@ -1390,10 +1094,23 @@ fn replace_loop_template(
     rel -> {
       let preserved = js_string.slice(tail, 0, rel)
       let after = js_string.drop_start(tail, rel + search_len)
-      let replacement = case has_dollar {
-        True ->
-          get_substitution(template, search_str, before <> preserved, after)
-        False -> template
+      // No '$' in the template means every segment is the one LiteralSeg —
+      // skip building the Ctx (and its `before` slice) entirely.
+      let replacement = case has_dollar, segments {
+        False, [substitution.LiteralSeg(text)] -> text
+        _, _ ->
+          substitution.resolve_without_named(
+            segments,
+            substitution.Ctx(
+              matched: search_str,
+              before: fn() { before <> preserved },
+              after: fn() { after },
+              // A string search has no capture groups: m = 0, so `capture` is
+              // never called and "$1"/"$<n>" stay literal.
+              capture: fn(_) { "" },
+              m: 0,
+            ),
+          )
       }
       let acc = acc <> preserved <> replacement
       case all, search_len {
@@ -1413,7 +1130,7 @@ fn replace_loop_template(
                 js_string.drop_start(after, 1),
                 search_str,
                 search_len,
-                template,
+                segments,
                 has_dollar,
                 before,
                 acc <> cp,
@@ -1430,7 +1147,7 @@ fn replace_loop_template(
             after,
             search_str,
             search_len,
-            template,
+            segments,
             has_dollar,
             before,
             acc,
@@ -1439,30 +1156,6 @@ fn replace_loop_template(
         }
       }
     }
-  }
-}
-
-/// ES2024 §22.1.3.18.1 GetSubstitution for string searches (no capture
-/// groups, no named captures): $$ => $, $& => matched, $` => the part before
-/// the match, $' => the part after. Everything else (including $1..$99 and
-/// $<name>, which have no captures here) stays literal.
-fn get_substitution(
-  template: String,
-  matched: String,
-  before: String,
-  after: String,
-) -> String {
-  case string.split_once(template, "$") {
-    Error(Nil) -> template
-    Ok(#(pre, post)) ->
-      pre
-      <> case post {
-        "$" <> rest -> "$" <> get_substitution(rest, matched, before, after)
-        "&" <> rest -> matched <> get_substitution(rest, matched, before, after)
-        "`" <> rest -> before <> get_substitution(rest, matched, before, after)
-        "'" <> rest -> after <> get_substitution(rest, matched, before, after)
-        rest -> "$" <> get_substitution(rest, matched, before, after)
-      }
   }
 }
 
@@ -1844,7 +1537,7 @@ fn string_code_point_at(
   // Steps 4-7: out of bounds (including negative) => undefined, else the
   // codepoint at pos
   let cp = case pos >= 0 {
-    True -> ffi_codepoint_at(s, pos)
+    True -> js_string.codepoint_at(s, pos)
     False -> None
   }
   case cp {
@@ -1852,12 +1545,6 @@ fn string_code_point_at(
     None -> #(state, Ok(JsUndefined))
   }
 }
-
-/// Integer codepoint at codepoint index `pos`, or None when out of bounds.
-/// Shares the cursor cache with js_string.char_at, so sequential scans
-/// resume from the previous position instead of re-walking from byte 0.
-@external(erlang, "arc_string_ffi", "string_codepoint_at")
-fn ffi_codepoint_at(s: String, pos: Int) -> option.Option(Int)
 
 /// ES2024 22.1.3.13 — String.prototype.normalize ( [ form ] )
 ///   1. Let O be ? RequireObjectCoercible(this value).
@@ -2092,27 +1779,29 @@ fn char_codes_to_string(codes: List(Int), acc: List(UtfCodepoint)) -> String {
     -> {
       // Combine surrogate pair into a full codepoint
       let codepoint = { high - 0xD800 } * 0x400 + { low - 0xDC00 } + 0x10000
-      let cp = case string.utf_codepoint(codepoint) {
-        Ok(cp) -> cp
-        Error(Nil) -> replacement_codepoint()
-      }
-      char_codes_to_string(rest, [cp, ..acc])
+      char_codes_to_string(rest, [codepoint_or_replacement(codepoint), ..acc])
     }
     [code, ..rest] -> {
-      let cp = case string.utf_codepoint(code) {
-        Ok(cp) -> cp
-        Error(Nil) -> replacement_codepoint()
-      }
-      char_codes_to_string(rest, [cp, ..acc])
+      char_codes_to_string(rest, [codepoint_or_replacement(code), ..acc])
     }
   }
 }
 
-/// U+FFFD REPLACEMENT CHARACTER. FFI because UtfCodepoint has no public
-/// constructor — on Erlang it's just an Int, so this is a constant-pool load
-/// instead of a `string.utf_codepoint` call + Result unwrap + assert.
-@external(erlang, "arc_string_ffi", "replacement_codepoint")
-fn replacement_codepoint() -> UtfCodepoint
+/// `string.utf_codepoint(i)` with the one failure mode this engine can hit
+/// mapped to U+FFFD.
+///
+/// TODO(Deviation): the only ints in 0..0x10FFFF that `utf_codepoint` rejects
+/// are the lone surrogates D800..DFFF, which JS strings are allowed to hold
+/// (they are UTF-16 code unit sequences, not scalar values). Arc stores
+/// strings as UTF-8, so `String.fromCharCode(0xD800)` yields U+FFFD instead
+/// of a lone surrogate, and `"\uD800".charCodeAt(0)` is 0xFFFD, not 0xD800.
+/// Fixing this needs UTF-16 (or WTF-8) string storage — see js_string.gleam.
+fn codepoint_or_replacement(i: Int) -> UtfCodepoint {
+  case string.utf_codepoint(i) {
+    Ok(cp) -> cp
+    Error(Nil) -> js_string.replacement_codepoint()
+  }
+}
 
 /// ToUint16: modulo 65536 (2^16), always returns 0..65535.
 fn modulo_uint16(n: Int) -> Int {
@@ -2159,11 +1848,11 @@ fn from_code_point_loop(
             // Step 2c: must be in [0, 0x10FFFF]
             Some(i) if i >= 0 && i <= 0x10FFFF -> {
               // Step 2d: UTF16EncodeCodePoint
-              let cp = case string.utf_codepoint(i) {
-                Ok(cp) -> cp
-                Error(Nil) -> replacement_codepoint()
-              }
-              from_code_point_loop(rest, [cp, ..acc], state)
+              from_code_point_loop(
+                rest,
+                [codepoint_or_replacement(i), ..acc],
+                state,
+              )
             }
             _ ->
               state.range_error(
@@ -2273,7 +1962,13 @@ fn string_match_all(
       case regexp_arg {
         JsObject(ref) -> {
           // Step 2a: if IsRegExp(regexp), its flags must contain "g"
-          use Nil, state <- match_all_flags_check(state, ref, regexp_arg)
+          use is_re, state <- regexp_ops.is_regexp(state, regexp_arg)
+          use Nil, state <- require_global_when_regexp(
+            state,
+            regexp_arg,
+            is_re,
+            "matchAll",
+          )
           // Step 2b: matcher = GetMethod(regexp, @@matchAll)
           use match_all_fn, state <- state.try_op(object.get_symbol_value(
             state,
@@ -2333,52 +2028,6 @@ fn match_all_create_regexp(
   case method_opt {
     Some(method) -> call_symbol_method(state, method, rx, [JsString(s)])
     None -> state.type_error(state, not_a_function(value.symbol_match_all))
-  }
-}
-
-/// §22.1.3.14 step 2.b: if IsRegExp(regexp): flags = ? Get(regexp, "flags");
-/// ? RequireObjectCoercible(flags); if ToString(flags) lacks "g" → TypeError.
-fn match_all_flags_check(
-  state: State(host),
-  ref: Ref,
-  regexp_arg: JsValue,
-  cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use matcher, state <- state.try_op(object.get_symbol_value(
-    state,
-    ref,
-    value.symbol_match,
-    regexp_arg,
-  ))
-  let is_regexp = case matcher {
-    JsUndefined -> option.is_some(heap.read_regexp(state.heap, ref))
-    other -> value.is_truthy(other)
-  }
-  case is_regexp {
-    False -> cont(Nil, state)
-    True -> {
-      use flags_val, state <- state.try_op(object.get_value(
-        state,
-        ref,
-        Named("flags"),
-        regexp_arg,
-      ))
-      case flags_val {
-        JsUndefined | value.JsNull ->
-          state.type_error(
-            state,
-            "The .flags property of the regexp argument must not be undefined or null",
-          )
-        _ -> {
-          use flags_str, state <- coerce.try_to_string(state, flags_val)
-          case string.contains(flags_str, "g") {
-            True -> cont(Nil, state)
-            False ->
-              state.type_error(state, "matchAll called with non-global RegExp")
-          }
-        }
-      }
-    }
   }
 }
 
@@ -2504,12 +2153,9 @@ fn string_transform(
 fn index_of_from(s: String, search: String, from: Int) -> Int {
   case search {
     "" -> int.clamp(from, 0, js_string.length(s))
-    _ -> ffi_index_of(s, search, from)
+    _ -> js_string.index_of(s, search, from)
   }
 }
-
-@external(erlang, "arc_string_ffi", "string_index_of")
-fn ffi_index_of(haystack: String, needle: String, from: Int) -> Int
 
 /// Reverse StringIndexOf: find last occurrence of `search` in `s`
 /// searching backwards from index `from`.
@@ -2517,12 +2163,10 @@ fn ffi_index_of(haystack: String, needle: String, from: Int) -> Int
 fn last_index_of_from(s: String, search: String, from: Int) -> Int {
   case search {
     "" -> int.clamp(from, 0, js_string.length(s))
-    _ -> ffi_last_index_of(s, search, from)
+    _ -> js_string.last_index_of(s, search, from)
   }
 }
 
-@external(erlang, "arc_string_ffi", "string_last_index_of")
-fn ffi_last_index_of(haystack: String, needle: String, from: Int) -> Int
 // The codepoint string primitives (`js_string.slice`,
 // `js_string.drop_start`, `js_string.explode`, `js_string.length`,
 // `js_string.char_at`) all live in `arc/vm/js_string` — one place that
