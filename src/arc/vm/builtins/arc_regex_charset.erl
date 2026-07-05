@@ -160,8 +160,8 @@ scf(CP) ->
 %%
 %% Cached in persistent_term, not the process dictionary: the table is derived
 %% from immutable generated data, so it is the same in every process, and the
-%% sibling cache of the same shape (arc_unicode_ffi's id_ranges/1) already
-%% lives there. A per-process cache re-derived the whole thing — a full
+%% sibling caches of the same shape (arc_unicode_tables) already live there.
+%% A per-process cache re-derived the whole thing — a full
 %% lists:seq over every Changes_When_Casefolded range — once per agent process.
 %%
 %% The table carrying Changes_When_Casefolded is a hard invariant of this
@@ -222,9 +222,17 @@ class_complement(Set, CI) ->
 %% Render the evaluated set back to PCRE: longer strings first (the spec
 %% matches CharSetOfStrings longest-first), then the codepoint class, then
 %% the empty string (matches last).
+%%
+%% This is the ONE place the PCRE "no lone surrogates in a UTF pattern"
+%% constraint is applied, and it applies to both halves of the set: a range is
+%% clipped (vstrip_surrogates) and an ALTERNATIVE containing an unpaired
+%% surrogate is dropped, on the same argument — a valid UTF-8 subject can never
+%% contain one, so neither can ever match. Rendering such an alternative
+%% verbatim (`\x{D800}`) makes PCRE reject a perfectly legal JS pattern like
+%% `[\q{\uD800}]`.
 emit_vclass(Ranges0, Strings0) ->
     Ranges = vstrip_surrogates(vnorm(Ranges0)),
-    Strings = lists:usort(Strings0),
+    Strings = [S || S <- lists:usort(Strings0), not has_surrogate(S)],
     NonEmpty = [S || S <- Strings, S =/= []],
     HasEmpty = lists:member([], Strings),
     Sorted = lists:sort(
@@ -246,6 +254,9 @@ emit_vclass(Ranges0, Strings0) ->
               {Ps, Cs, Es} -> ["(?:", lists:join($|, Ps ++ Cs ++ Es), ")"]
           end,
     unicode:characters_to_list(iolist_to_binary(Txt)).
+
+has_surrogate(CPs) ->
+    lists:any(fun(CP) -> CP >= 16#D800 andalso CP =< 16#DFFF end, CPs).
 
 vrender_string(CPs) ->
     [["\\x{", integer_to_list(CP, 16), "}"] || CP <- CPs].

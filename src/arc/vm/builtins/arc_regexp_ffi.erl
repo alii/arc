@@ -18,16 +18,33 @@
 %% the v-mode class evaluator that spelling it out would hide the code.
 -define(CS, arc_regex_charset).
 
-%% Convert JS flags to re:compile options
+%% Convert JS flags to re:compile options.
+%%
+%% `i` is the only flag PCRE can be trusted with directly. `m` and `s` are NOT
+%% passed through: PCRE's line-terminator set is LF-only (JS's LineTerminator is
+%% {LF, CR, U+2028, U+2029}) and PCRE's `$` also matches before a trailing
+%% newline, so `multiline`/`dotall` give the wrong answer for /a$/.test("a\n")
+%% and /^b/m.test("a\rb"). Instead `.`, `^` and `$` are desugared in
+%% translate_pat/5 against ?JS_LT — the same "spell the JS set out rather than
+%% trust PCRE's" policy that \s, \w and \b already follow in this module.
 flags_to_opts(Flags) ->
     flags_to_opts(Flags, [unicode]).  %% always enable unicode for UTF-8 strings
 
 flags_to_opts(<<>>, Acc) -> Acc;
 flags_to_opts(<<"i", Rest/binary>>, Acc) -> flags_to_opts(Rest, [caseless | Acc]);
-flags_to_opts(<<"m", Rest/binary>>, Acc) -> flags_to_opts(Rest, [multiline | Acc]);
-flags_to_opts(<<"s", Rest/binary>>, Acc) -> flags_to_opts(Rest, [dotall | Acc]);
 flags_to_opts(<<_, Rest/binary>>, Acc) -> flags_to_opts(Rest, Acc).
-%% g, y, u, d, v are handled at the Gleam level, not PCRE options
+%% g, y, u, d, v are handled at the Gleam level, not PCRE options;
+%% m and s are handled by translate_pat/5 — see newline_mode/1.
+
+%% newline_mode(Flags) -> {Multiline, DotAll} — the two flags translate_pat/5
+%% needs in order to desugar `^`, `$` and `.`. It is the BOTTOM of that
+%% function's modifier stack; a `(?ims-ims:...)` group pushes onto it.
+newline_mode(Flags) -> newline_mode(Flags, false, false).
+
+newline_mode(<<>>, M, S) -> {M, S};
+newline_mode(<<"m", Rest/binary>>, _M, S) -> newline_mode(Rest, true, S);
+newline_mode(<<"s", Rest/binary>>, M, _S) -> newline_mode(Rest, M, true);
+newline_mode(<<_, Rest/binary>>, M, S) -> newline_mode(Rest, M, S).
 
 %% get_compiled(Pattern, Flags) -> {ok, {MP, GroupCount, Names}}
 %%                               | {error, {pattern_compile_failed, Reason}}
@@ -50,18 +67,20 @@ flags_to_opts(<<_, Rest/binary>>, Acc) -> flags_to_opts(Rest, Acc).
 %% tight test()/exec loops over short subjects. The scan of the source
 %% pattern (group count + named groups) is cached alongside the MP, so
 %% regexp_exec_info gets it for free on a hit. Keyed by the ORIGINAL pattern
-%% plus {CompileOpts, UnicodeMode} — both compilation and translation inputs
-%% — so flag chars that affect neither (g/y/d/etc.) share an entry.
+%% plus {CompileOpts, UnicodeMode, NewlineMode} — every compilation and
+%% translation input — so flag chars that affect none of them (g/y/d/etc.)
+%% share an entry.
 get_compiled(Pattern, Flags) ->
     Opts = flags_to_opts(Flags),
     Mode = unicode_mode(Flags),
-    Key = {arc_re_mp, Pattern, Opts, Mode},
+    NL = newline_mode(Flags),
+    Key = {arc_re_mp, Pattern, Opts, Mode, NL},
     case erlang:get(Key) of
         undefined ->
             Caseless = lists:member(caseless, Opts),
             {Stripped, GroupCount, Names} = scan_pattern(Pattern),
             Translated = unicode:characters_to_binary(
-                           translate_pat(Stripped, false, Mode, Caseless)),
+                           translate_pat(Stripped, false, Mode, Caseless, [NL])),
             Result = case re:compile(Translated, Opts) of
                          {ok, MP} ->
                              {ok, {MP, GroupCount, Names}};
@@ -99,7 +118,7 @@ cache_put(Key, Result) ->
         end,
     case N >= ?CACHE_MAX of
         true ->
-            [erlang:erase(K) || {{arc_re_mp, _, _, _} = K, _} <- erlang:get()],
+            [erlang:erase(K) || {{arc_re_mp, _, _, _, _} = K, _} <- erlang:get()],
             erlang:put(arc_re_mp_count, 1);
         false ->
             erlang:put(arc_re_mp_count, N + 1)
@@ -232,6 +251,12 @@ unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
         "\\t\\n\\x0B\\f\\r \\x{A0}\\x{1680}\\x{2000}-\\x{200A}"
         "\\x{2028}\\x{2029}\\x{202F}\\x{205F}\\x{3000}\\x{FEFF}").
 
+%% JS LineTerminator per §12.3: LF, CR, LS (U+2028), PS (U+2029). PCRE's own
+%% newline set is LF-only, so `.`, `^` and `$` are desugared against this class
+%% instead of being handed to PCRE (see flags_to_opts/1). Class-item text: it
+%% is always spliced between `[` and `]`.
+-define(JS_LT, "\\n\\r\\x{2028}\\x{2029}").
+
 %% ---- Escape translation --------------------------------------------------
 %%
 %% Rewrite the JS-regex escapes PCRE doesn't accept, or reads differently, into
@@ -243,7 +268,7 @@ unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
 %% a `u` is not misread as a unicode escape. The original (untranslated) source
 %% is what RegExp.prototype.source returns; this only affects what re sees.
 %%
-%% translate_pat(Chars, InClass, Mode, CI)
+%% translate_pat(Chars, InClass, Mode, CI, MS)
 %%   InClass — inside a [...] character class, where \w/\b are not the same
 %%             productions (\b is backspace) and a negated set cannot be
 %%             written as a nested class.
@@ -252,141 +277,150 @@ unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
 %%   CI      — the i flag. It changes what a class must contain: PCRE folds
 %%             every class item at match time, so an emitted set has to be
 %%             closed under simple case folding to mean what JS means.
-translate_pat([], _InClass, _Mode, _CI) -> [];
-translate_pat([$\\, $u, ${ | Rest], InClass, Mode, CI) ->
+%%   MS      — a stack of {Multiline, DotAll}, head = the state in force. The
+%%             m and s flags are not PCRE options here; `.`, `^` and `$` are
+%%             rewritten against ?JS_LT, so their scope — which an ES2025
+%%             `(?ims-ims:...)` modifier group narrows — is tracked here.
+translate_pat([], _InClass, _Mode, _CI, _MS) -> [];
+translate_pat([$\\, $u, ${ | Rest], InClass, Mode, CI, MS) ->
     case take_hex(Rest, []) of
         {Hex, [$} | Rest2]} when Hex =/= [] ->
             case is_surrogate_hex(Hex) of
                 true ->
                     %% Lone surrogate: PCRE refuses \x{D800}-\x{DFFF} in UTF
                     %% mode, which would degrade the WHOLE pattern to
-                    %% no-match. Neutralize to a never-matching sentinel.
-                    surrogate_sentinel(InClass)
-                        ++ translate_pat(Rest2, InClass, Mode, CI);
+                    %% no-match. Emit an unmatchable stand-in instead.
+                    emit_surrogate(InClass, Rest2, Mode, CI, MS);
                 false ->
                     [$\\, $x, ${] ++ Hex ++ [$}]
-                        ++ translate_pat(Rest2, InClass, Mode, CI)
+                        ++ translate_pat(Rest2, InClass, Mode, CI, MS)
             end;
         _ ->
-            [$\\, $u, ${ | translate_pat(Rest, InClass, Mode, CI)]
+            [$\\, $u, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
     end;
-translate_pat([$\\, $u, A, B, C, D | Rest], InClass, Mode, CI) ->
+translate_pat([$\\, $u, A, B, C, D | Rest], InClass, Mode, CI, MS) ->
     case is_hex(A) andalso is_hex(B) andalso is_hex(C) andalso is_hex(D) of
         true ->
             V = list_to_integer([A, B, C, D], 16),
             if
-                V >= 16#D800, V =< 16#DBFF, not InClass ->
-                    %% Lead surrogate outside a class: JS (non-u) regexes pair
-                    %% the pattern's code units, so a lead+trail escape pair
-                    %% denotes one astral character. Combine an immediately
-                    %% following trail-surrogate escape; an unpaired lead
-                    %% surrogate can never match (arc strings are well-formed
-                    %% Unicode) — emit the sentinel so PCRE still compiles
-                    %% the rest of the pattern.
-                    case Rest of
-                        [$\\, $u, E, F, G, H | Rest2] ->
-                            case is_hex(E) andalso is_hex(F) andalso is_hex(G)
-                                andalso is_hex(H) of
-                                true ->
-                                    W = list_to_integer([E, F, G, H], 16),
-                                    if
-                                        W >= 16#DC00, W =< 16#DFFF ->
-                                            CP = 16#10000
-                                                + (V - 16#D800) * 16#400
-                                                + (W - 16#DC00),
-                                            "\\x{" ++ integer_to_list(CP, 16)
-                                                ++ "}"
-                                                ++ translate_pat(Rest2, InClass, Mode, CI);
-                                        true ->
-                                            surrogate_sentinel(InClass)
-                                                ++ translate_pat(Rest, InClass, Mode, CI)
-                                    end;
-                                false ->
-                                    surrogate_sentinel(InClass)
-                                        ++ translate_pat(Rest, InClass, Mode, CI)
-                            end;
-                        _ ->
-                            surrogate_sentinel(InClass)
-                                ++ translate_pat(Rest, InClass, Mode, CI)
+                V >= 16#D800, V =< 16#DBFF,
+                (not InClass orelse Mode =/= none) ->
+                    %% Lead surrogate: a lead+trail escape pair denotes one
+                    %% astral character. Outside a class that is how JS
+                    %% (non-u) pairs the pattern's code units; INSIDE a class
+                    %% it is only true under u/v, where the
+                    %% RegExpUnicodeEscapeSequence[+U] LeadSurrogate/
+                    %% TrailSurrogate production applies to class atoms too
+                    %% (`[😀]` matches U+1F600). Without u/v the two
+                    %% escapes really are two lone code units in the class, so
+                    %% each falls to the stand-in below.
+                    %% An unpaired lead surrogate can never match (arc strings
+                    %% are well-formed Unicode) — emit the stand-in so PCRE
+                    %% still compiles the rest of the pattern.
+                    case pair_trail(Rest) of
+                        {ok, W, Rest2} ->
+                            CP = 16#10000 + (V - 16#D800) * 16#400
+                                + (W - 16#DC00),
+                            "\\x{" ++ integer_to_list(CP, 16) ++ "}"
+                                ++ translate_pat(Rest2, InClass, Mode, CI, MS);
+                        none ->
+                            emit_surrogate(InClass, Rest, Mode, CI, MS)
                     end;
                 V >= 16#D800, V =< 16#DFFF ->
-                    %% Unpaired trail surrogate, or any surrogate inside a
-                    %% character class: never matches a well-formed string —
-                    %% the sentinel keeps the pattern compiling.
-                    surrogate_sentinel(InClass)
-                        ++ translate_pat(Rest, InClass, Mode, CI);
+                    %% Unpaired trail surrogate, or a lone surrogate inside a
+                    %% non-unicode class: never matches a well-formed string.
+                    emit_surrogate(InClass, Rest, Mode, CI, MS);
                 true ->
                     [$\\, $x, ${, A, B, C, D, $}
-                     | translate_pat(Rest, InClass, Mode, CI)]
+                     | translate_pat(Rest, InClass, Mode, CI, MS)]
             end;
-        false -> [$\\, $u | translate_pat([A, B, C, D | Rest], InClass, Mode, CI)]
+        false -> [$\\, $u | translate_pat([A, B, C, D | Rest], InClass, Mode, CI, MS)]
     end;
 %% \p{...} / \P{...} in unicode mode -> PCRE2 property syntax. An
 %% untranslatable payload is left verbatim; PCRE then fails to compile and
 %% the regex degrades to no-match (the parser already rejected invalid names
 %% in literals, so this only affects RegExp-constructor patterns).
-translate_pat([$\\, P, ${ | Rest], InClass, Mode, CI)
+translate_pat([$\\, P, ${ | Rest], InClass, Mode, CI, MS)
   when (P =:= $p orelse P =:= $P), Mode =/= none ->
     case take_prop(Rest, []) of
         {Payload, Rest2} ->
             case prop_translation(Payload, P =:= $P, InClass, Mode) of
                 {ok, Io} ->
                     unicode:characters_to_list(iolist_to_binary(Io))
-                        ++ translate_pat(Rest2, InClass, Mode, CI);
+                        ++ translate_pat(Rest2, InClass, Mode, CI, MS);
                 error ->
-                    [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI)]
+                    [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
             end;
         none ->
-            [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI)]
+            [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
     end;
 %% \s, \S -> the explicit JS sets: PCRE's own \s is ASCII-only and `ucp` \s both
 %% over- and under-shoots. \w, \W -> the explicit sets under u/v only; see
 %% word_atom/1. Outside a class the negated forms are their own negated bracket
 %% class; inside a class they must become class ITEMS (classes cannot nest), so
 %% the negated forms splice their complement — see class_complement/2.
-translate_pat([$\\, $s | Rest], false, Mode, CI) ->
-    "[" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI);
-translate_pat([$\\, $S | Rest], false, Mode, CI) ->
-    "[^" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI);
-translate_pat([$\\, $w | Rest], false, Mode, CI) ->
-    word_atom(Mode) ++ translate_pat(Rest, false, Mode, CI);
-translate_pat([$\\, $W | Rest], false, Mode, CI) ->
-    nword_atom(Mode) ++ translate_pat(Rest, false, Mode, CI);
-translate_pat([$\\, $s | Rest], true, Mode, CI) ->
-    splice_in_class(?JSS_CHARS, Rest, Mode, CI);
-translate_pat([$\\, $S | Rest], true, Mode, CI) ->
-    splice_in_class(?CS:class_complement(?CS:vspace(), CI), Rest, Mode, CI);
-translate_pat([$\\, $w | Rest], true, Mode, CI) ->
-    splice_in_class(word_items(Mode), Rest, Mode, CI);
-translate_pat([$\\, $W | Rest], true, Mode, CI) ->
-    splice_in_class(nword_items(Mode, CI), Rest, Mode, CI);
+translate_pat([$\\, $s | Rest], false, Mode, CI, MS) ->
+    "[" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([$\\, $S | Rest], false, Mode, CI, MS) ->
+    "[^" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([$\\, $w | Rest], false, Mode, CI, MS) ->
+    word_atom(Mode) ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([$\\, $W | Rest], false, Mode, CI, MS) ->
+    nword_atom(Mode) ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([$\\, $s | Rest], true, Mode, CI, MS) ->
+    splice_in_class(?JSS_CHARS, Rest, Mode, CI, MS);
+translate_pat([$\\, $S | Rest], true, Mode, CI, MS) ->
+    splice_in_class(?CS:class_complement(?CS:vspace(), CI), Rest, Mode, CI, MS);
+translate_pat([$\\, $w | Rest], true, Mode, CI, MS) ->
+    splice_in_class(word_items(Mode), Rest, Mode, CI, MS);
+translate_pat([$\\, $W | Rest], true, Mode, CI, MS) ->
+    splice_in_class(nword_items(Mode, CI), Rest, Mode, CI, MS);
 %% \d/\D need no translation, but they are class escapes too, so route them
 %% through splice_in_class for the dash rule below (`[\d-x]` is three atoms in
 %% JS; PCRE would reject it as a bad range).
-translate_pat([$\\, D | Rest], true, Mode, CI) when D =:= $d; D =:= $D ->
-    splice_in_class([$\\, D], Rest, Mode, CI);
+translate_pat([$\\, D | Rest], true, Mode, CI, MS) when D =:= $d; D =:= $D ->
+    splice_in_class([$\\, D], Rest, Mode, CI, MS);
 %% A `-` immediately BEFORE a class escape is a literal, never a range operator
 %% (JS never lets a class escape be a range endpoint). Escape it and let the
 %% escape splice normally, or PCRE reads `[!-\w]` as the range `!`-`0` and
 %% silently widens the class. Mirror image of the trailing dash that
 %% splice_in_class/4 escapes.
-translate_pat([$-, $\\, E | Rest], true, Mode, CI)
+translate_pat([$-, $\\, E | Rest], true, Mode, CI, MS)
   when E =:= $d; E =:= $D; E =:= $s; E =:= $S; E =:= $w; E =:= $W ->
-    [$\\, $- | translate_pat([$\\, E | Rest], true, Mode, CI)];
+    [$\\, $- | translate_pat([$\\, E | Rest], true, Mode, CI, MS)];
+%% A range whose HIGH endpoint is a lone surrogate, e.g. `[a-\uD800]`. The
+%% low endpoint is already emitted, and the stand-in for the high one is a
+%% class (\p{Cs}), which PCRE will not accept as a range endpoint. JS matches
+%% Lo..U+D800 minus the surrogates a subject can never contain, i.e. Lo..U+D7FF
+%% — so clamp. (A surrogate LOW endpoint is consumed with its whole range by
+%% class_surrogate_item/1, so it never reaches here.)
+translate_pat([$-, $\\, $u | R0] = L, true, Mode, CI, MS) ->
+    case parse_uescape(R0) of
+        {ok, V, R1} when V >= 16#D800, V =< 16#DFFF ->
+            case Mode =/= none andalso V =< 16#DBFF
+                andalso pair_trail(R1) =/= none of
+                %% Under u/v `[a-😀]` is the range a..U+1F600; let
+                %% the pairing clause above see the escape.
+                true -> [$- | translate_pat(tl(L), true, Mode, CI, MS)];
+                false -> "-\\x{D7FF}" ++ translate_pat(R1, true, Mode, CI, MS)
+            end;
+        _ ->
+            [$- | translate_pat(tl(L), true, Mode, CI, MS)]
+    end;
 %% \b, \B outside a character class (inside one, \b is backspace).
-translate_pat([$\\, $b | Rest], false, Mode, CI) ->
+translate_pat([$\\, $b | Rest], false, Mode, CI, MS) ->
     %% Word boundary: word|nonword transition (start/end count as nonword).
     W = word_atom(Mode),
     "(?:(?<=" ++ W ++ ")(?!" ++ W ++ ")|(?<!" ++ W ++ ")(?=" ++ W ++ "))"
-        ++ translate_pat(Rest, false, Mode, CI);
-translate_pat([$\\, $B | Rest], false, Mode, CI) ->
+        ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([$\\, $B | Rest], false, Mode, CI, MS) ->
     %% Non-boundary: both sides word, or both sides nonword/edge.
     W = word_atom(Mode),
     "(?:(?<=" ++ W ++ ")(?=" ++ W ++ ")|(?<!" ++ W ++ ")(?!" ++ W ++ "))"
-        ++ translate_pat(Rest, false, Mode, CI);
+        ++ translate_pat(Rest, false, Mode, CI, MS);
 %% Preserve any other escape pair verbatim (don't reinterpret its 2nd char).
-translate_pat([$\\, C | Rest], InClass, Mode, CI) ->
-    [$\\, C | translate_pat(Rest, InClass, Mode, CI)];
+translate_pat([$\\, C | Rest], InClass, Mode, CI, MS) ->
+    [$\\, C | translate_pat(Rest, InClass, Mode, CI, MS)];
 %% v-flag classes: PCRE has no ClassSetExpression (nested classes, &&
 %% intersection, -- subtraction, \q{...} string literals, properties of
 %% strings inside classes). Desugar the whole [...] here: parse the set
@@ -394,7 +428,7 @@ translate_pat([$\\, C | Rest], InClass, Mode, CI) ->
 %% and emit a plain PCRE class plus an alternation for the strings. A class
 %% the desugarer can't handle falls through to the generic translation
 %% (degrading to PCRE's interpretation / no-match), as before.
-translate_pat([$[ | Rest], false, v, CI) ->
+translate_pat([$[ | Rest], false, v, CI, MS) ->
     case vclass(Rest, CI) of
         {ok, Ranges0, Strings, Rest2} ->
             %% With the i flag the algebra ran over scf-folded sets; PCRE's own
@@ -406,17 +440,94 @@ translate_pat([$[ | Rest], false, v, CI) ->
                          true -> ?CS:vclose(Ranges0);
                          false -> Ranges0
                      end,
-            ?CS:emit_vclass(Ranges, Strings) ++ translate_pat(Rest2, false, v, CI);
+            ?CS:emit_vclass(Ranges, Strings) ++ translate_pat(Rest2, false, v, CI, MS);
         error ->
-            [$[ | translate_pat(Rest, true, v, CI)]
+            [$[ | translate_pat(Rest, true, v, CI, MS)]
     end;
 %% Track character-class nesting on unescaped brackets.
-translate_pat([$[ | Rest], false, Mode, CI) ->
-    [$[ | translate_pat(Rest, true, Mode, CI)];
-translate_pat([$] | Rest], true, Mode, CI) ->
-    [$] | translate_pat(Rest, false, Mode, CI)];
-translate_pat([C | Rest], InClass, Mode, CI) ->
-    [C | translate_pat(Rest, InClass, Mode, CI)].
+translate_pat([$[ | Rest], false, Mode, CI, MS) ->
+    [$[ | translate_pat(Rest, true, Mode, CI, MS)];
+translate_pat([$] | Rest], true, Mode, CI, MS) ->
+    [$] | translate_pat(Rest, false, Mode, CI, MS)];
+%% Modifier groups `(?ims-ims:...)` (ES2025 RegExp modifiers) change m/s for
+%% their body only. `.`, `^` and `$` are desugared here rather than left to
+%% PCRE, so their m/s scope has to be tracked here too — hence MS is a stack
+%% whose head is the modifier state in force. Every other `(` re-pushes it, and
+%% `)` pops. (The `i` letter is left to PCRE, which sees the group verbatim.)
+translate_pat([$( | Rest], false, Mode, CI, [Cur | _] = MS) ->
+    case take_modifiers(Rest, Cur) of
+        {ok, Src, Cur2, Rest2} ->
+            [$( | Src] ++ translate_pat(Rest2, false, Mode, CI, [Cur2 | MS]);
+        none ->
+            [$( | translate_pat(Rest, false, Mode, CI, [Cur | MS])]
+    end;
+translate_pat([$) | Rest], false, Mode, CI, MS) ->
+    [$) | translate_pat(Rest, false, Mode, CI, pop_ms(MS))];
+%% `.` (§22.2.2.7): every character except a JS LineTerminator, or every
+%% character at all under the s flag. PCRE's `.` excludes LF only, and its
+%% `dotall` would still leave the no-s case wrong, so both cases are spelled out.
+translate_pat([$. | Rest], false, Mode, CI, [{_M, false} | _] = MS) ->
+    "[^" ?JS_LT "]" ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([$. | Rest], false, Mode, CI, [{_M, true} | _] = MS) ->
+    "(?s:.)" ++ translate_pat(Rest, false, Mode, CI, MS);
+%% `^` (§22.2.2.6): start of input, plus (m flag) any position after a JS
+%% LineTerminator. PCRE's `^` only knows LF, so use \A + an explicit lookbehind.
+translate_pat([$^ | Rest], false, Mode, CI, [{false, _S} | _] = MS) ->
+    "\\A" ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([$^ | Rest], false, Mode, CI, [{true, _S} | _] = MS) ->
+    "(?:\\A|(?<=[" ?JS_LT "]))" ++ translate_pat(Rest, false, Mode, CI, MS);
+%% `$` (§22.2.2.6): end of input, plus (m flag) any position before a JS
+%% LineTerminator. PCRE's `$` also matches before a trailing newline even
+%% without `multiline`, which JS never does — hence \z, not `$`.
+translate_pat([$$ | Rest], false, Mode, CI, [{false, _S} | _] = MS) ->
+    "\\z" ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([$$ | Rest], false, Mode, CI, [{true, _S} | _] = MS) ->
+    "(?=[" ?JS_LT "]|\\z)" ++ translate_pat(Rest, false, Mode, CI, MS);
+translate_pat([C | Rest], InClass, Mode, CI, MS) ->
+    [C | translate_pat(Rest, InClass, Mode, CI, MS)].
+
+%% Read a modifier-group prefix — "?[ims][-[ims]]:" — from just after the `(`,
+%% and fold it into the enclosing {Multiline, DotAll}. Either RegularExpressionFlags
+%% may be empty, so `(?m-:...)` and the plain non-capturing `(?:...)` are the same
+%% production and land here too, the latter simply re-pushing Cur. Anything else
+%% (a lookaround, a plain group) is `none`. The prefix's source text is returned so
+%% it can be re-emitted verbatim — PCRE still needs to see the `i` letter, which we
+%% do not desugar.
+take_modifiers([$? | Rest], Cur) ->
+    {Add, R1} = take_ims(Rest, []),
+    case R1 of
+        [$: | R2] ->
+            {ok, [$? | Add] ++ ":", apply_ims(Cur, Add, []), R2};
+        [$- | R1b] ->
+            case take_ims(R1b, []) of
+                {Rem, [$: | R2]} ->
+                    {ok, [$? | Add] ++ [$- | Rem] ++ ":",
+                     apply_ims(Cur, Add, Rem), R2};
+                _ -> none
+            end;
+        _ -> none
+    end;
+take_modifiers(_Rest, _Cur) -> none.
+
+take_ims([C | Rest], Acc) when C =:= $i; C =:= $m; C =:= $s ->
+    take_ims(Rest, [C | Acc]);
+take_ims(Rest, Acc) -> {lists:reverse(Acc), Rest}.
+
+apply_ims({M, S}, Add, Rem) ->
+    {ims_bit($m, Add, Rem, M), ims_bit($s, Add, Rem, S)}.
+
+ims_bit(C, Add, Rem, Cur) ->
+    case {lists:member(C, Add), lists:member(C, Rem)} of
+        {true, _} -> true;
+        {_, true} -> false;
+        _ -> Cur
+    end.
+
+%% Leave the pattern's own {Multiline, DotAll} at the bottom of the stack: an
+%% unbalanced `)` is a pattern PCRE will reject anyway, and popping past the
+%% bottom here would crash the translation instead.
+pop_ms([_Inner, Outer | Rest]) -> [Outer | Rest];
+pop_ms([Bottom]) -> [Bottom].
 
 %% Splice a class escape's items into the enclosing [...] and carry on.
 %%
@@ -426,10 +537,10 @@ translate_pat([C | Rest], InClass, Mode, CI) ->
 %% would read the last spliced item and the `-` as a range — either rejecting
 %% the pattern (`[\s-.]`: \x{FEFF}-. is out of order) or, worse, silently
 %% widening it (`[\w-z]`: _-z quietly admits a backtick). Escape the dash.
-splice_in_class(Items, [$-, C | Rest], Mode, CI) when C =/= $] ->
-    Items ++ [$\\, $-] ++ translate_pat([C | Rest], true, Mode, CI);
-splice_in_class(Items, Rest, Mode, CI) ->
-    Items ++ translate_pat(Rest, true, Mode, CI).
+splice_in_class(Items, [$-, C | Rest], Mode, CI, MS) when C =/= $] ->
+    Items ++ [$\\, $-] ++ translate_pat([C | Rest], true, Mode, CI, MS);
+splice_in_class(Items, Rest, Mode, CI, MS) ->
+    Items ++ translate_pat(Rest, true, Mode, CI, MS).
 
 %% JS \w / \W as PCRE text, per unicode mode. Under u/v the spelled-out class is
 %% what earns the spec's two extra word characters (U+017F, U+212A) from PCRE's
@@ -741,12 +852,72 @@ is_surrogate_hex(Hex) ->
     V = list_to_integer(Hex, 16),
     V >= 16#D800 andalso V =< 16#DFFF.
 
-%% A pattern fragment that compiles under PCRE UTF mode but never matches a
-%% well-formed string, standing in for an unmatchable lone-surrogate escape.
-%% Outside a class: a never-true assertion. Inside a class (where assertions
-%% are not allowed): the noncharacter U+FDD0, which arc strings never contain.
-surrogate_sentinel(false) -> "(?!)";
-surrogate_sentinel(true) -> "\\x{FDD0}".
+%% Emit the stand-in for a lone-surrogate escape PCRE cannot express, then keep
+%% translating. Rest is the source AFTER the escape.
+%%
+%% Outside a class the stand-in is a never-true assertion. Inside a class it has
+%% to be a class ITEM that no valid UTF-8 subject can ever match: \p{Cs} — the
+%% surrogate general category, empty by construction over well-formed strings.
+%% (It cannot be a codepoint: every scalar value, noncharacters included, is a
+%% legal member of an arc string, so no single codepoint is unmatchable.)
+emit_surrogate(false, Rest, Mode, CI, MS) ->
+    "(?!)" ++ translate_pat(Rest, false, Mode, CI, MS);
+emit_surrogate(true, Rest, Mode, CI, MS) ->
+    {Item, Rest2} = class_surrogate_item(Rest),
+    Item ++ translate_pat(Rest2, true, Mode, CI, MS).
+
+%% \p{Cs} is a class, not a codepoint, so PCRE rejects it as a range endpoint.
+%% A range STARTING at a lone surrogate is therefore consumed here, its high
+%% endpoint clamped out of the surrogate block:
+%%   [\uD800-\uDFFF]  -> matches nothing        -> \p{Cs}
+%%   [\uD800-\uFFFF]  -> matches U+E000..U+FFFF -> \x{E000}-\x{FFFF}
+%% A high endpoint we cannot read (only reachable from a pattern whose range is
+%% already out of order, i.e. a JS SyntaxError) keeps its dash as a literal so
+%% the pattern still compiles.
+class_surrogate_item([$-, C | _] = Rest) when C =/= $] ->
+    case class_range_hi(tl(Rest)) of
+        {ok, Hi, Rest2} when Hi > 16#DFFF ->
+            {"\\x{E000}-\\x{" ++ integer_to_list(Hi, 16) ++ "}", Rest2};
+        {ok, _Hi, Rest2} ->
+            {"\\p{Cs}", Rest2};
+        none ->
+            {"\\p{Cs}\\-", tl(Rest)}
+    end;
+class_surrogate_item(Rest) ->
+    {"\\p{Cs}", Rest}.
+
+%% The high endpoint of a class range starting at a lone surrogate: only the
+%% forms that can legally sit above U+D7FF are worth reading.
+class_range_hi([$\\, $u | R0]) -> parse_uescape(R0);
+class_range_hi([C | R]) when C > 16#DFFF -> {ok, C, R};
+class_range_hi(_) -> none.
+
+%% Read the body of a `\u` escape (the source AFTER the `\u`) as a codepoint:
+%% either \u{H..} or \uHHHH. Returns none if it is neither.
+parse_uescape([${ | R]) ->
+    case take_hex(R, []) of
+        {Hex, [$} | R2]} when Hex =/= [] -> {ok, list_to_integer(Hex, 16), R2};
+        _ -> none
+    end;
+parse_uescape([A, B, C, D | R]) ->
+    case is_hex(A) andalso is_hex(B) andalso is_hex(C) andalso is_hex(D) of
+        true -> {ok, list_to_integer([A, B, C, D], 16), R};
+        false -> none
+    end;
+parse_uescape(_) -> none.
+
+%% An immediately following `\uHHHH` trail-surrogate escape, to be paired with a
+%% lead surrogate already read.
+pair_trail([$\\, $u, E, F, G, H | Rest]) ->
+    case is_hex(E) andalso is_hex(F) andalso is_hex(G) andalso is_hex(H) of
+        true ->
+            case list_to_integer([E, F, G, H], 16) of
+                W when W >= 16#DC00, W =< 16#DFFF -> {ok, W, Rest};
+                _ -> none
+            end;
+        false -> none
+    end;
+pair_trail(_) -> none.
 
 %% regexp_exec_info(Pattern, Flags, String, Offset, Sticky)
 %%   -> {ok, {Captures, GroupCount, Names}}
