@@ -13,7 +13,7 @@
 
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array
-import arc/vm/internal/tuple_array.{type TupleArray}
+import arc/vm/internal/tuple_array
 import arc/vm/value
 import gleam/dict
 import gleam/list
@@ -79,12 +79,14 @@ fn push_option_ref(
 
 /// Both halves of an Iterator Record are heap-reachable: the iterator object
 /// itself and its cached [[NextMethod]] (a bound function keeps its target and
-/// receiver alive).
+/// receiver alive). Exhaustive destructure so a new Ref-carrying field is a
+/// compile error, not a silent GC leak.
 fn push_iter_record(
   rec: value.IteratorRecord,
   acc: List(value.Ref),
 ) -> List(value.Ref) {
-  push_value_ref(rec.next_method, push_value_ref(rec.iterator, acc))
+  let value.IteratorRecord(iterator:, next_method:) = rec
+  push_value_ref(next_method, push_value_ref(iterator, acc))
 }
 
 /// Every heap reference reachable from an %IteratorHelper%'s body. Exhaustive
@@ -118,7 +120,9 @@ fn helper_body_refs(
     value.ConcatHelper(remaining:, inner:) -> {
       let acc =
         list.fold(remaining, acc, fn(a, item) {
-          push_value_ref(item.iterable, push_value_ref(item.open_method, a))
+          // Full destructure so a new field is a compile error here.
+          let value.ConcatItem(open_method:, iterable:) = item
+          push_value_ref(iterable, push_value_ref(open_method, a))
         })
       case inner {
         Some(inner) -> push_iter_record(inner, acc)
@@ -158,23 +162,32 @@ fn push_dispose_resources(
   })
 }
 
-/// Root a suspended coroutine frame plus the function environment it resumes
-/// into: locals, operand stack, and the frame's own direct-eval var dict.
+/// Root a suspended coroutine frame: locals, operand stack, and the frame's
+/// own sloppy-direct-eval var dict — the EnvSlot is reachable ONLY from the
+/// frame that owns it, so a suspended coroutine's copy has to be walked or GC
+/// would free it out from under a later resume. Exhaustive destructure so a
+/// future Ref-carrying `SuspendedFrame` field is a compile error here, not a
+/// silent GC leak.
 fn push_suspended_frame_refs(
-  env_ref: value.Ref,
   frame: value.SuspendedFrame,
   acc: List(value.Ref),
 ) -> List(value.Ref) {
-  push_saved_locals_stack_refs(frame.locals, frame.stack, [
-    env_ref,
-    ..push_opt_ref(frame.eval_env, acc)
-  ])
+  let value.SuspendedFrame(
+    pc: _,
+    locals:,
+    stack:,
+    try_stack: _,
+    eval_env:,
+    line: _,
+  ) = frame
+  let acc = push_opt_ref(eval_env, acc)
+  let acc =
+    list.fold(tuple_array.to_list(locals), acc, fn(a, v) {
+      push_value_ref(v, a)
+    })
+  list.fold(stack, acc, fn(a, v) { push_value_ref(v, a) })
 }
 
-/// Root an optional ref (a suspended frame's sloppy-direct-eval var dict): the
-/// EnvSlot is reachable ONLY from the frame that owns it, so a suspended
-/// generator's copy has to be walked or GC would free it out from under a
-/// later resume.
 fn push_opt_ref(
   ref: Option(value.Ref),
   acc: List(value.Ref),
@@ -183,20 +196,6 @@ fn push_opt_ref(
     Some(r) -> [r, ..acc]
     None -> acc
   }
-}
-
-/// Same, for a suspended frame that owns no environment ref (an async
-/// function's captures live in `saved_locals`; a module body has none).
-fn push_saved_locals_stack_refs(
-  saved_locals: TupleArray(value.JsValue),
-  saved_stack: List(value.JsValue),
-  acc: List(value.Ref),
-) -> List(value.Ref) {
-  let acc =
-    list.fold(tuple_array.to_list(saved_locals), acc, fn(a, v) {
-      push_value_ref(v, a)
-    })
-  list.fold(saved_stack, acc, fn(a, v) { push_value_ref(v, a) })
 }
 
 /// Prepend all refs reachable from a heap slot onto `acc`. 
@@ -251,8 +250,11 @@ fn do_refs_in_slot(
         value.NativeFunction(native:, ..) -> native_fn_refs(native, acc)
         // ShadowRealm instances keep their realm record alive.
         value.ShadowRealmObject(realm_ref:) -> [realm_ref, ..acc]
-        value.ProxyObject(target:, handler:, ..) ->
-          push_option_ref(target, push_option_ref(handler, acc))
+        value.ProxyObject(slots:, ..) ->
+          case slots {
+            Some(value.ProxySlots(target:, handler:)) -> [target, handler, ..acc]
+            None -> acc
+          }
         value.PromiseObject(promise_data:) -> [promise_data, ..acc]
         value.GeneratorObject(generator_data:) -> [generator_data, ..acc]
         value.AsyncGeneratorObject(generator_data:) -> [generator_data, ..acc]
@@ -385,11 +387,13 @@ fn do_refs_in_slot(
         value.PromisePending -> acc
       }
       let push_reactions = fn(reactions, a) {
-        list.fold(reactions, a, fn(a, r: value.PromiseReaction) {
+        list.fold(reactions, a, fn(a, r) {
+          // Full destructure so a new field is a compile error here.
+          let value.PromiseReaction(child_resolve:, child_reject:, handler:) = r
           a
-          |> push_value_ref(r.child_resolve, _)
-          |> push_value_ref(r.child_reject, _)
-          |> push_reaction_handler_ref(r.handler, _)
+          |> push_value_ref(child_resolve, _)
+          |> push_value_ref(child_reject, _)
+          |> push_reaction_handler_ref(handler, _)
         })
       }
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
@@ -401,22 +405,21 @@ fn do_refs_in_slot(
     value.GeneratorSlot(gen_state:, env_ref:, ..) ->
       case gen_state {
         value.GenSuspended(frame:, ..) | value.GenExecuting(frame:) ->
-          push_suspended_frame_refs(env_ref, frame, acc)
+          push_suspended_frame_refs(frame, [env_ref, ..acc])
         value.GenCompleted -> [env_ref, ..acc]
       }
     value.AsyncFunctionSlot(
       promise_data_ref:,
       resolve:,
       reject:,
-      saved_locals:,
-      saved_stack:,
-      ..,
+      func_template: _,
+      frame:,
     ) -> {
       let acc =
         [promise_data_ref, ..acc]
         |> push_value_ref(resolve, _)
         |> push_value_ref(reject, _)
-      push_saved_locals_stack_refs(saved_locals, saved_stack, acc)
+      push_suspended_frame_refs(frame, acc)
     }
     value.AsyncGeneratorSlot(
       queue: #(queue_front, queue_back),
@@ -425,15 +428,18 @@ fn do_refs_in_slot(
       ..,
     ) -> {
       // Both halves of the two-list FIFO hold live requests — walk both.
-      let push_request = fn(a, r: value.AsyncGenRequest) {
+      let push_request = fn(a, r) {
+        // Full destructure so a new field is a compile error here.
+        let value.AsyncGenRequest(completion: _, value: v, resolve:, reject:) =
+          r
         a
-        |> push_value_ref(r.value, _)
-        |> push_value_ref(r.resolve, _)
-        |> push_value_ref(r.reject, _)
+        |> push_value_ref(v, _)
+        |> push_value_ref(resolve, _)
+        |> push_value_ref(reject, _)
       }
       let acc = list.fold(queue_front, acc, push_request)
       let acc = list.fold(queue_back, acc, push_request)
-      push_suspended_frame_refs(env_ref, frame, acc)
+      push_suspended_frame_refs(frame, [env_ref, ..acc])
     }
     value.RealmSlot(global_object:, lexical_globals:, symbol_registry: _) ->
       dict.fold(lexical_globals, [global_object, ..acc], fn(a, _k, v) {
