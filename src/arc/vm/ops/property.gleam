@@ -114,10 +114,17 @@ pub fn put_elem_value(
 // ============================================================================
 
 /// LengthOfArrayLike ( obj ) — `ℝ(? ToLength(? Get(obj, "length")))`. THE
-/// canonical implementation: every array-like iteration in the runtime
-/// (spread, for-of over an array-like, Array Iterator steps, JSON.stringify,
+/// generic implementation: every array-like iteration in the runtime (spread,
+/// for-of over an array-like, Array Iterator steps, JSON.stringify,
 /// Function.prototype.apply) derives its bound from here, so they cannot
 /// disagree about what a hostile `length` means.
+///
+/// `builtins/array.gleam`'s `object_length` is the slot fast-path variant used
+/// by every generic Array.prototype method (via `require_array`): it answers
+/// from [[ArrayLength]] / [[StringData]] — non-configurable, non-writable
+/// lengths no user code can observe a shortcut on — or from an own data
+/// `length`, and delegates every other object straight back to this function.
+/// The two therefore cannot drift on what a hostile `length` means.
 ///
 /// Both halves are observable and can throw: the Get runs a getter or a proxy
 /// trap, and ToNumber can run a user `valueOf` — hence the threaded state.

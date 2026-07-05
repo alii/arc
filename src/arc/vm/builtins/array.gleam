@@ -10,6 +10,7 @@ import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/ops/operators
+import arc/vm/ops/property
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ArrayNativeFn, type JsElements, type JsValue, type Property, type Ref,
@@ -637,7 +638,10 @@ fn to_object_ref(
 /// own: `? ToLength(? Get(O, "length"))`, clamped to [0, 2^53 - 1]. The Get may
 /// invoke a getter or a proxy trap and the ToLength a `valueOf` — both can
 /// throw, and their side effects are kept (state is threaded through).
-fn length_of_array_like(
+///
+/// CPS shape over `object_length`; the abstract operation itself lives in
+/// `property.length_of_array_like`.
+fn require_length(
   ref: Ref,
   state: State(host),
   cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
@@ -665,7 +669,7 @@ fn require_array(
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use obj, ref, state <- to_object_ref(this, state)
-  use length, state <- length_of_array_like(ref, state)
+  use length, state <- require_length(ref, state)
   cont(obj, ref, length, state)
 }
 
@@ -1143,10 +1147,11 @@ fn hole_is_inherited(state: State(host), proto: Option(Ref), idx: Int) -> Bool {
   }
 }
 
-/// LengthOfArrayLike (ES2024 §7.3.18) — ℝ(? ToLength(? Get(obj, "length"))) —
-/// in Result shape. THIS is the implementation the CPS `length_of_array_like`
-/// wraps; concat's spread path calls it directly because its spread target is
-/// an argument rather than the receiver.
+/// LengthOfArrayLike (ES2024 §7.3.18) — the slot fast-path variant of
+/// `property.length_of_array_like`, which it delegates to for every object it
+/// has no shortcut for. `require_length` wraps this in CPS; concat's spread
+/// path calls it directly because its spread target is an argument rather than
+/// the receiver.
 ///
 /// The Array / String slot kinds answer from their [[ArrayLength]] /
 /// [[StringData]] (a non-configurable, non-writable "length" — no user code can
@@ -1178,18 +1183,11 @@ fn length_of_properties(
   // but ToLength may still call valueOf on an object-valued length.
   case dict.get(properties, Named("length")) {
     Ok(DataProperty(value: len_val, ..)) -> to_length_value(state, len_val)
-    // Accessor or missing: full [[Get]] (getters + prototype chain). Getter
-    // exceptions propagate; getter side effects are kept via the threaded
-    // state (§7.3.18 LengthOfArrayLike step order matters for test262).
-    _ -> {
-      use #(len_val, state) <- result.try(object.get_value(
-        state,
-        ref,
-        Named("length"),
-        JsObject(ref),
-      ))
-      to_length_value(state, len_val)
-    }
+    // Accessor or missing: the generic LengthOfArrayLike — full [[Get]]
+    // (getters + prototype chain) then ToLength. Getter exceptions propagate;
+    // getter side effects are kept via the threaded state (§7.3.18 step order
+    // matters for test262).
+    _ -> property.length_of_array_like(state, ref, JsObject(ref))
   }
 }
 
@@ -1205,16 +1203,10 @@ fn to_length_value(
   val: JsValue,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   use #(num, state) <- result.map(coerce.js_to_number(state, val))
-  // Step 1: ToIntegerOrInfinity saturates ±∞ to ±(2^53 - 1), so the
-  // [0, 2^53 - 1] clamp is exactly steps 2-3 (NaN/-∞/negatives → 0,
-  // +∞ → 2^53 - 1).
-  let len =
-    int.clamp(
-      coerce.jsnum_to_integer_or_infinity(num),
-      0,
-      limits.max_safe_integer,
-    )
-  #(len, state)
+  // Steps 1-3 are `coerce.jsnum_to_length`: ToIntegerOrInfinity saturates ±∞ to
+  // ±(2^53 - 1), so its [0, 2^53 - 1] clamp is exactly steps 2-3 (NaN/-∞/
+  // negatives → 0, +∞ → 2^53 - 1).
+  #(coerce.jsnum_to_length(num), state)
 }
 
 /// Allocate a RangeError in the op-result shape `Result(a, #(JsValue, State))`
