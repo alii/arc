@@ -10,10 +10,12 @@
 /// or `NaN`.
 ///
 /// Date math (year/month/day/weekday/hour/minute/second/ms breakdown) is done
-/// in pure Gleam Int arithmetic ported from the QuickJS algorithms; only
-/// `now_ms` and the two local-time-zone offset lookups go through FFI.
+/// in pure Gleam Int arithmetic ported from the QuickJS algorithms; only the
+/// wall clock and the local-zone offset lookups go through FFI, and those live
+/// in `arc/internal/host_time`.
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{days_in_year, floor_div, floor_mod as math_mod}
+import arc/internal/host_time.{now_ms, offset_at_local_ms, offset_at_utc_ms}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
@@ -51,44 +53,12 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-// ============================================================================
-// FFI
-//
-// This is the ONLY place these Erlang contracts are declared. Other modules
-// (intl, temporal) must call `date.now_ms()` / `date.offset_at_utc_ms` rather
-// than redeclaring the @external — a private redeclaration can silently lie
-// about the return type (Gleam trusts the annotation) and the BEAM term would
-// then be misused.
-//
-// Both offset lookups read the same IANA/TZif data Temporal reads and report
-// LOCAL MINUS UTC minutes. They differ in what their argument *is*: an instant
-// (`_utc_ms`) or a wall clock (`_local_ms`). Passing one where the other
-// belongs is what the old single `tz_offset_minutes(epoch_ms)` allowed.
-// ============================================================================
-
-/// Milliseconds since the Unix epoch (`erlang:system_time(millisecond)`).
-/// Returns an Erlang integer — convert with `int.to_float` where a Float is
-/// needed.
-@external(erlang, "arc_date_ffi", "now_ms")
-pub fn now_ms() -> Int
-
-/// Local time zone offset in minutes (local − UTC) at the UTC instant
-/// `epoch_ms`.
-@external(erlang, "arc_tz_ffi", "offset_at_utc_ms")
-pub fn offset_at_utc_ms(epoch_ms: Int) -> Int
-
-/// Local time zone offset in minutes (local − UTC) for the *local wall clock*
-/// `local_ms` — ES2024 §21.4.1.25 LocalTZA with isUTC = false, so a wall clock
-/// a transition skips or repeats is read with the offset in effect before that
-/// transition. Not interchangeable with `offset_at_utc_ms`.
-@external(erlang, "arc_tz_ffi", "offset_at_local_ms")
-pub fn offset_at_local_ms(local_ms: Int) -> Int
-
 /// The `Date.prototype.getTimezoneOffset` sign convention: minutes UTC is
 /// *ahead of* local (US Pacific Standard is +480). This negation is the only
 /// place the runtime flips the sign — everything else, arc_tz_ffi and Temporal
 /// included, speaks local − UTC. Deliberately private: a caller that wants an
-/// offset wants `offset_at_utc_ms`, not this getter's inverted convention.
+/// offset wants `host_time.offset_at_utc_ms`, not this getter's inverted
+/// convention.
 fn js_get_timezone_offset_minutes(epoch_ms: Int) -> Int {
   0 - offset_at_utc_ms(epoch_ms)
 }

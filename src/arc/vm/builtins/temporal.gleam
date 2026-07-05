@@ -22,8 +22,8 @@ import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, floor_div,
   floor_mod as math_mod, is_leap_year,
 }
+import arc/internal/host_time
 import arc/vm/builtins/common
-import arc/vm/builtins/date
 import arc/vm/builtins/helpers
 import arc/vm/builtins/temporal_tz
 import arc/vm/heap
@@ -6250,7 +6250,7 @@ fn zoned_field(
 // ============================================================================
 
 fn now_epoch_ns() -> Int {
-  date.now_ms() * ns_per_ms
+  host_time.now_ms() * ns_per_ms
 }
 
 fn now_dispatch(

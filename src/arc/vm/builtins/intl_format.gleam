@@ -5,6 +5,7 @@
 //// ECMA-402 (PartitionNumberPattern, PartitionDateTimePattern, …). The
 //// builtins layer turns parts into strings or {type, value} part objects.
 
+import arc/internal/digits
 import arc/internal/gregorian.{civil_from_days, floor_div}
 import arc/vm/ops/numeric
 import arc/vm/value.{
@@ -1973,11 +1974,7 @@ fn is_word_char(g: String) -> Bool {
   case string.to_utf_codepoints(g) {
     [cp, ..] -> {
       let c = string.utf_codepoint_to_int(cp)
-      { c >= 0x30 && c <= 0x39 }
-      || { c >= 0x41 && c <= 0x5a }
-      || { c >= 0x61 && c <= 0x7a }
-      || c == 0x27
-      || c > 0x7f
+      digits.is_ascii_alnum_code(c) || c == 0x27 || c > 0x7f
     }
     [] -> False
   }
@@ -2162,6 +2159,172 @@ pub fn currency_display_name(code: String) -> Option(String) {
     "CHF" -> Some("Swiss Franc")
     "CAD" -> Some("Canadian Dollar")
     "AUD" -> Some("Australian Dollar")
+    _ -> None
+  }
+}
+
+// ============================================================================
+// Numbering systems (§9.2.x `nu`) — digit transliteration
+// ============================================================================
+
+/// Numbering systems we can render digits for (sorted).
+pub fn numbering_systems() -> List(String) {
+  [
+    "adlm", "ahom", "arab", "arabext", "bali", "beng", "bhks", "brah", "cakm",
+    "cham", "deva", "diak", "fullwide", "gara", "gong", "gonm", "gujr", "gukh",
+    "guru", "hanidec", "hmng", "hmnp", "java", "kali", "kawi", "khmr", "knda",
+    "krai", "lana", "lanatham", "laoo", "latn", "lepc", "limb", "mathbold",
+    "mathdbl", "mathmono", "mathsanb", "mathsans", "mlym", "modi", "mong",
+    "mroo", "mtei", "mymr", "mymrepka", "mymrpao", "mymrshan", "mymrtlng",
+    "nagm", "newa", "nkoo", "olck", "onao", "orya", "osma", "outlined", "rohg",
+    "saur", "segment", "shrd", "sind", "sinh", "sora", "sund", "sunu", "takr",
+    "talu", "tamldec", "telu", "thai", "tibt", "tirh", "tnsa", "tols", "vaii",
+    "wara", "wcho",
+  ]
+}
+
+pub fn is_numbering_system(s: String) -> Bool {
+  list.contains(numbering_systems(), s)
+}
+
+/// Transliterate latn digits to the numbering system, in the parts selected by
+/// `translits` (`is_number_digit` for numbers, `is_date_numeric` for
+/// date-times).
+pub fn apply_numbering_system(
+  parts: List(Part),
+  nu: String,
+  translits: fn(PartType) -> Bool,
+) -> List(Part) {
+  case nu {
+    "latn" -> parts
+    _ ->
+      list.map(parts, fn(part: Part) {
+        case translits(part.0) {
+          True -> #(part.0, translit_digits(part.1, nu))
+          False -> part
+        }
+      })
+  }
+}
+
+fn translit_digits(s: String, nu: String) -> String {
+  case nu {
+    "hanidec" ->
+      string.to_graphemes(s)
+      |> list.map(fn(c) {
+        case c {
+          "0" -> "〇"
+          "1" -> "一"
+          "2" -> "二"
+          "3" -> "三"
+          "4" -> "四"
+          "5" -> "五"
+          "6" -> "六"
+          "7" -> "七"
+          "8" -> "八"
+          "9" -> "九"
+          _ -> c
+        }
+      })
+      |> string.join("")
+    _ ->
+      case numbering_base(nu) {
+        None -> s
+        Some(base) ->
+          string.to_graphemes(s)
+          |> list.map(fn(c) {
+            case int.parse(c) {
+              Ok(d) ->
+                case string.utf_codepoint(base + d) {
+                  Ok(cp) -> string.from_utf_codepoints([cp])
+                  Error(Nil) -> c
+                }
+              Error(Nil) -> c
+            }
+          })
+          |> string.join("")
+      }
+  }
+}
+
+fn numbering_base(nu: String) -> Option(Int) {
+  case nu {
+    "adlm" -> Some(0x1e950)
+    "ahom" -> Some(0x11730)
+    "bhks" -> Some(0x11c50)
+    "brah" -> Some(0x11066)
+    "cakm" -> Some(0x11136)
+    "cham" -> Some(0xaa50)
+    "diak" -> Some(0x11950)
+    "gara" -> Some(0x10d40)
+    "gukh" -> Some(0x16130)
+    "krai" -> Some(0x16d70)
+    "onao" -> Some(0x1e5f1)
+    "tols" -> Some(0x11de0)
+    "sunu" -> Some(0x11bf0)
+    "mymrepka" -> Some(0x116da)
+    "mymrpao" -> Some(0x116d0)
+    "outlined" -> Some(0x1ccf0)
+    "gong" -> Some(0x11da0)
+    "gonm" -> Some(0x11d50)
+    "hmng" -> Some(0x16b50)
+    "hmnp" -> Some(0x1e140)
+    "java" -> Some(0xa9d0)
+    "kali" -> Some(0xa900)
+    "kawi" -> Some(0x11f50)
+    "lana" -> Some(0x1a80)
+    "lanatham" -> Some(0x1a90)
+    "lepc" -> Some(0x1c40)
+    "mathbold" -> Some(0x1d7ce)
+    "mathdbl" -> Some(0x1d7d8)
+    "mathmono" -> Some(0x1d7f6)
+    "mathsanb" -> Some(0x1d7ec)
+    "mathsans" -> Some(0x1d7e2)
+    "modi" -> Some(0x11650)
+    "mroo" -> Some(0x16a60)
+    "mtei" -> Some(0xabf0)
+    "mymrshan" -> Some(0x1090)
+    "mymrtlng" -> Some(0xa9f0)
+    "nagm" -> Some(0x1e4f0)
+    "newa" -> Some(0x11450)
+    "nkoo" -> Some(0x07c0)
+    "olck" -> Some(0x1c50)
+    "osma" -> Some(0x104a0)
+    "rohg" -> Some(0x10d30)
+    "saur" -> Some(0xa8d0)
+    "segment" -> Some(0x1fbf0)
+    "shrd" -> Some(0x111d0)
+    "sind" -> Some(0x112f0)
+    "sinh" -> Some(0x0de6)
+    "sora" -> Some(0x110f0)
+    "sund" -> Some(0x1bb0)
+    "takr" -> Some(0x116c0)
+    "talu" -> Some(0x19d0)
+    "tirh" -> Some(0x114d0)
+    "tnsa" -> Some(0x16ac0)
+    "vaii" -> Some(0xa620)
+    "wara" -> Some(0x118e0)
+    "wcho" -> Some(0x1e2f0)
+    "arab" -> Some(0x0660)
+    "arabext" -> Some(0x06f0)
+    "bali" -> Some(0x1b50)
+    "beng" -> Some(0x09e6)
+    "deva" -> Some(0x0966)
+    "fullwide" -> Some(0xff10)
+    "gujr" -> Some(0x0ae6)
+    "guru" -> Some(0x0a66)
+    "khmr" -> Some(0x17e0)
+    "knda" -> Some(0x0ce6)
+    "laoo" -> Some(0x0ed0)
+    "limb" -> Some(0x1946)
+    "mlym" -> Some(0x0d66)
+    "mong" -> Some(0x1810)
+    "mymr" -> Some(0x1040)
+    "orya" -> Some(0x0b66)
+    "tamldec" -> Some(0x0be6)
+    "telu" -> Some(0x0c66)
+    "thai" -> Some(0x0e50)
+    "tibt" -> Some(0x0f20)
     _ -> None
   }
 }
