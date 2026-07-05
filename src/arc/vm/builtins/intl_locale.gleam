@@ -9,7 +9,6 @@
 //// (language/region/variant aliases, u-extension value aliases).
 
 import arc/internal/digits
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -391,11 +390,12 @@ fn parse_t_fields(
 
 /// CLDR languageAlias subset. Keys are already written in the exact lookup form
 /// `apply_language_alias` builds its candidates in — lowercase, subtags in
-/// language-script-region-variant order, variants sorted — so a lookup is a
-/// plain dict hit and only the replacement of the row that actually matched is
-/// ever parsed. This runs on every canonicalization (every `Intl.*`
+/// language-script-region-variant order, so a lookup is a single pattern match
+/// on the compiled table and only the replacement of the row that actually
+/// matched is ever parsed. This runs on every canonicalization (every `Intl.*`
 /// construction, every `localeCompare(x, locale)`), so nothing here may parse a
-/// tag it does not need.
+/// tag it does not need — nor build the table itself, which is why every alias
+/// table in this module is a `case`, not a dict assembled per lookup.
 ///
 /// Rows whose key cannot be produced by the lookup at all — legacy tags whose
 /// subtags are not valid script/region/variant subtags, e.g. `zh-min-nan`,
@@ -716,73 +716,86 @@ fn region_alias(region: String) -> Option(String) {
   }
 }
 
+/// The successor states of the Soviet Union, in CLDR order. A `const` so the
+/// list is a literal in the compiled module rather than rebuilt per lookup.
+const soviet_successors = [
+  "RU", "AM", "AZ", "BY", "EE", "GE", "KZ", "KG", "LV", "LT", "MD", "TJ", "TM",
+  "UA", "UZ",
+]
+
 /// CLDR territoryAlias subset — multi-replacement entries. The right
 /// replacement is picked via likely subtags (UTS 35 §3.2.1).
-fn region_multi_aliases() -> dict.Dict(String, List(String)) {
-  let su = [
-    "RU", "AM", "AZ", "BY", "EE", "GE", "KZ", "KG", "LV", "LT", "MD", "TJ", "TM",
-    "UA", "UZ",
-  ]
-  dict.from_list([
-    #("su", su),
-    #("810", su),
-    #("cs", ["RS", "ME"]),
-    #("200", ["CZ", "SK"]),
-    #("nt", ["SA", "IQ"]),
-    #("yu", ["RS", "ME"]),
-    #("890", ["RS", "ME", "SI", "HR", "MK", "BA"]),
-  ])
+fn region_multi_alias(region: String) -> Option(List(String)) {
+  case region {
+    "su" | "810" -> Some(soviet_successors)
+    "cs" -> Some(["RS", "ME"])
+    "200" -> Some(["CZ", "SK"])
+    "nt" -> Some(["SA", "IQ"])
+    "yu" -> Some(["RS", "ME"])
+    "890" -> Some(["RS", "ME", "SI", "HR", "MK", "BA"])
+    _ -> None
+  }
 }
 
 /// CLDR variantAlias subset.
-fn variant_aliases() -> dict.Dict(String, String) {
-  dict.from_list([#("heploc", "alalc97"), #("polytoni", "polyton")])
+fn variant_alias(variant: String) -> Option(String) {
+  case variant {
+    "heploc" -> Some("alalc97")
+    "polytoni" -> Some("polyton")
+    _ -> None
+  }
 }
 
 /// Likely-subtags subset: language or und-script → likely region.
 /// Used only to disambiguate multi-replacement territory aliases.
 fn likely_region(language: String, script: Option(String)) -> Option(String) {
-  let by_lang =
-    dict.from_list([
-      #("ru", "RU"),
-      #("en", "US"),
-      #("hy", "AM"),
-      #("az", "AZ"),
-      #("sr", "RS"),
-      #("be", "BY"),
-      #("et", "EE"),
-      #("ka", "GE"),
-      #("kk", "KZ"),
-      #("ky", "KG"),
-      #("lv", "LV"),
-      #("lt", "LT"),
-      #("ro", "RO"),
-      #("tg", "TJ"),
-      #("tk", "TM"),
-      #("uk", "UA"),
-      #("uz", "UZ"),
-      #("cs", "CZ"),
-      #("sk", "SK"),
-      #("sl", "SI"),
-      #("hr", "HR"),
-      #("mk", "MK"),
-      #("bs", "BA"),
-      #("und", "US"),
-    ])
-  let by_script =
-    dict.from_list([
-      #("armn", "AM"),
-      #("cyrl", "RU"),
-      #("geor", "GE"),
-      #("glag", "BG"),
-    ])
-  case script {
+  case option.map(script, string.lowercase) {
     Some(sc) ->
-      case dict.get(by_script, string.lowercase(sc)) {
-        Ok(r) -> Some(r)
-        Error(Nil) -> dict.get(by_lang, language) |> option.from_result
+      case likely_region_of_script(sc) {
+        Some(r) -> Some(r)
+        None -> likely_region_of_language(language)
       }
-    None -> dict.get(by_lang, language) |> option.from_result
+    None -> likely_region_of_language(language)
+  }
+}
+
+fn likely_region_of_language(language: String) -> Option(String) {
+  case language {
+    "ru" -> Some("RU")
+    "en" -> Some("US")
+    "hy" -> Some("AM")
+    "az" -> Some("AZ")
+    "sr" -> Some("RS")
+    "be" -> Some("BY")
+    "et" -> Some("EE")
+    "ka" -> Some("GE")
+    "kk" -> Some("KZ")
+    "ky" -> Some("KG")
+    "lv" -> Some("LV")
+    "lt" -> Some("LT")
+    "ro" -> Some("RO")
+    "tg" -> Some("TJ")
+    "tk" -> Some("TM")
+    "uk" -> Some("UA")
+    "uz" -> Some("UZ")
+    "cs" -> Some("CZ")
+    "sk" -> Some("SK")
+    "sl" -> Some("SI")
+    "hr" -> Some("HR")
+    "mk" -> Some("MK")
+    "bs" -> Some("BA")
+    "und" -> Some("US")
+    _ -> None
+  }
+}
+
+fn likely_region_of_script(script: String) -> Option(String) {
+  case script {
+    "armn" -> Some("AM")
+    "cyrl" -> Some("RU")
+    "geor" -> Some("GE")
+    "glag" -> Some("BG")
+    _ -> None
   }
 }
 
@@ -919,7 +932,6 @@ type AliasCandidate {
 }
 
 fn apply_language_alias(lid: LocaleId) -> LocaleId {
-  let aliases = language_aliases()
   let sorted_variants = list.sort(lid.variants, string.compare)
   let candidates = [
     AliasCandidate(
@@ -971,7 +983,7 @@ fn apply_language_alias(lid: LocaleId) -> LocaleId {
       consumes_variants: False,
     ),
   ]
-  find_language_alias(lid, aliases, candidates)
+  find_language_alias(lid, candidates)
 }
 
 fn key_join(
@@ -992,7 +1004,6 @@ fn key_join(
 
 fn find_language_alias(
   lid: LocaleId,
-  aliases: dict.Dict(String, String),
   candidates: List(AliasCandidate),
 ) -> LocaleId {
   case candidates {
@@ -1000,8 +1011,12 @@ fn find_language_alias(
     [candidate, ..rest] ->
       // Only the matched row's replacement is parsed; a row that fails to parse
       // is a data bug in the table and simply does not alias.
-      case dict.get(aliases, candidate.key) |> result.try(parse) {
-        Error(Nil) -> find_language_alias(lid, aliases, rest)
+      case
+        language_alias(candidate.key)
+        |> option.to_result(Nil)
+        |> result.try(parse)
+      {
+        Error(Nil) -> find_language_alias(lid, rest)
         Ok(rep) -> {
           // Replacement components fill in; original components are kept only
           // when the key did not consume them and the replacement is silent.
@@ -1028,12 +1043,12 @@ fn apply_region_alias(lid: LocaleId) -> LocaleId {
     None -> lid
     Some(region) -> {
       let region = string.lowercase(region)
-      case dict.get(region_aliases(), region) {
-        Ok(rep) -> LocaleId(..lid, region: Some(string.lowercase(rep)))
-        Error(Nil) ->
-          case dict.get(region_multi_aliases(), region) {
-            Error(Nil) -> lid
-            Ok([first, ..] as reps) -> {
+      case region_alias(region) {
+        Some(rep) -> LocaleId(..lid, region: Some(string.lowercase(rep)))
+        None ->
+          case region_multi_alias(region) {
+            None -> lid
+            Some([first, ..] as reps) -> {
               // Pick the likely territory for language(+script) if it is in
               // the replacement list; otherwise the first entry.
               let likely = likely_region(lid.language, lid.script)
@@ -1047,7 +1062,7 @@ fn apply_region_alias(lid: LocaleId) -> LocaleId {
               }
               LocaleId(..lid, region: Some(string.lowercase(chosen)))
             }
-            Ok([]) -> lid
+            Some([]) -> lid
           }
       }
     }
@@ -1055,9 +1070,8 @@ fn apply_region_alias(lid: LocaleId) -> LocaleId {
 }
 
 fn apply_variant_alias(lid: LocaleId) -> LocaleId {
-  let aliases = variant_aliases()
   let variants =
-    list.map(lid.variants, fn(v) { dict.get(aliases, v) |> result.unwrap(v) })
+    list.map(lid.variants, fn(v) { variant_alias(v) |> option.unwrap(v) })
   LocaleId(..lid, variants:)
 }
 

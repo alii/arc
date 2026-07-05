@@ -151,7 +151,7 @@ fn parse_decimal(text: String) -> Result(LiteralNumber, NumberParseError) {
     || string.contains(text, "E")
   {
     True ->
-      case parse_float(normalize_dot(text)) {
+      case parse_float(text) {
         Ok(f) -> Ok(FiniteNumber(f))
         // A literal never carries a sign (unary minus is a separate
         // operator), so an out-of-range float literal is always +Infinity.
@@ -207,39 +207,12 @@ fn bit_length(n: Int, acc: Int) -> Int {
   }
 }
 
-/// Erlang's binary_to_float requires digits on both sides of the '.', but a
-/// JS literal may omit either: ".5", "1.", "1.e3", "2.E5". Insert the
-/// missing "0". The exponent (if any) is split off first so a mantissa's
-/// trailing dot is still seen as trailing in "1.e3".
-fn normalize_dot(s: String) -> String {
-  let #(mantissa, exponent) = split_exponent(s)
-  let mantissa = case string.starts_with(mantissa, ".") {
-    True -> "0" <> mantissa
-    False -> mantissa
-  }
-  let mantissa = case string.ends_with(mantissa, ".") {
-    True -> mantissa <> "0"
-    False -> mantissa
-  }
-  mantissa <> exponent
-}
-
-/// Split a decimal literal into mantissa and exponent ("1.e3" -> #("1.",
-/// "e3")). The exponent keeps its leading e/E and is empty when absent.
-fn split_exponent(s: String) -> #(String, String) {
-  case string.split_once(s, "e") {
-    Ok(#(mantissa, exp)) -> #(mantissa, "e" <> exp)
-    Error(Nil) ->
-      case string.split_once(s, "E") {
-        Ok(#(mantissa, exp)) -> #(mantissa, "E" <> exp)
-        Error(Nil) -> #(s, "")
-      }
-  }
-}
-
-/// Erlang binary_to_float with a typed failure: OutOfRange when the text is
-/// valid float syntax whose magnitude overflows a double, Invalid otherwise.
-@external(erlang, "arc_parser_ffi", "parse_float")
+/// A JS decimal literal → Float, with a typed failure: OutOfRange when the text
+/// is valid float syntax whose magnitude overflows a double, Invalid otherwise.
+/// The literal is fed in verbatim: padding it into the shape Erlang's
+/// binary_to_float accepts (".5" → "0.5", "1.e3" → "1.0e3") happens inside the
+/// FFI, next to the syntax classifier that must see the very same text.
+@external(erlang, "arc_float_ffi", "parse_float")
 fn parse_float(s: String) -> Result(Float, FloatParseError)
 
 /// The exact integer value of a run of digits in `radix`.

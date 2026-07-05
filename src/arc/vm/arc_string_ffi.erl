@@ -14,7 +14,7 @@
 %%
 %% INVALID UTF-8 POLICY (the one policy, for every walker below): a JS string
 %% is always well-formed UTF-8 — every construction path maps lone surrogates
-%% to U+FFFD (arc_parser_ffi:encode_codepoint, char_codes_to_string,
+%% to U+FFFD (arc_escape_ffi:encode_codepoint, char_codes_to_string,
 %% from_code_point_loop) — so a bad byte reaching here means the boundary that
 %% produced the string is broken. Every walker therefore has NO per-byte
 %% fallback clause and crashes with function_clause on one, at the string it

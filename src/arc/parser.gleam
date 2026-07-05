@@ -102,14 +102,14 @@ import gleam/string
 /// Decode JS string literal escape sequences (\n, \t, \xNN, \uNNNN, etc.)
 /// per ES2024 §12.9.4. The lexer validates escape syntax; this transforms
 /// the raw content into the cooked string value.
-@external(erlang, "arc_parser_ffi", "decode_string_escapes")
+@external(erlang, "arc_escape_ffi", "decode_string_escapes")
 fn decode_string_escapes(raw: String) -> String
 
 /// Compute a template quasi's Template Value (TV, ES2024 §12.9.6) from its
 /// raw text. Error(Nil) when the quasi contains an escape sequence that is
 /// invalid in templates — a SyntaxError for untagged templates, an undefined
 /// cooked entry for tagged ones.
-@external(erlang, "arc_parser_ffi", "cook_template_string")
+@external(erlang, "arc_escape_ffi", "cook_template_string")
 fn cook_template_string(raw: String) -> Result(String, Nil)
 
 pub type ParseMode {
