@@ -944,6 +944,9 @@ pub type IrOp {
 /// to reach the corresponding `Op`. Wrapping the `Op` in `IrFinal` instead
 /// would ride through `resolve` untouched with a label id sitting where a PC
 /// belongs, so `emit_op`/`resolve` panic on it rather than miscompile.
+///
+/// Exhaustive on purpose — adding a new Op variant MUST force a decision here
+/// so IrFinal cannot smuggle a label-id-as-PC through resolve.
 pub fn carries_pc(op: Op) -> Bool {
   case op {
     Jump(..)
@@ -963,6 +966,138 @@ pub fn carries_pc(op: Op) -> Bool {
     | WithPutRefValue(..)
     | CmpLocalLocalJump(..)
     | CmpLocalConstJump(..) -> True
-    _ -> False
+    // -- Source mapping --
+    SetLine(..)
+    | // -- Literals + Stack --
+      PushConst(..)
+    | Pop
+    | Dup
+    | Swap
+    | Rot3
+    | Unrot4
+    | // -- Variable Access (resolved) --
+      GetLocal(..)
+    | PutLocal(..)
+    | PutLocalCheckInit(..)
+    | GetGlobal(..)
+    | PutGlobal(..)
+    | DeleteGlobalVar(..)
+    | GetEvalVar(..)
+    | PutEvalVar(..)
+    | DeclareEvalVar(..)
+    | TypeofEvalVar(..)
+    | // -- `with` statement (non-PC probes) / coercion / template --
+      ToObject
+    | ToStringVal
+    | GetTemplateObject(..)
+    | // -- Property Access --
+      GetField(..)
+    | GetField2(..)
+    | PutField(..)
+    | GetElem
+    | GetElem2
+    | PutElem
+    | DeleteField(..)
+    | DeleteElem
+    | GetPrivateField(..)
+    | GetPrivateField2(..)
+    | PutPrivateField(..)
+    | PrivateIn(..)
+    | // -- Spec-shaped PrivateName ops --
+      NewPrivateName(..)
+    | GetPrivateFieldDyn
+    | GetPrivateFieldDyn2
+    | PutPrivateFieldDyn
+    | PrivateInDyn
+    | DefinePrivateField
+    | DefinePrivateMethod
+    | DefinePrivateAccessor(..)
+    | // -- Object/Array Construction --
+      NewObject
+    | DefineField(..)
+    | DefineFieldComputed
+    | ToPropertyKey
+    | DefineMethod(..)
+    | DefineMethodComputed
+    | DefineAccessor(..)
+    | DefineAccessorComputed(..)
+    | MakeMethod
+    | SetProto
+    | ObjectSpread
+    | ObjectRestCopy(..)
+    | ArrayFrom(..)
+    | ArrayFromWithHoles(..)
+    | ArrayPush
+    | ArrayPushHole
+    | ArraySpread
+    | // -- Calls --
+      Call(..)
+    | CallEval(..)
+    | CallMethod(..)
+    | CallConstructor(..)
+    | CallApply
+    | CallMethodApply
+    | CallConstructorApply
+    | Return
+    | // -- Control Flow (non-PC) --
+      Ret
+    | // -- Exception Handling (non-PC) --
+      Throw
+    | ThrowConstAssign(..)
+    | ThrowError(..)
+    | PopTry
+    | // -- Closures --
+      MakeClosure(..)
+    | BoxLocal(..)
+    | GetBoxed(..)
+    | PutBoxed(..)
+    | PutBoxedCheckInit(..)
+    | // -- Operators --
+      BinOp(..)
+    | UnaryOp(..)
+    | TypeOf
+    | TypeofGlobal(..)
+    | // -- Fused superinstructions (non-PC) --
+      IncLocal(..)
+    | DecLocal(..)
+    | // -- Iteration --
+      ForInStart
+    | ForInNext
+    | GetIterator
+    | GetAsyncIterator
+    | IteratorRecord
+    | IteratorNext
+    | IteratorClose
+    | IteratorCloseThrow
+    | IteratorCheckObject
+    | IteratorRest
+    | // -- Class Inheritance / Super --
+      SetupDerivedClass
+    | GetPrototypeOf
+    | GetSuperValue
+    | GetSuperValue2
+    | PutSuperValue
+    | // -- Generator (non-PC) --
+      InitialYield
+    | Yield
+    | YieldStar
+    | // -- Async --
+      Await
+    | // -- Arguments object --
+      CreateArguments(..)
+    | CreateRestArray(..)
+    | // -- RegExp --
+      NewRegExp
+    | // -- Dynamic import --
+      DynamicImport
+    | DynamicImportSource
+    | DynamicImportDefer
+    | // -- Global Environment Record --
+      DeclareGlobalVar(..)
+    | DeclareGlobalLex(..)
+    | InitGlobalLex(..)
+    | // -- Explicit Resource Management --
+      GetDisposer(..)
+    | MakeSuppressed -> False
   }
 }
