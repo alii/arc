@@ -14,6 +14,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/vm/heap
+import arc/vm/internal/typed_array_ffi.{splice_clamped}
 import arc/vm/ops/buffer as ops_buffer
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
@@ -181,7 +182,7 @@ fn construct(
       use view_len, state <- coerce.to_index_cps(
         state,
         len_arg,
-        "Invalid DataView offset",
+        "Invalid DataView length",
       )
       // Step 9.b: check against the buffer length captured BEFORE
       // ToIndex(byteLength) ran user code (a poisoned valueOf may have grown
@@ -269,31 +270,11 @@ fn set_view_value(
   let little = value.is_truthy(arg_at(args, 2))
   let elem_size = element_size(element)
   use data, pos, state <- checked_view_bytes(state, view, get_index, elem_size)
-  let total = bit_array.byte_size(data)
   let chunk = to_endian(encoded, little, elem_size)
-  let written = case
-    bit_array.slice(data, 0, pos),
-    bit_array.slice(data, pos + elem_size, total - pos - elem_size)
-  {
-    Ok(pre), Ok(post) -> Some(bit_array.concat([pre, chunk, post]))
-    _, _ -> None
-  }
-  case written {
-    Some(new_data) -> {
-      let heap =
-        ops_buffer.store_region(
-          state.heap,
-          view.buffer,
-          new_data,
-          pos,
-          elem_size,
-        )
-      #(State(..state, heap:), Ok(JsUndefined))
-    }
-    None ->
-      // Unreachable: bounds were validated above against the live buffer.
-      state.range_error(state, "Offset is outside the bounds of the DataView")
-  }
+  let #(new_data, written) = splice_clamped(data, pos, chunk)
+  let heap =
+    ops_buffer.store_region(state.heap, view.buffer, new_data, pos, written)
+  #(State(..state, heap:), Ok(JsUndefined))
 }
 
 // ============================================================================

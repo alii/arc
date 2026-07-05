@@ -2711,8 +2711,13 @@ fn has_own(
       use key, state <- try_to_property_key(state, key_val)
       #(state, Ok(JsBool(option.is_some(string_exotic_own_property(s, key)))))
     }
-    // Number/boolean/symbol have no own string-keyed properties.
-    _ -> #(state, Ok(JsBool(False)))
+    // Number/Boolean/Symbol/BigInt: their wrappers have no own properties,
+    // but Step 2 (ToPropertyKey) is observable — a key with a throwing
+    // toString/@@toPrimitive must throw before we return false.
+    _ -> {
+      use _key, state <- try_to_property_key(state, key_val)
+      #(state, Ok(JsBool(False)))
+    }
   }
 }
 
