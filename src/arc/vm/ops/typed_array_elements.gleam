@@ -275,7 +275,18 @@ fn encode_typed_number(
     // The ONE kind whose store differs from its codec: Uint8Clamped reads as
     // U8 but writes through §7.1.12 ToUint8Clamp instead of the ToInt wrap.
     value.Uint8ClampedKind -> ta_set_int(data, off, U8, ta_clamp_uint8(num))
-    _ ->
+    // Every other kind stores through its own read codec. Spelled out rather
+    // than caught by `_` so a future kind whose store diverges from its codec
+    // (another clamped/saturating variant) is a compile error here, not a
+    // silently wrong store.
+    value.Int8Kind
+    | value.Uint8Kind
+    | value.Int16Kind
+    | value.Uint16Kind
+    | value.Int32Kind
+    | value.Uint32Kind
+    | value.Float32Kind
+    | value.Float64Kind ->
       case typed_array_ffi.elem_of_kind(value.NumKind(elem_kind)) {
         typed_array_ffi.Int(e) ->
           ta_set_int(data, off, e, jsnum_to_store_int(num))
