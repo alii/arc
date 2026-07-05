@@ -15,7 +15,6 @@ import arc/vm/state.{type Heap, type State, type StepExit, State, Threw}
 import arc/vm/value.{
   type IteratorRecord, type JsValue, type ObjectKey, type Ref, ArrayObject,
   Finite, JsBool, JsObject, JsString, JsUndefined, ObjectSlot, OrdinaryObject,
-  StringPropKey, SymbolPropKey,
 }
 import gleam/bool
 import gleam/dict
@@ -589,6 +588,26 @@ pub fn call_native_promise_then(
   }
 }
 
+/// §7.3.20 Invoke(this, "then", args) — Get(this, "then") then Call it — then
+/// push the result and advance. §27.2.5.1 catch step 1 and §27.2.5.3 finally
+/// step 7 route through the receiver's own (possibly overridden) `then`, so a
+/// subclass that overrides `then` sees `.catch`/`.finally` traffic too; they
+/// never jump straight into the intrinsic PerformPromiseThen.
+pub fn invoke_then_push(
+  state: State(host),
+  this: JsValue,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State(host), StepExit(host)) {
+  use #(then_fn, state) <- result.try(
+    state.rethrow(object.get_value_of(state, this, Named("then"))),
+  )
+  use #(then_result, state) <- result.try(
+    state.rethrow(state.call(state, then_fn, this, args)),
+  )
+  Ok(State(..state, stack: [then_result, ..rest_stack], pc: state.pc + 1))
+}
+
 /// §27.2.5.3 Promise.prototype.finally(onFinally) — wraps the handler to
 /// preserve the resolution value. Creates wrapper functions that call
 /// onFinally(), then pass through the original value/reason via
@@ -622,17 +641,13 @@ pub fn call_native_promise_finally(
     )),
   )
   let constructor = JsObject(ctor_ref)
-  // If onFinally is not callable, pass-through (like .then(onFinally, onFinally))
-  case helpers.is_callable(state.heap, on_finally) {
-    False ->
-      call_native_promise_then(
-        state,
-        this,
-        [on_finally, on_finally],
-        rest_stack,
-      )
+  // Steps 5-6: pick thenFinally/catchFinally — a non-callable onFinally passes
+  // through as-is; a callable one is wrapped to preserve the settled value.
+  let #(state, then_finally, catch_finally) = case
+    helpers.is_callable(state.heap, on_finally)
+  {
+    False -> #(state, on_finally, on_finally)
     True -> {
-      // Create fulfill wrapper: calls onFinally(), then returns original value
       let #(h, fulfill_ref) =
         common.alloc_wrapper(
           state.heap,
@@ -642,7 +657,6 @@ pub fn call_native_promise_finally(
           ),
           state.builtins.function.prototype,
         )
-      // Create reject wrapper: calls onFinally(), then re-throws original reason
       let #(h, reject_ref) =
         common.alloc_wrapper(
           h,
@@ -652,14 +666,11 @@ pub fn call_native_promise_finally(
           ),
           state.builtins.function.prototype,
         )
-      call_native_promise_then(
-        State(..state, heap: h),
-        this,
-        [JsObject(fulfill_ref), JsObject(reject_ref)],
-        rest_stack,
-      )
+      #(State(..state, heap: h), JsObject(fulfill_ref), JsObject(reject_ref))
     }
   }
+  // Step 7: Return ? Invoke(promise, "then", «thenFinally, catchFinally»).
+  invoke_then_push(state, this, [then_finally, catch_finally], rest_stack)
 }
 
 /// §27.2.5.3.1 Then Finally Function — called when the promise fulfills.
@@ -750,20 +761,16 @@ fn finally_chain(
       value.NativeFunction(value.Call(native_call), constructible: False),
       state.builtins.function.prototype,
     )
-  let state = State(..state, heap: h2)
   // §27.2.5.3.1/§27.2.5.3.2 step 4: Return ? Invoke(promise, "then", «handler»).
-  // A generic Invoke — Get "then", then Call it — never a direct jump into
-  // Promise.prototype.then: with a species constructor, `cap.promise` is
-  // whatever `new C(executor)` returned and need not be a promise at all.
-  use #(then_fn, state) <- result.try(
-    state.rethrow(object.get_value_of(state, cap.promise, Named("then"))),
+  // A generic Invoke — never a direct jump into Promise.prototype.then: with a
+  // species constructor, `cap.promise` is whatever `new C(executor)` returned
+  // and need not be a promise at all.
+  invoke_then_push(
+    State(..state, heap: h2),
+    cap.promise,
+    [JsObject(handler_ref)],
+    rest_stack,
   )
-  use #(then_result, state) <- result.try(
-    state.rethrow(state.call(state, then_fn, cap.promise, [
-      JsObject(handler_ref),
-    ])),
-  )
-  Ok(State(..state, stack: [then_result, ..rest_stack], pc: state.pc + 1))
 }
 
 /// Promise.resolve(value) — if value is already a promise with same constructor,
@@ -1256,10 +1263,11 @@ fn perform_keyed_loop(
         False -> perform_keyed_loop(state, loop, rest, index)
         True -> {
           // Step 6.b.i: Let propertyValue be ? Get(promises, key).
-          use #(prop_value, state) <- result.try(get_keyed_value(
+          use #(prop_value, state) <- result.try(object.get_prop_value(
             state,
-            loop,
+            loop.promises_ref,
             key,
+            loop.promises,
           ))
           // Steps 6.b.ii-iii: append key to keys, undefined to values.
           let h =
@@ -1336,21 +1344,6 @@ fn perform_keyed_loop(
         }
       }
     }
-  }
-}
-
-/// Step 6.b.i Get(promises, key) for a property key produced by
-/// [[OwnPropertyKeys]].
-fn get_keyed_value(
-  state: State(host),
-  loop: KeyedLoop,
-  key: ObjectKey,
-) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  case key {
-    StringPropKey(pkey:, ..) ->
-      object.get_value(state, loop.promises_ref, pkey, loop.promises)
-    SymbolPropKey(sym) ->
-      object.get_symbol_value(state, loop.promises_ref, sym, loop.promises)
   }
 }
 

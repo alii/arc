@@ -785,12 +785,13 @@ pub fn call_native(
     // Promise.prototype.then(onFulfilled, onRejected)
     value.Call(value.PromiseThen) ->
       promises.call_native_promise_then(state, this, args, rest_stack)
-    // Promise.prototype.catch(onRejected) -- sugar for .then(undefined, onRejected)
+    // Promise.prototype.catch(onRejected) — §27.2.5.1:
+    // Return ? Invoke(this, "then", «undefined, onRejected»).
     value.Call(value.PromiseCatch) ->
-      promises.call_native_promise_then(
+      promises.invoke_then_push(
         state,
         this,
-        [JsUndefined, ..args],
+        [JsUndefined, helpers.first_arg_or_undefined(args)],
         rest_stack,
       )
     // Promise.prototype.finally(onFinally)
@@ -2358,7 +2359,7 @@ pub fn dispatch_native(
         run_to_completion,
         new_state_fn,
       )
-    value.VmNative(value.IteratorSymbolIterator) -> #(state, Ok(this))
+    value.VmNative(value.ReturnThis) -> #(state, Ok(this))
     // §10.2.4.1 %ThrowTypeError% — restricted "caller"/"arguments" accessor.
     value.VmNative(value.ThrowTypeErrorFn) ->
       restricted_function_property(this, state)
