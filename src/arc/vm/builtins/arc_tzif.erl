@@ -7,7 +7,7 @@
 -module(arc_tzif).
 
 -export([parse/1, offset_at/2, first_transition_after/2,
-         last_transition_before/2, footer/1, last_transition/1]).
+         last_transition_before/2]).
 
 -export_type([tz/0, footer/0]).
 
@@ -20,12 +20,6 @@
 %% binary-search it), the footer, and the last transition's time (`none` when
 %% there are no transitions), precomputed rather than walked on every query.
 -type tz() :: {tz, integer(), tuple(), footer(), integer() | none}.
-
--spec footer(tz()) -> footer().
-footer({tz, _First, _Trans, Footer, _LastT}) -> Footer.
-
--spec last_transition(tz()) -> integer() | none.
-last_transition({tz, _First, _Trans, _Footer, LastT}) -> LastT.
 
 %% ----------------------------------------------------------------------
 %% File format
@@ -136,11 +130,15 @@ search_transitions(Acc, Trans, Sec, Lo, Hi) ->
         _ -> search_transitions(Acc, Trans, Sec, Lo, Mid - 1)
     end.
 
-%% Smallest recorded transition time strictly after Sec, `none` if there is
-%% none.
+%% Smallest transition time strictly after Sec, `none` if there is none. Past
+%% the last recorded transition the POSIX footer rule generates them, exactly as
+%% offset_at/2 defers to it.
 -spec first_transition_after(tz(), integer()) -> integer() | none.
-first_transition_after({tz, _First, Trans, _Footer, _LastT}, Sec) ->
-    search_after(none, Trans, Sec, 1, tuple_size(Trans)).
+first_transition_after({tz, _First, Trans, Footer, LastT}, Sec) ->
+    case search_after(none, Trans, Sec, 1, tuple_size(Trans)) of
+        none -> footer_next(Footer, LastT, Sec);
+        T -> T
+    end.
 
 search_after(Best, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Best;
 search_after(Best, Trans, Sec, Lo, Hi) ->
@@ -150,11 +148,31 @@ search_after(Best, Trans, Sec, Lo, Hi) ->
         _ -> search_after(Best, Trans, Sec, Mid + 1, Hi)
     end.
 
-%% Largest recorded transition time strictly before Sec, `none` if there is
-%% none.
+%% Look a couple of years either side of Sec for the earliest footer-generated
+%% transition after both Sec and the last recorded one.
+footer_next(none, _LastT, _Sec) -> none;
+footer_next(Footer, LastT, Sec) ->
+    FromY = case LastT of
+        none -> arc_posix_tz:year_of(Sec);
+        L -> max(arc_posix_tz:year_of(Sec), arc_posix_tz:year_of(L))
+    end,
+    Cands = [T || {T, _} <- arc_posix_tz:transitions(Footer, FromY - 1, FromY + 2),
+                  T > Sec,
+                  LastT =:= none orelse T > LastT],
+    case Cands of
+        [] -> none;
+        _ -> lists:min(Cands)
+    end.
+
+%% Largest transition time strictly before Sec, `none` if there is none. When
+%% Sec is past the last recorded transition the footer rule may have fired since
+%% then; otherwise the recorded table answers.
 -spec last_transition_before(tz(), integer()) -> integer() | none.
-last_transition_before({tz, _First, Trans, _Footer, _LastT}, Sec) ->
-    search_before(none, Trans, Sec, 1, tuple_size(Trans)).
+last_transition_before({tz, _First, Trans, Footer, LastT}, Sec) ->
+    case footer_previous(Footer, LastT, Sec) of
+        none -> search_before(none, Trans, Sec, 1, tuple_size(Trans));
+        T -> T
+    end.
 
 search_before(Best, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Best;
 search_before(Best, Trans, Sec, Lo, Hi) ->
@@ -162,4 +180,22 @@ search_before(Best, Trans, Sec, Lo, Hi) ->
     case element(Mid, Trans) of
         {T, _} when T < Sec -> search_before(T, Trans, Sec, Mid + 1, Hi);
         _ -> search_before(Best, Trans, Sec, Lo, Mid - 1)
+    end.
+
+%% Latest footer-generated transition strictly before Sec that postdates the
+%% recorded ones. The footer only takes over after the last recorded transition,
+%% so an instant at or before it has none from here.
+footer_previous(none, _LastT, _Sec) -> none;
+footer_previous(Footer, LastT, Sec) ->
+    case LastT =:= none orelse Sec > LastT of
+        false -> none;
+        true ->
+            Y = arc_posix_tz:year_of(Sec),
+            Cands = [T || {T, _} <- arc_posix_tz:transitions(Footer, Y - 2, Y + 1),
+                          T < Sec,
+                          LastT =:= none orelse T > LastT],
+            case Cands of
+                [] -> none;
+                _ -> lists:max(Cands)
+            end
     end.

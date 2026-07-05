@@ -72,28 +72,9 @@ next_transition(Id, Sec) ->
         {error, Reason} -> {load_failed, Reason};
         {ok, Zone} ->
             case arc_tzif:first_transition_after(Zone, Sec) of
-                none -> footer_next(arc_tzif:footer(Zone),
-                                    arc_tzif:last_transition(Zone), Sec);
+                none -> no_transition;
                 T -> {found, T}
             end
-    end.
-
-%% Past the last recorded transition the footer rule generates them; look a
-%% couple of years either side of Sec for the earliest one it fires after Sec.
-%% `none` means the TZif file carried no footer at all; any actual footer goes
-%% straight to arc_posix_tz:transitions/3, which owns the exhaustive match.
-footer_next(none, _LastT, _Sec) -> no_transition;
-footer_next(Footer, LastT, Sec) ->
-    FromY = case LastT of
-        none -> arc_posix_tz:year_of(Sec);
-        L -> max(arc_posix_tz:year_of(Sec), arc_posix_tz:year_of(L))
-    end,
-    Cands = [T || {T, _} <- arc_posix_tz:transitions(Footer, FromY - 1, FromY + 2),
-                  T > Sec,
-                  LastT =:= none orelse T > LastT],
-    case Cands of
-        [] -> no_transition;
-        _ -> {found, lists:min(Cands)}
     end.
 
 %% Largest transition time T with T < Sec where the UTC offset changes.
@@ -103,29 +84,10 @@ previous_transition(Id, Sec) ->
     case zone(Id) of
         {error, Reason} -> {load_failed, Reason};
         {ok, Zone} ->
-            case footer_previous(arc_tzif:footer(Zone),
-                                 arc_tzif:last_transition(Zone), Sec) of
-                [] ->
-                    case arc_tzif:last_transition_before(Zone, Sec) of
-                        none -> no_transition;
-                        T -> {found, T}
-                    end;
-                Cands -> {found, lists:max(Cands)}
+            case arc_tzif:last_transition_before(Zone, Sec) of
+                none -> no_transition;
+                T -> {found, T}
             end
-    end.
-
-%% Footer-generated transitions before Sec that postdate the recorded ones. The
-%% footer only takes over after the last recorded transition, so an instant at
-%% or before it has none from here.
-footer_previous(none, _LastT, _Sec) -> [];
-footer_previous(Footer, LastT, Sec) ->
-    case LastT =:= none orelse Sec > LastT of
-        false -> [];
-        true ->
-            Y = arc_posix_tz:year_of(Sec),
-            [T || {T, _} <- arc_posix_tz:transitions(Footer, Y - 2, Y + 1),
-                  T < Sec,
-                  LastT =:= none orelse T > LastT]
     end.
 
 %% Resolve a (properly-cased) zone id through tzdata.zi Link entries to its
