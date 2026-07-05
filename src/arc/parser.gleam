@@ -1790,22 +1790,14 @@ fn parse_object_binding_property(
     Identifier -> True
     _ -> is_contextual_keyword(prop_kind)
   }
-  use #(p2, key_expr, is_computed) <- result.try(parse_property_name(p))
-  use Nil <- result.try(reject_private_property_key(p, key_expr))
+  use #(p2, key) <- result.try(parse_property_name(p))
+  use Nil <- result.try(reject_private_property_key(p, key))
   case peek(p2) {
     Colon -> {
       // property: pattern
       use #(p4, val_pat) <- result.try(parse_binding_pattern(advance(p2)))
       use #(p5, final_pat) <- result.map(parse_pattern_default(p4, val_pat))
-      #(
-        p5,
-        ast.PatternProperty(
-          key: key_expr,
-          value: final_pat,
-          computed: is_computed,
-          shorthand: False,
-        ),
-      )
+      #(p5, ast.PatternProperty(key:, value: final_pat, shorthand: False))
     }
     next -> {
       // shorthand binding (with optional default) — validate the name as a binding identifier
@@ -1828,15 +1820,7 @@ fn parse_object_binding_property(
             }
             _ -> Ok(#(p3, ident))
           })
-          #(
-            p4,
-            ast.PatternProperty(
-              key: key_expr,
-              value: value,
-              computed: False,
-              shorthand: True,
-            ),
-          )
+          #(p4, ast.PatternProperty(key:, value: value, shorthand: True))
         }
       }
     }
@@ -1892,24 +1876,46 @@ fn string_token_value(p: P, strict: Bool) -> Result(String, ParseError) {
   Ok(decode_string_escapes(peek_value(p)))
 }
 
-/// Parse a property name and return (parser, key_expression, is_computed).
-fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
+/// The current `Number` token as a property key — a `KeyNumber` or a
+/// `KeyBigInt`, decided by `number.parse_numeric_literal` exactly as
+/// `numeric_literal` decides between NumberLiteral and BigIntLiteral.
+fn numeric_property_key(p: P) -> Result(ast.PropertyKey, ParseError) {
+  let span = span_of(p)
+  case number.parse_numeric_literal(peek_value(p)) {
+    Ok(number.NumberValue(n)) -> Ok(ast.KeyNumber(value: n, span:))
+    Ok(number.BigIntValue(i)) -> Ok(ast.KeyBigInt(value: i, span:))
+    Error(err) -> Error(MalformedNumericLiteral(pos_of(p), err))
+  }
+}
+
+/// An IdentifierName property key. Private names lex as Identifier tokens with
+/// a `#` prefix, so that prefix is what separates `KeyPrivate` from
+/// `KeyIdentifier` — this is the ONE place the distinction is drawn.
+fn identifier_property_key(name: String, span: ast.Span) -> ast.PropertyKey {
+  case name {
+    "#" <> _ -> ast.KeyPrivate(name:, span:)
+    _ -> ast.KeyIdentifier(name:, span:)
+  }
+}
+
+/// Parse a PropertyName / ClassElementName into the `ast.PropertyKey` shape it
+/// syntactically is — the parser is the only place that knows, so downstream
+/// consumers never re-derive "was this computed?" from the key expression.
+fn parse_property_name(p: P) -> Result(#(P, ast.PropertyKey), ParseError) {
   case peek(p) {
-    Identifier -> {
-      let name = peek_value(p)
-      Ok(#(advance(p), ast.Identifier(name: name, span: span_of(p)), False))
-    }
+    Identifier ->
+      Ok(#(advance(p), identifier_property_key(peek_value(p), span_of(p))))
     Number -> {
       use <- bool.guard(
         p.ctx.strict && peek_annex_b_legacy(p),
         Error(OctalLiteralStrictMode(pos_of(p))),
       )
-      use lit <- result.map(numeric_literal(p))
-      #(advance(p), lit, False)
+      use key <- result.map(numeric_property_key(p))
+      #(advance(p), key)
     }
     KString -> {
       use value <- result.map(string_literal_value(p))
-      #(advance(p), ast.StringExpression(value:, span: span_of(p)), False)
+      #(advance(p), ast.KeyString(value:, span: span_of(p)))
     }
     LeftBracket -> {
       // ComputedPropertyName : [ AssignmentExpression[+In] ] - brackets reset
@@ -1920,15 +1926,13 @@ fn parse_property_name(p: P) -> Result(#(P, ast.Expression, Bool), ParseError) {
         use p4 <- result.map(expect(p3, RightBracket))
         #(p4, expr)
       })
-      #(p4, expr, True)
+      #(p4, ast.KeyComputed(expr))
     }
     // Keywords that can be used as property names
     _ ->
       case is_identifier_or_keyword(peek(p)) {
-        True -> {
-          let name = peek_value(p)
-          Ok(#(advance(p), ast.Identifier(name: name, span: span_of(p)), False))
-        }
+        True ->
+          Ok(#(advance(p), identifier_property_key(peek_value(p), span_of(p))))
         False -> Error(error_at_current(p, ExpectedPropertyName(pos_of(p))))
       }
   }
@@ -2312,10 +2316,13 @@ fn pattern_has_eval_args_target(expr: ast.Expression) -> Bool {
     ast.ObjectExpression(properties:, ..) ->
       list.any(properties, fn(prop) {
         case prop {
-          ast.Property(value:, ..) ->
+          ast.InitProperty(value:, ..) ->
             pattern_element_has_eval_args_target(value)
           ast.SpreadProperty(argument:) ->
             destructuring_target_is_eval_args(argument)
+          // Methods/accessors are never valid destructuring targets — the
+          // parser has already flagged the literal as an invalid pattern.
+          ast.MethodProperty(..) | ast.AccessorProperty(..) -> False
         }
       })
     _ -> False
@@ -3817,11 +3824,7 @@ fn class_scope_finalize(
   let needs_instance_init =
     list.any(elements, fn(el) {
       case el {
-        ast.ClassMethod(
-          key: ast.Identifier(name: "#" <> _, ..),
-          is_static: False,
-          ..,
-        ) -> True
+        ast.ClassMethod(key: ast.KeyPrivate(..), is_static: False, ..) -> True
         _ -> ast_util.is_instance_field(el)
       }
     })
@@ -3902,15 +3905,14 @@ fn class_scope_finalize(
 /// key, nothing for a public literal key (`ref_field_key` port).
 fn class_ref_field_key(
   sb: scope.ScopeBuilder,
-  key: ast.Expression,
-  computed: Bool,
+  key: ast.PropertyKey,
   idx: Int,
 ) -> scope.ScopeBuilder {
-  case computed, key {
-    True, _ -> scope.sb_ref(sb, ast_util.computed_field_const(idx))
-    False, ast.Identifier(name: "#" <> _ as pname, ..) ->
-      scope.sb_ref(sb, pname)
-    False, _ -> sb
+  case key {
+    ast.KeyComputed(..) -> scope.sb_ref(sb, ast_util.computed_field_const(idx))
+    ast.KeyPrivate(name:, ..) -> scope.sb_ref(sb, name)
+    ast.KeyIdentifier(..) | ast.KeyString(..) | ast.KeyNumber(..) -> sb
+    ast.KeyBigInt(..) -> sb
   }
 }
 
@@ -3945,14 +3947,14 @@ fn class_seed_field_shell(
       list.fold(tagged, sb, fn(sb, pair) {
         case pair.0 {
           ast.ClassMethod(
-            key: ast.Identifier(name: "#" <> _ as pname, ..),
+            key: ast.KeyPrivate(name:, ..),
             kind:,
             is_static: False,
             ..,
           ) ->
             sb
-            |> scope.sb_ref(pname)
-            |> scope.sb_ref(ast_util.private_fn_const(kind, pname))
+            |> scope.sb_ref(name)
+            |> scope.sb_ref(ast_util.private_fn_const(kind, name))
           _ -> sb
         }
       })
@@ -3960,8 +3962,8 @@ fn class_seed_field_shell(
   // Each matching ClassFieldInit reads its stashed key.
   list.index_fold(tagged, sb, fn(sb, pair, idx) {
     case pair.0 {
-      ast.ClassField(key:, computed:, is_static: s, ..) if s == is_static ->
-        class_ref_field_key(sb, key, computed, idx)
+      ast.ClassField(key:, is_static: s, ..) if s == is_static ->
+        class_ref_field_key(sb, key, idx)
       _ -> sb
     }
   })
@@ -4097,23 +4099,18 @@ fn register_private_name(
 fn private_element_info(
   element: ast.ClassElement,
 ) -> Option(#(String, Bool, PrivateNameKind)) {
-  let info = case element {
-    ast.ClassMethod(key:, kind:, is_static:, computed: False, ..) -> {
+  case element {
+    ast.ClassMethod(key: ast.KeyPrivate(name:, ..), kind:, is_static:, ..) -> {
       let private_kind = case kind {
         ast.MethodGet -> PrivateGet
         ast.MethodSet -> PrivateSet
-        _ -> PrivateOther
+        ast.MethodMethod | ast.MethodConstructor -> PrivateOther
       }
-      Some(#(key, is_static, private_kind))
+      Some(#(name, is_static, private_kind))
     }
-    ast.ClassField(key:, is_static:, computed: False, ..) ->
-      Some(#(key, is_static, PrivateOther))
-    _ -> None
-  }
-  case info {
-    Some(#(ast.Identifier(name: "#" <> rest, ..), is_static, kind)) ->
-      Some(#("#" <> rest, is_static, kind))
-    _ -> None
+    ast.ClassField(key: ast.KeyPrivate(name:, ..), is_static:, ..) ->
+      Some(#(name, is_static, PrivateOther))
+    ast.ClassMethod(..) | ast.ClassField(..) | ast.StaticBlock(..) -> None
   }
 }
 
@@ -4263,18 +4260,22 @@ fn parse_class_element_body(
   // scopes from a computed `[expr]` key (declare_class step 4) can be
   // identified by diff afterwards.
   let key_before = scope.sb_children_raw(p5.sb, ctx.class_id)
-  use #(p6, key_expr, is_computed) <- result.try(parse_property_name(p5))
+  use #(p6, key) <- result.try(parse_property_name(p5))
   let key_scopes = class_new_children(p6.sb, ctx.class_id, key_before)
   // §15.7.1 ClassElementName : PrivateIdentifier — it is a Syntax Error if
   // StringValue is "#constructor". Applies to methods and fields alike.
+  let is_private_constructor = case key {
+    ast.KeyPrivate(name: "#constructor", ..) -> True
+    _ -> False
+  }
   use <- bool.guard(
-    !is_computed && class_key_name(key_expr) == Some("#constructor"),
+    is_private_constructor,
     Error(PrivateNameConstructor(pos_of(p6))),
   )
   // §15.7.1: PropName of a FieldDefinition may not be "constructor"
   // (static or not). Constructor *methods* are handled by the caller.
   let is_constructor_field_name =
-    !is_computed && class_key_name(key_expr) == Some("constructor")
+    ast.property_key_static_name(key) == Some("constructor")
   case peek(p6) {
     LeftParen -> {
       // Method — validate getter/setter params
@@ -4310,7 +4311,7 @@ fn parse_class_element_body(
         p7,
         is_constructor,
         ast.ClassMethod(
-          key: key_expr,
+          key:,
           value: ast.FunctionLiteral(
             name: None,
             params: params,
@@ -4320,7 +4321,6 @@ fn parse_class_element_body(
           ),
           kind: method_kind,
           is_static: is_static,
-          computed: is_computed,
         ),
         MethodScopes(key_scopes:, method_fn_id:),
       ))
@@ -4383,27 +4383,10 @@ fn parse_class_element_body(
       Ok(#(
         p9,
         False,
-        ast.ClassField(
-          key: key_expr,
-          value: value,
-          is_static: is_static,
-          computed: is_computed,
-        ),
+        ast.ClassField(key:, value: value, is_static: is_static),
         NonMethodScopes(key_scopes:),
       ))
     }
-  }
-}
-
-/// Extract the literal name of a non-computed class element key.
-/// Identifier keys (including private `#name` keys, which the lexer encodes
-/// as identifiers with a `#` prefix) and string literal keys have names;
-/// numbers and computed keys do not.
-fn class_key_name(key_expr: ast.Expression) -> Option(String) {
-  case key_expr {
-    ast.Identifier(name:, ..) -> Some(name)
-    ast.StringExpression(value:, ..) -> Some(value)
-    _ -> None
   }
 }
 
@@ -4553,22 +4536,11 @@ fn parse_with_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
   use p3 <- result.try(expect(p2, LeftParen))
   use #(p4, object) <- result.try(parse_expression(p3))
   use p5 <- result.try(expect(p4, RightParen))
-  // Push a With scope and declare its synthetic `<withN_M>` holder so
-  // child closures can capture the with-object. Depth = count of With
-  // scopes already on the chain to root (computed BEFORE the push so the
-  // first/outermost `with` gets 0). The holder is a LetBinding so it
-  // lands IN the With scope — sb_declare routes VarBinding to current_fn,
-  // which would leave the With scope's own bindings empty, so
-  // `scope.do_lookup` could never resolve the holder named by
-  // `Scope.with_object` from that scope's bindings.
-  let depth = scope.sb_with_depth(p5.sb)
-  let #(sb, with_id) = scope.sb_push(p5.sb, scope.With)
-  let synth = scope.with_object_name(depth, with_id)
-  let sb =
-    scope.sb_update_current(
-      scope.sb_declare(sb, synth, scope.LetBinding, synthetic: True),
-      fn(s) { scope.RawScope(..s, with_object_name: Some(synth)) },
-    )
+  // Push a With scope: `sb_push_with` mints its `<withN_M>` holder name onto
+  // the `With(holder)` kind and declares the holder binding inside the new
+  // scope, so child closures can capture the with-object and `scope.lookup`
+  // can find the holder's slot.
+  let #(sb, with_id) = scope.sb_push_with(p5.sb)
   use #(p6, body) <- result.try(parse_single_statement(P(..p5, sb:), False))
   // Flip children_at[with_id] to source order before the pop — the With
   // body is a single statement so no FunctionDeclaration can be a direct
@@ -5418,12 +5390,15 @@ fn check_super_private(
 /// `{ #x: 1 }` and `const { #x: y } = o` are SyntaxErrors.
 fn reject_private_property_key(
   p: P,
-  key: ast.Expression,
+  key: ast.PropertyKey,
 ) -> Result(Nil, ParseError) {
   case key {
-    ast.Identifier(name: "#" <> _, ..) ->
-      Error(PrivateNameAsPropertyKey(pos_of(p)))
-    _ -> Ok(Nil)
+    ast.KeyPrivate(..) -> Error(PrivateNameAsPropertyKey(pos_of(p)))
+    ast.KeyIdentifier(..)
+    | ast.KeyString(..)
+    | ast.KeyNumber(..)
+    | ast.KeyBigInt(..)
+    | ast.KeyComputed(..) -> Ok(Nil)
   }
 }
 
@@ -6486,8 +6461,8 @@ fn parse_object_property(p: P) -> Result(#(P, ast.Property), ParseError) {
     Identifier -> True
     _ -> is_contextual_keyword(prop_name_kind)
   }
-  use #(p5, key_expr, is_computed) <- result.try(parse_property_name(p4))
-  use Nil <- result.try(reject_private_property_key(p4, key_expr))
+  use #(p5, key) <- result.try(parse_property_name(p4))
+  use Nil <- result.try(reject_private_property_key(p4, key))
   // Generator shorthand (*name) must be a method — must have (
   case is_generator && peek(p5) != LeftParen {
     True -> Error(UnexpectedToken(pos_of(p5), token_kind_to_string(peek(p5))))
@@ -6501,8 +6476,7 @@ fn parse_object_property(p: P) -> Result(#(P, ast.Property), ParseError) {
         prop_name_kind,
         prop_name_value,
         is_valid_shorthand,
-        key_expr,
-        is_computed,
+        key,
       )
   }
 }
@@ -6516,8 +6490,7 @@ fn parse_object_property_value(
   prop_name_kind: TokenKind,
   prop_name_value: String,
   is_valid_shorthand: Bool,
-  key_expr: ast.Expression,
-  is_computed: Bool,
+  key: ast.PropertyKey,
 ) -> Result(#(P, ast.Property), ParseError) {
   case peek(p5) {
     LeftParen -> {
@@ -6525,12 +6498,7 @@ fn parse_object_property_value(
       // Object methods allow super.x but not super()
       // Methods make the object invalid as destructuring target
       let p5 = P(..p5, has_invalid_pattern: True)
-      let #(kind, is_method) = case accessor_kind {
-        GetPrefix -> #(ast.Get, False)
-        SetPrefix -> #(ast.Set, False)
-        NoAccessor -> #(ast.Init, True)
-      }
-      use #(p6, params, body) <- result.try(parse_method_params_body(
+      use #(p6, params, body) <- result.map(parse_method_params_body(
         p5,
         p,
         accessor_kind,
@@ -6539,24 +6507,22 @@ fn parse_object_property_value(
         False,
         False,
       ))
-      Ok(#(
-        p6,
-        ast.Property(
-          key: key_expr,
-          value: ast.FunctionExpression(
-            name: None,
-            params: params,
-            body: body,
-            is_generator: is_generator,
-            is_async: has_async,
-            span: span_from(pos_of(p), p6),
-          ),
-          kind: kind,
-          computed: is_computed,
-          shorthand: False,
-          method: is_method,
-        ),
-      ))
+      let fn_lit =
+        ast.FunctionLiteral(
+          name: None,
+          params: params,
+          body: body,
+          is_generator: is_generator,
+          is_async: has_async,
+        )
+      let prop = case accessor_kind {
+        GetPrefix ->
+          ast.AccessorProperty(key:, value: fn_lit, kind: ast.GetAccessor)
+        SetPrefix ->
+          ast.AccessorProperty(key:, value: fn_lit, kind: ast.SetAccessor)
+        NoAccessor -> ast.MethodProperty(key:, value: fn_lit)
+      }
+      #(p6, prop)
     }
     Colon -> {
       // key: value — mark invalid pattern if value is not a valid
@@ -6569,17 +6535,7 @@ fn parse_object_property_value(
       use #(p7, expr) <- result.try(parse_assignment_expression(p6))
       let elem_invalid = cover_elem_invalid(p7, value_start, True)
       let p7 = P(..p7, has_invalid_pattern: saved_invalid || elem_invalid)
-      Ok(#(
-        p7,
-        ast.Property(
-          key: key_expr,
-          value: expr,
-          kind: ast.Init,
-          computed: is_computed,
-          shorthand: False,
-          method: False,
-        ),
-      ))
+      Ok(#(p7, ast.InitProperty(key:, value: expr, shorthand: False)))
     }
     tok -> {
       // Shorthand `{ x }` or shorthand-with-default `{ x = d }` (cover
@@ -6597,10 +6553,13 @@ fn parse_object_property_value(
           // yield/await, arguments in static blocks / field initializers).
           use Nil <- result.try(check_identifier_reference(p5, prop_name_value))
           let p5 = P(..p5, sb: scope.sb_ref(p5.sb, prop_name_value))
-          // The value identifier is the same token as the key, so reuse
-          // `key_expr` (already an `Identifier` with the right span). For
-          // `= default`, wrap it in an AssignmentExpression and set the
-          // cover flag so the caller can reject if not destructuring.
+          // The value identifier is the same token as the key (shorthand is
+          // only reachable for an identifier key), so it is rebuilt from the
+          // key's name and span. For `= default`, wrap it in an
+          // AssignmentExpression and set the cover flag so the caller can
+          // reject if not destructuring.
+          let key_span = ast.property_key_span(key)
+          let key_ident = ast.Identifier(name: prop_name_value, span: key_span)
           use #(p7, value) <- result.map(case tok {
             Equal -> {
               let p6 = advance(p5)
@@ -6609,28 +6568,15 @@ fn parse_object_property_value(
                 P(..p7, ctx: Ctx(..p7.ctx, has_cover_initializer: True)),
                 ast.AssignmentExpression(
                   operator: ast.Assign,
-                  left: key_expr,
+                  left: key_ident,
                   right: rhs,
-                  span: ast.Span(
-                    ast.expression_span(key_expr).start,
-                    p7.prev_end,
-                  ),
+                  span: ast.Span(key_span.start, p7.prev_end),
                 ),
               )
             }
-            _ -> Ok(#(p5, key_expr))
+            _ -> Ok(#(p5, key_ident))
           })
-          #(
-            p7,
-            ast.Property(
-              key: key_expr,
-              value:,
-              kind: ast.Init,
-              computed: False,
-              shorthand: True,
-              method: False,
-            ),
-          )
+          #(p7, ast.InitProperty(key:, value:, shorthand: True))
         }
       }
     }

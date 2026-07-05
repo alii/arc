@@ -297,6 +297,50 @@ pub type FieldInitMode {
   FieldInitAfterSuper
 }
 
+/// One element of a synthetic class-initializer function body (the instance
+/// [[Fields]] closure, or the static-element wrapper). NOT part of the parser
+/// AST: class lowering builds these directly, and each constructor names the
+/// opcode `emit_field_init` emits — so an initializer can never be lowered to
+/// the wrong define-op. §7.3.32 DefineField uses CreateDataPropertyOrThrow
+/// ([[DefineOwnProperty]]), never [[Set]], so prototype setters are not
+/// invoked and an own data property is always created (even shadowing an
+/// inherited accessor).
+type FieldInit {
+  /// §7.3.29 PrivateMethodOrAccessorAdd — install an instance private
+  /// method/accessor half. `closure_const` is the hidden class-scope const
+  /// (ast_util.private_fn_const) holding the already-built closure; `kind`
+  /// picks DefinePrivateMethod vs DefinePrivateAccessor(Getter/Setter).
+  PrivateMethodInit(name: String, closure_const: String, kind: ast.MethodKind)
+  /// §7.3.28 PrivateFieldAdd. `name` is the source `#x`, whose PrivateName is
+  /// read from the class-scope const of the same name.
+  PrivateFieldInit(name: String, init: ast.Expression)
+  /// Literal identifier/string key — the field name also drives NamedEvaluation
+  /// of an anonymous function initializer (§7.3.33 DefineField step 7).
+  NamedFieldInit(name: String, init: ast.Expression)
+  /// Numeric literal key (`class C { 1 = 2 }`).
+  NumericFieldInit(value: ast.LiteralNumber, init: ast.Expression)
+  /// Computed key, already evaluated + ToPropertyKey'd once at class-definition
+  /// time into the hidden const `key_const` (`ast_util.computed_field_const` of
+  /// the element's body index — see compile_class_body). The stashed key is read
+  /// back — the name expression is NEVER re-evaluated (§15.7.14 step 27).
+  ComputedFieldInit(key_const: String, init: ast.Expression)
+  /// BigInt literal key (`class C { 1n = 2 }`), the remaining
+  /// LiteralPropertyName form. Side-effect-free, so pushed inline.
+  BigIntFieldInit(value: Int, init: ast.Expression)
+  /// `static { ... }` — lowered to an arrow IIFE so the block gets its own var
+  /// environment (§15.7.1 ClassStaticBlockBody) while inheriting
+  /// `this`/[[HomeObject]] from the wrapper. Mirrors QuickJS
+  /// emit_class_init_start/end.
+  StaticBlockInit(body: List(ast.StmtWithLine))
+}
+
+/// The body of a function being compiled: real source statements, or the
+/// synthetic field-initializer elements of a class-init function.
+type FnBody {
+  StmtsBody(stmts: List(ast.StmtWithLine))
+  FieldInitsBody(inits: List(FieldInit))
+}
+
 /// QuickJS JS_ATOM_class_fields_init. Declared as a const in the per-class
 /// block scope (P6) and captured via the ordinary closure path — `<...>` is
 /// outside §12.7 IdentifierName grammar so it can't collide with user code.
@@ -1554,10 +1598,10 @@ fn emit_annexb_promote(e: Emitter, name: String) -> Emitter {
         AnnexBBlocked -> e
         AnnexBLocal(slot:, is_boxed:) ->
           e
-          |> emit_slot_get(source.slot, source.is_boxed)
-          |> emit_slot_put(slot, is_boxed)
+          |> emit_slot_get(scope.SlotRef(source.slot, source.is_boxed))
+          |> emit_slot_put(scope.SlotRef(slot, is_boxed))
         AnnexBFallthrough -> {
-          let e = emit_slot_get(e, source.slot, source.is_boxed)
+          let e = emit_slot_get(e, scope.SlotRef(source.slot, source.is_boxed))
           case fn_fallthrough(e) {
             ToGlobal -> emit_op(e, opcode.PutGlobal(name))
             ToEvalEnv -> emit_op(e, opcode.PutEvalVar(name))
@@ -1628,19 +1672,20 @@ fn annexb_find_target(
   }
 }
 
-/// Push the value held in local slot `slot` (boxed or unboxed).
-fn emit_slot_get(e: Emitter, slot: Int, is_boxed: Bool) -> Emitter {
-  case is_boxed {
-    True -> emit_op(e, opcode.GetBoxed(slot))
-    False -> emit_op(e, opcode.GetLocal(slot))
+/// Push the value held in the local slot `ref` names (boxed or unboxed).
+fn emit_slot_get(e: Emitter, ref: scope.SlotRef) -> Emitter {
+  case ref.boxed {
+    True -> emit_op(e, opcode.GetBoxed(ref.slot))
+    False -> emit_op(e, opcode.GetLocal(ref.slot))
   }
 }
 
-/// Store top-of-stack into local slot `slot` (boxed or unboxed). Pops.
-fn emit_slot_put(e: Emitter, slot: Int, is_boxed: Bool) -> Emitter {
-  case is_boxed {
-    True -> emit_op(e, opcode.PutBoxed(slot))
-    False -> emit_op(e, opcode.PutLocal(slot))
+/// Store top-of-stack into the local slot `ref` names (boxed or unboxed).
+/// Pops.
+fn emit_slot_put(e: Emitter, ref: scope.SlotRef) -> Emitter {
+  case ref.boxed {
+    True -> emit_op(e, opcode.PutBoxed(ref.slot))
+    False -> emit_op(e, opcode.PutLocal(ref.slot))
   }
 }
 
@@ -1796,7 +1841,7 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
   let static = fn(e: Emitter) {
     case fallback {
       scope.Local(slot:, boxed:, ..) ->
-        emit_slot_get(e, slot, boxed) |> emit_op(opcode.TypeOf)
+        emit_slot_get(e, scope.SlotRef(slot:, boxed:)) |> emit_op(opcode.TypeOf)
       scope.Global(name:) -> emit_op(e, opcode.TypeofGlobal(name))
       scope.EvalEnv(name:) -> emit_op(e, opcode.TypeofEvalVar(name))
     }
@@ -1812,7 +1857,7 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
       let e =
         list.fold(crossed, e, fn(e, w) {
           e
-          |> emit_slot_get(w.0, w.1)
+          |> emit_slot_get(w)
           |> emit_ir(opcode.IrWithGetVar(name, hit))
         })
       let e = static(e)
@@ -1884,7 +1929,7 @@ fn emit_var_ref_make(e: Emitter, name: String) -> #(Emitter, VarRef) {
       let e =
         list.fold(crossed, e, fn(e, w) {
           e
-          |> emit_slot_get(w.0, w.1)
+          |> emit_slot_get(w)
           |> emit_ir(opcode.IrWithMakeRef(name, lref))
         })
       // No with object had the property: store undefined as the base so
@@ -1986,7 +2031,7 @@ fn resolve(e: Emitter, name: String) -> scope.Resolution {
 /// emit_var_* helpers reuse `emit_with_chain` unchanged.
 fn split_with_chain(
   res: scope.Resolution,
-) -> #(List(#(Int, Bool)), scope.Direct) {
+) -> #(List(scope.SlotRef), scope.Direct) {
   case res {
     scope.WithChain(crossed_slots:, fallback:) -> #(crossed_slots, fallback)
     scope.Plain(direct) -> #([], direct)
@@ -1997,7 +2042,8 @@ fn split_with_chain(
 /// global/eval-env fallthrough.
 fn emit_static_get(e: Emitter, res: scope.Direct) -> Emitter {
   case res {
-    scope.Local(slot:, boxed:, ..) -> emit_slot_get(e, slot, boxed)
+    scope.Local(slot:, boxed:, ..) ->
+      emit_slot_get(e, scope.SlotRef(slot:, boxed:))
     scope.Global(name:) -> emit_op(e, opcode.GetGlobal(name))
     scope.EvalEnv(name:) -> emit_op(e, opcode.GetEvalVar(name))
   }
@@ -2030,16 +2076,17 @@ fn emit_static_put(e: Emitter, res: scope.Direct, name: String) -> Emitter {
     // read that throws on JsUninitialized before the put). Var/param origin
     // cells are never uninitialized, so for them this is only a wasted read.
     scope.Local(kind: CaptureBinding, slot:, boxed:, ..) ->
-      emit_checked_put(e, slot, boxed)
+      emit_checked_put(e, scope.SlotRef(slot:, boxed:))
     // A let binding whose initialization has NOT been emitted yet
     // (linearly) — the store may run during TDZ (`{ x = 1; let x; }`),
     // so check first.
     scope.Local(kind: LetBinding, slot:, boxed:, ..) ->
       case set.contains(e.initialized, slot) {
-        True -> emit_slot_put(e, slot, boxed)
-        False -> emit_checked_put(e, slot, boxed)
+        True -> emit_slot_put(e, scope.SlotRef(slot:, boxed:))
+        False -> emit_checked_put(e, scope.SlotRef(slot:, boxed:))
       }
-    scope.Local(slot:, boxed:, ..) -> emit_slot_put(e, slot, boxed)
+    scope.Local(slot:, boxed:, ..) ->
+      emit_slot_put(e, scope.SlotRef(slot:, boxed:))
     scope.Global(name:) -> emit_op(e, opcode.PutGlobal(name))
     scope.EvalEnv(name:) -> emit_op(e, opcode.PutEvalVar(name))
   }
@@ -2048,11 +2095,11 @@ fn emit_static_put(e: Emitter, res: scope.Direct, name: String) -> Emitter {
 /// A store that must respect TDZ (§9.1.1.1.5 SetMutableBinding step 5):
 /// re-use the TDZ-checking read ops (GetLocal/GetBoxed throw ReferenceError
 /// on JsUninitialized), drop the read value, then store.
-fn emit_checked_put(e: Emitter, slot: Int, is_boxed: Bool) -> Emitter {
+fn emit_checked_put(e: Emitter, ref: scope.SlotRef) -> Emitter {
   e
-  |> emit_slot_get(slot, is_boxed)
+  |> emit_slot_get(ref)
   |> emit_op(opcode.Pop)
-  |> emit_slot_put(slot, is_boxed)
+  |> emit_slot_put(ref)
 }
 
 /// §14.11: emit the runtime check chain for `crossed` with-object slots
@@ -2063,7 +2110,7 @@ fn emit_checked_put(e: Emitter, slot: Int, is_boxed: Bool) -> Emitter {
 /// binding), just runs `fallback`.
 fn emit_with_chain(
   e: Emitter,
-  crossed: List(#(Int, Bool)),
+  crossed: List(scope.SlotRef),
   with_op: fn(Int) -> IrOp,
   fallback: fn(Emitter) -> Emitter,
 ) -> Emitter {
@@ -2073,7 +2120,7 @@ fn emit_with_chain(
       let #(e, done) = fresh_label(e)
       let e =
         list.fold(crossed, e, fn(e, w) {
-          e |> emit_slot_get(w.0, w.1) |> emit_ir(with_op(done))
+          e |> emit_slot_get(w) |> emit_ir(with_op(done))
         })
       let e = fallback(e)
       emit_ir(e, IrLabel(done))
@@ -3043,7 +3090,7 @@ fn collect_hoisted_funcs(
             Some(name),
             None,
             params,
-            body,
+            StmtsBody(body),
             False,
             is_gen,
             is_async,
@@ -3121,8 +3168,8 @@ fn emit_body_param_copies(
       // The copy IS a read of the parameter-scope `arguments` binding, so
       // it must trigger the IrCreateArguments splice like any other read.
       let e = track_arguments_ref(e, bname)
-      emit_slot_get(e, src_slot, src_boxed)
-      |> emit_slot_put(b.slot, b.is_boxed)
+      emit_slot_get(e, scope.SlotRef(slot: src_slot, boxed: src_boxed))
+      |> emit_slot_put(scope.SlotRef(slot: b.slot, boxed: b.is_boxed))
     }
     // Degenerate: the analyzer registered no Function-scope binding for
     // the name (only possible for `arguments` in exotic shapes). Nothing
@@ -3145,7 +3192,7 @@ fn compile_function_body(
   name: Option(String),
   self_name: Option(String),
   params: List(ast.Pattern),
-  stmts: List(ast.StmtWithLine),
+  body: FnBody,
   is_arrow: Bool,
   is_generator: Bool,
   is_async: Bool,
@@ -3164,6 +3211,14 @@ fn compile_function_body(
   // miscompile the child against the root scope's slots.
   let assert [fn_id, ..rest] = parent.child_fn_cursor
   let parent = Emitter(..parent, child_fn_cursor: rest)
+  // Every prologue scan below (directives, hoisting, lexical names) is a walk
+  // over source statements. A synthetic field-init body has none of those —
+  // no directives, no declarations, no `using` — so it scans as an empty body
+  // and only the body-emission step below dispatches on it.
+  let stmts = case body {
+    StmtsBody(stmts:) -> stmts
+    FieldInitsBody(..) -> []
+  }
   // Direct using/await-using declarations are emitted in place (no AST
   // rewrite) — the lexical-name and hoisting scans below see the user's
   // bindings (collect_top_lex_names treats Using/AwaitUsing as ConstBinding)
@@ -3441,10 +3496,12 @@ fn compile_function_body(
     NoFieldInit | FieldInitAfterSuper -> e
   }
 
-  // Emit body statements.
-  use e <- result.try(case body_has_using {
-    False -> emit_stmts(e, stmts)
-    True -> {
+  // Emit the body: field-init elements for a class-init function, statements
+  // otherwise.
+  use e <- result.try(case body, body_has_using {
+    FieldInitsBody(inits:), _ -> list.try_fold(inits, e, emit_field_init)
+    StmtsBody(..), False -> emit_stmts(e, stmts)
+    StmtsBody(..), True -> {
       // Directive prologue stays at function-scope top (already scanned
       // for "use strict" above); the rest is wrapped in the
       // DisposeResources try/catch/finally so a `return` inside the body
@@ -3599,78 +3656,6 @@ fn emit_stmt_inner(
   }
   case stmt {
     ast.EmptyStatement | ast.DebuggerStatement -> Ok(e)
-
-    // §7.3.32 DefineField — synthesized by inject_field_inits for class
-    // instance fields. Uses CreateDataPropertyOrThrow ([[DefineOwnProperty]]),
-    // not [[Set]], so prototype setters are NOT invoked and an own data
-    // property is always created (even shadowing an inherited accessor).
-    ast.ClassFieldInit(key:, value:, computed:) -> {
-      let e = get_this(e)
-      // §15.7.14: if Initializer is absent, initValue = undefined. The
-      // synthetic undefined-expression carries the key's span so any error
-      // points at the field declaration.
-      let key_span = ast.expression_span(key)
-      let init = option.unwrap(value, ast.UndefinedExpression(span: key_span))
-      use e <- result.map(case key, computed {
-        // Class private element. The PrivateName key is read from the
-        // class-scope const "#m" (see compile_class). A NUL-prefixed
-        // identifier value is the synthetic install of an instance private
-        // method/accessor (see private_method_init_stmts); anything else is
-        // a field initializer (§7.3.28 PrivateFieldAdd).
-        ast.Identifier(name: "#" <> rest, ..), False -> {
-          let name = "#" <> rest
-          let e = emit_var_get(e, name)
-          case init {
-            ast.Identifier(name: "\u{0}pg:" <> _ as hidden, ..) -> {
-              let e = emit_var_get(e, hidden)
-              Ok(emit_op(e, opcode.DefinePrivateAccessor(opcode.Getter)))
-            }
-            ast.Identifier(name: "\u{0}ps:" <> _ as hidden, ..) -> {
-              let e = emit_var_get(e, hidden)
-              Ok(emit_op(e, opcode.DefinePrivateAccessor(opcode.Setter)))
-            }
-            ast.Identifier(name: "\u{0}pm:" <> _ as hidden, ..) -> {
-              let e = emit_var_get(e, hidden)
-              Ok(emit_op(e, opcode.DefinePrivateMethod))
-            }
-            _ -> {
-              use e <- result.map(emit_named_expr(e, init, name))
-              emit_op(e, opcode.DefinePrivateField)
-            }
-          }
-        }
-        ast.Identifier(name:, ..), False
-        | ast.StringExpression(value: name, ..), False
-        -> {
-          // §7.3.33 DefineField step 7: anonymous function initializers get
-          // the field name (NamedEvaluation).
-          use e <- result.map(emit_named_expr(e, init, name))
-          emit_ir(e, IrDefineField(name))
-        }
-        ast.NumberLiteral(value: n, ..), False -> {
-          let e = push_const(e, JsNumber(literal_number(n)))
-          use e <- result.map(emit_expr(e, init))
-          emit_op(e, opcode.DefineFieldComputed)
-        }
-        // Computed field name, already evaluated + ToPropertyKey'd at
-        // class-definition time into a hidden class-scope const (see
-        // compile_class / stash_computed_element_keys). Read the stashed key —
-        // never re-evaluate the name expression (§15.7.14 step 27).
-        ast.Identifier(name: "\u{0}ck:" <> _ as hidden, ..), _ -> {
-          let e = emit_var_get(e, hidden)
-          use e <- result.map(emit_expr(e, init))
-          emit_op(e, opcode.DefineFieldComputed)
-        }
-        _, _ -> {
-          // Exotic non-computed key (shouldn't occur: computed keys are
-          // rewritten to stash-const reads above) — evaluate inline.
-          use e <- result.try(emit_expr(e, key))
-          use e <- result.map(emit_expr(e, init))
-          emit_op(e, opcode.DefineFieldComputed)
-        }
-      })
-      emit_op(e, opcode.Pop)
-    }
 
     ast.ExpressionStatement(expression: expr, ..) -> {
       use e <- result.map(emit_expr(e, expr))
@@ -3999,20 +3984,19 @@ fn emit_stmt_inner(
 /// §14.11 WithStatement (sloppy mode only — the parser rejects `with` in
 /// strict code). The ToObject'd head expression is stored in a synthetic
 /// block-scoped local; the body sits in the analyzer's With scope whose
-/// `with_object` names that local (the `<withN_M>` holder) —
+/// `scope.With(holder)` kind names that local (the `<withN_M>` holder) —
 /// `scope.lookup` picks it up
 /// for every name resolution inside the body (returned as `WithChain`) and
 /// the emit_var_* helpers emit
 /// the IrWith* runtime probes inline.
 ///
-/// The holder binding is read FROM THE TREE — the analyzer mints it as
-/// `scope.with_object_name(depth, scope_id)` and allocates its slot, so
-/// the emitter never invents a name or slot of its own (avoids the
-/// emitter↔analyzer name desync the old `fresh_label`-based scheme had).
-/// That same name goes on `with_stack` so direct-eval inside the body
-/// (IrCallEval) sees the analyzer's holder names. No EmitterOp scope
-/// markers are emitted: the Phase-2 IR walker is gone and `finish` would
-/// just discard them.
+/// The holder binding is read FROM THE TREE — the analyzer mints its name
+/// (`sb_push_with`) and allocates its slot, so the emitter never invents a
+/// name or slot of its own (avoids the emitter↔analyzer name desync the old
+/// `fresh_label`-based scheme had). That same name goes on `with_stack` so
+/// direct-eval inside the body (IrCallEval) sees the analyzer's holder
+/// names. No EmitterOp scope markers are emitted: the Phase-2 IR walker is
+/// gone and `finish` would just discard them.
 fn emit_with(
   e: Emitter,
   object: ast.Expression,
@@ -4024,26 +4008,30 @@ fn emit_with(
   // Enter the analyzer's With scope. ONE cursor move — the analyzer
   // creates a single With node that BOTH holds the `<withN_M>` binding
   // (so `enter_scope`'s prologue seeds its slot) and carries that holder's
-  // NAME in `with_object` (so `scope.lookup` from inside the body wraps the
-  // resolution in a `WithChain`). The body's own block, if any, is a child of
-  // this node and is entered by emit_stmt/emit_block — NOT here.
+  // NAME on its `With(holder)` kind (so `scope.lookup` from inside the body
+  // wraps the resolution in a `WithChain`). The body's own block, if any, is
+  // a child of this node and is entered by emit_stmt/emit_block — NOT here.
   let #(e, save) = enter_scope(e, in_block: e.in_block)
-  // Read the holder from the entered scope's sole binding and store the
+  // Read the holder BY NAME off the entered scope's kind and store the
   // ToObject'd target straight into its slot. `enter_scope` has just
   // seeded that slot with JsUninitialized (LetBinding prologue) and boxed
   // it if the analyzer marked it captured; this overwrites the seed.
   // Marking the slot `initialized` keeps later TDZ-check heuristics from
   // treating it as possibly-uninit.
   //
-  // Every entry point wires the analyzer tree, and the analyzer creates a
-  // With node holding exactly the `<withN_M>` binding — an empty bindings
-  // list here means the emitter is not sitting in that node (a cursor
-  // desync), so crash rather than mint a holder name the analyzer never
-  // allocated a slot for.
-  let assert [#(synth, scope.Binding(slot:, is_boxed:, ..)), ..] =
-    dict.to_list(scope.get_scope(e.scope_tree, e.current_scope).bindings)
+  // Every entry point wires the analyzer tree, and only `sb_push_with`
+  // creates a With scope (holder name on the kind, holder binding declared
+  // in the same scope) — a non-With kind here means the emitter is not
+  // sitting in that node (a cursor desync), so crash rather than store the
+  // with-object into some unrelated slot.
+  let with_scope = scope.get_scope(e.scope_tree, e.current_scope)
+  let assert scope.With(holder: synth) = with_scope.kind
+    as "emit_with: emitter cursor is not on the analyzer's With scope"
+  let assert Ok(scope.Binding(slot:, is_boxed:, ..)) =
+    dict.get(with_scope.bindings, synth)
+    as "emit_with: With scope is missing its holder binding"
   let e = Emitter(..e, initialized: set.insert(e.initialized, slot))
-  let e = emit_slot_put(e, slot, is_boxed)
+  let e = emit_slot_put(e, scope.SlotRef(slot:, boxed: is_boxed))
   let e = Emitter(..e, with_stack: [synth, ..e.with_stack])
   use e <- result.map(case tail {
     True -> emit_stmt_tail(e, body)
@@ -5250,7 +5238,7 @@ fn make_method_closure(
     name,
     None,
     params,
-    body,
+    StmtsBody(body),
     False,
     is_gen,
     is_async,
@@ -5284,7 +5272,7 @@ fn emit_function_closure(
     name,
     self_name,
     params,
-    body,
+    StmtsBody(body),
     False,
     is_gen,
     is_async,
@@ -5316,7 +5304,7 @@ fn emit_arrow_closure(
     name,
     None,
     params,
-    body_stmts,
+    StmtsBody(body_stmts),
     True,
     False,
     is_async,
@@ -5327,111 +5315,89 @@ fn emit_arrow_closure(
   |> register_closure
 }
 
-/// Emit one property in an object literal. Object is already on the stack.
-/// All handlers leave the object on the stack for the next property.
 /// Compile an object-literal *method* value — a concise method, getter, or
 /// setter — so it is NOT a constructor (methods/accessors have no
-/// [[Construct]], so `new o.m()` must throw). These values are always
-/// FunctionExpressions; fall back defensively for anything unexpected.
+/// [[Construct]], so `new o.m()` must throw).
 fn emit_method_value(
   e: Emitter,
-  value: ast.Expression,
+  value: ast.FunctionLiteral,
   name: Option(String),
 ) -> Result(Emitter, EmitError) {
-  case value {
-    ast.FunctionExpression(_, _, params, body, is_gen, is_async) ->
-      make_method_closure(e, name, params, body, is_gen, is_async)
-    _ -> emit_expr(e, value)
-  }
+  let ast.FunctionLiteral(_, params, body, is_gen, is_async) = value
+  make_method_closure(e, name, params, body, is_gen, is_async)
 }
 
+/// Emit one property in an object literal. Object is already on the stack.
+/// All handlers leave the object on the stack for the next property.
 fn emit_object_property(
   e: Emitter,
   prop: ast.Property,
 ) -> Result(Emitter, EmitError) {
   case prop {
     // Annex B §B.3.1 — `{__proto__: v}` / `{"__proto__": v}` sets [[Prototype]]
-    // instead of defining an own property. Only when non-computed, non-shorthand,
-    // non-method. Shorthand `{__proto__}` and computed `{["__proto__"]: v}` fall
-    // through to ordinary DefineField.
-    ast.Property(
-      key: ast.Identifier(name: "__proto__", ..),
+    // instead of defining an own property. Only when non-computed, non-shorthand.
+    // Shorthand `{__proto__}`, methods `{__proto__(){}}` and computed
+    // `{["__proto__"]: v}` fall through to ordinary DefineField.
+    ast.InitProperty(
+      key: ast.KeyIdentifier(name: "__proto__", ..),
       value:,
-      kind: ast.Init,
-      computed: False,
       shorthand: False,
-      method: False,
     )
-    | ast.Property(
-        key: ast.StringExpression(_, "__proto__"),
+    | ast.InitProperty(
+        key: ast.KeyString(value: "__proto__", ..),
         value:,
-        kind: ast.Init,
-        computed: False,
         shorthand: False,
-        method: False,
       ) -> {
       use e <- result.map(emit_expr(e, value))
       emit_op(e, opcode.SetProto)
     }
 
-    // Static key: {name: value}, {"name": value}, or shorthand method {name(){}}
-    // → IrDefineField(name) — pops value, keeps obj. Shorthand methods get
-    // [[HomeObject]] (§15.4.4) so super.x works inside them; `{m: fn}` does not.
-    ast.Property(
-      key: ast.Identifier(name:, ..),
-      value:,
-      kind: ast.Init,
-      computed: False,
-      method:,
-      ..,
-    )
-    | ast.Property(
-        key: ast.StringExpression(_, name),
-        value:,
-        kind: ast.Init,
-        computed: False,
-        method:,
-        ..,
-      ) -> {
-      case method {
-        // Concise method `{ m() {} }`: not constructible (`new o.m()` throws)
-        // and records its [[HomeObject]] for `super`. `{ x: function(){} }`
-        // stays a plain (constructible) function value with no home object.
-        True -> {
-          use e <- result.map(emit_method_value(e, value, Some(name)))
-          let e = emit_op(e, opcode.MakeMethod)
-          emit_ir(e, IrDefineField(name))
-        }
-        False -> {
-          use e <- result.map(emit_named_expr(e, value, name))
-          emit_ir(e, IrDefineField(name))
-        }
-      }
+    // Static key: {name: value} / {"name": value} → IrDefineField(name), which
+    // pops the value and keeps obj. `{ x: function(){} }` stays a plain
+    // (constructible) function value with no home object.
+    ast.InitProperty(key: ast.KeyIdentifier(name:, ..), value:, ..)
+    | ast.InitProperty(key: ast.KeyString(value: name, ..), value:, ..) -> {
+      use e <- result.map(emit_named_expr(e, value, name))
+      emit_ir(e, IrDefineField(name))
     }
 
-    // Numeric literal key: {1: "a"} — not computed in the AST, but needs
-    // ToPropertyKey at runtime to get the canonical string form ("1" not "1.0").
-    // Route through IrDefineFieldComputed which calls put_elem_value → js_to_string.
-    ast.Property(
-      key: ast.NumberLiteral(_, n),
-      value:,
-      kind: ast.Init,
-      computed: False,
-      method:,
-      ..,
-    ) ->
-      emit_computed_init_property(
-        e,
-        fn(e) { Ok(push_const(e, JsNumber(literal_number(n)))) },
-        value,
-        method,
-      )
+    // Every remaining key shape: computed (`{[expr]: v}`) or a numeric/bigint
+    // literal (`{1: v}`, `{1n: v}`), which needs a runtime ToPropertyKey for
+    // its canonical string form ("1", not "1.0"). Emit key, emit value,
+    // IrDefineFieldComputed — pops both, keeps obj (Symbol keys preserved).
+    ast.InitProperty(key:, value:, ..) ->
+      emit_computed_init_property(e, emit_property_key(_, key), value)
 
-    // Computed key: {[expr]: value} or {[expr](){}}
-    // Emit key, emit value, IrDefineFieldComputed — pops both, keeps obj.
-    // The VM handles ToPropertyKey (Symbol preserved, else ToString).
-    ast.Property(key:, value:, kind: ast.Init, computed: True, method:, ..) ->
-      emit_computed_init_property(e, emit_expr(_, key), value, method)
+    // Static-key concise method `{ m() {} }`: not constructible (`new o.m()`
+    // throws) and records its [[HomeObject]] (§15.4.4) so `super.x` works.
+    ast.MethodProperty(key: ast.KeyIdentifier(name:, ..), value:)
+    | ast.MethodProperty(key: ast.KeyString(value: name, ..), value:) -> {
+      use e <- result.map(emit_method_value(e, value, Some(name)))
+      let e = emit_op(e, opcode.MakeMethod)
+      emit_ir(e, IrDefineField(name))
+    }
+
+    // Computed / numeric-key method `{ [expr](){} }`, `{ 1(){} }`.
+    ast.MethodProperty(key:, value:) ->
+      emit_computed_method_property(e, emit_property_key(_, key), value)
+
+    // Accessor with static key: { get name() {} } / { set name(v) {} }
+    // Emit the function, then DefineAccessor(name, Getter/Setter).
+    ast.AccessorProperty(key: ast.KeyIdentifier(name:, ..), value:, kind:)
+    | ast.AccessorProperty(key: ast.KeyString(value: name, ..), value:, kind:) -> {
+      let #(prefix, accessor) = property_accessor(kind)
+      use e <- result.map(emit_method_value(e, value, Some(prefix <> name)))
+      emit_ir(e, IrDefineAccessor(name, accessor, True))
+    }
+
+    // Computed / numeric-key accessor: { get [expr]() {} }, { set 1(v) {} }
+    // Stack: emit key, emit fn → DefineAccessorComputed
+    ast.AccessorProperty(key:, value:, kind:) -> {
+      let #(_, accessor) = property_accessor(kind)
+      use e <- result.try(emit_property_key(e, key))
+      use e <- result.map(emit_method_value(e, value, None))
+      emit_op(e, opcode.DefineAccessorComputed(accessor, True))
+    }
 
     // Spread: {...source}
     // IrObjectSpread pops source, copies own enumerable props, keeps obj.
@@ -5440,84 +5406,65 @@ fn emit_object_property(
       use e <- result.map(emit_expr(e, argument))
       emit_op(e, opcode.ObjectSpread)
     }
-
-    // Remaining non-computed Init with an exotic key expression (shouldn't
-    // happen — parser only produces Identifier/StringExpression/NumberLiteral
-    // for non-computed keys). Route through computed path anyway. Placed before
-    // the accessor arms so they can bind `kind:` open — every Init shape is
-    // already matched by the time we reach them.
-    ast.Property(key:, value:, kind: ast.Init, computed: False, method:, ..) ->
-      emit_computed_init_property(e, emit_expr(_, key), value, method)
-
-    // Accessor with static key: { get name() {} } / { set name(v) {} }
-    // Emit the function, then DefineAccessor(name, Getter/Setter).
-    ast.Property(
-      key: ast.Identifier(name:, ..),
-      value:,
-      kind:,
-      computed: False,
-      ..,
-    )
-    | ast.Property(
-        key: ast.StringExpression(_, name),
-        value:,
-        kind:,
-        computed: False,
-        ..,
-      ) -> {
-      let #(prefix, accessor) = property_accessor(kind)
-      use e <- result.map(emit_method_value(e, value, Some(prefix <> name)))
-      emit_ir(e, IrDefineAccessor(name, accessor, True))
-    }
-
-    // Computed or exotic-key accessor: { get [expr]() {} } / { set [expr](v) {} }
-    // Stack: emit key, emit fn → DefineAccessorComputed
-    ast.Property(key:, value:, kind:, ..) -> {
-      let #(_, accessor) = property_accessor(kind)
-      use e <- result.try(emit_expr(e, key))
-      use e <- result.map(emit_method_value(e, value, None))
-      emit_op(e, opcode.DefineAccessorComputed(accessor, True))
-    }
   }
 }
 
-/// Map an accessor `PropertyKind` to its inferred-name prefix and opcode kind.
-/// `Init` is unreachable — every Init shape is matched before the accessor arms
-/// in `emit_object_property` — but handled defensively (no panic in emit).
-fn property_accessor(kind: ast.PropertyKind) -> #(String, opcode.AccessorKind) {
+/// Push a property key onto the stack, ready for a `*Computed` define/get op.
+/// Literal keys become constants; a computed key evaluates its expression. The
+/// caller-visible ToPropertyKey coercion is the VM's job (Symbol keys survive,
+/// everything else stringifies), so this never coerces here.
+///
+/// `KeyPrivate` is unreachable for object literals and object patterns (the
+/// parser rejects `{ #x: 1 }`); pushing the `#x` string keeps this total.
+fn emit_property_key(
+  e: Emitter,
+  key: ast.PropertyKey,
+) -> Result(Emitter, EmitError) {
+  case key {
+    ast.KeyIdentifier(name:, ..) | ast.KeyPrivate(name:, ..) ->
+      Ok(push_const(e, JsString(name)))
+    ast.KeyString(value: s, ..) -> Ok(push_const(e, JsString(s)))
+    ast.KeyNumber(value: n, ..) -> Ok(push_const(e, JsNumber(literal_number(n))))
+    ast.KeyBigInt(value: i, ..) ->
+      Ok(push_const(e, value.JsBigInt(value.BigInt(i))))
+    ast.KeyComputed(expression:) -> emit_expr(e, expression)
+  }
+}
+
+/// Map an accessor kind to its inferred-name prefix and opcode kind.
+fn property_accessor(kind: ast.AccessorKind) -> #(String, opcode.AccessorKind) {
   case kind {
-    ast.Get -> #("get ", opcode.Getter)
-    ast.Set -> #("set ", opcode.Setter)
-    ast.Init -> #("", opcode.Getter)
+    ast.GetAccessor -> #("get ", opcode.Getter)
+    ast.SetAccessor -> #("set ", opcode.Setter)
   }
 }
 
-/// Shared emit for `kind: Init` properties that go through DefineFieldComputed
-/// (computed key, numeric key, or exotic-key fallthrough). When `method` is
-/// True (`{[k](){}}`), the closure is emitted first so MakeMethod sees [obj, fn]
-/// directly, then the key, then Swap to restore [obj, key, fn] for
-/// DefineFieldComputed. Closure creation is unobservable so this doesn't change
-/// §13.2.5.5 evaluation order — key side-effects still run before any property
-/// is defined.
+/// Shared emit for data properties that go through DefineFieldComputed
+/// (computed key, numeric key, or exotic-key fallthrough).
 fn emit_computed_init_property(
   e: Emitter,
   emit_key: fn(Emitter) -> Result(Emitter, EmitError),
   value: ast.Expression,
-  method: Bool,
 ) -> Result(Emitter, EmitError) {
-  case method {
-    False -> {
-      use e <- result.try(emit_key(e))
-      use e <- result.map(emit_expr(e, value))
-      emit_op(e, opcode.DefineFieldComputed)
-    }
-    True -> {
-      use e <- result.try(emit_method_value(e, value, None))
-      let e = emit_op(e, opcode.MakeMethod)
-      use e <- result.map(emit_key(e))
-      emit_op(emit_ir(e, IrFinal(opcode.Swap)), opcode.DefineFieldComputed)
-    }
-  }
+  use e <- result.try(emit_key(e))
+  use e <- result.map(emit_expr(e, value))
+  emit_op(e, opcode.DefineFieldComputed)
+}
+
+/// Same, for a method value (`{[k](){}}`): the closure is emitted first so
+/// MakeMethod sees [obj, fn] directly, then the key, then Swap to restore
+/// [obj, key, fn] for DefineFieldComputed. Closure creation is unobservable so
+/// this doesn't change §13.2.5.5 evaluation order — key side-effects still run
+/// before any property is defined.
+fn emit_computed_method_property(
+  e: Emitter,
+  emit_key: fn(Emitter) -> Result(Emitter, EmitError),
+  value: ast.FunctionLiteral,
+) -> Result(Emitter, EmitError) {
+  use e <- result.try(emit_method_value(e, value, None))
+  let e = emit_op(e, opcode.MakeMethod)
+  use e <- result.map(emit_key(e))
+  emit_op(emit_ir(e, IrFinal(opcode.Swap)), opcode.DefineFieldComputed)
 }
 
 // ============================================================================
@@ -6221,18 +6168,8 @@ fn emit_single_object_prop(
 ) -> Result(#(Emitter, Int), EmitError) {
   case prop {
     // Static identifier/string key: {a: pat} or {"a": pat}
-    ast.PatternProperty(
-      key: ast.Identifier(name:, ..),
-      value:,
-      computed: False,
-      ..,
-    )
-    | ast.PatternProperty(
-        key: ast.StringExpression(_, name),
-        value:,
-        computed: False,
-        ..,
-      ) -> {
+    ast.PatternProperty(key: ast.KeyIdentifier(name:, ..), value:, ..)
+    | ast.PatternProperty(key: ast.KeyString(value: name, ..), value:, ..) -> {
       // [src,..] → Dup → [src,src,..] → GetField → [val,src,..] → bind → [src,..]
       let e = emit_op(e, opcode.Dup)
       let e = emit_ir(e, IrGetField(name))
@@ -6247,30 +6184,13 @@ fn emit_single_object_prop(
       }
     }
 
-    // Numeric literal key: {1: pat} — not flagged computed by parser, but
-    // needs runtime ToPropertyKey for canonical "1" (mirrors object-literal
-    // numeric-key path at line ~2500).
-    ast.PatternProperty(
-      key: ast.NumberLiteral(_, n),
-      value:,
-      computed: False,
-      ..,
-    ) ->
-      emit_computed_key_prop(
-        e,
-        fn(e) { Ok(push_const(e, JsNumber(literal_number(n)))) },
-        value,
-        binding_kind,
-        has_rest,
-        n_excl,
-      )
-
-    // Computed key {[expr]: pat}, plus any remaining non-computed literal
-    // key (e.g. BigInt) — evaluate the key expression and route via GetElem.
+    // Computed key `{[expr]: pat}` and the numeric/bigint literal keys
+    // (`{1: pat}`, `{1n: pat}`), which need a runtime ToPropertyKey for the
+    // canonical "1" — push the key and route via GetElem.
     ast.PatternProperty(key:, value:, ..) ->
       emit_computed_key_prop(
         e,
-        emit_expr(_, key),
+        emit_property_key(_, key),
         value,
         binding_kind,
         has_rest,
@@ -6407,7 +6327,9 @@ fn emit_destructuring_assign(
         list.any(properties, fn(p) {
           case p {
             ast.SpreadProperty(_) -> True
-            ast.Property(..) -> False
+            ast.InitProperty(..)
+            | ast.MethodProperty(..)
+            | ast.AccessorProperty(..) -> False
           }
         })
       emit_object_pattern(
@@ -6609,18 +6531,22 @@ fn emit_single_object_assign_prop(
   n_excl: Int,
 ) -> Result(#(Emitter, Int), EmitError) {
   case prop {
-    // {key: target} or shorthand {key} (value==Identifier(key)).
-    // Non-computed string/identifier/number key.
-    ast.Property(
-      key:,
-      value:,
-      computed: False,
-      kind: ast.Init,
-      method: False,
-      ..,
-    ) ->
+    // {[expr]: target} — Dup obj, eval key, GetElem, recurse.
+    ast.InitProperty(key: ast.KeyComputed(expression:), value:, ..) -> {
+      let e = emit_op(e, opcode.Dup)
+      use e <- result.try(emit_expr(e, expression))
+      // §13.2.5.4 ComputedPropertyName: ToPropertyKey fires eagerly at
+      // PropertyName evaluation — observably BEFORE the target reference
+      // is evaluated (keyed-destructuring evaluation-order tests).
+      let e = emit_op(e, opcode.ToPropertyKey)
+      emit_elem_key_assign(e, value, has_rest, n_excl)
+    }
+
+    // {key: target} or shorthand {key} (value==Identifier(key)) — a literal
+    // (identifier / string / numeric / bigint) key.
+    ast.InitProperty(key:, value:, ..) ->
       case object_prop_key_name(key) {
-        Ok(name) -> {
+        Some(name) -> {
           use e <- result.map(emit_keyed_destructure_assign(e, name, value))
           case has_rest {
             False -> #(e, n_excl)
@@ -6630,37 +6556,19 @@ fn emit_single_object_assign_prop(
             }
           }
         }
-        Error(Nil) -> {
-          // Non-stringifiable static key — fall through to computed-key path.
+        None -> {
+          // A bigint literal key — no static string form, so route through
+          // the elem path (GetElem does the ToPropertyKey).
           let e = emit_op(e, opcode.Dup)
-          use e <- result.try(emit_expr(e, key))
+          use e <- result.try(emit_property_key(e, key))
           emit_elem_key_assign(e, value, has_rest, n_excl)
         }
       }
 
-    // {[expr]: target} — Dup obj, eval key, GetElem, recurse.
-    ast.Property(
-      key:,
-      value:,
-      computed: True,
-      kind: ast.Init,
-      method: False,
-      ..,
-    ) -> {
-      let e = emit_op(e, opcode.Dup)
-      use e <- result.try(emit_expr(e, key))
-      // §13.2.5.4 ComputedPropertyName: ToPropertyKey fires eagerly at
-      // PropertyName evaluation — observably BEFORE the target reference
-      // is evaluated (keyed-destructuring evaluation-order tests).
-      let e = emit_op(e, opcode.ToPropertyKey)
-      emit_elem_key_assign(e, value, has_rest, n_excl)
-    }
-
     // Getter/setter/method properties never appear in valid assignment
     // patterns (parser sets has_invalid_pattern). Guard defensively.
-    ast.Property(kind: ast.Get, ..)
-    | ast.Property(kind: ast.Set, ..)
-    | ast.Property(method: True, ..) -> Error(AccessorInDestructuringPattern)
+    ast.AccessorProperty(..) | ast.MethodProperty(..) ->
+      Error(AccessorInDestructuringPattern)
 
     // {a, b, ...target} — §13.15.5.4 RestDestructuringAssignmentEvaluation.
     // Stack: [src, key_n,..,key_1] → ObjectRestCopy(n) → [rest_obj] → assign.
@@ -6874,15 +6782,18 @@ fn emit_unrot3(e: Emitter) -> Emitter {
   |> emit_op(opcode.Rot3)
 }
 
-/// Static property-key → string for non-computed object pattern keys.
-/// Numeric keys go through js_format_number for canonical form ("1" not "1.0").
-fn object_prop_key_name(key: ast.Expression) -> Result(String, Nil) {
+/// The compile-time string form of an object-pattern key, or None when the key
+/// has none (a computed key, or a bigint literal). Numeric keys go through
+/// js_format_number for the canonical form ("1", not "1.0"). `KeyPrivate` is
+/// unreachable — the parser rejects `({#x: y} = o)`.
+fn object_prop_key_name(key: ast.PropertyKey) -> Option(String) {
   case key {
-    ast.Identifier(name:, ..) -> Ok(name)
-    ast.StringExpression(_, name) -> Ok(name)
-    ast.NumberLiteral(_, ast.FiniteNumber(f)) -> Ok(value.js_format_number(f))
-    ast.NumberLiteral(_, ast.InfiniteNumber) -> Ok("Infinity")
-    _ -> Error(Nil)
+    ast.KeyIdentifier(name:, ..) | ast.KeyPrivate(name:, ..) -> Some(name)
+    ast.KeyString(value: s, ..) -> Some(s)
+    ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
+      Some(value.js_format_number(f))
+    ast.KeyNumber(value: ast.InfiniteNumber, ..) -> Some("Infinity")
+    ast.KeyBigInt(..) | ast.KeyComputed(..) -> None
   }
 }
 
@@ -7209,7 +7120,6 @@ fn compile_class(
       e |> emit_op(opcode.NewPrivateName(pname)) |> emit_var_init(pname)
     })
   let element_keys = ast_util.computed_element_keys(body)
-  let body = stash_computed_element_keys(body)
   use #(e, static_init_idx) <- result.map(compile_class_body(
     e,
     display_name,
@@ -7274,8 +7184,8 @@ fn compile_class_body(
   use #(e, init_idx) <- result.try(compile_class_init_fn(
     e,
     list.append(
-      private_method_init_stmts(instance_methods),
-      field_init_stmts(instance_fields),
+      private_method_inits(instance_methods),
+      field_inits(instance_fields),
     ),
   ))
   let #(ctor_kind, field_init) = case super_class {
@@ -7288,7 +7198,7 @@ fn compile_class_body(
     name,
     None,
     ctor_params,
-    ctor_body,
+    StmtsBody(ctor_body),
     False,
     False,
     False,
@@ -7364,7 +7274,7 @@ fn compile_class_body(
   let e = emit_attach_field_init(e, init_idx)
   use #(e, static_init_idx) <- result.map(compile_class_init_fn(
     e,
-    static_init_stmts(static_elements),
+    static_inits(static_elements),
   ))
 
   // Stack: [ctor]
@@ -7404,17 +7314,17 @@ fn default_ctor_body(
   }
 }
 
-/// Compile a list of statements into a synthetic non-arrow initializer
-/// function with FieldInitCode — a method-like body (§15.7.14: "the
-/// function created for [[Initializer]] is never directly accessible to
+/// Compile a list of field-init elements into a synthetic non-arrow
+/// initializer function with FieldInitCode — a method-like body (§15.7.14:
+/// "the function created for [[Initializer]] is never directly accessible to
 /// ECMAScript code"). Shared by instance-field init (this = instance,
 /// [[HomeObject]] = ctor.prototype) and static-element init (this = ctor,
-/// [[HomeObject]] = ctor). Returns Some(child_idx) when stmts is non-empty.
+/// [[HomeObject]] = ctor). Returns Some(child_idx) when `inits` is non-empty.
 fn compile_class_init_fn(
   e: Emitter,
-  stmts: List(ast.StmtWithLine),
+  inits: List(FieldInit),
 ) -> Result(#(Emitter, Option(Int)), EmitError) {
-  case stmts {
+  case inits {
     [] -> Ok(#(e, None))
     _ -> {
       use #(e, child) <- result.map(compile_function_body(
@@ -7422,7 +7332,7 @@ fn compile_class_init_fn(
         None,
         None,
         [],
-        stmts,
+        FieldInitsBody(inits),
         False,
         False,
         False,
@@ -7492,7 +7402,7 @@ fn emit_class_methods(
     // and double initialization via return-override throws).
     // Static: install on the constructor right now as an own private element.
     ast_util.ClassMethodEl(
-      key: ast.Identifier(name: "#" <> rest, ..),
+      key: ast.KeyPrivate(name:, ..),
       fun: ast.FunctionLiteral(
         params:,
         body:,
@@ -7503,7 +7413,6 @@ fn emit_class_methods(
       kind:,
       ..,
     ) -> {
-      let name = "#" <> rest
       let fn_name = case kind {
         ast.MethodGet -> "get " <> name
         ast.MethodSet -> "set " <> name
@@ -7539,7 +7448,7 @@ fn emit_class_methods(
     }
     // Static-string key: name() {}, "name"() {}, get name() {}, set name(v) {}
     ast_util.ClassMethodEl(
-      key: ast.Identifier(name:, ..),
+      key: ast.KeyIdentifier(name:, ..),
       fun: ast.FunctionLiteral(
         params:,
         body:,
@@ -7548,10 +7457,10 @@ fn emit_class_methods(
         ..,
       ),
       kind:,
-      computed: False,
+      ..,
     )
     | ast_util.ClassMethodEl(
-        key: ast.StringExpression(_, name),
+        key: ast.KeyString(value: name, ..),
         fun: ast.FunctionLiteral(
           params:,
           body:,
@@ -7560,7 +7469,7 @@ fn emit_class_methods(
           ..,
         ),
         kind:,
-        computed: False,
+        ..,
       ) -> {
       let #(fn_name, define_op) = case kind {
         ast.MethodGet -> #(
@@ -7588,10 +7497,11 @@ fn emit_class_methods(
       ))
       emit_ir(e, define_op)
     }
-    // Computed key or numeric-literal key (`[expr]() {}`, `0b10() {}`).
-    // Function name left None — SetFunctionName from runtime keys is not yet
-    // implemented (matches object-literal computed methods).
+    // Computed key or numeric/bigint-literal key (`[expr]() {}`, `0b10() {}`,
+    // `1n() {}`). Function name left None — SetFunctionName from runtime keys
+    // is not yet implemented (matches object-literal computed methods).
     ast_util.ClassMethodEl(
+      body_index:,
       key:,
       fun: ast.FunctionLiteral(
         params:,
@@ -7601,10 +7511,9 @@ fn emit_class_methods(
         ..,
       ),
       kind:,
-      ..,
     ) -> {
       use e <- with_method_target(e, on_prototype)
-      use e <- result.try(emit_expr(e, key))
+      use e <- result.try(emit_class_element_key(e, key, body_index))
       use e <- result.map(make_method_closure(
         e,
         None,
@@ -7627,6 +7536,26 @@ fn emit_class_methods(
   }
 }
 
+/// Push a class element's property key. A computed key is NEVER re-evaluated
+/// here — §15.7.14 evaluated it once, at class-definition time, into the
+/// element's stash const (see compile_class_body); this reads that const back.
+/// Literal keys are pushed as constants.
+fn emit_class_element_key(
+  e: Emitter,
+  key: ast.PropertyKey,
+  body_index: Int,
+) -> Result(Emitter, EmitError) {
+  case key {
+    ast.KeyComputed(..) ->
+      Ok(emit_var_get(e, ast_util.computed_field_const(body_index)))
+    ast.KeyIdentifier(..)
+    | ast.KeyString(..)
+    | ast.KeyNumber(..)
+    | ast.KeyBigInt(..)
+    | ast.KeyPrivate(..) -> emit_property_key(e, key)
+  }
+}
+
 /// Stack: [ctor] → [ctor]. §15.7.14 step 31: build the static-init closure
 /// with [[HomeObject]] = ctor and immediately [[Call]] it with `this` = ctor.
 /// No-op when the class has no static elements.
@@ -7643,109 +7572,155 @@ fn emit_call_static_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
   }
 }
 
-/// Rewrite each computed element's key to a read of its hidden stash const so
-/// downstream emission loads the already-coerced key instead of re-evaluating
-/// the name expression: field init fns run per-instantiation / at static-init
-/// time, and method definitions run after ALL keys were evaluated in source
-/// order (see compile_class_body).
-fn stash_computed_element_keys(
-  body: List(ast.ClassElement),
-) -> List(ast.ClassElement) {
-  list.index_map(body, fn(elem, idx) {
-    case elem {
-      ast.ClassField(key:, value:, is_static:, computed: True) ->
-        ast.ClassField(
-          key: ast.Identifier(
-            span: ast.expression_span(key),
-            name: ast_util.computed_field_const(idx),
-          ),
-          value:,
-          is_static:,
-          computed: True,
-        )
-      ast.ClassMethod(key:, value:, kind:, is_static:, computed: True) ->
-        ast.ClassMethod(
-          key: ast.Identifier(
-            span: ast.expression_span(key),
-            name: ast_util.computed_field_const(idx),
-          ),
-          value:,
-          kind:,
-          is_static:,
-          computed: True,
-        )
-      _ -> elem
-    }
-  })
-}
-
-/// §7.3.29 PrivateMethodOrAccessorAdd: synthesize the per-instance install
-/// statements for instance private methods/accessors. Encoded as
-/// ClassFieldInit with the hidden const (see ast_util.private_fn_const) as the value
-/// expression — emit_stmt's ClassFieldInit branch decodes the NUL-prefixed
-/// identifier and emits IrDefinePrivateMethod/Accessor instead of a field
-/// add. Spec order: all private methods install BEFORE field initializers
-/// run (InitializeInstanceElements steps 5 then 6).
-fn private_method_init_stmts(
+/// §7.3.29 PrivateMethodOrAccessorAdd: the per-instance install of every
+/// instance private method/accessor half. The closure was already built into
+/// the hidden class-scope const `ast_util.private_fn_const(kind, name)`; the
+/// element only has to read it back and pick the define-op from `kind`. Spec
+/// order: all private methods install BEFORE field initializers run
+/// (InitializeInstanceElements steps 5 then 6).
+fn private_method_inits(
   methods: List(ast_util.ClassMethodEl),
-) -> List(ast.StmtWithLine) {
+) -> List(FieldInit) {
   use m <- list.filter_map(methods)
   case m.key {
-    ast.Identifier(span: key_span, name: "#" <> rest) ->
-      Ok(ast.StmtWithLine(
-        0,
-        ast.ClassFieldInit(
-          key: ast.Identifier(span: key_span, name: "#" <> rest),
-          value: Some(ast.Identifier(
-            span: key_span,
-            name: ast_util.private_fn_const(m.kind, "#" <> rest),
-          )),
-          computed: False,
-        ),
+    ast.KeyPrivate(name:, ..) ->
+      Ok(PrivateMethodInit(
+        name:,
+        closure_const: ast_util.private_fn_const(m.kind, name),
+        kind: m.kind,
       ))
-    _ -> Error(Nil)
+    ast.KeyIdentifier(..)
+    | ast.KeyString(..)
+    | ast.KeyNumber(..)
+    | ast.KeyBigInt(..)
+    | ast.KeyComputed(..) -> Error(Nil)
   }
 }
 
-/// Map every instance ClassField → ClassFieldInit statement.
-/// Per §15.7.14 ClassFieldDefinitionEvaluation, value:None becomes undefined
-/// (handled in emit_stmt).
-fn field_init_stmts(
-  fields: List(ast_util.ClassFieldEl),
-) -> List(ast.StmtWithLine) {
-  use ast_util.ClassFieldEl(key:, value:, computed:) <- list.map(fields)
-  ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:))
+/// Map every instance ClassField → the FieldInit that defines it. This is the
+/// ONE place a field's key shape (private / literal / numeric / computed) is
+/// inspected: from here on the constructor names the opcode.
+fn field_inits(fields: List(ast_util.ClassFieldEl)) -> List(FieldInit) {
+  use field <- list.map(fields)
+  field_init_of(field)
 }
 
-/// Map static elements → statements for the static-init wrapper body.
-/// `static x = v` → ClassFieldInit (emit_stmt defines on `this` = ctor).
-/// `static { ... }` → arrow IIFE so the block gets its own var environment
-/// (§15.7.1 ClassStaticBlockBody) while inheriting `this`/home_object from
-/// the wrapper. Mirrors QuickJS emit_class_init_start/end.
-fn static_init_stmts(
-  elements: List(ast_util.StaticEl),
-) -> List(ast.StmtWithLine) {
-  use elem <- list.map(elements)
-  case elem {
-    ast_util.StaticField(ast_util.ClassFieldEl(key:, value:, computed:)) ->
-      ast.StmtWithLine(0, ast.ClassFieldInit(key:, value:, computed:))
-    ast_util.StaticBlockEl(body) ->
-      ast.StmtWithLine(
-        0,
-        ast.ExpressionStatement(
-          // Synthetic — no source token, so Span(0, 0).
-          ast.CallExpression(
-            span: ast.Span(0, 0),
-            callee: ast.ArrowFunctionExpression(
-              span: ast.Span(0, 0),
-              params: [],
-              body: ast.ArrowBodyBlock(body),
-              is_async: False,
-            ),
-            arguments: [],
-          ),
-          directive: None,
-        ),
+fn field_init_of(field: ast_util.ClassFieldEl) -> FieldInit {
+  let ast_util.ClassFieldEl(body_index:, key:, value:) = field
+  // §15.7.14: if Initializer is absent, initValue = undefined. The synthetic
+  // undefined-expression carries the key's span so any error points at the
+  // field declaration.
+  let init =
+    option.unwrap(value, ast.UndefinedExpression(ast.property_key_span(key)))
+  case key {
+    ast.KeyPrivate(name:, ..) -> PrivateFieldInit(name:, init:)
+    ast.KeyIdentifier(name:, ..) | ast.KeyString(value: name, ..) ->
+      NamedFieldInit(name:, init:)
+    ast.KeyNumber(value: n, ..) -> NumericFieldInit(value: n, init:)
+    ast.KeyBigInt(value: i, ..) -> BigIntFieldInit(value: i, init:)
+    // The key was evaluated + ToPropertyKey'd once at class-definition time
+    // into this element's stash const (compile_class_body).
+    ast.KeyComputed(..) ->
+      ComputedFieldInit(
+        key_const: ast_util.computed_field_const(body_index),
+        init:,
       )
   }
+}
+
+/// Map static elements → the FieldInits of the static-init wrapper body.
+/// `static x = v` defines on `this` = ctor; `static { ... }` becomes a
+/// StaticBlockInit.
+fn static_inits(elements: List(ast_util.StaticEl)) -> List(FieldInit) {
+  use elem <- list.map(elements)
+  case elem {
+    ast_util.StaticField(field) -> field_init_of(field)
+    ast_util.StaticBlockEl(body) -> StaticBlockInit(body)
+  }
+}
+
+/// Emit one element of a class-init function body. Stack-neutral. Every field
+/// element pushes `this` (the instance, or the ctor for static elements),
+/// leaves the define-op to consume the value, then pops `this` back off.
+fn emit_field_init(e: Emitter, fi: FieldInit) -> Result(Emitter, EmitError) {
+  case fi {
+    // The static block runs as an arrow IIFE, so it takes `this` from the
+    // enclosing wrapper rather than pushing its own.
+    StaticBlockInit(body:) -> {
+      use e <- result.map(emit_expr(e, static_block_iife(body)))
+      emit_op(e, opcode.Pop)
+    }
+    PrivateMethodInit(name:, closure_const:, kind:) ->
+      use_this(e, fn(e) {
+        let e =
+          e
+          |> emit_var_get(name)
+          |> emit_var_get(closure_const)
+        Ok(case kind {
+          ast.MethodGet ->
+            emit_op(e, opcode.DefinePrivateAccessor(opcode.Getter))
+          ast.MethodSet ->
+            emit_op(e, opcode.DefinePrivateAccessor(opcode.Setter))
+          ast.MethodMethod | ast.MethodConstructor ->
+            emit_op(e, opcode.DefinePrivateMethod)
+        })
+      })
+    // §7.3.28 PrivateFieldAdd — the PrivateName comes from the class-scope
+    // const named `#x` (see compile_class).
+    PrivateFieldInit(name:, init:) ->
+      use_this(e, fn(e) {
+        let e = emit_var_get(e, name)
+        use e <- result.map(emit_named_expr(e, init, name))
+        emit_op(e, opcode.DefinePrivateField)
+      })
+    // §7.3.33 DefineField step 7: anonymous function initializers get the
+    // field name (NamedEvaluation).
+    NamedFieldInit(name:, init:) ->
+      use_this(e, fn(e) {
+        use e <- result.map(emit_named_expr(e, init, name))
+        emit_ir(e, IrDefineField(name))
+      })
+    NumericFieldInit(value: n, init:) ->
+      use_this(e, fn(e) {
+        let e = push_const(e, JsNumber(literal_number(n)))
+        use e <- result.map(emit_expr(e, init))
+        emit_op(e, opcode.DefineFieldComputed)
+      })
+    ComputedFieldInit(key_const:, init:) ->
+      use_this(e, fn(e) {
+        let e = emit_var_get(e, key_const)
+        use e <- result.map(emit_expr(e, init))
+        emit_op(e, opcode.DefineFieldComputed)
+      })
+    BigIntFieldInit(value: i, init:) ->
+      use_this(e, fn(e) {
+        let e = push_const(e, value.JsBigInt(value.BigInt(i)))
+        use e <- result.map(emit_expr(e, init))
+        emit_op(e, opcode.DefineFieldComputed)
+      })
+  }
+}
+
+/// Push `this` (the target of a field definition), run `body`, pop it back off.
+fn use_this(
+  e: Emitter,
+  body: fn(Emitter) -> Result(Emitter, EmitError),
+) -> Result(Emitter, EmitError) {
+  use e <- result.map(body(get_this(e)))
+  emit_op(e, opcode.Pop)
+}
+
+/// `(() => { ...body })()` — the static-block lowering. Synthetic, so all
+/// spans are Span(0, 0).
+fn static_block_iife(body: List(ast.StmtWithLine)) -> ast.Expression {
+  ast.CallExpression(
+    span: ast.Span(0, 0),
+    callee: ast.ArrowFunctionExpression(
+      span: ast.Span(0, 0),
+      params: [],
+      body: ast.ArrowBodyBlock(body),
+      is_async: False,
+    ),
+    arguments: [],
+  )
 }

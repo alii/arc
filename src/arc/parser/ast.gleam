@@ -1,7 +1,7 @@
 /// Core AST types for the Arc JavaScript parser.
 /// Based on the ESTree specification, adapted for Gleam's type system.
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 
 pub type Program {
   Script(body: List(StmtWithLine))
@@ -213,11 +213,6 @@ pub type Statement {
     super_class: Option(Expression),
     body: List(ClassElement),
   )
-  /// Internal-only — never produced by the parser. Synthesized by class
-  /// compilation for §7.3.32 DefineField (CreateDataPropertyOrThrow on `this`).
-  /// Unlike `this.x = v` (which uses [[Set]] and triggers prototype setters),
-  /// this compiles to IrDefineField / IrDefineFieldComputed ([[DefineOwnProperty]]).
-  ClassFieldInit(key: Expression, value: Option(Expression), computed: Bool)
 }
 
 pub type ForInit {
@@ -255,18 +250,12 @@ pub type FunctionLiteral {
 
 pub type ClassElement {
   ClassMethod(
-    key: Expression,
+    key: PropertyKey,
     value: FunctionLiteral,
     kind: MethodKind,
     is_static: Bool,
-    computed: Bool,
   )
-  ClassField(
-    key: Expression,
-    value: Option(Expression),
-    is_static: Bool,
-    computed: Bool,
-  )
+  ClassField(key: PropertyKey, value: Option(Expression), is_static: Bool)
   StaticBlock(body: List(StmtWithLine))
 }
 
@@ -479,22 +468,72 @@ pub type ArrowBody {
   ArrowBodyBlock(List(StmtWithLine))
 }
 
+/// One property in an object literal, in the shapes the grammar spells:
+/// `k: v` / `{k}` (Init), `k(){}` (Method), `get k(){}` / `set k(v){}`
+/// (Accessor), `...v` (Spread). Methods and accessors carry a
+/// `FunctionLiteral` — a non-function method body is unrepresentable, and
+/// only Init properties can be `shorthand`.
+/// The name of a property or class element, in the shapes the grammar spells
+/// (§13.2.5.1 PropertyName, §15.7.1 ClassElementName). Every property-bearing
+/// node carries one of these instead of a `(key: Expression, computed: Bool)`
+/// pair, so a non-computed key holding an arbitrary expression — e.g.
+/// `InitProperty(key: CallExpression(..), computed: False)`, which used to be
+/// constructible and reached a defensive "shouldn't happen" fallback in emit —
+/// cannot exist. Consumers match the five literal shapes plus `KeyComputed`
+/// exhaustively and never need a fallback arm.
+pub type PropertyKey {
+  /// `{ x: 1 }`, `class C { x }` — an IdentifierName, keywords included.
+  KeyIdentifier(name: String, span: Span)
+  /// `{ "x": 1 }` — the cooked string value, escapes already decoded.
+  KeyString(value: String, span: Span)
+  /// `{ 1: v }`, `{ 0x10() {} }` — needs ToPropertyKey at runtime for the
+  /// canonical string form ("1", not "1.0").
+  KeyNumber(value: LiteralNumber, span: Span)
+  /// `{ 1n: v }` — the other LiteralPropertyName numeric form.
+  KeyBigInt(value: Int, span: Span)
+  /// `class C { #x }`, `#x() {}` — `name` includes the leading `#`. Only legal
+  /// on class elements; the parser rejects it as an object-literal /
+  /// object-pattern key.
+  KeyPrivate(name: String, span: Span)
+  /// `{ [expr]: v }` — evaluated and ToPropertyKey'd at runtime (once, at
+  /// class-definition time, for class elements).
+  KeyComputed(expression: Expression)
+}
+
+/// The source span of a property key: the key token, or the whole `[expr]`
+/// key expression for a computed key.
+pub fn property_key_span(key: PropertyKey) -> Span {
+  case key {
+    KeyIdentifier(span:, ..)
+    | KeyString(span:, ..)
+    | KeyNumber(span:, ..)
+    | KeyBigInt(span:, ..)
+    | KeyPrivate(span:, ..) -> span
+    KeyComputed(expression:) -> expression.span
+  }
+}
+
+/// The static string form of a non-computed, non-private key, or None. Numeric
+/// keys are excluded: their canonical string form is a runtime ToPropertyKey
+/// question, not a syntactic one.
+pub fn property_key_static_name(key: PropertyKey) -> Option(String) {
+  case key {
+    KeyIdentifier(name:, ..) -> Some(name)
+    KeyString(value:, ..) -> Some(value)
+    KeyNumber(..) | KeyBigInt(..) | KeyPrivate(..) | KeyComputed(..) -> None
+  }
+}
+
 pub type Property {
-  Property(
-    key: Expression,
-    value: Expression,
-    kind: PropertyKind,
-    computed: Bool,
-    shorthand: Bool,
-    method: Bool,
-  )
+  InitProperty(key: PropertyKey, value: Expression, shorthand: Bool)
+  MethodProperty(key: PropertyKey, value: FunctionLiteral)
+  AccessorProperty(key: PropertyKey, value: FunctionLiteral, kind: AccessorKind)
   SpreadProperty(argument: Expression)
 }
 
-pub type PropertyKind {
-  Init
-  Get
-  Set
+pub type AccessorKind {
+  GetAccessor
+  SetAccessor
 }
 
 pub type UpdateOp {
@@ -511,12 +550,7 @@ pub type Pattern {
 }
 
 pub type PatternProperty {
-  PatternProperty(
-    key: Expression,
-    value: Pattern,
-    computed: Bool,
-    shorthand: Bool,
-  )
+  PatternProperty(key: PropertyKey, value: Pattern, shorthand: Bool)
   RestProperty(argument: Pattern)
 }
 
