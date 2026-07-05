@@ -23,6 +23,7 @@ import arc/vm/state.{
 import arc/vm/value.{
   type ArrayIterKind, type JsValue, type Ref, JsObject, JsUndefined, ObjectSlot,
 }
+import gleam/bool
 import gleam/dict
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -57,17 +58,7 @@ pub fn step(
         ),
         ..,
       ) as slot,
-    ) ->
-      // Pragmatic drain budget: an iterator over `Array(2**32-1)` or over a
-      // hostile `{length: 1e300}` array-like is spec-legal to CREATE (§23.1.5.1
-      // is ToObject and nothing else) but must not be allowed to spin the VM
-      // for hours. Bail on the STEP that exceeds the budget, not at creation —
-      // creation reads nothing and can never be observed to fail.
-      case index >= limits.max_iteration {
-        True ->
-          rethrow(Error(state.range_error_value(state, "Invalid array length")))
-        False -> step_at(state, iter_ref, slot, source, index, iter_kind)
-      }
+    ) -> step_at(state, iter_ref, slot, source, index, iter_kind)
     _ ->
       Error(VmFailed(
         InternalError("ArrayIteratorNext", "not an array-iterator slot"),
@@ -178,6 +169,15 @@ fn step_at(
         // proxy traps.
         None -> {
           use #(length, state) <- result.try(array_like_length(state, source))
+          // §7.1.20 clamps a hostile `{length: 1e300}` / `{length: Infinity}`
+          // to 2^53-1, which no `for..of` could ever drain — bail loudly rather
+          // than spin the VM for hours. Only array-LIKES reach here: real
+          // Arrays and typed arrays take the branches above, where `length` is
+          // bounded by what the heap actually holds, so a legal 20M-element
+          // array or view still iterates to completion.
+          use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+            rethrow(Error(state.range_error_value(state, iteration_budget_msg)))
+          })
           case index >= length {
             True -> Ok(#(Exhausted, exhaust(state, iter_ref)))
             False ->
@@ -203,6 +203,11 @@ fn step_at(
       }
   }
 }
+
+/// Thrown when an array-LIKE reports a `length` past the engine's iteration
+/// budget. Not a spec behaviour: §23.1.5.1 would keep yielding `undefined`
+/// forever, which is indistinguishable from a hang.
+const iteration_budget_msg = "Array-like length exceeds the maximum supported iteration"
 
 /// §7.1.20 LengthOfArrayLike, in this module's StepExit error shape — the
 /// implementation itself is `property.length_of_array_like`, so a hostile
