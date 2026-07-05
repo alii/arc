@@ -349,9 +349,9 @@ fn hard_error_token(
 }
 
 /// The single-byte punctuation table: tokens recognizable from their first
-/// byte alone, with no multi-char variants. THE table — both the fast path
-/// (`read_fast_punct`, which runs first) and `read_token` consult it, so the
-/// two can never disagree about what `(` lexes to.
+/// byte alone, with no multi-char variants. THE table — `read_fast_punct` is
+/// its only consumer, and it runs before `read_token`, so these bytes never
+/// reach the slow path.
 fn single_char_punct(byte: Int) -> Option(#(TokenKind, String)) {
   case byte {
     0x28 -> Some(#(LeftParen, "("))
@@ -373,14 +373,6 @@ fn read_fast_punct(rest: BitArray) -> Option(#(TokenKind, String)) {
   case rest {
     <<b, _:bytes>> -> single_char_punct(b)
     _ -> None
-  }
-}
-
-/// `single_char_punct` at byte position `pos`.
-fn punct_at(bytes: BitArray, pos: Int) -> Option(#(TokenKind, String)) {
-  case bit_array.slice(bytes, pos, 1) {
-    Ok(<<b>>) -> single_char_punct(b)
-    Ok(_) | Error(Nil) -> None
   }
 }
 
@@ -564,15 +556,10 @@ fn tokn(kind: TokenKind, value: String, pos: Int, raw_len: Int) -> Token {
   )
 }
 
+/// Reads one non-punctuation token. `scan_next` only calls this after
+/// `read_fast_punct` has already returned `None`, so the single-byte punctuation
+/// of `single_char_punct` never reaches here.
 fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
-  case punct_at(bytes, pos) {
-    // Single-char punctuation (the same table the fast path uses)
-    Some(#(kind, value)) -> Ok(tokn(kind, value, pos, 1))
-    None -> read_non_punct_token(bytes, pos)
-  }
-}
-
-fn read_non_punct_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
   let ch = char_at(bytes, pos)
   case ch {
     // Dot / spread
