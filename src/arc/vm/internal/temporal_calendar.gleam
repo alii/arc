@@ -1608,8 +1608,12 @@ pub type Era {
 /// shift `eras_of` already declares for that code, so the two directions of
 /// the mapping cannot drift apart.
 pub fn era_for(cal: Calendar, year: Int, month: Int, day: Int) -> Option(Era) {
-  use code <- option.then(era_code_for(cal, year, month, day))
-  use shift <- option.map(option.from_result(list.key_find(eras_of(cal), code)))
+  use code <- option.map(era_code_for(cal, year, month, day))
+  // Invariant: every code `era_code_for` can hand back for `cal` is declared
+  // in `eras_of(cal)`. A miss means the two tables have drifted apart, which
+  // is a bug — not a date that legitimately has no era. Fail loudly rather
+  // than silently reporting `None`.
+  let assert Ok(shift) = list.key_find(eras_of(cal), code)
   Era(code, era_year(shift, year))
 }
 
