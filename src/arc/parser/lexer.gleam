@@ -2,6 +2,7 @@
 /// Converts source text into a stream of tokens.
 /// Operates on raw bytes (UTF-8) for O(1) character access.
 import arc/internal/digits
+import arc/internal/utf16
 import gleam/bit_array
 import gleam/bool
 import gleam/int
@@ -385,6 +386,10 @@ fn do_count_newlines(bytes: BitArray, count: Int) -> Int {
     <<13, 10, rest:bytes>> -> do_count_newlines(rest, count + 1)
     <<10, rest:bytes>> -> do_count_newlines(rest, count + 1)
     <<13, rest:bytes>> -> do_count_newlines(rest, count + 1)
+    // U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR are §12.3
+    // LineTerminators too — both encode as E2 80 A8/A9 in UTF-8.
+    <<0xE2, 0x80, 0xA8, rest:bytes>> -> do_count_newlines(rest, count + 1)
+    <<0xE2, 0x80, 0xA9, rest:bytes>> -> do_count_newlines(rest, count + 1)
     <<_, rest:bytes>> -> do_count_newlines(rest, count)
     _ -> count
   }
@@ -867,56 +872,56 @@ fn validate_escape(
   }
 }
 
+/// Parse `\u{H+}` or `\uHHHH` starting at `after_u` — the byte AFTER 'u'.
+/// Returns `Some(#(codepoint, end))`: the raw parsed hex value and the byte
+/// offset just past the escape's last byte. `None` on any syntax error (no
+/// digits, missing `}`, fewer than 4 hex). Pure syntax — range and surrogate
+/// checks are the caller's job, so all three `\u` consumers agree on what a
+/// well-formed escape *is* before deciding what it may *mean*.
+fn scan_unicode_escape(bytes: BitArray, after_u: Int) -> Option(#(Int, Int)) {
+  case char_at(bytes, after_u) {
+    "{" -> {
+      let digits_start = after_u + 1
+      let digits_end = skip_hex_run(bytes, digits_start)
+      case digits_end > digits_start && char_at(bytes, digits_end) == "}" {
+        False -> None
+        True ->
+          byte_slice(bytes, digits_start, digits_end - digits_start)
+          |> int.base_parse(16)
+          |> result.map(fn(cp) { #(cp, digits_end + 1) })
+          |> option.from_result
+      }
+    }
+    _ ->
+      case
+        digits.is_hex_digit(char_at(bytes, after_u))
+        && digits.is_hex_digit(char_at(bytes, after_u + 1))
+        && digits.is_hex_digit(char_at(bytes, after_u + 2))
+        && digits.is_hex_digit(char_at(bytes, after_u + 3))
+      {
+        False -> None
+        True ->
+          byte_slice(bytes, after_u, 4)
+          |> int.base_parse(16)
+          |> result.map(fn(cp) { #(cp, after_u + 4) })
+          |> option.from_result
+      }
+  }
+}
+
 /// Validate \u escape. `pos` points to the char after 'u'.
 fn validate_unicode_escape(
   bytes: BitArray,
   pos: Int,
   backslash_pos: Int,
 ) -> Result(Escape, LexError) {
-  case char_at(bytes, pos) {
-    "{" -> {
-      // Braced unicode escape: \u{XXXX}
-      // Collect hex digits until }
-      let digits_start = pos + 1
-      let digits_end = skip_hex_run(bytes, digits_start)
-      let digit_count = digits_end - digits_start
-      case digit_count == 0 {
+  case scan_unicode_escape(bytes, pos) {
+    None -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
+    Some(#(cp, end)) ->
+      case cp > 0x10FFFF {
         True -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
-        False ->
-          case char_at(bytes, digits_end) {
-            "}" -> {
-              // Validate the codepoint value <= 0x10FFFF
-              let hex_str = byte_slice(bytes, digits_start, digit_count)
-              case int.base_parse(hex_str, 16) {
-                Ok(value) ->
-                  case value > 0x10FFFF {
-                    True -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
-                    // Total skip: \ u { digits } = 2 + 1 + digit_count + 1
-                    False -> Ok(Escape(digit_count + 4, False))
-                  }
-                Error(Nil) -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
-              }
-            }
-            _ -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
-          }
+        False -> Ok(Escape(end - backslash_pos, False))
       }
-    }
-    _ -> {
-      // Non-braced: must be exactly 4 hex digits
-      let h1 = char_at(bytes, pos)
-      let h2 = char_at(bytes, pos + 1)
-      let h3 = char_at(bytes, pos + 2)
-      let h4 = char_at(bytes, pos + 3)
-      case
-        digits.is_hex_digit(h1)
-        && digits.is_hex_digit(h2)
-        && digits.is_hex_digit(h3)
-        && digits.is_hex_digit(h4)
-      {
-        True -> Ok(Escape(6, False))
-        False -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
-      }
-    }
   }
 }
 
@@ -932,27 +937,9 @@ fn skip_hex_run(bytes: BitArray, pos: Int) -> Int {
 /// Returns the number of bytes in the escape: \u{...} or \uXXXX.
 /// Falls back to 2 (just \u) if the format doesn't match.
 fn unicode_escape_span(bytes: BitArray, pos: Int) -> Int {
-  case char_at(bytes, pos + 2) {
-    "{" -> {
-      // \u{...} — scan to the closing }
-      let digits_end = skip_hex_run(bytes, pos + 3)
-      case char_at(bytes, digits_end) {
-        "}" -> digits_end + 1 - pos
-        _ -> 2
-      }
-    }
-    _ -> {
-      // \uXXXX — 4 hex digits
-      case
-        digits.is_hex_digit(char_at(bytes, pos + 2))
-        && digits.is_hex_digit(char_at(bytes, pos + 3))
-        && digits.is_hex_digit(char_at(bytes, pos + 4))
-        && digits.is_hex_digit(char_at(bytes, pos + 5))
-      {
-        True -> 6
-        False -> 2
-      }
-    }
+  case scan_unicode_escape(bytes, pos + 2) {
+    Some(#(_, end)) -> end - pos
+    None -> 2
   }
 }
 
@@ -1567,65 +1554,18 @@ fn read_identifier_escape(
   pos: Int,
   is_start: Bool,
 ) -> Result(#(Int, String), LexError) {
-  // Must be \u
-  case char_at(bytes, pos + 1) {
-    "u" -> {
-      case char_at(bytes, pos + 2) {
-        "{" -> {
-          // Braced: \u{XXXX}
-          let digits_start = pos + 3
-          let digits_end = skip_hex_run(bytes, digits_start)
-          let digit_count = digits_end - digits_start
-          case digit_count == 0 {
-            True -> Error(InvalidUnicodeEscapeSequence(pos))
-            False ->
-              case char_at(bytes, digits_end) {
-                "}" -> {
-                  let hex_str = byte_slice(bytes, digits_start, digit_count)
-                  case int.base_parse(hex_str, 16) {
-                    Ok(cp) ->
-                      case cp > 0x10FFFF {
-                        True -> Error(InvalidUnicodeEscapeSequence(pos))
-                        False ->
-                          decoded_identifier_char(cp, is_start, digits_end + 1)
-                          |> result.replace_error(InvalidUnicodeEscapeSequence(
-                            pos,
-                          ))
-                      }
-                    Error(Nil) -> Error(InvalidUnicodeEscapeSequence(pos))
-                  }
-                }
-                _ -> Error(InvalidUnicodeEscapeSequence(pos))
-              }
-          }
-        }
-        _ -> {
-          // Non-braced: \uXXXX — exactly 4 hex digits
-          let h1 = char_at(bytes, pos + 2)
-          let h2 = char_at(bytes, pos + 3)
-          let h3 = char_at(bytes, pos + 4)
-          let h4 = char_at(bytes, pos + 5)
-          case
-            digits.is_hex_digit(h1)
-            && digits.is_hex_digit(h2)
-            && digits.is_hex_digit(h3)
-            && digits.is_hex_digit(h4)
-          {
-            True -> {
-              let hex_str = byte_slice(bytes, pos + 2, 4)
-              case int.base_parse(hex_str, 16) {
-                Ok(cp) ->
-                  decoded_identifier_char(cp, is_start, pos + 6)
-                  |> result.replace_error(InvalidUnicodeEscapeSequence(pos))
-                Error(Nil) -> Error(InvalidUnicodeEscapeSequence(pos))
-              }
-            }
-            False -> Error(InvalidUnicodeEscapeSequence(pos))
-          }
-        }
+  let bad = Error(InvalidUnicodeEscapeSequence(pos))
+  use <- bool.guard(char_at(bytes, pos + 1) != "u", bad)
+  case scan_unicode_escape(bytes, pos + 2) {
+    None -> bad
+    Some(#(cp, end)) ->
+      case cp > 0x10FFFF {
+        True -> bad
+        // `decoded_identifier_char` rejects surrogates and non-ID codepoints.
+        False ->
+          decoded_identifier_char(cp, is_start, end)
+          |> result.replace_error(InvalidUnicodeEscapeSequence(pos))
       }
-    }
-    _ -> Error(InvalidUnicodeEscapeSequence(pos))
   }
 }
 
@@ -1652,7 +1592,7 @@ pub fn validate_identifier_codepoint(cp: Int, is_start: Bool) -> Bool {
   case cp {
     0 -> False
     _ ->
-      case cp >= 0xD800 && cp <= 0xDFFF {
+      case utf16.is_surrogate(cp) {
         True -> False
         False ->
           case is_start {
