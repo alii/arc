@@ -1663,7 +1663,7 @@ fn proto_set(
     JsUndefined | value.JsNull ->
       state.type_error(
         state,
-        "Cannot convert " <> string.inspect(src) <> " to object",
+        "Cannot convert " <> object.inspect(src, state.heap) <> " to object",
       )
     _ ->
       case common.to_object(state.heap, state.builtins, src) {
@@ -1679,7 +1679,7 @@ fn proto_set(
         None ->
           state.type_error(
             state,
-            "Cannot convert " <> string.inspect(src) <> " to object",
+            "Cannot convert " <> object.inspect(src, state.heap) <> " to object",
           )
       }
   }
@@ -2261,7 +2261,11 @@ fn require_cb(
   let this_arg = helpers.arg_at(args, 1)
   case helpers.is_callable(state.heap, cb) {
     True -> cont(cb, this_arg, state)
-    False -> state.type_error(state, string.inspect(cb) <> " is not a function")
+    False ->
+      state.type_error(
+        state,
+        object.inspect(cb, state.heap) <> " is not a function",
+      )
   }
 }
 
@@ -2635,7 +2639,10 @@ fn proto_reduce(
   let len = view.length
   let cb = helpers.first_arg_or_undefined(args)
   use <- bool.lazy_guard(!helpers.is_callable(state.heap, cb), fn() {
-    state.type_error(state, string.inspect(cb) <> " is not a function")
+    state.type_error(
+      state,
+      object.inspect(cb, state.heap) <> " is not a function",
+    )
   })
   let start = direction_start(dir, len)
   case helpers.list_at(args, 1) {
