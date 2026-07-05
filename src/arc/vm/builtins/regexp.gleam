@@ -717,7 +717,7 @@ fn validate_flags_and_pattern(
 ) -> Result(Nil, regex.PatternError) {
   use parsed <- result.try(regex.validate_flags(flags))
   let bytes = <<pattern:utf8>>
-  regex.validate_pattern(bytes, 0, bit_array.byte_size(bytes), parsed.flags)
+  regex.validate_pattern(bytes, 0, bit_array.byte_size(bytes), parsed)
 }
 
 /// ToString, except undefined → "" (RegExpInitialize steps 1-2).
@@ -1872,7 +1872,8 @@ fn finish_replacement(
   cont: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let parts = list.reverse(acc)
-  let total = list.fold(parts, 0, fn(sum, part) { sum + string.byte_size(part) })
+  let total =
+    list.fold(parts, 0, fn(sum, part) { sum + string.byte_size(part) })
   case total > limits.max_string_bytes {
     True -> state.range_error(state, "Invalid string length")
     False -> cont(string.concat(parts), state)

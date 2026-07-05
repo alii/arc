@@ -2639,10 +2639,14 @@ fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     }
     _ -> Ok(#(p4, option.None))
   })
-  case handler, finalizer {
+  use tail <- result.map(case handler, finalizer {
     option.None, option.None -> Error(MissingCatchOrFinally(pos_of(p5)))
-    _, _ -> Ok(#(p5, ast.TryStatement(block:, handler:, finalizer:)))
-  }
+    option.Some(handler), option.None -> Ok(ast.TryCatch(handler:))
+    option.None, option.Some(finalizer) -> Ok(ast.TryFinally(finalizer:))
+    option.Some(handler), option.Some(finalizer) ->
+      Ok(ast.TryCatchFinally(handler:, finalizer:))
+  })
+  #(p5, ast.TryStatement(block:, tail:))
 }
 
 fn parse_catch_clause(
@@ -5950,11 +5954,11 @@ fn parse_tagged_template(
   p: P,
   tag: ast.Expression,
 ) -> Result(#(P, ast.Expression), ParseError) {
-  use #(p2, raw_quasis, expressions) <- result.map(parse_template_spans(p))
+  use #(p2, raw_parts) <- result.map(parse_template_spans(p))
   // §12.9.6: an invalid escape in a TAGGED template's quasi is legal — its
   // cooked value is undefined (None); the raw text is always available.
-  let quasis =
-    list.map(raw_quasis, fn(q) {
+  let parts =
+    ast.map_template_quasis(raw_parts, fn(q) {
       case cook_template_string(q) {
         Ok(s) -> ast.TemplateQuasi(cooked: Some(s), raw: q)
         Error(Nil) -> ast.TemplateQuasi(cooked: None, raw: q)
@@ -5963,8 +5967,7 @@ fn parse_tagged_template(
   let expr =
     ast.TaggedTemplateExpression(
       tag:,
-      quasis:,
-      expressions:,
+      parts:,
       span: span_from(tag.span.start, p2),
     )
   #(P(..p2, last_expr_assignable: False), expr)
@@ -6078,11 +6081,11 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     Undefined -> ok_lit(p, ast.UndefinedExpression(span: span_of(p)))
     TemplateLiteral | TemplateHead -> {
       let start = pos_of(p)
-      use #(p, raw_quasis, expressions) <- result.try(parse_template_spans(p))
+      use #(p, raw_parts) <- result.try(parse_template_spans(p))
       // §12.9.6: an undefined TV (invalid escape) is only legal in TAGGED
       // templates; in a plain template literal it is a SyntaxError.
-      use quasis <- result.map(
-        list.try_map(raw_quasis, fn(q) {
+      use parts <- result.map(
+        ast.try_map_template_quasis(raw_parts, fn(q) {
           case cook_template_string(q) {
             Ok(s) -> Ok(s)
             Error(Nil) -> Error(InvalidTemplateEscape(start))
@@ -6091,11 +6094,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       )
       #(
         P(..p, last_expr_assignable: False),
-        ast.TemplateLiteral(
-          quasis:,
-          expressions:,
-          span: ast.Span(start:, end: p.prev_end),
-        ),
+        ast.TemplateLiteral(parts:, span: ast.Span(start:, end: p.prev_end)),
       )
     }
     This ->
@@ -6665,7 +6664,7 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let start_pos = pos_of(p)
   // Scan the regex body starting after the opening /
   let body_start = start_pos + 1
-  case regex.scan_regex_source(p.bytes, body_start, False) {
+  case regex.scan_regex_source(p.bytes, body_start) {
     Ok(end_pos) -> {
       // end_pos is past the closing /, now skip optional flags
       use #(flags_end, flags) <- result.try(
@@ -6685,7 +6684,8 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let pattern =
         source_bytes.slice(p.bytes, body_start, end_pos - 1 - body_start)
         |> option.unwrap("")
-      let flags_str = string.join(flags, "")
+      // `flags.flags` is in source order, so this is the source text after `/`.
+      let flags_str = string.join(flags.flags, "")
       // The token window at/past the `/` was lexed with no expression
       // context, so it is garbage (a quote, backtick or `/*` in the body
       // may have opened a phantom string / template / comment). Lexing is
@@ -7767,10 +7767,14 @@ fn peek_at(p: P, n: Int) -> TokenKind {
 /// that a `}` re-enters a template.
 fn parse_template_spans(
   p: P,
-) -> Result(#(P, List(String), List(ast.Expression)), ParseError) {
+) -> Result(#(P, ast.TemplateParts(String)), ParseError) {
   case peek(p) {
     // `…` — complete, no substitutions.
-    TemplateLiteral -> Ok(#(advance(p), [template_span_raw(p, 1)], []))
+    TemplateLiteral ->
+      Ok(#(
+        advance(p),
+        ast.TemplateParts(head: template_span_raw(p, 1), tail: []),
+      ))
     // `…${ — one or more substitutions follow. The last-expression flags
     // and the enclosing [In] context are none of the substitutions'
     // business: restore them once the whole template is consumed.
@@ -7778,22 +7782,17 @@ fn parse_template_spans(
       let saved_assignable = p.last_expr_assignable
       let saved_is_assignment = p.last_expr_is_assignment
       let head = template_span_raw(p, 2)
-      use #(p, spans) <- result.map({
+      use #(p, rev_tail) <- result.map({
         use p <- with_allow_in(advance(p), True)
-        use #(p, rev_quasis, rev_exprs) <- result.map(
-          parse_template_substitutions(p, [head], []),
-        )
-        #(p, #(rev_quasis, rev_exprs))
+        parse_template_substitutions(p, [])
       })
-      let #(rev_quasis, rev_exprs) = spans
       #(
         P(
           ..p,
           last_expr_assignable: saved_assignable,
           last_expr_is_assignment: saved_is_assignment,
         ),
-        list.reverse(rev_quasis),
-        list.reverse(rev_exprs),
+        ast.TemplateParts(head:, tail: list.reverse(rev_tail)),
       )
     }
   }
@@ -7801,12 +7800,12 @@ fn parse_template_spans(
 
 /// Parse one `${ Expression }` — the parser sits on the first token INSIDE
 /// the substitution — plus the template span at its `}`, recursing while
-/// spans keep ending in `${`.
+/// spans keep ending in `${`. Returns the `#(expression, quasi)` pairs of
+/// `TemplateParts.tail`, in reverse source order.
 fn parse_template_substitutions(
   p: P,
-  rev_quasis: List(String),
-  rev_exprs: List(ast.Expression),
-) -> Result(#(P, List(String), List(ast.Expression)), ParseError) {
+  rev_tail: List(#(ast.Expression, String)),
+) -> Result(#(P, List(#(ast.Expression, String))), ParseError) {
   // [In] is already forced on for the whole template by the `with_allow_in`
   // in `parse_template_spans`.
   use #(p, expr) <- result.try(parse_expression(
@@ -7818,19 +7817,13 @@ fn parse_template_substitutions(
       case peek(p) {
         // }…${ — another substitution follows.
         TemplateHead ->
-          parse_template_substitutions(
-            advance(p),
-            [template_span_raw(p, 2), ..rev_quasis],
-            [expr, ..rev_exprs],
-          )
+          parse_template_substitutions(advance(p), [
+            #(expr, template_span_raw(p, 2)),
+            ..rev_tail
+          ])
         // }…` — the template ends.
         TemplateLiteral ->
-          Ok(
-            #(advance(p), [template_span_raw(p, 1), ..rev_quasis], [
-              expr,
-              ..rev_exprs
-            ]),
-          )
+          Ok(#(advance(p), [#(expr, template_span_raw(p, 1)), ..rev_tail]))
         // The continuation hit end of input: unterminated template.
         _ -> Error(UnterminatedTemplateSubstitution(pos_of(p)))
       }
