@@ -833,20 +833,8 @@ fn to_array(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use rec, state <- state.try_op(get_iterator_direct(state, this, "toArray"))
-  to_array_loop(state, rec, [])
-}
-
-fn to_array_loop(
-  state: State(host),
-  rec: IteratorRecord,
-  acc: List(JsValue),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(state, step) = iter_protocol.iterator_step_value(state, rec)
-  case step {
-    Error(thrown) -> #(state, Error(thrown))
-    Ok(None) -> state.ok_array(state, list.reverse(acc))
-    Ok(Some(v)) -> to_array_loop(state, rec, [v, ..acc])
-  }
+  use values, state <- state.try_op(iter_protocol.iterator_to_list(state, rec))
+  state.ok_array(state, values)
 }
 
 fn for_each(

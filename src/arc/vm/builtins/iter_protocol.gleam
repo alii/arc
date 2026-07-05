@@ -221,6 +221,30 @@ pub fn iterator_step_value(
   }
 }
 
+/// §7.4.14 IteratorToList — drain `rec` to exhaustion, collecting every yielded
+/// value in order. Abrupt completions from next()/done/value propagate without
+/// close (§7.4.8 marks the record done). This is the ONE reversed-accumulator
+/// drain loop; `iterator_rest`, Iterator.prototype.toArray and the
+/// AggregateError constructor's `errors` iteration all funnel through it.
+pub fn iterator_to_list(
+  state: State(host),
+  rec: IteratorRecord,
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+  iterator_to_list_loop(state, rec, [])
+}
+
+fn iterator_to_list_loop(
+  state: State(host),
+  rec: IteratorRecord,
+  acc: List(JsValue),
+) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
+  case iterator_step_value(state, rec) {
+    #(state, Error(thrown)) -> Error(#(thrown, state))
+    #(state, Ok(None)) -> Ok(#(list.reverse(acc), state))
+    #(state, Ok(Some(v))) -> iterator_to_list_loop(state, rec, [v, ..acc])
+  }
+}
+
 // ============================================================================
 // §7.4.11 IteratorClose
 // ============================================================================
@@ -434,20 +458,8 @@ pub fn iterator_rest(
     iter,
     "Iterator rest element target is not an object",
   ))
-  iterator_rest_loop(state, rec, [])
-}
-
-fn iterator_rest_loop(
-  state: State(host),
-  rec: IteratorRecord,
-  acc: List(JsValue),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(state, step) = iterator_step_value(state, rec)
-  case step {
-    Error(thrown) -> #(state, Error(thrown))
-    Ok(None) -> state.ok_array(state, list.reverse(acc))
-    Ok(Some(v)) -> iterator_rest_loop(state, rec, [v, ..acc])
-  }
+  use values, state <- state.try_op(iterator_to_list(state, rec))
+  state.ok_array(state, values)
 }
 
 /// §7.4.5 IteratorComplete + §7.4.6 IteratorValue: read {done, value} from an

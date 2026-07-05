@@ -1,5 +1,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/dom_exception
+import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/object as builtins_object
 import arc/vm/heap
@@ -14,7 +15,6 @@ import arc/vm/value.{
 }
 import gleam/dict
 import gleam/io
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
@@ -226,21 +226,16 @@ fn call_native(
   _this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let options = case args {
-    [_, o, ..] -> o
-    _ -> JsUndefined
-  }
+  let #(message, options) = helpers.two_args_or_undefined(args)
   use proto, state <- object.proto_from_new_target(
     state,
     state.new_target,
     proto,
   )
-  case args {
-    [JsUndefined, ..] | [] ->
-      alloc_error(state, proto, None, options) |> as_object
-    [JsString(msg), ..] ->
-      alloc_error(state, proto, Some(msg), options) |> as_object
-    [other, ..] -> {
+  case message {
+    JsUndefined -> alloc_error(state, proto, None, options) |> as_object
+    JsString(msg) -> alloc_error(state, proto, Some(msg), options) |> as_object
+    other -> {
       // Step 3a: ToString(message) — runs BEFORE the options "cause" get.
       use msg, state <- coerce.try_to_string(state, other)
       alloc_error(state, proto, Some(msg), options) |> as_object
@@ -271,12 +266,7 @@ fn aggregate_error_native(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(errors, message, options) = case args {
-    [] -> #(JsUndefined, JsUndefined, JsUndefined)
-    [e] -> #(e, JsUndefined, JsUndefined)
-    [e, m] -> #(e, m, JsUndefined)
-    [e, m, o, ..] -> #(e, m, o)
-  }
+  let #(errors, message, options) = helpers.three_args_or_undefined(args)
   // Steps 1-2: OrdinaryCreateFromConstructor(newTarget, ...).
   use proto, state <- object.proto_from_new_target(
     state,
@@ -295,7 +285,14 @@ fn aggregate_error_native(
     Error(thrown) -> #(state, Error(thrown))
     // Steps 5-6: drain the iterable, install the "errors" array.
     Ok(ref) -> {
-      use collected, state <- state.try_op(iterate_to_list(state, errors))
+      use rec, state <- state.try_op(iter_protocol.get_iterator_sync(
+        state,
+        errors,
+      ))
+      use collected, state <- state.try_op(iter_protocol.iterator_to_list(
+        state,
+        rec,
+      ))
       let #(heap, arr) =
         common.alloc_array(
           state.heap,
@@ -311,32 +308,6 @@ fn aggregate_error_native(
         )
       #(State(..state, heap:), Ok(JsObject(ref)))
     }
-  }
-}
-
-/// §7.4.14 IteratorToList ( ? GetIterator(iterable, sync) ) — drain every value
-/// of `iterable` into a Gleam list. A non-iterable (including `undefined`, i.e.
-/// `new AggregateError()`) throws a TypeError from GetIterator, per spec.
-fn iterate_to_list(
-  state: State(host),
-  iterable: JsValue,
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
-  use #(rec, state) <- result.try(iter_protocol.get_iterator_sync(
-    state,
-    iterable,
-  ))
-  drain_iterator(state, rec, [])
-}
-
-fn drain_iterator(
-  state: State(host),
-  rec: value.IteratorRecord,
-  acc: List(JsValue),
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
-  case iter_protocol.iterator_step_value(state, rec) {
-    #(state, Error(thrown)) -> Error(#(thrown, state))
-    #(state, Ok(None)) -> Ok(#(list.reverse(acc), state))
-    #(state, Ok(Some(v))) -> drain_iterator(state, rec, [v, ..acc])
   }
 }
 
@@ -366,12 +337,7 @@ fn suppressed_error_native(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let #(err, suppressed, message) = case args {
-    [] -> #(JsUndefined, JsUndefined, JsUndefined)
-    [e] -> #(e, JsUndefined, JsUndefined)
-    [e, s] -> #(e, s, JsUndefined)
-    [e, s, m, ..] -> #(e, s, m)
-  }
+  let #(err, suppressed, message) = helpers.three_args_or_undefined(args)
   // Steps 1-2: OrdinaryCreateFromConstructor(newTarget, ...).
   use proto, state <- object.proto_from_new_target(
     state,
@@ -517,11 +483,7 @@ fn is_error_native(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let arg = case args {
-    [x, ..] -> x
-    [] -> JsUndefined
-  }
-  let result = case arg {
+  let result = case helpers.first_arg_or_undefined(args) {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(kind: value.ErrorObject(_), ..)) -> True
@@ -572,11 +534,7 @@ fn stack_setter(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let v = case args {
-    [x, ..] -> x
-    [] -> JsUndefined
-  }
-  case this, v {
+  case this, helpers.first_arg_or_undefined(args) {
     // Step 2: E is not an Object → TypeError.
     JsNull, _ | JsUndefined, _ ->
       state.type_error(state, "set Error.prototype.stack called on non-object")
