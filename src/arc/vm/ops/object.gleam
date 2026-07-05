@@ -3997,13 +3997,11 @@ pub fn get_prototype_of_stateful(
 /// §10.5.1 Proxy [[GetPrototypeOf]] ( ).
 fn proxy_get_prototype_of(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
-    target,
-    handler,
+    slots,
     "getPrototypeOf",
   ))
   case trap {
@@ -4050,14 +4048,12 @@ fn proxy_get_prototype_of(
 /// for proxy refs. `proto_val` is JsObject(p) or JsNull.
 pub fn proxy_set_prototype_of(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   proto_val: JsValue,
 ) -> Result(#(State(host), Option(Ref), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
-    target,
-    handler,
+    slots,
     "setPrototypeOf",
   ))
   case trap {
@@ -4102,11 +4098,10 @@ pub fn is_extensible_stateful(
   ref: Ref,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) -> {
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) -> {
       use #(t, h, trap, state) <- result.try(proxy_trap(
         state,
-        target,
-        handler,
+        slots,
         "isExtensible",
       ))
       case trap {
@@ -4145,11 +4140,10 @@ pub fn prevent_extensions_stateful(
   ref: Ref,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) -> {
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) -> {
       use #(t, h, trap, state) <- result.try(proxy_trap(
         state,
-        target,
-        handler,
+        slots,
         "preventExtensions",
       ))
       case trap {

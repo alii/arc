@@ -1864,8 +1864,7 @@ fn fill_deferred_namespace(
     proxy_ref,
     ObjectSlot(
       kind: value.ProxyObject(
-        target: Some(target_ref),
-        handler: Some(handler_ref),
+        slots: Some(value.ProxySlots(target: target_ref, handler: handler_ref)),
         callable: False,
         constructable: False,
       ),

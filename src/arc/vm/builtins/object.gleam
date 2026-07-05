@@ -636,9 +636,9 @@ fn define_parsed(
     // (DefinePropertyOrThrow) converts a false trap result to TypeError.
     // Errors out of the proxy machinery (trap call throws, invariant
     // TypeErrors §10.5.6 steps 12-16) are genuine abrupt completions.
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) -> {
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) -> {
       use #(state, ok) <- result.try(
-        proxy_define_own_property(state, target, handler, dkey, parsed)
+        proxy_define_own_property(state, slots, dkey, parsed)
         |> result.map_error(as_thrown),
       )
       case ok {
@@ -3011,13 +3011,8 @@ pub fn set_prototype_of_stateful(
   new_proto: Option(Ref),
 ) -> Result(#(State(host), Result(Nil, SetProtoFail)), #(JsValue, State(host))) {
   case object.as_proxy(state.heap, ref) {
-    Some(#(target, handler)) -> {
-      use #(state, ok) <- result.map(proxy_set_proto(
-        state,
-        target,
-        handler,
-        new_proto,
-      ))
+    Some(slots) -> {
+      use #(state, ok) <- result.map(proxy_set_proto(state, slots, new_proto))
       case ok {
         True -> #(state, Ok(Nil))
         False -> #(state, Error(TrapRefused))
@@ -4279,8 +4274,7 @@ pub fn own_property_keyed(
   key: ObjectKey,
 ) -> Result(#(Option(value.Property), State(host)), #(JsValue, State(host))) {
   use #(prop, state) <- result.try(case object.as_proxy(state.heap, ref) {
-    Some(#(target, handler)) ->
-      proxy_get_own_property(state, target, handler, key)
+    Some(slots) -> proxy_get_own_property(state, slots, key)
     None -> Ok(#(get_own_property_by_key(state.heap, ref, key), state))
   })
   case prop {
@@ -4293,14 +4287,12 @@ pub fn own_property_keyed(
 /// §10.5.5 Proxy [[GetOwnProperty]] ( P ).
 fn proxy_get_own_property(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   key: ObjectKey,
 ) -> Result(#(Option(value.Property), State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(object.proxy_trap(
     state,
-    target,
-    handler,
+    slots,
     "getOwnPropertyDescriptor",
   ))
   case trap {
@@ -4467,15 +4459,13 @@ fn proxy_get_own_property(
 /// (Reflect.defineProperty).
 fn proxy_define_own_property(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   key: ObjectKey,
   parsed: ParsedDesc,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(object.proxy_trap(
     state,
-    target,
-    handler,
+    slots,
     "defineProperty",
   ))
   case trap {
@@ -4486,7 +4476,7 @@ fn proxy_define_own_property(
     // ArraySetLength's RangeError) propagate.
     None ->
       case object.as_proxy(state.heap, t) {
-        Some(#(t2, h2)) -> proxy_define_own_property(state, t2, h2, key, parsed)
+        Some(inner) -> proxy_define_own_property(state, inner, key, parsed)
         None ->
           case define_parsed(state, t, key, parsed) {
             Ok(state) -> Ok(#(state, True))
@@ -4629,8 +4619,7 @@ pub fn define_property_bool_value(
   use #(dkey, state) <- result.try(to_object_key(state, key_val))
   use #(parsed, state) <- result.try(parse_descriptor(state, desc_val))
   case object.as_proxy(state.heap, ref) {
-    Some(#(target, handler)) ->
-      proxy_define_own_property(state, target, handler, dkey, parsed)
+    Some(slots) -> proxy_define_own_property(state, slots, dkey, parsed)
     None ->
       case define_parsed(state, ref, dkey, parsed) {
         Ok(state) -> Ok(#(state, True))
@@ -4734,8 +4723,7 @@ fn create_data_property_dkey(
   // Trap-aware [[DefineOwnProperty]] on the already-parsed record —
   // the same tail define_property_bool dispatches to after parsing.
   case object.as_proxy(state.heap, ref) {
-    Some(#(target, handler)) ->
-      proxy_define_own_property(state, target, handler, dkey, parsed)
+    Some(slots) -> proxy_define_own_property(state, slots, dkey, parsed)
     None ->
       case define_parsed(state, ref, dkey, parsed) {
         Ok(state) -> Ok(#(state, True))
@@ -4759,7 +4747,7 @@ pub fn own_property_keys(
   ref: Ref,
 ) -> Result(#(List(ObjectKey), State(host)), #(JsValue, State(host))) {
   case object.as_proxy(state.heap, ref) {
-    Some(#(target, handler)) -> proxy_own_keys(state, target, handler)
+    Some(slots) -> proxy_own_keys(state, slots)
     None -> {
       let strings =
         collect_own_keys(state.heap, ref, False)
@@ -4786,13 +4774,11 @@ pub fn own_keys_stateful(
 /// §10.5.11 Proxy [[OwnPropertyKeys]] ( ).
 fn proxy_own_keys(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
 ) -> Result(#(List(ObjectKey), State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(object.proxy_trap(
     state,
-    target,
-    handler,
+    slots,
     "ownKeys",
   ))
   case trap {
@@ -5042,8 +5028,7 @@ pub fn enumerable_string_keys_stateful(
 /// proxy-vs-ordinary dispatch this recurses back into.
 fn proxy_set_proto(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   new_proto: Option(Ref),
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   let proto_val = case new_proto {
@@ -5052,8 +5037,7 @@ fn proxy_set_proto(
   }
   use #(state, fallthrough, ok) <- result.try(object.proxy_set_prototype_of(
     state,
-    target,
-    handler,
+    slots,
     proto_val,
   ))
   case fallthrough {
