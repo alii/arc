@@ -349,11 +349,11 @@ fn with_ta_and_index(
       "Invalid TypedArray element type for Atomics operation",
     )
   })
-  use slot <- some_or(read_buffer(state, view.buffer), fn() {
+  use storage <- some_or(read_buffer(state, view.buffer), fn() {
     state.type_error(state, "TypedArray is not attached")
   })
   use Nil <- require(
-    !require_shared || option.is_some(slot_storage(slot)),
+    !require_shared || option.is_some(slot_storage(storage)),
     fn() {
       state.type_error(
         state,
@@ -361,7 +361,7 @@ fn with_ta_and_index(
       )
     },
   )
-  use buf <- some_or(live_buffer(slot), fn() {
+  use buf <- some_or(live_buffer(storage), fn() {
     state.type_error(state, "ArrayBuffer is detached")
   })
   // ValidateTypedArray step 4 (immutable-arraybuffer proposal):
@@ -463,27 +463,12 @@ fn read_typed_array(state: State(host), val: JsValue) -> option.Option(TaView) {
   }
 }
 
-/// One heap read of a viewed ArrayBuffer slot, fully destructured. This is
-/// the ONLY place Atomics inspects [[ArrayBufferData]]: `storage` is
-/// derived from `data` right here, so a "shared" flag can never disagree
-/// with the storage it describes, and a write-back rebuilds the slot from
-/// THESE fields rather than from a second heap read.
-type BufferSlot {
-  BufferSlot(
-    /// [[ArrayBufferData]]: None IS the detached case — there is no separate
-    /// `detached` flag that could disagree with the storage.
-    data: option.Option(value.BufferData),
-    max_byte_length: option.Option(Int),
-    immutable: Bool,
-  )
-}
-
 /// A buffer slot projected onto its LIVE storage: only reachable for a
 /// non-detached buffer, so nothing downstream has to re-check that.
 type BufferInfo {
   BufferInfo(
-    /// The live [[ArrayBufferData]] storage (BufBytes | BufShared).
-    data: value.BufferData,
+    /// The live [[ArrayBufferData]] storage — never `value.Detached`.
+    data: value.BufferStorage,
     /// Byte snapshot of `data`. For shared (atomics-backed) storage this is
     /// a fresh copy of the live cells, so a re-read observes other agents'
     /// writes.
@@ -494,50 +479,49 @@ type BufferInfo {
     /// cell-CAS loop (cross-process atomicity); None means the snapshot
     /// path is trivially atomic (single process).
     storage: option.Option(value.AtomicsRef),
-    max_byte_length: option.Option(Int),
     immutable: Bool,
   )
 }
 
-/// Read the viewed buffer's slot, or None when `buffer` does not hold an
-/// ArrayBuffer at all.
-fn read_buffer(state: State(host), buffer: Ref) -> option.Option(BufferSlot) {
+/// Read the viewed buffer's storage, or None when `buffer` does not hold an
+/// ArrayBuffer at all. This is the ONLY place Atomics inspects
+/// [[ArrayBufferData]]: shared-ness, immutability and detached-ness are all
+/// variants of the one storage value, so no pair of them can disagree.
+fn read_buffer(
+  state: State(host),
+  buffer: Ref,
+) -> option.Option(value.BufferStorage) {
   case heap.read(state.heap, buffer) {
-    Some(ObjectSlot(
-      kind: value.ArrayBufferObject(data:, max_byte_length:, immutable:),
-      ..,
-    )) -> Some(BufferSlot(data:, max_byte_length:, immutable:))
+    Some(ObjectSlot(kind: value.ArrayBufferObject(storage:), ..)) ->
+      Some(storage)
     _ -> None
   }
 }
 
-/// IsDetachedBuffer(O) is false — project a slot onto its live storage.
-/// None IS the detached case: there are no bytes to hand out.
-fn live_buffer(slot: BufferSlot) -> option.Option(BufferInfo) {
-  use data <- option.map(slot.data)
+/// IsDetachedBuffer(O) is false — project a storage value onto its live
+/// bytes. `value.Detached` IS the detached case: there are no bytes to hand
+/// out.
+fn live_buffer(storage: value.BufferStorage) -> option.Option(BufferInfo) {
+  use bits <- option.map(value.buffer_bits(storage))
   BufferInfo(
-    data:,
-    bits: value.buffer_bits(data),
-    storage: buffer_storage(data),
-    max_byte_length: slot.max_byte_length,
-    immutable: slot.immutable,
+    data: storage,
+    bits:,
+    storage: slot_storage(storage),
+    immutable: value.buffer_is_immutable(storage),
   )
 }
 
 /// The atomics ref backing shared (cross-process) storage, or None for
-/// plain process-local byte storage. [[ArrayBufferData]] itself is the
-/// single source of truth for shared-ness.
-fn buffer_storage(data: value.BufferData) -> option.Option(value.AtomicsRef) {
-  case data {
-    value.BufShared(ref:) -> Some(ref)
-    value.BufBytes(..) -> None
+/// plain process-local byte storage (or a detached buffer, which is never
+/// shared). The storage variant is the single source of truth for
+/// shared-ness.
+fn slot_storage(
+  storage: value.BufferStorage,
+) -> option.Option(value.AtomicsRef) {
+  case storage {
+    value.Shared(ref:, ..) -> Some(ref)
+    value.Bytes(..) | value.Immutable(..) | value.Detached(..) -> None
   }
-}
-
-/// Shared-ness of a possibly-detached slot: a detached buffer is never
-/// shared (a SharedArrayBuffer cannot be detached in the first place).
-fn slot_storage(slot: BufferSlot) -> option.Option(value.AtomicsRef) {
-  option.then(slot.data, buffer_storage)
 }
 
 /// §25.4.3.4 RevalidateAtomicAccess — the value coercion may have run user
@@ -569,11 +553,11 @@ fn revalidate_or_abort(
   on_abort: fn() -> Nil,
   cont: fn(BufferInfo, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use slot <- some_or(read_buffer(state, info.buffer), fn() {
+  use storage <- some_or(read_buffer(state, info.buffer), fn() {
     let Nil = on_abort()
     state.type_error(state, "TypedArray is not attached")
   })
-  use buf <- some_or(live_buffer(slot), fn() {
+  use buf <- some_or(live_buffer(storage), fn() {
     let Nil = on_abort()
     state.type_error(state, "ArrayBuffer is detached")
   })
@@ -652,11 +636,12 @@ fn write_element(
   let off = info.byte_offset + idx * size
   let new_bits = ta_set_int(buf.bits, off, info.elem, v)
   let kind =
-    value.ArrayBufferObject(
-      data: Some(value.buffer_store_region(buf.data, new_bits, off, size)),
-      max_byte_length: buf.max_byte_length,
-      immutable: buf.immutable,
-    )
+    value.ArrayBufferObject(storage: value.buffer_store_region(
+      buf.data,
+      new_bits,
+      off,
+      size,
+    ))
   State(..state, heap: heap.update_kind(state.heap, info.buffer, kind))
 }
 

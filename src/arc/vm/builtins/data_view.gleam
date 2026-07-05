@@ -14,6 +14,7 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, list_at}
 import arc/vm/heap
+import arc/vm/ops/buffer as ops_buffer
 import arc/vm/ops/coerce
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
@@ -283,41 +284,19 @@ fn set_view_value(
   case written {
     Some(new_data) -> {
       let heap =
-        write_buffer_bytes(state.heap, view.buffer, new_data, pos, elem_size)
+        ops_buffer.store_region(
+          state.heap,
+          view.buffer,
+          new_data,
+          pos,
+          elem_size,
+        )
       #(State(..state, heap:), Ok(JsUndefined))
     }
     None ->
       // Unreachable: bounds were validated above against the live buffer.
       state.range_error(state, "Offset is outside the bounds of the DataView")
   }
-}
-
-/// Store `new_bits` (a whole new image of the buffer's bytes) into `buffer`,
-/// persisting only the `count` bytes at `byte_offset` — other regions of a
-/// shared buffer may be concurrently written by other agents.
-///
-/// `checked_view_bytes` has already proved the buffer is a live (non-detached)
-/// ArrayBuffer, so anything else here is a wiring bug: crash rather than
-/// silently dropping the store while still reporting success to JS. The
-/// `..k` update preserves `max_byte_length` / `immutable` structurally.
-fn write_buffer_bytes(
-  h: Heap(host),
-  buffer: Ref,
-  new_bits: BitArray,
-  byte_offset: Int,
-  count: Int,
-) -> Heap(host) {
-  use slot <- heap.update(h, buffer)
-  let assert ObjectSlot(kind: ArrayBufferObject(data: Some(old), ..) as k, ..) =
-    slot
-    as "data_view: buffer slot is not a live ArrayBuffer"
-  ObjectSlot(
-    ..slot,
-    kind: ArrayBufferObject(
-      ..k,
-      data: Some(value.buffer_store_region(old, new_bits, byte_offset, count)),
-    ),
-  )
 }
 
 // ============================================================================
@@ -362,7 +341,7 @@ fn require_mutable_buffer(
   cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case heap.read(state.heap, buffer) {
-    Some(ObjectSlot(kind: ArrayBufferObject(immutable: True, ..), ..)) ->
+    Some(ObjectSlot(kind: ArrayBufferObject(storage: value.Immutable(..)), ..)) ->
       state.type_error(
         state,
         "Cannot modify a DataView backed by an immutable ArrayBuffer",
@@ -431,19 +410,19 @@ fn live_buffer_info(
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case heap.read(state.heap, buf_ref) {
-    Some(ObjectSlot(
-      kind: ArrayBufferObject(data: Some(data), max_byte_length:, ..),
-      ..,
-    )) ->
-      cont(
-        #(value.buffer_byte_size(data), option.is_some(max_byte_length)),
-        state,
-      )
-    // `data: None` is a detached buffer — [[ArrayBufferData]] is null.
-    Some(ObjectSlot(kind: ArrayBufferObject(data: None, ..), ..)) ->
+    // `value.Detached` is a detached buffer — [[ArrayBufferData]] is null.
+    Some(ObjectSlot(kind: ArrayBufferObject(storage: value.Detached(..)), ..)) ->
       state.type_error(
         state,
         "Cannot perform operation on a detached ArrayBuffer",
+      )
+    Some(ObjectSlot(kind: ArrayBufferObject(storage:), ..)) ->
+      cont(
+        #(
+          value.buffer_byte_size(storage),
+          option.is_some(value.buffer_max_byte_length(storage)),
+        ),
+        state,
       )
     _ -> state.type_error(state, "DataView buffer is not an ArrayBuffer")
   }
@@ -455,10 +434,14 @@ fn buffer_data(
   buf_ref: Ref,
   cont: fn(BitArray, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case heap.read(state.heap, buf_ref) {
-    Some(ObjectSlot(kind: ArrayBufferObject(data: Some(data), ..), ..)) ->
-      cont(value.buffer_bits(data), state)
-    _ ->
+  let bits = case heap.read(state.heap, buf_ref) {
+    Some(ObjectSlot(kind: ArrayBufferObject(storage:), ..)) ->
+      value.buffer_bits(storage)
+    _ -> None
+  }
+  case bits {
+    Some(bits) -> cont(bits, state)
+    None ->
       state.type_error(
         state,
         "Cannot perform operation on a detached ArrayBuffer",

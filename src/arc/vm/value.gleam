@@ -4,7 +4,7 @@ import arc/vm/internal/temporal_calendar.{type Calendar}
 import arc/vm/internal/tree_array.{type TreeArray}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/key.{type PropertyKey, Index, Named}
-import arc/vm/opcode.{type Op, type TryKind}
+import arc/vm/opcode.{type Op, type Pc, type TryKind}
 import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -2073,6 +2073,60 @@ pub type IntlService {
   IntlSegmentIterator
 }
 
+/// The three services whose prototype exposes a lazily-created bound function
+/// (`Collator.prototype.compare`, `NumberFormat.prototype.format`,
+/// `DateTimeFormat.prototype.format`) — the only ones with a cache slot for it
+/// in their resolved state. Narrower than `IntlService` on purpose: a bound
+/// getter for a service that has nowhere to cache the function cannot be
+/// registered.
+pub type BoundGetterService {
+  BgCollator
+  BgNumberFormat
+  BgDateTimeFormat
+}
+
+/// The brand a `BoundGetterService`'s receiver must carry.
+pub fn bound_getter_service(service: BoundGetterService) -> IntlService {
+  case service {
+    BgCollator -> IntlCollator
+    BgNumberFormat -> IntlNumberFormat
+    BgDateTimeFormat -> IntlDateTimeFormat
+  }
+}
+
+/// The Intl services with a public constructor. `IntlSegments` /
+/// `IntlSegmentIterator` are ordinary objects handed out by
+/// `Segmenter.prototype.segment` and its iterator — they have no constructor,
+/// so they are absent here rather than an "illegal constructor" arm.
+pub type ConstructibleService {
+  CsLocale
+  CsCollator
+  CsNumberFormat
+  CsDateTimeFormat
+  CsPluralRules
+  CsListFormat
+  CsRelativeTimeFormat
+  CsSegmenter
+  CsDisplayNames
+  CsDurationFormat
+}
+
+/// The brand instances of a `ConstructibleService` carry.
+pub fn constructible_service(service: ConstructibleService) -> IntlService {
+  case service {
+    CsLocale -> IntlLocale
+    CsCollator -> IntlCollator
+    CsNumberFormat -> IntlNumberFormat
+    CsDateTimeFormat -> IntlDateTimeFormat
+    CsPluralRules -> IntlPluralRules
+    CsListFormat -> IntlListFormat
+    CsRelativeTimeFormat -> IntlRelativeTimeFormat
+    CsSegmenter -> IntlSegmenter
+    CsDisplayNames -> IntlDisplayNames
+    CsDurationFormat -> IntlDurationFormat
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Intl per-service resolved state (ECMA-402 internal slots)
 // ---------------------------------------------------------------------------
@@ -2956,16 +3010,16 @@ pub type IntlNativeFn {
   /// Intl.supportedValuesOf(key)
   IntlSupportedValuesOf
   /// new Intl.<Service>(locales, options) — proto is the intrinsic prototype.
-  IntlConstructor(service: IntlService, proto: Ref)
+  IntlConstructor(service: ConstructibleService, proto: Ref)
   /// Intl.<Service>.supportedLocalesOf(locales, options)
   IntlSupportedLocalesOf(service: IntlService)
   /// Intl.<Service>.prototype.resolvedOptions()
   IntlResolvedOptions(service: IntlService)
   /// Accessor getter for NumberFormat/DateTimeFormat .format and
   /// Collator .compare — returns (and caches) a bound method.
-  IntlBoundGetter(service: IntlService)
+  IntlBoundGetter(service: BoundGetterService)
   /// The bound method produced by IntlBoundGetter — target is the instance.
-  IntlBoundMethod(service: IntlService, target: Ref)
+  IntlBoundMethod(service: BoundGetterService, target: Ref)
   /// Named prototype method (format/formatToParts/select/of/…). The
   /// receiver's brand (`service`) plus `method` pick the implementation
   /// inside the intl builtins module.
@@ -3169,10 +3223,14 @@ pub type CallNativeFn {
     data_ref: Ref,
     already_resolved_ref: Ref,
   )
-  /// Promise.prototype.finally wrapper: called on fulfill.
-  PromiseFinallyFulfill(on_finally: JsValue)
-  /// Promise.prototype.finally wrapper: called on reject.
-  PromiseFinallyReject(on_finally: JsValue)
+  /// Promise.prototype.finally wrapper: called on fulfill. `constructor` is
+  /// the C of §27.2.5.3 step 3 (SpeciesConstructor(promise, %Promise%)),
+  /// captured at `finally` time — the Then Finally Function does
+  /// `PromiseResolve(C, result)`, not `PromiseResolve(%Promise%, result)`.
+  PromiseFinallyFulfill(on_finally: JsValue, constructor: JsValue)
+  /// Promise.prototype.finally wrapper: called on reject. Carries the same
+  /// captured C as `PromiseFinallyFulfill`.
+  PromiseFinallyReject(on_finally: JsValue, constructor: JsValue)
   /// Thunk that ignores its argument and returns the captured value.
   PromiseFinallyValueThunk(value: JsValue)
   /// Thunk that ignores its argument and throws the captured reason.
@@ -3329,21 +3387,39 @@ pub type VmNativeFn {
 /// SharedArrayBuffer needs across real agent processes.
 pub type AtomicsRef
 
-/// Backing storage of an ArrayBuffer/SharedArrayBuffer ([[ArrayBufferData]]).
+/// Backing storage of an ArrayBuffer/SharedArrayBuffer — the whole
+/// [[ArrayBufferData]] / [[ArrayBufferMaxByteLength]] / IsImmutableBuffer
+/// state as ONE sum type, so the four combinations the spec forbids
+/// (immutable+shared, immutable+resizable, immutable+detached,
+/// shared+detached) cannot be written down at all.
 ///
-/// Non-shared ArrayBuffers keep the original immutable-BitArray
-/// representation (`BufBytes`) — the fast path is a single one-constructor
-/// unwrap. SharedArrayBuffers live in an Erlang `atomics` array
-/// (`BufShared`): one unsigned 64-bit cell per 8 bytes, little-endian within
-/// the cell, sub-word writes via a compare_exchange retry loop (the cell
-/// mapping is documented in arc_sab_ffi.erl). Growable SABs pre-allocate
-/// max_byte_length cells up front. `BufShared` carries NOTHING but the ref:
-/// the CURRENT [[ArrayBufferByteLength]] of a SAB lives in the shared cells
-/// too (§25.2.2.1 makes it a shared 8-byte block), so a `grow` in one agent
-/// is observed by every other agent holding the same buffer.
-pub type BufferData {
-  BufBytes(bytes: BitArray)
-  BufShared(ref: AtomicsRef)
+/// * `Detached` — [[ArrayBufferData]] is null (§25.1.3.5 DetachArrayBuffer).
+///   There is no leftover byte array to read; [[ArrayBufferMaxByteLength]]
+///   survives so the `resizable` getter keeps reporting true.
+/// * `Bytes` — a plain (non-shared, mutable) ArrayBuffer: an immutable BEAM
+///   binary. `max_byte_length: Some(_)` iff resizable.
+/// * `Immutable` — the TC39 Immutable ArrayBuffer proposal's
+///   IsImmutableBuffer state (transferToImmutable / sliceToImmutable
+///   results): never shared, never resizable, never detachable, and every
+///   write path (Atomics, TypedArray/DataView stores) rejects it.
+/// * `Shared` — a SharedArrayBuffer, living in an Erlang `atomics` array:
+///   one unsigned 64-bit cell per 8 bytes, little-endian within the cell,
+///   sub-word writes via a compare_exchange retry loop (the cell mapping is
+///   documented in arc_sab_ffi.erl). Growable SABs pre-allocate
+///   max_byte_length cells up front. `Shared` carries NOTHING but the ref
+///   and the declared max: the CURRENT [[ArrayBufferByteLength]] of a SAB
+///   lives in the shared cells too (§25.2.2.1 makes it a shared 8-byte
+///   block), so a `grow` in one agent is observed by every other agent
+///   holding the same buffer.
+///
+/// Shared-ness is not a flag: a buffer is shared iff its storage is
+/// `Shared`. Detached-ness is not a flag: a buffer is detached iff its
+/// storage is `Detached`.
+pub type BufferStorage {
+  Detached(max_byte_length: option.Option(Int))
+  Bytes(bytes: BitArray, max_byte_length: option.Option(Int))
+  Immutable(bytes: BitArray)
+  Shared(ref: AtomicsRef, max_byte_length: option.Option(Int))
 }
 
 /// Allocate a fresh zero-filled shared storage able to hold
@@ -3359,10 +3435,14 @@ pub fn sab_byte_length(ref: AtomicsRef) -> Int
 
 /// Result of a §25.2.2.2 GrowSharedArrayBuffer on the shared length cell.
 /// `TooSmall` means another agent already grew the buffer past `new_length`
-/// (the length is monotonic), which is a RangeError for the caller.
+/// (the length is monotonic); `TooLarge` means `new_length` exceeds the
+/// max_byte_length the storage was allocated with. Both are a RangeError for
+/// the caller — the FFI is the one place that knows the buffer's real
+/// capacity, so it, not the caller, decides.
 pub type SabGrowResult {
   Grown
   TooSmall
+  TooLarge
 }
 
 /// Publish a new (larger) [[ArrayBufferByteLength]] into the shared length
@@ -3386,29 +3466,62 @@ pub fn sab_write_bytes(
 
 /// Whether the storage is shared across agents (SharedArrayBuffer backing).
 /// This is THE definition of shared-ness — there is no separate flag; a
-/// buffer is shared iff its storage is `BufShared`.
-pub fn buffer_is_shared(data: BufferData) -> Bool {
-  case data {
-    BufShared(..) -> True
-    BufBytes(..) -> False
+/// buffer is shared iff its storage is `Shared`.
+pub fn buffer_is_shared(storage: BufferStorage) -> Bool {
+  case storage {
+    Shared(..) -> True
+    Bytes(..) | Immutable(..) | Detached(..) -> False
   }
 }
 
-/// [[ArrayBufferByteLength]] of a storage value.
-pub fn buffer_byte_size(data: BufferData) -> Int {
-  case data {
-    BufBytes(bytes:) -> bit_array.byte_size(bytes)
-    BufShared(ref:) -> sab_byte_length(ref)
+/// IsDetachedBuffer(O) — [[ArrayBufferData]] is null.
+pub fn buffer_is_detached(storage: BufferStorage) -> Bool {
+  case storage {
+    Detached(..) -> True
+    Bytes(..) | Immutable(..) | Shared(..) -> False
   }
 }
 
-/// Snapshot the live buffer contents as a BitArray. For `BufBytes` this is
-/// the (immutable) backing binary itself — zero cost. For `BufShared` it
-/// copies the current bytes out of the atomics cells.
-pub fn buffer_bits(data: BufferData) -> BitArray {
-  case data {
-    BufBytes(bytes:) -> bytes
-    BufShared(ref:) -> sab_read_bytes(ref, 0, sab_byte_length(ref))
+/// IsImmutableBuffer(O) (immutable-arraybuffer proposal).
+pub fn buffer_is_immutable(storage: BufferStorage) -> Bool {
+  case storage {
+    Immutable(..) -> True
+    Bytes(..) | Shared(..) | Detached(..) -> False
+  }
+}
+
+/// [[ArrayBufferMaxByteLength]], absent for fixed-length buffers. An
+/// immutable buffer is fixed-length by construction, so it never has one.
+pub fn buffer_max_byte_length(storage: BufferStorage) -> option.Option(Int) {
+  case storage {
+    Detached(max_byte_length:)
+    | Bytes(max_byte_length:, ..)
+    | Shared(max_byte_length:, ..) -> max_byte_length
+    Immutable(..) -> option.None
+  }
+}
+
+/// [[ArrayBufferByteLength]] of a storage value — +0 for a detached buffer,
+/// which is exactly what §25.1.6.2 / §25.1.3.4 want.
+pub fn buffer_byte_size(storage: BufferStorage) -> Int {
+  case storage {
+    Detached(..) -> 0
+    Bytes(bytes:, ..) | Immutable(bytes:) -> bit_array.byte_size(bytes)
+    Shared(ref:, ..) -> sab_byte_length(ref)
+  }
+}
+
+/// Snapshot the live buffer contents as a BitArray, or None when the buffer
+/// is DETACHED — there are no bytes to hand out, and the compiler makes
+/// every reader say what it does about that. For byte-backed storage this is
+/// the (immutable) backing binary itself — zero cost. For `Shared` it copies
+/// the current bytes out of the atomics cells.
+pub fn buffer_bits(storage: BufferStorage) -> option.Option(BitArray) {
+  case storage {
+    Detached(..) -> option.None
+    Bytes(bytes:, ..) | Immutable(bytes:) -> option.Some(bytes)
+    Shared(ref:, ..) ->
+      option.Some(sab_read_bytes(ref, 0, sab_byte_length(ref)))
   }
 }
 
@@ -3421,20 +3534,29 @@ pub fn buffer_bits(data: BufferData) -> BitArray {
 /// The region MUST lie inside `new_bits`: every caller has already validated
 /// the write range against the live buffer, so an out-of-range region is an
 /// arithmetic bug in the caller — crash rather than silently drop the store.
+///
+/// `Detached` and `Immutable` storage have nothing to write into: every write
+/// path rejects them BEFORE getting here (a detached store is a spec no-op, an
+/// immutable store is a TypeError), so the store is dropped rather than
+/// forging bytes into a buffer that must not have any. Rebuilding the storage
+/// from its own variant is what makes "forgot to preserve max_byte_length on
+/// write-back" unwritable.
 pub fn buffer_store_region(
-  data: BufferData,
+  storage: BufferStorage,
   new_bits: BitArray,
   byte_offset: Int,
   count: Int,
-) -> BufferData {
-  case data {
-    BufBytes(bytes: _) -> BufBytes(bytes: new_bits)
-    BufShared(ref:) -> {
+) -> BufferStorage {
+  case storage {
+    Bytes(bytes: _, max_byte_length:) ->
+      Bytes(bytes: new_bits, max_byte_length:)
+    Shared(ref:, max_byte_length:) -> {
       let assert Ok(region) = bit_array.slice(new_bits, byte_offset, count)
         as "buffer_store_region: write range outside the new buffer image"
       let Nil = sab_write_bytes(ref, byte_offset, region)
-      BufShared(ref:)
+      Shared(ref:, max_byte_length:)
     }
+    Immutable(..) | Detached(..) -> storage
   }
 }
 
@@ -3564,29 +3686,14 @@ pub type ExoticKind(ctx, host) {
   /// `state` is that slot's value plus the [[DisposeCapability]] it governs
   /// (see `DisposableState`).
   DisposableStackObject(async: Bool, state: DisposableState)
-  /// ArrayBuffer / SharedArrayBuffer — ES2024 §25.1/§25.2.
-  /// [[ArrayBufferData]] is `data`: `None` is the spec's null (a DETACHED
-  /// buffer — there is no separate `detached` flag, so "detached but still
-  /// holding bytes" is unrepresentable and every read of a buffer's bytes is
-  /// an unwrap the compiler forces you to handle). `Some(BufBytes(_))` is an
-  /// immutable BEAM binary (non-shared buffers); `Some(BufShared(_))` is an
-  /// Erlang `atomics` array shared across BEAM processes
-  /// (SharedArrayBuffers). [[ArrayBufferByteLength]] is derived
-  /// (`buffer_byte_size(data)`).
-  /// `max_byte_length` is Some for resizable (AB) / growable (SAB) buffers.
-  /// Shared-ness (SharedArrayBuffer, never detachable) is NOT a separate
-  /// flag — it is derived from the storage: `buffer_is_shared(data)` is True
-  /// iff `data` is `BufShared`. This makes "flagged shared but backed by
-  /// process-local bytes" unrepresentable.
-  /// `immutable` is the TC39 Immutable ArrayBuffer proposal's
-  /// IsImmutableBuffer state (transferToImmutable / sliceToImmutable
-  /// results): always BufBytes, never shared, never detachable, never
-  /// resizable; every write path (Atomics, TypedArray stores) rejects it.
-  ArrayBufferObject(
-    data: option.Option(BufferData),
-    max_byte_length: option.Option(Int),
-    immutable: Bool,
-  )
+  /// ArrayBuffer / SharedArrayBuffer — ES2024 §25.1/§25.2. All of
+  /// [[ArrayBufferData]], [[ArrayBufferMaxByteLength]] and IsImmutableBuffer
+  /// live in ONE `BufferStorage` sum type: detached-ness, shared-ness and
+  /// immutability are variants, not flags, so the four spec-forbidden
+  /// combinations (immutable+shared, immutable+resizable, immutable+detached,
+  /// shared+detached) cannot be constructed. [[ArrayBufferByteLength]] is
+  /// derived (`buffer_byte_size(storage)`).
+  ArrayBufferObject(storage: BufferStorage)
   /// Integer-Indexed (TypedArray) exotic object — ES2024 §10.4.5 / §23.2.
   /// [[ViewedArrayBuffer]] is `buffer` (an ArrayBufferObject slot),
   /// [[TypedArrayName]]/[[ContentType]] derive from `elem_kind`,
@@ -4103,7 +4210,7 @@ pub type PromiseReaction {
 
 /// Saved try-frame for generator suspension (mirrors TryFrame from state.gleam).
 pub type SavedTryFrame {
-  SavedTryFrame(catch_target: Int, stack_depth: Int, kind: TryKind)
+  SavedTryFrame(catch_target: Int, stack_depth: Int, kind: TryKind(Pc))
 }
 
 /// A suspended coroutine body: everything a resume must restore into a fresh
@@ -4126,7 +4233,10 @@ pub type SuspendedFrame {
   )
 }
 
-/// Generator internal lifecycle state.
+/// Generator internal lifecycle state, for coroutines whose "body" is NOT a
+/// suspended VM frame: %IteratorHelper%'s [[GeneratorState]], where the body
+/// is a builtin (`HelperBody`). A real generator's slot uses
+/// `GeneratorSlotState`, which carries the frame in the suspended variant.
 pub type GeneratorState {
   /// Created but body not yet entered (before first .next())
   SuspendedStart
@@ -4136,6 +4246,29 @@ pub type GeneratorState {
   Executing
   /// Finished (returned or threw)
   Completed
+}
+
+/// Where a suspended generator body is paused.
+pub type SuspendPoint {
+  /// Created but body not yet entered (before the first `.next()`).
+  AtStart
+  /// Paused at a `yield` (or `yield*`) point.
+  AtYield
+}
+
+/// A generator's [[GeneratorState]] *and* the body it would resume into.
+///
+/// The `SuspendedFrame` lives inside `GenSuspended`, so a `GenCompleted` (or
+/// `GenExecuting`) generator structurally cannot hold one: a finished
+/// generator's locals / operand stack / try stack stop being GC roots the
+/// moment it completes, and no reader can trust a `.frame` that the lifecycle
+/// says isn't there.
+pub type GeneratorSlotState {
+  GenSuspended(at: SuspendPoint, frame: SuspendedFrame)
+  /// Currently executing (a re-entrant .next() on a running generator).
+  GenExecuting
+  /// Finished (returned or threw) — nothing left to resume.
+  GenCompleted
 }
 
 /// Async generator internal lifecycle state (ES §27.6.3.1).
@@ -4252,12 +4385,12 @@ pub type HeapSlot(ctx, host) {
   )
   /// Engine-internal generator suspended state. The ObjectSlot has
   /// `kind: GeneratorObject(generator_data: Ref)` pointing here.
-  /// Saves the full execution context so .next() can resume.
+  /// The suspended execution context .next() resumes into hangs off
+  /// `gen_state` — only a suspended generator has one.
   GeneratorSlot(
-    gen_state: GeneratorState,
+    gen_state: GeneratorSlotState,
     func_template: FuncTemplate,
     env_ref: Ref,
-    frame: SuspendedFrame,
   )
   /// Engine-internal async function suspended state.
   /// Saves the full execution context so await can resume. There is no

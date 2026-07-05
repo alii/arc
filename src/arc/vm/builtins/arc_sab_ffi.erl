@@ -2,9 +2,10 @@
 %%
 %% Cell mapping
 %% ------------
-%% Cell 1 (atomics arrays are 1-indexed) is RESERVED for the buffer's current
-%% [[ArrayBufferByteLength]] — see "Growable SABs" below. Data starts at cell
-%% 2: one UNSIGNED 64-bit atomics cell per 8 bytes of buffer, so buffer byte K
+%% Cells 1 and 2 (atomics arrays are 1-indexed) are RESERVED: cell 1 holds the
+%% buffer's current [[ArrayBufferByteLength]] and cell 2 its declared
+%% [[ArrayBufferMaxByteLength]] — see "Growable SABs" below. Data starts at
+%% cell 3: one UNSIGNED 64-bit atomics cell per 8 bytes of buffer, so buffer byte K
 %% lives in cell (K div 8) + ?DATA_BASE, at little-endian byte position
 %% (K rem 8) within the cell — i.e. a cell holding bytes B0..B7 has the
 %% integer value
@@ -36,6 +37,11 @@
 %% a length another agent has already passed) is told `too_small` rather than
 %% silently shrinking the buffer.
 %%
+%% Cell 2 remembers the max_byte_length the data cells were sized for, so
+%% grow/2 rejects (`too_large`) any length past the storage that actually
+%% exists — the length cell can never be published beyond the buffer's own
+%% capacity, whatever the caller believes the max to be.
+%%
 %% Atomic element RMW
 %% -------------------
 %% Atomics read-modify-write ops (add/sub/and/or/xor/exchange) and
@@ -55,8 +61,10 @@
 
 %% Cell 1 holds the buffer's current [[ArrayBufferByteLength]].
 -define(LEN_CELL, 1).
+%% Cell 2 holds the [[ArrayBufferMaxByteLength]] the data cells were sized for.
+-define(MAX_CELL, 2).
 %% Buffer byte 0 lives in cell ?DATA_BASE.
--define(DATA_BASE, 2).
+-define(DATA_BASE, 3).
 
 %% Allocate zero-filled shared storage able to hold MaxByteLength bytes, whose
 %% current [[ArrayBufferByteLength]] is ByteLength.
@@ -64,8 +72,9 @@ new(MaxByteLength, ByteLength)
   when is_integer(MaxByteLength), MaxByteLength >= 0,
        is_integer(ByteLength), ByteLength >= 0, ByteLength =< MaxByteLength ->
     DataCells = max(1, (MaxByteLength + 7) div 8),
-    Ref = atomics:new(DataCells + 1, [{signed, false}]),
+    Ref = atomics:new(DataCells + 2, [{signed, false}]),
     atomics:put(Ref, ?LEN_CELL, ByteLength),
+    atomics:put(Ref, ?MAX_CELL, MaxByteLength),
     Ref.
 
 %% The buffer's current [[ArrayBufferByteLength]], as every agent sees it.
@@ -75,10 +84,15 @@ byte_length(Ref) ->
 %% §25.2.2.2 GrowSharedArrayBuffer: publish NewLen as the buffer's byte
 %% length. The length is monotonic, so a NewLen below the value another agent
 %% has already published is rejected (`too_small`) rather than shrinking the
-%% buffer under it. Retries when a concurrent grow raced the CAS.
+%% buffer under it; a NewLen past the max the data cells were allocated for is
+%% rejected (`too_large`) rather than publishing a length that reads off the
+%% end of the storage. Retries when a concurrent grow raced the CAS.
 grow(Ref, NewLen) when is_integer(NewLen), NewLen >= 0 ->
     Cur = atomics:get(Ref, ?LEN_CELL),
+    Max = atomics:get(Ref, ?MAX_CELL),
     if
+        NewLen > Max ->
+            too_large;
         NewLen < Cur ->
             too_small;
         NewLen =:= Cur ->
