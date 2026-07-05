@@ -759,6 +759,8 @@ pub fn evaluate_linked(
   builtins: Builtins,
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(Heap(host), Result(EvaluatedBundle, ModuleError)) {
   let #(heap, _evaluated, _jobs, result) =
@@ -768,6 +770,8 @@ pub fn evaluate_linked(
       builtins,
       global_object,
       host_hooks,
+      can_block,
+      extend_262,
       finish,
       set.new(),
     )
@@ -802,6 +806,8 @@ pub fn evaluate_linked_tracking(
   builtins: Builtins,
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(state.State(host)) -> state.State(host),
   already_evaluated: Set(String),
 ) -> #(
@@ -825,6 +831,8 @@ pub fn evaluate_linked_tracking(
       builtins,
       global_object,
       host_hooks,
+      can_block,
+      extend_262,
       finish,
     )
   // Surface the entry namespace alongside the completion value (post-eval,
@@ -948,6 +956,8 @@ pub fn evaluate_bundle(
     builtins,
     global_object,
     host_hooks.default_host_hooks(),
+    True,
+    None,
     finish,
   )
 }
@@ -964,6 +974,8 @@ pub fn evaluate_bundle_with_hooks(
   builtins: Builtins,
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(Heap(host), Result(EvaluatedBundle, ModuleError)) {
   case link_for_evaluation(bundle, heap, builtins) {
@@ -975,6 +987,8 @@ pub fn evaluate_bundle_with_hooks(
         builtins,
         global_object,
         host_hooks,
+        can_block,
+        extend_262,
         finish,
       )
   }
@@ -1032,6 +1046,8 @@ fn eval_module_inner(
   builtins: Builtins,
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(JsValue, ModuleError)) {
   // One lookup, three outcomes — the module is absent, has no body, or has one.
@@ -1064,6 +1080,8 @@ fn eval_module_inner(
             builtins,
             global_object,
             host_hooks,
+            can_block,
+            extend_262,
             finish,
           )
       }
@@ -1080,6 +1098,8 @@ fn eval_module_body(
   builtins: Builtins,
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(JsValue, ModuleError)) {
   // Mark as evaluating
@@ -1119,6 +1139,8 @@ fn eval_module_body(
         builtins,
         global_object,
         host_hooks,
+        can_block,
+        extend_262,
         finish,
       )
     #(state, result.replace(r, Nil))
@@ -1177,6 +1199,8 @@ fn eval_module_body(
           global_object,
           seeds,
           host_hooks,
+          can_block,
+          extend_262,
           finish,
         )
       {
@@ -1275,6 +1299,8 @@ fn run_module_with_referrer(
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> entry.ModuleResult(host) {
   entry.run_module(
@@ -1284,6 +1310,8 @@ fn run_module_with_referrer(
     global_object,
     seeds,
     HostHooks(..host_hooks, import_referrer: Some(specifier)),
+    can_block,
+    extend_262,
     finish,
   )
 }
@@ -1495,6 +1523,8 @@ pub fn evaluate_async_transitive_deps(
   builtins: Builtins,
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(Heap(host), List(value.Job), Result(List(#(String, Ref)), ModuleError)) {
   let LinkedBundle(bundle:, linked:) = linked_bundle
@@ -1518,6 +1548,8 @@ pub fn evaluate_async_transitive_deps(
         builtins,
         global_object,
         host_hooks,
+        can_block,
+        extend_262,
         finish,
       )
     case dep_result {
@@ -2026,6 +2058,8 @@ fn evaluate_deferred_subgraph(
       builtins,
       global_object,
       state.ctx.host_hooks,
+      state.can_block,
+      state.ctx.extend_262,
       fn(s) { s },
     )
   let state =

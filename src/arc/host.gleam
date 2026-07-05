@@ -258,7 +258,8 @@ pub fn resume(
 //     A host with neither passes `default_host_hooks()`, which means
 //     "cannot block": sync `Atomics.wait` throws instead of hanging.
 //   * `can_block` is NOT in here. Agent [[CanBlock]] (§9.7) is per-agent spec
-//     policy, set before realm boot via `arc/vm/agent` — see that module.
+//     policy, threaded to `interpreter.new_state` at realm boot and carried on
+//     `State.can_block`.
 //   * Wakes come back in through `event_loop.inject_notify(state, key,
 //     byte_index)` when an `{arc_notify, Ref, Key, ByteIndex}` message lands
 //     in your mailbox.
@@ -327,7 +328,7 @@ pub fn default_host_hooks() -> HostHooks {
 ///
 /// Hand the result to the engine/realm constructor ONCE — it is a value, not
 /// a State mutation — and every State derived from that realm inherits it.
-/// Says nothing about the agent's [[CanBlock]] (`arc/vm/agent`), which is
+/// Says nothing about the agent's [[CanBlock]] (`State.can_block`), which is
 /// spec policy, not capability presence.
 pub fn with_atomics(
   hooks: HostHooks,

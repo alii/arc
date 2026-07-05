@@ -63,6 +63,8 @@ pub type NewStateFn(host) =
     dict.Dict(String, value.LexicalGlobal),
     dict.Dict(String, value.SymbolId),
     host_hooks.HostHooks,
+    Bool,
+    Option(state.Extend262(host)),
   ) -> State(host)
 
 // ============================================================================
@@ -142,6 +144,8 @@ pub fn eval_script_native(
             symbol_registry,
             // Child realm inherits the parent's embedder host capabilities.
             state.ctx.host_hooks,
+            state.can_block,
+            state.ctx.extend_262,
           ),
           state,
         )
@@ -201,7 +205,7 @@ pub fn create_realm_native(
 
   // Build the $262 object for the new realm
   let #(h, dollar_262_ref) =
-    build_262(h, new_builtins, new_global_ref, realm_ref)
+    build_262(h, new_builtins, new_global_ref, realm_ref, state.ctx.extend_262)
 
   // Install $262 on the new realm's global object
   let #(h, _) =
@@ -229,6 +233,7 @@ pub fn build_262(
   b: Builtins,
   global_ref: Ref,
   realm_ref: Ref,
+  extend_262: Option(state.Extend262(host)),
 ) -> #(Heap(host), Ref) {
   let func_proto = b.function.prototype
 
@@ -293,12 +298,12 @@ pub fn build_262(
       ),
     )
   let h = heap.root(h, ref)
-  // Apply the embedder's $262 extension hook (if registered) — this is how
-  // the test262 harness installs its host-side `agent` object on the
-  // initial $262, every $262.createRealm() child, and every realm a
-  // spawned agent process boots.
+  // Apply the embedder's $262 extension hook (if any) — this is how the
+  // test262 harness installs its host-side `agent` object on the initial
+  // $262, every $262.createRealm() child, and every realm a spawned agent
+  // process boots.
   let h =
-    get_extend_262()
+    extend_262
     |> option.map(fn(extend) { extend(h, b, ref) })
     |> option.unwrap(h)
   #(h, ref)
@@ -311,32 +316,12 @@ pub fn build_262(
 // core: real agent processes block on their mailboxes for broadcasts and
 // wake messages, which is embedder territory (the same boundary as the
 // Atomics host capabilities — see arc/host.gleam). The test262 harness
-// registers a hook here (process-local, like the CanBlock flag read at
-// realm boot — see arc_agent_ffi.erl) and build_262 applies it to EVERY
-// $262 it builds: the initial one, each $262.createRealm() child, and the
-// $262 of each realm a spawned agent process boots (the harness re-registers
-// the hook inside the agent child's process body). Embedders that register
-// nothing get a plain $262 without `agent`.
+// supplies a hook via `RealmCtx.extend_262` (agent-wide, threaded from the
+// State that boots the realm) and build_262 applies it to EVERY $262 it
+// builds: the initial one, each $262.createRealm() child, and the $262 of
+// each realm a spawned agent process boots. Embedders that supply `None` get
+// a plain $262 without `agent`.
 // ============================================================================
-
-/// Embedder extension applied to a freshly built (and rooted) $262 object:
-/// receives the heap, the realm's builtins and the $262 ref, and returns
-/// the heap with any extra properties installed.
-pub type Extend262(host) =
-  fn(Heap(host), Builtins, Ref) -> Heap(host)
-
-/// Register the process-local $262 extension hook (a data-only process-
-/// dictionary write — see arc_realm_ffi.erl). Freshly spawned processes
-/// start with no hook; per-process embedder setup (the harness's per-test
-/// worker, an agent child body) must register it before booting a realm.
-@external(erlang, "arc_realm_ffi", "set_extend_262")
-pub fn set_extend_262(hook: Extend262(host)) -> Nil
-
-/// The registered hook, or `None` when this process never set one: an absent
-/// hook is a MISSING VALUE, not a failed operation (see arc_realm_ffi.erl,
-/// which answers `{some, Hook} | none`).
-@external(erlang, "arc_realm_ffi", "get_extend_262")
-fn get_extend_262() -> Option(Extend262(host))
 
 // ============================================================================
 // eval() and Function() constructor — runtime code evaluation
@@ -425,6 +410,8 @@ fn run_eval(
           state.ctx.symbol_registry,
           // The eval realm inherits the caller's embedder host capabilities.
           state.ctx.host_hooks,
+          state.can_block,
+          state.ctx.extend_262,
         ),
         state,
       ),
@@ -1337,6 +1324,8 @@ fn do_shadow_realm_evaluate(
             // The shadow realm inherits the caller's embedder host
             // capabilities.
             state.ctx.host_hooks,
+            state.can_block,
+            state.ctx.extend_262,
           ),
           state,
         )

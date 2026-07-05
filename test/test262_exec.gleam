@@ -24,7 +24,6 @@ import arc/module
 import arc/module/load_error
 import arc/module_host
 import arc/parser
-import arc/vm/agent
 import arc/vm/builtins
 import arc/vm/builtins/common
 import arc/vm/completion.{ThrowCompletion}
@@ -38,7 +37,6 @@ import arc/vm/internal/elements
 import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
-import arc/vm/realm
 import arc/vm/state.{type Heap, type State, RealmCtx, State}
 import arc/vm/value
 import gleam/dict
@@ -498,23 +496,15 @@ fn run_test_completion(
   async_outcome: fn(Settled(host), value.Ref) -> TestOutcome,
 ) -> TestOutcome {
   // test262 CanBlockIsFalse flag: the test must run in an agent whose
-  // [[CanBlock]] is false (sync Atomics.wait throws a TypeError). The flag
-  // is process-local and read at realm boot, so it must be set inside the
-  // worker closure (run_with_timeout executes it in a spawned process).
-  // Set unconditionally: True for every other test.
-  // install_agent_hook is process-local for the same reason: it registers
-  // the $262 extension that puts the harness's host-side `agent` object on
-  // every $262 the worker's realms build (initial + createRealm children).
+  // [[CanBlock]] is false (sync Atomics.wait throws a TypeError). Threaded
+  // to the freshly booted State's `can_block` field. True for every other
+  // test.
   let can_block = !list.contains(metadata.flags, "CanBlockIsFalse")
   case is_module {
     True ->
       case
         test_runner.run_with_timeout(
-          fn() {
-            let Nil = agent.set_can_block(can_block)
-            let Nil = install_agent_hook()
-            do_run_module(metadata, source, path, is_async)
-          },
+          fn() { do_run_module(metadata, source, path, is_async, can_block) },
           test_timeout_ms,
         )
         |> result.flatten
@@ -530,14 +520,13 @@ fn run_test_completion(
       case
         test_runner.run_with_timeout(
           fn() {
-            let Nil = agent.set_can_block(can_block)
-            let Nil = install_agent_hook()
             do_run_script_with_harness(
               metadata,
               source,
               path,
               variant,
               is_async,
+              can_block,
             )
           },
           test_timeout_ms,
@@ -781,6 +770,7 @@ fn do_run_module(
   source: String,
   path: String,
   is_async: Bool,
+  can_block: Bool,
 ) -> Result(#(Settled(host), value.Ref), String) {
   let #(h, b, global_object) = boot_base_realm()
 
@@ -814,6 +804,8 @@ fn do_run_module(
           global_object,
           bundle,
           test_hooks,
+          can_block,
+          Some(extend_262_with_agent),
           settle_pending_wakes,
         )
       case result {
@@ -872,6 +864,7 @@ fn do_run_script_with_harness(
   path: String,
   variant: StrictnessVariant,
   is_async: Bool,
+  can_block: Bool,
 ) -> Result(#(Settled(host), value.Ref), String) {
   let #(h, b, global_object) = boot_base_realm()
 
@@ -910,6 +903,8 @@ fn do_run_script_with_harness(
               b,
               env,
               test_hooks,
+              can_block,
+              Some(extend_262_with_agent),
               settle_pending_wakes,
             )
           {
@@ -972,7 +967,14 @@ fn eval_harness(
           ),
         )
       let h = heap.root(h, realm_ref)
-      let #(h, dollar_262_ref) = entry.build_262(h, b, global_object, realm_ref)
+      let #(h, dollar_262_ref) =
+        entry.build_262(
+          h,
+          b,
+          global_object,
+          realm_ref,
+          Some(extend_262_with_agent),
+        )
       let #(h, _) =
         object.set_property(
           h,
@@ -1085,8 +1087,9 @@ fn inspect_thrown(val: value.JsValue, heap: Heap(host)) -> String {
 // messages, and mailbox receives are embedder territory (the same boundary
 // as the Atomics host capabilities; see the contract in arc/host.gleam).
 // The harness injects the `agent` object onto every $262 via the
-// realm.set_extend_262 hook, registered per-test worker process and
-// re-registered inside each spawned agent child.
+// `extend_262_with_agent` hook, threaded to each realm boot and to
+// `entry.build_262` directly (initial + createRealm children + spawned
+// agent children all receive it).
 //
 // `$262.agent.start(script)` spawns a REAL BEAM child process
 // (test262_exec_ffi.erl) that boots a completely fresh realm — its own
@@ -1113,14 +1116,11 @@ fn inspect_thrown(val: value.JsValue, heap: Heap(host)) -> String {
 // degenerate same-process case (the main agent reporting to itself).
 // ============================================================================
 
-/// Register the harness's $262 extension hook in the CURRENT process.
-/// Process-local (like the CanBlock flag): must run in every per-test
-/// worker before realms boot, and again inside each agent child body.
-fn install_agent_hook() -> Nil {
-  realm.set_extend_262(extend_262_with_agent)
-}
-
-/// The hook itself: build the agent object and hang it off the fresh $262.
+/// The harness's $262 extension hook: build the agent object and hang it off
+/// the fresh $262. Threaded (as `Some(extend_262_with_agent)`) to every realm
+/// boot and `entry.build_262` call in the harness so the initial $262, every
+/// `$262.createRealm()` child, and every spawned agent process's realm all
+/// receive it.
 fn extend_262_with_agent(
   h: Heap(host),
   b: common.Builtins,
@@ -1241,11 +1241,6 @@ fn agent_start_native(
 /// the spawned BEAM process — errors are reported to stderr, never thrown
 /// back (there is no JS frame to throw into).
 fn run_agent_child(source: String) -> Nil {
-  // Fresh process: re-register the process-local $262 hook so this child's
-  // realm (and any realm it creates) also gets the agent object. CanBlock
-  // needs no re-set — fresh processes default to True, which is correct
-  // for spawned agents (§9.7).
-  let Nil = install_agent_hook()
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   let #(h, global_ref) = builtins.globals(b, h)
@@ -1259,7 +1254,8 @@ fn run_agent_child(source: String) -> Nil {
       ),
     )
   let h = heap.root(h, realm_ref)
-  let #(h, dollar_262_ref) = entry.build_262(h, b, global_ref, realm_ref)
+  let #(h, dollar_262_ref) =
+    entry.build_262(h, b, global_ref, realm_ref, Some(extend_262_with_agent))
   let #(h, _) =
     object.set_property(
       h,
@@ -1308,6 +1304,9 @@ fn run_agent_child(source: String) -> Nil {
           dict.new(),
           dict.new(),
           harness_host_hooks(),
+          // Spawned agents may block (§9.7 [[CanBlock]] defaults to true).
+          True,
+          Some(extend_262_with_agent),
         )
       let st =
         State(

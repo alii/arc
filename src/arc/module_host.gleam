@@ -226,6 +226,8 @@ fn evaluate_module(
           state.ctx.global_object,
           bundle,
           state.ctx.host_hooks,
+          state.can_block,
+          state.ctx.extend_262,
           fn(module_state) { module_state },
         )
       let state =
@@ -419,6 +421,8 @@ fn evaluate_deferred_async_deps(
       state.builtins,
       state.ctx.global_object,
       state.ctx.host_hooks,
+      state.can_block,
+      state.ctx.extend_262,
       fn(module_state) { module_state },
     )
   let state =
@@ -760,6 +764,8 @@ pub fn evaluate_bundle_with_registry(
   global_object: Ref,
   bundle: module.ModuleBundle,
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: option.Option(state.Extend262(host)),
   finish: fn(State(host)) -> State(host),
 ) -> #(
   Heap(host),
@@ -799,6 +805,8 @@ pub fn evaluate_bundle_with_registry(
           b,
           global_object,
           host_hooks,
+          can_block,
+          extend_262,
           finish,
           already_evaluated,
         )

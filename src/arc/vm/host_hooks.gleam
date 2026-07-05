@@ -101,7 +101,7 @@ pub type DeliverWakeFn =
 /// "cannot block".
 ///
 /// `can_block` (Agent Record [[CanBlock]], §9.7) is a SEPARATE, per-agent
-/// spec policy — see `arc/vm/agent`. AgentCanSuspend() is
+/// spec policy carried on `State.can_block`. AgentCanSuspend() is
 /// `can_block && option.is_some(host_hooks.atomics)`.
 pub type AtomicsCapabilities {
   AtomicsCapabilities(

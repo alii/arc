@@ -504,6 +504,8 @@ pub fn eval_module_with(
       engine.builtins,
       engine.global,
       engine.host_hooks,
+      True,
+      option.None,
       finish,
     )
   case result {

@@ -231,9 +231,9 @@ check_key(_, _, _) -> none.
 
 %% ---------------------------------------------------------------------
 %% Registry lifecycle. Called ONCE per realm boot (interpreter.new_state,
-%% at the same seam that reads arc_agent_ffi:can_block/0) — never lazily
-%% from a waiterlist operation, so no hot-path function has to carry a
-%% "table might not exist" failure mode.
+%% at the same seam that seeds State.can_block) — never lazily from a
+%% waiterlist operation, so no hot-path function has to carry a "table
+%% might not exist" failure mode.
 %%
 %% The table is owned by a dedicated process so it is not torn down when
 %% its creator (e.g. a per-test worker) exits. Creation races between

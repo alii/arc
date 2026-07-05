@@ -141,6 +141,8 @@ pub fn run_with_hooks(
       global_object,
       False,
       host_hooks,
+      True,
+      None,
     )
     |> interpreter.execute_to_completion("run_with_hooks")
   use #(settled, drained) <- result.map(settle(executed, finish))
@@ -165,6 +167,8 @@ pub fn run_module(
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(State(host)) -> State(host),
 ) -> ModuleResult(host) {
   let locals = interpreter.init_module_locals(func, seeds)
@@ -178,6 +182,8 @@ pub fn run_module(
       dict.new(),
       dict.new(),
       host_hooks,
+      can_block,
+      extend_262,
     )
   case interpreter.execute_inner(state) {
     Error(vm_err) -> ModuleError(error: vm_err)
@@ -333,6 +339,8 @@ pub fn run_and_drain_repl(
     builtins,
     env,
     host_hooks.default_host_hooks(),
+    True,
+    None,
     event_loop.drain_jobs,
   )
 }
@@ -351,6 +359,8 @@ pub fn run_and_drain_repl_with(
   builtins: Builtins,
   env: ReplEnv,
   host_hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
   finish: fn(State(host)) -> State(host),
 ) -> Result(#(Result(JsValue, JsValue), Heap(host), ReplEnv), VmError) {
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
@@ -366,6 +376,8 @@ pub fn run_and_drain_repl_with(
       env.lexical_globals,
       env.symbol_registry,
       host_hooks,
+      can_block,
+      extend_262,
     )
   let run_state = State(..base, ctx: RealmCtx(..base.ctx, realms: env.realms))
   use #(settled, drained) <- result.map(settle(
@@ -573,6 +585,7 @@ pub fn build_262(
   b: Builtins,
   global_ref: Ref,
   realm_ref: Ref,
+  extend_262: Option(state.Extend262(host)),
 ) -> #(Heap(host), Ref) {
-  realm.build_262(h, b, global_ref, realm_ref)
+  realm.build_262(h, b, global_ref, realm_ref, extend_262)
 }

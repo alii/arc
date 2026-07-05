@@ -44,6 +44,14 @@ pub type HostFn(host) =
   fn(List(JsValue), JsValue, State(host)) ->
     #(State(host), Result(JsValue, JsValue))
 
+/// Embedder extension applied to a freshly built (and rooted) $262 object:
+/// receives the heap, the realm's builtins and the $262 ref, and returns the
+/// heap with any extra properties installed. Agent-wide — set once at boot,
+/// inherited by every realm the agent creates so `$262.createRealm()` children
+/// receive the same extras.
+pub type Extend262(host) =
+  fn(Heap(host), Builtins, Ref) -> Heap(host)
+
 /// Exception handler frame, pushed by PushTry. `kind` is copied straight off
 /// the opcode: it says whether unwinding a *return* completion past this frame
 /// must run a finally subroutine, close a live iterator, or just skip it
@@ -155,6 +163,10 @@ pub type RealmCtx(host) {
     /// all `..spread` or re-thread this RealmCtx, so a forgotten install is
     /// a compile error rather than a silent "cannot block".
     host_hooks: host_hooks.HostHooks,
+    /// Embedder extension applied to every $262 object `realm.build_262`
+    /// creates (initial + `$262.createRealm()` children). `None` for embedders
+    /// that don't extend $262. Agent-wide, set once at boot.
+    extend_262: Option(Extend262(host)),
   )
 }
 
@@ -291,7 +303,7 @@ pub type State(host) {
 //   ENGINE PLUMBING — installed once by `new_state` / passed positionally,
 //   never spread from a caller State:
 //     * `call_fn`, `construct_fn`, `to_number_fn`, `to_bigint_fn`,
-//       `callback_sentinel`, `host_hooks`
+//       `callback_sentinel`, `host_hooks`, `extend_262`
 
 /// Seed the agent-wide state a child execution must inherit from its caller:
 /// the pending job queue, the outstanding `host.suspend` promise count, the

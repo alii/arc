@@ -1,4 +1,3 @@
-import arc/vm/agent
 import arc/vm/binop
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/disposable_stack
@@ -375,9 +374,11 @@ pub fn new_state(
   lexical_globals: dict.Dict(String, value.LexicalGlobal),
   symbol_registry: dict.Dict(String, value.SymbolId),
   hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
 ) -> State(host) {
   // Realm boot: bring up the shared Atomics waiterlist registry (the ETS
-  // table + its owner process) once, explicitly, at the same seam that reads
+  // table + its owner process) once, explicitly, at the same seam that seeds
   // this agent's [[CanBlock]]. Idempotent, so every booting agent process may
   // call it. Nothing on the Atomics hot path creates the table lazily — an
   // insert/take/cancel is then a plain ETS access that cannot fail with "the
@@ -424,6 +425,7 @@ pub fn new_state(
       // supplied exactly once at engine/realm construction and inherited by
       // every derived State via `..ctx` spreads.
       host_hooks: hooks,
+      extend_262:,
     ),
     new_target: JsUndefined,
     call_args: [],
@@ -434,9 +436,7 @@ pub fn new_state(
     call_depth: 0,
     eval_env: None,
     current_line: 0,
-    // Agent [[CanBlock]]: read once at state init from the process-local
-    // flag (defaults to True) — see arc/vm/agent for the full contract.
-    can_block: agent.can_block(),
+    can_block:,
   )
 }
 
@@ -454,6 +454,8 @@ pub fn init_state(
   global_object: Ref,
   is_module: Bool,
   hooks: host_hooks.HostHooks,
+  can_block: Bool,
+  extend_262: Option(state.Extend262(host)),
 ) -> State(host) {
   // ES §16.2.1.5.2 ModuleEvaluation: module `this` is undefined.
   // ES §16.1.6 ScriptEvaluation: the script's this is the global object,
@@ -472,6 +474,8 @@ pub fn init_state(
     dict.new(),
     dict.new(),
     hooks,
+    can_block,
+    extend_262,
   )
 }
 
@@ -549,7 +553,16 @@ pub fn call_root(
   hooks: host_hooks.HostHooks,
 ) -> Result(#(Completion, State(host)), VmError) {
   let state =
-    init_state(empty_template(), heap, builtins, global_object, False, hooks)
+    init_state(
+      empty_template(),
+      heap,
+      builtins,
+      global_object,
+      False,
+      hooks,
+      True,
+      None,
+    )
   call_value_to_completion(state, callee, this_val, args)
 }
 
@@ -566,7 +579,16 @@ pub fn root_state(
   global_object: Ref,
   hooks: host_hooks.HostHooks,
 ) -> State(host) {
-  init_state(empty_template(), heap, builtins, global_object, False, hooks)
+  init_state(
+    empty_template(),
+    heap,
+    builtins,
+    global_object,
+    False,
+    hooks,
+    True,
+    None,
+  )
 }
 
 /// Allocate a closure (FunctionObject) for `child_template`, capturing
