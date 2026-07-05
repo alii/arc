@@ -36,7 +36,7 @@ fn deferred_namespace_of(
     )
   let #(_eng, out) =
     engine.with_state(eng, fn(s) {
-      let assert Ok(#(h, linked)) =
+      let assert #(h, Ok(linked)) =
         module.link_for_evaluation(bundle, s.heap, s.builtins)
       let #(h, deferred) =
         module.get_or_create_deferred_namespace(h, s.builtins, linked, spec)

@@ -7904,11 +7904,12 @@ fn run_module(
       case
         module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
       {
-        Ok(module.EvaluatedBundle(value: val, heap: new_heap, ..)) ->
+        #(new_heap, Ok(module.EvaluatedBundle(value: val, ..))) ->
           Ok(#(Ok(val), new_heap))
-        Error(module.EvaluationError(value: val, heap: new_heap)) ->
+        #(new_heap, Error(module.EvaluationError(value: val))) ->
           Ok(#(Error(val), new_heap))
-        Error(err) -> Error("module error: " <> string.inspect(err))
+        #(_new_heap, Error(err)) ->
+          Error("module error: " <> string.inspect(err))
       }
   }
 }
@@ -8062,11 +8063,12 @@ pub fn module_repl_harness_globals_test() -> Nil {
   case
     module.evaluate_bundle(bundle, h, b, env.global_object, event_loop.finish)
   {
-    Ok(module.EvaluatedBundle(value: val, ..)) -> {
+    #(_heap, Ok(module.EvaluatedBundle(value: val, ..))) -> {
       let assert True = val == JsString("hello from harness")
       Nil
     }
-    Error(err) -> panic as { "module failed: " <> string.inspect(err) }
+    #(_heap, Error(err)) ->
+      panic as { "module failed: " <> string.inspect(err) }
   }
 }
 
@@ -8095,7 +8097,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       fn(_d, _p) { Error(load_error.ResolveForbidden) },
       fn(_resolved) { Error(load_error.LoadForbidden) },
     )
-  let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(ns_ref), ..)) =
+  let assert #(h, Ok(module.EvaluatedBundle(namespace: ns_ref, ..))) =
     module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
   let namespace = value.JsObject(ns_ref)
 
@@ -8527,7 +8529,7 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
-  let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(ns), ..)) =
+  let assert #(h, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
     module.evaluate_bundle(first, h, b, global_object, event_loop.finish)
 
   // Same specifier, source has since gained an export.
@@ -8538,7 +8540,7 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
       no_resolve,
       no_load,
     )
-  let assert Error(err) =
+  let assert #(h, Error(err)) =
     module.link_for_evaluation_reusing(
       second,
       h,
@@ -8548,7 +8550,66 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
     )
   let assert True = case err {
     module.EvaluationError(..) ->
-      string.contains(module.error_message(err), "was re-loaded with an export")
+      string.contains(
+        module.error_message(err, h),
+        "was re-loaded with an export",
+      )
+    _ -> False
+  }
+  Nil
+}
+
+/// The same host-loader contract violation, but the fresh parse gained a
+/// RE-export rather than a local export: the reused namespace has no cell for
+/// it either, so it is the same guest-visible link error — never a linker panic
+/// on the missing cell.
+pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, global_object) = builtins.globals(b, h)
+  let spec = "/shared.js"
+  let no_resolve = fn(_dep, _parent) { Error(load_error.ResolveForbidden) }
+  let no_load = fn(_resolved) { Error(load_error.LoadForbidden) }
+
+  let assert Ok(first) =
+    module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
+  let assert #(h, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
+    module.evaluate_bundle(first, h, b, global_object, event_loop.finish)
+
+  // Same specifier, source has since gained `export { y } from './dep.js'`.
+  let dep_resolve = fn(dep, _parent) {
+    case dep {
+      "./dep.js" -> Ok("/dep.js")
+      _ -> Error(load_error.ResolveForbidden)
+    }
+  }
+  let dep_load = fn(resolved) {
+    case resolved {
+      "/dep.js" -> Ok("export const y = 2;")
+      _ -> Error(load_error.LoadForbidden)
+    }
+  }
+  let assert Ok(second) =
+    module.compile_bundle(
+      spec,
+      "export const x = 1; export { y } from './dep.js';",
+      dep_resolve,
+      dep_load,
+    )
+  let assert #(h, Error(err)) =
+    module.link_for_evaluation_reusing(
+      second,
+      h,
+      b,
+      dict.from_list([#(spec, ns)]),
+      dict.new(),
+    )
+  let assert True = case err {
+    module.EvaluationError(..) ->
+      string.contains(
+        module.error_message(err, h),
+        "was re-loaded with an export",
+      )
     _ -> False
   }
   Nil

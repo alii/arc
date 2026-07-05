@@ -188,8 +188,10 @@ pub fn write_namespace(
 }
 
 /// Roll back a namespace registration for a module whose body never
-/// completed — it may be (re-)evaluated by a later import.
-pub fn clear_namespace(
+/// completed — it may be (re-)evaluated by a later import. Private: the only
+/// blessed rollback is `clear_module_registrations`, which drops every
+/// registration together.
+fn clear_namespace(
   h: Heap(host),
   global_object: Ref,
   spec: String,
@@ -226,7 +228,8 @@ pub fn write_deferred_namespace(
 /// Roll back a deferred-namespace registration for a module whose body never
 /// completed — its exports would read uninitialized cells, and a later
 /// `import defer` must build a fresh namespace over a re-evaluated module.
-pub fn clear_deferred_namespace(
+/// Private for the same reason as `clear_namespace`.
+fn clear_deferred_namespace(
   h: Heap(host),
   global_object: Ref,
   spec: String,
@@ -272,6 +275,74 @@ pub fn clear_pending_promise(
   spec: String,
 ) -> Heap(host) {
   clear_entry(h, global_object, pending_cache_property(), spec)
+}
+
+// =============================================================================
+// The combined view — one precedence ladder over all five caches
+// =============================================================================
+
+/// Everything the caches say about one module, as ONE value with the
+/// precedence rules baked in. Both dynamic-import hook arms (`import()` and
+/// `import.defer()`) read the registry through this, so they cannot grow two
+/// subtly different ladders over the same five caches.
+///
+/// Precedence, highest first:
+///   1. the sticky evaluation error (§16.2.1.5.3) — a namespace may have been
+///      pre-published before the body threw, so the error must win;
+///   2. the in-flight top-level-await promise (Evaluate() step 4) — a re-import
+///      chains onto the same evaluation instead of re-running the body;
+///   3. the module namespace, split by whether the body has started.
+///
+/// The Deferred Module Namespace rides along on every state that can have one:
+/// its identity is per module record ([[DeferredNamespace]]) and is valid
+/// whatever the body's status, so an `import.defer()` can hand it back without
+/// re-deriving the ladder.
+pub type CacheState {
+  /// The module's evaluation threw; every later import rethrows this value.
+  Failed(error: JsValue)
+  /// The body is parked on top-level await; `promise` is its in-flight
+  /// namespace promise.
+  Pending(promise: Ref, deferred: Option(Ref))
+  /// The body has started (it is running, parked, or completed) — an eager
+  /// import must NOT run it again and resolves with `namespace`.
+  Started(namespace: Ref, deferred: Option(Ref))
+  /// Linked (so the namespace exists) but the body never started — an eager
+  /// import still has to evaluate it. This is what an earlier `import.defer()`
+  /// leaves behind.
+  LinkedOnly(namespace: Ref, deferred: Option(Ref))
+  /// No namespace registered. `deferred` is `None` in every reachable case (a
+  /// deferred namespace is only ever registered alongside a namespace, and
+  /// `clear_module_registrations` drops both together); it is carried anyway so
+  /// this type is a LOSSLESS view of the caches rather than one that quietly
+  /// forgets an entry.
+  Absent(deferred: Option(Ref))
+}
+
+/// Everything the five caches say about `spec`, collapsed to one `CacheState`.
+pub fn read_cache_state(
+  h: Heap(host),
+  global_object: Ref,
+  spec: String,
+) -> CacheState {
+  case read_module_error(h, global_object, spec) {
+    Some(error) -> Failed(error:)
+    None -> {
+      let deferred = read_deferred_namespace(h, global_object, spec)
+      case read_pending_promise(h, global_object, spec) {
+        Some(promise) -> Pending(promise:, deferred:)
+        None ->
+          case read_namespace(h, global_object, spec) {
+            None -> Absent(deferred:)
+            Some(namespace) ->
+              case read_module_status(h, global_object, spec) {
+                Some(Evaluating) | Some(Evaluated) ->
+                  Started(namespace:, deferred:)
+                None -> LinkedOnly(namespace:, deferred:)
+              }
+          }
+      }
+    }
+  }
 }
 
 // =============================================================================

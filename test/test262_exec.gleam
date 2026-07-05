@@ -760,12 +760,12 @@ fn do_run_module(
       case result {
         Ok(module.EvaluatedBundle(value: val, ..)) ->
           Ok(#(#(Ok(val), new_heap), global_object))
-        Error(module.EvaluationError(value: val, heap: _)) ->
+        Error(module.EvaluationError(value: val)) ->
           Ok(#(#(Error(val), new_heap), global_object))
         // Entry module still parked on top-level await after a full drain:
         // an awaited promise can never settle. Same outcome as the
         // pre-EvaluationPending behavior (a host-level throw).
-        Error(module.EvaluationPending(promise_data_ref: _, heap: _)) ->
+        Error(module.EvaluationPending(promise_data_ref: _)) ->
           Ok(#(
             #(
               Error(value.JsString(
@@ -1040,7 +1040,7 @@ fn inspect_thrown(val: value.JsValue, heap: Heap(host)) -> String {
 // (the ack is sent BEFORE the child invokes its receiveBroadcast callbacks,
 // so a callback blocking in a sync Atomics.wait cannot deadlock broadcast).
 // Because shared buffers are backed by an Erlang `atomics` array
-// (value.BufShared — see arc_sab_ffi.erl) and atomics refs cross process
+// (value.Shared — see arc_sab_ffi.erl) and atomics refs cross process
 // boundaries by reference, the SAB the child reconstructs aliases the very
 // same mutable cells as the parent's: Atomics writes in an agent are
 // genuinely visible to the main agent and vice versa, and a child blocked
@@ -1135,19 +1135,16 @@ fn build_agent(h: Heap(host), b: common.Builtins) -> #(Heap(host), value.Ref) {
 type AgentPid
 
 /// The term `broadcast` ships to each child process. SharedArrayBuffers
-/// travel as their raw `BufferData` storage: for `BufShared` the atomics
-/// ref is shared by reference (true shared memory); a `BufBytes` payload
+/// travel as their raw `value.BufferStorage`: for `value.Shared` the atomics
+/// ref is shared by reference (true shared memory); a byte-backed payload
 /// would arrive as a copy (non-shared buffers have no cross-agent identity
 /// to preserve). Non-object primitives pass through as-is — they are
 /// heap-independent.
 type AgentPayload {
-  /// Shared-ness is derived from `data` (`value.buffer_is_shared`), not a
-  /// separate flag — `BufShared` is shared, `BufBytes` is not.
-  AgentSabPayload(
-    data: value.BufferData,
-    max_byte_length: option.Option(Int),
-    immutable: Bool,
-  )
+  /// Shared-ness is derived from the storage variant
+  /// (`value.buffer_is_shared`), not a separate flag — `value.Shared` is
+  /// shared, the byte-backed variants are not.
+  AgentSabPayload(storage: value.BufferStorage)
   AgentValuePayload(value: value.JsValue)
 }
 
@@ -1330,7 +1327,7 @@ fn agent_child_loop(st: State(host), agent_this: value.JsValue) -> Nil {
 }
 
 /// Rebuild a broadcast payload as a JsValue in the child's heap. A
-/// `BufShared` payload aliases the parent's atomics cells — this IS the
+/// `value.Shared` payload aliases the parent's atomics cells — this IS the
 /// shared memory, not a copy.
 fn payload_to_value(
   st: State(host),
@@ -1338,21 +1335,13 @@ fn payload_to_value(
 ) -> #(State(host), value.JsValue) {
   case payload {
     AgentValuePayload(v) -> #(st, v)
-    AgentSabPayload(data:, max_byte_length:, immutable:) -> {
-      let proto = case value.buffer_is_shared(data) {
+    AgentSabPayload(storage:) -> {
+      let proto = case value.buffer_is_shared(storage) {
         True -> st.builtins.shared_array_buffer.prototype
         False -> st.builtins.array_buffer.prototype
       }
       let #(heap, ref) =
-        common.alloc_wrapper(
-          st.heap,
-          value.ArrayBufferObject(
-            data: Some(data),
-            max_byte_length:,
-            immutable:,
-          ),
-          proto,
-        )
+        common.alloc_wrapper(st.heap, value.ArrayBufferObject(storage:), proto)
       #(State(..st, heap:), value.JsObject(ref))
     }
   }
@@ -1417,15 +1406,13 @@ fn make_broadcast_payload(
   case v {
     value.JsObject(ref) ->
       case heap.read(st.heap, ref) {
-        // A detached buffer (`data: None`) has no storage to ship.
+        // A detached buffer has no storage to ship.
         Some(value.ObjectSlot(
-          kind: value.ArrayBufferObject(
-            data: Some(data),
-            max_byte_length:,
-            immutable:,
-          ),
+          kind: value.ArrayBufferObject(storage: value.Detached(..)),
           ..,
-        )) -> Ok(AgentSabPayload(data:, max_byte_length:, immutable:))
+        )) -> Error(Nil)
+        Some(value.ObjectSlot(kind: value.ArrayBufferObject(storage:), ..)) ->
+          Ok(AgentSabPayload(storage:))
         _ -> Error(Nil)
       }
     other -> Ok(AgentValuePayload(other))

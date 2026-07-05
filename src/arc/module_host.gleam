@@ -174,49 +174,28 @@ fn eager_import_module(
   resolve: ResolveFn,
   load: LoadFn,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // A previous import of this module settled (or is mid-evaluation) —
-  // repeat the same result. The error cache wins: a namespace entry is
-  // pre-published before evaluation and may be stale after a throw. The
-  // pending cache (module parked on top-level await) wins over the
-  // namespace cache: per Evaluate() step 4 a re-import returns the same
-  // in-flight top-level promise instead of re-running the body.
+  // A previous import of this module settled (or is mid-evaluation) — repeat
+  // the same result. `registry.read_cache_state` holds the precedence rules
+  // (error over pending over namespace), shared with the `import.defer()` arm.
   case
-    registry.read_module_error(state.heap, state.ctx.global_object, resolved)
+    registry.read_cache_state(state.heap, state.ctx.global_object, resolved)
   {
-    Some(error) -> #(state, Error(error))
-    None ->
-      case
-        registry.read_pending_promise(
-          state.heap,
-          state.ctx.global_object,
-          resolved,
-        )
-      {
-        Some(pending_promise_ref) -> #(state, Ok(JsObject(pending_promise_ref)))
-        None -> {
-          // A registered namespace alone is not enough: linking (e.g. an
-          // earlier `import.defer()`) registers namespaces WITHOUT
-          // evaluating. Only short-circuit when the module's body has
-          // completed (`Evaluated`) or is mid-run (`Evaluating` — the
-          // re-entrant import case, which must not re-run the body).
-          let status =
-            registry.read_module_status(
-              state.heap,
-              state.ctx.global_object,
-              resolved,
-            )
-          let namespace =
-            registry.read_namespace(
-              state.heap,
-              state.ctx.global_object,
-              resolved,
-            )
-          case namespace, status {
-            Some(ns_ref), Some(_) -> #(state, Ok(JsObject(ns_ref)))
-            _, _ -> evaluate_module(state, resolved, resolve, load)
-          }
-        }
-      }
+    // The error cache wins: a namespace entry is pre-published before
+    // evaluation and may be stale after a throw.
+    registry.Failed(error:) -> #(state, Error(error))
+    // Parked on top-level await: per Evaluate() step 4 a re-import returns the
+    // same in-flight top-level promise instead of re-running the body.
+    registry.Pending(promise:, deferred: _) -> #(state, Ok(JsObject(promise)))
+    // The body has completed, or is mid-run (the re-entrant import case, which
+    // must not re-run it).
+    registry.Started(namespace:, deferred: _) -> #(
+      state,
+      Ok(JsObject(namespace)),
+    )
+    // A registered namespace alone is not enough: linking (e.g. an earlier
+    // `import.defer()`) registers namespaces WITHOUT evaluating.
+    registry.LinkedOnly(..) | registry.Absent(..) ->
+      evaluate_module(state, resolved, resolve, load)
   }
 }
 
@@ -256,21 +235,16 @@ fn evaluate_module(
           job_queue: job_queue.append(state.job_queue, jobs),
         )
       case result {
-        Ok(module.EvaluatedBundle(value: _, namespace: Some(ns_ref), ..)) -> #(
+        Ok(module.EvaluatedBundle(value: _, namespace: ns_ref)) -> #(
           state,
           Ok(JsObject(ns_ref)),
         )
-        Ok(module.EvaluatedBundle(value: _, namespace: None, ..)) ->
-          state.type_error(
-            state,
-            "Module '" <> resolved <> "' produced no namespace",
-          )
-        Error(module.EvaluationError(value: thrown, heap: _)) -> {
+        Error(module.EvaluationError(value: thrown)) -> {
           // Repeat the same rejection on every future import of this entry.
           let state = cache_module_error(state, resolved, thrown)
           #(state, Error(thrown))
         }
-        Error(module.EvaluationPending(promise_data_ref:, heap: _)) ->
+        Error(module.EvaluationPending(promise_data_ref:)) ->
           pending_module_promise(state, resolved, promise_data_ref)
         Error(module.NotInBundle(..) as other) ->
           state.type_error(
@@ -278,7 +252,7 @@ fn evaluate_module(
             "Failed to evaluate module '"
               <> resolved
               <> "': "
-              <> module.error_message(other),
+              <> module.error_message(other, state.heap),
           )
       }
     }
@@ -306,88 +280,91 @@ fn defer_import_module(
   resolve_fn: JsValue,
   reject_fn: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // An already-failed module repeats the same rejection; an already
-  // registered deferred namespace is resolved with as-is.
+  // An already-failed module repeats the same rejection; an already registered
+  // deferred namespace is resolved with as-is. Same `registry.read_cache_state`
+  // ladder as the eager arm — the deferred namespace's identity is per module
+  // record, so it is handed back whatever the body's status is (including
+  // "parked on top-level await": the deferred namespace is still THE object).
   case
-    registry.read_module_error(state.heap, state.ctx.global_object, resolved)
+    registry.read_cache_state(state.heap, state.ctx.global_object, resolved)
   {
-    Some(error) -> #(state, Error(error))
-    None ->
-      case
-        registry.read_deferred_namespace(
-          state.heap,
-          state.ctx.global_object,
-          resolved,
-        )
-      {
-        Some(deferred_ns_ref) ->
-          settle_defer_import(state, resolve_fn, JsObject(deferred_ns_ref))
-        None -> {
-          use source <- with_loaded_source(state, resolved, load)
-          case module.compile_bundle(resolved, source, resolve, load) {
-            Error(err) -> compile_bundle_rejection(state, err)
-            Ok(bundle) ->
-              case
-                link_bundle_with_registry(
+    registry.Failed(error:) -> #(state, Error(error))
+    registry.Pending(deferred: Some(deferred_ns_ref), ..)
+    | registry.Started(deferred: Some(deferred_ns_ref), ..)
+    | registry.LinkedOnly(deferred: Some(deferred_ns_ref), ..)
+    | registry.Absent(deferred: Some(deferred_ns_ref)) ->
+      settle_defer_import(state, resolve_fn, JsObject(deferred_ns_ref))
+    registry.Pending(deferred: None, ..)
+    | registry.Started(deferred: None, ..)
+    | registry.LinkedOnly(deferred: None, ..)
+    | registry.Absent(deferred: None) -> {
+      use source <- with_loaded_source(state, resolved, load)
+      case module.compile_bundle(resolved, source, resolve, load) {
+        Error(err) -> compile_bundle_rejection(state, err)
+        Ok(bundle) -> {
+          // The heap comes back beside the result — always the live one.
+          let #(h, link_result) =
+            link_bundle_with_registry(
+              state.heap,
+              state.builtins,
+              state.ctx.global_object,
+              bundle,
+            )
+          let state = State(..state, heap: h)
+          case link_result {
+            Error(module.EvaluationError(value: thrown)) -> #(
+              state,
+              Error(thrown),
+            )
+            Error(other) ->
+              state.type_error(
+                state,
+                "Failed to link module '"
+                  <> resolved
+                  <> "': "
+                  <> module.error_message(other, state.heap),
+              )
+            Ok(linked_bundle) -> {
+              let #(h, deferred_ns) =
+                module.get_or_create_deferred_namespace(
                   state.heap,
                   state.builtins,
-                  state.ctx.global_object,
-                  bundle,
+                  linked_bundle,
+                  resolved,
                 )
-              {
-                Error(#(h, module.EvaluationError(value: thrown, ..))) -> #(
-                  State(..state, heap: h),
-                  Error(thrown),
-                )
-                Error(#(h, other)) ->
-                  state.type_error(
-                    State(..state, heap: h),
-                    "Failed to link module '"
-                      <> resolved
-                      <> "': "
-                      <> module.error_message(other),
-                  )
-                Ok(#(h, linked_bundle)) -> {
-                  let #(h, deferred_ns) =
-                    module.get_or_create_deferred_namespace(
-                      h,
-                      state.builtins,
-                      linked_bundle,
-                      resolved,
-                    )
-                  let state = State(..state, heap: h)
-                  case deferred_ns {
-                    Ok(ns_ref) -> {
-                      let state =
-                        State(
-                          ..state,
-                          heap: registry.write_deferred_namespace(
-                            state.heap,
-                            state.ctx.global_object,
-                            resolved,
-                            ns_ref,
-                          ),
-                        )
-                      evaluate_deferred_async_deps(
-                        state,
+              let state = State(..state, heap: h)
+              case deferred_ns {
+                Ok(ns_ref) -> {
+                  let state =
+                    State(
+                      ..state,
+                      heap: registry.write_deferred_namespace(
+                        state.heap,
+                        state.ctx.global_object,
                         resolved,
-                        JsObject(ns_ref),
-                        linked_bundle,
-                        resolve_fn,
-                        reject_fn,
-                      )
-                    }
-                    Error(module.DeferredSpecifierNotInBundle(specifier:)) ->
-                      state.type_error(
-                        state,
-                        "Cannot find module '" <> specifier <> "'",
-                      )
-                  }
+                        ns_ref,
+                      ),
+                    )
+                  evaluate_deferred_async_deps(
+                    state,
+                    resolved,
+                    JsObject(ns_ref),
+                    linked_bundle,
+                    resolve_fn,
+                    reject_fn,
+                  )
                 }
+                Error(module.DeferredSpecifierNotInBundle(specifier:)) ->
+                  state.type_error(
+                    state,
+                    "Cannot find module '" <> specifier <> "'",
+                  )
               }
+            }
           }
         }
       }
+    }
   }
 }
 
@@ -455,7 +432,7 @@ fn evaluate_deferred_async_deps(
       chain_deferred_settlement(state, ns, pendings, resolve_fn, reject_fn),
       Ok(JsUndefined),
     )
-    Error(module.EvaluationError(value: thrown, heap: _)) -> {
+    Error(module.EvaluationError(value: thrown)) -> {
       // Repeat the same rejection on every future import of this entry.
       let state = cache_module_error(state, resolved, thrown)
       #(state, Error(thrown))
@@ -467,7 +444,7 @@ fn evaluate_deferred_async_deps(
         "Failed to evaluate async dependencies of module '"
           <> resolved
           <> "': "
-          <> module.error_message(other),
+          <> module.error_message(other, state.heap),
       )
   }
 }
@@ -571,15 +548,16 @@ fn call_import_settle_fn(
 /// evaluate_bundle_with_registry) WITHOUT evaluating any body: registers
 /// every new module's namespace and deferred namespace so later imports —
 /// eager or deferred, static or dynamic — resolve to the same module records.
+///
+/// The heap travels BESIDE the result and is the live one on both paths (a link
+/// error's JS error object was allocated in it), so there is nothing to choose
+/// between.
 fn link_bundle_with_registry(
   h: Heap(host),
   b: Builtins,
   global_object: Ref,
   bundle: module.ModuleBundle,
-) -> Result(
-  #(Heap(host), module.LinkedBundle),
-  #(Heap(host), module.ModuleError(host)),
-) {
+) -> #(Heap(host), Result(module.LinkedBundle, module.ModuleError)) {
   let specs = dict.keys(bundle.modules)
   let preexisting =
     list.fold(specs, dict.new(), fn(acc, spec) {
@@ -604,9 +582,8 @@ fn link_bundle_with_registry(
       preexisting_deferred,
     )
   {
-    Error(module.EvaluationError(heap:, ..) as err) -> Error(#(heap, err))
-    Error(other) -> Error(#(h, other))
-    Ok(#(h, linked_bundle)) -> {
+    #(h, Error(err)) -> #(h, Error(err))
+    #(h, Ok(linked_bundle)) -> {
       let h =
         list.fold(module.linked_namespaces(linked_bundle, h), h, fn(h, pair) {
           let #(spec, ns_ref) = pair
@@ -633,7 +610,7 @@ fn link_bundle_with_registry(
             }
           },
         )
-      Ok(#(h, linked_bundle))
+      #(h, Ok(linked_bundle))
     }
   }
 }
@@ -787,7 +764,7 @@ pub fn evaluate_bundle_with_registry(
 ) -> #(
   Heap(host),
   List(value.Job),
-  Result(module.EvaluatedBundle(host), module.ModuleError(host)),
+  Result(module.EvaluatedBundle, module.ModuleError),
 ) {
   let specs = dict.keys(bundle.modules)
   let preexisting =
@@ -800,9 +777,10 @@ pub fn evaluate_bundle_with_registry(
   // Link + register every NEW module's namespace (and deferred namespace)
   // before any body runs.
   case link_bundle_with_registry(h, b, global_object, bundle) {
-    // Link errors carry the heap the error object was allocated in.
-    Error(#(heap, err)) -> #(heap, [], Error(err))
-    Ok(#(h, linked_bundle)) -> {
+    // The heap comes back beside the result — on the error path it holds the
+    // JS error object the `ModuleError` names.
+    #(heap, Error(err)) -> #(heap, [], Error(err))
+    #(h, Ok(linked_bundle)) -> {
       // Treat as already-evaluated exactly the modules whose bodies have
       // completed (per the heap status registry) — a registered-but-linked-
       // only module (from an earlier `import.defer()`) still needs its body
@@ -814,7 +792,7 @@ pub fn evaluate_bundle_with_registry(
             Some(registry.Evaluating) | None -> acc
           }
         })
-      let #(evaluated, jobs, result) =
+      let #(heap, evaluated, jobs, result) =
         module.evaluate_linked_tracking(
           linked_bundle,
           h,
@@ -825,8 +803,8 @@ pub fn evaluate_bundle_with_registry(
           already_evaluated,
         )
       case result {
-        Ok(module.EvaluatedBundle(heap:, ..)) -> #(heap, jobs, result)
-        Error(module.EvaluationError(value:, heap:)) -> {
+        Ok(module.EvaluatedBundle(..)) -> #(heap, jobs, result)
+        Error(module.EvaluationError(value:)) -> {
           // Roll back nodes whose bodies never completed — every registration
           // `link_bundle_with_registry` published for them, not just the
           // namespace (a surviving deferred namespace would hand out
@@ -845,17 +823,13 @@ pub fn evaluate_bundle_with_registry(
                   registry.clear_module_registrations(h, global_object, spec)
               }
             })
-          #(h, jobs, Error(module.EvaluationError(value:, heap: h)))
+          #(h, jobs, Error(module.EvaluationError(value:)))
         }
         // Mid-flight on top-level await: registrations stay (a re-import
         // must resolve to the same record), and the in-flight heap is the
         // live one.
-        Error(module.EvaluationPending(promise_data_ref: _, heap:)) -> #(
-          heap,
-          jobs,
-          result,
-        )
-        Error(module.NotInBundle(..)) -> #(h, jobs, result)
+        Error(module.EvaluationPending(promise_data_ref: _))
+        | Error(module.NotInBundle(..)) -> #(heap, jobs, result)
       }
     }
   }

@@ -75,7 +75,10 @@ pub type EvalError(host) {
   /// Linking a module graph failed, or its evaluation could not settle. A
   /// module whose top level THREW is not this: it comes back as an
   /// `Ok(EvaluatedModule(outcome: Threw(..), ..))`, like every other run.
-  ModuleError(module.ModuleError(host))
+  ///
+  /// `heap` is the heap the failing call handed back beside its `ModuleError`
+  /// — the `ModuleError` itself carries none, and rendering it needs one.
+  ModuleError(error: module.ModuleError, heap: state.Heap(host))
 }
 
 /// How a top-level run of JS ended, once every VM-internal state has been
@@ -493,7 +496,8 @@ pub fn eval_module_with(
     )
     |> result.map_error(ModuleCompileError),
   )
-  case
+  // The heap comes back beside the result and is the live one on every path.
+  let #(heap, result) =
     module.evaluate_bundle_with_hooks(
       bundle,
       engine.heap,
@@ -502,24 +506,24 @@ pub fn eval_module_with(
       engine.host_hooks,
       finish,
     )
-  {
-    Ok(module.EvaluatedBundle(value:, heap:, namespace:)) ->
+  case result {
+    Ok(module.EvaluatedBundle(value:, namespace:)) ->
       Ok(#(
         EvaluatedModule(
           outcome: Returned(value),
-          namespace: option.map(namespace, Namespace),
+          namespace: option.Some(Namespace(namespace)),
         ),
         Engine(..engine, heap:),
       ))
     // "The module's top level threw" is the same event `eval`/`call` report as
     // `Threw` — not an engine failure. The heap the throw left behind is
     // threaded forward, so the engine stays usable.
-    Error(module.EvaluationError(value: thrown, heap:)) ->
+    Error(module.EvaluationError(value: thrown)) ->
       Ok(#(
         EvaluatedModule(outcome: Threw(thrown), namespace: option.None),
         Engine(..engine, heap:),
       ))
-    Error(err) -> Error(ModuleError(err))
+    Error(err) -> Error(ModuleError(error: err, heap:))
   }
 }
 
@@ -743,12 +747,15 @@ fn module_compile_error_message(err: module.CompileBundleError) -> String {
 /// the uncaught thrown value, and `EvaluationPending` is only reachable with a
 /// non-draining finish driver (static entry points convert pending to
 /// `EvaluationError` inside `module.evaluate_linked`).
-fn module_error_message(err: module.ModuleError(host)) -> String {
+fn module_error_message(
+  err: module.ModuleError,
+  heap: state.Heap(host),
+) -> String {
   let phase = case err {
     module.NotInBundle(..) -> "ResolutionError: "
     module.EvaluationError(..) | module.EvaluationPending(..) -> ""
   }
-  phase <> module.error_message(err)
+  phase <> module.error_message(err, heap)
 }
 
 pub fn eval_error_message(err: EvalError(host)) -> String {
@@ -757,6 +764,6 @@ pub fn eval_error_message(err: EvalError(host)) -> String {
     CompileError(e) -> compiler.error_message(e)
     VmError(e) -> state.vm_error_message(e)
     ModuleCompileError(e) -> module_compile_error_message(e)
-    ModuleError(e) -> module_error_message(e)
+    ModuleError(error:, heap:) -> module_error_message(error, heap)
   }
 }
