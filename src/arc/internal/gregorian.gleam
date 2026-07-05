@@ -35,9 +35,10 @@ pub fn days_in_year(y: Int) -> Int {
 
 /// Length of 1-based month `m` in year `y`.
 ///
-/// A month outside 1..12 has no length, so it reports 0 rather than passing
-/// itself off as a 31-day month: a caller checking `day <= days_in_month(..)`
-/// rejects the whole date instead of accepting a plausible-looking one.
+/// Callers are expected to have already constrained `m` to 1..12; anything
+/// else falls into the 31-day arm. Do not "harden" this into returning 0 for
+/// out-of-range months without also fixing the month-scan loops that walk
+/// `m` upwards subtracting `days_in_month` — a 0 makes them spin forever.
 pub fn days_in_month(y: Int, m: Int) -> Int {
   case m {
     2 ->
@@ -46,8 +47,7 @@ pub fn days_in_month(y: Int, m: Int) -> Int {
         False -> 28
       }
     4 | 6 | 9 | 11 -> 30
-    1 | 3 | 5 | 7 | 8 | 10 | 12 -> 31
-    _ -> 0
+    _ -> 31
   }
 }
 

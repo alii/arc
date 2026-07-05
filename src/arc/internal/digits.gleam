@@ -109,24 +109,61 @@ pub fn alnum_value(ch: String) -> Option(Int) {
   }
 }
 
+// The four predicates below are the lexer's per-character digit scan, so they
+// match on the character directly rather than round-tripping through the
+// `Option`-returning tables above (which would allocate a `Some(_)` per char).
+
 /// `0-9`, `a-f`, `A-F`.
 pub fn is_hex(ch: String) -> Bool {
-  hex_value(ch) != None
+  case ch {
+    "0"
+    | "1"
+    | "2"
+    | "3"
+    | "4"
+    | "5"
+    | "6"
+    | "7"
+    | "8"
+    | "9"
+    | "a"
+    | "b"
+    | "c"
+    | "d"
+    | "e"
+    | "f"
+    | "A"
+    | "B"
+    | "C"
+    | "D"
+    | "E"
+    | "F" -> True
+    _ -> False
+  }
 }
 
 /// `0-9`.
 pub fn is_decimal(ch: String) -> Bool {
-  digit_value(ch) != None
+  case ch {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
+    _ -> False
+  }
 }
 
 /// `0-7`.
 pub fn is_octal(ch: String) -> Bool {
-  digit_value(ch) |> option.map(fn(d) { d < 8 }) |> option.unwrap(False)
+  case ch {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
+    _ -> False
+  }
 }
 
 /// `0` or `1`.
 pub fn is_binary(ch: String) -> Bool {
-  digit_value(ch) |> option.map(fn(d) { d < 2 }) |> option.unwrap(False)
+  case ch {
+    "0" | "1" -> True
+    _ -> False
+  }
 }
 
 /// Consume exactly `n` ASCII digits, returning #(value, rest). None if fewer
