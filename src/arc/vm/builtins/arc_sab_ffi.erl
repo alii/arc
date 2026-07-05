@@ -57,7 +57,7 @@
 -module(arc_sab_ffi).
 
 -export([new/2, byte_length/1, grow/2, read_bytes/3, write_bytes/3,
-         rmw_element/5, cas_element/6]).
+         rmw_element/4, cas_element/5]).
 
 %% Cell 1 holds the buffer's current [[ArrayBufferByteLength]].
 -define(LEN_CELL, 1).
@@ -161,38 +161,53 @@ cas_merge(Ref, Cell, Skip, Chunk) ->
         _Raced -> cas_merge(Ref, Cell, Skip, Chunk)
     end.
 
+%% Gleam's typed_array_ffi.IntElem constructors, mapped to the ONE bit width
+%% and signedness each names. The Gleam side passes an IntElem (not a raw
+%% {SizeBits, Signed} pair), so a nonsense width like 24 is a type error at
+%% the FFI boundary rather than a runtime badmatch here.
+int_elem_spec(i8)  -> {8,  signed};
+int_elem_spec(u8)  -> {8,  unsigned};
+int_elem_spec(i16) -> {16, signed};
+int_elem_spec(u16) -> {16, unsigned};
+int_elem_spec(i32) -> {32, signed};
+int_elem_spec(u32) -> {32, unsigned};
+int_elem_spec(i64) -> {64, signed};
+int_elem_spec(u64) -> {64, unsigned}.
+
 %% Atomic read-modify-write of one element (§25.4.3.12 AtomicReadModifyWrite).
 %% Fun(OldVal) -> NewVal computes the replacement from the element value the
 %% cell was witnessed to hold; NewVal is truncated mod 2^SizeBits by the bit
-%% syntax. Returns OldVal (sign-extended when Signed). Retries the WHOLE
+%% syntax. Returns OldVal (sign-extended for signed Elem). Retries the WHOLE
 %% read-compute-write when another writer raced the cell.
-rmw_element(Ref, ByteOffset, SizeBits, Signed, Fun)
+rmw_element(Ref, ByteOffset, Elem, Fun)
   when is_integer(ByteOffset), ByteOffset >= 0 ->
+    {SizeBits, Sign} = int_elem_spec(Elem),
     Cell = ByteOffset div 8 + ?DATA_BASE,
     Skip = ByteOffset rem 8,
     Size = SizeBits div 8,
     OldCell = atomics:get(Ref, Cell),
     <<Pre:Skip/binary, ElemBin:Size/binary, Post/binary>> = <<OldCell:64/little>>,
-    OldVal = decode_elem(ElemBin, SizeBits, Signed),
+    OldVal = decode_elem(ElemBin, SizeBits, Sign),
     NewVal = Fun(OldVal),
     <<NewCell:64/little>> = <<Pre/binary, NewVal:SizeBits/little, Post/binary>>,
     case atomics:compare_exchange(Ref, Cell, OldCell, NewCell) of
         ok -> OldVal;
-        _Raced -> rmw_element(Ref, ByteOffset, SizeBits, Signed, Fun)
+        _Raced -> rmw_element(Ref, ByteOffset, Elem, Fun)
     end.
 
 %% Atomic compare-and-swap of one element (§25.4.7 Atomics.compareExchange):
 %% store Replacement only when the element's current value equals Expected
 %% (already wrapped to the element domain by the caller). Returns the
 %% witnessed old value either way. Retries only when the CAS itself raced.
-cas_element(Ref, ByteOffset, SizeBits, Signed, Expected, Replacement)
+cas_element(Ref, ByteOffset, Elem, Expected, Replacement)
   when is_integer(ByteOffset), ByteOffset >= 0 ->
+    {SizeBits, Sign} = int_elem_spec(Elem),
     Cell = ByteOffset div 8 + ?DATA_BASE,
     Skip = ByteOffset rem 8,
     Size = SizeBits div 8,
     OldCell = atomics:get(Ref, Cell),
     <<Pre:Skip/binary, ElemBin:Size/binary, Post/binary>> = <<OldCell:64/little>>,
-    OldVal = decode_elem(ElemBin, SizeBits, Signed),
+    OldVal = decode_elem(ElemBin, SizeBits, Sign),
     case OldVal =:= Expected of
         false ->
             OldVal;
@@ -202,14 +217,13 @@ cas_element(Ref, ByteOffset, SizeBits, Signed, Expected, Replacement)
             case atomics:compare_exchange(Ref, Cell, OldCell, NewCell) of
                 ok -> OldVal;
                 _Raced ->
-                    cas_element(Ref, ByteOffset, SizeBits, Signed,
-                                Expected, Replacement)
+                    cas_element(Ref, ByteOffset, Elem, Expected, Replacement)
             end
     end.
 
-decode_elem(Bin, SizeBits, true) ->
+decode_elem(Bin, SizeBits, signed) ->
     <<V:SizeBits/little-signed>> = Bin,
     V;
-decode_elem(Bin, SizeBits, false) ->
+decode_elem(Bin, SizeBits, unsigned) ->
     <<V:SizeBits/little>> = Bin,
     V.

@@ -132,8 +132,7 @@ pub fn dispatch(
 fn sab_rmw_element(
   ref: value.AtomicsRef,
   byte_offset: Int,
-  size_bits: Int,
-  signed: Bool,
+  elem: IntElem,
   op: fn(Int) -> Int,
 ) -> Int
 
@@ -144,8 +143,7 @@ fn sab_rmw_element(
 fn sab_cas_element(
   ref: value.AtomicsRef,
   byte_offset: Int,
-  size_bits: Int,
-  signed: Bool,
+  elem: IntElem,
   expected: Int,
   replacement: Int,
 ) -> Int
@@ -281,9 +279,9 @@ type TaInfo {
     /// Live element count at validation time (clamped for shrunk resizable
     /// buffers).
     length: Int,
-    /// The integer element type: its byte width and signedness are read off
-    /// it (`int_elem_size` / `int_elem_signed`), so a bits/signed pair that
-    /// names no real element type is unrepresentable.
+    /// The integer element type. Passed to the FFI codecs as-is (never as a
+    /// bits/signed pair), so an element width the FFI has no clause for is
+    /// unrepresentable.
     elem: IntElem,
     /// The atomics ref of the view's shared (cross-process) storage, or
     /// None for plain process-local byte storage — captured ONCE from the
@@ -581,10 +579,11 @@ fn to_operand(
 
 /// Truncate an arbitrary integer to the element's bit pattern, then
 /// reinterpret per the element's signedness (two's complement).
-fn wrap_to_kind(v: Int, bits: Int, signed: Bool) -> Int {
+fn wrap_to_kind(v: Int, elem: IntElem) -> Int {
+  let bits = int_elem_bits(elem)
   let modulus = int.bitwise_shift_left(1, bits)
   let m = int.bitwise_and(v, modulus - 1)
-  case signed && m >= modulus / 2 {
+  case int_elem_signed(elem) && m >= modulus / 2 {
     True -> m - modulus
     False -> m
   }
@@ -655,13 +654,7 @@ fn rmw(
     Some(ref) -> {
       let off = info.byte_offset + idx * elem_size(info)
       let old =
-        sab_rmw_element(
-          ref,
-          off,
-          int_elem_bits(info.elem),
-          int_elem_signed(info.elem),
-          fn(old) { op(old, operand) },
-        )
+        sab_rmw_element(ref, off, info.elem, fn(old) { op(old, operand) })
       #(state, Ok(element_to_js(info, old)))
     }
     // Process-local storage: no interleaving is possible, the snapshot
@@ -689,8 +682,7 @@ fn compare_exchange(
   use expected, state <- to_operand(state, info, helpers.arg_at(args, 2))
   use replacement, state <- to_operand(state, info, helpers.arg_at(args, 3))
   use buf, state <- revalidate(state, info, idx)
-  let wrapped_expected =
-    wrap_to_kind(expected, int_elem_bits(info.elem), int_elem_signed(info.elem))
+  let wrapped_expected = wrap_to_kind(expected, info.elem)
   case info.storage {
     // Shared storage: compare and (conditional) store must be one atomic
     // step across agent processes — the FFI CAS-es the containing cell
@@ -698,14 +690,7 @@ fn compare_exchange(
     Some(ref) -> {
       let off = info.byte_offset + idx * elem_size(info)
       let old =
-        sab_cas_element(
-          ref,
-          off,
-          int_elem_bits(info.elem),
-          int_elem_signed(info.elem),
-          wrapped_expected,
-          replacement,
-        )
+        sab_cas_element(ref, off, info.elem, wrapped_expected, replacement)
       #(state, Ok(element_to_js(info, old)))
     }
     // Process-local storage: snapshot compare-then-write is atomic.
@@ -1073,7 +1058,7 @@ fn wait_value(
   case info.elem_kind {
     value.BigKind(_) -> {
       use n, state <- coerce.to_bigint_cps(state, val)
-      cont(wrap_to_kind(n, 64, True), state)
+      cont(wrap_to_kind(n, I64), state)
     }
     value.NumKind(_) -> coerce.try_to_int32(state, val, cont)
   }
