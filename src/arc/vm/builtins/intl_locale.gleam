@@ -39,20 +39,20 @@ pub type Extension {
 // Character class helpers (ASCII only — non-ASCII rejected up front)
 // ============================================================================
 
-fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
+pub fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
   string.to_utf_codepoints(s)
   |> list.all(fn(cp) { pred(string.utf_codepoint_to_int(cp)) })
 }
 
-fn is_alpha(s: String) -> Bool {
+pub fn is_alpha(s: String) -> Bool {
   s != "" && all_codepoints(s, digits.is_ascii_alpha_code)
 }
 
-fn is_digits(s: String) -> Bool {
+pub fn is_digits(s: String) -> Bool {
   s != "" && all_codepoints(s, digits.is_decimal_code)
 }
 
-fn is_alnum(s: String) -> Bool {
+pub fn is_alnum(s: String) -> Bool {
   s != "" && all_codepoints(s, digits.is_ascii_alnum_code)
 }
 
@@ -61,23 +61,23 @@ fn len(s: String) -> Int {
 }
 
 /// unicode_language_subtag = alpha{2,3} | alpha{5,8}
-fn is_language(s: String) -> Bool {
+pub fn is_language(s: String) -> Bool {
   let n = len(s)
   is_alpha(s) && { n == 2 || n == 3 || { n >= 5 && n <= 8 } }
 }
 
 /// unicode_script_subtag = alpha{4}
-fn is_script(s: String) -> Bool {
+pub fn is_script(s: String) -> Bool {
   is_alpha(s) && len(s) == 4
 }
 
 /// unicode_region_subtag = alpha{2} | digit{3}
-fn is_region(s: String) -> Bool {
+pub fn is_region(s: String) -> Bool {
   { is_alpha(s) && len(s) == 2 } || { is_digits(s) && len(s) == 3 }
 }
 
 /// unicode_variant_subtag = alphanum{5,8} | digit alphanum{3}
-fn is_variant(s: String) -> Bool {
+pub fn is_variant(s: String) -> Bool {
   let n = len(s)
   case is_alnum(s) {
     False -> False

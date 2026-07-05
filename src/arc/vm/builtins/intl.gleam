@@ -1061,17 +1061,8 @@ fn is_type_sequence(s: String) -> Bool {
   parts != []
   && list.all(parts, fn(p) {
     let n = string.length(p)
-    n >= 3 && n <= 8 && is_alnum(p)
+    n >= 3 && n <= 8 && tags.is_alnum(p)
   })
-}
-
-fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
-  string.to_utf_codepoints(s)
-  |> list.all(fn(cp) { pred(string.utf_codepoint_to_int(cp)) })
-}
-
-fn is_alnum(s: String) -> Bool {
-  s != "" && all_codepoints(s, digits.is_ascii_alnum_code)
 }
 
 // ============================================================================
@@ -1534,7 +1525,7 @@ fn locale_state(
   ))
   use Nil <- result.try(case language {
     Some(l) ->
-      case is_language_subtag(l) {
+      case tags.is_language(l) {
         True -> Ok(Nil)
         False -> throw_range(state, "Invalid language: " <> l)
       }
@@ -1549,7 +1540,7 @@ fn locale_state(
   ))
   use Nil <- result.try(case script {
     Some(s) ->
-      case is_script_subtag(s) {
+      case tags.is_script(s) {
         True -> Ok(Nil)
         False -> throw_range(state, "Invalid script: " <> s)
       }
@@ -1564,7 +1555,7 @@ fn locale_state(
   ))
   use Nil <- result.try(case region {
     Some(r) ->
-      case is_region_subtag(r) {
+      case tags.is_region(r) {
         True -> Ok(Nil)
         False -> throw_range(state, "Invalid region: " <> r)
       }
@@ -1584,7 +1575,7 @@ fn locale_state(
       let parts = string.split(lower, "-")
       let valid =
         parts != []
-        && list.all(parts, is_variant_subtag)
+        && list.all(parts, tags.is_variant)
         && list.length(list.unique(parts)) == list.length(parts)
       case valid {
         True -> Ok(Some(parts))
@@ -1711,40 +1702,6 @@ fn weekday_string(fd: String) -> Option(String) {
         False -> None
       }
   }
-}
-
-fn is_variant_subtag(s: String) -> Bool {
-  let n = string.length(s)
-  case n {
-    4 ->
-      case string.first(s) {
-        Ok(c) -> is_digit_str(c) && is_alnum(s)
-        Error(Nil) -> False
-      }
-    _ -> n >= 5 && n <= 8 && is_alnum(s)
-  }
-}
-
-fn is_language_subtag(s: String) -> Bool {
-  let n = string.length(s)
-  is_alpha_str(s) && { n == 2 || n == 3 || { n >= 5 && n <= 8 } }
-}
-
-fn is_script_subtag(s: String) -> Bool {
-  is_alpha_str(s) && string.length(s) == 4
-}
-
-fn is_region_subtag(s: String) -> Bool {
-  let n = string.length(s)
-  { is_alpha_str(s) && n == 2 } || { is_digit_str(s) && n == 3 }
-}
-
-fn is_alpha_str(s: String) -> Bool {
-  s != "" && all_codepoints(s, digits.is_ascii_alpha_code)
-}
-
-fn is_digit_str(s: String) -> Bool {
-  s != "" && all_codepoints(s, digits.is_decimal_code)
 }
 
 fn require_type_seq(
@@ -2171,7 +2128,7 @@ fn read_unit_options(
   ))
   use Nil <- result.try(case currency {
     Some(c) ->
-      case is_alpha_str(c) && string.length(c) == 3 {
+      case tags.is_alpha(c) && string.length(c) == 3 {
         True -> Ok(Nil)
         False -> throw_range(state, "Invalid currency code: " <> c)
       }
@@ -3196,7 +3153,7 @@ fn tzdata_zone(lower: String) -> Option(DtfTimeZone) {
 }
 
 fn is_zone_word(p: String) -> Bool {
-  all_codepoints(p, fn(c) {
+  tags.all_codepoints(p, fn(c) {
     digits.is_ascii_alnum_code(c) || c == 0x5f || c == 0x2b || c == 0x2d
   })
 }
@@ -5990,7 +5947,7 @@ fn display_names_of(
         Error(Nil) -> throw_range(state, "invalid language code: " <> code)
       }
     DnRegion ->
-      case is_region_subtag(code) {
+      case tags.is_region(code) {
         True -> {
           let r = string.uppercase(code)
           Ok(#(r, fmt.region_display_name(r)))
@@ -5998,7 +5955,7 @@ fn display_names_of(
         False -> throw_range(state, "invalid region code: " <> code)
       }
     DnScript ->
-      case is_script_subtag(code) {
+      case tags.is_script(code) {
         True -> {
           let s = titlecase_ascii(code)
           Ok(#(s, fmt.script_display_name(s)))
@@ -6006,7 +5963,7 @@ fn display_names_of(
         False -> throw_range(state, "invalid script code: " <> code)
       }
     DnCurrency ->
-      case is_alpha_str(code) && string.length(code) == 3 {
+      case tags.is_alpha(code) && string.length(code) == 3 {
         True -> {
           let c = string.uppercase(code)
           Ok(#(c, fmt.currency_display_name(c)))
