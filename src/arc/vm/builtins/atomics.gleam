@@ -267,6 +267,23 @@ fn waiter_key(info: TaInfo) -> WaiterKey {
 // Validation — §25.4.3.1 ValidateIntegerTypedArray + §25.4.3.2/3
 // ============================================================================
 
+/// The four validation shapes an Atomics operation can take. Replaces three
+/// independent Bool flags on `with_ta_and_index` — of whose 8 combinations
+/// only these 4 ever occur — so a nonsensical combo (a waitable write, a
+/// shared-required non-waitable) is unrepresentable rather than a call site
+/// the reader has to squint at.
+type AtomicAccess {
+  /// add/and/or/xor/sub/exchange/compareExchange/store: any integer kind,
+  /// buffer need not be shared, ~write~ accessMode (immutable → TypeError).
+  RmwAccess
+  /// load: any integer kind, buffer need not be shared, ~read~ accessMode.
+  LoadAccess
+  /// wait/waitAsync: Int32/BigInt64 only, buffer MUST be shared, ~read~.
+  WaitAccess
+  /// notify: Int32/BigInt64 only, buffer need not be shared, ~read~.
+  NotifyAccess
+}
+
 /// Everything Atomics needs to know about a validated integer TypedArray.
 type TaInfo {
   TaInfo(
@@ -276,9 +293,6 @@ type TaInfo {
     /// ToNumber. There is no second encoding of ContentType here.
     elem_kind: TypedArrayKind,
     byte_offset: Int,
-    /// Live element count at validation time (clamped for shrunk resizable
-    /// buffers).
-    length: Int,
     /// The integer element type. Passed to the FFI codecs as-is (never as a
     /// bits/signed pair), so an element width the FFI has no clause for is
     /// unrepresentable.
@@ -323,20 +337,32 @@ fn elem_size(info: TaInfo) -> Int {
 /// §25.4.3.1 ValidateIntegerTypedArray + §25.4.3.3 ValidateAtomicAccessOn-
 /// IntegerTypedArray: validate `args[0]` as an integer TypedArray of an
 /// allowed kind, then coerce `args[1]` with ToIndex and bounds-check it.
-/// `require_shared` is the wait/waitAsync mode (non-shared → TypeError before
-/// the index is even coerced — observable, test262 checks it).
-/// `write` is the immutable-arraybuffer proposal's ~write~ accessMode
-/// (ValidateTypedArray step 4): a mutating op on a view over an immutable
-/// buffer is a TypeError BEFORE the index is coerced — also observable.
+/// `mode` picks the validation shape — the checks below derive from it, so
+/// the wait-mode shared-buffer check (non-shared → TypeError before the
+/// index is even coerced; observable, test262 checks it) and the
+/// immutable-arraybuffer proposal's ~write~ accessMode check
+/// (ValidateTypedArray step 4: mutating op on an immutable buffer →
+/// TypeError before index coercion; also observable) each fire for exactly
+/// one variant.
 fn with_ta_and_index(
   state: State(host),
   args: List(JsValue),
-  waitable waitable: Bool,
-  require_shared require_shared: Bool,
-  write write: Bool,
+  mode mode: AtomicAccess,
   cont cont: fn(TaInfo, Int, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  let waitable = case mode {
+    WaitAccess | NotifyAccess -> True
+    RmwAccess | LoadAccess -> False
+  }
+  let require_shared = case mode {
+    WaitAccess -> True
+    RmwAccess | LoadAccess | NotifyAccess -> False
+  }
+  let write = case mode {
+    RmwAccess -> True
+    LoadAccess | WaitAccess | NotifyAccess -> False
+  }
   let ta_val = helpers.first_arg_or_undefined(args)
   use view <- helpers.some_or(read_typed_array(state, ta_val), fn() {
     state.type_error(state, "Atomics operation needs an integer TypedArray")
@@ -380,12 +406,11 @@ fn with_ta_and_index(
       buffer: view.buffer,
       elem_kind: view.elem_kind,
       byte_offset: view.byte_offset,
-      length: live,
       elem:,
       storage: buf.storage,
     )
   // §25.4.3.2 ValidateAtomicAccess: ToIndex then bounds check.
-  use idx, state <- coerce.to_index_cps(
+  use idx, state <- coerce.try_to_index(
     state,
     helpers.arg_at(args, 1),
     "Invalid atomic access index",
@@ -562,7 +587,7 @@ fn to_operand(
   cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case info.elem_kind {
-    value.BigKind(_) -> coerce.to_bigint_cps(state, val, cont)
+    value.BigKind(_) -> coerce.try_to_bigint(state, val, cont)
     value.NumKind(_) -> {
       use num, state <- coerce.try_to_number(state, val)
       case num {
@@ -641,9 +666,7 @@ fn rmw(
   use info, idx, state <- with_ta_and_index(
     state,
     args,
-    waitable: False,
-    require_shared: False,
-    write: True,
+    mode: RmwAccess,
   )
   use operand, state <- to_operand(state, info, helpers.arg_at(args, 2))
   use buf, state <- revalidate(state, info, idx)
@@ -675,9 +698,7 @@ fn compare_exchange(
   use info, idx, state <- with_ta_and_index(
     state,
     args,
-    waitable: False,
-    require_shared: False,
-    write: True,
+    mode: RmwAccess,
   )
   use expected, state <- to_operand(state, info, helpers.arg_at(args, 2))
   use replacement, state <- to_operand(state, info, helpers.arg_at(args, 3))
@@ -713,9 +734,7 @@ fn atomic_load(
   use info, idx, state <- with_ta_and_index(
     state,
     args,
-    waitable: False,
-    require_shared: False,
-    write: False,
+    mode: LoadAccess,
   )
   // The index coercion may have run user code — revalidate (§25.4.10 step 2).
   use buf, state <- revalidate(state, info, idx)
@@ -731,13 +750,11 @@ fn atomic_store(
   use info, idx, state <- with_ta_and_index(
     state,
     args,
-    waitable: False,
-    require_shared: False,
-    write: True,
+    mode: RmwAccess,
   )
   case info.elem_kind {
     value.BigKind(_) -> {
-      use v, state <- coerce.to_bigint_cps(state, helpers.arg_at(args, 2))
+      use v, state <- coerce.try_to_bigint(state, helpers.arg_at(args, 2))
       use buf, state <- revalidate(state, info, idx)
       let state = write_element(state, info, buf, idx, v)
       #(state, Ok(JsBigInt(BigInt(v))))
@@ -845,9 +862,7 @@ fn do_wait(
   use info, idx, state <- with_ta_and_index(
     state,
     args,
-    waitable: True,
-    require_shared: True,
-    write: False,
+    mode: WaitAccess,
   )
   // Step 6/7: v = ToBigInt64(value) | ToInt32(value).
   use v, state <- wait_value(state, info, helpers.arg_at(args, 2))
@@ -1057,7 +1072,7 @@ fn wait_value(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case info.elem_kind {
     value.BigKind(_) -> {
-      use n, state <- coerce.to_bigint_cps(state, val)
+      use n, state <- coerce.try_to_bigint(state, val)
       cont(wrap_to_kind(n, I64), state)
     }
     value.NumKind(_) -> coerce.try_to_int32(state, val, cont)
@@ -1112,9 +1127,7 @@ fn notify(
   use info, idx, state <- with_ta_and_index(
     state,
     args,
-    waitable: True,
-    require_shared: False,
-    write: False,
+    mode: NotifyAccess,
   )
   // Step 3: count — undefined → +∞, else ToIntegerOrInfinity clamped ≥ 0.
   // Coerced BEFORE the non-shared early return (observable, test262 checks).
