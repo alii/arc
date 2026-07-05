@@ -1041,6 +1041,7 @@ built-ins/AggregateError/message-tostring-abrupt.js
 built-ins/AggregateError/message-undefined-no-prop.js
 built-ins/AggregateError/name.js
 built-ins/AggregateError/newtarget-is-undefined.js
+built-ins/AggregateError/newtarget-proto-custom.js
 built-ins/AggregateError/newtarget-proto-fallback.js
 built-ins/AggregateError/newtarget-proto.js
 built-ins/AggregateError/order-of-args-evaluation.js
@@ -5701,6 +5702,7 @@ built-ins/Date/parse/not-a-constructor.js
 built-ins/Date/parse/prop-desc.js
 built-ins/Date/parse/time-value-maximum-range.js
 built-ins/Date/parse/without-utc-offset.js
+built-ins/Date/parse/year-zero.js
 built-ins/Date/prop-desc.js
 built-ins/Date/prototype/S15.9.5_A01_T1.js
 built-ins/Date/prototype/S15.9.5_A02_T1.js
@@ -6191,6 +6193,7 @@ built-ins/Date/value-to-primitive-get-meth-err.js
 built-ins/Date/value-to-primitive-result-faulty.js
 built-ins/Date/value-to-primitive-result-non-string-prim.js
 built-ins/Date/value-to-primitive-result-string.js
+built-ins/Date/year-zero.js
 built-ins/DisposableStack/constructor.js
 built-ins/DisposableStack/instance-extensible.js
 built-ins/DisposableStack/is-a-constructor.js
@@ -8315,6 +8318,7 @@ built-ins/Number/S9.3.1_A5_T1.js
 built-ins/Number/S9.3.1_A5_T2.js
 built-ins/Number/S9.3.1_A5_T3.js
 built-ins/Number/S9.3.1_A6_T1.js
+built-ins/Number/S9.3.1_A6_T2.js
 built-ins/Number/S9.3.1_A7.js
 built-ins/Number/S9.3.1_A8.js
 built-ins/Number/S9.3.1_A9.js
@@ -10742,6 +10746,8 @@ built-ins/Object/entries/function-length.js
 built-ins/Object/entries/function-name.js
 built-ins/Object/entries/function-property-descriptor.js
 built-ins/Object/entries/getter-adding-key.js
+built-ins/Object/entries/getter-making-future-key-nonenumerable.js
+built-ins/Object/entries/getter-removing-future-key.js
 built-ins/Object/entries/inherited-properties-omitted.js
 built-ins/Object/entries/not-a-constructor.js
 built-ins/Object/entries/observable-operations.js
@@ -11945,6 +11951,8 @@ built-ins/Object/values/function-length.js
 built-ins/Object/values/function-name.js
 built-ins/Object/values/function-property-descriptor.js
 built-ins/Object/values/getter-adding-key.js
+built-ins/Object/values/getter-making-future-key-nonenumerable.js
+built-ins/Object/values/getter-removing-future-key.js
 built-ins/Object/values/inherited-properties-omitted.js
 built-ins/Object/values/not-a-constructor.js
 built-ins/Object/values/observable-operations.js
@@ -12384,9 +12392,11 @@ built-ins/Promise/prototype/finally/length.js
 built-ins/Promise/prototype/finally/name.js
 built-ins/Promise/prototype/finally/not-a-constructor.js
 built-ins/Promise/prototype/finally/prop-desc.js
+built-ins/Promise/prototype/finally/rejected-observable-then-calls-argument.js
 built-ins/Promise/prototype/finally/rejection-reason-no-fulfill.js
 built-ins/Promise/prototype/finally/rejection-reason-override-with-throw.js
 built-ins/Promise/prototype/finally/resolution-value-no-override.js
+built-ins/Promise/prototype/finally/resolved-observable-then-calls-argument.js
 built-ins/Promise/prototype/finally/resolved-observable-then-calls.js
 built-ins/Promise/prototype/finally/species-constructor-throws.js
 built-ins/Promise/prototype/finally/species-constructor.js
@@ -13426,6 +13436,11 @@ built-ins/RegExp/S15.10.2.9_A1_T2.js
 built-ins/RegExp/S15.10.2.9_A1_T3.js
 built-ins/RegExp/S15.10.2.9_A1_T5.js
 built-ins/RegExp/S15.10.2_A1_T1.js
+built-ins/RegExp/S15.10.3.1_A1_T1.js
+built-ins/RegExp/S15.10.3.1_A1_T2.js
+built-ins/RegExp/S15.10.3.1_A1_T3.js
+built-ins/RegExp/S15.10.3.1_A1_T4.js
+built-ins/RegExp/S15.10.3.1_A1_T5.js
 built-ins/RegExp/S15.10.3.1_A2_T1.js
 built-ins/RegExp/S15.10.3.1_A2_T2.js
 built-ins/RegExp/S15.10.3.1_A3_T1.js
@@ -13481,11 +13496,13 @@ built-ins/RegExp/S15.10.7_A1_T2.js
 built-ins/RegExp/S15.10.7_A2_T1.js
 built-ins/RegExp/S15.10.7_A3_T1.js
 built-ins/RegExp/S15.10.7_A3_T2.js
+built-ins/RegExp/call_with_non_regexp_same_constructor.js
 built-ins/RegExp/call_with_regexp_match_falsy.js
 built-ins/RegExp/call_with_regexp_not_same_constructor.js
 built-ins/RegExp/character-class-escape-non-whitespace-u180e.js
 built-ins/RegExp/character-class-escape-non-whitespace.js
 built-ins/RegExp/dotall/with-dotall-unicode.js
+built-ins/RegExp/dotall/without-dotall-unicode.js
 built-ins/RegExp/duplicate-flags.js
 built-ins/RegExp/duplicate-named-capturing-groups-syntax.js
 built-ins/RegExp/early-err-modifiers-code-point-repeat-i-1.js
@@ -13511,8 +13528,10 @@ built-ins/RegExp/early-err-modifiers-should-not-case-fold-s.js
 built-ins/RegExp/early-err-modifiers-should-not-unicode-case-fold-i.js
 built-ins/RegExp/early-err-modifiers-should-not-unicode-case-fold-s.js
 built-ins/RegExp/from-regexp-like-flag-override.js
+built-ins/RegExp/from-regexp-like-get-ctor-err.js
 built-ins/RegExp/from-regexp-like-get-flags-err.js
 built-ins/RegExp/from-regexp-like-get-source-err.js
+built-ins/RegExp/from-regexp-like-short-circuit.js
 built-ins/RegExp/from-regexp-like.js
 built-ins/RegExp/is-a-constructor.js
 built-ins/RegExp/lastIndex.js
@@ -14658,6 +14677,7 @@ built-ins/RegExp/regexp-modifiers/add-multiline-does-not-affect-alternatives-out
 built-ins/RegExp/regexp-modifiers/add-multiline-does-not-affect-dotAll-flag.js
 built-ins/RegExp/regexp-modifiers/add-multiline-does-not-affect-ignoreCase-flag.js
 built-ins/RegExp/regexp-modifiers/add-multiline-does-not-affect-multiline-property.js
+built-ins/RegExp/regexp-modifiers/add-multiline.js
 built-ins/RegExp/regexp-modifiers/add-remove-modifiers.js
 built-ins/RegExp/regexp-modifiers/changing-ignoreCase-flag-does-not-affect-ignoreCase-modifier.js
 built-ins/RegExp/regexp-modifiers/changing-multiline-flag-does-not-affect-multiline-modifier.js
@@ -14688,6 +14708,7 @@ built-ins/RegExp/regexp-modifiers/remove-ignoreCase-does-not-affect-ignoreCase-p
 built-ins/RegExp/regexp-modifiers/remove-ignoreCase-does-not-affect-multiline-flag.js
 built-ins/RegExp/regexp-modifiers/remove-ignoreCase.js
 built-ins/RegExp/regexp-modifiers/remove-multiline-does-not-affect-alternatives-outside.js
+built-ins/RegExp/regexp-modifiers/remove-multiline-does-not-affect-dotAll-flag.js
 built-ins/RegExp/regexp-modifiers/remove-multiline-does-not-affect-ignoreCase-flag.js
 built-ins/RegExp/regexp-modifiers/remove-multiline-does-not-affect-multiline-property.js
 built-ins/RegExp/regexp-modifiers/remove-multiline.js
@@ -16664,6 +16685,7 @@ built-ins/SuppressedError/message-tostring-abrupt.js
 built-ins/SuppressedError/message-undefined-no-prop.js
 built-ins/SuppressedError/name.js
 built-ins/SuppressedError/newtarget-is-undefined.js
+built-ins/SuppressedError/newtarget-proto-custom.js
 built-ins/SuppressedError/newtarget-proto-fallback.js
 built-ins/SuppressedError/newtarget-proto.js
 built-ins/SuppressedError/prop-desc.js
@@ -24006,8 +24028,10 @@ built-ins/parseFloat/S15.1.2.3_A1_T5.js
 built-ins/parseFloat/S15.1.2.3_A1_T6.js
 built-ins/parseFloat/S15.1.2.3_A1_T7.js
 built-ins/parseFloat/S15.1.2.3_A2_T1.js
+built-ins/parseFloat/S15.1.2.3_A2_T10.js
 built-ins/parseFloat/S15.1.2.3_A2_T10_U180E.js
 built-ins/parseFloat/S15.1.2.3_A2_T2.js
+built-ins/parseFloat/S15.1.2.3_A2_T3.js
 built-ins/parseFloat/S15.1.2.3_A2_T4.js
 built-ins/parseFloat/S15.1.2.3_A2_T5.js
 built-ins/parseFloat/S15.1.2.3_A2_T6.js
@@ -24058,8 +24082,10 @@ built-ins/parseInt/S15.1.2.2_A1_T5.js
 built-ins/parseInt/S15.1.2.2_A1_T6.js
 built-ins/parseInt/S15.1.2.2_A1_T7.js
 built-ins/parseInt/S15.1.2.2_A2_T1.js
+built-ins/parseInt/S15.1.2.2_A2_T10.js
 built-ins/parseInt/S15.1.2.2_A2_T10_U180E.js
 built-ins/parseInt/S15.1.2.2_A2_T2.js
+built-ins/parseInt/S15.1.2.2_A2_T3.js
 built-ins/parseInt/S15.1.2.2_A2_T4.js
 built-ins/parseInt/S15.1.2.2_A2_T5.js
 built-ins/parseInt/S15.1.2.2_A2_T6.js
@@ -39845,6 +39871,8 @@ language/import/dup-bound-names.js
 language/import/escaped-as-import-specifier.js
 language/import/escaped-as-namespace-import.js
 language/import/escaped-from.js
+language/import/import-attributes/json-invalid.js
+language/import/import-attributes/json-named-bindings.js
 language/import/import-defer/deferred-namespace-object/exotic-object-behavior.js
 language/import/import-defer/deferred-namespace-object/identity.js
 language/import/import-defer/deferred-namespace-object/reexport-deferred-ns-evaluation.js
@@ -39858,6 +39886,7 @@ language/import/import-defer/errors/module-throws/defer-import-after-evaluation.
 language/import/import-defer/errors/module-throws/third-party-evaluation-after-defer-import.js
 language/import/import-defer/errors/module-throws/trigger-evaluation.js
 language/import/import-defer/errors/resolution-error/import-defer-of-missing-module-fails.js
+language/import/import-defer/errors/syntax-error/import-defer-of-syntax-error-fails.js
 language/import/import-defer/evaluation-sync/import-defer-does-not-evaluate.js
 language/import/import-defer/evaluation-sync/module-imported-defer-and-eager.js
 language/import/import-defer/evaluation-top-level-await/import-defer-async-module/main.js
@@ -40456,9 +40485,11 @@ language/literals/regexp/u-invalid-range-lookbehind.js
 language/literals/regexp/u-invalid-range-negative-lookahead.js
 language/literals/regexp/u-invalid-range-negative-lookbehind.js
 language/literals/regexp/u-null-character-escape.js
+language/literals/regexp/u-surrogate-pairs-atom-char-class.js
 language/literals/regexp/u-surrogate-pairs-atom-dot.js
 language/literals/regexp/u-surrogate-pairs-atom-escape-char-class.js
 language/literals/regexp/u-surrogate-pairs-atom-escape-decimal.js
+language/literals/regexp/u-surrogate-pairs.js
 language/literals/regexp/u-unicode-esc-bounds.js
 language/literals/regexp/u-unicode-esc-non-hex.js
 language/literals/regexp/u-unicode-esc.js
@@ -40607,6 +40638,7 @@ language/module-code/eval-gtbndng-local-bndng-let.js
 language/module-code/eval-gtbndng-local-bndng-var.js
 language/module-code/eval-rqstd-abrupt.js
 language/module-code/eval-rqstd-once.js
+language/module-code/eval-rqstd-order.js
 language/module-code/eval-self-abrupt.js
 language/module-code/eval-self-once.js
 language/module-code/eval-this.js
@@ -40633,6 +40665,14 @@ language/module-code/import-attributes/allow-nlt-before-with.js
 language/module-code/import-attributes/early-dup-attribute-key-export.js
 language/module-code/import-attributes/early-dup-attribute-key-import-nobinding.js
 language/module-code/import-attributes/early-dup-attribute-key-import-withbinding.js
+language/module-code/import-attributes/import-attribute-key-identifiername.js
+language/module-code/import-attributes/import-attribute-key-string-double.js
+language/module-code/import-attributes/import-attribute-key-string-single.js
+language/module-code/import-attributes/import-attribute-many.js
+language/module-code/import-attributes/import-attribute-newlines.js
+language/module-code/import-attributes/import-attribute-trlng-comma.js
+language/module-code/import-attributes/import-attribute-value-string-double.js
+language/module-code/import-attributes/import-attribute-value-string-single.js
 language/module-code/instn-iee-bndng-cls.js
 language/module-code/instn-iee-bndng-const.js
 language/module-code/instn-iee-bndng-fun.js
@@ -40686,6 +40726,11 @@ language/module-code/instn-named-iee-cycle.js
 language/module-code/instn-named-star-cycle.js
 language/module-code/instn-once.js
 language/module-code/instn-resolve-empty-export.js
+language/module-code/instn-resolve-empty-import.js
+language/module-code/instn-resolve-err-syntax-1.js
+language/module-code/instn-resolve-err-syntax-2.js
+language/module-code/instn-resolve-order-depth.js
+language/module-code/instn-resolve-order-src.js
 language/module-code/instn-same-global.js
 language/module-code/instn-star-as-props-dflt-skip.js
 language/module-code/instn-star-binding.js
@@ -50849,6 +50894,7 @@ staging/sm/Date/toJSON-01.js
 staging/sm/Date/toPrimitive.js
 staging/sm/Date/toString-generic.js
 staging/sm/Date/two-digit-years.js
+staging/sm/Error/constructor-ordering.js
 staging/sm/Error/isError.js
 staging/sm/Exceptions/error-expando-reconfigure.js
 staging/sm/Function/10.2.1.1.6.js
@@ -51007,6 +51053,7 @@ staging/sm/Iterator/prototype/map/pass-lastValue-to-next.js
 staging/sm/Iterator/prototype/map/proxy-abrupt-completion-in-iteratorValue.js
 staging/sm/Iterator/prototype/map/proxy-abrupt-completion-in-yield.js
 staging/sm/Iterator/prototype/map/proxy-abrupt-completion.js
+staging/sm/Iterator/prototype/map/proxy-accesses.js
 staging/sm/Iterator/prototype/map/reenter-map-generator-from-mapper.js
 staging/sm/Iterator/prototype/map/this-not-iterator-throw.js
 staging/sm/Iterator/prototype/map/this-value-array-throws.js
@@ -51139,6 +51186,7 @@ staging/sm/Number/defaultvalue.js
 staging/sm/Number/isSafeInteger-01.js
 staging/sm/Number/numericSeparator.js
 staging/sm/Number/parseFloat-01.js
+staging/sm/Number/parseInt-01.js
 staging/sm/Number/parseInt-default-to-decimal.js
 staging/sm/Number/toExponential-values.js
 staging/sm/Number/toFixed-values.js
@@ -51210,6 +51258,8 @@ staging/sm/RegExp/RegExpExec-return.js
 staging/sm/RegExp/character-class-escape-s.js
 staging/sm/RegExp/class-null.js
 staging/sm/RegExp/compile-lastIndex.js
+staging/sm/RegExp/constructor-IsRegExp.js
+staging/sm/RegExp/constructor-ordering-2.js
 staging/sm/RegExp/constructor-ordering.js
 staging/sm/RegExp/constructor-regexp-unicode.js
 staging/sm/RegExp/constructor-regexp.js
@@ -51662,6 +51712,7 @@ staging/sm/global/eval-inside-with-is-direct.js
 staging/sm/global/eval-native-callback-is-indirect.js
 staging/sm/global/globalThis-enumeration.js
 staging/sm/global/parseFloat-01.js
+staging/sm/global/parseInt-01.js
 staging/sm/global/parseInt-default-to-decimal.js
 staging/sm/lexical-environment/block-scoped-functions-annex-b-arguments.js
 staging/sm/lexical-environment/block-scoped-functions-annex-b-eval.js
@@ -51735,6 +51786,7 @@ staging/sm/object/defineGetter-defineSetter.js
 staging/sm/object/defineProperties-callable-accessor.js
 staging/sm/object/defineProperties-order.js
 staging/sm/object/defineProperty-proxy.js
+staging/sm/object/entries.js
 staging/sm/object/extensibility-01.js
 staging/sm/object/extensibility-02.js
 staging/sm/object/freeze-proxy.js
@@ -51775,6 +51827,7 @@ staging/sm/object/vacuous-accessor-unqualified-name.js
 staging/sm/object/values-entries-indexed.js
 staging/sm/object/values-entries-lazy-props.js
 staging/sm/object/values-entries-typedarray.js
+staging/sm/object/values.js
 staging/sm/regress/regress-10278.js
 staging/sm/regress/regress-1383630.js
 staging/sm/regress/regress-1507322-deep-weakmap.js
