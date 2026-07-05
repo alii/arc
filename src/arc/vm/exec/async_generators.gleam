@@ -106,7 +106,7 @@ pub fn call_native_method(
         InternalError("call_native_method", "async gen slot missing"),
         state,
       ))
-    Ok(#(data_ref, AsyncGenLive(frame:, ..))) -> {
+    Ok(#(data_ref, AsyncGenLive(gen_state:, ..))) -> {
       let req =
         AsyncGenRequest(
           completion:,
@@ -115,7 +115,7 @@ pub fn call_native_method(
           reject: cap.reject,
         )
       let enqueued = enqueue(state, data_ref, req)
-      let stepped = case frame.gen_state {
+      let stepped = case gen_state {
         AGExecuting | AGAwaitingReturn -> Ok(enqueued)
         _ -> resume_next(enqueued, data_ref, execute_inner, unwind_to_catch)
       }
@@ -145,12 +145,13 @@ fn resume_next(
     // AsyncGeneratorSlot; anything else is an engine bug. Returning Ok here
     // would leave the generator permanently suspended instead of crashing.
     None -> Error(InternalError("resume_next", "async gen slot missing"))
-    // Only `frame` and `req` escape the match — the queue is not in scope for
-    // any of the body-execution helpers below, which run user code.
+    // Only `frame` and `req` escape the match — neither the queue nor
+    // `gen_state` is in scope for the body-execution helpers below, which run
+    // user code (and move `gen_state` on to AGExecuting under them).
     Some(AsyncGenLive(queue_front: [], ..)) -> Ok(state)
-    Some(AsyncGenLive(frame:, queue_front: [req, ..], ..)) -> {
+    Some(AsyncGenLive(gen_state:, frame:, queue_front: [req, ..], ..)) -> {
       let run = Run(data_ref:, frame:, req:, execute_inner:, unwind_to_catch:)
-      case frame.gen_state {
+      case gen_state {
         AGExecuting | AGAwaitingReturn -> Ok(state)
 
         AGCompleted ->
@@ -744,12 +745,13 @@ fn setup_await(
 // ============================================================================
 
 /// The suspended body of an async generator: everything needed to rebuild an
-/// execution State, and nothing else. Deliberately carries NO queue — a frame
-/// is handed to the body-execution helpers, which run user code and therefore
-/// must never see (let alone write back) a queue captured before that ran.
+/// execution State, and nothing else. IMMUTABLE for the duration of a driver
+/// step — carries neither the queue nor `gen_state`, both of which the slot
+/// mutates while the body runs. A frame is handed to the body-execution
+/// helpers, which run user code and therefore must never see (let alone write
+/// back) a snapshot of mutable slot state captured before that ran.
 type AsyncGenFrame {
   AsyncGenFrame(
-    gen_state: value.AsyncGeneratorState,
     func_template: value.FuncTemplate,
     env_ref: Ref,
     /// The suspended body snapshot — the same record the heap slot stores.
@@ -757,12 +759,17 @@ type AsyncGenFrame {
   )
 }
 
-/// A whole decoded AsyncGeneratorSlot: the frame plus the request queue.
-/// Only ever produced by `read_slot` and consumed by `encode_slot`, so the
-/// queue exists exactly where a live slot is being read or written — the
-/// drivers peel the head request off and thereafter hold only a frame.
+/// A whole decoded AsyncGeneratorSlot: the mutable slot state (`gen_state`,
+/// the request queue) plus the immutable body snapshot. Only ever produced by
+/// `read_slot` and consumed by `encode_slot`, so the mutable half exists
+/// exactly where a live slot is being read or written — the drivers peel the
+/// head request off and thereafter hold only a frame, so a body-executing path
+/// CANNOT read a stale `gen_state` (e.g. the pre-`AGExecuting` value the step
+/// started from): the field is not reachable from what it holds.
 type AsyncGenLive {
   AsyncGenLive(
+    /// [[AsyncGeneratorState]] — mutated by the driver as the body runs.
+    gen_state: value.AsyncGeneratorState,
     frame: AsyncGenFrame,
     /// Decoded two-list FIFO — see AsyncGeneratorSlot.queue in value.gleam.
     queue_front: List(AsyncGenRequest),
@@ -808,7 +815,8 @@ fn read_slot(h: Heap(host), data_ref: Ref) -> Option(AsyncGenLive) {
     )) -> {
       let #(queue_front, queue_back) = queue
       Some(AsyncGenLive(
-        frame: AsyncGenFrame(gen_state:, func_template:, env_ref:, saved: frame),
+        gen_state:,
+        frame: AsyncGenFrame(func_template:, env_ref:, saved: frame),
         queue_front:,
         queue_back:,
       ))
@@ -834,9 +842,9 @@ fn normalize_queue(live: AsyncGenLive) -> AsyncGenLive {
 /// Encode a decoded AsyncGenLive back into its heap slot — the exact inverse
 /// of `read_slot`.
 fn encode_slot(live: AsyncGenLive) -> HeapSlot(host) {
-  let AsyncGenLive(frame:, queue_front:, queue_back:) = live
+  let AsyncGenLive(gen_state:, frame:, queue_front:, queue_back:) = live
   AsyncGeneratorSlot(
-    gen_state: frame.gen_state,
+    gen_state:,
     queue: #(queue_front, queue_back),
     func_template: frame.func_template,
     env_ref: frame.env_ref,
@@ -913,9 +921,9 @@ fn save_suspended(
   use live <- write_live(state, data_ref)
   AsyncGenLive(
     ..live,
+    gen_state: new_state,
     frame: AsyncGenFrame(
       ..live.frame,
-      gen_state: new_state,
       saved: generators.suspended_frame(suspended),
     ),
   )
@@ -927,7 +935,7 @@ fn with_state(
   live: AsyncGenLive,
   s: value.AsyncGeneratorState,
 ) -> AsyncGenLive {
-  AsyncGenLive(..live, frame: AsyncGenFrame(..live.frame, gen_state: s))
+  AsyncGenLive(..live, gen_state: s)
 }
 
 /// Drop the head (oldest) request — the one the caller just settled. Any

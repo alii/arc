@@ -194,6 +194,30 @@ pub fn default_host_hooks() -> HostHooks {
   host_hooks.default_host_hooks()
 }
 
+/// Every heap ref a `HostHooks` record can hold — the ENGINE-state values a
+/// GC must treat as reachable for as long as the hooks are installed (today:
+/// the dynamic-import hook's function object). Callers that build a root set
+/// by hand (`exec/entry.handoff_roots`) fold this in.
+///
+/// The destructure below is EXHAUSTIVE over `HostHooks` on purpose: adding a
+/// hook field is a compile error here until it has been classified as
+/// carrying a `JsValue` (root it) or not (bind it to `_`). The alternative —
+/// a hand-written list of the fields someone remembered — is exactly how a
+/// live ref goes unrooted.
+pub fn host_hook_roots(hooks: HostHooks) -> List(JsValue) {
+  let host_hooks.HostHooks(
+    // Capability closures + clock: no JsValue reachable through them.
+    atomics: _,
+    monotonic_now: _,
+    sleep_ms: _,
+    // The one JsValue-carrying hook: %DynamicImportHook%'s function object.
+    import_hook:,
+    // A resolved specifier — a plain string.
+    import_referrer: _,
+  ) = hooks
+  option.values([import_hook])
+}
+
 /// The internal VM executor state. Public so builtins can receive and return it,
 /// giving them full access to the runtime.
 pub type State(host) {
