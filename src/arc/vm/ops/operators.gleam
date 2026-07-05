@@ -632,19 +632,12 @@ pub fn typeof(heap: Heap(ctx, host), val: JsValue) -> String {
     value.JsBigInt(_) -> "bigint"
     // Table 41 row 7: Symbol → "symbol"
     value.JsSymbol(_) -> "symbol"
-    // Table 41 rows 9-10: Object — check for [[Call]]
+    // Table 41 rows 9-10: Object — "function" iff it has [[Call]], else
+    // "object". The callable-ObjectKind set lives in `heap.ref_is_callable`.
     value.JsObject(ref) ->
-      case heap.read(heap, ref) {
-        // Row 10: Object implements [[Call]] → "function"
-        Some(value.ObjectSlot(kind: value.FunctionObject(..), ..))
-        | Some(value.ObjectSlot(kind: value.NativeFunction(..), ..))
-        | // Proxy: has [[Call]] iff target was callable at creation (§10.5.15);
-          // survives revocation (typeof of revoked function proxy = "function").
-          Some(value.ObjectSlot(kind: value.ProxyObject(callable: True, ..), ..)) ->
-          "function"
-
-        // Row 9: Object does not implement [[Call]] → "object"
-        _ -> "object"
+      case heap.ref_is_callable(heap, ref) {
+        True -> "function"
+        False -> "object"
       }
   }
 }

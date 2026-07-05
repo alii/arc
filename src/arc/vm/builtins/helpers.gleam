@@ -2,7 +2,7 @@
 ///
 /// Lives one layer above `builtins/common` so it may depend on `state` and
 /// `ops/object` (`common` cannot — `state` imports it).
-import arc/vm/heap.{type Heap}
+import arc/vm/heap
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type State}
 import arc/vm/value.{
@@ -111,23 +111,51 @@ pub fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
 /// 2. If argument has a [[Call]] internal method, return true.
 /// 3. Return false.
 ///
-/// We check for FunctionObject or NativeFunction object kinds instead of a
-/// [[Call]] internal method slot, since our object representation uses tagged
-/// kinds rather than method tables.
-pub fn is_callable(h: Heap(ctx, host), val: JsValue) -> Bool {
-  // Step 1: If argument is not an Object, return false.
+/// The set of callable ObjectKinds lives in `heap.ref_is_callable` — the
+/// single source of truth so this, `ops_object.value_is_callable`, and
+/// `typeof` cannot drift.
+pub fn is_callable(h: state.Heap(host), val: JsValue) -> Bool {
   case val {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        // Step 2: If argument has a [[Call]] internal method, return true.
-        Some(ObjectSlot(kind: value.FunctionObject(..), ..)) -> True
-        Some(ObjectSlot(kind: value.NativeFunction(..), ..)) -> True
-        // Proxy: callable iff target was callable at creation (§10.5.15).
-        Some(ObjectSlot(kind: value.ProxyObject(callable:, ..), ..)) -> callable
-        // Step 3: Return false.
-        _ -> False
-      }
+    JsObject(ref) -> heap.ref_is_callable(h, ref)
     _ -> False
+  }
+}
+
+/// §7.2.3 IsCallable gate — TypeError with `msg()` when `val` isn't callable,
+/// otherwise continue with it. `msg` is a thunk so its (usually concatenated)
+/// message costs nothing on the common callable path — same convention as
+/// `require_brand`. CPS-style:
+///
+///   use cb, state <- helpers.require_callable(state, cb, fn() { "callback…" })
+pub fn require_callable(
+  state: State(host),
+  val: JsValue,
+  msg: fn() -> String,
+  cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case is_callable(state.heap, val) {
+    True -> cont(val, state)
+    False -> state.type_error(state, msg())
+  }
+}
+
+/// Bool gate for `use` chains: continue when `cond` holds, else `or_else()`.
+/// The generic CPS `bool.lazy_guard` — polymorphic in return so it works for
+/// any dispatch shape (Atomics, DataView, …), and the `Nil` param binds
+/// explicitly per house style: `use Nil <- helpers.guard(ok, fn() { … })`.
+pub fn guard(cond: Bool, or_else: fn() -> r, cont: fn(Nil) -> r) -> r {
+  case cond {
+    True -> cont(Nil)
+    False -> or_else()
+  }
+}
+
+/// `guard`'s Option twin: continue with the value when present, else
+/// `or_else()`. `use v <- helpers.some_or(opt, fn() { type_error(…) })`.
+pub fn some_or(opt: Option(a), or_else: fn() -> r, cont: fn(a) -> r) -> r {
+  case opt {
+    Some(v) -> cont(v)
+    None -> or_else()
   }
 }
 
@@ -179,5 +207,17 @@ pub fn three_args_or_undefined(
     [a, b] -> #(a, b, JsUndefined)
     [a] -> #(a, JsUndefined, JsUndefined)
     [] -> #(JsUndefined, JsUndefined, JsUndefined)
+  }
+}
+
+/// Lift the internal `Result(#(v, state), #(e, state))` chain shape into the
+/// builtin dispatch tuple `#(state, Result(v, e))`. The adapter at the end of
+/// a `use ... <- result.try` pipeline that threads state through both arms.
+pub fn lift_result(
+  r: Result(#(a, State(host)), #(b, State(host))),
+) -> #(State(host), Result(a, b)) {
+  case r {
+    Ok(#(v, state)) -> #(state, Ok(v))
+    Error(#(e, state)) -> #(state, Error(e))
   }
 }

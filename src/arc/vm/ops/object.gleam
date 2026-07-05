@@ -135,8 +135,8 @@ pub fn get_value(
     Some(ObjectSlot(kind: value.ModuleNamespace(exports:), ..)) ->
       namespace_get(state, exports, key)
     // §10.5.8 Proxy [[Get]] — route through the trap machinery.
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-      proxy_get(state, target, handler, PkString(key), receiver)
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+      proxy_get(state, slots, PkString(key), receiver)
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       case kind, key {
         // Fast paths for synthesized descriptors: own_property_of_slot would
@@ -613,8 +613,8 @@ pub fn set_value(
     // §10.4.6.9 Module Namespace [[Set]]: always returns false (read-only).
     Some(ObjectSlot(kind: value.ModuleNamespace(..), ..)) -> Ok(#(state, False))
     // §10.5.9 Proxy [[Set]] — route through the trap machinery.
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-      proxy_set(state, target, handler, PkString(key), val, receiver)
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+      proxy_set(state, slots, PkString(key), val, receiver)
     Some(
       ObjectSlot(kind:, properties:, elements:, prototype:, extensible:, ..) as slot,
     ) ->
@@ -934,15 +934,8 @@ fn set_on_receiver(
         // §10.1.9.2 steps 2.c-2.e with a PROXY receiver (Reflect.set with a
         // proxy receiver, or [[Set]] forwarded through a trapless proxy):
         // the GetOwnProperty/DefineOwnProperty pair must go through traps.
-        Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-          set_on_proxy_receiver(
-            state,
-            recv_ref,
-            target,
-            handler,
-            PkString(key),
-            val,
-          )
+        Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+          set_on_proxy_receiver(state, recv_ref, slots, PkString(key), val)
         // Receiver is itself an Integer-Indexed object: the receiver half of
         // OrdinarySet routes numeric index keys through the receiver's
         // [[DefineOwnProperty]] (§10.4.5.3) → IntegerIndexedElementSet for a
@@ -1019,8 +1012,7 @@ fn proxy_receiver_guard(
   cont: fn() -> Result(#(State(host), Bool), #(JsValue, State(host))),
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case as_proxy(state.heap, recv_ref) {
-    Some(#(target, handler)) ->
-      set_on_proxy_receiver(state, recv_ref, target, handler, pk, val)
+    Some(slots) -> set_on_proxy_receiver(state, recv_ref, slots, pk, val)
     None -> cont()
   }
 }
@@ -1032,8 +1024,7 @@ fn proxy_receiver_guard(
 fn set_on_proxy_receiver(
   state: State(host),
   recv_ref: Ref,
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   pk: PropKey,
   val: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
@@ -1048,9 +1039,8 @@ fn set_on_proxy_receiver(
     // Step 2.d.i-ii: accessor or non-writable existing → false.
     Some(AccessorProperty(..)) -> Ok(#(state, False))
     Some(DataProperty(writable: False, ..)) -> Ok(#(state, False))
-    Some(DataProperty(..)) ->
-      proxy_receiver_define(state, target, handler, pk, val, False)
-    None -> proxy_receiver_define(state, target, handler, pk, val, True)
+    Some(DataProperty(..)) -> proxy_receiver_define(state, slots, pk, val, False)
+    None -> proxy_receiver_define(state, slots, pk, val, True)
   }
 }
 
@@ -1059,16 +1049,14 @@ fn set_on_proxy_receiver(
 /// descriptor (absent property). No invariant checks (receiver-write path).
 fn proxy_receiver_define(
   state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
+  slots: Option(value.ProxySlots),
   pk: PropKey,
   val: JsValue,
   full: Bool,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
-    target,
-    handler,
+    slots,
     "defineProperty",
   ))
   case trap {
@@ -2045,6 +2033,31 @@ pub fn find_property(
   }
 }
 
+/// Symbol-keyed twin of `find_property`: walk the prototype chain for `sym`
+/// WITHOUT running any getter. A Proxy on the chain stops the walk with
+/// `NeedsTraps` — its `get`/`getOwnPropertyDescriptor` traps are user code, so
+/// no descriptor exists to return purely. Used as a protector read (e.g.
+/// `intrinsic_iterator_guard`), never as an observable [[Get]].
+pub fn find_symbol_property(
+  heap: Heap(host),
+  ref: Ref,
+  sym: SymbolId,
+) -> PureLookup(Option(Property)) {
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(kind: value.ProxyObject(..), ..)) -> NeedsTraps(ref)
+    Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
+      case list.key_find(symbol_properties, sym) {
+        Ok(prop) -> Answered(Some(prop))
+        Error(Nil) ->
+          case prototype {
+            Some(proto_ref) -> find_symbol_property(heap, proto_ref, sym)
+            None -> Answered(None)
+          }
+      }
+    _ -> Answered(None)
+  }
+}
+
 /// §10.1.9.2 OrdinarySetWithOwnDescriptor steps 2-7 given an already-found
 /// ownDesc (e.g. from find_property — avoids set_value's second chain walk).
 ///
@@ -2840,8 +2853,8 @@ pub fn get_symbol_value(
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     // §10.5.8 Proxy [[Get]] — symbol-keyed.
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-      proxy_get(state, target, handler, PkSymbol(key), receiver)
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+      proxy_get(state, slots, PkSymbol(key), receiver)
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
       // Step 1: Let desc be O.[[GetOwnProperty]](P).
       case list.key_find(symbol_properties, key) {
@@ -2901,8 +2914,8 @@ pub fn set_symbol_value(
     // including for symbol keys — never falls through to the receiver write.
     Some(ObjectSlot(kind: value.ModuleNamespace(..), ..)) -> Ok(#(state, False))
     // §10.5.9 Proxy [[Set]] — symbol-keyed.
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-      proxy_set(state, target, handler, PkSymbol(key), val, receiver)
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+      proxy_set(state, slots, PkSymbol(key), val, receiver)
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
       // Step 1: Let ownDesc be O.[[GetOwnProperty]](P).
       case list.key_find(symbol_properties, key) {
@@ -2977,16 +2990,23 @@ fn define_symbol_data_on_receiver(
             )
           Ok(#(State(..state, heap: h), True))
         }
-        None -> {
-          let h =
-            define_symbol_property(
-              state.heap,
-              recv_ref,
-              key,
-              value.data_property(val),
-            )
-          Ok(#(State(..state, heap: h), True))
-        }
+        None ->
+          // §10.1.6.3 step 2.a: current is undefined and receiver is not
+          // extensible → reject. Mirrors the string-keyed twin at
+          // set_string_property.
+          case slot_extensible(state.heap, recv_ref) {
+            False -> Ok(#(state, False))
+            True -> {
+              let h =
+                define_symbol_property(
+                  state.heap,
+                  recv_ref,
+                  key,
+                  value.data_property(val),
+                )
+              Ok(#(State(..state, heap: h), True))
+            }
+          }
       }
     }
     // Step 2.b: Receiver is not an Object → return false.
@@ -3474,17 +3494,11 @@ fn pk_label(pk: PropKey) -> String {
   }
 }
 
-/// §7.2.3 IsCallable, including proxies (callable iff target was callable at
-/// creation — §10.5.15 step 7.a).
+/// §7.2.3 IsCallable. Delegates to `heap.ref_is_callable` — the single source
+/// of truth for the callable-ObjectKind set.
 pub fn value_is_callable(h: Heap(host), val: JsValue) -> Bool {
   case val {
-    JsObject(ref) ->
-      case heap.read(h, ref) {
-        Some(ObjectSlot(kind: FunctionObject(..), ..)) -> True
-        Some(ObjectSlot(kind: NativeFunction(..), ..)) -> True
-        Some(ObjectSlot(kind: value.ProxyObject(callable:, ..), ..)) -> callable
-        _ -> False
-      }
+    JsObject(ref) -> heap.ref_is_callable(h, ref)
     _ -> False
   }
 }
@@ -3528,10 +3542,10 @@ fn is_array_ref(h: Heap(host), ref: Ref) -> Result(Bool, Nil) {
     // Step 2: If argument is an Array exotic object, return true.
     Some(ObjectSlot(kind: ArrayObject(_), ..)) -> Ok(True)
     // Step 3: Proxy exotic object.
-    Some(ObjectSlot(kind: value.ProxyObject(target:, ..), ..)) ->
-      case target {
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
+      case slots {
         // Step 3.b-c: Return ? IsArray(proxy.[[ProxyTarget]]).
-        Some(t) -> is_array_ref(h, t)
+        Some(value.ProxySlots(target:, ..)) -> is_array_ref(h, target)
         // Step 3.a: If proxy.[[ProxyHandler]] is null, throw TypeError.
         None -> Error(Nil)
       }
@@ -3540,14 +3554,11 @@ fn is_array_ref(h: Heap(host), ref: Ref) -> Result(Bool, Nil) {
   }
 }
 
-/// Read a ref's ProxyObject parts, or None when it isn't a proxy.
-pub fn as_proxy(
-  h: Heap(host),
-  ref: Ref,
-) -> Option(#(Option(Ref), Option(Ref))) {
+/// Read a ref's ProxyObject slots, or None when it isn't a proxy. The inner
+/// Option is the revocation state (None = revoked).
+pub fn as_proxy(h: Heap(host), ref: Ref) -> Option(Option(value.ProxySlots)) {
   case heap.read(h, ref) {
-    Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-      Some(#(target, handler))
+    Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) -> Some(slots)
     _ -> None
   }
 }

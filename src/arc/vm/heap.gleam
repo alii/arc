@@ -386,6 +386,23 @@ pub fn read_bigint_object(
   }
 }
 
+/// §7.2.3 IsCallable — true iff `ref` names an object that has a [[Call]]
+/// internal method. The single source of truth for the callable-kind set:
+/// `helpers.is_callable`, `ops_object.value_is_callable`, and `typeof` all
+/// delegate here so a new callable ObjectKind (e.g. a wrapped-function
+/// exotic) is one edit, not three.
+pub fn ref_is_callable(h: Heap(ctx, host), ref: Ref) -> Bool {
+  case read(h, ref) {
+    Some(value.ObjectSlot(kind: value.FunctionObject(..), ..))
+    | Some(value.ObjectSlot(kind: value.NativeFunction(..), ..))
+    | // Proxy: has [[Call]] iff target was callable at creation (§10.5.15
+      // step 7.a); survives revocation.
+      Some(value.ObjectSlot(kind: value.ProxyObject(callable: True, ..), ..)) ->
+      True
+    _ -> False
+  }
+}
+
 // -----------------------------------------------------------------------------
 
 /// Sentinel ref with no backing slot. `read` returns Error, `write`/`update`
