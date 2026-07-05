@@ -12,6 +12,7 @@
 /// bulk encoding live in arc/vm/ops/typed_array_elements (typed_array_store
 /// / typed_array_encode_value); this module is the constructor and
 /// prototype surface.
+import arc/internal/digits
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
@@ -4124,7 +4125,7 @@ fn hex_loop(
     <<>> -> Decoded(read, decode_bytes(acc))
     _ if written >= max_len -> Decoded(read, decode_bytes(acc))
     <<h1, h2, rest:bits>> ->
-      case hex_value(h1), hex_value(h2) {
+      case digits.hex_value_code(h1), digits.hex_value_code(h2) {
         Some(a), Some(b) -> {
           let byte = a * 16 + b
           hex_loop(rest, read + 2, [<<byte>>, ..acc], written + 1, max_len)
@@ -4132,15 +4133,6 @@ fn hex_loop(
         _, _ -> DecodeFailed(decode_bytes(acc))
       }
     _ -> DecodeFailed(decode_bytes(acc))
-  }
-}
-
-fn hex_value(c: Int) -> Option(Int) {
-  case c {
-    _ if c >= 48 && c <= 57 -> Some(c - 48)
-    _ if c >= 97 && c <= 102 -> Some(c - 87)
-    _ if c >= 65 && c <= 70 -> Some(c - 55)
-    _ -> None
   }
 }
 

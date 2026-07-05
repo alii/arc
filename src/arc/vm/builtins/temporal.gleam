@@ -847,7 +847,7 @@ fn month_day_from_doy(y: Int, d: Int, m: Int) -> #(Int, Int) {
 
 /// ISO day of week: Monday = 1 .. Sunday = 7. Epoch day 0 = Thursday.
 fn day_of_week(d: IsoDate) -> Int {
-  math_mod(epoch_days(d) + 3, 7) + 1
+  gregorian.iso_weekday_from_days(epoch_days(d))
 }
 
 fn day_of_year(d: IsoDate) -> Int {

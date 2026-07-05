@@ -122,10 +122,10 @@ fn classify_leading_zero(rest: String) -> LiteralForm {
   case string.to_graphemes(rest) {
     [] -> Decimal("0")
     graphemes ->
-      case list.all(graphemes, is_octal_digit) {
+      case list.all(graphemes, digits.is_octal) {
         True -> LegacyOctal(rest)
         False ->
-          case list.all(graphemes, is_decimal_digit) {
+          case list.all(graphemes, digits.is_decimal) {
             True -> NonOctalDecimal(rest)
             False -> Decimal("0" <> rest)
           }
@@ -256,19 +256,5 @@ fn parse_digits(s: String, radix: Int) -> Result(Int, NumberParseError) {
           False -> Error(NotANumericLiteral(s))
         }
       })
-  }
-}
-
-fn is_octal_digit(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
-    _ -> False
-  }
-}
-
-fn is_decimal_digit(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
-    _ -> False
   }
 }

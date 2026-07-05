@@ -34,6 +34,10 @@ pub fn days_in_year(y: Int) -> Int {
 }
 
 /// Length of 1-based month `m` in year `y`.
+///
+/// A month outside 1..12 has no length, so it reports 0 rather than passing
+/// itself off as a 31-day month: a caller checking `day <= days_in_month(..)`
+/// rejects the whole date instead of accepting a plausible-looking one.
 pub fn days_in_month(y: Int, m: Int) -> Int {
   case m {
     2 ->
@@ -42,8 +46,21 @@ pub fn days_in_month(y: Int, m: Int) -> Int {
         False -> 28
       }
     4 | 6 | 9 | 11 -> 30
-    _ -> 31
+    1 | 3 | 5 | 7 | 8 | 10 | 12 -> 31
+    _ -> 0
   }
+}
+
+/// Day of the week for a day count since 1970-01-01: 0 = Sunday .. 6 =
+/// Saturday. Epoch day 0 (1970-01-01) was a Thursday, hence the `+ 4`.
+pub fn weekday_from_days(z: Int) -> Int {
+  floor_mod(z + 4, 7)
+}
+
+/// ISO day of the week for a day count since 1970-01-01: 1 = Monday .. 7 =
+/// Sunday.
+pub fn iso_weekday_from_days(z: Int) -> Int {
+  floor_mod(z + 3, 7) + 1
 }
 
 /// Days since 1970-01-01 for a proleptic Gregorian date (1-based month).

@@ -1,5 +1,7 @@
+import arc/internal/digits
 import gleam/int
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
@@ -129,13 +131,13 @@ fn js_unescape_loop(
     // '%'
     [0x25, ..after_percent] -> {
       let escape =
-        result.lazy_or(take_unicode_escape(after_percent), fn() {
+        option.lazy_or(take_unicode_escape(after_percent), fn() {
           take_hex_escape(after_percent)
         })
       case escape {
-        Ok(#(code, rest)) ->
+        Some(#(code, rest)) ->
           js_unescape_loop(rest, [scalar_to_codepoint(code), ..acc])
-        Error(Nil) ->
+        None ->
           js_unescape_loop(after_percent, [scalar_to_codepoint(0x25), ..acc])
       }
     }
@@ -147,21 +149,19 @@ fn js_unescape_loop(
 /// code point and the unconsumed input. A high surrogate immediately
 /// followed by a `%uXXXX` low surrogate consumes both escapes and yields
 /// the combined supplementary-plane code point.
-fn take_unicode_escape(
-  after_percent: List(Int),
-) -> Result(#(Int, List(Int)), Nil) {
+fn take_unicode_escape(after_percent: List(Int)) -> Option(#(Int, List(Int))) {
   case after_percent {
     // 'u'
     [0x75, a, b, c, d, ..rest] -> {
-      use unit <- result.map(hex4(a, b, c, d))
+      use unit <- option.map(hex4(a, b, c, d))
       case is_high_surrogate(unit) {
         True ->
           case take_low_surrogate_escape(rest) {
-            Ok(#(low, after_pair)) -> #(
+            Some(#(low, after_pair)) -> #(
               combine_surrogates(unit, low),
               after_pair,
             )
-            Error(Nil) -> #(replacement_character, rest)
+            None -> #(replacement_character, rest)
           }
         False ->
           case is_low_surrogate(unit) {
@@ -170,35 +170,33 @@ fn take_unicode_escape(
           }
       }
     }
-    _ -> Error(Nil)
+    _ -> None
   }
 }
 
 /// Try to take a whole `%uXXXX` escape whose value is a low surrogate.
-fn take_low_surrogate_escape(
-  input: List(Int),
-) -> Result(#(Int, List(Int)), Nil) {
+fn take_low_surrogate_escape(input: List(Int)) -> Option(#(Int, List(Int))) {
   case input {
     // "%u"
     [0x25, 0x75, a, b, c, d, ..rest] -> {
-      use unit <- result.try(hex4(a, b, c, d))
+      use unit <- option.then(hex4(a, b, c, d))
       case is_low_surrogate(unit) {
-        True -> Ok(#(unit, rest))
-        False -> Error(Nil)
+        True -> Some(#(unit, rest))
+        False -> None
       }
     }
-    _ -> Error(Nil)
+    _ -> None
   }
 }
 
 /// Try to take `XX` (the input just after a `%`).
-fn take_hex_escape(after_percent: List(Int)) -> Result(#(Int, List(Int)), Nil) {
+fn take_hex_escape(after_percent: List(Int)) -> Option(#(Int, List(Int))) {
   case after_percent {
     [a, b, ..rest] -> {
-      use code <- result.map(hex2(a, b))
+      use code <- option.map(hex2(a, b))
       #(code, rest)
     }
-    _ -> Error(Nil)
+    _ -> None
   }
 }
 
@@ -228,34 +226,21 @@ fn combine_surrogates(high: Int, low: Int) -> Int {
   0x10000 + { high - 0xd800 } * 0x400 + { low - 0xdc00 }
 }
 
-/// The numeric value of an ASCII hex digit (`0-9`, `A-F`, `a-f`).
+/// Combine two hex digits; `None` if either is not a hex digit.
 ///
-/// §B.2.1.2 admits only hex DIGITS inside an escape sequence. We must not
-/// lean on `int.base_parse` here: that is Erlang's `binary_to_integer/2`,
-/// which also accepts a leading sign, so `unescape("%+4")` would decode to
-/// U+0004 instead of passing through unchanged.
-fn hex_digit_value(code: Int) -> Result(Int, Nil) {
-  case code {
-    // 0-9
-    _ if code >= 0x30 && code <= 0x39 -> Ok(code - 0x30)
-    // A-F
-    _ if code >= 0x41 && code <= 0x46 -> Ok(code - 0x41 + 10)
-    // a-f
-    _ if code >= 0x61 && code <= 0x66 -> Ok(code - 0x61 + 10)
-    _ -> Error(Nil)
-  }
-}
-
-/// Combine two hex digits; `Error` if either is not a hex digit.
-fn hex2(a: Int, b: Int) -> Result(Int, Nil) {
-  use high <- result.try(hex_digit_value(a))
-  use low <- result.map(hex_digit_value(b))
+/// §B.2.1.2 admits only hex DIGITS inside an escape sequence, which is why
+/// this goes through `digits.hex_value_code` rather than `int.base_parse`
+/// (that one also accepts a leading sign, so `unescape("%+4")` would decode
+/// to U+0004 instead of passing through unchanged).
+fn hex2(a: Int, b: Int) -> Option(Int) {
+  use high <- option.then(digits.hex_value_code(a))
+  use low <- option.map(digits.hex_value_code(b))
   high * 16 + low
 }
 
-/// Combine four hex digits; `Error` if any is not a hex digit.
-fn hex4(a: Int, b: Int, c: Int, d: Int) -> Result(Int, Nil) {
-  use high <- result.try(hex2(a, b))
-  use low <- result.map(hex2(c, d))
+/// Combine four hex digits; `None` if any is not a hex digit.
+fn hex4(a: Int, b: Int, c: Int, d: Int) -> Option(Int) {
+  use high <- option.then(hex2(a, b))
+  use low <- option.map(hex2(c, d))
   high * 256 + low
 }

@@ -505,7 +505,7 @@ fn get_date_fields(tv: Int, time_ref: TimeRef) -> DateFields {
   let h = { h - seconds } / 60
   let minutes = math_mod(h, 60)
   let hours = { h - minutes } / 60
-  let weekday = math_mod(days + 4, 7)
+  let weekday = gregorian.weekday_from_days(days)
   let #(year, day_in_year) = year_from_days(days)
   let #(month, date) = month_from_day_in_year(year, day_in_year, 0)
   DateFields(
