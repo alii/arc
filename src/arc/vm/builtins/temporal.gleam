@@ -6237,8 +6237,7 @@ fn now_tz_arg(
 ) -> Result(#(TimeZone, State(host)), #(JsValue, State(host))) {
   case helpers.arg_at(args, 0) {
     JsUndefined -> Ok(#(TzUtc, state))
-    JsString(s) -> terr_op(state, parse_time_zone_id(s))
-    _ -> type_error_result(state, "time zone must be a string")
+    arg -> to_temporal_time_zone(state, arg)
   }
 }
 
@@ -10244,14 +10243,12 @@ fn zoned_date_time_method(
           }
         }
         ZmWithTimeZone -> {
-          case helpers.arg_at(args, 0) {
-            JsString(tz_str) -> {
-              use tz2 <- terr(state, parse_time_zone_id(tz_str))
-              let #(state, v) = make_zoned_cal(state, protos, ns, tz2, zcal)
-              #(state, Ok(v))
-            }
-            _ -> state.type_error(state, "time zone must be a string")
-          }
+          use tz2, state <- state.try_op(to_temporal_time_zone(
+            state,
+            helpers.arg_at(args, 0),
+          ))
+          let #(state, v) = make_zoned_cal(state, protos, ns, tz2, zcal)
+          #(state, Ok(v))
         }
         ZmUntil | ZmSince -> {
           use #(ons, otz, ocal), state <- state.try_op(to_temporal_zoned(
