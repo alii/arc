@@ -19,8 +19,8 @@
 /// ISODateTimeWithinLimits, IsValidDuration, ParseISODateTime).
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{
-  days_in_month, days_in_year as days_in_iso_year, floor_div,
-  floor_mod as math_mod, is_leap_year,
+  days_from_year, days_in_month, days_in_year as days_in_iso_year, floor_div,
+  floor_mod as math_mod, is_leap_year, year_from_days,
 }
 import arc/internal/host_time
 import arc/vm/builtins/common
@@ -790,15 +790,6 @@ fn apply_new_target_proto(
 // Pure calendar math (ISO 8601 proleptic Gregorian)
 // ============================================================================
 
-/// Days since epoch to Jan 1 of year y.
-fn days_from_year(y: Int) -> Int {
-  365
-  * { y - 1970 }
-  + floor_div(y - 1969, 4)
-  - floor_div(y - 1901, 100)
-  + floor_div(y - 1601, 400)
-}
-
 fn days_before_month(y: Int, m: Int) -> Int {
   sum_months(y, 1, m, 0)
 }
@@ -812,23 +803,6 @@ fn sum_months(y: Int, i: Int, until: Int, acc: Int) -> Int {
 
 fn epoch_days(d: IsoDate) -> Int {
   days_from_year(d.year) + days_before_month(d.year, d.month) + d.day - 1
-}
-
-fn year_from_days(days: Int) -> #(Int, Int) {
-  let y = floor_div(days * 10_000, 3_652_425) + 1970
-  year_from_days_loop(y, days)
-}
-
-fn year_from_days_loop(y: Int, days: Int) -> #(Int, Int) {
-  let d = days - days_from_year(y)
-  case d < 0 {
-    True -> year_from_days_loop(y - 1, days)
-    False ->
-      case d >= days_in_iso_year(y) {
-        True -> year_from_days_loop(y + 1, days)
-        False -> #(y, d)
-      }
-  }
 }
 
 fn iso_date_from_epoch_days(days: Int) -> IsoDate {

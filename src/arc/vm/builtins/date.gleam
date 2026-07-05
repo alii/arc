@@ -14,7 +14,9 @@
 /// wall clock and the local-zone offset lookups go through FFI, and those live
 /// in `arc/internal/host_time`.
 import arc/internal/digits.{take_digits}
-import arc/internal/gregorian.{days_in_year, floor_div, floor_mod as math_mod}
+import arc/internal/gregorian.{
+  days_from_year, floor_div, floor_mod as math_mod, year_from_days,
+}
 import arc/internal/host_time.{now_ms, offset_at_local_ms, offset_at_utc_ms}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
@@ -344,34 +346,6 @@ fn method_name(native: DateNativeFn) -> String {
 const ms_per_day = 86_400_000
 
 const max_time_value = 8.64e15
-
-/// ES2024 §21.4.1.3 Day Number from year. Days since epoch to Jan 1 of `y`.
-fn days_from_year(y: Int) -> Int {
-  365
-  * { y - 1970 }
-  + floor_div(y - 1969, 4)
-  - floor_div(y - 1901, 100)
-  + floor_div(y - 1601, 400)
-}
-
-/// Return #(year, day_within_year) for an absolute day number since epoch.
-/// Initial guess from average year length, then correct ±1 (QuickJS algorithm).
-fn year_from_days(days: Int) -> #(Int, Int) {
-  let y = floor_div(days * 10_000, 3_652_425) + 1970
-  year_from_days_loop(y, days)
-}
-
-fn year_from_days_loop(y: Int, days: Int) -> #(Int, Int) {
-  let d = days - days_from_year(y)
-  case d < 0 {
-    True -> year_from_days_loop(y - 1, days)
-    False ->
-      case d >= days_in_year(y) {
-        True -> year_from_days_loop(y + 1, days)
-        False -> #(y, d)
-      }
-  }
-}
 
 /// Days in month `m` (0-based, as ES exposes it) for year `y`.
 fn days_in_month(y: Int, m: Int) -> Int {
@@ -790,9 +764,9 @@ fn date_get_tz_offset(
       state,
       Ok(
         JsNumber(
-          Finite(int.to_float(js_get_timezone_offset_minutes(
-            value.float_to_int(f),
-          ))),
+          Finite(
+            int.to_float(js_get_timezone_offset_minutes(value.float_to_int(f))),
+          ),
         ),
       ),
     )
