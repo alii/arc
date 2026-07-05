@@ -589,10 +589,15 @@ pub fn call_native_promise_then(
   }
 }
 
-/// Promise.prototype.finally(onFinally) — per spec, wraps the handler
-/// to preserve the resolution value. Creates wrapper functions that call
+/// §27.2.5.3 Promise.prototype.finally(onFinally) — wraps the handler to
+/// preserve the resolution value. Creates wrapper functions that call
 /// onFinally(), then pass through the original value/reason via
-/// Promise.resolve(result).then(thunk).
+/// PromiseResolve(C, result).then(thunk).
+///
+/// Step 3 captures C = ? SpeciesConstructor(promise, %Promise%) HERE, at
+/// `finally` time, and the wrappers carry it: the Then Finally Functions
+/// resolve through C, so `p.constructor = MyPromise; p.finally(f)` builds the
+/// intermediate promise with MyPromise, not %Promise%.
 pub fn call_native_promise_finally(
   state: State(host),
   this: JsValue,
@@ -600,6 +605,23 @@ pub fn call_native_promise_finally(
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
   let on_finally = helpers.first_arg_or_undefined(args)
+  // Steps 1-2: the receiver must be an Object.
+  use <- bool.lazy_guard(
+    case this {
+      JsObject(_) -> False
+      _ -> True
+    },
+    fn() { state.throw_type_error(state, "finally called on non-object") },
+  )
+  // Step 3: C = ? SpeciesConstructor(promise, %Promise%).
+  use #(ctor_ref, state) <- result.try(
+    state.rethrow(object.species_constructor(
+      state,
+      this,
+      state.builtins.promise.constructor,
+    )),
+  )
+  let constructor = JsObject(ctor_ref)
   // If onFinally is not callable, pass-through (like .then(onFinally, onFinally))
   case helpers.is_callable(state.heap, on_finally) {
     False ->
@@ -615,7 +637,7 @@ pub fn call_native_promise_finally(
         common.alloc_wrapper(
           state.heap,
           value.NativeFunction(
-            value.Call(value.PromiseFinallyFulfill(on_finally:)),
+            value.Call(value.PromiseFinallyFulfill(on_finally:, constructor:)),
             constructible: False,
           ),
           state.builtins.function.prototype,
@@ -625,7 +647,7 @@ pub fn call_native_promise_finally(
         common.alloc_wrapper(
           h,
           value.NativeFunction(
-            value.Call(value.PromiseFinallyReject(on_finally:)),
+            value.Call(value.PromiseFinallyReject(on_finally:, constructor:)),
             constructible: False,
           ),
           state.builtins.function.prototype,
@@ -640,37 +662,40 @@ pub fn call_native_promise_finally(
   }
 }
 
-/// Promise.prototype.finally fulfill wrapper — called when promise fulfills.
-/// Calls onFinally(), then Promise.resolve(result).then(() => original_value).
+/// §27.2.5.3.1 Then Finally Function — called when the promise fulfills.
+/// Calls onFinally(), then PromiseResolve(C, result).then(() => original_value).
 pub fn call_native_finally_fulfill(
   state: State(host),
   on_finally: JsValue,
+  constructor: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  call_native_finally(state, on_finally, args, rest_stack, fn(v) {
+  call_native_finally(state, on_finally, constructor, args, rest_stack, fn(v) {
     value.PromiseFinallyValueThunk(value: v)
   })
 }
 
-/// Promise.prototype.finally reject wrapper — called when promise rejects.
-/// Calls onFinally(), then Promise.resolve(result).then(() => { throw reason }).
+/// §27.2.5.3.2 Catch Finally Function — called when the promise rejects.
+/// Calls onFinally(), then PromiseResolve(C, result).then(() => { throw reason }).
 pub fn call_native_finally_reject(
   state: State(host),
   on_finally: JsValue,
+  constructor: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  call_native_finally(state, on_finally, args, rest_stack, fn(r) {
+  call_native_finally(state, on_finally, constructor, args, rest_stack, fn(r) {
     value.PromiseFinallyThrower(reason: r)
   })
 }
 
 /// Shared body for the finally wrappers: calls onFinally(), then chains
-/// Promise.resolve(result).then(make_handler(original settled value)).
+/// PromiseResolve(C, result).then(make_handler(original settled value)).
 fn call_native_finally(
   state: State(host),
   on_finally: JsValue,
+  constructor: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
   make_handler: fn(JsValue) -> value.CallNativeFn,
@@ -682,6 +707,7 @@ fn call_native_finally(
     Ok(#(finally_result, new_state)) ->
       finally_chain(
         new_state,
+        constructor,
         finally_result,
         make_handler(original),
         rest_stack,
@@ -692,33 +718,37 @@ fn call_native_finally(
   }
 }
 
-/// Create Promise.resolve(resolve_value).then(handler) where handler is the
-/// given native call (a value thunk or a re-thrower).
+/// Create PromiseResolve(C, resolve_value).then(handler) where handler is the
+/// given native call (a value thunk or a re-thrower). `C` is the species
+/// constructor captured by `Promise.prototype.finally` (§27.2.5.3 step 3), so
+/// a subclass's `then` sees a promise built by the subclass.
 fn finally_chain(
   state: State(host),
+  constructor: JsValue,
   resolve_value: JsValue,
   native_call: value.CallNativeFn,
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  // Promise.resolve(resolve_value)
-  let #(h, cap) =
-    builtins_promise.new_promise_capability(state.heap, state.builtins)
-  // Call resolve(resolve_value)
-  let state1 =
-    job_call.call_settlement_fn(State(..state, heap: h), cap.resolve, [
-      resolve_value,
-    ])
+  // PromiseResolve(C, resolve_value): NewPromiseCapability(C) — the intrinsic
+  // %Promise% takes the direct internal path — then Call(cap.resolve, x). A
+  // user constructor's resolve can throw; that rejects the finally chain.
+  use #(cap, state) <- result.try(
+    state.rethrow(new_capability_from_constructor(state, constructor)),
+  )
+  use #(_resolve_result, state) <- result.try(
+    state.rethrow(state.call(state, cap.resolve, JsUndefined, [resolve_value])),
+  )
   // Create the handler
   let #(h2, handler_ref) =
     common.alloc_wrapper(
-      state1.heap,
+      state.heap,
       value.NativeFunction(value.Call(native_call), constructible: False),
       state.builtins.function.prototype,
     )
   // Chain .then(handler) on the resolved promise
   call_native_promise_then(
-    State(..state1, heap: h2),
-    JsObject(cap.promise),
+    State(..state, heap: h2),
+    cap.promise,
     [JsObject(handler_ref), JsUndefined],
     rest_stack,
   )
@@ -1615,22 +1645,12 @@ pub fn make_aggregate_error(
   message: String,
 ) -> #(Heap(host), JsValue) {
   let #(h, errors_arr_ref) = common.alloc_array(h, errors, b.array.prototype)
+  // [[ErrorData]] internal slot — AggregateError is an Error instance.
   let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        // [[ErrorData]] internal slot — AggregateError is an Error instance.
-        kind: value.ErrorObject(stack: ""),
-        properties: dict.from_list([
-          #(Named("message"), value.builtin_property(JsString(message))),
-          #(Named("errors"), value.builtin_property(JsObject(errors_arr_ref))),
-        ]),
-        elements: elements.new(),
-        prototype: Some(b.aggregate_error.prototype),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
+    common.alloc_error_slot(h, b.aggregate_error.prototype, [
+      #("message", value.builtin_property(JsString(message))),
+      #("errors", value.builtin_property(JsObject(errors_arr_ref))),
+    ])
   #(h, JsObject(ref))
 }
 

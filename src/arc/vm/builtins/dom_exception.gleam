@@ -1,17 +1,14 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
-import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, Dispatch, DomExceptionConstructor, DomExceptionGetCode,
-  ErrorNative, Finite, JsNumber, JsObject, JsString, JsUndefined, ObjectSlot,
+  ErrorNative, Finite, JsNumber, JsObject, JsString, JsUndefined,
 }
 import gleam/int
-import gleam/option.{Some}
 
 /// WebIDL §2.8.1 DOMException — Error-like with a `name` drawn from a fixed
 /// table that maps to a legacy integer `code`. Prototype chain goes through
@@ -84,9 +81,9 @@ fn arg_string(
 }
 
 /// Allocate a DOMException instance with own name+message data properties.
-/// The slot kind is ErrorObject — the [[ErrorData]] internal slot (§20.5.4)
-/// — so instances hold a stack trace and satisfy Error.isError, exactly like
-/// the native Error types (see error.gleam's alloc_error_slot).
+/// Allocated through common.alloc_error_slot, so the slot kind is ErrorObject
+/// — the [[ErrorData]] internal slot (§20.5.4) — and instances hold a stack
+/// trace and satisfy Error.isError, exactly like the native Error types.
 fn alloc(
   h: Heap(host),
   proto: Ref,
@@ -94,20 +91,10 @@ fn alloc(
   message: String,
 ) -> #(Heap(host), JsValue) {
   let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: value.ErrorObject(stack: ""),
-        properties: common.named_props([
-          #("message", value.builtin_property(JsString(message))),
-          #("name", value.builtin_property(JsString(name))),
-        ]),
-        elements: elements.new(),
-        prototype: Some(proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
+    common.alloc_error_slot(h, proto, [
+      #("message", value.builtin_property(JsString(message))),
+      #("name", value.builtin_property(JsString(name))),
+    ])
   #(h, JsObject(ref))
 }
 

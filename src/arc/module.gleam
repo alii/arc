@@ -56,7 +56,7 @@ pub type CompiledModule {
   CompiledModule(
     specifier: esm.Resolved,
     template: value.FuncTemplate,
-    /// (raw specifier text, bindings) — resolve through `specifier_map`.
+    /// (raw specifier as written, bindings) — resolve through `specifier_map`.
     import_bindings: List(#(esm.Raw, List(esm.ImportBinding))),
     export_entries: List(esm.ExportEntry),
     /// Module-root name → local-slot map (compiler.CompiledModuleBody.
@@ -169,20 +169,24 @@ pub type CompileBundleError {
 /// variant of their own: `link_for_evaluation` allocates the JS SyntaxError
 /// in the heap right there (its identity and stack ARE the module's rejection
 /// value), so they surface as `EvaluationError`.
-pub type ModuleError(host) {
+///
+/// NO variant carries a heap. Every function that can fail hands the live heap
+/// back BESIDE the result — `#(Heap(host), Result(_, ModuleError))` — so there
+/// is exactly one heap channel out of it and no caller can pick the wrong one
+/// of two. `EvaluationError`'s value is a `Ref` into that heap.
+pub type ModuleError {
   /// Evaluation asked for a resolved specifier the bundle does not contain.
   NotInBundle(specifier: String)
-  /// A module threw during evaluation. Carries both the thrown value and the
-  /// heap it was allocated in — the value is a Ref into this heap, so callers
-  /// must use it (not a pre-evaluation heap) to inspect the thrown object.
-  EvaluationError(value: JsValue, heap: Heap(host))
+  /// A module threw during evaluation. The thrown value is a `Ref` into the
+  /// heap returned alongside this error.
+  EvaluationError(value: JsValue)
   /// Evaluation is parked on top-level await and the supplied `finish`
   /// driver did not settle it (only reachable with a non-draining driver —
   /// the dynamic-import path). `promise_data_ref` is the entry module's
   /// [[TopLevelCapability]] promise data: per Evaluate() step 4 the host
   /// must chain onto this promise (and hand any returned jobs to its own
   /// event loop) rather than treat the module as failed.
-  EvaluationPending(promise_data_ref: Ref, heap: Heap(host))
+  EvaluationPending(promise_data_ref: Ref)
 }
 
 /// The message a module parked forever on top-level await surfaces with (cf.
@@ -238,13 +242,14 @@ pub fn compile_bundle_error_phase(err: CompileBundleError) -> String {
 /// `string.inspect` a `ModuleError`: its Gleam debug repr structurally
 /// contains a whole `Heap`, and would leak Gleam constructor syntax into a
 /// guest-visible JS error message.
-pub fn error_message(err: ModuleError(host)) -> String {
+/// `heap` is the heap the failing call handed back beside the error — the one
+/// an `EvaluationError`'s thrown value lives in.
+pub fn error_message(err: ModuleError, heap: Heap(host)) -> String {
   case err {
     NotInBundle(specifier:) ->
       "Module '" <> specifier <> "' not found in bundle"
-    EvaluationError(value:, heap:) ->
-      "Uncaught " <> object.format_error(value, heap)
-    EvaluationPending(promise_data_ref: _, heap: _) -> tla_never_settled_message
+    EvaluationError(value:) -> "Uncaught " <> object.format_error(value, heap)
+    EvaluationPending(promise_data_ref: _) -> tla_never_settled_message
   }
 }
 
@@ -306,13 +311,17 @@ fn assert_link_invariant(result: Result(a, LinkInvariantBroken)) -> a {
 }
 
 /// The successful result of `evaluate_bundle`: the entry module's completion
-/// value, the resulting heap, and the entry module's Module Namespace Exotic
-/// Object (§10.4.6). Read named exports off `namespace` via its [[Get]] — a
-/// live, TDZ-throwing, write-protected view of the export bindings. This is the
-/// embedder's `GetModuleNamespace` handle (cf. V8 `Module::GetModuleNamespace`,
-/// QuickJS `JS_GetModuleNamespace`).
-pub type EvaluatedBundle(host) {
-  EvaluatedBundle(value: JsValue, heap: Heap(host), namespace: Option(Ref))
+/// value and the entry module's Module Namespace Exotic Object (§10.4.6). Read
+/// named exports off `namespace` via its [[Get]] — a live, TDZ-throwing,
+/// write-protected view of the export bindings. This is the embedder's
+/// `GetModuleNamespace` handle (cf. V8 `Module::GetModuleNamespace`, QuickJS
+/// `JS_GetModuleNamespace`).
+///
+/// `namespace` is not optional: the linker reserves a namespace box for every
+/// module of the bundle, so a bundle that evaluated has one. The heap it lives
+/// in is the one returned beside this record.
+pub type EvaluatedBundle {
+  EvaluatedBundle(value: JsValue, namespace: Ref)
 }
 
 // =============================================================================
@@ -422,7 +431,7 @@ fn compile_source_module(
   CompiledModule(
     specifier:,
     template:,
-    import_bindings: list.map(summary.imports, fn(e) { #(esm.raw(e.0), e.1) }),
+    import_bindings: summary.imports,
     export_entries: summary.exports,
     export_names:,
     specifier_map: graph.specifier_map(node),
@@ -450,8 +459,11 @@ fn module_has_tla(template: value.FuncTemplate) -> Bool {
 // projects a bundle into that view (`linkable_of_bundle`) and calls
 // `link.validate` / `link.resolve_export` / `link.exported_names`.
 
-/// Project a compiled bundle onto the shared `link.LinkableGraph` view: a
-/// trivial per-module field copy of the three fields the resolver reads.
+/// Project a compiled bundle onto the shared `link.LinkableGraph` view.
+/// `link.project_module` resolves each module's raw specifiers through its own
+/// (TOTAL) specifier map exactly here, once — so nothing on the linking path
+/// downstream can meet an unresolved dependency. An uncovered specifier is the
+/// linker-invariant break `import_seeds` fails on; fail at its cause.
 ///
 /// A `ModuleBundle` is keyed by module identity — every key came out of a
 /// `graph.load` walk (or is a host module the embedder registered under one) —
@@ -461,11 +473,9 @@ fn linkable_of_bundle(bundle: ModuleBundle) -> link.LinkableGraph {
   use acc, specifier, bundle_module <- dict.fold(bundle.modules, dict.new())
   let linkable = case bundle_module {
     SourceModule(m) ->
-      link.LinkableModule(
-        import_bindings: m.import_bindings,
-        export_entries: m.export_entries,
-        specifier_map: m.specifier_map,
-      )
+      link.project_module(m.import_bindings, m.export_entries, m.specifier_map)
+      |> result.map_error(UnresolvedDependency)
+      |> assert_link_invariant
     // A host module projects as a module with no imports and a LocalExport per
     // supplied name (its cells are pre-seeded with the host values at link
     // time), so the resolver's import/re-export checks and `exported_names`
@@ -474,9 +484,9 @@ fn linkable_of_bundle(bundle: ModuleBundle) -> link.LinkableGraph {
       link.LinkableModule(
         import_bindings: [],
         export_entries: list.map(hm.exports, fn(e) {
-          esm.LocalExport(export_name: e.0, local_name: e.0)
+          link.LocalExport(export_name: e.0, local_name: e.0)
         }),
-        specifier_map: esm.new_specifier_map(),
+        star_exports: [],
       )
   }
   dict.insert(acc, esm.resolved_unchecked(specifier), linkable)
@@ -607,12 +617,23 @@ fn try_fold_state(
 
 /// A linked-but-not-yet-evaluated bundle: every binding cell and namespace
 /// object pre-allocated (§16.2 instantiation), exported hoisted functions
-/// instantiated. `namespace` is the entry module's Module Namespace Exotic
-/// Object — live before evaluation, so a host can publish it in its module
-/// registry first and a re-entrant dynamic import of the evaluating module
-/// resolves to the same namespace instead of re-evaluating (§16.2.1.8).
+/// instantiated. The entry module's Module Namespace Exotic Object is live
+/// before evaluation — read it out of the heap with `entry_namespace_of` (a
+/// function, not a stored field, so it cannot go stale against a heap the
+/// caller has since advanced), so a host can publish it in its module registry
+/// first and a re-entrant dynamic import of the evaluating module resolves to
+/// the same namespace instead of re-evaluating (§16.2.1.8).
 pub type LinkedBundle {
-  LinkedBundle(bundle: ModuleBundle, linked: Linked, namespace: Option(Ref))
+  LinkedBundle(bundle: ModuleBundle, linked: Linked)
+}
+
+/// The entry module's Module Namespace Exotic Object of a linked bundle, read
+/// live out of `heap`.
+pub fn entry_namespace_of(
+  linked_bundle: LinkedBundle,
+  heap: Heap(host),
+) -> Ref {
+  entry_namespace(linked_bundle.linked, linked_bundle.bundle.entry, heap)
 }
 
 /// Link phase of `evaluate_bundle` (§16.2.1.6.4): resolve every import and
@@ -620,11 +641,14 @@ pub type LinkedBundle {
 /// missing or ambiguous exports are a SyntaxError at link time, surfaced as
 /// `EvaluationError`. On success, pre-allocates every binding cell and
 /// namespace object and instantiates exported hoisted function declarations.
+///
+/// The returned heap is the live one either way: on failure it holds the
+/// freshly allocated JS error object the `EvaluationError` names.
 pub fn link_for_evaluation(
   bundle: ModuleBundle,
   heap: Heap(host),
   builtins: Builtins,
-) -> Result(#(Heap(host), LinkedBundle), ModuleError(host)) {
+) -> #(Heap(host), Result(LinkedBundle, ModuleError)) {
   link_for_evaluation_reusing(bundle, heap, builtins, dict.new(), dict.new())
 }
 
@@ -641,21 +665,18 @@ pub fn link_for_evaluation_reusing(
   builtins: Builtins,
   preexisting: Dict(String, Ref),
   preexisting_deferred: Dict(String, Ref),
-) -> Result(#(Heap(host), LinkedBundle), ModuleError(host)) {
-  case link.validate(linkable_of_bundle(bundle)) {
-    // Not a guest-visible link failure: the bundle's own specifier maps are
-    // TOTAL over its requests, so this is the same invariant `import_seeds`
-    // fails on — panic at its cause rather than throwing a bogus SyntaxError.
-    Error(link.UnresolvedDependency(requested_module:)) ->
-      assert_link_invariant(Error(UnresolvedDependency(requested_module)))
+) -> #(Heap(host), Result(LinkedBundle, ModuleError)) {
+  let lg = linkable_of_bundle(bundle)
+  case link.validate(lg) {
     Error(link_error) -> {
       let #(heap, err) =
-        common.make_syntax_error(
+        common.make_error(
           heap,
           builtins,
+          common.SyntaxErr,
           link.link_error_message(link_error),
         )
-      Error(EvaluationError(err, heap))
+      #(heap, Error(EvaluationError(err)))
     }
     Ok(Nil) -> {
       // Expand each preexisting namespace ref into (ref, export-name → box):
@@ -675,62 +696,63 @@ pub fn link_for_evaluation_reusing(
               )
           }
         })
-      // A preexisting module's live export map must hold a cell for every
-      // local export THIS bundle's fresh parse of it declares. Only a host
-      // loader that served different source for a specifier it already served
-      // (a file edited between two `import()`s) can break that, so it is a
-      // guest-visible link error, not a linker invariant — and it must be
-      // caught before `build_linked`, whose reuse of the live map assumes the
-      // two agree.
-      use Nil <- result.try(case stale_reused_export(bundle, pre) {
+      // A preexisting module's live export map must hold a cell for every name
+      // THIS bundle's fresh parse of it exports. Only a host loader that served
+      // different source for a specifier it already served (a file edited
+      // between two `import()`s) can break that, so it is a guest-visible link
+      // error, not a linker invariant — and it must be caught before
+      // `build_linked`, whose reuse of the live map assumes the two agree.
+      case stale_reused_export(bundle, lg, pre) {
         Some(#(spec, name)) -> {
           let #(heap, err) =
-            common.make_syntax_error(
+            common.make_error(
               heap,
               builtins,
+              common.SyntaxErr,
               stale_reused_export_message(spec, name),
             )
-          Error(EvaluationError(err, heap))
+          #(heap, Error(EvaluationError(err)))
         }
-        None -> Ok(Nil)
-      })
-      // Instantiate: pre-allocate every binding cell + namespace object, then
-      // create exported function-declaration closures so cyclic function
-      // imports are callable before any body runs (§16.2.1.6.4 step 9).
-      let #(heap, linked, deferred_to_fill) =
-        build_linked(bundle, heap, pre, preexisting_deferred)
-      // Now that the full Linked record exists, write the reserved deferred
-      // namespace proxies — their traps capture the complete bundle+linked so
-      // a first access can run the deferred subgraph's evaluation.
-      let heap =
-        list.fold(deferred_to_fill, heap, fn(heap, pair) {
-          let #(spec, proxy_ref) = pair
-          fill_deferred_namespace(
-            heap,
-            builtins,
-            bundle,
-            linked,
-            spec,
-            proxy_ref,
-          )
-        })
-      let heap =
-        instantiate_hoisted_functions(
-          bundle,
-          linked,
-          builtins,
-          heap,
-          set.from_list(dict.keys(pre)),
-        )
-      let namespace = entry_namespace(linked, bundle.entry, heap)
-      Ok(#(heap, LinkedBundle(bundle:, linked:, namespace:)))
+        None -> {
+          // Instantiate: pre-allocate every binding cell + namespace object,
+          // then create exported function-declaration closures so cyclic
+          // function imports are callable before any body runs (§16.2.1.6.4
+          // step 9).
+          let #(heap, linked, deferred_to_fill) =
+            build_linked(bundle, heap, pre, preexisting_deferred)
+          // Now that the full Linked record exists, write the reserved deferred
+          // namespace proxies — their traps capture the complete bundle+linked
+          // so a first access can run the deferred subgraph's evaluation.
+          let heap =
+            list.fold(deferred_to_fill, heap, fn(heap, pair) {
+              let #(spec, proxy_ref) = pair
+              fill_deferred_namespace(
+                heap,
+                builtins,
+                bundle,
+                linked,
+                spec,
+                proxy_ref,
+              )
+            })
+          let heap =
+            instantiate_hoisted_functions(
+              bundle,
+              linked,
+              builtins,
+              heap,
+              set.from_list(dict.keys(pre)),
+            )
+          #(heap, Ok(LinkedBundle(bundle:, linked:)))
+        }
+      }
     }
   }
 }
 
 /// Evaluation phase of `evaluate_bundle`: execute module bodies in DFS
-/// post-order (dependencies first). Returns the entry module's completion
-/// value and post-evaluation namespace.
+/// post-order (dependencies first). Returns the live heap and, beside it, the
+/// entry module's completion value and post-evaluation namespace.
 pub fn evaluate_linked(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
@@ -738,8 +760,8 @@ pub fn evaluate_linked(
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(EvaluatedBundle(host), ModuleError(host)) {
-  let #(_evaluated, _jobs, result) =
+) -> #(Heap(host), Result(EvaluatedBundle, ModuleError)) {
+  let #(heap, _evaluated, _jobs, result) =
     evaluate_linked_tracking(
       linked_bundle,
       heap,
@@ -754,25 +776,26 @@ pub fn evaluate_linked(
   // throw (cf. Node's exit code 13 for unsettled top-level await), as a real
   // JS TypeError object rather than a bare string.
   case result {
-    Error(EvaluationPending(promise_data_ref: _, heap: pending_heap)) -> {
-      let #(pending_heap, err) =
-        common.make_type_error(
-          pending_heap,
+    Error(EvaluationPending(promise_data_ref: _)) -> {
+      let #(heap, err) =
+        common.make_error(
+          heap,
           builtins,
+          common.TypeErr,
           tla_never_settled_message,
         )
-      Error(EvaluationError(value: err, heap: pending_heap))
+      #(heap, Error(EvaluationError(value: err)))
     }
-    other -> other
+    other -> #(heap, other)
   }
 }
 
 /// `evaluate_linked` for registry-aware hosts: modules in `already_evaluated`
 /// are treated as done (their bodies never run — pair with
 /// `link_for_evaluation_reusing` so their cells are the live preexisting
-/// ones). Returns the full set of successfully evaluated specifiers alongside
-/// the result, so the host can register exactly the modules whose bodies ran
-/// (even when a later module's evaluation threw).
+/// ones). Returns the live heap, then the full set of successfully evaluated
+/// specifiers alongside the result, so the host can register exactly the
+/// modules whose bodies ran (even when a later module's evaluation threw).
 pub fn evaluate_linked_tracking(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
@@ -782,11 +805,12 @@ pub fn evaluate_linked_tracking(
   finish: fn(state.State(host)) -> state.State(host),
   already_evaluated: Set(String),
 ) -> #(
+  Heap(host),
   Set(String),
   List(value.Job),
-  Result(EvaluatedBundle(host), ModuleError(host)),
+  Result(EvaluatedBundle, ModuleError),
 ) {
-  let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
+  let LinkedBundle(bundle:, linked:) = linked_bundle
   let modules =
     set.fold(already_evaluated, dict.new(), fn(acc, spec) {
       dict.insert(acc, spec, Evaluated)
@@ -805,15 +829,15 @@ pub fn evaluate_linked_tracking(
     )
   // Surface the entry namespace alongside the completion value (post-eval,
   // so its bindings are initialized — no TDZ for the embedder to hit).
+  // `EvalState.heap` is the live heap on every path, error or not.
   let result = {
-    use #(completion_value, final_heap) <- result.map(result)
+    use completion_value <- result.map(result)
     EvaluatedBundle(
       value: completion_value,
-      heap: final_heap,
-      namespace: entry_namespace(linked, bundle.entry, final_heap),
+      namespace: entry_namespace(linked, bundle.entry, state.heap),
     )
   }
-  #(evaluated_specifiers(state), state.jobs, result)
+  #(state.heap, evaluated_specifiers(state), state.jobs, result)
 }
 
 /// Read a reserved namespace / deferred-namespace box as the object it holds.
@@ -885,7 +909,7 @@ pub fn get_or_create_deferred_namespace(
   linked_bundle: LinkedBundle,
   spec: String,
 ) -> #(Heap(host), Result(Ref, DeferredNamespaceError)) {
-  let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
+  let LinkedBundle(bundle:, linked:) = linked_bundle
   use <- bool.lazy_guard(dict.has_key(bundle.modules, spec) == False, fn() {
     #(heap, Error(DeferredSpecifierNotInBundle(specifier: spec)))
   })
@@ -917,7 +941,7 @@ pub fn evaluate_bundle(
   builtins: Builtins,
   global_object: Ref,
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(EvaluatedBundle(host), ModuleError(host)) {
+) -> #(Heap(host), Result(EvaluatedBundle, ModuleError)) {
   evaluate_bundle_with_hooks(
     bundle,
     heap,
@@ -941,35 +965,31 @@ pub fn evaluate_bundle_with_hooks(
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(EvaluatedBundle(host), ModuleError(host)) {
-  use #(heap, linked_bundle) <- result.try(link_for_evaluation(
-    bundle,
-    heap,
-    builtins,
-  ))
-  evaluate_linked(
-    linked_bundle,
-    heap,
-    builtins,
-    global_object,
-    host_hooks,
-    finish,
-  )
+) -> #(Heap(host), Result(EvaluatedBundle, ModuleError)) {
+  case link_for_evaluation(bundle, heap, builtins) {
+    #(heap, Error(err)) -> #(heap, Error(err))
+    #(heap, Ok(linked_bundle)) ->
+      evaluate_linked(
+        linked_bundle,
+        heap,
+        builtins,
+        global_object,
+        host_hooks,
+        finish,
+      )
+  }
 }
 
 /// The entry module's Module Namespace Exotic Object, read out of the rooted
 /// box the linker reserved for it (`build_linked`). This is what
-/// `evaluate_bundle` hands back as `EvaluatedBundle.namespace`. `None` means
-/// exactly one thing — no box was reserved for the entry — since a reserved box
-/// that does not hold its namespace panics like every other reserved-box read.
-fn entry_namespace(
-  linked: Linked,
-  entry: String,
-  heap: Heap(host),
-) -> Option(Ref) {
-  use box <- option.map(
-    dict.get(linked.namespace_boxes, entry) |> option.from_result,
-  )
+/// `evaluate_bundle` hands back as `EvaluatedBundle.namespace`. `build_linked`
+/// reserves a namespace box for EVERY module of the bundle, entry included, so
+/// a missing box is a linker bug — never "this bundle has no namespace".
+fn entry_namespace(linked: Linked, entry: String, heap: Heap(host)) -> Ref {
+  let box =
+    dict.get(linked.namespace_boxes, entry)
+    |> result.replace_error(MissingNamespaceBox(entry))
+    |> assert_link_invariant
   read_namespace_box(heap, entry, box) |> assert_link_invariant
 }
 
@@ -1001,7 +1021,9 @@ pub fn read_export(
   }
 }
 
-/// DFS post-order evaluation of a single module and its dependencies.
+/// DFS post-order evaluation of a single module and its dependencies. The
+/// returned `EvalState.heap` is the live heap on every path — an error's values
+/// are Refs into it, so nothing needs to carry a heap of its own.
 fn eval_module_inner(
   bundle: ModuleBundle,
   linked: Linked,
@@ -1011,7 +1033,7 @@ fn eval_module_inner(
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
-) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
+) -> #(EvalState(host), Result(JsValue, ModuleError)) {
   // One lookup, three outcomes — the module is absent, has no body, or has one.
   case dict.get(bundle.modules, specifier) {
     // Nothing to evaluate and no cells to reach: whatever the realm's status
@@ -1019,22 +1041,19 @@ fn eval_module_inner(
     Error(Nil) -> #(state, Error(NotInBundle(specifier:)))
     // A host (synthetic) module has no body and ready exports, so its
     // `[[Evaluate]]` is a no-op — always "done".
-    Ok(SyntheticModule(_)) -> #(state, Ok(#(JsUndefined, state.heap)))
+    Ok(SyntheticModule(_)) -> #(state, Ok(JsUndefined))
     Ok(SourceModule(compiled)) ->
       case module_eval_status(state, global_object, specifier) {
         // Body already ran (in this DFS, or re-entrantly via a
         // deferred-namespace trigger, or in an earlier bundle sharing this
         // realm).
-        Some(Evaluated) -> #(state, Ok(#(JsUndefined, state.heap)))
+        Some(Evaluated) -> #(state, Ok(JsUndefined))
         // Cached error — re-throw, never re-evaluate.
-        Some(Failed(err_val)) -> #(
-          state,
-          Error(EvaluationError(err_val, state.heap)),
-        )
+        Some(Failed(err_val)) -> #(state, Error(EvaluationError(err_val)))
         // Circular dependency (in this DFS, or in an outer evaluation a
         // deferred-namespace trigger re-entered from) — return without
         // re-entering.
-        Some(Evaluating) -> #(state, Ok(#(JsUndefined, state.heap)))
+        Some(Evaluating) -> #(state, Ok(JsUndefined))
         None ->
           eval_module_body(
             bundle,
@@ -1062,7 +1081,7 @@ fn eval_module_body(
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
-) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
+) -> #(EvalState(host), Result(JsValue, ModuleError)) {
   // Mark as evaluating
   let state = set_eval_status(state, specifier, Evaluating)
 
@@ -1108,18 +1127,20 @@ fn eval_module_body(
   case dep_result {
     // A dependency parked on top-level await is not a failure — propagate
     // without caching an error (the dependency may still complete later).
-    Error(EvaluationPending(promise_data_ref: _, heap: _) as err) -> #(
-      state,
-      Error(err),
-    )
+    Error(EvaluationPending(promise_data_ref: _) as err) -> #(state, Error(err))
     Error(err) -> {
       // Dependency failed — cache the error on this module too. A dependency
       // that isn't in the bundle at all has no thrown value of its own, so
       // allocate a real TypeError for it (never a Gleam debug repr).
       let #(heap, error_val) = case err {
-        EvaluationError(value: val, ..) -> #(state.heap, val)
+        EvaluationError(value: val) -> #(state.heap, val)
         NotInBundle(..) | EvaluationPending(..) ->
-          common.make_type_error(state.heap, builtins, error_message(err))
+          common.make_error(
+            state.heap,
+            builtins,
+            common.TypeErr,
+            error_message(err, state.heap),
+          )
       }
       let heap =
         registry.write_module_error(heap, global_object, specifier, error_val)
@@ -1161,9 +1182,10 @@ fn eval_module_body(
       {
         entry.ModuleError(error: vm_err) -> {
           let #(heap, error_val) =
-            common.make_type_error(
+            common.make_error(
               heap,
               builtins,
+              common.TypeErr,
               "InternalError: " <> vm_error_message(vm_err),
             )
           let heap =
@@ -1177,7 +1199,7 @@ fn eval_module_body(
             )
           let state = EvalState(..state, heap:)
           let state = set_eval_status(state, specifier, Failed(error_val))
-          #(state, Error(EvaluationError(error_val, state.heap)))
+          #(state, Error(EvaluationError(error_val)))
         }
         entry.ModuleThrow(value: thrown_val, heap: new_heap, jobs:) -> {
           let new_heap =
@@ -1196,7 +1218,7 @@ fn eval_module_body(
               jobs: list.append(state.jobs, jobs),
             )
           let state = set_eval_status(state, specifier, Failed(thrown_val))
-          #(state, Error(EvaluationError(thrown_val, new_heap)))
+          #(state, Error(EvaluationError(thrown_val)))
         }
         entry.ModuleOk(value: val, heap: new_heap, locals: _, jobs:) -> {
           let new_heap =
@@ -1213,7 +1235,7 @@ fn eval_module_body(
               jobs: list.append(state.jobs, jobs),
             )
           let state = set_eval_status(state, specifier, Evaluated)
-          #(state, Ok(#(val, new_heap)))
+          #(state, Ok(val))
         }
         // Parked on top-level await (non-draining driver): not evaluated, not
         // errored — the body will resume on the host's event loop. Hand back
@@ -1225,7 +1247,7 @@ fn eval_module_body(
               heap: new_heap,
               jobs: list.append(state.jobs, jobs),
             )
-          #(state, Error(EvaluationPending(promise_data_ref:, heap: new_heap)))
+          #(state, Error(EvaluationPending(promise_data_ref:)))
         }
       }
     }
@@ -1474,12 +1496,8 @@ pub fn evaluate_async_transitive_deps(
   global_object: Ref,
   host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
-) -> #(
-  Heap(host),
-  List(value.Job),
-  Result(List(#(String, Ref)), ModuleError(host)),
-) {
-  let LinkedBundle(bundle:, linked:, namespace: _) = linked_bundle
+) -> #(Heap(host), List(value.Job), Result(List(#(String, Ref)), ModuleError)) {
+  let LinkedBundle(bundle:, linked:) = linked_bundle
   let eval_state = EvalState(heap:, modules: dict.new(), jobs: [])
   let #(to_evaluate, _seen) =
     gather_async_transitive_deps(
@@ -1507,7 +1525,7 @@ pub fn evaluate_async_transitive_deps(
       // Parked on top-level await: record the capability and keep
       // going — the spec Evaluate()s every gathered module before
       // waiting on all their promises.
-      Error(EvaluationPending(promise_data_ref:, heap: _)) -> #(
+      Error(EvaluationPending(promise_data_ref:)) -> #(
         eval_state,
         Ok([#(dep, promise_data_ref), ..pendings]),
       )
@@ -1598,34 +1616,51 @@ fn instantiate_hoisted_functions(
   })
 }
 
-/// The first local export of a preexisting module that this bundle's fresh
-/// parse declares but the module's LIVE export map has no cell for, as
-/// `#(specifier, export name)`.
+/// The first name a preexisting module's fresh parse EXPORTS that the module's
+/// LIVE export map has no cell for, as `#(specifier, export name)`.
+///
+/// The comparison is over the module's whole exported-name set — its own local
+/// exports AND everything it re-exports (`export {x} from`, `export * from`) —
+/// because that is the set `build_linked` would build cells for and the set
+/// `import_seeds` reads back out of the reused map. Checking only local exports
+/// let a fresh parse that changed only its re-exports through, and it panicked
+/// on `MissingExportCell` in the linker instead.
+///
+/// Names that do not RESOLVE (§16.2.1.6.3: reached only through an ambiguous or
+/// dead `export *`) never get a cell in any bundle's map, so they are excluded
+/// from both sides.
 ///
 /// Reachable only when the host loader served different source for a specifier
 /// it had already served (arc's own CLI loader re-reads the file from disk on
 /// every graph walk), so this is a host-contract violation, not a linker bug:
 /// `link_for_evaluation_reusing` turns it into a link-time SyntaxError instead
-/// of letting `preallocate_local_boxes` panic on the missing cell.
+/// of letting the linker panic on the missing cell.
 fn stale_reused_export(
   bundle: ModuleBundle,
+  lg: link.LinkableGraph,
   preexisting: Dict(String, #(Ref, Dict(String, Ref))),
 ) -> Option(#(String, String)) {
   dict.to_list(bundle.modules)
   |> list.find_map(fn(entry) {
     let #(spec, bundle_module) = entry
     case bundle_module, dict.get(preexisting, spec) {
-      SourceModule(m), Ok(#(_ns_ref, existing_exports)) ->
-        list.find_map(m.export_entries, fn(e) {
-          case e {
-            esm.LocalExport(export_name:, ..) ->
-              case dict.has_key(existing_exports, export_name) {
+      SourceModule(_), Ok(#(_ns_ref, existing_exports)) -> {
+        let key = esm.resolved_unchecked(spec)
+        link.exported_names(lg, key)
+        |> list.find_map(fn(name) {
+          case link.resolve_export(lg, key, name) {
+            // No cell exists for these in ANY bundle — nothing to compare.
+            link.Unresolvable | link.Ambiguous -> Error(Nil)
+            link.ResolvedTo(..)
+            | link.ResolvedNamespace(..)
+            | link.ResolvedDeferredNamespace(..) ->
+              case dict.has_key(existing_exports, name) {
                 True -> Error(Nil)
-                False -> Ok(#(spec, export_name))
+                False -> Ok(#(spec, name))
               }
-            _ -> Error(Nil)
           }
         })
+      }
       _, _ -> Error(Nil)
     }
   })
@@ -2001,8 +2036,8 @@ fn evaluate_deferred_subgraph(
     )
   case result {
     Ok(_) -> Ok(state)
-    Error(EvaluationError(value:, heap:)) ->
-      Error(#(value, State(..state, heap:)))
+    // `state` already carries `st.heap`, the heap the throw left behind.
+    Error(EvaluationError(value:)) -> Error(#(value, state))
     // A deferred subgraph is only entered when ReadyForSyncExecution said yes,
     // so no body in it can park on top-level await; and the specifier came out
     // of this bundle, so it is in it. Both are unreachable — but rendered
@@ -2013,7 +2048,7 @@ fn evaluate_deferred_subgraph(
         "Failed to evaluate deferred module '"
           <> spec
           <> "': "
-          <> error_message(other),
+          <> error_message(other, state.heap),
       ))
   }
 }
@@ -2023,7 +2058,7 @@ fn evaluate_deferred_subgraph(
 // -----------------------------------------------------------------------------
 
 /// Import bindings seeded into capture slots 0..N-1, in declaration order
-/// (matching compiler.import_local_names). Named/default forward the
+/// (matching esm.import_local_names). Named/default forward the
 /// exporting module's live cell; namespace imports get the shared namespace box.
 fn import_seeds(
   linked: Linked,
@@ -2092,9 +2127,7 @@ fn own_export_seeds(
   compiled: CompiledModule,
 ) -> List(#(Int, JsValue)) {
   let import_locals =
-    list.map(compiled.import_bindings, fn(e) { #(esm.raw_text(e.0), e.1) })
-    |> compiler.import_local_names
-    |> set.from_list
+    esm.binding_local_names(compiled.import_bindings) |> set.from_list
   let spec = esm.resolved_text(compiled.specifier)
   dict.get(linked.local_boxes, spec)
   |> result.replace_error(MissingLocalBoxes(spec))

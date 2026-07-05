@@ -584,20 +584,16 @@ fn run(
   }
 }
 
+/// Raise a RangeError as an abrupt completion. `range_error_value` hands back
+/// the bare `#(thrown, state)` pair, so there is no success value in scope that
+/// could accidentally be thrown.
 fn throw_range(state: State(host), msg: String) -> Result(a, Thrown(host)) {
-  let #(state, res) = state.range_error(state, msg)
-  case res {
-    Error(e) -> Error(#(e, state))
-    Ok(v) -> Error(#(v, state))
-  }
+  Error(state.range_error_value(state, msg))
 }
 
+/// Raise a TypeError as an abrupt completion. See `throw_range`.
 fn throw_type(state: State(host), msg: String) -> Result(a, Thrown(host)) {
-  let #(state, res) = state.type_error(state, msg)
-  case res {
-    Error(e) -> Error(#(e, state))
-    Ok(v) -> Error(#(v, state))
-  }
+  Error(state.type_error_value(state, msg))
 }
 
 /// Read the IntlObject state for `this`, throwing TypeError on brand mismatch.
@@ -2688,9 +2684,9 @@ fn public_component(
   user: Option(a),
   default: Option(a),
   styled: Bool,
-  required_present: Bool,
+  required_group_present: Bool,
 ) -> Option(a) {
-  case user, styled || required_present {
+  case user, styled || required_group_present {
     Some(_), _ -> user
     None, False -> default
     None, True -> None
@@ -2932,18 +2928,24 @@ fn dtf_state_required(
       fractional_second_digits: fractional,
       time_zone_name: tz_name_opt,
     )
+  // ECMA-402 §11.1.2 InitializeDateTimeFormat's `hasExplicitFormatComponents`:
+  // ANY of the 11 Table-7 components (era and timeZoneName included). Used
+  // ONLY for the dateStyle/timeStyle-with-components TypeError below — never
+  // for defaulting.
   let explicit = list.any(dtf_component_order, fn(c) { has_component(user, c) })
-  // ToDateTimeOptions: defaults apply when no component of the required
-  // group was requested.
-  let required_present = case required {
-    DateOnly ->
-      list.any([DtfWeekday, DtfYear, DtfMonth, DtfDay], has_component(user, _))
-    TimeOnly ->
-      list.any(
-        [DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits],
-        has_component(user, _),
-      )
-    DateAndTime -> explicit
+  // ToDateTimeOptions' `needDefaults`: cleared only by a component of the
+  // REQUIRED group — a narrower set than `explicit`, since era and
+  // timeZoneName clear nothing. `new Intl.DateTimeFormat("en", {timeZoneName:
+  // "short"})` must still default to numeric year/month/day.
+  let date_group = [DtfWeekday, DtfYear, DtfMonth, DtfDay]
+  let time_group = [
+    DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits,
+  ]
+  let required_group_present = case required {
+    DateOnly -> list.any(date_group, has_component(user, _))
+    TimeOnly -> list.any(time_group, has_component(user, _))
+    DateAndTime ->
+      list.any(list.append(date_group, time_group), has_component(user, _))
   }
   use Nil <- result.try(case required {
     DateOnly ->
@@ -2970,7 +2972,7 @@ fn dtf_state_required(
     False -> Ok(Nil)
   })
   // Expand styles / apply defaults into the effective formatting components.
-  let components = case styled, required_present {
+  let components = case styled, required_group_present {
     True, _ ->
       merge_components(
         date_style_components(date_style),
@@ -3005,37 +3007,52 @@ fn dtf_state_required(
         weekday,
         defaults.weekday,
         styled,
-        required_present,
+        required_group_present,
       ),
-      era: public_component(era, defaults.era, styled, required_present),
-      year: public_component(year, defaults.year, styled, required_present),
-      month: public_component(month, defaults.month, styled, required_present),
-      day: public_component(day, defaults.day, styled, required_present),
+      era: public_component(era, defaults.era, styled, required_group_present),
+      year: public_component(
+        year,
+        defaults.year,
+        styled,
+        required_group_present,
+      ),
+      month: public_component(
+        month,
+        defaults.month,
+        styled,
+        required_group_present,
+      ),
+      day: public_component(day, defaults.day, styled, required_group_present),
       day_period: public_component(
         day_period,
         defaults.day_period,
         styled,
-        required_present,
+        required_group_present,
       ),
-      hour: public_component(hour, defaults.hour, styled, required_present),
+      hour: public_component(
+        hour,
+        defaults.hour,
+        styled,
+        required_group_present,
+      ),
       minute: public_component(
         minute,
         defaults.minute,
         styled,
-        required_present,
+        required_group_present,
       ),
       second: public_component(
         second,
         defaults.second,
         styled,
-        required_present,
+        required_group_present,
       ),
       fractional_second_digits: fractional,
       time_zone_name: public_component(
         tz_name_opt,
         defaults.time_zone_name,
         styled,
-        required_present,
+        required_group_present,
       ),
       date_style:,
       time_style:,

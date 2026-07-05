@@ -3,15 +3,14 @@ import arc/vm/builtins/dom_exception
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/object as builtins_object
 import arc/vm/heap
-import arc/vm/internal/elements
 import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type ErrorNativeFn, type JsValue, type Property, type Ref, DataProperty,
-  Dispatch, ErrorConstructor, ErrorNative, JsBool, JsNull, JsObject, JsString,
-  JsUndefined, ObjectSlot,
+  type ErrorNativeFn, type JsValue, type Ref, DataProperty, Dispatch,
+  ErrorConstructor, ErrorNative, JsBool, JsNull, JsObject, JsString, JsUndefined,
+  ObjectSlot,
 }
 import gleam/dict
 import gleam/io
@@ -411,7 +410,7 @@ fn alloc_suppressed(
     Some(msg) -> [#("message", value.builtin_property(JsString(msg))), ..props]
     None -> props
   }
-  let #(heap, ref) = alloc_error_slot(state.heap, proto, props)
+  let #(heap, ref) = common.alloc_error_slot(state.heap, proto, props)
   let state = State(..state, heap:)
   let header = state.error_header("SuppressedError", option.unwrap(message, ""))
   let state = state.attach_stack(state, JsObject(ref), header)
@@ -450,7 +449,7 @@ fn alloc_error(
     Some(msg) -> [#("message", value.builtin_property(JsString(msg)))]
     None -> []
   }
-  let #(heap, ref) = alloc_error_slot(state.heap, proto, props)
+  let #(heap, ref) = common.alloc_error_slot(state.heap, proto, props)
   let state = State(..state, heap:)
   let header =
     state.error_header(
@@ -505,27 +504,6 @@ fn install_error_cause(
     }
     _ -> #(state, Ok(ref))
   }
-}
-
-/// Allocate an error instance slot: an otherwise-ordinary object whose kind
-/// is ErrorObject — the [[ErrorData]] internal slot (§20.5.4). The stack
-/// string starts empty; state.attach_stack fills it in.
-fn alloc_error_slot(
-  h: Heap(host),
-  proto: Ref,
-  props: List(#(String, Property)),
-) -> #(Heap(host), Ref) {
-  heap.alloc(
-    h,
-    ObjectSlot(
-      kind: value.ErrorObject(stack: ""),
-      properties: common.named_props(props),
-      elements: elements.new(),
-      prototype: Some(proto),
-      symbol_properties: [],
-      extensible: True,
-    ),
-  )
 }
 
 /// Error.isError ( arg ) — Error.isError proposal:

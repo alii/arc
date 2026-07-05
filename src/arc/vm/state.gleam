@@ -1,4 +1,6 @@
-import arc/vm/builtins/common.{type Builtins}
+import arc/vm/builtins/common.{
+  type Builtins, RangeErr, ReferenceErr, SyntaxErr, TypeErr,
+}
 import arc/vm/completion.{type SuspendKind}
 import arc/vm/heap
 import arc/vm/host_hooks
@@ -679,36 +681,19 @@ pub fn error_header(name: String, msg: String) -> String {
   }
 }
 
-/// The kind of native JS error to allocate. VM-raised errors go through
-/// `alloc_error` with one of these, so the constructor intrinsic and the
-/// stack-trace header can never disagree (there is no way to pair
-/// `%RangeError%` with the name "TypeError"), and the thrown error gets a
-/// stack trace attached.
+/// The kind of native JS error to allocate — re-exported from `common`, which
+/// owns the kind → #(prototype, name) pairing (`common.error_kind_intrinsics`).
+/// VM-raised errors go through `alloc_error` with one of these, so the
+/// constructor intrinsic and the stack-trace header can never disagree, and the
+/// thrown error gets a stack trace attached.
 ///
-/// Do NOT call `common.make_*_error` from a context that has a `State` —
-/// that skips `attach_stack` and produces an error with no `.stack`. The
-/// only legitimate direct callers are `kind_ctor` below and module linking
-/// (`module.gleam`), which runs at the heap level before any call stack
+/// Do NOT call `common.make_error` from a context that has a `State` — that
+/// skips `attach_stack` and produces an error with no `.stack`. The only
+/// legitimate direct callers are `alloc_error_with_builtins` below and module
+/// linking (`module.gleam`), which runs at the heap level before any call stack
 /// exists.
-pub type ErrorKind {
-  TypeErr
-  RangeErr
-  ReferenceErr
-  SyntaxErr
-}
-
-/// Map an ErrorKind to its heap allocator and its `name` (the first word of
-/// the stack-trace header). This is the single place the pairing exists.
-fn kind_ctor(
-  kind: ErrorKind,
-) -> #(fn(Heap(host), Builtins, String) -> #(Heap(host), JsValue), String) {
-  case kind {
-    TypeErr -> #(common.make_type_error, "TypeError")
-    RangeErr -> #(common.make_range_error, "RangeError")
-    ReferenceErr -> #(common.make_reference_error, "ReferenceError")
-    SyntaxErr -> #(common.make_syntax_error, "SyntaxError")
-  }
-}
+pub type ErrorKind =
+  common.ErrorKind
 
 /// Core error allocator: allocate a JS error of `kind`, attach a stack
 /// trace headed by `name: msg`, and return the updated state plus the
@@ -730,8 +715,8 @@ fn alloc_error_with_builtins(
   kind: ErrorKind,
   msg: String,
 ) -> #(State(host), JsValue) {
-  let #(make, name) = kind_ctor(kind)
-  let #(heap, err) = make(state.heap, builtins, msg)
+  let #(_proto, name) = common.error_kind_intrinsics(builtins, kind)
+  let #(heap, err) = common.make_error(state.heap, builtins, kind, msg)
   let state = attach_stack(State(..state, heap:), err, error_header(name, msg))
   #(state, err)
 }

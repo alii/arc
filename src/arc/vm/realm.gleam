@@ -11,13 +11,13 @@ import arc/vm/compile_task
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/event_loop
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
 import arc/vm/opcode
 import arc/vm/ops/coerce
 import arc/vm/ops/object
-import arc/vm/host_hooks
 import arc/vm/state.{type Heap, type State, type VmError, State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, DataProperty, JsObject, JsString,
@@ -362,7 +362,7 @@ fn compile_or_throw(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let throw_syntax = fn(msg) {
     let #(err, state) =
-      state.error_value_with_builtins(state, builtins, state.SyntaxErr, msg)
+      state.error_value_with_builtins(state, builtins, common.SyntaxErr, msg)
     #(state, Error(err))
   }
   // Big sources parse+compile in a heap-sized scratch process (see
@@ -1524,7 +1524,7 @@ fn shadow_realm_import_value(
             state.error_value_with_builtins(
               state,
               caller_builtins,
-              state.TypeErr,
+              common.TypeErr,
               "ShadowRealm.prototype.importValue: module loading is not "
                 <> "available in this host",
             )

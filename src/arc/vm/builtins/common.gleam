@@ -943,9 +943,60 @@ pub fn init_type_on(
   #(h, BuiltinType(prototype: proto, constructor: ctor_ref))
 }
 
-/// Allocate an error object with a message and given prototype.
+/// Allocate an error instance slot: an otherwise-ordinary object whose kind
+/// is `ErrorObject` — the [[ErrorData]] internal slot (§20.5.4). The stack
+/// string starts empty; `state.attach_stack` fills it in and the
+/// Error.prototype.stack accessor (error-stack-accessor proposal) surfaces
+/// it — it is NOT an own property.
 ///
+/// The single definition of the [[ErrorData]] slot shape: every error-ish
+/// object in the engine (native errors, AggregateError, DOMException, the
+/// Error/NativeError constructors) allocates through here, so the shape
+/// cannot drift between them.
+pub fn alloc_error_slot(
+  h: Heap(ctx, host),
+  proto: Ref,
+  props: List(#(String, Property)),
+) -> #(Heap(ctx, host), Ref) {
+  heap.alloc(
+    h,
+    ObjectSlot(
+      kind: value.ErrorObject(stack: ""),
+      properties: named_props(props),
+      elements: elements.new(),
+      prototype: Some(proto),
+      symbol_properties: [],
+      extensible: True,
+    ),
+  )
+}
+
+/// The kind of native JS error to allocate. Errors raised by the engine go
+/// through `make_error` (or, when a `State` is at hand, `state.alloc_error`)
+/// with one of these, so the constructor intrinsic and the stack-trace header
+/// can never disagree — there is no way to pair `%RangeError%` with the name
+/// "TypeError".
+pub type ErrorKind {
+  TypeErr
+  RangeErr
+  ReferenceErr
+  SyntaxErr
+}
+
+/// The prototype intrinsic and the `name` (first word of the stack-trace
+/// header) for an ErrorKind. This is the single place the pairing exists.
+pub fn error_kind_intrinsics(b: Builtins, kind: ErrorKind) -> #(Ref, String) {
+  case kind {
+    TypeErr -> #(b.type_error.prototype, "TypeError")
+    RangeErr -> #(b.range_error.prototype, "RangeError")
+    ReferenceErr -> #(b.reference_error.prototype, "ReferenceError")
+    SyntaxErr -> #(b.syntax_error.prototype, "SyntaxError")
+  }
+}
+
 /// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
+///
+/// Allocates a native error instance of `kind` with a "message" own property.
 /// Simplified: we skip steps involving NewTarget / OrdinaryCreateFromConstructor
 /// and the "options" parameter (InstallErrorCause). We directly allocate an
 /// ordinary object with the NativeError prototype and set the "message" property.
@@ -957,78 +1008,30 @@ pub fn init_type_on(
 ///   3. If message is not undefined, then
 ///      a. Let msg be ? ToString(message).
 ///      b. Perform CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
-///      We always set "message" — callers pass a string directly.
+///      Per §20.5.6.3 that is writable+configurable, NOT enumerable — which is
+///      exactly `value.builtin_property`. We always set "message"; callers pass
+///      a string directly.
 ///   4. (skipped) Perform ? InstallErrorCause(O, options).
 ///   5. Return O.
 ///
-/// Local copy of object.make_error to avoid the import cycle
-/// (object.gleam -> builtins -> builtins/* -> object).
-fn alloc_error(
+/// STACK-LESS: the returned error has no `.stack`, because attaching one needs
+/// the call stack that only a `State` carries. Do NOT call this from a context
+/// that has a `State` — use `state.type_error` / `state.range_error` / … , which
+/// go through `attach_stack`. The only legitimate direct callers are
+/// `state.alloc_error_with_builtins` itself and module linking (`module.gleam`),
+/// which runs at the heap level before any call stack exists.
+pub fn make_error(
   h: Heap(ctx, host),
-  proto: Ref,
+  b: Builtins,
+  kind: ErrorKind,
   message: String,
 ) -> #(Heap(ctx, host), JsValue) {
+  let #(proto, _name) = error_kind_intrinsics(b, kind)
   let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        // [[ErrorData]] internal slot; the stack string is filled in by
-        // state.attach_stack and surfaced via the Error.prototype.stack
-        // accessor (error-stack-accessor proposal) — NOT an own property.
-        kind: value.ErrorObject(stack: ""),
-        // Step 3b: CreateNonEnumerableDataPropertyOrThrow(O, "message", msg)
-        // Per §20.5.6.3: writable+configurable, NOT enumerable.
-        properties: named_props([
-          #("message", value.builtin_property(JsString(message))),
-        ]),
-        elements: elements.new(),
-        // Step 2: [[Prototype]] set to the NativeError prototype
-        prototype: Some(proto),
-        symbol_properties: [],
-        extensible: True,
-      ),
-    )
+    alloc_error_slot(h, proto, [
+      #("message", value.builtin_property(JsString(message))),
+    ])
   #(h, JsObject(ref))
-}
-
-/// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
-/// Allocates a TypeError instance. See alloc_error for spec step details.
-pub fn make_type_error(
-  h: Heap(ctx, host),
-  b: Builtins,
-  message: String,
-) -> #(Heap(ctx, host), JsValue) {
-  alloc_error(h, b.type_error.prototype, message)
-}
-
-/// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
-/// Allocates a RangeError instance. See alloc_error for spec step details.
-pub fn make_range_error(
-  h: Heap(ctx, host),
-  b: Builtins,
-  message: String,
-) -> #(Heap(ctx, host), JsValue) {
-  alloc_error(h, b.range_error.prototype, message)
-}
-
-/// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
-/// Allocates a ReferenceError instance. See alloc_error for spec step details.
-pub fn make_reference_error(
-  h: Heap(ctx, host),
-  b: Builtins,
-  message: String,
-) -> #(Heap(ctx, host), JsValue) {
-  alloc_error(h, b.reference_error.prototype, message)
-}
-
-/// ES2024 §20.5.6.1.1 NativeError ( message [ , options ] )
-/// Allocates a SyntaxError instance. See alloc_error for spec step details.
-pub fn make_syntax_error(
-  h: Heap(ctx, host),
-  b: Builtins,
-  message: String,
-) -> #(Heap(ctx, host), JsValue) {
-  alloc_error(h, b.syntax_error.prototype, message)
 }
 
 /// ES2024 §7.1.18 ToObject ( argument )

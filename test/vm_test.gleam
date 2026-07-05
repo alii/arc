@@ -780,7 +780,7 @@ pub fn prototype_chain_inherited_property_test() {
   // through the chain.
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let #(h, err_val) = common.make_type_error(h, b, "test error")
+  let #(h, err_val) = common.make_error(h, b, common.TypeErr, "test error")
   let assert JsObject(ref) = err_val
   // "message" is own property
   let assert Ok(JsString("test error")) = get_data(h, ref, "message")
