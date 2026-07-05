@@ -802,23 +802,14 @@ fn merge_components(
   )
 }
 
-/// Pair a resolved min/max digit slot into a `fmt.Precision`. The two slots of
-/// a precision are always resolved together (§15.1.6), so a half-set pair
-/// means the precision was not requested at all.
-fn precision(min: Option(Int), max: Option(Int)) -> Option(fmt.Precision) {
-  case min, max {
-    Some(min), Some(max) -> Some(fmt.Precision(min:, max:))
-    _, _ -> None
-  }
-}
-
 /// Overlay a formatter's resolved digit options onto a `fmt.NumOpts` base.
 fn with_digits(o: fmt.NumOpts, dg: IntlDigitOptions) -> fmt.NumOpts {
+  let precision = fn(p: #(Int, Int)) { fmt.Precision(min: p.0, max: p.1) }
   fmt.NumOpts(
     ..o,
     min_int: dg.minimum_integer_digits,
-    frac: precision(dg.minimum_fraction_digits, dg.maximum_fraction_digits),
-    sig: precision(dg.minimum_significant_digits, dg.maximum_significant_digits),
+    frac: option.map(dg.fraction_digits, precision),
+    sig: option.map(dg.significant_digits, precision),
     rounding_increment: dg.rounding_increment,
     rounding_mode: dg.rounding_mode,
     rounding_priority: dg.rounding_priority,
@@ -1440,6 +1431,14 @@ fn construct_service(
           <> " requires 'new'",
       )
     False -> {
+      // §10.1.13 OrdinaryCreateFromConstructor: resolve the prototype from
+      // NewTarget so `class Sub extends Intl.X` instances get Sub.prototype.
+      // Falls back to the intrinsic `proto` when called without `new`.
+      use proto, state <- object.proto_from_new_target(
+        state,
+        state.new_target,
+        proto,
+      )
       let arg0 = first_arg_or_undefined(args)
       let arg1 = helpers.arg_at(args, 1)
       run({
@@ -2488,10 +2487,8 @@ fn digit_options(
   Ok(#(
     IntlDigitOptions(
       minimum_integer_digits: option.unwrap(mnid, 1),
-      minimum_fraction_digits: option.map(fd, fn(p) { p.0 }),
-      maximum_fraction_digits: option.map(fd, fn(p) { p.1 }),
-      minimum_significant_digits: option.map(sig, fn(p) { p.0 }),
-      maximum_significant_digits: option.map(sig, fn(p) { p.1 }),
+      fraction_digits: fd,
+      significant_digits: sig,
       rounding_increment:,
       rounding_mode:,
       rounding_priority:,
@@ -4164,19 +4161,19 @@ fn digit_option_pairs(
     #("minimumIntegerDigits", Some(value.from_int(dg.minimum_integer_digits))),
     #(
       "minimumFractionDigits",
-      option.map(dg.minimum_fraction_digits, value.from_int),
+      option.map(dg.fraction_digits, fn(p) { value.from_int(p.0) }),
     ),
     #(
       "maximumFractionDigits",
-      option.map(dg.maximum_fraction_digits, value.from_int),
+      option.map(dg.fraction_digits, fn(p) { value.from_int(p.1) }),
     ),
     #(
       "minimumSignificantDigits",
-      option.map(dg.minimum_significant_digits, value.from_int),
+      option.map(dg.significant_digits, fn(p) { value.from_int(p.0) }),
     ),
     #(
       "maximumSignificantDigits",
-      option.map(dg.maximum_significant_digits, value.from_int),
+      option.map(dg.significant_digits, fn(p) { value.from_int(p.1) }),
     ),
     ..rest
   ]
