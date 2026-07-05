@@ -70,7 +70,7 @@ pub fn resume_generator_next(
         value.GenCompleted ->
           // Already done -- {value: undefined, done: true} without alloc.
           Ok(#(True, JsUndefined, State(..state, pc: state.pc + 1)))
-        value.GenExecuting -> {
+        value.GenExecuting(..) -> {
           state.throw_type_error(state, "Generator is already running")
         }
         value.GenSuspended(at:, frame:) -> {
@@ -134,7 +134,7 @@ pub fn call_native_generator_return(
             ),
           )
         }
-        value.GenExecuting -> {
+        value.GenExecuting(..) -> {
           state.throw_type_error(state, "Generator is already running")
         }
         value.GenSuspended(at: value.AtYield, frame:) ->
@@ -215,7 +215,7 @@ pub fn call_native_generator_throw(
         value.GenCompleted | value.GenSuspended(at: value.AtStart, ..) ->
           // Mark completed and throw the exception
           complete_and_throw(state, gen, throw_val)
-        value.GenExecuting -> {
+        value.GenExecuting(..) -> {
           state.throw_type_error(state, "Generator is already running")
         }
         value.GenSuspended(at: value.AtYield, frame:) ->
@@ -307,8 +307,8 @@ fn get_generator_data(h: Heap(host), this: JsValue) -> Option(GenData) {
 }
 
 /// Create a GeneratorSlot with only the gen_state changed. `new_state` carries
-/// the suspended frame when (and only when) there is one to keep, so a
-/// Completed/Executing generator cannot leave a stale body behind on the heap.
+/// the frame when (and only when) there is one to keep, so a Completed
+/// generator cannot leave a stale body behind on the heap.
 fn gen_with_state(
   gen: GenData,
   new_state: value.GeneratorSlotState,
@@ -347,6 +347,11 @@ fn complete_and_throw(
 
 /// Mark a generator Executing and restore its saved execution context into a
 /// fresh State for resumption. `stack` and `pc` vary per resume mode.
+///
+/// The Executing state keeps the frame we resumed *from*: the running body's
+/// live values now sit in the returned State, but a nested drive (this body
+/// calling into another generator, or user code) hands the collector a State
+/// that no longer mentions them, and only the slot's frame keeps them rooted.
 fn build_resumed_state(
   outer: State(host),
   gen: GenData,
@@ -358,7 +363,7 @@ fn build_resumed_state(
     heap.write(
       outer.heap,
       gen.data_ref,
-      gen_with_state(gen, value.GenExecuting),
+      gen_with_state(gen, value.GenExecuting(frame)),
     )
   let restored_try = restore_stacks(frame.try_stack)
   State(
@@ -371,6 +376,14 @@ fn build_resumed_state(
     constants: gen.func_template.constants,
     pc:,
     call_stack: [],
+    // A generator body is a RE-ENTRANT drive: the resumer's frames (its
+    // locals, its operand stack, the generator object itself) live on the
+    // Gleam call stack, invisible to any GC that runs from this State. The
+    // interpreter's top-level collector treats `call_depth > 0` as exactly
+    // that condition, so the body must not resume at the resumer's depth —
+    // an empty `call_stack` at depth 0 would let a collection inside the body
+    // free everything only the resumer holds.
+    call_depth: outer.call_depth + 1,
     try_stack: restored_try,
     new_target: JsUndefined,
     call_args: [],

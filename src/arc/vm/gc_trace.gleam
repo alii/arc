@@ -394,13 +394,15 @@ fn do_refs_in_slot(
       }
       push_reactions(reject_reactions, push_reactions(fulfill_reactions, acc))
     }
-    // A completed (or currently-executing) generator holds no frame at all —
-    // its locals / operand stack stopped being roots the moment it finished.
+    // A completed generator holds no frame at all — its locals / operand stack
+    // stopped being roots the moment it finished. A running one still does:
+    // a nested drive replaces the live State, so its frame is all that roots
+    // the body's values.
     value.GeneratorSlot(gen_state:, env_ref:, ..) ->
       case gen_state {
-        value.GenSuspended(frame:, ..) ->
+        value.GenSuspended(frame:, ..) | value.GenExecuting(frame:) ->
           push_suspended_frame_refs(env_ref, frame, acc)
-        value.GenExecuting | value.GenCompleted -> [env_ref, ..acc]
+        value.GenCompleted -> [env_ref, ..acc]
       }
     value.AsyncFunctionSlot(
       promise_data_ref:,

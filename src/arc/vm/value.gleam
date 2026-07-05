@@ -4262,15 +4262,22 @@ pub type SuspendPoint {
 
 /// A generator's [[GeneratorState]] *and* the body it would resume into.
 ///
-/// The `SuspendedFrame` lives inside `GenSuspended`, so a `GenCompleted` (or
-/// `GenExecuting`) generator structurally cannot hold one: a finished
+/// Only `GenCompleted` structurally lacks a `SuspendedFrame`: a finished
 /// generator's locals / operand stack / try stack stop being GC roots the
 /// moment it completes, and no reader can trust a `.frame` that the lifecycle
-/// says isn't there.
+/// says isn't there. A *running* generator still needs its frame on the slot —
+/// see `GenExecuting`.
 pub type GeneratorSlotState {
   GenSuspended(at: SuspendPoint, frame: SuspendedFrame)
   /// Currently executing (a re-entrant .next() on a running generator).
-  GenExecuting
+  ///
+  /// Carries the frame it was resumed from, purely so the collector can still
+  /// reach the body's values. While the body runs, its live locals/stack are
+  /// the interpreter `State`'s — but a nested drive (the body driving another
+  /// generator, or a callback) swaps that `State` out, and the parent's values
+  /// are then rooted by nothing *except* this frame. Dropping it here lets a
+  /// mid-body collection free objects the body still holds.
+  GenExecuting(frame: SuspendedFrame)
   /// Finished (returned or threw) — nothing left to resume.
   GenCompleted
 }
@@ -4417,6 +4424,15 @@ pub type HeapSlot(ctx, host) {
   /// Unlike sync generators, .next()/.return()/.throw() enqueue requests
   /// and return promises; yield settles the head request, await suspends
   /// without settling.
+  ///
+  /// Deliberately NOT modelled like `GeneratorSlot`, whose lifecycle
+  /// (`GeneratorSlotState`) carries the frame in the states that have one:
+  /// an async generator's `frame` is read and rewritten from *outside* the
+  /// lifecycle transitions (a queued request resumes a body whose state may
+  /// already have moved to `AGExecuting`/`AGAwaitingReturn`), so the two are
+  /// not in lockstep and pairing them in one variant would only push the
+  /// "which state has a frame?" question into a runtime unwrap. The cost is
+  /// that an `AGCompleted` slot keeps a dead frame alive until the slot dies.
   AsyncGeneratorSlot(
     gen_state: AsyncGeneratorState,
     /// Two-list FIFO (Okasaki) as `#(front, back)`: front in dequeue order,
