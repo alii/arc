@@ -2688,6 +2688,20 @@ pub fn dtf_time_zone_id(tz: DtfTimeZone) -> String {
   }
 }
 
+/// A Temporal.ZonedDateTime's [[TimeZone]] — resolved once at construction,
+/// so no operation on a ZonedDateTime can hold a zone that failed lookup.
+/// There is no "unknown" variant: an unrecognised identifier is a RangeError
+/// at parse time and never reaches a slot.
+pub type TimeZone {
+  /// The distinguished "UTC" zone (offset 0, no transitions).
+  TzUtc
+  /// A fixed numeric offset ("+05:30"), stored in nanoseconds. No transitions.
+  TzOffset(ns: Int)
+  /// A named IANA zone, validated against the system tzdata. The zone handle
+  /// *is* the identifier — `temporal_tz.zone_id` recovers it.
+  TzNamed(zone: temporal_tz.Zone)
+}
+
 /// Intl.DateTimeFormat resolved options (§11.1.2 CreateDateTimeFormat).
 ///
 /// The `weekday` … `time_style` fields are the resolvedOptions view (the
@@ -3780,11 +3794,12 @@ pub type ExoticKind(ctx, host) {
   /// Temporal.Instant — exact time as nanoseconds since the epoch
   /// (BEAM Ints are arbitrary precision, so the full ±8.64e21 range fits).
   TemporalInstantSlot(epoch_ns: Int)
-  /// Temporal.ZonedDateTime — exact time + time zone identifier. Only "UTC"
-  /// and fixed-offset zones (canonical "±HH:MM" form) are supported.
+  /// Temporal.ZonedDateTime — exact time + resolved time zone. The zone is
+  /// validated at construction, so every operation on a ZonedDateTime holds a
+  /// zone that is known to exist.
   TemporalZonedDateTimeSlot(
     epoch_ns: Int,
-    time_zone: String,
+    time_zone: TimeZone,
     calendar: Calendar,
   )
   /// Array iterator — ES2024 §23.1.5 Array Iterator Objects.
