@@ -12,8 +12,8 @@ import arc/vm/builtins/common
 import arc/vm/builtins/date
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/intl_format.{
-  PDay, PDayPeriod, PElement, PEra, PFraction, PFractionalSecond, PHour,
-  PInteger, PLiteral, PMinute, PMonth, PSecond, PTimeZoneName, PWeekday, PYear,
+  PDay, PDayPeriod, PElement, PEra, PFractionalSecond, PHour, PLiteral, PMinute,
+  PMonth, PSecond, PTimeZoneName, PWeekday, PYear,
 } as fmt
 import arc/vm/builtins/intl_locale as tags
 import arc/vm/builtins/temporal_tz
@@ -760,15 +760,23 @@ fn merge_components(
   )
 }
 
+/// Pair a resolved min/max digit slot into a `fmt.Precision`. The two slots of
+/// a precision are always resolved together (§15.1.6), so a half-set pair
+/// means the precision was not requested at all.
+fn precision(min: Option(Int), max: Option(Int)) -> Option(fmt.Precision) {
+  case min, max {
+    Some(min), Some(max) -> Some(fmt.Precision(min:, max:))
+    _, _ -> None
+  }
+}
+
 /// Overlay a formatter's resolved digit options onto a `fmt.NumOpts` base.
 fn with_digits(o: fmt.NumOpts, dg: IntlDigitOptions) -> fmt.NumOpts {
   fmt.NumOpts(
     ..o,
     min_int: dg.minimum_integer_digits,
-    min_frac: dg.minimum_fraction_digits,
-    max_frac: dg.maximum_fraction_digits,
-    min_sig: dg.minimum_significant_digits,
-    max_sig: dg.maximum_significant_digits,
+    frac: precision(dg.minimum_fraction_digits, dg.maximum_fraction_digits),
+    sig: precision(dg.minimum_significant_digits, dg.maximum_significant_digits),
     rounding_increment: dg.rounding_increment,
     rounding_mode: dg.rounding_mode,
     rounding_priority: dg.rounding_priority,
@@ -842,7 +850,7 @@ fn parts_to_js_sourced(
 }
 
 /// Parts → JS array of `{ type, value, unit? }` objects (RelativeTimeFormat /
-/// DurationFormat formatToParts). Empty unit string means no unit property.
+/// DurationFormat formatToParts). `unit: None` means no unit property.
 fn parts_to_js_with_unit(
   state: State(host),
   parts: List(fmt.UnitPart),
@@ -850,15 +858,13 @@ fn parts_to_js_with_unit(
   let #(state, objs) =
     list.fold(parts, #(state, []), fn(acc, part: fmt.UnitPart) {
       let #(state, objs) = acc
-      let t = fmt.part_type_to_js_string(part.type_)
-      let v = part.value
+      let base = [
+        #("type", JsString(fmt.part_type_to_js_string(part.type_))),
+        #("value", JsString(part.value)),
+      ]
       let props = case part.unit {
-        "" -> [#("type", JsString(t)), #("value", JsString(v))]
-        unit -> [
-          #("type", JsString(t)),
-          #("value", JsString(v)),
-          #("unit", JsString(unit)),
-        ]
+        None -> base
+        Some(unit) -> list.append(base, [#("unit", JsString(unit))])
       }
       let #(state, obj) = alloc_pojo(state, props)
       #(state, [obj, ..objs])
@@ -4135,7 +4141,9 @@ fn resolved_options(
         let #(state, cats) =
           alloc_array(
             state,
-            fmt.plural_categories_en(p.plural_type) |> list.map(JsString),
+            fmt.plural_categories_en(p.plural_type)
+              |> list.map(fmt.plural_category_to_js_string)
+              |> list.map(JsString),
           )
         #(
           state,
@@ -5787,7 +5795,10 @@ fn run_method(
       }
       IntlSelect, PluralRulesData(p) -> {
         use #(n, state) <- result.try(coerce.js_to_number(state, arg0))
-        Ok(#(JsString(plural_select(p, n)), state))
+        Ok(#(
+          JsString(fmt.plural_category_to_js_string(plural_select(p, n))),
+          state,
+        ))
       }
       IntlSelectRange, PluralRulesData(_) -> {
         use Nil <- result.try(case arg0, arg1 {
@@ -5803,7 +5814,7 @@ fn run_method(
           _, _ -> Ok(Nil)
         })
         // CLDR en plural ranges resolve to "other" for all combinations.
-        Ok(#(JsString("other"), state))
+        Ok(#(JsString(fmt.plural_category_to_js_string(fmt.PcOther)), state))
       }
       IntlFormat, ListFormatData(l) -> {
         use #(items, state) <- result.try(string_list_from_iterable(state, arg0))
@@ -6148,7 +6159,7 @@ fn host_date_to_locale(
 }
 
 /// PluralRules select: operands come from the formatted digit strings.
-fn plural_select(p: PluralRulesState, n: value.JsNum) -> String {
+fn plural_select(p: PluralRulesState, n: value.JsNum) -> fmt.PluralCategory {
   case n {
     value.Finite(f) -> {
       let opts =
@@ -6158,28 +6169,12 @@ fn plural_select(p: PluralRulesState, n: value.JsNum) -> String {
           use_grouping: GroupingNever,
           sign_display: SignNever,
         )
-      let parts = fmt.format_number_parts(opts, f)
-      let int_digits =
-        parts
-        |> list.filter_map(fn(p: fmt.Part) {
-          case p.0 {
-            PInteger -> Ok(p.1)
-            _ -> Error(Nil)
-          }
-        })
-        |> string.join("")
-      let frac_digits =
-        parts
-        |> list.filter_map(fn(p: fmt.Part) {
-          case p.0 {
-            PFraction -> Ok(p.1)
-            _ -> Error(Nil)
-          }
-        })
-        |> string.join("")
+      let #(int_digits, frac_digits) =
+        fmt.plural_operands(fmt.format_number_parts(opts, f))
       fmt.plural_select_en(p.plural_type, int_digits, frac_digits, f <. 0.0)
     }
-    _ -> "other"
+    // NaN/Infinity have no operands.
+    _ -> fmt.PcOther
   }
 }
 
@@ -6715,7 +6710,7 @@ fn build_duration_parts(
             Some(next_style) -> folds_into_fraction(next_style)
             None -> False
           }
-          let #(value_repr, is_zero, this_done, max_frac, min_frac, trunc_mode) = case
+          let #(value_repr, is_zero, this_done, frac_precision, trunc_mode) = case
             combine
           {
             True -> {
@@ -6724,17 +6719,19 @@ fn build_duration_parts(
                 repr,
                 zero,
                 True,
-                Some(option.unwrap(frac_digits, 9)),
-                Some(option.unwrap(frac_digits, 0)),
+                fmt.Precision(
+                  min: option.unwrap(frac_digits, 0),
+                  max: option.unwrap(frac_digits, 9),
+                ),
                 True,
               )
             }
+            // Not folded into a fraction: an integral count of this unit.
             False -> #(
               FloatValue(raw_value),
               raw_value == 0.0,
               False,
-              None,
-              None,
+              fmt.Precision(min: 0, max: 0),
               False,
             )
           }
@@ -6780,14 +6777,7 @@ fn build_duration_parts(
                     True -> GroupingNever
                     False -> GroupingAuto
                   },
-                  min_frac: case min_frac {
-                    Some(_) -> min_frac
-                    None -> Some(0)
-                  },
-                  max_frac: case max_frac {
-                    Some(_) -> max_frac
-                    None -> Some(0)
-                  },
+                  frac: Some(frac_precision),
                   rounding_mode: case trunc_mode {
                     True -> RoundTrunc
                     False -> RoundHalfExpand
@@ -6812,8 +6802,8 @@ fn build_duration_parts(
                 apply_numbering_system(parts, nu, fmt.is_number_digit)
                 |> list.map(fn(part: fmt.Part) {
                   case part.0 {
-                    PLiteral -> fmt.UnitPart(part.0, part.1, "")
-                    _ -> fmt.UnitPart(part.0, part.1, unit_tag)
+                    PLiteral -> fmt.UnitPart(part.0, part.1, None)
+                    _ -> fmt.UnitPart(part.0, part.1, Some(unit_tag))
                   }
                 })
               case need_sep {
@@ -6824,7 +6814,7 @@ fn build_duration_parts(
                       [
                         list.flatten([
                           last,
-                          [fmt.UnitPart(PLiteral, ":", "")],
+                          [fmt.UnitPart(PLiteral, ":", None)],
                           parts,
                         ]),
                         ..earlier
@@ -6944,7 +6934,7 @@ fn expand_list_elements(
         [] -> expand_list_elements(rest, [], acc)
       }
     [#(t, v), ..rest] ->
-      expand_list_elements(rest, groups, [[fmt.UnitPart(t, v, "")], ..acc])
+      expand_list_elements(rest, groups, [[fmt.UnitPart(t, v, None)], ..acc])
   }
 }
 
@@ -6997,17 +6987,15 @@ fn make_segment_data(
   state: State(host),
   input: String,
   granularity: Granularity,
-  segment: String,
-  index: Int,
-  word_like: Bool,
+  seg: fmt.Segment,
 ) -> #(State(host), JsValue) {
   let base = [
-    #("segment", JsString(segment)),
-    #("index", value.from_int(index)),
+    #("segment", JsString(seg.text)),
+    #("index", value.from_int(seg.index)),
     #("input", JsString(input)),
   ]
   let props = case granularity {
-    GWord -> list.append(base, [#("isWordLike", JsBool(word_like))])
+    GWord -> list.append(base, [#("isWordLike", JsBool(seg.word_like))])
     GGrapheme | GSentence -> base
   }
   alloc_pojo(state, props)
@@ -7031,17 +7019,15 @@ fn segments_containing(
     True -> Ok(#(JsUndefined, state))
     False -> {
       let found =
-        list.fold(segments, None, fn(acc, seg) {
-          let #(_s, start, _wl) = seg
-          case start <= idx {
+        list.fold(segments, None, fn(acc, seg: fmt.Segment) {
+          case seg.index <= idx {
             True -> Some(seg)
             False -> acc
           }
         })
       case found {
-        Some(#(s, start, wl)) -> {
-          let #(state, obj) =
-            make_segment_data(state, input, granularity, s, start, wl)
+        Some(seg) -> {
+          let #(state, obj) = make_segment_data(state, input, granularity, seg)
           Ok(#(obj, state))
         }
         None -> Ok(#(JsUndefined, state))
@@ -7060,17 +7046,14 @@ fn segment_iterator_next(
   let position = it.position
   let segments = fmt.segment_string(input, granularity)
   let next_seg =
-    list.find(segments, fn(seg) {
-      let #(_s, start, _wl) = seg
-      start >= position
-    })
+    list.find(segments, fn(seg: fmt.Segment) { seg.index >= position })
   case next_seg {
     Error(Nil) -> {
       let #(state, res) = iter_result(state, JsUndefined, True)
       Ok(#(res, state))
     }
-    Ok(#(s, start, wl)) -> {
-      let new_pos = start + fmt.utf16_len(s)
+    Ok(seg) -> {
+      let new_pos = seg.index + fmt.utf16_len(seg.text)
       let heap =
         write_intl_data(
           state.heap,
@@ -7078,8 +7061,7 @@ fn segment_iterator_next(
           SegmentIteratorData(SegmentIteratorState(..it, position: new_pos)),
         )
       let state = State(..state, heap:)
-      let #(state, data) =
-        make_segment_data(state, input, granularity, s, start, wl)
+      let #(state, data) = make_segment_data(state, input, granularity, seg)
       let #(state, res) = iter_result(state, data, False)
       Ok(#(res, state))
     }

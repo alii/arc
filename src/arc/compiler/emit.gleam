@@ -14,11 +14,11 @@ import arc/compiler/scope.{
 }
 import arc/parser/ast
 import arc/vm/opcode.{
-  type IrOp, type TryKind, CatchOnly, Finally, IrAsyncYieldStarNext,
-  IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
-  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
-  IrPutField, IterCloseGuard,
+  type IrOp, type LabelId, type TryKind, CatchOnly, Finally,
+  IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor,
+  IrDefineField, IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2,
+  IrGosub, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
+  IrPushTry, IrPutField, IterCloseGuard, LabelId,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -2358,7 +2358,7 @@ fn emit_try_catch_finally(
   let #(e, end_label) = fresh_label(e)
 
   // -- try body ----------------------------------------------------------
-  let e = emit_ir(e, IrPushTry(throw_label, Finally(fin_label)))
+  let e = emit_ir(e, IrPushTry(throw_label, Finally(LabelId(fin_label))))
   let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
   let e = push_barrier(e, pop_try: 2, label_finally: Some(fin_label), drop: 0)
   use e <- result.try(emit_body(e))
@@ -3847,7 +3847,8 @@ fn emit_stmt_inner(
           let #(e, end_label) = fresh_label(e)
 
           // -- try body --------------------------------------------------
-          let e = emit_ir(e, IrPushTry(throw_label, Finally(fin_label)))
+          let e =
+            emit_ir(e, IrPushTry(throw_label, Finally(LabelId(fin_label))))
           let e =
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_block(e, block, tail: False))
@@ -5728,7 +5729,7 @@ fn emit_for_of_common(
   left: ast.ForInit,
   right: ast.Expression,
   get_iter: IrOp,
-  body_kind: TryKind,
+  body_kind: TryKind(LabelId),
   // tail receives: e, loop_start, loop_continue, break_target, catch_body, end
   tail: fn(Emitter, Int, Int, Int, Int, Int) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {

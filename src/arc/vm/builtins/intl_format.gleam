@@ -202,9 +202,9 @@ pub type RangePart {
 }
 
 /// A part of a formatted relative time / duration: `{ type, value, unit? }`.
-/// An empty `unit` means the part carries no `unit` property.
+/// `unit: None` means the part carries no `unit` property.
 pub type UnitPart {
-  UnitPart(type_: PartType, value: String, unit: String)
+  UnitPart(type_: PartType, value: String, unit: Option(String))
 }
 
 pub fn parts_to_string(parts: List(Part)) -> String {
@@ -301,15 +301,23 @@ fn range_sep(key: LocaleKey, spaced: Bool) -> String {
 // Number formatting — ECMA-402 §15.5 (root/en patterns)
 // ============================================================================
 
+/// A digit-precision request: minimum and maximum digits, always both or
+/// neither. `Precision(min: 2, max: 5)` reads "at least 2, at most 5".
+pub type Precision {
+  Precision(min: Int, max: Int)
+}
+
 pub type NumOpts {
   NumOpts(
     locale: LocaleKey,
     style: NumStyle,
     min_int: Int,
-    min_frac: Option(Int),
-    max_frac: Option(Int),
-    min_sig: Option(Int),
-    max_sig: Option(Int),
+    /// Fraction-digit precision (minimum/maximumFractionDigits), if requested.
+    frac: Option(Precision),
+    /// Significant-digit precision (minimum/maximumSignificantDigits), if
+    /// requested. When both `frac` and `sig` are present, `rounding_priority`
+    /// picks between them.
+    sig: Option(Precision),
     use_grouping: IntlUseGrouping,
     notation: Notation,
     sign_display: SignDisplay,
@@ -325,10 +333,8 @@ pub fn default_num_opts() -> NumOpts {
     locale: locale_key("en"),
     style: StyleDecimal,
     min_int: 1,
-    min_frac: Some(0),
-    max_frac: Some(3),
-    min_sig: None,
-    max_sig: None,
+    frac: Some(Precision(min: 0, max: 3)),
+    sig: None,
     use_grouping: GroupingAuto,
     notation: NotationStandard,
     sign_display: SignAuto,
@@ -768,44 +774,35 @@ fn unit_affixes(
   }
 }
 
-/// Whether a part carries the value's decimal digits (as opposed to affixes,
-/// separators or date/list decoration).
-fn is_digit_part(t: PartType) -> Bool {
-  case part_class(t) {
-    NumberDigit -> True
-    NumberExponentDigit
-    | NumberCore
-    | NumberAffix
-    | DateNumeric
-    | DateText
-    | OtherPart -> False
+/// The plural operands of a formatted number: #(integer digits, fraction
+/// digits) as they were actually rendered (so digit options affect them, per
+/// spec). Group separators and every non-digit part are excluded. The single
+/// place operands are read off a `List(Part)`.
+pub fn plural_operands(parts: List(Part)) -> #(String, String) {
+  let digits_of = fn(want: PartType) {
+    parts
+    |> list.filter_map(fn(p: Part) {
+      case p.0 == want {
+        True -> Ok(p.1)
+        False -> Error(Nil)
+      }
+    })
+    |> string.join("")
   }
+  #(digits_of(PInteger), digits_of(PFraction))
 }
 
 /// Plural-relevant: formatted value is exactly "1" (i = 1, v = 0).
 fn is_one_parts(parts: List(Part)) -> Bool {
-  let ints =
-    parts
-    |> list.filter_map(fn(p: Part) {
-      case p.0 {
-        PInteger -> Ok(p.1)
-        _ -> Error(Nil)
-      }
-    })
-    |> string.join("")
-  let has_frac = list.any(parts, fn(p: Part) { p.0 == PFraction })
-  ints == "1" && !has_frac
+  let #(int_digits, frac_digits) = plural_operands(parts)
+  int_digits == "1" && frac_digits == ""
 }
 
+/// Formatted value is zero: it has digits, and all of them are "0".
 fn is_zero_parts(parts: List(Part)) -> Bool {
-  let has_digits = list.any(parts, fn(p: Part) { is_digit_part(p.0) })
-  has_digits
-  && list.all(parts, fn(p: Part) {
-    case is_digit_part(p.0) {
-      True -> string.to_graphemes(p.1) |> list.all(fn(c) { c == "0" })
-      False -> True
-    }
-  })
+  let #(int_digits, frac_digits) = plural_operands(parts)
+  let digits = int_digits <> frac_digits
+  digits != "" && string.to_graphemes(digits) |> list.all(fn(c) { c == "0" })
 }
 
 /// Currency display text. Mostly the en symbols; a handful of locales use a
@@ -1361,60 +1358,20 @@ fn render_dec(dec: Dec, frac_len: Int) -> #(String, String) {
 /// Round + render the absolute value into integer/group/decimal/fraction parts.
 fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
   let mode = opts.rounding_mode
-  let has_sig = opts.min_sig != None && opts.max_sig != None
-  let has_frac = opts.min_frac != None && opts.max_frac != None
-  let use_sig = case has_sig, has_frac {
-    True, False -> True
-    False, _ -> False
-    True, True ->
-      case opts.rounding_priority {
-        PriorityAuto -> True
-        PriorityMorePrecision | PriorityLessPrecision -> {
-          let max_sig = option.unwrap(opts.max_sig, 21)
-          let max_frac = option.unwrap(opts.max_frac, 3)
-          // Rounding magnitudes: lower = more precise.
-          let m_s = case dec.digits {
-            "" -> 0 - max_sig
-            _ -> dec.exp - max_sig
-          }
-          let m_f = 0 - max_frac
-          case opts.rounding_priority == PriorityMorePrecision {
-            True -> m_s <= m_f
-            False -> m_s >= m_f
-          }
-        }
-      }
+  let by_sig = fn(sig: Precision) { render_sig(dec, sig, mode, negative) }
+  let by_frac = fn(frac: Precision) {
+    render_frac(dec, frac, opts.rounding_increment, mode, negative)
   }
-  let #(int_str, frac_str) = case use_sig {
-    True -> {
-      let min_sig = option.unwrap(opts.min_sig, 1)
-      let max_sig = option.unwrap(opts.max_sig, 21)
-      case dec.digits {
-        // Zero: "0" plus min_sig-1 fraction zeros (ToRawPrecision step 5).
-        "" -> #("0", string.repeat("0", min_sig - 1))
-        _ -> {
-          let rounded = round_dec(dec, max_sig, mode, negative)
-          let frac_len = int.max(0, string.length(rounded.digits) - rounded.exp)
-          let #(i, f) = render_dec(rounded, frac_len)
-          // Pad with zeros until min_sig significant digits.
-          let sig = count_sig(i, f)
-          let f = case sig < min_sig {
-            True -> f <> string.repeat("0", min_sig - sig)
-            False -> f
-          }
-          #(i, f)
-        }
+  let #(int_str, frac_str) = case opts.sig, opts.frac {
+    Some(sig), None -> by_sig(sig)
+    Some(sig), Some(frac) ->
+      case prefer_sig(opts.rounding_priority, dec, sig, frac) {
+        True -> by_sig(sig)
+        False -> by_frac(frac)
       }
-    }
-    False -> {
-      let min_frac = option.unwrap(opts.min_frac, 0)
-      let max_frac = option.unwrap(opts.max_frac, 3)
-      let rounded =
-        round_fraction(dec, max_frac, opts.rounding_increment, mode, negative)
-      let #(i, f) = render_dec(rounded, max_frac)
-      // Strip trailing zeros beyond min_frac.
-      #(i, strip_frac_to_min(f, min_frac))
-    }
+    None, Some(frac) -> by_frac(frac)
+    // Neither requested: the ECMA-402 defaults for a plain decimal.
+    None, None -> by_frac(Precision(min: 0, max: 3))
   }
   // stripIfInteger: drop fraction when it is all zeros.
   let frac_str = case opts.trailing_zero_display {
@@ -1437,6 +1394,71 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
         #(PFraction, frac_str),
       ])
   }
+}
+
+/// When both precisions are requested, `roundingPriority` picks the winner
+/// (§15.1.6): "auto" always takes significant digits, otherwise the rounding
+/// magnitudes decide (lower magnitude = more precise).
+fn prefer_sig(
+  priority: RoundingPriority,
+  dec: Dec,
+  sig: Precision,
+  frac: Precision,
+) -> Bool {
+  case priority {
+    PriorityAuto -> True
+    PriorityMorePrecision | PriorityLessPrecision -> {
+      let m_s = case dec.digits {
+        "" -> 0 - sig.max
+        _ -> dec.exp - sig.max
+      }
+      let m_f = 0 - frac.max
+      case priority == PriorityMorePrecision {
+        True -> m_s <= m_f
+        False -> m_s >= m_f
+      }
+    }
+  }
+}
+
+/// ToRawPrecision (§15.1.3): render to significant digits.
+fn render_sig(
+  dec: Dec,
+  sig: Precision,
+  mode: RoundingMode,
+  negative: Bool,
+) -> #(String, String) {
+  case dec.digits {
+    // Zero: "0" plus min-1 fraction zeros (ToRawPrecision step 5).
+    "" -> #("0", string.repeat("0", sig.min - 1))
+    _ -> {
+      let rounded = round_dec(dec, sig.max, mode, negative)
+      let frac_len = int.max(0, string.length(rounded.digits) - rounded.exp)
+      let #(i, f) = render_dec(rounded, frac_len)
+      // Pad with zeros until `sig.min` significant digits.
+      let count = count_sig(i, f)
+      let f = case count < sig.min {
+        True -> f <> string.repeat("0", sig.min - count)
+        False -> f
+      }
+      #(i, f)
+    }
+  }
+}
+
+/// ToRawFixed (§15.1.4): render to fraction digits.
+fn render_frac(
+  dec: Dec,
+  frac: Precision,
+  rounding_increment: Int,
+  mode: RoundingMode,
+  negative: Bool,
+) -> #(String, String) {
+  let rounded =
+    round_fraction(dec, frac.max, rounding_increment, mode, negative)
+  let #(i, f) = render_dec(rounded, frac.max)
+  // Strip trailing zeros beyond `frac.min`.
+  #(i, strip_frac_to_min(f, frac.min))
 }
 
 fn count_sig(int_str: String, frac_str: String) -> Int {
@@ -1538,14 +1560,39 @@ fn split_pairs_loop(s: String, acc: List(String)) -> List(String) {
 // Plural rules — CLDR en
 // ============================================================================
 
+/// A CLDR plural category. The spec-visible strings live in
+/// `plural_category_to_js_string` and nowhere else.
+pub type PluralCategory {
+  PcZero
+  PcOne
+  PcTwo
+  PcFew
+  PcMany
+  PcOther
+}
+
+/// The spec-visible category string. Only the JS boundary (`select`,
+/// `resolvedOptions().pluralCategories`) should call this.
+pub fn plural_category_to_js_string(c: PluralCategory) -> String {
+  case c {
+    PcZero -> "zero"
+    PcOne -> "one"
+    PcTwo -> "two"
+    PcFew -> "few"
+    PcMany -> "many"
+    PcOther -> "other"
+  }
+}
+
 /// Select the plural category for English. `int_digits`/`frac_digits` are the
-/// formatted digit strings (so digit options affect the operands, per spec).
+/// formatted digit strings (so digit options affect the operands, per spec) —
+/// see `plural_operands`.
 pub fn plural_select_en(
   type_: PluralType,
   int_digits: String,
   frac_digits: String,
   negative: Bool,
-) -> String {
+) -> PluralCategory {
   let _ = negative
   case type_ {
     Ordinal -> {
@@ -1554,25 +1601,25 @@ pub fn plural_select_en(
       let r10 = n % 10
       let r100 = n % 100
       case r10, r100 {
-        1, _ if r100 != 11 -> "one"
-        2, _ if r100 != 12 -> "two"
-        3, _ if r100 != 13 -> "few"
-        _, _ -> "other"
+        1, _ if r100 != 11 -> PcOne
+        2, _ if r100 != 12 -> PcTwo
+        3, _ if r100 != 13 -> PcFew
+        _, _ -> PcOther
       }
     }
     // cardinal: one iff i = 1 and v = 0
     Cardinal ->
       case int_digits == "1" && frac_digits == "" {
-        True -> "one"
-        False -> "other"
+        True -> PcOne
+        False -> PcOther
       }
   }
 }
 
-pub fn plural_categories_en(type_: PluralType) -> List(String) {
+pub fn plural_categories_en(type_: PluralType) -> List(PluralCategory) {
   case type_ {
-    Ordinal -> ["few", "one", "other", "two"]
-    Cardinal -> ["one", "other"]
+    Ordinal -> [PcFew, PcOne, PcOther, PcTwo]
+    Cardinal -> [PcOne, PcOther]
   }
 }
 
@@ -1664,14 +1711,14 @@ pub fn rtf_parts_en(
     RtfAlways -> False
   }
   // The unit property is only attached to numeric parts (never literals).
-  let js3 = fn(p: Part, unit) { UnitPart(p.0, p.1, unit) }
-  let literal3 = fn(text) { js3(#(PLiteral, text), "") }
+  let js3 = fn(p: Part, unit) { UnitPart(p.0, p.1, Some(unit)) }
+  let literal3 = fn(text) { UnitPart(PLiteral, text, None) }
   case is_auto, rtf_auto_name(unit, value +. 0.0) {
     True, Some(name) -> [literal3(name)]
     _, _ -> {
       let plural = case float.absolute_value(value) {
-        1.0 -> "one"
-        _ -> "other"
+        1.0 -> PcOne
+        _ -> PcOther
       }
       let unit_text = rtf_unit_en(style, unit, plural)
       let past = numeric.is_negative_float(value)
@@ -1718,8 +1765,15 @@ fn rtf_auto_name(unit: String, value: Float) -> Option(String) {
   }
 }
 
-fn rtf_unit_en(style: RtfStyle, unit: String, plural: String) -> String {
-  let single = plural == "one"
+fn rtf_unit_en(
+  style: RtfStyle,
+  unit: String,
+  plural: PluralCategory,
+) -> String {
+  let single = case plural {
+    PcOne -> True
+    PcZero | PcTwo | PcFew | PcMany | PcOther -> False
+  }
   case style {
     RtfLong ->
       case single {
@@ -1881,11 +1935,14 @@ pub fn pad2(n: Int) -> String {
 // Segmentation (root rules, approximate)
 // ============================================================================
 
-/// Returns (segment, startIndex, isWordLike) triples covering the string.
-pub fn segment_string(
-  s: String,
-  granularity: Granularity,
-) -> List(#(String, Int, Bool)) {
+/// One segment of a segmented string: its text, its UTF-16 start index in the
+/// input, and whether it is word-like (only meaningful for word granularity).
+pub type Segment {
+  Segment(text: String, index: Int, word_like: Bool)
+}
+
+/// The segments covering the string, in order.
+pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {
   case granularity {
     GWord -> segment_words(s)
     GSentence -> segment_sentences(s)
@@ -1893,11 +1950,11 @@ pub fn segment_string(
   }
 }
 
-fn segment_graphemes(s: String) -> List(#(String, Int, Bool)) {
+fn segment_graphemes(s: String) -> List(Segment) {
   string.to_graphemes(s)
   |> list.fold(#([], 0), fn(acc, g) {
     let #(parts, idx) = acc
-    #([#(g, idx, False), ..parts], idx + utf16_len(g))
+    #([Segment(g, idx, False), ..parts], idx + utf16_len(g))
   })
   |> fn(acc) { list.reverse(acc.0) }
 }
@@ -1926,7 +1983,7 @@ fn is_word_char(g: String) -> Bool {
   }
 }
 
-fn segment_words(s: String) -> List(#(String, Int, Bool)) {
+fn segment_words(s: String) -> List(Segment) {
   let graphemes = string.to_graphemes(s)
   segment_words_loop(graphemes, 0, [], "", 0, None)
 }
@@ -1934,18 +1991,18 @@ fn segment_words(s: String) -> List(#(String, Int, Bool)) {
 fn segment_words_loop(
   rest: List(String),
   idx: Int,
-  acc: List(#(String, Int, Bool)),
+  acc: List(Segment),
   current: String,
   current_start: Int,
   current_kind: Option(Bool),
-) -> List(#(String, Int, Bool)) {
+) -> List(Segment) {
   case rest {
     [] ->
       case current {
         "" -> list.reverse(acc)
         _ ->
           list.reverse([
-            #(current, current_start, option.unwrap(current_kind, False)),
+            Segment(current, current_start, option.unwrap(current_kind, False)),
             ..acc
           ])
       }
@@ -1965,7 +2022,7 @@ fn segment_words_loop(
           segment_words_loop(
             gs,
             idx + utf16_len(g),
-            [#(current, current_start, k), ..acc],
+            [Segment(current, current_start, k), ..acc],
             g,
             idx,
             Some(kind),
@@ -1977,7 +2034,7 @@ fn segment_words_loop(
   }
 }
 
-fn segment_sentences(s: String) -> List(#(String, Int, Bool)) {
+fn segment_sentences(s: String) -> List(Segment) {
   case s {
     "" -> []
     _ -> segment_sentences_loop(string.to_graphemes(s), 0, [], "", 0, False)
@@ -1987,16 +2044,16 @@ fn segment_sentences(s: String) -> List(#(String, Int, Bool)) {
 fn segment_sentences_loop(
   rest: List(String),
   idx: Int,
-  acc: List(#(String, Int, Bool)),
+  acc: List(Segment),
   current: String,
   current_start: Int,
   after_terminator: Bool,
-) -> List(#(String, Int, Bool)) {
+) -> List(Segment) {
   case rest {
     [] ->
       case current {
         "" -> list.reverse(acc)
-        _ -> list.reverse([#(current, current_start, False), ..acc])
+        _ -> list.reverse([Segment(current, current_start, False), ..acc])
       }
     [g, ..gs] -> {
       let next_idx = idx + utf16_len(g)
@@ -2007,7 +2064,7 @@ fn segment_sentences_loop(
           segment_sentences_loop(
             gs,
             next_idx,
-            [#(current, current_start, False), ..acc],
+            [Segment(current, current_start, False), ..acc],
             g,
             idx,
             False,

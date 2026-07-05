@@ -8,7 +8,7 @@ import arc/vm/internal/job_queue.{type JobQueue}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/key.{Named}
 import arc/vm/limits
-import arc/vm/opcode.{type Op, type TryKind}
+import arc/vm/opcode.{type Op, type Pc, type TryKind}
 import arc/vm/value.{type FuncTemplate, type JsValue, type Ref}
 import gleam/dict
 import gleam/float
@@ -49,7 +49,7 @@ pub type HostFn(host) =
 /// must run a finally subroutine, close a live iterator, or just skip it
 /// (see `opcode.TryKind` and `generators.find_next_return_handler`).
 pub type TryFrame {
-  TryFrame(catch_target: Int, stack_depth: Int, kind: TryKind)
+  TryFrame(catch_target: Int, stack_depth: Int, kind: TryKind(Pc))
 }
 
 /// A saved caller frame, pushed onto call_stack when Call enters a function.

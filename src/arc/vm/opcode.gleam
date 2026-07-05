@@ -221,6 +221,17 @@ pub type ErrorKind {
   TypeErrorKind
 }
 
+/// A jump target in emitter IR: an id handed out by `emit.fresh_label`, made
+/// concrete only once `IrLabel(id)` is placed and `resolve` maps it to a PC.
+pub type LabelId {
+  LabelId(id: Int)
+}
+
+/// A jump target in final bytecode: an absolute index into the op array.
+pub type Pc {
+  Pc(pc: Int)
+}
+
 /// What a `PushTry` handler frame is FOR. Carried by both `IrPushTry` and
 /// `PushTry` (and mirrored onto `state.TryFrame` when the frame is pushed) so
 /// that unwinding a *return* completion out of a suspended generator
@@ -228,15 +239,18 @@ pub type ErrorKind {
 /// supplied instead of disassembling the instruction at `catch_target`.
 ///
 /// Like every other label-carrying operand, `Finally`'s payload is a label id
-/// in `IrPushTry` and an absolute PC after `resolve` rewrites it.
-pub type TryKind {
+/// in `IrPushTry` and an absolute PC after `resolve` rewrites it — and the two
+/// are DIFFERENT TYPES (`TryKind(LabelId)` vs `TryKind(Pc)`), so a label id can
+/// never be handed to the interpreter as if it were a PC. `resolve_try_kind` is
+/// the only bridge between them.
+pub type TryKind(target) {
   /// A plain `catch` handler, or an internal handler that only ever catches
   /// throws. A return completion unwinding past it just skips it.
   CatchOnly
   /// A `try`/`finally` — the frame's `catch_target` is the throw entry
   /// (`Gosub(fin_label); Throw`). A return completion must run the finally
   /// subroutine at `fin_label` before it keeps unwinding.
-  Finally(fin_label: Int)
+  Finally(fin_label: target)
   /// A for-of loop / array-destructuring scaffold guarding a live iterator:
   /// the value at the frame's recorded `stack_depth` is the iterator, and a
   /// return completion must close it (§7.4.9 IteratorClose). Only the *sync*
@@ -559,7 +573,7 @@ pub type Op {
   /// Push an exception-handler frame. `kind` says what the frame is FOR, so
   /// the return-completion unwinder (generators.find_next_return_handler)
   /// never has to guess by disassembling whatever sits at `catch_target`.
-  PushTry(catch_target: Int, kind: TryKind)
+  PushTry(catch_target: Int, kind: TryKind(Pc))
   PopTry
 
   // -- Closures --
@@ -885,7 +899,7 @@ pub type IrOp {
   IrJumpIfFalse(label: Int)
   IrJumpIfTrue(label: Int)
   IrJumpIfNullish(label: Int)
-  IrPushTry(catch_label: Int, kind: TryKind)
+  IrPushTry(catch_label: Int, kind: TryKind(LabelId))
   IrGosub(label: Int)
   /// See Op.AsyncYieldStarNext — `after_label` becomes `after_pc`.
   IrAsyncYieldStarNext(after_label: Int)

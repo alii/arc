@@ -234,15 +234,19 @@ fn label_pc(labels: Dict(Int, Int), label: Int) -> Int {
   pc
 }
 
-/// `TryKind` is shared between IR and bytecode; the only label it can carry is
-/// `Finally`'s finally-subroutine entry, resolved here like any other target.
+/// The ONLY bridge from an IR `TryKind(LabelId)` to a bytecode `TryKind(Pc)`.
+/// The only label a `TryKind` can carry is `Finally`'s finally-subroutine
+/// entry, resolved here like any other target; skipping this function is a
+/// type error, since `opcode.PushTry` accepts nothing but a `TryKind(Pc)`.
 fn resolve_try_kind(
   labels: Dict(Int, Int),
-  kind: opcode.TryKind,
-) -> opcode.TryKind {
+  kind: opcode.TryKind(opcode.LabelId),
+) -> opcode.TryKind(opcode.Pc) {
   case kind {
-    opcode.Finally(fin_label:) -> opcode.Finally(label_pc(labels, fin_label))
-    opcode.CatchOnly | opcode.IterCloseGuard -> kind
+    opcode.Finally(fin_label: opcode.LabelId(id)) ->
+      opcode.Finally(opcode.Pc(label_pc(labels, id)))
+    opcode.CatchOnly -> opcode.CatchOnly
+    opcode.IterCloseGuard -> opcode.IterCloseGuard
   }
 }
 
