@@ -397,6 +397,9 @@ pub fn new_state(
     builtins:,
     ctx: state.RealmCtx(
       lexical_globals:,
+      // Script default; module bodies override in `entry.run_module`, and
+      // child evals inherit the caller's referrer via `state.seed_child`.
+      import_referrer: None,
       global_object:,
       symbol_registry:,
       template_objects: dict.new(),

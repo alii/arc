@@ -175,16 +175,6 @@ pub type HostHooks {
     /// `heap.root` at install time (like `RealmCtx.template_objects` entries),
     /// because nothing else in the heap reaches it.
     import_hook: Option(JsValue),
-    /// §16.2.1.8 referencingScriptOrModule: the resolved specifier of the
-    /// module whose body is currently executing, set by the module evaluator
-    /// on each body's freshly booted State (`arc/module.run_module_with_referrer`)
-    /// and read at ImportCall time so a nested `import()` resolves relative to
-    /// the importing MODULE. `None` = script code: the host hook falls back to
-    /// its install-time entry referrer.
-    ///
-    /// ENGINE state, never a globalThis property — guest JS cannot forge a
-    /// referrer to escape the module loader's resolution root.
-    import_referrer: Option(String),
   )
 }
 
@@ -201,6 +191,5 @@ pub fn default_host_hooks() -> HostHooks {
     monotonic_now: clock_ffi.monotonic_now,
     sleep_ms: clock_ffi.sleep_ms,
     import_hook: option.None,
-    import_referrer: option.None,
   )
 }

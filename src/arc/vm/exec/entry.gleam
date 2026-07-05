@@ -167,12 +167,13 @@ pub fn run_module(
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
   host_hooks: host_hooks.HostHooks,
+  import_referrer: Option(String),
   can_block: Bool,
   extend_262: Option(state.Extend262(host)),
   finish: fn(State(host)) -> State(host),
 ) -> ModuleResult(host) {
   let locals = interpreter.init_module_locals(func, seeds)
-  let state =
+  let base =
     interpreter.new_state(
       func,
       locals,
@@ -185,6 +186,9 @@ pub fn run_module(
       can_block,
       extend_262,
     )
+  // §16.2.1.8 referencingScriptOrModule for this module body — per-evaluation
+  // state on RealmCtx, not on the boot-once HostHooks.
+  let state = State(..base, ctx: RealmCtx(..base.ctx, import_referrer:))
   case interpreter.execute_inner(state) {
     Error(vm_err) -> ModuleError(error: vm_err)
     // A module body is the ONE non-function frame that can legitimately

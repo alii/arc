@@ -94,6 +94,14 @@ pub type RealmCtx(host) {
     /// first. Each binding is `Let`/`Const` (const rejects assignment) wrapping
     /// `JsUninitialized` while in TDZ, then its bound value.
     lexical_globals: dict.Dict(String, value.LexicalGlobal),
+    /// §16.2.1.8 referencingScriptOrModule: the resolved specifier of the
+    /// module whose body this State was booted for, set by `entry.run_module`
+    /// and captured at ImportCall time so a nested `import()` resolves
+    /// relative to the importing MODULE. `None` = script code: the host hook
+    /// falls back to its install-time entry referrer. Per-evaluation ENGINE
+    /// state, never a globalThis property — guest JS cannot forge a referrer
+    /// to escape the module loader's resolution root.
+    import_referrer: Option(String),
     /// ObjectRecord: Ref to globalThis heap object. var/function/builtins live here.
     global_object: Ref,
     /// Global symbol registry for Symbol.for() / Symbol.keyFor().
@@ -185,8 +193,6 @@ pub fn host_hook_roots(hooks: host_hooks.HostHooks) -> List(JsValue) {
     sleep_ms: _,
     // The one JsValue-carrying hook: %DynamicImportHook%'s function object.
     import_hook:,
-    // A resolved specifier — a plain string.
-    import_referrer: _,
   ) = hooks
   option.values([import_hook])
 }
@@ -314,6 +320,10 @@ pub fn seed_child(child: State(host), caller: State(host)) -> State(host) {
       ..child.ctx,
       realms: caller.ctx.realms,
       template_objects: caller.ctx.template_objects,
+      // §9.4.1 GetActiveScriptOrModule: an eval / Function / evalScript body
+      // is not a script or module record, so a nested `import()` inside it
+      // resolves against the caller's active module (if any).
+      import_referrer: caller.ctx.import_referrer,
     ),
     job_queue: caller.job_queue,
     outstanding: caller.outstanding,
@@ -390,6 +400,7 @@ pub fn seed_draining_child(
       ..child.ctx,
       realms: caller.ctx.realms,
       template_objects: caller.ctx.template_objects,
+      import_referrer: caller.ctx.import_referrer,
     ),
     job_queue: caller.job_queue,
     outstanding: caller.outstanding,

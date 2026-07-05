@@ -37,7 +37,7 @@
 //// settled" signal all used to live in guest-reachable strings/properties,
 //// which let user JS replace the module loader or forge its resolution root.
 //// They are now typed engine state (`HostHooks.import_hook` /
-//// `HostHooks.import_referrer`) and a typed job outcome (`DeferHookOutcome`).
+//// `RealmCtx.import_referrer`) and a typed job outcome (`DeferHookOutcome`).
 
 import arc/vm/builtins/common
 import arc/vm/builtins/object as builtins_object
@@ -333,13 +333,13 @@ fn import_request(
 }
 
 /// §16.2.1.8 HostLoadImportedModule referrer: the resolved specifier of the
-/// module whose body is currently executing, carried as ENGINE state on the
-/// realm's host hooks (set on each module body's freshly booted State by
+/// module whose body is currently executing, carried as per-evaluation ENGINE
+/// state on `RealmCtx` (set on each module body's freshly booted State by
 /// `arc/module.run_module_with_referrer`). Captured at ImportCall time (the
 /// spec captures referencingScriptOrModule synchronously) — the import job
 /// may run after the current module body finishes. `None` = script code.
 fn capture_referrer(state: State(host)) -> option.Option(String) {
-  state.ctx.host_hooks.import_referrer
+  state.ctx.import_referrer
 }
 
 /// Step 9+ deferred: enqueue a promise job that runs `settle` (loading the
