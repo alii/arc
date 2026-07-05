@@ -8659,8 +8659,10 @@ built-ins/Object/assign/target-is-frozen-accessor-property-set-succeeds.js
 built-ins/Object/assign/target-is-frozen-data-property-set-throws.js
 built-ins/Object/assign/target-is-non-extensible-existing-accessor-property.js
 built-ins/Object/assign/target-is-non-extensible-existing-data-property.js
+built-ins/Object/assign/target-is-non-extensible-property-creation-throws.js
 built-ins/Object/assign/target-is-sealed-existing-accessor-property.js
 built-ins/Object/assign/target-is-sealed-existing-data-property.js
+built-ins/Object/assign/target-is-sealed-property-creation-throws.js
 built-ins/Object/assign/target-set-not-writable.js
 built-ins/Object/assign/target-set-user-error.js
 built-ins/Object/bigint.js
@@ -11592,6 +11594,8 @@ built-ins/Object/preventExtensions/15.2.3.10-3-9.js
 built-ins/Object/preventExtensions/abrupt-completion.js
 built-ins/Object/preventExtensions/name.js
 built-ins/Object/preventExtensions/not-a-constructor.js
+built-ins/Object/preventExtensions/symbol-object-contains-symbol-properties-non-strict.js
+built-ins/Object/preventExtensions/symbol-object-contains-symbol-properties-strict.js
 built-ins/Object/preventExtensions/throws-when-false.js
 built-ins/Object/prop-desc.js
 built-ins/Object/property-order.js
@@ -11930,6 +11934,8 @@ built-ins/Object/seal/seal-undefined.js
 built-ins/Object/seal/seal-urierror.js
 built-ins/Object/seal/seal-weakmap.js
 built-ins/Object/seal/seal-weakset.js
+built-ins/Object/seal/symbol-object-contains-symbol-properties-non-strict.js
+built-ins/Object/seal/symbol-object-contains-symbol-properties-strict.js
 built-ins/Object/seal/throws-when-false.js
 built-ins/Object/setPrototypeOf/bigint.js
 built-ins/Object/setPrototypeOf/length.js
@@ -34626,6 +34632,10 @@ language/expressions/class/subclass-builtins/subclass-Uint8ClampedArray.js
 language/expressions/class/subclass-builtins/subclass-WeakMap.js
 language/expressions/class/subclass-builtins/subclass-WeakSet.js
 language/expressions/coalesce/abrupt-is-a-short-circuit.js
+language/expressions/coalesce/cannot-chain-head-with-logical-and.js
+language/expressions/coalesce/cannot-chain-head-with-logical-or.js
+language/expressions/coalesce/cannot-chain-tail-with-logical-and.js
+language/expressions/coalesce/cannot-chain-tail-with-logical-or.js
 language/expressions/coalesce/chainable-if-parenthesis-covered-logical-and.js
 language/expressions/coalesce/chainable-if-parenthesis-covered-logical-or.js
 language/expressions/coalesce/chainable-with-bitwise-and.js
@@ -51383,6 +51393,7 @@ staging/sm/Symbol/property-accessor.js
 staging/sm/Symbol/property-basics.js
 staging/sm/Symbol/property-inheritance.js
 staging/sm/Symbol/property-nonwritable.js
+staging/sm/Symbol/property-reflection.js
 staging/sm/Symbol/surfaces.js
 staging/sm/Symbol/symbol-object-not-unboxed-for-value-to-id.js
 staging/sm/Symbol/toPrimitive-undefined-or-null.js
