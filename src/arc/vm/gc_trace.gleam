@@ -268,18 +268,28 @@ fn do_refs_in_slot(
           ordered_entries.fold(store, acc, fn(a, k, v) {
             push_value_ref(v, push_value_ref(value.map_key_to_js(k), a))
           })
+        // Weak keys/members/targets are traced STRONGLY on purpose.
+        // heap.alloc recycles freed ids from the free list, and these
+        // collections key their Dicts on JsObject(Ref(id)) — dropping a key
+        // from the mark set without ALSO pruning it from `data` before sweep
+        // lets a fresh alloc reuse the id and produce a false has()/get() hit.
+        // An impl MAY decline to collect weak refs (spec-legal over-retention);
+        // it MUST NOT return spurious hits. Weak semantics land together with
+        // a post-mark ephemeron pass that prunes dead entries before their ids
+        // reach heap.free — not before.
         value.WeakMapObject(data:) ->
-          // TODO: post-mark ephemeron/cleanup pass
-          // keys are weak — do NOT trace; values are traced conservatively
-          // (proper ephemeron pass is future work)
-          dict.fold(data, acc, fn(a, _k, v) { push_value_ref(v, a) })
-        // members are weak — trace nothing
-        value.WeakSetObject(data: _data) -> acc
+          dict.fold(data, acc, fn(a, k, v) {
+            push_value_ref(v, push_value_ref(k, a))
+          })
+        value.WeakSetObject(data:) ->
+          dict.fold(data, acc, fn(a, k, _v) { push_value_ref(k, a) })
         value.FinalizationRegistryObject(cells:, callback:) ->
           list.fold(cells, push_value_ref(callback, acc), fn(a, cell) {
-            // target is weak — do NOT trace; held/token are strong
-            let value.FinRegCell(target: _target, held:, token:) = cell
-            let a = push_value_ref(held, a)
+            let value.FinRegCell(target:, held:, token:) = cell
+            // target AND token are both spec-weak (§9.10.3 lets an impl clear
+            // [[UnregisterToken]] once unreachable); held is strong. Both are
+            // traced strong for now — same prune-pass precondition as above.
+            let a = push_value_ref(held, push_value_ref(target, a))
             case token {
               Some(t) -> push_value_ref(t, a)
               None -> a
