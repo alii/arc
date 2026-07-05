@@ -67,27 +67,7 @@ pub fn init(
   // §27.2.4.9 get Promise [ @@species ] — an accessor returning `this`, so
   // SpeciesConstructor(promise, %Promise%) resolves to the SUBCLASS through
   // inheritance (`class P extends Promise {}` → Get(P, @@species) is P).
-  // Reuses the VM's generic return-`this` native (IteratorSymbolIterator).
-  let #(h, species_getter) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      value.VmNative(value.IteratorSymbolIterator),
-      "get [Symbol.species]",
-      0,
-    )
-  let h =
-    common.add_symbol_property(
-      h,
-      bt.constructor,
-      value.symbol_species,
-      value.accessor(
-        get: Some(JsObject(species_getter)),
-        set: None,
-        enumerable: False,
-        configurable: True,
-      ),
-    )
+  let h = common.add_species_accessor(h, function_proto, bt.constructor)
   #(h, bt)
 }
 
@@ -254,12 +234,7 @@ fn fulfill_promise_tracked(
   result_value: JsValue,
 ) -> #(state.State(host), SettleOutcome) {
   let #(h, jobs, outcome) =
-    settle_promise(
-      state.heap,
-      data_ref,
-      result_value,
-      value.PromiseFulfilled(result_value),
-    )
+    settle_promise(state.heap, data_ref, value.PromiseFulfilled(result_value))
   case outcome {
     // Not a promise slot: nothing to settle, report it back to the caller.
     NotAPromiseSlot -> #(state, outcome)
@@ -311,15 +286,14 @@ pub type SettleOutcome {
 
 /// Shared settle core of FulfillPromise/RejectPromise (steps 2-6 plus
 /// TriggerPromiseReactions): if the promise is pending, pick the reaction
-/// list that matches `settled_state`, build reaction jobs from it, and write
-/// the settled PromiseSlot with cleared reaction lists.
+/// list and result value that match `settled_state`, build reaction jobs
+/// from them, and write the settled PromiseSlot with cleared reaction lists.
 ///
 /// The `SettleOutcome` distinguishes the transition, the legitimate
 /// already-settled no-op, and a ref that is not a promise at all.
 fn settle_promise(
   h: Heap(host),
   data_ref: Ref,
-  result_value: JsValue,
   settled_state: value.PromiseState,
 ) -> #(Heap(host), List(Job), SettleOutcome) {
   case heap.read(h, data_ref) {
@@ -332,13 +306,14 @@ fn settle_promise(
       // TriggerPromiseReactions(reactions, value) — build job list.
       // Reactions are stored newest-first (see perform_promise_then), so
       // reverse once here to enqueue jobs in attachment order per spec.
-      // Which list fires is fully determined by the settled state, so derive
-      // it here rather than trusting the caller to pass a matching selector.
-      let reactions = case settled_state {
-        value.PromiseFulfilled(_) -> fulfill_reactions
-        value.PromiseRejected(_) -> reject_reactions
+      // Which list fires and which value the reactions receive are both
+      // fully determined by the settled state, so derive them here — a
+      // caller cannot pass a value that disagrees with the state it wraps.
+      let #(reactions, result_value) = case settled_state {
+        value.PromiseFulfilled(v) -> #(fulfill_reactions, v)
+        value.PromiseRejected(r) -> #(reject_reactions, r)
         // Unreachable: both callers pass a settled variant.
-        value.PromisePending -> []
+        value.PromisePending -> panic as "settle_promise called with Pending"
       }
       let jobs =
         list.map(list.reverse(reactions), fn(r) {
@@ -404,12 +379,7 @@ fn reject_promise_tracked(
   reason: JsValue,
 ) -> #(state.State(host), SettleOutcome) {
   let #(h, jobs, outcome) =
-    settle_promise(
-      state.heap,
-      data_ref,
-      reason,
-      value.PromiseRejected(reason),
-    )
+    settle_promise(state.heap, data_ref, value.PromiseRejected(reason))
   case outcome {
     Transitioned(is_handled:) -> {
       // Step 7: HostPromiseRejectionTracker(promise, "reject")
