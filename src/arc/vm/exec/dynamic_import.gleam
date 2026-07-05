@@ -42,6 +42,7 @@
 import arc/vm/builtins/common
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/exec/event_loop
 import arc/vm/exec/promises
 import arc/vm/internal/job_queue
 import arc/vm/key.{Named}
@@ -49,11 +50,9 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type State, type StepExit, State}
 import arc/vm/value.{type JsValue, type Ref, JsObject, JsString, JsUndefined}
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/string
 
 /// Positional phase marker (3rd hook argument) that `import.defer(spec)`
 /// passes to the host hook: load + LINK the graph without evaluating it, and
@@ -403,43 +402,19 @@ fn enqueue_defer_import_job(
         let state = case outcome {
           DeferHookSettledCapability -> state
           DeferHookRejected(reason) ->
-            call_resolving_fn(state, reject_fn, reason)
+            event_loop.call_settlement_fn(state, reject_fn, [reason])
         }
         #(state, Ok(JsUndefined))
       },
       "%ContinueDynamicImport%",
       0,
     )
-  // The job's own child resolve/reject are unused (non-callable sentinels):
-  // settlement happens through the hook / reject_fn above, whose
-  // [[AlreadyResolved]] flag also makes any double settle a no-op.
-  let job =
-    value.PromiseReactionJob(
-      handler: value.Handler(JsObject(job_fn)),
-      arg: JsUndefined,
-      resolve: JsUndefined,
-      reject: JsUndefined,
-    )
+  // A `HostJob` carries NO child capability, so there are no resolve/reject
+  // sentinels for the executor to call: settlement happens through the hook /
+  // `reject_fn` above, whose [[AlreadyResolved]] flag also makes any double
+  // settle a no-op.
+  let job = value.HostJob(run: JsObject(job_fn))
   State(..state, heap:, job_queue: job_queue.push(state.job_queue, job))
-}
-
-/// Call one of the import promise's resolving functions (§27.2.1.3 — they
-/// return undefined and never throw); log defensively if one somehow does.
-fn call_resolving_fn(
-  state: State(host),
-  target: JsValue,
-  arg: JsValue,
-) -> State(host) {
-  case state.call(state, target, JsUndefined, [arg]) {
-    Ok(#(_, state)) -> state
-    Error(#(thrown, state)) -> {
-      io.println_error(
-        "arc: import promise resolving function threw: "
-        <> string.inspect(thrown),
-      )
-      state
-    }
-  }
 }
 
 /// Step 8: options must be undefined or an object whose "with" value (if

@@ -1988,6 +1988,43 @@ fn alloc_entry_pair(
   #(h, JsObject(pair_ref))
 }
 
+/// Shared tail of %SetIteratorPrototype%.next() and %MapIteratorPrototype%
+/// .next() (ES §24.2.5.2.1 / §24.1.5.2.1): the source store has been read and
+/// stepped from `cursor`; here we latch `done` when it is exhausted, project
+/// the record into what this iterator kind yields, and park the cursor for the
+/// next call. `write_cursor(heap, cursor, done)` rewrites the iterator's own
+/// slot — the only bit that differs between Set and Map.
+fn advance_ordered_iterator(
+  state: State(host),
+  rest_stack: List(JsValue),
+  cursor: Int,
+  next: Option(#(Int, k, JsValue)),
+  project: fn(Heap(host), k, JsValue) -> #(Heap(host), JsValue),
+  write_cursor: fn(Heap(host), Int, Bool) -> Heap(host),
+) -> Result(State(host), StepExit(host)) {
+  case next {
+    // Exhausted: latch done: True so a later add can't revive the iterator.
+    None ->
+      push_iter_result(
+        state,
+        rest_stack,
+        write_cursor(state.heap, cursor, True),
+        JsUndefined,
+        True,
+      )
+    Some(#(next_cursor, k, v)) -> {
+      let #(h, yielded) = project(state.heap, k, v)
+      push_iter_result(
+        state,
+        rest_stack,
+        write_cursor(h, next_cursor, False),
+        yielded,
+        False,
+      )
+    }
+  }
+}
+
 /// ES §24.2.5.2.1 %SetIteratorPrototype%.next() — LIVE iteration by seq
 /// cursor: yield the source Set's first live record at seq >= cursor and
 /// resume at the cursor `next_from` hands back (amortized O(1) per step).
@@ -2016,53 +2053,28 @@ fn call_set_iterator_next(
               ordered_entries.next_from(store, cursor)
             _ -> None
           }
-          case next {
-            None -> {
-              let h =
-                heap.write(
-                  state.heap,
-                  iter_ref,
-                  ObjectSlot(
-                    ..slot,
-                    kind: value.SetIteratorObject(
-                      source:,
-                      cursor:,
-                      done: True,
-                      kind:,
-                    ),
-                  ),
-                )
-              push_iter_result(state, rest_stack, h, JsUndefined, True)
-            }
-            Some(#(next_cursor, _k, v)) -> {
+          use h, cursor, done <- advance_ordered_iterator(
+            state,
+            rest_stack,
+            cursor,
+            next,
+            fn(h, _k, v) {
               // For "entries" yield [v, v]; for "values"/"keys" yield v.
-              let #(h, yielded) = case kind {
-                value.SetIterValues -> #(state.heap, v)
+              case kind {
+                value.SetIterValues -> #(h, v)
                 value.SetIterEntries ->
-                  alloc_entry_pair(
-                    state.heap,
-                    state.builtins.array.prototype,
-                    v,
-                    v,
-                  )
+                  alloc_entry_pair(h, state.builtins.array.prototype, v, v)
               }
-              let h =
-                heap.write(
-                  h,
-                  iter_ref,
-                  ObjectSlot(
-                    ..slot,
-                    kind: value.SetIteratorObject(
-                      source:,
-                      cursor: next_cursor,
-                      done: False,
-                      kind:,
-                    ),
-                  ),
-                )
-              push_iter_result(state, rest_stack, h, yielded, False)
-            }
-          }
+            },
+          )
+          heap.write(
+            h,
+            iter_ref,
+            ObjectSlot(
+              ..slot,
+              kind: value.SetIteratorObject(source:, cursor:, done:, kind:),
+            ),
+          )
         }
         _ -> iter_incompatible(state, "Set")
       }
@@ -2094,53 +2106,33 @@ fn call_map_iterator_next(
               ordered_entries.next_from(store, cursor)
             _ -> None
           }
-          case next {
-            None -> {
-              let h =
-                heap.write(
-                  state.heap,
-                  iter_ref,
-                  ObjectSlot(
-                    ..slot,
-                    kind: value.MapIteratorObject(
-                      source:,
-                      cursor:,
-                      done: True,
-                      kind:,
-                    ),
-                  ),
-                )
-              push_iter_result(state, rest_stack, h, JsUndefined, True)
-            }
-            Some(#(next_cursor, k, v)) -> {
-              let #(h, yielded) = case kind {
-                value.MapIterKeys -> #(state.heap, value.map_key_to_js(k))
-                value.MapIterValues -> #(state.heap, v)
+          use h, cursor, done <- advance_ordered_iterator(
+            state,
+            rest_stack,
+            cursor,
+            next,
+            fn(h, k, v) {
+              case kind {
+                value.MapIterKeys -> #(h, value.map_key_to_js(k))
+                value.MapIterValues -> #(h, v)
                 value.MapIterEntries ->
                   alloc_entry_pair(
-                    state.heap,
+                    h,
                     state.builtins.array.prototype,
                     value.map_key_to_js(k),
                     v,
                   )
               }
-              let h =
-                heap.write(
-                  h,
-                  iter_ref,
-                  ObjectSlot(
-                    ..slot,
-                    kind: value.MapIteratorObject(
-                      source:,
-                      cursor: next_cursor,
-                      done: False,
-                      kind:,
-                    ),
-                  ),
-                )
-              push_iter_result(state, rest_stack, h, yielded, False)
-            }
-          }
+            },
+          )
+          heap.write(
+            h,
+            iter_ref,
+            ObjectSlot(
+              ..slot,
+              kind: value.MapIteratorObject(source:, cursor:, done:, kind:),
+            ),
+          )
         }
         _ -> iter_incompatible(state, "Map")
       }

@@ -3,6 +3,7 @@ import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
+import arc/vm/exec/event_loop
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/key.{Index, Named}
@@ -61,32 +62,44 @@ type IterStep {
   IterValue(JsValue)
 }
 
-/// Error shape inside PerformPromiseAll/AllSettled/Any/Race: the thrown value
-/// plus the iterator's [[Done]] flag (False → caller must IteratorClose).
-type CombinatorError(host) =
-  #(JsValue, Bool, State(host))
+/// The spec's iterator [[Done]] flag as seen by a combinator's error path:
+/// does the thrown value leave an iterator that still needs IteratorClose?
+pub type IterState {
+  /// The iterator is still open — the caller must IteratorClose it before
+  /// rejecting the capability promise.
+  IteratorOpen
+  /// The iterator is done (exhausted, or already closed by the step that
+  /// threw) — reject with the thrown value as-is, no close.
+  IteratorDone
+}
+
+/// Error shape inside PerformPromiseAll/AllSettled/Any/Race.
+type CombinatorError(host) {
+  CombinatorError(thrown: JsValue, iterator: IterState, state: State(host))
+}
 
 /// `use` adapter lifting a #(thrown, state) error into the combinator loop
-/// error shape with done = False (iterator still open — caller must close).
+/// error shape with the iterator still open (caller must close it).
 fn open_iter(
   r: Result(#(a, State(host)), #(JsValue, State(host))),
   cont: fn(a, State(host)) -> Result(b, CombinatorError(host)),
 ) -> Result(b, CombinatorError(host)) {
   case r {
     Ok(#(v, state)) -> cont(v, state)
-    Error(#(err, state)) -> Error(#(err, False, state))
+    Error(#(err, state)) -> Error(CombinatorError(err, IteratorOpen, state))
   }
 }
 
-/// Same as open_iter, but done = True — per IteratorStepValue (§7.4.8) any
-/// abrupt completion while stepping marks the iterator done (no close).
+/// Same as open_iter, but marks the iterator done — per IteratorStepValue
+/// (§7.4.8) any abrupt completion while stepping marks the iterator done
+/// (no close).
 fn done_iter(
   r: Result(#(a, State(host)), #(JsValue, State(host))),
   cont: fn(a, State(host)) -> Result(b, CombinatorError(host)),
 ) -> Result(b, CombinatorError(host)) {
   case r {
     Ok(#(v, state)) -> cont(v, state)
-    Error(#(err, state)) -> Error(#(err, True, state))
+    Error(#(err, state)) -> Error(CombinatorError(err, IteratorDone, state))
   }
 }
 
@@ -206,33 +219,30 @@ fn iterator_step_value_native(
     _ -> {
       let #(err, state) =
         state.type_error_value(state, "Iterator result is not an object")
-      Error(#(err, True, state))
+      Error(CombinatorError(err, IteratorDone, state))
     }
   }
 }
 
-/// Shared scaffold for Promise.all/allSettled/any/race (§27.2.4.1 steps 1-8):
-/// C = this value, NewPromiseCapability(C), GetPromiseResolve(C),
-/// GetIterator(iterable), then run `perform`. NewPromiseCapability errors
-/// throw synchronously; later abrupt completions reject the capability
-/// promise (IfAbruptRejectPromise), closing the iterator first when the
-/// perform loop left it open.
-fn with_spec_combinator(
+/// The scaffold every promise combinator (`Promise.all`/`allSettled`/`any`/
+/// `race` and the keyed variants) shares: NewPromiseCapability(this) — whose
+/// abrupt completion throws synchronously — then run `perform`, whose abrupt
+/// completion goes through IfAbruptRejectPromise (Call(cap.[[Reject]], «err»),
+/// which itself may throw), and finally push cap.[[Promise]].
+fn with_capability(
   state: State(host),
   this: JsValue,
-  args: List(JsValue),
   rest_stack: List(JsValue),
-  perform: fn(State(host), IteratorRecord, JsValue, Capability, JsValue) ->
-    Result(State(host), CombinatorError(host)),
+  perform: fn(State(host), Capability) ->
+    Result(State(host), #(JsValue, State(host))),
 ) -> Result(State(host), StepExit(host)) {
   // Drop the args from the operand stack before re-entrant calls; the
   // capability promise is pushed when the combinator completes.
   let state = State(..state, stack: rest_stack)
   case new_capability_from_constructor(state, this) {
     Error(#(err, state)) -> Error(Threw(err, state))
-    Ok(#(cap, state)) -> {
-      let iterable = helpers.first_arg_or_undefined(args)
-      case combinator_prepare_and_perform(state, this, iterable, cap, perform) {
+    Ok(#(cap, state)) ->
+      case perform(state, cap) {
         Ok(state) -> push_combinator_result(state, cap, rest_stack)
         Error(#(err, state)) ->
           // IfAbruptRejectPromise: Perform ? Call(cap.[[Reject]], undefined, «err»).
@@ -242,8 +252,23 @@ fn with_spec_combinator(
             Error(#(thrown, state)) -> Error(Threw(thrown, state))
           }
       }
-    }
   }
+}
+
+/// `with_capability` plus the iterable half of §27.2.4.1 steps 1-8:
+/// GetPromiseResolve(C), GetIterator(iterable), then run `perform` — closing
+/// the iterator first when the perform loop left it open.
+fn with_spec_combinator(
+  state: State(host),
+  this: JsValue,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  perform: fn(State(host), IteratorRecord, JsValue, Capability, JsValue) ->
+    Result(State(host), CombinatorError(host)),
+) -> Result(State(host), StepExit(host)) {
+  use state, cap <- with_capability(state, this, rest_stack)
+  let iterable = helpers.first_arg_or_undefined(args)
+  combinator_prepare_and_perform(state, this, iterable, cap, perform)
 }
 
 fn push_combinator_result(
@@ -271,11 +296,10 @@ fn combinator_prepare_and_perform(
   ))
   case perform(state, rec, c, cap, promise_resolve) {
     Ok(state) -> Ok(state)
-    Error(#(err, done, state)) ->
-      case done {
-        True -> Error(#(err, state))
-        False -> Error(iter_protocol.close_and_throw(state, rec.iterator, err))
-      }
+    Error(CombinatorError(thrown:, iterator: IteratorDone, state:)) ->
+      Error(#(thrown, state))
+    Error(CombinatorError(thrown:, iterator: IteratorOpen, state:)) ->
+      Error(iter_protocol.close_and_throw(state, rec.iterator, thrown))
   }
 }
 
@@ -339,7 +363,7 @@ fn final_resolve_values(
     True ->
       case state.call(state, resolve, JsUndefined, [JsObject(values_ref)]) {
         Ok(#(_resolve_result, state)) -> Ok(state)
-        Error(#(err, state)) -> Error(#(err, True, state))
+        Error(#(err, state)) -> Error(CombinatorError(err, IteratorDone, state))
       }
   }
 }
@@ -681,7 +705,9 @@ fn finally_chain(
     builtins_promise.new_promise_capability(state.heap, state.builtins)
   // Call resolve(resolve_value)
   let state1 =
-    call_native_for_job(State(..state, heap: h), cap.resolve, [resolve_value])
+    event_loop.call_settlement_fn(State(..state, heap: h), cap.resolve, [
+      resolve_value,
+    ])
   // Create the handler
   let #(h2, handler_ref) =
     common.alloc_wrapper(
@@ -1045,7 +1071,7 @@ pub fn call_native_promise_any(
               errors,
               "All promises were rejected",
             )
-          Error(#(err, True, State(..state, heap: h)))
+          Error(CombinatorError(err, IteratorDone, State(..state, heap: h)))
         }
       }
     },
@@ -1072,27 +1098,11 @@ pub fn call_native_promise_all_keyed(
   rest_stack: List(JsValue),
   settled settled: Bool,
 ) -> Result(State(host), StepExit(host)) {
-  // Drop the args from the operand stack before re-entrant calls; the
-  // capability promise is pushed when the combinator completes.
-  let state = State(..state, stack: rest_stack)
-  // Step 2: NewPromiseCapability(ctor) — abrupt completions throw.
-  case new_capability_from_constructor(state, this) {
-    Error(#(err, state)) -> Error(Threw(err, state))
-    Ok(#(cap, state)) -> {
-      let promises = helpers.first_arg_or_undefined(args)
-      case perform_promise_all_keyed(state, this, promises, cap, settled) {
-        Ok(state) -> push_combinator_result(state, cap, rest_stack)
-        Error(#(err, state)) ->
-          // Steps 4/5/7 IfAbruptRejectPromise:
-          // ? Call(cap.[[Reject]], undefined, «err»).
-          case state.call(state, cap.reject, JsUndefined, [err]) {
-            Ok(#(_reject_result, state)) ->
-              push_combinator_result(state, cap, rest_stack)
-            Error(#(thrown, state)) -> Error(Threw(thrown, state))
-          }
-      }
-    }
-  }
+  // Steps 2 and 4/5/7 (NewPromiseCapability + IfAbruptRejectPromise) are
+  // `with_capability`; steps 3/5/6 are the perform below.
+  use state, cap <- with_capability(state, this, rest_stack)
+  let promises = helpers.first_arg_or_undefined(args)
+  perform_promise_all_keyed(state, this, promises, cap, settled)
 }
 
 /// PerformPromiseAllKeyed steps 1-5 plus the method's steps 3 and 5
@@ -1849,24 +1859,17 @@ fn async_from_sync_continuation(
   ))
 }
 
+/// §7.4.11 IteratorClose with a normal completion, in this module's
+/// `Result(State, #(thrown, State))` shape. The close itself is
+/// `iter_protocol.iterator_close_normal` — the ONE implementation of the
+/// GetMethod(return) + Call + result-is-an-Object rules.
 fn iterator_close_normal(
   state: State(host),
   sync_iter: Ref,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  let sync_iter_val = JsObject(sync_iter)
-  use #(ret_fn, state) <- result.try(object.get_value(
-    state,
-    sync_iter,
-    Named("return"),
-    sync_iter_val,
-  ))
-  use <- bool.guard(!helpers.is_callable(state.heap, ret_fn), Ok(state))
-  use #(ret_result, state) <- result.try(
-    state.call(state, ret_fn, sync_iter_val, []),
-  )
-  case ret_result {
-    JsObject(_) -> Ok(state)
-    _ -> coerce.thrown_type_error(state, "Iterator result is not an object")
+  case iter_protocol.iterator_close_normal(state, JsObject(sync_iter)) {
+    #(state, Ok(Nil)) -> Ok(state)
+    #(state, Error(thrown)) -> Error(#(thrown, state))
   }
 }
 
@@ -1915,20 +1918,11 @@ pub fn call_native_async_from_sync_close(
   args: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
   let err = list.first(args) |> result.unwrap(JsUndefined)
-  let sync_iter_val = JsObject(sync_iter)
-  let state = case
-    object.get_value(state, sync_iter, Named("return"), sync_iter_val)
-  {
-    Ok(#(ret_fn, state)) ->
-      case helpers.is_callable(state.heap, ret_fn) {
-        True ->
-          case state.call(state, ret_fn, sync_iter_val, []) {
-            Ok(#(_, state)) | Error(#(_, state)) -> state
-          }
-        False -> state
-      }
-    Error(#(_, state)) -> state
-  }
+  // §7.4.11 IteratorClose with a THROW completion: the original error wins, so
+  // anything the close itself throws is observed and dropped (that policy lives
+  // in `iter_protocol.close_and_throw`, not re-hand-rolled here).
+  let #(err, state) =
+    iter_protocol.close_and_throw(state, JsObject(sync_iter), err)
   Error(Threw(err, state))
 }
 
@@ -1981,19 +1975,6 @@ fn promise_resolve_then_with_capability(
 // ============================================================================
 // Private helpers
 // ============================================================================
-
-/// Call a function for its side effects (return value discarded).
-/// Used by finally chain helpers.
-fn call_native_for_job(
-  state: State(host),
-  target: JsValue,
-  args: List(JsValue),
-) -> State(host) {
-  case state.call(state, target, JsUndefined, args) {
-    Ok(#(_, new_state)) -> new_state
-    Error(#(_, new_state)) -> new_state
-  }
-}
 
 // ============================================================================
 // Array.fromAsync — §23.1.2.1 (proposal-array-from-async, ES2026)
@@ -2262,7 +2243,8 @@ pub fn call_native_from_async_on_next(
   let state = case from_async_next_steps(state, ctx, next_result) {
     Ok(state) -> state
     // Plain rejection — these abrupt completions do NOT close the iterator.
-    Error(#(thrown, state)) -> call_native_for_job(state, ctx.reject, [thrown])
+    Error(#(thrown, state)) ->
+      event_loop.call_settlement_fn(state, ctx.reject, [thrown])
   }
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }
@@ -2288,7 +2270,7 @@ fn from_async_next_steps(
     // Step 3.j.ii.7: done — Set(A, "length", k, true), resolve with A.
     True -> {
       use state <- result.map(from_async_set_length(state, ctx.target, ctx.k))
-      call_native_for_job(state, ctx.resolve, [ctx.target])
+      event_loop.call_settlement_fn(state, ctx.resolve, [ctx.target])
     }
     False -> {
       // Step 3.j.ii.8: nextValue = ? IteratorValue(nextResult).
@@ -2350,7 +2332,8 @@ pub fn call_native_from_async_on_mapped(
   let mapped = list.first(args) |> result.unwrap(JsUndefined)
   let state = case from_async_define_and_continue(state, ctx, mapped) {
     Ok(state) -> state
-    Error(#(thrown, state)) -> call_native_for_job(state, ctx.reject, [thrown])
+    Error(#(thrown, state)) ->
+      event_loop.call_settlement_fn(state, ctx.reject, [thrown])
   }
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }
@@ -2391,7 +2374,7 @@ pub fn call_native_from_async_reject_with(
   reject: JsValue,
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  let state = call_native_for_job(state, reject, [error])
+  let state = event_loop.call_settlement_fn(state, reject, [error])
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }
 
@@ -2410,15 +2393,15 @@ fn from_async_close_then_reject(
       case object.get_value(state, iter_ref, Named("return"), iter) {
         // GetMethod threw — original error wins (§7.4.13 step 4).
         Error(#(_inner_thrown, state)) ->
-          call_native_for_job(state, reject, [err])
+          event_loop.call_settlement_fn(state, reject, [err])
         Ok(#(ret_fn, state)) ->
           case helpers.is_callable(state.heap, ret_fn) {
-            False -> call_native_for_job(state, reject, [err])
+            False -> event_loop.call_settlement_fn(state, reject, [err])
             True ->
               case state.call(state, ret_fn, iter, []) {
                 // return() threw — original error wins (§7.4.13 step 4).
                 Error(#(_inner_thrown, state)) ->
-                  call_native_for_job(state, reject, [err])
+                  event_loop.call_settlement_fn(state, reject, [err])
                 Ok(#(inner, state)) -> {
                   // Await(innerResult), then reject with the original error
                   // whichever way it settles.
@@ -2440,7 +2423,7 @@ fn from_async_close_then_reject(
               }
           }
       }
-    _ -> call_native_for_job(state, reject, [err])
+    _ -> event_loop.call_settlement_fn(state, reject, [err])
   }
 }
 
@@ -2493,7 +2476,7 @@ fn from_async_like_step(
   case ctx.k < ctx.len {
     False -> {
       use state <- result.map(from_async_set_length(state, ctx.target, ctx.len))
-      call_native_for_job(state, ctx.resolve, [ctx.target])
+      event_loop.call_settlement_fn(state, ctx.resolve, [ctx.target])
     }
     True -> {
       use #(k_val, state) <- result.try(object.get_value_of(
@@ -2521,7 +2504,8 @@ pub fn call_native_from_async_like_on_value(
   let v = list.first(args) |> result.unwrap(JsUndefined)
   let state = case from_async_like_value_steps(state, ctx, v) {
     Ok(state) -> state
-    Error(#(thrown, state)) -> call_native_for_job(state, ctx.reject, [thrown])
+    Error(#(thrown, state)) ->
+      event_loop.call_settlement_fn(state, ctx.reject, [thrown])
   }
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }
@@ -2560,7 +2544,8 @@ pub fn call_native_from_async_like_on_mapped(
   let mapped = list.first(args) |> result.unwrap(JsUndefined)
   let state = case from_async_like_define_and_continue(state, ctx, mapped) {
     Ok(state) -> state
-    Error(#(thrown, state)) -> call_native_for_job(state, ctx.reject, [thrown])
+    Error(#(thrown, state)) ->
+      event_loop.call_settlement_fn(state, ctx.reject, [thrown])
   }
   Ok(State(..state, stack: [JsUndefined, ..rest_stack], pc: state.pc + 1))
 }

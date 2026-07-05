@@ -277,25 +277,20 @@ fn fulfill_promise_tracked(
 }
 
 /// Settle a promise from a host outcome: FulfillPromise on `Ok`,
-/// RejectPromise on `Error`. Returns `True` when THIS call performed the
-/// pending -> settled transition, `False` when the promise was already
-/// settled (the underlying settle is a soft no-op, per the spec's pending
-/// Assert). `arc/host.resume` relies on the Bool to decrement its
-/// `outstanding` counter exactly once per suspend, no matter how many times
-/// the embedder resumes the same ticket. `fulfill_promise`/`reject_promise`
-/// are thin wrappers that discard the Bool for internal callers.
+/// RejectPromise on `Error`. Reports HOW the settle went, so a caller can
+/// tell the three cases apart: `arc/host.resume` decrements its `outstanding`
+/// counter only on `Transitioned`, treats `AlreadySettled` (a double resume)
+/// as a silent no-op, and surfaces `NotAPromiseSlot` (a stale ticket) as the
+/// embedder bug it is. `fulfill_promise`/`reject_promise` are thin wrappers
+/// that discard the outcome for internal callers.
 pub fn settle_outcome(
   state: state.State(host),
   data_ref: Ref,
   outcome: Result(JsValue, JsValue),
-) -> #(state.State(host), Bool) {
-  let #(state, settled) = case outcome {
+) -> #(state.State(host), SettleOutcome) {
+  case outcome {
     Ok(v) -> fulfill_promise_tracked(state, data_ref, v)
     Error(reason) -> reject_promise_tracked(state, data_ref, reason)
-  }
-  case settled {
-    Transitioned(_) -> #(state, True)
-    AlreadySettled | NotAPromiseSlot -> #(state, False)
   }
 }
 
@@ -310,8 +305,8 @@ pub type SettleOutcome {
   /// The ref does not point at a PromiseSlot at all. No JS program can cause
   /// this, but an embedder can: a `Ticket` outlives the promise slot it names
   /// once `shrink_for_handoff` has dropped that slot, so resuming a stale
-  /// ticket lands here. Treated as a settle that did nothing — `settle_outcome`
-  /// reports `False` and the caller decides what to do.
+  /// ticket lands here. Nothing was settled; the caller decides what to do
+  /// (`arc/host.resume` reports it — it is an embedder bug, not a no-op).
   NotAPromiseSlot
 }
 

@@ -101,6 +101,15 @@ fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
       let embedder_wake_pending =
         state.outstanding > 0 || state.atomics_waiters != []
       case earliest_deadline(state) {
+        // NOT a drain exit: control comes back here (the embedder consumes
+        // its wake and re-drains), so this return deliberately does NOT run
+        // `finish_drain`. INVARIANT: unhandled-rejection reporting happens
+        // only where the drain is done for good, because a wake-driven job
+        // that runs after this hand-back can still attach a handler to a
+        // promise sitting in `unhandled_rejections` — reporting (and
+        // clearing) it here would print a rejection that ends up handled.
+        // The list is threaded through untouched and reported by whichever
+        // later drain reaches `finish_drain`.
         Some(_) if yield_to_embedder && embedder_wake_pending -> state
         Some(deadline) -> {
           let wait_ms =
@@ -124,10 +133,7 @@ fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
             yield_to_embedder,
           )
         }
-        None -> {
-          report_unhandled_rejections(state)
-          State(..state, unhandled_rejections: [])
-        }
+        None -> finish_drain(state)
       }
     }
     Some(#(job, rest)) -> {
@@ -136,6 +142,16 @@ fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
       do_drain_jobs(state, yield_to_embedder)
     }
   }
+}
+
+/// The drain's TERMINAL exit — the queue is dry and there is nothing left for
+/// this drain to wait on. The one place unhandled rejections are reported and
+/// the pending list cleared, so "did we report?" cannot depend on which
+/// return the drain took. The other return out of `do_drain_jobs` (the
+/// yielding hand-back) is deliberately not terminal — see the comment there.
+fn finish_drain(state: State(host)) -> State(host) {
+  report_unhandled_rejections(state)
+  State(..state, unhandled_rejections: [])
 }
 
 /// Earliest pending Atomics.waitAsync waiter deadline, if any.
@@ -161,13 +177,24 @@ fn execute_job(state: State(host), job: value.Job) -> State(host) {
       execute_reaction_job(state, handler, arg, resolve, reject)
     value.PromiseResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
       execute_thenable_job(state, thenable, then_fn, resolve, reject)
+    value.HostJob(run:) -> execute_host_job(state, run)
   }
 }
 
-/// Helper: Call a function via state.call during job execution (fire-and-forget:
-/// there is no continuation to hand the return value to).
-/// Used for calling resolve/reject on child promises after a handler runs.
-fn call_for_job(
+/// Execute a host job: call `run()` for its effects. The job carries no child
+/// promise capability, so there is nothing to settle with the return value —
+/// it is discarded, and an abrupt completion is reported like any other
+/// job-level throw.
+fn execute_host_job(state: State(host), run: JsValue) -> State(host) {
+  call_settlement_fn(state, run, [])
+}
+
+/// Call a function during job execution, fire-and-forget: the return value is
+/// discarded (a job has no continuation to hand it to) and an abrupt
+/// completion is reported on stderr rather than propagated (a job has no
+/// caller to propagate to). Used for the resolve/reject of a child promise
+/// after a reaction runs, and by any host that must call into JS from a job.
+pub fn call_settlement_fn(
   state: State(host),
   target: JsValue,
   args: List(JsValue),
@@ -207,17 +234,17 @@ fn execute_reaction_job(
   reject: JsValue,
 ) -> State(host) {
   case handler {
-    value.IdentityPassThrough -> call_for_job(state, resolve, [arg])
-    value.ThrowerPassThrough -> call_for_job(state, reject, [arg])
+    value.IdentityPassThrough -> call_settlement_fn(state, resolve, [arg])
+    value.ThrowerPassThrough -> call_settlement_fn(state, reject, [arg])
     value.Handler(fun) -> {
       // Call handler(arg)
       case state.call(state, fun, JsUndefined, [arg]) {
         Ok(#(return_val, new_state)) ->
           // Resolve child with handler's return value
-          call_for_job(new_state, resolve, [return_val])
+          call_settlement_fn(new_state, resolve, [return_val])
         Error(#(thrown, new_state)) ->
           // Handler threw — reject child
-          call_for_job(new_state, reject, [thrown])
+          call_settlement_fn(new_state, reject, [thrown])
       }
     }
   }
@@ -236,6 +263,6 @@ fn execute_thenable_job(
     Ok(#(_return_val, new_state)) -> new_state
     Error(#(thrown, new_state)) ->
       // then() threw — reject the promise
-      call_for_job(new_state, reject, [thrown])
+      call_settlement_fn(new_state, reject, [thrown])
   }
 }

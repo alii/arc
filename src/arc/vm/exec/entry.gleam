@@ -390,9 +390,10 @@ pub fn run_and_drain_repl_with(
 /// threshold and skip the sweep entirely.
 const handoff_gc_min_slots = 65_536
 
-/// GC the finished script's heap down to what the caller can still reach:
-/// the settled value, the global object, lexical globals, realms, template
-/// objects, leftover jobs/timers/waiters, and top-level locals. Only used
+/// GC the finished script's heap down to what the caller can still reach —
+/// the exact set `handoff_roots` enumerates (settled value, global object,
+/// lexical globals, realms, template objects, host hooks, leftover
+/// jobs/waiters/rejections, eval env, top-level locals and stack). Only used
 /// after execution has fully settled (empty stack/call stack), so there are
 /// no hidden VM roots. No-op below `handoff_gc_min_slots`.
 fn shrink_for_handoff(
@@ -407,7 +408,10 @@ fn shrink_for_handoff(
 
 /// Every slot id the caller of a settled run can still reach from outside
 /// the heap. The persistent root set (builtins, global, realm slots) is
-/// added by `heap.compact` itself.
+/// added by `heap.compact` itself. ENGINE state hanging off `ctx.host_hooks`
+/// (the dynamic-import hook's function object) comes from
+/// `state.host_hook_roots`, which is exhaustive over the hook record so a new
+/// ref-carrying hook cannot silently miss this set.
 fn handoff_roots(
   settled: Result(JsValue, JsValue),
   state: State(host),
@@ -431,6 +435,8 @@ fn handoff_roots(
     dict.fold(state.ctx.realms, acc, fn(a, ref: Ref, _b) {
       set.insert(a, ref.id)
     })
+  let acc =
+    list.fold(state.host_hook_roots(state.ctx.host_hooks), acc, add_value_root)
   let acc =
     list.fold(state.unhandled_rejections, acc, fn(a, ref: Ref) {
       set.insert(a, ref.id)
@@ -478,6 +484,7 @@ fn add_job_roots(acc: set.Set(Int), job: value.Job) -> set.Set(Int) {
       |> add_value_root(then_fn)
       |> add_value_root(resolve)
       |> add_value_root(reject)
+    value.HostJob(run:) -> add_value_root(acc, run)
   }
 }
 
