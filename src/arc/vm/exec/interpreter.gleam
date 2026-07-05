@@ -410,6 +410,12 @@ pub fn new_state(
       // call_fn/construct_fn — instead of a private re-implementation.
       to_number_fn: coerce.js_to_number,
       to_bigint_fn: coerce.to_bigint,
+      // Canonical trap-aware [[GetOwnProperty]] (§10.1.5.1 / §10.5.5). The
+      // proxy invariant checks in ops/object are specified against
+      // `? target.[[GetOwnProperty]](P)`, but §10.5.5 needs descriptor
+      // parsing from builtins/object — above ops in the module graph. Same
+      // inversion as to_number_fn.
+      get_own_property_fn: builtins_object.own_property_keyed,
       callback_sentinel: value.FuncTemplate(
         ..empty_template(),
         bytecode: tuple_array.from_list([Return, Return]),

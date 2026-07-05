@@ -935,7 +935,14 @@ fn set_on_receiver(
         // proxy receiver, or [[Set]] forwarded through a trapless proxy):
         // the GetOwnProperty/DefineOwnProperty pair must go through traps.
         Some(ObjectSlot(kind: value.ProxyObject(target:, handler:, ..), ..)) ->
-          set_on_proxy_receiver(state, target, handler, PkString(key), val)
+          set_on_proxy_receiver(
+            state,
+            recv_ref,
+            target,
+            handler,
+            PkString(key),
+            val,
+          )
         // Receiver is itself an Integer-Indexed object: the receiver half of
         // OrdinarySet routes numeric index keys through the receiver's
         // [[DefineOwnProperty]] (§10.4.5.3) → IntegerIndexedElementSet for a
@@ -1013,7 +1020,7 @@ fn proxy_receiver_guard(
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case as_proxy(state.heap, recv_ref) {
     Some(#(target, handler)) ->
-      set_on_proxy_receiver(state, target, handler, pk, val)
+      set_on_proxy_receiver(state, recv_ref, target, handler, pk, val)
     None -> cont()
   }
 }
@@ -1024,16 +1031,18 @@ fn proxy_receiver_guard(
 /// CreateDataProperty(Receiver, P, V). Both go through the proxy's traps.
 fn set_on_proxy_receiver(
   state: State(host),
+  recv_ref: Ref,
   target: Option(Ref),
   handler: Option(Ref),
   pk: PropKey,
   val: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
-  use #(existing, state) <- result.try(proxy_receiver_get_own(
+  // Step 2.c: existingDescriptor = ? Receiver.[[GetOwnProperty]](P) — the
+  // canonical §10.5.5, invariants and all, not a private re-implementation.
+  use #(existing, state) <- result.try(state.get_own_property(
     state,
-    target,
-    handler,
-    pk,
+    recv_ref,
+    prop_key_object_key(pk),
   ))
   case existing {
     // Step 2.d.i-ii: accessor or non-writable existing → false.
@@ -1042,88 +1051,6 @@ fn set_on_proxy_receiver(
     Some(DataProperty(..)) ->
       proxy_receiver_define(state, target, handler, pk, val, False)
     None -> proxy_receiver_define(state, target, handler, pk, val, True)
-  }
-}
-
-/// Receiver-side Proxy [[GetOwnProperty]] — simplified (no invariant checks;
-/// they are enforced on the read path in builtins/object). Used only by the
-/// OrdinarySet receiver steps above.
-fn proxy_receiver_get_own(
-  state: State(host),
-  target: Option(Ref),
-  handler: Option(Ref),
-  pk: PropKey,
-) -> Result(#(Option(Property), State(host)), #(JsValue, State(host))) {
-  use #(t, h, trap, state) <- result.try(proxy_trap(
-    state,
-    target,
-    handler,
-    "getOwnPropertyDescriptor",
-  ))
-  case trap {
-    None ->
-      case as_proxy(state.heap, t) {
-        Some(#(t2, h2)) -> proxy_receiver_get_own(state, t2, h2, pk)
-        None -> Ok(#(target_own_property(state.heap, t, pk), state))
-      }
-    Some(trap_fn) -> {
-      use #(res, state) <- result.try(
-        state.call(state, trap_fn, JsObject(h), [
-          JsObject(t),
-          prop_key_value(pk),
-        ]),
-      )
-      case res {
-        value.JsUndefined | value.JsNull -> Ok(#(None, state))
-        JsObject(desc_ref) -> {
-          // Minimal ToPropertyDescriptor: read the fields off the returned
-          // object (own data reads only — descriptor objects are plain).
-          let read = fn(name) {
-            case get_own_property(state.heap, desc_ref, Named(name)) {
-              Some(DataProperty(value: v, ..)) -> Some(v)
-              _ -> None
-            }
-          }
-          let get_f = read("get")
-          let set_f = read("set")
-          case get_f, set_f {
-            None, None ->
-              Ok(#(
-                Some(DataProperty(
-                  value: read("value") |> option.unwrap(value.JsUndefined),
-                  writable: read("writable")
-                    |> option.map(value.is_truthy)
-                    |> option.unwrap(False),
-                  enumerable: read("enumerable")
-                    |> option.map(value.is_truthy)
-                    |> option.unwrap(False),
-                  configurable: read("configurable")
-                    |> option.map(value.is_truthy)
-                    |> option.unwrap(False),
-                  seq: value.next_prop_seq(),
-                )),
-                state,
-              ))
-            _, _ ->
-              Ok(#(
-                Some(AccessorProperty(
-                  get: get_f,
-                  set: set_f,
-                  enumerable: read("enumerable")
-                    |> option.map(value.is_truthy)
-                    |> option.unwrap(False),
-                  configurable: read("configurable")
-                    |> option.map(value.is_truthy)
-                    |> option.unwrap(False),
-                  seq: value.next_prop_seq(),
-                )),
-                state,
-              ))
-          }
-        }
-        _ -> Ok(#(None, state))
-      }
-    }
   }
 }
 
@@ -3666,14 +3593,30 @@ pub fn proxy_trap(
   }
 }
 
-/// target.[[GetOwnProperty]](P) for either key kind. Non-trapping read used
-/// by the invariant checks (a nested-proxy target reports no own properties
-/// here, which only makes the invariant checks more permissive).
-fn target_own_property(h: Heap(host), t: Ref, pk: PropKey) -> Option(Property) {
+/// The `value.ObjectKey` form of a PropKey — the shape the canonical
+/// [[GetOwnProperty]] (`state.get_own_property`) is keyed on. `display` must be
+/// the exact ToPropertyKey string, since a `getOwnPropertyDescriptor` trap
+/// receives it as its property-key argument.
+fn prop_key_object_key(pk: PropKey) -> value.ObjectKey {
   case pk {
-    PkString(key) -> get_own_property(h, t, key)
-    PkSymbol(sym) -> get_own_symbol_property(h, t, sym)
+    PkString(k) -> value.StringPropKey(k, key.key_to_text(k))
+    PkSymbol(sym) -> value.SymbolPropKey(sym)
   }
+}
+
+/// `? target.[[GetOwnProperty]](P)` — the read every proxy invariant check
+/// below is specified against, and the ONLY way to reach a target's own
+/// descriptor from here. It is TRAP-AWARE: when the target is itself a proxy
+/// this fires the target's `getOwnPropertyDescriptor` trap (§10.5.5) instead
+/// of reading past it, so the invariants hold across nested proxies and the
+/// trap's observable side effects happen. Routed through the ctx hook because
+/// §10.5.5 needs descriptor parsing, which lives above this module.
+fn target_own_property(
+  state: State(host),
+  t: Ref,
+  pk: PropKey,
+) -> Result(#(Option(Property), State(host)), #(JsValue, State(host))) {
+  state.get_own_property(state, t, prop_key_object_key(pk))
 }
 
 /// §10.5.8 Proxy [[Get]] ( P, Receiver ).
@@ -3707,8 +3650,9 @@ pub fn proxy_get(
           receiver,
         ]),
       )
-      // Steps 8-10: invariants against the target's own descriptor.
-      case target_own_property(state.heap, t, pk) {
+      // Steps 8-10: invariants against `? target.[[GetOwnProperty]](P)`.
+      use #(target_desc, state) <- result.try(target_own_property(state, t, pk))
+      case target_desc {
         Some(DataProperty(value: tv, writable: False, configurable: False, ..)) ->
           case value.same_value(res, tv) {
             True -> Ok(#(res, state))
@@ -3772,9 +3716,14 @@ pub fn proxy_set(
       case value.is_truthy(res) {
         // Step 8: trap returned false → [[Set]] fails.
         False -> Ok(#(state, False))
-        True ->
-          // Steps 9-11: invariants against the target's own descriptor.
-          case target_own_property(state.heap, t, pk) {
+        True -> {
+          // Steps 9-11: invariants against `? target.[[GetOwnProperty]](P)`.
+          use #(target_desc, state) <- result.try(target_own_property(
+            state,
+            t,
+            pk,
+          ))
+          case target_desc {
             Some(DataProperty(
               value: tv,
               writable: False,
@@ -3800,6 +3749,7 @@ pub fn proxy_set(
               ))
             _ -> Ok(#(state, True))
           }
+        }
       }
     }
   }
@@ -3905,9 +3855,15 @@ pub fn proxy_has(
       )
       case value.is_truthy(res) {
         True -> Ok(#(True, state))
-        False ->
-          // Step 8: invariants when the trap reports the key as absent.
-          case target_own_property(state.heap, t, pk) {
+        False -> {
+          // Steps 9-13: invariants when the trap reports the key as absent,
+          // starting from `? target.[[GetOwnProperty]](P)`.
+          use #(target_desc, state) <- result.try(target_own_property(
+            state,
+            t,
+            pk,
+          ))
+          case target_desc {
             None -> Ok(#(False, state))
             Some(prop) ->
               case value.prop_configurable(prop) {
@@ -3938,6 +3894,7 @@ pub fn proxy_has(
                 }
               }
           }
+        }
       }
     }
   }
@@ -3992,9 +3949,15 @@ pub fn proxy_delete(
       )
       case value.is_truthy(res) {
         False -> Ok(#(state, False))
-        True ->
-          // Steps 9-13: invariants.
-          case target_own_property(state.heap, t, pk) {
+        True -> {
+          // Steps 8-13: invariants, starting from
+          // `? target.[[GetOwnProperty]](P)`.
+          use #(target_desc, state) <- result.try(target_own_property(
+            state,
+            t,
+            pk,
+          ))
+          case target_desc {
             None -> Ok(#(state, True))
             Some(prop) ->
               case value.prop_configurable(prop) {
@@ -4022,6 +3985,7 @@ pub fn proxy_delete(
                 }
               }
           }
+        }
       }
     }
   }
@@ -4284,29 +4248,18 @@ pub fn typed_array_element(
   use <- bool.guard(idx < 0 || idx >= length, None)
   case typed_array_buffer_data(h, buffer) {
     None -> None
-    Some(data) -> {
-      // §10.4.5.14 IsValidIntegerIndex against the CURRENT backing store — the
-      // SAME predicate the write half applies (typed_array_elements owns it),
-      // so a read and a write can never disagree about which indices exist.
-      // The view bundles the byte size the length was resolved against with
-      // the length itself, so the two cannot come from different buffers.
-      let view =
-        typed_array_elements.resolve_view(
+    Some(data) ->
+      element_of_view(
+        data,
+        typed_array_elements.fixed_view(
           bit_array.byte_size(data),
           elem_kind,
           byte_offset,
-          Some(length),
-        )
-      case typed_array_elements.valid_integer_index(view, idx) {
-        True ->
-          Some(decode_typed_element(
-            data,
-            typed_array_elements.view_element_offset(view, idx),
-            elem_kind,
-          ))
-        False -> None
-      }
-    }
+          length,
+        ),
+        elem_kind,
+        idx,
+      )
   }
 }
 
@@ -4314,6 +4267,8 @@ pub fn typed_array_element(
 /// declared `length` (None for a length-tracking view) is resolved through
 /// TypedArrayLength first. This is what every MOP element read wants — the
 /// declared length alone is stale the moment a resizable buffer changes size.
+/// The buffer is read ONCE and both TypedArrayLength and IsValidIntegerIndex
+/// answer against those bytes.
 pub fn typed_array_element_live(
   h: Heap(host),
   buffer: Ref,
@@ -4322,14 +4277,45 @@ pub fn typed_array_element_live(
   length: Option(Int),
   idx: Int,
 ) -> Option(JsValue) {
-  typed_array_element(
-    h,
-    buffer,
-    elem_kind,
-    byte_offset,
-    typed_array_view_length(h, buffer, elem_kind, byte_offset, length),
-    idx,
-  )
+  use <- bool.guard(idx < 0, None)
+  case typed_array_buffer_data(h, buffer) {
+    None -> None
+    Some(data) ->
+      element_of_view(
+        data,
+        typed_array_elements.resolve_view(
+          bit_array.byte_size(data),
+          elem_kind,
+          byte_offset,
+          length,
+        ),
+        elem_kind,
+        idx,
+      )
+  }
+}
+
+/// The tail both element reads share: §10.4.5.14 IsValidIntegerIndex against
+/// the CURRENT backing store — the SAME predicate the write half applies
+/// (typed_array_elements owns it), so a read and a write can never disagree
+/// about which indices exist. `view` bundles the byte size the length was
+/// resolved against with the length itself, so the two cannot come from
+/// different buffers, and the decoded byte range comes off the same view.
+fn element_of_view(
+  data: BitArray,
+  view: typed_array_elements.ResolvedView,
+  elem_kind: value.TypedArrayKind,
+  idx: Int,
+) -> Option(JsValue) {
+  case typed_array_elements.valid_integer_index(view, idx) {
+    True ->
+      Some(decode_typed_element(
+        data,
+        typed_array_elements.view_element_offset(view, idx),
+        elem_kind,
+      ))
+    False -> None
+  }
 }
 
 /// Why a typed-array view failed its buffer witness. The cases are NOT
@@ -4412,11 +4398,11 @@ pub fn typed_array_live_length(
     None -> 0
     Some(data) -> {
       let view =
-        typed_array_elements.resolve_view(
+        typed_array_elements.fixed_view(
           bit_array.byte_size(data),
           elem_kind,
           byte_offset,
-          Some(length),
+          length,
         )
       case typed_array_elements.view_in_bounds(view) {
         True -> length
@@ -4426,10 +4412,10 @@ pub fn typed_array_live_length(
   }
 }
 
-/// `typed_array_live_length` of the CURRENT view length: resolves the declared
-/// `length` (None for a length-tracking view) through TypedArrayLength first.
-/// The number of indices the view actually has right now — 0 when detached or
-/// out of bounds.
+/// `typed_array_live_length` for a view whose declared `length` may still be
+/// AUTO (None for a length-tracking view): TypedArrayLength and the bounds
+/// check both answer against ONE read of the buffer. The number of indices the
+/// view actually has right now — 0 when detached or out of bounds.
 pub fn typed_array_live_count(
   h: Heap(host),
   buffer: Ref,
@@ -4437,13 +4423,8 @@ pub fn typed_array_live_count(
   byte_offset: Int,
   length: Option(Int),
 ) -> Int {
-  typed_array_live_length(
-    h,
-    buffer,
-    elem_kind,
-    byte_offset,
-    typed_array_view_length(h, buffer, elem_kind, byte_offset, length),
-  )
+  typed_array_iter_length(h, buffer, elem_kind, byte_offset, length)
+  |> result.unwrap(0)
 }
 
 /// Decode one element from the backing store (§25.1.2.10 GetValueFromBuffer).

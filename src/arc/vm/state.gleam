@@ -128,6 +128,20 @@ pub type RealmCtx(host) {
     /// by BigInt64/BigUint64 element stores.
     to_bigint_fn: fn(State(host), JsValue) ->
       Result(#(Int, State(host)), #(JsValue, State(host))),
+    /// Canonical, TRAP-AWARE `O.[[GetOwnProperty]](P)`: §10.1.5.1 for ordinary
+    /// objects, §10.5.5 for proxies (so a proxy target's own
+    /// getOwnPropertyDescriptor trap fires, and its invariants are enforced).
+    /// Set by the VM executor to `builtins/object.own_property_keyed`.
+    ///
+    /// Same layering inversion as `to_number_fn`: §10.5.5 needs descriptor
+    /// parsing (ToPropertyDescriptor), which lives ABOVE the MOP in
+    /// builtins/object, yet the proxy invariant checks in ops/object — the
+    /// `get`/`set`/`has`/`deleteProperty` traps — are all specified against
+    /// `? target.[[GetOwnProperty]](P)`. Routing through this hook is what
+    /// keeps the engine at exactly ONE [[GetOwnProperty]]; a private raw heap
+    /// read here silently skips the target's traps and invariants.
+    get_own_property_fn: fn(State(host), Ref, value.ObjectKey) ->
+      Result(#(Option(value.Property), State(host)), #(JsValue, State(host))),
     /// Pre-built sentinel frame template (bytecode = [Return, Return]) used by
     /// the re-entrant call/construct callbacks to drive a callee to completion
     /// on an isolated stack. Built once at state init — these callbacks run
@@ -501,6 +515,16 @@ pub fn call(
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let f = state.ctx.call_fn
   f(state, callee, this_val, args)
+}
+
+/// Call ctx.get_own_property_fn — the trap-aware `O.[[GetOwnProperty]](P)`.
+pub fn get_own_property(
+  state: State(host),
+  ref: Ref,
+  key: value.ObjectKey,
+) -> Result(#(Option(value.Property), State(host)), #(JsValue, State(host))) {
+  let f = state.ctx.get_own_property_fn
+  f(state, ref, key)
 }
 
 /// Call ctx.construct_fn (re-entrant `new target(...args)`). newTarget = target.
