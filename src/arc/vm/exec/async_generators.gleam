@@ -12,6 +12,7 @@
 /// before any settle, and each gets its own promise.
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{
   type Outcome, Completed, NormalCompletion, Suspended, ThrowCompletion,
@@ -311,15 +312,12 @@ fn async_delegate_iterator(frame: AsyncGenFrame) -> Option(Ref) {
   option.map(async_delegate_site(frame), pair.first)
 }
 
-/// The yield* iter slot may hold an internal Iterator Record wrapper
-/// (cached `next` from GetIteratorFromMethod) — resolve it to the real
-/// iterator for .return/.throw lookups.
+/// Ref-typed adapter over `iter_protocol.unwrap_record_value` — the yield*
+/// slot is stored as a Ref and `forward_async_delegate` needs one back.
 fn unwrap_record_ref(h: heap.Heap(State(host), host), ref: Ref) -> Ref {
-  case heap.read(h, ref) {
-    Some(ObjectSlot(
-      kind: value.IteratorRecordObject(iterated: JsObject(real), ..),
-      ..,
-    )) -> real
+  case iter_protocol.unwrap_record_value(h, JsObject(ref)) {
+    JsObject(real) -> real
+    // Unreachable: an Iterator Record's [[Iterator]] is always an Object.
     _ -> ref
   }
 }
@@ -492,33 +490,6 @@ fn close_async_iterator(
   }
 }
 
-/// Read {done, value} off an awaited iterator-result object. Returns
-/// Error(#(thrown, state)) for non-object results or property-get throws.
-fn read_iter_result(
-  state: State(host),
-  settled: JsValue,
-) -> Result(#(Bool, JsValue, State(host)), #(JsValue, State(host))) {
-  case settled {
-    JsObject(rref) -> {
-      use #(done_v, state) <- result.try(object_ops.get_value(
-        state,
-        rref,
-        Named("done"),
-        settled,
-      ))
-      use #(val, state) <- result.map(object_ops.get_value(
-        state,
-        rref,
-        Named("value"),
-        settled,
-      ))
-      #(value.is_truthy(done_v), val, state)
-    }
-    _non_obj ->
-      Error(state.type_error_value(state, "Iterator result is not an object"))
-  }
-}
-
 /// Handle the awaited result of a delegated iter.return()/iter.throw() call.
 /// Called from call_native_resume's AGResumeDelegate branch.
 fn resume_after_delegate(
@@ -532,7 +503,7 @@ fn resume_after_delegate(
   case is_reject {
     True -> throw_into_gen_body(state, run, settled)
     False ->
-      case read_iter_result(state, settled) {
+      case iter_protocol.read_iter_result(state, settled) {
         Error(#(thrown, state)) -> throw_into_gen_body(state, run, thrown)
         Ok(#(False, val, state)) -> {
           // Still delegating — yield val out, stay suspended at SAME

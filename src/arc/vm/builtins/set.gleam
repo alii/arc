@@ -20,13 +20,14 @@ import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
-  type JsValue, type MapKey, type Ref, type SetNativeFn, Dispatch, Finite,
-  JsBool, JsNumber, JsObject, JsUndefined, NaN, ObjectSlot, SetConstructor,
-  SetNative, SetObject, SetPrototypeAdd, SetPrototypeClear, SetPrototypeDelete,
-  SetPrototypeDifference, SetPrototypeEntries, SetPrototypeForEach,
-  SetPrototypeGetSize, SetPrototypeHas, SetPrototypeIntersection,
-  SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf, SetPrototypeIsSupersetOf,
-  SetPrototypeSymmetricDifference, SetPrototypeUnion, SetPrototypeValues,
+  type IteratorRecord, type JsValue, type MapKey, type Ref, type SetNativeFn,
+  Dispatch, Finite, IteratorRecord, JsBool, JsNumber, JsObject, JsUndefined, NaN,
+  ObjectSlot, SetConstructor, SetNative, SetObject, SetPrototypeAdd,
+  SetPrototypeClear, SetPrototypeDelete, SetPrototypeDifference,
+  SetPrototypeEntries, SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas,
+  SetPrototypeIntersection, SetPrototypeIsDisjointFrom, SetPrototypeIsSubsetOf,
+  SetPrototypeIsSupersetOf, SetPrototypeSymmetricDifference, SetPrototypeUnion,
+  SetPrototypeValues,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -339,8 +340,8 @@ fn set_union(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_set(this, state, "union")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  use iter, next_fn, state <- with_keys_iterator(state, rec)
-  union_loop(state, iter, next_fn, read_set_store(state.heap, ref))
+  use keys, state <- with_keys_iterator(state, rec)
+  union_loop(state, keys, read_set_store(state.heap, ref))
 }
 
 /// §24.2.3.14 steps 6-7: append every key other yields that isn't already in
@@ -348,14 +349,13 @@ fn set_union(
 /// resultSetData at step 5.
 fn union_loop(
   state: State(host),
-  iter: JsValue,
-  next_fn: JsValue,
+  keys: IteratorRecord,
   result: OrderedEntries(MapKey, JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use next, state <- step_keys(state, iter, next_fn)
+  use next, state <- step_keys(state, keys)
   case next {
     None -> alloc_new_set(state, result)
-    Some(v) -> union_loop(state, iter, next_fn, set_data_append(result, v))
+    Some(v) -> union_loop(state, keys, set_data_append(result, v))
   }
 }
 
@@ -376,8 +376,8 @@ fn set_intersection(
   case ordered_entries.size(read_set_store(state.heap, ref)) <= rec.size {
     True -> intersection_this_loop(state, ref, rec, 0, ordered_entries.new())
     False -> {
-      use iter, next_fn, state <- with_keys_iterator(state, rec)
-      intersection_other_loop(state, ref, iter, next_fn, ordered_entries.new())
+      use keys, state <- with_keys_iterator(state, rec)
+      intersection_other_loop(state, ref, keys, ordered_entries.new())
     }
   }
 }
@@ -411,11 +411,10 @@ fn intersection_this_loop(
 fn intersection_other_loop(
   state: State(host),
   ref: SetRef,
-  iter: JsValue,
-  next_fn: JsValue,
+  keys: IteratorRecord,
   result: OrderedEntries(MapKey, JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use next, state <- step_keys(state, iter, next_fn)
+  use next, state <- step_keys(state, keys)
   case next {
     None -> alloc_new_set(state, result)
     Some(v) -> {
@@ -424,7 +423,7 @@ fn intersection_other_loop(
         True -> set_data_append(result, v)
         False -> result
       }
-      intersection_other_loop(state, ref, iter, next_fn, result)
+      intersection_other_loop(state, ref, keys, result)
     }
   }
 }
@@ -453,8 +452,8 @@ fn set_difference(
         result,
       )
     False -> {
-      use iter, next_fn, state <- with_keys_iterator(state, rec)
-      difference_other_loop(state, iter, next_fn, result)
+      use keys, state <- with_keys_iterator(state, rec)
+      difference_other_loop(state, keys, result)
     }
   }
 }
@@ -480,16 +479,15 @@ fn difference_this_loop(
 
 fn difference_other_loop(
   state: State(host),
-  iter: JsValue,
-  next_fn: JsValue,
+  keys: IteratorRecord,
   result: OrderedEntries(MapKey, JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use next, state <- step_keys(state, iter, next_fn)
+  use next, state <- step_keys(state, keys)
   case next {
     None -> alloc_new_set(state, result)
     Some(v) -> {
       let result = ordered_entries.delete(result, value.js_to_map_key(v)).0
-      difference_other_loop(state, iter, next_fn, result)
+      difference_other_loop(state, keys, result)
     }
   }
 }
@@ -507,24 +505,17 @@ fn set_symmetric_difference(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- require_set(this, state, "symmetricDifference")
   use rec, state <- get_set_record(first_arg_or_undefined(args), state)
-  use iter, next_fn, state <- with_keys_iterator(state, rec)
-  symmetric_difference_loop(
-    state,
-    ref,
-    iter,
-    next_fn,
-    read_set_store(state.heap, ref),
-  )
+  use keys, state <- with_keys_iterator(state, rec)
+  symmetric_difference_loop(state, ref, keys, read_set_store(state.heap, ref))
 }
 
 fn symmetric_difference_loop(
   state: State(host),
   ref: SetRef,
-  iter: JsValue,
-  next_fn: JsValue,
+  keys: IteratorRecord,
   result: OrderedEntries(MapKey, JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use next, state <- step_keys(state, iter, next_fn)
+  use next, state <- step_keys(state, keys)
   case next {
     None -> alloc_new_set(state, result)
     Some(v) -> {
@@ -537,7 +528,7 @@ fn symmetric_difference_loop(
         True -> ordered_entries.delete(result, key).0
         False -> set_data_append(result, v)
       }
-      symmetric_difference_loop(state, ref, iter, next_fn, result)
+      symmetric_difference_loop(state, ref, keys, result)
     }
   }
 }
@@ -598,8 +589,8 @@ fn set_is_superset_of(
       // Steps 5-8: step other's keys iterator one value at a time.
       // Draining the whole iterator first would never terminate on an
       // infinite iterator whose first value is already a non-member.
-      use iter, next_fn, state <- with_keys_iterator(state, rec)
-      other_step_loop(state, ref, iter, next_fn, False)
+      use keys, state <- with_keys_iterator(state, rec)
+      other_step_loop(state, ref, keys, False)
     }
   }
 }
@@ -613,18 +604,17 @@ fn set_is_superset_of(
 fn other_step_loop(
   state: State(host),
   ref: SetRef,
-  iter: JsValue,
-  next_fn: JsValue,
+  keys: IteratorRecord,
   false_when false_when: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use next, state <- step_keys(state, iter, next_fn)
+  use next, state <- step_keys(state, keys)
   case next {
     None -> #(state, Ok(JsBool(True)))
     Some(v) -> {
       let store = read_set_store(state.heap, ref)
       case ordered_entries.has(store, value.js_to_map_key(v)) == false_when {
-        True -> close_keys_iterator_and_answer_false(state, iter)
-        False -> other_step_loop(state, ref, iter, next_fn, false_when)
+        True -> close_keys_iterator_and_answer_false(state, keys.iterator)
+        False -> other_step_loop(state, ref, keys, false_when)
       }
     }
   }
@@ -644,8 +634,8 @@ fn set_is_disjoint_from(
   case ordered_entries.size(read_set_store(state.heap, ref)) <= rec.size {
     True -> this_step_loop(state, ref, rec, 0, True)
     False -> {
-      use iter, next_fn, state <- with_keys_iterator(state, rec)
-      other_step_loop(state, ref, iter, next_fn, True)
+      use keys, state <- with_keys_iterator(state, rec)
+      other_step_loop(state, ref, keys, True)
     }
   }
 }
@@ -787,13 +777,14 @@ fn get_set_record(
   }
 }
 
-/// §24.2.1.3 GetKeysIterator(rec): call rec.keys(), resolve the returned
-/// iterator's .next method, and hand both to the continuation.
-/// CPS wrapper — `use iter, next_fn, state <- with_keys_iterator(state, rec)`.
+/// §24.2.1.3 GetKeysIterator(rec): call rec.keys(), require the result is an
+/// Object, require its .next is callable, and hand the resulting
+/// IteratorRecord to the continuation.
+/// CPS wrapper — `use keys, state <- with_keys_iterator(state, rec)`.
 fn with_keys_iterator(
   state: State(host),
   rec: SetRecord,
-  cont: fn(JsValue, JsValue, State(host)) ->
+  cont: fn(IteratorRecord, State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use iter, state <- state.try_call(state, rec.keys, rec.obj, [])
@@ -808,45 +799,25 @@ fn with_keys_iterator(
       use next_fn, state <- helpers.require_callable(state, next_fn, fn() {
         "iterator.next is not a function"
       })
-      cont(iter, next_fn, state)
+      cont(IteratorRecord(iterator: iter, next_method: next_fn), state)
     }
     _ -> state.type_error(state, "keys() did not return an object")
   }
 }
 
-/// One §7.4.8 IteratorStepValue on a keys iterator: `None` = done,
-/// `Some(v)` = the next value (with -0 normalized to +0 per §24.2.1.2
-/// step 7.b.ii). CPS — `use next, state <- step_keys(state, iter, next_fn)`.
+/// §7.4.8 IteratorStepValue on a keys IteratorRecord via `iter_protocol`, with
+/// -0 normalized to +0 (§24.2.1.2 step 7.b.ii) on yielded values.
+/// CPS — `use next, state <- step_keys(state, keys)`.
 fn step_keys(
   state: State(host),
-  iter: JsValue,
-  next_fn: JsValue,
+  keys: IteratorRecord,
   cont: fn(Option(JsValue), State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use result_obj, state <- state.try_call(state, next_fn, iter, [])
-  case result_obj {
-    JsObject(rref) -> {
-      use done, state <- state.try_op(object.get_value(
-        state,
-        rref,
-        Named("done"),
-        result_obj,
-      ))
-      case value.is_truthy(done) {
-        True -> cont(None, state)
-        False -> {
-          use v, state <- state.try_op(object.get_value(
-            state,
-            rref,
-            Named("value"),
-            result_obj,
-          ))
-          cont(Some(normalize_neg_zero(v)), state)
-        }
-      }
-    }
-    _ -> state.type_error(state, "iterator result is not an object")
+  let #(state, step) = iter_protocol.iterator_step_value(state, keys)
+  case step {
+    Error(thrown) -> #(state, Error(thrown))
+    Ok(step) -> cont(option.map(step, normalize_neg_zero), state)
   }
 }
 

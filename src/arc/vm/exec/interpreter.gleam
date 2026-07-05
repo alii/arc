@@ -12,6 +12,7 @@ import arc/vm/completion.{
 }
 import arc/vm/exec/call
 import arc/vm/exec/dynamic_import
+import arc/vm/exec/frame
 import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/host_hooks
@@ -468,7 +469,7 @@ pub fn init_state(
     True -> JsUndefined
     False -> JsObject(global_object)
   }
-  let locals = init_top_level_locals(func, this_val)
+  let locals = frame.init_top_level_locals(func, this_val)
   new_state(
     func,
     locals,
@@ -481,37 +482,6 @@ pub fn init_state(
     can_block,
     extend_262,
   )
-}
-
-/// Build the locals array for a top-level (script/module/eval/REPL) template:
-/// JsUndefined everywhere, then seed the lexical-`this` slot if present.
-/// Function bodies use frame.setup_frame instead — this is only for entries
-/// that don't go through the call protocol.
-pub fn init_top_level_locals(
-  func: FuncTemplate,
-  this_val: JsValue,
-) -> tuple_array.TupleArray(JsValue) {
-  let locals = tuple_array.repeat(JsUndefined, func.local_count)
-  case opcode.lexical_slot(func.lexical, opcode.RefThis) {
-    Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
-    None -> locals
-  }
-}
-
-/// Build the locals array for a module body. Module `this` is undefined
-/// (§16.2.1.5.2). `seeds` places pre-allocated BoxSlot refs into specific local
-/// slots: import bindings into capture slots 0..N-1 (each the exporting
-/// module's live cell), plus this module's own export cells into their declared
-/// slots. The body reads/writes both through GetBoxed/PutBoxed.
-pub fn init_module_locals(
-  func: FuncTemplate,
-  seeds: List(#(Int, JsValue)),
-) -> tuple_array.TupleArray(JsValue) {
-  let locals = tuple_array.repeat(JsUndefined, func.local_count)
-  list.fold(seeds, locals, fn(acc, seed) {
-    let #(index, box) = seed
-    tuple_array.set_unchecked(index, box, acc)
-  })
 }
 
 /// A function template with no body — every flag off, empty bytecode. Lets the
@@ -1612,7 +1582,10 @@ fn dispatch_slow(
         // saved stack sees the real iterator.
         DelegateYield ->
           State(..post, stack: case post.stack {
-            [_arg, iter, ..rest] -> [unwrap_iterator_record(post, iter), ..rest]
+            [_arg, iter, ..rest] -> [
+              iter_protocol.unwrap_record_value(post.heap, iter),
+              ..rest
+            ]
             [_arg] | [] -> []
           })
         // AsyncYieldStarResume: stack is [result_obj, iter, ..]. result_obj
@@ -4195,7 +4168,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             state.rethrow(property.to_prop_key(state, key)),
           )
           use #(val, state) <- result.map(
-            state.rethrow(get_prop_value_of(state, receiver, pk)),
+            state.rethrow(object.get_keyed_value_of(state, receiver, pk)),
           )
           State(
             ..state,
@@ -4928,7 +4901,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
         [JsObject(_) as iter, ..rest] -> {
           // Resolve internal Iterator Records so GetMethod(iter, "return")
           // hits the real iterator object.
-          let iter = unwrap_iterator_record(state, iter)
+          let iter = iter_protocol.unwrap_record_value(state.heap, iter)
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case iter_protocol.iterator_close_normal(state, iter) {
             #(state, Ok(Nil)) -> Ok(state)
@@ -4947,7 +4920,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // [[Done]] (set by IteratorNext on done/abrupt) → skip .return().
       case state.stack {
         [thrown, JsObject(_) as iter, ..rest] -> {
-          let iter = unwrap_iterator_record(state, iter)
+          let iter = iter_protocol.unwrap_record_value(state.heap, iter)
           let state = State(..state, stack: rest)
           // Original error wins regardless of what .return() does.
           let #(state, _inner) = iter_protocol.call_return(state, iter)
@@ -4965,7 +4938,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // without IteratorClose (spec: [[Done]]=true → no close on rest abrupt).
       case state.stack {
         [JsObject(_) as iter, ..rest] -> {
-          let iter = unwrap_iterator_record(state, iter)
+          let iter = iter_protocol.unwrap_record_value(state.heap, iter)
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case iter_protocol.iterator_rest(state, iter) {
             #(state, Ok(arr)) -> Ok(State(..state, stack: [arr, ..rest]))
@@ -5058,7 +5031,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 use #(res, state) <- result.try(
                   state.rethrow(state.call(state, next_fn, iter, [arg])),
                 )
-                iter_protocol.read_iter_result(state, res)
+                state.rethrow(iter_protocol.read_iter_result(state, res))
               }
             },
           )
@@ -5115,10 +5088,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // [result_obj, iter, ..rest]. done? → push value, pc+1 : Yielded(value).
       case state.stack {
         [res, _iter, ..rest] -> {
-          use #(done, val, state) <- result.try(iter_protocol.read_iter_result(
-            state,
-            res,
-          ))
+          use #(done, val, state) <- result.try(
+            state.rethrow(iter_protocol.read_iter_result(state, res)),
+          )
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
             False -> Error(Yielded(AsyncDelegateResume(next_pc:), val, state))
@@ -5427,19 +5399,6 @@ fn prop_key_value(pk: ObjectKey) -> JsValue {
   }
 }
 
-/// [[Get]] on any receiver keyed by a resolved ObjectKey — the primitive-
-/// receiver counterpart of `object.get_prop_value` (which needs a Ref).
-fn get_prop_value_of(
-  state: State(host),
-  receiver: JsValue,
-  pk: ObjectKey,
-) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
-  case pk {
-    SymbolPropKey(sym) -> object.get_symbol_value_of(state, receiver, sym)
-    StringPropKey(pkey:, ..) -> object.get_value_of(state, receiver, pkey)
-  }
-}
-
 /// GetElem on a primitive receiver — ToPropertyKey (§7.1.19) then delegate to
 /// the ObjectKey-keyed [[Get]].
 fn get_elem_on_primitive(
@@ -5448,7 +5407,7 @@ fn get_elem_on_primitive(
   key: JsValue,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   use #(pk, state) <- result.try(property.to_prop_key(state, key))
-  get_prop_value_of(state, receiver, pk)
+  object.get_keyed_value_of(state, receiver, pk)
 }
 
 // ============================================================================
@@ -6366,21 +6325,6 @@ fn push_iterator_record(
         pc: state.pc + 1,
       )
     }
-  }
-}
-
-/// Resolve a GetIterator stack slot to the real iterator object: internal
-/// IteratorRecordObject wrappers (cached `next`) must be transparent to
-/// .return()/.throw() lookups and to yield* delegation.
-fn unwrap_iterator_record(state: State(host), v: JsValue) -> JsValue {
-  case v {
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: value.IteratorRecordObject(iterated:, ..), ..)) ->
-          iterated
-        _ -> v
-      }
-    _ -> v
   }
 }
 

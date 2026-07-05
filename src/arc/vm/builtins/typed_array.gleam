@@ -15,6 +15,7 @@
 import arc/internal/digits
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
+import arc/vm/builtins/iter_protocol
 import arc/vm/heap
 import arc/vm/internal/typed_array_ffi.{fill_clamped, splice_clamped, ta_zeroed}
 import arc/vm/js_string
@@ -29,8 +30,8 @@ import arc/vm/value.{
   type JsValue, type Ref, type TypedArrayKind, type TypedArrayNativeFn, Dispatch,
   Finite, JsBool, JsNumber, JsObject, JsString, JsUndefined, ObjectSlot,
   TypedArrayConstructor, TypedArrayGetBuffer, TypedArrayGetByteLength,
-  TypedArrayGetByteOffset, TypedArrayGetLength, TypedArrayGetSpecies,
-  TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor, TypedArrayNative,
+  TypedArrayGetByteOffset, TypedArrayGetLength, TypedArrayGetToStringTag,
+  TypedArrayIntrinsicConstructor, TypedArrayNative,
   TypedArrayPrototypeAt, TypedArrayPrototypeCopyWithin,
   TypedArrayPrototypeEntries, TypedArrayPrototypeEvery, TypedArrayPrototypeFill,
   TypedArrayPrototypeFilter, TypedArrayPrototypeFind,
@@ -180,26 +181,7 @@ pub fn init(
       ),
     )
   // get %TypedArray%[@@species] (§23.2.2.4) — returns `this`.
-  let #(h, species_get) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      TypedArrayNative(TypedArrayGetSpecies),
-      "get [Symbol.species]",
-      0,
-    )
-  let h =
-    common.add_symbol_property(
-      h,
-      ta.constructor,
-      value.symbol_species,
-      value.accessor(
-        get: Some(JsObject(species_get)),
-        set: None,
-        enumerable: False,
-        configurable: True,
-      ),
-    )
+  let h = common.add_species_accessor(h, function_proto, ta.constructor)
   // The 11 concrete constructors, allocated in `all_typed_array_kinds` order.
   // Each ctor's [[Prototype]] is %TypedArray% itself, and each prototype's
   // [[Prototype]] is %TypedArray%.prototype (§23.2.5/§23.2.6/§23.2.7).
@@ -351,7 +333,6 @@ pub fn dispatch(
     TypedArrayGetByteOffset -> get_byte_offset(this, state)
     TypedArrayGetLength -> get_length(this, state)
     TypedArrayGetToStringTag -> get_to_string_tag(this, state)
-    TypedArrayGetSpecies -> #(state, Ok(this))
     TypedArrayPrototypeAt -> proto_at(this, args, state)
     TypedArrayPrototypeFill -> proto_fill(this, args, state)
     TypedArrayPrototypeSet -> proto_set(this, args, state)
@@ -509,10 +490,12 @@ fn ta_from(
   case helpers.is_callable(state.heap, iter_fn) {
     True ->
       helpers.lift_result({
-        use #(values, state) <- result.try(iterate_to_list(
+        use #(rec, state) <- result.try(
+          iter_protocol.get_iterator_from_method(state, source, iter_fn),
+        )
+        use #(values, state) <- result.try(iter_protocol.iterator_to_list(
           state,
-          source,
-          iter_fn,
+          rec,
         ))
         use #(target, target_ref, state) <- result.try(ta_create(
           state,
@@ -1089,10 +1072,12 @@ fn from_object(
   ))
   case helpers.is_callable(state.heap, iter_fn) {
     True -> {
-      use #(values, state) <- result.try(iterate_to_list(
+      use #(rec, state) <- result.try(
+        iter_protocol.get_iterator_from_method(state, obj_val, iter_fn),
+      )
+      use #(values, state) <- result.try(iter_protocol.iterator_to_list(
         state,
-        obj_val,
-        iter_fn,
+        rec,
       ))
       use #(fresh, state) <- result.try(alloc_ta_with_length(
         state,
@@ -1128,64 +1113,6 @@ fn from_object(
         None -> store_array_like(state, fresh, obj_ref, obj_val, 0, len)
       }
     }
-  }
-}
-
-/// Run the source's iterator to completion, collecting yielded values.
-fn iterate_to_list(
-  state: State(host),
-  obj: JsValue,
-  iter_fn: JsValue,
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
-  use #(iter, state) <- result.try(state.call(state, iter_fn, obj, []))
-  case iter {
-    JsObject(iter_ref) -> {
-      use #(next_fn, state) <- result.try(object.get_value(
-        state,
-        iter_ref,
-        Named("next"),
-        iter,
-      ))
-      iterate_loop(state, iter, next_fn, [])
-    }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Result of the Symbol.iterator method is not an object",
-      ))
-  }
-}
-
-fn iterate_loop(
-  state: State(host),
-  iter: JsValue,
-  next_fn: JsValue,
-  acc: List(JsValue),
-) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
-  use #(res, state) <- result.try(state.call(state, next_fn, iter, []))
-  case res {
-    JsObject(res_ref) -> {
-      use #(done, state) <- result.try(object.get_value(
-        state,
-        res_ref,
-        Named("done"),
-        res,
-      ))
-      case value.is_truthy(done) {
-        True -> Ok(#(list.reverse(acc), state))
-        False -> {
-          use #(v, state) <- result.try(object.get_value(
-            state,
-            res_ref,
-            Named("value"),
-            res,
-          ))
-          iterate_loop(state, iter, next_fn, [v, ..acc])
-        }
-      }
-    }
-    _ ->
-      Error(state.type_error_value(state, "Iterator result is not an object"))
   }
 }
 

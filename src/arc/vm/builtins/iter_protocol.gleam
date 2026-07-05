@@ -13,12 +13,13 @@
 /// WeakSet constructors drive. None of them import `builtins/iterator`, which
 /// only owns the `Iterator` builtin object itself.
 import arc/vm/builtins/helpers.{is_callable}
+import arc/vm/heap
 import arc/vm/key.{Index, Named}
 import arc/vm/ops/object
-import arc/vm/state.{type State, type StepExit}
+import arc/vm/state.{type State}
 import arc/vm/value.{
   type IteratorRecord, type JsValue, IteratorRecord, JsNull, JsObject,
-  JsUndefined,
+  JsUndefined, ObjectSlot,
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -32,6 +33,23 @@ pub fn type_error_any(
 ) -> #(State(host), Result(a, JsValue)) {
   let #(err, state) = state.type_error_value(state, msg)
   #(state, Error(err))
+}
+
+/// Resolve a GetIterator stack slot to the real iterator object: internal
+/// `IteratorRecordObject` wrappers (which cache `next` per §7.4.1) must be
+/// transparent to `.return()`/`.throw()` lookups and to `yield*` delegation.
+/// The one canonical unwrap so interpreter, generators and async-generators
+/// can't drift on what "the iterator behind this slot" means.
+pub fn unwrap_record_value(h: state.Heap(host), v: JsValue) -> JsValue {
+  case v {
+    JsObject(ref) ->
+      case heap.read(h, ref) {
+        Some(ObjectSlot(kind: value.IteratorRecordObject(iterated:, ..), ..)) ->
+          iterated
+        _ -> v
+      }
+    _ -> v
+  }
 }
 
 // ============================================================================
@@ -465,25 +483,32 @@ pub fn iterator_rest(
 /// §7.4.5 IteratorComplete + §7.4.6 IteratorValue: read {done, value} from an
 /// iterator result object; TypeError if it isn't an object. Both property reads
 /// can run user getters, so the returned State is threaded through and a getter
-/// throw propagates as a step-level Thrown. Shared by the interpreter's
-/// IteratorNext/yield* paths and the generator delegate-forwarding path.
+/// throw propagates. Shared by the interpreter's IteratorNext/yield* paths, the
+/// sync generator delegate-forwarding path and the async-generator delegate
+/// resume path — callers at a step boundary wrap with `state.rethrow`.
 /// (§7.4.8 IteratorStep must NOT read `value` when done — that variant lives
 /// in interpreter.gleam as `read_iter_step_result`.)
 pub fn read_iter_result(
   state: State(host),
   res: JsValue,
-) -> Result(#(Bool, JsValue, State(host)), StepExit(host)) {
+) -> Result(#(Bool, JsValue, State(host)), #(JsValue, State(host))) {
   case res {
     JsObject(rref) -> {
-      use #(done, state) <- result.try(
-        state.rethrow(object.get_value(state, rref, Named("done"), res)),
-      )
-      use #(val, state) <- result.map(
-        state.rethrow(object.get_value(state, rref, Named("value"), res)),
-      )
+      use #(done, state) <- result.try(object.get_value(
+        state,
+        rref,
+        Named("done"),
+        res,
+      ))
+      use #(val, state) <- result.map(object.get_value(
+        state,
+        rref,
+        Named("value"),
+        res,
+      ))
       #(value.is_truthy(done), val, state)
     }
-    _ -> state.throw_type_error(state, "Iterator result is not an object")
+    _ -> Error(state.type_error_value(state, "Iterator result is not an object"))
   }
 }
 

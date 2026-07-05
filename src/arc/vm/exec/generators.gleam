@@ -149,6 +149,7 @@ pub fn call_native_generator_return(
                 return_val,
                 rest_stack,
                 execute_inner,
+                unwind_to_catch,
                 fn(state) {
                   // Inner iterator has no .return — §27.5.3.8 step 7.c.iii:
                   // exit delegation and let the outer return proceed normally.
@@ -230,6 +231,7 @@ pub fn call_native_generator_throw(
                 throw_val,
                 rest_stack,
                 execute_inner,
+                unwind_to_catch,
                 fn(state) {
                   // Inner iterator has no .throw — §27.5.3.8 step 7.b.iii-vi:
                   // ? IteratorClose(iteratorRecord, NormalCompletion(empty)),
@@ -423,6 +425,7 @@ fn forward_delegate(
   arg: JsValue,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
   on_missing: fn(State(host)) -> Result(State(host), StepExit(host)),
 ) -> Result(State(host), StepExit(host)) {
   let iter = JsObject(iter_ref)
@@ -440,7 +443,7 @@ fn forward_delegate(
           // surrounding error arms.
           use #(done, val, state) <- result.try(
             result.map_error(
-              iter_protocol.read_iter_result(state, res),
+              state.rethrow(iter_protocol.read_iter_result(state, res)),
               state.map_exit_state(_, fn(st) { complete(st, gen) }),
             ),
           )
@@ -478,6 +481,7 @@ fn forward_delegate(
                 method,
                 rest_stack,
                 execute_inner,
+                unwind_to_catch,
               )
           }
         }
@@ -495,7 +499,8 @@ fn delegate_key(method: DelegateMethod) -> key.PropertyKey {
 
 /// Delegated iterator returned {done:true}. For .throw, resume the generator
 /// body normally past YieldStar with result.value on stack. For .return, the
-/// outer generator must ALSO return — complete it with that value.
+/// outer generator must ALSO return — a *return completion* propagating out
+/// of the yield*, so it runs enclosing finally blocks (§27.5.3.8 7.c.viii).
 fn resume_after_delegate(
   state: State(host),
   gen: GenData,
@@ -504,18 +509,23 @@ fn resume_after_delegate(
   method: DelegateMethod,
   rest_stack: List(JsValue),
   execute_inner: ExecuteInnerFn(host),
+  unwind_to_catch: UnwindToCatchFn(host),
 ) -> Result(State(host), StepExit(host)) {
   case method {
-    DelegateReturn -> {
-      // §27.5.3.8 step 7.c.viii: if the inner iterator's return completed,
-      // perform a return completion on the outer generator too.
-      let state = complete(state, gen)
-      let #(h, result) =
-        common.create_iter_result(state.heap, state.builtins, val, True)
-      Ok(
-        State(..state, heap: h, stack: [result, ..rest_stack], pc: state.pc + 1),
+    DelegateReturn ->
+      // §27.5.3.8 step 7.c.viii: the yield* evaluates to a return completion
+      // carrying the inner result's value. Route it through the SAME unwinder
+      // as the non-delegating / no-.return paths so an enclosing try/finally
+      // (or a finally that itself yields) is not skipped.
+      do_return_resume(
+        state,
+        gen,
+        frame,
+        val,
+        rest_stack,
+        execute_inner,
+        unwind_to_catch,
       )
-    }
     DelegateThrow -> {
       // .throw forwarded and inner is done — continue outer body past
       // YieldStar with val on stack (the yield* expression's value).
@@ -661,16 +671,11 @@ pub fn unwind_return(
     Some(IterCloseHandler(stack_depth, remaining_try)) -> {
       let restored_stack = truncate_stack(gen_state.stack, stack_depth)
       case restored_stack {
-        [JsObject(slot_ref), ..base] -> {
+        [JsObject(_) as slot, ..base] -> {
           let st = State(..gen_state, try_stack: remaining_try, stack: base)
           // GetIterator slots may hold an internal IteratorRecordObject
           // wrapper (cached `next`) — close the REAL iterator behind it.
-          let iter = case heap.read(st.heap, slot_ref) {
-            Some(ObjectSlot(kind: value.IteratorRecordObject(iterated:, ..), ..)) ->
-              iterated
-            _ -> JsObject(slot_ref)
-          }
-          case iter {
+          case iter_protocol.unwrap_record_value(st.heap, slot) {
             JsObject(iter_ref) ->
               close_for_return(
                 st,
