@@ -157,8 +157,7 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
     | ast.BreakStatement(..)
     | ast.ContinueStatement(..)
     | ast.DebuggerStatement
-    | ast.ClassDeclaration(..)
-    | ast.ClassFieldInit(..) -> []
+    | ast.ClassDeclaration(..) -> []
   }
 }
 
@@ -474,10 +473,12 @@ pub fn has_spread_element(elements: List(Option(ast.Expression))) -> Bool {
 /// A method definition of a class body, narrowed: the grammar guarantees the
 /// value is a function, so consumers get an `ast.FunctionLiteral` and never a
 /// "class method with a non-function value" arm to invent a fallback for.
+/// `body_index` is the element's position in the class body — the index whose
+/// `computed_field_const` holds this element's once-evaluated computed key.
 pub type ClassMethodEl {
   ClassMethodEl(
-    key: ast.Expression,
-    computed: Bool,
+    body_index: Int,
+    key: ast.PropertyKey,
     kind: ast.MethodKind,
     fun: ast.FunctionLiteral,
   )
@@ -487,8 +488,8 @@ pub type ClassMethodEl {
 /// which list a field lands in already answers that.
 pub type ClassFieldEl {
   ClassFieldEl(
-    key: ast.Expression,
-    computed: Bool,
+    body_index: Int,
+    key: ast.PropertyKey,
     value: Option(ast.Expression),
   )
 }
@@ -561,27 +562,28 @@ pub fn is_static_element(el: ast.ClassElement) -> Bool {
   }
 }
 
-/// Narrow a `ClassMethod` element to its `ClassMethodEl`. Only ever applied
-/// to elements one of the method predicates above already accepted.
-fn as_method_el(el: ast.ClassElement) -> Result(ClassMethodEl, Nil) {
+/// Narrow an indexed `ClassMethod` element to its `ClassMethodEl`. Only ever
+/// applied to elements one of the method predicates above already accepted.
+fn as_method_el(entry: #(Int, ast.ClassElement)) -> Result(ClassMethodEl, Nil) {
+  let #(body_index, el) = entry
   case el {
-    ast.ClassMethod(key:, value:, kind:, computed:, ..) ->
-      Ok(ClassMethodEl(key:, computed:, kind:, fun: value))
+    ast.ClassMethod(key:, value:, kind:, ..) ->
+      Ok(ClassMethodEl(body_index:, key:, kind:, fun: value))
     ast.ClassField(..) | ast.StaticBlock(..) -> Error(Nil)
   }
 }
 
-fn as_field_el(el: ast.ClassElement) -> Result(ClassFieldEl, Nil) {
+fn as_field_el(entry: #(Int, ast.ClassElement)) -> Result(ClassFieldEl, Nil) {
+  let #(body_index, el) = entry
   case el {
-    ast.ClassField(key:, value:, computed:, ..) ->
-      Ok(ClassFieldEl(key:, computed:, value:))
+    ast.ClassField(key:, value:, ..) -> Ok(ClassFieldEl(body_index:, key:, value:))
     ast.ClassMethod(..) | ast.StaticBlock(..) -> Error(Nil)
   }
 }
 
-fn as_static_el(el: ast.ClassElement) -> Result(StaticEl, Nil) {
-  case el {
-    ast.ClassField(..) -> as_field_el(el) |> result.map(StaticField)
+fn as_static_el(entry: #(Int, ast.ClassElement)) -> Result(StaticEl, Nil) {
+  case entry.1 {
+    ast.ClassField(..) -> as_field_el(entry) |> result.map(StaticField)
     ast.StaticBlock(body:) -> Ok(StaticBlockEl(body))
     ast.ClassMethod(..) -> Error(Nil)
   }
@@ -599,18 +601,20 @@ fn as_static_el(el: ast.ClassElement) -> Result(StaticEl, Nil) {
 /// created/consumed in the EXACT order `child_fn_cursor` entries are
 /// popped — hence the shared predicates above.
 pub fn classify_class_body(body: List(ast.ClassElement)) -> ClassBodyParts {
+  // Elements are indexed BEFORE bucketing so each narrowed element remembers
+  // its body position — that index names its computed-key stash const.
+  let indexed = list.index_map(body, fn(el, idx) { #(idx, el) })
+  let of_kind = fn(pred: fn(ast.ClassElement) -> Bool) {
+    list.filter(indexed, fn(entry) { pred(entry.1) })
+  }
   ClassBodyParts(
-    constructor: list.find(body, is_class_ctor)
+    constructor: list.find(indexed, fn(entry) { is_class_ctor(entry.1) })
       |> result.try(as_method_el)
       |> option.from_result,
-    instance_methods: list.filter(body, is_instance_method)
-      |> list.filter_map(as_method_el),
-    static_methods: list.filter(body, is_static_method)
-      |> list.filter_map(as_method_el),
-    instance_fields: list.filter(body, is_instance_field)
-      |> list.filter_map(as_field_el),
-    static_elements: list.filter(body, is_static_element)
-      |> list.filter_map(as_static_el),
+    instance_methods: of_kind(is_instance_method) |> list.filter_map(as_method_el),
+    static_methods: of_kind(is_static_method) |> list.filter_map(as_method_el),
+    instance_fields: of_kind(is_instance_field) |> list.filter_map(as_field_el),
+    static_elements: of_kind(is_static_element) |> list.filter_map(as_static_el),
   )
 }
 
@@ -626,9 +630,8 @@ pub const class_fields_init = "<class_fields_init>"
 pub fn class_private_names(body: List(ast.ClassElement)) -> List(String) {
   list.fold(body, [], fn(acc, elem) {
     let name = case elem {
-      ast.ClassMethod(key: ast.Identifier(name: "#" <> rest, ..), ..)
-      | ast.ClassField(key: ast.Identifier(name: "#" <> rest, ..), ..) ->
-        Some("#" <> rest)
+      ast.ClassMethod(key: ast.KeyPrivate(name:, ..), ..)
+      | ast.ClassField(key: ast.KeyPrivate(name:, ..), ..) -> Some(name)
       _ -> None
     }
     case name {
@@ -675,8 +678,9 @@ pub fn computed_element_keys(
   |> list.filter_map(fn(pair) {
     let #(idx, elem) = pair
     case elem {
-      ast.ClassField(key:, computed: True, ..) -> Ok(#(idx, key))
-      ast.ClassMethod(key:, computed: True, ..) -> Ok(#(idx, key))
+      ast.ClassField(key: ast.KeyComputed(expression:), ..)
+      | ast.ClassMethod(key: ast.KeyComputed(expression:), ..) ->
+        Ok(#(idx, expression))
       _ -> Error(Nil)
     }
   })
@@ -714,12 +718,8 @@ pub fn class_body_bindings(
   let private_fn_consts =
     list.filter_map(body, fn(elem) {
       case elem {
-        ast.ClassMethod(
-          key: ast.Identifier(name: "#" <> rest, ..),
-          kind:,
-          is_static: False,
-          ..,
-        ) -> Ok(private_fn_const(kind, "#" <> rest))
+        ast.ClassMethod(key: ast.KeyPrivate(name:, ..), kind:, is_static: False, ..) ->
+          Ok(private_fn_const(kind, name))
         _ -> Error(Nil)
       }
     })
