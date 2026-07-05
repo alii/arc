@@ -102,7 +102,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.VmNative(value.IteratorSymbolIterator),
+      value.VmNative(value.ReturnThis),
       "[Symbol.iterator]",
       0,
     )
@@ -175,7 +175,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
     common.alloc_native_fn(
       h,
       function.prototype,
-      value.VmNative(value.IteratorSymbolIterator),
+      value.VmNative(value.ReturnThis),
       "[Symbol.asyncIterator]",
       0,
     )

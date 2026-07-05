@@ -30,14 +30,14 @@ import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type ArrayBufferNativeFn, type JsValue, type Ref, ArrayBufferConstructor,
   ArrayBufferGetByteLength, ArrayBufferGetDetached, ArrayBufferGetImmutable,
-  ArrayBufferGetMaxByteLength, ArrayBufferGetResizable, ArrayBufferGetSpecies,
-  ArrayBufferIsView, ArrayBufferNative, ArrayBufferObject, ArrayBufferResize,
-  ArrayBufferSlice, ArrayBufferSliceToImmutable, ArrayBufferTransfer,
+  ArrayBufferGetMaxByteLength, ArrayBufferGetResizable, ArrayBufferIsView,
+  ArrayBufferNative, ArrayBufferObject, ArrayBufferResize, ArrayBufferSlice,
+  ArrayBufferSliceToImmutable, ArrayBufferTransfer,
   ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable,
   DetachArrayBuffer262, Dispatch, JsBool, JsObject, JsUndefined, ObjectSlot,
   SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
   SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
-  SharedArrayBufferGetSpecies, SharedArrayBufferGrow, SharedArrayBufferSlice,
+  SharedArrayBufferGrow, SharedArrayBufferSlice,
 }
 import gleam/bit_array
 import gleam/int
@@ -106,15 +106,7 @@ pub fn init(
       ab_statics,
     )
   let h = common.add_to_string_tag(h, ab_type.prototype, "ArrayBuffer")
-  let #(h, ab_species) =
-    alloc_species_getter(h, function_proto, ArrayBufferGetSpecies)
-  let h =
-    common.add_symbol_property(
-      h,
-      ab_type.constructor,
-      value.symbol_species,
-      ab_species,
-    )
+  let h = common.add_species_accessor(h, function_proto, ab_type.constructor)
 
   // --- SharedArrayBuffer ---
   let #(h, sab_methods) =
@@ -142,45 +134,12 @@ pub fn init(
       [],
     )
   let h = common.add_to_string_tag(h, sab_type.prototype, "SharedArrayBuffer")
-  let #(h, sab_species) =
-    alloc_species_getter(h, function_proto, SharedArrayBufferGetSpecies)
-  let h =
-    common.add_symbol_property(
-      h,
-      sab_type.constructor,
-      value.symbol_species,
-      sab_species,
-    )
+  let h = common.add_species_accessor(h, function_proto, sab_type.constructor)
 
   // §25.1.5.2/§25.2.4.1: the constructors' "prototype" property is
   // { writable: false, enumerable: false, configurable: false } — installed
   // that way by common.init_type (see common.ctor_properties).
   #(h, ab_type, sab_type)
-}
-
-/// Allocate a `get [Symbol.species]` accessor (getter only, configurable).
-fn alloc_species_getter(
-  h: Heap(host),
-  function_proto: Ref,
-  native: ArrayBufferNativeFn,
-) -> #(Heap(host), value.Property) {
-  let #(h, get_ref) =
-    common.alloc_native_fn(
-      h,
-      function_proto,
-      ArrayBufferNative(native),
-      "get [Symbol.species]",
-      0,
-    )
-  #(
-    h,
-    value.accessor(
-      get: Some(JsObject(get_ref)),
-      set: None,
-      enumerable: False,
-      configurable: True,
-    ),
-  )
 }
 
 // ============================================================================
@@ -200,7 +159,6 @@ pub fn dispatch(
     SharedArrayBufferConstructor(proto:) ->
       constructor(proto, args, state, shared: True)
     ArrayBufferIsView -> is_view(args, state)
-    ArrayBufferGetSpecies | SharedArrayBufferGetSpecies -> #(state, Ok(this))
     ArrayBufferGetByteLength -> ab_get_byte_length(this, state)
     ArrayBufferGetDetached -> ab_get_detached(this, state)
     ArrayBufferGetImmutable -> ab_get_immutable(this, state)

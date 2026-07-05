@@ -878,6 +878,36 @@ pub fn add_to_string_tag(
   )
 }
 
+/// Add `get Constructor[@@species]` — an accessor whose getter returns `this`
+/// (§25.1.5.3, §25.2.4.2, §23.2.2.4, §27.2.4.9 — all identical). The getter is
+/// the shared `ReturnThis` native, so every @@species behaves the same way and
+/// there is one place to change if the spec ever alters it.
+pub fn add_species_accessor(
+  h: Heap(ctx, host),
+  function_proto: Ref,
+  ctor_ref: Ref,
+) -> Heap(ctx, host) {
+  let #(h, getter) =
+    alloc_native_fn(
+      h,
+      function_proto,
+      value.VmNative(value.ReturnThis),
+      "get [Symbol.species]",
+      0,
+    )
+  add_symbol_property(
+    h,
+    ctor_ref,
+    value.symbol_species,
+    value.accessor(
+      get: Some(JsObject(getter)),
+      set: None,
+      enumerable: False,
+      configurable: True,
+    ),
+  )
+}
+
 /// Proto-ctor cycle for a pre-allocated prototype (Object, Function bootstrap).
 ///
 /// Not a spec operation — internal bootstrap helper.

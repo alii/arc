@@ -870,8 +870,6 @@ pub type TypedArrayNativeFn {
   TypedArrayGetLength
   /// get %TypedArray%.prototype[@@toStringTag] — the [[TypedArrayName]].
   TypedArrayGetToStringTag
-  /// get %TypedArray%[Symbol.species] — returns `this`.
-  TypedArrayGetSpecies
   TypedArrayPrototypeFill
   TypedArrayPrototypeSet
   TypedArrayPrototypeSubarray
@@ -1220,8 +1218,6 @@ pub type ArrayBufferNativeFn {
   ArrayBufferConstructor(proto: Ref)
   /// §25.1.5.1 ArrayBuffer.isView ( arg )
   ArrayBufferIsView
-  /// §25.1.5.3 get ArrayBuffer [ @@species ]
-  ArrayBufferGetSpecies
   /// §25.1.6.2 get ArrayBuffer.prototype.byteLength
   ArrayBufferGetByteLength
   /// §25.1.6.3 get ArrayBuffer.prototype.detached
@@ -1248,8 +1244,6 @@ pub type ArrayBufferNativeFn {
   ArrayBufferTransferToImmutable
   /// §25.2.3.1 SharedArrayBuffer ( length [ , options ] )
   SharedArrayBufferConstructor(proto: Ref)
-  /// §25.2.4.2 get SharedArrayBuffer [ @@species ]
-  SharedArrayBufferGetSpecies
   /// §25.2.5.2 get SharedArrayBuffer.prototype.byteLength
   SharedArrayBufferGetByteLength
   /// §25.2.5.3 SharedArrayBuffer.prototype.grow ( newLength )
@@ -2441,15 +2435,14 @@ pub fn trailing_zero_display_to_js_string(v: TrailingZeroDisplay) -> String {
 }
 
 /// SetNumberFormatDigitOptions result (§15.1.6) — shared by NumberFormat and
-/// PluralRules. The fraction/significant pairs are absent when that rounding
-/// kind was not requested, and resolvedOptions omits absent pairs.
+/// PluralRules. The fraction/significant `(min, max)` pairs are absent when
+/// that rounding kind was not requested, and resolvedOptions omits absent
+/// pairs.
 pub type IntlDigitOptions {
   IntlDigitOptions(
     minimum_integer_digits: Int,
-    minimum_fraction_digits: Option(Int),
-    maximum_fraction_digits: Option(Int),
-    minimum_significant_digits: Option(Int),
-    maximum_significant_digits: Option(Int),
+    fraction_digits: Option(#(Int, Int)),
+    significant_digits: Option(#(Int, Int)),
     rounding_increment: Int,
     rounding_mode: RoundingMode,
     rounding_priority: RoundingPriority,
@@ -3362,8 +3355,10 @@ pub type VmNativeFn {
   /// but builds `async function anonymous(...)`.
   AsyncFunctionConstructor
   FunctionToString
-  /// %IteratorPrototype%[Symbol.iterator]() — returns `this`.
-  IteratorSymbolIterator
+  /// Generic "return `this`" native — used for %IteratorPrototype%
+  /// [@@iterator], %AsyncIteratorPrototype%[@@asyncIterator], and every
+  /// `get Constructor[@@species]` accessor.
+  ReturnThis
   // Global functions
   Eval
   DecodeURI

@@ -269,15 +269,17 @@ fn do_refs_in_slot(
             push_value_ref(v, push_value_ref(value.map_key_to_js(k), a))
           })
         value.WeakMapObject(data:) ->
-          dict.fold(data, acc, fn(a, k, v) {
-            push_value_ref(v, push_value_ref(k, a))
-          })
-        value.WeakSetObject(data:) ->
-          dict.fold(data, acc, fn(a, k, _v) { push_value_ref(k, a) })
+          // TODO: post-mark ephemeron/cleanup pass
+          // keys are weak — do NOT trace; values are traced conservatively
+          // (proper ephemeron pass is future work)
+          dict.fold(data, acc, fn(a, _k, v) { push_value_ref(v, a) })
+        // members are weak — trace nothing
+        value.WeakSetObject(data: _data) -> acc
         value.FinalizationRegistryObject(cells:, callback:) ->
           list.fold(cells, push_value_ref(callback, acc), fn(a, cell) {
-            let value.FinRegCell(target:, held:, token:) = cell
-            let a = push_value_ref(held, push_value_ref(target, a))
+            // target is weak — do NOT trace; held/token are strong
+            let value.FinRegCell(target: _target, held:, token:) = cell
+            let a = push_value_ref(held, a)
             case token {
               Some(t) -> push_value_ref(t, a)
               None -> a
@@ -1070,7 +1072,6 @@ fn array_buffer_native_refs(
     value.ArrayBufferConstructor(proto:)
     | value.SharedArrayBufferConstructor(proto:) -> [proto, ..acc]
     value.ArrayBufferIsView
-    | value.ArrayBufferGetSpecies
     | value.ArrayBufferGetByteLength
     | value.ArrayBufferGetDetached
     | value.ArrayBufferGetMaxByteLength
@@ -1082,7 +1083,6 @@ fn array_buffer_native_refs(
     | value.ArrayBufferGetImmutable
     | value.ArrayBufferSliceToImmutable
     | value.ArrayBufferTransferToImmutable
-    | value.SharedArrayBufferGetSpecies
     | value.SharedArrayBufferGetByteLength
     | value.SharedArrayBufferGrow
     | value.SharedArrayBufferGetGrowable
@@ -1126,7 +1126,6 @@ fn typed_array_native_refs(
     | value.TypedArrayGetByteOffset
     | value.TypedArrayGetLength
     | value.TypedArrayGetToStringTag
-    | value.TypedArrayGetSpecies
     | value.TypedArrayPrototypeFill
     | value.TypedArrayPrototypeSet
     | value.TypedArrayPrototypeSubarray
@@ -1250,7 +1249,7 @@ fn vm_native_refs(
     | value.AsyncGeneratorFunctionConstructor
     | value.AsyncFunctionConstructor
     | value.FunctionToString
-    | value.IteratorSymbolIterator
+    | value.ReturnThis
     | value.Eval
     | value.DecodeURI
     | value.EncodeURI

@@ -948,7 +948,7 @@ const array_iterator_next = CallFn(value.ArrayIteratorNext)
 /// The intrinsic `%Iterator.prototype%[@@iterator]` (§27.1.4.1) — the
 /// `return this` self-iterator every built-in iterator (and every generator)
 /// inherits.
-const iterator_self = DispatchFn(value.VmNative(value.IteratorSymbolIterator))
+const iterator_self = DispatchFn(value.VmNative(value.ReturnThis))
 
 /// The intrinsic `%Set.prototype.values%` (§24.2.4.11) — a Set's @@iterator.
 const set_values = DispatchFn(value.SetNative(value.SetPrototypeValues))
