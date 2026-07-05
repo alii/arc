@@ -4136,15 +4136,6 @@ fn private_element_info(
   }
 }
 
-/// True if the current token is an Identifier or string literal whose value
-/// equals `name` — used for the "constructor" / static "prototype" checks.
-fn peek_propname_is(p: P, name: String) -> Bool {
-  case peek(p) {
-    Identifier | KString -> peek_value(p) == name
-    _ -> False
-  }
-}
-
 fn parse_class_element(
   p: P,
   ctx: ClassScopeCtx,
@@ -4220,16 +4211,53 @@ fn parse_class_element(
       },
       True,
     )
-  // Check if the property name is "constructor" (non-static only)
-  let is_named_constructor = !is_static && peek_propname_is(p5, "constructor")
-  // Static prototype is forbidden — disjoint from is_named_constructor
-  // (which requires !is_static), so the && short-circuit keeps work identical.
+  parse_class_element_body(
+    p,
+    p5,
+    ctx,
+    has_extends,
+    has_constructor,
+    is_method_async,
+    is_generator,
+    class_accessor_kind,
+    is_static,
+  )
+}
+
+/// Parse the property name, params, and body of a class element.
+/// Returns the updated parser and whether this element was a constructor.
+fn parse_class_element_body(
+  outer_p: P,
+  p5: P,
+  ctx: ClassScopeCtx,
+  has_extends: Bool,
+  has_constructor: Bool,
+  is_method_async: Bool,
+  is_generator: Bool,
+  class_accessor_kind: AccessorPrefix,
+  is_static: Bool,
+) -> Result(#(P, Bool, ast.ClassElement, ClassElementScopes), ParseError) {
+  // Snapshot class_id's children before the key parse so any nested
+  // scopes from a computed `[expr]` key (declare_class step 4) can be
+  // identified by diff afterwards.
+  let key_before = scope.sb_children_raw(p5.sb, ctx.class_id)
+  use #(p6, key) <- result.try(parse_property_name(p5))
+  let key_scopes = class_new_children(p6.sb, ctx.class_id, key_before)
+  // All PropName-based early errors (§15.7.1) key off the *decoded*
+  // PropertyKey — a string-literal PropName's PropName is its SV, so
+  // `"constructor"` and `constructor` name the same member.
+  let static_name = ast.property_key_static_name(key)
+  // §15.7.1: PropName of a static ClassElement may not be "prototype".
   use <- bool.guard(
-    is_static && peek_propname_is(p5, "prototype"),
+    is_static && static_name == Some("prototype"),
     Error(StaticPrototype(pos_of(p5))),
   )
-  // Validate constructor constraints
-  use Nil <- result.try(case is_named_constructor {
+  // §15.7.1: a non-static MethodDefinition whose PropName is "constructor"
+  // is the class's constructor — SpecialMethod (get/set/*/async) and
+  // duplicates are early errors.
+  let is_constructor_name = static_name == Some("constructor")
+  let is_constructor = !is_static && is_constructor_name
+  use Nil <- result.try(case is_constructor {
     True ->
       case class_accessor_kind {
         GetPrefix -> Error(ClassConstructorNotGetter(pos_of(p5)))
@@ -4252,38 +4280,6 @@ fn parse_class_element(
       }
     False -> Ok(Nil)
   })
-  parse_class_element_body(
-    p,
-    p5,
-    ctx,
-    has_extends,
-    is_method_async,
-    is_generator,
-    class_accessor_kind,
-    is_named_constructor,
-    is_static,
-  )
-}
-
-/// Parse the property name, params, and body of a class element.
-/// Returns the updated parser and whether this element was a constructor.
-fn parse_class_element_body(
-  outer_p: P,
-  p5: P,
-  ctx: ClassScopeCtx,
-  has_extends: Bool,
-  is_method_async: Bool,
-  is_generator: Bool,
-  class_accessor_kind: AccessorPrefix,
-  is_constructor: Bool,
-  is_static: Bool,
-) -> Result(#(P, Bool, ast.ClassElement, ClassElementScopes), ParseError) {
-  // Snapshot class_id's children before the key parse so any nested
-  // scopes from a computed `[expr]` key (declare_class step 4) can be
-  // identified by diff afterwards.
-  let key_before = scope.sb_children_raw(p5.sb, ctx.class_id)
-  use #(p6, key) <- result.try(parse_property_name(p5))
-  let key_scopes = class_new_children(p6.sb, ctx.class_id, key_before)
   // §15.7.1 ClassElementName : PrivateIdentifier — it is a Syntax Error if
   // StringValue is "#constructor". Applies to methods and fields alike.
   // A string-literal key `"#constructor"` is rejected too, matching V8/JSC.
@@ -4296,10 +4292,6 @@ fn parse_class_element_body(
     is_private_constructor,
     Error(PrivateNameConstructor(pos_of(p6))),
   )
-  // §15.7.1: PropName of a FieldDefinition may not be "constructor"
-  // (static or not). Constructor *methods* are handled by the caller.
-  let is_constructor_field_name =
-    ast.property_key_static_name(key) == Some("constructor")
   case peek(p6) {
     LeftParen -> {
       // Method — validate getter/setter params
@@ -4350,8 +4342,10 @@ fn parse_class_element_body(
       ))
     }
     _ -> {
+      // §15.7.1: PropName of a FieldDefinition may not be "constructor"
+      // (static or not).
       use <- bool.guard(
-        is_constructor_field_name,
+        is_constructor_name,
         Error(FieldNamedConstructor(pos_of(p6))),
       )
       // Field, optionally with `= initializer`. The initializer runs as a
@@ -6399,15 +6393,23 @@ fn parse_object_properties(
       }
     }
     _ -> {
-      // Duplicate non-computed __proto__ (§13.2.5.1). Deferred like
-      // has_cover_initializer: the early error is skipped when this object
-      // literal is consumed as an ObjectAssignmentPattern.
-      let is_proto = is_proto_property(p)
-      let p = case is_proto && has_proto, p.ctx.dup_proto_pos {
-        True, None -> P(..p, ctx: Ctx(..p.ctx, dup_proto_pos: Some(pos_of(p))))
-        _, _ -> p
-      }
       use #(p2, prop) <- result.try(parse_object_property(p))
+      // Duplicate non-computed __proto__ (§13.2.5.1) — applies only to
+      // `PropertyName : AssignmentExpression`; shorthand, methods, accessors,
+      // and computed keys are excluded. Checked on the *decoded* PropertyKey
+      // so `"__proto__"` matches. Deferred like has_cover_initializer: the
+      // early error is skipped when this object literal is consumed as an
+      // ObjectAssignmentPattern.
+      let is_proto = case prop {
+        ast.InitProperty(key:, shorthand: False, ..) ->
+          ast.property_key_static_name(key) == Some("__proto__")
+        _ -> False
+      }
+      let p2 = case is_proto && has_proto, p2.ctx.dup_proto_pos {
+        True, None ->
+          P(..p2, ctx: Ctx(..p2.ctx, dup_proto_pos: Some(pos_of(p))))
+        _, _ -> p2
+      }
       case peek(p2) {
         Comma ->
           parse_object_properties(advance(p2), has_proto || is_proto, [
@@ -6418,15 +6420,6 @@ fn parse_object_properties(
         _ -> Error(ExpectedCommaOrBraceInObject(pos_of(p2)))
       }
     }
-  }
-}
-
-fn is_proto_property(p: P) -> Bool {
-  // Check if current property is __proto__: value (not shorthand, not method, not computed)
-  case peek(p) {
-    Identifier | KString ->
-      peek_value(p) == "__proto__" && peek_at(p, 1) == Colon
-    _ -> False
   }
 }
 
