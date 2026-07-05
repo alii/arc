@@ -2613,8 +2613,10 @@ pub type DtfTimeZone {
   /// the formatted instant.
   HostZone
   /// A named IANA zone, validated against the system tzdata. Its offset
-  /// varies with the instant (DST).
-  NamedZone(id: String, zone: temporal_tz.Zone)
+  /// varies with the instant (DST). The zone handle *is* the identifier —
+  /// `temporal_tz.zone_id` recovers it — so no separate id is stored and
+  /// "id disagrees with zone" is unrepresentable.
+  NamedZone(zone: temporal_tz.Zone)
   /// A zone whose offset never varies: "UTC", "GMT", "Etc/GMT+3", "+05:30".
   FixedZone(id: String, offset_minutes: Int)
 }
@@ -2623,7 +2625,7 @@ pub type DtfTimeZone {
 pub fn dtf_time_zone_id(tz: DtfTimeZone) -> String {
   case tz {
     HostZone -> "UTC"
-    NamedZone(id:, ..) -> id
+    NamedZone(zone:) -> temporal_tz.zone_id(zone)
     FixedZone(id:, ..) -> id
   }
 }

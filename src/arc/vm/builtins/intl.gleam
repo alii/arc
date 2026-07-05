@@ -3216,11 +3216,16 @@ fn zone_offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
   case tz {
     HostZone -> date.offset_at_utc_ms(instant_ms)
     FixedZone(offset_minutes:, ..) -> offset_minutes
-    NamedZone(zone:, ..) ->
-      temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000)
-      |> result.map(fn(ns) { ns / 60_000_000_000 })
-      // Unloadable TZif for a zone `lookup` accepted: fall back to UTC.
-      |> result.unwrap(0)
+    NamedZone(zone:) -> {
+      // `temporal_tz.lookup` already loaded this zone's TZif to mint the
+      // handle, so a failure here means the zoneinfo install vanished
+      // underneath us. Falling back to UTC would silently render every
+      // timestamp in the wrong zone — fail loudly instead.
+      let assert Ok(offset_ns) =
+        temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000)
+        as "intl: tzdata offset lookup failed for a zone lookup accepted"
+      offset_ns / 60_000_000_000
+    }
   }
 }
 
@@ -3298,7 +3303,7 @@ fn iana_zone(lower: String) -> Option(DtfTimeZone) {
 /// snapshotted here. `None` when the name is not in tzdata.
 fn tzdata_zone(lower: String) -> Option(DtfTimeZone) {
   temporal_tz.lookup(lower)
-  |> result.map(fn(zone) { NamedZone(temporal_tz.zone_id(zone), zone) })
+  |> result.map(NamedZone)
   |> option.from_result
 }
 
