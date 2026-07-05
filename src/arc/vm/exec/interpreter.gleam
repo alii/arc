@@ -15,6 +15,7 @@ import arc/vm/exec/call
 import arc/vm/exec/dynamic_import
 import arc/vm/exec/generators
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
@@ -373,7 +374,7 @@ pub fn new_state(
   global_object: Ref,
   lexical_globals: dict.Dict(String, value.LexicalGlobal),
   symbol_registry: dict.Dict(String, value.SymbolId),
-  hooks: state.HostHooks,
+  hooks: host_hooks.HostHooks,
 ) -> State(host) {
   // Realm boot: bring up the shared Atomics waiterlist registry (the ETS
   // table + its owner process) once, explicitly, at the same seam that reads
@@ -446,7 +447,7 @@ pub fn init_state(
   builtins: Builtins,
   global_object: Ref,
   is_module: Bool,
-  hooks: state.HostHooks,
+  hooks: host_hooks.HostHooks,
 ) -> State(host) {
   // ES §16.2.1.5.2 ModuleEvaluation: module `this` is undefined.
   // ES §16.1.6 ScriptEvaluation: the script's this is the global object,
@@ -539,7 +540,7 @@ pub fn call_root(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  hooks: state.HostHooks,
+  hooks: host_hooks.HostHooks,
 ) -> Result(#(Completion, State(host)), VmError) {
   let state =
     init_state(empty_template(), heap, builtins, global_object, False, hooks)
@@ -557,7 +558,7 @@ pub fn root_state(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  hooks: state.HostHooks,
+  hooks: host_hooks.HostHooks,
 ) -> State(host) {
   init_state(empty_template(), heap, builtins, global_object, False, hooks)
 }

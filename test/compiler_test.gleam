@@ -7,6 +7,7 @@ import arc/vm/builtins/common
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state
@@ -7894,8 +7895,8 @@ fn run_module(
     module.compile_bundle(
       specifier,
       source,
-      fn(dep, _parent) { Error(load_error.ImportsForbidden(dep)) },
-      fn(resolved) { Error(load_error.ImportsForbidden(resolved)) },
+      fn(_dep, _parent) { Error(load_error.ResolveForbidden) },
+      fn(_resolved) { Error(load_error.LoadForbidden) },
     )
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
@@ -7991,7 +7992,7 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
       "./c.js" -> Ok("/c.js")
       "./d.js" -> Ok("/d.js")
       "./e.js" -> Ok("/e.js")
-      other -> Error(load_error.ResolveFailed(other, "/a.js"))
+      _ -> Error(load_error.ResolveNotFound)
     }
   }
   let load = fn(resolved: String) {
@@ -8001,7 +8002,7 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
       "/c.js" -> Ok("import './d.js';")
       "/d.js" -> Ok("import './e.js';")
       "/e.js" -> Ok("export const e = 1;")
-      other -> Error(load_error.NotFound(other))
+      _ -> Error(load_error.LoadNotFound)
     }
   }
   let entry = "import './b.js'; import './c.js';"
@@ -8053,8 +8054,8 @@ pub fn module_repl_harness_globals_test() -> Nil {
     module.compile_bundle(
       specifier,
       module_source,
-      fn(dep, _parent) { Error(load_error.ImportsForbidden(dep)) },
-      fn(resolved) { Error(load_error.ImportsForbidden(resolved)) },
+      fn(_dep, _parent) { Error(load_error.ResolveForbidden) },
+      fn(_resolved) { Error(load_error.LoadForbidden) },
     )
 
   // Evaluate the module, passing in REPL globals
@@ -8091,8 +8092,8 @@ pub fn run_export_namespace_call_test() -> Nil {
     module.compile_bundle(
       "<run_export-test>",
       source,
-      fn(d, _p) { Error(load_error.ImportsForbidden(d)) },
-      fn(resolved) { Error(load_error.ImportsForbidden(resolved)) },
+      fn(_d, _p) { Error(load_error.ResolveForbidden) },
+      fn(_resolved) { Error(load_error.LoadForbidden) },
     )
   let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(ns_ref), ..)) =
     module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
@@ -8111,7 +8112,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
-      state.default_host_hooks(),
+      host_hooks.default_host_hooks(),
       event_loop.finish,
     )
   let assert True = v1 == value.from_int(5)
@@ -8125,7 +8126,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
-      state.default_host_hooks(),
+      host_hooks.default_host_hooks(),
       event_loop.finish,
     )
   let assert True = v2 == value.from_int(8)
@@ -8141,7 +8142,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       h,
       b,
       global_object,
-      state.default_host_hooks(),
+      host_hooks.default_host_hooks(),
       event_loop.finish,
     )
   let assert True = v3 == value.from_int(8)
@@ -8509,4 +8510,46 @@ pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
     ",
     value.JsBool(True),
   )
+}
+
+/// A host loader that serves DIFFERENT source for a specifier it already
+/// served (a file edited between two dynamic imports) makes the fresh parse's
+/// export list disagree with the live namespace's export map. That is a
+/// host-contract violation, so it must surface as a link-time SyntaxError —
+/// never crash the linker on the missing cell.
+pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, global_object) = builtins.globals(b, h)
+  let spec = "/shared.js"
+  let no_resolve = fn(_dep, _parent) { Error(load_error.ResolveForbidden) }
+  let no_load = fn(_resolved) { Error(load_error.LoadForbidden) }
+
+  let assert Ok(first) =
+    module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
+  let assert Ok(module.EvaluatedBundle(heap: h, namespace: Some(ns), ..)) =
+    module.evaluate_bundle(first, h, b, global_object, event_loop.finish)
+
+  // Same specifier, source has since gained an export.
+  let assert Ok(second) =
+    module.compile_bundle(
+      spec,
+      "export const x = 1; export const y = 2;",
+      no_resolve,
+      no_load,
+    )
+  let assert Error(err) =
+    module.link_for_evaluation_reusing(
+      second,
+      h,
+      b,
+      dict.from_list([#(spec, ns)]),
+      dict.new(),
+    )
+  let assert True = case err {
+    module.EvaluationError(..) ->
+      string.contains(module.error_message(err), "was re-loaded with an export")
+    _ -> False
+  }
+  Nil
 }

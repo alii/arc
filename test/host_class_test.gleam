@@ -166,8 +166,8 @@ fn dance_resolve(raw: String, _ref: String) {
   Ok(raw)
 }
 
-fn no_source_loads(resolved: String) {
-  Error(load_error.ImportsForbidden(resolved))
+fn no_source_loads(_resolved: String) {
+  Error(load_error.LoadForbidden)
 }
 
 pub fn host_module_named_import_test() {

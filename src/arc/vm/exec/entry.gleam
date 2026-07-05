@@ -15,6 +15,7 @@ import arc/vm/heap
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
 import arc/vm/realm
+import arc/vm/host_hooks
 import arc/vm/state.{type Heap, type State, type VmError, RealmCtx, State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot, JsObject,
@@ -80,7 +81,7 @@ pub fn new_repl_env(global_object: Ref) -> ReplEnv {
 
 /// Run a function template with a globalThis object, then drain microtasks.
 /// No macrotask loop — for that, pass a driver to `run_with`.
-/// Boots with `state.default_host_hooks()` (no host capabilities); embedders
+/// Boots with `host_hooks.default_host_hooks()` (no host capabilities); embedders
 /// that need them use `run_with_hooks`.
 ///
 /// The settled outcome is `Ok(value)` for a normal top-level return and
@@ -99,7 +100,7 @@ pub fn run(
 /// receives the State after the top-level script returns and is expected
 /// to drain microtasks plus whatever macrotask loop the embedder owns
 /// (e.g. `arc/beam.run`). Core's `event_loop.finish` is the no-macrotask
-/// default. Boots with `state.default_host_hooks()`.
+/// default. Boots with `host_hooks.default_host_hooks()`.
 pub fn run_with(
   func: FuncTemplate,
   heap: Heap(host),
@@ -112,24 +113,24 @@ pub fn run_with(
     heap,
     builtins,
     global_object,
-    state.default_host_hooks(),
+    host_hooks.default_host_hooks(),
     finish,
   )
 }
 
-/// `run_with` with the embedder's `state.HostHooks` (host capabilities such
+/// `run_with` with the embedder's `host_hooks.HostHooks` (host capabilities such
 /// as the Atomics blocking wait / wake delivery). The hooks are supplied
 /// once, at State construction, and carried on the realm context
 /// (`RealmCtx.host_hooks`), so every derived State — child realms, eval and
 /// Function realms, module bodies — inherits them; there is no per-call-site
-/// install step to forget. `run`/`run_with` pass `state.default_host_hooks()`
+/// install step to forget. `run`/`run_with` pass `host_hooks.default_host_hooks()`
 /// (no capabilities — a blocking `Atomics.wait` then throws per DoWait).
 pub fn run_with_hooks(
   func: FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> Result(#(Result(JsValue, JsValue), Heap(host)), VmError) {
   let executed =
@@ -156,14 +157,14 @@ pub fn run_with_hooks(
 /// wait / wake delivery), supplied at State construction and carried on the
 /// realm context. Each module body boots a fresh State, so the hooks must be
 /// threaded here rather than installed after the fact; pass
-/// `state.default_host_hooks()` for none.
+/// `host_hooks.default_host_hooks()` for none.
 pub fn run_module(
   func: FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> ModuleResult(host) {
   let locals = interpreter.init_module_locals(func, seeds)
@@ -315,7 +316,7 @@ fn do_remaining_jobs(
 
 /// Like run, but persists globals across calls.
 /// Used by the REPL so var declarations and function definitions survive.
-/// Boots with `state.default_host_hooks()`; embedders that need host
+/// Boots with `host_hooks.default_host_hooks()`; embedders that need host
 /// capabilities use `run_and_drain_repl_with`.
 ///
 /// Hands back the settled outcome (`Ok(value)` / `Error(thrown)`), the drained
@@ -331,7 +332,7 @@ pub fn run_and_drain_repl(
     heap,
     builtins,
     env,
-    state.default_host_hooks(),
+    host_hooks.default_host_hooks(),
     event_loop.drain_jobs,
   )
 }
@@ -349,7 +350,7 @@ pub fn run_and_drain_repl_with(
   heap: Heap(host),
   builtins: Builtins,
   env: ReplEnv,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> Result(#(Result(JsValue, JsValue), Heap(host), ReplEnv), VmError) {
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
@@ -501,7 +502,7 @@ fn add_job_roots(acc: set.Set(Int), job: value.Job) -> set.Set(Int) {
 /// and can handle it). Draining happens once, at this outermost call.
 ///
 /// `host_hooks` carries the embedder's host capabilities into the fresh root
-/// State (pass `state.default_host_hooks()` for none).
+/// State (pass `host_hooks.default_host_hooks()` for none).
 pub fn run_export(
   callee: JsValue,
   this_val: JsValue,
@@ -509,7 +510,7 @@ pub fn run_export(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> Result(#(Result(JsValue, JsValue), Heap(host)), VmError) {
   use #(settled, drained) <- result.map(settle(

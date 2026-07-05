@@ -367,12 +367,12 @@ pub fn host_fn_can_throw_test() {
 // ----------------------------------------------------------------------------
 
 /// Single self-contained module — reject every import.
-fn reject_imports(raw: String, _parent: String) {
-  Error(load_error.ImportsForbidden(raw))
+fn reject_imports(_raw: String, _parent: String) {
+  Error(load_error.ResolveForbidden)
 }
 
-fn reject_loads(resolved: String) {
-  Error(load_error.ImportsForbidden(resolved))
+fn reject_loads(_resolved: String) {
+  Error(load_error.LoadForbidden)
 }
 
 pub fn eval_module_reads_export_test() {
@@ -430,7 +430,7 @@ pub fn destructured_declaration_exports_test() {
   let load = fn(resolved: String) {
     case resolved {
       "dep" -> Ok(dep)
-      other -> Error(load_error.NotFound(other))
+      _ -> Error(load_error.LoadNotFound)
     }
   }
   let assert Ok(#(evaluated, eng)) =

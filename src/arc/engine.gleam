@@ -21,6 +21,7 @@ import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type HostFn}
@@ -52,7 +53,7 @@ pub opaque type Engine(host) {
     heap: Heap(host),
     builtins: Builtins,
     global: Ref,
-    host_hooks: state.HostHooks,
+    host_hooks: host_hooks.HostHooks,
     /// Embedder-provided native (synthetic) modules, keyed by specifier. An
     /// `import … from "<specifier>"` in any module evaluated through this engine
     /// resolves here instead of being loaded as source. Set via
@@ -118,7 +119,7 @@ pub type EvaluatedModule {
 /// Create a fresh engine with a new heap and all builtins installed. The single
 /// bootstrap site — every other entry point threads an existing engine.
 ///
-/// The engine starts with `state.default_host_hooks()` (no capabilities — an
+/// The engine starts with `host_hooks.default_host_hooks()` (no capabilities — an
 /// agent that cannot block). Embedders that need to grant host capabilities
 /// (e.g. a real blocking `Atomics.wait`) compose `with_host_hooks` on top.
 ///
@@ -143,14 +144,14 @@ fn new_from_heap(h: state.Heap(host)) -> Engine(host) {
     heap: h,
     builtins: b,
     global:,
-    host_hooks: state.default_host_hooks(),
+    host_hooks: host_hooks.default_host_hooks(),
     host_modules: dict.new(),
   )
 }
 
 /// Install the embedder's host capabilities on the engine.
 ///
-/// This is the single injection point for `state.HostHooks` — set them once
+/// This is the single injection point for `host_hooks.HostHooks` — set them once
 /// here, before running any JS, and every State the engine subsequently boots
 /// (scripts via `eval`, module bodies via `eval_module` including dynamic
 /// `import()`, calls via `call`, plus all derived realms: `eval`/`Function`
@@ -158,7 +159,7 @@ fn new_from_heap(h: state.Heap(host)) -> Engine(host) {
 /// There is no per-call install to forget.
 pub fn with_host_hooks(
   engine: Engine(host),
-  hooks: state.HostHooks,
+  hooks: host_hooks.HostHooks,
 ) -> Engine(host) {
   Engine(..engine, host_hooks: hooks)
 }
@@ -446,8 +447,8 @@ pub fn eval_with(
 /// Compile and evaluate an ES module bundle, draining microtasks afterwards.
 /// `resolve` maps (raw, referrer) to the dependency's canonical specifier and
 /// `load` reads a resolved specifier's source (called once per unique
-/// module); both fail with a `module_host.ModuleLoadError` category, never a
-/// bare string a loader could accidentally return as a success. Returns the
+/// module); they fail with a `module_host.ResolveError` / `module_host.LoadError`
+/// category, never a bare string a loader could accidentally return as a success. Returns the
 /// entry module's outcome + namespace, plus a new engine carrying the updated
 /// heap.
 ///
@@ -481,7 +482,7 @@ pub fn eval_module_with(
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(
-    // The embedder's typed `ModuleLoadError` categories flow straight into the
+    // The embedder's typed resolve/load categories flow straight into the
     // graph walk — nothing along the way sees a rendered message.
     module.compile_bundle_with_hosts(
       specifier,
@@ -648,7 +649,7 @@ pub fn serialize(engine: Engine(host)) -> BitArray {
 /// (e.g. a snapshot written by an older or newer build) or hide a corrupt
 /// payload behind it.
 ///
-/// The restored engine carries `state.default_host_hooks()` and no host modules
+/// The restored engine carries `host_hooks.default_host_hooks()` and no host modules
 /// — both hold embedder closures that cannot round-trip through `serialize`.
 /// Re-install hooks with `with_host_hooks` and host modules with
 /// `register_host_module`, alongside re-registering host functions.
@@ -661,7 +662,7 @@ pub fn deserialize(data: BitArray) -> Result(Engine(host), DeserializeError) {
     heap:,
     builtins:,
     global:,
-    host_hooks: state.default_host_hooks(),
+    host_hooks: host_hooks.default_host_hooks(),
     host_modules: dict.new(),
   )
 }
@@ -711,9 +712,9 @@ pub fn global(engine: Engine(host)) -> Ref {
 }
 
 /// The engine's host hooks (whatever `with_host_hooks` installed, or
-/// `state.default_host_hooks()`). Needed by callers that drop to the lower
+/// `host_hooks.default_host_hooks()`). Needed by callers that drop to the lower
 /// `entry`/`module` layers and must thread the hooks themselves.
-pub fn host_hooks(engine: Engine(host)) -> state.HostHooks {
+pub fn host_hooks(engine: Engine(host)) -> host_hooks.HostHooks {
   engine.host_hooks
 }
 

@@ -255,7 +255,7 @@ pub fn resume(
 //     never to an already-running State. Every derived State (eval/Function
 //     realms, $262 children, ShadowRealms, module bodies) inherits it, so a
 //     forgotten install site is a compile error, not a silent "cannot block".
-//     A host with neither passes `state.default_host_hooks()`, which means
+//     A host with neither passes `default_host_hooks()`, which means
 //     "cannot block": sync `Atomics.wait` throws instead of hanging.
 //   * `can_block` is NOT in here. Agent [[CanBlock]] (§9.7) is per-agent spec
 //     policy, set before realm boot via `arc/vm/agent` — see that module.
@@ -305,11 +305,18 @@ pub type AtomicsCapabilities =
   host_hooks.AtomicsCapabilities
 
 /// Re-export: the embedder host-capability record carried on every realm's
-/// `RealmCtx`. Start from `state.default_host_hooks()` (or your own record),
-/// add capabilities, and hand it to the engine/realm constructor; every
-/// derived State inherits it.
+/// `RealmCtx`. Start from `default_host_hooks()` (or your own record), add
+/// capabilities, and hand it to the engine/realm constructor; every derived
+/// State inherits it.
 pub type HostHooks =
   host_hooks.HostHooks
+
+/// Re-export: the capability-free default — no Atomics capabilities (sync
+/// `Atomics.wait` throws instead of hanging), no dynamic-import hook, and the
+/// real BEAM monotonic clock / sleep. The starting point for `with_atomics`.
+pub fn default_host_hooks() -> HostHooks {
+  host_hooks.default_host_hooks()
+}
 
 /// Install the Atomics blocking-wait + wake-delivery capabilities on `hooks`,
 /// leaving every OTHER hook (`monotonic_now`, `sleep_ms`, `import_hook`, …)

@@ -1,4 +1,4 @@
-%% The DEFAULT clock/sleep host capability (state.default_host_hooks): the
+%% The DEFAULT clock/sleep host capability (host_hooks.default_host_hooks): the
 %% BEAM monotonic clock and timer:sleep/1. Every host has a clock, so unlike
 %% the Atomics blocking-wait capability these are not optional — an embedder
 %% that virtualises time overrides `HostHooks.monotonic_now` / `sleep_ms`

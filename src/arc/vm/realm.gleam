@@ -17,6 +17,7 @@ import arc/vm/key.{Named}
 import arc/vm/opcode
 import arc/vm/ops/coerce
 import arc/vm/ops/object
+import arc/vm/host_hooks
 import arc/vm/state.{type Heap, type State, type VmError, State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, DataProperty, JsObject, JsString,
@@ -61,7 +62,7 @@ pub type NewStateFn(host) =
     Ref,
     dict.Dict(String, value.LexicalGlobal),
     dict.Dict(String, value.SymbolId),
-    state.HostHooks,
+    host_hooks.HostHooks,
   ) -> State(host)
 
 // ============================================================================

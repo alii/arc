@@ -11,7 +11,7 @@ import arc/compiler
 import arc/esm
 import arc/link
 import arc/module/graph
-import arc/module/load_error.{type ModuleLoadError}
+import arc/module/load_error.{type LoadError, type ResolveError}
 import arc/module/registry
 import arc/parser
 import arc/vm/builtins/common.{type Builtins}
@@ -19,7 +19,7 @@ import arc/vm/builtins/reflect
 import arc/vm/exec/entry
 import arc/vm/exec/interpreter
 import arc/vm/heap
-import arc/vm/host_hooks as host_hooks_mod
+import arc/vm/host_hooks.{HostHooks}
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
@@ -202,17 +202,13 @@ pub fn compile_bundle_error_message(err: CompileBundleError) -> String {
       <> "': "
       <> parser.parse_error_to_string(parse_error)
     GraphError(error: graph.ResolveFailed(raw, referrer, error)) ->
-      "Cannot resolve module '"
-      <> esm.raw_text(raw)
-      <> "' from '"
-      <> esm.resolved_text(referrer)
-      <> "': "
-      <> load_error.message(error)
+      load_error.resolve_failure_message(
+        esm.raw_text(raw),
+        esm.resolved_text(referrer),
+        error,
+      )
     GraphError(error: graph.LoadFailed(specifier, error)) ->
-      "Cannot load module '"
-      <> esm.resolved_text(specifier)
-      <> "': "
-      <> load_error.message(error)
+      load_error.load_failure_message(esm.resolved_text(specifier), error)
     GraphError(error: graph.SourcePhaseUnsupported(specifier)) ->
       "'"
       <> esm.resolved_text(specifier)
@@ -335,8 +331,8 @@ pub type EvaluatedBundle(host) {
 pub fn compile_bundle(
   entry_specifier: String,
   entry_source: String,
-  resolve: fn(String, String) -> Result(String, ModuleLoadError),
-  load: fn(String) -> Result(String, ModuleLoadError),
+  resolve: fn(String, String) -> Result(String, ResolveError),
+  load: fn(String) -> Result(String, LoadError),
 ) -> Result(ModuleBundle, CompileBundleError) {
   compile_bundle_with_hosts(
     entry_specifier,
@@ -354,8 +350,8 @@ pub fn compile_bundle(
 pub fn compile_bundle_with_hosts(
   entry_specifier: String,
   entry_source: String,
-  resolve: fn(String, String) -> Result(String, ModuleLoadError),
-  load: fn(String) -> Result(String, ModuleLoadError),
+  resolve: fn(String, String) -> Result(String, ResolveError),
+  load: fn(String) -> Result(String, LoadError),
   host_modules: Dict(String, HostModule),
 ) -> Result(ModuleBundle, CompileBundleError) {
   // The host talks in plain strings; the graph walk talks in `esm.Raw` /
@@ -679,6 +675,25 @@ pub fn link_for_evaluation_reusing(
               )
           }
         })
+      // A preexisting module's live export map must hold a cell for every
+      // local export THIS bundle's fresh parse of it declares. Only a host
+      // loader that served different source for a specifier it already served
+      // (a file edited between two `import()`s) can break that, so it is a
+      // guest-visible link error, not a linker invariant — and it must be
+      // caught before `build_linked`, whose reuse of the live map assumes the
+      // two agree.
+      use Nil <- result.try(case stale_reused_export(bundle, pre) {
+        Some(#(spec, name)) -> {
+          let #(heap, err) =
+            common.make_syntax_error(
+              heap,
+              builtins,
+              stale_reused_export_message(spec, name),
+            )
+          Error(EvaluationError(err, heap))
+        }
+        None -> Ok(Nil)
+      })
       // Instantiate: pre-allocate every binding cell + namespace object, then
       // create exported function-declaration closures so cyclic function
       // imports are callable before any body runs (§16.2.1.6.4 step 9).
@@ -721,7 +736,7 @@ pub fn evaluate_linked(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(EvaluatedBundle(host), ModuleError(host)) {
   let #(_evaluated, _jobs, result) =
@@ -763,7 +778,7 @@ pub fn evaluate_linked_tracking(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
   already_evaluated: Set(String),
 ) -> #(
@@ -893,7 +908,7 @@ pub fn get_or_create_deferred_namespace(
 /// every binding cell), then executes module bodies in DFS post-order
 /// (dependencies first). Returns the entry module's completion value.
 ///
-/// Module bodies boot with `state.default_host_hooks()` (no embedder host
+/// Module bodies boot with `host_hooks.default_host_hooks()` (no embedder host
 /// capabilities); embedders that supply Atomics capabilities use
 /// `evaluate_bundle_with_hooks`.
 pub fn evaluate_bundle(
@@ -908,12 +923,12 @@ pub fn evaluate_bundle(
     heap,
     builtins,
     global_object,
-    state.default_host_hooks(),
+    host_hooks.default_host_hooks(),
     finish,
   )
 }
 
-/// `evaluate_bundle` with the embedder's `state.HostHooks` (host
+/// `evaluate_bundle` with the embedder's `host_hooks.HostHooks` (host
 /// capabilities such as the Atomics blocking wait / wake delivery). Each
 /// module body boots a FRESH State, so the hooks are threaded into every
 /// body's `RealmCtx` at construction rather than installed after the fact —
@@ -924,7 +939,7 @@ pub fn evaluate_bundle_with_hooks(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> Result(EvaluatedBundle(host), ModuleError(host)) {
   use #(heap, linked_bundle) <- result.try(link_for_evaluation(
@@ -994,7 +1009,7 @@ fn eval_module_inner(
   specifier: String,
   builtins: Builtins,
   global_object: Ref,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
   // One lookup, three outcomes — the module is absent, has no body, or has one.
@@ -1045,7 +1060,7 @@ fn eval_module_body(
   compiled: CompiledModule,
   builtins: Builtins,
   global_object: Ref,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(EvalState(host), Result(#(JsValue, Heap(host)), ModuleError(host))) {
   // Mark as evaluating
@@ -1237,7 +1252,7 @@ fn run_module_with_referrer(
   builtins: Builtins,
   global_object: Ref,
   seeds: List(#(Int, JsValue)),
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> entry.ModuleResult(host) {
   entry.run_module(
@@ -1246,7 +1261,7 @@ fn run_module_with_referrer(
     builtins,
     global_object,
     seeds,
-    host_hooks_mod.HostHooks(..host_hooks, import_referrer: Some(specifier)),
+    HostHooks(..host_hooks, import_referrer: Some(specifier)),
     finish,
   )
 }
@@ -1457,7 +1472,7 @@ pub fn evaluate_async_transitive_deps(
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(state.State(host)) -> state.State(host),
 ) -> #(
   Heap(host),
@@ -1583,6 +1598,51 @@ fn instantiate_hoisted_functions(
   })
 }
 
+/// The first local export of a preexisting module that this bundle's fresh
+/// parse declares but the module's LIVE export map has no cell for, as
+/// `#(specifier, export name)`.
+///
+/// Reachable only when the host loader served different source for a specifier
+/// it had already served (arc's own CLI loader re-reads the file from disk on
+/// every graph walk), so this is a host-contract violation, not a linker bug:
+/// `link_for_evaluation_reusing` turns it into a link-time SyntaxError instead
+/// of letting `preallocate_local_boxes` panic on the missing cell.
+fn stale_reused_export(
+  bundle: ModuleBundle,
+  preexisting: Dict(String, #(Ref, Dict(String, Ref))),
+) -> Option(#(String, String)) {
+  dict.to_list(bundle.modules)
+  |> list.find_map(fn(entry) {
+    let #(spec, bundle_module) = entry
+    case bundle_module, dict.get(preexisting, spec) {
+      SourceModule(m), Ok(#(_ns_ref, existing_exports)) ->
+        list.find_map(m.export_entries, fn(e) {
+          case e {
+            esm.LocalExport(export_name:, ..) ->
+              case dict.has_key(existing_exports, export_name) {
+                True -> Error(Nil)
+                False -> Ok(#(spec, export_name))
+              }
+            _ -> Error(Nil)
+          }
+        })
+      _, _ -> Error(Nil)
+    }
+  })
+  |> option.from_result
+}
+
+/// The prose of a `stale_reused_export` link failure — guest-visible, so it
+/// names the contract the loader broke rather than blaming the linker.
+fn stale_reused_export_message(specifier: String, name: String) -> String {
+  "module '"
+  <> specifier
+  <> "' was re-loaded with an export '"
+  <> name
+  <> "' its already-instantiated namespace does not have: a loader must return "
+  <> "the same source for a specifier it has already served"
+}
+
 /// One BoxSlot per exported local, seeded with its instantiation value:
 /// `uninitialized` (TDZ) for let/const/class/default, `undefined` for
 /// var/function (hoisted). Keyed specifier → local name → box.
@@ -1606,10 +1666,11 @@ fn preallocate_local_boxes(
         heap,
         list.fold(m.export_entries, dict.new(), fn(boxes, e) {
           case e {
-            // A preexisting module's export map is FINAL, so it holds a cell for
-            // every local export. Dropping the entry instead would leave
-            // `own_export_seeds` with nothing to seed, and this module's body
-            // would write its binding into a box no importer ever reads.
+            // `stale_reused_export` already rejected the one host-controlled
+            // way this map can miss a local export, so a miss here is a linker
+            // bug. Dropping the entry instead would leave `own_export_seeds`
+            // with nothing to seed, and this module's body would write its
+            // binding into a box no importer ever reads.
             esm.LocalExport(export_name:, local_name:) ->
               dict.get(existing_exports, export_name)
               |> result.replace_error(MissingExportCell(spec, export_name))

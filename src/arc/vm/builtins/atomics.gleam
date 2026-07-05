@@ -36,7 +36,7 @@ import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
-import arc/vm/host_hooks
+import arc/vm/host_hooks.{type WaiterKey}
 import arc/vm/internal/typed_array_ffi.{
   type IntElem, I16, I32, I64, I8, U16, U32, U64, U8, int_elem_bits,
   int_elem_signed, int_elem_size, ta_get_int, ta_set_int,
@@ -153,13 +153,6 @@ fn sab_cas_element(
 // ============================================================================
 // FFI — cross-process WaiterList (arc_waiter_ffi.erl)
 // ============================================================================
-
-/// Cross-process identity of a buffer's WaiterList (an Erlang term: the
-/// SAB's atomics ref for shared storage, a pid-scoped heap id otherwise).
-/// Alias of `value.WaiterKey` (which `arc/vm/state` also re-exports as its
-/// capability contract type); named here for existing callers.
-pub type WaiterKey =
-  value.WaiterKey
 
 /// Opaque handle to one registered waiterlist entry (its ETS key plus the
 /// unique message ref the notifier will address). Contract type from
@@ -1002,8 +995,8 @@ fn do_wait(
 /// returning, so no exit path can leave it stranded in the shared registry.
 ///
 /// The BLOCKING itself is not core's: the registered entry is handed to
-/// the embedder's `sync_wait` capability (contract clause 1,
-/// arc/host.gleam), which suspends in ITS mailbox until the entry's wake
+/// the embedder's `sync_wait` capability
+/// (`host_hooks.AtomicsCapabilities`), which suspends in ITS mailbox until the entry's wake
 /// message arrives or the timeout elapses — resolving the
 /// notify-vs-timeout race exactly as the old in-core receive did.
 ///
@@ -1087,7 +1080,8 @@ fn withdraw_entry(
 /// host opted out (test262's CanBlockIsFalse), threaded in via
 /// State.can_block at realm boot. A host that installed no
 /// `state.ctx.host_hooks.atomics` capabilities cannot suspend the agent
-/// either (contract clause 1): treated identically to [[CanBlock]] = false.
+/// either (no `host_hooks.AtomicsCapabilities.sync_wait`): treated identically
+/// to [[CanBlock]] = false.
 /// waitAsync never blocks, so async mode is exempt.
 ///
 /// Continues with the `WaitMode` this check ESTABLISHED rather than a bare

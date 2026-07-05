@@ -785,22 +785,19 @@ fn do_run_module(
 fn test262_resolve(
   raw_specifier: String,
   parent_specifier: String,
-) -> Result(String, module_host.ModuleLoadError) {
+) -> Result(String, module_host.ResolveError) {
   case path.resolve_specifier(raw_specifier, parent_specifier) {
     path.PathSpecifier(resolved) -> Ok(resolved)
-    path.BareSpecifier(bare) -> Error(load_error.UnsupportedBareSpecifier(bare))
+    path.BareSpecifier(_bare) -> Error(load_error.UnsupportedBareSpecifier)
   }
 }
 
 /// Read a resolved test262 module from disk.
-fn test262_load(
-  resolved: String,
-) -> Result(String, module_host.ModuleLoadError) {
+fn test262_load(resolved: String) -> Result(String, module_host.LoadError) {
   case simplifile.read(resolved) {
     Ok(source) -> Ok(source)
-    Error(simplifile.Enoent) -> Error(load_error.NotFound(resolved))
-    Error(err) ->
-      Error(load_error.ReadFailed(resolved, simplifile.describe_error(err)))
+    Error(simplifile.Enoent) -> Error(load_error.LoadNotFound)
+    Error(err) -> Error(load_error.ReadFailed(simplifile.describe_error(err)))
   }
 }
 
@@ -1153,7 +1150,7 @@ type AgentPayload {
 /// agent's pending waitAsync waiters, or the parent process dying.
 type AgentWake {
   AgentWakeBroadcast(payload: AgentPayload)
-  AgentWakeNotify(key: state.WaiterKey, byte_index: Int)
+  AgentWakeNotify(key: host_hooks.WaiterKey, byte_index: Int)
   AgentWakeParentDown
 }
 
@@ -1628,11 +1625,11 @@ fn ffi_take_report() -> Result(String, Nil) {
 
 // -- Atomics host capabilities (harness as embedder) --
 //
-// The embedder side of the host capability contract in arc/host.gleam:
-// clause 1 (blocking sync wait) and clause 2 (wake delivery) supplied as the
-// HostHooks value every State the harness boots is constructed with,
-// clauses 3-4 (the bounded mailbox receive
-// that feeds event_loop.inject_notify) as the post-script driver. Core
+// The embedder side of the capability contract in arc/vm/host_hooks.gleam:
+// `sync_wait` (blocking sync wait) and `deliver_wake` (wake delivery) supplied
+// as the `HostHooks.atomics` value every State the harness boots is
+// constructed with, plus the bounded mailbox receive that feeds
+// event_loop.inject_notify as the post-script driver. Core
 // registers waiterlist entries and claims waiters as pure ETS data
 // (arc_waiter_ffi); every receive of — and every send into — the
 // `{arc_notify, Ref, Key, ByteIndex}` wake protocol happens HERE, via
@@ -1640,7 +1637,7 @@ fn ffi_take_report() -> Result(String, Nil) {
 // agents and blocking waits are the host's job, the same engine/platform
 // split as V8 vs d8.
 
-/// Clause 1's blocking receive: selective receive for the entry's wake,
+/// The `sync_wait` blocking receive: selective receive for the entry's wake,
 /// with the notify-vs-timeout race resolved by ets:take of our own entry
 /// (negative timeout = infinity). Returns the JS "ok" / "timed-out".
 @external(erlang, "test262_exec_ffi", "await_notify")
@@ -1651,21 +1648,22 @@ fn ffi_await_notify(
   panic as beam_only_test
 }
 
-/// Clause 2's wake delivery: send `{arc_notify, Ref, Key, ByteIndex}` to
+/// The `deliver_wake` capability: send `{arc_notify, Ref, Key, ByteIndex}` to
 /// each remote waiter claimed by Atomics.notify's waiterlist take.
 @external(erlang, "test262_exec_ffi", "deliver_wakes")
 fn ffi_deliver_wakes(_claimed: List(host_hooks.ClaimedWaiter)) -> Nil {
   panic as beam_only_test
 }
 
-/// Clause 4's bounded dry-queue receive for arc_notify messages.
+/// The bounded dry-queue receive for arc_notify messages, feeding
+/// `event_loop.inject_notify`.
 @external(erlang, "test262_exec_ffi", "wait_for_notify")
 fn ffi_wait_for_notify(_ms: Int) -> Option(#(host_hooks.WaiterKey, Int)) {
   panic as beam_only_test
 }
 
 /// Blocking-wait capability (`AtomicsCapabilities.sync_wait` on
-/// `HostHooks.atomics`, contract clause 1):
+/// `HostHooks.atomics`):
 /// suspend this worker process in a selective receive until the registered
 /// waiterlist entry is woken or the timeout elapses. `timeout_ms: None` =
 /// wait forever (the FFI clamps to the BEAM receive ceiling). A `Some(0)`
@@ -1679,8 +1677,8 @@ fn atomics_sync_wait(req: host_hooks.WaitRequest) -> host_hooks.WaitOutcome {
 }
 
 /// The harness's host capabilities — both Atomics capabilities together,
-/// per contract clause 5 (a host that can block but not deliver wakes, or
-/// vice versa, deadlocks its peers). Supplied ONCE wherever the harness
+/// as `AtomicsCapabilities` demands (a host that can block but not deliver
+/// wakes, or vice versa, deadlocks its peers). Supplied ONCE wherever the harness
 /// boots a realm (entry/module/agent State construction); every derived
 /// State — eval/Function realms, $262.createRealm children, $262.agent
 /// children, module bodies including dynamic import() — inherits them.
@@ -1688,13 +1686,13 @@ fn atomics_sync_wait(req: host_hooks.WaitRequest) -> host_hooks.WaitOutcome {
 /// CanBlockIsFalse flag), not capability presence.
 fn harness_host_hooks() -> host.HostHooks {
   host.with_atomics(
-    state.default_host_hooks(),
+    host.default_host_hooks(),
     sync_wait: atomics_sync_wait,
     deliver_wake: ffi_deliver_wakes,
   )
 }
 
-/// One bounded wait-settle-drain step (contract clause 3): block at most
+/// One bounded wait-settle-drain step (the wake-injection side): block at most
 /// `timeout_ms` for a cross-process `arc_notify` message; if one arrives,
 /// settle this agent's first matching waitAsync waiter with "ok" and
 /// re-drain microtasks. `False` = the timeout elapsed, i.e. a deadline is

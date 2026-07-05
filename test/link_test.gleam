@@ -37,7 +37,7 @@ fn graph_of(
   let load = fn(specifier: esm.Resolved) {
     case dict.get(sources, esm.resolved_text(specifier)) {
       Ok(src) -> Ok(src)
-      Error(Nil) -> Error(load_error.NotFound(esm.resolved_text(specifier)))
+      Error(Nil) -> Error(load_error.LoadNotFound)
     }
   }
   let assert Ok(g) =

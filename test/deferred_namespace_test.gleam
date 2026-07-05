@@ -9,8 +9,8 @@ fn dance_resolve(raw: String, _ref: String) {
   Ok(raw)
 }
 
-fn no_source_loads(resolved: String) {
-  Error(load_error.NotFound(resolved))
+fn no_source_loads(_resolved: String) {
+  Error(load_error.LoadNotFound)
 }
 
 /// Link a bundle whose only dependency is an embedder host (synthetic) module,

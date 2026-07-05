@@ -241,7 +241,7 @@ take_report() ->
 %% erlang `receive ... after` rejects timeouts >= 2^32; clamp (49 days).
 -define(MAX_RECV_MS, 4294967294).
 
-%% Contract clause 1: block the calling agent until its waiterlist entry is
+%% The `sync_wait` capability: block the calling agent until its waiterlist entry is
 %% notified, or TimeoutMs elapses (negative -> infinity). Returns the JS
 %% result strings <<"ok">> | <<"timed-out">>. The notify-vs-timeout race is
 %% resolved lock-free via ets:take of our OWN entry on timeout: we removed
@@ -249,7 +249,7 @@ take_report() ->
 %% notifier claimed (and counted) us and its wake message is in flight ->
 %% bounded flush-receive, then "ok".
 %%
-%% TimeoutMs = 0 doubles as contract clause 4's cancel flush: core's
+%% TimeoutMs = 0 doubles as the cancel flush: core's
 %% sync_block "not-equal" path calls the sync_wait capability with a
 %% zero timeout exactly when its data-only cancel found the entry already
 %% claimed by a notifier, so the claimed branch below consumes the
@@ -280,11 +280,11 @@ await_notify({Key, Ref}, TimeoutMs) ->
         end
     end.
 
-%% Contract clause 2: deliver one wake message per remote waiter claimed by
+%% The `deliver_wake` capability: deliver one wake message per remote waiter claimed by
 %% Atomics.notify's waiterlist take. Claiming (the atomic ets:take in
 %% arc_waiter_ffi:take_waiters) already counted the waiter as woken; only
 %% the claimer may message it, so each entry is delivered at most once.
-%% Claimed terms are {Pid, Ref, Key, ByteIndex} (opaque state.ClaimedWaiter
+%% Claimed terms are {Pid, Ref, Key, ByteIndex} (opaque host_hooks.ClaimedWaiter
 %% on the Gleam side).
 deliver_wakes(Claimed) ->
     lists:foreach(
@@ -294,7 +294,7 @@ deliver_wakes(Claimed) ->
         Claimed),
     nil.
 
-%% Contract clause 4: the bounded dry-queue receive for cross-process
+%% The bounded dry-queue receive for cross-process
 %% Atomics.notify wakes. Blocks at most Ms (negative -> poll, clamped to
 %% the BEAM receive cap) for an {arc_notify, Ref, Key, ByteIndex} message
 %% sent by a notifier's wake delivery; returns {some, {Key, ByteIndex}} |

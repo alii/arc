@@ -23,6 +23,7 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/dynamic_import
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/internal/job_queue
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{type JsValue, type Ref, JsObject, JsUndefined}
@@ -39,47 +40,46 @@ import gleam/string
 // the module evaluator so a deferred-namespace trigger and a dynamic import
 // observe the same state.
 
-/// Why an embedder's loader could not produce a module — re-exported from
-/// `arc/module/load_error`, which the runtime-free graph walk and the AOT
-/// compiler share, so the SAME categories flow from a loader all the way to
-/// `module.compile_bundle_error_message` without ever passing through a
-/// rendered string.
-pub type ModuleLoadError =
-  load_error.ModuleLoadError
+/// Why an embedder's resolver / loader could not produce a module —
+/// re-exported from `arc/module/load_error`, which the runtime-free graph walk
+/// and the AOT compiler share, so the SAME categories flow from a loader all
+/// the way to `module.compile_bundle_error_message` without ever passing
+/// through a rendered string. Neither carries the specifier it failed on: the
+/// caller holds that, and words it via `load_error`'s two message functions.
+pub type ResolveError =
+  load_error.ResolveError
 
-/// The ONE place a `ModuleLoadError` becomes prose (see `load_error.message`).
-pub fn module_load_error_message(error: ModuleLoadError) -> String {
-  load_error.message(error)
-}
+pub type LoadError =
+  load_error.LoadError
 
 /// Resolve a raw specifier against its referrer to the module's canonical
 /// specifier — specifier math and existence probing, no source reading.
 pub type ResolveFn =
-  fn(String, String) -> Result(String, ModuleLoadError)
+  fn(String, String) -> Result(String, ResolveError)
 
 /// Read the source of a resolved specifier.
 pub type LoadFn =
-  fn(String) -> Result(String, ModuleLoadError)
+  fn(String) -> Result(String, LoadError)
 
 /// The `#(resolve, load)` pair for a SELF-CONTAINED module: every import is
-/// rejected with `load_error.ImportsForbidden`, so no source is ever fetched.
-/// The one blessed spelling of a loader pair embedders otherwise hand-roll
-/// identically each time.
+/// rejected as forbidden, so no source is ever fetched. The one blessed
+/// spelling of a loader pair embedders otherwise hand-roll identically each
+/// time.
 pub fn no_imports() -> #(ResolveFn, LoadFn) {
   #(forbid_resolve, forbid_load)
 }
 
 /// A `ResolveFn` that rejects every specifier — see `no_imports`.
 pub fn forbid_resolve(
-  raw_specifier: String,
+  _raw_specifier: String,
   _referrer: String,
-) -> Result(String, ModuleLoadError) {
-  Error(load_error.ImportsForbidden(raw_specifier))
+) -> Result(String, ResolveError) {
+  Error(load_error.ResolveForbidden)
 }
 
 /// A `LoadFn` that rejects every specifier — see `no_imports`.
-pub fn forbid_load(resolved: String) -> Result(String, ModuleLoadError) {
-  Error(load_error.ImportsForbidden(resolved))
+pub fn forbid_load(_resolved: String) -> Result(String, LoadError) {
+  Error(load_error.LoadForbidden)
 }
 
 /// Build the dynamic-import host hook. `referrer` is the path of the entry
@@ -143,7 +143,10 @@ fn import_module(
       case resolve(specifier, referrer) {
         Error(err) ->
           // Resolution failure → TypeError (host resolution error).
-          state.type_error(state, module_load_error_message(err))
+          state.type_error(
+            state,
+            load_error.resolve_failure_message(specifier, referrer, err),
+          )
         Ok(resolved) ->
           case phase {
             dynamic_import.DeferPhase(resolve_fn:, reject_fn:) ->
@@ -409,8 +412,8 @@ fn with_loaded_source(
   then: fn(String) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case load(resolved) {
-    Error(load_error) ->
-      state.type_error(state, module_load_error_message(load_error))
+    Error(err) ->
+      state.type_error(state, load_error.load_failure_message(resolved, err))
     Ok(source) -> then(source)
   }
 }
@@ -779,7 +782,7 @@ pub fn evaluate_bundle_with_registry(
   b: Builtins,
   global_object: Ref,
   bundle: module.ModuleBundle,
-  host_hooks: state.HostHooks,
+  host_hooks: host_hooks.HostHooks,
   finish: fn(State(host)) -> State(host),
 ) -> #(
   Heap(host),

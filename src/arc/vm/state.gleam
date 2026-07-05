@@ -138,60 +138,8 @@ pub type RealmCtx(host) {
     /// children, ShadowRealms, and module bodies (static and dynamic import)
     /// all `..spread` or re-thread this RealmCtx, so a forgotten install is
     /// a compile error rather than a silent "cannot block".
-    host_hooks: HostHooks,
+    host_hooks: host_hooks.HostHooks,
   )
-}
-
-// ============================================================================
-// Host capability contract — re-exported from arc/vm/host_hooks.
-//
-// The types (and the capability-free `default_host_hooks()`) live in
-// `arc/vm/host_hooks`, a tiny module BELOW this one; `RealmCtx.host_hooks`
-// stores a `HostHooks`. They are aliased here so the many modules that
-// already speak `state.HostHooks` keep working — build values with the
-// `host_hooks` module (or `arc/host`, which re-exports it for embedders).
-// ============================================================================
-
-/// See `host_hooks.WaiterKey` — opaque cross-process WaiterList identity.
-pub type WaiterKey =
-  value.WaiterKey
-
-/// See `host_hooks.WaiterHandle` — opaque registered-waiterlist-entry handle.
-pub type WaiterHandle =
-  host_hooks.WaiterHandle
-
-/// See `host_hooks.ClaimedWaiter` — opaque claimed remote waiter.
-pub type ClaimedWaiter =
-  host_hooks.ClaimedWaiter
-
-/// See `host_hooks.WaitRequest` — one blocking sync Atomics.wait.
-pub type WaitRequest =
-  host_hooks.WaitRequest
-
-/// See `host_hooks.WaitOutcome` — `WaitOk` / `WaitTimedOut`.
-pub type WaitOutcome =
-  host_hooks.WaitOutcome
-
-/// See `host_hooks.SyncWaitFn` — the blocking-wait capability.
-pub type SyncWaitFn =
-  host_hooks.SyncWaitFn
-
-/// See `host_hooks.DeliverWakeFn` — the wake-delivery capability.
-pub type DeliverWakeFn =
-  host_hooks.DeliverWakeFn
-
-/// See `host_hooks.AtomicsCapabilities` — both Atomics capabilities, bundled.
-pub type AtomicsCapabilities =
-  host_hooks.AtomicsCapabilities
-
-/// See `host_hooks.HostHooks` — the embedder capability record every realm
-/// carries.
-pub type HostHooks =
-  host_hooks.HostHooks
-
-/// See `host_hooks.default_host_hooks` — the capability-free default.
-pub fn default_host_hooks() -> HostHooks {
-  host_hooks.default_host_hooks()
 }
 
 /// Every heap ref a `HostHooks` record can hold — the ENGINE-state values a
@@ -204,7 +152,7 @@ pub fn default_host_hooks() -> HostHooks {
 /// carrying a `JsValue` (root it) or not (bind it to `_`). The alternative —
 /// a hand-written list of the fields someone remembered — is exactly how a
 /// live ref goes unrooted.
-pub fn host_hook_roots(hooks: HostHooks) -> List(JsValue) {
+pub fn host_hook_roots(hooks: host_hooks.HostHooks) -> List(JsValue) {
   let host_hooks.HostHooks(
     // Capability closures + clock: no JsValue reachable through them.
     atomics: _,

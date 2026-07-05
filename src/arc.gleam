@@ -4,7 +4,7 @@ import arc/engine.{Returned, Threw}
 import arc/esm
 import arc/internal/path
 import arc/module/load_error
-import arc/module_host.{type ModuleLoadError}
+import arc/module_host.{type LoadError, type ResolveError}
 import arc/parser
 import arc/repl/examples
 import arc/vm/builtins/common.{type Builtins}
@@ -370,22 +370,21 @@ fn run_module_file(
 fn resolve_dep(
   raw_specifier: String,
   parent_specifier: String,
-) -> Result(String, ModuleLoadError) {
+) -> Result(String, ResolveError) {
   case path.resolve_specifier(raw_specifier, parent_specifier) {
     path.PathSpecifier(resolved) -> Ok(resolved)
-    path.BareSpecifier(bare) -> Error(load_error.UnsupportedBareSpecifier(bare))
+    path.BareSpecifier(_bare) -> Error(load_error.UnsupportedBareSpecifier)
   }
 }
 
 /// Read a resolved dependency's source from disk. Only a genuinely absent
 /// file is `NotFound`; a directory, a permissions failure or an I/O error is a
 /// `ReadFailed` carrying simplifile's own description.
-fn load_dep(resolved: String) -> Result(String, ModuleLoadError) {
+fn load_dep(resolved: String) -> Result(String, LoadError) {
   case simplifile.read(resolved) {
     Ok(source) -> Ok(source)
-    Error(simplifile.Enoent) -> Error(load_error.NotFound(resolved))
-    Error(err) ->
-      Error(load_error.ReadFailed(resolved, simplifile.describe_error(err)))
+    Error(simplifile.Enoent) -> Error(load_error.LoadNotFound)
+    Error(err) -> Error(load_error.ReadFailed(simplifile.describe_error(err)))
   }
 }
 

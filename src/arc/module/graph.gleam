@@ -17,7 +17,7 @@
 
 import arc/compiler/scope
 import arc/esm.{type Raw, type Resolved}
-import arc/module/load_error.{type ModuleLoadError}
+import arc/module/load_error.{type LoadError, type ResolveError}
 import arc/parser
 import arc/parser/ast
 import gleam/bool
@@ -46,12 +46,12 @@ import gleam/set.{type Set}
 /// HostLoadImportedModule, only successful resolutions need to be stable — a
 /// failed resolution may succeed on a later walk.
 pub type Resolve =
-  fn(esm.ModuleRequest, Resolved) -> Result(Resolved, ModuleLoadError)
+  fn(esm.ModuleRequest, Resolved) -> Result(Resolved, ResolveError)
 
 /// Fetch the source text of a resolved specifier. Called exactly once per
 /// unique module per walk, however many edges point at it.
 pub type Load =
-  fn(Resolved) -> Result(String, ModuleLoadError)
+  fn(Resolved) -> Result(String, LoadError)
 
 /// One parsed-and-analyzed module, BEFORE any of its requests are resolved.
 /// This is exactly what `prepare` can know from a single file: no edges yet.
@@ -116,9 +116,9 @@ pub type GraphError {
   /// The host resolver rejected a request. `raw` is quoted as the source wrote
   /// it; `referrer` is the module that wrote it; `error` is the loader's own
   /// typed reason, still a category (never a rendered string) at this point.
-  ResolveFailed(raw: Raw, referrer: Resolved, error: ModuleLoadError)
+  ResolveFailed(raw: Raw, referrer: Resolved, error: ResolveError)
   /// The host loader could not read a resolved specifier's source.
-  LoadFailed(specifier: Resolved, error: ModuleLoadError)
+  LoadFailed(specifier: Resolved, error: LoadError)
   /// The module contains a static source-phase import
   /// (`import source x from "m"`), which neither the runtime nor graph
   /// tooling supports yet. Checked after the module's requests resolve, so
