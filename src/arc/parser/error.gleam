@@ -183,6 +183,9 @@ pub type ParseError {
   /// `using [a] = …` / `using {a} = …` — using declarations may only bind
   /// identifiers, never destructuring patterns.
   UsingPatternBinding(pos: Int)
+  /// §13.13.1: `??` mixed with `||`/`&&` at the same level without
+  /// parentheses (`a ?? b || c`, `a && b ?? c`, …).
+  CoalesceMixedWithLogical(pos: Int)
 }
 
 pub fn parse_error_to_string(error: ParseError) -> String {
@@ -385,6 +388,8 @@ pub fn parse_error_to_string(error: ParseError) -> String {
       "'using' declarations are not allowed in for-in statements"
     UsingPatternBinding(_) ->
       "'using' declarations may only declare identifier bindings"
+    CoalesceMixedWithLogical(_) ->
+      "Nullish coalescing operator '??' requires parentheses when mixed with '||' or '&&'"
   }
 }
 

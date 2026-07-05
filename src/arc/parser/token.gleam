@@ -92,12 +92,17 @@ pub type BinaryOperator {
   BinaryOperator(precedence: Int, op: BinOrLogical)
 }
 
-/// The two AST shapes a binary-operator token can build: an ordinary
-/// `BinaryExpression`, or a short-circuiting `LogicalExpression`
-/// (`&&` / `||` / `??`).
+/// What kind of AST a binary-operator token builds. `Coalesce` is split out
+/// from `ShortCircuit` even though both produce a `LogicalExpression`, because
+/// §13.13.1 forbids mixing `??` with `||`/`&&` without parentheses — the
+/// separate variant forces `parse_binary_rhs` to have a distinct arm for it,
+/// so that early error can never be silently forgotten.
 pub type BinOrLogical {
   Binary(ast.BinaryOp)
-  Logical(ast.LogicalOp)
+  /// `&&` / `||` — the truthy short-circuit operators.
+  ShortCircuit(ast.LogicalOp)
+  /// `??` — nullish coalescing.
+  Coalesce
 }
 
 /// The single table of binary/logical operator tokens.
@@ -109,9 +114,9 @@ pub fn binary_operator(
   allow_in: Bool,
 ) -> Option(BinaryOperator) {
   case kind {
-    QuestionQuestion -> Some(BinaryOperator(1, Logical(ast.NullishCoalescing)))
-    PipePipe -> Some(BinaryOperator(1, Logical(ast.LogicalOr)))
-    AmpersandAmpersand -> Some(BinaryOperator(2, Logical(ast.LogicalAnd)))
+    QuestionQuestion -> Some(BinaryOperator(1, Coalesce))
+    PipePipe -> Some(BinaryOperator(1, ShortCircuit(ast.LogicalOr)))
+    AmpersandAmpersand -> Some(BinaryOperator(2, ShortCircuit(ast.LogicalAnd)))
     Pipe -> Some(BinaryOperator(3, Binary(ast.BitwiseOr)))
     Caret -> Some(BinaryOperator(4, Binary(ast.BitwiseXor)))
     Ampersand -> Some(BinaryOperator(5, Binary(ast.BitwiseAnd)))
