@@ -576,7 +576,8 @@ fn as_method_el(entry: #(Int, ast.ClassElement)) -> Result(ClassMethodEl, Nil) {
 fn as_field_el(entry: #(Int, ast.ClassElement)) -> Result(ClassFieldEl, Nil) {
   let #(body_index, el) = entry
   case el {
-    ast.ClassField(key:, value:, ..) -> Ok(ClassFieldEl(body_index:, key:, value:))
+    ast.ClassField(key:, value:, ..) ->
+      Ok(ClassFieldEl(body_index:, key:, value:))
     ast.ClassMethod(..) | ast.StaticBlock(..) -> Error(Nil)
   }
 }
@@ -611,7 +612,8 @@ pub fn classify_class_body(body: List(ast.ClassElement)) -> ClassBodyParts {
     constructor: list.find(indexed, fn(entry) { is_class_ctor(entry.1) })
       |> result.try(as_method_el)
       |> option.from_result,
-    instance_methods: of_kind(is_instance_method) |> list.filter_map(as_method_el),
+    instance_methods: of_kind(is_instance_method)
+      |> list.filter_map(as_method_el),
     static_methods: of_kind(is_static_method) |> list.filter_map(as_method_el),
     instance_fields: of_kind(is_instance_field) |> list.filter_map(as_field_el),
     static_elements: of_kind(is_static_element) |> list.filter_map(as_static_el),
@@ -718,8 +720,12 @@ pub fn class_body_bindings(
   let private_fn_consts =
     list.filter_map(body, fn(elem) {
       case elem {
-        ast.ClassMethod(key: ast.KeyPrivate(name:, ..), kind:, is_static: False, ..) ->
-          Ok(private_fn_const(kind, name))
+        ast.ClassMethod(
+          key: ast.KeyPrivate(name:, ..),
+          kind:,
+          is_static: False,
+          ..,
+        ) -> Ok(private_fn_const(kind, name))
         _ -> Error(Nil)
       }
     })

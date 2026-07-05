@@ -5424,7 +5424,8 @@ fn emit_property_key(
     ast.KeyIdentifier(name:, ..) | ast.KeyPrivate(name:, ..) ->
       Ok(push_const(e, JsString(name)))
     ast.KeyString(value: s, ..) -> Ok(push_const(e, JsString(s)))
-    ast.KeyNumber(value: n, ..) -> Ok(push_const(e, JsNumber(literal_number(n))))
+    ast.KeyNumber(value: n, ..) ->
+      Ok(push_const(e, JsNumber(literal_number(n))))
     ast.KeyBigInt(value: i, ..) ->
       Ok(push_const(e, value.JsBigInt(value.BigInt(i))))
     ast.KeyComputed(expression:) -> emit_expr(e, expression)
