@@ -18,6 +18,20 @@
 %% the v-mode class evaluator that spelling it out would hide the code.
 -define(CS, arc_regex_charset).
 
+%% translate_pat/5's InClass parameter is three-valued, not a boolean:
+%%   false — outside a character class.
+%%   true  — inside `[...]`, and the previous item CANNOT be a range low
+%%           endpoint: the class just opened (`[` or `[^`), or the previous item
+%%           was a class escape, a property escape, or a range that completed.
+%%   atom  — inside `[...]`, and the previous item CAN be a range low endpoint
+%%           (a literal character or a single-character escape).
+%% The extra bit exists to decide whether a `-` is a range operator or a
+%% literal, which JS and PCRE agree on but which this module must know for
+%% itself: only a real range operator may clamp a lone-surrogate high endpoint
+%% (see translate_range_hi/4). `[-\uD800]` and `[a-b-\uD800]` are literal
+%% dashes; `[a-\uD800]` is a range.
+-define(IN_CLASS(X), (X =:= true orelse X =:= atom)).
+
 %% Convert JS flags to re:compile options.
 %%
 %% `i` is the only flag PCRE can be trusted with directly. `m` and `s` are NOT
@@ -80,7 +94,8 @@ get_compiled(Pattern, Flags) ->
             Caseless = lists:member(caseless, Opts),
             {Stripped, GroupCount, Names} = scan_pattern(Pattern),
             Translated = unicode:characters_to_binary(
-                           translate_pat(Stripped, false, Mode, Caseless, [NL])),
+                           leading_star_prefix(Stripped, NL)
+                           ++ translate_pat(Stripped, false, Mode, Caseless, [NL])),
             Result = case re:compile(Translated, Opts) of
                          {ok, MP} ->
                              {ok, {MP, GroupCount, Names}};
@@ -257,6 +272,31 @@ unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
 %% is always spliced between `[` and `]`.
 -define(JS_LT, "\\n\\r\\x{2028}\\x{2029}").
 
+%% Restore the start-position optimization that desugaring `.` costs us.
+%%
+%% PCRE recognises a pattern beginning with an unanchored `.*`/`.+` and, instead
+%% of retrying at every offset, either anchors it (dotall — `.` reaches the end
+%% of the subject from anywhere) or restricts starts to line beginnings (its
+%% "startline" flag). Both are exact: if the pattern matches starting at p, the
+%% leading star can just eat more, so it also matches starting at the beginning
+%% of p's line — hence the leftmost match always starts there. But translate_pat/5
+%% rewrites `.` into a class (PCRE's `.` has the wrong newline set for JS) and
+%% PCRE only recognises the star of a real `.`, so a failing /.*a$/ went from one
+%% scan to a quadratic bump-along. Assert the same thing here, in the pattern.
+%%
+%% `\G` — "the offset re:run was given" — keeps that very first attempt available:
+%% the theorem above only reaches back to the start of the line, which may lie
+%% before the offset (a /g loop resuming mid-line must still be able to match).
+%% That is exactly the exemption PCRE's own startline scan makes.
+leading_star_prefix([$., Star | _], {_Multiline, DotAll})
+  when Star =:= $*; Star =:= $+ ->
+    case DotAll of
+        true -> "\\G";
+        false -> "(?:\\G|(?<=[" ?JS_LT "]))"
+    end;
+leading_star_prefix(_Stripped, _NewlineMode) ->
+    "".
+
 %% ---- Escape translation --------------------------------------------------
 %%
 %% Rewrite the JS-regex escapes PCRE doesn't accept, or reads differently, into
@@ -269,9 +309,10 @@ unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
 %% is what RegExp.prototype.source returns; this only affects what re sees.
 %%
 %% translate_pat(Chars, InClass, Mode, CI, MS)
-%%   InClass — inside a [...] character class, where \w/\b are not the same
-%%             productions (\b is backspace) and a negated set cannot be
-%%             written as a nested class.
+%%   InClass — false | true | atom, see ?IN_CLASS. Inside a [...] character
+%%             class \w/\b are not the same productions (\b is backspace) and a
+%%             negated set cannot be written as a nested class; `atom` further
+%%             says the previous class item can be a range low endpoint.
 %%   Mode    — none | u | v: whether property escapes / v-flag class-set
 %%             expressions are in play.
 %%   CI      — the i flag. It changes what a class must contain: PCRE folds
@@ -290,10 +331,10 @@ translate_pat([$\\, $u, ${ | Rest], InClass, Mode, CI, MS) ->
                     %% Lone surrogate: PCRE refuses \x{D800}-\x{DFFF} in UTF
                     %% mode, which would degrade the WHOLE pattern to
                     %% no-match. Emit an unmatchable stand-in instead.
-                    emit_surrogate(InClass, Rest2, Mode, CI, MS);
+                    emit_surrogate(?IN_CLASS(InClass), Rest2, Mode, CI, MS);
                 false ->
                     [$\\, $x, ${] ++ Hex ++ [$}]
-                        ++ translate_pat(Rest2, InClass, Mode, CI, MS)
+                        ++ translate_pat(Rest2, after_atom(InClass), Mode, CI, MS)
             end;
         _ ->
             [$\\, $u, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
@@ -304,7 +345,7 @@ translate_pat([$\\, $u, A, B, C, D | Rest], InClass, Mode, CI, MS) ->
             V = list_to_integer([A, B, C, D], 16),
             if
                 V >= 16#D800, V =< 16#DBFF,
-                (not InClass orelse Mode =/= none) ->
+                (InClass =:= false orelse Mode =/= none) ->
                     %% Lead surrogate: a lead+trail escape pair denotes one
                     %% astral character. Outside a class that is how JS
                     %% (non-u) pairs the pattern's code units; INSIDE a class
@@ -322,17 +363,18 @@ translate_pat([$\\, $u, A, B, C, D | Rest], InClass, Mode, CI, MS) ->
                             CP = 16#10000 + (V - 16#D800) * 16#400
                                 + (W - 16#DC00),
                             "\\x{" ++ integer_to_list(CP, 16) ++ "}"
-                                ++ translate_pat(Rest2, InClass, Mode, CI, MS);
+                                ++ translate_pat(Rest2, after_atom(InClass),
+                                                 Mode, CI, MS);
                         none ->
-                            emit_surrogate(InClass, Rest, Mode, CI, MS)
+                            emit_surrogate(?IN_CLASS(InClass), Rest, Mode, CI, MS)
                     end;
                 V >= 16#D800, V =< 16#DFFF ->
                     %% Unpaired trail surrogate, or a lone surrogate inside a
                     %% non-unicode class: never matches a well-formed string.
-                    emit_surrogate(InClass, Rest, Mode, CI, MS);
+                    emit_surrogate(?IN_CLASS(InClass), Rest, Mode, CI, MS);
                 true ->
                     [$\\, $x, ${, A, B, C, D, $}
-                     | translate_pat(Rest, InClass, Mode, CI, MS)]
+                     | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)]
             end;
         false -> [$\\, $u | translate_pat([A, B, C, D | Rest], InClass, Mode, CI, MS)]
     end;
@@ -344,10 +386,12 @@ translate_pat([$\\, P, ${ | Rest], InClass, Mode, CI, MS)
   when (P =:= $p orelse P =:= $P), Mode =/= none ->
     case take_prop(Rest, []) of
         {Payload, Rest2} ->
-            case prop_translation(Payload, P =:= $P, InClass, Mode) of
+            case prop_translation(Payload, P =:= $P, ?IN_CLASS(InClass), Mode) of
                 {ok, Io} ->
+                    %% A property escape is a class, never a range low endpoint.
                     unicode:characters_to_list(iolist_to_binary(Io))
-                        ++ translate_pat(Rest2, InClass, Mode, CI, MS);
+                        ++ translate_pat(Rest2, after_class_item(InClass),
+                                         Mode, CI, MS);
                 error ->
                     [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
             end;
@@ -367,46 +411,43 @@ translate_pat([$\\, $w | Rest], false, Mode, CI, MS) ->
     word_atom(Mode) ++ translate_pat(Rest, false, Mode, CI, MS);
 translate_pat([$\\, $W | Rest], false, Mode, CI, MS) ->
     nword_atom(Mode) ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$\\, $s | Rest], true, Mode, CI, MS) ->
+translate_pat([$\\, $s | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
     splice_in_class(?JSS_CHARS, Rest, Mode, CI, MS);
-translate_pat([$\\, $S | Rest], true, Mode, CI, MS) ->
+translate_pat([$\\, $S | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
     splice_in_class(?CS:class_complement(?CS:vspace(), CI), Rest, Mode, CI, MS);
-translate_pat([$\\, $w | Rest], true, Mode, CI, MS) ->
+translate_pat([$\\, $w | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
     splice_in_class(word_items(Mode), Rest, Mode, CI, MS);
-translate_pat([$\\, $W | Rest], true, Mode, CI, MS) ->
+translate_pat([$\\, $W | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
     splice_in_class(nword_items(Mode, CI), Rest, Mode, CI, MS);
 %% \d/\D need no translation, but they are class escapes too, so route them
 %% through splice_in_class for the dash rule below (`[\d-x]` is three atoms in
 %% JS; PCRE would reject it as a bad range).
-translate_pat([$\\, D | Rest], true, Mode, CI, MS) when D =:= $d; D =:= $D ->
+translate_pat([$\\, D | Rest], IC, Mode, CI, MS)
+  when ?IN_CLASS(IC), D =:= $d orelse D =:= $D ->
     splice_in_class([$\\, D], Rest, Mode, CI, MS);
 %% A `-` immediately BEFORE a class escape is a literal, never a range operator
 %% (JS never lets a class escape be a range endpoint). Escape it and let the
 %% escape splice normally, or PCRE reads `[!-\w]` as the range `!`-`0` and
 %% silently widens the class. Mirror image of the trailing dash that
 %% splice_in_class/4 escapes.
-translate_pat([$-, $\\, E | Rest], true, Mode, CI, MS)
-  when E =:= $d; E =:= $D; E =:= $s; E =:= $S; E =:= $w; E =:= $W ->
+translate_pat([$-, $\\, E | Rest], IC, Mode, CI, MS)
+  when ?IN_CLASS(IC),
+       E =:= $d orelse E =:= $D orelse E =:= $s orelse E =:= $S
+       orelse E =:= $w orelse E =:= $W ->
     [$\\, $- | translate_pat([$\\, E | Rest], true, Mode, CI, MS)];
-%% A range whose HIGH endpoint is a lone surrogate, e.g. `[a-\uD800]`. The
-%% low endpoint is already emitted, and the stand-in for the high one is a
-%% class (\p{Cs}), which PCRE will not accept as a range endpoint. JS matches
-%% Lo..U+D800 minus the surrogates a subject can never contain, i.e. Lo..U+D7FF
-%% — so clamp. (A surrogate LOW endpoint is consumed with its whole range by
-%% class_surrogate_item/1, so it never reaches here.)
-translate_pat([$-, $\\, $u | R0] = L, true, Mode, CI, MS) ->
-    case parse_uescape(R0) of
-        {ok, V, R1} when V >= 16#D800, V =< 16#DFFF ->
-            case Mode =/= none andalso V =< 16#DBFF
-                andalso pair_trail(R1) =/= none of
-                %% Under u/v `[a-😀]` is the range a..U+1F600; let
-                %% the pairing clause above see the escape.
-                true -> [$- | translate_pat(tl(L), true, Mode, CI, MS)];
-                false -> "-\\x{D7FF}" ++ translate_pat(R1, true, Mode, CI, MS)
-            end;
-        _ ->
-            [$- | translate_pat(tl(L), true, Mode, CI, MS)]
-    end;
+%% A `-` in a class is a range operator only when the previous item can be a
+%% range LOW endpoint (state `atom`) and something other than the closing `]`
+%% follows. `[-\uD800]`, `[^-\uD800]` and `[a-b-\uD800]` are literal dashes;
+%% reading them as operators would substitute a real character (U+D7FF) for an
+%% unmatchable one and silently widen the class — the same hazard the clause
+%% above exists to prevent, from the other side.
+translate_pat([$-, C | _] = L, atom, Mode, CI, MS) when C =/= $] ->
+    translate_range_hi(tl(L), Mode, CI, MS);
+%% A literal `-`. Escape it so PCRE cannot read it as an operator either (the
+%% item after it may be a class, e.g. `[a-b-\uD800]` -> `[a-b\-\p{Cs}]`), and
+%% remember that a literal dash IS itself a range low endpoint (`[--a]`).
+translate_pat([$- | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
+    [$\\, $- | translate_pat(Rest, atom, Mode, CI, MS)];
 %% \b, \B outside a character class (inside one, \b is backspace).
 translate_pat([$\\, $b | Rest], false, Mode, CI, MS) ->
     %% Word boundary: word|nonword transition (start/end count as nonword).
@@ -419,8 +460,10 @@ translate_pat([$\\, $B | Rest], false, Mode, CI, MS) ->
     "(?:(?<=" ++ W ++ ")(?=" ++ W ++ ")|(?<!" ++ W ++ ")(?!" ++ W ++ "))"
         ++ translate_pat(Rest, false, Mode, CI, MS);
 %% Preserve any other escape pair verbatim (don't reinterpret its 2nd char).
+%% Every escape that reaches here denotes a single character (the class escapes
+%% were taken above), so in a class it can start a range.
 translate_pat([$\\, C | Rest], InClass, Mode, CI, MS) ->
-    [$\\, C | translate_pat(Rest, InClass, Mode, CI, MS)];
+    [$\\, C | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)];
 %% v-flag classes: PCRE has no ClassSetExpression (nested classes, &&
 %% intersection, -- subtraction, \q{...} string literals, properties of
 %% strings inside classes). Desugar the whole [...] here: parse the set
@@ -442,12 +485,12 @@ translate_pat([$[ | Rest], false, v, CI, MS) ->
                      end,
             ?CS:emit_vclass(Ranges, Strings) ++ translate_pat(Rest2, false, v, CI, MS);
         error ->
-            [$[ | translate_pat(Rest, true, v, CI, MS)]
+            open_class(Rest, v, CI, MS)
     end;
 %% Track character-class nesting on unescaped brackets.
 translate_pat([$[ | Rest], false, Mode, CI, MS) ->
-    [$[ | translate_pat(Rest, true, Mode, CI, MS)];
-translate_pat([$] | Rest], true, Mode, CI, MS) ->
+    open_class(Rest, Mode, CI, MS);
+translate_pat([$] | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
     [$] | translate_pat(Rest, false, Mode, CI, MS)];
 %% Modifier groups `(?ims-ims:...)` (ES2025 RegExp modifiers) change m/s for
 %% their body only. `.`, `^` and `$` are desugared here rather than left to
@@ -484,7 +527,80 @@ translate_pat([$$ | Rest], false, Mode, CI, [{false, _S} | _] = MS) ->
 translate_pat([$$ | Rest], false, Mode, CI, [{true, _S} | _] = MS) ->
     "(?=[" ?JS_LT "]|\\z)" ++ translate_pat(Rest, false, Mode, CI, MS);
 translate_pat([C | Rest], InClass, Mode, CI, MS) ->
-    [C | translate_pat(Rest, InClass, Mode, CI, MS)].
+    [C | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)].
+
+%% Enter a `[...]` class. A leading `^` is the negation, not a class item, so it
+%% must not become a range low endpoint — `[^-\uD800]`'s dash is a literal, the
+%% same as `[-\uD800]`'s.
+open_class(Rest, Mode, CI, MS) ->
+    {Open, Body} = case Rest of
+                       [$^ | R] -> {"[^", R};
+                       _ -> {"[", Rest}
+                   end,
+    Open ++ translate_pat(Body, true, Mode, CI, MS).
+
+%% State after emitting a class item that CAN be a range low endpoint (a literal
+%% character, or an escape denoting one).
+after_atom(false) -> false;
+after_atom(_InClass) -> atom.
+
+%% State after emitting a class item that CANNOT be a range low endpoint (a
+%% class escape, a property escape, a completed range).
+after_class_item(false) -> false;
+after_class_item(_InClass) -> true.
+
+%% The HIGH endpoint of a class range, consumed as exactly one item so the state
+%% resets: whatever follows a completed range starts fresh, and a `-` there is a
+%% literal rather than a second range operator (`[a-b-\uD800]`).
+%%
+%% Only `\u` needs care. A lone surrogate cannot be a PCRE range endpoint — its
+%% stand-in \p{Cs} is a class, not a codepoint — and no well-formed subject holds
+%% one, so JS's Lo..surrogate range is exactly Lo..U+D7FF: clamp. Only the
+%% \uHHHH form pairs with a following trail escape into one astral character
+%% (the \u{...} form never does), and only under u/v — `[a-😀]/u` is
+%% the range a..U+1F600, but `[a-\u{D83D}\uDE00]/u` is a clamped range plus a
+%% lone trail surrogate.
+translate_range_hi([$\\, $u | R0] = L, Mode, CI, MS) ->
+    Braced = case R0 of [${ | _] -> true; _ -> false end,
+    case parse_uescape(R0) of
+        {ok, V, R1} when V < 16#D800; V > 16#DFFF ->
+            "-\\x{" ++ integer_to_list(V, 16) ++ "}"
+                ++ translate_pat(R1, true, Mode, CI, MS);
+        {ok, V, R1} ->
+            case (not Braced) andalso Mode =/= none andalso V =< 16#DBFF
+                andalso pair_trail(R1) of
+                {ok, W, R2} ->
+                    CP = 16#10000 + (V - 16#D800) * 16#400 + (W - 16#DC00),
+                    "-\\x{" ++ integer_to_list(CP, 16) ++ "}"
+                        ++ translate_pat(R2, true, Mode, CI, MS);
+                _ ->
+                    "-\\x{D7FF}" ++ translate_pat(R1, true, Mode, CI, MS)
+            end;
+        none ->
+            range_hi_verbatim(L, Mode, CI, MS)
+    end;
+translate_range_hi(L, Mode, CI, MS) ->
+    range_hi_verbatim(L, Mode, CI, MS).
+
+%% Any other high endpoint is emitted as the generic translation would emit it;
+%% all this adds is knowing where the item ends.
+range_hi_verbatim([$\\, $x, A, B | R] = L, Mode, CI, MS) ->
+    case is_hex(A) andalso is_hex(B) of
+        true -> [$-, $\\, $x, A, B | translate_pat(R, true, Mode, CI, MS)];
+        false -> range_hi_escape(L, Mode, CI, MS)
+    end;
+range_hi_verbatim([$\\, $c, C | R] = L, Mode, CI, MS) ->
+    case (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z) of
+        true -> [$-, $\\, $c, C | translate_pat(R, true, Mode, CI, MS)];
+        false -> range_hi_escape(L, Mode, CI, MS)
+    end;
+range_hi_verbatim(L, Mode, CI, MS) ->
+    range_hi_escape(L, Mode, CI, MS).
+
+range_hi_escape([$\\, C | R], Mode, CI, MS) ->
+    [$-, $\\, C | translate_pat(R, true, Mode, CI, MS)];
+range_hi_escape([C | R], Mode, CI, MS) ->
+    [$-, C | translate_pat(R, true, Mode, CI, MS)].
 
 %% Read a modifier-group prefix — "?[ims][-[ims]]:" — from just after the `(`,
 %% and fold it into the enclosing {Multiline, DotAll}. Either RegularExpressionFlags
