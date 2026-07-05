@@ -1754,13 +1754,7 @@ fn compute_replacement(
     TemplateReplacer(with_named, without_named) -> {
       // 14.j.i: namedCaptures (when present) is ToObject'd.
       use named, state <- to_named_captures_object(state, named_captures)
-      let segments = case named {
-        Some(_) -> with_named
-        None -> without_named
-      }
-      resolve_segments(
-        state,
-        segments,
+      let ctx =
         substitution.Ctx(
           matched:,
           before: fn() { byte_slice(s, 0, position) },
@@ -1769,11 +1763,18 @@ fn compute_replacement(
           },
           capture: fn(idx) { capture_or_empty(captures, idx) },
           m: n_captures,
-        ),
-        named,
-        [],
-        cont,
-      )
+        )
+      case named {
+        // No `groups`: the template was tokenized without named references,
+        // so nothing here is observable — resolve it in one pass.
+        None ->
+          finish_replacement(
+            state,
+            list.reverse(substitution.resolve_plain_parts(without_named, ctx)),
+            cont,
+          )
+        Some(nc) -> resolve_segments(state, with_named, ctx, nc, [], cont)
+      }
     }
   }
 }
@@ -1800,8 +1801,8 @@ fn to_named_captures_object(
 type Replacer {
   FunctionalReplacer(fun: JsValue)
   TemplateReplacer(
-    with_named: List(substitution.ReplaceSegment),
-    without_named: List(substitution.ReplaceSegment),
+    with_named: List(substitution.NamedSegment),
+    without_named: List(substitution.PlainSegment),
   )
 }
 
@@ -1819,8 +1820,8 @@ fn with_replacer(
       use template, state <- coerce.try_to_string(state, replace_value)
       cont(
         TemplateReplacer(
-          substitution.tokenize_template(template, True),
-          substitution.tokenize_template(template, False),
+          substitution.tokenize_named(template),
+          substitution.tokenize_plain(template),
         ),
         state,
       )
@@ -1828,52 +1829,53 @@ fn with_replacer(
   }
 }
 
-/// §22.1.3.19.1 GetSubstitution over a pre-tokenized template. `substitution`
-/// resolves each segment purely; the loop only exists because `$<name>` needs
-/// an observable Get + ToString, so it stays CPS.
+/// §22.1.3.19.1 GetSubstitution over a template tokenized against a match with
+/// a `groups` object (`nc`). `substitution` resolves each segment purely; the
+/// loop only exists because `$<name>` needs an observable Get + ToString, so it
+/// stays CPS. `acc` holds the resolved pieces in reverse.
 fn resolve_segments(
   state: State(host),
-  segments: List(substitution.ReplaceSegment),
+  segments: List(substitution.NamedSegment),
   ctx: substitution.Ctx,
-  named: Option(JsValue),
+  nc: JsValue,
   acc: List(String),
   cont: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case segments {
-    [] -> {
-      let parts = list.reverse(acc)
-      let total =
-        list.fold(parts, 0, fn(sum, part) { sum + string.byte_size(part) })
-      case total > limits.max_string_bytes {
-        True -> state.range_error(state, "Invalid string length")
-        False -> cont(string.concat(parts), state)
-      }
-    }
+    [] -> finish_replacement(state, acc, cont)
     [seg, ..rest] -> {
       let plain = fn(text: String, state: State(host)) {
-        resolve_segments(state, rest, ctx, named, [text, ..acc], cont)
+        resolve_segments(state, rest, ctx, nc, [text, ..acc], cont)
       }
       case substitution.resolve(seg, ctx) {
         substitution.Text(text) -> plain(text, state)
-        // A NamedSeg is only ever tokenized when namedCaptures is present
-        // (see `Replacer`), so `named` is Some here; the None arm is the
-        // spec's own "keep $<name> literal" answer, kept for totality.
-        substitution.NamedRef(name) ->
-          case named {
-            None -> plain("$<" <> name <> ">", state)
-            Some(nc) -> {
-              use cap, state <- try_get_of(state, nc, Named(name))
-              case cap {
-                JsUndefined -> plain("", state)
-                _ -> {
-                  use cap_str, state <- coerce.try_to_string(state, cap)
-                  plain(cap_str, state)
-                }
-              }
+        substitution.NamedRef(name) -> {
+          use cap, state <- try_get_of(state, nc, Named(name))
+          case cap {
+            JsUndefined -> plain("", state)
+            _ -> {
+              use cap_str, state <- coerce.try_to_string(state, cap)
+              plain(cap_str, state)
             }
           }
+        }
       }
     }
+  }
+}
+
+/// Join a replacement's resolved pieces (given in reverse), refusing to
+/// materialise a string past `limits.max_string_bytes`.
+fn finish_replacement(
+  state: State(host),
+  acc: List(String),
+  cont: fn(String, State(host)) -> #(State(host), Result(JsValue, JsValue)),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let parts = list.reverse(acc)
+  let total = list.fold(parts, 0, fn(sum, part) { sum + string.byte_size(part) })
+  case total > limits.max_string_bytes {
+    True -> state.range_error(state, "Invalid string length")
+    False -> cont(string.concat(parts), state)
   }
 }
 

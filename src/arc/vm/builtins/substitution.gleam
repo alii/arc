@@ -2,22 +2,25 @@
 //// (`$$`, `$&`, `` $` ``, `$'`, `$1`..`$99`, `$<name>`) shared by
 //// `String.prototype.replace`/`replaceAll` and `RegExp.prototype[@@replace]`.
 ////
-//// The template is tokenized ONCE per replace call (`tokenize_template`) and
-//// each match then only resolves the segments (`resolve`). Resolution is
-//// pure: the single observable step in the whole operation is the
-//// `Get(namedCaptures, name)` behind `$<name>`, so `resolve` hands that back
-//// as `NamedRef` for the caller to perform. `String.prototype` never sees a
-//// `NamedRef` — a string search has no captures, so it tokenizes with
-//// `named_mode: False` and can use `resolve_without_named`.
+//// The template is tokenized ONCE per replace call and each match then only
+//// resolves the segments. Resolution is pure apart from `$<name>`, whose
+//// `Get(namedCaptures, name)` is observable, so the named resolver hands that
+//// back as `NamedRef` for the caller to perform.
+////
+//// Two segment types keep the two worlds apart at compile time:
+//// `tokenize_plain` yields `PlainSegment`s, which contain no named reference
+//// and resolve to a plain `String`; `tokenize_named` yields `NamedSegment`s,
+//// which may. `String.prototype` (a string search has no captures) only ever
+//// tokenizes plain, so it cannot be handed a `NamedSeg` at all.
 
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-/// One pre-tokenized piece of a replacement template. The common no-dollar
-/// template is a single `LiteralSeg`.
-pub type ReplaceSegment {
+/// One pre-tokenized piece of a replacement template that resolves purely.
+/// The common no-dollar template is a single `LiteralSeg`.
+pub type PlainSegment {
   /// Literal text — also covers "$$" → "$".
   LiteralSeg(text: String)
   /// "$&" — the matched substring.
@@ -33,9 +36,15 @@ pub type ReplaceSegment {
   TwoDigitSeg(two_idx: Int, one_idx: Int, suffix: String)
   /// "$0d" (d in 1-9): group d if d ≤ m, else the literal "$0d".
   ZeroDigitSeg(two_idx: Int, literal: String)
+}
+
+/// A segment of a template tokenized against a match result that has a
+/// `groups` object: everything a `PlainSegment` can be, plus the named
+/// reference that only exists in that mode.
+pub type NamedSegment {
+  Plain(seg: PlainSegment)
   /// "$<name>" — named capture: Get(namedCaptures, name) then ToString
-  /// (undefined → ""). When namedCaptures is undefined the whole "$<name>"
-  /// is literal text.
+  /// (undefined → "").
   NamedSeg(name: String)
 }
 
@@ -58,73 +67,90 @@ pub type Ctx {
   )
 }
 
-/// The outcome of resolving one segment: either final text, or the one case
-/// that needs an observable `Get` the caller must perform.
+/// The outcome of resolving one `NamedSegment`: either final text, or the one
+/// case that needs an observable `Get` the caller must perform.
 pub type Resolved {
   Text(text: String)
   NamedRef(name: String)
 }
 
-/// GetSubstitution for a single segment. Total and pure.
-pub fn resolve(seg: ReplaceSegment, ctx: Ctx) -> Resolved {
+/// GetSubstitution for a single plain segment. Total and pure.
+pub fn resolve_plain(seg: PlainSegment, ctx: Ctx) -> String {
   case seg {
-    LiteralSeg(text) -> Text(text)
-    MatchedSeg -> Text(ctx.matched)
-    BeforeSeg -> Text(ctx.before())
-    AfterSeg -> Text(ctx.after())
+    LiteralSeg(text) -> text
+    MatchedSeg -> ctx.matched
+    BeforeSeg -> ctx.before()
+    AfterSeg -> ctx.after()
     CaptureSeg(idx) ->
       case idx <= ctx.m {
-        True -> Text(ctx.capture(idx))
-        False -> Text("$" <> int.to_string(idx))
+        True -> ctx.capture(idx)
+        False -> "$" <> int.to_string(idx)
       }
     TwoDigitSeg(two_idx, one_idx, suffix) ->
       case two_idx <= ctx.m, one_idx <= ctx.m {
-        True, _ -> Text(ctx.capture(two_idx))
-        False, True -> Text(ctx.capture(one_idx) <> suffix)
-        False, False -> Text("$" <> int.to_string(one_idx) <> suffix)
+        True, _ -> ctx.capture(two_idx)
+        False, True -> ctx.capture(one_idx) <> suffix
+        False, False -> "$" <> int.to_string(one_idx) <> suffix
       }
     ZeroDigitSeg(two_idx, literal) ->
       case two_idx <= ctx.m && two_idx >= 1 {
-        True -> Text(ctx.capture(two_idx))
-        False -> Text(literal)
+        True -> ctx.capture(two_idx)
+        False -> literal
       }
+  }
+}
+
+/// GetSubstitution for a single segment of a named-mode template. Pure: the
+/// `Get` behind a `NamedSeg` is handed back to the caller as `NamedRef`.
+pub fn resolve(seg: NamedSegment, ctx: Ctx) -> Resolved {
+  case seg {
+    Plain(p) -> Text(resolve_plain(p, ctx))
     NamedSeg(name) -> NamedRef(name)
   }
 }
 
-/// GetSubstitution when there is no `namedCaptures` object, i.e. every caller
-/// that tokenized with `named_mode: False`. `NamedRef` is unreachable there —
-/// `tokenize_template(_, False)` never emits `NamedSeg` — but the spec's own
-/// answer for a `$<name>` with undefined namedCaptures is "keep it literal",
-/// so that is what the branch does.
-pub fn resolve_without_named(
-  segments: List(ReplaceSegment),
-  ctx: Ctx,
-) -> String {
+/// GetSubstitution over a whole plain-mode template. Nothing here is
+/// observable, so it is a plain function.
+pub fn resolve_without_named(segments: List(PlainSegment), ctx: Ctx) -> String {
   segments
-  |> list.map(fn(seg) {
-    case resolve(seg, ctx) {
-      Text(t) -> t
-      NamedRef(name) -> "$<" <> name <> ">"
-    }
-  })
+  |> resolve_plain_parts(ctx)
   |> string.concat
 }
 
-/// Tokenize a replacement template into segments. Called once per replace
-/// call; templates without "$" skip segmentation entirely.
-///
-/// `named_mode` selects the "$<" interpretation: with a `groups` object on the
-/// match result "$<" opens a named reference scanned to ">"; without one it is
-/// the 2-char literal "$<" and scanning resumes immediately after it. Callers
-/// that can see either shape tokenize twice and pick per match result.
-pub fn tokenize_template(
-  template: String,
-  named_mode: Bool,
-) -> List(ReplaceSegment) {
+/// The resolved pieces of a plain-mode template, unconcatenated — for callers
+/// that must size-check the result before materialising it.
+pub fn resolve_plain_parts(
+  segments: List(PlainSegment),
+  ctx: Ctx,
+) -> List(String) {
+  list.map(segments, resolve_plain(_, ctx))
+}
+
+/// How the tokenizer builds a segment of the caller's chosen segment type:
+/// every mode wraps a `PlainSegment`, and only named mode can build a
+/// `NamedSeg` — so `named: None` is what makes "$<" a 2-char literal.
+type Emit(seg) {
+  Emit(plain: fn(PlainSegment) -> seg, named: Option(fn(String) -> seg))
+}
+
+/// Tokenize a replacement template for a match with no `groups` object: "$<"
+/// is the 2-char literal "$<" and scanning resumes immediately after it.
+pub fn tokenize_plain(template: String) -> List(PlainSegment) {
+  tokenize(template, Emit(plain: fn(p) { p }, named: None))
+}
+
+/// Tokenize a replacement template for a match with a `groups` object: "$<"
+/// opens a named reference scanned to ">". Callers that can see either shape
+/// tokenize both ways and pick per match result.
+pub fn tokenize_named(template: String) -> List(NamedSegment) {
+  tokenize(template, Emit(plain: Plain, named: Some(NamedSeg)))
+}
+
+/// Called once per replace call; templates without "$" skip segmentation.
+fn tokenize(template: String, emit: Emit(seg)) -> List(seg) {
   case string.contains(template, "$") {
-    False -> [LiteralSeg(template)]
-    True -> tokenize_loop(to_code_points(template), named_mode, "", [])
+    False -> [emit.plain(LiteralSeg(template))]
+    True -> tokenize_loop(to_code_points(template), emit, "", [])
   }
 }
 
@@ -139,68 +165,66 @@ fn to_code_points(s: String) -> List(String) {
   |> list.map(fn(cp) { string.from_utf_codepoints([cp]) })
 }
 
-fn flush_literal(
-  lit: String,
-  segs: List(ReplaceSegment),
-) -> List(ReplaceSegment) {
+fn flush_literal(lit: String, emit: Emit(seg), segs: List(seg)) -> List(seg) {
   case lit {
     "" -> segs
-    _ -> [LiteralSeg(lit), ..segs]
+    _ -> [emit.plain(LiteralSeg(lit)), ..segs]
   }
 }
 
 fn tokenize_loop(
   chars: List(String),
-  named_mode: Bool,
+  emit: Emit(seg),
   lit: String,
-  segs: List(ReplaceSegment),
-) -> List(ReplaceSegment) {
+  segs: List(seg),
+) -> List(seg) {
   case chars {
-    [] -> list.reverse(flush_literal(lit, segs))
-    ["$", "$", ..rest] -> tokenize_loop(rest, named_mode, lit <> "$", segs)
+    [] -> list.reverse(flush_literal(lit, emit, segs))
+    ["$", "$", ..rest] -> tokenize_loop(rest, emit, lit <> "$", segs)
     ["$", "&", ..rest] ->
-      tokenize_loop(rest, named_mode, "", [
-        MatchedSeg,
-        ..flush_literal(lit, segs)
+      tokenize_loop(rest, emit, "", [
+        emit.plain(MatchedSeg),
+        ..flush_literal(lit, emit, segs)
       ])
     ["$", "`", ..rest] ->
-      tokenize_loop(rest, named_mode, "", [
-        BeforeSeg,
-        ..flush_literal(lit, segs)
+      tokenize_loop(rest, emit, "", [
+        emit.plain(BeforeSeg),
+        ..flush_literal(lit, emit, segs)
       ])
     ["$", "'", ..rest] ->
-      tokenize_loop(rest, named_mode, "", [AfterSeg, ..flush_literal(lit, segs)])
+      tokenize_loop(rest, emit, "", [
+        emit.plain(AfterSeg),
+        ..flush_literal(lit, emit, segs)
+      ])
     // "$<": named reference in named mode (scanned to ">"); otherwise the
     // 2-char literal "$<" with scanning resumed right after it.
     ["$", "<", ..rest] ->
-      case named_mode {
-        True ->
+      case emit.named {
+        Some(mk_named) ->
           case take_group_name(rest, "") {
             Some(#(name, rest2)) ->
-              tokenize_loop(rest2, named_mode, "", [
-                NamedSeg(name),
-                ..flush_literal(lit, segs)
+              tokenize_loop(rest2, emit, "", [
+                mk_named(name),
+                ..flush_literal(lit, emit, segs)
               ])
-            None -> tokenize_loop(rest, named_mode, lit <> "$<", segs)
+            None -> tokenize_loop(rest, emit, lit <> "$<", segs)
           }
-        False -> tokenize_loop(rest, named_mode, lit <> "$<", segs)
+        None -> tokenize_loop(rest, emit, lit <> "$<", segs)
       }
     ["$", d1, d2, ..rest] ->
       case is_digit(d1), is_digit(d2) {
-        True, True -> tokenize_two_digit(d1, d2, rest, named_mode, lit, segs)
+        True, True -> tokenize_two_digit(d1, d2, rest, emit, lit, segs)
         // "$N" followed by a non-digit — d2 is rescanned (it may start "$&").
-        True, False ->
-          tokenize_one_digit(d1, [d2, ..rest], named_mode, lit, segs)
+        True, False -> tokenize_one_digit(d1, [d2, ..rest], emit, lit, segs)
         // Not a reference — "$" is literal, rescan from d1.
-        False, _ ->
-          tokenize_loop([d1, d2, ..rest], named_mode, lit <> "$", segs)
+        False, _ -> tokenize_loop([d1, d2, ..rest], emit, lit <> "$", segs)
       }
     ["$", d1] ->
       case is_digit(d1) {
-        True -> tokenize_one_digit(d1, [], named_mode, lit, segs)
-        False -> tokenize_loop([d1], named_mode, lit <> "$", segs)
+        True -> tokenize_one_digit(d1, [], emit, lit, segs)
+        False -> tokenize_loop([d1], emit, lit <> "$", segs)
       }
-    [ch, ..rest] -> tokenize_loop(rest, named_mode, lit <> ch, segs)
+    [ch, ..rest] -> tokenize_loop(rest, emit, lit <> ch, segs)
   }
 }
 
@@ -220,16 +244,16 @@ fn take_group_name(
 fn tokenize_one_digit(
   d1: String,
   rest: List(String),
-  named_mode: Bool,
+  emit: Emit(seg),
   lit: String,
-  segs: List(ReplaceSegment),
-) -> List(ReplaceSegment) {
+  segs: List(seg),
+) -> List(seg) {
   case digit_value(d1) {
-    0 -> tokenize_loop(rest, named_mode, lit <> "$0", segs)
+    0 -> tokenize_loop(rest, emit, lit <> "$0", segs)
     idx ->
-      tokenize_loop(rest, named_mode, "", [
-        CaptureSeg(idx),
-        ..flush_literal(lit, segs)
+      tokenize_loop(rest, emit, "", [
+        emit.plain(CaptureSeg(idx)),
+        ..flush_literal(lit, emit, segs)
       ])
   }
 }
@@ -240,23 +264,23 @@ fn tokenize_two_digit(
   d1: String,
   d2: String,
   rest: List(String),
-  named_mode: Bool,
+  emit: Emit(seg),
   lit: String,
-  segs: List(ReplaceSegment),
-) -> List(ReplaceSegment) {
+  segs: List(seg),
+) -> List(seg) {
   let two_idx = digit_value(d1) * 10 + digit_value(d2)
   case digit_value(d1), two_idx {
     // "$00" can never resolve to a group — always literal.
-    0, 0 -> tokenize_loop(rest, named_mode, lit <> "$00", segs)
+    0, 0 -> tokenize_loop(rest, emit, lit <> "$00", segs)
     0, _ ->
-      tokenize_loop(rest, named_mode, "", [
-        ZeroDigitSeg(two_idx, "$0" <> d2),
-        ..flush_literal(lit, segs)
+      tokenize_loop(rest, emit, "", [
+        emit.plain(ZeroDigitSeg(two_idx, "$0" <> d2)),
+        ..flush_literal(lit, emit, segs)
       ])
     one_idx, _ ->
-      tokenize_loop(rest, named_mode, "", [
-        TwoDigitSeg(two_idx, one_idx, d2),
-        ..flush_literal(lit, segs)
+      tokenize_loop(rest, emit, "", [
+        emit.plain(TwoDigitSeg(two_idx, one_idx, d2)),
+        ..flush_literal(lit, emit, segs)
       ])
   }
 }
