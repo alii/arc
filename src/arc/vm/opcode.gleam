@@ -866,8 +866,16 @@ pub type UnaryOpKind {
 /// twin of all ~200 `Op` variants, so adding an opcode meant editing three
 /// places, and forgetting the `resolve.gleam` arm was a silent miscompile.
 /// Now a new opcode is one `Op` variant and no `IrOp`/`resolve` change at all.
+///
+/// The one invariant this shape gives up is that `IrFinal` is *typed* to accept
+/// any `Op`, including the ones whose `Int` field is an absolute PC that only
+/// Phase 3 can compute (`Jump`, `PushTry`, `WithGetVar`, …). Wrapping one of
+/// those in `IrFinal` compiles fine and produces a jump to a garbage PC.
+/// `carries_pc` names that set so the emitter and the resolver can reject it
+/// loudly instead of miscompiling silently — see `emit.emit_op`.
 pub type IrOp {
   /// Already-final instruction: nothing left to resolve. `resolve` unwraps it.
+  /// Must never wrap an op for which `carries_pc` is True.
   IrFinal(op: Op)
 
   // -- Labels and jumps (label ids resolved to PCs in Phase 3) --
@@ -912,4 +920,35 @@ pub type IrOp {
   // peephole; label targets, hence not `IrFinal`). See the matching Ops. --
   IrCmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, label: Int)
   IrCmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, label: Int)
+}
+
+/// True for the ops that carry an absolute PC, i.e. the ops the emitter must
+/// NOT construct directly — it has no PCs, only label ids, so it has to emit
+/// the matching `Ir*` variant and let Phase 3 (`resolve`) fill the PC in.
+///
+/// Every one of these has an `Ir*` twin above; that twin is the only legal way
+/// to reach the corresponding `Op`. Wrapping the `Op` in `IrFinal` instead
+/// would ride through `resolve` untouched with a label id sitting where a PC
+/// belongs, so `emit_op`/`resolve` panic on it rather than miscompile.
+pub fn carries_pc(op: Op) -> Bool {
+  case op {
+    Jump(..)
+    | JumpIfFalse(..)
+    | JumpIfTrue(..)
+    | JumpIfNullish(..)
+    | Gosub(..)
+    | PushTry(..)
+    | AsyncYieldStarNext(..)
+    | AsyncYieldStarResume(..)
+    | WithGetVar(..)
+    | WithGetVarThis(..)
+    | WithPutVar(..)
+    | WithDeleteVar(..)
+    | WithMakeRef(..)
+    | WithGetRefValue(..)
+    | WithPutRefValue(..)
+    | CmpLocalLocalJump(..)
+    | CmpLocalConstJump(..) -> True
+    _ -> False
+  }
 }

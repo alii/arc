@@ -19,6 +19,7 @@ import arc/vm/value.{type JsValue}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 
 /// Run Phase 3 over one function body's IR: peephole-fuse, then resolve label
 /// IDs to absolute PCs. Returns the runnable bytecode array plus the constant
@@ -264,8 +265,19 @@ fn resolve_ops(
     // Labels are dropped (they were just markers)
     [IrLabel(_), ..rest] -> resolve_ops(rest, labels, acc)
 
-    // Already-final: nothing to resolve.
-    [IrFinal(op), ..rest] -> resolve_ops(rest, labels, [op, ..acc])
+    // Already-final: nothing to resolve. A PC-carrying op (Jump, PushTry, …)
+    // has no business here — its Int would be an unresolved label id, so it
+    // would silently jump to a garbage PC. Refuse it instead of miscompiling.
+    [IrFinal(op), ..rest] ->
+      case opcode.carries_pc(op) {
+        False -> resolve_ops(rest, labels, [op, ..acc])
+        True ->
+          panic as {
+            "IrFinal wraps a PC-carrying opcode (label id where a PC belongs); "
+            <> "emit its Ir* variant instead: "
+            <> string.inspect(op)
+          }
+      }
 
     // Jump ops: resolve label → PC
     [IrJump(l), ..rest] ->

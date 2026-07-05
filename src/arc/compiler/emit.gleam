@@ -1698,6 +1698,12 @@ fn emit_ir(e: Emitter, op: IrOp) -> Emitter {
 /// left to resolve) — the overwhelmingly common case. `resolve` unwraps the
 /// `IrFinal` and copies it straight through, so a new pass-through opcode
 /// needs no `IrOp` variant and no `resolve` arm.
+///
+/// The type can't stop you handing this a PC-carrying op (`opcode.Jump`,
+/// `opcode.PushTry`, …), but the emitter has no PCs — only label ids — so such
+/// an op would ride through `resolve` unresolved and jump to a garbage PC. Emit
+/// the matching `Ir*` variant for those; `resolve` panics if one slips through
+/// as `IrFinal` (see `opcode.carries_pc`).
 fn emit_op(e: Emitter, op: opcode.Op) -> Emitter {
   emit_ir(e, IrFinal(op))
 }
