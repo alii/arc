@@ -430,7 +430,7 @@ fn run_test_by_phase(
     let outcome = case metadata.negative_phase {
       Some(Parse) -> run_parse_negative_test(metadata, source, variant)
       Some(Resolution) ->
-        run_runtime_negative_test(
+        run_resolution_negative_test(
           metadata,
           source,
           is_module,
@@ -588,6 +588,65 @@ fn run_runtime_negative_test(
       }
     },
   )
+}
+
+/// A `phase: resolution` negative test succeeds when the error is raised
+/// while building or linking the module graph (§16.2 INTERPRETING.md), before
+/// any code executes: a dependency's parse error, a resolver rejection, or a
+/// link failure. Those surface here as a Gleam-level `module.compile_bundle`
+/// error (stringified via `do_run_module`), not a JS throw. A JS throw is
+/// still accepted — some resolution-phase errors reach evaluation as a
+/// realm-built SyntaxError.
+fn run_resolution_negative_test(
+  metadata: TestMetadata,
+  source: String,
+  is_module: Bool,
+  path: String,
+  variant: StrictnessVariant,
+  is_async: Bool,
+) -> TestOutcome {
+  run_test_completion(
+    metadata,
+    source,
+    is_module,
+    path,
+    variant,
+    is_async,
+    resolution_error_outcome(metadata, _),
+    negative_completion_outcome(metadata, _),
+    fn(_completion, _global_ref) {
+      Fail("expected resolution-phase error but async test ran to $DONE")
+    },
+  )
+}
+
+/// Match a `module.compile_bundle`/link error against the test's expected
+/// negative type. A `GraphError(ParseFailed(..))` — a dependency's early
+/// error — is exactly the SyntaxError a `phase: resolution` test asks for;
+/// resolver and load rejections likewise satisfy a `phase: resolution`
+/// TypeError. Anything else is a genuine harness/engine failure and stays
+/// FAIL with the raw reason.
+fn resolution_error_outcome(
+  metadata: TestMetadata,
+  reason: String,
+) -> TestOutcome {
+  let expected = option.unwrap(metadata.negative_type, "")
+  let is_match = case expected {
+    "SyntaxError" ->
+      string.contains(reason, "ParseFailed(")
+      || string.contains(reason, "LinkError(")
+    "TypeError" ->
+      string.contains(reason, "ResolveFailed(")
+      || string.contains(reason, "LoadFailed(")
+    _ -> False
+  }
+  case is_match {
+    True -> Pass
+    False ->
+      Fail(
+        "expected resolution-phase " <> expected <> " but got: " <> reason,
+      )
+  }
 }
 
 /// Map a settled run to the outcome for a runtime-negative test:
