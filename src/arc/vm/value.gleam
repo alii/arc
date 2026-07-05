@@ -1,3 +1,4 @@
+import arc/parser/number
 import arc/vm/builtins/temporal_tz
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/temporal_calendar.{type Calendar}
@@ -4937,15 +4938,15 @@ fn parse_unsigned_literal(bytes: BitArray) -> Result(JsNum, Nil) {
           case icount > 0 || fcount > 0 {
             False -> Error(Nil)
             True -> {
-              use exp <- result.try(scan_exponent_part(after_frac))
-              build_and_parse_float(bytes, icount, fcount, exp)
+              use Nil <- result.try(check_exponent_part(after_frac))
+              parse_decimal_literal(bytes)
             }
           }
         }
         // No dot, trailing bytes after the digits: must be an ExponentPart.
         _ if icount > 0 -> {
-          use exp <- result.try(scan_exponent_part(after_int))
-          build_and_parse_float(bytes, icount, 0, exp)
+          use Nil <- result.try(check_exponent_part(after_int))
+          parse_decimal_literal(bytes)
         }
         _ -> Error(Nil)
       }
@@ -4961,13 +4962,12 @@ fn scan_ascii_digits(bytes: BitArray, count: Int) -> #(Int, BitArray) {
   }
 }
 
-/// Validate an optional ExponentPart and return it normalised: "" when
-/// absent, otherwise "e" followed by the (possibly signed) digits.
-/// binary_to_float accepts "e+5"/"E5" exponent forms, so the digits are kept
-/// verbatim.
-fn scan_exponent_part(bytes: BitArray) -> Result(String, Nil) {
+/// Check that whatever trails the mantissa is a well-formed (possibly absent)
+/// ExponentPart, and nothing else. Only its validity matters here: the literal
+/// text is handed to `number.parse_float` verbatim, exponent included.
+fn check_exponent_part(bytes: BitArray) -> Result(Nil, Nil) {
   case bytes {
-    <<>> -> Ok("")
+    <<>> -> Ok(Nil)
     <<e, digits:bytes>> if e == 0x65 || e == 0x45 -> {
       let valid = case digits {
         <<"+":utf8, ds:bytes>> | <<"-":utf8, ds:bytes>> ->
@@ -4976,9 +4976,7 @@ fn scan_exponent_part(bytes: BitArray) -> Result(String, Nil) {
       }
       case valid {
         False -> Error(Nil)
-        True ->
-          bit_array.to_string(digits)
-          |> result.map(fn(d) { "e" <> d })
+        True -> Ok(Nil)
       }
     }
     _ -> Error(Nil)
@@ -4993,37 +4991,21 @@ fn nonempty_all_digits(bytes: BitArray) -> Bool {
   }
 }
 
-/// Build an Erlang-acceptable float literal ("both sides of the dot") from
-/// the validated mantissa bytes and normalised exponent, then parse it.
-/// icount/fcount are the integer/fraction digit counts; the dot (when both
-/// are present) sits between them at offset icount.
-fn build_and_parse_float(
-  bytes: BitArray,
-  icount: Int,
-  fcount: Int,
-  exp: String,
-) -> Result(JsNum, Nil) {
-  use mant <- result.try(case icount > 0, fcount > 0 {
-    True, True ->
-      bit_array.slice(bytes, 0, icount + 1 + fcount)
-      |> result.try(bit_array.to_string)
-    // "5." / "5e3" — fraction digits absent: supply ".0".
-    True, False ->
-      bit_array.slice(bytes, 0, icount)
-      |> result.try(bit_array.to_string)
-      |> result.map(fn(i) { i <> ".0" })
-    // ".5" — integer digits absent: prepend "0".
-    False, True ->
-      bit_array.slice(bytes, 0, 1 + fcount)
-      |> result.try(bit_array.to_string)
-      |> result.map(fn(f) { "0" <> f })
-    False, False -> Error(Nil)
-  })
-  case float.parse(mant <> exp) {
+/// Convert an already-validated decimal literal (mantissa + optional exponent,
+/// no sign) to a Number through the engine's one decimal→double normalizer,
+/// the same one the parser reads NumericLiterals with. Padding the JS shapes
+/// Erlang won't take (".5", "1.", "1e10") happens in there — do NOT re-do it
+/// here, or the two normalizers drift.
+///
+/// A magnitude past the double range is Infinity, not NaN: §7.1.4.1 rounds
+/// StringNumericLiteral to the nearest Number, and `Number("1e999")` is
+/// +Infinity. The caller re-applies any leading sign.
+fn parse_decimal_literal(bytes: BitArray) -> Result(JsNum, Nil) {
+  use text <- result.try(bit_array.to_string(bytes))
+  case number.parse_float(text) {
     Ok(f) -> Ok(Finite(f))
-    // Out-of-double-range literal (e.g. "1e999"): binary_to_float rejects
-    // it. Preserves the previous behaviour (NaN).
-    Error(Nil) -> Ok(NaN)
+    Error(number.OutOfRange) -> Ok(Infinity)
+    Error(number.Invalid) -> Error(Nil)
   }
 }
 

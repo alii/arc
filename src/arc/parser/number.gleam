@@ -212,8 +212,13 @@ fn bit_length(n: Int, acc: Int) -> Int {
 /// The literal is fed in verbatim: padding it into the shape Erlang's
 /// binary_to_float accepts (".5" → "0.5", "1.e3" → "1.0e3") happens inside the
 /// FFI, next to the syntax classifier that must see the very same text.
+///
+/// The engine's ONE decimal-literal → double conversion: the parser reads
+/// NumericLiterals through it and the runtime reads StringNumericLiterals
+/// (`Number("1e999")`) through it, so both agree that an overflowing magnitude
+/// is Infinity rather than NaN.
 @external(erlang, "arc_float_ffi", "parse_float")
-fn parse_float(s: String) -> Result(Float, FloatParseError)
+pub fn parse_float(s: String) -> Result(Float, FloatParseError)
 
 /// The exact integer value of a run of digits in `radix`.
 fn parse_digits(s: String, radix: Int) -> Result(Int, NumberParseError) {
