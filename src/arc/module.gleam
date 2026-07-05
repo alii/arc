@@ -19,7 +19,7 @@ import arc/vm/builtins/reflect
 import arc/vm/exec/entry
 import arc/vm/exec/interpreter
 import arc/vm/heap
-import arc/vm/host_hooks.{HostHooks}
+import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
@@ -542,6 +542,22 @@ type ModuleEvalStatus {
   Failed(value: JsValue)
 }
 
+/// The immutable per-realm boot inputs every module body's freshly booted
+/// State is constructed from. Bundling them means the DFS chain
+/// (`eval_module_inner` ↔ `eval_module_body` → `run_module_with_referrer`)
+/// threads ONE param, and adding a boot input is one field here plus the
+/// handful of construction sites — not seven signatures.
+pub type BootCtx(host) {
+  BootCtx(
+    builtins: Builtins,
+    global_object: Ref,
+    host_hooks: host_hooks.HostHooks,
+    can_block: Bool,
+    extend_262: Option(state.Extend262(host)),
+    finish: fn(state.State(host)) -> state.State(host),
+  )
+}
+
 /// Internal evaluation state threaded through the DFS.
 type EvalState(host) {
   EvalState(
@@ -756,25 +772,10 @@ pub fn link_for_evaluation_reusing(
 pub fn evaluate_linked(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
-  builtins: Builtins,
-  global_object: Ref,
-  host_hooks: host_hooks.HostHooks,
-  can_block: Bool,
-  extend_262: Option(state.Extend262(host)),
-  finish: fn(state.State(host)) -> state.State(host),
+  boot: BootCtx(host),
 ) -> #(Heap(host), Result(EvaluatedBundle, ModuleError)) {
   let #(heap, _evaluated, _jobs, result) =
-    evaluate_linked_tracking(
-      linked_bundle,
-      heap,
-      builtins,
-      global_object,
-      host_hooks,
-      can_block,
-      extend_262,
-      finish,
-      set.new(),
-    )
+    evaluate_linked_tracking(linked_bundle, heap, boot, set.new())
   // Static entry points drive a draining `finish`, so pending here means an
   // awaited promise can never settle — keep the historical "never completed"
   // throw (cf. Node's exit code 13 for unsettled top-level await), as a real
@@ -784,7 +785,7 @@ pub fn evaluate_linked(
       let #(heap, err) =
         common.make_error(
           heap,
-          builtins,
+          boot.builtins,
           common.TypeErr,
           tla_never_settled_message,
         )
@@ -803,12 +804,7 @@ pub fn evaluate_linked(
 pub fn evaluate_linked_tracking(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
-  builtins: Builtins,
-  global_object: Ref,
-  host_hooks: host_hooks.HostHooks,
-  can_block: Bool,
-  extend_262: Option(state.Extend262(host)),
-  finish: fn(state.State(host)) -> state.State(host),
+  boot: BootCtx(host),
   already_evaluated: Set(String),
 ) -> #(
   Heap(host),
@@ -823,18 +819,7 @@ pub fn evaluate_linked_tracking(
     })
   let state = EvalState(heap:, modules:, jobs: [])
   let #(state, result) =
-    eval_module_inner(
-      bundle,
-      linked,
-      state,
-      bundle.entry,
-      builtins,
-      global_object,
-      host_hooks,
-      can_block,
-      extend_262,
-      finish,
-    )
+    eval_module_inner(bundle, linked, state, bundle.entry, boot)
   // Surface the entry namespace alongside the completion value (post-eval,
   // so its bindings are initialized — no TDZ for the embedder to hit).
   // `EvalState.heap` is the live heap on every path, error or not.
@@ -953,12 +938,14 @@ pub fn evaluate_bundle(
   evaluate_bundle_with_hooks(
     bundle,
     heap,
-    builtins,
-    global_object,
-    host_hooks.default_host_hooks(),
-    True,
-    None,
-    finish,
+    BootCtx(
+      builtins:,
+      global_object:,
+      host_hooks: host_hooks.default_host_hooks(),
+      can_block: True,
+      extend_262: None,
+      finish:,
+    ),
   )
 }
 
@@ -971,26 +958,11 @@ pub fn evaluate_bundle(
 pub fn evaluate_bundle_with_hooks(
   bundle: ModuleBundle,
   heap: Heap(host),
-  builtins: Builtins,
-  global_object: Ref,
-  host_hooks: host_hooks.HostHooks,
-  can_block: Bool,
-  extend_262: Option(state.Extend262(host)),
-  finish: fn(state.State(host)) -> state.State(host),
+  boot: BootCtx(host),
 ) -> #(Heap(host), Result(EvaluatedBundle, ModuleError)) {
-  case link_for_evaluation(bundle, heap, builtins) {
+  case link_for_evaluation(bundle, heap, boot.builtins) {
     #(heap, Error(err)) -> #(heap, Error(err))
-    #(heap, Ok(linked_bundle)) ->
-      evaluate_linked(
-        linked_bundle,
-        heap,
-        builtins,
-        global_object,
-        host_hooks,
-        can_block,
-        extend_262,
-        finish,
-      )
+    #(heap, Ok(linked_bundle)) -> evaluate_linked(linked_bundle, heap, boot)
   }
 }
 
@@ -1043,12 +1015,7 @@ fn eval_module_inner(
   linked: Linked,
   state: EvalState(host),
   specifier: String,
-  builtins: Builtins,
-  global_object: Ref,
-  host_hooks: host_hooks.HostHooks,
-  can_block: Bool,
-  extend_262: Option(state.Extend262(host)),
-  finish: fn(state.State(host)) -> state.State(host),
+  boot: BootCtx(host),
 ) -> #(EvalState(host), Result(JsValue, ModuleError)) {
   // One lookup, three outcomes — the module is absent, has no body, or has one.
   case dict.get(bundle.modules, specifier) {
@@ -1059,7 +1026,7 @@ fn eval_module_inner(
     // `[[Evaluate]]` is a no-op — always "done".
     Ok(SyntheticModule(_)) -> #(state, Ok(JsUndefined))
     Ok(SourceModule(compiled)) ->
-      case module_eval_status(state, global_object, specifier) {
+      case module_eval_status(state, boot.global_object, specifier) {
         // Body already ran (in this DFS, or re-entrantly via a
         // deferred-namespace trigger, or in an earlier bundle sharing this
         // realm).
@@ -1071,19 +1038,7 @@ fn eval_module_inner(
         // re-entering.
         Some(Evaluating) -> #(state, Ok(JsUndefined))
         None ->
-          eval_module_body(
-            bundle,
-            linked,
-            state,
-            specifier,
-            compiled,
-            builtins,
-            global_object,
-            host_hooks,
-            can_block,
-            extend_262,
-            finish,
-          )
+          eval_module_body(bundle, linked, state, specifier, compiled, boot)
       }
   }
 }
@@ -1095,13 +1050,9 @@ fn eval_module_body(
   state: EvalState(host),
   specifier: String,
   compiled: CompiledModule,
-  builtins: Builtins,
-  global_object: Ref,
-  host_hooks: host_hooks.HostHooks,
-  can_block: Bool,
-  extend_262: Option(state.Extend262(host)),
-  finish: fn(state.State(host)) -> state.State(host),
+  boot: BootCtx(host),
 ) -> #(EvalState(host), Result(JsValue, ModuleError)) {
+  let BootCtx(builtins:, global_object:, ..) = boot
   // Mark as evaluating
   let state = set_eval_status(state, specifier, Evaluating)
 
@@ -1130,19 +1081,7 @@ fn eval_module_body(
         ).0
     }
     use state, Nil, dep <- try_fold_state(to_evaluate, state, Nil)
-    let #(state, r) =
-      eval_module_inner(
-        bundle,
-        linked,
-        state,
-        dep,
-        builtins,
-        global_object,
-        host_hooks,
-        can_block,
-        extend_262,
-        finish,
-      )
+    let #(state, r) = eval_module_inner(bundle, linked, state, dep, boot)
     #(state, result.replace(r, Nil))
   }
 
@@ -1195,13 +1134,8 @@ fn eval_module_body(
           specifier,
           compiled.template,
           heap,
-          builtins,
-          global_object,
           seeds,
-          host_hooks,
-          can_block,
-          extend_262,
-          finish,
+          boot,
         )
       {
         entry.ModuleError(error: vm_err) -> {
@@ -1282,37 +1216,33 @@ fn eval_module_body(
 // Helper Functions
 // =============================================================================
 
-/// Run a module body with `host_hooks.import_referrer` set to its resolved
+/// Run a module body with `RealmCtx.import_referrer` set to its resolved
 /// specifier on the body's freshly booted State. An ImportCall inside the
 /// body captures this as its referencingScriptOrModule (§16.2.1.8
 /// HostLoadImportedModule), so nested dynamic imports resolve relative to the
 /// importing MODULE, not the realm's entry script.
 ///
-/// The referrer is per-boot ENGINE state on `RealmCtx.host_hooks`, not a
-/// mutable globalThis property, so there is nothing to save/restore around
-/// the body and guest JS can neither read nor forge it.
+/// The referrer is per-boot ENGINE state on `RealmCtx`, not a mutable
+/// globalThis property, so there is nothing to save/restore around the body
+/// and guest JS can neither read nor forge it.
 fn run_module_with_referrer(
   specifier: String,
   template: value.FuncTemplate,
   heap: Heap(host),
-  builtins: Builtins,
-  global_object: Ref,
   seeds: List(#(Int, JsValue)),
-  host_hooks: host_hooks.HostHooks,
-  can_block: Bool,
-  extend_262: Option(state.Extend262(host)),
-  finish: fn(state.State(host)) -> state.State(host),
+  boot: BootCtx(host),
 ) -> entry.ModuleResult(host) {
   entry.run_module(
     template,
     heap,
-    builtins,
-    global_object,
+    boot.builtins,
+    boot.global_object,
     seeds,
-    HostHooks(..host_hooks, import_referrer: Some(specifier)),
-    can_block,
-    extend_262,
-    finish,
+    boot.host_hooks,
+    Some(specifier),
+    boot.can_block,
+    boot.extend_262,
+    boot.finish,
   )
 }
 
@@ -1520,12 +1450,7 @@ fn gather_async_transitive_deps(
 pub fn evaluate_async_transitive_deps(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
-  builtins: Builtins,
-  global_object: Ref,
-  host_hooks: host_hooks.HostHooks,
-  can_block: Bool,
-  extend_262: Option(state.Extend262(host)),
-  finish: fn(state.State(host)) -> state.State(host),
+  boot: BootCtx(host),
 ) -> #(Heap(host), List(value.Job), Result(List(#(String, Ref)), ModuleError)) {
   let LinkedBundle(bundle:, linked:) = linked_bundle
   let eval_state = EvalState(heap:, modules: dict.new(), jobs: [])
@@ -1533,25 +1458,14 @@ pub fn evaluate_async_transitive_deps(
     gather_async_transitive_deps(
       bundle,
       eval_state,
-      global_object,
+      boot.global_object,
       bundle.entry,
       set.new(),
     )
   let #(eval_state, result) = {
     use eval_state, pendings, dep <- try_fold_state(to_evaluate, eval_state, [])
     let #(eval_state, dep_result) =
-      eval_module_inner(
-        bundle,
-        linked,
-        eval_state,
-        dep,
-        builtins,
-        global_object,
-        host_hooks,
-        can_block,
-        extend_262,
-        finish,
-      )
+      eval_module_inner(bundle, linked, eval_state, dep, boot)
     case dep_result {
       Ok(_) -> #(eval_state, Ok(pendings))
       // Parked on top-level await: record the capability and keep
@@ -2042,25 +1956,21 @@ fn evaluate_deferred_subgraph(
   spec: String,
   builtins: Builtins,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  let global_object = state.ctx.global_object
+  let boot =
+    BootCtx(
+      builtins:,
+      global_object: state.ctx.global_object,
+      host_hooks: state.ctx.host_hooks,
+      can_block: state.can_block,
+      extend_262: state.ctx.extend_262,
+      finish: fn(s) { s },
+    )
   // Nothing to seed: `module_eval_status` reads the realm's heap-resident
   // registry for any module this DFS has not itself touched, so bodies that
   // already ran (in this bundle, an earlier bundle, or an earlier trigger)
   // are recognized without copying the registry into Gleam data first.
   let st = EvalState(heap: state.heap, modules: dict.new(), jobs: [])
-  let #(st, result) =
-    eval_module_inner(
-      bundle,
-      linked,
-      st,
-      spec,
-      builtins,
-      global_object,
-      state.ctx.host_hooks,
-      state.can_block,
-      state.ctx.extend_262,
-      fn(s) { s },
-    )
+  let #(st, result) = eval_module_inner(bundle, linked, st, spec, boot)
   let state =
     State(
       ..state,

@@ -501,12 +501,14 @@ pub fn eval_module_with(
     module.evaluate_bundle_with_hooks(
       bundle,
       engine.heap,
-      engine.builtins,
-      engine.global,
-      engine.host_hooks,
-      True,
-      option.None,
-      finish,
+      module.BootCtx(
+        builtins: engine.builtins,
+        global_object: engine.global,
+        host_hooks: engine.host_hooks,
+        can_block: True,
+        extend_262: option.None,
+        finish:,
+      ),
     )
   case result {
     Ok(module.EvaluatedBundle(value:, namespace:)) ->

@@ -418,12 +418,14 @@ fn evaluate_deferred_async_deps(
     module.evaluate_async_transitive_deps(
       linked_bundle,
       state.heap,
-      state.builtins,
-      state.ctx.global_object,
-      state.ctx.host_hooks,
-      state.can_block,
-      state.ctx.extend_262,
-      fn(module_state) { module_state },
+      module.BootCtx(
+        builtins: state.builtins,
+        global_object: state.ctx.global_object,
+        host_hooks: state.ctx.host_hooks,
+        can_block: state.can_block,
+        extend_262: state.ctx.extend_262,
+        finish: fn(module_state) { module_state },
+      ),
     )
   let state =
     State(..state, heap: h, job_queue: job_queue.append(state.job_queue, jobs))
@@ -802,12 +804,14 @@ pub fn evaluate_bundle_with_registry(
         module.evaluate_linked_tracking(
           linked_bundle,
           h,
-          b,
-          global_object,
-          host_hooks,
-          can_block,
-          extend_262,
-          finish,
+          module.BootCtx(
+            builtins: b,
+            global_object:,
+            host_hooks:,
+            can_block:,
+            extend_262:,
+            finish:,
+          ),
           already_evaluated,
         )
       case result {
