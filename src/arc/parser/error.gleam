@@ -15,12 +15,19 @@ import gleam/option.{type Option, None, Some}
 /// Keep it that way when adding a variant.
 pub type ParseError {
   /// A lexer error surfaced through the parser. Carries the lexer's own
-  /// typed error rather than a pre-formatted message; `pos` is the lexer
-  /// error's own position (`lexer.lex_error_pos`).
+  /// typed error rather than a pre-formatted message.
+  ///
+  /// INVARIANT: `pos` MUST equal `lexer.lex_error_pos(error)` — the lexer's
+  /// own offset, never the parser cursor. Build it with `lex_error/1`, which
+  /// is the only thing that can get that right; do not call this constructor
+  /// directly.
   LexError(pos: Int, error: lexer.LexError)
   /// A regular-expression literal failed scanning or ECMAScript Pattern
   /// validation. Carries `parser/regex`'s own typed error; its message comes
-  /// from `regex.pattern_error_message` and `pos` from `regex.pattern_error_pos`.
+  /// from `regex.pattern_error_message`.
+  ///
+  /// INVARIANT: `pos` MUST equal `regex.pattern_error_pos(error)`. Build it
+  /// with `regexp_syntax_error/1`; do not call this constructor directly.
   RegExpSyntaxError(pos: Int, error: regex.PatternError)
   ExpectedToken(pos: Int, expected: String, got: String)
   ExpectedIdentifier(pos: Int)
@@ -385,4 +392,19 @@ pub fn parse_error_to_string(error: ParseError) -> String {
 /// `pos` as its first field, so this cannot fall out of date.
 pub fn parse_error_pos(error: ParseError) -> Int {
   error.pos
+}
+
+/// Lift a lexer's typed error into a `ParseError` at the position the lexer
+/// itself reports. THE ONLY way to build a `LexError` — going through this
+/// keeps `pos` and `error` from disagreeing.
+pub fn lex_error(err: lexer.LexError) -> ParseError {
+  LexError(lexer.lex_error_pos(err), err)
+}
+
+/// Lift a regex pattern error into a `ParseError` at the position the regex
+/// scanner/validator itself reports. THE ONLY way to build a
+/// `RegExpSyntaxError` — going through this keeps `pos` and `error` from
+/// disagreeing.
+pub fn regexp_syntax_error(err: regex.PatternError) -> ParseError {
+  RegExpSyntaxError(regex.pattern_error_pos(err), err)
 }

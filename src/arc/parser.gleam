@@ -47,24 +47,25 @@ import arc/parser/error.{
   GetterNoParams, IdentifierAlreadyDeclared, ImportNotTopLevel,
   InvalidAssignmentLhs, InvalidDestructuringTarget, InvalidForInLhs,
   InvalidForOfLhs, InvalidLhsPrefixOp, InvalidPostfixLhs, InvalidTemplateEscape,
-  LetBindingInLexicalDecl, LetIdentifierStrictMode, LexError, LexicalDeclInLabel,
+  LetBindingInLexicalDecl, LetIdentifierStrictMode, LexicalDeclInLabel,
   LexicalDeclInSingleStatement, MalformedNumericLiteral,
   MisplacedUseStrictDirective, MissingCatchOrFinally, MissingConstInitializer,
   NewTargetOutsideFunction, OctalEscapeStrictMode, OctalLiteralStrictMode,
-  PrivateNameAsPropertyKey, PrivateNameConstructor, RegExpSyntaxError,
-  ReservedWordImportBinding, ReservedWordStrictMode, RestDefaultInitializer,
-  RestMustBeLast, RestTrailingComma, ReturnOutsideFunction,
-  SetterExactlyOneParam, SetterNoRest, ShorthandDefaultOutsideDestructuring,
-  StaticPrototype, StaticReservedStrictMode, StrictModeAssignment,
-  StrictModeBindingName, StrictModeModification, StrictModeParamName,
-  SuperCallNotInDerivedConstructor, SuperPrivateName, SuperPropertyNotInMethod,
-  ThrowLineBreak, UndeclaredExportBinding, UndeclaredPrivateName, UndefinedLabel,
+  PrivateNameAsPropertyKey, PrivateNameConstructor, ReservedWordImportBinding,
+  ReservedWordStrictMode, RestDefaultInitializer, RestMustBeLast,
+  RestTrailingComma, ReturnOutsideFunction, SetterExactlyOneParam, SetterNoRest,
+  ShorthandDefaultOutsideDestructuring, StaticPrototype,
+  StaticReservedStrictMode, StrictModeAssignment, StrictModeBindingName,
+  StrictModeModification, StrictModeParamName, SuperCallNotInDerivedConstructor,
+  SuperPrivateName, SuperPropertyNotInMethod, ThrowLineBreak,
+  UndeclaredExportBinding, UndeclaredPrivateName, UndefinedLabel,
   UnexpectedAfterExport, UnexpectedCloseBrace, UnexpectedCloseParen,
   UnexpectedExport, UnexpectedSuper, UnexpectedToken,
   UnicodeEscapeInMetaProperty, UnterminatedTemplateSubstitution,
   UsingAtScriptTopLevel, UsingInCaseClause, UsingInForIn,
   UsingMissingInitializer, UsingPatternBinding, WithNotAllowedStrictMode,
-  YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode,
+  YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode, lex_error,
+  regexp_syntax_error,
 }
 import arc/parser/lexer.{
   type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
@@ -6749,7 +6750,7 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       let span = ast.Span(start: start_pos, end: flags_end)
       Ok(#(p2, ast.RegExpLiteral(pattern: pattern, flags: flags_str, span:)))
     }
-    Error(e) -> Error(RegExpSyntaxError(regex.pattern_error_pos(e), e))
+    Error(e) -> Error(regexp_syntax_error(e))
   }
 }
 
@@ -8106,16 +8107,6 @@ fn expect_identifier(p: P) -> Result(P, ParseError) {
 /// token (a stray character the lexer tolerates because a regex body could
 /// have made it legal) has no error to carry and keeps the generic
 /// unexpected-token report.
-/// A `regex`/`lexer` typed error lifted into a `ParseError`, at the position
-/// the error itself reports.
-fn regexp_syntax_error(err: regex.PatternError) -> ParseError {
-  RegExpSyntaxError(regex.pattern_error_pos(err), err)
-}
-
-fn lex_error(err: lexer.LexError) -> ParseError {
-  LexError(lexer.lex_error_pos(err), err)
-}
-
 fn illegal_token_error(p: P) -> ParseError {
   case peek(p) {
     LexFailure(err) -> lex_error(err)
