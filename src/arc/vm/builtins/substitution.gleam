@@ -112,7 +112,7 @@ pub fn resolve_without_named(
 }
 
 /// Tokenize a replacement template into segments. Called once per replace
-/// call; templates without "$" skip grapheme segmentation entirely.
+/// call; templates without "$" skip segmentation entirely.
 ///
 /// `named_mode` selects the "$<" interpretation: with a `groups` object on the
 /// match result "$<" opens a named reference scanned to ">"; without one it is
@@ -124,8 +124,19 @@ pub fn tokenize_template(
 ) -> List(ReplaceSegment) {
   case string.contains(template, "$") {
     False -> [LiteralSeg(template)]
-    True -> tokenize_loop(string.to_graphemes(template), named_mode, "", [])
+    True -> tokenize_loop(to_code_points(template), named_mode, "", [])
   }
+}
+
+/// GetSubstitution is defined over code units, NOT grapheme clusters: in
+/// `"$&" <> combining_acute` the escape is `$&` followed by a lone combining
+/// mark, even though those three code points form ONE grapheme. Splitting on
+/// graphemes would fuse `&` with the mark and leave the `$&` unrecognised, so
+/// the tokenizer scans one code point per element.
+fn to_code_points(s: String) -> List(String) {
+  s
+  |> string.to_utf_codepoints
+  |> list.map(fn(cp) { string.from_utf_codepoints([cp]) })
 }
 
 fn flush_literal(
