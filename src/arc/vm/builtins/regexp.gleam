@@ -65,9 +65,11 @@ type ExecFailure {
   PatternCompileFailed(reason: String)
 }
 
-/// FFI: execute pattern on string at byte offset. Returns the capture list
-/// padded to group_count+1 entries ({-1,0} = unset group), the total
-/// capturing-group count, and [(name, capture_index)] for named groups.
+/// FFI: execute pattern on string at byte offset. Returns the whole-match
+/// span, the group-capture list padded to group_count entries ({-1,0} = unset
+/// group), the total capturing-group count, and [(name, capture_index)] for
+/// named groups. The whole match is its own tuple field — a PCRE match always
+/// has one, so no caller need handle an impossible empty-captures list.
 /// `sticky` anchors the match exactly at `offset` (JS `y` semantics).
 /// The offset bounds/character-boundary checks live in the FFI: an out-of-range
 /// or mid-character offset comes back as a typed failure, never a crash.
@@ -78,7 +80,10 @@ fn ffi_regexp_exec_info(
   string: String,
   offset: Int,
   sticky: Bool,
-) -> Result(#(List(#(Int, Int)), Int, List(#(String, Int))), ExecFailure)
+) -> Result(
+  #(#(Int, Int), List(#(Int, Int)), Int, List(#(String, Int))),
+  ExecFailure,
+)
 
 /// FFI: O(1) sub-binary slice by byte offsets, WITHOUT re-validating UTF-8
 /// (hence `unsafe_`). regexp_exec_info returns byte indices (re:run), so all
@@ -543,21 +548,15 @@ fn write_legacy_statics(
 }
 
 /// UpdateLegacyRegExpStaticProperties: refresh %RegExp%'s legacy state after
-/// a successful RegExpBuiltinExec. `captures` is the raw byte-offset capture
-/// list (whole match first, unset groups as start -1).
+/// a successful RegExpBuiltinExec. `whole` is the raw byte-offset span of the
+/// whole match; `groups` is captures 1..N (unset groups as start -1).
 fn update_legacy_statics(
   state: State(host),
   s: String,
-  captures: List(#(Int, Int)),
+  whole: #(Int, Int),
+  groups: List(#(Int, Int)),
 ) -> State(host) {
-  let #(match_start, match_len) = case captures {
-    [first, ..] -> first
-    [] -> #(0, 0)
-  }
-  let groups = case captures {
-    [_, ..rest] -> rest
-    [] -> []
-  }
+  let #(match_start, match_len) = whole
   let group_strings = list.map(groups, capture_to_legacy_string(s, _))
   let last_paren = list.last(group_strings) |> result.unwrap("")
   // Groups the pattern doesn't have read as "" — the spec's [[RegExpParenN]]
@@ -911,11 +910,8 @@ fn try_builtin_exec(
         False -> cont(JsNull, state)
       }
     }
-    Ok(#(captures, _group_count, names)) -> {
-      let #(match_start, match_len) = case captures {
-        [first, ..] -> first
-        [] -> #(last_index, 0)
-      }
+    Ok(#(whole, groups, _group_count, names)) -> {
+      let #(match_start, match_len) = whole
       let e = match_start + match_len
       // Step 16: Set(R, "lastIndex", e, true) iff global or sticky.
       use state <- maybe_write_last_index(state, ref, global || sticky, e)
@@ -931,16 +927,8 @@ fn try_builtin_exec(
       // prototype-identity check is a `compile`-only approximation and is NOT
       // a stand-in for the [[LegacyFeaturesEnabled]] slot (that slot is fixed
       // at construction; a prototype swap must not change it).
-      let state = update_legacy_statics(state, s, captures)
-      build_exec_result(
-        state,
-        s,
-        captures,
-        names,
-        match_start,
-        has_indices,
-        cont,
-      )
+      let state = update_legacy_statics(state, s, whole, groups)
+      build_exec_result(state, s, whole, groups, names, has_indices, cont)
     }
   }
 }
@@ -963,19 +951,17 @@ fn maybe_write_last_index(
 fn build_exec_result(
   state: State(host),
   s: String,
-  captures: List(#(Int, Int)),
+  whole: #(Int, Int),
+  groups: List(#(Int, Int)),
   names: List(#(String, Int)),
-  match_start: Int,
   has_indices: Bool,
   cont: fn(JsValue, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let match_values = case captures {
-    [#(start, len), ..rest] -> [
-      JsString(byte_slice(s, start, len)),
-      ..list.map(rest, capture_to_value(s, _))
-    ]
-    [] -> [JsString("")]
-  }
+  let #(match_start, match_len) = whole
+  let match_values = [
+    JsString(byte_slice(s, match_start, match_len)),
+    ..list.map(groups, capture_to_value(s, _))
+  ]
   // groups: undefined when the pattern has no named groups, else a
   // null-prototype object mapping each name to its capture value.
   let #(heap, groups_val) = case names {
@@ -984,8 +970,9 @@ fn build_exec_result(
       let values =
         list.map(names, fn(pair) {
           let #(name, idx) = pair
+          // Named-group indices are 1-based (capture 1 = groups[0]).
           let v =
-            helpers.list_at(captures, idx)
+            helpers.list_at(groups, idx - 1)
             |> option.map(capture_to_value(s, _))
             |> option.unwrap(JsUndefined)
           #(name, v)
@@ -1001,7 +988,7 @@ fn build_exec_result(
   // unset groups) with a parallel `groups` object.
   let #(state, indices_val) = case has_indices {
     False -> #(state, JsUndefined)
-    True -> make_indices(state, captures, names)
+    True -> make_indices(state, whole, groups, names)
   }
 
   let #(heap, arr_ref) =
@@ -1036,11 +1023,12 @@ fn build_exec_result(
 /// §22.2.7.8 MakeMatchIndicesIndexPairArray (byte-offset approximation).
 fn make_indices(
   state: State(host),
-  captures: List(#(Int, Int)),
+  whole: #(Int, Int),
+  groups: List(#(Int, Int)),
   names: List(#(String, Int)),
 ) -> #(State(host), JsValue) {
   let #(state, pair_values) =
-    list.fold(captures, #(state, []), fn(acc, cap) {
+    list.fold([whole, ..groups], #(state, []), fn(acc, cap) {
       let #(state, vals) = acc
       case cap {
         #(start, len) if start >= 0 -> {

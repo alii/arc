@@ -1036,7 +1036,7 @@ pair_trail([$\\, $u, E, F, G, H | Rest]) ->
 pair_trail(_) -> none.
 
 %% regexp_exec_info(Pattern, Flags, String, Offset, Sticky)
-%%   -> {ok, {Captures, GroupCount, Names}}
+%%   -> {ok, {WholeMatch, Groups, GroupCount, Names}}
 %%    | {error, no_match}
 %%    | {error, offset_out_of_range}
 %%    | {error, {pattern_compile_failed, ReasonBinary}}
@@ -1056,8 +1056,11 @@ pair_trail(_) -> none.
 %% A negative Offset is clamped to 0 (ToLength, §7.1.20).
 %% Additionally:
 %%   - Sticky=true anchors the match at Offset (JS `y` flag semantics),
-%%   - Captures is padded with {-1, 0} up to GroupCount + 1 entries (PCRE
-%%     omits trailing unset groups; JS exposes them as undefined),
+%%   - WholeMatch is the {Start, Length} of capture 0 — split out so the Gleam
+%%     caller's type never admits an empty capture list (a PCRE match always
+%%     has one),
+%%   - Groups is captures 1..N padded with {-1, 0} up to GroupCount entries
+%%     (PCRE omits trailing unset groups; JS exposes them as undefined),
 %%   - Names is [{GroupName, CaptureIndex}] for (?<name>...) groups, in
 %%     source order, so the caller can build the `groups` object.
 regexp_exec_info(Pattern, Flags, String, Offset, Sticky) when Offset < 0 ->
@@ -1087,9 +1090,9 @@ exec_compiled(Pattern, Flags, String, Offset, Sticky) ->
             Err;
         {ok, {MP, GroupCount, Names}} ->
             case re:run(String, MP, Opts) of
-                {match, Captured} ->
-                    Padded = pad_captures(Captured, GroupCount + 1),
-                    {ok, {Padded, GroupCount, Names}};
+                {match, [Whole | Groups]} ->
+                    Padded = pad_captures(Groups, GroupCount),
+                    {ok, {Whole, Padded, GroupCount, Names}};
                 nomatch -> {error, no_match}
             end
     end.
