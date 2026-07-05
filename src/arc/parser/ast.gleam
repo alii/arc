@@ -65,18 +65,66 @@ pub type ModuleItem {
     phase: ImportPhase,
     span: Span,
   )
-  ExportNamedDeclaration(
-    declaration: Option(Statement),
+  /// `export <VariableStatement | Declaration>` (§16.2.3.1, first
+  /// production). Split from `ExportNamed` because no production has both a
+  /// declaration and specifiers/`from` — folding them into one node made
+  /// three states representable that the grammar cannot spell.
+  ///
+  /// `line` is the 1-based source line of the `export` keyword. The compiler
+  /// unwraps this item to a bare statement (`ast_util.module_items_to_stmts`)
+  /// and needs a real line to tag it with; `0` is the emitter's "no line
+  /// info" sentinel, so a runtime error thrown from `export function f(){}`
+  /// would otherwise have no line at all.
+  ExportDeclaration(declaration: Declaration, line: Int, span: Span)
+  /// `export { a, b as c }` and `export { a } from "m"` / `export {} from "m"`
+  /// (§16.2.3.1, remaining productions). Never carries a declaration.
+  ExportNamed(
     specifiers: List(ExportSpecifier),
     source: Option(StringLiteral),
     span: Span,
   )
-  ExportDefaultDeclaration(declaration: Expression, span: Span)
+  /// `line` is the 1-based source line of the `export` keyword — see
+  /// `ExportDeclaration.line`.
+  ExportDefaultDeclaration(declaration: Expression, line: Int, span: Span)
   ExportAllDeclaration(
     exported: Option(String),
     source: StringLiteral,
     span: Span,
   )
+}
+
+/// The three declaration forms `export` admits (§16.2.3.1: `export`
+/// VariableStatement, `export` Declaration). Modelling them as their own type
+/// — rather than `Option(Statement)` on the export node — makes
+/// `export while (x) {}` and friends unspellable, so no consumer needs an
+/// impossible arm to unwrap an exported declaration.
+pub type Declaration {
+  DeclVariable(kind: VariableKind, declarations: List(VariableDeclarator))
+  DeclFunction(function: FunctionLiteral)
+  DeclClass(
+    name: Option(NamedBinding),
+    super_class: Option(Expression),
+    body: List(ClassElement),
+  )
+}
+
+/// Re-wrap an exported declaration as the equivalent bare `Statement`, which
+/// is what the compiler lowers a module body to. Total — every `Declaration`
+/// has exactly one `Statement` counterpart.
+pub fn declaration_to_statement(decl: Declaration) -> Statement {
+  case decl {
+    DeclVariable(kind:, declarations:) ->
+      VariableDeclaration(kind:, declarations:)
+    DeclFunction(function: FunctionLiteral(
+      name:,
+      params:,
+      body:,
+      is_generator:,
+      is_async:,
+    )) -> FunctionDeclaration(name:, params:, body:, is_generator:, is_async:)
+    DeclClass(name:, super_class:, body:) ->
+      ClassDeclaration(name:, super_class:, body:)
+  }
 }
 
 pub type ImportSpecifier {

@@ -262,34 +262,51 @@ fn collect_undef_export_names(
   acc: set.Set(String),
   item: ast.ModuleItem,
 ) -> set.Set(String) {
-  let declaration = case item {
-    ast.StatementItem(located) -> Some(located.statement)
-    ast.ExportNamedDeclaration(declaration: Some(d), ..) -> Some(d)
-    _ -> None
+  case item {
+    ast.StatementItem(located) -> undef_names_of_stmt(acc, located.statement)
+    ast.ExportDeclaration(declaration:, ..) ->
+      undef_names_of_stmt(acc, ast.declaration_to_statement(declaration))
+    // `export default function fn() {}` — hoisted like any top-level
+    // function declaration, so its binding seeds `undefined` (not TDZ).
+    //
+    // KNOWN GAP: an ANONYMOUS `export default function () {}` is a var-scoped
+    // hoistable declaration too (§16.2.1.6.4), so `*default*` should also seed
+    // `undefined` and be initialized before the body runs. It currently seeds
+    // TDZ and is assigned in place. Fixing that needs the parser to tag the
+    // anonymous function's scope `TagFnDecl` and `module_items_to_stmts` to
+    // lower it to a FunctionDeclaration — while still naming the closure
+    // "default", not "*default*" — so it is left alone here rather than
+    // half-fixed into a silently-`undefined` read.
+    ast.ExportDefaultDeclaration(
+      declaration: ast.FunctionExpression(
+        name: Some(ast.NamedBinding(name:, ..)),
+        ..,
+      ),
+      ..,
+    ) -> set.insert(acc, name)
+    ast.ExportDefaultDeclaration(..)
+    | ast.ImportDeclaration(..)
+    | ast.ExportNamed(..)
+    | ast.ExportAllDeclaration(..) -> acc
   }
-  case declaration, item {
-    Some(ast.VariableDeclaration(kind: ast.Var, declarations:)), _ ->
+}
+
+/// The var/function-hoisted names a top-level statement introduces.
+fn undef_names_of_stmt(
+  acc: set.Set(String),
+  stmt: ast.Statement,
+) -> set.Set(String) {
+  case stmt {
+    ast.VariableDeclaration(kind: ast.Var, declarations:) ->
       // Every name the declarator binds — `var {a, b} = o` hoists `a` and
       // `b` exactly like `var a` does, so destructured names seed
       // `undefined` too.
       list.fold(declarations, acc, fn(a, decl) {
         list.fold(ast.pattern_bound_names(decl.id), a, set.insert)
       })
-    Some(ast.FunctionDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..)),
-      _
-    -> set.insert(acc, name)
-    // `export default function fn() {}` — hoisted like any top-level
-    // function declaration, so its binding seeds `undefined` (not TDZ).
-    _,
-      ast.ExportDefaultDeclaration(
-        declaration: ast.FunctionExpression(
-          name: Some(ast.NamedBinding(name:, ..)),
-          ..,
-        ),
-        ..,
-      )
-    -> set.insert(acc, name)
-    _, _ -> acc
+    ast.FunctionDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..) ->
+      set.insert(acc, name)
+    _ -> acc
   }
 }
 

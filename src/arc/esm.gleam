@@ -236,7 +236,8 @@ fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
       )
     }
     ast.StatementItem(_) -> acc
-    ast.ExportNamedDeclaration(..)
+    ast.ExportDeclaration(..)
+    | ast.ExportNamed(..)
     | ast.ExportDefaultDeclaration(..)
     | ast.ExportAllDeclaration(..) -> {
       let entries = export_entries(item)
@@ -326,8 +327,14 @@ fn declaration_bindings(
 /// The export entries of one top-level item ([] for non-exports).
 fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
   case item {
-    ast.ExportNamedDeclaration(declaration:, specifiers:, source: None, ..) ->
-      named_exports(declaration, specifiers)
+    ast.ExportDeclaration(declaration:, ..) -> declaration_exports(declaration)
+    ast.ExportNamed(specifiers:, source: None, ..) ->
+      list.map(specifiers, fn(spec) {
+        case spec {
+          ast.ExportSpecifier(local:, exported:, ..) ->
+            LocalExport(export_name: exported, local_name: local)
+        }
+      })
     // §16.2.3.7: `export default function fn() {}` / `class fn {}` bind
     // the NAME (BoundNames = « fn »); only anonymous defaults use the
     // synthetic *default* binding.
@@ -349,12 +356,7 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
       LocalExport(export_name: "default", local_name: "*default*"),
     ]
     // Re-exports from other modules
-    ast.ExportNamedDeclaration(
-      declaration: _,
-      specifiers:,
-      source: Some(ast.StringLit(source)),
-      ..,
-    ) ->
+    ast.ExportNamed(specifiers:, source: Some(ast.StringLit(source)), ..) ->
       list.map(specifiers, fn(spec) {
         case spec {
           ast.ExportSpecifier(local:, exported:, ..) ->
@@ -379,40 +381,32 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
   }
 }
 
-/// Exported names from a named export declaration.
-fn named_exports(
-  declaration: option.Option(ast.Statement),
-  specifiers: List(ast.ExportSpecifier),
-) -> List(ExportEntry) {
-  // From specifiers: `export { a, b as c }`
-  let spec_exports =
-    list.map(specifiers, fn(spec) {
-      case spec {
-        ast.ExportSpecifier(local:, exported:, ..) ->
-          LocalExport(export_name: exported, local_name: local)
-      }
-    })
-
-  // From declaration: `export let x = 42`, `export const { a, b } = o`,
-  // `export function f() {}`. §16.2.3.3: the ExportedNames of an exported
-  // VariableDeclaration are the BoundNames of every declarator's binding
-  // target — including everything a destructuring pattern binds.
-  let decl_exports = case declaration {
-    Some(ast.VariableDeclaration(declarations:, ..)) ->
+/// Exported names of `export let x = 42` / `export const { a, b } = o` /
+/// `export function f() {}` / `export class C {}`. §16.2.3.3: the
+/// ExportedNames of an exported VariableDeclaration are the BoundNames of
+/// every declarator's binding target — including everything a destructuring
+/// pattern binds. `ast.Declaration` has exactly these three variants, so
+/// there is no "some other statement got exported" arm to write.
+fn declaration_exports(declaration: ast.Declaration) -> List(ExportEntry) {
+  case declaration {
+    ast.DeclVariable(declarations:, ..) ->
       list.flat_map(declarations, fn(decl) {
-        ast.pattern_bound_names(decl.id)
-        |> list.map(fn(name) {
-          LocalExport(export_name: name, local_name: name)
-        })
+        ast.pattern_bound_names(decl.id) |> list.map(self_export)
       })
-    Some(ast.FunctionDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..)) -> [
-      LocalExport(export_name: name, local_name: name),
-    ]
-    Some(ast.ClassDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..)) -> [
-      LocalExport(export_name: name, local_name: name),
-    ]
-    _ -> []
+    // `export function`/`export class` require a name (§16.2.1 — only
+    // `export default` admits the anonymous forms), so `None` is unreachable.
+    ast.DeclFunction(function:) -> binding_exports(function.name)
+    ast.DeclClass(name:, ..) -> binding_exports(name)
   }
+}
 
-  list.append(spec_exports, decl_exports)
+/// `export function f() {}` — the local binding IS the exported name.
+fn binding_exports(name: Option(ast.NamedBinding)) -> List(ExportEntry) {
+  ast.binding_name(name)
+  |> option.map(fn(n) { [self_export(n)] })
+  |> option.unwrap([])
+}
+
+fn self_export(name: String) -> ExportEntry {
+  LocalExport(export_name: name, local_name: name)
 }

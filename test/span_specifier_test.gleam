@@ -36,7 +36,7 @@ fn export_specifiers(source: String) -> List(ast.ExportSpecifier) {
   let assert Ok(specs) =
     list.find_map(items, fn(item) {
       case item {
-        ast.ExportNamedDeclaration(specifiers:, ..) -> Ok(specifiers)
+        ast.ExportNamed(specifiers:, ..) -> Ok(specifiers)
         _ -> Error(Nil)
       }
     })

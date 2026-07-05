@@ -284,7 +284,7 @@ fn binding_span_texts(
     ast.Module(body), _ ->
       list.find_map(body, fn(item) {
         case item {
-          ast.ExportNamedDeclaration(specifiers: [_, ..] as specs, ..) ->
+          ast.ExportNamed(specifiers: [_, ..] as specs, ..) ->
             Ok(
               list.map(specs, fn(spec) {
                 let ast.ExportSpecifier(local:, local_span:, ..) = spec

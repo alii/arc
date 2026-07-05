@@ -312,14 +312,19 @@ pub fn split_directives(
 /// `*default* = expr;` — the `*default*` local was declared during module
 /// hoisting, and the synthesized assignment carries the declaration span
 /// so errors point at real source.
+///
+/// Every lowered statement keeps the source line of the `export` keyword the
+/// item was parsed from, so a runtime error thrown out of an exported
+/// declaration reports a real line. (Line `0` is emit's "no line info"
+/// sentinel — `set_line` is a no-op for it.)
 pub fn module_items_to_stmts(
   items: List(ast.ModuleItem),
 ) -> List(ast.StmtWithLine) {
   list.filter_map(items, fn(item) {
     case item {
       ast.StatementItem(s) -> Ok(s)
-      ast.ExportNamedDeclaration(declaration: Some(decl), ..) ->
-        Ok(ast.StmtWithLine(0, decl))
+      ast.ExportDeclaration(declaration:, line:, ..) ->
+        Ok(ast.StmtWithLine(line, ast.declaration_to_statement(declaration)))
       ast.ExportDefaultDeclaration(
         declaration: ast.FunctionExpression(
           name: Some(_) as name,
@@ -329,10 +334,11 @@ pub fn module_items_to_stmts(
           is_async:,
           span: _,
         ),
+        line:,
         ..,
       ) ->
         Ok(ast.StmtWithLine(
-          0,
+          line,
           ast.FunctionDeclaration(
             name:,
             params:,
@@ -348,12 +354,16 @@ pub fn module_items_to_stmts(
           body:,
           span: _,
         ),
+        line:,
         ..,
       ) ->
-        Ok(ast.StmtWithLine(0, ast.ClassDeclaration(name:, super_class:, body:)))
-      ast.ExportDefaultDeclaration(declaration: expr, span:) ->
         Ok(ast.StmtWithLine(
-          0,
+          line,
+          ast.ClassDeclaration(name:, super_class:, body:),
+        ))
+      ast.ExportDefaultDeclaration(declaration: expr, line:, span:) ->
+        Ok(ast.StmtWithLine(
+          line,
           ast.ExpressionStatement(
             expression: ast.AssignmentExpression(
               operator: ast.Assign,
@@ -365,7 +375,7 @@ pub fn module_items_to_stmts(
           ),
         ))
       ast.ImportDeclaration(..)
-      | ast.ExportNamedDeclaration(declaration: None, ..)
+      | ast.ExportNamed(..)
       | ast.ExportAllDeclaration(..) -> Error(Nil)
     }
   })
