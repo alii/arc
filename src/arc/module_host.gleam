@@ -61,6 +61,27 @@ pub type ResolveFn =
 pub type LoadFn =
   fn(String) -> Result(String, ModuleLoadError)
 
+/// The `#(resolve, load)` pair for a SELF-CONTAINED module: every import is
+/// rejected with `load_error.ImportsForbidden`, so no source is ever fetched.
+/// The one blessed spelling of a loader pair embedders otherwise hand-roll
+/// identically each time.
+pub fn no_imports() -> #(ResolveFn, LoadFn) {
+  #(forbid_resolve, forbid_load)
+}
+
+/// A `ResolveFn` that rejects every specifier — see `no_imports`.
+pub fn forbid_resolve(
+  raw_specifier: String,
+  _referrer: String,
+) -> Result(String, ModuleLoadError) {
+  Error(load_error.ImportsForbidden(raw_specifier))
+}
+
+/// A `LoadFn` that rejects every specifier — see `no_imports`.
+pub fn forbid_load(resolved: String) -> Result(String, ModuleLoadError) {
+  Error(load_error.ImportsForbidden(resolved))
+}
+
 /// Build the dynamic-import host hook. `referrer` is the path of the entry
 /// script/module (relative specifiers resolve against it when no module body
 /// is active); `resolve` maps specifiers to module identities and `load`

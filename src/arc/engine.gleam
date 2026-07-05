@@ -71,7 +71,9 @@ pub type EvalError(host) {
   /// AOT compilation of a module graph failed (parse / resolve / load /
   /// bytecode). Carries no heap — nothing has been allocated yet.
   ModuleCompileError(module.CompileBundleError)
-  /// Linking or evaluating a module graph failed.
+  /// Linking a module graph failed, or its evaluation could not settle. A
+  /// module whose top level THREW is not this: it comes back as an
+  /// `Ok(EvaluatedModule(outcome: Threw(..), ..))`, like every other run.
   ModuleError(module.ModuleError(host))
 }
 
@@ -92,12 +94,21 @@ pub type Outcome {
   Threw(error: JsValue)
 }
 
-/// The result of evaluating an ES module: the entry module's completion value
-/// plus its Module Namespace object (§10.4.6), if any. Read named exports off
-/// `namespace` with `read_export`. `namespace` is `None` only for a degenerate
-/// bundle that produced no entry namespace.
+/// A module's Module Namespace object (§10.4.6), as minted by `eval_module` /
+/// `eval_module_with`. Opaque and unforgeable: `read_export` cannot be handed
+/// something that isn't a namespace, so "read an export off an arbitrary
+/// JsValue" is not expressible.
+pub opaque type Namespace {
+  Namespace(ref: Ref)
+}
+
+/// The result of evaluating an ES module: how the entry module's top level
+/// ended (`Returned`/`Threw`, exactly as for `eval` and `call`) plus its
+/// Module Namespace object, if any. Read named exports off `namespace` with
+/// `read_export`. `namespace` is `None` when the module threw, and for a
+/// degenerate bundle that produced no entry namespace.
 pub type EvaluatedModule {
-  EvaluatedModule(value: JsValue, namespace: Option(JsValue))
+  EvaluatedModule(outcome: Outcome, namespace: Option(Namespace))
 }
 
 // ----------------------------------------------------------------------------
@@ -310,6 +321,18 @@ pub fn with_state(
   engine: Engine(host),
   body: fn(state.State(host)) -> #(state.State(host), a),
 ) -> #(Engine(host), a) {
+  with_state_with(engine, body, event_loop.finish)
+}
+
+/// Like `with_state` but the caller supplies the post-body driver — the same
+/// pairing every other run entry point has (`eval`/`eval_with`,
+/// `eval_module`/`eval_module_with`, `call`/`call_with`), so an embedder whose
+/// host functions suspend can drive its own macrotask loop here too.
+pub fn with_state_with(
+  engine: Engine(host),
+  body: fn(state.State(host)) -> #(state.State(host), a),
+  finish: fn(state.State(host)) -> state.State(host),
+) -> #(Engine(host), a) {
   let s =
     interpreter.root_state(
       engine.heap,
@@ -318,7 +341,7 @@ pub fn with_state(
       engine.host_hooks,
     )
   let #(s, result) = body(s)
-  let s = event_loop.finish(s)
+  let s = finish(s)
   #(Engine(..engine, heap: s.heap), result)
 }
 
@@ -425,12 +448,13 @@ pub fn eval_with(
 /// `load` reads a resolved specifier's source (called once per unique
 /// module); both fail with a `module_host.ModuleLoadError` category, never a
 /// bare string a loader could accidentally return as a success. Returns the
-/// entry module's value + namespace, plus a new engine carrying the updated
+/// entry module's outcome + namespace, plus a new engine carrying the updated
 /// heap.
 ///
-/// A module that throws at top level surfaces as `Error(ModuleError(...))`
-/// (mirroring `module.evaluate_bundle`), not a `Threw` outcome — read its
-/// thrown value via `eval_error_message`.
+/// A module that throws at top level is a normal `Ok` result whose `outcome`
+/// is `Threw(value)` — the same shape `eval` and `call` hand back, so one
+/// `Outcome` match covers scripts, modules and calls. `Error(ModuleError(..))`
+/// is reserved for genuine engine/link failures.
 pub fn eval_module(
   engine: Engine(host),
   specifier: String,
@@ -468,7 +492,7 @@ pub fn eval_module_with(
     )
     |> result.map_error(ModuleCompileError),
   )
-  use evaluated <- result.map(
+  case
     module.evaluate_bundle_with_hooks(
       bundle,
       engine.heap,
@@ -477,24 +501,36 @@ pub fn eval_module_with(
       engine.host_hooks,
       finish,
     )
-    |> result.map_error(ModuleError),
-  )
-  let module.EvaluatedBundle(value:, heap:, namespace:) = evaluated
-  #(
-    EvaluatedModule(value:, namespace: option.map(namespace, JsObject)),
-    Engine(..engine, heap:),
-  )
+  {
+    Ok(module.EvaluatedBundle(value:, heap:, namespace:)) ->
+      Ok(#(
+        EvaluatedModule(
+          outcome: Returned(value),
+          namespace: option.map(namespace, Namespace),
+        ),
+        Engine(..engine, heap:),
+      ))
+    // "The module's top level threw" is the same event `eval`/`call` report as
+    // `Threw` — not an engine failure. The heap the throw left behind is
+    // threaded forward, so the engine stays usable.
+    Error(module.EvaluationError(value: thrown, heap:)) ->
+      Ok(#(
+        EvaluatedModule(outcome: Threw(thrown), namespace: option.None),
+        Engine(..engine, heap:),
+      ))
+    Error(err) -> Error(ModuleError(err))
+  }
 }
 
-/// Read a named export off a Module Namespace object (the `namespace` from
-/// `eval_module`). `None` if the namespace isn't a module namespace, has no
-/// such export, or the binding is still uninitialized (TDZ).
+/// Read a named export off a module's `Namespace` (from `eval_module`).
+/// `None` if there is no such export, or the binding is still uninitialized
+/// (TDZ).
 pub fn read_export(
   engine: Engine(host),
-  namespace: JsValue,
+  namespace: Namespace,
   name: String,
 ) -> Option(JsValue) {
-  module.read_export(engine.heap, namespace, name)
+  module.read_export(engine.heap, JsObject(namespace.ref), name)
 }
 
 // ----------------------------------------------------------------------------

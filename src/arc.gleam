@@ -1,6 +1,6 @@
 import arc/compiler
 import arc/dis
-import arc/engine.{Threw}
+import arc/engine.{Returned, Threw}
 import arc/esm
 import arc/internal/path
 import arc/module/load_error
@@ -41,25 +41,38 @@ type ReplState(host) {
   ReplState(heap: Heap(host), builtins: Builtins, env: entry.ReplEnv)
 }
 
+/// A source string that never made it to bytecode. Renderable with NO heap —
+/// nothing has been allocated yet — which is what lets `/dis` (which never
+/// runs the code) report failures without holding one.
+type CompileError {
+  Syntax(parser.ParseError)
+  Compile(compiler.CompileError)
+}
+
+fn format_compile_error(err: CompileError) -> String {
+  case err {
+    Syntax(parse_err) ->
+      "SyntaxError: " <> parser.parse_error_to_string(parse_err)
+    Compile(compile_err) ->
+      "compile error: " <> compiler.error_message(compile_err)
+  }
+}
+
 /// Everything that can go wrong evaluating one REPL line, still carrying its
 /// original typed cause. Rendered for humans only at `format_repl_error`.
 type ReplError {
-  ReplSyntax(parser.ParseError)
-  ReplCompile(compiler.CompileError)
-  ReplUncaught(value.JsValue)
-  ReplInternal(state.VmError)
+  CompileFailed(CompileError)
+  Uncaught(value.JsValue)
+  Internal(state.VmError)
 }
 
 /// Render a `ReplError` at the print site. `heap` must be the heap returned by
 /// the `eval` that produced the error, so a thrown value can be inspected.
 fn format_repl_error(err: ReplError, heap: Heap(host)) -> String {
   case err {
-    ReplSyntax(parse_err) ->
-      "SyntaxError: " <> parser.parse_error_to_string(parse_err)
-    ReplCompile(compile_err) ->
-      "compile error: " <> compiler.error_message(compile_err)
-    ReplUncaught(thrown) -> "Uncaught " <> object.format_error(thrown, heap)
-    ReplInternal(vm_err) -> "InternalError: " <> vm_error_message(vm_err)
+    CompileFailed(compile_err) -> format_compile_error(compile_err)
+    Uncaught(thrown) -> "Uncaught " <> object.format_error(thrown, heap)
+    Internal(vm_err) -> "InternalError: " <> vm_error_message(vm_err)
   }
 }
 
@@ -67,14 +80,15 @@ fn format_repl_error(err: ReplError, heap: Heap(host)) -> String {
 
 /// Parse + compile one REPL line to a template, without running it. Shared
 /// by `eval` and the `/dis` command so both report syntax/compile errors the
-/// same way.
-fn compile_line(source: String) -> Result(value.FuncTemplate, ReplError) {
+/// same way — and it can only fail BEFORE anything runs, so its error type
+/// carries no thrown value and needs no heap to render.
+fn compile_line(source: String) -> Result(value.FuncTemplate, CompileError) {
   use #(body, sb) <- result.try(
     parser.parse_script(source)
-    |> result.map_error(ReplSyntax),
+    |> result.map_error(Syntax),
   )
   compiler.compile_repl(body, sb)
-  |> result.map_error(ReplCompile)
+  |> result.map_error(Compile)
 }
 
 fn eval(
@@ -82,7 +96,7 @@ fn eval(
   source: String,
 ) -> #(ReplState(host), Result(JsValue, ReplError)) {
   case compile_line(source) {
-    Error(err) -> #(state, Error(err))
+    Error(err) -> #(state, Error(CompileFailed(err)))
     Ok(template) ->
       case
         entry.run_and_drain_repl(
@@ -95,9 +109,9 @@ fn eval(
         Ok(#(Ok(val), heap, env)) -> #(ReplState(..state, heap:, env:), Ok(val))
         Ok(#(Error(val), heap, env)) -> #(
           ReplState(..state, heap:, env:),
-          Error(ReplUncaught(val)),
+          Error(Uncaught(val)),
         )
-        Error(vm_err) -> #(state, Error(ReplInternal(vm_err)))
+        Error(vm_err) -> #(state, Error(Internal(vm_err)))
       }
   }
 }
@@ -158,7 +172,7 @@ fn handle_repl_line(state: ReplState(host), line: String) -> ReplStep(host) {
     "/dis " <> source -> {
       case compile_line(source) {
         Ok(template) -> io.print(dis.disassemble(template))
-        Error(err) -> io.println(format_repl_error(err, state.heap))
+        Error(err) -> io.println(format_compile_error(err))
       }
       Continue(state)
     }
@@ -261,6 +275,8 @@ fn halt(code: Int) -> a
 /// they return one of these and `main` renders it once via `format_cli_error`,
 /// mirroring `ReplError` / `format_repl_error`.
 type CliError(host) {
+  /// argv did not name a runnable command.
+  BadUsage(reason: UsageError)
   /// The entry file could not be read from disk.
   ReadFailed(path: String, error: simplifile.FileError)
   /// `arc --dis <file>`: the disassembly output file could not be written.
@@ -268,9 +284,13 @@ type CliError(host) {
   /// The parse → compile → run pipeline failed (or an ES module bundle
   /// failed to link/evaluate).
   EvalFailed(error: engine.EvalError(host))
-  /// The script ran but threw an uncaught exception. The engine that produced
-  /// it is kept so the thrown value can be inspected at the print site.
-  Uncaught(engine: engine.Engine(host), thrown: JsValue)
+  /// `arc --dis <file>`: the file did not parse/compile. Nothing ran, so no
+  /// heap is needed to render it.
+  DisFailed(error: CompileError)
+  /// The script (or module) ran but threw an uncaught exception. The engine
+  /// that produced it is kept so the thrown value can be inspected at the
+  /// print site.
+  ScriptThrew(engine: engine.Engine(host), thrown: JsValue)
   /// `arc -p <expr>` failed. The heap that produced the error is kept so a
   /// thrown value can be inspected at the print site.
   PrintFailed(heap: Heap(host), error: ReplError)
@@ -280,13 +300,30 @@ type CliError(host) {
 /// non-zero).
 fn format_cli_error(err: CliError(host)) -> String {
   case err {
+    BadUsage(reason) -> format_usage_error(reason)
     ReadFailed(path, file_err) ->
       "Error reading " <> path <> ": " <> simplifile.describe_error(file_err)
     WriteFailed(path, file_err) ->
       "Error writing " <> path <> ": " <> simplifile.describe_error(file_err)
     EvalFailed(eval_err) -> engine.eval_error_message(eval_err)
-    Uncaught(eng, thrown) -> "Uncaught " <> engine.format_error(eng, thrown)
+    DisFailed(compile_err) -> format_compile_error(compile_err)
+    ScriptThrew(eng, thrown) -> "Uncaught " <> engine.format_error(eng, thrown)
     PrintFailed(heap, repl_err) -> format_repl_error(repl_err, heap)
+  }
+}
+
+/// Which goal symbol a file is parsed and compiled under. `.cjs` is a classic
+/// script; everything else is an ES module. Written ONCE, so `run_file` and
+/// `run_dis` cannot disagree about how a given path is treated.
+type GoalSymbol {
+  Script
+  Module
+}
+
+fn goal_symbol(path: String) -> GoalSymbol {
+  case string.ends_with(path, ".cjs") {
+    True -> Script
+    False -> Module
   }
 }
 
@@ -296,15 +333,13 @@ fn format_cli_error(err: CliError(host)) -> String {
 /// (`engine.new()`) and its default post-script driver, which drains
 /// microtasks after the top level returns.
 fn run_file(path: String) -> Result(Nil, CliError(host)) {
-  case simplifile.read(path) {
-    Error(err) -> Error(ReadFailed(path:, error: err))
-    Ok(source) -> {
-      let is_module = !string.ends_with(path, ".cjs")
-      case is_module {
-        True -> run_module_file(path, source)
-        False -> run_script_file(source)
-      }
-    }
+  use source <- result.try(
+    simplifile.read(path)
+    |> result.map_error(fn(err) { ReadFailed(path:, error: err) }),
+  )
+  case goal_symbol(path) {
+    Module -> run_module_file(path, source)
+    Script -> run_script_file(source)
   }
 }
 
@@ -318,9 +353,14 @@ fn run_module_file(
   // Normalize it, or `arc ./a.js` names a different module than the `a.js` a
   // dependency's `import "./a.js"` resolves to — one file, two module records.
   let entry = path.normalize(entry_path)
-  engine.eval_module(eng, entry, source, resolve_dep, load_dep)
-  |> result.replace(Nil)
-  |> result.map_error(EvalFailed)
+  case engine.eval_module(eng, entry, source, resolve_dep, load_dep) {
+    Ok(#(evaluated, eng)) ->
+      case evaluated.outcome {
+        Returned(_) -> Ok(Nil)
+        Threw(val) -> Error(ScriptThrew(engine: eng, thrown: val))
+      }
+    Error(err) -> Error(EvalFailed(err))
+  }
 }
 
 /// Resolve a dependency specifier: relative paths (./foo, ../bar) against
@@ -353,46 +393,55 @@ fn load_dep(resolved: String) -> Result(String, ModuleLoadError) {
 fn run_script_file(source: String) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
   case engine.eval(eng, source) {
-    Ok(#(Threw(val), eng)) -> Error(Uncaught(engine: eng, thrown: val))
+    Ok(#(Threw(val), eng)) -> Error(ScriptThrew(engine: eng, thrown: val))
     Ok(_) -> Ok(Nil)
     Error(err) -> Error(EvalFailed(err))
   }
 }
 
+/// Parse + compile a whole file under its goal symbol, without running it.
+/// Each goal symbol has its own parse + compile entry point, so the two paths
+/// never share a `Program` wrapper one of them would have to reject.
+fn compile_file(
+  goal: GoalSymbol,
+  source: String,
+) -> Result(value.FuncTemplate, CompileError) {
+  case goal {
+    Script -> {
+      use #(body, sb) <- result.try(
+        parser.parse_script(source)
+        |> result.map_error(Syntax),
+      )
+      compiler.compile(body, sb)
+      |> result.map_error(Compile)
+    }
+    Module -> {
+      use #(items, sb) <- result.try(
+        parser.parse_module(source)
+        |> result.map_error(Syntax),
+      )
+      use compiled <- result.map(
+        compiler.compile_module(items, sb, esm.analyze(items))
+        |> result.map_error(Compile),
+      )
+      compiled.template
+    }
+  }
+}
+
 /// `arc --dis <file>`: parse and compile <file> WITHOUT running it, and write
-/// the disassembled bytecode next to it as `<file>.dis.txt`. `.cjs` files
-/// compile as classic scripts, everything else as an ES module — the same
-/// rule `run_file` uses to pick an execution path. Parse/compile failures are
-/// reported through the same `engine.EvalError` shapes a normal run would use.
+/// the disassembled bytecode next to it as `<file>.dis.txt`. The goal symbol
+/// (`.cjs` ⇒ script, else module) is the same one `run_file` picks its
+/// execution path with.
 fn run_dis(path: String) -> Result(Nil, CliError(host)) {
   use source <- result.try(
     simplifile.read(path)
     |> result.map_error(fn(err) { ReadFailed(path:, error: err) }),
   )
-  // `.cjs` is a script; anything else is an ES module. Each goal symbol has
-  // its own parse + compile entry point, so the two paths never share a
-  // `Program` wrapper one of them would have to reject.
-  use template <- result.try(case string.ends_with(path, ".cjs") {
-    True -> {
-      use #(body, sb) <- result.try(
-        parser.parse_script(source)
-        |> result.map_error(fn(err) { EvalFailed(engine.ParseError(err)) }),
-      )
-      compiler.compile(body, sb)
-      |> result.map_error(fn(err) { EvalFailed(engine.CompileError(err)) })
-    }
-    False -> {
-      use #(items, sb) <- result.try(
-        parser.parse_module(source)
-        |> result.map_error(fn(err) { EvalFailed(engine.ParseError(err)) }),
-      )
-      use compiled <- result.map(
-        compiler.compile_module(items, sb, esm.analyze(items))
-        |> result.map_error(fn(err) { EvalFailed(engine.CompileError(err)) }),
-      )
-      compiled.template
-    }
-  })
+  use template <- result.try(
+    compile_file(goal_symbol(path), source)
+    |> result.map_error(DisFailed),
+  )
   let out_path = path <> ".dis.txt"
   use Nil <- result.map(
     simplifile.write(out_path, dis.disassemble(template))
@@ -423,27 +472,69 @@ fn new_repl_state() -> ReplState(host) {
   )
 }
 
-pub fn main() -> Nil {
-  let outcome = case get_script_args() {
-    ["-p", ..rest] -> run_print(string.join(rest, " "))
+/// Why argv did not name a runnable command. Rendered once, by
+/// `format_usage_error`.
+pub type UsageError {
+  MissingDisPath
+  MissingPrintExpr
+  UnknownFlag(String)
+}
 
-    ["--dis", path, ..] -> run_dis(path)
+/// What argv asked arc to do. Parsing argv into one of these keeps the flag
+/// list in a single place, and makes `Usage(_)` a value the caller must handle
+/// — the old inline match printed usage and still returned `Ok(Nil)`, so a
+/// usage error exited 0.
+pub type Command {
+  Repl
+  RunFile(String)
+  Print(String)
+  Dis(String)
+  Usage(reason: UsageError)
+}
 
-    ["--dis"] -> {
-      io.println_error("Usage: arc --dis <file>")
-      Ok(Nil)
-    }
+/// Pure argv → `Command`. No IO, no exits.
+fn parse_args(args: List(String)) -> Command {
+  case args {
+    [] -> Repl
+    ["-p"] -> Usage(MissingPrintExpr)
+    ["-p", ..rest] -> Print(string.join(rest, " "))
+    ["--dis"] -> Usage(MissingDisPath)
+    ["--dis", path, ..] -> Dis(path)
+    ["-" <> _ as flag, ..] -> Usage(UnknownFlag(flag))
+    [path, ..] -> RunFile(path)
+  }
+}
 
-    [path, ..] -> run_file(path)
+fn format_usage_error(reason: UsageError) -> String {
+  let detail = case reason {
+    MissingDisPath -> "arc --dis: missing <file>"
+    MissingPrintExpr -> "arc -p: missing <expr>"
+    UnknownFlag(flag) -> "arc: unknown flag " <> flag
+  }
+  detail
+  <> "\n\nUsage:\n"
+  <> "  arc                start the REPL\n"
+  <> "  arc <file>         run a file (.cjs as a script, else as an ES module)\n"
+  <> "  arc -p <expr>      evaluate <expr> and print the result\n"
+  <> "  arc --dis <file>   write <file>.dis.txt with the compiled bytecode"
+}
 
-    [] -> {
+fn run(command: Command) -> Result(Nil, CliError(host)) {
+  case command {
+    Repl -> {
       banner()
       new_repl_state() |> repl_loop()
       Ok(Nil)
     }
+    RunFile(path) -> run_file(path)
+    Print(source) -> run_print(source)
+    Dis(path) -> run_dis(path)
+    Usage(reason) -> Error(BadUsage(reason))
   }
+}
 
-  case outcome {
+pub fn main() -> Nil {
+  case run(parse_args(get_script_args())) {
     Ok(Nil) -> Nil
     Error(err) -> {
       io.println_error(format_cli_error(err))

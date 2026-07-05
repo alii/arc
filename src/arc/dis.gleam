@@ -19,7 +19,7 @@
 /// Nested functions are printed after their parent, depth-first, labelled
 /// with their path in the function tree (`[0]`, `[0.1]`, ...) — the same
 /// index `MakeClosure` refers to.
-import arc/vm/internal/tuple_array
+import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/opcode.{type Op}
 import arc/vm/value.{type FuncTemplate, type JsValue}
 import gleam/int
@@ -114,41 +114,52 @@ fn format_op(pc: Int, width: Int, op: Op, template: FuncTemplate) -> String {
 /// of the template's side tables — resolved here so the reader never has to.
 fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
   case op {
-    opcode.PushConst(index) -> Some(constant(template, index))
-    opcode.CmpLocalConstJump(_, index, _, _) -> Some(constant(template, index))
+    opcode.PushConst(index) ->
+      Some(resolve(index, template.constants, constant_to_string))
+    opcode.CmpLocalConstJump(_, index, _, _) ->
+      Some(resolve(index, template.constants, constant_to_string))
     opcode.MakeClosure(index) ->
-      tuple_array.get(index, template.functions)
-      |> option.map(child_label)
+      Some(resolve(index, template.functions, child_label))
     _ -> None
   }
 }
 
-/// Render `template.constants[index]` for an inline comment. A bad index is
-/// a compiler bug, not the disassembler's problem — surface it instead of
-/// crashing a debugging tool.
-fn constant(template: FuncTemplate, index: Int) -> String {
-  case tuple_array.get(index, template.constants) {
-    Some(constant) -> constant_to_string(constant)
+/// Render `table[index]` for an inline comment. A bad index is a compiler bug,
+/// not the disassembler's problem — every side-table lookup surfaces it the
+/// same way instead of crashing (or, worse, silently dropping the annotation)
+/// in a debugging tool.
+fn resolve(
+  index: Int,
+  table: TupleArray(a),
+  render: fn(a) -> String,
+) -> String {
+  case tuple_array.get(index, table) {
+    Some(entry) -> render(entry)
     None -> "<out of range: " <> int.to_string(index) <> ">"
   }
 }
 
 /// Compile-time constants are always primitives (the constant pool never
-/// holds object refs), so this stays pure — no Heap needed. `string.inspect`
-/// on the String arm gives JS-ish quoting/escaping for free; anything
-/// unexpected falls through to `string.inspect` of the whole value rather
-/// than being hidden.
+/// holds object refs), so this stays pure — no Heap needed. Every variant is
+/// matched explicitly: a catch-all `string.inspect(other)` would render a
+/// `JsBigInt` (which the emitter really does intern) as Gleam internals.
+/// `string.inspect` on the String arm gives JS-ish quoting/escaping for free.
 fn constant_to_string(constant: JsValue) -> String {
   case constant {
     value.JsString(text) -> string.inspect(text)
     value.JsNumber(number) -> value.format_number(number)
+    value.JsBigInt(value.BigInt(n)) -> int.to_string(n) <> "n"
     value.JsBool(True) -> "true"
     value.JsBool(False) -> "false"
     value.JsNull -> "null"
     value.JsUndefined -> "undefined"
     // The TDZ sentinel the emitter seeds `let`/`const` slots with.
     value.JsUninitialized -> "<uninitialized>"
-    other -> string.inspect(other)
+    value.JsSymbol(id) ->
+      "Symbol(" <> option.unwrap(value.symbol_description(id), "") <> ")"
+    // Unreachable: nothing interns a heap ref in the constant pool. Marked
+    // rather than crashed, since this is a debugging aid.
+    value.JsObject(_) -> "<object ref>"
   }
 }
 

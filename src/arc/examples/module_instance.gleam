@@ -9,7 +9,7 @@
 
 import arc/engine.{Returned, Threw}
 import arc/host
-import arc/module/load_error
+import arc/module_host
 import arc/vm/builtins/helpers
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
@@ -30,14 +30,10 @@ pub fn main() -> Nil {
        Host.emit('[' + count + '] ' + msg);
      }"
 
+  // Self-contained demo module — reject every import.
+  let #(resolve, load) = module_host.no_imports()
   let assert Ok(#(evaluated, eng)) =
-    engine.eval_module(
-      eng,
-      "demo:greeter",
-      source,
-      reject_imports,
-      reject_loads,
-    )
+    engine.eval_module(eng, "demo:greeter", source, resolve, load)
   let assert Some(namespace) = evaluated.namespace
   let assert Some(receive) = engine.read_export(eng, namespace, "receive")
 
@@ -46,7 +42,7 @@ pub fn main() -> Nil {
     case engine.call(eng, receive, JsUndefined, [JsString(msg)]) {
       Ok(#(Returned(_), eng)) -> eng
       Ok(#(Threw(val), eng)) -> {
-        io.println_error("receive threw: " <> engine.inspect(eng, val))
+        io.println_error("receive threw: " <> engine.format_error(eng, val))
         eng
       }
       Error(err) -> {
@@ -69,13 +65,4 @@ fn emit(args, _this, s) {
   )
   io.println(text)
   #(s, Ok(JsUndefined))
-}
-
-/// Self-contained demo module — reject every import.
-fn reject_imports(raw: String, _parent: String) {
-  Error(load_error.ImportsForbidden(raw))
-}
-
-fn reject_loads(specifier: String) {
-  Error(load_error.ImportsForbidden(specifier))
 }
