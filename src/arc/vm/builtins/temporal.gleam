@@ -1787,7 +1787,7 @@ fn extract_calendar_annotation(s: String) -> Option(String) {
       case parse_time_part(body) {
         Some(#(_, rest)) -> {
           let rest = case parse_offset_part(rest) {
-            Some(#(False, _, _, r)) -> r
+            Some(#(NumericOffset(_, _), r)) -> r
             _ -> rest
           }
           case parse_annotations(rest, None, None, False) {
@@ -1825,16 +1825,26 @@ fn to_calendar_arg(v: JsValue) -> Result(tcal.Calendar, TErr) {
 // ISO 8601 string parsing
 // ============================================================================
 
+/// The UTC-offset portion of a parsed ISO string. Makes the impossible
+/// combinations (Z with a numeric value, sub-minute without a value)
+/// unconstructable.
+type ParsedOffset {
+  /// no offset syntax was present
+  NoOffset
+  /// the Z designator (offset 0)
+  Zulu
+  /// an explicit ±HH:MM[:SS[.fff]] value; `sub_minute` is True when a seconds
+  /// component was spelled out (even ":00"), which disqualifies it from use as
+  /// a time zone identifier
+  NumericOffset(ns: Int, sub_minute: Bool)
+}
+
 type ParsedIso {
   ParsedIso(
     date: Option(IsoDate),
     time: Option(TimeRec),
-    /// UTC designator present (Z)
-    z: Bool,
-    /// explicit numeric offset, in nanoseconds
-    offset_ns: Option(Int),
-    /// the explicit offset spelled a seconds component (sub-minute syntax)
-    offset_sub_minute: Bool,
+    /// parsed UTC offset (Z / numeric / none)
+    offset: ParsedOffset,
     /// time zone annotation [Etc/UTC] / [+01:00]
     tz: Option(String),
     /// calendar annotation value
@@ -1985,23 +1995,17 @@ fn pow10(n: Int) -> Int {
 }
 
 /// UTC offset: Z / z / ±HH[:MM[:SS[.fff]]] / ±HH[MM[SS]].
-/// Returns #(is_z, offset_ns, rest).
-/// Returns #(is_z, offset_ns, sub_minute_syntax, rest). `sub_minute_syntax`
-/// is True when the offset spelled out a seconds component (even ":00"),
-/// which disqualifies it from use as a time zone identifier.
-fn parse_offset_part(s: String) -> Option(#(Bool, Option(Int), Bool, String)) {
+/// Returns None when no offset syntax is present at all.
+fn parse_offset_part(s: String) -> Option(#(ParsedOffset, String)) {
   case s {
-    "Z" <> rest | "z" <> rest -> Some(#(True, None, False, rest))
+    "Z" <> rest | "z" <> rest -> Some(#(Zulu, rest))
     "+" <> rest -> parse_offset_value(rest, 1)
     "-" <> rest -> parse_offset_value(rest, -1)
     _ -> None
   }
 }
 
-fn parse_offset_value(
-  s: String,
-  sign: Int,
-) -> Option(#(Bool, Option(Int), Bool, String)) {
+fn parse_offset_value(s: String, sign: Int) -> Option(#(ParsedOffset, String)) {
   use #(h, rest) <- option.then(take_digits(s, 2))
   let #(mi, sec, frac, sub_minute, rest) = case rest {
     ":" <> r1 ->
@@ -2038,7 +2042,7 @@ fn parse_offset_value(
       let ns =
         { h * ns_per_hour + mi * ns_per_minute + sec * ns_per_second + frac }
         * sign
-      Some(#(False, Some(ns), sub_minute, rest))
+      Some(#(NumericOffset(ns, sub_minute), rest))
     }
     False -> None
   }
@@ -2157,17 +2161,17 @@ fn parse_iso_datetime_string(s: String) -> Option(ParsedIso) {
     False -> None
     True -> {
       let date = IsoDate(y, m, d)
-      let #(time, z, offset_ns, offset_sub_minute, rest) = case rest {
+      let #(time, offset, rest) = case rest {
         "T" <> tr | "t" <> tr | " " <> tr ->
           case parse_time_part(tr) {
             Some(#(t, r2)) ->
               case parse_offset_part(r2) {
-                Some(#(z, off, sub, r3)) -> #(Some(t), z, off, sub, r3)
-                None -> #(Some(t), False, None, False, r2)
+                Some(#(off, r3)) -> #(Some(t), off, r3)
+                None -> #(Some(t), NoOffset, r2)
               }
-            None -> #(None, False, None, False, rest)
+            None -> #(None, NoOffset, rest)
           }
-        _ -> #(None, False, None, False, rest)
+        _ -> #(None, NoOffset, rest)
       }
       // If a "T" was present but the time failed to parse, reject.
       case time == None && is_time_prefix(rest) {
@@ -2184,9 +2188,7 @@ fn parse_iso_datetime_string(s: String) -> Option(ParsedIso) {
               Some(ParsedIso(
                 date: Some(date),
                 time:,
-                z:,
-                offset_ns:,
-                offset_sub_minute:,
+                offset:,
                 tz:,
                 calendar: cal,
               ))
@@ -2222,10 +2224,10 @@ fn parse_plain_datetime_string(s: String) -> Result(ParsedIso, TErr) {
   case parse_iso_datetime_string(s) {
     None -> Error(RangeE("invalid ISO 8601 string: " <> s))
     Some(p) ->
-      case p.z {
-        True ->
+      case p.offset {
+        Zulu ->
           Error(RangeE("Z designator not supported for plain Temporal types"))
-        False -> {
+        NoOffset | NumericOffset(_, _) -> {
           use Nil <- result.map(check_parsed_calendar(p))
           p
         }
@@ -2298,20 +2300,17 @@ fn tz_from_datetime_string(s: String) -> Result(String, TErr) {
               }
           }
         None ->
-          case p.z {
-            True -> Ok("UTC")
-            False ->
-              case p.offset_ns {
-                Some(off) ->
-                  // The offset must be syntactically minute-precision: a
-                  // seconds component (even ":00") is not a valid zone.
-                  case !p.offset_sub_minute && off % ns_per_minute == 0 {
-                    True -> Ok(format_offset_minutes(off))
-                    False ->
-                      Error(RangeE("sub-minute offset not valid as a time zone"))
-                  }
-                None -> Error(RangeE("no time zone found in string: " <> s))
+          case p.offset {
+            Zulu -> Ok("UTC")
+            NumericOffset(off, sub_minute) ->
+              // The offset must be syntactically minute-precision: a
+              // seconds component (even ":00") is not a valid zone.
+              case !sub_minute && off % ns_per_minute == 0 {
+                True -> Ok(format_offset_minutes(off))
+                False ->
+                  Error(RangeE("sub-minute offset not valid as a time zone"))
               }
+            NoOffset -> Error(RangeE("no time zone found in string: " <> s))
           }
       }
   }
@@ -2331,7 +2330,7 @@ fn parse_offset_tz_id(id: String) -> Option(String) {
       case parse_offset_part(id) {
         // A seconds component (sub-minute syntax) is not allowed in an
         // offset time zone identifier, even when it is ":00".
-        Some(#(False, Some(ns), False, "")) ->
+        Some(#(NumericOffset(ns, False), "")) ->
           case ns % ns_per_minute == 0 && int.absolute_value(ns) < ns_per_day {
             True -> Some(format_offset_minutes(ns))
             False -> None
@@ -2357,7 +2356,7 @@ fn tz_kind(tz: String) -> TzKind {
     "UTC" -> UtcZone
     "+" <> _ | "-" <> _ ->
       case parse_offset_part(tz) {
-        Some(#(False, Some(ns), _, "")) -> OffsetZone(ns)
+        Some(#(NumericOffset(ns, _), "")) -> OffsetZone(ns)
         _ -> named_or_unknown(tz)
       }
     _ -> named_or_unknown(tz)
@@ -3915,9 +3914,9 @@ fn parse_time_string(s: String) -> Result(TimeRec, TErr) {
   // Try a full date-time string first.
   case parse_iso_datetime_string(s) {
     Some(p) ->
-      case p.z {
-        True -> Error(RangeE("Z designator not valid for PlainTime"))
-        False ->
+      case p.offset {
+        Zulu -> Error(RangeE("Z designator not valid for PlainTime"))
+        NoOffset | NumericOffset(_, _) ->
           case p.time {
             Some(t) -> {
               use Nil <- result.map(check_parsed_calendar(p))
@@ -3947,8 +3946,8 @@ fn parse_time_with_annotations(s: String) -> Option(TimeRec) {
   use #(t, rest) <- option.then(parse_time_part(s))
   // Optional offset (not Z).
   let rest = case parse_offset_part(rest) {
-    Some(#(True, _, _, _)) -> "###invalid###"
-    Some(#(False, _, _, r)) -> r
+    Some(#(Zulu, _)) -> "###invalid###"
+    Some(#(_, r)) -> r
     None -> rest
   }
   use #(_, _cal, rest2) <- option.then(parse_annotations(
@@ -5252,16 +5251,15 @@ fn parse_instant_to_ns(
     None -> range_error_result(state, "invalid instant string: " <> s)
     Some(p) ->
       case p.date, p.time {
-        Some(d), Some(t) -> {
-          let offset = case p.z, p.offset_ns {
-            True, _ -> Some(0)
-            False, Some(o) -> Some(o)
-            False, None -> None
-          }
-          case offset {
-            None ->
+        Some(d), Some(t) ->
+          case p.offset {
+            NoOffset ->
               range_error_result(state, "instant string requires a UTC offset")
-            Some(off) -> {
+            Zulu | NumericOffset(_, _) -> {
+              let off = case p.offset {
+                NumericOffset(o, _) -> o
+                Zulu | NoOffset -> 0
+              }
               let ns = utc_epoch_ns(d, t) - off
               case int.absolute_value(ns) <= ns_max_instant {
                 True -> Ok(#(ns, state))
@@ -5270,7 +5268,6 @@ fn parse_instant_to_ns(
               }
             }
           }
-        }
         _, _ ->
           range_error_result(state, "instant string requires date and time")
       }
@@ -5299,10 +5296,7 @@ fn to_temporal_zoned(
         _ -> zoned_from_bag(state, ref, options)
       }
     JsString(s) -> {
-      use #(d, t_opt, z, off_opt, off_sub, tz) <- terr_r(
-        state,
-        parse_zoned_string(s),
-      )
+      use #(d, t_opt, offset, tz) <- terr_r(state, parse_zoned_string(s))
       use cal <- terr_r(state, case extract_calendar_annotation(s) {
         Some(c) -> canonicalize_calendar(c)
         None -> Ok(tcal.Iso8601)
@@ -5313,16 +5307,7 @@ fn to_temporal_zoned(
       ))
       use ns <- terr_r(
         st,
-        zoned_string_epoch_ns(
-          d,
-          t_opt,
-          z,
-          off_opt,
-          off_sub,
-          tz,
-          dis,
-          offset_opt,
-        ),
+        zoned_string_epoch_ns(d, t_opt, offset, tz, dis, offset_opt),
       )
       Ok(#(#(ns, tz, cal), st))
     }
@@ -5347,7 +5332,7 @@ fn validated_zdt_options(
 
 fn parse_zoned_string(
   s: String,
-) -> Result(#(IsoDate, Option(TimeRec), Bool, Option(Int), Bool, String), TErr) {
+) -> Result(#(IsoDate, Option(TimeRec), ParsedOffset, String), TErr) {
   case parse_iso_datetime_string(s) {
     None -> Error(RangeE("invalid ZonedDateTime string: " <> s))
     Some(p) -> {
@@ -5358,8 +5343,7 @@ fn parse_zoned_string(
           use tz <- result.try(parse_time_zone_id(tz_str))
           case p.date {
             None -> Error(RangeE("missing date"))
-            Some(d) ->
-              Ok(#(d, p.time, p.z, p.offset_ns, p.offset_sub_minute, tz))
+            Some(d) -> Ok(#(d, p.time, p.offset, tz))
           }
         }
       }
@@ -5373,22 +5357,19 @@ fn parse_zoned_string(
 fn zoned_string_epoch_ns(
   d: IsoDate,
   t_opt: Option(TimeRec),
-  z: Bool,
-  off_opt: Option(Int),
-  off_sub_minute: Bool,
+  offset: ParsedOffset,
   tz: String,
   dis: Disambiguation,
   offset_opt: OffsetOption,
 ) -> Result(Int, TErr) {
-  case t_opt, z, off_opt {
-    None, False, None -> start_of_day_ns(tz, d)
-    _, _, _ -> {
+  case t_opt, offset {
+    None, NoOffset -> start_of_day_ns(tz, d)
+    _, _ -> {
       let t = option.unwrap(t_opt, midnight)
-      // Match-minutes only when the offset lacks a seconds component.
-      let match_minutes = !off_sub_minute
-      case z, off_opt {
-        True, _ -> validate_epoch_ns(utc_epoch_ns(d, t))
-        False, Some(off) ->
+      case offset {
+        Zulu -> validate_epoch_ns(utc_epoch_ns(d, t))
+        NumericOffset(off, sub_minute) ->
+          // Match-minutes only when the offset lacks a seconds component.
           interpret_offset(
             d,
             t,
@@ -5396,9 +5377,9 @@ fn zoned_string_epoch_ns(
             tz,
             dis,
             offset_opt,
-            match_minutes,
+            !sub_minute,
           )
-        False, None ->
+        NoOffset ->
           interpret_offset(d, t, WallOffset, tz, dis, offset_opt, True)
       }
     }
@@ -5491,7 +5472,7 @@ fn read_bag_offset(
       case prim {
         JsString(s) ->
           case parse_offset_part(s) {
-            Some(#(False, Some(off), _, "")) -> Ok(#(Some(off), state))
+            Some(#(NumericOffset(off, _), "")) -> Ok(#(Some(off), state))
             _ -> range_error_result(state, "invalid offset string: " <> s)
           }
         _ -> type_error_result(state, "offset must be a string")
@@ -5550,9 +5531,7 @@ fn convert_relative_to(
                     zoned_string_epoch_ns(
                       d,
                       p.time,
-                      p.z,
-                      p.offset_ns,
-                      p.offset_sub_minute,
+                      p.offset,
                       tz,
                       Compatible,
                       RejectOffset,
@@ -5561,13 +5540,13 @@ fn convert_relative_to(
                   Ok(#(RelZoned(ens, tz, cal), state))
                 }
                 None ->
-                  case p.z {
-                    True ->
+                  case p.offset {
+                    Zulu ->
                       range_error_result(
                         state,
                         "Z designator requires a bracketed time zone in relativeTo",
                       )
-                    False ->
+                    NoOffset | NumericOffset(_, _) ->
                       case iso_date_within_limits(d) {
                         True -> Ok(#(RelPlain(d, cal), state))
                         False ->
