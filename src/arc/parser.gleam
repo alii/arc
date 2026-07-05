@@ -4630,22 +4630,18 @@ fn parse_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
         RightParen | RightBracket | RightBrace | Eof -> Ok(#(p2, first_expr))
         _ -> {
           let p3 = advance(p2)
-          case parse_expression(p3) {
-            // Comma expression is not a valid assignment target
-            Ok(#(p4, rest_expr)) ->
-              Ok(#(
-                P(..p4, last_expr_assignable: False),
-                ast.SequenceExpression(
-                  expressions: [first_expr, rest_expr],
-                  span: ast.Span(
-                    ast.expression_span(first_expr).start,
-                    p4.prev_end,
-                  ),
-                ),
-              ))
-            // If the next expression fails, the comma was a trailing comma
-            Error(_) -> Ok(#(p2, first_expr))
-          }
+          use #(p4, rest_expr) <- result.try(parse_expression(p3))
+          // Comma expression is not a valid assignment target
+          Ok(#(
+            P(..p4, last_expr_assignable: False),
+            ast.SequenceExpression(
+              expressions: [first_expr, rest_expr],
+              span: ast.Span(
+                ast.expression_span(first_expr).start,
+                p4.prev_end,
+              ),
+            ),
+          ))
         }
       }
     _ -> Ok(#(p2, first_expr))
