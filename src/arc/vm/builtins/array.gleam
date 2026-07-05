@@ -821,7 +821,7 @@ fn inherited_index(
   use #(has, state) <- result.try(object.has_property_stateful(
     state,
     start,
-    object.PkString(key),
+    value.string_object_key(key),
   ))
   case has {
     False -> Ok(#(None, state))
@@ -1403,7 +1403,7 @@ fn generic_delete(
   use #(state, ok) <- result.try(object.delete_property_stateful(
     state,
     ref,
-    object.PkString(key),
+    value.string_object_key(key),
   ))
   case ok {
     // success = true → return normally.
@@ -1437,7 +1437,11 @@ fn generic_has_op(
   ref: Ref,
   idx: Int,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
-  object.has_property_stateful(state, ref, object.PkString(key.index_key(idx)))
+  object.has_property_stateful(
+    state,
+    ref,
+    value.string_object_key(key.index_key(idx)),
+  )
 }
 
 /// Get (ES2024 §7.3.2).

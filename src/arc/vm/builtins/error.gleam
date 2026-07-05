@@ -444,7 +444,7 @@ fn install_error_cause(
       use has, state <- state.try_op(object.has_property_stateful(
         state,
         opts_ref,
-        object.PkString(Named("cause")),
+        value.string_object_key(Named("cause")),
       ))
       case has {
         False -> #(state, Ok(ref))

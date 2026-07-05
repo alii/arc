@@ -3938,6 +3938,15 @@ pub type ObjectKey {
   SymbolPropKey(sym: SymbolId)
 }
 
+/// Construct the string form of an ObjectKey from an already-resolved
+/// PropertyKey — computes and caches the exact ToPropertyKey `display`
+/// string once (`key.key_to_text`, never the `key_display_string` renderer:
+/// proxy `defineProperty` / `getOwnPropertyDescriptor` traps receive it as
+/// their property-key argument).
+pub fn string_object_key(k: PropertyKey) -> ObjectKey {
+  StringPropKey(pkey: k, display: key.key_to_text(k))
+}
+
 /// Property descriptor — writable/enumerable/configurable flags per property.
 /// Following QuickJS: bit-flags on every property.
 ///

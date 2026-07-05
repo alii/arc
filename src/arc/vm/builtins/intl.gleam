@@ -1166,7 +1166,7 @@ fn locale_list_loop(
       use #(has, state) <- result.try(object.has_property_stateful(
         state,
         ref,
-        object.PkString(key),
+        value.string_object_key(key),
       ))
       case has {
         False -> locale_list_loop(state, ref, k + 1, len, seen)

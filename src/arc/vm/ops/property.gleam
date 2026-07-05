@@ -1,10 +1,11 @@
 import arc/vm/key.{Index, Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
-import arc/vm/ops/object.{type PropKey, PkString, PkSymbol}
+import arc/vm/ops/object
 import arc/vm/state.{type State}
 import arc/vm/value.{
-  type JsValue, Finite, JsNumber, JsObject, JsString, JsSymbol,
+  type JsValue, type ObjectKey, Finite, JsNumber, JsObject, JsString, JsSymbol,
+  SymbolPropKey, string_object_key,
 }
 import gleam/list
 import gleam/option.{None, Some}
@@ -21,7 +22,7 @@ import gleam/result
 ///   3. Return ! ToString(key).
 ///
 /// Objects go through ToPrimitive FIRST and the *result* is re-dispatched, so
-/// a `@@toPrimitive` that returns a Symbol yields `PkSymbol` (not a bogus
+/// a `@@toPrimitive` that returns a Symbol yields `SymbolPropKey` (not a bogus
 /// "Cannot convert a Symbol value to a string" TypeError). Strings/numbers
 /// take the fast paths below — ToPrimitive is the identity on them.
 ///
@@ -32,7 +33,7 @@ import gleam/result
 pub fn to_prop_key(
   state: State(host),
   key: JsValue,
-) -> Result(#(PropKey, State(host)), #(JsValue, State(host))) {
+) -> Result(#(ObjectKey, State(host)), #(JsValue, State(host))) {
   case key {
     // Step 1: ToPrimitive is only observable for objects. Step 2's Symbol
     // check must run on the *primitive*, so re-dispatch on the result.
@@ -52,28 +53,28 @@ pub fn to_prop_key(
 fn primitive_to_prop_key(
   state: State(host),
   key: JsValue,
-) -> Result(#(PropKey, State(host)), #(JsValue, State(host))) {
+) -> Result(#(ObjectKey, State(host)), #(JsValue, State(host))) {
   case key {
     // Step 2: If key is a Symbol, return key.
-    JsSymbol(sym) -> Ok(#(PkSymbol(sym), state))
+    JsSymbol(sym) -> Ok(#(SymbolPropKey(sym), state))
     JsNumber(Finite(n)) ->
       // The one canonical-array-index test lives in key.gleam, so the numeric
       // and string forms of the same key can never disagree about which dict
       // slot they name.
       case key.array_index_of_float(n) {
         // Valid array index — skip stringification entirely.
-        Some(i) -> Ok(#(PkString(Index(i)), state))
+        Some(i) -> Ok(#(string_object_key(Index(i)), state))
         // Non-index number — stringify (e.g. 1.5 → "1.5", -1 → "-1").
-        None -> Ok(#(PkString(Named(value.js_format_number(n))), state))
+        None -> Ok(#(string_object_key(Named(value.js_format_number(n))), state))
       }
-    JsNumber(value.NaN) -> Ok(#(PkString(Named("NaN")), state))
-    JsNumber(value.Infinity) -> Ok(#(PkString(Named("Infinity")), state))
-    JsNumber(value.NegInfinity) -> Ok(#(PkString(Named("-Infinity")), state))
-    JsString(s) -> Ok(#(PkString(key.canonical_key(s)), state))
+    JsNumber(value.NaN) -> Ok(#(string_object_key(Named("NaN")), state))
+    JsNumber(value.Infinity) -> Ok(#(string_object_key(Named("Infinity")), state))
+    JsNumber(value.NegInfinity) -> Ok(#(string_object_key(Named("-Infinity")), state))
+    JsString(s) -> Ok(#(string_object_key(key.canonical_key(s)), state))
     // Step 3: ToString(key) — key is a non-Symbol primitive, cannot re-enter.
     _ -> {
       use #(s, state) <- result.map(coerce.js_to_string(state, key))
-      #(PkString(key.canonical_key(s)), state)
+      #(string_object_key(key.canonical_key(s)), state)
     }
   }
 }

@@ -554,7 +554,7 @@ fn replace_or_delete(
       use #(state, _deleted) <- result.map(objops.delete_property_stateful(
         state,
         ref,
-        objops.PkString(key.canonical_key(name)),
+        value.string_object_key(key.canonical_key(name)),
       ))
       state
     }

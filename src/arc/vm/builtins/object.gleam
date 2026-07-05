@@ -43,42 +43,15 @@ const cannot_convert = "Cannot convert undefined or null to object"
 /// (TDZ) export binding (§10.4.6 [[Get]] / [[GetOwnProperty]]).
 const tdz_message = "Cannot access module export before initialization"
 
-/// ToPropertyKey (§7.1.19) resolved to a value.ObjectKey (a PropKey
-/// plus a cached display string for error messages). The spec-order
-/// conversion — ToPrimitive(argument, string) FIRST, then the Symbol check,
-/// so `{[Symbol.toPrimitive]: () => sym}` used as a key produces a symbol
-/// key — is property.to_prop_key; this only re-shapes the result.
-fn to_object_key(
-  state: State(host),
-  key_val: JsValue,
-) -> Result(#(ObjectKey, State(host)), #(JsValue, State(host))) {
-  use #(pk, state) <- result.map(property.to_prop_key(state, key_val))
-  #(prop_key_to_object_key(pk), state)
-}
-
-/// The ObjectKey form of an already-resolved PropKey.
-///
-/// The `display` string is NOT just for error messages: `object_key_value`
-/// hands it to proxy `defineProperty` / `getOwnPropertyDescriptor` traps as
-/// the property-key argument, and the String-exotic gOPD path compares it to
-/// "length". So it must be the exact ToPropertyKey string — `key.key_to_text`,
-/// never the `key.key_display_string` renderer.
-fn prop_key_to_object_key(pk: object.PropKey) -> ObjectKey {
-  case pk {
-    object.PkSymbol(sym) -> SymbolPropKey(sym)
-    object.PkString(pkey) -> StringPropKey(pkey, key.key_to_text(pkey))
-  }
-}
-
-/// CPS form of `to_object_key` so callers can `use` before `case this`,
-/// preserving spec ordering (hasOwnProperty does ToPropertyKey step 1,
-/// ToObject step 2).
+/// CPS form of ToPropertyKey (§7.1.19) so callers can `use` before
+/// `case this`, preserving spec ordering (hasOwnProperty does ToPropertyKey
+/// step 1, ToObject step 2).
 fn try_to_property_key(
   state: State(host),
   key_val: JsValue,
   cont: fn(ObjectKey, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case to_object_key(state, key_val) {
+  case property.to_prop_key(state, key_val) {
     Error(#(thrown, state)) -> #(state, Error(thrown))
     Ok(#(dkey, state)) -> cont(dkey, state)
   }
@@ -509,7 +482,7 @@ pub fn apply_descriptor(
 ) -> Result(State(host), #(JsValue, State(host))) {
   // ToPropertyKey (which may run user code) strictly precedes
   // ToPropertyDescriptor's "not an object" rejection.
-  use #(dkey, state) <- result.try(to_object_key(state, key_val))
+  use #(dkey, state) <- result.try(property.to_prop_key(state, key_val))
   use #(parsed, state) <- result.try(parse_descriptor(state, desc_val))
   apply_parsed_or_throw(state, target_ref, dkey, parsed)
 }
@@ -1453,7 +1426,7 @@ fn read_desc_field(
       use #(present, state) <- result.try(object.has_property_stateful(
         state,
         ref,
-        object.PkString(Named(key)),
+        named_object_key(key),
       ))
       case present {
         False -> Ok(#(option.None, state))
@@ -2242,7 +2215,7 @@ fn collect_descriptors(
           use #(desc_val, state) <- result.try(object.get_prop_value(
             state,
             props_ref,
-            object_key_prop_key(dkey),
+            dkey,
             JsObject(props_ref),
           ))
           // Step 4.b.ii: ToPropertyDescriptor(descObj).
@@ -3864,7 +3837,7 @@ fn group_by_loop(
       // groups under the symbol, never a stringification. Abrupt →
       // IfAbruptCloseIterator.
       use dkey, state <- iter_protocol.or_close(
-        to_object_key(state, key_val),
+        property.to_prop_key(state, key_val),
         rec.iterator,
       )
       let key = object_key_value(dkey)
@@ -3953,15 +3926,6 @@ fn object_key_of_value(val: JsValue) -> Option(ObjectKey) {
     JsSymbol(sym) -> Some(SymbolPropKey(sym))
     JsString(s) -> Some(StringPropKey(key.canonical_key(s), s))
     _ -> None
-  }
-}
-
-/// The `arc/vm/ops/object` PropKey view of an ObjectKey (drops the display
-/// string) — for the ops-layer [[Get]]/[[Set]] entry points.
-fn object_key_prop_key(k: ObjectKey) -> object.PropKey {
-  case k {
-    StringPropKey(pkey:, ..) -> object.PkString(pkey)
-    SymbolPropKey(sym) -> object.PkSymbol(sym)
   }
 }
 
@@ -4616,7 +4580,7 @@ pub fn define_property_bool_value(
   key_val: JsValue,
   desc_val: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
-  use #(dkey, state) <- result.try(to_object_key(state, key_val))
+  use #(dkey, state) <- result.try(property.to_prop_key(state, key_val))
   use #(parsed, state) <- result.try(parse_descriptor(state, desc_val))
   case object.as_proxy(state.heap, ref) {
     Some(slots) -> proxy_define_own_property(state, slots, dkey, parsed)
@@ -4664,7 +4628,7 @@ pub fn create_data_property(
   key_val: JsValue,
   val: JsValue,
 ) -> Result(State(host), #(JsValue, State(host))) {
-  use #(dkey, state) <- result.try(to_object_key(state, key_val))
+  use #(dkey, state) <- result.try(property.to_prop_key(state, key_val))
   use #(state, defined) <- result.try(create_data_property_dkey(
     state,
     ref,
@@ -4691,7 +4655,7 @@ pub fn create_data_property_bool(
   key_val: JsValue,
   val: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
-  use #(dkey, state) <- result.try(to_object_key(state, key_val))
+  use #(dkey, state) <- result.try(property.to_prop_key(state, key_val))
   create_data_property_dkey(state, ref, dkey, val)
 }
 

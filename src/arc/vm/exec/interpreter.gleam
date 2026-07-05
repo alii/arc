@@ -56,10 +56,11 @@ import arc/vm/state.{
   VmFailed, Yielded,
 }
 import arc/vm/value.{
-  type FuncTemplate, type JsValue, type Ref, ArrayIteratorObject, ArrayObject,
-  DataProperty, EvalEnvSlot, ForInIteratorSlot, FunctionObject, GeneratorObject,
-  JsBool, JsNull, JsObject, JsString, JsUndefined, JsUninitialized,
-  NativeFunction, ObjectSlot, OrdinaryObject, TryFrame,
+  type FuncTemplate, type JsValue, type ObjectKey, type Ref,
+  ArrayIteratorObject, ArrayObject, DataProperty, EvalEnvSlot, ForInIteratorSlot,
+  FunctionObject, GeneratorObject, JsBool, JsNull, JsObject, JsString,
+  JsUndefined, JsUninitialized, NativeFunction, ObjectSlot, OrdinaryObject,
+  StringPropKey, SymbolPropKey, TryFrame, string_object_key,
 }
 import gleam/dict
 import gleam/float
@@ -2184,7 +2185,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 object.has_property_stateful(
                   state,
                   state.ctx.global_object,
-                  object.PkString(key),
+                  string_object_key(key),
                 )
               {
                 Ok(#(True, state)) ->
@@ -2257,7 +2258,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                     object.has_property_stateful(
                       state,
                       state.ctx.global_object,
-                      object.PkString(key),
+                      string_object_key(key),
                     )
                   {
                     Error(#(thrown, state)) -> Error(Threw(thrown, state))
@@ -2337,7 +2338,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             state.rethrow(object.delete_property_stateful(
               state,
               state.ctx.global_object,
-              object.PkString(Named(name)),
+              string_object_key(Named(name)),
             )),
           )
           State(
@@ -2639,7 +2640,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 state.rethrow(object.has_property_stateful(
                   state,
                   ref,
-                  object.PkString(Named(name)),
+                  string_object_key(Named(name)),
                 )),
               )
               use Nil <- result.try(case still, state.func.is_strict {
@@ -2690,7 +2691,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 state.rethrow(object.delete_property_stateful(
                   state,
                   ref,
-                  object.PkString(Named(name)),
+                  string_object_key(Named(name)),
                 )),
               )
               State(..state, stack: [JsBool(success), ..rest], pc: target)
@@ -2730,7 +2731,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             state.rethrow(object.has_property_stateful(
               state,
               ref,
-              object.PkString(Named(name)),
+              string_object_key(Named(name)),
             )),
           )
           case still, state.func.is_strict {
@@ -2763,7 +2764,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             state.rethrow(object.has_property_stateful(
               state,
               ref,
-              object.PkString(Named(name)),
+              string_object_key(Named(name)),
             )),
           )
           use Nil <- result.try(case still, state.func.is_strict {
@@ -2925,7 +2926,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                   state.rethrow(object.has_property_stateful(
                     state,
                     state.ctx.global_object,
-                    object.PkString(key),
+                    string_object_key(key),
                   )),
                 )
                 case has {
@@ -2971,7 +2972,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                   // §13.10.1: Let propertyKey be ? ToPropertyKey(lval), then
                   // ? HasProperty(rval, propertyKey). to_prop_key is the full
                   // §7.1.19 — a @@toPrimitive that resolves to a Symbol yields
-                  // PkSymbol here rather than a bogus TypeError.
+                  // SymbolPropKey here rather than a bogus TypeError.
                   use #(result, state) <- result.map({
                     use #(pk, state) <- result.try(
                       state.rethrow(property.to_prop_key(state, left)),
@@ -3617,7 +3618,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             state.rethrow(property.to_prop_key(state, key)),
           )
           case pk {
-            object.PkSymbol(sym) -> {
+            SymbolPropKey(sym) -> {
               let heap =
                 set_computed_fn_name(state.heap, func, "", symbol_fn_name(sym))
               let heap = make_method(heap, func, ref)
@@ -3630,7 +3631,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 )
               Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
             }
-            object.PkString(pk) -> {
+            StringPropKey(pkey: pk, ..) -> {
               // DefinePropertyOrThrow (§14.3.9 step 11): redefining an existing
               // non-configurable own property — e.g. static ['prototype']() on
               // the constructor — throws TypeError.
@@ -3678,7 +3679,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             state.rethrow(property.to_prop_key(state, key)),
           )
           case pk {
-            object.PkSymbol(sym) -> {
+            SymbolPropKey(sym) -> {
               let heap =
                 set_computed_fn_name(
                   state.heap,
@@ -3698,7 +3699,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 )
               Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
             }
-            object.PkString(pk) -> {
+            StringPropKey(pkey: pk, ..) -> {
               // DefinePropertyOrThrow (§14.3.9): an accessor cannot replace an
               // existing non-configurable own property (static get/set
               // ['prototype'] on the constructor) — TypeError.
@@ -3770,7 +3771,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
               // (e.g. `{0: v}` with an accessor "0" on Object.prototype),
               // so use the raw own-define, not [[Set]].
               case pk {
-                object.PkSymbol(sym) -> {
+                SymbolPropKey(sym) -> {
                   let heap =
                     object.define_symbol_property(
                       state.heap,
@@ -3787,7 +3788,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                     ),
                   )
                 }
-                object.PkString(pk) -> {
+                StringPropKey(pkey: pk, ..) -> {
                   // CreateDataPropertyOrThrow (§7.3.7): defining over an
                   // existing non-configurable own property → TypeError.
                   // Reachable via a static class field with computed name
@@ -3926,7 +3927,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 state.rethrow(object.delete_property_stateful(
                   state,
                   ref,
-                  object.PkString(key),
+                  string_object_key(key),
                 )),
               )
               // §13.5.1.2 step 5.b.i: strict-mode delete of a
@@ -5341,7 +5342,7 @@ fn with_get_var(
             state.rethrow(object.has_property_stateful(
               state,
               ref,
-              object.PkString(Named(name)),
+              string_object_key(Named(name)),
             )),
           )
           let below = case keep_this {
@@ -5385,7 +5386,7 @@ fn with_has_binding(
     state.rethrow(object.has_property_stateful(
       state,
       ref,
-      object.PkString(Named(name)),
+      string_object_key(Named(name)),
     )),
   )
   case found {
@@ -5411,39 +5412,36 @@ fn with_has_binding(
   }
 }
 
-/// Re-materialize an already-converted PropKey as a JsValue whose
+/// Re-materialize an already-converted ObjectKey as a JsValue whose
 /// re-conversion through to_prop_key is side-effect-free and yields the same
 /// key. GetElem2 / GetSuperValue2 leave this on the stack so the later
 /// PutElem / PutSuperValue does not re-run a user-observable ToPropertyKey
 /// (§13.15.2: ToPropertyKey once). Index keys round-trip as numbers so the
 /// re-conversion skips stringification.
-fn prop_key_value(pk: object.PropKey) -> JsValue {
+fn prop_key_value(pk: ObjectKey) -> JsValue {
   case pk {
-    object.PkSymbol(sym) -> value.JsSymbol(sym)
-    object.PkString(Index(n)) -> value.from_int(n)
-    object.PkString(Named(s)) -> JsString(s)
-    // Unreachable: PropKeys come from to_prop_key, which canonicalizes JS
-    // values and so can only produce Index/Named. Rendering the storage text
-    // keeps this total without a panic.
-    object.PkString(key.Private(text)) -> JsString(text)
+    SymbolPropKey(sym) -> value.JsSymbol(sym)
+    StringPropKey(pkey: Index(n), ..) -> value.from_int(n)
+    // Named / Private: the cached display IS the canonical ToPropertyKey text.
+    StringPropKey(display:, ..) -> JsString(display)
   }
 }
 
-/// [[Get]] on any receiver keyed by a resolved PropKey — the primitive-
+/// [[Get]] on any receiver keyed by a resolved ObjectKey — the primitive-
 /// receiver counterpart of `object.get_prop_value` (which needs a Ref).
 fn get_prop_value_of(
   state: State(host),
   receiver: JsValue,
-  pk: object.PropKey,
+  pk: ObjectKey,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case pk {
-    object.PkSymbol(sym) -> object.get_symbol_value_of(state, receiver, sym)
-    object.PkString(k) -> object.get_value_of(state, receiver, k)
+    SymbolPropKey(sym) -> object.get_symbol_value_of(state, receiver, sym)
+    StringPropKey(pkey:, ..) -> object.get_value_of(state, receiver, pkey)
   }
 }
 
 /// GetElem on a primitive receiver — ToPropertyKey (§7.1.19) then delegate to
-/// the PropKey-keyed [[Get]].
+/// the ObjectKey-keyed [[Get]].
 fn get_elem_on_primitive(
   state: State(host),
   receiver: JsValue,
@@ -5865,8 +5863,8 @@ fn build_exclusion_sets(
   ))
   use #(pk, state) <- result.map(property.to_prop_key(state, key))
   case pk {
-    object.PkSymbol(id) -> #(pks, set.insert(syms, id), state)
-    object.PkString(k) -> #(set.insert(pks, k), syms, state)
+    SymbolPropKey(id) -> #(pks, set.insert(syms, id), state)
+    StringPropKey(pkey: k, ..) -> #(set.insert(pks, k), syms, state)
   }
 }
 

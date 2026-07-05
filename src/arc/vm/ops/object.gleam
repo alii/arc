@@ -8,10 +8,11 @@ import arc/vm/opcode
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type HeapSlot, type State, State}
 import arc/vm/value.{
-  type JsElements, type JsValue, type Property, type Ref, type SymbolId,
-  AccessorProperty, ArrayObject, DataProperty, Finite, FunctionObject,
-  GeneratorObject, JsNumber, JsObject, JsString, NativeFunction, ObjectSlot,
-  OrdinaryObject, PromiseObject,
+  type JsElements, type JsValue, type ObjectKey, type Property, type Ref,
+  type SymbolId, AccessorProperty, ArrayObject, DataProperty, Finite,
+  FunctionObject, GeneratorObject, JsNumber, JsObject, JsString, NativeFunction,
+  ObjectSlot, OrdinaryObject, PromiseObject, StringPropKey, SymbolPropKey,
+  string_object_key,
 }
 import gleam/bit_array
 import gleam/bool
@@ -136,7 +137,7 @@ pub fn get_value(
       namespace_get(state, exports, key)
     // §10.5.8 Proxy [[Get]] — route through the trap machinery.
     Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
-      proxy_get(state, slots, PkString(key), receiver)
+      proxy_get(state, slots, string_object_key(key), receiver)
     Some(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
       case kind, key {
         // Fast paths for synthesized descriptors: own_property_of_slot would
@@ -614,7 +615,7 @@ pub fn set_value(
     Some(ObjectSlot(kind: value.ModuleNamespace(..), ..)) -> Ok(#(state, False))
     // §10.5.9 Proxy [[Set]] — route through the trap machinery.
     Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
-      proxy_set(state, slots, PkString(key), val, receiver)
+      proxy_set(state, slots, string_object_key(key), val, receiver)
     Some(
       ObjectSlot(kind:, properties:, elements:, prototype:, extensible:, ..) as slot,
     ) ->
@@ -935,7 +936,7 @@ fn set_on_receiver(
         // proxy receiver, or [[Set]] forwarded through a trapless proxy):
         // the GetOwnProperty/DefineOwnProperty pair must go through traps.
         Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
-          set_on_proxy_receiver(state, recv_ref, slots, PkString(key), val)
+          set_on_proxy_receiver(state, recv_ref, slots, string_object_key(key), val)
         // Receiver is itself an Integer-Indexed object: the receiver half of
         // OrdinarySet routes numeric index keys through the receiver's
         // [[DefineOwnProperty]] (§10.4.5.3) → IntegerIndexedElementSet for a
@@ -1007,7 +1008,7 @@ fn set_on_receiver(
 fn proxy_receiver_guard(
   state: State(host),
   recv_ref: Ref,
-  pk: PropKey,
+  pk: ObjectKey,
   val: JsValue,
   cont: fn() -> Result(#(State(host), Bool), #(JsValue, State(host))),
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
@@ -1025,7 +1026,7 @@ fn set_on_proxy_receiver(
   state: State(host),
   recv_ref: Ref,
   slots: Option(value.ProxySlots),
-  pk: PropKey,
+  pk: ObjectKey,
   val: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   // Step 2.c: existingDescriptor = ? Receiver.[[GetOwnProperty]](P) — the
@@ -1033,7 +1034,7 @@ fn set_on_proxy_receiver(
   use #(existing, state) <- result.try(state.get_own_property(
     state,
     recv_ref,
-    prop_key_object_key(pk),
+    pk,
   ))
   case existing {
     // Step 2.d.i-ii: accessor or non-writable existing → false.
@@ -1050,7 +1051,7 @@ fn set_on_proxy_receiver(
 fn proxy_receiver_define(
   state: State(host),
   slots: Option(value.ProxySlots),
-  pk: PropKey,
+  pk: ObjectKey,
   val: JsValue,
   full: Bool,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
@@ -1064,8 +1065,8 @@ fn proxy_receiver_define(
     // write on the (possibly nested-proxy) target.
     None ->
       case pk {
-        PkString(key) -> set_on_receiver(state, JsObject(t), key, val)
-        PkSymbol(sym) ->
+        StringPropKey(pkey:, ..) -> set_on_receiver(state, JsObject(t), pkey, val)
+        SymbolPropKey(sym) ->
           define_symbol_data_on_receiver(state, JsObject(t), sym, val)
       }
     Some(trap_fn) -> {
@@ -2854,7 +2855,7 @@ pub fn get_symbol_value(
   case heap.read(state.heap, ref) {
     // §10.5.8 Proxy [[Get]] — symbol-keyed.
     Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
-      proxy_get(state, slots, PkSymbol(key), receiver)
+      proxy_get(state, slots, SymbolPropKey(key), receiver)
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
       // Step 1: Let desc be O.[[GetOwnProperty]](P).
       case list.key_find(symbol_properties, key) {
@@ -2915,7 +2916,7 @@ pub fn set_symbol_value(
     Some(ObjectSlot(kind: value.ModuleNamespace(..), ..)) -> Ok(#(state, False))
     // §10.5.9 Proxy [[Set]] — symbol-keyed.
     Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
-      proxy_set(state, slots, PkSymbol(key), val, receiver)
+      proxy_set(state, slots, SymbolPropKey(key), val, receiver)
     Some(ObjectSlot(symbol_properties:, prototype:, ..)) ->
       // Step 1: Let ownDesc be O.[[GetOwnProperty]](P).
       case list.key_find(symbol_properties, key) {
@@ -2959,7 +2960,7 @@ fn define_symbol_data_on_receiver(
     JsObject(recv_ref) -> {
       // Proxy receiver: the GetOwnProperty/DefineOwnProperty pair must go
       // through the proxy's traps.
-      use <- proxy_receiver_guard(state, recv_ref, PkSymbol(key), val)
+      use <- proxy_receiver_guard(state, recv_ref, SymbolPropKey(key), val)
       // §10.1.9.2 step 2.c: merging {[[Value]]: V} into the receiver's
       // existing descriptor only changes [[Value]] — attributes are
       // preserved. A non-writable or accessor existing property rejects.
@@ -3437,60 +3438,50 @@ pub fn is_constructor(heap: Heap(host), value: JsValue) -> Bool {
 // Proxy exotic object internal methods — ES2024 §10.5
 // ============================================================================
 
-/// A general ECMAScript property key: string-ish key or symbol.
-/// This is what §7.1.19 ToPropertyKey (property.to_prop_key) produces
-/// and what the proxy internal methods below are keyed on — it unifies the
-/// codebase's PropertyKey / SymbolId split so each internal method exists
-/// once instead of twice.
-pub type PropKey {
-  PkString(PropertyKey)
-  PkSymbol(SymbolId)
-}
-
-/// The JsValue form of a PropKey (a String or Symbol value) — used both as
+/// The JsValue form of an ObjectKey (a String or Symbol value) — used both as
 /// the proxy-trap key argument and to re-materialize an already-converted
 /// key without a second user-observable ToPropertyKey.
-pub fn prop_key_value(pk: PropKey) -> JsValue {
+pub fn prop_key_value(pk: ObjectKey) -> JsValue {
   case pk {
-    PkString(key) -> JsString(key.key_to_text(key))
-    PkSymbol(sym) -> value.JsSymbol(sym)
+    StringPropKey(display:, ..) -> JsString(display)
+    SymbolPropKey(sym) -> value.JsSymbol(sym)
   }
 }
 
-/// [[Get]] keyed by a resolved PropKey — dispatches to the string- or
+/// [[Get]] keyed by a resolved ObjectKey — dispatches to the string- or
 /// symbol-keyed [[Get]] so ToPropertyKey callers don't hand-split the key.
 pub fn get_prop_value(
   state: State(host),
   ref: Ref,
-  pk: PropKey,
+  pk: ObjectKey,
   receiver: JsValue,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   case pk {
-    PkString(key) -> get_value(state, ref, key, receiver)
-    PkSymbol(sym) -> get_symbol_value(state, ref, sym, receiver)
+    StringPropKey(pkey:, ..) -> get_value(state, ref, pkey, receiver)
+    SymbolPropKey(sym) -> get_symbol_value(state, ref, sym, receiver)
   }
 }
 
-/// [[Set]] keyed by a resolved PropKey — dispatches to the string- or
+/// [[Set]] keyed by a resolved ObjectKey — dispatches to the string- or
 /// symbol-keyed [[Set]]. Returns the [[Set]] success flag.
 pub fn set_prop_value(
   state: State(host),
   ref: Ref,
-  pk: PropKey,
+  pk: ObjectKey,
   val: JsValue,
   receiver: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case pk {
-    PkString(key) -> set_value(state, ref, key, val, receiver)
-    PkSymbol(sym) -> set_symbol_value(state, ref, sym, val, receiver)
+    StringPropKey(pkey:, ..) -> set_value(state, ref, pkey, val, receiver)
+    SymbolPropKey(sym) -> set_symbol_value(state, ref, sym, val, receiver)
   }
 }
 
 /// Human-readable key for invariant-violation error messages.
-fn pk_label(pk: PropKey) -> String {
+fn pk_label(pk: ObjectKey) -> String {
   case pk {
-    PkString(key) -> "'" <> key.key_display_string(key) <> "'"
-    PkSymbol(_) -> "[symbol]"
+    StringPropKey(display:, ..) -> "'" <> display <> "'"
+    SymbolPropKey(_) -> "[symbol]"
   }
 }
 
@@ -3603,17 +3594,6 @@ pub fn proxy_trap(
   }
 }
 
-/// The `value.ObjectKey` form of a PropKey — the shape the canonical
-/// [[GetOwnProperty]] (`state.get_own_property`) is keyed on. `display` must be
-/// the exact ToPropertyKey string, since a `getOwnPropertyDescriptor` trap
-/// receives it as its property-key argument.
-fn prop_key_object_key(pk: PropKey) -> value.ObjectKey {
-  case pk {
-    PkString(k) -> value.StringPropKey(k, key.key_to_text(k))
-    PkSymbol(sym) -> value.SymbolPropKey(sym)
-  }
-}
-
 /// `? target.[[GetOwnProperty]](P)` — the read every proxy invariant check
 /// below is specified against, and the ONLY way to reach a target's own
 /// descriptor from here. It is TRAP-AWARE: when the target is itself a proxy
@@ -3624,27 +3604,23 @@ fn prop_key_object_key(pk: PropKey) -> value.ObjectKey {
 fn target_own_property(
   state: State(host),
   t: Ref,
-  pk: PropKey,
+  pk: ObjectKey,
 ) -> Result(#(Option(Property), State(host)), #(JsValue, State(host))) {
-  state.get_own_property(state, t, prop_key_object_key(pk))
+  state.get_own_property(state, t, pk)
 }
 
 /// §10.5.8 Proxy [[Get]] ( P, Receiver ).
 pub fn proxy_get(
   state: State(host),
   slots: Option(value.ProxySlots),
-  pk: PropKey,
+  pk: ObjectKey,
   receiver: JsValue,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Steps 1-5: revocation check + GetMethod(handler, "get").
   use #(t, h, trap, state) <- result.try(proxy_trap(state, slots, "get"))
   case trap {
     // Step 6: trap undefined → target.[[Get]](P, Receiver).
-    None ->
-      case pk {
-        PkString(key) -> get_value(state, t, key, receiver)
-        PkSymbol(sym) -> get_symbol_value(state, t, sym, receiver)
-      }
+    None -> get_prop_value(state, t, pk, receiver)
     Some(trap_fn) -> {
       // Step 7: Call(trap, handler, « target, P, Receiver »).
       use #(res, state) <- result.try(
@@ -3689,18 +3665,14 @@ pub fn proxy_get(
 pub fn proxy_set(
   state: State(host),
   slots: Option(value.ProxySlots),
-  pk: PropKey,
+  pk: ObjectKey,
   val: JsValue,
   receiver: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(state, slots, "set"))
   case trap {
     // Step 6: trap undefined → target.[[Set]](P, V, Receiver).
-    None ->
-      case pk {
-        PkString(key) -> set_value(state, t, key, val, receiver)
-        PkSymbol(sym) -> set_symbol_value(state, t, sym, val, receiver)
-      }
+    None -> set_prop_value(state, t, pk, val, receiver)
     Some(trap_fn) -> {
       // Step 7: ToBoolean(? Call(trap, handler, « target, P, V, Receiver »)).
       use #(res, state) <- result.try(
@@ -3759,7 +3731,7 @@ pub fn proxy_set(
 pub fn has_property_stateful(
   state: State(host),
   ref: Ref,
-  pk: PropKey,
+  pk: ObjectKey,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
@@ -3770,9 +3742,9 @@ pub fn has_property_stateful(
       ..,
     )) ->
       case pk {
-        PkString(key) ->
-          Ok(#(dict.has_key(exports, key.key_to_text(key)), state))
-        PkSymbol(sym) ->
+        StringPropKey(display:, ..) ->
+          Ok(#(dict.has_key(exports, display), state))
+        SymbolPropKey(sym) ->
           Ok(#(result.is_ok(list.key_find(symbol_properties, sym)), state))
       }
     Some(ObjectSlot(
@@ -3788,20 +3760,20 @@ pub fn has_property_stateful(
       // function). Checked here on the ordinary path only — for proxies the
       // key is an ordinary string and must reach the "has" trap.
       let is_private = case pk {
-        PkString(key) -> value.is_private_name(key)
-        PkSymbol(_) -> False
+        StringPropKey(pkey:, ..) -> value.is_private_name(pkey)
+        SymbolPropKey(_) -> False
       }
       use <- bool.guard(is_private, Ok(#(False, state)))
       let own = case pk {
-        PkString(key) ->
+        StringPropKey(pkey:, ..) ->
           option.is_some(own_property_of_slot(
             state.heap,
             kind,
             properties,
             elements,
-            key,
+            pkey,
           ))
-        PkSymbol(sym) -> result.is_ok(list.key_find(symbol_properties, sym))
+        SymbolPropKey(sym) -> result.is_ok(list.key_find(symbol_properties, sym))
       }
       case own {
         True -> Ok(#(True, state))
@@ -3809,8 +3781,8 @@ pub fn has_property_stateful(
           // §10.4.5.2 TypedArray [[HasProperty]]: invalid canonical numeric
           // index → false, never the prototype chain (mirrors has_property).
           let ta_numeric = case pk {
-            PkString(key) -> typed_array_numeric_key(kind, key)
-            PkSymbol(_) -> False
+            StringPropKey(pkey:, ..) -> typed_array_numeric_key(kind, pkey)
+            SymbolPropKey(_) -> False
           }
           case ta_numeric {
             True -> Ok(#(False, state))
@@ -3831,7 +3803,7 @@ pub fn has_property_stateful(
 pub fn proxy_has(
   state: State(host),
   slots: Option(value.ProxySlots),
-  pk: PropKey,
+  pk: ObjectKey,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(state, slots, "has"))
   case trap {
@@ -3897,18 +3869,18 @@ pub fn proxy_has(
 pub fn delete_property_stateful(
   state: State(host),
   ref: Ref,
-  pk: PropKey,
+  pk: ObjectKey,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) ->
       proxy_delete(state, slots, pk)
     _ ->
       case pk {
-        PkString(key) -> {
-          let #(h, ok) = delete_property(state.heap, ref, key)
+        StringPropKey(pkey:, ..) -> {
+          let #(h, ok) = delete_property(state.heap, ref, pkey)
           Ok(#(State(..state, heap: h), ok))
         }
-        PkSymbol(sym) -> {
+        SymbolPropKey(sym) -> {
           let #(h, ok) = delete_symbol_property(state.heap, ref, sym)
           Ok(#(State(..state, heap: h), ok))
         }
@@ -3920,7 +3892,7 @@ pub fn delete_property_stateful(
 pub fn proxy_delete(
   state: State(host),
   slots: Option(value.ProxySlots),
-  pk: PropKey,
+  pk: ObjectKey,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(t, h, trap, state) <- result.try(proxy_trap(
     state,
