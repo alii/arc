@@ -508,7 +508,7 @@ fn ta_from(
   ))
   case helpers.is_callable(state.heap, iter_fn) {
     True ->
-      wrap({
+      helpers.lift_result({
         use #(values, state) <- result.try(iterate_to_list(
           state,
           source,
@@ -538,7 +538,7 @@ fn ta_from(
         }
       })
     False ->
-      wrap({
+      helpers.lift_result({
         // Step 7: array-like path (works on primitives like strings too).
         use #(len_val, state) <- result.try(object.get_value_of(
           state,
@@ -671,7 +671,7 @@ fn ta_of(
   use <- bool.lazy_guard(!object.is_constructor(state.heap, this), fn() {
     state.type_error(state, "%TypedArray%.of called on non-constructor")
   })
-  wrap({
+  helpers.lift_result({
     use #(target, target_ref, state) <- result.try(ta_create(
       state,
       this,
@@ -683,16 +683,6 @@ fn ta_of(
         from_store_loop(state, target, target_ref, args, 0, None, JsUndefined)
     }
   })
-}
-
-/// Adapt internal Result style to the builtin dispatch tuple shape.
-fn wrap(
-  r: Result(#(JsValue, State(host)), #(JsValue, State(host))),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case r {
-    Ok(#(v, state)) -> #(state, Ok(v))
-    Error(#(e, state)) -> #(state, Error(e))
-  }
 }
 
 // ============================================================================
@@ -714,13 +704,16 @@ fn ta_construct(
   })
   case args {
     // Step 4: no args → AllocateTypedArray(0).
-    [] -> wrap(fresh_value(alloc_ta_with_length(state, kind, proto, 0)))
+    [] ->
+      helpers.lift_result(
+        fresh_value(alloc_ta_with_length(state, kind, proto, 0)),
+      )
     [first, ..rest] ->
       case first {
         JsObject(ref) ->
           case heap.read(state.heap, ref) {
             Some(ObjectSlot(kind: value.ArrayBufferObject(..), ..)) ->
-              wrap(from_buffer(state, kind, proto, ref, rest))
+              helpers.lift_result(from_buffer(state, kind, proto, ref, rest))
             Some(ObjectSlot(
               kind: value.TypedArrayObject(
                 buffer: src_buf,
@@ -730,7 +723,7 @@ fn ta_construct(
               ),
               ..,
             )) ->
-              wrap(from_typed_array(
+              helpers.lift_result(from_typed_array(
                 state,
                 kind,
                 proto,
@@ -745,11 +738,12 @@ fn ta_construct(
                   src_len,
                 ),
               ))
-            _ -> wrap(from_object(state, kind, proto, first, ref))
+            _ ->
+              helpers.lift_result(from_object(state, kind, proto, first, ref))
           }
         // Step 6.b: not an object → AllocateTypedArray(ToIndex(arg)).
         _ ->
-          wrap({
+          helpers.lift_result({
             use #(len, state) <- result.try(to_index(state, first))
             fresh_value(alloc_ta_with_length(state, kind, proto, len))
           })
@@ -834,8 +828,7 @@ fn from_buffer(
   rest: List(JsValue),
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   let size = typed_array_ffi.elem_size(kind)
-  let offset_arg = helpers.first_arg_or_undefined(rest)
-  let len_arg = helpers.list_at(rest, 1) |> option.unwrap(JsUndefined)
+  let #(offset_arg, len_arg) = helpers.two_args_or_undefined(rest)
   // Step 2: offset = ToIndex(byteOffset).
   use #(offset, state) <- result.try(to_index(state, offset_arg))
   // Step 3: offset modulo elementSize must be 0.
@@ -1412,7 +1405,8 @@ fn try_bulk_store(
       }
       let off = byte_offset + start * size
       let #(new_data, written) = splice_clamped(data, off, region)
-      let h = ops_buffer.store_region(state.heap, buffer, new_data, off, written)
+      let h =
+        ops_buffer.store_region(state.heap, buffer, new_data, off, written)
       Some(State(..state, heap: h))
     }
   }
@@ -1644,7 +1638,8 @@ fn proto_fill(
     typed_array_elements.typed_array_encode_value(ta_zeroed(size), 0, converted)
   let region_off = off + start * size
   let #(new_data, written) = fill_clamped(data, region_off, end - start, elem)
-  let h = ops_buffer.store_region(state.heap, buffer, new_data, region_off, written)
+  let h =
+    ops_buffer.store_region(state.heap, buffer, new_data, region_off, written)
   #(State(..state, heap: h), Ok(this))
 }
 
@@ -1840,7 +1835,8 @@ fn set_from_typed_array(
   let #(new_data, written) = splice_clamped(data, start, region)
   case written > 0 {
     True -> {
-      let h = ops_buffer.store_region(state.heap, dst_buf, new_data, start, written)
+      let h =
+        ops_buffer.store_region(state.heap, dst_buf, new_data, start, written)
       #(State(..state, heap: h), Ok(JsUndefined))
     }
     False -> #(state, Ok(JsUndefined))
@@ -2797,7 +2793,13 @@ fn proto_copy_within(
   #(
     State(
       ..state,
-      heap: ops_buffer.store_region(state.heap, buffer, new_data, target, written),
+      heap: ops_buffer.store_region(
+        state.heap,
+        buffer,
+        new_data,
+        target,
+        written,
+      ),
     ),
     Ok(this),
   )
@@ -2843,7 +2845,13 @@ fn proto_reverse(
       #(
         State(
           ..state,
-          heap: ops_buffer.store_region(state.heap, buffer, new_data, off, written),
+          heap: ops_buffer.store_region(
+            state.heap,
+            buffer,
+            new_data,
+            off,
+            written,
+          ),
         ),
         Ok(this),
       )
@@ -3204,7 +3212,8 @@ fn proto_sort(
       let #(new_data, written) = splice_clamped(data, off, region)
       case written > 0 {
         True -> {
-          let h = ops_buffer.store_region(state.heap, buffer, new_data, off, written)
+          let h =
+            ops_buffer.store_region(state.heap, buffer, new_data, off, written)
           #(State(..state, heap: h), Ok(this))
         }
         False -> #(state, Ok(this))
@@ -3668,7 +3677,13 @@ fn u8_write_bytes(
     _ ->
       State(
         ..state,
-        heap: ops_buffer.store_region(state.heap, buffer, new_data, off, written),
+        heap: ops_buffer.store_region(
+          state.heap,
+          buffer,
+          new_data,
+          off,
+          written,
+        ),
       )
   }
 }
@@ -3679,7 +3694,7 @@ fn u8_to_base64(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     use state <- result.try(validate_u8(this, state))
     use #(opts, state) <- result.try(get_opts_object(
       state,
@@ -3715,7 +3730,7 @@ fn u8_to_hex(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     use state <- result.try(validate_u8(this, state))
     use view <- result.map(u8_live_view(state, this))
     // u8_live_view proved byte_offset + length <= byte_size(data).
@@ -3731,7 +3746,7 @@ fn u8_set_from_base64(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     use state <- result.try(validate_u8(this, state))
     use Nil <- result.try(u8_require_mutable(state, this))
     use #(s, state) <- result.try(require_string(
@@ -3754,7 +3769,7 @@ fn u8_set_from_hex(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     use state <- result.try(validate_u8(this, state))
     use Nil <- result.try(u8_require_mutable(state, this))
     use #(s, state) <- result.try(require_string(
@@ -3815,7 +3830,7 @@ fn u8_from_base64(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     use #(s, state) <- result.try(require_string(
       state,
       helpers.first_arg_or_undefined(args),
@@ -3834,7 +3849,7 @@ fn u8_from_hex(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     use #(s, state) <- result.try(require_string(
       state,
       helpers.first_arg_or_undefined(args),

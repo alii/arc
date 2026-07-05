@@ -36,6 +36,35 @@ import gleam/io
 import gleam/list
 import gleam/option.{type Option}
 
+// -- Argument access ---------------------------------------------------------
+//
+// Embedders read positional arguments the same way builtins do — a missing
+// argument is `undefined`, per JS semantics. Re-exported here so example /
+// embedder code doesn't reach into `arc/vm/builtins/helpers` (an internal
+// module).
+
+/// The first argument, or `undefined` when the caller passed none.
+pub const first_arg = helpers.first_arg_or_undefined
+
+/// The i-th argument (0-based), or `undefined` when the caller passed fewer.
+pub const arg_at = helpers.arg_at
+
+/// Throw a `TypeError` with `msg`. The dispatch-shaped `#(state, Error(...))`.
+pub fn type_error(
+  s: State(host),
+  msg: String,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  state.type_error(s, msg)
+}
+
+/// Throw a `RangeError` with `msg`. The dispatch-shaped `#(state, Error(...))`.
+pub fn range_error(
+  s: State(host),
+  msg: String,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  state.range_error(s, msg)
+}
+
 // -- Validators --------------------------------------------------------------
 
 /// Reject unless `val` is a JS string. Unwraps to the Gleam `String`.

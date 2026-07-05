@@ -68,7 +68,7 @@ pub fn bigint_global(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let arg = helpers.first_arg_or_undefined(args)
-  wrap({
+  helpers.lift_result({
     // Step 2: prim = ToPrimitive(value, number).
     use #(prim, state) <- result.try(coerce.to_primitive(
       state,
@@ -143,7 +143,7 @@ pub fn bigint_proto_to_string(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     // Step 1: x = ? thisBigIntValue(this value).
     use #(n, state) <- result.try(this_bigint_value(state, this))
     // Step 2: radixMV = ToIntegerOrInfinity(radix); undefined → 10.
@@ -181,7 +181,7 @@ pub fn bigint_proto_to_locale_string(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     use #(n, state) <- result.map(this_bigint_value(state, this))
     #(JsString(int.to_string(n)), state)
   })
@@ -193,22 +193,8 @@ pub fn bigint_proto_value_of(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  wrap({
+  helpers.lift_result({
     use #(n, state) <- result.try(this_bigint_value(state, this))
     Ok(#(value.JsBigInt(value.BigInt(n)), state))
   })
-}
-
-// ============================================================================
-// Local helpers
-// ============================================================================
-
-/// Adapt internal Result style to the builtin dispatch tuple shape.
-fn wrap(
-  r: Result(#(JsValue, State(host)), #(JsValue, State(host))),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case r {
-    Ok(#(v, state)) -> #(state, Ok(v))
-    Error(#(e, state)) -> #(state, Error(e))
-  }
 }

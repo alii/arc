@@ -144,9 +144,7 @@ fn register(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use cells, registry, state <- require_registry(this, state, "register")
-  let target = helpers.first_arg_or_undefined(args)
-  let held = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
-  let token_arg = helpers.list_at(args, 2) |> option.unwrap(JsUndefined)
+  let #(target, held, token_arg) = helpers.three_args_or_undefined(args)
   // Step 3
   case can_be_held_weakly(state, target) {
     False -> state.type_error(state, "Invalid value used as weak ref target")

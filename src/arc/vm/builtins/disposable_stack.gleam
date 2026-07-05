@@ -747,8 +747,7 @@ fn adopt(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposable_state, state <- require_stack(this, state, async, "adopt")
   use resources, state <- try_pending(state, disposable_state)
-  let val = helpers.first_arg_or_undefined(args)
-  let on_dispose = helpers.list_at(args, 1) |> option.unwrap(JsUndefined)
+  let #(val, on_dispose) = helpers.two_args_or_undefined(args)
   case helpers.is_callable(state.heap, on_dispose) {
     // Step 4: onDispose must be callable
     False -> state.type_error(state, "onDispose is not a function")

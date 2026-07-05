@@ -4,7 +4,6 @@
 
 import arc/engine.{Returned}
 import arc/host
-import arc/vm/state
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
 import gleam/list
@@ -36,23 +35,13 @@ fn print(args, _this, s) {
 }
 
 fn uppercase(args, _this, s) {
-  case args {
-    [v, ..] -> {
-      use str, s <- host.validate_string(s, v, "str")
-      #(s, Ok(JsString(string.uppercase(str))))
-    }
-    _ -> state.type_error(s, "uppercase: expected 1 argument")
-  }
+  use str, s <- host.validate_string(s, host.first_arg(args), "str")
+  #(s, Ok(JsString(string.uppercase(str))))
 }
 
 fn map_range(args, _this, s) {
-  case args {
-    [n, cb, ..] -> {
-      use n, s <- host.validate_integer(s, n, "n", 0, 1_000_000)
-      map_range_loop(s, cb, 0, n, [])
-    }
-    _ -> state.type_error(s, "mapRange: expected (n, callback)")
-  }
+  use n, s <- host.validate_integer(s, host.first_arg(args), "n", 0, 1_000_000)
+  map_range_loop(s, host.arg_at(args, 1), 0, n, [])
 }
 
 fn map_range_loop(s, cb, i, n, acc) {
