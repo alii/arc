@@ -123,6 +123,8 @@ fn resolve_export_in(
           Ok(case esm.resolve(m.specifier_map, source_specifier) {
             Some(src) ->
               resolve_export_set(graph, src, imported_name, resolve_set)
+            // Unreachable for a graph `validate` accepted: it proves the
+            // specifier map covers every specifier the module mentions.
             None -> Unresolvable
           })
         esm.ReExportNamespace(export_name:, source_specifier:)
@@ -130,6 +132,7 @@ fn resolve_export_in(
         ->
           Ok(case esm.resolve(m.specifier_map, source_specifier) {
             Some(src) -> ResolvedNamespace(src)
+            // Unreachable post-`validate` (see `check_covered`).
             None -> Unresolvable
           })
         _ -> Error(Nil)
@@ -177,6 +180,8 @@ fn resolve_local_export(
     Error(Nil) -> ResolvedTo(specifier, local_name)
     Ok(#(raw_dep, binding)) ->
       case esm.resolve(m.specifier_map, raw_dep) {
+        // Unreachable post-`validate`: `check_imports` covers every import
+        // binding's dependency, including namespace imports.
         None -> Unresolvable
         Some(dep) ->
           case binding {
@@ -219,7 +224,9 @@ fn resolve_star_exports(
   })
 }
 
-/// Resolved specifiers of every `export *` source of `m`.
+/// Resolved specifiers of every `export *` source of `m`. An uncovered source
+/// would be silently dropped from the star set here — `validate`'s
+/// `check_covered` rejects such a graph before any of this runs.
 fn star_sources(m: LinkableModule) -> List(Resolved) {
   list.filter_map(m.export_entries, fn(e) {
     case e {
@@ -345,8 +352,9 @@ fn check_imports(
     let #(raw_dep, bindings) = entry
     list.try_each(bindings, fn(binding) {
       case binding {
-        // `import * as ns` always resolves (the namespace gathers names).
-        esm.NamespaceImport(..) -> Ok(Nil)
+        // `import * as ns` requests no particular export name — the namespace
+        // gathers whatever the source provides — so only coverage can fail.
+        esm.NamespaceImport(..) -> check_covered(m, raw_dep)
         esm.NamedImport(imported:, ..) -> check_dep(graph, m, raw_dep, imported)
         esm.DefaultImport(..) -> check_dep(graph, m, raw_dep, "default")
       }
@@ -360,6 +368,10 @@ fn check_imports(
 /// `./m` was never asked for. So look the source-side name up in the source
 /// module, exactly as `check_imports` does; the reported name is then the one
 /// that actually failed.
+///
+/// `export *` and `export * as ns` name no export, so only their coverage is
+/// checked. A `LocalExport` names no dependency at all — and if its local name
+/// is an import binding, `check_imports` already covered that dependency.
 fn check_indirect_exports(
   graph: LinkableGraph,
   m: LinkableModule,
@@ -368,9 +380,28 @@ fn check_indirect_exports(
     case e {
       esm.ReExport(export_name: _, imported_name:, source_specifier:) ->
         check_dep(graph, m, source_specifier, imported_name)
-      _ -> Ok(Nil)
+      esm.ReExportAll(source_specifier:) -> check_covered(m, source_specifier)
+      esm.ReExportNamespace(source_specifier:, ..) ->
+        check_covered(m, source_specifier)
+      esm.LocalExport(..) -> Ok(Nil)
     }
   })
+}
+
+/// Check only that `m`'s specifier map covers `raw_dep` — the whole of what
+/// `import * as ns` / `export *` / `export * as ns` can get wrong, since none
+/// of them requests a particular export name.
+///
+/// Together with `check_dep`, this makes `validate` cover EVERY raw specifier
+/// a module mentions. That is what lets `resolve_local_export`, `star_sources`
+/// and `resolve_export_in`'s `ReExportNamespace` arm treat an uncovered
+/// specifier as impossible rather than silently dropping the source or
+/// reporting a guest-visible "does not provide an export named" lie.
+fn check_covered(m: LinkableModule, raw_dep: Raw) -> Result(Nil, LinkError) {
+  case esm.resolve(m.specifier_map, raw_dep) {
+    Some(_) -> Ok(Nil)
+    None -> Error(UnresolvedDependency(requested_module: raw_dep))
+  }
 }
 
 /// Check that the dependency `raw_dep` names within `m` provides
