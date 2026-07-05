@@ -135,14 +135,12 @@ fn construct(
         set,
         Named("add"),
       ))
-      case helpers.is_callable(state.heap, adder) {
-        False ->
-          state.type_error(state, "'add' property of Set is not a function")
-        // Step 8: iterate the iterable's values, calling adder(set, v) for
-        // each one and closing the iterator on any abrupt completion.
-        True ->
-          iter_protocol.add_values_from_iterable(state, set, iterable, adder)
-      }
+      use adder, state <- helpers.require_callable(state, adder, fn() {
+        "'add' property of Set is not a function"
+      })
+      // Step 8: iterate the iterable's values, calling adder(set, v) for
+      // each one and closing the iterator on any abrupt completion.
+      iter_protocol.add_values_from_iterable(state, set, iterable, adder)
     }
   }
 }
@@ -293,14 +291,10 @@ fn set_for_each(
     [_, ta, ..] -> ta
     _ -> JsUndefined
   }
-  case helpers.is_callable(state.heap, callback) {
-    False ->
-      state.type_error(
-        state,
-        "Set.prototype.forEach callback is not a function",
-      )
-    True -> for_each_loop(state, ref, 0, callback, this_arg, this)
-  }
+  use callback, state <- helpers.require_callable(state, callback, fn() {
+    "Set.prototype.forEach callback is not a function"
+  })
+  for_each_loop(state, ref, 0, callback, this_arg, this)
 }
 
 /// Iterate over Set entries, calling callback(value, value, set) for each.
@@ -762,38 +756,30 @@ fn get_set_record(
           // +∞ still exceeds every real [[SetData]] size.
           let int_size = coerce.jsnum_to_integer_or_infinity(num)
           // Step 6: if intSize < 0, throw RangeError
-          case int_size < 0 {
-            True -> state.range_error(state, "size is negative")
-            False -> {
-              // Step 7-8: has = Get(obj, "has"); IsCallable check
-              use has, state <- state.try_op(object.get_value(
-                state,
-                ref,
-                Named("has"),
-                other,
-              ))
-              case helpers.is_callable(state.heap, has) {
-                False -> state.type_error(state, "has is not a function")
-                True -> {
-                  // Step 9-10: keys = Get(obj, "keys"); IsCallable check
-                  use keys, state <- state.try_op(object.get_value(
-                    state,
-                    ref,
-                    Named("keys"),
-                    other,
-                  ))
-                  case helpers.is_callable(state.heap, keys) {
-                    False -> state.type_error(state, "keys is not a function")
-                    True ->
-                      cont(
-                        SetRecord(obj: other, size: int_size, has:, keys:),
-                        state,
-                      )
-                  }
-                }
-              }
-            }
-          }
+          use Nil <- helpers.guard(int_size >= 0, fn() {
+            state.range_error(state, "size is negative")
+          })
+          // Step 7-8: has = Get(obj, "has"); IsCallable check
+          use has, state <- state.try_op(object.get_value(
+            state,
+            ref,
+            Named("has"),
+            other,
+          ))
+          use has, state <- helpers.require_callable(state, has, fn() {
+            "has is not a function"
+          })
+          // Step 9-10: keys = Get(obj, "keys"); IsCallable check
+          use keys, state <- state.try_op(object.get_value(
+            state,
+            ref,
+            Named("keys"),
+            other,
+          ))
+          use keys, state <- helpers.require_callable(state, keys, fn() {
+            "keys is not a function"
+          })
+          cont(SetRecord(obj: other, size: int_size, has:, keys:), state)
         }
       }
     }
@@ -819,10 +805,10 @@ fn with_keys_iterator(
         Named("next"),
         iter,
       ))
-      case helpers.is_callable(state.heap, next_fn) {
-        False -> state.type_error(state, "iterator.next is not a function")
-        True -> cont(iter, next_fn, state)
-      }
+      use next_fn, state <- helpers.require_callable(state, next_fn, fn() {
+        "iterator.next is not a function"
+      })
+      cont(iter, next_fn, state)
     }
     _ -> state.type_error(state, "keys() did not return an object")
   }

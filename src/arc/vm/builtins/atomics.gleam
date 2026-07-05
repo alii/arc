@@ -340,19 +340,19 @@ fn with_ta_and_index(
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let ta_val = helpers.first_arg_or_undefined(args)
-  use view <- some_or(read_typed_array(state, ta_val), fn() {
+  use view <- helpers.some_or(read_typed_array(state, ta_val), fn() {
     state.type_error(state, "Atomics operation needs an integer TypedArray")
   })
-  use elem <- some_or(atomics_elem(view.elem_kind, waitable), fn() {
+  use elem <- helpers.some_or(atomics_elem(view.elem_kind, waitable), fn() {
     state.type_error(
       state,
       "Invalid TypedArray element type for Atomics operation",
     )
   })
-  use storage <- some_or(read_buffer(state, view.buffer), fn() {
+  use storage <- helpers.some_or(read_buffer(state, view.buffer), fn() {
     state.type_error(state, "TypedArray is not attached")
   })
-  use Nil <- require(
+  use Nil <- helpers.guard(
     !require_shared || option.is_some(slot_storage(storage)),
     fn() {
       state.type_error(
@@ -361,12 +361,12 @@ fn with_ta_and_index(
       )
     },
   )
-  use buf <- some_or(live_buffer(storage), fn() {
+  use buf <- helpers.some_or(live_buffer(storage), fn() {
     state.type_error(state, "ArrayBuffer is detached")
   })
   // ValidateTypedArray step 4 (immutable-arraybuffer proposal):
   // accessMode ~write~ on an immutable buffer → TypeError.
-  use Nil <- require(!write || !buf.immutable, fn() {
+  use Nil <- helpers.guard(!write || !buf.immutable, fn() {
     state.type_error(
       state,
       "Atomics operation cannot write to an immutable ArrayBuffer",
@@ -392,36 +392,10 @@ fn with_ta_and_index(
     helpers.arg_at(args, 1),
     "Invalid atomic access index",
   )
-  use Nil <- require(idx < live, fn() {
+  use Nil <- helpers.guard(idx < live, fn() {
     state.range_error(state, "Atomics access index out of range")
   })
   cont(info, idx, state)
-}
-
-/// `bool.guard`-shaped helper for the dispatch-result shape: call `or` when
-/// the condition fails, otherwise continue.
-fn require(
-  cond: Bool,
-  alt: fn() -> #(State(host), Result(JsValue, JsValue)),
-  cont: fn(Nil) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case cond {
-    True -> cont(Nil)
-    False -> alt()
-  }
-}
-
-/// `require`'s Option twin for the dispatch-result shape: call `alt` when
-/// the value is absent, otherwise continue with it.
-fn some_or(
-  opt: option.Option(a),
-  alt: fn() -> #(State(host), Result(JsValue, JsValue)),
-  cont: fn(a) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case opt {
-    Some(v) -> cont(v)
-    None -> alt()
-  }
 }
 
 /// The internal slots of the TypedArray under validation (§25.4.3.1
@@ -553,20 +527,23 @@ fn revalidate_or_abort(
   on_abort: fn() -> Nil,
   cont: fn(BufferInfo, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use storage <- some_or(read_buffer(state, info.buffer), fn() {
+  use storage <- helpers.some_or(read_buffer(state, info.buffer), fn() {
     let Nil = on_abort()
     state.type_error(state, "TypedArray is not attached")
   })
-  use buf <- some_or(live_buffer(storage), fn() {
+  use buf <- helpers.some_or(live_buffer(storage), fn() {
     let Nil = on_abort()
     state.type_error(state, "ArrayBuffer is detached")
   })
   let size = elem_size(info)
   let byte_off = info.byte_offset + idx * size
-  use Nil <- require(byte_off + size <= bit_array.byte_size(buf.bits), fn() {
-    let Nil = on_abort()
-    state.range_error(state, "Atomics access index out of range")
-  })
+  use Nil <- helpers.guard(
+    byte_off + size <= bit_array.byte_size(buf.bits),
+    fn() {
+      let Nil = on_abort()
+      state.range_error(state, "Atomics access index out of range")
+    },
+  )
   cont(buf, state)
 }
 

@@ -1266,16 +1266,11 @@ fn require_callback(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Extract callbackfn (args[0]) and thisArg (args[1], default undefined).
   let #(cb, this_arg) = helpers.two_args_or_undefined(args)
-  // §7.2.3 IsCallable: check [[Call]] internal method.
-  case helpers.is_callable(state.heap, cb) {
-    True -> cont(cb, this_arg, state)
-    // Step 2: If IsCallable(callbackfn) is false, throw a TypeError exception.
-    False ->
-      state.type_error(
-        state,
-        operators.typeof(state.heap, cb) <> " is not a function",
-      )
-  }
+  // §7.2.3 IsCallable — TypeError if not callable.
+  use cb, state <- helpers.require_callable(state, cb, fn() {
+    operators.typeof(state.heap, cb) <> " is not a function"
+  })
+  cont(cb, this_arg, state)
 }
 
 /// Shared steps 7-10 of splice (§23.1.3.29) / step 7 of toSpliced
@@ -1818,14 +1813,14 @@ fn array_slice(
   // Steps 3-6: relativeStart → k (clamped). Default 0 if no arg.
   use start, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,0),
+    helpers.arg_at(args, 0),
     length,
     0,
   )
   // Steps 7-10: relativeEnd → final (clamped). Default len if no end arg.
   use end, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,1),
+    helpers.arg_at(args, 1),
     length,
     length,
   )
@@ -2802,7 +2797,7 @@ fn array_fill(
   // default 0 when absent. The coercion can run user code or throw.
   use start, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,1),
+    helpers.arg_at(args, 1),
     length,
     0,
   )
@@ -2810,7 +2805,7 @@ fn array_fill(
   // (step 7: if end is undefined, relativeEnd = len)
   use end, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,2),
+    helpers.arg_at(args, 2),
     length,
     length,
   )
@@ -2873,7 +2868,7 @@ fn array_at(
   // coercion: valueOf/toString run, Symbol/BigInt throw TypeError.
   use raw, state <- coerce.try_to_integer_or_infinity(
     state,
-    helpers.arg_at(args,0),
+    helpers.arg_at(args, 0),
   )
   // Steps 4-5: resolve negative index
   let idx = case raw < 0 {
@@ -2956,7 +2951,7 @@ fn forward_search_driver(
   //   Step 6 (n = -∞ → 0): max(length + n, 0) = 0.
   use from, state <- coerce.try_to_integer_or_infinity(
     state,
-    helpers.arg_at(args,1),
+    helpers.arg_at(args, 1),
   )
   // Steps 7-8: resolve start index (negative → max(len + n, 0))
   let start = case from < 0 {
@@ -3714,15 +3709,12 @@ fn with_comparefn(
   let comparefn = helpers.first_arg_or_undefined(args)
   case comparefn {
     JsUndefined -> cont(None, state)
-    _ ->
-      case helpers.is_callable(state.heap, comparefn) {
-        True -> cont(Some(comparefn), state)
-        False ->
-          state.type_error(
-            state,
-            operators.typeof(state.heap, comparefn) <> " is not a function",
-          )
-      }
+    _ -> {
+      use comparefn, state <- helpers.require_callable(state, comparefn, fn() {
+        operators.typeof(state.heap, comparefn) <> " is not a function"
+      })
+      cont(Some(comparefn), state)
+    }
   }
 }
 
@@ -4465,13 +4457,9 @@ fn reduce_impl(
   // Step 3 setup: extract callbackfn argument
   let cb = helpers.first_arg_or_undefined(args)
   // Step 3: If IsCallable(callbackfn) is false, throw a TypeError exception.
-  use <- bool.guard(
-    !helpers.is_callable(state.heap, cb),
-    state.type_error(
-      state,
-      operators.typeof(state.heap, cb) <> " is not a function",
-    ),
-  )
+  use cb, state <- helpers.require_callable(state, cb, fn() {
+    operators.typeof(state.heap, cb) <> " is not a function"
+  })
   // Step 5: k = 0 (reduce) or len - 1 (reduceRight); loop bound is exclusive.
   let #(start, end, step) = bounds(dir, length)
   // Step 7: If initialValue is present, set accumulator to initialValue.
@@ -4658,7 +4646,7 @@ fn array_splice(
   // Steps 3-6: actualStart
   use actual_start, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,0),
+    helpers.arg_at(args, 0),
     length,
     0,
   )
@@ -5146,21 +5134,21 @@ fn array_copy_within(
   // Steps 3-5: target (observable ToIntegerOrInfinity, in argument order)
   use target, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,0),
+    helpers.arg_at(args, 0),
     length,
     0,
   )
   // Steps 6-8: start (from)
   use from, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,1),
+    helpers.arg_at(args, 1),
     length,
     0,
   )
   // Steps 9-11: end (final)
   use final, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,2),
+    helpers.arg_at(args, 2),
     length,
     length,
   )
@@ -5268,22 +5256,18 @@ fn array_from(
             array_proto,
             state,
           )
-        _ ->
-          case helpers.is_callable(state.heap, mf) {
-            True ->
-              array_from_array_like(
-                items_val,
-                Some(mf),
-                this_arg,
-                array_proto,
-                state,
-              )
-            False ->
-              state.type_error(
-                state,
-                operators.typeof(state.heap, mf) <> " is not a function",
-              )
-          }
+        _ -> {
+          use mf, state <- helpers.require_callable(state, mf, fn() {
+            operators.typeof(state.heap, mf) <> " is not a function"
+          })
+          array_from_array_like(
+            items_val,
+            Some(mf),
+            this_arg,
+            array_proto,
+            state,
+          )
+        }
       }
     None ->
       array_from_array_like(items_val, None, JsUndefined, array_proto, state)
@@ -5340,24 +5324,13 @@ fn array_from_array_like(
             [],
           )
         }
-        m ->
-          case helpers.is_callable(state.heap, m) {
-            True ->
-              array_from_iterator(
-                state,
-                items,
-                iter_method,
-                map_fn,
-                this_arg,
-                array_proto,
-              )
-            // GetMethod step 4 (§7.3.10): present but not callable → TypeError.
-            False ->
-              state.type_error(
-                state,
-                operators.typeof(state.heap, m) <> " is not a function",
-              )
-          }
+        // GetMethod step 4 (§7.3.10): present but not callable → TypeError.
+        m -> {
+          use m, state <- helpers.require_callable(state, m, fn() {
+            operators.typeof(state.heap, m) <> " is not a function"
+          })
+          array_from_iterator(state, items, m, map_fn, this_arg, array_proto)
+        }
       }
     }
   }
@@ -5546,7 +5519,7 @@ fn array_to_spliced(
   // Steps 3-6: actualStart
   use actual_start, state <- coerce.try_relative_index(
     state,
-    helpers.arg_at(args,0),
+    helpers.arg_at(args, 0),
     length,
     0,
   )
@@ -5625,7 +5598,7 @@ fn array_with(
   // Step 3: relativeIndex = ToIntegerOrInfinity(index) — observable coercion
   use raw, state <- coerce.try_to_integer_or_infinity(
     state,
-    helpers.arg_at(args,0),
+    helpers.arg_at(args, 0),
   )
   // Steps 4-5: resolve relative index (without clamping — out of bounds throws)
   let actual_index = case raw < 0 {
@@ -5933,11 +5906,8 @@ fn to_locale_string_loop(
             elem,
             Named("toLocaleString"),
           ))
-          use <- bool.lazy_guard(!helpers.is_callable(state.heap, method), fn() {
-            state.type_error(
-              state,
-              operators.typeof(state.heap, method) <> " is not a function",
-            )
+          use method, state <- helpers.require_callable(state, method, fn() {
+            operators.typeof(state.heap, method) <> " is not a function"
           })
           // ECMA-402 §18.4.1: Invoke(element, "toLocaleString",
           // « locales, options ») — both are always passed.

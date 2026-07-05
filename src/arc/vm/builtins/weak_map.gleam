@@ -16,7 +16,7 @@
 /// shared with `weak_set` and `finalization_registry`.
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{
-  can_be_held_weakly, first_arg_or_undefined, is_callable, list_at,
+  arg_at, can_be_held_weakly, first_arg_or_undefined,
 }
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/weak_collection.{type WeakKind, WeakKind}
@@ -144,7 +144,7 @@ fn weak_map_set(
   use ref, state <- weak_collection.require(kind(), this, state, "set")
   let key = first_arg_or_undefined(args)
   use key, state <- weak_collection.require_weak_key(kind(), state, key)
-  let val = list_at(args, 1) |> option.unwrap(JsUndefined)
+  let val = arg_at(args, 1)
   #(weak_collection.insert(state, ref, key, val), Ok(this))
 }
 
@@ -160,7 +160,7 @@ fn get_or_insert(
   case dict.get(weak_collection.read_data(state, ref), key) {
     Ok(existing) -> #(state, Ok(existing))
     Error(Nil) -> {
-      let val = list_at(args, 1) |> option.unwrap(JsUndefined)
+      let val = arg_at(args, 1)
       #(weak_collection.insert(state, ref, weak_key, val), Ok(val))
     }
   }
@@ -186,26 +186,18 @@ fn get_or_insert_computed(
   )
   let key = first_arg_or_undefined(args)
   use weak_key, state <- weak_collection.require_weak_key(kind(), state, key)
-  let callback = list_at(args, 1) |> option.unwrap(JsUndefined)
-  case is_callable(state.heap, callback) {
-    False ->
-      state.type_error(
-        state,
-        object.inspect(callback, state.heap) <> " is not a function",
-      )
-    True -> {
-      case dict.get(weak_collection.read_data(state, ref), key) {
-        Ok(existing) -> #(state, Ok(existing))
-        Error(Nil) -> {
-          use computed, state <- state.try_call(state, callback, JsUndefined, [
-            key,
-          ])
-          // The callback may have mutated the map — `insert` re-reads the live
-          // entry dict, so an entry it inserted under this key is overwritten
-          // rather than the whole dict being reverted.
-          #(weak_collection.insert(state, ref, weak_key, computed), Ok(computed))
-        }
-      }
+  let callback = arg_at(args, 1)
+  use callback, state <- helpers.require_callable(state, callback, fn() {
+    object.inspect(callback, state.heap) <> " is not a function"
+  })
+  case dict.get(weak_collection.read_data(state, ref), key) {
+    Ok(existing) -> #(state, Ok(existing))
+    Error(Nil) -> {
+      use computed, state <- state.try_call(state, callback, JsUndefined, [key])
+      // The callback may have mutated the map — `insert` re-reads the live
+      // entry dict, so an entry it inserted under this key is overwritten
+      // rather than the whole dict being reverted.
+      #(weak_collection.insert(state, ref, weak_key, computed), Ok(computed))
     }
   }
 }

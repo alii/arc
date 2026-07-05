@@ -12,7 +12,7 @@
 //// arrays don't support 16-bit float segments.
 
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/builtins/helpers.{first_arg_or_undefined, list_at}
+import arc/vm/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/vm/heap
 import arc/vm/ops/buffer as ops_buffer
 import arc/vm/ops/coerce
@@ -115,49 +115,48 @@ fn construct(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: NewTarget undefined → TypeError. do_construct sets
   // state.new_target before native dispatch; a plain call leaves JsUndefined.
-  use Nil, state <- require(
-    case state.new_target {
-      JsUndefined -> None
-      _ -> Some(Nil)
-    },
-    state,
-    "Constructor DataView requires 'new'",
-  )
+  use Nil <- helpers.guard(state.new_target != JsUndefined, fn() {
+    state.type_error(state, "Constructor DataView requires 'new'")
+  })
   // Step 2: RequireInternalSlot(buffer, [[ArrayBufferData]])
-  use buf_ref, state <- require(
+  use buf_ref <- helpers.some_or(
     as_array_buffer(state, first_arg_or_undefined(args)),
-    state,
-    "First argument to DataView constructor must be an ArrayBuffer",
+    fn() {
+      state.type_error(
+        state,
+        "First argument to DataView constructor must be an ArrayBuffer",
+      )
+    },
   )
   // Step 3: offset = ToIndex(byteOffset)
   use offset, state <- coerce.to_index_cps(
     state,
-    list_at(args, 1) |> option.unwrap(JsUndefined),
+    arg_at(args, 1),
     "Invalid DataView offset",
   )
   // Step 4: re-check detached — ToIndex may have run user code.
   use #(buf_len, resizable), state <- live_buffer_info(state, buf_ref)
   // Step 5-6: offset > bufferByteLength → RangeError
-  use Nil, state <- range_check(
-    offset <= buf_len,
-    state,
-    "Start offset "
-      <> int.to_string(offset)
-      <> " is outside the bounds of the buffer",
-  )
+  use Nil <- helpers.guard(offset <= buf_len, fn() {
+    state.range_error(
+      state,
+      "Start offset "
+        <> int.to_string(offset)
+        <> " is outside the bounds of the buffer",
+    )
+  })
   // Steps 8-10: resolve view byte length
-  let len_arg = list_at(args, 2) |> option.unwrap(JsUndefined)
+  let len_arg = arg_at(args, 2)
   let resolve = fn(view_len: Option(Int), state) {
     // Step 12: re-check detached (OrdinaryCreateFromConstructor can run user
     // code in full ES; ours cannot, but a poisoned ToIndex above already can).
     use #(buf_len, _), state <- live_buffer_info(state, buf_ref)
-    use Nil, state <- range_check(
+    use Nil <- helpers.guard(
       case view_len {
         Some(l) -> offset + l <= buf_len
         None -> offset <= buf_len
       },
-      state,
-      "Invalid DataView length",
+      fn() { state.range_error(state, "Invalid DataView length") },
     )
     let #(heap, ref) =
       common.alloc_wrapper(
@@ -187,11 +186,9 @@ fn construct(
       // Step 9.b: check against the buffer length captured BEFORE
       // ToIndex(byteLength) ran user code (a poisoned valueOf may have grown
       // a resizable buffer). resolve() re-checks the fresh length (step 14).
-      use Nil, state <- range_check(
-        offset + view_len <= buf_len,
-        state,
-        "Invalid DataView length",
-      )
+      use Nil <- helpers.guard(offset + view_len <= buf_len, fn() {
+        state.range_error(state, "Invalid DataView length")
+      })
       resolve(Some(view_len), state)
     }
   }
@@ -238,7 +235,7 @@ fn get_view_value(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use view, get_index, state <- view_and_index(this, args, state)
-  let little = value.is_truthy(list_at(args, 1) |> option.unwrap(JsUndefined))
+  let little = value.is_truthy(arg_at(args, 1))
   let elem_size = element_size(element)
   use data, pos, state <- checked_view_bytes(state, view, get_index, elem_size)
   case bit_array.slice(data, pos, elem_size) {
@@ -267,9 +264,9 @@ fn set_view_value(
   use view, get_index, state <- view_and_index(this, args, state)
   // Step 3: numberValue = ToBigInt(value) / ToNumber(value) — spec-mandated
   // BEFORE the bounds check, so it cannot fold into checked_view_bytes.
-  let value_arg = list_at(args, 1) |> option.unwrap(JsUndefined)
+  let value_arg = arg_at(args, 1)
   use encoded, state <- encode_value(state, element, value_arg)
-  let little = value.is_truthy(list_at(args, 2) |> option.unwrap(JsUndefined))
+  let little = value.is_truthy(arg_at(args, 2))
   let elem_size = element_size(element)
   use data, pos, state <- checked_view_bytes(state, view, get_index, elem_size)
   let total = bit_array.byte_size(data)
@@ -380,11 +377,9 @@ fn checked_view_bytes(
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use size, state <- view_size(state, view)
-  use Nil, state <- range_check(
-    get_index + elem_size <= size,
-    state,
-    "Offset is outside the bounds of the DataView",
-  )
+  use Nil <- helpers.guard(get_index + elem_size <= size, fn() {
+    state.range_error(state, "Offset is outside the bounds of the DataView")
+  })
   use data, state <- buffer_data(state, view.buffer)
   cont(data, view.byte_offset + get_index, state)
 }
@@ -477,32 +472,6 @@ fn view_size(
             "DataView is outside the bounds of its buffer",
           )
       }
-  }
-}
-
-/// Generic Option→TypeError gate. CPS for `use`.
-fn require(
-  opt: Option(t),
-  state: State(host),
-  msg: String,
-  cont: fn(t, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case opt {
-    Some(v) -> cont(v, state)
-    None -> state.type_error(state, msg)
-  }
-}
-
-/// Bool→RangeError gate. CPS for `use`.
-fn range_check(
-  ok: Bool,
-  state: State(host),
-  msg: String,
-  cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case ok {
-    True -> cont(Nil, state)
-    False -> state.range_error(state, msg)
   }
 }
 
