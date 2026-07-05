@@ -19,6 +19,7 @@ import arc/vm/heap
 import arc/vm/internal/typed_array_ffi.{fill_clamped, splice_clamped, ta_zeroed}
 import arc/vm/js_string
 import arc/vm/key.{Index, Named}
+import arc/vm/ops/buffer as ops_buffer
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/ops/operators
@@ -421,7 +422,12 @@ fn ta_create(
     [value.from_int(len)],
     Some(len),
   ))
-  case ta_buffer_immutable(state.heap, obj_ref) {
+  let immutable = case ta_slot_of(state.heap, obj_ref) {
+    Some(view) ->
+      typed_array_elements.buffer_is_immutable(state.heap, view.buffer)
+    None -> False
+  }
+  case immutable {
     True ->
       Error(state.type_error_value(
         state,
@@ -446,7 +452,7 @@ fn ta_create_with_args(
       // returned a view over a detached buffer (or one that no longer
       // fits its resizable buffer) throws TypeError.
       case view_witness_bytes(state.heap, view) {
-        Error(err) -> Error(state.type_error_value(state, witness_message(err)))
+        Error(err) -> Error(witness_error_value(state, err))
         Ok(_bytes) -> {
           let l =
             object.typed_array_view_length(
@@ -466,7 +472,7 @@ fn ta_create_with_args(
           }
         }
       }
-    None -> Error(state.type_error_value(state, witness_message(NotTypedArray)))
+    None -> Error(witness_error_value(state, object.NotAView))
   }
 }
 
@@ -796,11 +802,10 @@ fn alloc_fresh_ta(
   let #(h, buf) =
     common.alloc_wrapper(
       state.heap,
-      value.ArrayBufferObject(
-        data: Some(value.BufBytes(data)),
+      value.ArrayBufferObject(storage: value.Bytes(
+        bytes: data,
         max_byte_length: None,
-        immutable: False,
-      ),
+      )),
       state.builtins.array_buffer.prototype,
     )
   let #(h, ta_ref) =
@@ -862,10 +867,8 @@ fn from_buffer(
       let buf_len = bit_array.byte_size(data)
       let range_err = fn(msg) { Error(state.range_error_value(state, msg)) }
       let resizable = case heap.read(state.heap, buf_ref) {
-        Some(ObjectSlot(
-          kind: value.ArrayBufferObject(max_byte_length: Some(_), ..),
-          ..,
-        )) -> True
+        Some(ObjectSlot(kind: value.ArrayBufferObject(storage:), ..)) ->
+          value.buffer_max_byte_length(storage) != None
         _ -> False
       }
       case new_len {
@@ -1409,7 +1412,7 @@ fn try_bulk_store(
       }
       let off = byte_offset + start * size
       let #(new_data, written) = splice_clamped(data, off, region)
-      let h = write_buffer_data(state.heap, buffer, new_data, off, written)
+      let h = ops_buffer.store_region(state.heap, buffer, new_data, off, written)
       Some(State(..state, heap: h))
     }
   }
@@ -1462,11 +1465,11 @@ fn validate_ta(
   use view, state <- require_ta(this, state)
   let TaWitness(buffer:, kind:, byte_offset: off, length: len, ..) = view
   case object.typed_array_buffer_data(state.heap, buffer) {
-    None -> witness_type_error(state, Detached)
+    None -> witness_type_error(state, object.BufferDetached)
     Some(data) -> {
       let size = typed_array_ffi.elem_size(kind)
       case off + len * size > bit_array.byte_size(data) {
-        True -> witness_type_error(state, OutOfBounds)
+        True -> witness_type_error(state, object.OutOfBoundsView)
         False -> cont(view, state)
       }
     }
@@ -1475,32 +1478,22 @@ fn validate_ta(
 
 /// Immutable ArrayBuffer proposal — ValidateTypedArray step 4: accessMode
 /// ~write~ on a view over an immutable buffer is a TypeError, raised BEFORE
-/// any argument coercion (observable; test262 checks it).
+/// any argument coercion (observable; test262 checks it). The predicate itself
+/// is `typed_array_elements.buffer_is_immutable` — the same one the [[Set]]
+/// element path consults, so a builtin and an element store can never disagree
+/// about whether a buffer accepts writes.
 fn require_mutable(
   state: State(host),
   buffer: Ref,
   cont: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case heap.read(state.heap, buffer) {
-    Some(ObjectSlot(kind: value.ArrayBufferObject(immutable: True, ..), ..)) ->
+  case typed_array_elements.buffer_is_immutable(state.heap, buffer) {
+    True ->
       state.type_error(
         state,
         "Cannot modify a TypedArray backed by an immutable ArrayBuffer",
       )
-    _ -> cont(state)
-  }
-}
-
-/// True when a TypedArray heap ref views an immutable ArrayBuffer.
-fn ta_buffer_immutable(h: Heap(host), ta_ref: Ref) -> Bool {
-  case heap.read(h, ta_ref) {
-    Some(ObjectSlot(kind: value.TypedArrayObject(buffer:, ..), ..)) ->
-      case heap.read(h, buffer) {
-        Some(ObjectSlot(kind: value.ArrayBufferObject(immutable:, ..), ..)) ->
-          immutable
-        _ -> False
-      }
-    _ -> False
+    False -> cont(state)
   }
 }
 
@@ -1657,7 +1650,7 @@ fn proto_fill(
     typed_array_elements.typed_array_encode_value(ta_zeroed(size), 0, converted)
   let region_off = off + start * size
   let #(new_data, written) = fill_clamped(data, region_off, end - start, elem)
-  let h = write_buffer_data(state.heap, buffer, new_data, region_off, written)
+  let h = ops_buffer.store_region(state.heap, buffer, new_data, region_off, written)
   #(State(..state, heap: h), Ok(this))
 }
 
@@ -1853,7 +1846,7 @@ fn set_from_typed_array(
   let #(new_data, written) = splice_clamped(data, start, region)
   case written > 0 {
     True -> {
-      let h = write_buffer_data(state.heap, dst_buf, new_data, start, written)
+      let h = ops_buffer.store_region(state.heap, dst_buf, new_data, start, written)
       #(State(..state, heap: h), Ok(JsUndefined))
     }
     False -> #(state, Ok(JsUndefined))
@@ -2068,7 +2061,7 @@ fn proto_slice(
                   let #(new_data, written) =
                     splice_clamped(tdata, target_off, region)
                   let h =
-                    write_buffer_data(
+                    ops_buffer.store_region(
                       state.heap,
                       target_buf,
                       new_data,
@@ -2372,29 +2365,22 @@ fn ta_get(h: Heap(host), ta_ref: Ref, k: Int) -> JsValue {
   ta_read(h, ta_ref, k) |> option.unwrap(JsUndefined)
 }
 
-/// The ways §23.2.4.4 ValidateTypedArray's witness checks can fail. Each is
-/// a TypeError; witness_message owns the prose.
-type WitnessError {
-  Detached
-  OutOfBounds
-  NotTypedArray
-}
-
-/// THE owner of the witness-failure TypeError prose.
-fn witness_message(err: WitnessError) -> String {
-  case err {
-    Detached -> "Cannot perform operation on a detached ArrayBuffer"
-    OutOfBounds -> "TypedArray is out of bounds"
-    NotTypedArray -> "Method invoked on an object that is not a TypedArray"
-  }
-}
-
-/// Throw the TypeError for a witness failure.
+/// Throw the TypeError a §23.2.4.4 ValidateTypedArray witness failure demands.
+/// The categories and their prose live in `object.ViewWitnessError` — the ONE
+/// witness error type — and this only adapts it to a builtin's return shape.
 fn witness_type_error(
   state: State(host),
-  err: WitnessError,
+  err: object.ViewWitnessError,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  state.type_error(state, witness_message(err))
+  state.type_error(state, object.view_witness_error_message(err))
+}
+
+/// `witness_type_error` for the `Result(_, #(JsValue, State))` builtins.
+fn witness_error_value(
+  state: State(host),
+  err: object.ViewWitnessError,
+) -> #(JsValue, State(host)) {
+  state.type_error_value(state, object.view_witness_error_message(err))
 }
 
 /// §23.2.4.4 ValidateTypedArray buffer-witness checks against the LIVE
@@ -2409,10 +2395,10 @@ fn witness_type_error(
 fn view_witness_bytes(
   h: Heap(host),
   view: TaView,
-) -> Result(BitArray, WitnessError) {
+) -> Result(BitArray, object.ViewWitnessError) {
   let TaView(buffer:, kind:, byte_offset: off, length: declared, ..) = view
   case object.typed_array_buffer_data(h, buffer) {
-    None -> Error(Detached)
+    None -> Error(object.BufferDetached)
     Some(data) -> {
       let byte_size = bit_array.byte_size(data)
       let size = typed_array_ffi.elem_size(kind)
@@ -2421,7 +2407,7 @@ fn view_witness_bytes(
         None -> off > byte_size
       }
       case oob {
-        True -> Error(OutOfBounds)
+        True -> Error(object.OutOfBoundsView)
         False -> Ok(data)
       }
     }
@@ -2433,10 +2419,10 @@ fn view_witness_bytes(
 fn ta_witness_bytes(
   h: Heap(host),
   this: JsValue,
-) -> Result(BitArray, WitnessError) {
+) -> Result(BitArray, object.ViewWitnessError) {
   case ta_slot(h, this) {
     Some(view) -> view_witness_bytes(h, view)
-    None -> Error(NotTypedArray)
+    None -> Error(object.NotAView)
   }
 }
 
@@ -2817,7 +2803,7 @@ fn proto_copy_within(
   #(
     State(
       ..state,
-      heap: write_buffer_data(state.heap, buffer, new_data, target, written),
+      heap: ops_buffer.store_region(state.heap, buffer, new_data, target, written),
     ),
     Ok(this),
   )
@@ -2863,7 +2849,7 @@ fn proto_reverse(
       #(
         State(
           ..state,
-          heap: write_buffer_data(state.heap, buffer, new_data, off, written),
+          heap: ops_buffer.store_region(state.heap, buffer, new_data, off, written),
         ),
         Ok(this),
       )
@@ -2892,7 +2878,7 @@ fn write_fresh_buffer(
   #(
     State(
       ..state,
-      heap: write_buffer_data(
+      heap: ops_buffer.store_region(
         state.heap,
         new_buf,
         new_data,
@@ -3224,7 +3210,7 @@ fn proto_sort(
       let #(new_data, written) = splice_clamped(data, off, region)
       case written > 0 {
         True -> {
-          let h = write_buffer_data(state.heap, buffer, new_data, off, written)
+          let h = ops_buffer.store_region(state.heap, buffer, new_data, off, written)
           #(State(..state, heap: h), Ok(this))
         }
         False -> #(state, Ok(this))
@@ -3371,7 +3357,7 @@ fn check_content_type(
             "Content types of source and created typed arrays differ",
           ))
       }
-    _ -> Error(state.type_error_value(state, witness_message(NotTypedArray)))
+    _ -> Error(witness_error_value(state, object.NotAView))
   }
 }
 
@@ -3483,13 +3469,11 @@ fn u8_require_mutable(
   state: State(host),
   this: JsValue,
 ) -> Result(Nil, #(JsValue, State(host))) {
+  // Same predicate as `require_mutable` / the [[Set]] element path; only the
+  // prose differs (these methods are Uint8Array-only).
   let immutable = case ta_slot(state.heap, this) {
     Some(TaView(buffer:, ..)) ->
-      case heap.read(state.heap, buffer) {
-        Some(ObjectSlot(kind: value.ArrayBufferObject(immutable:, ..), ..)) ->
-          immutable
-        _ -> False
-      }
+      typed_array_elements.buffer_is_immutable(state.heap, buffer)
     None -> False
   }
   case immutable {
@@ -3502,26 +3486,41 @@ fn u8_require_mutable(
   }
 }
 
+/// The LIVE Uint8Array view a base64/hex method operates on: the buffer it
+/// writes back into, the bytes it just proved are there, and the byte range it
+/// covers. A record rather than a `#(Ref, BitArray, Int, Int)` — the last two
+/// fields were adjacent bare `Int`s, so `off` and `len` could be swapped at a
+/// call site and still type-check.
+type U8LiveView {
+  U8LiveView(buffer: Ref, data: BitArray, byte_offset: Int, length: Int)
+}
+
 /// MakeTypedArrayWithBufferWitnessRecord + IsTypedArrayOutOfBounds: resolve
 /// the LIVE view right now (option getters may have detached/shrunk the
-/// buffer). Returns (buffer ref, buffer data, byte offset, element length).
+/// buffer). The bounds proof is `view_witness_bytes` — the same one every
+/// other %TypedArray% method uses.
 fn u8_live_view(
   state: State(host),
   this: JsValue,
-) -> Result(#(Ref, BitArray, Int, Int), #(JsValue, State(host))) {
+) -> Result(U8LiveView, #(JsValue, State(host))) {
   case ta_slot(state.heap, this) {
-    Some(TaView(buffer:, kind:, byte_offset: off, length: decl_len, ..)) -> {
-      let len =
-        object.typed_array_view_length(state.heap, buffer, kind, off, decl_len)
-      case object.typed_array_buffer_data(state.heap, buffer) {
-        None -> Error(state.type_error_value(state, witness_message(Detached)))
-        Some(data) ->
-          case off + len > bit_array.byte_size(data) {
-            True ->
-              Error(state.type_error_value(state, witness_message(OutOfBounds)))
-            False -> Ok(#(buffer, data, off, len))
-          }
-      }
+    Some(TaView(buffer:, kind:, byte_offset:, length:, ..) as view) -> {
+      use data <- result.map(
+        view_witness_bytes(state.heap, view)
+        |> result.map_error(witness_error_value(state, _)),
+      )
+      U8LiveView(
+        buffer:,
+        data:,
+        byte_offset:,
+        length: object.typed_array_view_length(
+          state.heap,
+          buffer,
+          kind,
+          byte_offset,
+          length,
+        ),
+      )
     }
     None ->
       Error(state.type_error_value(
@@ -3667,7 +3666,7 @@ fn u8_write_bytes(
     _ ->
       State(
         ..state,
-        heap: write_buffer_data(state.heap, buffer, new_data, off, written),
+        heap: ops_buffer.store_region(state.heap, buffer, new_data, off, written),
       )
   }
 }
@@ -3697,12 +3696,13 @@ fn u8_to_base64(
       "omitPadding",
     ))
     let padding = !value.is_truthy(omit_val)
-    use #(_buffer, data, off, len) <- result.map(u8_live_view(state, this))
-    // u8_live_view proved off + len <= byte_size(data).
-    let assert Ok(view) = bit_array.slice(data, off, len)
+    use view <- result.map(u8_live_view(state, this))
+    // u8_live_view proved byte_offset + length <= byte_size(data).
+    let assert Ok(bytes) =
+      bit_array.slice(view.data, view.byte_offset, view.length)
     let out = case alphabet {
-      Base64Url -> bit_array.base64_url_encode(view, padding)
-      Base64 -> bit_array.base64_encode(view, padding)
+      Base64Url -> bit_array.base64_url_encode(bytes, padding)
+      Base64 -> bit_array.base64_encode(bytes, padding)
     }
     #(JsString(out), state)
   })
@@ -3715,10 +3715,11 @@ fn u8_to_hex(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   wrap({
     use state <- result.try(validate_u8(this, state))
-    use #(_buffer, data, off, len) <- result.map(u8_live_view(state, this))
-    // u8_live_view proved off + len <= byte_size(data).
-    let assert Ok(view) = bit_array.slice(data, off, len)
-    #(JsString(string.lowercase(bit_array.base16_encode(view))), state)
+    use view <- result.map(u8_live_view(state, this))
+    // u8_live_view proved byte_offset + length <= byte_size(data).
+    let assert Ok(bytes) =
+      bit_array.slice(view.data, view.byte_offset, view.length)
+    #(JsString(string.lowercase(bit_array.base16_encode(bytes))), state)
   })
 }
 
@@ -3739,9 +3740,9 @@ fn u8_set_from_base64(
       state,
       helpers.arg_at(args, 1),
     ))
-    use #(buffer, data, off, len) <- result.try(u8_live_view(state, this))
-    let res = from_base64(s, alphabet, handling, len)
-    decode_into_view(state, buffer, data, off, res, Base64Codec)
+    use view <- result.try(u8_live_view(state, this))
+    let res = from_base64(s, alphabet, handling, view.length)
+    decode_into_view(state, view, res, Base64Codec)
   })
 }
 
@@ -3758,9 +3759,9 @@ fn u8_set_from_hex(
       state,
       helpers.first_arg_or_undefined(args),
     ))
-    use #(buffer, data, off, len) <- result.try(u8_live_view(state, this))
-    let res = from_hex(s, len)
-    decode_into_view(state, buffer, data, off, res, HexCodec)
+    use view <- result.try(u8_live_view(state, this))
+    let res = from_hex(s, view.length)
+    decode_into_view(state, view, res, HexCodec)
   })
 }
 
@@ -3775,12 +3776,11 @@ fn decode_error(state: State(host), codec: Codec) -> #(JsValue, State(host)) {
 /// error ARE written, THEN the SyntaxError is thrown ("writes up to error").
 fn decode_into_view(
   state: State(host),
-  buffer: Ref,
-  data: BitArray,
-  off: Int,
+  view: U8LiveView,
   res: DecodeResult,
   codec: Codec,
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
+  let U8LiveView(buffer:, data:, byte_offset: off, ..) = view
   case res {
     DecodeFailed(partial:) ->
       Error(decode_error(
@@ -3859,7 +3859,7 @@ fn u8_alloc_from_bytes(
     fresh.value,
     State(
       ..state,
-      heap: write_buffer_data(state.heap, fresh.buffer, bytes, 0, len),
+      heap: ops_buffer.store_region(state.heap, fresh.buffer, bytes, 0, len),
     ),
   )
 }
@@ -4144,54 +4144,6 @@ fn hex_loop(
 /// constructor table is total, so there is no "kind not installed" case.
 fn default_proto_for(state: State(host), kind: TypedArrayKind) -> Ref {
   common.typed_array_builtin(state.builtins, kind).prototype
-}
-
-/// Replace a buffer slot's backing bytes with a full-buffer image,
-/// preserving its other fields. `byte_offset`/`count` delimit the byte range
-/// the caller actually modified: shared (atomics-backed) storage writes ONLY
-/// those bytes into the shared cells — other regions may be concurrently
-/// mutated by other agent processes, and writing the whole snapshot back
-/// would clobber their updates. (Non-shared storage just swaps in the full
-/// image.) Callers that own the whole buffer — a freshly allocated result —
-/// pass the full range.
-/// Immutable buffers (immutable-arraybuffer proposal) are never modified —
-/// the write is dropped, mirroring the detached-buffer no-op treatment.
-fn write_buffer_data(
-  h: Heap(host),
-  buffer: Ref,
-  new_data: BitArray,
-  byte_offset: Int,
-  count: Int,
-) -> Heap(host) {
-  heap.update(h, buffer, fn(slot) {
-    case slot {
-      ObjectSlot(kind: value.ArrayBufferObject(immutable: True, ..), ..) as s ->
-        s
-      ObjectSlot(
-        kind: value.ArrayBufferObject(
-          max_byte_length:,
-          immutable:,
-          data: Some(old_data),
-        ),
-        ..,
-      ) as s ->
-        ObjectSlot(
-          ..s,
-          kind: value.ArrayBufferObject(
-            data: Some(value.buffer_store_region(
-              old_data,
-              new_data,
-              byte_offset,
-              count,
-            )),
-            max_byte_length:,
-            immutable:,
-          ),
-        )
-      // Detached (`data: None`) or not a buffer at all: nothing to write into.
-      other -> other
-    }
-  })
 }
 
 /// `use`-style adapter: thread Result(#(a, State), #(thrown, State)) into a

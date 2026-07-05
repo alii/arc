@@ -8,10 +8,10 @@
 //// signature exists exactly once and the compiler checks every caller
 //// against it.
 ////
-//// It also owns the ONE `TypedArrayKind -> element codec` mapping
-//// (`elem_of_kind`) and the byte width derived from it (`elem_size`), so a
-//// new element kind cannot be given a codec in one table and a width in
-//// another.
+//// It also owns the ONE `TypedArrayKind -> element codec` mapping — read
+//// direction (`elem_of_kind`), store direction (`store_elem_of_kind`) — and
+//// the byte width derived from it (`elem_size`), so a new element kind cannot
+//// be given a codec in one table and a width in another.
 ////
 //// Float elements speak `value.JsNum` directly (`{finite, F} | na_n |
 //// infinity | neg_infinity` on the Erlang side) — the same technique as
@@ -134,9 +134,9 @@ pub fn bigint_elem(kind: BigIntKind) -> IntElem {
 /// The codec for any typed-array element kind. Total: adding a kind is a
 /// compile error here rather than a wrong-width read somewhere downstream.
 ///
-/// Uint8Clamped decodes exactly like Uint8 (`U8`); only its *store* path
-/// differs (§7.1.12 ToUint8Clamp), which is why the encoders special-case it
-/// before consulting this mapping.
+/// READ direction only. Uint8Clamped decodes exactly like Uint8 (`U8`); its
+/// *store* path differs (§7.1.12 ToUint8Clamp), so stores must go through
+/// `store_elem_of_kind` instead — never through this table.
 pub fn elem_of_kind(kind: TypedArrayKind) -> Elem {
   case kind {
     value.NumKind(value.Int8Kind) -> Int(I8)
@@ -149,6 +149,39 @@ pub fn elem_of_kind(kind: TypedArrayKind) -> Elem {
     value.NumKind(value.Float32Kind) -> Float(F32)
     value.NumKind(value.Float64Kind) -> Float(F64)
     value.BigKind(k) -> Int(bigint_elem(k))
+  }
+}
+
+/// Which codec a *store* into an element kind speaks. Deliberately NOT the
+/// same type as `Elem`: Uint8Clamped reads as `Int(U8)` but writes through
+/// §7.1.12 ToUint8Clamp, and that difference used to live only in a doc
+/// comment on `elem_of_kind`. A store site that reaches for the codec now
+/// gets a `StoreClampedU8` it must handle, so an unclamped Uint8Clamped
+/// store cannot type-check.
+pub type StoreElem {
+  StoreInt(IntElem)
+  StoreFloat(FloatElem)
+  StoreClampedU8
+}
+
+/// The codec a store into `kind` speaks (§25.1.2.12 SetValueInBuffer). Total,
+/// like `elem_of_kind`, so a new element kind is a compile error here — and
+/// spelled out kind by kind rather than delegating with a `_` arm, so a future
+/// kind whose store diverges from its read codec (another clamped/saturating
+/// variant) has to be classified rather than silently inheriting `StoreInt`.
+pub fn store_elem_of_kind(kind: TypedArrayKind) -> StoreElem {
+  case kind {
+    // The ONE kind whose store differs from its read codec.
+    value.NumKind(value.Uint8ClampedKind) -> StoreClampedU8
+    value.NumKind(value.Int8Kind) -> StoreInt(I8)
+    value.NumKind(value.Uint8Kind) -> StoreInt(U8)
+    value.NumKind(value.Int16Kind) -> StoreInt(I16)
+    value.NumKind(value.Uint16Kind) -> StoreInt(U16)
+    value.NumKind(value.Int32Kind) -> StoreInt(I32)
+    value.NumKind(value.Uint32Kind) -> StoreInt(U32)
+    value.NumKind(value.Float32Kind) -> StoreFloat(F32)
+    value.NumKind(value.Float64Kind) -> StoreFloat(F64)
+    value.BigKind(k) -> StoreInt(bigint_elem(k))
   }
 }
 

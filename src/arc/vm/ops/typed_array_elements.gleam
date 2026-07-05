@@ -113,8 +113,8 @@ pub fn typed_array_store(
 /// ArrayBufferObject whose [[ArrayBufferData]] is immutable.
 pub fn buffer_is_immutable(h: Heap(host), buffer: Ref) -> Bool {
   case heap.read(h, buffer) {
-    Some(ObjectSlot(kind: value.ArrayBufferObject(immutable:, ..), ..)) ->
-      immutable
+    Some(ObjectSlot(kind: value.ArrayBufferObject(storage:), ..)) ->
+      value.buffer_is_immutable(storage)
     _ -> False
   }
 }
@@ -125,10 +125,21 @@ pub fn buffer_is_immutable(h: Heap(host), buffer: Ref) -> Bool {
 /// shared cells; for plain buffers it is the backing binary itself.
 pub fn buffer_bytes(h: Heap(host), buffer: Ref) -> Option(BitArray) {
   case heap.read(h, buffer) {
-    Some(ObjectSlot(kind: value.ArrayBufferObject(data: Some(data), ..), ..)) ->
-      Some(value.buffer_bits(data))
+    Some(ObjectSlot(kind: value.ArrayBufferObject(storage:), ..)) ->
+      value.buffer_bits(storage)
     _ -> None
   }
+}
+
+/// A typed-array view whose §10.4.5.13 TypedArrayLength has ALREADY been
+/// resolved against a specific live byte size — the four numbers that a bounds
+/// check needs, bundled so they cannot be mixed and matched. Opaque, and only
+/// `resolve_view` builds one, so `len` is always TypedArrayLength of *these*
+/// `byte_size`/`elem_size`/`byte_offset`: pairing a length resolved against one
+/// buffer with the byte size of another (or swapping the offset and the length,
+/// both bare `Int`s) is no longer expressible.
+pub opaque type ResolvedView {
+  ResolvedView(byte_size: Int, elem_size: Int, byte_offset: Int, len: Int)
 }
 
 /// §10.4.5.13 TypedArrayLength, resolved against a live byte size the caller
@@ -137,16 +148,37 @@ pub fn buffer_bytes(h: Heap(host), buffer: Ref) -> Option(BitArray) {
 /// length-tracking view over a resizable buffer, whose element count follows
 /// the live byte length. Detached buffers and tracking views whose byte
 /// offset lies past the end of a shrunk buffer resolve to 0.
-pub fn resolved_view_length(
+pub fn resolve_view(
   byte_size: Int,
-  elem_size: Int,
+  elem_kind: value.TypedArrayKind,
   byte_offset: Int,
   length: Option(Int),
-) -> Int {
-  case length {
+) -> ResolvedView {
+  let elem_size = typed_array_ffi.elem_size(elem_kind)
+  let len = case length {
     Some(n) -> n
     None -> int.max(0, { byte_size - byte_offset } / elem_size)
   }
+  ResolvedView(byte_size:, elem_size:, byte_offset:, len:)
+}
+
+/// The resolved TypedArrayLength of the view.
+pub fn view_len(view: ResolvedView) -> Int {
+  view.len
+}
+
+/// Byte offset of element `idx` — derived from the view's own element size,
+/// so a bounds check and the read/write it guards can never disagree about
+/// which bytes the element occupies.
+pub fn view_element_offset(view: ResolvedView, idx: Int) -> Int {
+  view.byte_offset + idx * view.elem_size
+}
+
+/// True when the whole view still fits inside the live buffer. False for a
+/// fixed view over a resizable buffer that shrank below it — which per
+/// §10.4.5.14 has NO valid indices, even for elements whose bytes still exist.
+pub fn view_in_bounds(view: ResolvedView) -> Bool {
+  view.byte_offset + view.len * view.elem_size <= view.byte_size
 }
 
 /// §10.4.5.13 TypedArrayLength against the buffer currently in the heap.
@@ -157,34 +189,33 @@ pub fn view_length(
   byte_offset: Int,
   length: Option(Int),
 ) -> Int {
+  live_view(h, buffer, elem_kind, byte_offset, length) |> view_len
+}
+
+/// `resolve_view` against the buffer currently in the heap. A detached buffer
+/// (or a ref that isn't a buffer at all) reads as zero bytes, so every view
+/// over it resolves out of bounds.
+pub fn live_view(
+  h: Heap(host),
+  buffer: Ref,
+  elem_kind: value.TypedArrayKind,
+  byte_offset: Int,
+  length: Option(Int),
+) -> ResolvedView {
   let byte_size =
     buffer_bytes(h, buffer)
     |> option.map(bit_array.byte_size)
     |> option.unwrap(0)
-  resolved_view_length(
-    byte_size,
-    typed_array_ffi.elem_size(elem_kind),
-    byte_offset,
-    length,
-  )
+  resolve_view(byte_size, elem_kind, byte_offset, length)
 }
 
-/// §10.4.5.14 IsValidIntegerIndex, against a live byte size. `len` is the
-/// already-resolved TypedArrayLength (see `resolved_view_length`). An
-/// out-of-bounds view — a fixed view over a resizable buffer that shrank
-/// below it — has NO valid indices, even for elements whose bytes still
-/// exist, so the whole view is checked, not just this element. Both the read
-/// half (`ops/object`'s IntegerIndexedElementGet) and the write half
-/// (`do_typed_store` below) go through here: the two bounds checks cannot
-/// drift apart.
-pub fn valid_integer_index(
-  byte_size: Int,
-  elem_size: Int,
-  byte_offset: Int,
-  len: Int,
-  idx: Int,
-) -> Bool {
-  idx >= 0 && idx < len && byte_offset + len * elem_size <= byte_size
+/// §10.4.5.14 IsValidIntegerIndex, against the byte size the view was resolved
+/// against. The whole view is checked, not just this element (see
+/// `view_in_bounds`). Both the read half (`ops/object`'s
+/// IntegerIndexedElementGet) and the write half (`do_typed_store` below) go
+/// through here: the two bounds checks cannot drift apart.
+pub fn valid_integer_index(view: ResolvedView, idx: Int) -> Bool {
+  idx >= 0 && idx < view.len && view_in_bounds(view)
 }
 
 /// Shared store tail: bounds/detach check, then rebuild the buffer binary.
@@ -200,29 +231,27 @@ fn do_typed_store(
   case idx {
     Some(i) ->
       case heap.read(state.heap, buffer) {
-        Some(
-          ObjectSlot(
-            kind: value.ArrayBufferObject(
-              data: Some(data),
-              max_byte_length:,
-              immutable:,
-            ),
-            ..,
-          ) as slot,
-        ) -> {
+        Some(ObjectSlot(kind: value.ArrayBufferObject(storage:), ..) as slot) -> {
           let size = typed_array_ffi.elem_size(elem_kind)
-          let byte_size = value.buffer_byte_size(data)
           // §10.4.5.13/§10.4.5.14 against the LIVE buffer, resolved HERE (not
           // at [[Set]] entry): the ToNumber/ToBigInt conversion above may have
           // run user code that resized the buffer. Same two primitives the
           // read half uses, so an out-of-bounds write can never be accepted by
           // one and rejected by the other.
-          let len = resolved_view_length(byte_size, size, byte_offset, length)
-          let off = byte_offset + i * size
-          case valid_integer_index(byte_size, size, byte_offset, len, i) {
-            False -> #(state, True)
-            True ->
-              case immutable {
+          let view =
+            resolve_view(
+              value.buffer_byte_size(storage),
+              elem_kind,
+              byte_offset,
+              length,
+            )
+          let off = view_element_offset(view, i)
+          case value.buffer_bits(storage), valid_integer_index(view, i) {
+            // Detached (no bytes) or out of bounds: silent no-op per
+            // §10.4.5.16 step 2.
+            None, _ | _, False -> #(state, True)
+            Some(data), True ->
+              case value.buffer_is_immutable(storage) {
                 // Immutable ArrayBuffer proposal: typed_array_store already
                 // reported [[Set]] failure (False) before value coercion, and
                 // a live buffer ref can never become immutable in place
@@ -232,22 +261,18 @@ fn do_typed_store(
                 // success like detached/out-of-bounds.
                 True -> #(state, False)
                 False -> {
-                  let new_bits = write(value.buffer_bits(data), off)
+                  let new_bits = write(data, off)
                   // Shared storage: persist only the element's bytes — other
                   // regions may be concurrently written by other agents.
-                  let new_data =
-                    value.buffer_store_region(data, new_bits, off, size)
+                  let new_storage =
+                    value.buffer_store_region(storage, new_bits, off, size)
                   let h =
                     heap.write(
                       state.heap,
                       buffer,
                       ObjectSlot(
                         ..slot,
-                        kind: value.ArrayBufferObject(
-                          data: Some(new_data),
-                          max_byte_length:,
-                          immutable: False,
-                        ),
+                        kind: value.ArrayBufferObject(storage: new_storage),
                       ),
                     )
                   #(State(..state, heap: h), True)
@@ -271,27 +296,15 @@ fn encode_typed_number(
   elem_kind: value.NumberKind,
   num: value.JsNum,
 ) -> BitArray {
-  case elem_kind {
-    // The ONE kind whose store differs from its codec: Uint8Clamped reads as
-    // U8 but writes through §7.1.12 ToUint8Clamp instead of the ToInt wrap.
-    value.Uint8ClampedKind -> ta_set_int(data, off, U8, ta_clamp_uint8(num))
-    // Every other kind stores through its own read codec. Spelled out rather
-    // than caught by `_` so a future kind whose store diverges from its codec
-    // (another clamped/saturating variant) is a compile error here, not a
-    // silently wrong store.
-    value.Int8Kind
-    | value.Uint8Kind
-    | value.Int16Kind
-    | value.Uint16Kind
-    | value.Int32Kind
-    | value.Uint32Kind
-    | value.Float32Kind
-    | value.Float64Kind ->
-      case typed_array_ffi.elem_of_kind(value.NumKind(elem_kind)) {
-        typed_array_ffi.Int(e) ->
-          ta_set_int(data, off, e, jsnum_to_store_int(num))
-        typed_array_ffi.Float(e) -> ta_set_float(data, off, e, num)
-      }
+  // The store-direction codec table (typed_array_ffi.store_elem_of_kind), NOT
+  // the read one: Uint8Clamped comes back as its own `StoreClampedU8` case, so
+  // an unclamped Uint8Clamped store cannot be written here by accident.
+  case typed_array_ffi.store_elem_of_kind(value.NumKind(elem_kind)) {
+    typed_array_ffi.StoreClampedU8 ->
+      ta_set_int(data, off, U8, ta_clamp_uint8(num))
+    typed_array_ffi.StoreInt(e) ->
+      ta_set_int(data, off, e, jsnum_to_store_int(num))
+    typed_array_ffi.StoreFloat(e) -> ta_set_float(data, off, e, num)
   }
 }
 

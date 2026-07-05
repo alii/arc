@@ -3208,17 +3208,15 @@ fn inspect_object(
           "/" <> source <> "/" <> flags
         }
         value.DataViewObject(..) -> "DataView {}"
-        value.ArrayBufferObject(data: Some(value.BufBytes(..) as data), ..) ->
-          "ArrayBuffer { byteLength: "
-          <> int.to_string(value.buffer_byte_size(data))
-          <> " }"
-        value.ArrayBufferObject(data: Some(value.BufShared(..) as data), ..) ->
+        value.ArrayBufferObject(storage: value.Shared(..) as storage) ->
           "SharedArrayBuffer { byteLength: "
-          <> int.to_string(value.buffer_byte_size(data))
+          <> int.to_string(value.buffer_byte_size(storage))
           <> " }"
-        // Detached: [[ArrayBufferData]] is null, so byteLength is +0.
-        value.ArrayBufferObject(data: None, ..) ->
-          "ArrayBuffer { byteLength: 0 }"
+        // Detached storage has no bytes, so byteLength is +0.
+        value.ArrayBufferObject(storage:) ->
+          "ArrayBuffer { byteLength: "
+          <> int.to_string(value.buffer_byte_size(storage))
+          <> " }"
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:) ->
           value.typed_array_name(elem_kind)
           <> "("
@@ -4287,21 +4285,25 @@ pub fn typed_array_element(
   case typed_array_buffer_data(h, buffer) {
     None -> None
     Some(data) -> {
-      let size = typed_array_ffi.elem_size(elem_kind)
       // §10.4.5.14 IsValidIntegerIndex against the CURRENT backing store — the
       // SAME predicate the write half applies (typed_array_elements owns it),
       // so a read and a write can never disagree about which indices exist.
-      case
-        typed_array_elements.valid_integer_index(
+      // The view bundles the byte size the length was resolved against with
+      // the length itself, so the two cannot come from different buffers.
+      let view =
+        typed_array_elements.resolve_view(
           bit_array.byte_size(data),
-          size,
+          elem_kind,
           byte_offset,
-          length,
-          idx,
+          Some(length),
         )
-      {
+      case typed_array_elements.valid_integer_index(view, idx) {
         True ->
-          Some(decode_typed_element(data, byte_offset + idx * size, elem_kind))
+          Some(decode_typed_element(
+            data,
+            typed_array_elements.view_element_offset(view, idx),
+            elem_kind,
+          ))
         False -> None
       }
     }
@@ -4330,15 +4332,19 @@ pub fn typed_array_element_live(
   )
 }
 
-/// Why a typed-array view failed its buffer witness. The two cases are NOT
+/// Why a typed-array view failed its buffer witness. The cases are NOT
 /// interchangeable — a detached buffer has no bytes at all, an out-of-bounds
-/// view is a resizable buffer that shrank below the view — so callers get a
-/// category, never a pre-worded string they could accidentally reword.
+/// view is a resizable buffer that shrank below the view, and a non-view is a
+/// receiver that never had a buffer — so callers get a category, never a
+/// pre-worded string they could accidentally reword. This is the ONE witness
+/// error type in the engine: the %TypedArray% builtins raise these too.
 pub type ViewWitnessError {
   /// The view's `ArrayBuffer` was detached (transferred, or `.transfer()`d).
   BufferDetached
   /// The buffer is live but no longer covers the view's byte range.
   OutOfBoundsView
+  /// The receiver is not a TypedArray at all (RequireInternalSlot failed).
+  NotAView
 }
 
 /// The ONE place a `ViewWitnessError` becomes prose.
@@ -4346,6 +4352,7 @@ pub fn view_witness_error_message(err: ViewWitnessError) -> String {
   case err {
     BufferDetached -> "Cannot perform operation on a detached ArrayBuffer"
     OutOfBoundsView -> "TypedArray is out of bounds"
+    NotAView -> "Method invoked on an object that is not a TypedArray"
   }
 }
 
@@ -4371,15 +4378,19 @@ pub fn typed_array_iter_length(
   byte_offset: Int,
   length: Option(Int),
 ) -> Result(Int, ViewWitnessError) {
-  let length =
-    typed_array_view_length(h, buffer, elem_kind, byte_offset, length)
   case typed_array_buffer_data(h, buffer) {
     None -> Error(BufferDetached)
     Some(data) -> {
-      let size = typed_array_ffi.elem_size(elem_kind)
-      case byte_offset + length * size > bit_array.byte_size(data) {
-        True -> Error(OutOfBoundsView)
-        False -> Ok(length)
+      let view =
+        typed_array_elements.resolve_view(
+          bit_array.byte_size(data),
+          elem_kind,
+          byte_offset,
+          length,
+        )
+      case typed_array_elements.view_in_bounds(view) {
+        False -> Error(OutOfBoundsView)
+        True -> Ok(typed_array_elements.view_len(view))
       }
     }
   }
@@ -4400,8 +4411,14 @@ pub fn typed_array_live_length(
   case typed_array_buffer_data(h, buffer) {
     None -> 0
     Some(data) -> {
-      let size = typed_array_ffi.elem_size(elem_kind)
-      case byte_offset + length * size <= bit_array.byte_size(data) {
+      let view =
+        typed_array_elements.resolve_view(
+          bit_array.byte_size(data),
+          elem_kind,
+          byte_offset,
+          Some(length),
+        )
+      case typed_array_elements.view_in_bounds(view) {
         True -> length
         False -> 0
       }
