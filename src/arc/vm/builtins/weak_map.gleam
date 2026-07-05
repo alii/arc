@@ -28,7 +28,6 @@ import arc/vm/value.{
   WeakMapPrototypeGet, WeakMapPrototypeGetOrInsert,
   WeakMapPrototypeGetOrInsertComputed, WeakMapPrototypeHas, WeakMapPrototypeSet,
 }
-import gleam/dict
 import gleam/option.{None, Some}
 
 /// The three things that make a WeakMap a WeakMap rather than a WeakSet.
@@ -127,7 +126,7 @@ fn weak_map_get(
   let key = first_arg_or_undefined(args)
   case can_be_held_weakly(state, key) {
     True ->
-      case dict.get(weak_collection.read_data(state, ref), key) {
+      case weak_collection.lookup(state, ref, key) {
         Ok(val) -> #(state, Ok(val))
         Error(Nil) -> #(state, Ok(JsUndefined))
       }
@@ -143,7 +142,7 @@ fn weak_map_set(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- weak_collection.require(kind(), this, state, "set")
   let key = first_arg_or_undefined(args)
-  use key, state <- weak_collection.require_weak_key(kind(), state, key)
+  use key, state <- weak_collection.require_weak_key(ref, state, key)
   let val = arg_at(args, 1)
   #(weak_collection.insert(state, ref, key, val), Ok(this))
 }
@@ -156,8 +155,8 @@ fn get_or_insert(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- weak_collection.require(kind(), this, state, "getOrInsert")
   let key = first_arg_or_undefined(args)
-  use weak_key, state <- weak_collection.require_weak_key(kind(), state, key)
-  case dict.get(weak_collection.read_data(state, ref), key) {
+  use weak_key, state <- weak_collection.require_weak_key(ref, state, key)
+  case weak_collection.lookup(state, ref, key) {
     Ok(existing) -> #(state, Ok(existing))
     Error(Nil) -> {
       let val = arg_at(args, 1)
@@ -185,12 +184,12 @@ fn get_or_insert_computed(
     "getOrInsertComputed",
   )
   let key = first_arg_or_undefined(args)
-  use weak_key, state <- weak_collection.require_weak_key(kind(), state, key)
+  use weak_key, state <- weak_collection.require_weak_key(ref, state, key)
   let callback = arg_at(args, 1)
   use callback, state <- helpers.require_callable(state, callback, fn() {
     object.inspect(callback, state.heap) <> " is not a function"
   })
-  case dict.get(weak_collection.read_data(state, ref), key) {
+  case weak_collection.lookup(state, ref, key) {
     Ok(existing) -> #(state, Ok(existing))
     Error(Nil) -> {
       use computed, state <- state.try_call(state, callback, JsUndefined, [key])

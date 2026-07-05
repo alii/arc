@@ -107,6 +107,6 @@ fn weak_set_add(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- weak_collection.require(kind(), this, state, "add")
   let val = first_arg_or_undefined(args)
-  use val, state <- weak_collection.require_weak_key(kind(), state, val)
+  use val, state <- weak_collection.require_weak_key(ref, state, val)
   #(weak_collection.insert(state, ref, val, Nil), Ok(this))
 }

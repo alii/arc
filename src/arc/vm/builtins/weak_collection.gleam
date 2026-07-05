@@ -10,8 +10,8 @@
 /// back a *stale* entry dict over mutations that user code made re-entrantly
 /// (a `getOrInsertComputed` callback that `set`s the same key). `require`
 /// hands out only a `WeakRef` — no dict — and `WeakRef` is opaque, so the only
-/// way to reach the entries is `read_data`/`insert` at the moment of use, both
-/// of which read the live heap slot.
+/// way to reach the entries is `lookup`/`insert` at the moment of use, both of
+/// which read the live heap slot.
 ///
 /// Two proof-carrying tokens keep the discipline honest, both mintable only by
 /// the check that establishes them: a `WeakRef` (from `require`) carries the
@@ -50,8 +50,8 @@ pub type WeakKind(host, v) {
 /// carrying the very `WeakKind` it was proved against.
 ///
 /// Opaque, and constructible only by `require`, so "a ref that isn't a weak
-/// collection" cannot reach `read_data`/`insert` — the assertions in those
-/// functions are unreachable by construction rather than a silent no-op. And
+/// collection" cannot reach `lookup`/`insert` — the assertions behind them are
+/// unreachable by construction rather than a silent no-op. And
 /// because the kind travels *inside* the ref rather than alongside it as a
 /// second argument, "a WeakSet's ref read with `weak_map.kind()`" is not
 /// expressible either.
@@ -72,8 +72,8 @@ pub opaque type WeakKey {
 /// is a collection of `kind` and hands over a `WeakRef`, or throws a TypeError
 /// naming `method`.
 ///
-/// Deliberately does *not* hand over the entry dict: callers must fetch it with
-/// `read_data` at the point of use, so nothing can capture a snapshot across a
+/// Deliberately does *not* hand over the entry dict: callers reach entries via
+/// `lookup` at the point of use, so nothing can capture a snapshot across a
 /// call into user code.
 ///
 /// CPS-style — `use ref, state <- require(kind, this, state, "get")`.
@@ -101,18 +101,21 @@ pub fn require(
 }
 
 /// ES2024 §9.13 CanBeHeldWeakly — proves `key` may be held weakly and hands
-/// over a `WeakKey`, or throws the kind's TypeError.
+/// over a `WeakKey`, or throws the ref's kind's TypeError.
 ///
 /// The only way to mint a `WeakKey`, and `insert` takes nothing else, so every
 /// insertion path is gated whether or not its author remembered to gate it.
+/// Takes the `WeakRef` (not a bare `WeakKind`) so the error message can never
+/// disagree with the collection the caller is operating on.
 ///
-/// CPS-style — `use key, state <- require_weak_key(kind, state, key)`.
+/// CPS-style — `use key, state <- require_weak_key(ref, state, key)`.
 pub fn require_weak_key(
-  kind: WeakKind(host, v),
+  ref: WeakRef(host, v),
   state: State(host),
   key: JsValue,
   cont: fn(WeakKey, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  let WeakRef(kind:, ..) = ref
   case helpers.can_be_held_weakly(state, key) {
     True -> cont(WeakKey(key), state)
     False -> state.type_error(state, kind.invalid_key_message)
@@ -121,12 +124,9 @@ pub fn require_weak_key(
 
 /// The collection's *live* entry dict, read straight from the heap.
 ///
-/// Call this at the moment the entries are needed — never before running user
-/// code — so a re-entrant mutation is always visible.
-pub fn read_data(state: State(host), weak_ref: WeakRef(host, v)) -> Dict(
-  JsValue,
-  v,
-) {
+/// Private: external callers reach entries only via `lookup`/`insert`/`delete`,
+/// so nothing outside this module can capture the whole dict as a snapshot.
+fn read_data(state: State(host), weak_ref: WeakRef(host, v)) -> Dict(JsValue, v) {
   let WeakRef(ref:, kind:) = weak_ref
   // A heap slot's kind never changes after allocation, and a `WeakRef` can only
   // come from `require`, so anything else here is a wiring bug — crash rather
@@ -136,6 +136,19 @@ pub fn read_data(state: State(host), weak_ref: WeakRef(host, v)) -> Dict(
   let assert Some(data) = kind.unwrap(slot_kind)
     as "weak_collection: WeakRef points at a slot of the wrong kind"
   data
+}
+
+/// Look up `key` in the collection's *live* entry dict.
+///
+/// Call this at the moment the entry is needed — never before running user
+/// code — so a re-entrant mutation is always visible. The only external read
+/// path, so callers cannot capture the whole dict.
+pub fn lookup(
+  state: State(host),
+  ref: WeakRef(host, v),
+  key: JsValue,
+) -> Result(v, Nil) {
+  dict.get(read_data(state, ref), key)
 }
 
 /// Read-modify-write the entry dict inside a single heap access.
