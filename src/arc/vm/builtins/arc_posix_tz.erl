@@ -217,11 +217,13 @@ offset_at({dst, Std, Dst, _R1, _R2} = F, Sec) ->
           end
       end, Initial, Trans).
 
-%% Sorted [{TransitionSec, NewOffsetSec}] generated from the rule for the
-%% given (inclusive) year range. Only a {dst, ...} footer has transitions, and
-%% only such a footer is ever passed here.
--spec transitions({dst, integer(), integer(), rule(), rule()},
-                  integer(), integer()) -> [{integer(), integer()}].
+%% Sorted [{TransitionSec, NewOffsetSec}] the footer generates for the given
+%% (inclusive) year range. A fixed-offset footer has none. Every footer() shape
+%% is matched here — the type owner does the exhaustive match — so a new
+%% variant crashes in this module rather than being silently swallowed by a
+%% caller's catch-all.
+-spec transitions(footer(), integer(), integer()) -> [{integer(), integer()}].
+transitions({fixed, _Off}, _FromY, _ToY) -> [];
 transitions({dst, Std, Dst, R1, R2}, FromY, ToY) ->
     L = lists:flatmap(
           fun(Y) ->

@@ -80,7 +80,10 @@ next_transition(Id, Sec) ->
 
 %% Past the last recorded transition the footer rule generates them; look a
 %% couple of years either side of Sec for the earliest one it fires after Sec.
-footer_next({dst, _, _, _, _} = Footer, LastT, Sec) ->
+%% `none` means the TZif file carried no footer at all; any actual footer goes
+%% straight to arc_posix_tz:transitions/3, which owns the exhaustive match.
+footer_next(none, _LastT, _Sec) -> no_transition;
+footer_next(Footer, LastT, Sec) ->
     FromY = case LastT of
         none -> arc_posix_tz:year_of(Sec);
         L -> max(arc_posix_tz:year_of(Sec), arc_posix_tz:year_of(L))
@@ -91,8 +94,7 @@ footer_next({dst, _, _, _, _} = Footer, LastT, Sec) ->
     case Cands of
         [] -> no_transition;
         _ -> {found, lists:min(Cands)}
-    end;
-footer_next(_NoRule, _LastT, _Sec) -> no_transition.
+    end.
 
 %% Largest transition time T with T < Sec where the UTC offset changes.
 %% Same three-way result as next_transition/2.
@@ -112,14 +114,19 @@ previous_transition(Id, Sec) ->
             end
     end.
 
-%% Footer-generated transitions before Sec that postdate the recorded ones.
-footer_previous({dst, _, _, _, _} = Footer, LastT, Sec)
-  when LastT =:= none orelse Sec > LastT ->
-    Y = arc_posix_tz:year_of(Sec),
-    [T || {T, _} <- arc_posix_tz:transitions(Footer, Y - 2, Y + 1),
-          T < Sec,
-          LastT =:= none orelse T > LastT];
-footer_previous(_NoRule, _LastT, _Sec) -> [].
+%% Footer-generated transitions before Sec that postdate the recorded ones. The
+%% footer only takes over after the last recorded transition, so an instant at
+%% or before it has none from here.
+footer_previous(none, _LastT, _Sec) -> [];
+footer_previous(Footer, LastT, Sec) ->
+    case LastT =:= none orelse Sec > LastT of
+        false -> [];
+        true ->
+            Y = arc_posix_tz:year_of(Sec),
+            [T || {T, _} <- arc_posix_tz:transitions(Footer, Y - 2, Y + 1),
+                  T < Sec,
+                  LastT =:= none orelse T > LastT]
+    end.
 
 %% Resolve a (properly-cased) zone id through tzdata.zi Link entries to its
 %% canonical zone name. Identity for unknown ids or when no link data exists.
