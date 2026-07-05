@@ -563,33 +563,33 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
   let ch = char_at(bytes, pos)
   case ch {
     // Dot / spread
-    "." -> read_dot(bytes, pos)
+    "." -> Ok(read_dot(bytes, pos))
 
     // Operators with multi-char variants
-    "+" -> read_plus(bytes, pos)
-    "-" -> read_minus(bytes, pos)
-    "*" -> read_star(bytes, pos)
-    "/" -> read_slash(bytes, pos)
-    "%" -> read_percent(bytes, pos)
-    "=" -> read_equal(bytes, pos)
-    "!" -> read_bang(bytes, pos)
-    "<" -> read_less_than(bytes, pos)
-    ">" -> read_greater_than(bytes, pos)
-    "&" -> read_ampersand(bytes, pos)
-    "|" -> read_pipe(bytes, pos)
-    "^" -> read_caret(bytes, pos)
-    "?" -> read_question(bytes, pos)
+    "+" -> Ok(read_plus(bytes, pos))
+    "-" -> Ok(read_minus(bytes, pos))
+    "*" -> Ok(read_star(bytes, pos))
+    "/" -> Ok(read_slash(bytes, pos))
+    "%" -> Ok(read_percent(bytes, pos))
+    "=" -> Ok(read_equal(bytes, pos))
+    "!" -> Ok(read_bang(bytes, pos))
+    "<" -> Ok(read_less_than(bytes, pos))
+    ">" -> Ok(read_greater_than(bytes, pos))
+    "&" -> Ok(read_ampersand(bytes, pos))
+    "|" -> Ok(read_pipe(bytes, pos))
+    "^" -> Ok(read_caret(bytes, pos))
+    "?" -> Ok(read_question(bytes, pos))
 
     // String literals
     "\"" -> read_string(bytes, pos, 0x22)
     "'" -> read_string(bytes, pos, 0x27)
 
     // Template literals
-    "`" -> read_template_literal(bytes, pos)
+    "`" -> Ok(read_template_literal(bytes, pos))
 
     // Numbers
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-      read_number_lenient(bytes, pos)
+      Ok(read_number_lenient(bytes, pos))
 
     // Identifiers and keywords
     "\\" ->
@@ -627,160 +627,159 @@ fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
 
 // --- Punctuation readers ---
 
-fn read_dot(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_dot(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
     "." ->
       case char_at(bytes, pos + 2) {
-        "." -> Ok(tokn(DotDotDot, "...", pos, 3))
-        _ -> Ok(tokn(Dot, ".", pos, 1))
+        "." -> tokn(DotDotDot, "...", pos, 3)
+        _ -> tokn(Dot, ".", pos, 1)
       }
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
       read_number_lenient(bytes, pos)
-    _ -> Ok(tokn(Dot, ".", pos, 1))
+    _ -> tokn(Dot, ".", pos, 1)
   }
 }
 
-fn read_plus(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_plus(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
-    "+" -> Ok(tokn(PlusPlus, "++", pos, 2))
-    "=" -> Ok(tokn(PlusEqual, "+=", pos, 2))
-    _ -> Ok(tokn(Plus, "+", pos, 1))
+    "+" -> tokn(PlusPlus, "++", pos, 2)
+    "=" -> tokn(PlusEqual, "+=", pos, 2)
+    _ -> tokn(Plus, "+", pos, 1)
   }
 }
 
-fn read_minus(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_minus(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
-    "-" -> Ok(tokn(MinusMinus, "--", pos, 2))
-    "=" -> Ok(tokn(MinusEqual, "-=", pos, 2))
-    _ -> Ok(tokn(Minus, "-", pos, 1))
+    "-" -> tokn(MinusMinus, "--", pos, 2)
+    "=" -> tokn(MinusEqual, "-=", pos, 2)
+    _ -> tokn(Minus, "-", pos, 1)
   }
 }
 
-fn read_star(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_star(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
     "*" ->
       case char_at(bytes, pos + 2) {
-        "=" -> Ok(tokn(StarStarEqual, "**=", pos, 3))
-        _ -> Ok(tokn(StarStar, "**", pos, 2))
+        "=" -> tokn(StarStarEqual, "**=", pos, 3)
+        _ -> tokn(StarStar, "**", pos, 2)
       }
-    "=" -> Ok(tokn(StarEqual, "*=", pos, 2))
-    _ -> Ok(tokn(Star, "*", pos, 1))
+    "=" -> tokn(StarEqual, "*=", pos, 2)
+    _ -> tokn(Star, "*", pos, 1)
   }
 }
 
-fn read_slash(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_slash(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
-    "=" -> Ok(tokn(SlashEqual, "/=", pos, 2))
-    _ -> Ok(tokn(Slash, "/", pos, 1))
+    "=" -> tokn(SlashEqual, "/=", pos, 2)
+    _ -> tokn(Slash, "/", pos, 1)
   }
 }
 
-fn read_percent(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_percent(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
-    "=" -> Ok(tokn(PercentEqual, "%=", pos, 2))
-    _ -> Ok(tokn(Percent, "%", pos, 1))
+    "=" -> tokn(PercentEqual, "%=", pos, 2)
+    _ -> tokn(Percent, "%", pos, 1)
   }
 }
 
-fn read_equal(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_equal(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
     "=" ->
       case char_at(bytes, pos + 2) {
-        "=" -> Ok(tokn(EqualEqualEqual, "===", pos, 3))
-        _ -> Ok(tokn(EqualEqual, "==", pos, 2))
+        "=" -> tokn(EqualEqualEqual, "===", pos, 3)
+        _ -> tokn(EqualEqual, "==", pos, 2)
       }
-    ">" -> Ok(tokn(Arrow, "=>", pos, 2))
-    _ -> Ok(tokn(Equal, "=", pos, 1))
+    ">" -> tokn(Arrow, "=>", pos, 2)
+    _ -> tokn(Equal, "=", pos, 1)
   }
 }
 
-fn read_bang(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_bang(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
     "=" ->
       case char_at(bytes, pos + 2) {
-        "=" -> Ok(tokn(BangEqualEqual, "!==", pos, 3))
-        _ -> Ok(tokn(BangEqual, "!=", pos, 2))
+        "=" -> tokn(BangEqualEqual, "!==", pos, 3)
+        _ -> tokn(BangEqual, "!=", pos, 2)
       }
-    _ -> Ok(tokn(Bang, "!", pos, 1))
+    _ -> tokn(Bang, "!", pos, 1)
   }
 }
 
-fn read_less_than(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_less_than(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
-    "=" -> Ok(tokn(LessThanEqual, "<=", pos, 2))
+    "=" -> tokn(LessThanEqual, "<=", pos, 2)
     "<" ->
       case char_at(bytes, pos + 2) {
-        "=" -> Ok(tokn(LessThanLessThanEqual, "<<=", pos, 3))
-        _ -> Ok(tokn(LessThanLessThan, "<<", pos, 2))
+        "=" -> tokn(LessThanLessThanEqual, "<<=", pos, 3)
+        _ -> tokn(LessThanLessThan, "<<", pos, 2)
       }
-    _ -> Ok(tokn(LessThan, "<", pos, 1))
+    _ -> tokn(LessThan, "<", pos, 1)
   }
 }
 
-fn read_greater_than(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_greater_than(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
-    "=" -> Ok(tokn(GreaterThanEqual, ">=", pos, 2))
+    "=" -> tokn(GreaterThanEqual, ">=", pos, 2)
     ">" ->
       case char_at(bytes, pos + 2) {
-        "=" -> Ok(tokn(GreaterThanGreaterThanEqual, ">>=", pos, 3))
+        "=" -> tokn(GreaterThanGreaterThanEqual, ">>=", pos, 3)
         ">" ->
           case char_at(bytes, pos + 3) {
-            "=" ->
-              Ok(tokn(GreaterThanGreaterThanGreaterThanEqual, ">>>=", pos, 4))
-            _ -> Ok(tokn(GreaterThanGreaterThanGreaterThan, ">>>", pos, 3))
+            "=" -> tokn(GreaterThanGreaterThanGreaterThanEqual, ">>>=", pos, 4)
+            _ -> tokn(GreaterThanGreaterThanGreaterThan, ">>>", pos, 3)
           }
-        _ -> Ok(tokn(GreaterThanGreaterThan, ">>", pos, 2))
+        _ -> tokn(GreaterThanGreaterThan, ">>", pos, 2)
       }
-    _ -> Ok(tokn(GreaterThan, ">", pos, 1))
+    _ -> tokn(GreaterThan, ">", pos, 1)
   }
 }
 
-fn read_ampersand(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_ampersand(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
     "&" ->
       case char_at(bytes, pos + 2) {
-        "=" -> Ok(tokn(AmpersandAmpersandEqual, "&&=", pos, 3))
-        _ -> Ok(tokn(AmpersandAmpersand, "&&", pos, 2))
+        "=" -> tokn(AmpersandAmpersandEqual, "&&=", pos, 3)
+        _ -> tokn(AmpersandAmpersand, "&&", pos, 2)
       }
-    "=" -> Ok(tokn(AmpersandEqual, "&=", pos, 2))
-    _ -> Ok(tokn(Ampersand, "&", pos, 1))
+    "=" -> tokn(AmpersandEqual, "&=", pos, 2)
+    _ -> tokn(Ampersand, "&", pos, 1)
   }
 }
 
-fn read_pipe(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_pipe(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
     "|" ->
       case char_at(bytes, pos + 2) {
-        "=" -> Ok(tokn(PipePipeEqual, "||=", pos, 3))
-        _ -> Ok(tokn(PipePipe, "||", pos, 2))
+        "=" -> tokn(PipePipeEqual, "||=", pos, 3)
+        _ -> tokn(PipePipe, "||", pos, 2)
       }
-    "=" -> Ok(tokn(PipeEqual, "|=", pos, 2))
-    _ -> Ok(tokn(Pipe, "|", pos, 1))
+    "=" -> tokn(PipeEqual, "|=", pos, 2)
+    _ -> tokn(Pipe, "|", pos, 1)
   }
 }
 
-fn read_caret(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_caret(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
-    "=" -> Ok(tokn(CaretEqual, "^=", pos, 2))
-    _ -> Ok(tokn(Caret, "^", pos, 1))
+    "=" -> tokn(CaretEqual, "^=", pos, 2)
+    _ -> tokn(Caret, "^", pos, 1)
   }
 }
 
-fn read_question(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+fn read_question(bytes: BitArray, pos: Int) -> Token {
   case char_at(bytes, pos + 1) {
     "?" ->
       case char_at(bytes, pos + 2) {
-        "=" -> Ok(tokn(QuestionQuestionEqual, "??=", pos, 3))
-        _ -> Ok(tokn(QuestionQuestion, "??", pos, 2))
+        "=" -> tokn(QuestionQuestionEqual, "??=", pos, 3)
+        _ -> tokn(QuestionQuestion, "??", pos, 2)
       }
     "." ->
       // ?. but not ?.digit (that would be ? followed by .5 etc)
       case char_at(bytes, pos + 2) {
         "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-          Ok(tokn(Question, "?", pos, 1))
-        _ -> Ok(tokn(QuestionDot, "?.", pos, 2))
+          tokn(Question, "?", pos, 1)
+        _ -> tokn(QuestionDot, "?.", pos, 2)
       }
-    _ -> Ok(tokn(Question, "?", pos, 1))
+    _ -> tokn(Question, "?", pos, 1)
   }
 }
 
@@ -1065,10 +1064,7 @@ fn scan_string_inner(rest: BitArray, n: Int, quote: Int) -> StrScan {
 /// Lex the template span opening at the backtick at `start`: a complete
 /// no-substitution template (TemplateLiteral, `…`) or a head ending at
 /// `${` (TemplateHead). Called by the ordinary scanner on a backtick.
-fn read_template_literal(
-  bytes: BitArray,
-  start: Int,
-) -> Result(Token, LexError) {
+fn read_template_literal(bytes: BitArray, start: Int) -> Token {
   read_template_span(bytes, start + 1, start)
 }
 
@@ -1086,34 +1082,30 @@ pub fn scan_template_continuation(
   rbrace_pos: Int,
   line: Int,
   mode: LexMode,
-) -> Result(#(Token, Scanner), LexError) {
-  use token <- result.try(read_template_span(bytes, rbrace_pos + 1, rbrace_pos))
-  let token = Token(..token, line:)
+) -> #(Token, Scanner) {
+  let token =
+    Token(..read_template_span(bytes, rbrace_pos + 1, rbrace_pos), line:)
   let end_pos = token.pos + token.raw_len
   let raw = byte_slice(bytes, token.pos, token.raw_len)
-  Ok(#(token, scanner_at(bytes, end_pos, line + count_newlines_in(raw), mode)))
+  #(token, scanner_at(bytes, end_pos, line + count_newlines_in(raw), mode))
 }
 
 /// Scan one template span starting at `start` (a backtick or the `}` of a
 /// substitution), with `pos` just past that opening delimiter. Ends at an
 /// unescaped `` ` `` (TemplateLiteral) or `${` (TemplateHead), both
 /// included in the token's raw text.
-fn read_template_span(
-  bytes: BitArray,
-  pos: Int,
-  start: Int,
-) -> Result(Token, LexError) {
+fn read_template_span(bytes: BitArray, pos: Int, start: Int) -> Token {
   let ch = char_at(bytes, pos)
   case ch {
     // An unterminated template is legal inside a regex literal (`` /`/ ``),
     // which the parser re-scans from source — emit an Illegal token spanning
     // just the opening delimiter so the rest of the input still lexes. A
     // stray Illegal token outside a regex is rejected by the parser.
-    "" -> Ok(unterminated_quote_token(bytes, start))
+    "" -> unterminated_quote_token(bytes, start)
     "\\" -> {
       let next = char_at(bytes, pos + 1)
       case next {
-        "" -> Ok(unterminated_quote_token(bytes, start))
+        "" -> unterminated_quote_token(bytes, start)
         _ ->
           case validate_escape(bytes, pos + 1, pos, True) {
             // A template's escapes are never Annex B legacy forms — those are
@@ -1142,13 +1134,13 @@ fn read_template_span(
       case char_at(bytes, pos + 1) {
         "{" -> {
           let len = pos + 2 - start
-          Ok(tokn(TemplateHead, byte_slice(bytes, start, len), start, len))
+          tokn(TemplateHead, byte_slice(bytes, start, len), start, len)
         }
         _ -> read_template_span(bytes, pos + 1, start)
       }
     "`" -> {
       let len = pos - start + 1
-      Ok(tokn(TemplateLiteral, byte_slice(bytes, start, len), start, len))
+      tokn(TemplateLiteral, byte_slice(bytes, start, len), start, len)
     }
     _ -> read_template_span(bytes, pos + char_width_at(bytes, pos), start)
   }
@@ -1167,17 +1159,12 @@ fn read_template_span(
 /// error position, but always at least one character, so lexing makes
 /// progress and never slices into a multi-byte codepoint (every numeric
 /// lex error is positioned at an ASCII char or a codepoint boundary).
-fn read_number_lenient(bytes: BitArray, start: Int) -> Result(Token, LexError) {
+fn read_number_lenient(bytes: BitArray, start: Int) -> Token {
   case read_number(bytes, start) {
-    Ok(token) -> Ok(token)
+    Ok(token) -> token
     Error(err) -> {
       let end = int.max(lex_error_pos(err), start + 1)
-      Ok(tokn(
-        Illegal,
-        byte_slice(bytes, start, end - start),
-        start,
-        end - start,
-      ))
+      tokn(Illegal, byte_slice(bytes, start, end - start), start, end - start)
     }
   }
 }

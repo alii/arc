@@ -23,8 +23,9 @@ import arc/parser/error.{
   ArgumentsInClassFieldInit, ArgumentsInStaticBlock, AwaitInAsyncFunction,
   AwaitInModule, AwaitInStaticBlock, BreakOutsideLoopOrSwitch,
   ClassConstructorAsync, ClassConstructorGenerator, ClassConstructorNotGetter,
-  ClassConstructorNotSetter, ClassDuplicateConstructor, ContinueOutsideLoop,
-  ContinueToNonIterationLabel, DeletePrivateName, DeleteUnqualifiedStrictMode,
+  ClassConstructorNotSetter, ClassDuplicateConstructor, CoalesceMixedWithLogical,
+  ContinueOutsideLoop, ContinueToNonIterationLabel, DeletePrivateName,
+  DeleteUnqualifiedStrictMode,
   DestructuringMissingInitializer, DuplicateBindingLexical, DuplicateDefaultCase,
   DuplicateExport, DuplicateImportBinding, DuplicateLabel,
   DuplicateParamNameStrictMode, DuplicateParameterName, DuplicatePrivateName,
@@ -85,7 +86,7 @@ import arc/parser/number
 import arc/parser/regex
 import arc/parser/source_bytes
 import arc/parser/token.{
-  Binary, BinaryOperator, Logical, assignment_op, binary_operator,
+  Binary, BinaryOperator, Coalesce, ShortCircuit, assignment_op, binary_operator,
   is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
   is_reserved_word_kind, token_kind_to_string,
 }
@@ -5235,6 +5236,7 @@ fn parse_binary_rhs(
       case precedence > min_prec {
         False -> Ok(#(p, left))
         True -> {
+          let op_pos = pos_of(p)
           let p2 = advance(p)
           // Right-associative for **
           let next_min = case tok {
@@ -5243,12 +5245,40 @@ fn parse_binary_rhs(
           }
           use #(p3, right) <- result.try(parse_binary_expression(p2, next_min))
           let span = ast.Span(ast.expression_span(left).start, p3.prev_end)
-          let expr = case op {
-            Logical(op) ->
-              ast.LogicalExpression(operator: op, left:, right:, span:)
+          // `BinOrLogical` splits `Coalesce` from `ShortCircuit` precisely so
+          // this `case op` cannot compile without an arm for each — the
+          // §13.13.1 mixing check below can never be silently dropped.
+          use expr <- result.try(case op {
             Binary(op) ->
-              ast.BinaryExpression(operator: op, left:, right:, span:)
-          }
+              Ok(ast.BinaryExpression(operator: op, left:, right:, span:))
+            ShortCircuit(op) ->
+              // §13.13.1: `||`/`&&` may not have an unparenthesized `??` on
+              // the left. (Right is impossible: `??` binds no tighter than
+              // `||`, so the rhs parse at `next_min ≥ 1` never consumes it.)
+              case left {
+                ast.LogicalExpression(operator: ast.NullishCoalescing, ..) ->
+                  Error(CoalesceMixedWithLogical(op_pos))
+                _ ->
+                  Ok(ast.LogicalExpression(operator: op, left:, right:, span:))
+              }
+            Coalesce ->
+              // §13.13.1: `??` may not have an unparenthesized `||`/`&&` on
+              // either side. `&&` binds tighter, so it CAN reach `right`.
+              case left, right {
+                ast.LogicalExpression(operator: ast.LogicalOr, ..), _
+                | ast.LogicalExpression(operator: ast.LogicalAnd, ..), _
+                | _, ast.LogicalExpression(operator: ast.LogicalOr, ..)
+                | _, ast.LogicalExpression(operator: ast.LogicalAnd, ..) ->
+                  Error(CoalesceMixedWithLogical(op_pos))
+                _, _ ->
+                  Ok(ast.LogicalExpression(
+                    operator: ast.NullishCoalescing,
+                    left:,
+                    right:,
+                    span:,
+                  ))
+              }
+          })
           parse_binary_rhs(P(..p3, last_expr_assignable: False), expr, min_prec)
         }
       }
@@ -7813,7 +7843,7 @@ fn parse_template_substitutions(
   ))
   case peek(p) {
     RightBrace -> {
-      use p <- result.try(template_continuation(p))
+      let p = template_continuation(p)
       case peek(p) {
         // }…${ — another substitution follows.
         TemplateHead ->
@@ -7841,16 +7871,9 @@ fn parse_template_substitutions(
 /// the `}` is garbage — it was lexed without knowing that the `}`
 /// re-enters a template — so it is discarded, exactly like the window
 /// past a re-scanned regex literal.
-fn template_continuation(p: P) -> Result(P, ParseError) {
-  use #(token, scan) <- result.map(
-    lexer.scan_template_continuation(
-      p.bytes,
-      pos_of(p),
-      line_of(p),
-      p.scan.mode,
-    )
-    |> result.map_error(lex_error),
-  )
+fn template_continuation(p: P) -> P {
+  let #(token, scan) =
+    lexer.scan_template_continuation(p.bytes, pos_of(p), line_of(p), p.scan.mode)
   P(..p, tokens: [token], scan:)
 }
 
