@@ -122,10 +122,10 @@ fn classify_leading_zero(rest: String) -> LiteralForm {
   case string.to_graphemes(rest) {
     [] -> Decimal("0")
     graphemes ->
-      case list.all(graphemes, digits.is_octal) {
+      case list.all(graphemes, digits.is_octal_digit) {
         True -> LegacyOctal(rest)
         False ->
-          case list.all(graphemes, digits.is_decimal) {
+          case list.all(graphemes, digits.is_decimal_digit) {
             True -> NonOctalDecimal(rest)
             False -> Decimal("0" <> rest)
           }

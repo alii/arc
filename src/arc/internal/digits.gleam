@@ -47,6 +47,27 @@ pub fn hex_value_code(code: Int) -> Option(Int) {
   }
 }
 
+// The code-point predicates below are the single definition of the ASCII
+// character classes: callers scanning code points or code units use these
+// instead of re-inlining `c >= 0x30 && c <= 0x39` and friends. Note that Gleam
+// guards cannot call functions, so a `<<b, _:bytes>> if …` bit-array pattern
+// still has to spell the range out.
+
+/// `0-9`, as a code point.
+pub fn is_decimal_code(c: Int) -> Bool {
+  c >= 0x30 && c <= 0x39
+}
+
+/// `A-Z` or `a-z`, as a code point.
+pub fn is_ascii_alpha_code(c: Int) -> Bool {
+  { c >= 0x41 && c <= 0x5A } || { c >= 0x61 && c <= 0x7A }
+}
+
+/// `0-9`, `A-Z` or `a-z`, as a code point.
+pub fn is_ascii_alnum_code(c: Int) -> Bool {
+  is_decimal_code(c) || is_ascii_alpha_code(c)
+}
+
 /// Value of an ASCII decimal digit.
 pub fn digit_value(ch: String) -> Option(Int) {
   case ch {
@@ -114,7 +135,7 @@ pub fn alnum_value(ch: String) -> Option(Int) {
 // `Option`-returning tables above (which would allocate a `Some(_)` per char).
 
 /// `0-9`, `a-f`, `A-F`.
-pub fn is_hex(ch: String) -> Bool {
+pub fn is_hex_digit(ch: String) -> Bool {
   case ch {
     "0"
     | "1"
@@ -143,7 +164,7 @@ pub fn is_hex(ch: String) -> Bool {
 }
 
 /// `0-9`.
-pub fn is_decimal(ch: String) -> Bool {
+pub fn is_decimal_digit(ch: String) -> Bool {
   case ch {
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
     _ -> False
@@ -151,7 +172,7 @@ pub fn is_decimal(ch: String) -> Bool {
 }
 
 /// `0-7`.
-pub fn is_octal(ch: String) -> Bool {
+pub fn is_octal_digit(ch: String) -> Bool {
   case ch {
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
     _ -> False
@@ -159,7 +180,7 @@ pub fn is_octal(ch: String) -> Bool {
 }
 
 /// `0` or `1`.
-pub fn is_binary(ch: String) -> Bool {
+pub fn is_binary_digit(ch: String) -> Bool {
   case ch {
     "0" | "1" -> True
     _ -> False

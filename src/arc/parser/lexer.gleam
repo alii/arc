@@ -825,7 +825,7 @@ fn validate_escape(
           // In templates, only \0 NOT followed by a digit is valid (null char)
           case ch {
             "0" ->
-              case digits.is_decimal(char_at(bytes, pos + 1)) {
+              case digits.is_decimal_digit(char_at(bytes, pos + 1)) {
                 True -> Error(InvalidEscapeSequence(backslash_pos))
                 False -> Ok(Escape(2, False))
               }
@@ -835,7 +835,8 @@ fn validate_escape(
           case ch {
             // `\0` alone is the NUL escape, legal in strict code; `\0` followed
             // by any decimal digit is a LegacyOctalEscapeSequence.
-            "0" -> Ok(Escape(2, digits.is_decimal(char_at(bytes, pos + 1))))
+            "0" ->
+              Ok(Escape(2, digits.is_decimal_digit(char_at(bytes, pos + 1))))
             _ -> Ok(Escape(2, True))
           }
       }
@@ -844,7 +845,7 @@ fn validate_escape(
     "x" -> {
       let h1 = char_at(bytes, pos + 1)
       let h2 = char_at(bytes, pos + 2)
-      case digits.is_hex(h1) && digits.is_hex(h2) {
+      case digits.is_hex_digit(h1) && digits.is_hex_digit(h2) {
         True -> Ok(Escape(4, False))
         False -> Error(InvalidHexEscapeSequence(backslash_pos))
       }
@@ -908,10 +909,10 @@ fn validate_unicode_escape(
       let h3 = char_at(bytes, pos + 2)
       let h4 = char_at(bytes, pos + 3)
       case
-        digits.is_hex(h1)
-        && digits.is_hex(h2)
-        && digits.is_hex(h3)
-        && digits.is_hex(h4)
+        digits.is_hex_digit(h1)
+        && digits.is_hex_digit(h2)
+        && digits.is_hex_digit(h3)
+        && digits.is_hex_digit(h4)
       {
         True -> Ok(Escape(6, False))
         False -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
@@ -922,7 +923,7 @@ fn validate_unicode_escape(
 
 /// Skip consecutive hex digits (no underscores). Used for \u{} validation.
 fn skip_hex_run(bytes: BitArray, pos: Int) -> Int {
-  case digits.is_hex(char_at(bytes, pos)) {
+  case digits.is_hex_digit(char_at(bytes, pos)) {
     True -> skip_hex_run(bytes, pos + 1)
     False -> pos
   }
@@ -944,10 +945,10 @@ fn unicode_escape_span(bytes: BitArray, pos: Int) -> Int {
     _ -> {
       // \uXXXX — 4 hex digits
       case
-        digits.is_hex(char_at(bytes, pos + 2))
-        && digits.is_hex(char_at(bytes, pos + 3))
-        && digits.is_hex(char_at(bytes, pos + 4))
-        && digits.is_hex(char_at(bytes, pos + 5))
+        digits.is_hex_digit(char_at(bytes, pos + 2))
+        && digits.is_hex_digit(char_at(bytes, pos + 3))
+        && digits.is_hex_digit(char_at(bytes, pos + 4))
+        && digits.is_hex_digit(char_at(bytes, pos + 5))
       {
         True -> 6
         False -> 2
@@ -1393,22 +1394,22 @@ fn number_token(bytes: BitArray, start: Int, end: Int) -> Token {
 /// Skip decimal digits with numeric separator validation.
 /// Returns Ok(end_pos) or Error if separator rules violated.
 fn skip_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False, digits.is_decimal)
+  skip_digits_loop(bytes, pos, pos, False, digits.is_decimal_digit)
 }
 
 /// Skip hex digits with numeric separator validation.
 fn skip_hex_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False, digits.is_hex)
+  skip_digits_loop(bytes, pos, pos, False, digits.is_hex_digit)
 }
 
 /// Skip octal digits with numeric separator validation.
 fn skip_octal_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False, digits.is_octal)
+  skip_digits_loop(bytes, pos, pos, False, digits.is_octal_digit)
 }
 
 /// Skip binary digits with numeric separator validation.
 fn skip_binary_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(bytes, pos, pos, False, digits.is_binary)
+  skip_digits_loop(bytes, pos, pos, False, digits.is_binary_digit)
 }
 
 /// Shared scan loop: consume digits accepted by `is_digit`, validating
@@ -1618,10 +1619,10 @@ fn read_identifier_escape(
           let h3 = char_at(bytes, pos + 4)
           let h4 = char_at(bytes, pos + 5)
           case
-            digits.is_hex(h1)
-            && digits.is_hex(h2)
-            && digits.is_hex(h3)
-            && digits.is_hex(h4)
+            digits.is_hex_digit(h1)
+            && digits.is_hex_digit(h2)
+            && digits.is_hex_digit(h3)
+            && digits.is_hex_digit(h4)
           {
             True -> {
               let hex_str = byte_slice(bytes, pos + 2, 4)
@@ -1672,8 +1673,7 @@ pub fn validate_identifier_codepoint(cp: Int, is_start: Bool) -> Bool {
               // ID_Start: letters, _, $
               { cp == 0x24 }
               || { cp == 0x5F }
-              || { cp >= 0x41 && cp <= 0x5A }
-              || { cp >= 0x61 && cp <= 0x7A }
+              || digits.is_ascii_alpha_code(cp)
               || { cp > 127 && is_unicode_id_start(cp) }
             False ->
               // ID_Continue: letters, digits, _, $, ZWNJ, ZWJ
@@ -1905,9 +1905,7 @@ fn all_id_continue_cps(cps: List(UtfCodepoint)) -> Bool {
 
 fn is_cp_id_continue(n: Int) -> Bool {
   // ASCII fast path
-  { n >= 0x61 && n <= 0x7A }
-  || { n >= 0x41 && n <= 0x5A }
-  || { n >= 0x30 && n <= 0x39 }
+  digits.is_ascii_alnum_code(n)
   || n == 0x5F
   || n == 0x24
   || n == 0x200C
