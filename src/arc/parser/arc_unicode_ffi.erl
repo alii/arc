@@ -1,6 +1,6 @@
 %% Unicode ID_Start / ID_Continue membership for the lexer, backed by the
 %% SAME generated Unicode 17 range tables the regex engine uses
-%% (arc_regex_uni17_ffi:decoded_ranges/1), so the lexer and \p{ID_Start} in RegExp
+%% (arc_unicode_tables:range_tuple/1), so the lexer and \p{ID_Start} in RegExp
 %% can never disagree about which identifiers are legal.
 %%
 %% Both predicates are total over the integers: surrogates (reachable from a
@@ -12,35 +12,24 @@
 %% ID_Start (Unicode derived property: L, Nl + Other_ID_Start).
 is_id_start(CP) when CP >= 16#D800, CP =< 16#DFFF -> false;
 is_id_start(CP) when CP < 0; CP > 16#10FFFF -> false;
-is_id_start(CP) -> in_ranges(CP, id_ranges(id_start)).
+is_id_start(CP) -> in_ranges(CP, table(id_start)).
 
 %% ID_Continue (ID_Start + Mn, Mc, Nd, Pc + Other_ID_Continue).
 is_id_continue(CP) when CP >= 16#D800, CP =< 16#DFFF -> false;
 is_id_continue(CP) when CP < 0; CP > 16#10FFFF -> false;
-is_id_continue(CP) -> in_ranges(CP, id_ranges(id_continue)).
+is_id_continue(CP) -> in_ranges(CP, table(id_continue)).
 
 %% -- range tables ---------------------------------------------------------
 
-%% Tuple of {Lo, Hi} pairs (inclusive, sorted, disjoint), decoded once from
-%% the generated table and cached in persistent_term so lookups are a pure
-%% O(log n) binary search.
-id_ranges(Which) ->
-    Key = {?MODULE, Which},
-    case persistent_term:get(Key, undefined) of
-        undefined ->
-            Ranges = list_to_tuple(table(Which)),
-            persistent_term:put(Key, Ranges),
-            Ranges;
-        Ranges ->
-            Ranges
-    end.
-
+%% Tuple of {Lo, Hi} pairs (inclusive, sorted, disjoint) so lookups are a pure
+%% O(log n) binary search. arc_unicode_tables decodes and caches it.
+%%
 %% The generated table carrying these two properties is a hard build
 %% invariant: without it every identifier in every source file would be
 %% rejected. Crash on a missing key rather than answer `false` forever.
 table(Which) ->
     Key = table_key(Which),
-    case arc_regex_uni17_ffi:decoded_ranges(Key) of
+    case arc_unicode_tables:range_tuple(Key) of
         none -> erlang:error({missing_unicode_table, Key});
         Ranges -> Ranges
     end.
