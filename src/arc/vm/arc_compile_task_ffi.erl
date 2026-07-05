@@ -34,9 +34,12 @@
 %% matches, left to sit in its mailbox forever.
 %%
 %% What the link bought — a worker dying with a caller that was killed
-%% mid-compile — is only wasted CPU when it is missing: the worker's reply
-%% goes to a dead pid and the process then exits on its own. That is not
-%% worth an uncatchable kill and a leaked message.
+%% mid-compile — matters: the worker holds a min_heap_size of up to
+%% ?COMPILE_HEAP_MAX_WORDS (~1GB) allocated up front, and would sit there
+%% parsing for seconds with nobody left to read the result. So the worker
+%% follows the caller by a REVERSE monitor instead: it monitors the caller
+%% and exits the moment the caller goes down. Same teardown as the link, no
+%% exit signal travelling back the other way.
 -module(arc_compile_task_ffi).
 -export([run_compile_task/2]).
 
@@ -53,6 +56,7 @@ run_compile_task(SourceBytes, Task) ->
     Ref = make_ref(),
     {Pid, MRef} = spawn_opt(
         fun() ->
+            watch_caller(Self, self()),
             Reply = try {ok, Task()}
                     catch Class:Reason:Stack -> {raise, Class, Reason, Stack}
                     end,
@@ -74,3 +78,20 @@ run_compile_task(SourceBytes, Task) ->
             %% Nothing to re-raise faithfully — surface it as an exit.
             erlang:exit(Reason)
     end.
+
+%% The worker cannot select on the caller's death while it is inside Task/0,
+%% so a third, tiny process does the watching: it holds a monitor on each and
+%% kills the worker if the caller dies first. This is what makes the worker's
+%% ~1GB pre-allocated heap and its multi-second parse go away when the caller
+%% is killed mid-compile — the job the removed link used to do (see LIFETIME).
+%% It exits on its own the moment the worker finishes.
+watch_caller(Caller, Worker) ->
+    spawn(fun() ->
+        CallerRef = erlang:monitor(process, Caller),
+        WorkerRef = erlang:monitor(process, Worker),
+        receive
+            {'DOWN', CallerRef, process, Caller, _} -> erlang:exit(Worker, kill);
+            {'DOWN', WorkerRef, process, Worker, _} -> ok
+        end
+    end),
+    ok.

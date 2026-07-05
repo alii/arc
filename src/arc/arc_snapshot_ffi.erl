@@ -1,18 +1,20 @@
 %% Both sides of the engine snapshot CONTAINER (see arc/engine.gleam
-%% `serialize`/`deserialize`). Kept in Erlang for one reason: `binary_to_term`
-%% must never run on bytes we have not first proved to be one of our own
-%% snapshots.
+%% `serialize`/`deserialize`).
 %%
 %% Container layout — plain bytes, no term encoding:
 %%
 %%     <<"arc-engine", Version:32, TermBin/binary>>
 %%
 %% The tag and version live OUTSIDE the term, so `decode/2` can reject a
-%% foreign, corrupt or stale binary by pattern-matching bytes, before
-%% `binary_to_term` is ever handed anything. (The old format put the tag and
-%% version INSIDE the term, which meant every byte sequence reaching the
-%% public `engine.deserialize/1` was fully deserialized first and only then
-%% checked — the check came too late to protect the decoder that performed it.)
+%% stale, foreign or corrupt binary by pattern-matching bytes, without
+%% deserializing it first. (The old format put the tag and version INSIDE
+%% the term, so a version mismatch was only noticed after the whole term had
+%% been decoded.)
+%%
+%% TRUST: the header is an ACCIDENT guard, not an authenticity check. A tag
+%% and a public version integer prove nothing about provenance — anyone can
+%% prepend them to a hostile term. The snapshot is trusted in-VM data:
+%% `deserialize` must only ever be handed bytes this VM produced.
 -module(arc_snapshot_ffi).
 -export([encode/2, decode/2]).
 
@@ -35,15 +37,17 @@ encode(Version, Snapshot) when is_integer(Version), is_tuple(Snapshot) ->
 %% The error atoms are the constructors of `engine.DeserializeError`.
 %%
 %% Plain binary_to_term (not [safe]): a snapshot legitimately contains funs,
-%% which [safe] would reject. Safety comes from the header match above it —
-%% only bytes carrying our tag AND our exact version reach the decoder.
+%% which [safe] would reject. This is only sound because the caller is trusted
+%% (see TRUST above) — the header match buys us early rejection of stale and
+%% obviously-not-a-snapshot bytes, NOT protection from a hostile term.
 decode(Version, <<?TAG, V:32, TermBin/binary>>) when V =:= Version ->
     try erlang:binary_to_term(TermBin) of
         {_Heap, _Builtins, _Global} = Snapshot ->
             {ok, Snapshot};
         _Other ->
-            %% Our tag and our version, but not our payload shape: a truncated
-            %% or hand-forged container.
+            %% Our tag and our version, but not our payload shape. This is a
+            %% shape check, not a validation: it keeps a wrong-shaped payload
+            %% from badmatching once it reaches Gleam.
             {error, incompatible_snapshot}
     catch
         error:badarg -> {error, incompatible_snapshot}

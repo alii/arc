@@ -77,7 +77,6 @@
          take_self_async_tokens/3]).
 
 -define(TAB, arc_atomics_waiterlist).
--define(OWNER, arc_atomics_waiterlist_owner).
 
 %% Process-local buffer identity fallback: the heap ref id scoped by the
 %% owning process. Used for buffers without process-independent shared
@@ -262,7 +261,6 @@ spawn_owner() ->
                            {write_concurrency, true},
                            {read_concurrency, true}]) of
             ?TAB ->
-                register(?OWNER, self()),
                 Caller ! {Tag, ready},
                 owner_loop()
         catch
@@ -291,14 +289,11 @@ spawn_owner() ->
             erlang:error({arc_atomics_waiterlist_unavailable, Reason})
     end.
 
-%% The owner exists to hold the table, nothing more. It is REGISTERED (so it
-%% is findable, and so a second owner cannot silently start), and it matches
-%% only the messages it defines: `stop` (tears the table down with the
-%% process) and nothing else. The old bare `receive _ -> loop end` swallowed
-%% every message sent to it, including exit signals from a trapping parent
-%% and any future protocol we might add — a message going missing here is a
-%% bug that would never be seen.
+%% The owner exists to hold the table, nothing more: it is unregistered,
+%% nobody holds its pid, and it never terminates. It has no protocol, so it
+%% just drains anything that somehow reaches its mailbox rather than letting
+%% it accumulate and slow every later selective receive down.
 owner_loop() ->
     receive
-        stop -> ok
+        _ -> owner_loop()
     end.
