@@ -8,9 +8,7 @@ import arc/vm/key.{Index, Named}
 import arc/vm/ops/array_iterator
 import arc/vm/ops/object
 import arc/vm/ops/property
-import arc/vm/state.{
-  type Heap, type State, type StepExit, State, Threw,
-}
+import arc/vm/state.{type Heap, type State, type StepExit, State, Threw}
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, GeneratorObject, JsObject, JsUndefined,
   ObjectSlot,
@@ -208,7 +206,9 @@ fn typed_array_values_range(
 ///
 /// One drained element is shaped by exactly the same `array_iterator.shape_result`
 /// the one-at-a-time stepper uses, so the spread fast path and the slow path
-/// cannot drift apart.
+/// cannot drift apart. For a "value" iterator that shaping is the identity, so
+/// the drained list is handed back untouched — this fast path exists precisely
+/// to avoid per-element work.
 fn shape_iter_values(
   h: Heap(host),
   array_proto: Ref,
@@ -216,12 +216,25 @@ fn shape_iter_values(
   start: Int,
   values: List(JsValue),
 ) -> #(Heap(host), List(JsValue)) {
-  values
-  |> list.index_map(fn(v, i) { #(start + i, v) })
-  |> list.map_fold(h, fn(h, indexed) {
-    let #(index, elem) = indexed
-    array_iterator.shape_result(h, array_proto, iter_kind, index, elem)
-  })
+  case iter_kind {
+    value.ArrayIterValues -> #(h, values)
+    value.ArrayIterKeys | value.ArrayIterEntries -> {
+      let #(h, shaped) =
+        list.index_fold(values, #(h, []), fn(acc, elem, i) {
+          let #(h, shaped) = acc
+          let #(h, out) =
+            array_iterator.shape_result(
+              h,
+              array_proto,
+              iter_kind,
+              start + i,
+              elem,
+            )
+          #(h, [out, ..shaped])
+        })
+      #(h, list.reverse(shaped))
+    }
+  }
 }
 
 /// Shared drain for the Set-iterator and Map-iterator spread fast paths — both
