@@ -5,10 +5,11 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/ordered_entries
 import arc/vm/key.{Index, Named}
+import arc/vm/ops/array_iterator
 import arc/vm/ops/object
 import arc/vm/ops/property
 import arc/vm/state.{
-  type Heap, type State, type StepExit, type VmError, State, Threw,
+  type Heap, type State, type StepExit, State, Threw,
 }
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, GeneratorObject, JsObject, JsUndefined,
@@ -19,15 +20,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
-
-// ============================================================================
-// Callback types for VM functions that can't be imported directly
-// ============================================================================
-
-pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(completion.Outcome, State(host)), VmError)
-
-import arc/vm/completion
 
 // ============================================================================
 // Array manipulation helpers
@@ -213,6 +205,10 @@ fn typed_array_values_range(
 /// §23.1.5.1: shape a drained run of iteration results for the iterator's
 /// kind — indices ("key"), the elements ("value"), or fresh [index, element]
 /// pair arrays ("key+value"). `start` is the source index of the first value.
+///
+/// One drained element is shaped by exactly the same `array_iterator.shape_result`
+/// the one-at-a-time stepper uses, so the spread fast path and the slow path
+/// cannot drift apart.
 fn shape_iter_values(
   h: Heap(host),
   array_proto: Ref,
@@ -220,41 +216,12 @@ fn shape_iter_values(
   start: Int,
   values: List(JsValue),
 ) -> #(Heap(host), List(JsValue)) {
-  case iter_kind {
-    value.ArrayIterValues -> #(h, values)
-    value.ArrayIterKeys -> #(
-      h,
-      list.index_map(values, fn(_, i) { value.from_int(start + i) }),
-    )
-    value.ArrayIterEntries -> {
-      let #(h, rev) =
-        list.index_fold(values, #(h, []), fn(acc, el, i) {
-          let #(h, lst) = acc
-          let #(h, pair_ref) =
-            common.alloc_array(h, [value.from_int(start + i), el], array_proto)
-          #(h, [JsObject(pair_ref), ..lst])
-        })
-      #(h, list.reverse(rev))
-    }
-  }
-}
-
-/// Latch an Array Iterator as exhausted (`cursor: None`) after a full drain —
-/// further .next() calls answer done, matching the spec's
-/// [[IteratedObject]] = undefined "already returned" state.
-fn latch_array_iter_done(h: Heap(host), iter_ref: Ref) -> Heap(host) {
-  let assert Some(
-    ObjectSlot(kind: value.ArrayIteratorObject(source:, iter_kind:, ..), ..) as slot,
-  ) = heap.read(h, iter_ref)
-    as "array iterator ref is not an ArrayIteratorObject"
-  heap.write(
-    h,
-    iter_ref,
-    ObjectSlot(
-      ..slot,
-      kind: value.ArrayIteratorObject(source:, cursor: None, iter_kind:),
-    ),
-  )
+  values
+  |> list.index_map(fn(v, i) { #(start + i, v) })
+  |> list.map_fold(h, fn(h, indexed) {
+    let #(index, elem) = indexed
+    array_iterator.shape_result(h, array_proto, iter_kind, index, elem)
+  })
 }
 
 /// Shared drain for the Set-iterator and Map-iterator spread fast paths — both
@@ -324,7 +291,7 @@ pub fn spread_into_array(
   state: State(host),
   target_ref: Ref,
   iterable: JsValue,
-  execute_inner: ExecuteInnerFn(host),
+  execute_inner: generators.ExecuteInnerFn(host),
 ) -> Result(State(host), StepExit(host)) {
   case iterable {
     JsObject(src_ref) ->
@@ -725,7 +692,7 @@ fn spread_array_iterator(
               values,
             )
           let heap = append_list_to_array(heap, target_ref, values)
-          let heap = latch_array_iter_done(heap, src_ref)
+          let heap = array_iterator.exhaust_heap(heap, src_ref)
           Ok(State(..state, heap:))
         }
       }
@@ -771,7 +738,7 @@ fn spread_array_iterator(
               append_list_to_array(heap, target_ref, values)
             }
           }
-          let heap = latch_array_iter_done(heap, src_ref)
+          let heap = array_iterator.exhaust_heap(heap, src_ref)
           Ok(State(..state, heap:))
         }
       }
@@ -1033,7 +1000,7 @@ pub fn drain_generator_to_array(
   state: State(host),
   gen_ref: Ref,
   target_ref: Ref,
-  execute_inner: ExecuteInnerFn(host),
+  execute_inner: generators.ExecuteInnerFn(host),
 ) -> Result(State(host), StepExit(host)) {
   use #(done, val, next_state) <- result.try(generators.resume_generator_next(
     state,

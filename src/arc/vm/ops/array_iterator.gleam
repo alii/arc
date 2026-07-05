@@ -267,7 +267,13 @@ fn shape_yield(
 /// Latch the iterator done — `cursor: None`, the spec's [[IteratedObject]] =
 /// undefined state.
 fn exhaust(state: State(host), iter_ref: Ref) -> State(host) {
-  State(..state, heap: set_cursor(state.heap, iter_ref, None))
+  State(..state, heap: exhaust_heap(state.heap, iter_ref))
+}
+
+/// `exhaust` for a caller that only holds a heap (the spread fast paths in
+/// `ops/array`, which drain an iterator without ever building a `State`).
+pub fn exhaust_heap(h: state.Heap(host), iter_ref: Ref) -> state.Heap(host) {
+  set_cursor(h, iter_ref, None)
 }
 
 /// `exhaust` for a caller holding a still-current iterator slot — see

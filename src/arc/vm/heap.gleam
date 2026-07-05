@@ -1,3 +1,4 @@
+import arc/vm/gc_trace
 import arc/vm/internal/elements
 import arc/vm/key.{Named}
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
@@ -578,7 +579,7 @@ fn mark_loop(
             Ok(slot) -> {
               // Prepend child ref IDs directly onto frontier — avoids
               // intermediate list from list.map + the O(n) list.append.
-              let child_refs = value.refs_in_slot(slot, heap.host_refs)
+              let child_refs = gc_trace.refs_in_slot(slot, heap.host_refs)
               let frontier = prepend_ref_ids(child_refs, rest)
               // A materialised lazy proto (tagged id) additionally pins its
               // owning fn id: if the fn were collected and its id recycled, a
