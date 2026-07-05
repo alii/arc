@@ -1246,6 +1246,7 @@ fn parse_iso(s: String) -> Option(JsNum) {
 /// string invalid — they must NOT reach `make_date`, whose MakeDay/MakeTime
 /// arithmetic happily rolls "2021-13-01" over into 2022 and "2021-01-01T25:00"
 /// into the next day. Parsing rejects; only construction rolls over.
+/// The zone offset is gated separately, in `parse_hhmm`.
 fn validate_iso(
   year: Int,
   mon: Int,
@@ -1352,14 +1353,19 @@ fn parse_zone(s: String, has_time: Bool) -> Option(#(Zone, String)) {
 }
 
 /// The `HH:mm` / `HHmm` body of a `±` offset. Minutes are not optional — a
-/// bare `+05` is not a Date Time String Format offset.
+/// bare `+05` is not a Date Time String Format offset. The TimeZoneUTCOffset
+/// production also bounds the digits (HH 00-23, mm 00-59), so `+99:99` and
+/// `-24:00` are parse failures, not offsets that roll over.
 fn parse_hhmm(s: String) -> Option(#(Int, String)) {
   use #(h, rest) <- option.then(take_digits(s, 2))
   use #(m, rest) <- option.then(case rest {
     ":" <> r -> take_digits(r, 2)
     _ -> take_digits(rest, 2)
   })
-  Some(#(h * 60 + m, rest))
+  case h <= 23 && m <= 59 {
+    True -> Some(#(h * 60 + m, rest))
+    False -> None
+  }
 }
 
 fn jsnum_add_minutes(n: JsNum, minutes: Int) -> JsNum {
