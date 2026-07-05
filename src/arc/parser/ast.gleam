@@ -603,7 +603,10 @@ pub type Pattern {
 
 pub type PatternProperty {
   PatternProperty(key: PropertyKey, value: Pattern, shorthand: Bool)
-  RestProperty(argument: Pattern)
+  /// §13.3.3 BindingRestProperty is `... BindingIdentifier` — no nested
+  /// pattern (unlike array-rest `RestElement`, which does allow one). Storing
+  /// name+span directly makes `{...[a]}` / `{...{x}}` unrepresentable.
+  RestProperty(name: String, span: Span)
 }
 
 /// §8.2.1 BoundNames of a BindingPattern, in source order. This is the single
@@ -622,7 +625,7 @@ pub fn pattern_bound_names(p: Pattern) -> List(String) {
       list.flat_map(properties, fn(property) {
         case property {
           PatternProperty(value:, ..) -> pattern_bound_names(value)
-          RestProperty(argument:) -> pattern_bound_names(argument)
+          RestProperty(name:, ..) -> [name]
         }
       })
     AssignmentPattern(left:, ..) -> pattern_bound_names(left)

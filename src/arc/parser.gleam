@@ -25,31 +25,31 @@ import arc/parser/error.{
   ClassConstructorAsync, ClassConstructorGenerator, ClassConstructorNotGetter,
   ClassConstructorNotSetter, ClassDuplicateConstructor, CoalesceMixedWithLogical,
   ContinueOutsideLoop, ContinueToNonIterationLabel, DeletePrivateName,
-  DeleteUnqualifiedStrictMode,
-  DestructuringMissingInitializer, DuplicateBindingLexical, DuplicateDefaultCase,
-  DuplicateExport, DuplicateImportBinding, DuplicateLabel,
-  DuplicateParamNameStrictMode, DuplicateParameterName, DuplicatePrivateName,
-  DuplicateProtoProperty, EnumReservedWord, EscapedReservedWord,
-  EvalArgsAssignStrictMode, ExpectedAfterOptionalChain,
-  ExpectedAsOrFromAfterExportStar, ExpectedBindingPattern,
-  ExpectedBraceOrStarAfterComma, ExpectedCallOrDotAfterImport,
-  ExpectedCaseDefaultOrBrace, ExpectedCloseAfterSetter,
-  ExpectedCommaOrBraceInExport, ExpectedCommaOrBraceInImport,
-  ExpectedCommaOrBraceInObject, ExpectedCommaOrBracket,
-  ExpectedCommaOrBracketInExpr, ExpectedCommaOrCloseParen,
-  ExpectedCommaOrObjectClose, ExpectedExportAlias, ExpectedExportSpecifierName,
-  ExpectedForDeclSeparator, ExpectedForHeadSeparator, ExpectedForSeparator,
-  ExpectedFromOrComma, ExpectedFunctionAfterAsync, ExpectedIdentifier,
-  ExpectedIdentifierAfterDot, ExpectedImportMeta, ExpectedImportSpecifier,
-  ExpectedImportSpecifierName, ExpectedModuleSpecifier, ExpectedNewTarget,
-  ExpectedPropertyName, ExpectedSemicolon, ExpectedToken, ExportNotTopLevel,
-  FieldNamedConstructor, ForInInitializer, ForOfInitializer,
-  FunctionDeclInLabelBody, FunctionDeclInSingleStatement, GeneratorDeclLabeled,
-  GetterNoParams, IdentifierAlreadyDeclared, ImportNotTopLevel,
-  InvalidAssignmentLhs, InvalidDestructuringTarget, InvalidForInLhs,
-  InvalidForOfLhs, InvalidLhsPrefixOp, InvalidPostfixLhs, InvalidTemplateEscape,
-  LetBindingInLexicalDecl, LetIdentifierStrictMode, LexicalDeclInLabel,
-  LexicalDeclInSingleStatement, MalformedNumericLiteral,
+  DeleteUnqualifiedStrictMode, DestructuringMissingInitializer,
+  DuplicateBindingLexical, DuplicateDefaultCase, DuplicateExport,
+  DuplicateImportBinding, DuplicateLabel, DuplicateParamNameStrictMode,
+  DuplicateParameterName, DuplicatePrivateName, DuplicateProtoProperty,
+  EnumReservedWord, EscapedReservedWord, EvalArgsAssignStrictMode,
+  ExpectedAfterOptionalChain, ExpectedAsOrFromAfterExportStar,
+  ExpectedBindingPattern, ExpectedBraceOrStarAfterComma,
+  ExpectedCallOrDotAfterImport, ExpectedCaseDefaultOrBrace,
+  ExpectedCloseAfterSetter, ExpectedCommaOrBraceInExport,
+  ExpectedCommaOrBraceInImport, ExpectedCommaOrBraceInObject,
+  ExpectedCommaOrBracket, ExpectedCommaOrBracketInExpr,
+  ExpectedCommaOrCloseParen, ExpectedCommaOrObjectClose, ExpectedExportAlias,
+  ExpectedExportSpecifierName, ExpectedForDeclSeparator,
+  ExpectedForHeadSeparator, ExpectedForSeparator, ExpectedFromOrComma,
+  ExpectedFunctionAfterAsync, ExpectedIdentifier, ExpectedIdentifierAfterDot,
+  ExpectedImportMeta, ExpectedImportSpecifier, ExpectedImportSpecifierName,
+  ExpectedModuleSpecifier, ExpectedNewTarget, ExpectedPropertyName,
+  ExpectedSemicolon, ExpectedToken, ExportNotTopLevel, FieldNamedConstructor,
+  ForInInitializer, ForOfInitializer, FunctionDeclInLabelBody,
+  FunctionDeclInSingleStatement, GeneratorDeclLabeled, GetterNoParams,
+  IdentifierAlreadyDeclared, ImportNotTopLevel, InvalidAssignmentLhs,
+  InvalidDestructuringTarget, InvalidForInLhs, InvalidForOfLhs,
+  InvalidLhsPrefixOp, InvalidPostfixLhs, InvalidRestBinding,
+  InvalidTemplateEscape, LetBindingInLexicalDecl, LetIdentifierStrictMode,
+  LexicalDeclInLabel, LexicalDeclInSingleStatement, MalformedNumericLiteral,
   MisplacedUseStrictDirective, MissingCatchOrFinally, MissingConstInitializer,
   NewTargetOutsideFunction, OctalEscapeStrictMode, OctalLiteralStrictMode,
   PrivateNameAsPropertyKey, PrivateNameConstructor, ReservedWordImportBinding,
@@ -1756,14 +1756,33 @@ fn parse_object_binding_properties(
       Ok(#(advance(p), ast.ObjectPattern(properties: list.reverse(acc))))
     DotDotDot -> {
       let p2 = advance(p)
-      use #(p3, inner_pat) <- result.try(parse_binding_pattern(p2))
-      let rest = ast.RestProperty(argument: inner_pat)
-      let p4 = case peek(p3) {
-        Comma -> advance(p3)
-        _ -> p3
+      let kind = peek(p2)
+      // §13.3.3: BindingRestProperty is `... BindingIdentifier` — no nested
+      // pattern (unlike array-rest BindingRestElement, which allows one).
+      use Nil <- result.try(case kind {
+        LeftBrace | LeftBracket -> Error(InvalidRestBinding(pos_of(p2)))
+        Identifier -> Ok(Nil)
+        _ ->
+          case is_contextual_keyword(kind) {
+            True -> Ok(Nil)
+            False -> Error(ExpectedIdentifier(pos_of(p2)))
+          }
+      })
+      let name = peek_value(p2)
+      let span = span_of(p2)
+      use #(p3, _ident_pat) <- result.try(validate_and_register_binding(
+        p2,
+        name,
+      ))
+      let rest = ast.RestProperty(name:, span:)
+      // Rest must be last — trailing comma is a SyntaxError.
+      case peek(p3) {
+        Comma -> Error(RestTrailingComma(pos_of(p3)))
+        _ -> {
+          use p4 <- result.map(expect(p3, RightBrace))
+          #(p4, ast.ObjectPattern(properties: list.reverse([rest, ..acc])))
+        }
       }
-      use p5 <- result.try(expect(p4, RightBrace))
-      Ok(#(p5, ast.ObjectPattern(properties: list.reverse([rest, ..acc]))))
     }
     _ -> {
       use #(p2, prop) <- result.try(parse_object_binding_property(p))
@@ -5268,8 +5287,8 @@ fn parse_binary_rhs(
                 ast.LogicalExpression(operator: ast.LogicalOr, ..), _
                 | ast.LogicalExpression(operator: ast.LogicalAnd, ..), _
                 | _, ast.LogicalExpression(operator: ast.LogicalOr, ..)
-                | _, ast.LogicalExpression(operator: ast.LogicalAnd, ..) ->
-                  Error(CoalesceMixedWithLogical(op_pos))
+                | _, ast.LogicalExpression(operator: ast.LogicalAnd, ..)
+                -> Error(CoalesceMixedWithLogical(op_pos))
                 _, _ ->
                   Ok(ast.LogicalExpression(
                     operator: ast.NullishCoalescing,
@@ -7873,7 +7892,12 @@ fn parse_template_substitutions(
 /// past a re-scanned regex literal.
 fn template_continuation(p: P) -> P {
   let #(token, scan) =
-    lexer.scan_template_continuation(p.bytes, pos_of(p), line_of(p), p.scan.mode)
+    lexer.scan_template_continuation(
+      p.bytes,
+      pos_of(p),
+      line_of(p),
+      p.scan.mode,
+    )
   P(..p, tokens: [token], scan:)
 }
 

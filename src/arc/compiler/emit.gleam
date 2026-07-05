@@ -6054,7 +6054,7 @@ fn emit_destructuring_bind(
       let has_rest =
         list.any(properties, fn(p) {
           case p {
-            ast.RestProperty(_) -> True
+            ast.RestProperty(..) -> True
             ast.PatternProperty(..) -> False
           }
         })
@@ -6187,9 +6187,10 @@ fn emit_single_object_prop(
 
     // {a, b, ...rest} — §13.15.5.3 RestBindingInitialization.
     // Stack: [src, key_n,..,key_1] → ObjectRestCopy(n) → [rest_obj] → bind.
-    ast.RestProperty(argument) -> {
+    ast.RestProperty(name:, span:) -> {
       let e = emit_op(e, opcode.ObjectRestCopy(n_excl))
-      use e <- result.map(emit_destructuring_bind(e, argument, binding_kind))
+      let ident = ast.IdentifierPattern(name:, span:)
+      use e <- result.map(emit_destructuring_bind(e, ident, binding_kind))
       #(e, 0)
     }
   }

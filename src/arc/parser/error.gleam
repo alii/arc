@@ -91,6 +91,9 @@ pub type ParseError {
   NewTargetOutsideFunction(pos: Int)
   MissingConstInitializer(pos: Int)
   RestTrailingComma(pos: Int)
+  /// `{...pat}` where `pat` is a nested `[`/`{` pattern — §13.3.3
+  /// BindingRestProperty accepts a BindingIdentifier only.
+  InvalidRestBinding(pos: Int)
   ExpectedForHeadSeparator(pos: Int)
   MissingCatchOrFinally(pos: Int)
   StrictModeModification(pos: Int, name: String)
@@ -274,6 +277,8 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     NewTargetOutsideFunction(_) -> "'new.target' outside of function"
     MissingConstInitializer(_) -> "Missing initializer in const declaration"
     RestTrailingComma(_) -> "Rest element may not have a trailing comma"
+    InvalidRestBinding(_) ->
+      "`...` must be followed by an identifier in declaration contexts"
     ExpectedForHeadSeparator(_) -> "Expected 'in', 'of', ';', or ','"
     MissingCatchOrFinally(_) -> "Missing catch or finally after try"
     StrictModeModification(name:, ..) ->
