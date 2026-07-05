@@ -6,7 +6,7 @@ import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
-  type Job, type JsValue, type PromiseReaction, type Ref, BoxSlot, Call, JsBool,
+  type Job, type JsValue, type Ref, BoxSlot, Call, JsBool,
   JsObject, PromiseCatch, PromiseConstructor, PromiseFinally, PromiseObject,
   PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
@@ -258,7 +258,6 @@ fn fulfill_promise_tracked(
       state.heap,
       data_ref,
       result_value,
-      fn(fulfill, _reject) { fulfill },
       value.PromiseFulfilled(result_value),
     )
   case outcome {
@@ -311,9 +310,9 @@ pub type SettleOutcome {
 }
 
 /// Shared settle core of FulfillPromise/RejectPromise (steps 2-6 plus
-/// TriggerPromiseReactions): if the promise is pending, build reaction jobs
-/// from the picked reaction list and write the settled PromiseSlot with
-/// cleared reaction lists.
+/// TriggerPromiseReactions): if the promise is pending, pick the reaction
+/// list that matches `settled_state`, build reaction jobs from it, and write
+/// the settled PromiseSlot with cleared reaction lists.
 ///
 /// The `SettleOutcome` distinguishes the transition, the legitimate
 /// already-settled no-op, and a ref that is not a promise at all.
@@ -321,8 +320,6 @@ fn settle_promise(
   h: Heap(host),
   data_ref: Ref,
   result_value: JsValue,
-  pick_reactions: fn(List(PromiseReaction), List(PromiseReaction)) ->
-    List(PromiseReaction),
   settled_state: value.PromiseState,
 ) -> #(Heap(host), List(Job), SettleOutcome) {
   case heap.read(h, data_ref) {
@@ -335,7 +332,14 @@ fn settle_promise(
       // TriggerPromiseReactions(reactions, value) — build job list.
       // Reactions are stored newest-first (see perform_promise_then), so
       // reverse once here to enqueue jobs in attachment order per spec.
-      let reactions = pick_reactions(fulfill_reactions, reject_reactions)
+      // Which list fires is fully determined by the settled state, so derive
+      // it here rather than trusting the caller to pass a matching selector.
+      let reactions = case settled_state {
+        value.PromiseFulfilled(_) -> fulfill_reactions
+        value.PromiseRejected(_) -> reject_reactions
+        // Unreachable: both callers pass a settled variant.
+        value.PromisePending -> []
+      }
       let jobs =
         list.map(list.reverse(reactions), fn(r) {
           value.PromiseReactionJob(
@@ -404,7 +408,6 @@ fn reject_promise_tracked(
       state.heap,
       data_ref,
       reason,
-      fn(_fulfill, reject) { reject },
       value.PromiseRejected(reason),
     )
   case outcome {
