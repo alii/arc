@@ -1,4 +1,4 @@
-import arc/engine.{Returned}
+import arc/engine.{ModuleReturned, Returned}
 import arc/module/load_error
 import arc/vm/builtins/console
 import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
@@ -385,7 +385,7 @@ pub fn eval_module_reads_export_test() {
       reject_imports,
       reject_loads,
     )
-  let assert Some(ns) = evaluated.namespace
+  let assert ModuleReturned(namespace: ns, ..) = evaluated
   assert engine.read_export(eng, ns, "answer") == Some(JsNumber(Finite(42.0)))
   // Missing exports are None, not an error.
   assert engine.read_export(eng, ns, "missing") == option.None
@@ -405,7 +405,7 @@ pub fn call_export_threads_module_state_test() {
       reject_imports,
       reject_loads,
     )
-  let assert Some(ns) = evaluated.namespace
+  let assert ModuleReturned(namespace: ns, ..) = evaluated
   let assert Some(bump) = engine.read_export(eng, ns, "bump")
 
   let assert Ok(#(Returned(value:), eng)) =
@@ -446,7 +446,7 @@ pub fn destructured_declaration_exports_test() {
       resolve,
       load,
     )
-  let assert Some(ns) = evaluated.namespace
+  let assert ModuleReturned(namespace: ns, ..) = evaluated
   // a=1, c (renamed from b)=2, x=10 — every destructured binding linked.
   assert engine.read_export(eng, ns, "sum") == Some(JsNumber(Finite(13.0)))
   // Rest element: `r` is `{ extra: 3 }`.

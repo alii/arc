@@ -63,8 +63,7 @@ pub opaque type Engine(host) {
 }
 
 /// Errors from the parse → compile → run pipeline, across both the script
-/// (`eval`) and module (`eval_module`) paths. `call` only ever surfaces
-/// `VmError`.
+/// (`eval`) and module (`eval_module`) paths.
 pub type EvalError(host) {
   ParseError(parser.ParseError)
   CompileError(compiler.CompileError)
@@ -74,7 +73,7 @@ pub type EvalError(host) {
   ModuleCompileError(module.CompileBundleError)
   /// Linking a module graph failed, or its evaluation could not settle. A
   /// module whose top level THREW is not this: it comes back as an
-  /// `Ok(EvaluatedModule(outcome: Threw(..), ..))`, like every other run.
+  /// `Ok(ModuleThrew(..))`, like every other run.
   ///
   /// `heap` is the heap the failing call handed back beside its `ModuleError`
   /// — the `ModuleError` itself carries none, and rendering it needs one.
@@ -106,13 +105,14 @@ pub opaque type Namespace {
   Namespace(ref: Ref)
 }
 
-/// The result of evaluating an ES module: how the entry module's top level
-/// ended (`Returned`/`Threw`, exactly as for `eval` and `call`) plus its
-/// Module Namespace object, if any. Read named exports off `namespace` with
-/// `read_export`. `namespace` is `None` when the module threw, and for a
-/// degenerate bundle that produced no entry namespace.
+/// The result of evaluating an ES module: either the entry module's top level
+/// completed normally — carrying its return value and Module Namespace object
+/// (read named exports off it with `read_export`) — or it threw. A two-variant
+/// sum, so a caller never has to unwrap an `Option(Namespace)` that is always
+/// `Some` on the returned path and always `None` on the threw path.
 pub type EvaluatedModule {
-  EvaluatedModule(outcome: Outcome, namespace: Option(Namespace))
+  ModuleReturned(value: JsValue, namespace: Namespace)
+  ModuleThrew(error: JsValue)
 }
 
 // ----------------------------------------------------------------------------
@@ -455,10 +455,9 @@ pub fn eval_with(
 /// entry module's outcome + namespace, plus a new engine carrying the updated
 /// heap.
 ///
-/// A module that throws at top level is a normal `Ok` result whose `outcome`
-/// is `Threw(value)` — the same shape `eval` and `call` hand back, so one
-/// `Outcome` match covers scripts, modules and calls. `Error(ModuleError(..))`
-/// is reserved for genuine engine/link failures.
+/// A module that throws at top level is a normal `Ok(ModuleThrew(value))` —
+/// the module analogue of `eval`/`call`'s `Threw`. `Error(ModuleError(..))` is
+/// reserved for genuine engine/link failures.
 pub fn eval_module(
   engine: Engine(host),
   specifier: String,
@@ -512,21 +511,15 @@ pub fn eval_module_with(
     )
   case result {
     Ok(module.EvaluatedBundle(value:, namespace:)) ->
-      Ok(#(
-        EvaluatedModule(
-          outcome: Returned(value),
-          namespace: option.Some(Namespace(namespace)),
-        ),
-        Engine(..engine, heap:),
-      ))
+      Ok(#(ModuleReturned(value:, namespace: Namespace(namespace)), Engine(
+        ..engine,
+        heap:,
+      )))
     // "The module's top level threw" is the same event `eval`/`call` report as
     // `Threw` — not an engine failure. The heap the throw left behind is
     // threaded forward, so the engine stays usable.
     Error(module.EvaluationError(value: thrown)) ->
-      Ok(#(
-        EvaluatedModule(outcome: Threw(thrown), namespace: option.None),
-        Engine(..engine, heap:),
-      ))
+      Ok(#(ModuleThrew(error: thrown), Engine(..engine, heap:)))
     Error(err) -> Error(ModuleError(error: err, heap:))
   }
 }
@@ -550,13 +543,14 @@ pub fn read_export(
 /// counterpart to `eval` for a callable you already hold — e.g. a `receive`
 /// export read off a module namespace — invoked repeatedly across turns, each
 /// call threading the heap forward via the returned engine. A thrown value is
-/// `Threw(error)`; an engine `VmError` is `Error(VmError(..))`.
+/// `Threw(error)`; there is nothing to parse or compile, so the only engine
+/// failure is a `state.VmError` — render it with `state.vm_error_message`.
 pub fn call(
   engine: Engine(host),
   callee: JsValue,
   this: JsValue,
   args: List(JsValue),
-) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
+) -> Result(#(Outcome, Engine(host)), state.VmError) {
   call_with(engine, callee, this, args, event_loop.finish)
 }
 
@@ -567,20 +561,17 @@ pub fn call_with(
   this: JsValue,
   args: List(JsValue),
   finish: fn(state.State(host)) -> state.State(host),
-) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
-  use #(settled, heap) <- result.map(
-    entry.run_export(
-      callee,
-      this,
-      args,
-      engine.heap,
-      engine.builtins,
-      engine.global,
-      engine.host_hooks,
-      finish,
-    )
-    |> result.map_error(VmError),
-  )
+) -> Result(#(Outcome, Engine(host)), state.VmError) {
+  use #(settled, heap) <- result.map(entry.run_export(
+    callee,
+    this,
+    args,
+    engine.heap,
+    engine.builtins,
+    engine.global,
+    engine.host_hooks,
+    finish,
+  ))
   #(outcome_of(settled), Engine(..engine, heap:))
 }
 

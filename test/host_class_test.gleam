@@ -3,7 +3,7 @@
 //// uses to provide base classes embedder JS can `extends` and to run host-side
 //// work against a live `State` without installing a global shim.
 
-import arc/engine.{Returned}
+import arc/engine.{ModuleReturned, Returned}
 import arc/module/load_error
 import arc/vm/builtins/common
 import arc/vm/key.{Named}
@@ -184,7 +184,7 @@ pub fn host_module_named_import_test() {
       dance_resolve,
       no_source_loads,
     )
-  let assert Some(ns) = evaluated.namespace
+  let assert ModuleReturned(namespace: ns, ..) = evaluated
   assert engine.read_export(eng, ns, "default") == Some(JsString("hi"))
 }
 
@@ -202,7 +202,7 @@ pub fn host_module_namespace_import_test() {
       dance_resolve,
       no_source_loads,
     )
-  let assert Some(ns) = evaluated.namespace
+  let assert ModuleReturned(namespace: ns, ..) = evaluated
   assert engine.read_export(eng, ns, "r") == Some(JsString("yo"))
 }
 
@@ -227,7 +227,7 @@ pub fn host_module_class_extends_test() {
       dance_resolve,
       no_source_loads,
     )
-  let assert Some(ns) = evaluated.namespace
+  let assert ModuleReturned(namespace: ns, ..) = evaluated
   assert engine.read_export(eng, ns, "default") == Some(JsString("svc-1"))
 }
 

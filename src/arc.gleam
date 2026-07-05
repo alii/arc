@@ -1,6 +1,6 @@
 import arc/compiler
 import arc/dis
-import arc/engine.{Returned, Threw}
+import arc/engine.{ModuleReturned, ModuleThrew, Threw}
 import arc/esm
 import arc/internal/path
 import arc/module/load_error
@@ -354,11 +354,9 @@ fn run_module_file(
   // dependency's `import "./a.js"` resolves to — one file, two module records.
   let entry = path.normalize(entry_path)
   case engine.eval_module(eng, entry, source, resolve_dep, load_dep) {
-    Ok(#(evaluated, eng)) ->
-      case evaluated.outcome {
-        Returned(_) -> Ok(Nil)
-        Threw(val) -> Error(ScriptThrew(engine: eng, thrown: val))
-      }
+    Ok(#(ModuleReturned(..), _eng)) -> Ok(Nil)
+    Ok(#(ModuleThrew(error:), eng)) ->
+      Error(ScriptThrew(engine: eng, thrown: error))
     Error(err) -> Error(EvalFailed(err))
   }
 }

@@ -7,9 +7,10 @@
 //// This is the lifecycle the Dance server (otters) is built on, distilled to
 //// one file. Run with: gleam run -m arc/examples/module_instance
 
-import arc/engine.{Returned, Threw}
+import arc/engine.{ModuleReturned, Returned, Threw}
 import arc/host
 import arc/module_host
+import arc/vm/state
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
 import gleam/list
@@ -31,9 +32,8 @@ pub fn main() -> Nil {
 
   // Self-contained demo module — reject every import.
   let #(resolve, load) = module_host.no_imports()
-  let assert Ok(#(evaluated, eng)) =
+  let assert Ok(#(ModuleReturned(namespace:, ..), eng)) =
     engine.eval_module(eng, "demo:greeter", source, resolve, load)
-  let assert Some(namespace) = evaluated.namespace
   let assert Some(receive) = engine.read_export(eng, namespace, "receive")
 
   // 3. Drive it: each call threads the heap forward, so `count` accumulates.
@@ -45,7 +45,7 @@ pub fn main() -> Nil {
         eng
       }
       Error(err) -> {
-        io.println_error("receive error: " <> engine.eval_error_message(err))
+        io.println_error("receive error: " <> state.vm_error_message(err))
         eng
       }
     }
