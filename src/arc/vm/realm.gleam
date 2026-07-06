@@ -772,6 +772,37 @@ pub fn realm_lookup_message(err: RealmLookupError) -> String {
   }
 }
 
+/// One direction of a value crossing the ShadowRealm membrane. Bundles the
+/// four realm-direction parameters `get_wrapped_value` / `wrap_all` /
+/// `wrapped_function_create` need, so a caller can't silently swap `src` and
+/// `dest` positionally (they used to differ in order between those callees).
+type Boundary {
+  Boundary(
+    /// Realm the value is coming FROM.
+    src_realm: Ref,
+    /// Realm the value is being wrapped INTO — the wrapper's [[Realm]].
+    dest_realm: Ref,
+    /// `dest_realm`'s intrinsics — the wrapper's `Function.prototype`.
+    dest_builtins: Builtins,
+    /// Realm whose TypeError brands boundary violations. Per spec this is
+    /// always the running caller's realm, so it does NOT swap on flip.
+    err_builtins: Builtins,
+  )
+}
+
+/// The reverse crossing: what was `dest` is now `src` and vice versa.
+/// `err_builtins` stays put — every TypeError a wrapped-function [[Call]]
+/// throws belongs to F.[[Realm]] regardless of direction — and it becomes the
+/// new `dest_builtins` (the caller realm is where the return value lands).
+fn boundary_flip(b: Boundary) -> Boundary {
+  Boundary(
+    src_realm: b.dest_realm,
+    dest_realm: b.src_realm,
+    dest_builtins: b.err_builtins,
+    err_builtins: b.err_builtins,
+  )
+}
+
 /// Route ShadowRealm natives. Called from dispatch_native.
 pub fn shadow_realm_dispatch(
   native: value.ShadowRealmNativeFn,
@@ -1073,7 +1104,14 @@ fn with_realm(
                   ),
                 ),
               )
-            _ -> State(..after, builtins: origin_builtins)
+            // `origin_ref` was allocated by `ensure_current_realm` moments
+            // ago; if it no longer names a RealmSlot the heap is corrupt.
+            // Continuing here would leave `ctx` pointing at the TARGET
+            // realm's globals with the ORIGIN realm's builtins — a torn
+            // state that turns every subsequent identity check into a
+            // heisenbug. Fail loud.
+            _ ->
+              panic as "realm.with_realm: origin realm slot lost during callee execution (heap corruption)"
           }
           #(restored, res)
         }
@@ -1081,34 +1119,21 @@ fn with_realm(
   }
 }
 
-/// GetWrappedValue ( realm, value ) — proposal §3.1.4. `dest_realm` is the
-/// realm the value is being passed INTO (the new wrapper's [[Realm]]),
-/// `src_realm` is the realm the value comes from. TypeErrors use
-/// `err_builtins` — the running caller context's realm per spec.
+/// GetWrappedValue ( realm, value ) — proposal §3.1.4. `boundary.dest_realm`
+/// is the realm the value is being passed INTO (the new wrapper's [[Realm]]).
 fn get_wrapped_value(
   state: State(host),
-  dest_realm: Ref,
-  dest_builtins: Builtins,
-  err_builtins: Builtins,
-  src_realm: Ref,
+  boundary: Boundary,
   val: JsValue,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
     JsObject(_) ->
       case object.value_is_callable(state.heap, val) {
-        True ->
-          wrapped_function_create(
-            state,
-            val,
-            src_realm,
-            dest_realm,
-            dest_builtins,
-            err_builtins,
-          )
+        True -> wrapped_function_create(state, val, boundary)
         False ->
           state.type_error_with_builtins(
             state,
-            err_builtins,
+            boundary.err_builtins,
             "value crossing the ShadowRealm boundary must be callable or primitive",
           )
       }
@@ -1118,15 +1143,14 @@ fn get_wrapped_value(
 
 /// WrappedFunctionCreate ( callerRealm, Target ) — proposal §2.1.1, including
 /// CopyNameAndLength (§2.2). Any abrupt completion from the observable Gets
-/// on Target becomes a TypeError in `err_builtins`' realm.
+/// on Target becomes a TypeError in `boundary.err_builtins`' realm.
 fn wrapped_function_create(
   state: State(host),
   target: JsValue,
-  src_realm: Ref,
-  dest_realm: Ref,
-  dest_builtins: Builtins,
-  err_builtins: Builtins,
+  boundary: Boundary,
 ) -> #(State(host), Result(JsValue, JsValue)) {
+  let Boundary(src_realm:, dest_realm:, dest_builtins:, err_builtins:) =
+    boundary
   // The name/length Gets are observable (accessors run) — execute them in
   // the target's own realm so getter code resolves globals there.
   let #(state, copied) =
@@ -1349,10 +1373,12 @@ fn do_shadow_realm_evaluate(
             NormalCompletion(val) ->
               get_wrapped_value(
                 state,
-                caller_realm_ref,
-                caller_builtins,
-                caller_builtins,
-                realm_ref,
+                Boundary(
+                  src_realm: realm_ref,
+                  dest_realm: caller_realm_ref,
+                  dest_builtins: caller_builtins,
+                  err_builtins: caller_builtins,
+                ),
                 val,
               )
             // Step 25: abrupt completions become the caller realm's TypeError.
@@ -1408,103 +1434,61 @@ fn wrapped_function_call(
     caller_realm,
     target_realm,
   )
-  // Steps 6-7: wrap thisArgument and every argument into the target realm.
-  let #(state, wrapped_this_res) =
-    get_wrapped_value(
-      state,
-      target_realm,
-      target_builtins,
-      caller_builtins,
-      caller_realm,
-      this,
+  let into_target =
+    Boundary(
+      src_realm: caller_realm,
+      dest_realm: target_realm,
+      dest_builtins: target_builtins,
+      err_builtins: caller_builtins,
     )
-  case wrapped_this_res {
-    Error(thrown) -> #(state, Error(thrown))
-    Ok(wrapped_this) -> {
-      let #(state, wrapped_args_res) =
-        wrap_all(
-          state,
-          target_realm,
-          target_builtins,
-          caller_builtins,
-          caller_realm,
-          args,
-          [],
-        )
-      case wrapped_args_res {
-        Error(thrown) -> #(state, Error(thrown))
-        Ok(wrapped_args) -> {
-          // Step 8: Call(target, wrappedThisArgument, wrappedArgs) in the
-          // target function's realm.
-          let #(state, call_res) =
-            with_realm(state, target_realm, fn(state) {
-              case state.call(state, target, wrapped_this, wrapped_args) {
-                Ok(#(v, state)) -> #(state, Ok(v))
-                Error(#(thrown, state)) -> #(state, Error(thrown))
-              }
-            })
-          case call_res {
-            // Step 9: GetWrappedValue(callerRealm, result).
-            Ok(result_val) ->
-              get_wrapped_value(
-                state,
-                caller_realm,
-                caller_builtins,
-                caller_builtins,
-                target_realm,
-                result_val,
-              )
-            // Step 10: any abrupt completion becomes the caller realm's
-            // TypeError (the original error must not cross the boundary).
-            Error(thrown) ->
-              state.type_error_with_builtins(
-                state,
-                caller_builtins,
-                "wrapped function threw: "
-                  <> object.format_error(thrown, state.heap),
-              )
-          }
-        }
+  // Steps 6-7: wrap thisArgument and every argument into the target realm.
+  use wrapped_this, state <- state.try_then(get_wrapped_value(
+    state,
+    into_target,
+    this,
+  ))
+  use wrapped_args, state <- state.try_then(wrap_all(
+    state,
+    into_target,
+    args,
+    [],
+  ))
+  // Step 8: Call(target, wrappedThisArgument, wrappedArgs) in the target
+  // function's realm.
+  let #(state, call_res) =
+    with_realm(state, target_realm, fn(state) {
+      case state.call(state, target, wrapped_this, wrapped_args) {
+        Ok(#(v, state)) -> #(state, Ok(v))
+        Error(#(thrown, state)) -> #(state, Error(thrown))
       }
-    }
+    })
+  case call_res {
+    // Step 9: GetWrappedValue(callerRealm, result).
+    Ok(result_val) ->
+      get_wrapped_value(state, boundary_flip(into_target), result_val)
+    // Step 10: any abrupt completion becomes the caller realm's TypeError
+    // (the original error must not cross the boundary).
+    Error(thrown) ->
+      state.type_error_with_builtins(
+        state,
+        caller_builtins,
+        "wrapped function threw: " <> object.format_error(thrown, state.heap),
+      )
   }
 }
 
 /// GetWrappedValue over a list, short-circuiting on the first error.
 fn wrap_all(
   state: State(host),
-  dest_realm: Ref,
-  dest_builtins: Builtins,
-  err_builtins: Builtins,
-  src_realm: Ref,
+  boundary: Boundary,
   vals: List(JsValue),
   acc: List(JsValue),
 ) -> #(State(host), Result(List(JsValue), JsValue)) {
   case vals {
     [] -> #(state, Ok(list.reverse(acc)))
     [v, ..rest] -> {
-      let #(state, res) =
-        get_wrapped_value(
-          state,
-          dest_realm,
-          dest_builtins,
-          err_builtins,
-          src_realm,
-          v,
-        )
-      case res {
-        Ok(w) ->
-          wrap_all(
-            state,
-            dest_realm,
-            dest_builtins,
-            err_builtins,
-            src_realm,
-            rest,
-            [w, ..acc],
-          )
-        Error(thrown) -> #(state, Error(thrown))
-      }
+      use w, state <- state.try_then(get_wrapped_value(state, boundary, v))
+      wrap_all(state, boundary, rest, [w, ..acc])
     }
   }
 }

@@ -599,6 +599,19 @@ pub fn try_op(
   }
 }
 
+/// CPS helper for the `#(State, Result(a, JsValue))` shape — the tuple form
+/// realm/cross-realm helpers return. Use with `use` syntax:
+///   use val, state <- state.try_then(get_wrapped_value(state, ...))
+pub fn try_then(
+  step: #(State(host), Result(a, JsValue)),
+  cont: fn(a, State(host)) -> #(State(host), Result(b, JsValue)),
+) -> #(State(host), Result(b, JsValue)) {
+  case step {
+    #(state, Ok(val)) -> cont(val, state)
+    #(state, Error(thrown)) -> #(state, Error(thrown))
+  }
+}
+
 /// CPS helper for fallible state operations that return only an updated State
 /// (no extra value). Use with `use` syntax:
 ///   use state <- state.try_state(some_operation(state, ...))
@@ -773,11 +786,13 @@ fn alloc_error_with_builtins(
 
 /// Convenience wrapper: allocate a TypeError on the heap and return it as
 /// an Error result. Shared by all builtin modules to avoid boilerplate
-/// around error allocation + state threading.
+/// around error allocation + state threading. Polymorphic in the Ok type so
+/// callers whose surrounding Result's Ok type isn't JsValue don't need a
+/// separate helper.
 pub fn type_error(
   state: State(host),
   msg: String,
-) -> #(State(host), Result(JsValue, JsValue)) {
+) -> #(State(host), Result(a, JsValue)) {
   let #(state, err) = alloc_error(state, TypeErr, msg)
   #(state, Error(err))
 }
@@ -785,7 +800,7 @@ pub fn type_error(
 pub fn range_error(
   state: State(host),
   msg: String,
-) -> #(State(host), Result(JsValue, JsValue)) {
+) -> #(State(host), Result(a, JsValue)) {
   let #(state, err) = alloc_error(state, RangeErr, msg)
   #(state, Error(err))
 }
@@ -826,6 +841,16 @@ pub fn type_error_value(
   #(err, state)
 }
 
+/// `type_error_value` wrapped in `Error` — the ops-level throw shape
+/// `Result(a, #(JsValue, State))`. The one canonical helper for this;
+/// modules must not roll their own private copy.
+pub fn type_error_op(
+  state: State(host),
+  msg: String,
+) -> Result(a, #(JsValue, State(host))) {
+  Error(type_error_value(state, msg))
+}
+
 /// Allocate a RangeError as the bare #(thrown, state) tuple used by ops-level
 /// results `Result(_, #(JsValue, State))`.
 pub fn range_error_value(
@@ -834,6 +859,14 @@ pub fn range_error_value(
 ) -> #(JsValue, State(host)) {
   let #(state, err) = alloc_error(state, RangeErr, msg)
   #(err, state)
+}
+
+/// `range_error_value` wrapped in `Error` — the ops-level throw shape.
+pub fn range_error_op(
+  state: State(host),
+  msg: String,
+) -> Result(a, #(JsValue, State(host))) {
+  Error(range_error_value(state, msg))
 }
 
 /// Allocate a ReferenceError and return it as the bare #(thrown, state) tuple
