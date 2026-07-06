@@ -90,7 +90,7 @@ import arc/parser/token.{
   is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
   is_reserved_word_kind,
 }
-import arc/vm/opcode
+import arc/vm/lexical
 import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -3951,7 +3951,7 @@ fn class_seed_field_shell(
       synthetic: True,
     )
   // Every ClassFieldInit emits `get_this`.
-  let sb = scope.sb_lexical_ref(sb, opcode.RefThis)
+  let sb = scope.sb_lexical_ref(sb, lexical.RefThis)
   // §7.3.29 PrivateMethodOrAccessorAdd: each instance private
   // method/accessor reads `#x` and its closure stash const.
   let sb = case is_static {
@@ -4013,16 +4013,16 @@ fn class_seed_ctor_shell(
     True ->
       sb
       |> scope.sb_ref(ast_util.class_fields_init)
-      |> scope.sb_lexical_ref(opcode.RefThis)
+      |> scope.sb_lexical_ref(lexical.RefThis)
     False -> sb
   }
   // Synthetic derived ctor body is `super(...arguments)`.
   case is_synthetic && has_super_class {
     True ->
       sb
-      |> scope.sb_lexical_ref(opcode.RefActiveFunc)
-      |> scope.sb_lexical_ref(opcode.RefNewTarget)
-      |> scope.sb_lexical_ref(opcode.RefThis)
+      |> scope.sb_lexical_ref(lexical.RefActiveFunc)
+      |> scope.sb_lexical_ref(lexical.RefNewTarget)
+      |> scope.sb_lexical_ref(lexical.RefThis)
       |> scope.sb_ref("arguments")
     False -> sb
   }
@@ -5376,16 +5376,9 @@ fn is_bare_identifier(expr: ast.Expression) -> Bool {
 /// with a "#" prefix, so check the property name's first char.
 fn is_private_name_access(expr: ast.Expression) -> Bool {
   case expr {
-    ast.MemberExpression(
-      property: ast.Identifier(name:, ..),
-      computed: False,
-      ..,
-    )
-    | ast.OptionalMemberExpression(
-        property: ast.Identifier(name:, ..),
-        computed: False,
-        ..,
-      ) -> string.starts_with(name, "#")
+    ast.MemberExpression(property: ast.Dot(name:, ..), ..)
+    | ast.OptionalMemberExpression(property: ast.Dot(name:, ..), ..) ->
+      string.starts_with(name, "#")
     _ -> False
   }
 }
@@ -5565,7 +5558,7 @@ fn parse_new_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
                   let p4 =
                     P(
                       ..p4,
-                      sb: scope.sb_lexical_ref(p4.sb, opcode.RefNewTarget),
+                      sb: scope.sb_lexical_ref(p4.sb, lexical.RefNewTarget),
                     )
                   let meta =
                     ast.MetaProperty(
@@ -5650,9 +5643,9 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
               // captures the const.
               let sb =
                 p3.sb
-                |> scope.sb_lexical_ref(opcode.RefActiveFunc)
-                |> scope.sb_lexical_ref(opcode.RefNewTarget)
-                |> scope.sb_lexical_ref(opcode.RefThis)
+                |> scope.sb_lexical_ref(lexical.RefActiveFunc)
+                |> scope.sb_lexical_ref(lexical.RefNewTarget)
+                |> scope.sb_lexical_ref(lexical.RefThis)
                 |> scope.sb_ref(ast_util.class_fields_init)
               Ok(#(
                 P(..p3, sb:),
@@ -5672,8 +5665,8 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
               // parse_primary_expression Super arm.
               let sb =
                 p2.sb
-                |> scope.sb_lexical_ref(opcode.RefHomeObject)
-                |> scope.sb_lexical_ref(opcode.RefThis)
+                |> scope.sb_lexical_ref(lexical.RefHomeObject)
+                |> scope.sb_lexical_ref(lexical.RefThis)
               Ok(#(P(..p2, sb:), ast.SuperExpression(span: super_span)))
             }
             False -> Error(SuperPropertyNotInMethod(pos_of(p)))
@@ -5922,17 +5915,18 @@ fn parse_bracket_member(
   optional: Bool,
 ) -> Result(#(P, ast.Expression), ParseError) {
   use p2 <- with_allow_in(advance(p), True)
-  use #(p3, property) <- result.try(parse_expression(p2))
+  use #(p3, expression) <- result.try(parse_expression(p2))
   use p4 <- result.map(expect(p3, RightBracket))
   let span = span_from(start, p4)
+  let property = ast.Bracket(expression:)
   case optional {
     False -> #(
       P(..p4, last_expr_assignable: True),
-      ast.MemberExpression(object:, property:, computed: True, span:),
+      ast.MemberExpression(object:, property:, span:),
     )
     True -> #(
       P(..p4, last_expr_assignable: False),
-      ast.OptionalMemberExpression(object:, property:, computed: True, span:),
+      ast.OptionalMemberExpression(object:, property:, span:),
     )
   }
 }
@@ -5957,17 +5951,17 @@ fn finish_dot_member(
     "#" <> _ -> P(..p, sb: scope.sb_ref(p.sb, prop_name))
     _ -> p
   }
-  let property = ast.Identifier(name: prop_name, span: span_of(p))
+  let property = ast.Dot(name: prop_name, span: span_of(p))
   let p2 = advance(p)
   let span = span_from(start, p2)
   case optional {
     False -> #(
       P(..p2, last_expr_assignable: True),
-      ast.MemberExpression(object:, property:, computed: False, span:),
+      ast.MemberExpression(object:, property:, span:),
     )
     True -> #(
       P(..p2, last_expr_assignable: False),
-      ast.OptionalMemberExpression(object:, property:, computed: False, span:),
+      ast.OptionalMemberExpression(object:, property:, span:),
     )
   }
 }
@@ -6126,7 +6120,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     }
     This ->
       ok_lit(
-        P(..p, sb: scope.sb_lexical_ref(p.sb, opcode.RefThis)),
+        P(..p, sb: scope.sb_lexical_ref(p.sb, lexical.RefThis)),
         ast.ThisExpression(span: span_of(p)),
       )
     Super -> {
@@ -6143,8 +6137,8 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
               // (emit.gleam: get_lexical(RefHomeObject) + get_this).
               let sb =
                 p.sb
-                |> scope.sb_lexical_ref(opcode.RefHomeObject)
-                |> scope.sb_lexical_ref(opcode.RefThis)
+                |> scope.sb_lexical_ref(lexical.RefHomeObject)
+                |> scope.sb_lexical_ref(lexical.RefThis)
               Ok(#(P(..advance(p), sb:), ast.SuperExpression(span: span_of(p))))
             }
             False -> Error(UnexpectedSuper(pos_of(p)))

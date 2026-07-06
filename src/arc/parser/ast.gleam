@@ -95,6 +95,24 @@ pub type MetaPropertyKind {
   ImportMeta
 }
 
+/// The property of a `MemberExpression` / `OptionalMemberExpression`, in the
+/// two shapes the grammar spells (§13.3.2): `.x` / `.#x` (an IdentifierName
+/// or PrivateIdentifier — both a bare name) versus `[expr]` (a computed
+/// expression). Carrying this in place of a `(property: Expression,
+/// computed: Bool)` pair makes a non-computed property holding an arbitrary
+/// expression — `MemberExpression(o, CallExpression(..), computed: False)` —
+/// unrepresentable, so no consumer needs a "static member with a
+/// non-identifier property" fallback arm.
+pub type MemberProperty {
+  /// `.prop` / `.#priv` — an IdentifierName (keywords included) or a
+  /// PrivateIdentifier. Private names carry the leading `#` in `name`
+  /// (matching `PropertyKey.KeyPrivate`); the emit layer's field helpers
+  /// dispatch on that prefix. `span` covers the identifier token.
+  Dot(name: String, span: Span)
+  /// `[expr]` — evaluated and ToPropertyKey'd at runtime.
+  Bracket(expression: Expression)
+}
+
 /// A statement paired with the 1-based source line where it begins. Statement
 /// *lists* (block bodies, program bodies, switch-case bodies) hold `Stmt` so the
 /// compiler can emit `SetLine` ops and build line numbers for `Error.stack`.
@@ -400,17 +418,11 @@ pub type Expression {
     right: Expression,
   )
   CallExpression(span: Span, callee: Expression, arguments: List(Expression))
-  MemberExpression(
-    span: Span,
-    object: Expression,
-    property: Expression,
-    computed: Bool,
-  )
+  MemberExpression(span: Span, object: Expression, property: MemberProperty)
   OptionalMemberExpression(
     span: Span,
     object: Expression,
-    property: Expression,
-    computed: Bool,
+    property: MemberProperty,
   )
   OptionalCallExpression(
     span: Span,

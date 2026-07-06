@@ -415,18 +415,16 @@ pub fn has_using_decl(stmts: List(ast.StmtWithLine)) -> Bool {
 // Expression shape predicates
 // ============================================================================
 
-/// If `expr` is a non-computed `obj.prop` MemberExpression, return
-/// `Some(#(obj, "prop"))`. Folds the Identifier / defensive-StringExpression
-/// OR-pattern that the emitter's assignment-target arms otherwise repeat to
-/// pick the PutField fast path. (The parser emits computed=True for
-/// `obj["s"]`, so the StringExpression case is belt-and-braces.)
+/// If `expr` is a dot-access `obj.prop` / `obj.#prop` MemberExpression,
+/// return `Some(#(obj, "prop"))`. Private accesses are included — the name
+/// carries the `#` prefix and the emit layer's `emit_put_field` /
+/// `emit_get_field` route on it. Used by the emitter's assignment-target
+/// arms to pick the PutField (vs PutElem) path.
 pub fn member_static_prop(
   expr: ast.Expression,
 ) -> Option(#(ast.Expression, String)) {
   case expr {
-    ast.MemberExpression(_, obj, ast.Identifier(name:, ..), False)
-    | ast.MemberExpression(_, obj, ast.StringExpression(_, name), False) ->
-      Some(#(obj, name))
+    ast.MemberExpression(_, obj, ast.Dot(name:, ..)) -> Some(#(obj, name))
     _ -> None
   }
 }

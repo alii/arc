@@ -20,7 +20,8 @@ import arc/compiler/scope
 import arc/esm
 import arc/parser/ast
 import arc/vm/internal/tuple_array
-import arc/vm/opcode.{type CodeKind, type LexicalSlots}
+import arc/vm/lexical.{type CodeKind, type LexicalSlots}
+import arc/vm/opcode
 import arc/vm/value.{
   type EvalNameTable, type FuncTemplate, type JsValue, type VarEnvKind,
   CaptureLocal, EvalNameTable, FuncTemplate, GlobalVarEnv, JsUndefined,
@@ -68,8 +69,6 @@ pub fn error_message(err: CompileError) -> String {
     emit.InvalidUpdateTarget -> internal_error("invalid ++/-- target")
     emit.InvalidCompoundAssignTarget ->
       internal_error("invalid compound-assignment target")
-    emit.NonIdentifierStaticMember ->
-      internal_error("non-identifier static member property")
     emit.NonGenericUnaryOperator ->
       internal_error("typeof/delete in generic unary expression")
   }
@@ -308,7 +307,7 @@ fn compile_module_with_scope(
       info,
       child_templates,
       is_strict,
-      opcode.ScriptCode,
+      lexical.ScriptCode,
       None,
     )
   let has_tla =
@@ -385,11 +384,11 @@ pub fn compile_eval_direct(
   // caller.slots. Treat each as a capture so get_lexical → GetBoxed.
   let #(lexical_captures, _next) =
     list.fold(
-      opcode.all_lexical_refs,
+      lexical.all_lexical_refs,
       #(dict.new(), list.length(caller.names)),
       fn(acc, ref) {
         let #(m, i) = acc
-        case opcode.lexical_slot(caller.slots, ref) {
+        case lexical.lexical_slot(caller.slots, ref) {
           Some(_) -> #(dict.insert(m, ref, i), i + 1)
           None -> acc
         }
@@ -565,7 +564,7 @@ fn compile_script(
     info,
     child_templates,
     is_strict,
-    opcode.ScriptCode,
+    lexical.ScriptCode,
     local_names,
   )
 }
@@ -600,11 +599,11 @@ fn compile_child(
   // slot in its OWN frame) in `info.lexical_captures`; the PARENT slot
   // index for each comes from `parent_info.lexical`.
   let lex_descriptors =
-    list.filter_map(opcode.all_lexical_refs, fn(ref) {
+    list.filter_map(lexical.all_lexical_refs, fn(ref) {
       case dict.has_key(info.lexical_captures, ref) {
         False -> Error(Nil)
         True ->
-          case opcode.lexical_slot(parent_info.lexical, ref) {
+          case lexical.lexical_slot(parent_info.lexical, ref) {
             Some(parent_idx) -> Ok(CaptureLocal(parent_idx))
             // Analyzer recorded a lexical capture but the parent has no
             // slot for it — unreachable for a well-formed tree. Crash

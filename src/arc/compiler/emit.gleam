@@ -13,6 +13,7 @@ import arc/compiler/scope.{
   root_scope_id,
 }
 import arc/parser/ast
+import arc/vm/lexical
 import arc/vm/opcode.{
   type IrOp, type LabelId, type TryKind, CatchOnly, Finally,
   IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor,
@@ -83,13 +84,13 @@ pub type CompiledChild {
     /// Per-binding "is referenced in this body or a nested arrow" flags.
     /// For arrows, the parent must capture/box the corresponding slot; for
     /// non-arrows this is informational (they own their slots).
-    lexical_refs: opcode.LexicalRefs,
+    lexical_refs: lexical.LexicalRefs,
     /// True if this body (or a nested arrow) emitted an
     /// IrScope*Var("arguments"). For arrows, the enclosing non-arrow uses
     /// this to decide whether to materialise its `arguments` object.
     references_arguments: Bool,
     /// What kind of code this body is; direct eval inherits it.
-    code_kind: opcode.CodeKind,
+    code_kind: lexical.CodeKind,
   )
 }
 
@@ -186,7 +187,7 @@ pub opaque type Emitter {
     /// propagated up from an inner ARROW child via add_child_function".
     /// Mirrors JSC's InnerArrowFunctionCodeFeatures — lets the compiler
     /// decide capture/box without re-walking the IR.
-    lexical_refs: opcode.LexicalRefs,
+    lexical_refs: lexical.LexicalRefs,
     /// True once an IrScope*Var("arguments") has been emitted in this body,
     /// or propagated up from an inner ARROW child via add_child_function.
     /// Same propagation rule as `lexical_refs` (arrows inherit the enclosing
@@ -196,7 +197,7 @@ pub opaque type Emitter {
     references_arguments: Bool,
     /// What kind of code the body being emitted is. Arrows inherit the
     /// parent's verbatim; non-arrows take it from their function kind.
-    code_kind: opcode.CodeKind,
+    code_kind: lexical.CodeKind,
     /// Where top-level let/const/class go. LexGlobal only for the REPL
     /// program emitter; everything else (scripts, eval, modules, function
     /// bodies) uses LexLocal.
@@ -423,9 +424,6 @@ pub type EmitError {
   /// Identifier, a MemberExpression, nor a (web-compat) CallExpression. Only
   /// plain `=` admits a destructuring pattern target.
   InvalidCompoundAssignTarget
-  /// A non-computed `MemberExpression` (`o.x`) whose property is not an
-  /// Identifier. The parser only ever puts an Identifier there.
-  NonIdentifierStaticMember
   /// The generic `UnaryExpression` arm reached `typeof` / `delete`, which
   /// have their own dedicated `emit_expr` arms above it.
   NonGenericUnaryOperator
@@ -1308,9 +1306,9 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     strict: False,
     is_async: False,
     is_arrow: False,
-    lexical_refs: opcode.no_lexical_refs,
+    lexical_refs: lexical.no_lexical_refs,
     references_arguments: False,
-    code_kind: opcode.ScriptCode,
+    code_kind: lexical.ScriptCode,
     top_lex: tree.top_lex,
     scope_tree: tree,
     fn_scope: fn_id,
@@ -1499,11 +1497,11 @@ fn enter_root_scope(e: Emitter) -> Emitter {
   // from the parent and are skipped via the `lexical_captures` membership
   // guard, mirroring `emit_binding_prologue`'s CaptureBinding skip.
   let info = fn_info(e)
-  use e, ref <- list.fold(opcode.all_lexical_refs, e)
+  use e, ref <- list.fold(lexical.all_lexical_refs, e)
   case
     dict.has_key(info.lexical_captures, ref),
-    opcode.lexical_slot(info.lexical, ref),
-    opcode.lexical_refs_get(info.lexical_boxed, ref)
+    lexical.lexical_slot(info.lexical, ref),
+    lexical.lexical_refs_get(info.lexical_boxed, ref)
   {
     False, Some(slot), True -> emit_op(e, opcode.BoxLocal(slot))
     _, _, _ -> e
@@ -2538,7 +2536,7 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
   // parent's references. Non-arrows own their slots — flags don't propagate.
   let #(lexical_refs, references_arguments) = case child.is_arrow {
     True -> #(
-      opcode.lexical_refs_or(e.lexical_refs, child.lexical_refs),
+      lexical.lexical_refs_or(e.lexical_refs, child.lexical_refs),
       e.references_arguments || child.references_arguments,
     )
     False -> #(e.lexical_refs, e.references_arguments)
@@ -2569,11 +2567,11 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
 /// `this` / `new.target` has no backing slot. §16.1.6 / §11.2.4: module
 /// `this` reads `undefined`; the old IR-level resolver lowered this case
 /// to `IrPushConst(JsUndefined)` and that behavior must be preserved.
-fn resolve_lexical(e: Emitter, ref: opcode.LexicalRef) -> Option(#(Int, Bool)) {
+fn resolve_lexical(e: Emitter, ref: lexical.LexicalRef) -> Option(#(Int, Bool)) {
   let info = fn_info(e)
-  case opcode.lexical_slot(info.lexical, ref) {
+  case lexical.lexical_slot(info.lexical, ref) {
     Some(slot) ->
-      Some(#(slot, opcode.lexical_refs_get(info.lexical_boxed, ref)))
+      Some(#(slot, lexical.lexical_refs_get(info.lexical_boxed, ref)))
     None ->
       case dict.get(info.lexical_captures, ref) {
         Ok(slot) -> Some(#(slot, True))
@@ -2586,15 +2584,15 @@ fn resolve_lexical(e: Emitter, ref: opcode.LexicalRef) -> Option(#(Int, Bool)) {
 /// body as referencing that binding (so add_child_function propagates the
 /// flag up through arrows). Lowers to IrGetLocal / IrGetBoxed against the
 /// analyzer-assigned slot.
-fn get_lexical(e: Emitter, ref: opcode.LexicalRef) -> Emitter {
+fn get_lexical(e: Emitter, ref: lexical.LexicalRef) -> Emitter {
   let lexical_refs = case ref {
-    opcode.RefThis -> opcode.LexicalRefs(..e.lexical_refs, this: True)
-    opcode.RefActiveFunc ->
-      opcode.LexicalRefs(..e.lexical_refs, active_func: True)
-    opcode.RefHomeObject ->
-      opcode.LexicalRefs(..e.lexical_refs, home_object: True)
-    opcode.RefNewTarget ->
-      opcode.LexicalRefs(..e.lexical_refs, new_target: True)
+    lexical.RefThis -> lexical.LexicalRefs(..e.lexical_refs, this: True)
+    lexical.RefActiveFunc ->
+      lexical.LexicalRefs(..e.lexical_refs, active_func: True)
+    lexical.RefHomeObject ->
+      lexical.LexicalRefs(..e.lexical_refs, home_object: True)
+    lexical.RefNewTarget ->
+      lexical.LexicalRefs(..e.lexical_refs, new_target: True)
   }
   let e = Emitter(..e, lexical_refs:)
   case resolve_lexical(e, ref) {
@@ -2608,7 +2606,7 @@ fn get_lexical(e: Emitter, ref: opcode.LexicalRef) -> Emitter {
 
 /// Read the lexical `this`.
 fn get_this(e: Emitter) -> Emitter {
-  get_lexical(e, opcode.RefThis)
+  get_lexical(e, lexical.RefThis)
 }
 
 /// Store top-of-stack into the lexical `this` slot (derived-class
@@ -2618,8 +2616,8 @@ fn get_this(e: Emitter) -> Emitter {
 /// ReferenceError).
 fn set_this(e: Emitter) -> Emitter {
   let e =
-    Emitter(..e, lexical_refs: opcode.LexicalRefs(..e.lexical_refs, this: True))
-  case resolve_lexical(e, opcode.RefThis) {
+    Emitter(..e, lexical_refs: lexical.LexicalRefs(..e.lexical_refs, this: True))
+  case resolve_lexical(e, lexical.RefThis) {
     Some(#(slot, True)) -> emit_op(e, opcode.PutBoxedCheckInit(slot))
     Some(#(slot, False)) -> emit_op(e, opcode.PutLocalCheckInit(slot))
     // Defensive only — set_this is reached solely from derived-ctor
@@ -2635,7 +2633,7 @@ fn set_this(e: Emitter) -> Emitter {
 fn emit_super_base(e: Emitter) -> Emitter {
   e
   |> get_this
-  |> get_lexical(opcode.RefHomeObject)
+  |> get_lexical(lexical.RefHomeObject)
   |> emit_op(opcode.GetPrototypeOf)
 }
 
@@ -2645,7 +2643,7 @@ fn emit_super_base_keep_recv(e: Emitter) -> Emitter {
   e
   |> get_this
   |> emit_op(opcode.Dup)
-  |> get_lexical(opcode.RefHomeObject)
+  |> get_lexical(lexical.RefHomeObject)
   |> emit_op(opcode.GetPrototypeOf)
 }
 
@@ -3278,11 +3276,11 @@ fn compile_function_body(
   // emitter's kind verbatim; every other shape fixes it structurally.
   let code_kind = case shape {
     Arrow(..) -> parent.code_kind
-    FnDecl(..) | FnExpr(..) -> opcode.FunctionCode
-    Method(..) -> opcode.MethodCode
-    ClassCtor(derived: True, ..) -> opcode.DerivedCtorCode
-    ClassCtor(derived: False, ..) -> opcode.MethodCode
-    ClassInitFn -> opcode.FieldInitCode
+    FnDecl(..) | FnExpr(..) -> lexical.FunctionCode
+    Method(..) -> lexical.MethodCode
+    ClassCtor(derived: True, ..) -> lexical.DerivedCtorCode
+    ClassCtor(derived: False, ..) -> lexical.MethodCode
+    ClassInitFn -> lexical.FieldInitCode
   }
   // Like CodeKind, arrows inherit FieldInitMode so `()=>super()` inside a
   // derived ctor can emit the init call. Only FieldInitAfterSuper is
@@ -3426,7 +3424,7 @@ fn compile_function_body(
       case shadowed {
         True -> e
         False -> {
-          let e = get_lexical(e, opcode.RefActiveFunc)
+          let e = get_lexical(e, lexical.RefActiveFunc)
           emit_var_init(e, fname)
         }
       }
@@ -4637,9 +4635,9 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.CallExpression(_, ast.SuperExpression(_), args) -> {
       let e =
         e
-        |> get_lexical(opcode.RefActiveFunc)
+        |> get_lexical(lexical.RefActiveFunc)
         |> emit_op(opcode.GetPrototypeOf)
-        |> get_lexical(opcode.RefNewTarget)
+        |> get_lexical(lexical.RefNewTarget)
       use e <- result.map(case e.in_synth_default_ctor {
         // §15.7.14 ClassDefaultConstructor: a class with no source
         // constructor forwards its whole argument List to the parent
@@ -4708,7 +4706,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Computed method call: obj[key](args) — must bind `this` to obj.
     // GetElem2 leaves [method, key, receiver]; we shuffle to [method, receiver]
     // via Swap+Pop so CallMethod sees the same shape as the dot-access path.
-    ast.CallExpression(_, ast.MemberExpression(_, obj, key, True), args) ->
+    ast.CallExpression(_, ast.MemberExpression(_, obj, ast.Bracket(key)), args) ->
       case ast_util.chain_has_optional(obj) {
         // `a?.b[k](x)` — the receiver chain short-circuits the call too.
         True -> emit_chain_root(e, expr)
@@ -4818,16 +4816,16 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // §13.3.7.3 super.prop / super[k] — read via [[HomeObject]].[[Prototype]]
     // with receiver = lexical this. Must precede the generic MemberExpression
     // arm.
-    ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
+    ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
       let e = emit_super_base(e)
-      use e <- result.map(emit_super_key(e, key, computed))
+      use e <- result.map(emit_super_key(e, property))
       emit_op(e, opcode.GetSuperValue)
     }
 
     // Member expression (dot access). A `?.` link anywhere in the object
     // chain routes the WHOLE expression through the shared-short-circuit
     // chain compiler (§13.3.9.1).
-    ast.MemberExpression(_, object, ast.Identifier(name: prop, ..), False) ->
+    ast.MemberExpression(_, object, ast.Dot(name: prop, ..)) ->
       case ast_util.chain_has_optional(object) {
         True -> emit_chain_root(e, expr)
         False -> {
@@ -4837,18 +4835,15 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
 
     // Computed member expression (obj[key])
-    ast.MemberExpression(_, object, property, True) ->
+    ast.MemberExpression(_, object, ast.Bracket(key)) ->
       case ast_util.chain_has_optional(object) {
         True -> emit_chain_root(e, expr)
         False -> {
           use e <- result.try(emit_expr(e, object))
-          use e <- result.map(emit_expr(e, property))
+          use e <- result.map(emit_expr(e, key))
           emit_op(e, opcode.GetElem)
         }
       }
-    // A non-computed member (`o.x`) whose property is not an Identifier: the
-    // parser only ever puts an Identifier there, so this is an engine bug.
-    ast.MemberExpression(..) -> Error(NonIdentifierStaticMember)
 
     // Optional member / call expressions — always chain roots.
     ast.OptionalMemberExpression(..) | ast.OptionalCallExpression(..) ->
@@ -4889,7 +4884,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // §13.3.12 new.target — reads the lexical [[NewTarget]] slot.
     ast.MetaProperty(_, ast.NewTarget) ->
-      Ok(get_lexical(e, opcode.RefNewTarget))
+      Ok(get_lexical(e, lexical.RefNewTarget))
 
     // §13.3.13 import.meta — the per-module meta object is not plumbed
     // through the runtime yet, so this is a typed unsupported-feature error
@@ -6264,15 +6259,15 @@ fn emit_destructuring_assign(
     // shape below. Stack: [val] → this → Swap → [val,this] → home proto →
     // Swap → [val,proto,this] → key → Swap → [val,key,proto,this]
     // → PutSuperValue → [val] → Pop.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
+    _, ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
       let e =
         e
         |> get_this
         |> emit_op(opcode.Swap)
-        |> get_lexical(opcode.RefHomeObject)
+        |> get_lexical(lexical.RefHomeObject)
         |> emit_op(opcode.GetPrototypeOf)
         |> emit_op(opcode.Swap)
-      use e <- result.map(emit_super_key(e, key, computed))
+      use e <- result.map(emit_super_key(e, property))
       e
       |> emit_op(opcode.Swap)
       |> emit_op(opcode.PutSuperValue)
@@ -6291,7 +6286,7 @@ fn emit_destructuring_assign(
     // obj[key] — PutElem wants [val,key,obj]. With only Dup/Swap (no rot3):
     // [val] → emit obj → [obj,val] → swap → [val,obj] → emit key → [key,val,obj]
     // → swap → [val,key,obj] → PutElem → [val] → Pop.
-    _, ast.MemberExpression(_, obj, key, True) -> {
+    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
       use e <- result.try(emit_expr(e, obj))
       let e = emit_op(e, opcode.Swap)
       use e <- result.map(emit_expr(e, key))
@@ -6399,7 +6394,7 @@ fn emit_array_assign_element(
     // emit_destructuring_assign build the PutSuperValue store (the member
     // arms below are shaped around a single evaluated base object). Only a
     // COMPUTED super key deviates from lref-before-step order.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
       let e = emit_op(e, opcode.IteratorNext)
       let e = emit_op(e, opcode.Pop)
       emit_destructuring_assign(e, target)
@@ -6424,7 +6419,7 @@ fn emit_array_assign_element(
     // → key → [key,obj,iter] → Rot3 → [iter,key,obj] → IteratorNext → Pop
     // → [value,iter,key,obj] → Swap → [iter,value,key,obj] → Unrot4
     // → [value,key,obj,iter] → PutElem → [value,iter] → Pop → [iter].
-    _, ast.MemberExpression(_, obj, key, True) -> {
+    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
       use e <- result.try(emit_expr(e, obj))
       use e <- result.map(emit_expr(e, key))
       e
@@ -6466,7 +6461,7 @@ fn emit_array_assign_rest(
     // super.p / super[k] rest target — same routing as
     // emit_array_assign_element: no observable lref evaluation, so drain
     // first and let emit_destructuring_assign build the super store.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
       let e = emit_op(e, opcode.PopTry)
       let e = emit_op(e, opcode.IteratorRest)
       use e <- result.map(emit_destructuring_assign(e, target))
@@ -6490,7 +6485,7 @@ fn emit_array_assign_rest(
     // [iter] → [obj,iter] → PopTry → Swap → [iter,obj] → PushTry(close_throw)
     // → emit key → [key,iter,obj] → Swap → [iter,key,obj] → PopTry
     // → IteratorRest → [arr,key,obj] → PutElem → [arr] → Pop.
-    _, ast.MemberExpression(_, obj, key, True) -> {
+    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
       use e <- result.try(emit_expr(e, obj))
       let e = emit_op(e, opcode.PopTry)
       let e = emit_op(e, opcode.Swap)
@@ -6592,7 +6587,7 @@ fn emit_keyed_destructure_assign(
   case ast_util.member_static_prop(bare), bare {
     // super.p / super[k] target: no observable lref evaluation, so GetV
     // first and let emit_destructuring_assign build the super store.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
       let e = emit_op(e, opcode.Dup)
       let e = emit_ir(e, IrGetField(name))
       emit_destructuring_assign(e, target)
@@ -6612,7 +6607,7 @@ fn emit_keyed_destructure_assign(
     // [src,obj,src] → key → [key,src,obj,src] → Swap → [src,key,obj,src] →
     // GetField → [v,key,obj,src] → PutElem → [v,src] → Pop → [src].
     // base→key→GetV order matches §13.3.2.1 + §13.15.5.6 step 1a.
-    _, ast.MemberExpression(_, obj, key, True) -> {
+    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
       let e = emit_op(e, opcode.Dup)
       use e <- result.try(emit_expr(e, obj))
       let e = emit_op(e, opcode.Swap)
@@ -6676,7 +6671,7 @@ fn emit_elem_keyed_target(
   case ast_util.member_static_prop(target), target {
     // super.p / super[k] target: no observable lref evaluation — get the
     // source value and let emit_destructuring_assign build the super store.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
       let e = emit_op(e, opcode.GetElem)
       emit_destructuring_assign(e, target)
     }
@@ -6694,7 +6689,7 @@ fn emit_elem_keyed_target(
     // [key,srcd,src] → tobj → unrot3 → [key,srcd,tobj,src] → tkey → unrot3
     // → [key,srcd,tkey,tobj,src] → GetElem → [v,tkey,tobj,src]
     // → PutElem → [v,src] → Pop → [src].
-    _, ast.MemberExpression(_, tobj, tkey, True) -> {
+    _, ast.MemberExpression(_, tobj, ast.Bracket(tkey)) -> {
       use e <- result.try(emit_expr(e, tobj))
       let e = emit_unrot3(e)
       use e <- result.map(emit_expr(e, tkey))
@@ -6710,7 +6705,7 @@ fn emit_elem_keyed_target(
       case ast_util.unwrap_parens(left) {
         // Super member with a default: handled by the generic path (the
         // lref has no observable evaluation).
-        ast.MemberExpression(_, ast.SuperExpression(_), _, _) -> {
+        ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
           let e = emit_op(e, opcode.GetElem)
           emit_destructuring_assign(e, assign)
         }
@@ -6752,7 +6747,7 @@ fn emit_elem_keyed_member_default(
       let e = emit_unrot3(e)
       #(emit_op(e, opcode.GetElem), emit_put_field(_, prop))
     }
-    _, ast.MemberExpression(_, tobj, tkey, True) -> {
+    _, ast.MemberExpression(_, tobj, ast.Bracket(tkey)) -> {
       use e <- result.try(emit_expr(e, tobj))
       let e = emit_unrot3(e)
       use e <- result.map(emit_expr(e, tkey))
@@ -6985,14 +6980,14 @@ fn emit_logical_assign(
     }
     // super.x &&= v — needs GetSuperValue2/PutSuperValue stack juggling on
     // the short-circuit path; a genuine engine gap, not a user error.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _, _) ->
+    _, ast.MemberExpression(_, ast.SuperExpression(_), _) ->
       Error(UnsupportedFeature("logical assignment to a super property"))
     Some(#(obj, prop)), _ -> {
       use e <- result.try(emit_expr(e, obj))
       let e = emit_get_field2(e, prop)
       emit_logical_assign_member(e, op, right, emit_put_field(_, prop), 1)
     }
-    _, ast.MemberExpression(_, obj, key, True) -> {
+    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
       use e <- result.try(emit_expr(e, obj))
       use e <- result.try(emit_expr(e, key))
       let e = emit_op(e, opcode.GetElem2)
