@@ -4,21 +4,18 @@
 import arc/parser/ast
 import arc/parser/lexer.{
   type TokenKind, Ampersand, AmpersandAmpersand, AmpersandAmpersandEqual,
-  AmpersandEqual, Arrow, As, Async, Await, Bang, BangEqual, BangEqualEqual,
-  Break, Caret, CaretEqual, Case, Catch, Class, Colon, Comma, Const, Continue,
-  Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal, EqualEqual,
-  EqualEqualEqual, Export, Extends, Finally, For, From, Function, GreaterThan,
-  GreaterThanEqual, GreaterThanGreaterThan, GreaterThanGreaterThanEqual,
-  GreaterThanGreaterThanGreaterThan, GreaterThanGreaterThanGreaterThanEqual,
-  Identifier, If, Illegal, Import, In, Instanceof, KFalse, KString, KTrue,
-  LeftBrace, LeftBracket, LeftParen, LessThan, LessThanEqual, LessThanLessThan,
-  LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual, MinusMinus, New,
-  Null, Number, Of, Percent, PercentEqual, Pipe, PipeEqual, PipePipe,
-  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
-  QuestionQuestion, QuestionQuestionEqual, Return, RightBrace, RightBracket,
-  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
-  StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral, This,
-  Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
+  AmpersandEqual, As, Async, Await, BangEqual, BangEqualEqual, Break, Caret,
+  CaretEqual, Case, Catch, Class, Const, Continue, Debugger, Default, Delete, Do,
+  Else, Equal, EqualEqual, EqualEqualEqual, Export, Extends, Finally, For, From,
+  Function, GreaterThan, GreaterThanEqual, GreaterThanGreaterThan,
+  GreaterThanGreaterThanEqual, GreaterThanGreaterThanGreaterThan,
+  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Import, In, Instanceof,
+  KFalse, KTrue, LessThan, LessThanEqual, LessThanLessThan,
+  LessThanLessThanEqual, Let, Minus, MinusEqual, New, Null, Of, Percent,
+  PercentEqual, Pipe, PipeEqual, PipePipe, PipePipeEqual, Plus, PlusEqual,
+  QuestionQuestion, QuestionQuestionEqual, Return, Slash, SlashEqual, Star,
+  StarEqual, StarStar, StarStarEqual, Static, Super, Switch, This, Throw, Try,
+  Typeof, Undefined, Var, Void, While, With, Yield,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -169,118 +166,5 @@ pub fn assignment_op(kind: TokenKind) -> Option(ast.AssignmentOp) {
     PipePipeEqual -> Some(ast.LogicalOrAssign)
     QuestionQuestionEqual -> Some(ast.NullishCoalesceAssign)
     _ -> None
-  }
-}
-
-pub fn token_kind_to_string(kind: TokenKind) -> String {
-  case kind {
-    Number -> "number"
-    KString -> "string"
-    TemplateLiteral -> "template"
-    TemplateHead -> "template"
-    Identifier -> "identifier"
-    Var -> "'var'"
-    Let -> "'let'"
-    Const -> "'const'"
-    Function -> "'function'"
-    Return -> "'return'"
-    If -> "'if'"
-    Else -> "'else'"
-    While -> "'while'"
-    Do -> "'do'"
-    For -> "'for'"
-    Break -> "'break'"
-    Continue -> "'continue'"
-    Switch -> "'switch'"
-    Case -> "'case'"
-    Default -> "'default'"
-    Throw -> "'throw'"
-    Try -> "'try'"
-    Catch -> "'catch'"
-    Finally -> "'finally'"
-    New -> "'new'"
-    Delete -> "'delete'"
-    Typeof -> "'typeof'"
-    Void -> "'void'"
-    In -> "'in'"
-    Instanceof -> "'instanceof'"
-    This -> "'this'"
-    Class -> "'class'"
-    Extends -> "'extends'"
-    Super -> "'super'"
-    Import -> "'import'"
-    Export -> "'export'"
-    From -> "'from'"
-    As -> "'as'"
-    Of -> "'of'"
-    Async -> "'async'"
-    Await -> "'await'"
-    Yield -> "'yield'"
-    Null -> "'null'"
-    Undefined -> "'undefined'"
-    KTrue -> "'true'"
-    KFalse -> "'false'"
-    Debugger -> "'debugger'"
-    With -> "'with'"
-    Static -> "'static'"
-    LeftParen -> "'('"
-    RightParen -> "')'"
-    LeftBrace -> "'{'"
-    RightBrace -> "'}'"
-    LeftBracket -> "'['"
-    RightBracket -> "']'"
-    Semicolon -> "';'"
-    Comma -> "','"
-    Dot -> "'.'"
-    DotDotDot -> "'...'"
-    QuestionDot -> "'?.'"
-    QuestionQuestion -> "'??'"
-    Arrow -> "'=>'"
-    Colon -> "':'"
-    Plus -> "'+'"
-    Minus -> "'-'"
-    Star -> "'*'"
-    StarStar -> "'**'"
-    Slash -> "'/'"
-    Percent -> "'%'"
-    Ampersand -> "'&'"
-    AmpersandAmpersand -> "'&&'"
-    Pipe -> "'|'"
-    PipePipe -> "'||'"
-    Caret -> "'^'"
-    Tilde -> "'~'"
-    Bang -> "'!'"
-    Equal -> "'='"
-    EqualEqual -> "'=='"
-    EqualEqualEqual -> "'==='"
-    BangEqual -> "'!='"
-    BangEqualEqual -> "'!=='"
-    LessThan -> "'<'"
-    LessThanEqual -> "'<='"
-    GreaterThan -> "'>'"
-    GreaterThanEqual -> "'>='"
-    LessThanLessThan -> "'<<'"
-    GreaterThanGreaterThan -> "'>>'"
-    GreaterThanGreaterThanGreaterThan -> "'>>>'"
-    PlusEqual -> "'+='"
-    MinusEqual -> "'-='"
-    StarEqual -> "'*='"
-    StarStarEqual -> "'**='"
-    SlashEqual -> "'/='"
-    PercentEqual -> "'%='"
-    AmpersandEqual -> "'&='"
-    AmpersandAmpersandEqual -> "'&&='"
-    PipeEqual -> "'|='"
-    PipePipeEqual -> "'||='"
-    CaretEqual -> "'^='"
-    QuestionQuestionEqual -> "'??='"
-    LessThanLessThanEqual -> "'<<='"
-    GreaterThanGreaterThanEqual -> "'>>='"
-    GreaterThanGreaterThanGreaterThanEqual -> "'>>>='"
-    PlusPlus -> "'++'"
-    MinusMinus -> "'--'"
-    Question -> "'?'"
-    Eof -> "end of file"
-    Illegal | LexFailure(_) -> "illegal token"
   }
 }

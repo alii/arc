@@ -88,7 +88,7 @@ import arc/parser/source_bytes
 import arc/parser/token.{
   Binary, BinaryOperator, Coalesce, ShortCircuit, assignment_op, binary_operator,
   is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
-  is_reserved_word_kind, token_kind_to_string,
+  is_reserved_word_kind,
 }
 import arc/vm/opcode
 import gleam/bit_array
@@ -1819,8 +1819,7 @@ fn parse_object_binding_property(
     next -> {
       // shorthand binding (with optional default) — validate the name as a binding identifier
       case is_valid_shorthand {
-        False ->
-          Error(UnexpectedToken(pos_of(p), token_kind_to_string(prop_kind)))
+        False -> Error(UnexpectedToken(pos_of(p), prop_kind))
         True -> {
           use #(p3, _) <- result.try(validate_and_register_binding_no_advance(
             p,
@@ -4622,10 +4621,7 @@ fn parse_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
             P(..p4, last_expr_assignable: False),
             ast.SequenceExpression(
               expressions: [first_expr, rest_expr],
-              span: ast.Span(
-                ast.expression_span(first_expr).start,
-                p4.prev_end,
-              ),
+              span: ast.Span(ast.expression_span(first_expr).start, p4.prev_end),
             ),
           ))
         }
@@ -6238,8 +6234,7 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
               }
             _ -> contextual_ident_ok(p)
           }
-        False ->
-          Error(UnexpectedToken(pos_of(p), token_kind_to_string(peek(p))))
+        False -> Error(UnexpectedToken(pos_of(p), peek(p)))
       }
   }
 }
@@ -6494,7 +6489,7 @@ fn parse_object_property(p: P) -> Result(#(P, ast.Property), ParseError) {
   use Nil <- result.try(reject_private_property_key(p4, key))
   // Generator shorthand (*name) must be a method — must have (
   case is_generator && peek(p5) != LeftParen {
-    True -> Error(UnexpectedToken(pos_of(p5), token_kind_to_string(peek(p5))))
+    True -> Error(UnexpectedToken(pos_of(p5), peek(p5)))
     False ->
       parse_object_property_value(
         p,
@@ -6571,11 +6566,7 @@ fn parse_object_property_value(
       // grammar — the latter only valid in destructuring / arrow params).
       // Both require the key to be a plain identifier.
       case is_valid_shorthand {
-        False ->
-          Error(UnexpectedToken(
-            pos_of(p5),
-            token_kind_to_string(prop_name_kind),
-          ))
+        False -> Error(UnexpectedToken(pos_of(p5), prop_name_kind))
         True -> {
           // Shorthand is an IdentifierReference — apply §13.1.1 early
           // errors (escaped reserved words, strict future-reserved,
@@ -7859,10 +7850,7 @@ fn parse_template_substitutions(
       }
     }
     other ->
-      Error(error_at_current(
-        p,
-        ExpectedToken(pos_of(p), "}", token_kind_to_string(other)),
-      ))
+      Error(error_at_current(p, ExpectedToken(pos_of(p), RightBrace, other)))
   }
 }
 
@@ -8047,12 +8035,7 @@ fn expect(p: P, kind: TokenKind) -> Result(P, ParseError) {
     False ->
       case peek(p) {
         Illegal | LexFailure(_) -> Error(illegal_token_error(p))
-        found ->
-          Error(ExpectedToken(
-            pos_of(p),
-            token_kind_to_string(kind),
-            token_kind_to_string(found),
-          ))
+        found -> Error(ExpectedToken(pos_of(p), kind, found))
       }
   }
 }
@@ -8079,7 +8062,7 @@ fn expect_identifier(p: P) -> Result(P, ParseError) {
 fn illegal_token_error(p: P) -> ParseError {
   case peek(p) {
     LexFailure(err) -> lex_error(err)
-    kind -> UnexpectedToken(pos_of(p), token_kind_to_string(kind))
+    kind -> UnexpectedToken(pos_of(p), kind)
   }
 }
 
