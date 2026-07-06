@@ -693,9 +693,7 @@ fn string_trim(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  string_transform(this, state, fn(s) {
-    value.trim_leading_js_whitespace(value.trim_trailing_js_whitespace(s))
-  })
+  string_transform(this, state, value.trim_js_whitespace)
 }
 
 /// ES2024 22.1.3.30 — String.prototype.trimStart ( )

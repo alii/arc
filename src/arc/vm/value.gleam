@@ -4753,7 +4753,7 @@ fn float_same_term(a: Float, b: Float) -> Bool
 /// relational comparison) and `ops/coerce` (ToBigInt) need it and `operators`
 /// cannot import `coerce`. One copy: a fix lands everywhere.
 pub fn string_to_bigint(s: String) -> Option(Int) {
-  let s = string.trim(s)
+  let s = trim_js_whitespace(s)
   case s {
     "" -> Some(0)
     "0x" <> rest | "0X" <> rest -> parse_bigint_radix_digits(rest, 16)
@@ -4927,6 +4927,15 @@ pub fn trim_leading_js_whitespace(s: String) -> String {
     drop_leading_string_ws(bit_array.from_string(s)) |> bit_array.to_string
     as "whole codepoints are dropped, so the rest is valid UTF-8"
   trimmed
+}
+
+/// §22.1.3.32.1 TrimString with `where` = start+end — the composition of
+/// `trim_leading_js_whitespace` and `trim_trailing_js_whitespace`. The single
+/// entry point for callers that need the full StrWhiteSpace trim (ToNumber,
+/// StringToBigInt, `String.prototype.trim`): reach for this, not
+/// `gleam/string.trim`, which trims Erlang's Unicode White_Space set instead.
+pub fn trim_js_whitespace(s: String) -> String {
+  trim_trailing_js_whitespace(trim_leading_js_whitespace(s))
 }
 
 /// §22.1.3.32.1 TrimString with `where` = end. The trailing twin of
