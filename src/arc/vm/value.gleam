@@ -61,14 +61,20 @@ pub type WellKnown {
 /// sum. User-created symbols use Erlang references for global uniqueness
 /// across processes — no shared counter needed.
 ///
-/// A `UserSymbol` carries its own `[[Description]]`: it is fixed at creation
-/// (`Symbol(desc)` / `Symbol.for(key)`) and never changes, so it is a pure
-/// function of `ref` and term equality / dict-key semantics still hinge on
-/// `ref` alone. Keeping it here means a symbol cannot reach a realm, a
-/// ShadowRealm or a serialized state that has "forgotten" its description.
+/// A user symbol carries its own `[[Description]]` and its provenance
+/// (`Symbol(desc)` vs `Symbol.for(key)`): both are fixed at creation and never
+/// change, so they are pure functions of `ref` and term equality / dict-key
+/// semantics still hinge on `ref` alone. Keeping them here means a symbol
+/// cannot reach a realm, a ShadowRealm or a serialized state that has
+/// "forgotten" its description — and §9.13 CanBeHeldWeakly / §20.4.2.6
+/// KeyForSymbol are pure O(1) reads of the id, no registry scan.
 pub type SymbolId {
   WellKnownSymbol(which: WellKnown)
+  /// Minted by `Symbol(desc)` — never in the GlobalSymbolRegistry.
   UserSymbol(ref: ErlangRef, description: Option(String))
+  /// Minted by `Symbol.for(key)` — lives in the GlobalSymbolRegistry forever;
+  /// its `[[Description]]` is `key` (§20.4.2.2 step 4.a).
+  RegisteredSymbol(ref: ErlangRef, key: String)
 }
 
 // Well-known symbol constants.
@@ -125,20 +131,32 @@ pub fn well_known_description(which: WellKnown) -> String {
   }
 }
 
-/// Get the description string for a well-known symbol. `None` for `UserSymbol`.
+/// Get the description string for a well-known symbol. `None` for user symbols.
 pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
   case id {
     WellKnownSymbol(which) -> Some(well_known_description(which))
-    UserSymbol(..) -> None
+    UserSymbol(..) | RegisteredSymbol(..) -> None
   }
 }
 
 /// §20.4 [[Description]] of any symbol: the canonical name for a well-known
-/// symbol, or the (optional) description a user symbol was created with.
+/// symbol, the (optional) description a user symbol was created with, or the
+/// registry key of a `Symbol.for` symbol (§20.4.2.2 step 4.a).
 pub fn symbol_description(id: SymbolId) -> Option(String) {
   case id {
     WellKnownSymbol(which) -> Some(well_known_description(which))
     UserSymbol(description:, ..) -> description
+    RegisteredSymbol(key:, ..) -> Some(key)
+  }
+}
+
+/// §9.13 CanBeHeldWeakly's registered-symbol test / §20.4.2.6 KeyForSymbol:
+/// true iff `id` was minted by `Symbol.for`. Pure — a symbol's provenance is
+/// on the id itself, so no registry (or `State`) is consulted.
+pub fn is_registered_symbol(id: SymbolId) -> Bool {
+  case id {
+    RegisteredSymbol(..) -> True
+    WellKnownSymbol(_) | UserSymbol(..) -> False
   }
 }
 
@@ -1215,10 +1233,11 @@ pub type DisposableState {
 /// One entry of a [[DisposableResourceStack]] — a DisposableResource Record
 /// (Explicit Resource Management proposal §3.1).
 pub type DisposeResource {
-  /// From use(): [[ResourceValue]] = value, [[DisposeMethod]] = method.
-  /// Dispose calls `method` with `value` as this and no arguments.
-  /// On an async stack the call result is awaited.
-  SyncDispose(value: JsValue, method: JsValue)
+  /// From use(): [[ResourceValue]] = value, [[DisposeMethod]] = method
+  /// (@@dispose on a sync stack, @@asyncDispose on an async one). Dispose
+  /// calls `method` with `value` as this and no arguments; on an async stack
+  /// the call result is awaited.
+  MethodDispose(value: JsValue, method: JsValue)
   /// From adopt()/defer(): the spec wraps the user callback in a built-in
   /// closure with [[ResourceValue]] = undefined. We store the callback and
   /// its argument list directly (the closure is not observable from JS).
@@ -3077,12 +3096,11 @@ pub type CallNativeFn {
 }
 
 /// Captured state for Array.fromAsync's async-iterator loop continuations.
-/// `map_fn` is JsUndefined when no mapping function was supplied.
 pub type FromAsyncCtx {
   FromAsyncCtx(
     iter: JsValue,
     next_method: JsValue,
-    map_fn: JsValue,
+    map_fn: Option(JsValue),
     this_arg: JsValue,
     target: JsValue,
     k: Int,
@@ -3095,7 +3113,7 @@ pub type FromAsyncCtx {
 pub type FromAsyncLikeCtx {
   FromAsyncLikeCtx(
     items: JsValue,
-    map_fn: JsValue,
+    map_fn: Option(JsValue),
     this_arg: JsValue,
     target: JsValue,
     k: Int,

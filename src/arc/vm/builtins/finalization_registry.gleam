@@ -146,7 +146,7 @@ fn register(
   use cells, registry, state <- require_registry(this, state, "register")
   let #(target, held, token_arg) = helpers.three_args_or_undefined(args)
   // Step 3
-  case can_be_held_weakly(state, target) {
+  case can_be_held_weakly(target) {
     False -> state.type_error(state, "Invalid value used as weak ref target")
     True ->
       // Step 4
@@ -154,7 +154,7 @@ fn register(
         True -> state.type_error(state, "target and holdings must not be same")
         False ->
           // Step 5
-          case can_be_held_weakly(state, token_arg), token_arg {
+          case can_be_held_weakly(token_arg), token_arg {
             False, JsUndefined ->
               do_register(state, cells, registry, target, held, None)
             False, _ ->
@@ -208,7 +208,7 @@ fn unregister(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use cells, registry, state <- require_registry(this, state, "unregister")
   let token = helpers.first_arg_or_undefined(args)
-  case can_be_held_weakly(state, token) {
+  case can_be_held_weakly(token) {
     False -> state.type_error(state, "Invalid value used as unregister token")
     True -> {
       let #(removed, kept) =

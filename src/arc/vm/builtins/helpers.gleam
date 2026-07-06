@@ -8,8 +8,6 @@ import arc/vm/state.{type State}
 import arc/vm/value.{
   type JsValue, type Ref, JsObject, JsSymbol, JsUndefined, ObjectSlot,
 }
-import gleam/dict
-import gleam/list
 import gleam/option.{type Option, None, Some}
 
 /// Shared step-1 guard for native constructors that must not be [[Call]]ed
@@ -97,10 +95,14 @@ pub fn require_brand(
 /// collected, so it can't be held weakly. The single shared predicate for
 /// WeakMap keys, WeakSet members, and FinalizationRegistry targets /
 /// unregister tokens (and WeakRef, once implemented).
-pub fn can_be_held_weakly(state: State(host), v: JsValue) -> Bool {
+///
+/// Pure: a symbol's registered-ness is on the `SymbolId` itself
+/// (`value.RegisteredSymbol`), so no `State` — and no O(n) registry scan —
+/// is needed.
+pub fn can_be_held_weakly(v: JsValue) -> Bool {
   case v {
     JsObject(_) -> True
-    JsSymbol(id) -> !list.contains(dict.values(state.ctx.symbol_registry), id)
+    JsSymbol(id) -> !value.is_registered_symbol(id)
     _ -> False
   }
 }

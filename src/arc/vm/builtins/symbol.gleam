@@ -15,7 +15,6 @@ import arc/vm/value.{
   SymbolKeyFor, SymbolNative, SymbolToPrimitive, SymbolToString, SymbolValueOf,
 }
 import gleam/dict
-import gleam/list
 import gleam/option.{type Option, None, Some}
 
 /// Set up the Symbol constructor (with well-known symbol properties) and a
@@ -156,10 +155,16 @@ pub fn init(
 @external(erlang, "erlang", "make_ref")
 fn make_ref() -> value.ErlangRef
 
-/// Mint a new user symbol with the given [[Description]] (exposed for
-/// Symbol.for, which stores the registry key as the description).
+/// Mint a `Symbol(desc)` symbol — unique, never registered.
 pub fn new_symbol(description: Option(String)) -> value.SymbolId {
   value.UserSymbol(make_ref(), description)
+}
+
+/// Mint a `Symbol.for(key)` symbol — the ONLY constructor of the
+/// `RegisteredSymbol` variant, so `is_registered_symbol` is true iff the id
+/// came from here.
+fn new_registered_symbol(key: String) -> value.SymbolId {
+  value.RegisteredSymbol(make_ref(), key)
 }
 
 /// Per-module dispatch for Symbol native functions.
@@ -210,9 +215,7 @@ fn symbol_for(
   case dict.get(state.ctx.symbol_registry, key_str) {
     Ok(existing_id) -> #(state, Ok(JsSymbol(existing_id)))
     Error(Nil) -> {
-      // §20.4.2.2 step 4.a: the registered symbol's [[Description]] IS
-      // the registry key.
-      let id = new_symbol(Some(key_str))
+      let id = new_registered_symbol(key_str)
       let new_registry = dict.insert(state.ctx.symbol_registry, key_str, id)
       let ctx = RealmCtx(..state.ctx, symbol_registry: new_registry)
       #(State(..state, ctx:), Ok(JsSymbol(id)))
@@ -221,20 +224,15 @@ fn symbol_for(
 }
 
 /// §20.4.2.6 Symbol.keyFor ( sym ) — reverse lookup in the global registry.
+/// A registered symbol carries its own key, so this is a pure O(1) read; the
+/// registry dict is never scanned.
 fn symbol_key_for(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
-    [JsSymbol(id), ..] -> {
-      let val =
-        dict.to_list(state.ctx.symbol_registry)
-        |> list.find(fn(pair) { pair.1 == id })
-        |> option.from_result
-        |> option.map(fn(pair) { JsString(pair.0) })
-        |> option.unwrap(JsUndefined)
-      #(state, Ok(val))
-    }
+    [JsSymbol(value.RegisteredSymbol(key:, ..)), ..] -> #(state, Ok(JsString(key)))
+    [JsSymbol(_), ..] -> #(state, Ok(JsUndefined))
     _ -> state.type_error(state, "Symbol.keyFor requires a Symbol argument")
   }
 }

@@ -15,9 +15,7 @@
 /// The key predicate (§9.13 CanBeHeldWeakly) is `helpers.can_be_held_weakly`,
 /// shared with `weak_set` and `finalization_registry`.
 import arc/vm/builtins/common.{type BuiltinType}
-import arc/vm/builtins/helpers.{
-  arg_at, can_be_held_weakly, first_arg_or_undefined,
-}
+import arc/vm/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/weak_collection.{type WeakKind, WeakKind}
 import arc/vm/ops/object
@@ -124,14 +122,9 @@ fn weak_map_get(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, state <- weak_collection.require(kind(), this, state, "get")
   let key = first_arg_or_undefined(args)
-  case can_be_held_weakly(state, key) {
-    True ->
-      case weak_collection.lookup(state, ref, key) {
-        Ok(val) -> #(state, Ok(val))
-        Error(Nil) -> #(state, Ok(JsUndefined))
-      }
-    False -> #(state, Ok(JsUndefined))
-  }
+  // A non-weakly-holdable key can never be present (`insert` demands a proved
+  // `WeakKey`), so no separate CanBeHeldWeakly gate — mirrors `has`.
+  #(state, Ok(weak_collection.lookup(state, ref, key) |> option.unwrap(JsUndefined)))
 }
 
 /// ES2024 §24.3.3.5 WeakMap.prototype.set ( key, value )
@@ -157,8 +150,8 @@ fn get_or_insert(
   let key = first_arg_or_undefined(args)
   use weak_key, state <- weak_collection.require_weak_key(ref, state, key)
   case weak_collection.lookup(state, ref, key) {
-    Ok(existing) -> #(state, Ok(existing))
-    Error(Nil) -> {
+    Some(existing) -> #(state, Ok(existing))
+    None -> {
       let val = arg_at(args, 1)
       #(weak_collection.insert(state, ref, weak_key, val), Ok(val))
     }
@@ -190,8 +183,8 @@ fn get_or_insert_computed(
     object.inspect(callback, state.heap) <> " is not a function"
   })
   case weak_collection.lookup(state, ref, key) {
-    Ok(existing) -> #(state, Ok(existing))
-    Error(Nil) -> {
+    Some(existing) -> #(state, Ok(existing))
+    None -> {
       use computed, state <- state.try_call(state, callback, JsUndefined, [key])
       // The callback may have mutated the map — `insert` re-reads the live
       // entry dict, so an entry it inserted under this key is overwritten

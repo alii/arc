@@ -116,7 +116,7 @@ pub fn require_weak_key(
   cont: fn(WeakKey, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let WeakRef(kind:, ..) = ref
-  case helpers.can_be_held_weakly(state, key) {
+  case helpers.can_be_held_weakly(key) {
     True -> cont(WeakKey(key), state)
     False -> state.type_error(state, kind.invalid_key_message)
   }
@@ -147,8 +147,8 @@ pub fn lookup(
   state: State(host),
   ref: WeakRef(host, v),
   key: JsValue,
-) -> Result(v, Nil) {
-  dict.get(read_data(state, ref), key)
+) -> Option(v) {
+  dict.get(read_data(state, ref), key) |> option.from_result
 }
 
 /// Read-modify-write the entry dict inside a single heap access.
