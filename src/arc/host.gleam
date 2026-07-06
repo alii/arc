@@ -133,11 +133,10 @@ pub fn validate_integer(
   cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case val {
-    JsNumber(Finite(n)) -> {
-      let i = value.float_to_int(n)
-      case int.to_float(i) == n {
-        False -> not_an_integer(s, name, value.js_format_number(n))
-        True ->
+    JsNumber(Finite(n)) ->
+      case value.integral_int(n) {
+        option.None -> not_an_integer(s, name, value.js_format_number(n))
+        option.Some(i) ->
           case i >= min && i <= max {
             True -> cont(i, s)
             False ->
@@ -154,7 +153,6 @@ pub fn validate_integer(
               )
           }
       }
-    }
     // A number, just not an integral one — out of the integer domain, not
     // out of the type.
     JsNumber(NaN) -> not_an_integer(s, name, "NaN")
