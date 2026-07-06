@@ -228,7 +228,28 @@ fn module_export_seeds(
   items: List(ast.ModuleItem),
   exports: List(esm.ExportEntry),
 ) -> Dict(String, JsValue) {
-  let undef = list.fold(items, set.new(), collect_undef_export_names)
+  // The `undefined`-seeded names are exactly the module-level VarDeclaredNames
+  // plus the top-level FunctionDeclarations — the same ast_util helpers the
+  // emitter drives instantiation from, so `export {x}; if (c) var x` sees `x`
+  // as var-declared (the shallow walk this replaced did not descend into
+  // compound statements). `module_items_to_stmts` also lowers a NAMED
+  // `export default function fn(){}` to a FunctionDeclaration, so `fn` seeds
+  // `undefined`.
+  //
+  // KNOWN GAP: an ANONYMOUS `export default function () {}` is a var-scoped
+  // hoistable declaration too (§16.2.1.6.4), so `*default*` should also seed
+  // `undefined` and be initialized before the body runs. It currently seeds
+  // TDZ and is assigned in place. Fixing that needs the parser to tag the
+  // anonymous function's scope `TagFnDecl` and `module_items_to_stmts` to
+  // lower it to a FunctionDeclaration — while still naming the closure
+  // "default", not "*default*" — so it is left alone here rather than
+  // half-fixed into a silently-`undefined` read.
+  let stmts = ast_util.module_items_to_stmts(items)
+  let undef =
+    set.from_list(list.append(
+      ast_util.collect_hoisted_vars(stmts),
+      ast_util.direct_fn_names(stmts),
+    ))
   local_export_names(exports)
   |> list.fold(dict.new(), fn(acc, name) {
     let seed = case set.contains(undef, name) {
@@ -237,60 +258,6 @@ fn module_export_seeds(
     }
     dict.insert(acc, name, seed)
   })
-}
-
-/// Names declared by `var` or `function` at module top level — hoisted to
-/// `undefined`, so seeded `undefined` (not TDZ). Unwraps `export <decl>`.
-fn collect_undef_export_names(
-  acc: set.Set(String),
-  item: ast.ModuleItem,
-) -> set.Set(String) {
-  case item {
-    ast.StatementItem(located) -> undef_names_of_stmt(acc, located.statement)
-    ast.ExportDeclaration(declaration:, ..) ->
-      undef_names_of_stmt(acc, ast.declaration_to_statement(declaration))
-    // `export default function fn() {}` — hoisted like any top-level
-    // function declaration, so its binding seeds `undefined` (not TDZ).
-    //
-    // KNOWN GAP: an ANONYMOUS `export default function () {}` is a var-scoped
-    // hoistable declaration too (§16.2.1.6.4), so `*default*` should also seed
-    // `undefined` and be initialized before the body runs. It currently seeds
-    // TDZ and is assigned in place. Fixing that needs the parser to tag the
-    // anonymous function's scope `TagFnDecl` and `module_items_to_stmts` to
-    // lower it to a FunctionDeclaration — while still naming the closure
-    // "default", not "*default*" — so it is left alone here rather than
-    // half-fixed into a silently-`undefined` read.
-    ast.ExportDefaultDeclaration(
-      declaration: ast.FunctionExpression(
-        name: Some(ast.NamedBinding(name:, ..)),
-        ..,
-      ),
-      ..,
-    ) -> set.insert(acc, name)
-    ast.ExportDefaultDeclaration(..)
-    | ast.ImportDeclaration(..)
-    | ast.ExportNamed(..)
-    | ast.ExportAllDeclaration(..) -> acc
-  }
-}
-
-/// The var/function-hoisted names a top-level statement introduces.
-fn undef_names_of_stmt(
-  acc: set.Set(String),
-  stmt: ast.Statement,
-) -> set.Set(String) {
-  case stmt {
-    ast.VariableDeclaration(kind: ast.Var, declarations:) ->
-      // Every name the declarator binds — `var {a, b} = o` hoists `a` and
-      // `b` exactly like `var a` does, so destructured names seed
-      // `undefined` too.
-      list.fold(declarations, acc, fn(a, decl) {
-        list.fold(ast.pattern_bound_names(decl.id), a, set.insert)
-      })
-    ast.FunctionDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..) ->
-      set.insert(acc, name)
-    _ -> acc
-  }
 }
 
 fn compile_module_with_scope(
