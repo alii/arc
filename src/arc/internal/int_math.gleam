@@ -15,3 +15,14 @@ pub fn floor_div(a: Int, b: Int) -> Int {
 pub fn floor_mod(a: Int, b: Int) -> Int {
   a - floor_div(a, b) * b
 }
+
+/// Integer division truncating toward zero (Gleam's `/`, named for symmetry
+/// with `floor_div` at call sites that mix both flavours).
+pub fn trunc_div(a: Int, b: Int) -> Int {
+  a / b
+}
+
+/// Modulo whose result carries the sign of the dividend. `b` must be non-zero.
+pub fn trunc_mod(a: Int, b: Int) -> Int {
+  a - trunc_div(a, b) * b
+}
