@@ -7,7 +7,7 @@ import arc/vm/key.{Named}
 import arc/vm/opcode.{
   type Op, Add, BitAnd, BitNot, BitOr, BitXor, CatchOnly, DefineField, Div, Dup,
   Eq, Exp, GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue,
-  LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst,
+  LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pc, Pop, Pos, PushConst,
   PushTry, PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq,
   StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void, bin_op,
 }
@@ -528,7 +528,7 @@ pub fn multiple_locals_test() {
 pub fn jump_test() {
   // Jump over one instruction
   let assert Ok(JsNumber(Finite(2.0))) =
-    run_simple([PushConst(0), Jump(3), PushConst(1), PushConst(2)], [
+    run_simple([PushConst(0), Jump(Pc(3)), PushConst(1), PushConst(2)], [
       JsNumber(Finite(1.0)),
       JsNumber(Finite(99.0)),
       JsNumber(Finite(2.0)),
@@ -537,7 +537,7 @@ pub fn jump_test() {
 
 pub fn jump_if_false_taken_test() {
   let assert Ok(JsNumber(Finite(42.0))) =
-    run_simple([PushConst(0), JumpIfFalse(3), PushConst(1), PushConst(2)], [
+    run_simple([PushConst(0), JumpIfFalse(Pc(3)), PushConst(1), PushConst(2)], [
       JsBool(False),
       JsNumber(Finite(99.0)),
       JsNumber(Finite(42.0)),
@@ -546,7 +546,7 @@ pub fn jump_if_false_taken_test() {
 
 pub fn jump_if_false_not_taken_test() {
   let assert Ok(JsNumber(Finite(99.0))) =
-    run_simple([PushConst(0), JumpIfFalse(3), PushConst(1), Return], [
+    run_simple([PushConst(0), JumpIfFalse(Pc(3)), PushConst(1), Return], [
       JsBool(True),
       JsNumber(Finite(99.0)),
     ])
@@ -554,7 +554,7 @@ pub fn jump_if_false_not_taken_test() {
 
 pub fn jump_if_true_test() {
   let assert Ok(JsString("yes")) =
-    run_simple([PushConst(0), JumpIfTrue(3), PushConst(1), PushConst(2)], [
+    run_simple([PushConst(0), JumpIfTrue(Pc(3)), PushConst(1), PushConst(2)], [
       JsBool(True),
       JsString("nope"),
       JsString("yes"),
@@ -567,7 +567,7 @@ pub fn jump_if_true_test() {
 
 pub fn truthy_zero_is_false_test() {
   let assert Ok(JsString("falsy")) =
-    run_simple([PushConst(0), JumpIfFalse(3), PushConst(1), PushConst(2)], [
+    run_simple([PushConst(0), JumpIfFalse(Pc(3)), PushConst(1), PushConst(2)], [
       JsNumber(Finite(0.0)),
       JsString("truthy"),
       JsString("falsy"),
@@ -576,7 +576,7 @@ pub fn truthy_zero_is_false_test() {
 
 pub fn truthy_empty_string_is_false_test() {
   let assert Ok(JsString("falsy")) =
-    run_simple([PushConst(0), JumpIfFalse(3), PushConst(1), PushConst(2)], [
+    run_simple([PushConst(0), JumpIfFalse(Pc(3)), PushConst(1), PushConst(2)], [
       JsString(""),
       JsString("truthy"),
       JsString("falsy"),
@@ -585,7 +585,7 @@ pub fn truthy_empty_string_is_false_test() {
 
 pub fn truthy_null_is_false_test() {
   let assert Ok(JsString("falsy")) =
-    run_simple([PushConst(0), JumpIfFalse(3), PushConst(1), PushConst(2)], [
+    run_simple([PushConst(0), JumpIfFalse(Pc(3)), PushConst(1), PushConst(2)], [
       JsNull,
       JsString("truthy"),
       JsString("falsy"),
@@ -595,7 +595,7 @@ pub fn truthy_null_is_false_test() {
 pub fn truthy_nonempty_string_is_true_test() {
   let assert Ok(JsString("truthy")) =
     run_simple(
-      [PushConst(0), JumpIfFalse(3), PushConst(1), Return, PushConst(2)],
+      [PushConst(0), JumpIfFalse(Pc(3)), PushConst(1), Return, PushConst(2)],
       [JsString("hello"), JsString("truthy"), JsString("falsy")],
     )
 }
@@ -656,7 +656,7 @@ pub fn try_catch_basic_test() {
   //  2: Throw             -- throw it
   //  3: Return            -- catch: stack has thrown value, return it
   let assert Ok(JsString("caught!")) =
-    run_simple([PushTry(3, CatchOnly), PushConst(0), opcode.Throw, Return], [
+    run_simple([PushTry(Pc(3), CatchOnly), PushConst(0), opcode.Throw, Return], [
       JsString("caught!"),
     ])
 }
@@ -671,7 +671,7 @@ pub fn try_no_throw_test() {
   //  4: Return            -- catch (never reached)
   let assert Ok(JsNumber(Finite(42.0))) =
     run_simple(
-      [PushTry(4, CatchOnly), PushConst(0), opcode.PopTry, Return, Return],
+      [PushTry(Pc(4), CatchOnly), PushConst(0), opcode.PopTry, Return, Return],
       [
         JsNumber(Finite(42.0)),
       ],
@@ -835,7 +835,7 @@ pub fn simple_loop_with_jump_test() {
         PushConst(1),
         // 2,3: push i, push 3
         bin_op(Lt),
-        JumpIfFalse(11),
+        JumpIfFalse(Pc(11)),
         // 4,5: i < 3 ? continue : exit
         GetLocal(0),
         PushConst(2),
@@ -843,7 +843,7 @@ pub fn simple_loop_with_jump_test() {
         bin_op(Add),
         PutLocal(0),
         // 8,9: i = i + 1
-        Jump(2),
+        Jump(Pc(2)),
         // 10: back to loop start
         GetLocal(0),
         Return,
@@ -884,7 +884,7 @@ pub fn try_catch_with_computation_test() {
   let func =
     make_func(
       [
-        PushTry(7, CatchOnly),
+        PushTry(Pc(7), CatchOnly),
         PushConst(0),
         PushConst(1),
         bin_op(Add),
