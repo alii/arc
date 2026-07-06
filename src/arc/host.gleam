@@ -32,7 +32,6 @@ import arc/vm/value.{
 }
 import gleam/dict
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option}
 
@@ -198,10 +197,24 @@ pub fn validate_boolean(
 //         0 -> s
 //         _ -> {
 //           let #(ticket, result) = my_queue.block()
-//           my_loop(host.resume(s, ticket, result))
+//           let #(s, _outcome) = host.resume(s, ticket, result)
+//           my_loop(s)
 //         }
 //       }
 //     }
+
+/// What `resume` did with the ticket. Embedders that don't care can bind
+/// `_outcome`; embedders that want to detect their own bugs match on it.
+pub type ResumeOutcome {
+  /// The promise was pending and is now settled; `outstanding` decremented.
+  Resumed
+  /// The ticket had already been resumed once. Nothing changed.
+  AlreadySettled
+  /// The ticket's promise slot no longer exists — an embedder bug (it was
+  /// dropped by `shrink_for_handoff`). Nothing was settled and `outstanding`
+  /// still counts a suspend that can never complete.
+  StaleTicket
+}
 
 /// Opaque settle handle for one `suspend`ed Promise. The ONLY way to get one
 /// is from `suspend`, and the only thing to do with it is hand it back to
@@ -237,30 +250,25 @@ pub fn suspend(s: State(host)) -> #(State(host), JsValue, Ticket) {
 ///
 /// Resuming a ticket whose promise slot no longer exists (it was dropped by
 /// `shrink_for_handoff`) settles nothing and cannot be silently confused with
-/// a double resume: it is reported on stderr as the embedder bug it is.
+/// a double resume: it is returned as `StaleTicket` so the embedder can act
+/// on it — the library never writes to stderr behind the embedder's back.
 pub fn resume(
   s: State(host),
   ticket: Ticket,
   outcome: Result(JsValue, JsValue),
-) -> State(host) {
+) -> #(State(host), ResumeOutcome) {
   let Ticket(data_ref:) = ticket
   let #(s, settle_outcome) =
     builtins_promise.settle_outcome(s, data_ref, outcome)
   case settle_outcome {
     // The one settle per suspend: balance the counter.
     builtins_promise.Transitioned(_) ->
-      state.State(..s, outstanding: s.outstanding - 1)
+      #(state.State(..s, outstanding: s.outstanding - 1), Resumed)
     // A double resume of the same ticket: legitimately does nothing.
-    builtins_promise.AlreadySettled -> s
+    builtins_promise.AlreadySettled -> #(s, AlreadySettled)
     // A stale ticket: the promise it named is gone, so nothing was settled
     // and `outstanding` still counts a suspend that can never complete.
-    builtins_promise.NotAPromiseSlot -> {
-      io.println_error(
-        "arc: host.resume called with a stale ticket — its promise no longer "
-        <> "exists (dropped by shrink_for_handoff?); nothing was settled",
-      )
-      s
-    }
+    builtins_promise.NotAPromiseSlot -> #(s, StaleTicket)
   }
 }
 
