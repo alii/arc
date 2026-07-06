@@ -787,7 +787,7 @@ fn get_index_if_present(
     value.JsSymbol(_) ->
       inherited_index(
         state,
-        state.builtins.symbol_proto,
+        state.builtins.symbol.prototype,
         key.index_key(idx),
         this,
       )
@@ -5286,6 +5286,11 @@ fn array_from_array_like(
             Named("length"),
           ))
           use length, state <- state.try_op(to_length_value(state, len_val))
+          // Pragmatic bound: O(length) per-index Get with no early exit —
+          // cap at max_iteration (see iteration_budget_msg).
+          use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+            state.range_error(state, iteration_budget_msg)
+          })
           array_from_loop(
             state,
             items,
