@@ -1818,7 +1818,7 @@ type ParsedOffset {
 
 type ParsedIso {
   ParsedIso(
-    date: Option(IsoDate),
+    date: IsoDate,
     time: Option(TimeRec),
     /// parsed UTC offset (Z / numeric / none)
     offset: ParsedOffset,
@@ -2161,14 +2161,7 @@ fn parse_iso_datetime_string(s: String) -> Option(ParsedIso) {
             False,
           ))
           case rest2 {
-            "" ->
-              Some(ParsedIso(
-                date: Some(date),
-                time:,
-                offset:,
-                tz:,
-                calendar: cal,
-              ))
+            "" -> Some(ParsedIso(date:, time:, offset:, tz:, calendar: cal))
             _ -> None
           }
         }
@@ -3729,16 +3722,11 @@ fn to_temporal_date(
       }
     JsString(s) -> {
       use p <- terr_r(state, parse_plain_datetime_string(s))
-      case p.date {
-        Some(d) -> {
-          use cal <- terr_r(state, parsed_calendar_id(p))
-          use #(_opts, st) <- result.try(validated_overflow(state, options))
-          case iso_date_within_limits(d) {
-            True -> Ok(#(#(d, cal), st))
-            False -> state.range_error_op(st, "date outside of supported range")
-          }
-        }
-        None -> state.range_error_op(state, "invalid date string")
+      use cal <- terr_r(state, parsed_calendar_id(p))
+      use #(_opts, st) <- result.try(validated_overflow(state, options))
+      case iso_date_within_limits(p.date) {
+        True -> Ok(#(#(p.date, cal), st))
+        False -> state.range_error_op(st, "date outside of supported range")
       }
     }
     _ -> state.type_error_op(state, "cannot convert to a Temporal.PlainDate")
@@ -4628,18 +4616,12 @@ fn to_temporal_date_time(
       }
     JsString(s) -> {
       use p <- terr_r(state, parse_plain_datetime_string(s))
-      case p.date {
-        Some(d) -> {
-          let t = option.unwrap(p.time, midnight)
-          use cal <- terr_r(state, parsed_calendar_id(p))
-          use #(_o, st) <- result.try(validated_overflow(state, options))
-          case iso_datetime_within_limits(d, t) {
-            True -> Ok(#(#(d, t, cal), st))
-            False ->
-              state.range_error_op(st, "date-time outside supported range")
-          }
-        }
-        None -> state.range_error_op(state, "invalid date-time string")
+      let t = option.unwrap(p.time, midnight)
+      use cal <- terr_r(state, parsed_calendar_id(p))
+      use #(_o, st) <- result.try(validated_overflow(state, options))
+      case iso_datetime_within_limits(p.date, t) {
+        True -> Ok(#(#(p.date, t, cal), st))
+        False -> state.range_error_op(st, "date-time outside supported range")
       }
     }
     _ ->
@@ -4750,28 +4732,23 @@ fn parse_year_month_string(
       }
     None -> {
       use p <- result.try(parse_plain_datetime_string(s))
-      case p.date {
-        Some(d) -> {
-          use cal_id <- result.try(parsed_calendar_id(p))
-          case cal_id {
-            tcal.Iso8601 ->
-              check_ym_limits(d.year, d.month, d.day, tcal.Iso8601)
-            cal -> {
-              // Reference day: first day of the calendar month
-              // containing the parsed date.
-              let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-              let first =
-                iso_date_from_epoch_days(tcal.date_to_epoch_days(
-                  cal,
-                  cd.year,
-                  cd.month,
-                  1,
-                ))
-              check_ym_limits(first.year, first.month, first.day, cal)
-            }
-          }
+      let d = p.date
+      use cal_id <- result.try(parsed_calendar_id(p))
+      case cal_id {
+        tcal.Iso8601 -> check_ym_limits(d.year, d.month, d.day, tcal.Iso8601)
+        cal -> {
+          // Reference day: first day of the calendar month
+          // containing the parsed date.
+          let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+          let first =
+            iso_date_from_epoch_days(tcal.date_to_epoch_days(
+              cal,
+              cd.year,
+              cd.month,
+              1,
+            ))
+          check_ym_limits(first.year, first.month, first.day, cal)
         }
-        None -> Error(RangeE("invalid year-month string"))
       }
     }
   }
@@ -4945,31 +4922,22 @@ fn try_month_day_as_datetime(
   s: String,
 ) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
   use p <- result.try(parse_plain_datetime_string(s))
-  case p.date {
-    Some(d) -> {
-      use cal_id <- result.try(parsed_calendar_id(p))
-      case cal_id {
-        tcal.Iso8601 -> Ok(#(d.month, d.day, 1972, tcal.Iso8601))
-        cal -> {
-          // ISODateWithinLimits before converting to calendar space:
-          // e.g. -999999-01-01[u-ca=gregory] must throw RangeError.
-          use Nil <- result.try(case iso_date_within_limits(d) {
-            False -> Error(RangeE("date outside of supported range"))
-            True -> Ok(Nil)
-          })
-          let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-          let mc = tcal.month_code_of(cal, cd.year, cd.month)
-          use iso <- result.try(month_day_reference_iso(
-            cal,
-            mc,
-            cd.day,
-            Constrain,
-          ))
-          Ok(#(iso.month, iso.day, iso.year, cal))
-        }
-      }
+  let d = p.date
+  use cal_id <- result.try(parsed_calendar_id(p))
+  case cal_id {
+    tcal.Iso8601 -> Ok(#(d.month, d.day, 1972, tcal.Iso8601))
+    cal -> {
+      // ISODateWithinLimits before converting to calendar space:
+      // e.g. -999999-01-01[u-ca=gregory] must throw RangeError.
+      use Nil <- result.try(case iso_date_within_limits(d) {
+        False -> Error(RangeE("date outside of supported range"))
+        True -> Ok(Nil)
+      })
+      let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+      let mc = tcal.month_code_of(cal, cd.year, cd.month)
+      use iso <- result.try(month_day_reference_iso(cal, mc, cd.day, Constrain))
+      Ok(#(iso.month, iso.day, iso.year, cal))
     }
-    None -> Error(RangeE("invalid month-day string"))
   }
 }
 
@@ -5254,8 +5222,8 @@ fn parse_instant_to_ns(
   case parse_iso_datetime_string(s) {
     None -> state.range_error_op(state, "invalid instant string: " <> s)
     Some(p) ->
-      case p.date, p.time {
-        Some(d), Some(t) ->
+      case p.time {
+        Some(t) ->
           case p.offset {
             NoOffset ->
               state.range_error_op(
@@ -5267,7 +5235,7 @@ fn parse_instant_to_ns(
                 NumericOffset(o, _) -> o
                 Zulu | NoOffset -> 0
               }
-              let ns = utc_epoch_ns(d, t) - off
+              let ns = utc_epoch_ns(p.date, t) - off
               case int.absolute_value(ns) <= ns_max_instant {
                 True -> Ok(#(ns, state))
                 False ->
@@ -5275,8 +5243,7 @@ fn parse_instant_to_ns(
               }
             }
           }
-        _, _ ->
-          state.range_error_op(state, "instant string requires date and time")
+        None -> state.range_error_op(state, "instant string requires a time")
       }
   }
 }
@@ -5348,11 +5315,8 @@ fn parse_zoned_string(
       case p.tz {
         None -> Error(RangeE("ZonedDateTime string requires a [TimeZone]"))
         Some(tz_str) -> {
-          use tz <- result.try(parse_time_zone_id(tz_str))
-          case p.date {
-            None -> Error(RangeE("missing date"))
-            Some(d) -> Ok(#(d, p.time, p.offset, tz))
-          }
+          use tz <- result.map(parse_time_zone_id(tz_str))
+          #(p.date, p.time, p.offset, tz)
         }
       }
     }
@@ -5526,42 +5490,38 @@ fn convert_relative_to(
         Some(p) -> {
           use Nil <- terr_r(state, check_parsed_calendar(p))
           use cal <- terr_r(state, parsed_calendar_id(p))
-          case p.date {
+          let d = p.date
+          case p.tz {
+            Some(tz_str) -> {
+              use tz <- terr_r(state, parse_time_zone_id(tz_str))
+              use ens <- terr_r(
+                state,
+                zoned_string_epoch_ns(
+                  d,
+                  p.time,
+                  p.offset,
+                  tz,
+                  Compatible,
+                  RejectOffset,
+                ),
+              )
+              Ok(#(RelZoned(ens, tz, cal), state))
+            }
             None ->
-              state.range_error_op(state, "relativeTo string requires a date")
-            Some(d) ->
-              case p.tz {
-                Some(tz_str) -> {
-                  use tz <- terr_r(state, parse_time_zone_id(tz_str))
-                  use ens <- terr_r(
+              case p.offset {
+                Zulu ->
+                  state.range_error_op(
                     state,
-                    zoned_string_epoch_ns(
-                      d,
-                      p.time,
-                      p.offset,
-                      tz,
-                      Compatible,
-                      RejectOffset,
-                    ),
+                    "Z designator requires a bracketed time zone in relativeTo",
                   )
-                  Ok(#(RelZoned(ens, tz, cal), state))
-                }
-                None ->
-                  case p.offset {
-                    Zulu ->
+                NoOffset | NumericOffset(_, _) ->
+                  case iso_date_within_limits(d) {
+                    True -> Ok(#(RelPlain(d, cal), state))
+                    False ->
                       state.range_error_op(
                         state,
-                        "Z designator requires a bracketed time zone in relativeTo",
+                        "date outside of supported range",
                       )
-                    NoOffset | NumericOffset(_, _) ->
-                      case iso_date_within_limits(d) {
-                        True -> Ok(#(RelPlain(d, cal), state))
-                        False ->
-                          state.range_error_op(
-                            state,
-                            "date outside of supported range",
-                          )
-                      }
                   }
               }
           }
