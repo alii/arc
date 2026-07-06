@@ -152,13 +152,11 @@ fn map_constructor(
         map,
         Named("set"),
       ))
-      case helpers.is_callable(state.heap, adder) {
-        False ->
-          state.type_error(state, "'set' property of Map is not a function")
-        // Step 7: ? AddEntriesFromIterable(map, iterable, adder).
-        True ->
-          iter_protocol.add_entries_from_iterable(state, map, iterable, adder)
-      }
+      use adder, state <- helpers.require_callable(state, adder, fn() {
+        "'set' property of Map is not a function"
+      })
+      // Step 7: ? AddEntriesFromIterable(map, iterable, adder).
+      iter_protocol.add_entries_from_iterable(state, map, iterable, adder)
     }
   }
 }
@@ -358,19 +356,14 @@ fn map_for_each(
   // Steps 1-2: RequireInternalSlot — before the IsCallable check.
   use ref, state <- require_map(this, state, "forEach")
   // Step 3: If IsCallable(callbackfn) is false, throw TypeError
-  case helpers.is_callable(state.heap, cb) {
-    False ->
-      state.type_error(
-        state,
-        operators.typeof(state.heap, cb) <> " is not a function",
-      )
-    True ->
-      // Steps 4-5: LIVE iteration by seq cursor — the source is re-read from
-      // the heap each step, so entries the callback deletes before being
-      // reached are skipped and entries it adds (including delete + re-add)
-      // are visited, per the spec's index-based [[MapData]] walk.
-      for_each_loop(state, ref, 0, cb, this_arg, this)
-  }
+  use cb, state <- helpers.require_callable(state, cb, fn() {
+    operators.typeof(state.heap, cb) <> " is not a function"
+  })
+  // Steps 4-5: LIVE iteration by seq cursor — the source is re-read from
+  // the heap each step, so entries the callback deletes before being
+  // reached are skipped and entries it adds (including delete + re-add)
+  // are visited, per the spec's index-based [[MapData]] walk.
+  for_each_loop(state, ref, 0, cb, this_arg, this)
 }
 
 /// Inner loop for Map.prototype.forEach — advances a seq cursor over the
