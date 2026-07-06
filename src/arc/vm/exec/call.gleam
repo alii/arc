@@ -1287,7 +1287,7 @@ pub fn call_native(
           Ok(State(..state, stack: [val, ..rest_stack], pc: state.pc + 1))
         }
         _ ->
-          state.rethrow(coerce.thrown_type_error(
+          state.rethrow(state.type_error_op(
             state,
             "Symbol.keyFor requires a Symbol argument",
           ))

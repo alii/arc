@@ -8,8 +8,9 @@
 //// intl_locale.gleam.
 
 import arc/internal/digits
-import arc/internal/gregorian.{days_from_civil, floor_div}
+import arc/internal/gregorian.{days_from_civil}
 import arc/internal/host_time
+import arc/internal/int_math.{floor_div}
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/intl_collate.{collator_compare}
@@ -1117,20 +1118,8 @@ fn locale_list_from_object(
     JsObject(ref),
   ))
   use #(len_n, state) <- result.try(coerce.js_to_number(state, len_v))
-  let len = to_length(len_n)
+  let len = coerce.jsnum_to_length(len_n)
   locale_list_loop(state, ref, 0, len, [])
-}
-
-fn to_length(n: value.JsNum) -> Int {
-  case n {
-    value.Finite(f) ->
-      case f <. 0.0 {
-        True -> 0
-        False -> int.min(float.truncate(f), 9_007_199_254_740_991)
-      }
-    value.Infinity -> 9_007_199_254_740_991
-    _ -> 0
-  }
 }
 
 fn locale_list_loop(
@@ -5958,7 +5947,7 @@ fn display_names_of(
     DnScript ->
       case tags.is_script(code) {
         True -> {
-          let s = titlecase_ascii(code)
+          let s = tags.titlecase(code)
           Ok(#(s, fmt.script_display_name(s)))
         }
         False -> throw_range(state, "invalid script code: " <> code)
@@ -6011,13 +6000,6 @@ fn display_names_of(
     Some(n), _ -> Ok(#(JsString(n), state))
     None, FbCode -> Ok(#(JsString(canonical), state))
     None, FbNone -> Ok(#(JsUndefined, state))
-  }
-}
-
-fn titlecase_ascii(s: String) -> String {
-  case string.pop_grapheme(s) {
-    Ok(#(first, rest)) -> string.uppercase(first) <> string.lowercase(rest)
-    Error(Nil) -> s
   }
 }
 
@@ -6675,8 +6657,9 @@ fn segment_iterator_next(
 ) -> Result(#(JsValue, State(host)), Thrown(host)) {
   case it.remaining {
     [] -> {
-      let #(state, res) = iter_result(state, JsUndefined, True)
-      Ok(#(res, state))
+      let #(heap, res) =
+        common.create_iter_result(state.heap, state.builtins, JsUndefined, True)
+      Ok(#(res, State(..state, heap:)))
     }
     [seg, ..rest] -> {
       let heap =
@@ -6688,18 +6671,11 @@ fn segment_iterator_next(
       let state = State(..state, heap:)
       let #(state, data) =
         make_segment_data(state, it.string, it.granularity, seg)
-      let #(state, res) = iter_result(state, data, False)
-      Ok(#(res, state))
+      let #(heap, res) =
+        common.create_iter_result(state.heap, state.builtins, data, False)
+      Ok(#(res, State(..state, heap:)))
     }
   }
-}
-
-fn iter_result(
-  state: State(host),
-  v: JsValue,
-  done: Bool,
-) -> #(State(host), JsValue) {
-  alloc_pojo(state, [#("value", v), #("done", JsBool(done))])
 }
 
 // ============================================================================
@@ -6747,7 +6723,7 @@ fn locale_getter(
       LocaleScript ->
         case lid {
           Some(tags.LocaleId(script: Some(s), ..)) ->
-            JsString(titlecase_ascii(s))
+            JsString(tags.titlecase(s))
           _ -> JsUndefined
         }
       LocaleRegion ->

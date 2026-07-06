@@ -1139,7 +1139,7 @@ fn extension_to_string(ext: Extension) -> String {
   }
 }
 
-fn titlecase(s: String) -> String {
+pub fn titlecase(s: String) -> String {
   case string.pop_grapheme(s) {
     Ok(#(first, rest)) -> string.uppercase(first) <> string.lowercase(rest)
     Error(Nil) -> s
