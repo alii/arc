@@ -236,7 +236,7 @@ pub fn init(
 
   // Allocate Symbol method functions and patch onto prototype
   let #(h, match_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       RegExpNative(RegExpSymbolMatch),
@@ -244,7 +244,7 @@ pub fn init(
       1,
     )
   let #(h, match_all_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       RegExpNative(RegExpSymbolMatchAll),
@@ -252,7 +252,7 @@ pub fn init(
       1,
     )
   let #(h, replace_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       RegExpNative(RegExpSymbolReplace),
@@ -260,7 +260,7 @@ pub fn init(
       2,
     )
   let #(h, search_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       RegExpNative(RegExpSymbolSearch),
@@ -268,7 +268,7 @@ pub fn init(
       1,
     )
   let #(h, split_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       RegExpNative(RegExpSymbolSplit),
@@ -344,7 +344,7 @@ fn install_legacy_accessors(
     list.fold(["input", "$_"], #(h, []), fn(acc, name) {
       let #(h, props) = acc
       let #(h, get_ref) =
-        common.alloc_native_fn(
+        common.alloc_rooted_native_fn(
           h,
           function_proto,
           RegExpNative(RegExpLegacyGetter(ctor, LegacyInput)),
@@ -352,7 +352,7 @@ fn install_legacy_accessors(
           0,
         )
       let #(h, set_ref) =
-        common.alloc_native_fn(
+        common.alloc_rooted_native_fn(
           h,
           function_proto,
           RegExpNative(RegExpLegacyInputSetter(ctor)),
@@ -373,7 +373,7 @@ fn install_legacy_accessors(
       let #(h, props) = acc
       let #(name, slot) = spec
       let #(h, get_ref) =
-        common.alloc_native_fn(
+        common.alloc_rooted_native_fn(
           h,
           function_proto,
           RegExpNative(RegExpLegacyGetter(ctor, slot)),
@@ -2138,7 +2138,7 @@ fn create_regexp_string_iterator(
   full_unicode: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let #(heap, next_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       state.heap,
       state.builtins.function.prototype,
       RegExpNative(RegExpStringIteratorNext),

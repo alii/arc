@@ -1160,7 +1160,7 @@ fn build_agent(h: Heap(host), b: common.Builtins) -> #(Heap(host), value.Ref) {
     list.fold(methods, #(h, []), fn(acc, method) {
       let #(h, props) = acc
       let #(name, impl, arity) = method
-      let #(h, fn_ref) = common.alloc_host_fn(h, func_proto, impl, name, arity)
+      let #(h, fn_ref) = common.alloc_rooted_host_fn(h, func_proto, impl, name, arity)
       #(h, [
         #(Named(name), value.builtin_property(value.JsObject(fn_ref))),
         ..props

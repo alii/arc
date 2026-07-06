@@ -187,7 +187,7 @@ pub fn build_262(
 
   // Allocate method function objects
   let #(h, eval_script_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       func_proto,
       value.VmNative(value.EvalScript),
@@ -195,7 +195,7 @@ pub fn build_262(
       1,
     )
   let #(h, create_realm_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       func_proto,
       value.VmNative(value.CreateRealm),
@@ -203,9 +203,9 @@ pub fn build_262(
       0,
     )
   let #(h, gc_fn) =
-    common.alloc_native_fn(h, func_proto, value.VmNative(value.Gc), "gc", 0)
+    common.alloc_rooted_native_fn(h, func_proto, value.VmNative(value.Gc), "gc", 0)
   let #(h, detach_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       func_proto,
       value.ArrayBufferNative(value.DetachArrayBuffer262),

@@ -46,7 +46,7 @@ pub fn init(
   // `Number.parseFloat === parseFloat` — the constructor installs these very
   // refs below rather than allocating twins.
   let #(h, parse_int_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       NumberNative(GlobalParseInt),
@@ -54,7 +54,7 @@ pub fn init(
       2,
     )
   let #(h, parse_float_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       NumberNative(GlobalParseFloat),
@@ -64,7 +64,7 @@ pub fn init(
   // Number.isNaN / Number.isFinite are deliberately NOT the globals: they skip
   // ToNumber coercion, so they are distinct function objects (§21.1.2.2/.4).
   let #(h, is_nan_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       NumberNative(GlobalIsNaN),
@@ -72,7 +72,7 @@ pub fn init(
       1,
     )
   let #(h, is_finite_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       NumberNative(GlobalIsFinite),

@@ -33,9 +33,9 @@ pub fn init(
 
   // Allocate Symbol.for and Symbol.keyFor static method function objects
   let #(h, for_ref) =
-    common.alloc_native_fn(h, function_proto, SymbolNative(SymbolFor), "for", 1)
+    common.alloc_rooted_native_fn(h, function_proto, SymbolNative(SymbolFor), "for", 1)
   let #(h, key_for_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       SymbolNative(SymbolKeyFor),
@@ -83,7 +83,7 @@ pub fn init(
 
   // %Symbol.prototype% methods (§20.4.3).
   let #(h, to_string_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       SymbolNative(SymbolToString),
@@ -91,7 +91,7 @@ pub fn init(
       0,
     )
   let #(h, value_of_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       SymbolNative(SymbolValueOf),
@@ -101,7 +101,7 @@ pub fn init(
   // §20.4.3.5: @@toPrimitive { writable: false, enumerable: false,
   // configurable: true }, name "[Symbol.toPrimitive]", length 1.
   let #(h, to_primitive_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       SymbolNative(SymbolToPrimitive),
@@ -110,7 +110,7 @@ pub fn init(
     )
   // §20.4.3.2: get-only accessor `description`.
   let #(h, description_get_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       SymbolNative(SymbolDescriptionGetter),

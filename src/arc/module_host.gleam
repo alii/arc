@@ -106,7 +106,7 @@ pub fn install_import_hook(
   load: LoadFn,
 ) -> #(Heap(host), JsValue) {
   let #(h, hook_ref) =
-    common.alloc_host_fn(
+    common.alloc_rooted_host_fn(
       h,
       b.function.prototype,
       fn(args, this, state) {
@@ -472,7 +472,7 @@ fn chain_deferred_settlement(
     [] -> call_import_settle_fn(state, resolve_fn, ns)
     [#(dep_spec, tla_data_ref), ..rest] -> {
       let #(heap, on_fulfilled) =
-        common.alloc_host_fn(
+        common.alloc_rooted_host_fn(
           state.heap,
           state.builtins.function.prototype,
           fn(_args, _this, state) {
@@ -500,7 +500,7 @@ fn chain_deferred_settlement(
           0,
         )
       let #(heap, on_rejected) =
-        common.alloc_host_fn(
+        common.alloc_rooted_host_fn(
           heap,
           state.builtins.function.prototype,
           fn(args, _this, state) {
@@ -657,7 +657,7 @@ fn pending_module_promise(
       // Fulfilled: evaluation completed — future imports read the namespace
       // cache; the namespace promise fulfills with the namespace itself.
       let #(heap, on_fulfilled) =
-        common.alloc_host_fn(
+        common.alloc_rooted_host_fn(
           heap,
           state.builtins.function.prototype,
           fn(_args, _this, state) {
@@ -670,7 +670,7 @@ fn pending_module_promise(
       // Rejected: cache the evaluation error (every future import repeats
       // the same rejection) and re-throw so the namespace promise rejects.
       let #(heap, on_rejected) =
-        common.alloc_host_fn(
+        common.alloc_rooted_host_fn(
           heap,
           state.builtins.function.prototype,
           fn(args, _this, state) {

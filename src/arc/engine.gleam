@@ -182,7 +182,7 @@ pub fn define_fn(
   impl: HostFn(host),
 ) -> Engine(host) {
   let #(h, fn_ref) =
-    common.alloc_host_fn(
+    common.alloc_rooted_host_fn(
       engine.heap,
       engine.builtins.function.prototype,
       impl,
@@ -247,7 +247,7 @@ fn set_global(
 /// its value — WITHOUT installing it as a global. The "return me the ref" twin of
 /// `define_fn`, for building values to place elsewhere (e.g. as host-module
 /// exports via `register_host_module`, or methods on a `define_class`). The ref
-/// is GC-rooted by `alloc_host_fn`.
+/// is GC-rooted by `alloc_rooted_host_fn`.
 pub fn host_fn(
   engine: Engine(host),
   name: String,
@@ -255,7 +255,7 @@ pub fn host_fn(
   impl: HostFn(host),
 ) -> #(Engine(host), JsValue) {
   let #(h, fn_ref) =
-    common.alloc_host_fn(
+    common.alloc_rooted_host_fn(
       engine.heap,
       engine.builtins.function.prototype,
       impl,

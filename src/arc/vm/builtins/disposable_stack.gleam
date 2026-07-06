@@ -114,7 +114,7 @@ fn init_stack_type(
   // dispose/disposeAsync allocated separately: the prototype's well-known
   // symbol property must be the SAME function object as the named method.
   let #(h, dispose_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       DisposableStackNative(dispose_fn),

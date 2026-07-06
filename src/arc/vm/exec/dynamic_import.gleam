@@ -374,7 +374,7 @@ fn enqueue_import_job(
       data_ref,
     )
   let #(heap, job_fn) =
-    common.alloc_host_fn(
+    common.alloc_rooted_host_fn(
       heap,
       state.builtins.function.prototype,
       fn(_args, _this, state) { settle(state) },
@@ -409,7 +409,7 @@ fn enqueue_defer_import_job(
   settle: fn(State(host)) -> #(State(host), DeferHookOutcome),
 ) -> State(host) {
   let #(heap, job_fn) =
-    common.alloc_host_fn(
+    common.alloc_rooted_host_fn(
       state.heap,
       state.builtins.function.prototype,
       fn(_args, _this, state) {

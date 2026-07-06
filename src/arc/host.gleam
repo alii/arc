@@ -457,7 +457,7 @@ pub fn function(
   impl: HostFn(host),
 ) -> #(State(host), JsValue) {
   let #(heap, ref) =
-    common.alloc_host_fn(
+    common.alloc_rooted_host_fn(
       s.heap,
       s.builtins.function.prototype,
       impl,

@@ -155,7 +155,7 @@ pub fn init(
   // §21.4.4.45 Date.prototype [ @@toPrimitive ] ( hint )
   // Property attributes: { writable: false, enumerable: false, configurable: true }
   let #(h, to_prim_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       DateNative(DatePrototypeSymbolToPrimitive),

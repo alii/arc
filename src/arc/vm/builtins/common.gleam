@@ -381,23 +381,28 @@ pub fn named_props(
   dict.insert(acc, Named(k), v)
 }
 
-/// Allocate a NativeFunction ObjectSlot with standard name/length properties.
+/// Allocate a NativeFunction ObjectSlot with standard name/length properties
+/// and ROOT it — the ref is added to the heap's GC root set and lives forever.
 ///
 /// Not a spec operation — internal helper for builtin initialization.
 /// Creates a function object with the correct .name and .length data
 /// properties per §20.2.3 (Function instances).
-pub fn alloc_native_fn(
+///
+/// For a transient function object that must be collectible, use
+/// `alloc_call_fn` / `alloc_native_fn_props` instead — they do NOT root.
+pub fn alloc_rooted_native_fn(
   h: Heap(ctx, host),
   function_proto: Ref,
   native: NativeFn,
   name: String,
   arity: Int,
 ) -> #(Heap(ctx, host), Ref) {
-  alloc_native_fn_slot(h, function_proto, Dispatch(native), name, arity)
+  alloc_rooted_native_fn_slot(h, function_proto, Dispatch(native), name, arity)
 }
 
-/// Allocate a NativeFunction ObjectSlot from a NativeFnSlot directly.
-fn alloc_native_fn_slot(
+/// Allocate a NativeFunction ObjectSlot from a NativeFnSlot directly, and
+/// ROOT it — the ref is added to the heap's GC root set.
+fn alloc_rooted_native_fn_slot(
   h: Heap(ctx, host),
   function_proto: Ref,
   slot: NativeFnSlot(ctx),
@@ -417,9 +422,12 @@ fn alloc_native_fn_slot(
 }
 
 /// Allocate a Call-dispatched NativeFunction object with standard name/length
-/// properties, WITHOUT rooting it. For transient function objects (promise
-/// resolving functions, reaction closures) whose lifetime is governed by
-/// normal GC reachability — rooting them would leak.
+/// properties.
+///
+/// Does NOT root the returned ref — caller must `heap.root` if the ref
+/// outlives the current allocation batch. For transient function objects
+/// (promise resolving functions, reaction closures) whose lifetime is governed
+/// by normal GC reachability — rooting them would leak.
 pub fn alloc_call_fn(
   h: Heap(ctx, host),
   function_proto: Ref,
@@ -437,7 +445,9 @@ pub fn alloc_call_fn(
 /// Like alloc_call_fn, but with a caller-supplied named property list — for
 /// function objects whose properties aren't just name+length (the Proxy
 /// constructor's `revocable`, bound functions' name-only set).
-/// Non-rooting; callers that need rooting do it themselves.
+///
+/// Does NOT root the returned ref — caller must `heap.root` if the ref
+/// outlives the current allocation batch.
 pub fn alloc_call_fn_props(
   h: Heap(ctx, host),
   function_proto: Ref,
@@ -450,7 +460,9 @@ pub fn alloc_call_fn_props(
 
 /// Dispatch-flavoured `alloc_call_fn_props`: allocate a NativeFunction that is
 /// routed via `dispatch_native`, with a caller-supplied named property list.
-/// Non-rooting; callers that need rooting do it themselves.
+///
+/// Does NOT root the returned ref — caller must `heap.root` if the ref
+/// outlives the current allocation batch. Contrast `alloc_rooted_native_fn`.
 pub fn alloc_native_fn_props(
   h: Heap(ctx, host),
   function_proto: Ref,
@@ -482,17 +494,18 @@ fn alloc_fn_slot(
   )
 }
 
-/// Allocate a host-provided native function. Same heap shape as built-in
+/// Allocate a host-provided native function and ROOT it — the ref is added to
+/// the heap's GC root set and lives forever. Same heap shape as built-in
 /// natives (name/length properties, Function.prototype), but dispatches
 /// to the embedder's closure via the Host variant.
-pub fn alloc_host_fn(
+pub fn alloc_rooted_host_fn(
   h: Heap(ctx, host),
   function_proto: Ref,
   impl: fn(List(JsValue), JsValue, ctx) -> #(ctx, Result(JsValue, JsValue)),
   name: String,
   arity: Int,
 ) -> #(Heap(ctx, host), Ref) {
-  alloc_native_fn_slot(h, function_proto, value.Host(impl), name, arity)
+  alloc_rooted_native_fn_slot(h, function_proto, value.Host(impl), name, arity)
 }
 
 /// ES2024 §20.2.2: Function name property — non-writable, non-enumerable, configurable.
@@ -560,7 +573,8 @@ pub fn alloc_methods(
   list.fold(specs, #(h, []), fn(acc, spec) {
     let #(h, props) = acc
     let #(name, native, arity) = spec
-    let #(h, fn_ref) = alloc_native_fn(h, function_proto, native, name, arity)
+    let #(h, fn_ref) =
+      alloc_rooted_native_fn(h, function_proto, native, name, arity)
     #(h, [#(name, value.builtin_property(JsObject(fn_ref))), ..props])
   })
 }
@@ -584,7 +598,8 @@ pub fn alloc_host_methods(
   list.fold(specs, #(h, []), fn(acc, spec) {
     let #(h, props) = acc
     let #(name, arity, impl) = spec
-    let #(h, fn_ref) = alloc_host_fn(h, function_proto, impl, name, arity)
+    let #(h, fn_ref) =
+      alloc_rooted_host_fn(h, function_proto, impl, name, arity)
     #(h, [#(name, value.builtin_property(JsObject(fn_ref))), ..props])
   })
 }
@@ -600,7 +615,7 @@ pub fn alloc_getters(
     let #(h, props) = acc
     let #(name, native) = spec
     let #(h, fn_ref) =
-      alloc_native_fn(h, function_proto, native, "get " <> name, 0)
+      alloc_rooted_native_fn(h, function_proto, native, "get " <> name, 0)
     let prop =
       value.accessor(
         get: Some(JsObject(fn_ref)),
@@ -622,8 +637,10 @@ pub fn alloc_get_set_accessor(
   set: NativeFn,
   name: String,
 ) -> #(Heap(ctx, host), Property) {
-  let #(h, get_ref) = alloc_native_fn(h, function_proto, get, "get " <> name, 0)
-  let #(h, set_ref) = alloc_native_fn(h, function_proto, set, "set " <> name, 1)
+  let #(h, get_ref) =
+    alloc_rooted_native_fn(h, function_proto, get, "get " <> name, 0)
+  let #(h, set_ref) =
+    alloc_rooted_native_fn(h, function_proto, set, "set " <> name, 1)
   #(
     h,
     value.accessor(
@@ -646,7 +663,7 @@ pub fn alloc_call_methods(
     let #(h, props) = acc
     let #(name, native, arity) = spec
     let #(h, fn_ref) =
-      alloc_native_fn_slot(h, function_proto, Call(native), name, arity)
+      alloc_rooted_native_fn_slot(h, function_proto, Call(native), name, arity)
     #(h, [#(name, value.builtin_property(JsObject(fn_ref))), ..props])
   })
 }
@@ -801,7 +818,7 @@ pub fn init_keyed_collection(
   // Iterator fn allocated separately so all its property names (and
   // [@@iterator]) alias the SAME function object.
   let #(h, iter_ref) =
-    alloc_native_fn(h, function_proto, iter_native, iter_name, 0)
+    alloc_rooted_native_fn(h, function_proto, iter_native, iter_name, 0)
   let iter_prop = value.builtin_property(JsObject(iter_ref))
   // Each named alias gets its OWN seq (value.restamp keeps the function-object
   // identity): two keys sharing one Property record is an enumeration-order
@@ -897,7 +914,7 @@ pub fn add_species_accessor(
   ctor_ref: Ref,
 ) -> Heap(ctx, host) {
   let #(h, getter) =
-    alloc_native_fn(
+    alloc_rooted_native_fn(
       h,
       function_proto,
       value.VmNative(value.ReturnThis),

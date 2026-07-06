@@ -92,7 +92,7 @@ pub fn init(
     ])
   // values() doubles as [@@iterator] — must be the SAME function object.
   let #(h, values_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       TypedArrayNative(TypedArrayPrototypeValues),
@@ -160,7 +160,7 @@ pub fn init(
   // get %TypedArray%.prototype[@@toStringTag] (§23.2.3.38) — an accessor that
   // returns the [[TypedArrayName]] (undefined for non-TypedArray receivers).
   let #(h, tag_get) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       TypedArrayNative(TypedArrayGetToStringTag),

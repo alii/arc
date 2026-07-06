@@ -1802,7 +1802,7 @@ fn alloc_deferred_trap(
   spec: String,
 ) -> #(Heap(host), Ref) {
   let #(name, arity, native, always_triggers) = trap
-  common.alloc_host_fn(
+  common.alloc_rooted_host_fn(
     h,
     builtins.function.prototype,
     fn(args, _this, state) {

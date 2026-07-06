@@ -99,7 +99,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
   // %IteratorPrototype% — shared base for all iterators
   // Has [Symbol.iterator]() { return this; } so iterators are iterable
   let #(h, iterator_symbol_iterator) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.ReturnThis),
@@ -172,7 +172,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
   // %AsyncIteratorPrototype% — shared base for async iterators
   // Has [Symbol.asyncIterator]() { return this; } so async iterators are async-iterable
   let #(h, async_iter_sym_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.ReturnThis),
@@ -320,7 +320,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
 
   // Global utility functions: eval, URI functions
   let #(h, eval) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.Eval),
@@ -328,7 +328,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       1,
     )
   let #(h, decode_uri) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.DecodeURI),
@@ -336,7 +336,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       1,
     )
   let #(h, encode_uri) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.EncodeURI),
@@ -344,7 +344,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       1,
     )
   let #(h, decode_uri_component) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.DecodeURIComponent),
@@ -352,7 +352,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       1,
     )
   let #(h, encode_uri_component) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.EncodeURIComponent),
@@ -360,7 +360,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       1,
     )
   let #(h, escape) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.Escape),
@@ -368,7 +368,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       1,
     )
   let #(h, unescape) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function.prototype,
       value.VmNative(value.Unescape),

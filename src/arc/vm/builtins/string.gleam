@@ -126,7 +126,7 @@ pub fn init(
     )
   // §22.1.3.36 String.prototype [ @@iterator ] ( ) — yields code points.
   let #(h, iter_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       StringNative(StringPrototypeSymbolIterator),

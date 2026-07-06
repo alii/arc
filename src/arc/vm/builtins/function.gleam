@@ -87,7 +87,7 @@ pub fn init(
 
   // §20.2.3.6 Function.prototype [ @@hasInstance ] — {W:F, E:F, C:F}.
   let #(h, has_instance_ref) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       func_proto,
       VmNative(FunctionHasInstance),
