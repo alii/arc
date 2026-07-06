@@ -678,15 +678,19 @@ pub fn set_value(
         // leaving the buffer untouched.
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:),
           Index(idx)
-        ->
+        -> {
+          let view =
+            typed_array_elements.ViewSlot(
+              buffer:,
+              elem_kind:,
+              byte_offset:,
+              length:,
+            )
           case receiver == JsObject(ref) {
             True ->
               typed_array_elements.typed_array_store(
                 state,
-                buffer,
-                elem_kind,
-                byte_offset,
-                length,
+                view,
                 Some(idx),
                 val,
               )
@@ -705,6 +709,7 @@ pub fn set_value(
                 Some(_) -> set_on_receiver(state, receiver, key, val)
               }
           }
+        }
         value.TypedArrayObject(buffer:, elem_kind:, byte_offset:, length:),
           Named(s)
         ->
@@ -718,10 +723,12 @@ pub fn set_value(
                 True ->
                   typed_array_elements.typed_array_store(
                     state,
-                    buffer,
-                    elem_kind,
-                    byte_offset,
-                    length,
+                    typed_array_elements.ViewSlot(
+                      buffer:,
+                      elem_kind:,
+                      byte_offset:,
+                      length:,
+                    ),
                     None,
                     val,
                   )
@@ -971,10 +978,12 @@ fn set_on_receiver(
                 Some(_) ->
                   typed_array_elements.typed_array_store(
                     state,
-                    buffer,
-                    elem_kind,
-                    byte_offset,
-                    length,
+                    typed_array_elements.ViewSlot(
+                      buffer:,
+                      elem_kind:,
+                      byte_offset:,
+                      length:,
+                    ),
                     Some(idx),
                     val,
                   )
@@ -3868,7 +3877,10 @@ pub fn typed_array_view_length(
   byte_offset: Int,
   length: Option(Int),
 ) -> Int {
-  typed_array_elements.view_length(h, buffer, elem_kind, byte_offset, length)
+  typed_array_elements.view_length(
+    h,
+    typed_array_elements.ViewSlot(buffer:, elem_kind:, byte_offset:, length:),
+  )
 }
 
 /// §10.4.5.15 IntegerIndexedElementGet — element at `idx`, or None when the
@@ -3925,9 +3937,12 @@ pub fn typed_array_element_live(
         data,
         typed_array_elements.resolve_view(
           bit_array.byte_size(data),
-          elem_kind,
-          byte_offset,
-          length,
+          typed_array_elements.ViewSlot(
+            buffer:,
+            elem_kind:,
+            byte_offset:,
+            length:,
+          ),
         ),
         elem_kind,
         idx,
@@ -4010,9 +4025,12 @@ pub fn typed_array_iter_length(
       let view =
         typed_array_elements.resolve_view(
           bit_array.byte_size(data),
-          elem_kind,
-          byte_offset,
-          length,
+          typed_array_elements.ViewSlot(
+            buffer:,
+            elem_kind:,
+            byte_offset:,
+            length:,
+          ),
         )
       case typed_array_elements.view_in_bounds(view) {
         False -> Error(OutOfBoundsView)

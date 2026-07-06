@@ -35,6 +35,21 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
+/// The four internal slots that identify a typed-array view of a buffer —
+/// [[ViewedArrayBuffer]], [[TypedArrayName]]'s element kind, [[ByteOffset]],
+/// and [[ArrayLength]] (None for AUTO on a length-tracking view). Bundled so
+/// the store path takes ONE view identity, not four positionals whose
+/// `length: Option(Int)` and `idx: Option(Int)` sat adjacent and could be
+/// swapped without the compiler noticing.
+pub type ViewSlot {
+  ViewSlot(
+    buffer: Ref,
+    elem_kind: value.TypedArrayKind,
+    byte_offset: Int,
+    length: Option(Int),
+  )
+}
+
 /// ToIntegerOrInfinity-style truncation for integer element stores:
 /// NaN/±Infinity → 0 (the mod-2^n wrap in the FFI handles the rest).
 fn jsnum_to_store_int(n: value.JsNum) -> Int {
@@ -53,10 +68,7 @@ fn jsnum_to_store_int(n: value.JsNum) -> Int {
 /// throws and valueOf/toString side effects never run.
 pub fn typed_array_store(
   state: State(host),
-  buffer: Ref,
-  elem_kind: value.TypedArrayKind,
-  byte_offset: Int,
-  length: Option(Int),
+  view: ViewSlot,
   idx: Option(Int),
   val: JsValue,
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
@@ -68,26 +80,18 @@ pub fn typed_array_store(
   // numeric string property IS reported — unlike detached/out-of-bounds,
   // which stay silent successes.
   use <- bool.guard(
-    buffer_is_immutable(state.heap, buffer),
+    buffer_is_immutable(state.heap, view.buffer),
     Ok(#(state, False)),
   )
-  case elem_kind {
+  case view.elem_kind {
     value.BigKind(big_kind) -> {
       // §7.1.13 ToBigInt via the canonical hook (coerce.to_bigint).
       let to_bigint = state.ctx.to_bigint_fn
       use #(n, state) <- result.try(to_bigint(state, val))
       Ok(
-        do_typed_store(
-          state,
-          buffer,
-          elem_kind,
-          byte_offset,
-          length,
-          idx,
-          fn(data, off) {
-            ta_set_int(data, off, typed_array_ffi.bigint_elem(big_kind), n)
-          },
-        ),
+        do_typed_store(state, view, idx, fn(data, off) {
+          ta_set_int(data, off, typed_array_ffi.bigint_elem(big_kind), n)
+        }),
       )
     }
     value.NumKind(num_kind) -> {
@@ -95,15 +99,9 @@ pub fn typed_array_store(
       let to_number = state.ctx.to_number_fn
       use #(num, state) <- result.try(to_number(state, val))
       Ok(
-        do_typed_store(
-          state,
-          buffer,
-          elem_kind,
-          byte_offset,
-          length,
-          idx,
-          fn(data, off) { encode_typed_number(data, off, num_kind, num) },
-        ),
+        do_typed_store(state, view, idx, fn(data, off) {
+          encode_typed_number(data, off, num_kind, num)
+        }),
       )
     }
   }
@@ -148,12 +146,8 @@ pub opaque type ResolvedView {
 /// length-tracking view over a resizable buffer, whose element count follows
 /// the live byte length. Detached buffers and tracking views whose byte
 /// offset lies past the end of a shrunk buffer resolve to 0.
-pub fn resolve_view(
-  byte_size: Int,
-  elem_kind: value.TypedArrayKind,
-  byte_offset: Int,
-  length: Option(Int),
-) -> ResolvedView {
+pub fn resolve_view(byte_size: Int, view: ViewSlot) -> ResolvedView {
+  let ViewSlot(elem_kind:, byte_offset:, length:, ..) = view
   let elem_size = typed_array_ffi.elem_size(elem_kind)
   ResolvedView(
     byte_size:,
@@ -218,18 +212,12 @@ pub fn view_in_bounds(view: ResolvedView) -> Bool {
 /// detached buffer reads as zero bytes, so a length-tracking view over one
 /// resolves to 0 (a fixed view keeps its declared [[ArrayLength]] — the
 /// bounds check, not the length, is what rejects its indices).
-pub fn view_length(
-  h: Heap(host),
-  buffer: Ref,
-  elem_kind: value.TypedArrayKind,
-  byte_offset: Int,
-  length: Option(Int),
-) -> Int {
+pub fn view_length(h: Heap(host), view: ViewSlot) -> Int {
   resolve_len(
-    live_byte_size(h, buffer),
-    typed_array_ffi.elem_size(elem_kind),
-    byte_offset,
-    length,
+    live_byte_size(h, view.buffer),
+    typed_array_ffi.elem_size(view.elem_kind),
+    view.byte_offset,
+    view.length,
   )
 }
 
@@ -238,15 +226,9 @@ pub fn view_length(
 /// detached buffer has no valid indices at all, so there is no live view to
 /// resolve — and no `ResolvedView` a caller could mistake for an in-bounds
 /// one. Every `ResolvedView` therefore describes bytes that really exist.
-pub fn live_view(
-  h: Heap(host),
-  buffer: Ref,
-  elem_kind: value.TypedArrayKind,
-  byte_offset: Int,
-  length: Option(Int),
-) -> Option(ResolvedView) {
-  use data <- option.map(buffer_bytes(h, buffer))
-  resolve_view(bit_array.byte_size(data), elem_kind, byte_offset, length)
+pub fn live_view(h: Heap(host), view: ViewSlot) -> Option(ResolvedView) {
+  use data <- option.map(buffer_bytes(h, view.buffer))
+  resolve_view(bit_array.byte_size(data), view)
 }
 
 /// Byte size of the buffer currently in the heap; 0 for a detached buffer or
@@ -273,37 +255,28 @@ pub fn valid_integer_index(view: ResolvedView, idx: Int) -> Bool {
 /// Shared store tail: bounds/detach check, then rebuild the buffer binary.
 fn do_typed_store(
   state: State(host),
-  buffer: Ref,
-  elem_kind: value.TypedArrayKind,
-  byte_offset: Int,
-  length: Option(Int),
+  view: ViewSlot,
   idx: Option(Int),
   write: fn(BitArray, Int) -> BitArray,
 ) -> #(State(host), Bool) {
   case idx {
     Some(i) ->
-      case heap.read(state.heap, buffer) {
+      case heap.read(state.heap, view.buffer) {
         Some(ObjectSlot(kind: value.ArrayBufferObject(storage:), ..) as slot) -> {
-          let size = typed_array_ffi.elem_size(elem_kind)
+          let size = typed_array_ffi.elem_size(view.elem_kind)
           // §10.4.5.13/§10.4.5.14 against the LIVE buffer, resolved HERE (not
           // at [[Set]] entry): the ToNumber/ToBigInt conversion above may have
           // run user code that resized the buffer. Same two primitives the
           // read half uses, so an out-of-bounds write can never be accepted by
           // one and rejected by the other.
-          let view =
-            resolve_view(
-              value.buffer_byte_size(storage),
-              elem_kind,
-              byte_offset,
-              length,
-            )
-          let off = view_element_offset(view, i)
+          let resolved = resolve_view(value.buffer_byte_size(storage), view)
+          let off = view_element_offset(resolved, i)
           // Bounds FIRST, bytes second: `buffer_bits` on shared storage copies
           // the whole buffer out of its atomics cells, and a store that isn't
           // going to happen must not pay for it. A detached buffer measures 0
           // bytes, so it fails this check too — the silent no-op of
           // §10.4.5.16 step 2 covers both.
-          use <- bool.guard(!valid_integer_index(view, i), #(state, True))
+          use <- bool.guard(!valid_integer_index(resolved, i), #(state, True))
           // Immutable ArrayBuffer proposal: typed_array_store already reported
           // [[Set]] failure (False) before value coercion, and a live buffer
           // ref can never become immutable in place (transferToImmutable
@@ -323,7 +296,7 @@ fn do_typed_store(
               let h =
                 heap.write(
                   state.heap,
-                  buffer,
+                  view.buffer,
                   ObjectSlot(
                     ..slot,
                     kind: value.ArrayBufferObject(storage: new_storage),

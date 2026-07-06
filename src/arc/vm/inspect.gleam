@@ -151,10 +151,12 @@ fn inspect_object(
           <> "("
           <> int.to_string(typed_array_elements.view_length(
             heap,
-            buffer,
-            elem_kind,
-            byte_offset,
-            length,
+            typed_array_elements.ViewSlot(
+              buffer:,
+              elem_kind:,
+              byte_offset:,
+              length:,
+            ),
           ))
           <> ")"
         value.IteratorHelperObject(..) -> "[Iterator Helper]"

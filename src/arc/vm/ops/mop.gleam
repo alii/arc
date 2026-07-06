@@ -530,10 +530,12 @@ fn typed_array_define_index(
       use #(state, stored) <- result.try(
         typed_array_elements.typed_array_store(
           state,
-          buffer,
-          elem_kind,
-          byte_offset,
-          length,
+          typed_array_elements.ViewSlot(
+            buffer:,
+            elem_kind:,
+            byte_offset:,
+            length:,
+          ),
           Some(idx),
           v,
         )

@@ -31,14 +31,13 @@ import arc/vm/value.{
   Finite, JsBool, JsNumber, JsObject, JsString, JsUndefined, ObjectSlot,
   TypedArrayConstructor, TypedArrayGetBuffer, TypedArrayGetByteLength,
   TypedArrayGetByteOffset, TypedArrayGetLength, TypedArrayGetToStringTag,
-  TypedArrayIntrinsicConstructor, TypedArrayNative,
-  TypedArrayPrototypeAt, TypedArrayPrototypeCopyWithin,
-  TypedArrayPrototypeEntries, TypedArrayPrototypeEvery, TypedArrayPrototypeFill,
-  TypedArrayPrototypeFilter, TypedArrayPrototypeFind,
-  TypedArrayPrototypeFindIndex, TypedArrayPrototypeFindLast,
-  TypedArrayPrototypeFindLastIndex, TypedArrayPrototypeForEach,
-  TypedArrayPrototypeIncludes, TypedArrayPrototypeIndexOf,
-  TypedArrayPrototypeJoin, TypedArrayPrototypeKeys,
+  TypedArrayIntrinsicConstructor, TypedArrayNative, TypedArrayPrototypeAt,
+  TypedArrayPrototypeCopyWithin, TypedArrayPrototypeEntries,
+  TypedArrayPrototypeEvery, TypedArrayPrototypeFill, TypedArrayPrototypeFilter,
+  TypedArrayPrototypeFind, TypedArrayPrototypeFindIndex,
+  TypedArrayPrototypeFindLast, TypedArrayPrototypeFindLastIndex,
+  TypedArrayPrototypeForEach, TypedArrayPrototypeIncludes,
+  TypedArrayPrototypeIndexOf, TypedArrayPrototypeJoin, TypedArrayPrototypeKeys,
   TypedArrayPrototypeLastIndexOf, TypedArrayPrototypeMap,
   TypedArrayPrototypeReduce, TypedArrayPrototypeReduceRight,
   TypedArrayPrototypeReverse, TypedArrayPrototypeSet, TypedArrayPrototypeSlice,
@@ -490,9 +489,11 @@ fn ta_from(
   case helpers.is_callable(state.heap, iter_fn) {
     True ->
       helpers.lift_result({
-        use #(rec, state) <- result.try(
-          iter_protocol.get_iterator_from_method(state, source, iter_fn),
-        )
+        use #(rec, state) <- result.try(iter_protocol.get_iterator_from_method(
+          state,
+          source,
+          iter_fn,
+        ))
         use #(values, state) <- result.try(iter_protocol.iterator_to_list(
           state,
           rec,
@@ -1072,9 +1073,11 @@ fn from_object(
   ))
   case helpers.is_callable(state.heap, iter_fn) {
     True -> {
-      use #(rec, state) <- result.try(
-        iter_protocol.get_iterator_from_method(state, obj_val, iter_fn),
-      )
+      use #(rec, state) <- result.try(iter_protocol.get_iterator_from_method(
+        state,
+        obj_val,
+        iter_fn,
+      ))
       use #(values, state) <- result.try(iter_protocol.iterator_to_list(
         state,
         rec,
@@ -1439,7 +1442,14 @@ fn get_buffer(
 /// up because it is not two adjacent bare Ints.
 fn witness_in_bounds(h: Heap(host), witness: TaWitness) -> Bool {
   let TaWitness(buffer:, kind:, byte_offset:, length:, ..) = witness
-  typed_array_elements.live_view(h, buffer, kind, byte_offset, Some(length))
+  let view =
+    typed_array_elements.ViewSlot(
+      buffer:,
+      elem_kind: kind,
+      byte_offset:,
+      length: Some(length),
+    )
+  typed_array_elements.live_view(h, view)
   |> option.map(typed_array_elements.view_in_bounds)
   |> option.unwrap(False)
 }
@@ -3456,9 +3466,12 @@ fn u8_live_view(
       let resolved =
         typed_array_elements.resolve_view(
           bit_array.byte_size(data),
-          kind,
-          byte_offset,
-          length,
+          typed_array_elements.ViewSlot(
+            buffer:,
+            elem_kind: kind,
+            byte_offset:,
+            length:,
+          ),
         )
       U8LiveView(
         buffer:,
