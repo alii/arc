@@ -1,6 +1,6 @@
 import arc/vm/gc_trace
 import arc/vm/internal/elements
-import arc/vm/internal/lazy_proto.{LazyProto}
+import arc/vm/internal/lazy_proto.{type LazyProto, LazyProto}
 import arc/vm/key.{Named}
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
@@ -82,10 +82,9 @@ fn proto_slot(
   )
 }
 
-/// Build the ObjectSlot a tagged lazy-proto id stands for.
-fn synth_lazy_proto(id: Int) -> HeapSlot(ctx, host) {
-  let LazyProto(fn_id:, object_proto_id:, has_constructor:) =
-    lazy_proto.decode_lazy_proto(id)
+/// Build the ObjectSlot a decoded lazy-proto tag stands for.
+fn synth_lazy_proto(lp: LazyProto) -> HeapSlot(ctx, host) {
+  let LazyProto(fn_id:, object_proto_id:, has_constructor:) = lp
   proto_slot(Ref(fn_id), has_constructor, Ref(object_proto_id))
 }
 
@@ -204,11 +203,7 @@ pub fn reserve(heap: Heap(ctx, host)) -> #(Heap(ctx, host), Ref) {
 pub fn read(heap: Heap(ctx, host), ref: Ref) -> Option(HeapSlot(ctx, host)) {
   case ffi_heap_read(heap.data, ref.id) {
     Some(_) as found -> found
-    None ->
-      case lazy_proto.is_lazy_proto(ref.id) {
-        True -> Some(synth_lazy_proto(ref.id))
-        False -> None
-      }
+    None -> option.map(lazy_proto.decode_lazy_proto(ref.id), synth_lazy_proto)
   }
 }
 
@@ -283,51 +278,6 @@ pub fn read_box(h: Heap(ctx, host), ref: Ref) -> Option(value.JsValue) {
   case read(h, ref) {
     Some(value.BoxSlot(value:)) -> Some(value)
     _ -> None
-  }
-}
-
-/// Allocate a `CounterSlot` holding `count` — the promise combinators'
-/// remainingElementsCount Record { [[Value]]: n }.
-pub fn alloc_counter(
-  h: Heap(ctx, host),
-  count: Int,
-) -> #(Heap(ctx, host), Ref) {
-  alloc(h, value.CounterSlot(count:))
-}
-
-/// remainingElementsCount += 1. There is nothing to report: an increment can
-/// never take the counter to zero.
-pub fn increment_counter(h: Heap(ctx, host), ref: Ref) -> Heap(ctx, host) {
-  let #(h, _count) = adjust_counter(h, ref, 1)
-  h
-}
-
-/// remainingElementsCount -= 1, reporting whether it reached zero (i.e.
-/// whether this decrement is the one that settles the combinator's promise).
-pub fn decrement_counter(
-  h: Heap(ctx, host),
-  ref: Ref,
-) -> #(Heap(ctx, host), Bool) {
-  let #(h, count) = adjust_counter(h, ref, -1)
-  #(h, count <= 0)
-}
-
-/// A counter ref that does not point at a `CounterSlot` is an engine bug —
-/// counter refs are only ever minted by `alloc_counter` and only ever handed
-/// to these functions, and the GC traces them from the element closures that
-/// hold them. Panicking beats the old silent no-op, which lost the decrement
-/// and left the combinator's promise pending forever.
-fn adjust_counter(
-  h: Heap(ctx, host),
-  ref: Ref,
-  delta: Int,
-) -> #(Heap(ctx, host), Int) {
-  case read(h, ref) {
-    Some(value.CounterSlot(count:)) -> {
-      let count = count + delta
-      #(write(h, ref, value.CounterSlot(count:)), count)
-    }
-    _ -> panic as "heap.adjust_counter: ref does not point to a CounterSlot"
   }
 }
 
@@ -438,13 +388,13 @@ pub fn update(
   case dict.get(heap.data, ref.id) {
     Ok(slot) -> Heap(..heap, data: dict.insert(heap.data, ref.id, f(slot)))
     Error(Nil) ->
-      case lazy_proto.is_lazy_proto(ref.id) {
-        True ->
+      case lazy_proto.decode_lazy_proto(ref.id) {
+        Some(lp) ->
           Heap(
             ..heap,
-            data: dict.insert(heap.data, ref.id, f(synth_lazy_proto(ref.id))),
+            data: dict.insert(heap.data, ref.id, f(synth_lazy_proto(lp))),
           )
-        False -> heap
+        None -> heap
       }
   }
 }
@@ -554,13 +504,10 @@ fn mark_loop(
               // (tagged id — keep its constructor fn and parent prototype
               // alive, exactly as the materialised slot's props/prototype
               // fields would) or a genuinely dangling ref (skip).
-              case lazy_proto.is_lazy_proto(id) {
-                True -> {
-                  let LazyProto(fn_id:, object_proto_id:, ..) =
-                    lazy_proto.decode_lazy_proto(id)
+              case lazy_proto.decode_lazy_proto(id) {
+                Some(LazyProto(fn_id:, object_proto_id:, ..)) ->
                   mark_loop(heap, [fn_id, object_proto_id, ..rest], visited)
-                }
-                False -> mark_loop(heap, rest, visited)
+                None -> mark_loop(heap, rest, visited)
               }
             Ok(slot) -> {
               // Prepend child ref IDs directly onto frontier — avoids
@@ -571,9 +518,9 @@ fn mark_loop(
               // owning fn id: if the fn were collected and its id recycled, a
               // new closure could mint this same tagged id and alias the
               // stale materialised slot.
-              let frontier = case lazy_proto.is_lazy_proto(id) {
-                True -> [lazy_proto.decode_lazy_proto(id).fn_id, ..frontier]
-                False -> frontier
+              let frontier = case lazy_proto.decode_lazy_proto(id) {
+                Some(lp) -> [lp.fn_id, ..frontier]
+                None -> frontier
               }
               mark_loop(heap, frontier, visited)
             }

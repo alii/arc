@@ -42,21 +42,16 @@ pub fn is_sentinel(id: Int) -> Bool {
   id == sentinel_id
 }
 
-/// Is `id` a tagged (possibly already materialised) lazy function prototype?
-pub fn is_lazy_proto(id: Int) -> Bool {
-  id < sentinel_id
-}
-
-/// Pack a lazy-proto tag. `None` when `object_proto_id` doesn't fit the
-/// encoding (practically unreachable) — the caller must then allocate the
-/// prototype eagerly instead, since a truncated payload would alias another
+/// Pack a lazy-proto tag. `None` when either input id doesn't fit the encoding
+/// (practically unreachable) — the caller must then allocate the prototype
+/// eagerly instead, since an out-of-range payload would alias another
 /// closure's proto ref.
 pub fn encode_lazy_proto(
   fn_id: Int,
   object_proto_id: Int,
   has_constructor: Bool,
 ) -> Option(Int) {
-  case object_proto_id >= 0 && object_proto_id < shift {
+  case fn_id >= 0 && object_proto_id >= 0 && object_proto_id < shift {
     False -> None
     True -> {
       let flag = case has_constructor {
@@ -69,13 +64,20 @@ pub fn encode_lazy_proto(
   }
 }
 
-/// Unpack a tagged lazy-proto id. Only meaningful when `is_lazy_proto(id)`.
-pub fn decode_lazy_proto(id: Int) -> LazyProto {
-  let payload = -2 - id
-  let rest = payload / 2
-  LazyProto(
-    fn_id: rest / shift,
-    object_proto_id: rest % shift,
-    has_constructor: payload % 2 == 1,
-  )
+/// Unpack a tagged lazy-proto id. `None` when `id` is not in the lazy-proto
+/// region (i.e. a real slot or the sentinel) — a non-lazy id has no valid
+/// decoding.
+pub fn decode_lazy_proto(id: Int) -> Option(LazyProto) {
+  case id < sentinel_id {
+    False -> None
+    True -> {
+      let payload = -2 - id
+      let rest = payload / 2
+      Some(LazyProto(
+        fn_id: rest / shift,
+        object_proto_id: rest % shift,
+        has_constructor: payload % 2 == 1,
+      ))
+    }
+  }
 }
