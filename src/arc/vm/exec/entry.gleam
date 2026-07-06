@@ -552,12 +552,8 @@ fn settle(
   executed: Result(#(Completion, State(host)), VmError),
   finish: fn(State(host)) -> State(host),
 ) -> Result(#(Result(JsValue, JsValue), State(host)), VmError) {
-  use #(completion, final_state) <- result.try(executed)
-  let drained = finish(final_state)
-  case completion {
-    NormalCompletion(val) -> Ok(#(Ok(val), drained))
-    ThrowCompletion(val) -> Ok(#(Error(val), drained))
-  }
+  use #(comp, final_state) <- result.map(executed)
+  #(completion.to_result(comp), finish(final_state))
 }
 
 /// How a promise JsValue has settled: `Some(Ok(value))` if fulfilled,

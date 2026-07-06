@@ -120,8 +120,7 @@ pub fn eval_script_native(
             state,
             "evalScript: VM error: " <> state.vm_error_message(vm_err),
           )
-        Ok(#(NormalCompletion(val), _)) -> #(state, Ok(val))
-        Ok(#(ThrowCompletion(thrown), _)) -> #(state, Error(thrown))
+        Ok(#(comp, _)) -> #(state, completion.to_result(comp))
       }
     }
   }
@@ -372,7 +371,7 @@ fn run_eval(
         state,
         "eval: VM error: " <> state.vm_error_message(vm_err),
       )
-    Ok(#(completion, final_state)) -> {
+    Ok(#(comp, final_state)) -> {
       // Thread VM-global state back to caller. merge_globals is the ONE
       // merge path for realm-context state (lexical globals, symbol tables,
       // template cache, realm registry) — only heap/eval_env need patching.
@@ -383,10 +382,7 @@ fn run_eval(
           heap: final_state.heap,
           eval_env: option.or(eval_env, state.eval_env),
         )
-      case completion {
-        NormalCompletion(val) -> #(state, Ok(val))
-        ThrowCompletion(thrown) -> #(state, Error(thrown))
-      }
+      #(state, completion.to_result(comp))
     }
   }
 }

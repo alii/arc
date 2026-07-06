@@ -16,6 +16,16 @@ pub type Completion {
   ThrowCompletion(value: JsValue)
 }
 
+/// Map a `Completion` to `Result` — `NormalCompletion(v)` → `Ok(v)`,
+/// `ThrowCompletion(v)` → `Error(v)`. The one place this mapping lives; a new
+/// `Completion` variant is a single compile error here, not one per caller.
+pub fn to_result(c: Completion) -> Result(JsValue, JsValue) {
+  case c {
+    NormalCompletion(v) -> Ok(v)
+    ThrowCompletion(v) -> Error(v)
+  }
+}
+
 /// Which coroutine primitive suspended the frame.
 pub type SuspendKind {
   /// Generator yielded a value (or hit InitialYield) -- execution is
