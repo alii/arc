@@ -145,9 +145,15 @@ pub opaque type ResolvedView {
 /// not read it twice). `length: None` is [[ArrayLength]] = AUTO — a
 /// length-tracking view over a resizable buffer, whose element count follows
 /// the live byte length. Detached buffers and tracking views whose byte
-/// offset lies past the end of a shrunk buffer resolve to 0.
-pub fn resolve_view(byte_size: Int, view: ViewSlot) -> ResolvedView {
-  let ViewSlot(elem_kind:, byte_offset:, length:, ..) = view
+/// offset lies past the end of a shrunk buffer resolve to 0. Positional, not
+/// `ViewSlot`: this sits on the per-element read path and must not allocate a
+/// wrapper record just to ask a bounds question.
+pub fn resolve_view(
+  byte_size: Int,
+  elem_kind: value.TypedArrayKind,
+  byte_offset: Int,
+  length: Option(Int),
+) -> ResolvedView {
   let elem_size = typed_array_ffi.elem_size(elem_kind)
   ResolvedView(
     byte_size:,
@@ -227,8 +233,9 @@ pub fn view_length(h: Heap(host), view: ViewSlot) -> Int {
 /// resolve — and no `ResolvedView` a caller could mistake for an in-bounds
 /// one. Every `ResolvedView` therefore describes bytes that really exist.
 pub fn live_view(h: Heap(host), view: ViewSlot) -> Option(ResolvedView) {
-  use data <- option.map(buffer_bytes(h, view.buffer))
-  resolve_view(bit_array.byte_size(data), view)
+  let ViewSlot(buffer:, elem_kind:, byte_offset:, length:) = view
+  use data <- option.map(buffer_bytes(h, buffer))
+  resolve_view(bit_array.byte_size(data), elem_kind, byte_offset, length)
 }
 
 /// Byte size of the buffer currently in the heap; 0 for a detached buffer or
@@ -269,7 +276,13 @@ fn do_typed_store(
           // run user code that resized the buffer. Same two primitives the
           // read half uses, so an out-of-bounds write can never be accepted by
           // one and rejected by the other.
-          let resolved = resolve_view(value.buffer_byte_size(storage), view)
+          let resolved =
+            resolve_view(
+              value.buffer_byte_size(storage),
+              view.elem_kind,
+              view.byte_offset,
+              view.length,
+            )
           let off = view_element_offset(resolved, i)
           // Bounds FIRST, bytes second: `buffer_bits` on shared storage copies
           // the whole buffer out of its atomics cells, and a store that isn't

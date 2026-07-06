@@ -1223,7 +1223,7 @@ fn define_outcome_to_bool(
   case outcome {
     Defined -> Ok(#(state, True))
     Rejected -> Ok(#(state, False))
-    ThrewRangeError(msg) -> Error(state.range_error_value(state, msg))
+    ThrewRangeError(msg) -> state.range_error_op(state, msg)
   }
 }
 
@@ -2506,19 +2506,15 @@ pub fn species_constructor(
           case s, is_constructor(state.heap, s) {
             JsObject(s_ref), True -> Ok(#(s_ref, state))
             _, _ ->
-              Error(state.type_error_value(
+              state.type_error_op(
                 state,
                 "species constructor is not a constructor",
-              ))
+              )
           }
       }
     }
     // Step 3: a present but non-object "constructor" is a TypeError.
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "constructor property is not an object",
-      ))
+    _ -> state.type_error_op(state, "constructor property is not an object")
   }
 }
 
@@ -3199,10 +3195,10 @@ pub fn try_is_array(
     Ok(b) -> Ok(#(b, state))
     // Step 3.a: If proxy.[[ProxyHandler]] is null, throw a TypeError.
     Error(Nil) ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "Cannot perform 'IsArray' on a proxy that has been revoked",
-      ))
+      )
   }
 }
 
@@ -3271,18 +3267,18 @@ pub fn proxy_trap(
           case value_is_callable(state.heap, trap) {
             True -> Ok(#(t, h, Some(trap), state))
             False ->
-              Error(state.type_error_value(
+              state.type_error_op(
                 state,
                 "'" <> name <> "' trap of proxy handler is not a function",
-              ))
+              )
           }
       }
     }
     None ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "Cannot perform '" <> name <> "' on a proxy that has been revoked",
-      ))
+      )
   }
 }
 
@@ -3329,23 +3325,23 @@ pub fn proxy_get(
           case value.same_value(res, tv) {
             True -> Ok(#(res, state))
             False ->
-              Error(state.type_error_value(
+              state.type_error_op(
                 state,
                 "'get' on proxy: property "
                   <> pk_label(pk)
                   <> " is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value",
-              ))
+              )
           }
         Some(AccessorProperty(get: None, configurable: False, ..)) ->
           case res {
             value.JsUndefined -> Ok(#(res, state))
             _ ->
-              Error(state.type_error_value(
+              state.type_error_op(
                 state,
                 "'get' on proxy: property "
                   <> pk_label(pk)
                   <> " is a non-configurable accessor property on the proxy target without a getter, but the trap did not return undefined",
-              ))
+              )
           }
         _ -> Ok(#(res, state))
       }
@@ -3395,20 +3391,20 @@ pub fn proxy_set(
               case value.same_value(val, tv) {
                 True -> Ok(#(state, True))
                 False ->
-                  Error(state.type_error_value(
+                  state.type_error_op(
                     state,
                     "'set' on proxy: trap returned truish for property "
                       <> pk_label(pk)
                       <> " which exists in the proxy target as a non-configurable and non-writable data property with a different value",
-                  ))
+                  )
               }
             Some(AccessorProperty(set: None, configurable: False, ..)) ->
-              Error(state.type_error_value(
+              state.type_error_op(
                 state,
                 "'set' on proxy: trap returned truish for property "
                   <> pk_label(pk)
                   <> " which exists in the proxy target as a non-configurable accessor property without a setter",
-              ))
+              )
             _ -> Ok(#(state, True))
           }
         }
@@ -3525,12 +3521,12 @@ pub fn proxy_has(
             Some(prop) ->
               case value.prop_configurable(prop) {
                 False ->
-                  Error(state.type_error_value(
+                  state.type_error_op(
                     state,
                     "'has' on proxy: trap returned falsish for property "
                       <> pk_label(pk)
                       <> " which exists in the proxy target as non-configurable",
-                  ))
+                  )
                 True -> {
                   // Step 9.b.ii: ? IsExtensible(target) — traps when the
                   // target is itself a proxy.
@@ -3540,12 +3536,12 @@ pub fn proxy_has(
                   ))
                   case ext {
                     False ->
-                      Error(state.type_error_value(
+                      state.type_error_op(
                         state,
                         "'has' on proxy: trap returned falsish for property "
                           <> pk_label(pk)
                           <> " but the proxy target is not extensible",
-                      ))
+                      )
                     True -> Ok(#(False, state))
                   }
                 }
@@ -3617,12 +3613,12 @@ pub fn proxy_delete(
             Some(prop) ->
               case value.prop_configurable(prop) {
                 False ->
-                  Error(state.type_error_value(
+                  state.type_error_op(
                     state,
                     "'deleteProperty' on proxy: trap returned truish for property "
                       <> pk_label(pk)
                       <> " which is non-configurable in the proxy target",
-                  ))
+                  )
                 True -> {
                   // Step 12: ? IsExtensible(target).
                   use #(ext, state) <- result.try(is_extensible_stateful(
@@ -3631,10 +3627,10 @@ pub fn proxy_delete(
                   ))
                   case ext {
                     False ->
-                      Error(state.type_error_value(
+                      state.type_error_op(
                         state,
                         "'deleteProperty' on proxy: trap returned truish but the proxy target is not extensible",
-                      ))
+                      )
                     True -> Ok(#(state, True))
                   }
                 }
@@ -3690,19 +3686,19 @@ fn proxy_get_prototype_of(
               case value.same_value(res, target_proto) {
                 True -> Ok(#(res, state))
                 False ->
-                  Error(state.type_error_value(
+                  state.type_error_op(
                     state,
                     "'getPrototypeOf' on proxy: proxy target is non-extensible but the trap did not return its actual prototype",
-                  ))
+                  )
               }
             }
           }
         }
         _ ->
-          Error(state.type_error_value(
+          state.type_error_op(
             state,
             "'getPrototypeOf' on proxy: trap returned neither object nor null",
-          ))
+          )
       }
     }
   }
@@ -3744,10 +3740,10 @@ pub fn proxy_set_prototype_of(
               case value.same_value(proto_val, target_proto) {
                 True -> Ok(#(state, None, True))
                 False ->
-                  Error(state.type_error_value(
+                  state.type_error_op(
                     state,
                     "'setPrototypeOf' on proxy: trap returned truish for setting a new prototype on the non-extensible proxy target",
-                  ))
+                  )
               }
             }
           }
@@ -3784,12 +3780,12 @@ pub fn is_extensible_stateful(
           case b == target_ext {
             True -> Ok(#(b, state))
             False ->
-              Error(state.type_error_value(
+              state.type_error_op(
                 state,
                 "'isExtensible' on proxy: trap result does not reflect extensibility of proxy target (which is '"
                   <> bool.to_string(target_ext)
                   <> "')",
-              ))
+              )
           }
         }
       }
@@ -3827,10 +3823,10 @@ pub fn prevent_extensions_stateful(
               ))
               case target_ext {
                 True ->
-                  Error(state.type_error_value(
+                  state.type_error_op(
                     state,
                     "'preventExtensions' on proxy: trap returned truish but the proxy target is extensible",
-                  ))
+                  )
                 False -> Ok(#(state, True))
               }
             }
@@ -3937,12 +3933,9 @@ pub fn typed_array_element_live(
         data,
         typed_array_elements.resolve_view(
           bit_array.byte_size(data),
-          typed_array_elements.ViewSlot(
-            buffer:,
-            elem_kind:,
-            byte_offset:,
-            length:,
-          ),
+          elem_kind,
+          byte_offset,
+          length,
         ),
         elem_kind,
         idx,
@@ -4025,12 +4018,9 @@ pub fn typed_array_iter_length(
       let view =
         typed_array_elements.resolve_view(
           bit_array.byte_size(data),
-          typed_array_elements.ViewSlot(
-            buffer:,
-            elem_kind:,
-            byte_offset:,
-            length:,
-          ),
+          elem_kind,
+          byte_offset,
+          length,
         )
       case typed_array_elements.view_in_bounds(view) {
         False -> Error(OutOfBoundsView)

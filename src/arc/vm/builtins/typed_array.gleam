@@ -409,10 +409,10 @@ fn ta_create(
   }
   case immutable {
     True ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "Constructor returned a TypedArray backed by an immutable ArrayBuffer",
-      ))
+      )
     False -> Ok(#(obj, obj_ref, state))
   }
 }
@@ -444,10 +444,10 @@ fn ta_create_with_args(
             )
           case min_len {
             Some(len) if l < len ->
-              Error(state.type_error_value(
+              state.type_error_op(
                 state,
                 "Derived TypedArray constructor created an array which was too small",
-              ))
+              )
             _ -> Ok(#(obj, view.ref, state))
           }
         }
@@ -474,7 +474,7 @@ fn ta_from(
     _ ->
       case helpers.is_callable(state.heap, mapfn) {
         True -> Ok(#(Some(mapfn), state))
-        False -> Error(state.type_error_value(state, "mapfn is not a function"))
+        False -> state.type_error_op(state, "mapfn is not a function")
       }
   })
   use <- bool.lazy_guard(source == JsUndefined || source == value.JsNull, fn() {
@@ -763,7 +763,7 @@ fn alloc_ta_with_length(
   let size = typed_array_ffi.elem_size(kind)
   let byte_len = len * size
   use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
-    Error(state.range_error_value(state, "Invalid typed array length"))
+    state.range_error_op(state, "Invalid typed array length")
   })
   Ok(alloc_fresh_ta(state, kind, proto, ta_zeroed(byte_len), len))
 }
@@ -817,13 +817,13 @@ fn from_buffer(
   use #(offset, state) <- result.try(to_index(state, offset_arg))
   // Step 3: offset modulo elementSize must be 0.
   use <- bool.lazy_guard(offset % size != 0, fn() {
-    Error(state.range_error_value(
+    state.range_error_op(
       state,
       "start offset of "
         <> value.typed_array_name(kind)
         <> " should be a multiple of "
         <> int.to_string(size),
-    ))
+    )
   })
   // Step 5: newLength = ToIndex(length) when present.
   use #(new_len, state) <- result.try(case len_arg {
@@ -836,13 +836,13 @@ fn from_buffer(
   // Step 6: detached check AFTER the (observable) conversions.
   case object.typed_array_buffer_data(state.heap, buf_ref) {
     None ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "Cannot perform Construct on a detached ArrayBuffer",
-      ))
+      )
     Some(data) -> {
       let buf_len = bit_array.byte_size(data)
-      let range_err = fn(msg) { Error(state.range_error_value(state, msg)) }
+      let range_err = fn(msg) { state.range_error_op(state, msg) }
       let resizable = case heap.read(state.heap, buf_ref) {
         Some(ObjectSlot(kind: value.ArrayBufferObject(storage:), ..)) ->
           value.buffer_max_byte_length(storage) != None
@@ -928,25 +928,25 @@ fn from_typed_array(
 ) -> Result(#(JsValue, State(host)), #(JsValue, State(host))) {
   // Step 6.c: BigInt and Number content types never mix.
   use <- bool.lazy_guard(!same_content_type(kind, src_kind), fn() {
-    Error(state.type_error_value(
+    state.type_error_op(
       state,
       "Cannot initialize "
         <> value.typed_array_name(kind)
         <> " from "
         <> value.typed_array_name(src_kind),
-    ))
+    )
   })
   case object.typed_array_buffer_data(state.heap, src_buf) {
     None ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "Cannot perform Construct on a detached ArrayBuffer",
-      ))
+      )
     Some(src_data) -> {
       let size = typed_array_ffi.elem_size(kind)
       let byte_len = src_len * size
       use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
-        Error(state.range_error_value(state, "Invalid typed array length"))
+        state.range_error_op(state, "Invalid typed array length")
       })
       // §23.2.5.1.2 step 5 (MakeTypedArrayWithBufferWitnessRecord +
       // IsTypedArrayOutOfBounds): a source view whose resizable buffer has
@@ -955,10 +955,10 @@ fn from_typed_array(
       use <- bool.lazy_guard(
         src_off + src_len * src_size > bit_array.byte_size(src_data),
         fn() {
-          Error(state.type_error_value(
+          state.type_error_op(
             state,
             "Cannot perform Construct on an out-of-bounds TypedArray",
-          ))
+          )
         },
       )
       let new_data = case kind == src_kind {
@@ -3262,24 +3262,17 @@ fn resolve_species_ctor(
               case object.is_constructor(state.heap, species) {
                 True -> Ok(#(Some(species), state))
                 False ->
-                  Error(state.type_error_value(
+                  state.type_error_op(
                     state,
                     "Species constructor is not a constructor",
-                  ))
+                  )
               }
           }
         _ ->
-          Error(state.type_error_value(
-            state,
-            "Species constructor is not a constructor",
-          ))
+          state.type_error_op(state, "Species constructor is not a constructor")
       }
     }
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Constructor property is not an object",
-      ))
+    _ -> state.type_error_op(state, "Constructor property is not an object")
   }
 }
 
@@ -3299,10 +3292,10 @@ fn check_content_type(
       case same_content_type(result_kind, kind) {
         True -> Ok(#(#(obj, obj_ref), state))
         False ->
-          Error(state.type_error_value(
+          state.type_error_op(
             state,
             "Content types of source and created typed arrays differ",
-          ))
+          )
       }
     _ -> Error(witness_error_value(state, object.NotAView))
   }
@@ -3401,11 +3394,7 @@ fn validate_u8(
 ) -> Result(State(host), #(JsValue, State(host))) {
   case ta_slot(state.heap, this) {
     Some(TaView(kind: value.NumKind(value.Uint8Kind), ..)) -> Ok(state)
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "Method must be called on a Uint8Array",
-      ))
+    _ -> state.type_error_op(state, "Method must be called on a Uint8Array")
   }
 }
 
@@ -3425,10 +3414,10 @@ fn u8_require_mutable(
   }
   case immutable {
     True ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "Cannot modify a Uint8Array backed by an immutable ArrayBuffer",
-      ))
+      )
     False -> Ok(Nil)
   }
 }
@@ -3466,12 +3455,9 @@ fn u8_live_view(
       let resolved =
         typed_array_elements.resolve_view(
           bit_array.byte_size(data),
-          typed_array_elements.ViewSlot(
-            buffer:,
-            elem_kind: kind,
-            byte_offset:,
-            length:,
-          ),
+          kind,
+          byte_offset,
+          length,
         )
       U8LiveView(
         buffer:,
@@ -3480,11 +3466,7 @@ fn u8_live_view(
         length: typed_array_elements.view_len(resolved),
       )
     }
-    None ->
-      Error(state.type_error_value(
-        state,
-        "Method must be called on a Uint8Array",
-      ))
+    None -> state.type_error_op(state, "Method must be called on a Uint8Array")
   }
 }
 
@@ -3496,11 +3478,7 @@ fn get_opts_object(
   case v {
     JsUndefined -> Ok(#(None, state))
     JsObject(ref) -> Ok(#(Some(ref), state))
-    _ ->
-      Error(state.type_error_value(
-        state,
-        "options must be an object or undefined",
-      ))
+    _ -> state.type_error_op(state, "options must be an object or undefined")
   }
 }
 
@@ -3535,19 +3513,19 @@ fn get_enum_option(
       case parse(s) {
         Some(v) -> Ok(#(v, state))
         None ->
-          Error(state.type_error_value(
+          state.type_error_op(
             state,
             "\"" <> s <> "\" is not a valid value for option " <> key,
-          ))
+          )
       }
     other ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "option "
           <> key
           <> " must be a string, got "
           <> operators.typeof(state.heap, other),
-      ))
+      )
   }
 }
 
@@ -3587,11 +3565,11 @@ fn require_string(
   case v {
     JsString(s) -> Ok(#(s, state))
     other ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "expected input to be a string, got "
           <> operators.typeof(state.heap, other),
-      ))
+      )
   }
 }
 
