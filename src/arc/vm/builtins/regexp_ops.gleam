@@ -53,55 +53,49 @@ pub fn is_regexp(
 }
 
 /// `String.prototype.matchAll` step 2.b / `String.prototype.replaceAll`
-/// step 2.a, verbatim: the caller has already established that `val` is an
-/// IsRegExp object, so
+/// step 2.a, verbatim: the caller has already established IsRegExp(argument),
+/// which is only true for objects (§7.2.6 step 1), so the argument is a Ref.
 ///
-///   1. Let flags be ? Get(val, "flags").
+///   1. Let flags be ? Get(argument, "flags").
 ///   2. Perform ? RequireObjectCoercible(flags).
 ///   3. If ! ToString(flags) does not contain "g", throw a TypeError.
 ///
 /// `method` names the caller for the message ("matchAll", "replaceAll").
 pub fn require_global_flags(
   state: State(host),
-  val: JsValue,
+  ref: value.Ref,
   method: String,
   cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case val {
-    JsObject(ref) -> {
-      // Step 1.
-      use flags_val, state <- state.try_op(object.get_value(
+  // Step 1.
+  use flags_val, state <- state.try_op(object.get_value(
+    state,
+    ref,
+    Named("flags"),
+    JsObject(ref),
+  ))
+  case flags_val {
+    // Step 2.
+    JsUndefined | JsNull ->
+      state.type_error(
         state,
-        ref,
-        Named("flags"),
-        val,
-      ))
-      case flags_val {
-        // Step 2.
-        JsUndefined | JsNull ->
+        "String.prototype."
+          <> method
+          <> ": the .flags property of the argument must not be undefined or null",
+      )
+    // Step 3.
+    _ -> {
+      use flags_str, state <- coerce.try_to_string(state, flags_val)
+      case string.contains(flags_str, "g") {
+        True -> cont(Nil, state)
+        False ->
           state.type_error(
             state,
             "String.prototype."
               <> method
-              <> ": the .flags property of the argument must not be undefined or null",
+              <> " called with a non-global RegExp argument",
           )
-        // Step 3.
-        _ -> {
-          use flags_str, state <- coerce.try_to_string(state, flags_val)
-          case string.contains(flags_str, "g") {
-            True -> cont(Nil, state)
-            False ->
-              state.type_error(
-                state,
-                "String.prototype."
-                  <> method
-                  <> " called with a non-global RegExp argument",
-              )
-          }
-        }
       }
     }
-    // IsRegExp is only true for objects, so a non-object never gets here.
-    _ -> cont(Nil, state)
   }
 }

@@ -961,7 +961,11 @@ fn require_global_when_regexp(
   cont: fn(Nil, State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case is_re {
-    True -> regexp_ops.require_global_flags(state, val, method, cont)
+    True -> {
+      // IsRegExp is only True for objects (§7.2.6 step 1), so this cannot fail.
+      let assert JsObject(ref) = val
+      regexp_ops.require_global_flags(state, ref, method, cont)
+    }
     False -> cont(Nil, state)
   }
 }
@@ -1974,56 +1978,29 @@ fn string_match_all(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  // Step 1: RequireObjectCoercible(this) — ToString is deferred to step 3.
-  case this {
-    JsNull | JsUndefined ->
-      state.type_error(
-        state,
-        "String.prototype.matchAll called on null or undefined",
-      )
-    _ -> {
-      let regexp_arg = helpers.first_arg_or_undefined(args)
-      // Step 2: only when regexp is an Object — primitives (including
-      // null/undefined) never have their @@matchAll accessed.
-      case regexp_arg {
-        JsObject(ref) -> {
-          // Step 2a: if IsRegExp(regexp), its flags must contain "g"
-          use is_re, state <- regexp_ops.is_regexp(state, regexp_arg)
-          use Nil, state <- require_global_when_regexp(
-            state,
-            regexp_arg,
-            is_re,
-            "matchAll",
-          )
-          // Step 2b: matcher = GetMethod(regexp, @@matchAll)
-          use match_all_fn, state <- state.try_op(object.get_symbol_value(
-            state,
-            ref,
-            value.symbol_match_all,
-            regexp_arg,
-          ))
-          case match_all_fn {
-            JsUndefined | JsNull ->
-              match_all_create_regexp(state, this, regexp_arg)
-            _ ->
-              case helpers.is_callable(state.heap, match_all_fn) {
-                True -> {
-                  use result, state <- state.try_call(
-                    state,
-                    match_all_fn,
-                    regexp_arg,
-                    [this],
-                  )
-                  #(state, Ok(result))
-                }
-                False ->
-                  state.type_error(state, "@@matchAll method is not a function")
-              }
-          }
-        }
-        _ -> match_all_create_regexp(state, this, regexp_arg)
-      }
-    }
+  // Step 1: RequireObjectCoercible(O) — ToString deferred to step 3.
+  use Nil, state <- require_object_coercible(this, state, "matchAll")
+  let regexp_arg = helpers.first_arg_or_undefined(args)
+  // Step 2a: if IsRegExp(regexp), Get(regexp, "flags") must be
+  // object-coercible and its string must contain "g".
+  use is_re, state <- regexp_ops.is_regexp(state, regexp_arg)
+  use Nil, state <- require_global_when_regexp(
+    state,
+    regexp_arg,
+    is_re,
+    "matchAll",
+  )
+  // Step 2b: matcher = ? GetMethod(regexp, @@matchAll); delegate if set.
+  use method_opt, state <- state.try_op(get_method(
+    state,
+    regexp_arg,
+    value.symbol_match_all,
+  ))
+  case method_opt {
+    Some(method) -> call_symbol_method(state, method, regexp_arg, [this])
+    // Steps 3-5: S = ToString(O); rx = RegExpCreate(regexp, "g");
+    // return Invoke(rx, @@matchAll, « S »).
+    None -> match_all_create_regexp(state, this, regexp_arg)
   }
 }
 

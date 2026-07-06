@@ -218,10 +218,15 @@ index_by_name(Names) ->
 resolve_backrefs(Chunks, ByName) ->
     lists:flatmap(fun(Chunk) -> resolve_chunk(Chunk, ByName) end, Chunks).
 
+%% Generated PCRE text is emitted as a `{pcre, Iolist}` tuple, not raw
+%% characters, so translate_pat/5 passes it through opaque instead of
+%% re-reading it as user source. Without the tag the `\g` in a generated
+%% `\g{N}` backref would be caught by translate_pat's JS-escape clause and
+%% turned into a literal `g`.
 resolve_chunk({backref, Name, Raw}, ByName) ->
     case lists:keyfind(Name, 1, ByName) of
         {_, [Idx]} ->
-            "\\g{" ++ integer_to_list(Idx) ++ "}";
+            [{pcre, "\\g{" ++ integer_to_list(Idx) ++ "}"}];
         {_, Idxs} ->
             %% ES2025 duplicate group names: the same name is bound by several
             %% groups in different alternatives, so at most one of them can
@@ -229,7 +234,7 @@ resolve_chunk({backref, Name, Raw}, ByName) ->
             %% fails to match, so an alternation over every index picks
             %% whichever group actually did participate.
             Refs = ["\\g{" ++ integer_to_list(I) ++ "}" || I <- Idxs],
-            "(?:" ++ lists:append(lists:join("|", Refs)) ++ ")";
+            [{pcre, "(?:" ++ lists:append(lists:join("|", Refs)) ++ ")"}];
         false ->
             %% No such group (or no named groups at all): leave the source
             %% text alone.
@@ -463,6 +468,21 @@ translate_pat([$\\, $B | Rest], false, Mode, CI, MS) ->
     W = word_atom(Mode),
     "(?:(?<=" ++ W ++ ")(?=" ++ W ++ ")|(?<!" ++ W ++ ")(?!" ++ W ++ "))"
         ++ translate_pat(Rest, false, Mode, CI, MS);
+%% Generated PCRE fragment (from resolve_chunk/2): pass through opaque so the
+%% escape handling below cannot reinterpret it as user source.
+translate_pat([{pcre, Io} | Rest], InClass, Mode, CI, MS) ->
+    [Io | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)];
+%% Escapes JS defines as one literal character but PCRE gives meta-meaning to
+%% (`\v` vertical-whitespace, `\R` any-newline, `\X` grapheme, `\h \H \V`
+%% h/v-space classes, `\a` BEL, `\e` ESC, `\N` non-newline, `\A \z \Z \G`
+%% anchors, `\g` backref, `\C` byte, `\K` match-reset). JS: `\v` is U+000B
+%% (ControlEscape); the rest are Annex B IdentityEscape — the letter itself.
+translate_pat([$\\, C | Rest], InClass, Mode, CI, MS)
+  when C =:= $v; C =:= $a; C =:= $e; C =:= $g;
+       C =:= $h; C =:= $H; C =:= $V; C =:= $R; C =:= $X; C =:= $N;
+       C =:= $z; C =:= $Z; C =:= $A; C =:= $G; C =:= $C; C =:= $K ->
+    ["\\x{", integer_to_list(js_escape_cp(C), 16), "}"
+     | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)];
 %% Preserve any other escape pair verbatim (don't reinterpret its 2nd char).
 %% Every escape that reaches here denotes a single character (the class escapes
 %% were taken above), so in a class it can start a range.
@@ -552,6 +572,11 @@ after_atom(_InClass) -> atom.
 %% class escape, a property escape, a completed range).
 after_class_item(false) -> false;
 after_class_item(_InClass) -> true.
+
+%% JS meaning of an escape PCRE would read as a metacharacter: `\v` is the one
+%% ControlEscape in the set (U+000B); the rest are Annex B IdentityEscape.
+js_escape_cp($v) -> 16#0B;
+js_escape_cp(C) -> C.
 
 %% The HIGH endpoint of a class range, consumed as exactly one item so the state
 %% resets: whatever follows a completed range starts fresh, and a `-` there is a
