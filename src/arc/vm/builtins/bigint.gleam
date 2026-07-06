@@ -87,18 +87,18 @@ pub fn bigint_global(
             case value.integral_int(f) {
               Some(i) -> Ok(#(value.JsBigInt(value.BigInt(i)), state))
               None ->
-                Error(state.range_error_value(
+                state.range_error_op(
                   state,
                   "The number "
                     <> value.js_format_number(f)
                     <> " cannot be converted to a BigInt because it is not an integer",
-                ))
+                )
             }
           _ ->
-            Error(state.range_error_value(
+            state.range_error_op(
               state,
               "The number cannot be converted to a BigInt because it is not an integer",
-            ))
+            )
         }
       // Step 4: otherwise ToBigInt(prim).
       _ -> {
@@ -121,10 +121,10 @@ fn this_bigint_value(
   this: JsValue,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   let incompatible = fn() {
-    Error(state.type_error_value(
+    state.type_error_op(
       state,
       "BigInt.prototype method called on incompatible receiver",
-    ))
+    )
   }
   case this {
     value.JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
@@ -161,10 +161,7 @@ pub fn bigint_proto_to_string(
     case value.radix(radix) {
       Ok(r) -> Ok(#(JsString(value.format_bigint_radix(n, r)), state))
       Error(Nil) ->
-        Error(state.range_error_value(
-          state,
-          "toString() radix must be between 2 and 36",
-        ))
+        state.range_error_op(state, "toString() radix must be between 2 and 36")
     }
   })
 }

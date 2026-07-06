@@ -379,9 +379,10 @@ fn own_keys_impl(
         Some(_) ->
           case enumerable_only {
             True -> {
-              use ks, state <- state.try_op(
-                mop.enumerable_string_keys_stateful(state, ref),
-              )
+              use ks, state <- state.try_op(mop.enumerable_string_keys_stateful(
+                state,
+                ref,
+              ))
               state.ok_array(state, list.map(ks, JsString))
             }
             False -> {
@@ -452,10 +453,7 @@ fn string_index_keys(i: Int, len: Int) -> List(JsValue) {
 fn string_index_object_keys(i: Int, len: Int) -> List(ObjectKey) {
   case i >= len {
     True -> []
-    False -> [
-      mop.index_object_key(i),
-      ..string_index_object_keys(i + 1, len)
-    ]
+    False -> [mop.index_object_key(i), ..string_index_object_keys(i + 1, len)]
   }
 }
 
@@ -869,11 +867,7 @@ fn collect_enumerable_own(
     [SymbolPropKey(_), ..rest] ->
       collect_enumerable_own(state, ref, receiver, rest, combine, acc)
     [StringPropKey(pkey:, display: s) as skey, ..rest] -> {
-      use #(prop, state) <- result.try(mop.own_property_keyed(
-        state,
-        ref,
-        skey,
-      ))
+      use #(prop, state) <- result.try(mop.own_property_keyed(state, ref, skey))
       let enumerable =
         option.map(prop, value.prop_enumerable) |> option.unwrap(False)
       case enumerable {
@@ -989,10 +983,7 @@ fn define_properties_on(
       // symbol-inclusive, so `Object.create(p, {[Symbol.x]: {..}})` defines
       // the symbol property and a Proxy props object goes through its
       // ownKeys trap.
-      use keys, state <- state.try_op(mop.own_property_keys(
-        state,
-        props_ref,
-      ))
+      use keys, state <- state.try_op(mop.own_property_keys(state, props_ref))
       // Step 4: read + parse EVERY descriptor first — nothing is defined on
       // the target until all of them validate.
       use descriptors, state <- state.try_op(
@@ -1181,10 +1172,7 @@ fn assign_source(
     // is re-done for ordinary sources too — a getter run for an earlier key can
     // make a later key non-enumerable or delete it.
     JsObject(src_ref) as receiver -> {
-      use #(keys, state) <- result.try(mop.own_property_keys(
-        state,
-        src_ref,
-      ))
+      use #(keys, state) <- result.try(mop.own_property_keys(state, src_ref))
       assign_own_keys(state, target_ref, src_ref, receiver, keys)
     }
     // String sources: each index character is an enumerable own property.
@@ -1241,10 +1229,10 @@ fn assign_set_failed(
   state: State(host),
   key: String,
 ) -> Result(a, #(JsValue, State(host))) {
-  Error(state.type_error_value(
+  state.type_error_op(
     state,
     "Cannot assign to read only property '" <> key <> "' of object",
-  ))
+  )
 }
 
 /// Object.assign step 3.a.iii — per key of the source's [[OwnPropertyKeys]]:
@@ -1267,11 +1255,7 @@ fn assign_own_keys(
     [] -> Ok(state)
     [k, ..rest] -> {
       // Step 1: desc = ? from.[[GetOwnProperty]](nextKey) — trap-aware.
-      use #(prop, state) <- result.try(mop.own_property_keyed(
-        state,
-        src_ref,
-        k,
-      ))
+      use #(prop, state) <- result.try(mop.own_property_keyed(state, src_ref, k))
       let enumerable =
         option.map(prop, value.prop_enumerable) |> option.unwrap(False)
       use state <- result.try(case enumerable, k {
@@ -1341,10 +1325,7 @@ pub fn copy_data_properties_stateful(
         Some(_) -> {
           // Step 3: Let keys be ? from.[[OwnPropertyKeys]]() — ownKeys trap
           // (throws TypeError when the proxy is revoked).
-          use #(keys, state) <- result.try(mop.own_property_keys(
-            state,
-            src_ref,
-          ))
+          use #(keys, state) <- result.try(mop.own_property_keys(state, src_ref))
           copy_proxy_keys(
             state,
             src_ref,
@@ -1417,11 +1398,7 @@ fn copy_one_proxy_key(
   k: ObjectKey,
 ) -> Result(State(host), #(JsValue, State(host))) {
   // Step 4.c.i: Let desc be ? from.[[GetOwnProperty]](nextKey) — trap-aware.
-  use #(prop, state) <- result.try(mop.own_property_keyed(
-    state,
-    src_ref,
-    k,
-  ))
+  use #(prop, state) <- result.try(mop.own_property_keyed(state, src_ref, k))
   let enumerable =
     option.map(prop, value.prop_enumerable) |> option.unwrap(False)
   case enumerable, k {
@@ -1522,9 +1499,7 @@ fn has_own(
       use key, state <- try_to_property_key(state, key_val)
       #(
         state,
-        Ok(
-          JsBool(option.is_some(mop.string_exotic_own_property(s, key))),
-        ),
+        Ok(JsBool(option.is_some(mop.string_exotic_own_property(s, key)))),
       )
     }
     // Number/Boolean/Symbol/BigInt: their wrappers have no own properties,
@@ -1623,8 +1598,7 @@ fn set_prototype_of(
       ))
       case status {
         Ok(Nil) -> #(state, Ok(target))
-        Error(fail) ->
-          state.type_error(state, mop.set_proto_fail_message(fail))
+        Error(fail) -> state.type_error(state, mop.set_proto_fail_message(fail))
       }
     }
     // §20.1.2.21 step 3: If O is not an Object, return O.
@@ -1886,10 +1860,7 @@ fn set_integrity_level(
           )
         True -> {
           // Step 6: ? O.[[OwnPropertyKeys]]() — trap-aware.
-          use keys, state <- state.try_op(mop.own_property_keys(
-            state,
-            ref,
-          ))
+          use keys, state <- state.try_op(mop.own_property_keys(state, ref))
           // Steps 7-8: ? DefinePropertyOrThrow per key.
           use state <- state.try_state(set_integrity_keys(
             state,
@@ -2039,10 +2010,7 @@ fn test_integrity_level(
         True -> #(state, Ok(JsBool(False)))
         False -> {
           // Step 6: ? O.[[OwnPropertyKeys]]() — trap-aware.
-          use keys, state <- state.try_op(mop.own_property_keys(
-            state,
-            ref,
-          ))
+          use keys, state <- state.try_op(mop.own_property_keys(state, ref))
           // Steps 7-9.
           use ok, state <- state.try_op(keys_at_integrity_level(
             state,
@@ -2074,11 +2042,7 @@ fn keys_at_integrity_level(
     [] -> Ok(#(True, state))
     [dkey, ..rest] -> {
       // Step 8.a: ? O.[[GetOwnProperty]](k) — trap-aware.
-      use #(cur, state) <- result.try(mop.own_property_keyed(
-        state,
-        ref,
-        dkey,
-      ))
+      use #(cur, state) <- result.try(mop.own_property_keyed(state, ref, dkey))
       case option.map(cur, prop_at_integrity_level(_, level)) {
         Some(False) -> Ok(#(False, state))
         Some(True) | None -> keys_at_integrity_level(state, ref, rest, level)
@@ -2373,10 +2337,7 @@ fn get_own_property_symbols(
       case object.as_proxy(state.heap, ref) {
         // Proxy: [[OwnPropertyKeys]] trap, keep only Symbols.
         Some(_) -> {
-          use all_keys, state <- state.try_op(mop.own_property_keys(
-            state,
-            ref,
-          ))
+          use all_keys, state <- state.try_op(mop.own_property_keys(state, ref))
           let syms =
             list.filter_map(all_keys, fn(k) {
               case k {

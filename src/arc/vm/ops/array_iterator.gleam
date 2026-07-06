@@ -176,7 +176,7 @@ fn step_at(
           // bounded by what the heap actually holds, so a legal 20M-element
           // array or view still iterates to completion.
           use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-            rethrow(Error(state.range_error_value(state, iteration_budget_msg)))
+            rethrow(state.range_error_op(state, iteration_budget_msg))
           })
           case index >= length {
             True -> Ok(#(Exhausted, exhaust(state, iter_ref)))

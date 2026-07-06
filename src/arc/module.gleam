@@ -1883,12 +1883,12 @@ fn ensure_deferred_evaluated(
             )
           case ready {
             False ->
-              Error(state.type_error_value(
+              state.type_error_op(
                 state,
                 "Cannot synchronously evaluate deferred module: '"
                   <> spec
                   <> "' is still evaluating or has an unevaluated async dependency",
-              ))
+              )
             True ->
               evaluate_deferred_subgraph(state, bundle, linked, spec, builtins)
           }
@@ -1987,13 +1987,13 @@ fn evaluate_deferred_subgraph(
     // of this bundle, so it is in it. Both are unreachable — but rendered
     // through `error_message`, never a Gleam debug repr.
     Error(NotInBundle(..) as other) | Error(EvaluationPending(..) as other) ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         "Failed to evaluate deferred module '"
           <> spec
           <> "': "
           <> error_message(other, state.heap),
-      ))
+      )
   }
 }
 

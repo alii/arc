@@ -592,18 +592,6 @@ fn run(
   }
 }
 
-/// Raise a RangeError as an abrupt completion. `range_error_value` hands back
-/// the bare `#(thrown, state)` pair, so there is no success value in scope that
-/// could accidentally be thrown.
-fn throw_range(state: State(host), msg: String) -> Result(a, Thrown(host)) {
-  Error(state.range_error_value(state, msg))
-}
-
-/// Raise a TypeError as an abrupt completion. See `throw_range`.
-fn throw_type(state: State(host), msg: String) -> Result(a, Thrown(host)) {
-  Error(state.type_error_value(state, msg))
-}
-
 /// Read the IntlObject state for `this`, throwing TypeError on brand mismatch.
 fn branded(
   state: State(host),
@@ -640,7 +628,8 @@ fn branded_of(
     })
   case found {
     Some(#(v, ref)) -> Ok(#(ref, v))
-    None -> throw_type(state, method <> " called on incompatible receiver")
+    None ->
+      state.type_error_op(state, method <> " called on incompatible receiver")
   }
 }
 
@@ -921,7 +910,7 @@ fn coerce_options(
     _ ->
       case common.to_object(state.heap, state.builtins, v) {
         Some(#(heap, ref)) -> Ok(#(Some(ref), State(..state, heap:)))
-        None -> throw_type(state, "Cannot convert options to object")
+        None -> state.type_error_op(state, "Cannot convert options to object")
       }
   }
 }
@@ -934,7 +923,7 @@ fn strict_options(
   case v {
     JsUndefined -> Ok(#(None, state))
     JsObject(ref) -> Ok(#(Some(ref), state))
-    _ -> throw_type(state, "options must be an object or undefined")
+    _ -> state.type_error_op(state, "options must be an object or undefined")
   }
 }
 
@@ -965,7 +954,7 @@ fn get_str_opt(
       case allowed == [] || list.contains(allowed, s) {
         True -> Ok(#(Some(s), state))
         False ->
-          throw_range(
+          state.range_error_op(
             state,
             "Value " <> s <> " out of range for options property " <> name,
           )
@@ -993,7 +982,7 @@ fn get_enum_opt(
       case list.key_find(variants, s) {
         Ok(variant) -> Ok(#(variant, state))
         Error(Nil) ->
-          throw_range(
+          state.range_error_op(
             state,
             "Value " <> s <> " out of range for options property " <> name,
           )
@@ -1046,12 +1035,12 @@ fn default_number_option(
           case f >=. int.to_float(min) && f <=. int.to_float(max) {
             True -> Ok(#(Some(float.truncate(float.floor(f))), state))
             False ->
-              throw_range(
+              state.range_error_op(
                 state,
                 name <> " value is out of range: " <> float.to_string(f),
               )
           }
-        _ -> throw_range(state, name <> " value is out of range")
+        _ -> state.range_error_op(state, name <> " value is out of range")
       }
     }
   }
@@ -1091,7 +1080,7 @@ fn canonicalize_locale_list(
       case common.to_object(state.heap, state.builtins, locales) {
         Some(#(heap, ref)) ->
           locale_list_from_object(State(..state, heap:), ref)
-        None -> throw_type(state, "Cannot convert locales to object")
+        None -> state.type_error_op(state, "Cannot convert locales to object")
       }
   }
 }
@@ -1103,7 +1092,10 @@ fn canonical_tag_or_throw(
   case tags.canonicalize_tag(s) {
     Ok(tag) -> Ok(#(tag, state))
     Error(Nil) ->
-      throw_range(state, "Incorrect locale information provided: " <> s)
+      state.range_error_op(
+        state,
+        "Incorrect locale information provided: " <> s,
+      )
   }
 }
 
@@ -1157,7 +1149,11 @@ fn locale_list_loop(
                   Ok(#(l.locale, state))
                 _ -> coerce.js_to_string(state, k_value)
               }
-            _ -> throw_type(state, "Locales item must be a string or object")
+            _ ->
+              state.type_error_op(
+                state,
+                "Locales item must be a string or object",
+              )
           })
           use #(tag, state) <- result.try(canonical_tag_or_throw(state, tag_str))
           let seen = case list.contains(seen, tag) {
@@ -1217,7 +1213,7 @@ fn supported_values_of(
         let #(state, arr) = alloc_array(state, list.map(vs, JsString))
         Ok(#(arr, state))
       }
-      None -> throw_range(state, "Invalid key : " <> key)
+      None -> state.range_error_op(state, "Invalid key : " <> key)
     }
   })
 }
@@ -1497,14 +1493,18 @@ fn locale_state(
           Ok(#(l.locale, state))
         _ -> coerce.js_to_string(state, tag_v)
       }
-    _ -> throw_type(state, "Intl.Locale tag must be a string or object")
+    _ ->
+      state.type_error_op(state, "Intl.Locale tag must be a string or object")
   })
   use #(opts, state) <- result.try(coerce_options(state, options_v))
   // ApplyOptionsToTag: structural validity first.
   use lid <- result.try(case tags.parse(tag_str) {
     Ok(lid) -> Ok(lid)
     Error(Nil) ->
-      throw_range(state, "Incorrect locale information provided: " <> tag_str)
+      state.range_error_op(
+        state,
+        "Incorrect locale information provided: " <> tag_str,
+      )
   })
   use #(language, state) <- result.try(get_str_opt(
     state,
@@ -1517,7 +1517,7 @@ fn locale_state(
     Some(l) ->
       case tags.is_language(l) {
         True -> Ok(Nil)
-        False -> throw_range(state, "Invalid language: " <> l)
+        False -> state.range_error_op(state, "Invalid language: " <> l)
       }
     None -> Ok(Nil)
   })
@@ -1532,7 +1532,7 @@ fn locale_state(
     Some(s) ->
       case tags.is_script(s) {
         True -> Ok(Nil)
-        False -> throw_range(state, "Invalid script: " <> s)
+        False -> state.range_error_op(state, "Invalid script: " <> s)
       }
     None -> Ok(Nil)
   })
@@ -1547,7 +1547,7 @@ fn locale_state(
     Some(r) ->
       case tags.is_region(r) {
         True -> Ok(Nil)
-        False -> throw_range(state, "Invalid region: " <> r)
+        False -> state.range_error_op(state, "Invalid region: " <> r)
       }
     None -> Ok(Nil)
   })
@@ -1569,7 +1569,7 @@ fn locale_state(
         && list.length(list.unique(parts)) == list.length(parts)
       case valid {
         True -> Ok(Some(parts))
-        False -> throw_range(state, "Invalid variants: " <> v)
+        False -> state.range_error_op(state, "Invalid variants: " <> v)
       }
     }
   })
@@ -1632,7 +1632,7 @@ fn locale_state(
     Some(fd) ->
       case weekday_string(fd) {
         Some(v) -> Ok(Some(v))
-        None -> throw_range(state, "Invalid firstDayOfWeek: " <> fd)
+        None -> state.range_error_op(state, "Invalid firstDayOfWeek: " <> fd)
       }
   })
   use #(numbering, state) <- result.try(get_str_opt(
@@ -1703,7 +1703,7 @@ fn require_type_seq(
     Some(s) ->
       case is_type_sequence(s) {
         True -> Ok(Nil)
-        False -> throw_range(state, "Invalid " <> name <> ": " <> s)
+        False -> state.range_error_op(state, "Invalid " <> name <> ": " <> s)
       }
     None -> Ok(Nil)
   }
@@ -2037,7 +2037,7 @@ fn number_format_state(
         "always" -> Ok(#(GroupingAlways, state))
         // Spec: any other string (including "true"/"false") is out of range.
         _ ->
-          throw_range(
+          state.range_error_op(
             state,
             "Value " <> s <> " out of range for options property useGrouping",
           )
@@ -2120,14 +2120,17 @@ fn read_unit_options(
     Some(c) ->
       case tags.is_alpha(c) && string.length(c) == 3 {
         True -> Ok(Nil)
-        False -> throw_range(state, "Invalid currency code: " <> c)
+        False -> state.range_error_op(state, "Invalid currency code: " <> c)
       }
     None -> Ok(Nil)
   })
   use sc <- result.try(case kind, currency {
     KCurrency, Some(c) -> Ok(ScCurrency(currency: string.uppercase(c)))
     KCurrency, None ->
-      throw_type(state, "Currency code is required with currency style")
+      state.type_error_op(
+        state,
+        "Currency code is required with currency style",
+      )
     KDecimal, _ -> Ok(ScDecimal)
     KPercent, _ -> Ok(ScPercent)
     KUnit, _ -> Ok(ScUnit)
@@ -2157,7 +2160,10 @@ fn read_unit_options(
       case fmt.is_well_formed_unit(u) {
         True -> Ok(Nil)
         False ->
-          throw_range(state, "Invalid unit argument for option unit: " <> u)
+          state.range_error_op(
+            state,
+            "Invalid unit argument for option unit: " <> u,
+          )
       }
     None -> Ok(Nil)
   })
@@ -2170,7 +2176,8 @@ fn read_unit_options(
         StyleCurrency(currency:, display: currency_display, sign: currency_sign)
       })
     ScUnit, Some(u) -> Ok(fn(ud) { StyleUnit(unit: u, display: ud) })
-    ScUnit, None -> throw_type(state, "Unit is required with unit style")
+    ScUnit, None ->
+      state.type_error_op(state, "Unit is required with unit style")
   })
   use #(unit_display, state) <- result.map(get_enum_opt(
     state,
@@ -2278,7 +2285,7 @@ fn digit_options(
     {
       True -> Ok(Nil)
       False ->
-        throw_range(
+        state.range_error_op(
           state,
           "roundingIncrement value is out of range: "
             <> int.to_string(rounding_increment),
@@ -2384,7 +2391,7 @@ fn digit_options(
             Some(mn), Some(mx) ->
               case mn > mx {
                 True ->
-                  throw_range(
+                  state.range_error_op(
                     state,
                     "minimumFractionDigits is greater than maximumFractionDigits",
                   )
@@ -2415,7 +2422,7 @@ fn digit_options(
     True ->
       case need_sd || !need_fd {
         True ->
-          throw_type(
+          state.type_error_op(
             state,
             "roundingIncrement requires fractionDigits rounding type",
           )
@@ -2424,7 +2431,7 @@ fn digit_options(
             None -> Ok(Nil)
             Some(#(mn, mx)) if mn == mx -> Ok(Nil)
             Some(_) ->
-              throw_range(
+              state.range_error_op(
                 state,
                 "roundingIncrement requires minimumFractionDigits equal to maximumFractionDigits",
               )
@@ -2617,7 +2624,8 @@ fn dtf_state_required(
       use #(s, state) <- result.try(coerce.js_to_string(state, tz_v))
       case canonical_time_zone(s) {
         Some(tz) -> Ok(#(tz, state))
-        None -> throw_range(state, "Invalid time zone specified: " <> s)
+        None ->
+          state.range_error_op(state, "Invalid time zone specified: " <> s)
       }
     }
   })
@@ -2769,13 +2777,19 @@ fn dtf_state_required(
     DateOnly ->
       case time_style {
         Some(_) ->
-          throw_type(state, "timeStyle cannot be used with toLocaleDateString")
+          state.type_error_op(
+            state,
+            "timeStyle cannot be used with toLocaleDateString",
+          )
         None -> Ok(Nil)
       }
     TimeOnly ->
       case date_style {
         Some(_) ->
-          throw_type(state, "dateStyle cannot be used with toLocaleTimeString")
+          state.type_error_op(
+            state,
+            "dateStyle cannot be used with toLocaleTimeString",
+          )
         None -> Ok(Nil)
       }
     DateAndTime -> Ok(Nil)
@@ -2783,7 +2797,7 @@ fn dtf_state_required(
   let styled = option.is_some(date_style) || option.is_some(time_style)
   use Nil <- result.try(case styled && explicit {
     True ->
-      throw_type(
+      state.type_error_op(
         state,
         "Invalid option: dateStyle/timeStyle cannot be used with other date/time options",
       )
@@ -3391,7 +3405,10 @@ fn display_names_state(
   use type_ <- result.try(case type_ {
     Some(t) -> Ok(t)
     None ->
-      throw_type(state, "Intl.DisplayNames constructor requires type option")
+      state.type_error_op(
+        state,
+        "Intl.DisplayNames constructor requires type option",
+      )
   })
   use #(fallback, state) <- result.try(get_enum_opt(
     state,
@@ -3736,7 +3753,7 @@ fn duration_unit_options(
   use Nil <- result.try(
     case display == DisplayAlways && style == DurFractional {
       True ->
-        throw_range(
+        state.range_error_op(
           state,
           name <> "Display cannot be 'always' for fractional units",
         )
@@ -3749,7 +3766,7 @@ fn duration_unit_options(
       case style {
         DurFractional -> Ok(style)
         _ ->
-          throw_range(
+          state.range_error_op(
             state,
             name <> " style must be fractional after a fractional unit",
           )
@@ -3763,7 +3780,7 @@ fn duration_unit_options(
             False -> style
           })
         _ ->
-          throw_range(
+          state.range_error_op(
             state,
             name <> " style cannot be mixed with numeric styles",
           )
@@ -4394,14 +4411,14 @@ fn nf_range_parts(
 ) -> Result(#(List(fmt.RangePart), State(host)), Thrown(host)) {
   use Nil <- result.try(case x_v, y_v {
     JsUndefined, _ | _, JsUndefined ->
-      throw_type(state, "Invalid range arguments")
+      state.type_error_op(state, "Invalid range arguments")
     _, _ -> Ok(Nil)
   })
   use #(x, state) <- result.try(to_intl_number(state, x_v))
   use #(y, state) <- result.try(to_intl_number(state, y_v))
   use Nil <- result.try(case x, y {
     value.NaN, _ | _, value.NaN ->
-      throw_range(state, "Invalid range argument: NaN")
+      state.range_error_op(state, "Invalid range argument: NaN")
     _, _ -> Ok(Nil)
   })
   // Format the original values: decimal strings stay exact (they can exceed
@@ -4467,7 +4484,7 @@ type AcceptedTemporal {
 
 /// HandleDateTimeValue's ZonedDateTime rejection.
 fn throw_zoned(state: State(host)) -> Result(a, Thrown(host)) {
-  throw_type(
+  state.type_error_op(
     state,
     "Temporal.ZonedDateTime cannot be formatted with Intl.DateTimeFormat; use Temporal.ZonedDateTime.prototype.toLocaleString instead",
   )
@@ -4692,7 +4709,7 @@ fn dtf_temporal_state(
       use Nil <- result.try(case cal_ok {
         True -> Ok(Nil)
         False ->
-          throw_range(
+          state.range_error_op(
             state,
             "Temporal object calendar does not match DateTimeFormat calendar",
           )
@@ -4713,7 +4730,7 @@ fn dtf_temporal_state(
           use Nil <- result.try(case style_ok {
             True -> Ok(Nil)
             False ->
-              throw_type(
+              state.type_error_op(
                 state,
                 "DateTimeFormat has no suitable format for this Temporal type",
               )
@@ -4741,7 +4758,7 @@ fn dtf_temporal_state(
                     state,
                   ))
                 _ ->
-                  throw_type(
+                  state.type_error_op(
                     state,
                     "DateTimeFormat options have no overlap with this Temporal type",
                   )
@@ -5171,7 +5188,7 @@ fn dtf_range_parts(
 ) -> Result(#(List(fmt.RangePart), State(host)), Thrown(host)) {
   use Nil <- result.try(case x_v, y_v {
     JsUndefined, _ | _, JsUndefined ->
-      throw_type(state, "Invalid range arguments")
+      state.type_error_op(state, "Invalid range arguments")
     _, _ -> Ok(Nil)
   })
   // ToDateTimeFormattable runs on both arguments (in order) before the
@@ -5198,7 +5215,7 @@ fn dtf_range_parts(
     Some(a), Some(b) ->
       case same_temporal_kind(a, b) {
         False ->
-          throw_type(
+          state.type_error_op(
             state,
             "Intl.DateTimeFormat range arguments must be of the same type",
           )
@@ -5211,7 +5228,7 @@ fn dtf_range_parts(
         }
       }
     _, _ ->
-      throw_type(
+      state.type_error_op(
         state,
         "Intl.DateTimeFormat range arguments must be of the same type",
       )
@@ -5352,10 +5369,10 @@ fn dtf_fields_number(
       let f = int.to_float(float.truncate(f))
       case float.absolute_value(f) <=. 8.64e15 {
         True -> Ok(f)
-        False -> throw_range(state, "Invalid time value")
+        False -> state.range_error_op(state, "Invalid time value")
       }
     }
-    _ -> throw_range(state, "Invalid time value")
+    _ -> state.range_error_op(state, "Invalid time value")
   })
   let offset = zone_offset_at(d.time_zone, float.truncate(tv_f))
   Ok(#(fmt.fields_from_epoch_ms(tv_f, offset), offset, state))
@@ -5420,14 +5437,14 @@ fn run_method(
       IntlSelectRange, PluralRulesData(_) -> {
         use Nil <- result.try(case arg0, arg1 {
           JsUndefined, _ | _, JsUndefined ->
-            throw_type(state, "Invalid selectRange arguments")
+            state.type_error_op(state, "Invalid selectRange arguments")
           _, _ -> Ok(Nil)
         })
         use #(x, state) <- result.try(coerce.js_to_number(state, arg0))
         use #(y, state) <- result.try(coerce.js_to_number(state, arg1))
         use Nil <- result.try(case x, y {
           value.NaN, _ | _, value.NaN ->
-            throw_range(state, "Invalid selectRange argument: NaN")
+            state.range_error_op(state, "Invalid selectRange argument: NaN")
           _, _ -> Ok(Nil)
         })
         // CLDR en plural ranges resolve to "other" for all combinations.
@@ -5478,7 +5495,11 @@ fn run_method(
       | IntlOf, _
       | IntlSegmentIteratorNext, _
       | IntlSegmentsContaining, _
-      -> throw_type(state, js_name <> " called on incompatible receiver")
+      ->
+        state.type_error_op(
+          state,
+          js_name <> " called on incompatible receiver",
+        )
     }
   })
 }
@@ -5526,13 +5547,13 @@ fn host_number_to_locale_string(
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(kind: value.NumberObject(value: n), ..)) -> Ok(n)
         _ ->
-          throw_type(
+          state.type_error_op(
             state,
             "Number.prototype.toLocaleString requires that 'this' be a Number",
           )
       }
     _ ->
-      throw_type(
+      state.type_error_op(
         state,
         "Number.prototype.toLocaleString requires that 'this' be a Number",
       )
@@ -5570,7 +5591,7 @@ fn host_bigint_to_locale_string(
 }
 
 fn throw_bigint_receiver(state: State(host)) -> Result(a, Thrown(host)) {
-  throw_type(
+  state.type_error_op(
     state,
     "BigInt.prototype.toLocaleString requires that 'this' be a BigInt",
   )
@@ -5586,7 +5607,7 @@ fn host_locale_compare(
 ) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use Nil <- result.try(case this {
     JsUndefined | value.JsNull ->
-      throw_type(
+      state.type_error_op(
         state,
         "String.prototype.localeCompare called on null or undefined",
       )
@@ -5608,7 +5629,7 @@ fn host_locale_case(
 ) -> Result(#(JsValue, State(host)), Thrown(host)) {
   use Nil <- result.try(case this {
     JsUndefined | value.JsNull ->
-      throw_type(state, "method called on null or undefined")
+      state.type_error_op(state, "method called on null or undefined")
     _ -> Ok(Nil)
   })
   use #(s, state) <- result.try(coerce.js_to_string(state, this))
@@ -5750,9 +5771,9 @@ fn host_date_to_locale(
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(kind: value.DateObject(time_value: tv), ..)) -> Ok(tv)
-        _ -> throw_type(state, "this is not a Date object")
+        _ -> state.type_error_op(state, "this is not a Date object")
       }
-    _ -> throw_type(state, "this is not a Date object")
+    _ -> state.type_error_op(state, "this is not a Date object")
   })
   let defaults = case required {
     DateOnly -> date_defaults()
@@ -5805,12 +5826,12 @@ fn rtf_method_parts(
   use #(n, state) <- result.try(coerce.js_to_number(state, value_v))
   use f <- result.try(case n {
     value.Finite(f) -> Ok(f)
-    _ -> throw_range(state, "Value need to be finite number")
+    _ -> state.range_error_op(state, "Value need to be finite number")
   })
   use #(unit_str, state) <- result.try(coerce.js_to_string(state, unit_v))
   use unit <- result.try(case singular_unit(unit_str) {
     Some(u) -> Ok(u)
-    None -> throw_range(state, "Invalid unit argument: " <> unit_str)
+    None -> state.range_error_op(state, "Invalid unit argument: " <> unit_str)
   })
   let abs_opts = fmt.NumOpts(..fmt.default_num_opts(), sign_display: SignNever)
   let value_parts = fmt.format_number_parts(abs_opts, float.absolute_value(f))
@@ -5861,12 +5882,12 @@ fn string_list_from_iterable(
       ))
       use Nil <- result.try(case helpers.is_callable(state.heap, method) {
         True -> Ok(Nil)
-        False -> throw_type(state, "object is not iterable")
+        False -> state.type_error_op(state, "object is not iterable")
       })
       use #(iter, state) <- result.try(state.call(state, method, iterable, []))
       use iter_ref <- result.try(case iter {
         JsObject(r) -> Ok(r)
-        _ -> throw_type(state, "iterator result is not an object")
+        _ -> state.type_error_op(state, "iterator result is not an object")
       })
       use #(next_fn, state) <- result.try(object.get_value(
         state,
@@ -5888,7 +5909,7 @@ fn iterate_strings(
   use #(step, state) <- result.try(state.call(state, next_fn, iter, []))
   use step_ref <- result.try(case step {
     JsObject(r) -> Ok(r)
-    _ -> throw_type(state, "iterator result is not an object")
+    _ -> state.type_error_op(state, "iterator result is not an object")
   })
   use #(done, state) <- result.try(object.get_value(
     state,
@@ -5907,7 +5928,11 @@ fn iterate_strings(
       ))
       case v {
         JsString(s) -> iterate_strings(state, iter, next_fn, [s, ..acc])
-        _ -> throw_type(state, "Iterable yielded a value that is not a string")
+        _ ->
+          state.type_error_op(
+            state,
+            "Iterable yielded a value that is not a string",
+          )
       }
     }
   }
@@ -5932,9 +5957,11 @@ fn display_names_of(
               let tag = tags.to_string(tags.canonicalize(lid))
               Ok(#(tag, fmt.language_display_name(tag)))
             }
-            _, _ -> throw_range(state, "invalid language code: " <> code)
+            _, _ ->
+              state.range_error_op(state, "invalid language code: " <> code)
           }
-        Error(Nil) -> throw_range(state, "invalid language code: " <> code)
+        Error(Nil) ->
+          state.range_error_op(state, "invalid language code: " <> code)
       }
     DnRegion ->
       case tags.is_region(code) {
@@ -5942,7 +5969,7 @@ fn display_names_of(
           let r = string.uppercase(code)
           Ok(#(r, fmt.region_display_name(r)))
         }
-        False -> throw_range(state, "invalid region code: " <> code)
+        False -> state.range_error_op(state, "invalid region code: " <> code)
       }
     DnScript ->
       case tags.is_script(code) {
@@ -5950,7 +5977,7 @@ fn display_names_of(
           let s = tags.titlecase(code)
           Ok(#(s, fmt.script_display_name(s)))
         }
-        False -> throw_range(state, "invalid script code: " <> code)
+        False -> state.range_error_op(state, "invalid script code: " <> code)
       }
     DnCurrency ->
       case tags.is_alpha(code) && string.length(code) == 3 {
@@ -5958,7 +5985,7 @@ fn display_names_of(
           let c = string.uppercase(code)
           Ok(#(c, fmt.currency_display_name(c)))
         }
-        False -> throw_range(state, "invalid currency code: " <> code)
+        False -> state.range_error_op(state, "invalid currency code: " <> code)
       }
     DnCalendar ->
       case is_type_sequence(string.lowercase(code)) {
@@ -5971,7 +5998,7 @@ fn display_names_of(
           }
           Ok(#(c, name))
         }
-        False -> throw_range(state, "invalid calendar code: " <> code)
+        False -> state.range_error_op(state, "invalid calendar code: " <> code)
       }
     DnDateTimeField ->
       case
@@ -5993,7 +6020,8 @@ fn display_names_of(
           }
           Ok(#(code, Some(name)))
         }
-        False -> throw_range(state, "invalid dateTimeField code: " <> code)
+        False ->
+          state.range_error_op(state, "invalid dateTimeField code: " <> code)
       }
   })
   case name, fallback {
@@ -6018,12 +6046,13 @@ fn duration_parts(
   let has_neg = list.any(values, fn(v) { v <. 0.0 })
   let has_pos = list.any(values, fn(v) { v >. 0.0 })
   use Nil <- result.try(case has_neg && has_pos {
-    True -> throw_range(state, "Duration fields must have consistent sign")
+    True ->
+      state.range_error_op(state, "Duration fields must have consistent sign")
     False -> Ok(Nil)
   })
   use Nil <- result.try(case is_valid_duration(fields) {
     True -> Ok(Nil)
-    False -> throw_range(state, "Duration field value is out of range")
+    False -> state.range_error_op(state, "Duration field value is out of range")
   })
   Ok(#(build_duration_parts(df, fields), state))
 }
@@ -6037,7 +6066,8 @@ fn to_duration_record(
     JsString(str) ->
       case parse_iso_duration(str) {
         Ok(fields) -> Ok(#(fields, state))
-        Error(Nil) -> throw_range(state, "Invalid duration string: " <> str)
+        Error(Nil) ->
+          state.range_error_op(state, "Invalid duration string: " <> str)
       }
     JsObject(dur_ref) -> {
       use acc <- result.try(
@@ -6063,12 +6093,16 @@ fn to_duration_record(
                       True ->
                         Ok(#(set_duration_field(fields, unit, f), state, True))
                       False ->
-                        throw_range(
+                        state.range_error_op(
                           state,
                           name <> " must be an integral number",
                         )
                     }
-                  _ -> throw_range(state, name <> " must be a finite number")
+                  _ ->
+                    state.range_error_op(
+                      state,
+                      name <> " must be a finite number",
+                    )
                 }
               }
             }
@@ -6078,11 +6112,11 @@ fn to_duration_record(
       let #(fields, state, any_defined) = acc
       use Nil <- result.try(case any_defined {
         True -> Ok(Nil)
-        False -> throw_range(state, "Invalid duration object")
+        False -> state.range_error_op(state, "Invalid duration object")
       })
       Ok(#(fields, state))
     }
-    _ -> throw_type(state, "Duration must be an object or string")
+    _ -> state.type_error_op(state, "Duration must be an object or string")
   }
 }
 

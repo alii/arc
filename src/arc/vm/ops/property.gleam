@@ -65,11 +65,14 @@ fn primitive_to_prop_key(
         // Valid array index — skip stringification entirely.
         Some(i) -> Ok(#(string_object_key(Index(i)), state))
         // Non-index number — stringify (e.g. 1.5 → "1.5", -1 → "-1").
-        None -> Ok(#(string_object_key(Named(value.js_format_number(n))), state))
+        None ->
+          Ok(#(string_object_key(Named(value.js_format_number(n))), state))
       }
     JsNumber(value.NaN) -> Ok(#(string_object_key(Named("NaN")), state))
-    JsNumber(value.Infinity) -> Ok(#(string_object_key(Named("Infinity")), state))
-    JsNumber(value.NegInfinity) -> Ok(#(string_object_key(Named("-Infinity")), state))
+    JsNumber(value.Infinity) ->
+      Ok(#(string_object_key(Named("Infinity")), state))
+    JsNumber(value.NegInfinity) ->
+      Ok(#(string_object_key(Named("-Infinity")), state))
     JsString(s) -> Ok(#(string_object_key(key.canonical_key(s)), state))
     // Step 3: ToString(key) — key is a non-Symbol primitive, cannot re-enter.
     _ -> {
@@ -176,19 +179,13 @@ pub fn create_list_from_array_like(
       use #(len, state) <- result.try(length_of_array_like(state, ref))
       case len > limits.max_iteration {
         True ->
-          Error(state.range_error_value(
-            state,
-            "Too many arguments in function call",
-          ))
+          state.range_error_op(state, "Too many arguments in function call")
         False -> gather_array_like(state, ref, arg, 0, len, [])
       }
     }
     // Step 1: If obj is not an Object, throw a TypeError exception.
     _ ->
-      Error(state.type_error_value(
-        state,
-        "CreateListFromArrayLike called on non-object",
-      ))
+      state.type_error_op(state, "CreateListFromArrayLike called on non-object")
   }
 }
 

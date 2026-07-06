@@ -1446,7 +1446,7 @@ fn to_integer_with_truncation(
   use num <- result.try(coerce.js_to_number(state, v))
   case num {
     #(Finite(f), st) -> Ok(#(value.float_to_int(f), st))
-    #(_, st) -> range_error_result(st, "not a finite number")
+    #(_, st) -> state.range_error_op(st, "not a finite number")
   }
 }
 
@@ -1458,7 +1458,7 @@ fn to_positive_integer_with_truncation(
   use #(n, st) <- result.try(to_integer_with_truncation(state, v))
   case n > 0 {
     True -> Ok(#(n, st))
-    False -> range_error_result(st, "expected a positive integer")
+    False -> state.range_error_op(st, "expected a positive integer")
   }
 }
 
@@ -1475,29 +1475,11 @@ fn to_integer_if_integral(
       // Arithmetic comparison: `==` is term equality, where -0.0 ≠ 0.0.
       case f >=. fi && f <=. fi {
         True -> Ok(#(i, st))
-        False -> range_error_result(st, "expected an integral number")
+        False -> state.range_error_op(st, "expected an integral number")
       }
     }
-    #(_, st) -> range_error_result(st, "expected an integral number")
+    #(_, st) -> state.range_error_op(st, "expected an integral number")
   }
-}
-
-/// A RangeError as an ops-level `Error(#(thrown, state))`. `range_error_value`
-/// always yields the thrown value, so there is no "no error was allocated"
-/// arm to invent behaviour for.
-fn range_error_result(
-  st: State(host),
-  msg: String,
-) -> Result(#(a, State(host)), #(JsValue, State(host))) {
-  Error(state.range_error_value(st, msg))
-}
-
-/// A TypeError as an ops-level `Error(#(thrown, state))`.
-fn type_error_result(
-  st: State(host),
-  msg: String,
-) -> Result(#(a, State(host)), #(JsValue, State(host))) {
-  Error(state.type_error_value(st, msg))
 }
 
 /// The one place a `TErr` becomes an ops-level thrown JS error, mirroring
@@ -1508,8 +1490,8 @@ fn throw_terr_op(
   e: TErr,
 ) -> Result(#(a, State(host)), #(JsValue, State(host))) {
   case e {
-    RangeE(m) -> range_error_result(state, m)
-    TypeE(m) -> type_error_result(state, m)
+    RangeE(m) -> state.range_error_op(state, m)
+    TypeE(m) -> state.type_error_op(state, m)
   }
 }
 
@@ -1537,7 +1519,7 @@ fn get_options_object(
   case v {
     JsUndefined -> Ok(#(None, state))
     JsObject(ref) -> Ok(#(Some(ref), state))
-    _ -> type_error_result(state, "options must be an object or undefined")
+    _ -> state.type_error_op(state, "options must be an object or undefined")
   }
 }
 
@@ -1567,7 +1549,7 @@ fn get_enum_option(
           case list.key_find(allowed, s) {
             Ok(parsed) -> Ok(#(parsed, st))
             Error(Nil) ->
-              range_error_result(
+              state.range_error_op(
                 st,
                 s <> " is not a valid value for option " <> key,
               )
@@ -3010,9 +2992,9 @@ fn read_month_code(
           // after the required-field TypeError checks.
           case parse_month_code_grammar(s) {
             Ok(mc) -> Ok(#(Some(mc), st))
-            Error(Nil) -> range_error_result(st, "invalid monthCode: " <> s)
+            Error(Nil) -> state.range_error_op(st, "invalid monthCode: " <> s)
           }
-        #(_, st) -> type_error_result(st, "monthCode must be a string")
+        #(_, st) -> state.type_error_op(st, "monthCode must be a string")
       }
     }
   }
@@ -3079,7 +3061,7 @@ fn read_bag_era(
       use prim <- result.try(coerce.to_primitive(st, v, coerce.StringHint))
       case prim {
         #(JsString(s), st) -> Ok(#(Some(s), st))
-        #(_, st) -> type_error_result(st, "era must be a string")
+        #(_, st) -> state.type_error_op(st, "era must be a string")
       }
     }
   }
@@ -3109,9 +3091,9 @@ fn read_bag_calendar(
         | Some(ObjectSlot(kind: TemporalMonthDaySlot(calendar:, ..), ..))
         | Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(calendar:, ..), ..)) ->
           Ok(#(calendar, st))
-        _ -> type_error_result(st, "invalid calendar")
+        _ -> state.type_error_op(st, "invalid calendar")
       }
-    #(_, st) -> type_error_result(st, "invalid calendar")
+    #(_, st) -> state.type_error_op(st, "invalid calendar")
   }
 }
 
@@ -3131,9 +3113,9 @@ fn to_temporal_calendar_identifier(
         | Some(ObjectSlot(kind: TemporalMonthDaySlot(calendar:, ..), ..))
         | Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(calendar:, ..), ..)) ->
           Ok(#(calendar, state))
-        _ -> type_error_result(state, "not a valid calendar")
+        _ -> state.type_error_op(state, "not a valid calendar")
       }
-    _ -> type_error_result(state, "not a valid calendar")
+    _ -> state.type_error_op(state, "not a valid calendar")
   }
 }
 
@@ -3295,9 +3277,9 @@ fn to_temporal_time_zone(
       case heap.read(state.heap, ref) {
         Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(time_zone:, ..), ..)) ->
           Ok(#(time_zone, state))
-        _ -> type_error_result(state, "timeZone must be a string")
+        _ -> state.type_error_op(state, "timeZone must be a string")
       }
-    _ -> type_error_result(state, "timeZone must be a string")
+    _ -> state.type_error_op(state, "timeZone must be a string")
   }
 }
 
@@ -3753,13 +3735,13 @@ fn to_temporal_date(
           use #(_opts, st) <- result.try(validated_overflow(state, options))
           case iso_date_within_limits(d) {
             True -> Ok(#(#(d, cal), st))
-            False -> range_error_result(st, "date outside of supported range")
+            False -> state.range_error_op(st, "date outside of supported range")
           }
         }
-        None -> range_error_result(state, "invalid date string")
+        None -> state.range_error_op(state, "invalid date string")
       }
     }
-    _ -> type_error_result(state, "cannot convert to a Temporal.PlainDate")
+    _ -> state.type_error_op(state, "cannot convert to a Temporal.PlainDate")
   }
 }
 
@@ -3830,7 +3812,7 @@ fn date_from_bag(
   use date <- terr_r(state, resolve_calendar_date(cal, fields, overflow))
   case iso_date_within_limits(date) {
     True -> Ok(#(#(date, cal), state))
-    False -> range_error_result(state, "date outside of supported range")
+    False -> state.range_error_op(state, "date outside of supported range")
   }
 }
 
@@ -3893,7 +3875,7 @@ fn to_temporal_time(
       use #(_o, st) <- result.try(validated_overflow(state, options))
       Ok(#(t, st))
     }
-    _ -> type_error_result(state, "cannot convert to a Temporal.PlainTime")
+    _ -> state.type_error_op(state, "cannot convert to a Temporal.PlainTime")
   }
 }
 
@@ -4016,7 +3998,7 @@ fn time_from_bag(
   use #(f, state) <- result.try(read_time_fields(state, ref))
   case f == no_time_fields {
     True ->
-      type_error_result(state, "invalid property bag for Temporal.PlainTime")
+      state.type_error_op(state, "invalid property bag for Temporal.PlainTime")
     False -> {
       use #(overflow, state) <- result.try(validated_overflow(state, options))
       let t0 = time_fields_apply(f, midnight)
@@ -4071,11 +4053,11 @@ fn to_temporal_duration(
         Some(d) ->
           case is_valid_duration(d) {
             True -> Ok(#(d, state))
-            False -> range_error_result(state, "invalid duration")
+            False -> state.range_error_op(state, "invalid duration")
           }
-        None -> range_error_result(state, "invalid duration string: " <> s)
+        None -> state.range_error_op(state, "invalid duration string: " <> s)
       }
-    _ -> type_error_result(state, "cannot convert to a Temporal.Duration")
+    _ -> state.type_error_op(state, "cannot convert to a Temporal.Duration")
   }
 }
 
@@ -4121,7 +4103,7 @@ fn duration_from_bag(
   let all = [days, hours, us, ms, minutes, months, ns, seconds, weeks, years]
   case list.all(all, fn(f) { f == None }) {
     True ->
-      type_error_result(state, "invalid property bag for Temporal.Duration")
+      state.type_error_op(state, "invalid property bag for Temporal.Duration")
     False -> {
       let d =
         DurRec(
@@ -4138,7 +4120,7 @@ fn duration_from_bag(
         )
       case is_valid_duration(d) {
         True -> Ok(#(d, state))
-        False -> range_error_result(state, "invalid duration")
+        False -> state.range_error_op(state, "invalid duration")
       }
     }
   }
@@ -4653,13 +4635,15 @@ fn to_temporal_date_time(
           use #(_o, st) <- result.try(validated_overflow(state, options))
           case iso_datetime_within_limits(d, t) {
             True -> Ok(#(#(d, t, cal), st))
-            False -> range_error_result(st, "date-time outside supported range")
+            False ->
+              state.range_error_op(st, "date-time outside supported range")
           }
         }
-        None -> range_error_result(state, "invalid date-time string")
+        None -> state.range_error_op(state, "invalid date-time string")
       }
     }
-    _ -> type_error_result(state, "cannot convert to a Temporal.PlainDateTime")
+    _ ->
+      state.type_error_op(state, "cannot convert to a Temporal.PlainDateTime")
   }
 }
 
@@ -4688,7 +4672,7 @@ fn date_time_from_bag(
   use t <- terr_r(state, regulate_time(t0, overflow))
   case iso_datetime_within_limits(date, t) {
     True -> Ok(#(#(date, t, cal), state))
-    False -> range_error_result(state, "date-time outside supported range")
+    False -> state.range_error_op(state, "date-time outside supported range")
   }
 }
 
@@ -4718,7 +4702,8 @@ fn to_temporal_year_month(
       use #(_o, st) <- result.try(validated_overflow(state, options))
       Ok(#(#(y, m, rd, cal), st))
     }
-    _ -> type_error_result(state, "cannot convert to a Temporal.PlainYearMonth")
+    _ ->
+      state.type_error_op(state, "cannot convert to a Temporal.PlainYearMonth")
   }
 }
 
@@ -4897,7 +4882,8 @@ fn to_temporal_month_day(
       use #(_o, st) <- result.try(validated_overflow(state, options))
       Ok(#(#(m, d, ry, cal), st))
     }
-    _ -> type_error_result(state, "cannot convert to a Temporal.PlainMonthDay")
+    _ ->
+      state.type_error_op(state, "cannot convert to a Temporal.PlainMonthDay")
   }
 }
 
@@ -5249,12 +5235,12 @@ fn to_temporal_instant(
           case prim {
             #(JsString(s), st) -> parse_instant_to_ns(st, s)
             #(_, st) ->
-              type_error_result(st, "cannot convert to a Temporal.Instant")
+              state.type_error_op(st, "cannot convert to a Temporal.Instant")
           }
         }
       }
     JsString(s) -> parse_instant_to_ns(state, s)
-    _ -> type_error_result(state, "cannot convert to a Temporal.Instant")
+    _ -> state.type_error_op(state, "cannot convert to a Temporal.Instant")
   }
 }
 
@@ -5266,13 +5252,16 @@ fn parse_instant_to_ns(
   // syntax-checked (done by parse_iso_datetime_string); its value is
   // IGNORED for Instant, so unknown calendars must not throw here.
   case parse_iso_datetime_string(s) {
-    None -> range_error_result(state, "invalid instant string: " <> s)
+    None -> state.range_error_op(state, "invalid instant string: " <> s)
     Some(p) ->
       case p.date, p.time {
         Some(d), Some(t) ->
           case p.offset {
             NoOffset ->
-              range_error_result(state, "instant string requires a UTC offset")
+              state.range_error_op(
+                state,
+                "instant string requires a UTC offset",
+              )
             Zulu | NumericOffset(_, _) -> {
               let off = case p.offset {
                 NumericOffset(o, _) -> o
@@ -5282,12 +5271,12 @@ fn parse_instant_to_ns(
               case int.absolute_value(ns) <= ns_max_instant {
                 True -> Ok(#(ns, state))
                 False ->
-                  range_error_result(state, "instant outside valid range")
+                  state.range_error_op(state, "instant outside valid range")
               }
             }
           }
         _, _ ->
-          range_error_result(state, "instant string requires date and time")
+          state.range_error_op(state, "instant string requires date and time")
       }
   }
 }
@@ -5329,7 +5318,8 @@ fn to_temporal_zoned(
       )
       Ok(#(#(ns, tz, cal), st))
     }
-    _ -> type_error_result(state, "cannot convert to a Temporal.ZonedDateTime")
+    _ ->
+      state.type_error_op(state, "cannot convert to a Temporal.ZonedDateTime")
   }
 }
 
@@ -5445,7 +5435,7 @@ fn zoned_from_bag(
   ))
   // timeZone is required.
   case f.tz {
-    JsUndefined -> type_error_result(state, "timeZone is required")
+    JsUndefined -> state.type_error_op(state, "timeZone is required")
     tz_val -> {
       use #(tz, state) <- result.try(to_temporal_time_zone(state, tz_val))
       use #(#(dis, offset_opt, ov), state) <- result.try(validated_zdt_options(
@@ -5490,9 +5480,9 @@ fn read_bag_offset(
         JsString(s) ->
           case parse_offset_part(s) {
             Some(#(NumericOffset(off, _), "")) -> Ok(#(Some(off), state))
-            _ -> range_error_result(state, "invalid offset string: " <> s)
+            _ -> state.range_error_op(state, "invalid offset string: " <> s)
           }
-        _ -> type_error_result(state, "offset must be a string")
+        _ -> state.type_error_op(state, "offset must be a string")
       }
     }
   }
@@ -5532,13 +5522,13 @@ fn convert_relative_to(
       }
     JsString(s) ->
       case parse_iso_datetime_string(s) {
-        None -> range_error_result(state, "invalid ISO 8601 string: " <> s)
+        None -> state.range_error_op(state, "invalid ISO 8601 string: " <> s)
         Some(p) -> {
           use Nil <- terr_r(state, check_parsed_calendar(p))
           use cal <- terr_r(state, parsed_calendar_id(p))
           case p.date {
             None ->
-              range_error_result(state, "relativeTo string requires a date")
+              state.range_error_op(state, "relativeTo string requires a date")
             Some(d) ->
               case p.tz {
                 Some(tz_str) -> {
@@ -5559,7 +5549,7 @@ fn convert_relative_to(
                 None ->
                   case p.offset {
                     Zulu ->
-                      range_error_result(
+                      state.range_error_op(
                         state,
                         "Z designator requires a bracketed time zone in relativeTo",
                       )
@@ -5567,7 +5557,7 @@ fn convert_relative_to(
                       case iso_date_within_limits(d) {
                         True -> Ok(#(RelPlain(d, cal), state))
                         False ->
-                          range_error_result(
+                          state.range_error_op(
                             state,
                             "date outside of supported range",
                           )
@@ -5577,7 +5567,7 @@ fn convert_relative_to(
           }
         }
       }
-    _ -> type_error_result(state, "relativeTo must be a string or an object")
+    _ -> state.type_error_op(state, "relativeTo must be a string or an object")
   }
 }
 
@@ -5603,7 +5593,7 @@ fn relative_from_bag(
     JsUndefined ->
       case iso_date_within_limits(date) {
         True -> Ok(#(RelPlain(date, cal), state))
-        False -> range_error_result(state, "date outside of supported range")
+        False -> state.range_error_op(state, "date outside of supported range")
       }
     tz_val -> {
       use #(tz, state) <- result.try(to_temporal_time_zone(state, tz_val))
@@ -6726,7 +6716,7 @@ fn require_partial_bag(
         | Some(ObjectSlot(kind: TemporalDurationSlot(..), ..))
         | Some(ObjectSlot(kind: TemporalInstantSlot(..), ..))
         | Some(ObjectSlot(kind: TemporalZonedDateTimeSlot(..), ..)) ->
-          type_error_result(
+          state.type_error_op(
             state,
             "with() argument must be a plain object, not a Temporal instance",
           )
@@ -6748,21 +6738,21 @@ fn require_partial_bag(
               case tz {
                 JsUndefined -> Ok(#(ref, state))
                 _ ->
-                  type_error_result(
+                  state.type_error_op(
                     state,
                     "with() argument must not have a timeZone property",
                   )
               }
             }
             _ ->
-              type_error_result(
+              state.type_error_op(
                 state,
                 "with() argument must not have a calendar property",
               )
           }
         }
       }
-    _ -> type_error_result(state, "with() argument must be an object")
+    _ -> state.type_error_op(state, "with() argument must be an object")
   }
 }
 
@@ -6969,7 +6959,7 @@ fn get_unit_option_impl(
             True, _ -> Ok(#(UnitAuto, st))
             False, Some(u) -> Ok(#(UnitValue(u), st))
             False, None ->
-              range_error_result(st, s <> " is not a valid value for " <> key)
+              state.range_error_op(st, s <> " is not a valid value for " <> key)
           }
         }
       }
@@ -7024,10 +7014,10 @@ fn get_rounding_increment_option(
               let i = value.float_to_int(f)
               case i >= 1 && i <= 1_000_000_000 {
                 True -> Ok(#(i, st))
-                False -> range_error_result(st, "invalid roundingIncrement")
+                False -> state.range_error_op(st, "invalid roundingIncrement")
               }
             }
-            #(_, st) -> range_error_result(st, "invalid roundingIncrement")
+            #(_, st) -> state.range_error_op(st, "invalid roundingIncrement")
           }
         }
       }
@@ -7817,18 +7807,19 @@ fn get_fractional_digits(
           let i = value.float_to_int(float.floor(f))
           case i >= 0 && i <= 9 {
             True -> Ok(#(DigitsFixed(i), st))
-            False -> range_error_result(st, "invalid fractionalSecondDigits")
+            False -> state.range_error_op(st, "invalid fractionalSecondDigits")
           }
         }
         #(JsNumber(_), st) ->
-          range_error_result(st, "invalid fractionalSecondDigits")
+          state.range_error_op(st, "invalid fractionalSecondDigits")
         // Non-number: ToString it; only "auto" is accepted. Symbols raise
         // TypeError from the string coercion.
         #(v, st) -> {
           use str <- result.try(coerce.js_to_string(st, v))
           case str {
             #("auto", st) -> Ok(#(DigitsAuto, st))
-            #(_, st) -> range_error_result(st, "invalid fractionalSecondDigits")
+            #(_, st) ->
+              state.range_error_op(st, "invalid fractionalSecondDigits")
           }
         }
       }
@@ -7847,11 +7838,11 @@ fn round_options(
   #(JsValue, State(host)),
 ) {
   case arg {
-    JsUndefined -> type_error_result(state, "options parameter is required")
+    JsUndefined -> state.type_error_op(state, "options parameter is required")
     JsString(s) ->
       case singular_unit(s) |> option.then(round_unit(_, allow_day)) {
         Some(u) -> Ok(#(#(u, 1, HalfExpand), state))
-        None -> range_error_result(state, "invalid smallestUnit")
+        None -> state.range_error_op(state, "invalid smallestUnit")
       }
     JsObject(ref) -> {
       use #(inc, state) <- result.try(get_rounding_increment_option(
@@ -7870,15 +7861,15 @@ fn round_options(
         allow_auto: False,
       ))
       case su {
-        None -> range_error_result(state, "smallestUnit is required")
+        None -> state.range_error_op(state, "smallestUnit is required")
         Some(u) ->
           case round_unit(u, allow_day) {
             Some(tu) -> Ok(#(#(tu, inc, mode), state))
-            None -> range_error_result(state, "invalid smallestUnit")
+            None -> state.range_error_op(state, "invalid smallestUnit")
           }
       }
     }
-    _ -> type_error_result(state, "invalid options")
+    _ -> state.type_error_op(state, "invalid options")
   }
 }
 
@@ -7909,7 +7900,7 @@ fn check_diff_setup(
   inc: Int,
 ) -> Result(#(Nil, State(host)), #(JsValue, State(host))) {
   case largest_smaller_than_smallest(largest, smallest) {
-    True -> range_error_result(state, largest_smaller_msg)
+    True -> state.range_error_op(state, largest_smaller_msg)
     False -> {
       let ok = case smallest {
         Hour -> valid_time_increment(inc, 24)
@@ -7920,7 +7911,7 @@ fn check_diff_setup(
       }
       case ok {
         True -> Ok(#(Nil, state))
-        False -> range_error_result(state, "invalid roundingIncrement")
+        False -> state.range_error_op(state, "invalid roundingIncrement")
       }
     }
   }
@@ -10459,11 +10450,11 @@ fn zoned_date_time_method(
         ZmGetTimeZoneTransition -> {
           use dir, state <- state.try_op(case helpers.arg_at(args, 0) {
             JsUndefined ->
-              type_error_result(state, "direction parameter is required")
+              state.type_error_op(state, "direction parameter is required")
             JsString("next") -> Ok(#(Next, state))
             JsString("previous") -> Ok(#(Previous, state))
             JsString(_) ->
-              range_error_result(state, "direction must be next or previous")
+              state.range_error_op(state, "direction must be next or previous")
             JsObject(oref) -> {
               use #(dir, st) <- result.try(get_enum_option(
                 state,
@@ -10474,10 +10465,10 @@ fn zoned_date_time_method(
               ))
               case dir {
                 Some(d2) -> Ok(#(d2, st))
-                None -> range_error_result(st, "direction is required")
+                None -> state.range_error_op(st, "direction is required")
               }
             }
-            _ -> type_error_result(state, "invalid direction")
+            _ -> state.type_error_op(state, "invalid direction")
           })
           // UTC and offset zones have no transitions.
           case tz {
