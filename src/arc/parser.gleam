@@ -305,6 +305,16 @@ type Ctx {
     // check_use_strict_in_body retroactively enables strict mode, this name
     // is validated to reject eval/arguments.
     pending_strict_name: Option(String),
+    // Whether we are currently parsing an export var/let/const declaration.
+    // When true, each binding name is also registered as an export name.
+    // Cleared at function boundaries so a nested function's params (e.g.
+    // `export const {a = function(r){}} = obj`) don't register `r` as an
+    // export.
+    in_export_decl: Bool,
+    // Whether the next statement is DIRECTLY in a CaseClause/DefaultClause
+    // statement list (not nested in a block). using/await-using declarations
+    // are early errors there. Reset by blocks and function boundaries.
+    in_case_clause: Bool,
   )
 }
 
@@ -326,7 +336,6 @@ type P {
     // (pos + raw_len). Used to close a `Span` whose start was captured
     // before parsing, in O(1) without re-measuring the token stream.
     prev_end: Int,
-    source: String,
     bytes: BitArray,
     // The nesting-sensitive context, saved/restored WHOLE at function
     // boundaries. See `Ctx`.
@@ -373,9 +382,6 @@ type P {
     // import declaration. Used to detect duplicate import bindings like
     // `import {a, a} from "m";`.
     import_bindings: Set(String),
-    // Whether we are currently parsing an export var/let/const declaration.
-    // When true, each binding name is also registered as an export name.
-    in_export_decl: Bool,
     // Name of the last parsed simple identifier expression (e.g. "eval",
     // "arguments", or any variable name). Cleared by member access, calls,
     // and compound expressions.  Used to check strict-mode restrictions on
@@ -395,10 +401,6 @@ type P {
     // scope.analyze AST walks: scopes, bindings and references are recorded
     // here as they are parsed; finalize converts to a ScopeTree.
     sb: scope.ScopeBuilder,
-    // Whether the next statement is DIRECTLY in a CaseClause/DefaultClause
-    // statement list (not nested in a block). using/await-using declarations
-    // are early errors there. Reset by blocks and function boundaries.
-    in_case_clause: Bool,
   )
 }
 
@@ -522,7 +524,6 @@ fn init_parser(
         mode: mode,
         prev_line: 1,
         prev_end: 0,
-        source: source,
         bytes:,
         ctx: Ctx(
           strict: mode == Module,
@@ -550,6 +551,8 @@ fn init_parser(
           has_non_simple_param: False,
           param_bound_names: [],
           pending_strict_name: None,
+          in_export_decl: False,
+          in_case_clause: False,
         ),
         class_private_depth: 0,
         private_refs: [],
@@ -560,7 +563,6 @@ fn init_parser(
         export_names: set.new(),
         export_local_refs: [],
         import_bindings: set.new(),
-        in_export_decl: False,
         last_expr_name: None,
         sb: scope.sb_init(
           case mode {
@@ -569,7 +571,6 @@ fn init_parser(
           },
           mode == Module,
         ),
-        in_case_clause: False,
       )),
     )
   }
@@ -888,7 +889,7 @@ fn check_using_placement(p: P) -> Result(Nil, ParseError) {
     p.ctx.in_single_stmt_pos,
     Error(LexicalDeclInSingleStatement(pos_of(p))),
   )
-  use <- bool.guard(p.in_case_clause, Error(UsingInCaseClause(pos_of(p))))
+  use <- bool.guard(p.ctx.in_case_clause, Error(UsingInCaseClause(pos_of(p))))
   let script_top_level =
     p.mode == Script
     && p.ctx.function_depth == 0
@@ -915,8 +916,7 @@ fn parse_using_declaration(
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
-      ctx: Ctx(..p3.ctx, binding_kind: p.ctx.binding_kind),
-      in_export_decl: False,
+      ctx: Ctx(..p3.ctx, binding_kind: p.ctx.binding_kind, in_export_decl: False),
     ),
   ))
   let kind = case is_await {
@@ -1096,8 +1096,7 @@ fn parse_block_body(p: P) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
         #(
           P(
             ..p2,
-            ctx: Ctx(..p2.ctx, in_single_stmt_pos: False),
-            in_case_clause: False,
+            ctx: Ctx(..p2.ctx, in_single_stmt_pos: False, in_case_clause: False),
           ),
           [],
         ),
@@ -1126,8 +1125,8 @@ fn parse_block_body_slow(
         in_block: True,
         in_single_stmt_pos: False,
         module_top_level: False,
+        in_case_clause: False,
       ),
-      in_case_clause: False,
     )
   use #(p3, stmts) <- result.try(parse_statement_list(p_inner, False, []))
   use p4 <- result.try(expect(p3, RightBrace))
@@ -1188,8 +1187,7 @@ fn parse_variable_declaration_decl(
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
-      ctx: Ctx(..p3.ctx, binding_kind: p.ctx.binding_kind),
-      in_export_decl: False,
+      ctx: Ctx(..p3.ctx, binding_kind: p.ctx.binding_kind, in_export_decl: False),
     ),
   ))
   Ok(#(p4, ast.DeclVariable(kind:, declarations:)))
@@ -1218,25 +1216,20 @@ fn parse_variable_declarator(
   use #(p2, pattern) <- result.try(parse_binding_pattern(p))
   case peek(p2) {
     Equal -> {
-      // The initializer is an ordinary expression: bindings introduced
-      // inside it (arrow/function parameters, function expression names) are
-      // NOT exported names — clear in_export_decl for its duration so e.g.
-      // two `export const f = (r) => ...` declarations don't trip the
-      // duplicate-export check on the shared parameter name `r`. Restored
-      // afterwards for any later declarators in the same declaration.
-      let was_export_decl = p2.in_export_decl
+      // The initializer is an ordinary expression: any bindings it introduces
+      // (arrow/function params, function-expression names) live inside a
+      // function boundary, whose fresh Ctx clears `in_export_decl` — so they
+      // are never mistaken for exported names. `restore_outer_context` puts
+      // the flag back for any later declarators in the same declaration.
       let init_start = pos_of(p2)
       use #(p3, init_expr) <- result.try(
-        parse_assignment_expression(advance(P(..p2, in_export_decl: False))),
+        parse_assignment_expression(advance(p2)),
       )
       // The initializer is an ordinary expression (the declarator's TARGET is
       // a binding pattern, which never sets these flags), so a cover grammar
       // it left unconsumed is due now: `var x = {a = 1};` is a SyntaxError.
       use Nil <- result.try(check_cover_grammar_errors(p3, init_start))
-      Ok(#(
-        P(..p3, in_export_decl: was_export_decl),
-        ast.VariableDeclarator(id: pattern, init: Some(init_expr)),
-      ))
+      Ok(#(p3, ast.VariableDeclarator(id: pattern, init: Some(init_expr))))
     }
     _ -> {
       use <- bool.guard(
@@ -1665,7 +1658,7 @@ fn check_import_binding_name(
 /// When inside an export var/let/const declaration (in_export_decl is True),
 /// register the binding name as an exported name and check for duplicates.
 fn check_export_binding(p: P, name: String) -> Result(P, ParseError) {
-  case p.in_export_decl {
+  case p.ctx.in_export_decl {
     True -> check_duplicate_export(p, name)
     False -> Ok(p)
   }
@@ -2855,10 +2848,10 @@ fn parse_switch_case_stmts(
       // Statements here are DIRECTLY in the CaseClause/DefaultClause list —
       // using/await-using declarations are early errors in this position.
       use #(p2, stmt) <- result.try(parse_statement(
-        P(..p, in_case_clause: True),
+        P(..p, ctx: Ctx(..p.ctx, in_case_clause: True)),
       ))
       parse_switch_case_stmts(
-        P(..p2, in_case_clause: p.in_case_clause),
+        P(..p2, ctx: Ctx(..p2.ctx, in_case_clause: p.ctx.in_case_clause)),
         has_default,
         condition,
         [ast.StmtWithLine(line, stmt), ..stmt_acc],
@@ -7235,7 +7228,9 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
     }
     Var | Let | Const ->
       result.map(
-        parse_variable_declaration_decl(P(..p2, in_export_decl: True)),
+        parse_variable_declaration_decl(
+          P(..p2, ctx: Ctx(..p2.ctx, in_export_decl: True)),
+        ),
         export_named_decl(p, _),
       )
     Function ->
@@ -7602,11 +7597,12 @@ fn enter_function_context(
       has_non_simple_param: False,
       param_bound_names: [],
       pending_strict_name: strict_name,
+      in_export_decl: False,
+      in_case_clause: False,
     ),
     // Push a fresh Function scope; the new scope's id is now sb.current
     // and sb.current_fn.
     sb:,
-    in_case_clause: False,
   )
 }
 
