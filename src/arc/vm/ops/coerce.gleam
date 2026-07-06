@@ -96,13 +96,13 @@ pub fn to_primitive_prim(
               case value.value_to_primitive(result) {
                 Some(prim) -> Ok(#(prim, new_state))
                 None ->
-                  thrown_type_error(
+                  state.type_error_op(
                     new_state,
                     "Cannot convert object to primitive value",
                   )
               }
             }
-            False -> thrown_type_error(state, "@@toPrimitive is not callable")
+            False -> state.type_error_op(state, "@@toPrimitive is not callable")
           }
       }
     }
@@ -148,7 +148,7 @@ fn try_to_primitive_methods(
   method_names: List(String),
 ) -> Result(#(value.JsPrimitive, State(host)), #(JsValue, State(host))) {
   case method_names {
-    [] -> thrown_type_error(state, "Cannot convert object to primitive value")
+    [] -> state.type_error_op(state, "Cannot convert object to primitive value")
     [name, ..rest] -> {
       use #(method, state) <- result.try(object.get_value(
         state,
@@ -183,7 +183,7 @@ pub fn js_to_string(
   use #(prim, state) <- result.try(to_primitive_prim(state, val, StringHint))
   case prim {
     value.PSymbol(_) ->
-      thrown_type_error(state, "Cannot convert a Symbol value to a string")
+      state.type_error_op(state, "Cannot convert a Symbol value to a string")
     value.PString(s) -> Ok(#(s, state))
     value.PNumber(Finite(n)) -> Ok(#(value.js_format_number(n), state))
     value.PNumber(NaN) -> Ok(#("NaN", state))
@@ -225,9 +225,9 @@ pub fn js_to_number(
     value.PNull -> Ok(#(Finite(0.0), state))
     value.PUndefined -> Ok(#(NaN, state))
     value.PBigInt(_) ->
-      thrown_type_error(state, "Cannot convert BigInt to number")
+      state.type_error_op(state, "Cannot convert BigInt to number")
     value.PSymbol(_) ->
-      thrown_type_error(state, "Cannot convert Symbol to number")
+      state.type_error_op(state, "Cannot convert Symbol to number")
   }
 }
 
@@ -426,7 +426,7 @@ pub fn js_instanceof(
             True -> ordinary_has_instance(state, ctor_ref, left)
             // Step 4: Not callable → TypeError.
             False ->
-              thrown_type_error(
+              state.type_error_op(
                 state,
                 "Right-hand side of instanceof is not callable",
               )
@@ -441,12 +441,18 @@ pub fn js_instanceof(
         }
         // GetMethod step 3: present but not callable → TypeError.
         NotCallable ->
-          thrown_type_error(state, "Symbol.hasInstance handler is not callable")
+          state.type_error_op(
+            state,
+            "Symbol.hasInstance handler is not callable",
+          )
       }
     }
     // Step 1: Not an Object → TypeError.
     _ ->
-      thrown_type_error(state, "Right-hand side of instanceof is not callable")
+      state.type_error_op(
+        state,
+        "Right-hand side of instanceof is not callable",
+      )
   }
 }
 
@@ -519,7 +525,7 @@ pub fn ordinary_has_instance(
               instanceof_walk(state, obj_ref, proto_ref)
             _ ->
               // Step 5: If P is not an Object, throw TypeError.
-              thrown_type_error(
+              state.type_error_op(
                 state,
                 "Function has non-object prototype in instanceof check",
               )
@@ -556,15 +562,6 @@ fn instanceof_walk(
   }
 }
 
-/// Helper to throw a TypeError in functions that return Result(a, #(JsValue, State)).
-/// Used by toPrimitive, toString, instanceof, etc.
-pub fn thrown_type_error(
-  state: State(host),
-  msg: String,
-) -> Result(a, #(JsValue, State(host))) {
-  Error(state.type_error_value(state, msg))
-}
-
 /// §7.1.13 ToBigInt: ToPrimitive(number hint), then BigInt/Boolean/String per
 /// the conversion table; Number/Symbol/null/undefined → TypeError, and a
 /// string StringToBigInt rejects → SyntaxError. This is THE ToBigInt — the
@@ -591,12 +588,12 @@ pub fn to_bigint(
           ))
       }
     value.PNumber(_) ->
-      thrown_type_error(state, "Cannot convert a Number to a BigInt")
+      state.type_error_op(state, "Cannot convert a Number to a BigInt")
     value.PSymbol(_) ->
-      thrown_type_error(state, "Cannot convert a Symbol to a BigInt")
-    value.PNull -> thrown_type_error(state, "Cannot convert null to a BigInt")
+      state.type_error_op(state, "Cannot convert a Symbol to a BigInt")
+    value.PNull -> state.type_error_op(state, "Cannot convert null to a BigInt")
     value.PUndefined ->
-      thrown_type_error(state, "Cannot convert undefined to a BigInt")
+      state.type_error_op(state, "Cannot convert undefined to a BigInt")
   }
 }
 
@@ -630,12 +627,12 @@ pub fn to_index(
         Finite(f) -> {
           let i = value.float_to_int(f)
           case i < 0 || i > limits.max_safe_integer {
-            True -> Error(state.range_error_value(state, err_msg))
+            True -> state.range_error_op(state, err_msg)
             False -> Ok(#(i, state))
           }
         }
         NaN -> Ok(#(0, state))
-        Infinity | NegInfinity -> Error(state.range_error_value(state, err_msg))
+        Infinity | NegInfinity -> state.range_error_op(state, err_msg)
       }
     }
   }

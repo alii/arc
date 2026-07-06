@@ -25,16 +25,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-/// state.type_error but polymorphic in the Ok type — for callsites where the
-/// surrounding Result's Ok type isn't JsValue (so state.type_error won't unify).
-pub fn type_error_any(
-  state: State(host),
-  msg: String,
-) -> #(State(host), Result(a, JsValue)) {
-  let #(err, state) = state.type_error_value(state, msg)
-  #(state, Error(err))
-}
-
 /// Resolve a GetIterator stack slot to the real iterator object: internal
 /// `IteratorRecordObject` wrappers (which cache `next` per §7.4.1) must be
 /// transparent to `.return()`/`.throw()` lookups and to `yield*` delegation.
@@ -80,7 +70,7 @@ pub fn get_iterator_direct(
       ))
       #(IteratorRecord(iterator: obj, next_method: next), state)
     }
-    _ -> Error(state.type_error_value(state, non_object_msg))
+    _ -> state.type_error_op(state, non_object_msg)
   }
 }
 
@@ -102,10 +92,10 @@ pub fn get_iterator_sync(
   ))
   case is_callable(state.heap, method) {
     False ->
-      Error(state.type_error_value(
+      state.type_error_op(
         state,
         object.inspect(obj, state.heap) <> " is not iterable",
-      ))
+      )
     True -> get_iterator_from_method(state, obj, method)
   }
 }
@@ -161,7 +151,7 @@ pub fn get_iterator_flattenable(
     _, _ -> False
   }
   case acceptable {
-    False -> Error(state.type_error_value(state, what <> " is not an object"))
+    False -> state.type_error_op(state, what <> " is not an object")
     True -> {
       use #(method, state) <- result.try(object.get_symbol_value_of(
         state,
@@ -174,8 +164,7 @@ pub fn get_iterator_flattenable(
         JsUndefined | JsNull -> Ok(#(obj, state))
         _ ->
           case is_callable(state.heap, method) {
-            False ->
-              Error(state.type_error_value(state, what <> " is not iterable"))
+            False -> state.type_error_op(state, what <> " is not iterable")
             True -> state.call(state, method, obj, [])
           }
       }
@@ -209,7 +198,7 @@ pub fn iterator_step_result(
           ))
           cont(result, value.is_truthy(done), state)
         }
-        _ -> type_error_any(state, "Iterator result is not an object")
+        _ -> state.type_error(state, "Iterator result is not an object")
       }
   }
 }
@@ -311,7 +300,7 @@ pub fn iterator_close_normal(
     #(state, Ok(NoReturnMethod)) -> #(state, Ok(Nil))
     #(state, Ok(Returned(JsObject(_)))) -> #(state, Ok(Nil))
     #(state, Ok(Returned(_other))) ->
-      type_error_any(state, "Iterator return result is not an object")
+      state.type_error(state, "Iterator return result is not an object")
     #(state, Error(thrown)) -> #(state, Error(thrown))
   }
 }
@@ -347,7 +336,7 @@ pub fn call_return(
       // TypeError. The re-entrant call path silently passes non-callables
       // through (legacy promise-reaction behavior), so check here.
       case is_callable(state.heap, ret_fn) {
-        False -> type_error_any(state, "iterator.return is not a function")
+        False -> state.type_error(state, "iterator.return is not a function")
         True -> {
           use result, state <- state.try_call(state, ret_fn, obj, [])
           #(state, Ok(Returned(result)))
@@ -508,7 +497,7 @@ pub fn read_iter_result(
       ))
       #(value.is_truthy(done), val, state)
     }
-    _ -> Error(state.type_error_value(state, "Iterator result is not an object"))
+    _ -> state.type_error_op(state, "Iterator result is not an object")
   }
 }
 

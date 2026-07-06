@@ -256,7 +256,7 @@ pub fn define_parsed(
             // canonical_key is never a valid integer index ("1.5", "-0",
             // "NaN", "-1", "1e+21", …) → false, with NO value conversion.
             True ->
-              throw_type_error(state, "Invalid typed array index")
+              state.type_error_op(state, "Invalid typed array index")
               |> result.map(fn(_) { state })
               |> result.map_error(as_rejected)
             False ->
@@ -284,7 +284,7 @@ pub fn define_parsed(
             // Compatible with a frozen descriptor = a no-op redefinition.
             True -> Ok(state)
             False ->
-              throw_type_error(
+              state.type_error_op(
                 state,
                 "Cannot redefine property: " <> key_quoted(dkey),
               )
@@ -324,7 +324,7 @@ pub fn define_parsed(
       case ok {
         True -> Ok(state)
         False ->
-          throw_type_error(
+          state.type_error_op(
             state,
             "'defineProperty' on proxy: trap returned falsish for property "
               <> key_quoted(dkey),
@@ -353,7 +353,7 @@ fn namespace_define(
   use box <- result.try(case dict.get(exports, name) {
     Ok(box) -> Ok(box)
     Error(Nil) ->
-      throw_type_error(
+      state.type_error_op(
         state,
         "Cannot define property " <> name <> ", object is not extensible",
       )
@@ -370,7 +370,7 @@ fn namespace_define(
     || parsed.writable == Some(False)
   use Nil <- result.try(case incompatible {
     True ->
-      throw_type_error(state, "Cannot redefine property: " <> name)
+      state.type_error_op(state, "Cannot redefine property: " <> name)
       |> result.map_error(as_rejected)
     False -> Ok(Nil)
   })
@@ -396,7 +396,7 @@ fn namespace_define(
           case value.same_value(requested, current_value) {
             True -> Ok(state)
             False ->
-              throw_type_error(state, "Cannot redefine property: " <> name)
+              state.type_error_op(state, "Cannot redefine property: " <> name)
               |> result.map_error(as_rejected)
           }
         }
@@ -440,7 +440,7 @@ fn array_define_index(
   let len_writable = array_length_writable(state.heap, target_ref)
   use Nil <- result.try(case idx >= old_len && !len_writable {
     True ->
-      throw_type_error(
+      state.type_error_op(
         state,
         "Cannot add property "
           <> int.to_string(idx)
@@ -505,7 +505,7 @@ fn typed_array_define_index(
   let valid = option.is_some(current)
   let label = int.to_string(idx)
   let reject = fn(msg) {
-    throw_type_error(state, msg)
+    state.type_error_op(state, msg)
     |> result.map(fn(_) { state })
     |> result.map_error(as_rejected)
   }
@@ -609,7 +609,7 @@ fn array_define_length(
       // Steps 11-12: a non-writable length rejects any value change.
       use Nil <- result.try(
         case !cur_writable && new_len != old_len {
-          True -> throw_type_error(state, "Cannot redefine property: length")
+          True -> state.type_error_op(state, "Cannot redefine property: length")
           False -> Ok(Nil)
         }
         |> result.map_error(as_rejected),
@@ -639,9 +639,9 @@ fn parse_array_length(
     value.Finite(f) ->
       case value.array_length(f) {
         Some(n) -> Ok(n)
-        None -> throw_range_error(state, "Invalid array length")
+        None -> state.range_error_op(state, "Invalid array length")
       }
-    _ -> throw_range_error(state, "Invalid array length")
+    _ -> state.range_error_op(state, "Invalid array length")
   }
 }
 
@@ -655,23 +655,23 @@ fn validate_length_attrs(
 ) -> Result(Nil, #(JsValue, State(host))) {
   // §10.1.6.3 step 4.a: cannot make a non-configurable property configurable.
   use Nil <- result.try(case desc.configurable {
-    Some(True) -> throw_type_error(state, "Cannot redefine property: length")
+    Some(True) -> state.type_error_op(state, "Cannot redefine property: length")
     _ -> Ok(Nil)
   })
   // §10.1.6.3 step 4.b: cannot change [[Enumerable]] (currently false).
   use Nil <- result.try(case desc.enumerable {
-    Some(True) -> throw_type_error(state, "Cannot redefine property: length")
+    Some(True) -> state.type_error_op(state, "Cannot redefine property: length")
     _ -> Ok(Nil)
   })
   // §10.1.6.3 step 6: cannot convert non-configurable data → accessor.
   use Nil <- result.try(case desc_is_accessor(desc) {
-    True -> throw_type_error(state, "Cannot redefine property: length")
+    True -> state.type_error_op(state, "Cannot redefine property: length")
     False -> Ok(Nil)
   })
   // §10.1.6.3 step 7.a.i: cannot change [[Writable]] false → true.
   case desc.writable, cur_writable {
     Some(True), False ->
-      throw_type_error(state, "Cannot redefine property: length")
+      state.type_error_op(state, "Cannot redefine property: length")
     _, _ -> Ok(Nil)
   }
 }
@@ -799,7 +799,8 @@ fn shrink_array(
         )
       case blocked {
         // Step 17.b.iv: a delete failed — length stays at idx+1, then throw.
-        Some(_) -> throw_type_error(state, "Cannot redefine property: length")
+        Some(_) ->
+          state.type_error_op(state, "Cannot redefine property: length")
         None -> Ok(state)
       }
     }
@@ -874,7 +875,7 @@ fn ordinary_define(
           case extensible {
             True -> Ok(Nil)
             False ->
-              throw_type_error(
+              state.type_error_op(
                 state,
                 "Cannot define property " <> key <> ", object is not extensible",
               )
@@ -884,7 +885,7 @@ fn ordinary_define(
           case is_compatible_descriptor(extensible, desc, Some(cur)) {
             True -> Ok(Nil)
             False ->
-              throw_type_error(state, "Cannot redefine property: " <> key)
+              state.type_error_op(state, "Cannot redefine property: " <> key)
           }
       })
 
@@ -1088,25 +1089,6 @@ fn as_rejected(err: #(JsValue, State(host))) -> #(DefineFailure, State(host)) {
 fn as_thrown(err: #(JsValue, State(host))) -> #(DefineFailure, State(host)) {
   let #(thrown, state) = err
   #(DefineThrew(thrown), state)
-}
-
-/// The one way this module raises a thrown TypeError: defineProperty
-/// rejections, proxy invariant violations, CreateListFromArrayLike, typed-array
-/// index rejection, Object.assign's failed Set, …
-fn throw_type_error(
-  state: State(host),
-  msg: String,
-) -> Result(a, #(JsValue, State(host))) {
-  Error(state.type_error_value(state, msg))
-}
-
-/// The one way this module raises a thrown RangeError (ArraySetLength step 5,
-/// §10.4.2.4).
-fn throw_range_error(
-  state: State(host),
-  msg: String,
-) -> Result(a, #(JsValue, State(host))) {
-  Error(state.range_error_value(state, msg))
 }
 
 /// Helper for ToPropertyDescriptor: `if ? HasProperty(Obj, name) then
@@ -1615,7 +1597,7 @@ fn require_callable_accessor(
     Some(f) ->
       case f == JsUndefined || helpers.is_callable(state.heap, f) {
         True -> Ok(Nil)
-        False -> throw_type_error(state, role <> " must be a function")
+        False -> state.type_error_op(state, role <> " must be a function")
       }
     None -> Ok(Nil)
   }
@@ -1642,7 +1624,7 @@ pub fn parse_descriptor(
   // Step 1: If Obj is not an Object, throw a TypeError exception.
   use Nil <- result.try(case desc_obj {
     JsObject(_) -> Ok(Nil)
-    _ -> throw_type_error(state, "Property description must be an object")
+    _ -> state.type_error_op(state, "Property description must be an object")
   })
   // Steps 3-4.
   use #(desc_enumerable, state) <- result.try(read_desc_bool(
@@ -1686,7 +1668,7 @@ pub fn parse_descriptor(
   // Step 15: accessor and data attributes are mutually exclusive.
   use Nil <- result.map(case desc_is_accessor(parsed) && desc_is_data(parsed) {
     True ->
-      throw_type_error(
+      state.type_error_op(
         state,
         "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
       )
@@ -1772,7 +1754,7 @@ fn proxy_get_own_property(
             Some(prop) ->
               case value.prop_configurable(prop) {
                 False ->
-                  throw_type_error(
+                  state.type_error_op(
                     state,
                     "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
                       <> key_quoted(key)
@@ -1786,7 +1768,7 @@ fn proxy_get_own_property(
                   ))
                   case ext {
                     False ->
-                      throw_type_error(
+                      state.type_error_op(
                         state,
                         "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
                           <> key_quoted(key)
@@ -1843,7 +1825,7 @@ fn proxy_get_own_property(
           use Nil <- result.try(
             case is_compatible_descriptor(ext, completed_parsed, target_desc) {
               False ->
-                throw_type_error(
+                state.type_error_op(
                   state,
                   "'getOwnPropertyDescriptor' on proxy: trap returned descriptor for property "
                     <> key_quoted(key)
@@ -1859,7 +1841,7 @@ fn proxy_get_own_property(
             False ->
               case target_desc {
                 None ->
-                  throw_type_error(
+                  state.type_error_op(
                     state,
                     "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
                       <> key_quoted(key)
@@ -1868,7 +1850,7 @@ fn proxy_get_own_property(
                 Some(td) ->
                   case value.prop_configurable(td) {
                     True ->
-                      throw_type_error(
+                      state.type_error_op(
                         state,
                         "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
                           <> key_quoted(key)
@@ -1879,7 +1861,7 @@ fn proxy_get_own_property(
                       // writable:false too.
                       case parsed.writable, td {
                         Some(False), DataProperty(writable: True, ..) ->
-                          throw_type_error(
+                          state.type_error_op(
                             state,
                             "'getOwnPropertyDescriptor' on proxy: trap reported non-writability for property "
                               <> key_quoted(key)
@@ -1893,7 +1875,7 @@ fn proxy_get_own_property(
           Ok(#(Some(completed), state))
         }
         _ -> {
-          use Nil <- result.map(throw_type_error(
+          use Nil <- result.map(state.type_error_op(
             state,
             "'getOwnPropertyDescriptor' on proxy: trap returned neither object nor undefined for property "
               <> key_quoted(key),
@@ -1973,7 +1955,7 @@ fn proxy_define_own_property(
             None -> {
               use Nil <- result.try(case ext {
                 False ->
-                  throw_type_error(
+                  state.type_error_op(
                     state,
                     "'defineProperty' on proxy: trap returned truish for adding property "
                       <> key_quoted(key)
@@ -1983,7 +1965,7 @@ fn proxy_define_own_property(
               })
               use Nil <- result.map(case setting_config_false {
                 True ->
-                  throw_type_error(
+                  state.type_error_op(
                     state,
                     "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
                       <> key_quoted(key)
@@ -1997,7 +1979,7 @@ fn proxy_define_own_property(
               use Nil <- result.try(
                 case is_compatible_descriptor(ext, parsed, Some(cur)) {
                   False ->
-                    throw_type_error(
+                    state.type_error_op(
                       state,
                       "'defineProperty' on proxy: trap returned truish for adding property "
                         <> key_quoted(key)
@@ -2009,7 +1991,7 @@ fn proxy_define_own_property(
               use Nil <- result.try(
                 case setting_config_false && value.prop_configurable(cur) {
                   True ->
-                    throw_type_error(
+                    state.type_error_op(
                       state,
                       "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
                         <> key_quoted(key)
@@ -2024,7 +2006,7 @@ fn proxy_define_own_property(
                 DataProperty(configurable: False, writable: True, ..) ->
                   case parsed.writable {
                     Some(False) ->
-                      throw_type_error(
+                      state.type_error_op(
                         state,
                         "'defineProperty' on proxy: trap returned truish for defining non-writable property "
                           <> key_quoted(key)
@@ -2126,7 +2108,7 @@ pub fn create_data_property(
     True -> Ok(state)
     // §7.3.7 step 3: success is false → throw a TypeError exception.
     False ->
-      throw_type_error(state, "Cannot create property " <> key_quoted(dkey))
+      state.type_error_op(state, "Cannot create property " <> key_quoted(dkey))
   }
 }
 
@@ -2245,7 +2227,7 @@ fn proxy_own_keys(
       // Step 9: duplicate entries are rejected.
       use Nil <- result.try(case has_duplicate_keys(keys, []) {
         True ->
-          throw_type_error(
+          state.type_error_op(
             state,
             "'ownKeys' on proxy: trap returned duplicate entries",
           )
@@ -2264,7 +2246,7 @@ fn proxy_own_keys(
           case list.contains(keys, k) {
             True -> Ok(Nil)
             False ->
-              throw_type_error(
+              state.type_error_op(
                 state,
                 "'ownKeys' on proxy: trap result did not include "
                   <> key_quoted(k)
@@ -2283,7 +2265,7 @@ fn proxy_own_keys(
               case list.contains(keys, k) {
                 True -> Ok(Nil)
                 False ->
-                  throw_type_error(
+                  state.type_error_op(
                     state,
                     "'ownKeys' on proxy: trap result did not include "
                       <> key_quoted(k)
@@ -2298,7 +2280,7 @@ fn proxy_own_keys(
           use Nil <- result.map(case extras {
             [] -> Ok(Nil)
             [_, ..] ->
-              throw_type_error(
+              state.type_error_op(
                 state,
                 "'ownKeys' on proxy: trap returned extra keys but proxy target is non-extensible",
               )
@@ -2356,7 +2338,7 @@ fn keys_from_array_like(
         }
       }
     _ -> {
-      use Nil <- result.map(throw_type_error(
+      use Nil <- result.map(state.type_error_op(
         state,
         "CreateListFromArrayLike called on non-object",
       ))
@@ -2375,7 +2357,7 @@ fn validate_trap_key(
   case object_key_of_value(item) {
     Some(k) -> Ok(k)
     None ->
-      throw_type_error(
+      state.type_error_op(
         state,
         "'ownKeys' on proxy: trap returned a non-String, non-Symbol key",
       )
@@ -2397,10 +2379,10 @@ fn trap_result_length(
   }
   case len > limits.max_iteration {
     True ->
-      Error(state.range_error_value(
+      state.range_error_op(
         state,
         "'ownKeys' on proxy: trap result length exceeds iteration budget",
-      ))
+      )
     False -> Ok(#(len, state))
   }
 }

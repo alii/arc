@@ -435,11 +435,11 @@ fn validate_options(
         Ok(#(JsObject(attributes_ref), state)) ->
           validate_attributes(state, attributes_ref)
         Ok(#(_, state)) ->
-          coerce.thrown_type_error(state, "The 'with' option must be an object")
+          state.type_error_op(state, "The 'with' option must be an object")
       }
     }
     _ ->
-      coerce.thrown_type_error(
+      state.type_error_op(
         state,
         "The second argument to import() must be an object",
       )
@@ -457,9 +457,10 @@ fn validate_attributes(
 ) -> Result(State(host), #(JsValue, State(host))) {
   // Trap-aware EnumerableOwnProperties: a Proxy attributes object's ownKeys /
   // getOwnPropertyDescriptor traps run (and their throws reject the promise).
-  use #(keys, state) <- result.try(
-    mop.enumerable_string_keys_stateful(state, attributes_ref),
-  )
+  use #(keys, state) <- result.try(mop.enumerable_string_keys_stateful(
+    state,
+    attributes_ref,
+  ))
   // Step 8.d.ii-iv: Get each value (getters can throw → reject); every value
   // must be a String.
   use state <- result.try(
@@ -475,10 +476,7 @@ fn validate_attributes(
         Error(#(thrown, state)) -> Error(#(thrown, state))
         Ok(#(JsString(_), state)) -> Ok(state)
         Ok(#(_, state)) ->
-          coerce.thrown_type_error(
-            state,
-            "Import attribute values must be strings",
-          )
+          state.type_error_op(state, "Import attribute values must be strings")
       }
     }),
   )
@@ -486,7 +484,7 @@ fn validate_attributes(
   case keys {
     [] -> Ok(state)
     [key, ..] ->
-      coerce.thrown_type_error(
+      state.type_error_op(
         state,
         "Import attribute '" <> key <> "' is not supported",
       )

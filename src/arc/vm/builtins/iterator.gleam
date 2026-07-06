@@ -1117,15 +1117,6 @@ fn require_wrap(
   }
 }
 
-/// A TypeError as the canonical `#(thrown, state)` Error payload — the shape
-/// every fallible helper below returns, and the shape `state.try_op` unwraps.
-fn err_type(
-  state: State(host),
-  msg: String,
-) -> Result(a, #(JsValue, State(host))) {
-  Error(state.type_error_value(state, msg))
-}
-
 /// Step the underlying iterator. If next() throws, mark the helper done and
 /// propagate WITHOUT calling close (the iterator is already broken).
 fn after_step(
@@ -1352,14 +1343,14 @@ fn zip_options(
           case padding {
             JsUndefined | JsObject(_) -> Ok(#(OptLongest(padding:), state))
             _ ->
-              err_type(
+              state.type_error_op(
                 state,
                 "Iterator." <> name <> " padding is not an object",
               )
           }
         }
         _ ->
-          err_type(
+          state.type_error_op(
             state,
             "Iterator."
               <> name
@@ -1367,7 +1358,11 @@ fn zip_options(
           )
       }
     }
-    _ -> err_type(state, "Iterator." <> name <> " options is not an object")
+    _ ->
+      state.type_error_op(
+        state,
+        "Iterator." <> name <> " options is not an object",
+      )
   }
 }
 
