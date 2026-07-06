@@ -1264,9 +1264,9 @@ fn emit_top_level_body(
   let e = case e.top_lex {
     LexLocal -> e
     LexGlobal ->
-      list.fold(collect_top_lex_names(stmts), e, fn(e, lex) {
-        let #(name, kind) = lex
-        emit_op(e, opcode.DeclareGlobalLex(name, kind == ConstBinding))
+      list.fold(ast_util.collect_top_lex_names(stmts), e, fn(e, lex) {
+        let #(name, is_const) = lex
+        emit_op(e, opcode.DeclareGlobalLex(name, is_const))
       })
   }
   use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
@@ -3071,22 +3071,6 @@ fn emit_stmts_tail_value(
   }
 }
 
-/// Collect let/const names declared directly in the given statement list (NOT
-/// recursing into nested blocks). Used to hoist slot-allocation+boxing before
-/// hoisted-function MakeClosure so closures capture the box ref, not a stale
-/// pre-box value. Wraps ast_util.collect_top_lex_names (which is
-/// BindingKind-free: returns `(name, is_const)`) with the local LetBinding /
-/// ConstBinding mapping.
-fn collect_top_lex_names(
-  stmts: List(ast.StmtWithLine),
-) -> List(#(String, BindingKind)) {
-  use #(name, is_const) <- list.map(ast_util.collect_top_lex_names(stmts))
-  case is_const {
-    True -> #(name, ConstBinding)
-    False -> #(name, LetBinding)
-  }
-}
-
 /// Collect and compile hoisted function declarations.
 /// Returns updated emitter + list of (name, func_index) pairs.
 fn collect_hoisted_funcs(
@@ -3389,7 +3373,9 @@ fn compile_function_body(
         || fname == "arguments"
         || list.contains(ast_util.collect_hoisted_vars(stmts), fname)
         || list.contains(ast_util.direct_fn_names(stmts), fname)
-        || list.any(collect_top_lex_names(stmts), fn(lex) { lex.0 == fname })
+        || list.any(ast_util.collect_top_lex_names(stmts), fn(lex) {
+          lex.0 == fname
+        })
         || annexb_shadow
       case shadowed {
         True -> e
@@ -3710,10 +3696,9 @@ fn emit_stmt_inner(
             case init {
               Some(init_expr) -> {
                 use e <- result.map(emit_named_expr(e, init_expr, name))
-                case kind {
-                  ast.Var -> emit_var_put(e, name)
-                  ast.Let | ast.Const | ast.Using | ast.AwaitUsing ->
-                    init_lex(e, name)
+                case ast_util.is_lexical(kind) {
+                  False -> emit_var_put(e, name)
+                  True -> init_lex(e, name)
                 }
               }
               // `let x;` (no initializer) initializes the binding to undefined
@@ -3722,7 +3707,7 @@ fn emit_stmt_inner(
               // x;` then accessing it through the namespace). `var` is hoisted
               // to undefined already; only lexical bindings need this.
               None ->
-                case kind != ast.Var {
+                case ast_util.is_lexical(kind) {
                   True -> Ok(init_lex(push_const(e, JsUndefined), name))
                   False -> Ok(e)
                 }
@@ -5585,24 +5570,6 @@ fn emit_call_args(
 // For-in / for-of loops
 // ============================================================================
 
-/// Bound names of a lexical (`let`/`const`/`using`/`await using`) for-in/of
-/// head declaration. Empty for `var` heads and bare assignment-target heads
-/// — the two cases with no per-iteration environment.
-fn for_head_lex_names(left: ast.ForInit) -> List(String) {
-  case left {
-    ast.ForInitDeclaration(kind, declarators) ->
-      case kind {
-        ast.Let | ast.Const | ast.Using | ast.AwaitUsing ->
-          list.flat_map(declarators, fn(d) {
-            let ast.VariableDeclarator(pattern, _) = d
-            ast.pattern_bound_names(pattern)
-          })
-        ast.Var -> []
-      }
-    ast.ForInitPattern(_) | ast.ForInitExpression(_) -> []
-  }
-}
-
 /// §14.7.5.7 ForIn/OfBodyEvaluation steps 6.f-g: a lexical head gets a
 /// FRESH iteration environment on every pass (NewDeclarativeEnvironment +
 /// ForDeclarationBindingInstantiation), so closures created during
@@ -5620,7 +5587,7 @@ fn for_head_lex_names(left: ast.ForInit) -> List(String) {
 /// head scope and the analyzer kept it (binding-less scopes are pruned and
 /// not entered), so `e.current_scope` IS the head scope here.
 fn emit_for_per_iteration_env(e: Emitter, left: ast.ForInit) -> Emitter {
-  case for_head_lex_names(left) {
+  case ast_util.for_head_lex_names(left) {
     [] -> e
     _ -> emit_binding_prologue(e, e.current_scope)
   }

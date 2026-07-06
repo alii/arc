@@ -4,10 +4,7 @@
 ////
 //// The parser runs BEFORE emission and cannot import compiler/emit.gleam,
 //// so every helper here depends ONLY on arc/parser/ast and the Gleam
-//// stdlib — no Emitter, no IrOp, no BindingKind. emit.gleam wraps these
-//// where it needs an emit-local type (e.g. collect_top_lex_names below
-//// returns `is_const: Bool`; emit's thin wrapper maps that to
-//// LetBinding/ConstBinding).
+//// stdlib — no Emitter, no IrOp, no BindingKind.
 ////
 //// The parser and the emitter must make IDENTICAL structural decisions
 //// (which parameter lists are "simple", which statements are hoisted
@@ -165,6 +162,19 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
 // Lexical (let/const/class) name collection
 // ============================================================================
 
+/// True for the block-scoped `VariableKind`s (`let`/`const`/`using`/
+/// `await using`), false for `var`. THE partition function for "does this
+/// declaration introduce a lexical binding" — every predicate that must
+/// answer that question delegates here so adding a new `VariableKind` is a
+/// single exhaustive-case compile error rather than N silent `_ -> False`
+/// fallthroughs across the emitter.
+pub fn is_lexical(kind: ast.VariableKind) -> Bool {
+  case kind {
+    ast.Var -> False
+    ast.Let | ast.Const | ast.Using | ast.AwaitUsing -> True
+  }
+}
+
 /// FunctionDeclarations may sit under labels (`l: function f() {}`, sloppy
 /// mode only); labels are transparent for declaration instantiation.
 pub fn peel_labels(stmt: ast.Statement) -> ast.Statement {
@@ -200,19 +210,21 @@ pub fn switch_case_stmts(
 /// Collect let/const names declared directly in the given statement list (NOT
 /// recursing into nested blocks). Returned tuple is `(name, is_const)` —
 /// `is_const = True` for const/using/await using, `False` for let/class.
-/// emit.gleam's same-named `collect_top_lex_names` wraps this, mapping
-/// `is_const` onto its own `LetBinding`/`ConstBinding` type.
 pub fn collect_top_lex_names(
   stmts: List(ast.StmtWithLine),
 ) -> List(#(String, Bool)) {
   list.flat_map(stmts, fn(located) {
     case located.statement {
-      ast.VariableDeclaration(ast.Let, declarators) ->
-        declarator_names(declarators) |> list.map(fn(n) { #(n, False) })
-      ast.VariableDeclaration(ast.Const, declarators)
-      | ast.VariableDeclaration(ast.Using, declarators)
-      | ast.VariableDeclaration(ast.AwaitUsing, declarators) ->
-        declarator_names(declarators) |> list.map(fn(n) { #(n, True) })
+      ast.VariableDeclaration(kind, declarators) ->
+        // Exhaustive on VariableKind so a new lexical kind is a compile
+        // error here (and in `is_lexical`) rather than a silent `_ -> []`.
+        case kind {
+          ast.Var -> []
+          ast.Let ->
+            declarator_names(declarators) |> list.map(fn(n) { #(n, False) })
+          ast.Const | ast.Using | ast.AwaitUsing ->
+            declarator_names(declarators) |> list.map(fn(n) { #(n, True) })
+        }
       ast.ClassDeclaration(name: Some(ast.NamedBinding(name:, ..)), ..) -> [
         #(name, False),
       ]
@@ -227,12 +239,8 @@ pub fn collect_top_lex_names(
 pub fn block_has_declarations(body: List(ast.StmtWithLine)) -> Bool {
   list.any(body, fn(located) {
     case peel_labels(located.statement) {
-      ast.VariableDeclaration(ast.Let, _)
-      | ast.VariableDeclaration(ast.Const, _)
-      | ast.VariableDeclaration(ast.Using, _)
-      | ast.VariableDeclaration(ast.AwaitUsing, _)
-      | ast.ClassDeclaration(..)
-      | ast.FunctionDeclaration(..) -> True
+      ast.VariableDeclaration(kind, _) -> is_lexical(kind)
+      ast.ClassDeclaration(..) | ast.FunctionDeclaration(..) -> True
       _ -> False
     }
   })
@@ -254,11 +262,22 @@ pub fn for_let_names(
 /// the head and emit must consume it. var/expr/empty heads push no scope.
 pub fn for_classic_init_is_lex(init: Option(ast.ForInit)) -> Bool {
   case init {
-    Some(ast.ForInitDeclaration(ast.Let, _))
-    | Some(ast.ForInitDeclaration(ast.Const, _))
-    | Some(ast.ForInitDeclaration(ast.Using, _))
-    | Some(ast.ForInitDeclaration(ast.AwaitUsing, _)) -> True
+    Some(ast.ForInitDeclaration(kind, _)) -> is_lexical(kind)
     _ -> False
+  }
+}
+
+/// Bound names of a lexical (`let`/`const`/`using`/`await using`) for-in/of
+/// head declaration. Empty for `var` heads and bare assignment-target heads
+/// — the two cases with no per-iteration environment.
+pub fn for_head_lex_names(left: ast.ForInit) -> List(String) {
+  case left {
+    ast.ForInitDeclaration(kind, declarators) ->
+      case is_lexical(kind) {
+        True -> declarator_names(declarators)
+        False -> []
+      }
+    ast.ForInitPattern(_) | ast.ForInitExpression(_) -> []
   }
 }
 
