@@ -654,11 +654,7 @@ fn step_take(
       // generator body, so the helper is still "executing" while it does.
       let #(state, close_res) =
         iter_protocol.iterator_close_normal(state, underlying.iterator)
-      let state = mark_done(state, ref)
-      case close_res {
-        Error(e) -> #(state, Error(e))
-        Ok(Nil) -> create_iter_result(state, JsUndefined, True)
-      }
+      finish_after_close(state, ref, close_res)
     }
     False -> {
       use step, state <- after_step(state, ref, underlying)
@@ -1377,25 +1373,20 @@ fn zip_collect(
     Error(thrown) ->
       Error(close_all_and_throw(state, collected_iters(acc), thrown))
     Ok(None) -> Ok(#(list.reverse(acc), state))
-    Ok(Some(v)) ->
-      case
+    Ok(Some(v)) -> {
+      // IfAbruptCloseIterators(iter, « inputIter » + iters): reverse order
+      // closes the collected iterators first, then the input iterator.
+      use rec, state <- or_close_all(
         iter_protocol.get_iterator_flattenable(
           state,
           v,
           RejectPrimitives,
           "Iterator.zip input",
-        )
-      {
-        // IfAbruptCloseIterators(iter, « inputIter » + iters): reverse order
-        // closes the collected iterators first, then the input iterator.
-        Error(#(thrown, state)) ->
-          Error(close_all_and_throw(
-            state,
-            [input_rec.iterator, ..collected_iters(acc)],
-            thrown,
-          ))
-        Ok(#(rec, state)) -> zip_collect(state, input_rec, [rec, ..acc])
-      }
+        ),
+        [input_rec.iterator, ..collected_iters(acc)],
+      )
+      zip_collect(state, input_rec, [rec, ..acc])
+    }
   }
 }
 
@@ -1416,12 +1407,11 @@ fn zip_padding_iterated(
     JsUndefined -> Ok(#(list.repeat(JsUndefined, iter_count), state))
     _ -> {
       let opened = list.map(iters, fn(rec) { rec.iterator })
-      case iter_protocol.get_iterator_sync(state, padding_option) {
-        Error(#(thrown, state)) ->
-          Error(close_all_and_throw(state, opened, thrown))
-        Ok(#(pad_rec, state)) ->
-          zip_padding_loop(state, pad_rec, opened, iter_count, [])
-      }
+      use pad_rec, state <- or_close_all(
+        iter_protocol.get_iterator_sync(state, padding_option),
+        opened,
+      )
+      zip_padding_loop(state, pad_rec, opened, iter_count, [])
     }
   }
 }
@@ -1476,15 +1466,33 @@ fn zip_keyed_collect(
 ) {
   case keys_left {
     [] -> Ok(#(#(list.reverse(keys_acc), list.reverse(iters_acc)), state))
-    [key, ..rest] ->
-      case mop.own_property_keyed(state, iterables_ref, key) {
-        Error(#(thrown, state)) ->
-          Error(close_all_and_throw(state, collected_iters(iters_acc), thrown))
-        Ok(#(desc, state)) -> {
-          let enumerable =
-            option.map(desc, value.prop_enumerable) |> option.unwrap(False)
-          case enumerable {
-            False ->
+    [key, ..rest] -> {
+      // IfAbruptCloseIterators for every read — the collected iterators are
+      // already open, so any of the three Gets throwing must close them.
+      let opened = collected_iters(iters_acc)
+      use desc, state <- or_close_all(
+        mop.own_property_keyed(state, iterables_ref, key),
+        opened,
+      )
+      let enumerable =
+        option.map(desc, value.prop_enumerable) |> option.unwrap(False)
+      case enumerable {
+        False ->
+          zip_keyed_collect(
+            state,
+            iterables,
+            iterables_ref,
+            rest,
+            keys_acc,
+            iters_acc,
+          )
+        True -> {
+          use v, state <- or_close_all(
+            object.get_keyed_value_of(state, iterables, key),
+            opened,
+          )
+          case v {
+            JsUndefined ->
               zip_keyed_collect(
                 state,
                 iterables,
@@ -1493,52 +1501,29 @@ fn zip_keyed_collect(
                 keys_acc,
                 iters_acc,
               )
-            True ->
-              case object.get_keyed_value_of(state, iterables, key) {
-                Error(#(thrown, state)) ->
-                  Error(close_all_and_throw(
-                    state,
-                    collected_iters(iters_acc),
-                    thrown,
-                  ))
-                Ok(#(JsUndefined, state)) ->
-                  zip_keyed_collect(
-                    state,
-                    iterables,
-                    iterables_ref,
-                    rest,
-                    keys_acc,
-                    iters_acc,
-                  )
-                Ok(#(v, state)) ->
-                  case
-                    iter_protocol.get_iterator_flattenable(
-                      state,
-                      v,
-                      RejectPrimitives,
-                      "Iterator.zipKeyed input",
-                    )
-                  {
-                    Error(#(thrown, state)) ->
-                      Error(close_all_and_throw(
-                        state,
-                        collected_iters(iters_acc),
-                        thrown,
-                      ))
-                    Ok(#(rec, state)) ->
-                      zip_keyed_collect(
-                        state,
-                        iterables,
-                        iterables_ref,
-                        rest,
-                        [key, ..keys_acc],
-                        [rec, ..iters_acc],
-                      )
-                  }
-              }
+            _ -> {
+              use rec, state <- or_close_all(
+                iter_protocol.get_iterator_flattenable(
+                  state,
+                  v,
+                  RejectPrimitives,
+                  "Iterator.zipKeyed input",
+                ),
+                opened,
+              )
+              zip_keyed_collect(
+                state,
+                iterables,
+                iterables_ref,
+                rest,
+                [key, ..keys_acc],
+                [rec, ..iters_acc],
+              )
+            }
           }
         }
       }
+    }
   }
 }
 
@@ -1568,13 +1553,13 @@ fn zip_keyed_padding_loop(
 ) -> Result(#(List(JsValue), State(host)), #(JsValue, State(host))) {
   case keys_left {
     [] -> Ok(#(list.reverse(acc), state))
-    [key, ..rest] ->
-      case object.get_keyed_value_of(state, padding_option, key) {
-        Error(#(thrown, state)) ->
-          Error(close_all_and_throw(state, opened, thrown))
-        Ok(#(v, state)) ->
-          zip_keyed_padding_loop(state, padding_option, opened, rest, [v, ..acc])
-      }
+    [key, ..rest] -> {
+      use v, state <- or_close_all(
+        object.get_keyed_value_of(state, padding_option, key),
+        opened,
+      )
+      zip_keyed_padding_loop(state, padding_option, opened, rest, [v, ..acc])
+    }
   }
 }
 
@@ -1647,11 +1632,8 @@ fn zip_round(
         ZipOpen(record:, padding:) -> {
           let #(state, step) = iter_protocol.iterator_step_value(state, record)
           case step {
-            Error(thrown) -> {
-              let #(state, res) =
-                close_all_throw(state, open_others(prev, tail), thrown)
-              #(mark_done(state, ref), res)
-            }
+            Error(thrown) ->
+              close_all_throw_done(state, ref, open_others(prev, tail), thrown)
             Ok(Some(v)) ->
               zip_round(state, ref, mode, keys, [member, ..prev], tail, [
                 v,
@@ -1662,11 +1644,7 @@ fn zip_round(
                 ZipShortest -> {
                   let #(state, close_res) =
                     close_all_normal(state, open_others(prev, tail))
-                  let state = mark_done(state, ref)
-                  case close_res {
-                    Error(e) -> #(state, Error(e))
-                    Ok(Nil) -> create_iter_result(state, JsUndefined, True)
-                  }
+                  finish_after_close(state, ref, close_res)
                 }
                 ZipStrict ->
                   case prev {
@@ -1708,12 +1686,10 @@ fn zip_strict_check(
     // Unreachable: "strict" mode never exhausts members in place.
     [ZipExhausted(padding: _), ..tail] -> zip_strict_check(state, ref, tail)
     [ZipOpen(record:, padding: _), ..tail] -> {
-      let #(state, step) = iterator_step_done(state, record)
+      let #(state, step) = iter_protocol.iterator_step_done(state, record)
       case step {
-        Error(thrown) -> {
-          let #(state, res) = close_all_throw(state, open_members(tail), thrown)
-          #(mark_done(state, ref), res)
-        }
+        Error(thrown) ->
+          close_all_throw_done(state, ref, open_members(tail), thrown)
         Ok(True) -> zip_strict_check(state, ref, tail)
         // Not done — this iterator is still in openIters and is closed too.
         Ok(False) ->
@@ -1735,17 +1711,7 @@ fn zip_strict_throw(
       state,
       "Iterator.zip strict mode: iterators have different lengths",
     )
-  let #(state, res) = close_all_throw(state, open, terr)
-  #(mark_done(state, ref), res)
-}
-
-/// §7.4.6 IteratorStep: call next() and read only `done` (never `value`).
-fn iterator_step_done(
-  state: State(host),
-  rec: IteratorRecord,
-) -> #(State(host), Result(Bool, JsValue)) {
-  use _result, done, state <- iter_protocol.iterator_step_result(state, rec)
-  #(state, Ok(done))
+  close_all_throw_done(state, ref, open, terr)
 }
 
 /// Finish a round: persist longest-mode exhaustion transitions, then build
@@ -1816,11 +1782,7 @@ fn zip_return(
   members: List(ZipMember),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let #(state, close_res) = close_all_normal(state, open_members(members))
-  let state = mark_done(state, ref)
-  case close_res {
-    Error(e) -> #(state, Error(e))
-    Ok(Nil) -> create_iter_result(state, JsUndefined, True)
-  }
+  finish_after_close(state, ref, close_res)
 }
 
 /// Open iterator objects (spec's openIters) in order, given the reversed
@@ -1836,6 +1798,21 @@ fn open_members(members: List(ZipMember)) -> List(JsValue) {
       ZipExhausted(padding: _) -> Error(Nil)
     }
   })
+}
+
+/// Unwrap an op result, or IteratorCloseAll with the thrown error — the
+/// plural sibling of `iter_protocol.or_close`. Every fallible step of the
+/// zip/zipKeyed setup that runs while `iters` are already open funnels through
+/// here, so no site can forget the IfAbruptCloseIterators cleanup.
+fn or_close_all(
+  res: Result(#(a, State(host)), #(JsValue, State(host))),
+  iters: List(JsValue),
+  cont: fn(a, State(host)) -> Result(#(b, State(host)), #(JsValue, State(host))),
+) -> Result(#(b, State(host)), #(JsValue, State(host))) {
+  case res {
+    Ok(#(v, state)) -> cont(v, state)
+    Error(#(thrown, state)) -> Error(close_all_and_throw(state, iters, thrown))
+  }
 }
 
 /// IteratorCloseAll (joint-iteration proposal) with a pending throw: close
@@ -1864,6 +1841,35 @@ fn close_all_throw(
 ) -> #(State(host), Result(a, JsValue)) {
   let #(thrown, state) = close_all_and_throw(state, iters, original)
   #(state, Error(thrown))
+}
+
+/// The zip helper body's IfAbruptCloseIterators — the plural sibling of
+/// `close_throw_done`: close every still-open iterator while the helper is
+/// still "executing", then complete the generator and rethrow.
+fn close_all_throw_done(
+  state: State(host),
+  ref: Ref,
+  open: List(JsValue),
+  thrown: JsValue,
+) -> #(State(host), Result(a, JsValue)) {
+  let #(state, res) = close_all_throw(state, open, thrown)
+  #(mark_done(state, ref), res)
+}
+
+/// A helper body's normal-completion tail: latch `Completed` and either yield
+/// {value: undefined, done: true} or propagate the close's throw. `close_res`
+/// is the outcome of the IteratorClose(All) that just ran while the helper was
+/// still "executing".
+fn finish_after_close(
+  state: State(host),
+  ref: Ref,
+  close_res: Result(Nil, JsValue),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  let state = mark_done(state, ref)
+  case close_res {
+    Error(e) -> #(state, Error(e))
+    Ok(Nil) -> create_iter_result(state, JsUndefined, True)
+  }
 }
 
 /// IteratorCloseAll with a normal/return completion: close in reverse list
@@ -2029,18 +2035,12 @@ fn concat_return(
   ref: Ref,
   inner: Option(IteratorRecord),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case inner {
-    Some(inner_rec) -> {
-      let #(state, close_res) =
-        iter_protocol.iterator_close_normal(state, inner_rec.iterator)
-      let state = concat_mark_done(state, ref)
-      case close_res {
-        Error(e) -> #(state, Error(e))
-        Ok(Nil) -> create_iter_result(state, JsUndefined, True)
-      }
-    }
-    None -> create_iter_result(concat_mark_done(state, ref), JsUndefined, True)
+  let #(state, close_res) = case inner {
+    Some(inner_rec) ->
+      iter_protocol.iterator_close_normal(state, inner_rec.iterator)
+    None -> #(state, Ok(Nil))
   }
+  finish_after_close(concat_mark_done(state, ref), ref, close_res)
 }
 
 /// Complete the concat generator and drop its inner-iterator reference.

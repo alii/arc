@@ -228,6 +228,18 @@ pub fn iterator_step_value(
   }
 }
 
+/// §7.4.6 IteratorStep, done-only: call the record's cached next() and read
+/// only `done` (never `value` — a `value` getter must NOT fire when the caller
+/// only needs to know whether the iterator finished, e.g. Iterator.zip's strict
+/// length check).
+pub fn iterator_step_done(
+  state: State(host),
+  rec: IteratorRecord,
+) -> #(State(host), Result(Bool, JsValue)) {
+  use _result, done, state <- iterator_step_result(state, rec)
+  #(state, Ok(done))
+}
+
 /// §7.4.14 IteratorToList — drain `rec` to exhaustion, collecting every yielded
 /// value in order. Abrupt completions from next()/done/value propagate without
 /// close (§7.4.8 marks the record done). This is the ONE reversed-accumulator
@@ -388,6 +400,53 @@ pub fn add_entries_with_sink(
   add_entries_loop(state, target, rec, add_entry)
 }
 
+/// One IteratorStepValue + entry processing per iteration. Abrupt
+/// completions from next()/Get(done)/Get(value) propagate without close
+/// (§7.4.8 marks the iterator done); abrupt completions from the entry
+/// reads or the sink close the iterator first (§24.1.1.2 step 4).
+fn add_entries_loop(
+  state: State(host),
+  target: JsValue,
+  rec: IteratorRecord,
+  add_entry: EntrySink(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  use step, done, state <- iterator_step_result(state, rec)
+  case done {
+    True -> #(state, Ok(target))
+    False -> {
+      use entry, state <- state.try_op(object.get_value_of(
+        state,
+        step,
+        Named("value"),
+      ))
+      case entry {
+        JsObject(_) -> {
+          use k, state <- or_close(
+            object.get_value_of(state, entry, Index(0)),
+            rec.iterator,
+          )
+          use v, state <- or_close(
+            object.get_value_of(state, entry, Index(1)),
+            rec.iterator,
+          )
+          case add_entry(state, k, v) {
+            Error(#(thrown, state)) -> close_throw(state, rec.iterator, thrown)
+            Ok(state) -> add_entries_loop(state, target, rec, add_entry)
+          }
+        }
+        _ ->
+          close_throw_type(
+            state,
+            rec.iterator,
+            "Iterator value "
+              <> object.inspect(entry, state.heap)
+              <> " is not an entry object",
+          )
+      }
+    }
+  }
+}
+
 /// §24.1.1.2 AddEntriesFromIterable ( target, iterable, adder ) — the Map
 /// (§24.1.1.1) / WeakMap (§24.3.1.1) constructors' entry drain. `adder` is the
 /// user-reachable `set` method, so it must be [[Call]]ed observably; the
@@ -498,52 +557,5 @@ pub fn read_iter_result(
       #(value.is_truthy(done), val, state)
     }
     _ -> state.type_error_op(state, "Iterator result is not an object")
-  }
-}
-
-/// One IteratorStepValue + entry processing per iteration. Abrupt
-/// completions from next()/Get(done)/Get(value) propagate without close
-/// (§7.4.8 marks the iterator done); abrupt completions from the entry
-/// reads or the sink close the iterator first (§24.1.1.2 step 4).
-fn add_entries_loop(
-  state: State(host),
-  target: JsValue,
-  rec: IteratorRecord,
-  add_entry: EntrySink(host),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  use step, done, state <- iterator_step_result(state, rec)
-  case done {
-    True -> #(state, Ok(target))
-    False -> {
-      use entry, state <- state.try_op(object.get_value_of(
-        state,
-        step,
-        Named("value"),
-      ))
-      case entry {
-        JsObject(_) -> {
-          use k, state <- or_close(
-            object.get_value_of(state, entry, Index(0)),
-            rec.iterator,
-          )
-          use v, state <- or_close(
-            object.get_value_of(state, entry, Index(1)),
-            rec.iterator,
-          )
-          case add_entry(state, k, v) {
-            Error(#(thrown, state)) -> close_throw(state, rec.iterator, thrown)
-            Ok(state) -> add_entries_loop(state, target, rec, add_entry)
-          }
-        }
-        _ ->
-          close_throw_type(
-            state,
-            rec.iterator,
-            "Iterator value "
-              <> object.inspect(entry, state.heap)
-              <> " is not an entry object",
-          )
-      }
-    }
   }
 }
