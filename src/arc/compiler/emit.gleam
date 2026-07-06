@@ -6280,10 +6280,13 @@ fn classify_assign_target(target: ast.Expression) -> AssignTarget {
   case ast_util.unwrap_parens(target) {
     ast.MemberExpression(_, ast.SuperExpression(_), property) ->
       SuperMember(property:)
-    ast.MemberExpression(_, object, ast.Dot(name: prop, ..)) ->
-      StaticMember(object:, prop:)
-    ast.MemberExpression(_, object, ast.Bracket(key)) ->
-      ComputedMember(object:, key:)
+    ast.MemberExpression(_, object, property) ->
+      // Exhaustive over MemberProperty so a new variant is a compile error
+      // here, not a silent PlainTarget fallthrough.
+      case property {
+        ast.Dot(name: prop, ..) -> StaticMember(object:, prop:)
+        ast.Bracket(key) -> ComputedMember(object:, key:)
+      }
     other -> PlainTarget(other)
   }
 }
