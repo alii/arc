@@ -1,11 +1,13 @@
 import arc/vm/heap
 import arc/vm/key.{Named}
+import arc/vm/limits
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type JsValue, JsNull, JsObject, JsUndefined, JsUninitialized, NativeFunction,
   ObjectSlot,
 }
+import gleam/bool
 import gleam/option.{Some}
 import gleam/result
 
@@ -154,7 +156,12 @@ pub fn ordinary_has_instance(
             JsObject(proto_ref) ->
               // Step 7: prototype chain walk — stateful so a proxy on
               // the chain fires its getPrototypeOf trap (§10.5.1).
-              instanceof_walk(state, obj_ref, proto_ref)
+              instanceof_walk(
+                state,
+                obj_ref,
+                proto_ref,
+                limits.max_prototype_depth,
+              )
             _ ->
               // Step 5: If P is not an Object, throw TypeError.
               state.type_error_op(
@@ -170,12 +177,21 @@ pub fn ordinary_has_instance(
 
 /// ES2024 §7.3.22 OrdinaryHasInstance ( C, O ) — step 7 (prototype chain
 /// walk). Stateful: each level goes through [[GetPrototypeOf]], which traps
-/// (and may throw) for proxies on the chain.
+/// (and may throw) for proxies on the chain. Bounded by
+/// `limits.max_prototype_depth`: a `getPrototypeOf` trap that returns a fresh
+/// proxy every hop would otherwise spin this tail-recursive walk forever
+/// without ever re-entering the JS call stack, so `max_call_depth` never
+/// trips. V8 throws the same RangeError from its stack-limit check in
+/// `HasInPrototypeChain`.
 fn instanceof_walk(
   state: State(host),
   obj_ref: value.Ref,
   target_proto: value.Ref,
+  fuel: Int,
 ) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
+  use <- bool.lazy_guard(fuel <= 0, fn() {
+    state.range_error_op(state, "Maximum call stack size exceeded")
+  })
   // Step 6a: Let O be ? O.[[GetPrototypeOf]]().
   use #(proto_val, state) <- result.try(object.get_prototype_of_stateful(
     state,
@@ -187,7 +203,7 @@ fn instanceof_walk(
       case proto_ref.id == target_proto.id {
         True -> Ok(#(True, state))
         // Step 6: Repeat — walk up the chain.
-        False -> instanceof_walk(state, proto_ref, target_proto)
+        False -> instanceof_walk(state, proto_ref, target_proto, fuel - 1)
       }
     // Step 6b: O is null (no prototype) → return false.
     _ -> Ok(#(False, state))
