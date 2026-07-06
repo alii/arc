@@ -1247,19 +1247,19 @@ pub fn set_prototype_of_stateful(
   state: State(host),
   ref: Ref,
   new_proto: Option(Ref),
-) -> Result(#(State(host), Result(Nil, SetProtoFail)), #(JsValue, State(host))) {
+) -> Result(#(Result(Nil, SetProtoFail), State(host)), #(JsValue, State(host))) {
   case object.as_proxy(state.heap, ref) {
     Some(slots) -> {
-      use #(state, ok) <- result.map(proxy_set_proto(state, slots, new_proto))
+      use #(ok, state) <- result.map(proxy_set_proto(state, slots, new_proto))
       case ok {
-        True -> #(state, Ok(Nil))
-        False -> #(state, Error(TrapRefused))
+        True -> #(Ok(Nil), state)
+        False -> #(Error(TrapRefused), state)
       }
     }
     None ->
       case ordinary_set_prototype_of(state, ref, new_proto) {
-        Ok(state) -> Ok(#(state, Ok(Nil)))
-        Error(fail) -> Ok(#(state, Error(fail)))
+        Ok(state) -> Ok(#(Ok(Nil), state))
+        Error(fail) -> Ok(#(Error(fail), state))
       }
   }
 }
@@ -2470,7 +2470,7 @@ fn proxy_set_proto(
   state: State(host),
   slots: Option(value.ProxySlots),
   new_proto: Option(Ref),
-) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   let proto_val = case new_proto {
     Some(p) -> JsObject(p)
     None -> JsNull
@@ -2481,15 +2481,15 @@ fn proxy_set_proto(
     proto_val,
   ))
   case fallthrough {
-    None -> Ok(#(state, ok))
+    None -> Ok(#(ok, state))
     // Step 6: no trap → target.[[SetPrototypeOf]](V).
     Some(t) -> {
-      use #(state, status) <- result.map(set_prototype_of_stateful(
+      use #(status, state) <- result.map(set_prototype_of_stateful(
         state,
         t,
         new_proto,
       ))
-      #(state, result.is_ok(status))
+      #(result.is_ok(status), state)
     }
   }
 }
