@@ -979,7 +979,6 @@ pub fn call_native_promise_all(
             values_ref:,
             already_called_ref:,
             resolve: cap.resolve,
-            reject: cap.reject,
           ),
         )
       // Step 4.r: remainingElementsCount += 1.
@@ -1127,7 +1126,6 @@ pub fn call_native_promise_any(
             remaining_ref:,
             errors_ref:,
             already_called_ref:,
-            resolve: cap.resolve,
             reject: cap.reject,
           ),
         )

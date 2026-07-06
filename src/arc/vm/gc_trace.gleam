@@ -1379,24 +1379,14 @@ fn call_native_fn_refs(
       values_ref:,
       already_called_ref:,
       resolve:,
-      reject:,
-    ) ->
-      push_value_ref(
-        reject,
-        push_value_ref(resolve, [
-          remaining_ref,
-          values_ref,
-          already_called_ref,
-          ..acc
-        ]),
-      )
-    value.PromiseAllSettledResolveElement(
-      index: _,
-      remaining_ref:,
-      values_ref:,
-      already_called_ref:,
-      resolve:,
     )
+    | value.PromiseAllSettledResolveElement(
+        index: _,
+        remaining_ref:,
+        values_ref:,
+        already_called_ref:,
+        resolve:,
+      )
     | value.PromiseAllSettledRejectElement(
         index: _,
         remaining_ref:,
@@ -1415,18 +1405,14 @@ fn call_native_fn_refs(
       remaining_ref:,
       errors_ref:,
       already_called_ref:,
-      resolve:,
       reject:,
     ) ->
-      push_value_ref(
-        reject,
-        push_value_ref(resolve, [
-          remaining_ref,
-          errors_ref,
-          already_called_ref,
-          ..acc
-        ]),
-      )
+      push_value_ref(reject, [
+        remaining_ref,
+        errors_ref,
+        already_called_ref,
+        ..acc
+      ])
     value.PromiseKeyedElement(
       index: _,
       remaining_ref:,

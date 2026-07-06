@@ -3257,7 +3257,6 @@ pub type CallNativeFn {
     remaining_ref: Ref,
     errors_ref: Ref,
     already_called_ref: Ref,
-    resolve: JsValue,
     reject: JsValue,
   )
   /// Promise.allKeyed(promises) — await-dictionary proposal.

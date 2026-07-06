@@ -857,7 +857,6 @@ pub fn call_native(
       values_ref:,
       already_called_ref:,
       resolve:,
-      reject: _,
     )) ->
       promises.call_native_promise_all_resolve_element(
         state,
@@ -913,7 +912,6 @@ pub fn call_native(
       remaining_ref:,
       errors_ref:,
       already_called_ref:,
-      resolve: _,
       reject:,
     )) ->
       promises.call_native_promise_any_reject_element(
