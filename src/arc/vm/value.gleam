@@ -2249,13 +2249,6 @@ pub type CollatorUsage {
   UsageSearch
 }
 
-pub fn collator_usage_to_js_string(v: CollatorUsage) -> String {
-  case v {
-    UsageSort -> "sort"
-    UsageSearch -> "search"
-  }
-}
-
 /// `[[Sensitivity]]` (§10.1.2 InitializeCollator). Parsed once at construction
 /// so the comparator dispatches on the variants exhaustively — a misspelled
 /// sensitivity can never reach it and be silently treated as `variant`.
@@ -2264,15 +2257,6 @@ pub type CollatorSensitivity {
   SensAccent
   SensCase
   SensVariant
-}
-
-pub fn collator_sensitivity_to_js_string(v: CollatorSensitivity) -> String {
-  case v {
-    SensBase -> "base"
-    SensAccent -> "accent"
-    SensCase -> "case"
-    SensVariant -> "variant"
-  }
 }
 
 /// `[[CaseFirst]]` (§10.1.2 InitializeCollator, UTS 35 `kf`). Parsed once at
@@ -2285,32 +2269,14 @@ pub type CaseFirst {
   CaseFirstFalse
 }
 
-pub fn case_first_to_js_string(v: CaseFirst) -> String {
-  case v {
-    CaseFirstUpper -> "upper"
-    CaseFirstLower -> "lower"
-    CaseFirstFalse -> "false"
-  }
-}
-
-/// The `kf` u-extension / `caseFirst` option spellings.
-pub fn case_first_from_js_string(s: String) -> Option(CaseFirst) {
-  case s {
-    "upper" -> Some(CaseFirstUpper)
-    "lower" -> Some(CaseFirstLower)
-    "false" -> Some(CaseFirstFalse)
-    _ -> None
-  }
-}
-
 // --- Intl.NumberFormat closed option sets (§15.1) -------------------------
 //
 // Each of these options admits a fixed set of spellings. They are parsed
 // (and validated) exactly once, in the constructors in `intl.gleam`; the
 // formatting engine then dispatches on the variants exhaustively, so an
 // out-of-set value cannot reach — or be silently defaulted by — a formatter.
-// The `*_to_js_string` functions render the spec spelling for
-// resolvedOptions.
+// The spec spellings for resolvedOptions live alongside their consumer in
+// `builtins/intl.gleam`.
 
 /// `[[Style]]` (§15.1.3 SetNumberFormatUnitOptions). The style-conditional
 /// slots live *inside* the variant that selects them: `[[Currency]]` /
@@ -2325,15 +2291,6 @@ pub type NumStyle {
   StyleUnit(unit: String, display: UnitDisplay)
 }
 
-pub fn num_style_to_js_string(v: NumStyle) -> String {
-  case v {
-    StyleDecimal -> "decimal"
-    StylePercent -> "percent"
-    StyleCurrency(..) -> "currency"
-    StyleUnit(..) -> "unit"
-  }
-}
-
 /// `[[Notation]]` — shared by NumberFormat and PluralRules. `[[CompactDisplay]]`
 /// only exists under compact notation, so it lives in that variant.
 pub type Notation {
@@ -2343,26 +2300,10 @@ pub type Notation {
   NotationCompact(display: CompactDisplay)
 }
 
-pub fn notation_to_js_string(v: Notation) -> String {
-  case v {
-    NotationStandard -> "standard"
-    NotationScientific -> "scientific"
-    NotationEngineering -> "engineering"
-    NotationCompact(..) -> "compact"
-  }
-}
-
 /// `[[CompactDisplay]]` — only meaningful under compact notation.
 pub type CompactDisplay {
   CompactShort
   CompactLong
-}
-
-pub fn compact_display_to_js_string(v: CompactDisplay) -> String {
-  case v {
-    CompactShort -> "short"
-    CompactLong -> "long"
-  }
 }
 
 /// `[[SignDisplay]]`.
@@ -2374,16 +2315,6 @@ pub type SignDisplay {
   SignNegative
 }
 
-pub fn sign_display_to_js_string(v: SignDisplay) -> String {
-  case v {
-    SignAuto -> "auto"
-    SignNever -> "never"
-    SignAlways -> "always"
-    SignExceptZero -> "exceptZero"
-    SignNegative -> "negative"
-  }
-}
-
 /// `[[CurrencyDisplay]]` — only meaningful for the currency style.
 pub type CurrencyDisplay {
   CurCode
@@ -2392,26 +2323,10 @@ pub type CurrencyDisplay {
   CurName
 }
 
-pub fn currency_display_to_js_string(v: CurrencyDisplay) -> String {
-  case v {
-    CurCode -> "code"
-    CurSymbol -> "symbol"
-    CurNarrowSymbol -> "narrowSymbol"
-    CurName -> "name"
-  }
-}
-
 /// `[[CurrencySign]]` — only meaningful for the currency style.
 pub type CurrencySign {
   CurStandard
   CurAccounting
-}
-
-pub fn currency_sign_to_js_string(v: CurrencySign) -> String {
-  case v {
-    CurStandard -> "standard"
-    CurAccounting -> "accounting"
-  }
 }
 
 /// `[[UnitDisplay]]` — only meaningful for the unit style.
@@ -2419,14 +2334,6 @@ pub type UnitDisplay {
   UnitShort
   UnitNarrow
   UnitLong
-}
-
-pub fn unit_display_to_js_string(v: UnitDisplay) -> String {
-  case v {
-    UnitShort -> "short"
-    UnitNarrow -> "narrow"
-    UnitLong -> "long"
-  }
 }
 
 /// `[[RoundingMode]]` (§15.5.2).
@@ -2442,20 +2349,6 @@ pub type RoundingMode {
   RoundHalfEven
 }
 
-pub fn rounding_mode_to_js_string(v: RoundingMode) -> String {
-  case v {
-    RoundCeil -> "ceil"
-    RoundFloor -> "floor"
-    RoundExpand -> "expand"
-    RoundTrunc -> "trunc"
-    RoundHalfCeil -> "halfCeil"
-    RoundHalfFloor -> "halfFloor"
-    RoundHalfExpand -> "halfExpand"
-    RoundHalfTrunc -> "halfTrunc"
-    RoundHalfEven -> "halfEven"
-  }
-}
-
 /// `[[RoundingType]]` selection priority (§15.1.6).
 pub type RoundingPriority {
   PriorityAuto
@@ -2463,25 +2356,10 @@ pub type RoundingPriority {
   PriorityLessPrecision
 }
 
-pub fn rounding_priority_to_js_string(v: RoundingPriority) -> String {
-  case v {
-    PriorityAuto -> "auto"
-    PriorityMorePrecision -> "morePrecision"
-    PriorityLessPrecision -> "lessPrecision"
-  }
-}
-
 /// `[[TrailingZeroDisplay]]`.
 pub type TrailingZeroDisplay {
   TzdAuto
   TzdStripIfInteger
-}
-
-pub fn trailing_zero_display_to_js_string(v: TrailingZeroDisplay) -> String {
-  case v {
-    TzdAuto -> "auto"
-    TzdStripIfInteger -> "stripIfInteger"
-  }
 }
 
 /// SetNumberFormatDigitOptions result (§15.1.6) — shared by NumberFormat and
@@ -2560,13 +2438,6 @@ pub type NumericWidth {
   WTwoDigit
 }
 
-pub fn numeric_width_to_js_string(v: NumericWidth) -> String {
-  case v {
-    WNumeric -> "numeric"
-    WTwoDigit -> "2-digit"
-  }
-}
-
 /// Widths of the name components (weekday, era, dayPeriod).
 pub type NameWidth {
   WLong
@@ -2574,25 +2445,10 @@ pub type NameWidth {
   WNarrow
 }
 
-pub fn name_width_to_js_string(v: NameWidth) -> String {
-  case v {
-    WLong -> "long"
-    WShort -> "short"
-    WNarrow -> "narrow"
-  }
-}
-
 /// `month` is the one component that admits both a numeric and a name width.
 pub type MonthWidth {
   MonthNum(NumericWidth)
   MonthName(NameWidth)
-}
-
-pub fn month_width_to_js_string(v: MonthWidth) -> String {
-  case v {
-    MonthNum(w) -> numeric_width_to_js_string(w)
-    MonthName(w) -> name_width_to_js_string(w)
-  }
 }
 
 /// `timeZoneName` widths (§11.1.2).
@@ -2605,32 +2461,12 @@ pub type TimeZoneNameWidth {
   TzLongGeneric
 }
 
-pub fn time_zone_name_width_to_js_string(v: TimeZoneNameWidth) -> String {
-  case v {
-    TzShort -> "short"
-    TzLong -> "long"
-    TzShortOffset -> "shortOffset"
-    TzLongOffset -> "longOffset"
-    TzShortGeneric -> "shortGeneric"
-    TzLongGeneric -> "longGeneric"
-  }
-}
-
 /// `[[HourCycle]]` (§11.1.2).
 pub type HourCycle {
   H11
   H12
   H23
   H24
-}
-
-pub fn hour_cycle_to_js_string(v: HourCycle) -> String {
-  case v {
-    H11 -> "h11"
-    H12 -> "h12"
-    H23 -> "h23"
-    H24 -> "h24"
-  }
 }
 
 /// `[[DateStyle]]`.
@@ -2641,30 +2477,12 @@ pub type DateStyle {
   DsShort
 }
 
-pub fn date_style_to_js_string(v: DateStyle) -> String {
-  case v {
-    DsFull -> "full"
-    DsLong -> "long"
-    DsMedium -> "medium"
-    DsShort -> "short"
-  }
-}
-
 /// `[[TimeStyle]]`.
 pub type TimeStyle {
   TsFull
   TsLong
   TsMedium
   TsShort
-}
-
-pub fn time_style_to_js_string(v: TimeStyle) -> String {
-  case v {
-    TsFull -> "full"
-    TsLong -> "long"
-    TsMedium -> "medium"
-    TsShort -> "short"
-  }
 }
 
 /// The active DateTimeFormat formatting components — which date/time fields
@@ -2798,13 +2616,6 @@ pub type PluralType {
   Ordinal
 }
 
-pub fn plural_type_to_js_string(v: PluralType) -> String {
-  case v {
-    Cardinal -> "cardinal"
-    Ordinal -> "ordinal"
-  }
-}
-
 /// Intl.ListFormat resolved options (§13.1.2).
 pub type ListFormatState {
   ListFormatState(
@@ -2822,14 +2633,6 @@ pub type ListFormatType {
   UnitList
 }
 
-pub fn list_format_type_to_js_string(v: ListFormatType) -> String {
-  case v {
-    Conjunction -> "conjunction"
-    Disjunction -> "disjunction"
-    UnitList -> "unit"
-  }
-}
-
 /// `[[Style]]` (§13.1.2). The engine picks its separator patterns by matching
 /// `#(ListFormatType, ListFormatStyle)` exhaustively, so no combination can
 /// silently fall through to the conjunction/long pattern.
@@ -2837,14 +2640,6 @@ pub type ListFormatStyle {
   LLong
   LShort
   LNarrow
-}
-
-pub fn list_format_style_to_js_string(v: ListFormatStyle) -> String {
-  case v {
-    LLong -> "long"
-    LShort -> "short"
-    LNarrow -> "narrow"
-  }
 }
 
 /// Intl.RelativeTimeFormat resolved options (§17.1.2). `numeric` here is the
@@ -2865,25 +2660,10 @@ pub type RtfStyle {
   RtfNarrow
 }
 
-pub fn rtf_style_to_js_string(v: RtfStyle) -> String {
-  case v {
-    RtfLong -> "long"
-    RtfShort -> "short"
-    RtfNarrow -> "narrow"
-  }
-}
-
 /// `[[Numeric]]` (§17.1.2) — "auto" allows the special names ("yesterday").
 pub type RtfNumeric {
   RtfAlways
   RtfAuto
-}
-
-pub fn rtf_numeric_to_js_string(v: RtfNumeric) -> String {
-  case v {
-    RtfAlways -> "always"
-    RtfAuto -> "auto"
-  }
 }
 
 /// Intl.Segmenter resolved options (§18.1.2).
@@ -2898,14 +2678,6 @@ pub type Granularity {
   GGrapheme
   GWord
   GSentence
-}
-
-pub fn granularity_to_js_string(v: Granularity) -> String {
-  case v {
-    GGrapheme -> "grapheme"
-    GWord -> "word"
-    GSentence -> "sentence"
-  }
 }
 
 /// One segment of a segmented string: its text, its UTF-16 start index in the
@@ -2937,28 +2709,10 @@ pub type DisplayNamesType {
   DnDateTimeField
 }
 
-pub fn display_names_type_to_js_string(v: DisplayNamesType) -> String {
-  case v {
-    DnLanguage -> "language"
-    DnRegion -> "region"
-    DnScript -> "script"
-    DnCurrency -> "currency"
-    DnCalendar -> "calendar"
-    DnDateTimeField -> "dateTimeField"
-  }
-}
-
 /// `[[Fallback]]` (§12.1.2) — what `.of()` returns when there is no name.
 pub type DisplayNamesFallback {
   FbCode
   FbNone
-}
-
-pub fn display_names_fallback_to_js_string(v: DisplayNamesFallback) -> String {
-  case v {
-    FbCode -> "code"
-    FbNone -> "none"
-  }
 }
 
 /// `[[LanguageDisplay]]` (§12.1.2), only meaningful for type "language".
@@ -2967,17 +2721,9 @@ pub type LanguageDisplay {
   LdStandard
 }
 
-pub fn language_display_to_js_string(v: LanguageDisplay) -> String {
-  case v {
-    LdDialect -> "dialect"
-    LdStandard -> "standard"
-  }
-}
-
 /// A DurationFormat unit's resolved `[[<Unit>Style]]`. `DurFractional` is the
 /// internal-only style a sub-second unit folds into when it rides on the
-/// preceding numeric unit's fraction; resolvedOptions spells it "numeric"
-/// (see `duration_unit_style_to_js_string`).
+/// preceding numeric unit's fraction; resolvedOptions spells it "numeric".
 pub type DurationUnitStyle {
   DurLong
   DurShort
@@ -2987,30 +2733,10 @@ pub type DurationUnitStyle {
   DurFractional
 }
 
-/// The resolvedOptions spelling of a `[[<Unit>Style]]`.
-pub fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
-  case v {
-    DurLong -> "long"
-    DurShort -> "short"
-    DurNarrow -> "narrow"
-    DurNumeric -> "numeric"
-    DurTwoDigit -> "2-digit"
-    DurFractional -> "numeric"
-  }
-}
-
 /// A DurationFormat unit's resolved `[[<Unit>Display]]`.
 pub type DurationDisplay {
   DisplayAuto
   DisplayAlways
-}
-
-/// The resolvedOptions spelling of a `[[<Unit>Display]]`.
-pub fn duration_display_to_js_string(v: DurationDisplay) -> String {
-  case v {
-    DisplayAuto -> "auto"
-    DisplayAlways -> "always"
-  }
 }
 
 /// The DurationFormat `style` option (`[[Style]]`).
@@ -3019,16 +2745,6 @@ pub type DurationBaseStyle {
   BsShort
   BsNarrow
   BsDigital
-}
-
-/// The resolvedOptions spelling of a `[[Style]]`.
-pub fn duration_base_style_to_js_string(v: DurationBaseStyle) -> String {
-  case v {
-    BsLong -> "long"
-    BsShort -> "short"
-    BsNarrow -> "narrow"
-    BsDigital -> "digital"
-  }
 }
 
 /// One DurationFormat unit's resolved `[[<Unit>Style]]` / `[[<Unit>Display]]`

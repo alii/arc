@@ -28,38 +28,43 @@ import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/unicode_case
 import arc/vm/value.{
-  type BoundGetterService, type CollatorState, type ConstructibleService,
-  type DateStyle, type DateTimeFormatState, type DisplayNamesState,
-  type DtfComponent, type DtfComponents, type DtfTimeZone,
-  type DurationBaseStyle, type DurationFormatState, type DurationUnitOptions,
+  type BoundGetterService, type CaseFirst, type CollatorSensitivity,
+  type CollatorState, type CollatorUsage, type CompactDisplay,
+  type ConstructibleService, type CurrencyDisplay, type CurrencySign,
+  type DateStyle, type DateTimeFormatState, type DisplayNamesFallback,
+  type DisplayNamesState, type DisplayNamesType, type DtfComponent,
+  type DtfComponents, type DtfTimeZone, type DurationBaseStyle,
+  type DurationDisplay, type DurationFormatState, type DurationUnitOptions,
   type DurationUnitStyle, type Granularity, type HostOverride, type HourCycle,
   type IntlData, type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
-  type IntlService, type JsValue, type ListFormatState, type ListFormatStyle,
-  type LocaleGetterName, type LocaleMethodName, type LocaleState,
-  type MonthWidth, type NameWidth, type Notation, type NumberFormatState,
-  type NumericWidth, type PluralRulesState, type Ref,
-  type RelativeTimeFormatState, type Segment, type SegmentIteratorState,
-  type SegmenterState, type SegmentsState, type TimeStyle,
-  type TimeZoneNameWidth, BgCollator, BgDateTimeFormat, BgNumberFormat,
-  BigIntToLocaleString, BsDigital, BsLong, BsNarrow, BsShort, Cardinal,
-  CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CollatorData, CollatorState,
-  CompactLong, CompactShort, Conjunction, CsCollator, CsDateTimeFormat,
-  CsDisplayNames, CsDurationFormat, CsListFormat, CsLocale, CsNumberFormat,
-  CsPluralRules, CsRelativeTimeFormat, CsSegmenter, CurAccounting, CurCode,
-  CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
-  DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
-  DateToLocaleTimeString, Disjunction, Dispatch, DisplayAlways, DisplayAuto,
-  DisplayNamesData, DisplayNamesState, DnCalendar, DnCurrency, DnDateTimeField,
-  DnLanguage, DnRegion, DnScript, DsFull, DsLong, DsMedium, DsShort,
-  DtfComponents, DtfDay, DtfDayPeriod, DtfEra, DtfFractionalSecondDigits,
-  DtfHour, DtfMinute, DtfMonth, DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear,
-  DurFractional, DurLong, DurNarrow, DurNumeric, DurShort, DurTwoDigit,
-  DurationFormatData, DurationFormatState, DurationUnitOptions, FbCode, FbNone,
-  FixedZone, GGrapheme, GSentence, GWord, GroupingAlways, GroupingAuto,
-  GroupingMin2, GroupingNever, H11, H12, H23, H24, HostZone, IntlBoundGetter,
-  IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
-  IntlDigitOptions, IntlDisplayNames, IntlDurationFormat, IntlFormat,
-  IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
+  type IntlService, type JsValue, type LanguageDisplay, type ListFormatState,
+  type ListFormatStyle, type ListFormatType, type LocaleGetterName,
+  type LocaleMethodName, type LocaleState, type MonthWidth, type NameWidth,
+  type Notation, type NumStyle, type NumberFormatState, type NumericWidth,
+  type PluralRulesState, type PluralType, type Ref, type RelativeTimeFormatState,
+  type RoundingMode, type RoundingPriority, type RtfNumeric, type RtfStyle,
+  type Segment, type SegmentIteratorState, type SegmenterState,
+  type SegmentsState, type SignDisplay, type TimeStyle, type TimeZoneNameWidth,
+  type TrailingZeroDisplay, type UnitDisplay, BgCollator, BgDateTimeFormat,
+  BgNumberFormat, BigIntToLocaleString, BsDigital, BsLong, BsNarrow, BsShort,
+  Cardinal, CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CollatorData,
+  CollatorState, CompactLong, CompactShort, Conjunction, CsCollator,
+  CsDateTimeFormat, CsDisplayNames, CsDurationFormat, CsListFormat, CsLocale,
+  CsNumberFormat, CsPluralRules, CsRelativeTimeFormat, CsSegmenter,
+  CurAccounting, CurCode, CurName, CurNarrowSymbol, CurStandard, CurSymbol,
+  DateTimeFormatData, DateTimeFormatState, DateToLocaleDateString,
+  DateToLocaleString, DateToLocaleTimeString, Disjunction, Dispatch,
+  DisplayAlways, DisplayAuto, DisplayNamesData, DisplayNamesState, DnCalendar,
+  DnCurrency, DnDateTimeField, DnLanguage, DnRegion, DnScript, DsFull, DsLong,
+  DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
+  DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
+  DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
+  DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
+  DurationUnitOptions, FbCode, FbNone, FixedZone, GGrapheme, GSentence, GWord,
+  GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, H11, H12, H23, H24,
+  HostZone, IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
+  IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
+  IntlFormat, IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
   IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat, IntlLocale,
   IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat,
   IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
@@ -294,7 +299,7 @@ pub fn init(
     common.alloc_proto(h, Some(object_proto), dict.new())
   let h = add_named_properties(h, segments_proto, seg_containing)
   let #(h, seg_iter_fn) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       IntlNative(IntlSegmentsIterator(seg_iter_proto)),
@@ -326,7 +331,7 @@ pub fn init(
 
   // --- Namespace object ---
   let #(h, get_canonical_locales) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       IntlNative(IntlGetCanonicalLocales),
@@ -334,7 +339,7 @@ pub fn init(
       1,
     )
   let #(h, supported_values_of) =
-    common.alloc_native_fn(
+    common.alloc_rooted_native_fn(
       h,
       function_proto,
       IntlNative(IntlSupportedValuesOf),
@@ -1926,7 +1931,7 @@ fn collator_state(
       ext_kws,
       "kf",
       case_first_opt,
-      value.case_first_from_js_string,
+      case_first_from_js_string,
       CaseFirstFalse,
     )
   use #(sensitivity, state) <- result.try(get_enum_opt(
@@ -1955,7 +1960,7 @@ fn collator_state(
         True -> "true"
         False -> "false"
       }),
-      #("kf", kf_from_ext, value.case_first_to_js_string(case_first)),
+      #("kf", kf_from_ext, case_first_to_js_string(case_first)),
     ])
   Ok(#(
     CollatorState(
@@ -2612,7 +2617,7 @@ fn dtf_state_required(
     build_resolved_locale(data_locale, [
       #("ca", ca_from_ext, calendar),
       #("nu", nu_from_ext, nu),
-      #("hc", hc_from_ext && hour12 == None, value.hour_cycle_to_js_string(hc)),
+      #("hc", hc_from_ext && hour12 == None, hour_cycle_to_js_string(hc)),
     ])
   // timeZone
   use #(tz_v, state) <- result.try(opt_get(state, opts, "timeZone"))
@@ -3833,6 +3838,293 @@ fn duration_unit_list(
 // resolvedOptions
 // ============================================================================
 
+// The `*_to_js_string` renderers below produce the ECMA-402 spec spelling of
+// each closed option enum for `resolvedOptions()`. The enums themselves live
+// in `value.gleam` (they hang off ExoticKind → HeapSlot); the spellings live
+// here alongside their sole consumer.
+
+fn collator_usage_to_js_string(v: CollatorUsage) -> String {
+  case v {
+    UsageSort -> "sort"
+    UsageSearch -> "search"
+  }
+}
+
+fn collator_sensitivity_to_js_string(v: CollatorSensitivity) -> String {
+  case v {
+    SensBase -> "base"
+    SensAccent -> "accent"
+    SensCase -> "case"
+    SensVariant -> "variant"
+  }
+}
+
+fn case_first_to_js_string(v: CaseFirst) -> String {
+  case v {
+    CaseFirstUpper -> "upper"
+    CaseFirstLower -> "lower"
+    CaseFirstFalse -> "false"
+  }
+}
+
+/// The `kf` u-extension / `caseFirst` option spellings.
+fn case_first_from_js_string(s: String) -> Option(CaseFirst) {
+  case s {
+    "upper" -> Some(CaseFirstUpper)
+    "lower" -> Some(CaseFirstLower)
+    "false" -> Some(CaseFirstFalse)
+    _ -> None
+  }
+}
+
+fn num_style_to_js_string(v: NumStyle) -> String {
+  case v {
+    StyleDecimal -> "decimal"
+    StylePercent -> "percent"
+    StyleCurrency(..) -> "currency"
+    StyleUnit(..) -> "unit"
+  }
+}
+
+fn notation_to_js_string(v: Notation) -> String {
+  case v {
+    NotationStandard -> "standard"
+    NotationScientific -> "scientific"
+    NotationEngineering -> "engineering"
+    NotationCompact(..) -> "compact"
+  }
+}
+
+fn compact_display_to_js_string(v: CompactDisplay) -> String {
+  case v {
+    CompactShort -> "short"
+    CompactLong -> "long"
+  }
+}
+
+fn sign_display_to_js_string(v: SignDisplay) -> String {
+  case v {
+    SignAuto -> "auto"
+    SignNever -> "never"
+    SignAlways -> "always"
+    SignExceptZero -> "exceptZero"
+    SignNegative -> "negative"
+  }
+}
+
+fn currency_display_to_js_string(v: CurrencyDisplay) -> String {
+  case v {
+    CurCode -> "code"
+    CurSymbol -> "symbol"
+    CurNarrowSymbol -> "narrowSymbol"
+    CurName -> "name"
+  }
+}
+
+fn currency_sign_to_js_string(v: CurrencySign) -> String {
+  case v {
+    CurStandard -> "standard"
+    CurAccounting -> "accounting"
+  }
+}
+
+fn unit_display_to_js_string(v: UnitDisplay) -> String {
+  case v {
+    UnitShort -> "short"
+    UnitNarrow -> "narrow"
+    UnitLong -> "long"
+  }
+}
+
+fn rounding_mode_to_js_string(v: RoundingMode) -> String {
+  case v {
+    RoundCeil -> "ceil"
+    RoundFloor -> "floor"
+    RoundExpand -> "expand"
+    RoundTrunc -> "trunc"
+    RoundHalfCeil -> "halfCeil"
+    RoundHalfFloor -> "halfFloor"
+    RoundHalfExpand -> "halfExpand"
+    RoundHalfTrunc -> "halfTrunc"
+    RoundHalfEven -> "halfEven"
+  }
+}
+
+fn rounding_priority_to_js_string(v: RoundingPriority) -> String {
+  case v {
+    PriorityAuto -> "auto"
+    PriorityMorePrecision -> "morePrecision"
+    PriorityLessPrecision -> "lessPrecision"
+  }
+}
+
+fn trailing_zero_display_to_js_string(v: TrailingZeroDisplay) -> String {
+  case v {
+    TzdAuto -> "auto"
+    TzdStripIfInteger -> "stripIfInteger"
+  }
+}
+
+fn numeric_width_to_js_string(v: NumericWidth) -> String {
+  case v {
+    WNumeric -> "numeric"
+    WTwoDigit -> "2-digit"
+  }
+}
+
+fn name_width_to_js_string(v: NameWidth) -> String {
+  case v {
+    WLong -> "long"
+    WShort -> "short"
+    WNarrow -> "narrow"
+  }
+}
+
+fn month_width_to_js_string(v: MonthWidth) -> String {
+  case v {
+    MonthNum(w) -> numeric_width_to_js_string(w)
+    MonthName(w) -> name_width_to_js_string(w)
+  }
+}
+
+fn time_zone_name_width_to_js_string(v: TimeZoneNameWidth) -> String {
+  case v {
+    TzShort -> "short"
+    TzLong -> "long"
+    TzShortOffset -> "shortOffset"
+    TzLongOffset -> "longOffset"
+    TzShortGeneric -> "shortGeneric"
+    TzLongGeneric -> "longGeneric"
+  }
+}
+
+fn hour_cycle_to_js_string(v: HourCycle) -> String {
+  case v {
+    H11 -> "h11"
+    H12 -> "h12"
+    H23 -> "h23"
+    H24 -> "h24"
+  }
+}
+
+fn date_style_to_js_string(v: DateStyle) -> String {
+  case v {
+    DsFull -> "full"
+    DsLong -> "long"
+    DsMedium -> "medium"
+    DsShort -> "short"
+  }
+}
+
+fn time_style_to_js_string(v: TimeStyle) -> String {
+  case v {
+    TsFull -> "full"
+    TsLong -> "long"
+    TsMedium -> "medium"
+    TsShort -> "short"
+  }
+}
+
+fn plural_type_to_js_string(v: PluralType) -> String {
+  case v {
+    Cardinal -> "cardinal"
+    Ordinal -> "ordinal"
+  }
+}
+
+fn list_format_type_to_js_string(v: ListFormatType) -> String {
+  case v {
+    Conjunction -> "conjunction"
+    Disjunction -> "disjunction"
+    UnitList -> "unit"
+  }
+}
+
+fn list_format_style_to_js_string(v: ListFormatStyle) -> String {
+  case v {
+    LLong -> "long"
+    LShort -> "short"
+    LNarrow -> "narrow"
+  }
+}
+
+fn rtf_style_to_js_string(v: RtfStyle) -> String {
+  case v {
+    RtfLong -> "long"
+    RtfShort -> "short"
+    RtfNarrow -> "narrow"
+  }
+}
+
+fn rtf_numeric_to_js_string(v: RtfNumeric) -> String {
+  case v {
+    RtfAlways -> "always"
+    RtfAuto -> "auto"
+  }
+}
+
+fn granularity_to_js_string(v: Granularity) -> String {
+  case v {
+    GGrapheme -> "grapheme"
+    GWord -> "word"
+    GSentence -> "sentence"
+  }
+}
+
+fn display_names_type_to_js_string(v: DisplayNamesType) -> String {
+  case v {
+    DnLanguage -> "language"
+    DnRegion -> "region"
+    DnScript -> "script"
+    DnCurrency -> "currency"
+    DnCalendar -> "calendar"
+    DnDateTimeField -> "dateTimeField"
+  }
+}
+
+fn display_names_fallback_to_js_string(v: DisplayNamesFallback) -> String {
+  case v {
+    FbCode -> "code"
+    FbNone -> "none"
+  }
+}
+
+fn language_display_to_js_string(v: LanguageDisplay) -> String {
+  case v {
+    LdDialect -> "dialect"
+    LdStandard -> "standard"
+  }
+}
+
+/// The resolvedOptions spelling of a `[[<Unit>Style]]`. `DurFractional` is
+/// internal-only and surfaces as "numeric".
+fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
+  case v {
+    DurLong -> "long"
+    DurShort -> "short"
+    DurNarrow -> "narrow"
+    DurNumeric -> "numeric"
+    DurTwoDigit -> "2-digit"
+    DurFractional -> "numeric"
+  }
+}
+
+fn duration_display_to_js_string(v: DurationDisplay) -> String {
+  case v {
+    DisplayAuto -> "auto"
+    DisplayAlways -> "always"
+  }
+}
+
+fn duration_base_style_to_js_string(v: DurationBaseStyle) -> String {
+  case v {
+    BsLong -> "long"
+    BsShort -> "short"
+    BsNarrow -> "narrow"
+    BsDigital -> "digital"
+  }
+}
+
 fn resolved_options(
   service: IntlService,
   this: JsValue,
@@ -3852,15 +4144,15 @@ fn resolved_options(
       LocaleData(l) -> #(state, [#("locale", JsString(l.locale))])
       CollatorData(c) -> #(state, [
         #("locale", JsString(c.locale)),
-        #("usage", JsString(value.collator_usage_to_js_string(c.usage))),
+        #("usage", JsString(collator_usage_to_js_string(c.usage))),
         #(
           "sensitivity",
-          JsString(value.collator_sensitivity_to_js_string(c.sensitivity)),
+          JsString(collator_sensitivity_to_js_string(c.sensitivity)),
         ),
         #("ignorePunctuation", JsBool(c.ignore_punctuation)),
         #("collation", JsString(c.collation)),
         #("numeric", JsBool(c.numeric)),
-        #("caseFirst", JsString(value.case_first_to_js_string(c.case_first))),
+        #("caseFirst", JsString(case_first_to_js_string(c.case_first))),
       ])
       NumberFormatData(nf) -> {
         let dg = nf.digits
@@ -3886,7 +4178,7 @@ fn resolved_options(
           present_pairs([
             #("locale", Some(JsString(nf.locale))),
             #("numberingSystem", Some(JsString(nf.numbering_system))),
-            #("style", Some(JsString(value.num_style_to_js_string(nf.style)))),
+            #("style", Some(JsString(num_style_to_js_string(nf.style)))),
             #("currency", currency),
             #("currencyDisplay", currency_display),
             #("currencySign", currency_sign),
@@ -3894,14 +4186,11 @@ fn resolved_options(
             #("unitDisplay", unit_display),
             ..digit_option_pairs(dg, [
               #("useGrouping", Some(use_grouping_js(nf.use_grouping))),
-              #(
-                "notation",
-                Some(JsString(value.notation_to_js_string(nf.notation))),
-              ),
+              #("notation", Some(JsString(notation_to_js_string(nf.notation)))),
               #("compactDisplay", compact_display_of(nf.notation)),
               #(
                 "signDisplay",
-                Some(JsString(value.sign_display_to_js_string(nf.sign_display))),
+                Some(JsString(sign_display_to_js_string(nf.sign_display))),
               ),
               ..digit_rounding_pairs(dg)
             ])
@@ -3918,7 +4207,7 @@ fn resolved_options(
           #(
             "hourCycle",
             option.map(d.hour_cycle, fn(hc) {
-              JsString(value.hour_cycle_to_js_string(hc))
+              JsString(hour_cycle_to_js_string(hc))
             }),
           ),
           #(
@@ -3947,13 +4236,13 @@ fn resolved_options(
           #(
             "dateStyle",
             option.map(d.date_style, fn(s) {
-              JsString(value.date_style_to_js_string(s))
+              JsString(date_style_to_js_string(s))
             }),
           ),
           #(
             "timeStyle",
             option.map(d.time_style, fn(s) {
-              JsString(value.time_style_to_js_string(s))
+              JsString(time_style_to_js_string(s))
             }),
           ),
         ]),
@@ -3971,14 +4260,8 @@ fn resolved_options(
           state,
           present_pairs([
             #("locale", Some(JsString(p.locale))),
-            #(
-              "type",
-              Some(JsString(value.plural_type_to_js_string(p.plural_type))),
-            ),
-            #(
-              "notation",
-              Some(JsString(value.notation_to_js_string(p.notation))),
-            ),
+            #("type", Some(JsString(plural_type_to_js_string(p.plural_type)))),
+            #("notation", Some(JsString(notation_to_js_string(p.notation)))),
             #("compactDisplay", compact_display_of(p.notation)),
             ..digit_option_pairs(dg, [
               #("pluralCategories", Some(cats)),
@@ -3989,43 +4272,36 @@ fn resolved_options(
       }
       ListFormatData(l) -> #(state, [
         #("locale", JsString(l.locale)),
-        #("type", JsString(value.list_format_type_to_js_string(l.list_type))),
-        #("style", JsString(value.list_format_style_to_js_string(l.style))),
+        #("type", JsString(list_format_type_to_js_string(l.list_type))),
+        #("style", JsString(list_format_style_to_js_string(l.style))),
       ])
       RelativeTimeFormatData(r) -> #(state, [
         #("locale", JsString(r.locale)),
-        #("style", JsString(value.rtf_style_to_js_string(r.style))),
-        #("numeric", JsString(value.rtf_numeric_to_js_string(r.numeric))),
+        #("style", JsString(rtf_style_to_js_string(r.style))),
+        #("numeric", JsString(rtf_numeric_to_js_string(r.numeric))),
         #("numberingSystem", JsString(r.numbering_system)),
       ])
       SegmenterData(s) -> #(state, [
         #("locale", JsString(s.locale)),
-        #(
-          "granularity",
-          JsString(value.granularity_to_js_string(s.granularity)),
-        ),
+        #("granularity", JsString(granularity_to_js_string(s.granularity))),
       ])
       DisplayNamesData(d) -> #(
         state,
         present_pairs([
           #("locale", Some(JsString(d.locale))),
-          #("style", Some(JsString(value.name_width_to_js_string(d.style)))),
+          #("style", Some(JsString(name_width_to_js_string(d.style)))),
           #(
             "type",
-            Some(
-              JsString(value.display_names_type_to_js_string(d.display_type)),
-            ),
+            Some(JsString(display_names_type_to_js_string(d.display_type))),
           ),
           #(
             "fallback",
-            Some(
-              JsString(value.display_names_fallback_to_js_string(d.fallback)),
-            ),
+            Some(JsString(display_names_fallback_to_js_string(d.fallback))),
           ),
           #(
             "languageDisplay",
             option.map(d.language_display, fn(ld) {
-              JsString(value.language_display_to_js_string(ld))
+              JsString(language_display_to_js_string(ld))
             }),
           ),
         ]),
@@ -4036,19 +4312,16 @@ fn resolved_options(
           [
             #("locale", JsString(df.locale)),
             #("numberingSystem", JsString(df.numbering_system)),
-            #(
-              "style",
-              JsString(value.duration_base_style_to_js_string(df.style)),
-            ),
+            #("style", JsString(duration_base_style_to_js_string(df.style))),
           ],
           list.flat_map(duration_unit_list(df), fn(u) {
             let #(unit, o) = u
             let name = duration_unit_js_name(unit)
             [
-              #(name, JsString(value.duration_unit_style_to_js_string(o.style))),
+              #(name, JsString(duration_unit_style_to_js_string(o.style))),
               #(
                 name <> "Display",
-                JsString(value.duration_display_to_js_string(o.display)),
+                JsString(duration_display_to_js_string(o.display)),
               ),
             ]
           }),
@@ -4078,15 +4351,15 @@ fn use_grouping_js(g: value.IntlUseGrouping) -> JsValue {
 }
 
 fn currency_display_js(v: value.CurrencyDisplay) -> JsValue {
-  JsString(value.currency_display_to_js_string(v))
+  JsString(currency_display_to_js_string(v))
 }
 
 fn currency_sign_js(v: value.CurrencySign) -> JsValue {
-  JsString(value.currency_sign_to_js_string(v))
+  JsString(currency_sign_to_js_string(v))
 }
 
 fn unit_display_js(v: value.UnitDisplay) -> JsValue {
-  JsString(value.unit_display_to_js_string(v))
+  JsString(unit_display_to_js_string(v))
 }
 
 /// `[[CompactDisplay]]` as its resolvedOptions value — present only when the
@@ -4094,25 +4367,25 @@ fn unit_display_js(v: value.UnitDisplay) -> JsValue {
 fn compact_display_of(n: Notation) -> Option(JsValue) {
   case n {
     NotationCompact(display:) ->
-      Some(JsString(value.compact_display_to_js_string(display)))
+      Some(JsString(compact_display_to_js_string(display)))
     NotationStandard | NotationScientific | NotationEngineering -> None
   }
 }
 
 fn name_width_js(v: NameWidth) -> JsValue {
-  JsString(value.name_width_to_js_string(v))
+  JsString(name_width_to_js_string(v))
 }
 
 fn numeric_width_js(v: NumericWidth) -> JsValue {
-  JsString(value.numeric_width_to_js_string(v))
+  JsString(numeric_width_to_js_string(v))
 }
 
 fn month_width_js(v: MonthWidth) -> JsValue {
-  JsString(value.month_width_to_js_string(v))
+  JsString(month_width_to_js_string(v))
 }
 
 fn tz_name_width_js(v: TimeZoneNameWidth) -> JsValue {
-  JsString(value.time_zone_name_width_to_js_string(v))
+  JsString(time_zone_name_width_to_js_string(v))
 }
 
 /// The integer/fraction/significant digit resolvedOptions pairs shared by
@@ -4152,18 +4425,16 @@ fn digit_rounding_pairs(
     #("roundingIncrement", Some(value.from_int(dg.rounding_increment))),
     #(
       "roundingMode",
-      Some(JsString(value.rounding_mode_to_js_string(dg.rounding_mode))),
+      Some(JsString(rounding_mode_to_js_string(dg.rounding_mode))),
     ),
     #(
       "roundingPriority",
-      Some(JsString(value.rounding_priority_to_js_string(dg.rounding_priority))),
+      Some(JsString(rounding_priority_to_js_string(dg.rounding_priority))),
     ),
     #(
       "trailingZeroDisplay",
       Some(
-        JsString(value.trailing_zero_display_to_js_string(
-          dg.trailing_zero_display,
-        )),
+        JsString(trailing_zero_display_to_js_string(dg.trailing_zero_display)),
       ),
     ),
   ]
@@ -4236,7 +4507,7 @@ fn cached_bound_fn(
     Some(fn_ref) -> Ok(#(JsObject(fn_ref), state))
     None -> {
       let #(heap, fn_ref) =
-        common.alloc_native_fn(
+        common.alloc_rooted_native_fn(
           state.heap,
           state.builtins.function.prototype,
           IntlNative(IntlBoundMethod(service:, target:)),
