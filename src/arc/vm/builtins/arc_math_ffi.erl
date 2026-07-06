@@ -39,16 +39,28 @@ sinh(X) ->
     catch error:badarith -> signed_infinity(X)
     end.
 
-%% math:pow/2 raises badarith in exactly two situations:
+%% math:pow/2 raises badarith in exactly three situations:
+%%   * a ±0.0 base with a negative Exp (the true result is ±Infinity),
 %%   * the true result's magnitude overflows a 64-bit float, or
 %%   * the base is negative with a non-integer Exp (no real result).
 %% Distinguish them so overflow gets the sign the real result would have
-%% had: negative iff the base is negative and the (integer) exponent is odd.
+%% had (negative iff the base is negative and the integer exponent is odd),
+%% and so a -0.0 base is not mistaken for the negative-non-integer NaN case
+%% via its sign bit — §6.1.6.1.3: (-0) ** -0.5 is +Infinity, not NaN.
 pow(Base, Exp) ->
     try {finite, math:pow(Base, Exp)}
     catch error:badarith -> pow_non_finite(Base, Exp)
     end.
 
+%% Zero base only reaches here with a negative Exp (a positive/zero Exp
+%% returns a finite ±0 or 1 and never badariths). §6.1.6.1.3 steps 12–15:
+%% -Infinity iff base is -0 AND Exp is an odd integer, otherwise +Infinity.
+pow_non_finite(Base, Exp) when Base == 0.0 ->
+    T = trunc(Exp),
+    case neg_sign(Base) andalso T == Exp andalso T rem 2 =/= 0 of
+        true -> neg_infinity;
+        false -> infinity
+    end;
 pow_non_finite(Base, Exp) ->
     case neg_sign(Base) of
         true ->
