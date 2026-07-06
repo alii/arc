@@ -4,6 +4,7 @@ import arc/vm/builtins/iter_protocol
 import arc/vm/completion.{
   type Outcome, Completed, NormalCompletion, Suspended, ThrowCompletion,
 }
+import arc/vm/exec/frame
 import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
@@ -18,7 +19,6 @@ import arc/vm/value.{
   DelegateReturn, DelegateThrow, GeneratorObject, GeneratorSlot, JsObject,
   JsUndefined, ObjectSlot, TryFrame,
 }
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
@@ -32,6 +32,14 @@ pub type ExecuteInnerFn(host) =
 pub type UnwindToCatchFn(host) =
   fn(State(host), JsValue) -> Option(State(host))
 
+/// The pair of interpreter callbacks every generator / async-generator /
+/// async-function driver threads through its whole call graph. A record so a
+/// call site names which is which — the two share their first parameter type,
+/// so a positional swap would silently type-check.
+pub type Drive(host) {
+  Drive(execute_inner: ExecuteInnerFn(host), unwind_to_catch: UnwindToCatchFn(host))
+}
+
 // ============================================================================
 // Generator native function implementations
 // ============================================================================
@@ -43,11 +51,10 @@ pub fn call_native_generator_next(
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  _unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   let next_arg = helpers.first_arg_or_undefined(args)
-  resume_generator_next(state, this, next_arg, execute_inner)
+  resume_generator_next(state, this, next_arg, drive.execute_inner)
   |> alloc_iter_result(rest_stack)
 }
 
@@ -108,8 +115,7 @@ pub fn call_native_generator_return(
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   let return_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
@@ -148,8 +154,7 @@ pub fn call_native_generator_return(
                 DelegateReturn,
                 return_val,
                 rest_stack,
-                execute_inner,
-                unwind_to_catch,
+                drive,
                 fn(state) {
                   // Inner iterator has no .return — §27.5.3.8 step 7.c.iii:
                   // exit delegation and let the outer return proceed normally.
@@ -159,21 +164,12 @@ pub fn call_native_generator_return(
                     frame,
                     return_val,
                     rest_stack,
-                    execute_inner,
-                    unwind_to_catch,
+                    drive,
                   )
                 },
               )
             None ->
-              do_return_resume(
-                state,
-                gen,
-                frame,
-                return_val,
-                rest_stack,
-                execute_inner,
-                unwind_to_catch,
-              )
+              do_return_resume(state, gen, frame, return_val, rest_stack, drive)
           }
       }
     None -> {
@@ -190,12 +186,11 @@ fn do_return_resume(
   frame: value.SuspendedFrame,
   return_val: JsValue,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   let gen_exec_state =
     build_resumed_state(state, gen, frame, frame.stack, frame.pc)
-  unwind_return(gen_exec_state, return_val, execute_inner, unwind_to_catch)
+  unwind_return(gen_exec_state, return_val, drive)
   |> settle_completion(state, gen)
   |> alloc_iter_result(rest_stack)
 }
@@ -206,8 +201,7 @@ pub fn call_native_generator_throw(
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   let throw_val = helpers.first_arg_or_undefined(args)
   case get_generator_data(state.heap, this) {
@@ -230,8 +224,7 @@ pub fn call_native_generator_throw(
                 DelegateThrow,
                 throw_val,
                 rest_stack,
-                execute_inner,
-                unwind_to_catch,
+                drive,
                 fn(state) {
                   // Inner iterator has no .throw — §27.5.3.8 step 7.b.iii-vi:
                   // ? IteratorClose(iteratorRecord, NormalCompletion(empty)),
@@ -258,10 +251,15 @@ pub fn call_native_generator_throw(
               let gen_exec_state =
                 build_resumed_state(state, gen, frame, frame.stack, frame.pc)
               // Try to unwind to a catch handler within the generator
-              case unwind_to_catch(gen_exec_state, throw_val) {
+              case drive.unwind_to_catch(gen_exec_state, throw_val) {
                 Some(caught_state) ->
                   // The generator caught it -- continue executing
-                  run_to_completion(caught_state, state, gen, execute_inner)
+                  run_to_completion(
+                    caught_state,
+                    state,
+                    gen,
+                    drive.execute_inner,
+                  )
                   |> alloc_iter_result(rest_stack)
                 None ->
                   // No catch handler -- mark completed and propagate the throw.
@@ -424,8 +422,7 @@ fn forward_delegate(
   method: DelegateMethod,
   arg: JsValue,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
   on_missing: fn(State(host)) -> Result(State(host), StepExit(host)),
 ) -> Result(State(host), StepExit(host)) {
   let iter = JsObject(iter_ref)
@@ -480,8 +477,7 @@ fn forward_delegate(
                 val,
                 method,
                 rest_stack,
-                execute_inner,
-                unwind_to_catch,
+                drive,
               )
           }
         }
@@ -508,8 +504,7 @@ fn resume_after_delegate(
   val: JsValue,
   method: DelegateMethod,
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   case method {
     DelegateReturn ->
@@ -517,15 +512,7 @@ fn resume_after_delegate(
       // carrying the inner result's value. Route it through the SAME unwinder
       // as the non-delegating / no-.return paths so an enclosing try/finally
       // (or a finally that itself yields) is not skipped.
-      do_return_resume(
-        state,
-        gen,
-        frame,
-        val,
-        rest_stack,
-        execute_inner,
-        unwind_to_catch,
-      )
+      do_return_resume(state, gen, frame, val, rest_stack, drive)
     DelegateThrow -> {
       // .throw forwarded and inner is done — continue outer body past
       // YieldStar with val on stack (the yield* expression's value).
@@ -535,7 +522,7 @@ fn resume_after_delegate(
       }
       let resumed =
         build_resumed_state(state, gen, frame, stack_after, frame.pc + 1)
-      run_to_completion(resumed, state, gen, execute_inner)
+      run_to_completion(resumed, state, gen, drive.execute_inner)
       |> alloc_iter_result(rest_stack)
     }
   }
@@ -655,8 +642,7 @@ fn find_next_return_handler(
 pub fn unwind_return(
   gen_state: State(host),
   return_val: JsValue,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(#(Outcome, State(host)), state.VmError) {
   case find_next_return_handler(gen_state.try_stack) {
     // No more finally blocks / iterator guards: the return completes the body.
@@ -669,7 +655,7 @@ pub fn unwind_return(
     // with a throw completion that unwinds through the REMAINING frames
     // (catchable by the generator's own try/catch).
     Some(IterCloseHandler(stack_depth, remaining_try)) -> {
-      let restored_stack = truncate_stack(gen_state.stack, stack_depth)
+      let restored_stack = frame.truncate_stack(gen_state.stack, stack_depth)
       case restored_stack {
         [JsObject(_) as slot, ..base] -> {
           let st = State(..gen_state, try_stack: remaining_try, stack: base)
@@ -677,15 +663,9 @@ pub fn unwind_return(
           // wrapper (cached `next`) — close the REAL iterator behind it.
           case iter_protocol.unwrap_record_value(st.heap, slot) {
             JsObject(iter_ref) ->
-              close_for_return(
-                st,
-                iter_ref,
-                return_val,
-                execute_inner,
-                unwind_to_catch,
-              )
+              close_for_return(st, iter_ref, return_val, drive)
             // Not an object (defensive) — nothing to close.
-            _ -> unwind_return(st, return_val, execute_inner, unwind_to_catch)
+            _ -> unwind_return(st, return_val, drive)
           }
         }
         // Slot is not a live iterator (for-of's [[Done]] sentinel writes
@@ -694,15 +674,13 @@ pub fn unwind_return(
           unwind_return(
             State(..gen_state, try_stack: remaining_try, stack: base),
             return_val,
-            execute_inner,
-            unwind_to_catch,
+            drive,
           )
         [] ->
           unwind_return(
             State(..gen_state, try_stack: remaining_try, stack: []),
             return_val,
-            execute_inner,
-            unwind_to_catch,
+            drive,
           )
       }
     }
@@ -711,7 +689,7 @@ pub fn unwind_return(
       // the gosub calling convention: stack = [retpc, slot, ..base]. The slot
       // is the return value; retpc = -1 is a sentinel that Ret recognises as
       // "complete the frame with slot" (interpreter.gleam Ret case).
-      let restored_stack = truncate_stack(gen_state.stack, stack_depth)
+      let restored_stack = frame.truncate_stack(gen_state.stack, stack_depth)
       let finally_state =
         State(
           ..gen_state,
@@ -719,7 +697,7 @@ pub fn unwind_return(
           stack: [value.from_int(-1), return_val, ..restored_stack],
           pc: fin_label,
         )
-      case execute_inner(finally_state) {
+      case drive.execute_inner(finally_state) {
         Ok(#(Completed(NormalCompletion(val)), final_state)) -> {
           // Finally completed normally. `val` is what the frame completed
           // with: the -1 sentinel makes Ret hand back the slot value, so a
@@ -736,7 +714,7 @@ pub fn unwind_return(
               eval_env: final_state.eval_env,
               current_line: final_state.current_line,
             )
-          unwind_return(updated_gen_state, val, execute_inner, unwind_to_catch)
+          unwind_return(updated_gen_state, val, drive)
         }
         // Yield / await inside the finally block (the body suspends there),
         // a throw out of it, or a VM error: that IS the body's outcome —
@@ -756,15 +734,14 @@ fn close_for_return(
   st: State(host),
   iter_ref: Ref,
   return_val: JsValue,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(#(Outcome, State(host)), state.VmError) {
   let iter = JsObject(iter_ref)
   let continue_return = fn(st: State(host)) {
-    unwind_return(st, return_val, execute_inner, unwind_to_catch)
+    unwind_return(st, return_val, drive)
   }
   let continue_throw = fn(st: State(host), thrown: JsValue) {
-    replace_return_with_throw(st, thrown, execute_inner, unwind_to_catch)
+    replace_return_with_throw(st, thrown, drive)
   }
   case object_ops.get_value(st, iter_ref, Named("return"), iter) {
     Ok(#(JsUndefined, st)) | Ok(#(value.JsNull, st)) -> continue_return(st)
@@ -793,15 +770,14 @@ fn close_for_return(
 fn replace_return_with_throw(
   gen_state: State(host),
   thrown: JsValue,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(#(Outcome, State(host)), state.VmError) {
   // unwind_to_catch expects the throw site's stack; gen_state.stack is
   // already truncated to the frame base and try_stack holds the remaining
   // frames, so the unwind lands on the next handler in spec order.
-  case unwind_to_catch(gen_state, thrown) {
+  case drive.unwind_to_catch(gen_state, thrown) {
     // The generator caught it — continue executing from the handler.
-    Some(caught_state) -> execute_inner(caught_state)
+    Some(caught_state) -> drive.execute_inner(caught_state)
     None -> Ok(#(Completed(ThrowCompletion(thrown)), gen_state))
   }
 }
@@ -818,13 +794,4 @@ pub fn suspended_frame(suspended: State(host)) -> value.SuspendedFrame {
     eval_env: suspended.eval_env,
     line: suspended.current_line,
   )
-}
-
-/// Truncate stack to a given depth.
-fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
-  let excess = list.length(stack) - depth
-  case excess > 0 {
-    True -> list.drop(stack, excess)
-    False -> stack
-  }
 }

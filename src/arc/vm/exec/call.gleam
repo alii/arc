@@ -34,7 +34,7 @@ import arc/vm/completion.{
 }
 import arc/vm/exec/async_generators
 import arc/vm/exec/frame
-import arc/vm/exec/generators
+import arc/vm/exec/generators.{type Drive, type ExecuteInnerFn}
 import arc/vm/exec/promises
 import arc/vm/heap
 import arc/vm/internal/elements
@@ -67,16 +67,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-// ============================================================================
-// Callback types for VM functions that can't be imported directly
-// ============================================================================
-
-pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(Outcome, State(host)), VmError)
-
-pub type UnwindToCatchFn(host) =
-  fn(State(host), JsValue) -> Option(State(host))
-
 pub type DispatchNativeFn(host) =
   fn(value.NativeFn, List(JsValue), JsValue, State(host)) ->
     #(State(host), Result(JsValue, JsValue))
@@ -99,8 +89,7 @@ pub fn call_function(
   this_val: JsValue,
   constructor_this: option.Option(JsValue),
   new_target: JsValue,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   // §10.2.1 [[Call]] step 2: [[IsClassConstructor]] → TypeError. Construct
   // paths (new / super() / Reflect.construct) always pass an object
@@ -136,7 +125,7 @@ pub fn call_function(
             rest_stack,
             locals,
             env_ref,
-            execute_inner,
+            drive.execute_inner,
             is_async,
           )
         False, True ->
@@ -146,8 +135,7 @@ pub fn call_function(
             args,
             rest_stack,
             locals,
-            execute_inner,
-            unwind_to_catch,
+            drive.execute_inner,
           )
         False, False ->
           // `heap` rides along separately so the callee-frame State update
@@ -369,7 +357,6 @@ fn call_async_function(
   rest_stack: List(JsValue),
   locals: tuple_array.TupleArray(JsValue),
   execute_inner: ExecuteInnerFn(host),
-  _unwind_to_catch: UnwindToCatchFn(host),
 ) -> Result(State(host), StepExit(host)) {
   // Create the outer promise that the async function returns
   let #(h, promise_ref, data_ref) =
@@ -523,8 +510,7 @@ pub fn call_native_async_resume(
   is_reject: Bool,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   let settled_value = helpers.first_arg_or_undefined(args)
   case heap.read(state.heap, async_data_ref) {
@@ -544,10 +530,10 @@ pub fn call_native_async_resume(
         coroutine_resume_state(state, func_template, frame, resume_stack)
       // For rejection, throw the value so try/catch inside async fn can handle it
       let exec_result = case is_reject {
-        False -> execute_inner(exec_state)
+        False -> drive.execute_inner(exec_state)
         True -> {
-          case unwind_to_catch(exec_state, settled_value) {
-            Some(caught_state) -> execute_inner(caught_state)
+          case drive.unwind_to_catch(exec_state, settled_value) {
+            Some(caught_state) -> drive.execute_inner(caught_state)
             None -> Ok(#(Completed(ThrowCompletion(settled_value)), exec_state))
           }
         }
@@ -593,8 +579,7 @@ pub fn call_native(
   rest_stack: List(JsValue),
   this: JsValue,
   new_target: JsValue,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
   dispatch_fn: DispatchNativeFn(host),
 ) -> Result(State(host), StepExit(host)) {
   case native {
@@ -610,8 +595,7 @@ pub fn call_native(
         this,
         call_args,
         this_arg,
-        execute_inner,
-        unwind_to_catch,
+        drive,
         dispatch_fn,
       )
     }
@@ -636,8 +620,7 @@ pub fn call_native(
         this,
         call_args,
         this_arg,
-        execute_inner,
-        unwind_to_catch,
+        drive,
         dispatch_fn,
       )
     }
@@ -749,8 +732,7 @@ pub fn call_native(
         JsObject(target),
         final_args,
         bound_this,
-        execute_inner,
-        unwind_to_catch,
+        drive,
         dispatch_fn,
       )
     }
@@ -976,27 +958,18 @@ pub fn call_native(
         is_reject,
         args,
         rest_stack,
-        execute_inner,
-        unwind_to_catch,
+        drive,
       )
     // Generator prototype methods
     value.Call(value.GeneratorNext) ->
-      generators.call_native_generator_next(
-        state,
-        this,
-        args,
-        rest_stack,
-        execute_inner,
-        unwind_to_catch,
-      )
+      generators.call_native_generator_next(state, this, args, rest_stack, drive)
     value.Call(value.GeneratorReturn) ->
       generators.call_native_generator_return(
         state,
         this,
         args,
         rest_stack,
-        execute_inner,
-        unwind_to_catch,
+        drive,
       )
     value.Call(value.ArrayIteratorNext) ->
       call_array_iterator_next(state, this, rest_stack)
@@ -1010,8 +983,7 @@ pub fn call_native(
         this,
         args,
         rest_stack,
-        execute_inner,
-        unwind_to_catch,
+        drive,
       )
     // Async generator prototype methods — enqueue a request, return a promise
     value.Call(value.AsyncGeneratorNext) ->
@@ -1021,8 +993,7 @@ pub fn call_native(
         args,
         rest_stack,
         value.AGNext,
-        execute_inner,
-        unwind_to_catch,
+        drive,
       )
     value.Call(value.AsyncGeneratorReturn) ->
       async_generators.call_native_method(
@@ -1031,8 +1002,7 @@ pub fn call_native(
         args,
         rest_stack,
         value.AGReturn,
-        execute_inner,
-        unwind_to_catch,
+        drive,
       )
     value.Call(value.AsyncGeneratorThrow) ->
       async_generators.call_native_method(
@@ -1041,8 +1011,7 @@ pub fn call_native(
         args,
         rest_stack,
         value.AGThrow,
-        execute_inner,
-        unwind_to_catch,
+        drive,
       )
     value.Call(value.AsyncFromSyncNext) ->
       promises.call_native_async_from_sync(
@@ -1116,8 +1085,7 @@ pub fn call_native(
         kind,
         args,
         rest_stack,
-        execute_inner,
-        unwind_to_catch,
+        drive,
       )
     // §28.2.1: Proxy called without `new` throws TypeError.
     value.Call(value.ProxyConstructor) ->
@@ -1411,8 +1379,7 @@ pub fn do_construct(
   args: List(JsValue),
   rest_stack: List(JsValue),
   new_target_ref: Ref,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
   dispatch_fn: DispatchNativeFn(host),
 ) -> Result(State(host), StepExit(host)) {
   let new_target = JsObject(new_target_ref)
@@ -1453,8 +1420,7 @@ pub fn do_construct(
             JsUninitialized,
             None,
             new_target,
-            execute_inner,
-            unwind_to_catch,
+            drive,
           )
         False -> {
           // Base constructor: §10.1.13.1 OrdinaryCreateFromConstructor —
@@ -1492,8 +1458,7 @@ pub fn do_construct(
             new_obj,
             Some(new_obj),
             new_target,
-            execute_inner,
-            unwind_to_catch,
+            drive,
           )
         }
       }
@@ -1517,8 +1482,7 @@ pub fn do_construct(
         list.append(bound_args, args),
         rest_stack,
         nt,
-        execute_inner,
-        unwind_to_catch,
+        drive,
         dispatch_fn,
       )
     }
@@ -1554,8 +1518,7 @@ pub fn do_construct(
             args,
             rest_stack,
             new_target_ref,
-            execute_inner,
-            unwind_to_catch,
+            drive,
             dispatch_fn,
           )
         Some(trap_fn) -> {
@@ -1724,8 +1687,7 @@ pub fn do_construct(
           rest_stack,
           JsUndefined,
           new_target,
-          execute_inner,
-          unwind_to_catch,
+          drive,
           dispatch_fn,
         )
         |> result.map_error(fn(exit) {
@@ -1774,8 +1736,7 @@ pub fn call_value(
   callee: JsValue,
   args: List(JsValue),
   this_val: JsValue,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
   dispatch_fn: DispatchNativeFn(host),
 ) -> Result(State(host), StepExit(host)) {
   case callee {
@@ -1796,8 +1757,7 @@ pub fn call_value(
             this_val,
             None,
             JsUndefined,
-            execute_inner,
-            unwind_to_catch,
+            drive,
           )
         Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
           // Plain [[Call]] of a native: NewTarget is undefined (§10.2.1),
@@ -1809,8 +1769,7 @@ pub fn call_value(
             state.stack,
             this_val,
             JsUndefined,
-            execute_inner,
-            unwind_to_catch,
+            drive,
             dispatch_fn,
           )
         // §10.5.12 Proxy [[Call]] ( thisArgument, argumentsList ).
@@ -1834,8 +1793,7 @@ pub fn call_value(
                     JsObject(t),
                     args,
                     this_val,
-                    execute_inner,
-                    unwind_to_catch,
+                    drive,
                     dispatch_fn,
                   )
                 // Steps 8-9: Call(trap, handler, « target, thisArg, argArray »).
@@ -1851,8 +1809,7 @@ pub fn call_value(
                     trap_fn,
                     [JsObject(t), this_val, JsObject(args_arr)],
                     JsObject(h),
-                    execute_inner,
-                    unwind_to_catch,
+                    drive,
                     dispatch_fn,
                   )
                 }

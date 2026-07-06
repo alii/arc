@@ -1639,7 +1639,7 @@ fn unwind_to_catch(
     // `kind` only matters to the return-completion unwinder; a *throw* lands
     // at catch_target no matter what the frame guards.
     [TryFrame(catch_target:, stack_depth:, kind: _), ..rest_try] -> {
-      let restored_stack = truncate_stack(state.stack, stack_depth)
+      let restored_stack = frame.truncate_stack(state.stack, stack_depth)
       Some(
         State(
           ..state,
@@ -1690,13 +1690,12 @@ fn unwind_to_catch(
   }
 }
 
-/// Truncate stack to a given depth.
-fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
-  let excess = list.length(stack) - depth
-  case excess > 0 {
-    True -> list.drop(stack, excess)
-    False -> stack
-  }
+/// The interpreter's `Drive` — the pair of VM callbacks the exec/* modules
+/// need but can't import (that would form a cycle). Built once here so every
+/// wrapper below hands the same record through, and adding a third callback
+/// touches this one line.
+fn drive() -> generators.Drive(host) {
+  generators.Drive(execute_inner:, unwind_to_catch:)
 }
 
 fn underflow(
@@ -4874,11 +4873,14 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
             }
             // Iterator Record (§7.4.1): `next` was cached at GetIterator —
             // call it directly, no per-iteration property re-resolution.
-            Some(ObjectSlot(
-              kind: value.IteratorRecordObject(iterated:, next_method:),
-              ..,
-            )) ->
-              step_iterator_record(state, iter_ref, iterated, next_method, rest)
+            Some(ObjectSlot(kind: value.IteratorRecordObject(record:), ..)) ->
+              step_iterator_record(
+                state,
+                iter_ref,
+                record.iterator,
+                record.next_method,
+                rest,
+              )
               |> result.map_error(mark_done(rest))
             // Generic iterator: any object with .next(). Call it, extract {value, done}.
             Some(ObjectSlot(..)) ->
@@ -5000,7 +5002,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           // the saved stack slot, so swap in the real iterator up front.
           let #(iter_ref, state) = case heap.read(state.heap, orig_ref) {
             Some(ObjectSlot(
-              kind: value.IteratorRecordObject(iterated: JsObject(real), ..),
+              kind: value.IteratorRecordObject(
+                record: value.IteratorRecord(iterator: JsObject(real), ..),
+              ),
               ..,
             )) -> #(real, State(..state, stack: [arg, JsObject(real), ..rest]))
             _ -> #(orig_ref, state)
@@ -5060,10 +5064,8 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
         [arg, JsObject(iter_ref) as iter, ..rest] -> {
           use #(next_fn, this, state) <- result.try(
             case heap.read(state.heap, iter_ref) {
-              Some(ObjectSlot(
-                kind: value.IteratorRecordObject(iterated:, next_method:),
-                ..,
-              )) -> Ok(#(next_method, iterated, state))
+              Some(ObjectSlot(kind: value.IteratorRecordObject(record:), ..)) ->
+                Ok(#(record.next_method, record.iterator, state))
               _ -> {
                 use #(next_fn, state) <- result.map(
                   state.rethrow(object.get_value(
@@ -5462,8 +5464,7 @@ fn call_function(
     this_val,
     constructor_this,
     new_target,
-    execute_inner,
-    unwind_to_catch,
+    drive(),
   )
 }
 
@@ -5485,8 +5486,7 @@ fn call_native(
     rest_stack,
     this,
     JsUndefined,
-    execute_inner,
-    unwind_to_catch,
+    drive(),
     dispatch_native,
   )
 }
@@ -5716,8 +5716,7 @@ fn do_construct(
     args,
     rest_stack,
     new_target_ref,
-    execute_inner,
-    unwind_to_catch,
+    drive(),
     dispatch_native,
   )
 }
@@ -5729,15 +5728,7 @@ fn call_value(
   args: List(JsValue),
   this_val: JsValue,
 ) -> Result(State(host), StepExit(host)) {
-  call.call_value(
-    state,
-    callee,
-    args,
-    this_val,
-    execute_inner,
-    unwind_to_catch,
-    dispatch_native,
-  )
+  call.call_value(state, callee, args, this_val, drive(), dispatch_native)
 }
 
 /// Thin wrapper: delegates to array_ops.spread_into_array with execute_inner.
@@ -6306,7 +6297,9 @@ fn push_iterator_record(
         heap.alloc(
           state.heap,
           ObjectSlot(
-            kind: value.IteratorRecordObject(iterated: iter, next_method:),
+            kind: value.IteratorRecordObject(
+              record: value.IteratorRecord(iterator: iter, next_method:),
+            ),
             properties: dict.new(),
             elements: elements.new(),
             prototype: None,
