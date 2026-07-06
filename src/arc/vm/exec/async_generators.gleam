@@ -251,17 +251,12 @@ fn build_exec_state(
   stack: List(JsValue),
   pc: Int,
 ) -> State(host) {
-  let restored = generators.restore_frame(state, frame.saved)
-  State(
-    ..restored,
-    stack:,
-    pc:,
-    func: frame.func_template,
-    code: frame.func_template.bytecode,
-    constants: frame.func_template.constants,
-    call_stack: [],
-    new_target: JsUndefined,
-    call_args: [],
+  generators.resumed_body_state(
+    state,
+    frame.func_template,
+    frame.saved,
+    stack,
+    pc,
   )
 }
 

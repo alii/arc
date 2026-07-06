@@ -345,6 +345,43 @@ fn complete_and_throw(
   Error(Threw(thrown, complete(state, gen)))
 }
 
+/// Build an isolated body State to RESUME a suspended coroutine (generator /
+/// async-generator / async-function) from a saved frame — the ONE place the
+/// "restore frame → isolate the resumer's fields → bump call_depth" spelling
+/// lives, so adding a State field that must be reset for a coroutine body is
+/// one edit here, and the async-generator / async-function drivers cannot
+/// diverge from the sync driver on the GC / stack-overflow guard `call_depth`
+/// feeds. Callers that need a slot-state write (`build_resumed_state`) or a
+/// different heap layer that on top with `State(..resumed_body_state(...), ..)`.
+pub fn resumed_body_state(
+  outer: State(host),
+  func_template: FuncTemplate,
+  saved: value.SuspendedFrame,
+  stack: List(JsValue),
+  pc: Int,
+) -> State(host) {
+  let restored = restore_frame(outer, saved)
+  State(
+    ..restored,
+    stack:,
+    pc:,
+    func: func_template,
+    code: func_template.bytecode,
+    constants: func_template.constants,
+    call_stack: [],
+    // A coroutine body is a RE-ENTRANT drive: the resumer's frames (its
+    // locals, its operand stack, the generator/promise it's driving) live on
+    // the Gleam call stack, invisible to any GC that runs from this State.
+    // The interpreter's top-level collector treats `call_depth > 0` as
+    // exactly that condition, so the body must not resume at the resumer's
+    // depth — an empty `call_stack` at depth 0 would let a collection inside
+    // the body free everything only the resumer holds.
+    call_depth: outer.call_depth + 1,
+    new_target: JsUndefined,
+    call_args: [],
+  )
+}
+
 /// Mark a generator Executing and restore its saved execution context into a
 /// fresh State for resumption. `stack` and `pc` vary per resume mode.
 ///
@@ -365,26 +402,9 @@ fn build_resumed_state(
       gen.data_ref,
       gen_with_state(gen, value.GenExecuting(frame)),
     )
-  let restored = restore_frame(outer, frame)
   State(
-    ..restored,
+    ..resumed_body_state(outer, gen.func_template, frame, stack, pc),
     heap: h,
-    stack:,
-    pc:,
-    func: gen.func_template,
-    code: gen.func_template.bytecode,
-    constants: gen.func_template.constants,
-    call_stack: [],
-    // A generator body is a RE-ENTRANT drive: the resumer's frames (its
-    // locals, its operand stack, the generator object itself) live on the
-    // Gleam call stack, invisible to any GC that runs from this State. The
-    // interpreter's top-level collector treats `call_depth > 0` as exactly
-    // that condition, so the body must not resume at the resumer's depth —
-    // an empty `call_stack` at depth 0 would let a collection inside the body
-    // free everything only the resumer holds.
-    call_depth: outer.call_depth + 1,
-    new_target: JsUndefined,
-    call_args: [],
   )
 }
 

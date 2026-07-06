@@ -44,6 +44,7 @@ import arc/vm/key.{Named}
 import arc/vm/limits
 import arc/vm/ops/array_iterator
 import arc/vm/ops/coerce
+import arc/vm/ops/instanceof
 import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/ops/property
@@ -237,30 +238,6 @@ fn coroutine_initial_state(
     // A coroutine body is its OWN frame: it must not inherit the caller's
     // sloppy-direct-eval var dict (`call_regular_function` resets it too).
     eval_env: None,
-  )
-}
-
-/// Set up an isolated execution state to RESUME an async-function body from a
-/// saved suspension point. Same isolation as `coroutine_initial_state` (no
-/// caller frames, no new.target, no call_args — the arguments object was built
-/// before the first suspension), but with the saved frame restored via
-/// `generators.restore_frame` — the one SuspendedFrame→State chokepoint.
-fn coroutine_resume_state(
-  state: State(host),
-  func_template: FuncTemplate,
-  frame: value.SuspendedFrame,
-  stack: List(JsValue),
-) -> State(host) {
-  let restored = generators.restore_frame(state, frame)
-  State(
-    ..restored,
-    stack:,
-    func: func_template,
-    code: func_template.bytecode,
-    constants: func_template.constants,
-    call_stack: [],
-    new_target: JsUndefined,
-    call_args: [],
   )
 }
 
@@ -523,7 +500,13 @@ pub fn call_native_async_resume(
         True -> frame.stack
       }
       let exec_state =
-        coroutine_resume_state(state, func_template, frame, resume_stack)
+        generators.resumed_body_state(
+          state,
+          func_template,
+          frame,
+          resume_stack,
+          frame.pc,
+        )
       // For rejection, throw the value so try/catch inside async fn can handle it
       let exec_result = case is_reject {
         False -> drive.execute_inner(exec_state)
@@ -2058,7 +2041,7 @@ fn function_has_instance(
     JsObject(ref) ->
       case helpers.is_callable(state.heap, this) {
         True ->
-          case coerce.ordinary_has_instance(state, ref, v) {
+          case instanceof.ordinary_has_instance(state, ref, v) {
             Ok(#(result, state)) -> #(state, Ok(JsBool(result)))
             Error(#(err, state)) -> #(state, Error(err))
           }
