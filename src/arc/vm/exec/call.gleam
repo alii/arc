@@ -243,31 +243,24 @@ fn coroutine_initial_state(
 /// Set up an isolated execution state to RESUME an async-function body from a
 /// saved suspension point. Same isolation as `coroutine_initial_state` (no
 /// caller frames, no new.target, no call_args — the arguments object was built
-/// before the first suspension), but with the saved frame restored. Exhaustive
-/// destructure so a new `SuspendedFrame` field is a compile error here, not a
-/// silently-unrestored value on resume.
+/// before the first suspension), but with the saved frame restored via
+/// `generators.restore_frame` — the one SuspendedFrame→State chokepoint.
 fn coroutine_resume_state(
   state: State(host),
   func_template: FuncTemplate,
   frame: value.SuspendedFrame,
   stack: List(JsValue),
 ) -> State(host) {
-  let value.SuspendedFrame(pc:, locals:, stack: _, try_stack:, eval_env:, line:) =
-    frame
+  let restored = generators.restore_frame(state, frame)
   State(
-    ..state,
+    ..restored,
     stack:,
-    locals:,
     func: func_template,
     code: func_template.bytecode,
     constants: func_template.constants,
-    pc:,
     call_stack: [],
-    try_stack:,
     new_target: JsUndefined,
     call_args: [],
-    eval_env:,
-    current_line: line,
   )
 }
 
