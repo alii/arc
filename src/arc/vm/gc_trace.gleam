@@ -188,7 +188,7 @@ fn push_dispose_resources(
 ) -> List(value.Ref) {
   list.fold(resources, acc, fn(a, r) {
     case r {
-      value.SyncDispose(value: v, method: m)
+      value.MethodDispose(value: v, method: m)
       | value.AsyncFallbackDispose(value: v, method: m) ->
         push_value_ref(m, push_value_ref(v, a))
       value.DisposeCallback(callback:, args:) ->
@@ -1544,7 +1544,7 @@ fn from_async_ctx_refs(
   acc
   |> push_value_ref(iter, _)
   |> push_value_ref(next_method, _)
-  |> push_value_ref(map_fn, _)
+  |> push_option_value(map_fn, _)
   |> push_value_ref(this_arg, _)
   |> push_value_ref(target, _)
   |> push_value_ref(resolve, _)
@@ -1568,7 +1568,7 @@ fn from_async_like_ctx_refs(
   ) = ctx
   acc
   |> push_value_ref(items, _)
-  |> push_value_ref(map_fn, _)
+  |> push_option_value(map_fn, _)
   |> push_value_ref(this_arg, _)
   |> push_value_ref(target, _)
   |> push_value_ref(resolve, _)

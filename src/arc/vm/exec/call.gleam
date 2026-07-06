@@ -32,6 +32,7 @@ import arc/vm/builtins/weak_set as builtins_weak_set
 import arc/vm/completion.{
   type Outcome, Completed, NormalCompletion, Suspended, ThrowCompletion,
 }
+import arc/vm/exec/array_from_async
 import arc/vm/exec/async_generators
 import arc/vm/exec/frame
 import arc/vm/exec/generators.{type Drive, type ExecuteInnerFn}
@@ -1026,13 +1027,28 @@ pub fn call_native(
       promises.call_native_async_from_sync_close(state, sync_iter, args)
     // Array.fromAsync and its await-continuation closures
     value.Call(value.ArrayFromAsync) ->
-      promises.call_native_array_from_async(state, this, args, rest_stack)
+      array_from_async.call_native_array_from_async(
+        state,
+        this,
+        args,
+        rest_stack,
+      )
     value.Call(value.ArrayFromAsyncOnNext(ctx:)) ->
-      promises.call_native_from_async_on_next(state, ctx, args, rest_stack)
+      array_from_async.call_native_from_async_on_next(
+        state,
+        ctx,
+        args,
+        rest_stack,
+      )
     value.Call(value.ArrayFromAsyncOnMapped(ctx:)) ->
-      promises.call_native_from_async_on_mapped(state, ctx, args, rest_stack)
+      array_from_async.call_native_from_async_on_mapped(
+        state,
+        ctx,
+        args,
+        rest_stack,
+      )
     value.Call(value.ArrayFromAsyncCloseReject(iter:, reject:)) ->
-      promises.call_native_from_async_close_reject(
+      array_from_async.call_native_from_async_close_reject(
         state,
         iter,
         reject,
@@ -1040,21 +1056,21 @@ pub fn call_native(
         rest_stack,
       )
     value.Call(value.ArrayFromAsyncRejectWith(error:, reject:)) ->
-      promises.call_native_from_async_reject_with(
+      array_from_async.call_native_from_async_reject_with(
         state,
         error,
         reject,
         rest_stack,
       )
     value.Call(value.ArrayFromAsyncLikeOnValue(ctx:)) ->
-      promises.call_native_from_async_like_on_value(
+      array_from_async.call_native_from_async_like_on_value(
         state,
         ctx,
         args,
         rest_stack,
       )
     value.Call(value.ArrayFromAsyncLikeOnMapped(ctx:)) ->
-      promises.call_native_from_async_like_on_mapped(
+      array_from_async.call_native_from_async_like_on_mapped(
         state,
         ctx,
         args,

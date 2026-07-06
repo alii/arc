@@ -26,8 +26,8 @@ import arc/vm/value.{
   DisposableStackNative, DisposableStackObject, DisposableStackPrototypeAdopt,
   DisposableStackPrototypeDefer, DisposableStackPrototypeDispose,
   DisposableStackPrototypeMove, DisposableStackPrototypeUse, DisposeCallback,
-  Disposed, JsBool, JsNull, JsObject, JsUndefined, NullDispose, ObjectSlot,
-  Pending, SyncDispose,
+  Disposed, JsBool, JsNull, JsObject, JsUndefined, MethodDispose, NullDispose,
+  ObjectSlot, Pending,
 }
 import gleam/dict
 import gleam/list
@@ -215,36 +215,46 @@ pub fn dispatch(
         is_reject,
       )
     value.UsingDisposer(method:, value: resource, discard:) ->
-      case state.call(state, method, resource, []) {
-        Ok(#(result, state)) ->
-          case discard {
-            // GetDisposeMethod step 1.b.ii closure: drop the sync @@dispose
-            // result so the desugared `await` awaits undefined instead.
-            True -> #(state, Ok(JsUndefined))
-            False -> #(state, Ok(result))
-          }
-        Error(#(thrown, state)) ->
-          case discard {
-            // GetDisposeMethod step 1.b.ii closure performs
-            // IfAbruptRejectPromise: a sync @@dispose throw must surface as
-            // a REJECTED promise that the desugared `await` then consumes,
-            // so the error lands one Await hop later — never synchronously.
-            True -> {
-              let #(h, builtins_promise.PromiseRefs(promise:, data:)) =
-                builtins_promise.create_promise(
-                  state.heap,
-                  state.builtins.promise.prototype,
-                )
-              let state =
-                builtins_promise.reject_promise(
-                  State(..state, heap: h),
-                  data,
-                  thrown,
-                )
-              #(state, Ok(JsObject(promise)))
-            }
-            False -> #(state, Error(thrown))
-          }
+      call_using_disposer(state, method, resource, discard)
+  }
+}
+
+/// Dispose(V, hint, method) for a `using`/`await using` binding: perform
+/// Call(method, resource). When `discard` (async hint's sync @@dispose
+/// fallback — GetDisposeMethod step 1.b.ii closure), the result is dropped
+/// and undefined returned so the desugared `await` awaits undefined; a
+/// synchronous throw likewise becomes a rejected promise
+/// (IfAbruptRejectPromise) so the error lands one Await hop later, never
+/// synchronously.
+fn call_using_disposer(
+  state: State(host),
+  method: JsValue,
+  resource: JsValue,
+  discard: Bool,
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case state.call(state, method, resource, []) {
+    Ok(#(result, state)) ->
+      case discard {
+        True -> #(state, Ok(JsUndefined))
+        False -> #(state, Ok(result))
+      }
+    Error(#(thrown, state)) ->
+      case discard {
+        True -> {
+          let #(h, builtins_promise.PromiseRefs(promise:, data:)) =
+            builtins_promise.create_promise(
+              state.heap,
+              state.builtins.promise.prototype,
+            )
+          let state =
+            builtins_promise.reject_promise(
+              State(..state, heap: h),
+              data,
+              thrown,
+            )
+          #(state, Ok(JsObject(promise)))
+        }
+        False -> #(state, Error(thrown))
       }
   }
 }
@@ -512,8 +522,7 @@ fn dispose_resources(
       // Step 1.a: Dispose(V, sync-dispose, method) — Call(method, V) for
       // use() resources, Call(callback, undefined, args) for adopt/defer.
       let result = case resource {
-        SyncDispose(value: v, method:)
-        | AsyncFallbackDispose(value: v, method:) ->
+        MethodDispose(value: v, method:) ->
           case method {
             // Dispose step 1: method undefined → result is undefined
             JsUndefined -> Ok(#(JsUndefined, state))
@@ -521,7 +530,11 @@ fn dispose_resources(
           }
         DisposeCallback(callback:, args:) ->
           state.call(state, callback, JsUndefined, args)
-        NullDispose -> Ok(#(JsUndefined, state))
+        // Async-only variants (created only by use_resource_async) cannot
+        // reach the sync loop — brand is fixed at construction and move()
+        // preserves it. Reaching here is an engine wiring bug.
+        AsyncFallbackDispose(..) | NullDispose ->
+          panic as "sync DisposableStack holds async-only resource variant — engine invariant"
       }
       case result {
         Ok(#(_val, state)) -> dispose_resources(state, rest, completion)
@@ -557,7 +570,7 @@ fn use_resource(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposable_state, state <- require_stack(this, state, False, "use")
-  use resources, state <- try_pending(state, disposable_state)
+  use resources, state <- try_pending(state, disposable_state, async: False)
   let val = helpers.first_arg_or_undefined(args)
   case val {
     // AddDisposableResource step 1.a: null/undefined with sync-dispose and
@@ -575,7 +588,7 @@ fn use_resource(
       )
       let resource = case dispose_method {
         DirectDispose(method) | SyncFallbackDispose(method) ->
-          SyncDispose(value: val, method:)
+          MethodDispose(value: val, method:)
       }
       let state = write_stack(state, ref, Pending([resource, ..resources]))
       #(state, Ok(val))
@@ -600,7 +613,7 @@ fn use_resource_async(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposable_state, state <- require_stack(this, state, True, "use")
-  use resources, state <- try_pending(state, disposable_state)
+  use resources, state <- try_pending(state, disposable_state, async: True)
   let val = helpers.first_arg_or_undefined(args)
   case val {
     // CreateDisposableResource step 1.a: V null/undefined with async-dispose
@@ -619,7 +632,7 @@ fn use_resource_async(
         is_async: True,
       )
       let resource = case dispose_method {
-        DirectDispose(method) -> SyncDispose(value: val, method:)
+        DirectDispose(method) -> MethodDispose(value: val, method:)
         // GetDisposeMethod step 1.b.ii: wrapper closure — call the sync
         // method, discard its result, await undefined.
         SyncFallbackDispose(method) -> AsyncFallbackDispose(value: val, method:)
@@ -746,7 +759,7 @@ fn adopt(
   async async: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposable_state, state <- require_stack(this, state, async, "adopt")
-  use resources, state <- try_pending(state, disposable_state)
+  use resources, state <- try_pending(state, disposable_state, async:)
   let #(val, on_dispose) = helpers.two_args_or_undefined(args)
   case helpers.is_callable(state.heap, on_dispose) {
     // Step 4: onDispose must be callable
@@ -772,7 +785,7 @@ fn defer(
   async async: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposable_state, state <- require_stack(this, state, async, "defer")
-  use resources, state <- try_pending(state, disposable_state)
+  use resources, state <- try_pending(state, disposable_state, async:)
   let on_dispose = helpers.first_arg_or_undefined(args)
   case helpers.is_callable(state.heap, on_dispose) {
     // Step 4: onDispose must be callable
@@ -807,7 +820,7 @@ fn move(
   async async: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, disposable_state, state <- require_stack(this, state, async, "move")
-  use resources, state <- try_pending(state, disposable_state)
+  use resources, state <- try_pending(state, disposable_state, async:)
   // Steps 4-6: new pending stack takes over the resources
   let #(heap, new_ref) =
     alloc_stack(state.heap, proto, async:, disposable_state: Pending(resources))
@@ -823,11 +836,16 @@ fn move(
 fn try_pending(
   state: State(host),
   disposable_state: DisposableState,
-  cont: fn(List(DisposeResource), State(host)) ->
+  async async: Bool,
+  cont cont: fn(List(DisposeResource), State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case disposable_state {
-    Disposed -> state.reference_error(state, "DisposableStack already disposed")
+    Disposed ->
+      state.reference_error(
+        state,
+        stack_type_name(async) <> " already disposed",
+      )
     Pending(resources:) -> cont(resources, state)
   }
 }
@@ -960,8 +978,8 @@ fn async_dispose_loop(
         }
       }
       case resource {
-        // @@asyncDispose (or a sync @@dispose moved in here by move()).
-        SyncDispose(value: v, method:) -> call_then_await(method, v, [])
+        // @@asyncDispose captured by use().
+        MethodDispose(value: v, method:) -> call_then_await(method, v, [])
         // adopt/defer closure. The spec closure RETURNS the Call result, so an
         // async onDispose's rejected promise must reject disposeAsync — Await
         // it like any other dispose method.
