@@ -234,7 +234,7 @@ fn fulfill_promise_tracked(
   result_value: JsValue,
 ) -> #(state.State(host), SettleOutcome) {
   let #(h, jobs, outcome) =
-    settle_promise(state.heap, data_ref, value.PromiseFulfilled(result_value))
+    settle_promise(state.heap, data_ref, AsFulfilled(result_value))
   case outcome {
     // Not a promise slot: nothing to settle, report it back to the caller.
     NotAPromiseSlot -> #(state, outcome)
@@ -284,17 +284,26 @@ pub type SettleOutcome {
   NotAPromiseSlot
 }
 
+/// A promise's target settled state — the two-armed input to
+/// `settle_promise`. Distinct from `value.PromiseState` precisely so the
+/// compiler rules out `settle_promise(.., PromisePending)`: there is no
+/// pending variant to construct.
+type Settled {
+  AsFulfilled(JsValue)
+  AsRejected(JsValue)
+}
+
 /// Shared settle core of FulfillPromise/RejectPromise (steps 2-6 plus
 /// TriggerPromiseReactions): if the promise is pending, pick the reaction
-/// list and result value that match `settled_state`, build reaction jobs
-/// from them, and write the settled PromiseSlot with cleared reaction lists.
+/// list and result value that match `settled`, build reaction jobs from
+/// them, and write the settled PromiseSlot with cleared reaction lists.
 ///
 /// The `SettleOutcome` distinguishes the transition, the legitimate
 /// already-settled no-op, and a ref that is not a promise at all.
 fn settle_promise(
   h: Heap(host),
   data_ref: Ref,
-  settled_state: value.PromiseState,
+  settled: Settled,
 ) -> #(Heap(host), List(Job), SettleOutcome) {
   case heap.read(h, data_ref) {
     Some(PromiseSlot(
@@ -306,14 +315,12 @@ fn settle_promise(
       // TriggerPromiseReactions(reactions, value) — build job list.
       // Reactions are stored newest-first (see perform_promise_then), so
       // reverse once here to enqueue jobs in attachment order per spec.
-      // Which list fires and which value the reactions receive are both
-      // fully determined by the settled state, so derive them here — a
-      // caller cannot pass a value that disagrees with the state it wraps.
-      let #(reactions, result_value) = case settled_state {
-        value.PromiseFulfilled(v) -> #(fulfill_reactions, v)
-        value.PromiseRejected(r) -> #(reject_reactions, r)
-        // Unreachable: both callers pass a settled variant.
-        value.PromisePending -> panic as "settle_promise called with Pending"
+      // Which list fires, which value the reactions receive, and the state
+      // to store are all determined by the two-armed `Settled` input — no
+      // third case to rule out at runtime.
+      let #(reactions, result_value, settled_state) = case settled {
+        AsFulfilled(v) -> #(fulfill_reactions, v, value.PromiseFulfilled(v))
+        AsRejected(r) -> #(reject_reactions, r, value.PromiseRejected(r))
       }
       let jobs =
         list.map(list.reverse(reactions), fn(r) {
@@ -379,7 +386,7 @@ fn reject_promise_tracked(
   reason: JsValue,
 ) -> #(state.State(host), SettleOutcome) {
   let #(h, jobs, outcome) =
-    settle_promise(state.heap, data_ref, value.PromiseRejected(reason))
+    settle_promise(state.heap, data_ref, AsRejected(reason))
   case outcome {
     Transitioned(is_handled:) -> {
       // Step 7: HostPromiseRejectionTracker(promise, "reject")
@@ -535,7 +542,14 @@ pub fn perform_promise_then(
         unhandled_rejections:,
       )
     }
-    _ -> state
+    // Not a PromiseSlot at all. Every caller reaches this via
+    // `as_promise_data`/`get_data_ref`, which only ever hand back a ref
+    // whose slot is a PromiseSlot. Silently returning `state` here would
+    // leave the child capability hung forever — crash loud on the VM
+    // invariant instead so a heap-corruption bug surfaces at the point of
+    // use, not as a mysteriously never-settling promise downstream.
+    Some(_) | None ->
+      panic as "perform_promise_then: data_ref is not a PromiseSlot (VM invariant)"
   }
 }
 
@@ -550,11 +564,20 @@ pub fn perform_promise_then(
 /// [[PromiseState]] slot directly, since our representation stores promise
 /// state in a separate PromiseSlot referenced by the PromiseObject kind tag.
 pub fn is_promise(h: Heap(host), val: JsValue) -> Bool {
+  as_promise_data(h, val) |> option.is_some
+}
+
+/// IsPromise(x) that also yields the promise's internal PromiseSlot ref on
+/// success. Use this over `is_promise` when the `True` branch would
+/// immediately re-prove the same fact with `let assert JsObject(..)` +
+/// `let assert Some(..) = get_data_ref(..)` — one heap lookup, one match,
+/// no partial assertions on a fact the caller already established.
+pub fn as_promise_data(h: Heap(host), val: JsValue) -> Option(Ref) {
   case val {
     // Step 1: If x is not an Object, return false.
     // Step 2-3: Check for [[PromiseState]] via PromiseObject kind tag.
-    JsObject(ref) -> heap.read_promise_data_ref(h, ref) |> option.is_some
-    _ -> False
+    JsObject(ref) -> get_data_ref(h, ref)
+    _ -> None
   }
 }
 
