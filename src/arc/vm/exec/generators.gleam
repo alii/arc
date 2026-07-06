@@ -33,9 +33,9 @@ pub type UnwindToCatchFn(host) =
   fn(State(host), JsValue) -> Option(State(host))
 
 /// The pair of interpreter callbacks every generator / async-generator /
-/// async-function driver threads through its whole call graph. A record so a
-/// call site names which is which — the two share their first parameter type,
-/// so a positional swap would silently type-check.
+/// async-function driver threads through its whole call graph — bundled so
+/// they travel as one arg and adding a third callback touches only this
+/// record and interpreter's `drive()`.
 pub type Drive(host) {
   Drive(execute_inner: ExecuteInnerFn(host), unwind_to_catch: UnwindToCatchFn(host))
 }
