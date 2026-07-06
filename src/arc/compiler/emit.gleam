@@ -5746,14 +5746,26 @@ fn emit_for_of_iter_body(
 /// return completion out of a suspended `yield` closes the iterator), but
 /// `CatchOnly` for `for await`, whose close needs an Await the generator
 /// unwinder cannot perform.
+///
+/// Labels handed to the tail as a record so a caller cannot silently swap
+/// e.g. `break_target` and `catch_body` — every field is named at both ends.
+type ForOfLabels {
+  ForOfLabels(
+    loop_start: Int,
+    loop_continue: Int,
+    break_target: Int,
+    catch_body: Int,
+    end: Int,
+  )
+}
+
 fn emit_for_of_common(
   e: Emitter,
   left: ast.ForInit,
   right: ast.Expression,
   get_iter: IrOp,
   body_kind: TryKind(LabelId),
-  // tail receives: e, loop_start, loop_continue, break_target, catch_body, end
-  tail: fn(Emitter, Int, Int, Int, Int, Int) -> Result(Emitter, EmitError),
+  tail: fn(Emitter, ForOfLabels) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
   let #(e, loop_start) = fresh_label(e)
   let #(e, loop_continue) = fresh_label(e)
@@ -5769,14 +5781,9 @@ fn emit_for_of_common(
     |> emit_ir(IrPushTry(catch_body, body_kind))
     |> push_loop_iter(break_target, loop_continue)
     |> emit_ir(IrLabel(loop_start))
-  use e <- result.map(tail(
-    e,
-    loop_start,
-    loop_continue,
-    break_target,
-    catch_body,
-    end,
-  ))
+  let labels =
+    ForOfLabels(loop_start:, loop_continue:, break_target:, catch_body:, end:)
+  use e <- result.map(tail(e, labels))
   e |> emit_ir(IrLabel(end)) |> pop_frame |> leave_for_scope(save)
 }
 
@@ -5795,13 +5802,15 @@ fn emit_for_of(
   right: ast.Expression,
   body: ast.Statement,
 ) -> Result(Emitter, EmitError) {
-  use e, loop_start, loop_continue, break_target, catch_body, end <- emit_for_of_common(
+  use e, labels <- emit_for_of_common(
     e,
     left,
     right,
     IrFinal(opcode.GetIterator),
     IterCloseGuard,
   )
+  let ForOfLabels(loop_start:, loop_continue:, break_target:, catch_body:, end:) =
+    labels
   let #(e, exhausted) = fresh_label(e)
   let e = emit_op(e, opcode.IteratorNext)
   // stack: [done, value, iter|undef, ..base], try=[F_body]
@@ -5866,7 +5875,7 @@ fn emit_for_await_of(
   right: ast.Expression,
   body: ast.Statement,
 ) -> Result(Emitter, EmitError) {
-  use e, loop_start, loop_continue, break_target, catch_body, end <- emit_for_of_common(
+  use e, labels <- emit_for_of_common(
     e,
     left,
     right,
@@ -5876,6 +5885,8 @@ fn emit_for_await_of(
     // and the close is open-coded in bytecode below.
     CatchOnly,
   )
+  let ForOfLabels(loop_start:, loop_continue:, break_target:, catch_body:, end:) =
+    labels
   let #(e, exhausted) = fresh_label(e)
   let #(e, catch_next) = fresh_label(e)
   let #(e, no_ret_thr) = fresh_label(e)
