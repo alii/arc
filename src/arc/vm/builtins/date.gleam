@@ -14,10 +14,9 @@
 /// wall clock and the local-zone offset lookups go through FFI, and those live
 /// in `arc/internal/host_time`.
 import arc/internal/digits.{take_digits}
-import arc/internal/gregorian.{
-  civil_from_days, days_from_year, floor_div, floor_mod as math_mod,
-}
+import arc/internal/gregorian.{civil_from_days, days_from_year}
 import arc/internal/host_time.{now_ms, offset_at_local_ms, offset_at_utc_ms}
+import arc/internal/int_math.{floor_div, floor_mod as math_mod}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
@@ -231,51 +230,49 @@ pub fn dispatch(
       date_get_field(this, state, name, FieldMs, UtcTime)
     DatePrototypeSetTime -> date_set_time(this, args, state, name)
     DatePrototypeSetMilliseconds ->
-      date_set_field(this, args, state, name, FieldMs, 1, LocalTime)
+      date_set_field(this, args, state, name, SetMs, LocalTime)
     DatePrototypeSetUTCMilliseconds ->
-      date_set_field(this, args, state, name, FieldMs, 1, UtcTime)
+      date_set_field(this, args, state, name, SetMs, UtcTime)
     DatePrototypeSetSeconds ->
-      date_set_field(this, args, state, name, FieldSeconds, 2, LocalTime)
+      date_set_field(this, args, state, name, SetSeconds, LocalTime)
     DatePrototypeSetUTCSeconds ->
-      date_set_field(this, args, state, name, FieldSeconds, 2, UtcTime)
+      date_set_field(this, args, state, name, SetSeconds, UtcTime)
     DatePrototypeSetMinutes ->
-      date_set_field(this, args, state, name, FieldMinutes, 3, LocalTime)
+      date_set_field(this, args, state, name, SetMinutes, LocalTime)
     DatePrototypeSetUTCMinutes ->
-      date_set_field(this, args, state, name, FieldMinutes, 3, UtcTime)
+      date_set_field(this, args, state, name, SetMinutes, UtcTime)
     DatePrototypeSetHours ->
-      date_set_field(this, args, state, name, FieldHours, 4, LocalTime)
+      date_set_field(this, args, state, name, SetHours, LocalTime)
     DatePrototypeSetUTCHours ->
-      date_set_field(this, args, state, name, FieldHours, 4, UtcTime)
+      date_set_field(this, args, state, name, SetHours, UtcTime)
     DatePrototypeSetDate ->
-      date_set_field(this, args, state, name, FieldDate, 1, LocalTime)
+      date_set_field(this, args, state, name, SetDate, LocalTime)
     DatePrototypeSetUTCDate ->
-      date_set_field(this, args, state, name, FieldDate, 1, UtcTime)
+      date_set_field(this, args, state, name, SetDate, UtcTime)
     DatePrototypeSetMonth ->
-      date_set_field(this, args, state, name, FieldMonth, 2, LocalTime)
+      date_set_field(this, args, state, name, SetMonth, LocalTime)
     DatePrototypeSetUTCMonth ->
-      date_set_field(this, args, state, name, FieldMonth, 2, UtcTime)
+      date_set_field(this, args, state, name, SetMonth, UtcTime)
     DatePrototypeSetFullYear ->
-      date_set_field(this, args, state, name, FieldYear, 3, LocalTime)
+      date_set_field(this, args, state, name, SetYear, LocalTime)
     DatePrototypeSetUTCFullYear ->
-      date_set_field(this, args, state, name, FieldYear, 3, UtcTime)
+      date_set_field(this, args, state, name, SetYear, UtcTime)
     DatePrototypeGetYear -> date_get_year(this, state, name)
     DatePrototypeSetYear -> date_set_year(this, args, state, name)
     DatePrototypeToString ->
-      date_to_string(this, state, name, FmtLocal, DateAndTime)
+      date_to_string(this, state, name, FmtLocal(DateAndTime))
     DatePrototypeToDateString ->
-      date_to_string(this, state, name, FmtLocal, DateOnly)
+      date_to_string(this, state, name, FmtLocal(DateOnly))
     DatePrototypeToTimeString ->
-      date_to_string(this, state, name, FmtLocal, TimeOnly)
-    DatePrototypeToISOString ->
-      date_to_string(this, state, name, FmtIso, DateAndTime)
-    DatePrototypeToUTCString ->
-      date_to_string(this, state, name, FmtUtc, DateAndTime)
+      date_to_string(this, state, name, FmtLocal(TimeOnly))
+    DatePrototypeToISOString -> date_to_string(this, state, name, FmtIso)
+    DatePrototypeToUTCString -> date_to_string(this, state, name, FmtUtc)
     DatePrototypeToLocaleString ->
-      date_to_string(this, state, name, FmtLocale, DateAndTime)
+      date_to_string(this, state, name, FmtLocale(DateAndTime))
     DatePrototypeToLocaleDateString ->
-      date_to_string(this, state, name, FmtLocale, DateOnly)
+      date_to_string(this, state, name, FmtLocale(DateOnly))
     DatePrototypeToLocaleTimeString ->
-      date_to_string(this, state, name, FmtLocale, TimeOnly)
+      date_to_string(this, state, name, FmtLocale(TimeOnly))
     DatePrototypeToJSON -> date_to_json(this, state)
     DatePrototypeSymbolToPrimitive -> date_to_primitive(this, args, state)
   }
@@ -390,9 +387,8 @@ type DateFields {
   )
 }
 
-/// One calendar field of a broken-down Date, as named by the get*/set*
-/// accessor pairs. The first seven (year..ms) are also the setters' write
-/// targets, in `setHours(h, m, s, ms)` argument order — see `field_index`.
+/// One calendar field of a broken-down Date, as named by the get* accessors.
+/// Setters use the narrower `SettableField` (weekday is read-only).
 type DateField {
   FieldYear
   FieldMonth
@@ -418,18 +414,46 @@ fn field_at(f: DateFields, field: DateField) -> Int {
   }
 }
 
-/// Position of a field in the year..ms component order (0..6, weekday last).
+/// The first field a setX method writes. Unlike `DateField` this excludes
+/// weekday (there is no `setDay`), and each variant fixes both WHERE the
+/// consecutive-component overwrite starts and HOW MANY arguments the spec
+/// admits — so `date_set_field(.., SetHours, ..)` cannot be paired with a
+/// wrong `max_args`, and a weekday setter is unrepresentable.
+type SettableField {
+  SetYear
+  SetMonth
+  SetDate
+  SetHours
+  SetMinutes
+  SetSeconds
+  SetMs
+}
+
+/// How many consecutive components a setter may accept, per §21.4.4.18-.30:
+/// setHours(h,m,s,ms) → 4, setFullYear(y,m,d) → 3, setMilliseconds(ms) → 1.
+fn settable_max_args(f: SettableField) -> Int {
+  case f {
+    SetMs -> 1
+    SetSeconds -> 2
+    SetMinutes -> 3
+    SetHours -> 4
+    SetDate -> 1
+    SetMonth -> 2
+    SetYear -> 3
+  }
+}
+
+/// Position of a settable field in the year..ms component order (0..6).
 /// The setters overwrite a consecutive run of components starting here.
-fn field_index(field: DateField) -> Int {
-  case field {
-    FieldYear -> 0
-    FieldMonth -> 1
-    FieldDate -> 2
-    FieldHours -> 3
-    FieldMinutes -> 4
-    FieldSeconds -> 5
-    FieldMs -> 6
-    FieldWeekday -> 7
+fn settable_index(f: SettableField) -> Int {
+  case f {
+    SetYear -> 0
+    SetMonth -> 1
+    SetDate -> 2
+    SetHours -> 3
+    SetMinutes -> 4
+    SetSeconds -> 5
+    SetMs -> 6
   }
 }
 
@@ -632,7 +656,7 @@ fn date_constructor(
   case state.new_target {
     JsUndefined -> {
       let fields = get_date_fields(now_ms(), LocalTime)
-      #(state, Ok(JsString(format_date(FmtLocal, DateAndTime, fields))))
+      #(state, Ok(JsString(format_date(FmtLocal(DateAndTime), fields))))
     }
     _ -> {
       let #(state, tv_result) = case args {
@@ -802,11 +826,11 @@ fn date_set_time(
   #(st, Ok(JsNumber(tv)))
 }
 
-/// Shared setter. `first` is the first field being written (year .. ms),
-/// `max_args` is how many consecutive fields from `first` may be supplied.
-/// Ported from QuickJS `set_date_field`.
+/// Shared setter. `first` names the first field being written; the number of
+/// consecutive fields the caller may supply is derived from it. Ported from
+/// QuickJS `set_date_field`.
 ///
-/// When `first` is `FieldYear` (setFullYear/setUTCFullYear) and the current
+/// When `first` is `SetYear` (setFullYear/setUTCFullYear) and the current
 /// value is NaN, the spec uses +0 as the base time (§21.4.4.21 step 5). For
 /// all other setters, NaN base → result stays NaN.
 fn date_set_field(
@@ -814,14 +838,14 @@ fn date_set_field(
   args: List(JsValue),
   state: State(host),
   name: String,
-  first: DateField,
-  max_args: Int,
+  first: SettableField,
   time_ref: TimeRef,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, tv <- require_time_value(state, this, name)
-  // Coerce supplied args (capped at max_args) to JsNum — full ToNumber so
-  // valueOf side effects and abrupt completions are observed in order.
-  let supplied = list.take(args, max_args)
+  // Coerce supplied args (capped at the spec arity for `first`) to JsNum —
+  // full ToNumber so valueOf side effects and abrupt completions are observed
+  // in order.
+  let supplied = list.take(args, settable_max_args(first))
   use new_nums, state <- state.try_op(args_to_nums(state, supplied))
   case compute_set_field(tv, first, new_nums, time_ref) {
     // Original [[DateValue]] was NaN (and this isn't setFullYear): per
@@ -844,7 +868,7 @@ fn date_set_field(
 /// NaN" early-out (caller must NOT write back), Some(tv) otherwise.
 fn compute_set_field(
   tv: JsNum,
-  first: DateField,
+  first: SettableField,
   new_nums: List(JsNum),
   time_ref: TimeRef,
 ) -> Option(JsNum) {
@@ -858,7 +882,7 @@ fn compute_set_field(
       case first {
         // setFullYear on Invalid Date: per §21.4.4.21 step 5, t becomes +0
         // (NOT LocalTime(+0)) → Year 1970, Month 0, Date 1, all-zero time.
-        FieldYear -> {
+        SetYear -> {
           let zero = Finite(0.0)
           let epoch =
             DateComponents(
@@ -899,10 +923,10 @@ fn int_num(i: Int) -> JsNum {
 /// the supplied values; every other component keeps its base value.
 fn overwrite_fields(
   base: DateComponents,
-  first: DateField,
+  first: SettableField,
   new_nums: List(JsNum),
 ) -> DateComponents {
-  let lo = field_index(first)
+  let lo = settable_index(first)
   DateComponents(
     year: merge_field(base.year, 0, lo, new_nums),
     month: merge_field(base.month, 1, lo, new_nums),
@@ -938,11 +962,15 @@ fn make_date_from_components(c: DateComponents, time_ref: TimeRef) -> JsNum {
 // String formatting
 // ============================================================================
 
+/// A toString-family output format. FmtIso and FmtUtc always render the full
+/// date-and-time string; only FmtLocal/FmtLocale have Date-only / Time-only
+/// halves, so the `DatePart` selector lives on those variants and a nonsense
+/// combination like "ISO, time-only" is unrepresentable.
 type DateFmt {
-  FmtLocal
+  FmtLocal(DatePart)
   FmtUtc
   FmtIso
-  FmtLocale
+  FmtLocale(DatePart)
 }
 
 /// Which half of a formatted date string a toString-family method returns:
@@ -978,18 +1006,16 @@ fn date_to_string(
   state: State(host),
   name: String,
   fmt: DateFmt,
-  part: DatePart,
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use _, tv <- require_time_value(state, this, name)
   case tv {
     Finite(f) -> {
       let time_ref = case fmt {
-        FmtLocal | FmtLocale -> LocalTime
+        FmtLocal(_) | FmtLocale(_) -> LocalTime
         FmtUtc | FmtIso -> UtcTime
       }
       let fields = get_date_fields(value.float_to_int(f), time_ref)
-      let s = format_date(fmt, part, fields)
-      #(state, Ok(JsString(s)))
+      #(state, Ok(JsString(format_date(fmt, fields))))
     }
     _ ->
       case fmt {
@@ -999,12 +1025,12 @@ fn date_to_string(
   }
 }
 
-fn format_date(fmt: DateFmt, part: DatePart, f: DateFields) -> String {
+fn format_date(fmt: DateFmt, f: DateFields) -> String {
   case fmt {
     FmtIso -> format_iso(f)
     FmtUtc -> format_utc(f)
-    FmtLocal -> format_local(part, f)
-    FmtLocale -> format_locale(part, f)
+    FmtLocal(part) -> format_local(part, f)
+    FmtLocale(part) -> format_locale(part, f)
   }
 }
 
