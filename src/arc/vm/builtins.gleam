@@ -241,8 +241,7 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
     )
 
   // Symbol constructor (callable, not new-able) + %Symbol.prototype%
-  let #(h, symbol, symbol_proto) =
-    builtins_symbol.init(h, object_proto, function.prototype)
+  let #(h, symbol) = builtins_symbol.init(h, object_proto, function.prototype)
 
   // console global — log/warn/error/info/debug
   let #(h, console) = builtins_console.init(h, object_proto, function.prototype)
@@ -421,7 +420,6 @@ pub fn init(h: Heap(host)) -> #(Heap(host), Builtins) {
       async_generator:,
       async_function_proto:,
       symbol:,
-      symbol_proto:,
       console:,
       json:,
       reflect:,
@@ -565,7 +563,7 @@ pub fn globals(b: Builtins, h: Heap(host)) -> #(Heap(host), value.Ref) {
     Builtin("isNaN", JsObject(b.is_nan)),
     Builtin("isFinite", JsObject(b.is_finite)),
     Builtin("Promise", JsObject(b.promise.constructor)),
-    Builtin("Symbol", JsObject(b.symbol)),
+    Builtin("Symbol", JsObject(b.symbol.constructor)),
     Builtin("console", JsObject(b.console)),
     Builtin("JSON", JsObject(b.json)),
     Builtin("Reflect", JsObject(b.reflect)),

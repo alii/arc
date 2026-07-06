@@ -71,7 +71,8 @@ pub fn get_value_of(
     JsNumber(_) -> get_value(state, state.builtins.number.prototype, key, val)
     value.JsBool(_) ->
       get_value(state, state.builtins.boolean.prototype, key, val)
-    value.JsSymbol(_) -> get_value(state, state.builtins.symbol_proto, key, val)
+    value.JsSymbol(_) ->
+      get_value(state, state.builtins.symbol.prototype, key, val)
     // BigInt primitive → %BigInt.prototype% (toString/valueOf/…).
     value.JsBigInt(_) ->
       get_value(state, state.builtins.bigint.prototype, key, val)
@@ -96,7 +97,7 @@ pub fn get_symbol_value_of(
     value.JsBool(_) ->
       get_symbol_value(state, state.builtins.boolean.prototype, sym, val)
     value.JsSymbol(_) ->
-      get_symbol_value(state, state.builtins.symbol_proto, sym, val)
+      get_symbol_value(state, state.builtins.symbol.prototype, sym, val)
     value.JsBigInt(_) ->
       get_symbol_value(state, state.builtins.bigint.prototype, sym, val)
     _ -> Ok(#(value.JsUndefined, state))
@@ -3799,7 +3800,7 @@ pub fn is_extensible_stateful(
 pub fn prevent_extensions_stateful(
   state: State(host),
   ref: Ref,
-) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
+) -> Result(#(Bool, State(host)), #(JsValue, State(host))) {
   case heap.read(state.heap, ref) {
     Some(ObjectSlot(kind: value.ProxyObject(slots:, ..), ..)) -> {
       use #(t, h, trap, state) <- result.try(proxy_trap(
@@ -3814,7 +3815,7 @@ pub fn prevent_extensions_stateful(
             state.call(state, trap_fn, JsObject(h), [JsObject(t)]),
           )
           case value.is_truthy(res) {
-            False -> Ok(#(state, False))
+            False -> Ok(#(False, state))
             True -> {
               // Step 8: trap returned true → target must be non-extensible.
               use #(target_ext, state) <- result.try(is_extensible_stateful(
@@ -3827,7 +3828,7 @@ pub fn prevent_extensions_stateful(
                     state,
                     "'preventExtensions' on proxy: trap returned truish but the proxy target is extensible",
                   )
-                False -> Ok(#(state, True))
+                False -> Ok(#(True, state))
               }
             }
           }
@@ -3836,9 +3837,9 @@ pub fn prevent_extensions_stateful(
     }
     Some(ObjectSlot(..) as slot) -> {
       let h = heap.write(state.heap, ref, ObjectSlot(..slot, extensible: False))
-      Ok(#(State(..state, heap: h), True))
+      Ok(#(True, State(..state, heap: h)))
     }
-    _ -> Ok(#(state, True))
+    _ -> Ok(#(True, state))
   }
 }
 

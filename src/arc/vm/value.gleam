@@ -141,6 +141,13 @@ pub fn symbol_description(id: SymbolId) -> Option(String) {
   }
 }
 
+/// §20.4.3.3.1 SymbolDescriptiveString — "Symbol(" + description + ")".
+/// Used by String(sym), Symbol.prototype.toString and diagnostic printing.
+/// Unlike ToString(sym), this never throws.
+pub fn symbol_descriptive_string(id: SymbolId) -> String {
+  "Symbol(" <> option.unwrap(symbol_description(id), "") <> ")"
+}
+
 /// Wrapper around BEAM's native arbitrary-precision integer.
 pub type BigInt {
   BigInt(value: Int)
@@ -529,6 +536,24 @@ pub type BooleanNativeFn {
   BooleanConstructor
   BooleanPrototypeValueOf
   BooleanPrototypeToString
+}
+
+/// Symbol constructor, statics and prototype methods (§20.4).
+pub type SymbolNativeFn {
+  /// Symbol() — callable but NOT new-able (do_construct intercepts and throws).
+  SymbolConstructor
+  /// Symbol.for(key) — global symbol registry lookup/insert.
+  SymbolFor
+  /// Symbol.keyFor(sym) — reverse lookup in global symbol registry.
+  SymbolKeyFor
+  /// §20.4.3.3 Symbol.prototype.toString — SymbolDescriptiveString(thisSymbolValue).
+  SymbolToString
+  /// §20.4.3.4 Symbol.prototype.valueOf — thisSymbolValue.
+  SymbolValueOf
+  /// §20.4.3.5 Symbol.prototype[Symbol.toPrimitive] — thisSymbolValue (hint ignored).
+  SymbolToPrimitive
+  /// §20.4.3.2 get Symbol.prototype.description — [[Description]] or undefined.
+  SymbolDescriptionGetter
 }
 
 /// Number methods — includes static methods and global utility functions.
@@ -2028,6 +2053,7 @@ pub type NativeFn {
   // Per-module dispatch wrappers
   MathNative(MathNativeFn)
   BooleanNative(BooleanNativeFn)
+  SymbolNative(SymbolNativeFn)
   NumberNative(NumberNativeFn)
   StringNative(StringNativeFn)
   ErrorNative(ErrorNativeFn)
@@ -3201,14 +3227,13 @@ pub type CallNativeFn {
   PromiseAnyStatic
   /// Per-element resolve handler for Promise.all.
   /// Captures: index, remaining_ref (BoxSlot counter), values_ref (array),
-  /// already_called_ref (BoxSlot bool), capability resolve/reject.
+  /// already_called_ref (BoxSlot bool), capability resolve.
   PromiseAllResolveElement(
     index: Int,
     remaining_ref: Ref,
     values_ref: Ref,
     already_called_ref: Ref,
     resolve: JsValue,
-    reject: JsValue,
   )
   /// Per-element resolve handler for Promise.allSettled — stores {status:"fulfilled",value}.
   PromiseAllSettledResolveElement(
@@ -3326,8 +3351,6 @@ pub type CallNativeFn {
   ArrayFromAsyncLikeOnValue(ctx: FromAsyncLikeCtx)
   /// fromAsync array-like path: onFulfilled for the awaited mapfn result.
   ArrayFromAsyncLikeOnMapped(ctx: FromAsyncLikeCtx)
-  /// Symbol() constructor — callable but NOT new-able.
-  SymbolConstructor
   /// Proxy(target, handler) constructor — new-able but NOT callable (§28.2.1).
   ProxyConstructor
   /// Proxy.revocable(target, handler) — §28.2.2.1.
@@ -3335,18 +3358,6 @@ pub type CallNativeFn {
   /// The revoke closure returned by Proxy.revocable. Carries the proxy's Ref;
   /// invoking it nulls the proxy's [[ProxyTarget]]/[[ProxyHandler]].
   ProxyRevoke(proxy: Ref)
-  /// Symbol.for(key) — global symbol registry lookup/insert.
-  SymbolFor
-  /// Symbol.keyFor(sym) — reverse lookup in global symbol registry.
-  SymbolKeyFor
-  /// §20.4.3.3 Symbol.prototype.toString — SymbolDescriptiveString(thisSymbolValue).
-  SymbolPrototypeToString
-  /// §20.4.3.4 Symbol.prototype.valueOf — thisSymbolValue.
-  SymbolPrototypeValueOf
-  /// §20.4.3.2 get Symbol.prototype.description — [[Description]] or undefined.
-  SymbolDescriptionGetter
-  /// §20.4.3.5 Symbol.prototype[Symbol.toPrimitive] — thisSymbolValue (hint ignored).
-  SymbolPrototypeToPrimitive
 }
 
 /// Captured state for Array.fromAsync's async-iterator loop continuations.

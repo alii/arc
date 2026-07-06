@@ -1,7 +1,6 @@
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/iter_protocol
-import arc/vm/builtins/symbol
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/js_string
@@ -1299,7 +1298,8 @@ fn assign_own_keys(
           ))
           case ok {
             True -> Ok(state)
-            False -> assign_set_failed(state, symbol.descriptive_string(sym))
+            False ->
+              assign_set_failed(state, value.symbol_descriptive_string(sym))
           }
         }
       })
@@ -1542,7 +1542,7 @@ fn get_prototype_of(
     JsNumber(_) -> #(state, Ok(JsObject(state.builtins.number.prototype)))
     JsString(_) -> #(state, Ok(JsObject(state.builtins.string.prototype)))
     JsBool(_) -> #(state, Ok(JsObject(state.builtins.boolean.prototype)))
-    value.JsSymbol(_) -> #(state, Ok(JsObject(state.builtins.symbol_proto)))
+    value.JsSymbol(_) -> #(state, Ok(JsObject(state.builtins.symbol.prototype)))
     value.JsBigInt(_) -> #(state, Ok(JsObject(state.builtins.bigint.prototype)))
     _ -> #(state, Ok(JsObject(state.builtins.object.prototype)))
   }
@@ -1591,7 +1591,7 @@ fn set_prototype_of(
       state.type_error(state, "Object prototype may only be an Object or null")
     JsObject(ref), Ok(new_proto) -> {
       // §20.1.2.21 steps 4-6: O.[[SetPrototypeOf]](proto); throw if false.
-      use #(state, status) <- try_op_pair(mop.set_prototype_of_stateful(
+      use status, state <- state.try_op(mop.set_prototype_of_stateful(
         state,
         ref,
         new_proto,
@@ -1847,7 +1847,7 @@ fn set_integrity_level(
   case target {
     JsObject(ref) -> {
       // Step 3: ? O.[[PreventExtensions]]() — trap-aware.
-      use #(state, ok) <- try_op_pair(object.prevent_extensions_stateful(
+      use ok, state <- state.try_op(object.prevent_extensions_stateful(
         state,
         ref,
       ))
@@ -1954,7 +1954,7 @@ fn prevent_extensions(
   case target {
     JsObject(ref) -> {
       // §20.1.2.17 step 2: O.[[PreventExtensions]]() — trap-aware.
-      use #(state, ok) <- try_op_pair(object.prevent_extensions_stateful(
+      use ok, state <- state.try_op(object.prevent_extensions_stateful(
         state,
         ref,
       ))
@@ -1968,18 +1968,6 @@ fn prevent_extensions(
     }
     // §20.1.2.17 step 1: If O is not an Object, return O.
     _ -> #(state, Ok(target))
-  }
-}
-
-/// CPS adapter for ops returning `Result(#(State, a), #(JsValue, State))`
-/// (state-first tuple, unlike state.try_op's value-first).
-fn try_op_pair(
-  result: Result(#(State(host), a), #(JsValue, State(host))),
-  cont: fn(#(State(host), a)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case result {
-    Ok(pair) -> cont(pair)
-    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 

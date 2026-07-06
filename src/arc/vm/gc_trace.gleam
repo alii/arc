@@ -545,6 +545,8 @@ fn dispatch_native_fn_refs(
   case native {
     value.MathNative(f) -> math_native_refs(f, acc)
     value.BooleanNative(f) -> boolean_native_refs(f, acc)
+    // Symbol natives carry no captured Refs.
+    value.SymbolNative(_) -> acc
     value.NumberNative(f) -> number_native_refs(f, acc)
     value.StringNative(f) -> string_native_refs(f, acc)
     value.ErrorNative(f) -> error_native_refs(f, acc)
@@ -1493,15 +1495,8 @@ fn call_native_fn_refs(
     | value.AsyncFromSyncThrow
     | value.AsyncFromSyncUnwrap(done: _)
     | value.ArrayFromAsync
-    | value.SymbolConstructor
     | value.ProxyConstructor
-    | value.ProxyRevocable
-    | value.SymbolFor
-    | value.SymbolKeyFor
-    | value.SymbolPrototypeToString
-    | value.SymbolPrototypeValueOf
-    | value.SymbolDescriptionGetter
-    | value.SymbolPrototypeToPrimitive -> acc
+    | value.ProxyRevocable -> acc
   }
 }
 

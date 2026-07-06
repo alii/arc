@@ -231,11 +231,7 @@ pub type Builtins {
     /// function objects. Its "constructor" is the %AsyncFunction% dynamic
     /// constructor.
     async_function_proto: Ref,
-    symbol: Ref,
-    /// %Symbol.prototype% — dedicated prototype object (toString/valueOf/
-    /// description/@@toPrimitive). Distinct from %Object.prototype% so
-    /// `x instanceof Symbol` walks the right chain.
-    symbol_proto: Ref,
+    symbol: BuiltinType,
     console: Ref,
     json: Ref,
     reflect: Ref,
@@ -439,8 +435,8 @@ pub fn alloc_call_fn(
 }
 
 /// Like alloc_call_fn, but with a caller-supplied named property list — for
-/// function objects whose properties aren't just name+length (the Symbol
-/// constructor's well-known symbols, bound functions' name-only set).
+/// function objects whose properties aren't just name+length (the Proxy
+/// constructor's `revocable`, bound functions' name-only set).
 /// Non-rooting; callers that need rooting do it themselves.
 pub fn alloc_call_fn_props(
   h: Heap(ctx, host),
@@ -450,6 +446,19 @@ pub fn alloc_call_fn_props(
   props props: List(#(String, Property)),
 ) -> #(Heap(ctx, host), Ref) {
   alloc_fn_slot(h, function_proto, Call(native), constructible, props)
+}
+
+/// Dispatch-flavoured `alloc_call_fn_props`: allocate a NativeFunction that is
+/// routed via `dispatch_native`, with a caller-supplied named property list.
+/// Non-rooting; callers that need rooting do it themselves.
+pub fn alloc_native_fn_props(
+  h: Heap(ctx, host),
+  function_proto: Ref,
+  native: NativeFn,
+  constructible constructible: Bool,
+  props props: List(#(String, Property)),
+) -> #(Heap(ctx, host), Ref) {
+  alloc_fn_slot(h, function_proto, Dispatch(native), constructible, props)
 }
 
 /// Shared core: allocate a NativeFunction ObjectSlot (non-rooting).
@@ -1108,7 +1117,7 @@ pub fn to_object(
       Some(alloc_wrapper(h, value.BooleanObject(bv), b.boolean.prototype))
     // Table 15 row 6: Symbol → new Symbol object with [[SymbolData]]
     value.JsSymbol(sym) ->
-      Some(alloc_wrapper(h, value.SymbolObject(sym), b.symbol_proto))
+      Some(alloc_wrapper(h, value.SymbolObject(sym), b.symbol.prototype))
     // Table 15 row 7: BigInt → new BigInt object with [[BigIntData]]
     value.JsBigInt(bv) ->
       Some(alloc_wrapper(h, value.BigIntObject(bv), b.bigint.prototype))
