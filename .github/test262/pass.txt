@@ -7036,6 +7036,7 @@ built-ins/Iterator/from/get-next-method-only-once.js
 built-ins/Iterator/from/get-next-method-throws.js
 built-ins/Iterator/from/get-return-method-when-call-return.js
 built-ins/Iterator/from/is-function.js
+built-ins/Iterator/from/iterable-primitives.js
 built-ins/Iterator/from/iterable-to-iterator-fallback.js
 built-ins/Iterator/from/length.js
 built-ins/Iterator/from/name.js
@@ -7209,6 +7210,7 @@ built-ins/Iterator/prototype/flatMap/get-next-method-only-once.js
 built-ins/Iterator/prototype/flatMap/get-next-method-throws.js
 built-ins/Iterator/prototype/flatMap/get-return-method-throws.js
 built-ins/Iterator/prototype/flatMap/is-function.js
+built-ins/Iterator/prototype/flatMap/iterable-primitives-are-not-flattened.js
 built-ins/Iterator/prototype/flatMap/iterable-to-iterator-fallback.js
 built-ins/Iterator/prototype/flatMap/iterator-already-exhausted.js
 built-ins/Iterator/prototype/flatMap/iterator-return-method-throws.js
@@ -8983,6 +8985,7 @@ built-ins/Object/create/15.2.3.5-4-99.js
 built-ins/Object/create/name.js
 built-ins/Object/create/not-a-constructor.js
 built-ins/Object/create/properties-arg-to-object-bigint.js
+built-ins/Object/create/properties-arg-to-object-non-empty-string.js
 built-ins/Object/create/properties-arg-to-object-null.js
 built-ins/Object/create/properties-arg-to-object.js
 built-ins/Object/defineProperties/15.2.3.7-0-1.js
@@ -12386,12 +12389,17 @@ built-ins/Promise/prototype/catch/S25.4.5.1_A1.1_T1.js
 built-ins/Promise/prototype/catch/S25.4.5.1_A2.1_T1.js
 built-ins/Promise/prototype/catch/S25.4.5.1_A3.1_T1.js
 built-ins/Promise/prototype/catch/S25.4.5.1_A3.1_T2.js
+built-ins/Promise/prototype/catch/invokes-then.js
 built-ins/Promise/prototype/catch/length.js
 built-ins/Promise/prototype/catch/name.js
 built-ins/Promise/prototype/catch/not-a-constructor.js
 built-ins/Promise/prototype/catch/prop-desc.js
 built-ins/Promise/prototype/catch/this-value-non-object.js
+built-ins/Promise/prototype/catch/this-value-obj-coercible.js
 built-ins/Promise/prototype/catch/this-value-then-not-callable.js
+built-ins/Promise/prototype/catch/this-value-then-poisoned.js
+built-ins/Promise/prototype/catch/this-value-then-throws.js
+built-ins/Promise/prototype/finally/invokes-then-with-non-function.js
 built-ins/Promise/prototype/finally/is-a-function.js
 built-ins/Promise/prototype/finally/is-a-method.js
 built-ins/Promise/prototype/finally/length.js
@@ -12399,6 +12407,7 @@ built-ins/Promise/prototype/finally/name.js
 built-ins/Promise/prototype/finally/not-a-constructor.js
 built-ins/Promise/prototype/finally/prop-desc.js
 built-ins/Promise/prototype/finally/rejected-observable-then-calls-argument.js
+built-ins/Promise/prototype/finally/rejected-observable-then-calls.js
 built-ins/Promise/prototype/finally/rejection-reason-no-fulfill.js
 built-ins/Promise/prototype/finally/rejection-reason-override-with-throw.js
 built-ins/Promise/prototype/finally/resolution-value-no-override.js
@@ -12411,6 +12420,11 @@ built-ins/Promise/prototype/finally/subclass-resolve-count.js
 built-ins/Promise/prototype/finally/subclass-species-constructor-reject-count.js
 built-ins/Promise/prototype/finally/subclass-species-constructor-resolve-count.js
 built-ins/Promise/prototype/finally/this-value-non-object.js
+built-ins/Promise/prototype/finally/this-value-proxy.js
+built-ins/Promise/prototype/finally/this-value-then-not-callable.js
+built-ins/Promise/prototype/finally/this-value-then-poisoned.js
+built-ins/Promise/prototype/finally/this-value-then-throws.js
+built-ins/Promise/prototype/finally/this-value-thenable.js
 built-ins/Promise/prototype/no-promise-state.js
 built-ins/Promise/prototype/prop-desc.js
 built-ins/Promise/prototype/proto.js
@@ -24559,6 +24573,7 @@ intl402/DateTimeFormat/timezone-invalid.js
 intl402/DateTimeFormat/timezone-legacy-non-iana.js
 intl402/DateTimeFormat/timezone-not-canonicalized.js
 intl402/DateTimeFormat/timezone-utc.js
+intl402/DisplayNames/ctor-custom-get-prototype-poison-throws.js
 intl402/DisplayNames/ctor-custom-prototype.js
 intl402/DisplayNames/ctor-default-prototype.js
 intl402/DisplayNames/instance-extensible.js
@@ -25396,6 +25411,7 @@ intl402/Segmenter/constructor/supportedLocalesOf/options-toobject.js
 intl402/Segmenter/constructor/supportedLocalesOf/options-undefined.js
 intl402/Segmenter/constructor/supportedLocalesOf/prop-desc.js
 intl402/Segmenter/constructor/supportedLocalesOf/result-type.js
+intl402/Segmenter/ctor-custom-get-prototype-poison-throws.js
 intl402/Segmenter/ctor-custom-prototype.js
 intl402/Segmenter/ctor-default-prototype.js
 intl402/Segmenter/instance/extensibility.js
@@ -39288,6 +39304,7 @@ language/expressions/yield/star-rhs-iter-nrml-res-done-err.js
 language/expressions/yield/star-rhs-iter-nrml-res-value-err.js
 language/expressions/yield/star-rhs-iter-nrml-res-value-final.js
 language/expressions/yield/star-rhs-iter-rtrn-no-rtrn.js
+language/expressions/yield/star-rhs-iter-rtrn-res-value-final.js
 language/expressions/yield/star-rhs-iter-rtrn-rtrn-invoke.js
 language/expressions/yield/star-rhs-iter-thrw-res-value-final.js
 language/expressions/yield/star-rhs-iter-thrw-thrw-invoke.js
@@ -50806,6 +50823,7 @@ staging/sm/Array/for_of_3.js
 staging/sm/Array/for_of_4.js
 staging/sm/Array/from_basics.js
 staging/sm/Array/from_iterable.js
+staging/sm/Array/from_primitive.js
 staging/sm/Array/from_surfaces.js
 staging/sm/Array/from_this.js
 staging/sm/Array/frozen-dense-array.js
@@ -50962,6 +50980,9 @@ staging/sm/Iterator/from/iterator-not-callable-throws.js
 staging/sm/Iterator/from/modify-next.js
 staging/sm/Iterator/from/modify-return.js
 staging/sm/Iterator/from/o-not-object-throws.js
+staging/sm/Iterator/from/proxy-not-wrapped.js
+staging/sm/Iterator/from/proxy-wrap-next.js
+staging/sm/Iterator/from/proxy-wrap-return.js
 staging/sm/Iterator/from/return-iterator-if-iterable.js
 staging/sm/Iterator/from/return-wrapper-if-not-iterable.js
 staging/sm/Iterator/from/return-wrapper-if-not-iterator-instance.js
@@ -51785,6 +51806,7 @@ staging/sm/object/15.2.3.4-03.js
 staging/sm/object/15.2.3.4-04.js
 staging/sm/object/15.2.3.5-01.js
 staging/sm/object/15.2.3.6-define-over-method.js
+staging/sm/object/15.2.3.7-01.js
 staging/sm/object/15.2.3.9.js
 staging/sm/object/accessor-arguments-rest.js
 staging/sm/object/accessor-name.js
