@@ -3895,7 +3895,9 @@ pub type ExoticKind(ctx, host) {
   IteratorHelperObject(gen_state: GeneratorState, body: HelperBody)
   /// Wrap For Valid Iterator — ES2025 §27.1.2.1.2. Created by Iterator.from
   /// when the source isn't already an instance of %Iterator.prototype%.
-  WrapForValidIteratorObject(iterated: JsValue, next_method: JsValue)
+  /// [[Iterated]] is the underlying Iterator Record — held whole so any
+  /// change to `IteratorRecord`'s shape flows here at compile time.
+  WrapForValidIteratorObject(record: IteratorRecord)
   /// Module Namespace Exotic Object — ES2024 §10.4.6. `exports` maps each
   /// exported name to the BoxSlot ref holding the binding's live value, so
   /// [[Get]] re-reads the cell (and throws ReferenceError on a TDZ binding).
@@ -3917,8 +3919,8 @@ pub type ExoticKind(ctx, host) {
   /// opcode wraps user-defined iterators in this so IteratorNext calls the
   /// cached `next_method` instead of re-walking the prototype chain every
   /// iteration. Never exposed to JS: IteratorClose/CloseThrow/Rest/YieldStar
-  /// unwrap to `iterated` before any dynamic .return/.throw lookup.
-  IteratorRecordObject(iterated: JsValue, next_method: JsValue)
+  /// unwrap to `record.iterator` before any dynamic .return/.throw lookup.
+  IteratorRecordObject(record: IteratorRecord)
 }
 
 /// A live proxy's paired [[ProxyTarget]]/[[ProxyHandler]] internal slots

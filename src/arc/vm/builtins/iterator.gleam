@@ -279,10 +279,7 @@ fn from(
       let #(heap, ref) =
         common.alloc_wrapper(
           state.heap,
-          WrapForValidIteratorObject(
-            iterated: rec.iterator,
-            next_method: rec.next_method,
-          ),
+          WrapForValidIteratorObject(record: rec),
           state.builtins.wrap_for_valid_iterator_proto,
         )
       #(State(..state, heap:), Ok(JsObject(ref)))
@@ -772,8 +769,8 @@ fn wrap_next(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use iterated, next_method <- require_wrap(this, state)
-  use result, state <- state.try_call(state, next_method, iterated, [])
+  use rec <- require_wrap(this, state)
+  use result, state <- state.try_call(state, rec.next_method, rec.iterator, [])
   #(state, Ok(result))
 }
 
@@ -787,8 +784,8 @@ fn wrap_return(
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use iterated, _next_method <- require_wrap(this, state)
-  case iter_protocol.call_return(state, iterated) {
+  use rec <- require_wrap(this, state)
+  case iter_protocol.call_return(state, rec.iterator) {
     #(state, Ok(iter_protocol.NoReturnMethod)) ->
       create_iter_result(state, JsUndefined, True)
     #(state, Ok(iter_protocol.Returned(result))) -> #(state, Ok(result))
@@ -1101,16 +1098,14 @@ fn require_object_of(
 fn require_wrap(
   this: JsValue,
   state: State(host),
-  cont: fn(JsValue, JsValue) -> #(State(host), Result(JsValue, JsValue)),
+  cont: fn(IteratorRecord) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let err = "WrapForValidIterator method called on incompatible receiver"
   case this {
     JsObject(ref) ->
       case heap.read(state.heap, ref) {
-        Some(ObjectSlot(
-          kind: WrapForValidIteratorObject(iterated:, next_method:),
-          ..,
-        )) -> cont(iterated, next_method)
+        Some(ObjectSlot(kind: WrapForValidIteratorObject(record:), ..)) ->
+          cont(record)
         _ -> state.type_error(state, err)
       }
     _ -> state.type_error(state, err)
@@ -1619,7 +1614,7 @@ fn zip_next(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case members {
     // IteratorZip closure step 1: iterCount = 0 → done forever.
-    [] -> finish_zip(state, ref)
+    [] -> finish(state, ref)
     _ -> zip_round(state, ref, mode, keys, [], members, [])
   }
 }
@@ -1681,7 +1676,7 @@ fn zip_round(
                 ZipLongest ->
                   case open_others(prev, tail) {
                     // openIters is empty — the generator just completes.
-                    [] -> finish_zip(state, ref)
+                    [] -> finish(state, ref)
                     _ ->
                       zip_round(
                         state,
@@ -1708,7 +1703,7 @@ fn zip_strict_check(
   rest: List(ZipMember),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case rest {
-    [] -> finish_zip(state, ref)
+    [] -> finish(state, ref)
     // Unreachable: "strict" mode never exhausts members in place.
     [ZipExhausted(padding: _), ..tail] -> zip_strict_check(state, ref, tail)
     [ZipOpen(record:, padding: _), ..tail] -> {
@@ -1888,13 +1883,6 @@ fn close_all_normal(
       }
     }
   })
-}
-
-fn finish_zip(
-  state: State(host),
-  ref: Ref,
-) -> #(State(host), Result(JsValue, JsValue)) {
-  create_iter_result(mark_done(state, ref), JsUndefined, True)
 }
 
 fn zip_write_members(

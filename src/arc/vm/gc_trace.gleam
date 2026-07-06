@@ -275,9 +275,8 @@ fn do_refs_in_slot(
           push_value_ref(sync_next, [sync_iter, ..acc])
         value.IteratorHelperObject(gen_state: _, body:) ->
           helper_body_refs(body, acc)
-        value.WrapForValidIteratorObject(iterated:, next_method:)
-        | value.IteratorRecordObject(iterated:, next_method:) ->
-          push_value_ref(next_method, push_value_ref(iterated, acc))
+        value.WrapForValidIteratorObject(record:)
+        | value.IteratorRecordObject(record:) -> push_iter_record(record, acc)
         value.MapObject(store:) ->
           ordered_entries.fold(store, acc, fn(a, k, v) {
             push_value_ref(v, push_value_ref(value.map_key_to_js(k), a))

@@ -34,8 +34,8 @@ pub fn unwrap_record_value(h: state.Heap(host), v: JsValue) -> JsValue {
   case v {
     JsObject(ref) ->
       case heap.read(h, ref) {
-        Some(ObjectSlot(kind: value.IteratorRecordObject(iterated:, ..), ..)) ->
-          iterated
+        Some(ObjectSlot(kind: value.IteratorRecordObject(record:), ..)) ->
+          record.iterator
         _ -> v
       }
     _ -> v
