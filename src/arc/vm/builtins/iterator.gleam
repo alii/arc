@@ -11,6 +11,7 @@ import arc/vm/internal/elements
 import arc/vm/key.{Named}
 import arc/vm/limits
 import arc/vm/ops/coerce
+import arc/vm/ops/instanceof
 import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
@@ -268,7 +269,7 @@ fn from(
   // §27.1.2.1 step 2: ? OrdinaryHasInstance(%Iterator%, iterator). The
   // canonical §7.3.22 op walks via [[GetPrototypeOf]] (proxy-aware) — a
   // hand-rolled heap-field walk would wrongly bypass a proxy trap here.
-  use is_iter, state <- state.try_op(coerce.ordinary_has_instance(
+  use is_iter, state <- state.try_op(instanceof.ordinary_has_instance(
     state,
     state.builtins.iterator.constructor,
     rec.iterator,

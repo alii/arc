@@ -1437,9 +1437,9 @@ fn date_to_primitive(
       let hint_arg = helpers.first_arg_or_undefined(args)
       case hint_arg {
         JsString("string") | JsString("default") ->
-          run_ordinary_to_primitive(state, this, ref, coerce.StringHint)
+          run_ordinary_to_primitive(state, ref, coerce.StringHint)
         JsString("number") ->
-          run_ordinary_to_primitive(state, this, ref, coerce.NumberHint)
+          run_ordinary_to_primitive(state, ref, coerce.NumberHint)
         _ -> state.type_error(state, "Invalid hint")
       }
     }
@@ -1453,11 +1453,10 @@ fn date_to_primitive(
 
 fn run_ordinary_to_primitive(
   state: State(host),
-  val: JsValue,
   ref: Ref,
   hint: coerce.ToPrimitiveHint,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use v, st <- state.try_op(coerce.ordinary_to_primitive(state, val, ref, hint))
+  use v, st <- state.try_op(coerce.ordinary_to_primitive(state, ref, hint))
   #(st, Ok(v))
 }
 

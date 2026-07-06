@@ -19,7 +19,8 @@
 %% `function_clause` crash, never a wrong-width read of an adjacent element.
 -module(arc_typed_array_ffi).
 -export([ta_zeroed/1, ta_get_int/3, ta_set_int/4, ta_get_float/3,
-         ta_set_float/4, ta_clamp_uint8/1, ta_splice/3]).
+         ta_set_float/4, ta_clamp_uint8/1, ta_splice/3,
+         f32_bits/1, f64_bits/1, decode_f32_bits/1, decode_f64_bits/1]).
 
 %% Allocate an all-zero binary of N bytes (ArrayBuffer backing store).
 ta_zeroed(N) when N =< 0 -> <<>>;
@@ -67,19 +68,28 @@ set_int(Bin, Off, SizeBits, V) ->
     <<Before:Off/binary, _:SizeBytes/binary, After/bits>> = Bin,
     <<Before/binary, V:SizeBits/little, After/bits>>.
 
-%% Read a float element as a `value.JsNum`. NaN/Inf bit patterns cannot be
-%% decoded by an Erlang float segment, so the exponent is inspected on the
-%% raw bits first.
+%% Read a float element as a `value.JsNum`.
 ta_get_float(Bin, Off, f32) ->
     <<_:Off/binary, B:32/little, _/bits>> = Bin,
+    decode_f32_bits(B);
+ta_get_float(Bin, Off, f64) ->
+    <<_:Off/binary, B:64/little, _/bits>> = Bin,
+    decode_f64_bits(B).
+
+%% Decode an IEEE 754 binary32/binary64 bit pattern (as an integer) into a
+%% `value.JsNum`. NaN/Inf bit patterns cannot be decoded by an Erlang float
+%% segment, so the exponent is inspected on the raw bits first. Paired with
+%% f32_bits/f64_bits below, this is the ONE JsNum <-> IEEE-754-bits codec —
+%% the six magic constants (NaN/+Inf/-Inf x 2 widths) live only here.
+decode_f32_bits(B) ->
     case <<B:32>> of
         <<0:1, 16#FF:8, 0:23>> -> infinity;
         <<1:1, 16#FF:8, 0:23>> -> neg_infinity;
         <<_:1, 16#FF:8, _:23>> -> na_n;
         <<F:32/float>> -> {finite, F}
-    end;
-ta_get_float(Bin, Off, f64) ->
-    <<_:Off/binary, B:64/little, _/bits>> = Bin,
+    end.
+
+decode_f64_bits(B) ->
     case <<B:64>> of
         <<0:1, 16#7FF:11, 0:52>> -> infinity;
         <<1:1, 16#7FF:11, 0:52>> -> neg_infinity;

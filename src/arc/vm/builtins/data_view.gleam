@@ -5,11 +5,12 @@
 //// [[ByteLength]] internal slots; all get*/set* methods funnel through
 //// GetViewValue / SetViewValue (§25.3.1.1 / §25.3.1.2).
 ////
-//// Numeric encode/decode uses BEAM bit syntax. Erlang float segments only
-//// match *finite* values, so NaN/Infinity decoding falls through to integer
-//// bit-pattern inspection; encoding writes the canonical bit patterns.
-//// Float16 is decoded/encoded manually (sign/exp/mantissa) because Gleam bit
-//// arrays don't support 16-bit float segments.
+//// Numeric encode/decode uses BEAM bit syntax. Float32/Float64 route through
+//// the ONE JsNum ↔ IEEE-754-bits codec in `arc/vm/internal/typed_array_ffi`
+//// (`f32_bits`/`f64_bits` and their `decode_*` inverses) so the NaN/±Infinity
+//// bit constants live in exactly one place. Float16 is decoded/encoded
+//// manually (sign/exp/mantissa) because BEAM bit syntax has no 16-bit float
+//// segment.
 
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{arg_at, first_arg_or_undefined}
@@ -511,8 +512,8 @@ fn decode_number(element: ViewNumElement, u: Int) -> JsValue {
     VInt16 -> value.from_int(to_signed(u, 16))
     VInt32 -> value.from_int(to_signed(u, 32))
     VFloat16 -> JsNumber(f16_from_bits(u))
-    VFloat32 -> JsNumber(f32_from_bits(u))
-    VFloat64 -> JsNumber(f64_from_bits(u))
+    VFloat32 -> JsNumber(typed_array_ffi.decode_f32_bits(u))
+    VFloat64 -> JsNumber(typed_array_ffi.decode_f64_bits(u))
   }
 }
 
@@ -521,39 +522,6 @@ fn decode_bigint(element: ViewBigElement, u: Int) -> JsValue {
   case element {
     VBigUint64 -> JsBigInt(BigInt(u))
     VBigInt64 -> JsBigInt(BigInt(to_signed(u, 64)))
-  }
-}
-
-/// Decode IEEE 754 binary32 bits. Erlang float segments only match finite
-/// values, so NaN/±Infinity fall through to bit inspection.
-fn f32_from_bits(u: Int) -> value.JsNum {
-  case <<u:size(32)>> {
-    <<f:float-size(32)>> -> Finite(f)
-    _ ->
-      case int.bitwise_and(u, 0x7FFFFF) == 0 {
-        True ->
-          case int.bitwise_and(u, 0x80000000) == 0 {
-            True -> Infinity
-            False -> NegInfinity
-          }
-        False -> NaN
-      }
-  }
-}
-
-/// Decode IEEE 754 binary64 bits — same fall-through strategy as binary32.
-fn f64_from_bits(u: Int) -> value.JsNum {
-  case <<u:size(64)>> {
-    <<f:float-size(64)>> -> Finite(f)
-    _ ->
-      case int.bitwise_and(u, 0xFFFFFFFFFFFFF) == 0 {
-        True ->
-          case int.bitwise_shift_right(u, 63) == 0 {
-            True -> Infinity
-            False -> NegInfinity
-          }
-        False -> NaN
-      }
   }
 }
 
@@ -625,21 +593,8 @@ fn encode_number(element: ViewNumElement, num: value.JsNum) -> BitArray {
     VInt8 | VUint8 -> <<to_int_wrap(num):size(8)>>
     VInt16 | VUint16 -> <<to_int_wrap(num):size(16)>>
     VInt32 | VUint32 -> <<to_int_wrap(num):size(32)>>
-    VFloat64 ->
-      case num {
-        Finite(f) -> <<f:float-size(64)>>
-        NaN -> <<0x7FF8000000000000:size(64)>>
-        Infinity -> <<0x7FF0000000000000:size(64)>>
-        NegInfinity -> <<0xFFF0000000000000:size(64)>>
-      }
-    VFloat32 ->
-      case num {
-        // Erlang rounds double→single (ties to even) and overflows to ±inf.
-        Finite(f) -> <<f:float-size(32)>>
-        NaN -> <<0x7FC00000:size(32)>>
-        Infinity -> <<0x7F800000:size(32)>>
-        NegInfinity -> <<0xFF800000:size(32)>>
-      }
+    VFloat64 -> <<typed_array_ffi.f64_bits(num):size(64)>>
+    VFloat32 -> <<typed_array_ffi.f32_bits(num):size(32)>>
     VFloat16 -> <<f16_to_bits(num):size(16)>>
   }
 }

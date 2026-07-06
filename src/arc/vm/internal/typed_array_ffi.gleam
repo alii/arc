@@ -262,3 +262,24 @@ pub fn ta_set_float(
 /// NaN → 0, +Infinity → 255, -Infinity → 0.
 @external(erlang, "arc_typed_array_ffi", "ta_clamp_uint8")
 pub fn ta_clamp_uint8(val: JsNum) -> Int
+
+/// Encode a `JsNum` as its IEEE 754 binary32 bit pattern (an integer). Finite
+/// values that overflow the 32-bit range round to ±infinity's bits (BEAM's
+/// native round-to-nearest). The ONE place the NaN/±Inf f32 constants live.
+@external(erlang, "arc_typed_array_ffi", "f32_bits")
+pub fn f32_bits(n: JsNum) -> Int
+
+/// Encode a `JsNum` as its IEEE 754 binary64 bit pattern (an integer).
+/// The ONE place the NaN/±Inf f64 constants live.
+@external(erlang, "arc_typed_array_ffi", "f64_bits")
+pub fn f64_bits(n: JsNum) -> Int
+
+/// Decode an IEEE 754 binary32 bit pattern (an integer) into a `JsNum`.
+/// Inverse of `f32_bits`.
+@external(erlang, "arc_typed_array_ffi", "decode_f32_bits")
+pub fn decode_f32_bits(bits: Int) -> JsNum
+
+/// Decode an IEEE 754 binary64 bit pattern (an integer) into a `JsNum`.
+/// Inverse of `f64_bits`.
+@external(erlang, "arc_typed_array_ffi", "decode_f64_bits")
+pub fn decode_f64_bits(bits: Int) -> JsNum
