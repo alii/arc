@@ -187,6 +187,12 @@ pub type CompiledModuleBody {
     /// function declarations (hoisted, never TDZ), `uninitialized` for
     /// let/const/class and the default export (TDZ until initialized).
     export_seeds: Dict(String, JsValue),
+    /// [[HasTLA]] (§16.2.1.5): the module body contains a top-level `await`.
+    /// An `await` inside a nested function compiles into that function's own
+    /// child template, so an Await opcode in the module-root bytecode is
+    /// exactly a top-level await. Set here — the layer that emits the opcode —
+    /// so callers never scan bytecode.
+    has_tla: Bool,
   )
 }
 
@@ -305,11 +311,15 @@ fn compile_module_with_scope(
       opcode.ScriptCode,
       None,
     )
+  let has_tla =
+    tuple_array.to_list(template.bytecode)
+    |> list.any(fn(op) { op == opcode.Await })
   CompiledModuleBody(
     template:,
     export_names: info.names,
     hoisted_funcs:,
     export_seeds: module_export_seeds(items, summary.exports),
+    has_tla:,
   )
 }
 
