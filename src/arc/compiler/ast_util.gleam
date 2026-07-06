@@ -415,20 +415,6 @@ pub fn has_using_decl(stmts: List(ast.StmtWithLine)) -> Bool {
 // Expression shape predicates
 // ============================================================================
 
-/// If `expr` is a dot-access `obj.prop` / `obj.#prop` MemberExpression,
-/// return `Some(#(obj, "prop"))`. Private accesses are included — the name
-/// carries the `#` prefix and the emit layer's `emit_put_field` /
-/// `emit_get_field` route on it. Used by the emitter's assignment-target
-/// arms to pick the PutField (vs PutElem) path.
-pub fn member_static_prop(
-  expr: ast.Expression,
-) -> Option(#(ast.Expression, String)) {
-  case expr {
-    ast.MemberExpression(_, obj, ast.Dot(name:, ..)) -> Some(#(obj, name))
-    _ -> None
-  }
-}
-
 /// Strip ParenthesizedExpression wrappers (possibly nested).
 /// Used to look through parens when the spec says they're transparent.
 pub fn unwrap_parens(expr: ast.Expression) -> ast.Expression {

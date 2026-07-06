@@ -2567,7 +2567,10 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
 /// `this` / `new.target` has no backing slot. §16.1.6 / §11.2.4: module
 /// `this` reads `undefined`; the old IR-level resolver lowered this case
 /// to `IrPushConst(JsUndefined)` and that behavior must be preserved.
-fn resolve_lexical(e: Emitter, ref: lexical.LexicalRef) -> Option(#(Int, Bool)) {
+fn resolve_lexical(
+  e: Emitter,
+  ref: lexical.LexicalRef,
+) -> Option(#(Int, Bool)) {
   let info = fn_info(e)
   case lexical.lexical_slot(info.lexical, ref) {
     Some(slot) ->
@@ -2616,7 +2619,10 @@ fn get_this(e: Emitter) -> Emitter {
 /// ReferenceError).
 fn set_this(e: Emitter) -> Emitter {
   let e =
-    Emitter(..e, lexical_refs: lexical.LexicalRefs(..e.lexical_refs, this: True))
+    Emitter(
+      ..e,
+      lexical_refs: lexical.LexicalRefs(..e.lexical_refs, this: True),
+    )
   case resolve_lexical(e, lexical.RefThis) {
     Some(#(slot, True)) -> emit_op(e, opcode.PutBoxedCheckInit(slot))
     Some(#(slot, False)) -> emit_op(e, opcode.PutLocalCheckInit(slot))
@@ -5254,10 +5260,13 @@ fn make_method_closure(
   is_gen: Bool,
   is_async: Bool,
 ) -> Result(Emitter, EmitError) {
-  compile_function_body(e, name, params, StmtsBody(body), shape: Method(
-    is_gen:,
-    is_async:,
-  ))
+  compile_function_body(
+    e,
+    name,
+    params,
+    StmtsBody(body),
+    shape: Method(is_gen:, is_async:),
+  )
   |> register_closure
 }
 
@@ -5279,11 +5288,13 @@ fn emit_function_closure(
     True -> name
     False -> None
   }
-  compile_function_body(e, name, params, StmtsBody(body), shape: FnExpr(
-    self_name:,
-    is_gen:,
-    is_async:,
-  ))
+  compile_function_body(
+    e,
+    name,
+    params,
+    StmtsBody(body),
+    shape: FnExpr(self_name:, is_gen:, is_async:),
+  )
   |> register_closure
 }
 
@@ -5303,9 +5314,13 @@ fn emit_arrow_closure(
     ]
     ast.ArrowBodyBlock(stmts) -> stmts
   }
-  compile_function_body(e, name, params, StmtsBody(body_stmts), shape: Arrow(
-    is_async:,
-  ))
+  compile_function_body(
+    e,
+    name,
+    params,
+    StmtsBody(body_stmts),
+    shape: Arrow(is_async:),
+  )
   |> register_closure
 }
 
@@ -6243,23 +6258,48 @@ fn emit_computed_key_prop(
 // through put_lvalue (PutVar/PutField/PutElem) instead of DeclareVar.
 // ----------------------------------------------------------------------------
 
+/// Assignment-target classification for §13.15 destructuring / logical
+/// assignment. Every write site matches on this ONE exhaustive type instead
+/// of open-coding the super/static/computed/other split, so adding a new
+/// target kind (e.g. a private-field write) is one constructor + N
+/// exhaustiveness errors instead of N silent fallthroughs.
+type AssignTarget {
+  /// `super.p` / `super[k]` — needs [[HomeObject]] proto + `this` receiver.
+  SuperMember(property: ast.MemberProperty)
+  /// `obj.prop` with a statically-known key — PutField fast path.
+  StaticMember(object: ast.Expression, prop: String)
+  /// `obj[key]` — runtime key, PutElem.
+  ComputedMember(object: ast.Expression, key: ast.Expression)
+  /// Identifier, nested pattern, default, or anything not a MemberExpression.
+  PlainTarget(expr: ast.Expression)
+}
+
+/// Looks through parentheses (§13.15: parens are transparent for
+/// AssignmentTargetType) and returns the member/plain target shape.
+fn classify_assign_target(target: ast.Expression) -> AssignTarget {
+  case ast_util.unwrap_parens(target) {
+    ast.MemberExpression(_, ast.SuperExpression(_), property) ->
+      SuperMember(property:)
+    ast.MemberExpression(_, object, ast.Dot(name: prop, ..)) ->
+      StaticMember(object:, prop:)
+    ast.MemberExpression(_, object, ast.Bracket(key)) ->
+      ComputedMember(object:, key:)
+    other -> PlainTarget(other)
+  }
+}
+
 fn emit_destructuring_assign(
   e: Emitter,
   target: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  case ast_util.member_static_prop(target), target {
-    _, ast.Identifier(name:, ..) -> Ok(emit_var_put(e, name))
-
-    _, ast.ParenthesizedExpression(_, inner) ->
-      emit_destructuring_assign(e, inner)
-
+  case classify_assign_target(target) {
     // super.p / super[k] — a SuperReference PutValue (§13.3.7.3) needs the
     // super base ([[HomeObject]]'s prototype) AND the `this` receiver under
     // the value: the IrPutSuperValue shape, not the single-object PutField
     // shape below. Stack: [val] → this → Swap → [val,this] → home proto →
     // Swap → [val,proto,this] → key → Swap → [val,key,proto,this]
     // → PutSuperValue → [val] → Pop.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
+    SuperMember(property:) -> {
       let e =
         e
         |> get_this
@@ -6276,8 +6316,8 @@ fn emit_destructuring_assign(
 
     // obj.prop — stack [val] → eval obj → [obj,val] → swap → [val,obj]
     // → PutField → [val] → Pop. (PutField pops [value,obj], leaves value.)
-    Some(#(obj, prop)), _ -> {
-      use e <- result.map(emit_expr(e, obj))
+    StaticMember(object:, prop:) -> {
+      use e <- result.map(emit_expr(e, object))
       let e = emit_op(e, opcode.Swap)
       let e = emit_put_field(e, prop)
       emit_op(e, opcode.Pop)
@@ -6286,8 +6326,8 @@ fn emit_destructuring_assign(
     // obj[key] — PutElem wants [val,key,obj]. With only Dup/Swap (no rot3):
     // [val] → emit obj → [obj,val] → swap → [val,obj] → emit key → [key,val,obj]
     // → swap → [val,key,obj] → PutElem → [val] → Pop.
-    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
-      use e <- result.try(emit_expr(e, obj))
+    ComputedMember(object:, key:) -> {
+      use e <- result.try(emit_expr(e, object))
       let e = emit_op(e, opcode.Swap)
       use e <- result.map(emit_expr(e, key))
       let e = emit_op(e, opcode.Swap)
@@ -6295,63 +6335,68 @@ fn emit_destructuring_assign(
       emit_op(e, opcode.Pop)
     }
 
-    // target = default  (AssignmentElement with Initializer, §13.15.5.3)
-    // If incoming value === undefined, replace with default; then recurse.
-    _, ast.AssignmentExpression(_, ast.Assign, left, default_expr) -> {
-      let name = case left {
-        ast.Identifier(name:, ..) -> Some(name)
-        _ -> None
-      }
-      use e <- result.try(emit_default_if_undefined(e, default_expr, name))
-      emit_destructuring_assign(e, left)
-    }
+    PlainTarget(target) ->
+      case target {
+        ast.Identifier(name:, ..) -> Ok(emit_var_put(e, name))
 
-    _, ast.ArrayExpression(_, elements) -> {
-      use e, close_throw <- with_iterator_scaffold(e)
-      emit_array_assign_elements(e, elements, close_throw)
-    }
-
-    _, ast.ObjectExpression(_, properties) -> {
-      let has_rest =
-        list.any(properties, fn(p) {
-          case p {
-            ast.SpreadProperty(_) -> True
-            ast.InitProperty(..)
-            | ast.MethodProperty(..)
-            | ast.AccessorProperty(..) -> False
+        // target = default  (AssignmentElement with Initializer, §13.15.5.3)
+        // If incoming value === undefined, replace with default; then recurse.
+        ast.AssignmentExpression(_, ast.Assign, left, default_expr) -> {
+          let name = case left {
+            ast.Identifier(name:, ..) -> Some(name)
+            _ -> None
           }
-        })
-      emit_object_pattern(
-        e,
-        properties,
-        has_rest,
-        emit_single_object_assign_prop,
-      )
-    }
+          use e <- result.try(emit_default_if_undefined(e, default_expr, name))
+          emit_destructuring_assign(e, left)
+        }
 
-    // Annex B web-compat for-in/of LHS: `for (f() of [1])` — evaluate the
-    // call each iteration, then throw ReferenceError before assigning.
-    // Entry stack is [val]; the trailing IrPop is unreachable but keeps the
-    // consumed-value invariant for static bookkeeping.
-    _, ast.CallExpression(..) as call -> {
-      use e <- result.map(emit_expr(e, call))
-      let e = emit_op(e, opcode.Pop)
-      let e =
-        emit_op(
-          e,
-          opcode.ThrowError(
-            opcode.ReferenceErrorKind,
-            "Invalid left-hand side in assignment",
-          ),
-        )
-      emit_op(e, opcode.Pop)
-    }
+        ast.ArrayExpression(_, elements) -> {
+          use e, close_throw <- with_iterator_scaffold(e)
+          emit_array_assign_elements(e, elements, close_throw)
+        }
 
-    // §13.15.5 early error: DestructuringAssignmentTargetType must be
-    // simple. The parser catches most of these, but some — e.g. an object
-    // rest with a non-target argument, `({...5} = {})` — only get shape-
-    // checked here, so report them with the parser's own message.
-    _, _ -> Error(EarlySyntaxError("Invalid destructuring assignment target"))
+        ast.ObjectExpression(_, properties) -> {
+          let has_rest =
+            list.any(properties, fn(p) {
+              case p {
+                ast.SpreadProperty(_) -> True
+                ast.InitProperty(..)
+                | ast.MethodProperty(..)
+                | ast.AccessorProperty(..) -> False
+              }
+            })
+          emit_object_pattern(
+            e,
+            properties,
+            has_rest,
+            emit_single_object_assign_prop,
+          )
+        }
+
+        // Annex B web-compat for-in/of LHS: `for (f() of [1])` — evaluate the
+        // call each iteration, then throw ReferenceError before assigning.
+        // Entry stack is [val]; the trailing IrPop is unreachable but keeps the
+        // consumed-value invariant for static bookkeeping.
+        ast.CallExpression(..) as call -> {
+          use e <- result.map(emit_expr(e, call))
+          let e = emit_op(e, opcode.Pop)
+          let e =
+            emit_op(
+              e,
+              opcode.ThrowError(
+                opcode.ReferenceErrorKind,
+                "Invalid left-hand side in assignment",
+              ),
+            )
+          emit_op(e, opcode.Pop)
+        }
+
+        // §13.15.5 early error: DestructuringAssignmentTargetType must be
+        // simple. The parser catches most of these, but some — e.g. an object
+        // rest with a non-target argument, `({...5} = {})` — only get shape-
+        // checked here, so report them with the parser's own message.
+        _ -> Error(EarlySyntaxError("Invalid destructuring assignment target"))
+      }
   }
 }
 
@@ -6388,23 +6433,13 @@ fn emit_array_assign_element(
   e: Emitter,
   target: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  case ast_util.member_static_prop(target), target {
-    // super.p / super[k] — its Reference evaluation (lexical home object +
-    // `this`) has no observable effect, so step the iterator first and let
-    // emit_destructuring_assign build the PutSuperValue store (the member
-    // arms below are shaped around a single evaluated base object). Only a
-    // COMPUTED super key deviates from lref-before-step order.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
-      let e = emit_op(e, opcode.IteratorNext)
-      let e = emit_op(e, opcode.Pop)
-      emit_destructuring_assign(e, target)
-    }
+  case classify_assign_target(target) {
     // obj.prop — [iter] → obj → [obj,iter] → Swap → [iter,obj]
     // → IteratorNext → [done,value,iter,obj] → Pop → [value,iter,obj]
     // → Rot3 → [obj,value,iter] → Swap → [value,obj,iter]
     // → PutField → [value,iter] → Pop → [iter].
-    Some(#(obj, prop)), _ -> {
-      use e <- result.map(emit_expr(e, obj))
+    StaticMember(object:, prop:) -> {
+      use e <- result.map(emit_expr(e, object))
       e
       |> emit_op(opcode.Swap)
       |> emit_op(opcode.IteratorNext)
@@ -6419,8 +6454,8 @@ fn emit_array_assign_element(
     // → key → [key,obj,iter] → Rot3 → [iter,key,obj] → IteratorNext → Pop
     // → [value,iter,key,obj] → Swap → [iter,value,key,obj] → Unrot4
     // → [value,key,obj,iter] → PutElem → [value,iter] → Pop → [iter].
-    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
-      use e <- result.try(emit_expr(e, obj))
+    ComputedMember(object:, key:) -> {
+      use e <- result.try(emit_expr(e, object))
       use e <- result.map(emit_expr(e, key))
       e
       |> emit_op(opcode.Rot3)
@@ -6432,7 +6467,11 @@ fn emit_array_assign_element(
       |> emit_op(opcode.Pop)
     }
     // Identifiers, nested patterns, defaults: step first, then assign.
-    _, _ -> {
+    // super.p / super[k] takes this path too — its Reference evaluation
+    // (lexical home object + `this`) has no observable effect, so we let
+    // emit_destructuring_assign build the PutSuperValue store; only a
+    // COMPUTED super key deviates from lref-before-step order.
+    SuperMember(..) | PlainTarget(_) -> {
       let e = emit_op(e, opcode.IteratorNext)
       // [done, value, iter] — discard done, assign value.
       let e = emit_op(e, opcode.Pop)
@@ -6457,22 +6496,13 @@ fn emit_array_assign_rest(
   target: ast.Expression,
   close_throw: LabelId,
 ) -> Result(#(Emitter, Bool), EmitError) {
-  case ast_util.member_static_prop(target), target {
-    // super.p / super[k] rest target — same routing as
-    // emit_array_assign_element: no observable lref evaluation, so drain
-    // first and let emit_destructuring_assign build the super store.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
-      let e = emit_op(e, opcode.PopTry)
-      let e = emit_op(e, opcode.IteratorRest)
-      use e <- result.map(emit_destructuring_assign(e, target))
-      #(e, True)
-    }
+  case classify_assign_target(target) {
     // obj.prop — evaluate obj (under the F_body guard, above iter so a throw
     // unwinds to [thrown, iter, ..]), then drain, then PutField.
     // [iter] → [obj,iter] → Swap → [iter,obj] → PopTry → IteratorRest
     // → [arr,obj] → PutField → [arr] → Pop.
-    Some(#(obj, prop)), _ -> {
-      use e <- result.map(emit_expr(e, obj))
+    StaticMember(object:, prop:) -> {
+      use e <- result.map(emit_expr(e, object))
       let e = emit_op(e, opcode.Swap)
       let e = emit_op(e, opcode.PopTry)
       let e = emit_op(e, opcode.IteratorRest)
@@ -6485,8 +6515,8 @@ fn emit_array_assign_rest(
     // [iter] → [obj,iter] → PopTry → Swap → [iter,obj] → PushTry(close_throw)
     // → emit key → [key,iter,obj] → Swap → [iter,key,obj] → PopTry
     // → IteratorRest → [arr,key,obj] → PutElem → [arr] → Pop.
-    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
-      use e <- result.try(emit_expr(e, obj))
+    ComputedMember(object:, key:) -> {
+      use e <- result.try(emit_expr(e, object))
       let e = emit_op(e, opcode.PopTry)
       let e = emit_op(e, opcode.Swap)
       let e = emit_ir(e, IrPushTry(close_throw, IterCloseGuard))
@@ -6499,12 +6529,14 @@ fn emit_array_assign_rest(
     }
     // Identifier targets (no observable Reference side effects) and nested
     // array/object patterns (spec drains into A first, §13.15.5.5 step 4):
-    // drain, then bind/destructure.
-    _, other -> {
+    // drain, then bind/destructure. super.p / super[k] rest targets take this
+    // path too — no observable lref evaluation, so drain first and let
+    // emit_destructuring_assign build the super store.
+    SuperMember(..) | PlainTarget(_) -> {
       // [iter], try=[F_body,..] → PopTry → IteratorRest → [arr]
       let e = emit_op(e, opcode.PopTry)
       let e = emit_op(e, opcode.IteratorRest)
-      use e <- result.map(emit_destructuring_assign(e, other))
+      use e <- result.map(emit_destructuring_assign(e, target))
       #(e, True)
     }
   }
@@ -6583,20 +6615,12 @@ fn emit_keyed_destructure_assign(
   name: String,
   target: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  let bare = ast_util.unwrap_parens(target)
-  case ast_util.member_static_prop(bare), bare {
-    // super.p / super[k] target: no observable lref evaluation, so GetV
-    // first and let emit_destructuring_assign build the super store.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
-      let e = emit_op(e, opcode.Dup)
-      let e = emit_ir(e, IrGetField(name))
-      emit_destructuring_assign(e, target)
-    }
+  case classify_assign_target(target) {
     // [src] → Dup → [src,src] → obj → [obj,src,src] → Swap → [src,obj,src]
     // → GetField → [v,obj,src] → Put → [v,src] → Pop → [src].
-    Some(#(obj, prop)), _ -> {
+    StaticMember(object:, prop:) -> {
       let e = emit_op(e, opcode.Dup)
-      use e <- result.map(emit_expr(e, obj))
+      use e <- result.map(emit_expr(e, object))
       e
       |> emit_op(opcode.Swap)
       |> emit_ir(IrGetField(name))
@@ -6607,9 +6631,9 @@ fn emit_keyed_destructure_assign(
     // [src,obj,src] → key → [key,src,obj,src] → Swap → [src,key,obj,src] →
     // GetField → [v,key,obj,src] → PutElem → [v,src] → Pop → [src].
     // base→key→GetV order matches §13.3.2.1 + §13.15.5.6 step 1a.
-    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
+    ComputedMember(object:, key:) -> {
       let e = emit_op(e, opcode.Dup)
-      use e <- result.try(emit_expr(e, obj))
+      use e <- result.try(emit_expr(e, object))
       let e = emit_op(e, opcode.Swap)
       use e <- result.map(emit_expr(e, key))
       e
@@ -6621,7 +6645,9 @@ fn emit_keyed_destructure_assign(
     // Identifier / nested pattern / default targets keep GetV-first — that's
     // spec-correct: step 1 only applies when target is NOT a pattern, and
     // Identifier lref evaluation has no observable effect ahead of GetV.
-    _, _ -> {
+    // super.p / super[k] targets likewise (no observable lref evaluation);
+    // emit_destructuring_assign builds the super store.
+    SuperMember(..) | PlainTarget(_) -> {
       let e = emit_op(e, opcode.Dup)
       let e = emit_ir(e, IrGetField(name))
       emit_destructuring_assign(e, target)
@@ -6668,18 +6694,12 @@ fn emit_elem_keyed_target(
   e: Emitter,
   target: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  case ast_util.member_static_prop(target), target {
-    // super.p / super[k] target: no observable lref evaluation — get the
-    // source value and let emit_destructuring_assign build the super store.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
-      let e = emit_op(e, opcode.GetElem)
-      emit_destructuring_assign(e, target)
-    }
+  case classify_assign_target(target) {
     // [key,srcd,src] → tobj → [tobj,key,srcd,src] → unrot3
     // → [key,srcd,tobj,src] → GetElem → [v,tobj,src]
     // → PutField → [v,src] → Pop → [src].
-    Some(#(tobj, prop)), _ -> {
-      use e <- result.map(emit_expr(e, tobj))
+    StaticMember(object:, prop:) -> {
+      use e <- result.map(emit_expr(e, object))
       e
       |> emit_unrot3
       |> emit_op(opcode.GetElem)
@@ -6689,45 +6709,46 @@ fn emit_elem_keyed_target(
     // [key,srcd,src] → tobj → unrot3 → [key,srcd,tobj,src] → tkey → unrot3
     // → [key,srcd,tkey,tobj,src] → GetElem → [v,tkey,tobj,src]
     // → PutElem → [v,src] → Pop → [src].
-    _, ast.MemberExpression(_, tobj, ast.Bracket(tkey)) -> {
-      use e <- result.try(emit_expr(e, tobj))
+    ComputedMember(object:, key:) -> {
+      use e <- result.try(emit_expr(e, object))
       let e = emit_unrot3(e)
-      use e <- result.map(emit_expr(e, tkey))
+      use e <- result.map(emit_expr(e, key))
       e
       |> emit_unrot3
       |> emit_op(opcode.GetElem)
       |> emit_op(opcode.PutElem)
       |> emit_op(opcode.Pop)
     }
-    // target = default with a member target: lref first, get, then the
-    // default check, then PutValue.
-    _, ast.AssignmentExpression(_, ast.Assign, left, default_expr) as assign ->
-      case ast_util.unwrap_parens(left) {
-        // Super member with a default: handled by the generic path (the
-        // lref has no observable evaluation).
-        ast.MemberExpression(_, ast.SuperExpression(_), _) -> {
-          let e = emit_op(e, opcode.GetElem)
-          emit_destructuring_assign(e, assign)
+    // super.p / super[k] target: no observable lref evaluation — get the
+    // source value and let emit_destructuring_assign build the super store.
+    SuperMember(..) -> {
+      let e = emit_op(e, opcode.GetElem)
+      emit_destructuring_assign(e, target)
+    }
+    PlainTarget(bare) ->
+      case bare {
+        // target = default with a member target: lref first, get, then the
+        // default check, then PutValue.
+        ast.AssignmentExpression(_, ast.Assign, left, default_expr) as assign -> {
+          let left_target = classify_assign_target(left)
+          case left_target {
+            StaticMember(..) | ComputedMember(..) ->
+              emit_elem_keyed_member_default(e, left_target, default_expr)
+            // Super member with a default: handled by the generic path (the
+            // lref has no observable evaluation).
+            SuperMember(..) | PlainTarget(_) -> {
+              let e = emit_op(e, opcode.GetElem)
+              emit_destructuring_assign(e, assign)
+            }
+          }
         }
-        ast.MemberExpression(..) as member -> {
-          use e <- result.try(emit_elem_keyed_member_default(
-            e,
-            member,
-            default_expr,
-          ))
-          Ok(e)
-        }
-        _ -> {
+        // Identifiers and nested patterns: get first (patterns skip step 1a;
+        // identifier lrefs have no observable evaluation).
+        other -> {
           let e = emit_op(e, opcode.GetElem)
-          emit_destructuring_assign(e, assign)
+          emit_destructuring_assign(e, other)
         }
       }
-    // Identifiers and nested patterns: get first (patterns skip step 1a;
-    // identifier lrefs have no observable evaluation).
-    _, other -> {
-      let e = emit_op(e, opcode.GetElem)
-      emit_destructuring_assign(e, other)
-    }
   }
 }
 
@@ -6735,28 +6756,28 @@ fn emit_elem_keyed_target(
 /// PutValue. Entry: [key, src, src]; exit: [src].
 fn emit_elem_keyed_member_default(
   e: Emitter,
-  member: ast.Expression,
+  target: AssignTarget,
   default_expr: ast.Expression,
 ) -> Result(Emitter, EmitError) {
   // Evaluate the member lref and the source get, leaving [v, ..put operands];
   // pair with the matching put closure so the post-default write is decided
   // once.
-  use #(e, put) <- result.try(case ast_util.member_static_prop(member), member {
-    Some(#(tobj, prop)), _ -> {
-      use e <- result.map(emit_expr(e, tobj))
+  use #(e, put) <- result.try(case target {
+    StaticMember(object:, prop:) -> {
+      use e <- result.map(emit_expr(e, object))
       let e = emit_unrot3(e)
       #(emit_op(e, opcode.GetElem), emit_put_field(_, prop))
     }
-    _, ast.MemberExpression(_, tobj, ast.Bracket(tkey)) -> {
-      use e <- result.try(emit_expr(e, tobj))
+    ComputedMember(object:, key:) -> {
+      use e <- result.try(emit_expr(e, object))
       let e = emit_unrot3(e)
-      use e <- result.map(emit_expr(e, tkey))
+      use e <- result.map(emit_expr(e, key))
       let e = emit_unrot3(e)
       #(emit_op(e, opcode.GetElem), emit_op(_, opcode.PutElem))
     }
-    // Only MemberExpression targets reach here, and the two arms above cover
-    // static and computed keys.
-    _, _ -> Error(NonMemberDefaultTarget)
+    // Caller only routes StaticMember/ComputedMember here — SuperMember and
+    // PlainTarget take the generic get-then-assign path.
+    SuperMember(..) | PlainTarget(_) -> Error(NonMemberDefaultTarget)
   })
   use e <- result.map(emit_default_if_undefined(e, default_expr, None))
   emit_op(put(e), opcode.Pop)
@@ -6966,8 +6987,23 @@ fn emit_logical_assign(
   lhs: ast.Expression,
   right: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  case ast_util.member_static_prop(lhs), lhs {
-    _, ast.Identifier(name:, ..) -> {
+  case classify_assign_target(lhs) {
+    // super.x &&= v — needs GetSuperValue2/PutSuperValue stack juggling on
+    // the short-circuit path; a genuine engine gap, not a user error.
+    SuperMember(..) ->
+      Error(UnsupportedFeature("logical assignment to a super property"))
+    StaticMember(object:, prop:) -> {
+      use e <- result.try(emit_expr(e, object))
+      let e = emit_get_field2(e, prop)
+      emit_logical_assign_member(e, op, right, emit_put_field(_, prop), 1)
+    }
+    ComputedMember(object:, key:) -> {
+      use e <- result.try(emit_expr(e, object))
+      use e <- result.try(emit_expr(e, key))
+      let e = emit_op(e, opcode.GetElem2)
+      emit_logical_assign_member(e, op, right, emit_op(_, opcode.PutElem), 2)
+    }
+    PlainTarget(ast.Identifier(name:, ..)) -> {
       let #(e, end_label) = fresh_label(e)
       with_identifier_lref(e, name, fn(e, ref) {
         let e = emit_var_ref_get(e, ref)
@@ -6978,24 +7014,9 @@ fn emit_logical_assign(
       })
       |> result.map(emit_ir(_, IrLabel(end_label)))
     }
-    // super.x &&= v — needs GetSuperValue2/PutSuperValue stack juggling on
-    // the short-circuit path; a genuine engine gap, not a user error.
-    _, ast.MemberExpression(_, ast.SuperExpression(_), _) ->
-      Error(UnsupportedFeature("logical assignment to a super property"))
-    Some(#(obj, prop)), _ -> {
-      use e <- result.try(emit_expr(e, obj))
-      let e = emit_get_field2(e, prop)
-      emit_logical_assign_member(e, op, right, emit_put_field(_, prop), 1)
-    }
-    _, ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
-      use e <- result.try(emit_expr(e, obj))
-      use e <- result.try(emit_expr(e, key))
-      let e = emit_op(e, opcode.GetElem2)
-      emit_logical_assign_member(e, op, right, emit_op(_, opcode.PutElem), 2)
-    }
     // The parser rejects non-simple logical-assignment targets, so this
     // should only ever be a target shape the emitter can't lower yet.
-    _, _ -> Error(UnsupportedFeature("logical assignment target"))
+    PlainTarget(_) -> Error(UnsupportedFeature("logical assignment target"))
   }
 }
 
