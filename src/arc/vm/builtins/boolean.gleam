@@ -6,7 +6,7 @@ import arc/vm/value.{
   BooleanNative, BooleanObject, BooleanPrototypeToString,
   BooleanPrototypeValueOf, Dispatch, JsBool, JsObject, JsString,
 }
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 
 /// Set up Boolean constructor + Boolean.prototype.
 pub fn init(
@@ -89,14 +89,8 @@ fn boolean_value_of(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Return ? thisBooleanValue(this value).
-  case this_boolean_value(state, this) {
-    Some(b) -> #(state, Ok(JsBool(b)))
-    None ->
-      state.type_error(
-        state,
-        "Boolean.prototype.valueOf requires that 'this' be a Boolean",
-      )
-  }
+  use b, state <- state.try_then(this_boolean_value(state, this, "valueOf"))
+  #(state, Ok(JsBool(b)))
 }
 
 /// ES2024 §20.3.3.2 Boolean.prototype.toString()
@@ -112,24 +106,15 @@ fn boolean_to_string(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Let b be ? thisBooleanValue(this value).
-  case this_boolean_value(state, this) {
-    // Step 2: If b is true, return "true"; otherwise return "false".
-    Some(True) -> #(state, Ok(JsString("true")))
-    Some(False) -> #(state, Ok(JsString("false")))
-    // Step 1 threw: thisBooleanValue returned abrupt completion (TypeError).
-    None ->
-      state.type_error(
-        state,
-        "Boolean.prototype.toString requires that 'this' be a Boolean",
-      )
+  use b, state <- state.try_then(this_boolean_value(state, this, "toString"))
+  // Step 2: If b is true, return "true"; otherwise return "false".
+  case b {
+    True -> #(state, Ok(JsString("true")))
+    False -> #(state, Ok(JsString("false")))
   }
 }
 
 /// ES2024 §20.3.3.1 thisBooleanValue(value)
-///
-/// The abstract operation thisBooleanValue takes argument value and returns
-/// either a normal completion containing a Boolean or a throw completion.
-/// It performs the following steps when called:
 ///
 /// 1. If value is a Boolean, return value.
 /// 2. If value is an Object and value has a [[BooleanData]] internal slot, then
@@ -138,15 +123,33 @@ fn boolean_to_string(
 ///    c. Return b.
 /// 3. Throw a TypeError exception.
 ///
-/// Correctly implements spec. Returns Option(Bool) instead of Result to
-/// let callers handle the TypeError with their own message.
-fn this_boolean_value(state: State(host), this: JsValue) -> Option(Bool) {
+/// Same shape as symbol/number/string/bigint's this-X-value: throws the
+/// branded TypeError internally so callers just `state.try_then` it.
+fn this_boolean_value(
+  state: State(host),
+  this: JsValue,
+  method: String,
+) -> #(State(host), Result(Bool, JsValue)) {
   case this {
     // Step 1: If value is a Boolean, return value.
-    JsBool(b) -> Some(b)
+    JsBool(b) -> #(state, Ok(b))
     // Step 2: If value is an Object with [[BooleanData]], return it.
-    JsObject(ref) -> heap.read_boolean_object(state.heap, ref)
+    JsObject(ref) ->
+      case heap.read_boolean_object(state.heap, ref) {
+        Some(b) -> #(state, Ok(b))
+        None -> not_a_boolean(state, method)
+      }
     // Step 3: Throw a TypeError exception.
-    _ -> None
+    _ -> not_a_boolean(state, method)
   }
+}
+
+fn not_a_boolean(
+  state: State(host),
+  method: String,
+) -> #(State(host), Result(a, JsValue)) {
+  state.type_error(
+    state,
+    "Boolean.prototype." <> method <> " requires that 'this' be a Boolean",
+  )
 }

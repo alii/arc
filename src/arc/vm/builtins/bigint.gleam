@@ -116,25 +116,33 @@ pub fn bigint_global(
 /// §21.2.3 "thisBigIntValue" — a BigInt primitive, or a BigInt wrapper
 /// object (kind `BigIntObject`, allocated by ToObject) carrying the
 /// [[BigIntData]] slot.
+///
+/// Same shape as symbol/boolean/number/string's this-X-value: throws the
+/// branded TypeError internally so callers just `state.try_then` it.
 fn this_bigint_value(
   state: State(host),
   this: JsValue,
-) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  let incompatible = fn() {
-    state.type_error_op(
-      state,
-      "BigInt.prototype method called on incompatible receiver",
-    )
-  }
+  method: String,
+) -> #(State(host), Result(Int, JsValue)) {
   case this {
-    value.JsBigInt(value.BigInt(n)) -> Ok(#(n, state))
+    value.JsBigInt(value.BigInt(n)) -> #(state, Ok(n))
     JsObject(ref) ->
       case heap.read_bigint_object(state.heap, ref) {
-        Some(value.BigInt(n)) -> Ok(#(n, state))
-        None -> incompatible()
+        Some(value.BigInt(n)) -> #(state, Ok(n))
+        None -> not_a_bigint(state, method)
       }
-    _ -> incompatible()
+    _ -> not_a_bigint(state, method)
   }
+}
+
+fn not_a_bigint(
+  state: State(host),
+  method: String,
+) -> #(State(host), Result(a, JsValue)) {
+  state.type_error(
+    state,
+    "BigInt.prototype." <> method <> " requires that 'this' be a BigInt",
+  )
 }
 
 /// §21.2.3.3 BigInt.prototype.toString ( [ radix ] )
@@ -143,27 +151,25 @@ pub fn bigint_proto_to_string(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  helpers.lift_result({
-    // Step 1: x = ? thisBigIntValue(this value).
-    use #(n, state) <- result.try(this_bigint_value(state, this))
-    // Step 2: radixMV = ToIntegerOrInfinity(radix); undefined → 10.
-    // (±∞ saturate to ±MAX_SAFE_INTEGER, which step 3 then rejects.)
-    let radix_arg = helpers.first_arg_or_undefined(args)
-    use #(radix, state) <- result.try(case radix_arg {
-      JsUndefined -> Ok(#(10, state))
-      _ -> {
-        use #(num, state) <- result.map(coerce.js_to_number(state, radix_arg))
-        #(coerce.jsnum_to_integer_or_infinity(num), state)
-      }
-    })
-    // Step 3: radixMV outside 2..36 → RangeError. Steps 4-5:
-    // BigInt::toString(x, radix) — lowercase digits, no suffix.
-    case value.radix(radix) {
-      Ok(r) -> Ok(#(JsString(value.format_bigint_radix(n, r)), state))
-      Error(Nil) ->
-        state.range_error_op(state, "toString() radix must be between 2 and 36")
+  // Step 1: x = ? thisBigIntValue(this value).
+  use n, state <- state.try_then(this_bigint_value(state, this, "toString"))
+  // Step 2: radixMV = ToIntegerOrInfinity(radix); undefined → 10.
+  // (±∞ saturate to ±MAX_SAFE_INTEGER, which step 3 then rejects.)
+  let radix_arg = helpers.first_arg_or_undefined(args)
+  use radix, state <- state.try_op(case radix_arg {
+    JsUndefined -> Ok(#(10, state))
+    _ -> {
+      use #(num, state) <- result.map(coerce.js_to_number(state, radix_arg))
+      #(coerce.jsnum_to_integer_or_infinity(num), state)
     }
   })
+  // Step 3: radixMV outside 2..36 → RangeError. Steps 4-5:
+  // BigInt::toString(x, radix) — lowercase digits, no suffix.
+  case value.radix(radix) {
+    Ok(r) -> #(state, Ok(JsString(value.format_bigint_radix(n, r))))
+    Error(Nil) ->
+      state.range_error(state, "toString() radix must be between 2 and 36")
+  }
 }
 
 /// §21.2.3.2 BigInt.prototype.toLocaleString ( [ reserved1 [ , reserved2 ] ] )
@@ -178,10 +184,8 @@ pub fn bigint_proto_to_locale_string(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  helpers.lift_result({
-    use #(n, state) <- result.map(this_bigint_value(state, this))
-    #(JsString(int.to_string(n)), state)
-  })
+  use n, state <- state.try_then(this_bigint_value(state, this, "toLocaleString"))
+  #(state, Ok(JsString(int.to_string(n))))
 }
 
 /// §21.2.3.4 BigInt.prototype.valueOf ( )
@@ -190,8 +194,6 @@ pub fn bigint_proto_value_of(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  helpers.lift_result({
-    use #(n, state) <- result.try(this_bigint_value(state, this))
-    Ok(#(value.JsBigInt(value.BigInt(n)), state))
-  })
+  use n, state <- state.try_then(this_bigint_value(state, this, "valueOf"))
+  #(state, Ok(value.JsBigInt(value.BigInt(n))))
 }

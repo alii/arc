@@ -1314,18 +1314,35 @@ fn concat_loop(
 ///     c. Return s.
 ///   3. Throw a TypeError exception.
 ///
+/// Same shape as symbol/boolean/number/bigint's this-X-value: throws the
+/// branded TypeError internally so callers just `state.try_then` it.
 fn this_string_value(
   state: State(host),
   this: JsValue,
-) -> option.Option(String) {
+  method: String,
+) -> #(State(host), Result(String, JsValue)) {
   case this {
     // Step 1: value is a String primitive
-    JsString(s) -> Some(s)
+    JsString(s) -> #(state, Ok(s))
     // Step 2: value is a String wrapper object
-    JsObject(ref) -> heap.read_string_object(state.heap, ref)
-    // Step 3: would throw TypeError (caller handles)
-    _ -> None
+    JsObject(ref) ->
+      case heap.read_string_object(state.heap, ref) {
+        Some(s) -> #(state, Ok(s))
+        None -> not_a_string(state, method)
+      }
+    // Step 3: Throw a TypeError exception.
+    _ -> not_a_string(state, method)
   }
+}
+
+fn not_a_string(
+  state: State(host),
+  method: String,
+) -> #(State(host), Result(a, JsValue)) {
+  state.type_error(
+    state,
+    "String.prototype." <> method <> " requires that 'this' be a String",
+  )
 }
 
 /// ES2024 22.1.3.26 — String.prototype.toString ( )
@@ -1336,14 +1353,8 @@ fn string_to_string(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: thisStringValue(this)
-  case this_string_value(state, this) {
-    Some(s) -> #(state, Ok(JsString(s)))
-    None ->
-      state.type_error(
-        state,
-        "String.prototype.toString requires that 'this' be a String",
-      )
-  }
+  use s, state <- state.try_then(this_string_value(state, this, "toString"))
+  #(state, Ok(JsString(s)))
 }
 
 /// ES2024 22.1.3.33 — String.prototype.valueOf ( )
@@ -1354,14 +1365,8 @@ fn string_value_of(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: thisStringValue(this)
-  case this_string_value(state, this) {
-    Some(s) -> #(state, Ok(JsString(s)))
-    None ->
-      state.type_error(
-        state,
-        "String.prototype.valueOf requires that 'this' be a String",
-      )
-  }
+  use s, state <- state.try_then(this_string_value(state, this, "valueOf"))
+  #(state, Ok(JsString(s)))
 }
 
 /// ES2024 22.1.3.16 — String.prototype.repeat ( count )

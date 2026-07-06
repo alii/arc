@@ -579,7 +579,7 @@ fn number_value_of(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Return ? thisNumberValue(this value).
-  use n, state <- require_number(this, state, "valueOf")
+  use n, state <- state.try_then(this_number_value(state, this, "valueOf"))
   #(state, Ok(JsNumber(n)))
 }
 
@@ -603,7 +603,7 @@ fn number_to_string(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 1: Let x be ? thisNumberValue(this value).
-  use n, state <- require_number(this, state, "toString")
+  use n, state <- state.try_then(this_number_value(state, this, "toString"))
   // Steps 2-3: radix defaults to 10; undefined -> 10.
   let radix_arg = case args {
     [] | [JsUndefined, ..] -> JsNumber(Finite(10.0))
@@ -631,18 +631,35 @@ fn number_to_string(
 ///      c. Return n.
 ///   3. Throw a TypeError exception.
 ///
-/// Used by Number.prototype.valueOf and Number.prototype.toString to
-/// unwrap `this`. Returns None instead of throwing — caller is responsible
-/// for producing the TypeError.
-fn this_number_value(state: State(host), this: JsValue) -> Option(JsNum) {
+/// Same shape as symbol/boolean/string/bigint's this-X-value: throws the
+/// branded TypeError internally so callers just `state.try_then` it.
+fn this_number_value(
+  state: State(host),
+  this: JsValue,
+  method: String,
+) -> #(State(host), Result(JsNum, JsValue)) {
   case this {
     // Step 1: If value is a Number, return value.
-    JsNumber(n) -> Some(n)
+    JsNumber(n) -> #(state, Ok(n))
     // Step 2: If value is an Object with [[NumberData]], return it.
-    JsObject(ref) -> heap.read_number_object(state.heap, ref)
-    // Step 3: (caller throws TypeError)
-    _ -> None
+    JsObject(ref) ->
+      case heap.read_number_object(state.heap, ref) {
+        Some(n) -> #(state, Ok(n))
+        None -> not_a_number(state, method)
+      }
+    // Step 3: Throw a TypeError exception.
+    _ -> not_a_number(state, method)
   }
+}
+
+fn not_a_number(
+  state: State(host),
+  method: String,
+) -> #(State(host), Result(a, JsValue)) {
+  state.type_error(
+    state,
+    "Number.prototype." <> method <> " requires that 'this' be a Number",
+  )
 }
 
 /// Number.isSafeInteger(number) — ES2024 §21.1.2.5
@@ -669,7 +686,7 @@ fn number_to_fixed(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- require_number(this, state, "toFixed")
+  use n, state <- state.try_then(this_number_value(state, this, "toFixed"))
   // Step 2: f = ToIntegerOrInfinity(fractionDigits). undefined → NaN → 0;
   // ±∞ saturate out of [0, 100] so step 3's RangeError fires.
   use f, state <- coerce.try_to_integer_or_infinity(
@@ -703,7 +720,7 @@ fn number_to_exponential(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- require_number(this, state, "toExponential")
+  use n, state <- state.try_then(this_number_value(state, this, "toExponential"))
   case args {
     // Step 6.c: fractionDigits undefined — as many significant digits as
     // needed to uniquely represent the value ("k is as small as possible").
@@ -746,7 +763,7 @@ fn number_to_precision(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- require_number(this, state, "toPrecision")
+  use n, state <- state.try_then(this_number_value(state, this, "toPrecision"))
   case args {
     // If precision is undefined, behave as toString.
     [JsUndefined, ..] | [] -> #(state, Ok(JsString(value.format_number(n))))
@@ -782,24 +799,6 @@ fn number_to_precision(
 // ============================================================================
 // Internal helpers
 // ============================================================================
-
-/// Unwrap `this` as a Number or return a TypeError.
-/// CPS-style — call with `use n, state <- require_number(this, state, "method")`.
-fn require_number(
-  this: JsValue,
-  state: State(host),
-  method: String,
-  cont: fn(JsNum, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case this_number_value(state, this) {
-    Some(n) -> cont(n, state)
-    None ->
-      state.type_error(
-        state,
-        "Number.prototype." <> method <> " requires that 'this' be a Number",
-      )
-  }
-}
 
 /// Stringify NaN/Infinity canonically, else apply `f` to the finite float.
 fn format_non_finite(n: JsNum, f: fn(Float) -> String) -> String {
