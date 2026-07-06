@@ -2654,25 +2654,23 @@ fn emit_super_base_keep_recv(e: Emitter) -> Emitter {
 /// — the CallMethod shape.
 fn emit_super_method_ref(
   e: Emitter,
-  key: ast.Expression,
-  computed: Bool,
+  property: ast.MemberProperty,
 ) -> Result(Emitter, EmitError) {
   let e = emit_super_base_keep_recv(e)
-  use e <- result.map(emit_super_key(e, key, computed))
+  use e <- result.map(emit_super_key(e, property))
   emit_op(e, opcode.GetSuperValue)
 }
 
-/// Push the property key for a super reference. Dot form (`super.x`,
-/// computed=False) pushes a literal string; computed form (`super[k]`)
-/// evaluates the expression. Stack after: [key, ..].
+/// Push the property key for a super reference. Dot form (`super.x`) pushes
+/// a literal string; bracket form (`super[k]`) evaluates the expression.
+/// Stack after: [key, ..].
 fn emit_super_key(
   e: Emitter,
-  key: ast.Expression,
-  computed: Bool,
+  property: ast.MemberProperty,
 ) -> Result(Emitter, EmitError) {
-  case computed, key {
-    False, ast.Identifier(name:, ..) -> Ok(push_const(e, JsString(name)))
-    _, _ -> emit_expr(e, key)
+  case property {
+    ast.Dot(name:, ..) -> Ok(push_const(e, JsString(name)))
+    ast.Bracket(expression:) -> emit_expr(e, expression)
   }
 }
 
@@ -2694,16 +2692,16 @@ fn emit_lvalue_get2(
   lhs: ast.Expression,
 ) -> Result(#(Emitter, LvalueShape), EmitError) {
   case lhs {
-    ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
+    ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
       let e = emit_super_base(e)
-      use e <- result.map(emit_super_key(e, key, computed))
+      use e <- result.map(emit_super_key(e, property))
       #(emit_op(e, opcode.GetSuperValue2), LvSuper)
     }
-    ast.MemberExpression(_, obj, ast.Identifier(name: prop, ..), False) -> {
+    ast.MemberExpression(_, obj, ast.Dot(name: prop, ..)) -> {
       use e <- result.map(emit_expr(e, obj))
       #(emit_get_field2(e, prop), LvField(prop))
     }
-    ast.MemberExpression(_, obj, key, True) -> {
+    ast.MemberExpression(_, obj, ast.Bracket(key)) -> {
       use e <- result.try(emit_expr(e, obj))
       use e <- result.map(emit_expr(e, key))
       #(emit_op(e, opcode.GetElem2), LvElem)
@@ -3094,16 +3092,9 @@ fn collect_hoisted_funcs(
           use #(e, child) <- result.map(compile_function_body(
             e,
             Some(name),
-            None,
             params,
             StmtsBody(body),
-            is_arrow: False,
-            is_generator: is_gen,
-            is_async:,
-            // Function declaration: a constructor unless gen/async.
-            is_constructor: !is_gen && !is_async,
-            code_kind: opcode.FunctionCode,
-            field_init: NoFieldInit,
+            shape: FnDecl(is_gen:, is_async:),
           ))
           let #(e, idx) = add_child_function(e, child)
           #(e, [#(name, idx), ..funcs])
@@ -3186,6 +3177,30 @@ fn emit_body_param_copies(
   }
 }
 
+/// The syntactic shape of a function-kind AST node being compiled. Replaces
+/// the five independent Bool flags + code_kind + self_name + field_init that
+/// compile_function_body previously took as separate parameters — every
+/// combination of those the JS grammar cannot produce (arrow-generator,
+/// async-constructor, arrow-with-self-name, generator-ctor, …) is now
+/// unrepresentable at the type level rather than a caller convention.
+type FunctionShape {
+  /// FunctionDeclaration — hoisted, constructible unless gen/async.
+  FnDecl(is_gen: Bool, is_async: Bool)
+  /// FunctionExpression — like FnDecl plus an optional §13.2.5.5 self-name
+  /// binding (Some only when SYNTACTICALLY named; NamedEvaluation-baked
+  /// names don't get one).
+  FnExpr(self_name: Option(String), is_gen: Bool, is_async: Bool)
+  /// ArrowFunctionExpression — never a generator, never a constructor,
+  /// inherits code_kind and (partial) field_init from the enclosing frame.
+  Arrow(is_async: Bool)
+  /// Object-literal / class method / accessor — never a constructor.
+  Method(is_gen: Bool, is_async: Bool)
+  /// Class `constructor` — always a constructor, never gen/async.
+  ClassCtor(derived: Bool, field_init: FieldInitMode)
+  /// Synthetic [[Fields]] / static-init function — FieldInitCode, no flags.
+  ClassInitFn
+}
+
 /// Compile a function body into a CompiledChild. Pops the next entry from
 /// `parent.child_fn_cursor` to learn THIS body's analyzer-assigned
 /// function-scope id, projects a per-function tree from
@@ -3196,16 +3211,39 @@ fn emit_body_param_copies(
 fn compile_function_body(
   parent: Emitter,
   name: Option(String),
-  self_name: Option(String),
   params: List(ast.Pattern),
   body: FnBody,
-  is_arrow is_arrow: Bool,
-  is_generator is_generator: Bool,
-  is_async is_async: Bool,
-  is_constructor is_constructor: Bool,
-  code_kind code_kind_if_not_arrow: opcode.CodeKind,
-  field_init field_init: FieldInitMode,
+  shape shape: FunctionShape,
 ) -> Result(#(Emitter, CompiledChild), EmitError) {
+  // Derive the flags the body-emission logic below branches on from the
+  // caller's syntactic shape. The exhaustive case makes every JS-grammar-
+  // impossible combination (arrow-generator, async-ctor, ctor-with-self-name,
+  // …) a compile error at the call site rather than a convention. Plain
+  // functions (decl/expr) are constructible iff neither gen nor async
+  // (§10.2.4 MakeConstructor is skipped for those); methods/arrows/init-fns
+  // never are; class ctors always are.
+  let #(is_arrow, is_generator, is_async, is_constructor, self_name) = case
+    shape
+  {
+    FnDecl(is_gen:, is_async:) -> #(
+      False,
+      is_gen,
+      is_async,
+      !is_gen && !is_async,
+      None,
+    )
+    FnExpr(self_name:, is_gen:, is_async:) -> #(
+      False,
+      is_gen,
+      is_async,
+      !is_gen && !is_async,
+      self_name,
+    )
+    Arrow(is_async:) -> #(True, False, is_async, False, None)
+    Method(is_gen:, is_async:) -> #(False, is_gen, is_async, False, None)
+    ClassCtor(..) -> #(False, False, False, True, None)
+    ClassInitFn -> #(False, False, False, False, None)
+  }
   // Consume the next child-function scope id. The analyzer's
   // `declare_stmts_hoist_order` walks each statement list with direct
   // FunctionDeclarations first — the same order `collect_hoisted_funcs`
@@ -3237,23 +3275,28 @@ fn compile_function_body(
   let child_strict = parent.strict || ast_util.has_use_strict_directive(stmts)
 
   // CodeKind (mirrors quickjs.c:36052-36076). Arrows inherit the parent
-  // emitter's kind verbatim — `code_kind_if_not_arrow` is ignored for them.
-  // Non-arrows take it as passed by the caller.
-  let code_kind = case is_arrow {
-    True -> parent.code_kind
-    False -> code_kind_if_not_arrow
+  // emitter's kind verbatim; every other shape fixes it structurally.
+  let code_kind = case shape {
+    Arrow(..) -> parent.code_kind
+    FnDecl(..) | FnExpr(..) -> opcode.FunctionCode
+    Method(..) -> opcode.MethodCode
+    ClassCtor(derived: True, ..) -> opcode.DerivedCtorCode
+    ClassCtor(derived: False, ..) -> opcode.MethodCode
+    ClassInitFn -> opcode.FieldInitCode
   }
   // Like CodeKind, arrows inherit FieldInitMode so `()=>super()` inside a
-  // derived ctor can emit the init call; non-arrows take the caller's value
-  // (only ctors get a non-NoFieldInit). Only FieldInitAfterSuper is
+  // derived ctor can emit the init call. Only FieldInitAfterSuper is
   // inherited — it fires on the `super()` call itself. FieldInitAtStart must
   // NOT leak into arrows: it fires at body entry, so an arrow inside a
   // base-class ctor would re-run the initializer on every arrow call
-  // (observable as a double private-element add → TypeError).
-  let field_init = case is_arrow, parent.field_init {
-    True, FieldInitAfterSuper -> FieldInitAfterSuper
-    True, FieldInitAtStart | True, NoFieldInit -> NoFieldInit
-    False, _ -> field_init
+  // (observable as a double private-element add → TypeError). Non-arrow
+  // shapes fix it structurally: only ClassCtor carries a non-NoFieldInit.
+  let field_init = case shape, parent.field_init {
+    Arrow(..), FieldInitAfterSuper -> FieldInitAfterSuper
+    Arrow(..), FieldInitAtStart | Arrow(..), NoFieldInit -> NoFieldInit
+    ClassCtor(field_init:, ..), _ -> field_init
+    FnDecl(..), _ | FnExpr(..), _ | Method(..), _ | ClassInitFn, _ ->
+      NoFieldInit
   }
   // Annex B promotion of a block-level function declaration is skipped when
   // its name collides with a formal parameter (B.3.3.1: "F is not an element
@@ -4093,13 +4136,13 @@ fn emit_chain(
     emit_expr(e, expr)
   })
   case expr {
-    ast.MemberExpression(_, obj, ast.Identifier(name:, ..), False)
-    | ast.OptionalMemberExpression(_, obj, ast.Identifier(name:, ..), False) -> {
+    ast.MemberExpression(_, obj, ast.Dot(name:, ..))
+    | ast.OptionalMemberExpression(_, obj, ast.Dot(name:, ..)) -> {
       use e <- result.map(chain_obj(e, expr, obj, l1, l2))
       emit_get_field(e, name)
     }
-    ast.MemberExpression(_, obj, prop, True)
-    | ast.OptionalMemberExpression(_, obj, prop, True) -> {
+    ast.MemberExpression(_, obj, ast.Bracket(prop))
+    | ast.OptionalMemberExpression(_, obj, ast.Bracket(prop)) -> {
       use e <- result.try(chain_obj(e, expr, obj, l1, l2))
       use e <- result.map(emit_expr(e, prop))
       emit_op(e, opcode.GetElem)
@@ -4155,17 +4198,17 @@ fn emit_chain_callee(
 ) -> Result(#(Emitter, Bool), EmitError) {
   case callee {
     // super.m?.() / super[k]?.() — §13.3.7.3 super ref, lexical-this receiver.
-    ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
-      use e <- result.map(emit_super_method_ref(e, key, computed))
+    ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
+      use e <- result.map(emit_super_method_ref(e, property))
       #(e, True)
     }
-    ast.MemberExpression(_, obj, ast.Identifier(name:, ..), False)
-    | ast.OptionalMemberExpression(_, obj, ast.Identifier(name:, ..), False) -> {
+    ast.MemberExpression(_, obj, ast.Dot(name:, ..))
+    | ast.OptionalMemberExpression(_, obj, ast.Dot(name:, ..)) -> {
       use e <- result.map(chain_obj(e, callee, obj, l1, l2))
       #(emit_get_field2(e, name), True)
     }
-    ast.MemberExpression(_, obj, key, True)
-    | ast.OptionalMemberExpression(_, obj, key, True) -> {
+    ast.MemberExpression(_, obj, ast.Bracket(key))
+    | ast.OptionalMemberExpression(_, obj, ast.Bracket(key)) -> {
       use e <- result.try(chain_obj(e, callee, obj, l1, l2))
       use e <- result.map(emit_expr(e, key))
       // [f, key, receiver] → [f, receiver]
@@ -4291,11 +4334,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         // §13.5.1.2 step 5.b — delete on a super reference is an
         // unconditional ReferenceError. Evaluate `this` (TDZ check) and the
         // computed key for side effects per §13.3.7 ordering, then throw.
-        ast.MemberExpression(_, ast.SuperExpression(_), key, computed) -> {
+        ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
           let e = get_this(e) |> emit_op(opcode.Pop)
-          use e <- result.map(case computed {
-            True -> result.map(emit_expr(e, key), emit_op(_, opcode.Pop))
-            False -> Ok(e)
+          use e <- result.map(case property {
+            ast.Bracket(key) ->
+              result.map(emit_expr(e, key), emit_op(_, opcode.Pop))
+            ast.Dot(..) -> Ok(e)
           })
           emit_op(
             e,
@@ -4305,12 +4349,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
             ),
           )
         }
-        ast.MemberExpression(_, obj, ast.Identifier(name: prop, ..), False) -> {
+        ast.MemberExpression(_, obj, ast.Dot(name: prop, ..)) -> {
           // delete obj.prop → emit obj, DeleteField(prop)
           use e <- result.map(emit_expr(e, obj))
           emit_ir(e, IrDeleteField(prop))
         }
-        ast.MemberExpression(_, obj, key_expr, True) -> {
+        ast.MemberExpression(_, obj, ast.Bracket(key_expr)) -> {
           // delete obj[key] → emit obj, emit key, DeleteElem
           use e <- result.try(emit_expr(e, obj))
           use e <- result.map(emit_expr(e, key_expr))
@@ -4514,11 +4558,11 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.AssignmentExpression(
       _,
       ast.Assign,
-      ast.MemberExpression(_, ast.SuperExpression(_), key, computed),
+      ast.MemberExpression(_, ast.SuperExpression(_), property),
       right,
     ) -> {
       let e = emit_super_base(e)
-      use e <- result.try(emit_super_key(e, key, computed))
+      use e <- result.try(emit_super_key(e, property))
       use e <- result.map(emit_expr(e, right))
       emit_op(e, opcode.PutSuperValue)
     }
@@ -4527,7 +4571,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.AssignmentExpression(
       _,
       ast.Assign,
-      ast.MemberExpression(_, obj, ast.Identifier(name: prop, ..), False),
+      ast.MemberExpression(_, obj, ast.Dot(name: prop, ..)),
       right,
     ) -> {
       use e <- result.try(emit_expr(e, obj))
@@ -4540,7 +4584,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.AssignmentExpression(
       _,
       ast.Assign,
-      ast.MemberExpression(_, obj, key, True),
+      ast.MemberExpression(_, obj, ast.Bracket(key)),
       right,
     ) -> {
       use e <- result.try(emit_expr(e, obj))
@@ -4628,10 +4672,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // super property with receiver=this, then CallMethod with this as recv.
     ast.CallExpression(
       _,
-      ast.MemberExpression(_, ast.SuperExpression(_), key, computed),
+      ast.MemberExpression(_, ast.SuperExpression(_), property),
       args,
     ) -> {
-      use e <- result.try(emit_super_method_ref(e, key, computed))
+      use e <- result.try(emit_super_method_ref(e, property))
       emit_call_args(
         e,
         args,
@@ -4644,7 +4688,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Spread path: build args array after GetField2, then IrCallMethodApply.
     ast.CallExpression(
       _,
-      ast.MemberExpression(_, obj, ast.Identifier(name: method_name, ..), False),
+      ast.MemberExpression(_, obj, ast.Dot(name: method_name, ..)),
       args,
     ) ->
       case ast_util.chain_has_optional(obj) {
@@ -5215,19 +5259,10 @@ fn make_method_closure(
   is_gen: Bool,
   is_async: Bool,
 ) -> Result(Emitter, EmitError) {
-  compile_function_body(
-    e,
-    name,
-    None,
-    params,
-    StmtsBody(body),
-    is_arrow: False,
-    is_generator: is_gen,
+  compile_function_body(e, name, params, StmtsBody(body), shape: Method(
+    is_gen:,
     is_async:,
-    is_constructor: False,
-    code_kind: opcode.MethodCode,
-    field_init: NoFieldInit,
-  )
+  ))
   |> register_closure
 }
 
@@ -5249,19 +5284,11 @@ fn emit_function_closure(
     True -> name
     False -> None
   }
-  compile_function_body(
-    e,
-    name,
-    self_name,
-    params,
-    StmtsBody(body),
-    is_arrow: False,
-    is_generator: is_gen,
+  compile_function_body(e, name, params, StmtsBody(body), shape: FnExpr(
+    self_name:,
+    is_gen:,
     is_async:,
-    is_constructor: !is_gen && !is_async,
-    code_kind: opcode.FunctionCode,
-    field_init: NoFieldInit,
-  )
+  ))
   |> register_closure
 }
 
@@ -5281,19 +5308,9 @@ fn emit_arrow_closure(
     ]
     ast.ArrowBodyBlock(stmts) -> stmts
   }
-  compile_function_body(
-    e,
-    name,
-    None,
-    params,
-    StmtsBody(body_stmts),
-    is_arrow: True,
-    is_generator: False,
+  compile_function_body(e, name, params, StmtsBody(body_stmts), shape: Arrow(
     is_async:,
-    is_constructor: False,
-    code_kind: opcode.FunctionCode,
-    field_init: NoFieldInit,
-  )
+  ))
   |> register_closure
 }
 
@@ -7165,31 +7182,25 @@ fn compile_class_body(
       field_inits(instance_fields),
     ),
   ))
-  let #(ctor_kind, field_init) = case super_class {
-    Some(_) -> #(opcode.DerivedCtorCode, FieldInitAfterSuper)
-    None -> #(opcode.MethodCode, FieldInitAtStart)
+  let derived = option.is_some(super_class)
+  let field_init = case init_idx, derived {
+    None, _ -> NoFieldInit
+    Some(_), True -> FieldInitAfterSuper
+    Some(_), False -> FieldInitAtStart
   }
   use #(e, child) <- result.try(compile_function_body(
     // Scoped to this one compile: the child emitter inherits the flag.
     Emitter(..e, in_synth_default_ctor: synth_super_forward),
     name,
-    None,
     ctor_params,
     StmtsBody(ctor_body),
-    is_arrow: False,
-    is_generator: False,
-    is_async: False,
-    // Class constructor — IS a constructor.
-    is_constructor: True,
-    code_kind: ctor_kind,
-    field_init: option.map(init_idx, fn(_) { field_init })
-      |> option.unwrap(NoFieldInit),
+    shape: ClassCtor(derived:, field_init:),
   ))
   let e = Emitter(..e, in_synth_default_ctor: False)
   let child =
     CompiledChild(
       ..child,
-      is_derived_constructor: option.is_some(super_class),
+      is_derived_constructor: derived,
       is_class_constructor: True,
     )
   let #(e, ctor_idx) = add_child_function(e, child)
@@ -7307,16 +7318,9 @@ fn compile_class_init_fn(
       use #(e, child) <- result.map(compile_function_body(
         e,
         None,
-        None,
         [],
         FieldInitsBody(inits),
-        is_arrow: False,
-        is_generator: False,
-        is_async: False,
-        // Synthetic field initializer — never directly constructible.
-        is_constructor: False,
-        code_kind: opcode.FieldInitCode,
-        field_init: NoFieldInit,
+        shape: ClassInitFn,
       ))
       let #(e, idx) = add_child_function(e, child)
       #(e, Some(idx))
