@@ -334,11 +334,10 @@ fn string_index_of(
   // through ToNumber, so an object position argument (e.g.
   // `{valueOf(){return 1}}`) is coerced via valueOf/@@toPrimitive rather than
   // silently falling back to 0.
-  let pos_val = case helpers.list_at(args, 1) {
-    Some(v) -> v
-    None -> JsUndefined
-  }
-  use pos, state <- coerce.try_to_integer_or_infinity(state, pos_val)
+  use pos, state <- coerce.try_to_integer_or_infinity(
+    state,
+    helpers.arg_at(args, 1),
+  )
   let from = int.clamp(pos, 0, js_string.length(s))
   // Step 8: StringIndexOf(S, searchStr, start). None (not found) is where the
   // JS -1 sentinel is minted — see js_string.index_of.
@@ -766,8 +765,7 @@ fn get_method(
         _ ->
           case helpers.is_callable(state.heap, func) {
             True -> Ok(#(Some(func), state))
-            False ->
-              Error(state.type_error_value(state, not_a_function(symbol)))
+            False -> state.type_error_op(state, not_a_function(symbol))
           }
       }
     }
@@ -868,10 +866,7 @@ fn string_replace(
   // @@replace delegation never observes ToString(this).
   use Nil, state <- require_object_coercible(this, state, "replace")
   let search_val = helpers.first_arg_or_undefined(args)
-  let replace_val = case args {
-    [_, rv, ..] -> rv
-    _ -> JsUndefined
-  }
+  let replace_val = helpers.arg_at(args, 1)
   // Step 2: replacer = ? GetMethod(searchValue, @@replace); delegate if set,
   // passing the original this value.
   use method_opt, state <- state.try_op(get_method(
@@ -901,10 +896,7 @@ fn string_replace_all(
   // Step 1: RequireObjectCoercible(O) — ToString deferred to step 3.
   use Nil, state <- require_object_coercible(this, state, "replaceAll")
   let search_val = helpers.first_arg_or_undefined(args)
-  let replace_val = case args {
-    [_, rv, ..] -> rv
-    _ -> JsUndefined
-  }
+  let replace_val = helpers.arg_at(args, 1)
   // Step 2a: if IsRegExp(searchValue), Get(searchValue, "flags") must be
   // object-coercible and its string must contain "g".
   use is_re, state <- regexp_ops.is_regexp(state, search_val)
@@ -1218,10 +1210,7 @@ fn string_split(
   // Step 1: RequireObjectCoercible(O) — must run before the @@split lookup.
   use Nil, state <- require_object_coercible(this, state, "split")
   let sep_val = helpers.first_arg_or_undefined(args)
-  let limit_val = case args {
-    [_, l, ..] -> l
-    _ -> JsUndefined
-  }
+  let limit_val = helpers.arg_at(args, 1)
   // Step 2: splitter = ? GetMethod(separator, @@split); delegate if set.
   use method_opt, state <- state.try_op(get_method(
     state,
@@ -1921,7 +1910,9 @@ fn string_substr(
     False -> int.min(raw_start, size)
   }
   // Step 5: length undefined => size, else ToIntegerOrInfinity(length)
-  use raw_len, state <- substr_length(state, args, size)
+  use raw_len, state <- second_arg_index_or_len(state, args, size, fn(n, _) {
+    n
+  })
   // Step 6: clamp intLength to [0, size]
   let len = int.clamp(raw_len, 0, size)
   // Steps 7-9: intEnd = min(intStart + intLength, size); empty if start >= end
@@ -1929,21 +1920,6 @@ fn string_substr(
   case start >= end {
     True -> #(state, Ok(JsString("")))
     False -> #(state, Ok(JsString(js_string.slice(s, start, end - start))))
-  }
-}
-
-/// substr step 5: length undefined => size, else ToIntegerOrInfinity.
-fn substr_length(
-  state: State(host),
-  args: List(JsValue),
-  size: Int,
-  cont: fn(Int, State(host)) -> #(State(host), Result(JsValue, JsValue)),
-) -> #(State(host), Result(JsValue, JsValue)) {
-  case args {
-    [_, JsUndefined, ..] -> cont(size, state)
-    [_, length_arg, ..] ->
-      coerce.try_to_integer_or_infinity(state, length_arg, cont)
-    _ -> cont(size, state)
   }
 }
 
@@ -2110,7 +2086,7 @@ fn coerce_to_string(
         JsNull -> "null"
         _ -> "undefined"
       }
-      coerce.thrown_type_error(state, "Cannot read properties of " <> type_name)
+      state.type_error_op(state, "Cannot read properties of " <> type_name)
     }
     _ -> coerce.js_to_string(state, this)
   }

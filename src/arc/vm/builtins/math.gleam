@@ -614,19 +614,10 @@ fn math_binary(
   state: State(host),
   apply: fn(value.JsNum, value.JsNum) -> value.JsNum,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use a, state <- coerce.try_to_number(
-    state,
-    helpers.first_arg_or_undefined(args),
-  )
-  use b, state <- coerce.try_to_number(state, second_arg_or_undefined(args))
+  let #(a_val, b_val) = helpers.two_args_or_undefined(args)
+  use a, state <- coerce.try_to_number(state, a_val)
+  use b, state <- coerce.try_to_number(state, b_val)
   #(state, Ok(JsNumber(apply(a, b))))
-}
-
-fn second_arg_or_undefined(args: List(JsValue)) -> JsValue {
-  case args {
-    [_, v, ..] -> v
-    _ -> value.JsUndefined
-  }
 }
 
 /// §7.1.4 ToNumber over a whole argument list, left to right, threading

@@ -168,19 +168,12 @@ pub fn dispatch(
     NumberPrototypeValueOf -> number_value_of(this, args, state)
     NumberPrototypeToString -> number_to_string(this, args, state)
     GlobalParseInt -> {
-      let #(val, radix) = case args {
-        [] -> #(JsUndefined, JsUndefined)
-        [val] -> #(val, JsUndefined)
-        [val, radix, ..] -> #(val, radix)
-      }
+      let #(val, radix) = helpers.two_args_or_undefined(args)
       let #(state, res) = parse_int_value(state, val, radix)
       #(state, result.map(res, JsNumber))
     }
     GlobalParseFloat -> {
-      let val = case args {
-        [] -> JsUndefined
-        [val, ..] -> val
-      }
+      let val = helpers.first_arg_or_undefined(args)
       let #(state, res) = parse_float_value(state, val)
       #(state, result.map(res, JsNumber))
     }

@@ -583,7 +583,7 @@ fn push_generic(
       }
       let exceeds_uint32 = is_real_array && length > max_array_length
       use <- bool.lazy_guard(exceeds_uint32, fn() {
-        range_error_op(state, "Invalid array length")
+        state.range_error_op(state, "Invalid array length")
       })
       // Step 6: Perform ? Set(O, "length", 𝔽(len), true).
       use state <- result.try(generic_set_length(state, ref, length))
@@ -1226,15 +1226,6 @@ fn to_length_value(
   #(coerce.jsnum_to_length(num), state)
 }
 
-/// Allocate a RangeError in the op-result shape `Result(a, #(JsValue, State))`
-/// used by the generic per-index loops.
-fn range_error_op(
-  state: State(host),
-  msg: String,
-) -> Result(a, #(JsValue, State(host))) {
-  Error(state.range_error_value(state, msg))
-}
-
 /// Pragmatic iteration bound for the generic per-index loops. ToLength allows
 /// lengths up to 2^53-1; spec-conformant programs over huge array-likes
 /// terminate early (element found / falsy callback / start near the end) long
@@ -1337,7 +1328,7 @@ fn generic_set(
       True -> Ok(state)
       // §7.3.4 step 2: success = false and Throw = true → TypeError.
       False ->
-        coerce.thrown_type_error(
+        state.type_error_op(
           state,
           "Cannot assign to read only property '"
             <> key.key_display_string(key)
@@ -1411,7 +1402,7 @@ fn generic_delete(
     True -> Ok(state)
     // §7.3.9 step 2: success = false → throw TypeError.
     False ->
-      coerce.thrown_type_error(
+      state.type_error_op(
         state,
         "Cannot delete property '"
           <> key.key_display_string(key)
@@ -1632,7 +1623,7 @@ fn move_range(
       // proxy trap on a huge array-like throws within its first few steps,
       // so only loops doing real unbounded work hit the RangeError.
       use <- bool.lazy_guard(fuel <= 0, fn() {
-        range_error_op(state, iteration_budget_msg)
+        state.range_error_op(state, iteration_budget_msg)
       })
       let step = step_of(dir)
       let to = k + delta
@@ -1874,7 +1865,7 @@ fn copy_range_dense(
   dst: JsElements,
 ) -> Result(#(JsElements, State(host)), #(JsValue, State(host))) {
   use <- bool.lazy_guard(remaining > limits.max_iteration, fn() {
-    range_error_op(state, iteration_budget_msg)
+    state.range_error_op(state, iteration_budget_msg)
   })
   case remaining <= 0 {
     True -> Ok(#(dst, state))
@@ -1943,7 +1934,7 @@ fn copy_range_fueled(
   fuel: Int,
 ) -> Result(#(JsElements, State(host)), #(JsValue, State(host))) {
   use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
-    range_error_op(state, iteration_budget_msg)
+    state.range_error_op(state, iteration_budget_msg)
   })
   case dense_snapshot(state, src) {
     Some(#(els, proto)) ->
@@ -1979,7 +1970,7 @@ fn copy_range_snapshot(
   fuel: Int,
 ) -> Result(#(JsElements, State(host)), #(JsValue, State(host))) {
   use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
-    range_error_op(state, iteration_budget_msg)
+    state.range_error_op(state, iteration_budget_msg)
   })
   case remaining <= 0 {
     True -> Ok(#(dst, state))
@@ -2042,7 +2033,7 @@ fn copy_range_generic(
   fuel: Int,
 ) -> Result(#(JsElements, State(host)), #(JsValue, State(host))) {
   use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
-    range_error_op(state, iteration_budget_msg)
+    state.range_error_op(state, iteration_budget_msg)
   })
   case remaining <= 0 {
     True -> Ok(#(dst, state))
@@ -2288,7 +2279,7 @@ fn array_species_create(
               case object.is_constructor(state.heap, ctor) {
                 // Step 7: not a constructor → TypeError.
                 False ->
-                  coerce.thrown_type_error(
+                  state.type_error_op(
                     state,
                     "Species constructor is not a constructor",
                   )
@@ -2324,7 +2315,7 @@ fn write_species_result(
   set_length: Option(Int),
 ) -> Result(State(host), #(JsValue, State(host))) {
   use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    range_error_op(state, iteration_budget_msg)
+    state.range_error_op(state, iteration_budget_msg)
   })
   use state <- result.try(write_species_elements(state, target, els, 0, length))
   case set_length {
@@ -2384,7 +2375,7 @@ fn write_species_element(
       ))
       case ok {
         False ->
-          coerce.thrown_type_error(
+          state.type_error_op(
             state,
             "Cannot define property " <> int.to_string(idx) <> " on proxy",
           )
@@ -2401,7 +2392,7 @@ fn write_species_element(
   let #(state, redefinable) =
     drop_configurable_index_override(state, target, idx)
   use <- bool.lazy_guard(!redefinable, fn() {
-    coerce.thrown_type_error(
+    state.type_error_op(
       state,
       "Cannot define property " <> int.to_string(idx) <> " on object",
     )
@@ -2412,13 +2403,13 @@ fn write_species_element(
   case outcome {
     object.Defined -> Ok(state)
     object.Rejected ->
-      coerce.thrown_type_error(
+      state.type_error_op(
         state,
         "Cannot define property " <> int.to_string(idx) <> " on object",
       )
     // ArraySetLength's RangeError is an abrupt completion, not a false result;
     // unreachable for an index key, but never silently downgraded to TypeError.
-    object.ThrewRangeError(msg) -> Error(state.range_error_value(state, msg))
+    object.ThrewRangeError(msg) -> state.range_error_op(state, msg)
   }
 }
 
@@ -2440,7 +2431,7 @@ fn copy_range_to_species(
   fuel: Int,
 ) -> Result(State(host), #(JsValue, State(host))) {
   use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
-    range_error_op(state, iteration_budget_msg)
+    state.range_error_op(state, iteration_budget_msg)
   })
   case remaining <= 0 {
     True -> Ok(state)
@@ -2556,10 +2547,7 @@ fn concat_item(
       use #(length, state) <- result.try(object_length(state, ref))
       // Step 5b.iii: If n + len > 2^53 - 1, throw a TypeError exception.
       use <- bool.lazy_guard(pos + length > limits.max_safe_integer, fn() {
-        coerce.thrown_type_error(
-          state,
-          "Array length exceeds maximum safe integer",
-        )
+        state.type_error_op(state, "Array length exceeds maximum safe integer")
       })
       // Step 5b.iv: copy elements [0..len) into result at position n.
       use #(copied, state) <- result.map(copy_range(
@@ -2598,7 +2586,7 @@ fn concat_items_species(
           use #(length, state) <- result.try(object_length(state, ref))
           // Step 5b.ii: If n + len > 2^53 - 1, throw a TypeError exception.
           use <- bool.lazy_guard(pos + length > limits.max_safe_integer, fn() {
-            coerce.thrown_type_error(
+            state.type_error_op(
               state,
               "Array length exceeds maximum safe integer",
             )
@@ -2701,7 +2689,7 @@ fn reverse_generic(
     True -> Ok(state)
     False -> {
       use <- bool.lazy_guard(fuel <= 0, fn() {
-        range_error_op(state, iteration_budget_msg)
+        state.range_error_op(state, iteration_budget_msg)
       })
       // Step 5d: Let lowerExists be ? HasProperty(O, lowerP)
       use #(has_lo, state) <- result.try(generic_has_op(state, ref, lo))
@@ -3098,7 +3086,7 @@ fn search_forward(
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   // Pragmatic step budget — see iteration_budget_msg.
   use <- bool.lazy_guard(fuel <= 0 && idx < length, fn() {
-    range_error_op(state, iteration_budget_msg)
+    state.range_error_op(state, iteration_budget_msg)
   })
   // Loop condition: k < len (both specs)
   case idx >= length {
@@ -3160,7 +3148,7 @@ fn search_backward(
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
   // Pragmatic step budget — see iteration_budget_msg.
   use <- bool.lazy_guard(fuel <= 0 && idx >= 0, fn() {
-    range_error_op(state, iteration_budget_msg)
+    state.range_error_op(state, iteration_budget_msg)
   })
   // Loop condition: k >= 0
   case idx < 0 {
@@ -4534,7 +4522,7 @@ fn find_present(
     False -> {
       // Pragmatic per-step budget — see iteration_budget_msg.
       use <- bool.lazy_guard(fuel <= 0, fn() {
-        range_error_op(state, iteration_budget_msg)
+        state.range_error_op(state, iteration_budget_msg)
       })
       // Step 8b.ii-iii: kPresent = HasProperty(O, Pk); if true,
       // accumulator = Get(O, Pk) — fused into one heap lookup.
@@ -5241,39 +5229,19 @@ fn array_from(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let array_proto = state.builtins.array.prototype
-  let #(items_val, map_fn, this_arg) = case args {
-    [i, m, t, ..] -> #(i, Some(m), t)
-    [i, m] -> #(i, Some(m), JsUndefined)
-    [i] -> #(i, None, JsUndefined)
-    [] -> #(JsUndefined, None, JsUndefined)
-  }
-  // Validate mapFn if provided
+  let #(items_val, map_fn, this_arg) = helpers.three_args_or_undefined(args)
+  // §23.1.2.1 step 2: If mapFn is undefined, mapping is false; otherwise it
+  // must be callable. `undefined` and "not passed" are the same case here —
+  // both mean "no mapping" — so there is no Option in play.
   case map_fn {
-    Some(mf) ->
-      case mf {
-        JsUndefined ->
-          array_from_array_like(
-            items_val,
-            None,
-            JsUndefined,
-            array_proto,
-            state,
-          )
-        _ -> {
-          use mf, state <- helpers.require_callable(state, mf, fn() {
-            operators.typeof(state.heap, mf) <> " is not a function"
-          })
-          array_from_array_like(
-            items_val,
-            Some(mf),
-            this_arg,
-            array_proto,
-            state,
-          )
-        }
-      }
-    None ->
-      array_from_array_like(items_val, None, JsUndefined, array_proto, state)
+    JsUndefined ->
+      array_from_array_like(items_val, None, this_arg, array_proto, state)
+    mf -> {
+      use mf, state <- helpers.require_callable(state, mf, fn() {
+        operators.typeof(state.heap, mf) <> " is not a function"
+      })
+      array_from_array_like(items_val, Some(mf), this_arg, array_proto, state)
+    }
   }
 }
 
@@ -5296,13 +5264,15 @@ fn array_from_array_like(
       )
     _ -> {
       // §23.1.2.1 step 4: usingIterator = ? GetMethod(items, @@iterator).
-      // Iterables (generators, Maps, Sets, custom iterators, proxies of
-      // arrays) take the iterator path; everything else is array-like.
-      use iter_method, state <- state.try_op(case items {
-        JsObject(_) ->
-          object.get_symbol_value_of(state, items, value.symbol_iterator)
-        _ -> Ok(#(JsUndefined, state))
-      })
+      // GetMethod is GetV — it goes through the primitive's prototype for
+      // JsString/JsNumber/JsBool/JsBigInt/JsSymbol, so `Array.from("ab")`
+      // takes the (surrogate-pair-aware) string iterator path, and a
+      // user-installed `Boolean.prototype[Symbol.iterator]` is honoured.
+      use iter_method, state <- state.try_op(object.get_symbol_value_of(
+        state,
+        items,
+        value.symbol_iterator,
+      ))
       case iter_method {
         // GetMethod step 3: undefined or null → no iterator; array-like path.
         JsUndefined | JsNull -> {
