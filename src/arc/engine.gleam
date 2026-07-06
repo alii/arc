@@ -175,21 +175,15 @@ pub fn with_host_hooks(
 ///
 /// The function becomes callable from JS as `name(...)`. `arity` is the
 /// reported `.length` property; the impl still receives all passed args.
+/// Exactly `host_fn` + `define_global` — the mint-and-install convenience.
 pub fn define_fn(
   engine: Engine(host),
   name: String,
   arity: Int,
   impl: HostFn(host),
 ) -> Engine(host) {
-  let #(h, fn_ref) =
-    common.alloc_rooted_host_fn(
-      engine.heap,
-      engine.builtins.function.prototype,
-      impl,
-      name,
-      arity,
-    )
-  set_global(engine, h, name, JsObject(fn_ref))
+  let #(engine, val) = host_fn(engine, name, arity, impl)
+  define_global(engine, name, val)
 }
 
 /// Add a top-level namespace object (like `Math` or `JSON`) with methods.
@@ -246,7 +240,7 @@ fn set_global(
 /// Mint a host-provided native function ref into the engine's heap and hand back
 /// its value — WITHOUT installing it as a global. The "return me the ref" twin of
 /// `define_fn`, for building values to place elsewhere (e.g. as host-module
-/// exports via `register_host_module`, or methods on a `define_class`). The ref
+/// exports via `register_host_module`, or methods on a `host_class`). The ref
 /// is GC-rooted by `alloc_rooted_host_fn`.
 pub fn host_fn(
   engine: Engine(host),
@@ -281,7 +275,7 @@ pub fn host_fn(
 /// Unlike `define_fn`/`define_namespace`, this does NOT install a global: it
 /// returns the constructor so the caller places it (e.g. a `register_host_module`
 /// export). The constructor and its prototype are GC-rooted by `init_type`.
-pub fn define_class(
+pub fn host_class(
   engine: Engine(host),
   name: String,
   arity: Int,
@@ -351,7 +345,7 @@ pub fn with_state_with(
 
 /// Register an embedder-provided native (synthetic) module under `specifier`.
 ///
-/// `exports` are `(name, value)` pairs — typically `define_class` constructors
+/// `exports` are `(name, value)` pairs — typically `host_class` constructors
 /// and `host_fn` values. Afterwards, any module evaluated through this engine
 /// that does `import { name } from "<specifier>"` (or `import * as ns from
 /// "<specifier>"`) binds straight to these values, with NO source loaded for
@@ -737,35 +731,13 @@ fn outcome_of(settled: Result(JsValue, JsValue)) -> Outcome {
   }
 }
 
-/// Prefix `module.compile_bundle_error_message`'s prose with the pipeline
-/// phase that failed.
-fn module_compile_error_message(err: module.CompileBundleError) -> String {
-  module.compile_bundle_error_phase(err)
-  <> module.compile_bundle_error_message(err)
-}
-
-/// Prefix `module.error_message`'s prose with the pipeline phase that failed.
-/// Evaluation results carry no phase label: an `EvaluationError` renders as
-/// the uncaught thrown value, and `EvaluationPending` is only reachable with a
-/// non-draining finish driver (static entry points convert pending to
-/// `EvaluationError` inside `module.evaluate_linked`).
-fn module_error_message(
-  err: module.ModuleError,
-  heap: state.Heap(host),
-) -> String {
-  let phase = case err {
-    module.NotInBundle(..) -> "ResolutionError: "
-    module.EvaluationError(..) | module.EvaluationPending(..) -> ""
-  }
-  phase <> module.error_message(err, heap)
-}
-
 pub fn eval_error_message(err: EvalError(host)) -> String {
   case err {
     ParseError(e) -> parser.parse_error_to_string(e)
     CompileError(e) -> compiler.error_message(e)
     VmError(e) -> state.vm_error_message(e)
-    ModuleCompileError(e) -> module_compile_error_message(e)
-    ModuleError(error:, heap:) -> module_error_message(error, heap)
+    ModuleCompileError(e) -> module.format_compile_bundle_error(e)
+    ModuleError(error:, heap:) ->
+      module.module_error_phase(error) <> module.error_message(error, heap)
   }
 }

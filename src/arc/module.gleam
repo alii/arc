@@ -149,7 +149,7 @@ pub fn source_specifiers(bundle: ModuleBundle) -> List(String) {
 /// A failure of AOT compilation (`compile_bundle*`) — everything that can go
 /// wrong BEFORE any heap exists. Each variant carries the structured cause
 /// from the layer that produced it (graph walk, bytecode compiler); dispatch
-/// on the variant, and render the prose with `compile_bundle_error_message`.
+/// on the variant, and render the prose with `format_compile_bundle_error`.
 ///
 /// Deliberately carries no `host` type parameter: compilation never allocates
 /// in a heap, so it can never produce a heap-carrying error, and its callers
@@ -222,19 +222,38 @@ pub fn compile_bundle_error_message(err: CompileBundleError) -> String {
   }
 }
 
-/// Which pipeline PHASE a `CompileBundleError` failed in, as the prefix
-/// embedders print in front of `compile_bundle_error_message`. Lives here, next
-/// to the variants it maps over, so a new `CompileBundleError` variant is a
-/// compile error in exactly one place instead of silently inheriting whatever
-/// label a distant caller's `case` fell through to.
-pub fn compile_bundle_error_phase(err: CompileBundleError) -> String {
-  case err {
-    GraphError(error: graph.ParseFailed(..)) -> "SyntaxError: "
+/// The FULL user-facing text for a `CompileBundleError` — pipeline-phase label
+/// plus `compile_bundle_error_message`'s detail, in one string. Lives next to
+/// the variants it maps over, so adding a `CompileBundleError` (or
+/// `graph.GraphError`) variant is a compile error HERE instead of silently
+/// inheriting whatever label a distant caller's `case` fell through to.
+///
+/// A `ParseFailed`'s detail already opens with `"SyntaxError in '<spec>'"`, so
+/// no separate phase prefix is added for it — the two used to compose into
+/// `"SyntaxError: SyntaxError in …"`.
+pub fn format_compile_bundle_error(err: CompileBundleError) -> String {
+  let phase = case err {
+    // Detail already reads "SyntaxError in '<spec>': …" — no extra prefix.
+    GraphError(error: graph.ParseFailed(..)) -> ""
     GraphError(error: graph.ResolveFailed(..))
     | GraphError(error: graph.LoadFailed(..)) -> "ResolutionError: "
     // A source-phase import is a link-time SyntaxError (§16.2.1.7.2).
     GraphError(error: graph.SourcePhaseUnsupported(..)) -> "LinkError: "
     CompileError(..) -> "CompileError: "
+  }
+  phase <> compile_bundle_error_message(err)
+}
+
+/// Which pipeline PHASE a `ModuleError` belongs to, as the prefix embedders
+/// print in front of `error_message`. Evaluation results carry no phase label:
+/// an `EvaluationError` renders as the uncaught thrown value, and
+/// `EvaluationPending` is only reachable with a non-draining finish driver.
+/// Lives next to the variants it maps over, so a new `ModuleError` variant is a
+/// compile error here — never in a distant caller matching foreign variants.
+pub fn module_error_phase(err: ModuleError) -> String {
+  case err {
+    NotInBundle(..) -> "ResolutionError: "
+    EvaluationError(..) | EvaluationPending(..) -> ""
   }
 }
 

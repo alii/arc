@@ -1,4 +1,4 @@
-//// Tests for the host-class / live-State embedder API: `engine.define_class`,
+//// Tests for the host-class / live-State embedder API: `engine.host_class`,
 //// `engine.host_fn`, and `engine.with_state`. These are the capabilities a host
 //// uses to provide base classes embedder JS can `extends` and to run host-side
 //// work against a live `State` without installing a global shim.
@@ -64,7 +64,7 @@ fn service_named(_args, this, s: state.State(host)) {
 
 fn engine_with_service() {
   let #(eng, service) =
-    engine.define_class(
+    engine.host_class(
       engine.new(),
       "Service",
       0,
@@ -75,7 +75,7 @@ fn engine_with_service() {
   engine.define_global(eng, "Service", service)
 }
 
-// -- define_class ------------------------------------------------------------
+// -- host_class --------------------------------------------------------------
 
 pub fn host_class_extends_instance_method_test() {
   let eng = engine_with_service()
@@ -119,9 +119,9 @@ pub fn host_class_subclass_fields_run_after_super_test() {
 }
 
 pub fn host_class_not_a_global_until_placed_test() {
-  // define_class does NOT install a global by itself.
+  // host_class does NOT install a global by itself.
   let #(eng, _service) =
-    engine.define_class(engine.new(), "Service", 0, service_ctor, [], [])
+    engine.host_class(engine.new(), "Service", 0, service_ctor, [], [])
   let assert Ok(#(Returned(value: JsString(out)), _)) =
     engine.eval(eng, "typeof globalThis.Service")
   assert out == "undefined"
@@ -210,7 +210,7 @@ pub fn host_module_class_extends_test() {
   // The real shape dance needs: a host class exported from the native module,
   // extended by user code imported from "dance".
   let #(eng, service) =
-    engine.define_class(
+    engine.host_class(
       engine.new(),
       "Service",
       0,
