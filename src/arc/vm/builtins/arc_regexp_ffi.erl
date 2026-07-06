@@ -611,7 +611,9 @@ translate_range_hi(L, Mode, CI, MS) ->
     range_hi_verbatim(L, Mode, CI, MS).
 
 %% Any other high endpoint is emitted as the generic translation would emit it;
-%% all this adds is knowing where the item ends.
+%% all this adds is knowing where the item ends. Kept in lockstep with
+%% translate_pat/5's escape clauses — an escape neutralized there (the PCRE
+%% metacharacters routed through js_escape_cp/1) is neutralized here too.
 range_hi_verbatim([$\\, $x, A, B | R] = L, Mode, CI, MS) ->
     case is_hex(A) andalso is_hex(B) of
         true -> [$-, $\\, $x, A, B | translate_pat(R, true, Mode, CI, MS)];
@@ -625,6 +627,12 @@ range_hi_verbatim([$\\, $c, C | R] = L, Mode, CI, MS) ->
 range_hi_verbatim(L, Mode, CI, MS) ->
     range_hi_escape(L, Mode, CI, MS).
 
+range_hi_escape([$\\, C | R], Mode, CI, MS)
+  when C =:= $v; C =:= $a; C =:= $e; C =:= $g;
+       C =:= $h; C =:= $H; C =:= $V; C =:= $R; C =:= $X; C =:= $N;
+       C =:= $z; C =:= $Z; C =:= $A; C =:= $G; C =:= $C; C =:= $K ->
+    [$-, "\\x{", integer_to_list(js_escape_cp(C), 16), "}"
+     | translate_pat(R, true, Mode, CI, MS)];
 range_hi_escape([$\\, C | R], Mode, CI, MS) ->
     [$-, $\\, C | translate_pat(R, true, Mode, CI, MS)];
 range_hi_escape([C | R], Mode, CI, MS) ->
