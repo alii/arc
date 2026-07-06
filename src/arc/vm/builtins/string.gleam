@@ -570,31 +570,23 @@ fn string_slice(
   // Step 3: len = length of S
   let len = js_string.length(s)
   // Steps 4-7: ToIntegerOrInfinity(start), resolve negatives
-  use int_start, state <- coerce.try_to_integer_or_infinity(
+  use start, state <- coerce.try_relative_index(
     state,
     helpers.first_arg_or_undefined(args),
-  )
-  let start = resolve_slice_index(int_start, len)
-  // Steps 8-11: end handling, resolve negatives
-  use end, state <- second_arg_index_or_len(
-    state,
-    args,
     len,
-    resolve_slice_index,
+    0,
+  )
+  // Steps 8-11: end handling, resolve negatives (undefined → len)
+  use end, state <- coerce.try_relative_index(
+    state,
+    helpers.arg_at(args, 1),
+    len,
+    len,
   )
   // Steps 12-13: if from >= to return "", else return substring
   case end > start {
     True -> #(state, Ok(JsString(js_string.slice(s, start, end - start))))
     False -> #(state, Ok(JsString("")))
-  }
-}
-
-/// Resolve a slice index: negative → max(len+n, 0), non-negative → min(n, len).
-/// Used by String.prototype.slice (steps 6-7 and 10-11).
-fn resolve_slice_index(n: Int, len: Int) -> Int {
-  case n < 0 {
-    True -> int.max(len + n, 0)
-    False -> int.min(n, len)
   }
 }
 
@@ -1292,22 +1284,24 @@ fn string_concat(
   // Steps 1-2: RequireObjectCoercible + ToString
   use s, state <- with_this_string(this, state)
   // Steps 3-5: R = S, then concatenate each arg
-  concat_loop(args, s, state)
+  concat_loop(args, [s], state)
 }
 
-/// Step 4 of concat: iterate args, ToString each, append to accumulator.
+/// Step 4 of concat: iterate args, ToString each, prepend to a reversed
+/// accumulator so `concat_within_limit` can enforce `limits.max_string_bytes`
+/// on the final join (same pattern the replace loops use).
 fn concat_loop(
   args: List(JsValue),
-  acc: String,
+  acc_rev: List(String),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
     // Step 5: return R
-    [] -> #(state, Ok(JsString(acc)))
+    [] -> concat_within_limit(state, acc_rev)
     // Step 4a-4b: ToString(next), R = R + nextString
     [arg, ..rest] -> {
       use s, state <- coerce.try_to_string(state, arg)
-      concat_loop(rest, acc <> s, state)
+      concat_loop(rest, [s, ..acc_rev], state)
     }
   }
 }
@@ -1655,20 +1649,12 @@ fn string_raw(
   // Step 3: Get(cooked, "raw")
   use raw_val, state <- try_get_of(state, template, "raw")
   // Step 4: LengthOfArrayLike(literals) — ? ToLength(? Get(raw, "length")).
-  // ToNumber runs ToPrimitive on an object-valued "length" (its valueOf can
-  // run user code and throw), so it threads State.
   use len_val, state <- try_get_of(state, raw_val, "length")
-  use len_num, state <- coerce.try_to_number(state, len_val)
-  let literal_count = case len_num {
-    Finite(f) -> value.float_to_int(f)
-    // NaN / ±Infinity: treated as no literals.
-    _ -> 0
-  }
-  // Step 5: If literalCount <= 0, return ""
-  case literal_count <= 0 {
-    True -> #(state, Ok(JsString("")))
-    False ->
-      string_raw_loop(raw_val, substitutions, literal_count, 0, "", state)
+  use literal_count, state <- coerce.try_to_length(state, len_val)
+  // Step 5: If literalCount ≤ 0, return "".
+  case literal_count {
+    0 -> #(state, Ok(JsString("")))
+    _ -> string_raw_loop(raw_val, substitutions, literal_count, 0, [], state)
   }
 }
 
@@ -1685,23 +1671,25 @@ fn try_get_of(
   }
 }
 
-/// Step 8 of String.raw: iterate through raw strings and substitutions.
+/// Step 8 of String.raw: iterate through raw strings and substitutions,
+/// prepending each piece to a reversed accumulator so `concat_within_limit`
+/// can enforce `limits.max_string_bytes` on the final join.
 fn string_raw_loop(
   raw_val: JsValue,
   substitutions: List(JsValue),
   literal_count: Int,
   index: Int,
-  acc: String,
+  acc_rev: List(String),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   // Step 8a: Get(literals, ToString(nextIndex))
   use lit_val, state <- try_get_of(state, raw_val, int.to_string(index))
   // Step 8b: ToString(nextLiteralVal)
   use lit, state <- coerce.try_to_string(state, lit_val)
-  let acc = acc <> lit
+  let acc_rev = [lit, ..acc_rev]
   // Step 8d: If nextIndex + 1 = literalCount, return R
   case index + 1 == literal_count {
-    True -> #(state, Ok(JsString(acc)))
+    True -> concat_within_limit(state, acc_rev)
     False ->
       // Step 8e: If nextIndex < numberOfSubstitutions, add substitution
       string_raw_add_sub(
@@ -1709,7 +1697,7 @@ fn string_raw_loop(
         substitutions,
         literal_count,
         index,
-        acc,
+        acc_rev,
         state,
       )
   }
@@ -1721,7 +1709,7 @@ fn string_raw_add_sub(
   substitutions: List(JsValue),
   literal_count: Int,
   index: Int,
-  acc: String,
+  acc_rev: List(String),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case substitutions {
@@ -1734,13 +1722,13 @@ fn string_raw_add_sub(
         rest_subs,
         literal_count,
         index + 1,
-        acc <> sub,
+        [sub, ..acc_rev],
         state,
       )
     }
     [] ->
       // No more substitutions, continue with just literals
-      string_raw_loop(raw_val, [], literal_count, index + 1, acc, state)
+      string_raw_loop(raw_val, [], literal_count, index + 1, acc_rev, state)
   }
 }
 
@@ -1897,16 +1885,14 @@ fn string_substr(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use s, state <- with_this_string(this, state)
   let size = js_string.length(s)
-  // B.2.2.1 step 3: intStart = ToIntegerOrInfinity(start)
-  use raw_start, state <- coerce.try_to_integer_or_infinity(
+  // B.2.2.1 steps 3-4: intStart = ToIntegerOrInfinity(start);
+  // -inf => 0; negative => max(size+intStart, 0); else min(_, size)
+  use start, state <- coerce.try_relative_index(
     state,
     helpers.first_arg_or_undefined(args),
+    size,
+    0,
   )
-  // Step 4: -inf => 0; negative => max(size+intStart, 0); else min(_, size)
-  let start = case raw_start < 0 {
-    True -> int.max(size + raw_start, 0)
-    False -> int.min(raw_start, size)
-  }
   // Step 5: length undefined => size, else ToIntegerOrInfinity(length)
   use raw_len, state <- second_arg_index_or_len(state, args, size, fn(n, _) {
     n
