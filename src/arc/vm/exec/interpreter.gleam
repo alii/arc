@@ -1006,8 +1006,8 @@ fn fast_loop(
             opcode.InstanceOfOp | opcode.InOp ->
               dispatch_slow(state, pc, stack, locals, hp, line)
             // Strict equality compares references — never coerces, pure.
-            opcode.PureOp(binop.StrictEq as op)
-            | opcode.PureOp(binop.StrictNotEq as op) ->
+            opcode.PureOp(binop.Equality(binop.StrictEqOp) as op)
+            | opcode.PureOp(binop.Equality(binop.StrictNotEqOp) as op) ->
               case operators.exec_binop(op, left, right) {
                 Ok(result) ->
                   fast_loop(
@@ -1103,7 +1103,7 @@ fn fast_loop(
     DecLocal(index) ->
       case tuple_array.get_unchecked(index, locals) {
         value.JsNumber(_) as v ->
-          case operators.exec_binop(binop.Sub, v, number_one) {
+          case operators.exec_binop(binop.Arith(binop.ArithSub), v, number_one) {
             Ok(result) ->
               fast_loop(
                 state,
@@ -2926,15 +2926,16 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
                 _, _ -> add_primitives(state, left, right, rest)
               }
             // Strict equality compares object references — never coerce.
-            opcode.PureOp(binop.StrictEq as op)
-            | opcode.PureOp(binop.StrictNotEq as op) ->
+            opcode.PureOp(binop.Equality(binop.StrictEqOp) as op)
+            | opcode.PureOp(binop.Equality(binop.StrictNotEqOp) as op) ->
               binop_direct(state, op, left, right, rest)
             // Loose equality: §7.2.14 step 12 only ToPrimitives the object
             // side when the other is Number/String/BigInt/Symbol. Bool is
             // first ToNumber'd (step 10) so it ends up here too. For
             // object×object (reference equality) and object×nullish (always
             // false) we stay on the direct path.
-            opcode.PureOp(binop.Eq as op) | opcode.PureOp(binop.NotEq as op) ->
+            opcode.PureOp(binop.Equality(binop.EqOp) as op)
+            | opcode.PureOp(binop.Equality(binop.NotEqOp) as op) ->
               case is_eq_coercible(left, right) {
                 True -> binop_with_to_primitive(state, op, left, right, rest)
                 False -> binop_direct(state, op, left, right, rest)
@@ -5890,7 +5891,13 @@ fn fused_update_local(
           pop_top(add_primitives(state, n, number_one, state.stack), "IncLocal")
         FusedDec ->
           pop_top(
-            binop_direct(state, binop.Sub, n, number_one, state.stack),
+            binop_direct(
+              state,
+              binop.Arith(binop.ArithSub),
+              n,
+              number_one,
+              state.stack,
+            ),
             "DecLocal",
           )
       })
@@ -5968,7 +5975,8 @@ fn binop_with_to_primitive(
   rest: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
   let hint = case kind {
-    binop.Eq | binop.NotEq -> coerce.DefaultHint
+    binop.Equality(binop.EqOp) | binop.Equality(binop.NotEqOp) ->
+      coerce.DefaultHint
     _ -> coerce.NumberHint
   }
   use #(lprim, s1) <- result.try(

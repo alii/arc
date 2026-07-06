@@ -1,9 +1,8 @@
 import arc/vm/binop.{
   type ArithOp, type BitwiseOp, type CompareOp, type EqualityOp, type PureBinOp,
-  AndOp, ArithDiv, ArithExp, ArithMod, ArithMul, ArithSub, BitAnd, BitOr, BitXor,
-  Div, Eq, EqOp, Exp, Gt, GtCmp, GtEq, GtEqCmp, Lt, LtCmp, LtEq, LtEqCmp, Mod,
-  Mul, NotEq, NotEqOp, OrOp, Shl, ShlOp, Shr, ShrOp, StrictEq, StrictEqOp,
-  StrictNotEq, StrictNotEqOp, Sub, UShr, UShrOp, XorOp,
+  AndOp, Arith, ArithDiv, ArithExp, ArithMod, ArithMul, ArithSub, Bitwise,
+  Compare, EqOp, Equality, GtCmp, GtEqCmp, LtCmp, LtEqCmp, NotEqOp, OrOp, ShlOp,
+  ShrOp, StrictEqOp, StrictNotEqOp, UShrOp, XorOp,
 }
 import arc/vm/heap.{type Heap}
 import arc/vm/opcode.{type UnaryOpKind, BitNot, LogicalNot, Neg, Pos, Void}
@@ -44,34 +43,19 @@ pub type OpError {
 /// what makes this total: `Add`, `In` and `InstanceOf` are handled by the
 /// interpreter and are simply not spellable here.
 ///
-/// This single exhaustive `case` is also where a `PureBinOp` narrows to the
-/// family that evaluates it, so `exec_arith` and friends can only ever be
-/// handed an operator they actually implement.
+/// The `PureBinOp` constructor IS the family that evaluates it — this
+/// dispatch just unwraps and forwards, so `exec_arith` and friends can only
+/// ever be handed an operator they actually implement.
 pub fn exec_binop(
   kind: PureBinOp,
   left: JsValue,
   right: JsValue,
 ) -> Result(JsValue, OpError) {
   case kind {
-    Sub -> exec_arith(ArithSub, left, right)
-    Mul -> exec_arith(ArithMul, left, right)
-    Div -> exec_arith(ArithDiv, left, right)
-    Mod -> exec_arith(ArithMod, left, right)
-    Exp -> exec_arith(ArithExp, left, right)
-    BitAnd -> exec_bitwise(AndOp, left, right)
-    BitOr -> exec_bitwise(OrOp, left, right)
-    BitXor -> exec_bitwise(XorOp, left, right)
-    Shl -> exec_bitwise(ShlOp, left, right)
-    Shr -> exec_bitwise(ShrOp, left, right)
-    UShr -> exec_bitwise(UShrOp, left, right)
-    Eq -> Ok(JsBool(exec_equality(EqOp, left, right)))
-    NotEq -> Ok(JsBool(exec_equality(NotEqOp, left, right)))
-    StrictEq -> Ok(JsBool(exec_equality(StrictEqOp, left, right)))
-    StrictNotEq -> Ok(JsBool(exec_equality(StrictNotEqOp, left, right)))
-    Lt -> exec_compare(LtCmp, left, right)
-    LtEq -> exec_compare(LtEqCmp, left, right)
-    Gt -> exec_compare(GtCmp, left, right)
-    GtEq -> exec_compare(GtEqCmp, left, right)
+    Arith(op) -> exec_arith(op, left, right)
+    Bitwise(op) -> exec_bitwise(op, left, right)
+    Compare(op) -> exec_compare(op, left, right)
+    Equality(op) -> Ok(JsBool(exec_equality(op, left, right)))
   }
 }
 

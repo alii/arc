@@ -16,37 +16,21 @@
 /// only ever carry a pure operator, which is what the resolver's peephole
 /// already guarantees.
 ///
+/// The four constructors are the four evaluation FAMILIES: `exec_binop`
+/// dispatches on the constructor and hands the payload straight to the family
+/// evaluator, so "which family runs this op" is answered by the type — there
+/// is no second enum to keep in sync, and no re-derivation to get wrong.
+///
 /// Lives in its own module purely because Gleam requires constructor names to
 /// be unique per module and `opcode.BinOpKind` already owns most of these.
 pub type PureBinOp {
-  // Arithmetic (Add is NOT here — see the module doc)
-  Sub
-  Mul
-  Div
-  Mod
-  Exp
-  // Bitwise
-  BitAnd
-  BitOr
-  BitXor
-  Shl
-  Shr
-  UShr
-  // Comparison (== with coercion)
-  Eq
-  NotEq
-  // Comparison (=== strict)
-  StrictEq
-  StrictNotEq
-  // Relational (In / InstanceOf are NOT here — see the module doc)
-  Lt
-  LtEq
-  Gt
-  GtEq
+  Arith(ArithOp)
+  Bitwise(BitwiseOp)
+  Compare(CompareOp)
+  Equality(EqualityOp)
 }
 
-/// The five arithmetic operators, as a type of their own so `bigint_arith`
-/// (which handles exactly these) cannot be handed a `Shl`.
+/// The five arithmetic operators (Add is NOT here — see the module doc).
 pub type ArithOp {
   ArithSub
   ArithMul
@@ -55,7 +39,7 @@ pub type ArithOp {
   ArithExp
 }
 
-/// The six bitwise/shift operators — see `ArithOp`.
+/// The six bitwise/shift operators.
 pub type BitwiseOp {
   AndOp
   OrOp
@@ -81,8 +65,3 @@ pub type EqualityOp {
   StrictEqOp
   StrictNotEqOp
 }
-
-// `ops/operators.exec_binop` narrows a `PureBinOp` straight into one of the
-// four families above with a single exhaustive `case` — adding a variant here
-// is a compile error there, and the per-family helpers cannot be handed an
-// operator they don't evaluate (`bigint_arith` cannot see a `Shl`).

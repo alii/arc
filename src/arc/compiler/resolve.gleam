@@ -199,10 +199,10 @@ fn peephole(
 /// smuggle an operator the fused step handler can't run.
 fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
   case kind {
-    opcode.Lt -> Some(binop.Lt)
-    opcode.LtEq -> Some(binop.LtEq)
-    opcode.Gt -> Some(binop.Gt)
-    opcode.GtEq -> Some(binop.GtEq)
+    opcode.Lt -> Some(binop.Compare(binop.LtCmp))
+    opcode.LtEq -> Some(binop.Compare(binop.LtEqCmp))
+    opcode.Gt -> Some(binop.Compare(binop.GtCmp))
+    opcode.GtEq -> Some(binop.Compare(binop.GtEqCmp))
     _ -> None
   }
 }
