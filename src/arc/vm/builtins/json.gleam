@@ -978,9 +978,9 @@ fn decode_unicode_escape(
   bytes: BitArray,
 ) -> Result(#(String, BitArray), JsonParseError) {
   use #(cp, rest) <- result.try(parse_unicode_escape(bytes))
-  case utf16.is_high(cp), utf16.is_low(cp) {
+  case utf16.classify(cp) {
     // High surrogate — look for a trailing \uXXXX low surrogate
-    True, _ ->
+    utf16.High ->
       case parse_low_surrogate(rest) {
         Some(#(low, rest)) ->
           codepoint_to_string(utf16.combine(cp, low))
@@ -990,8 +990,8 @@ fn decode_unicode_escape(
       }
     // Lone LOW surrogate (never valid on its own) → U+FFFD as well, rather
     // than a parse error: JSON.parse('"\\udc62"') must succeed.
-    _, True -> Ok(#("\u{FFFD}", rest))
-    False, False -> codepoint_to_string(cp) |> result.map(fn(s) { #(s, rest) })
+    utf16.Low -> Ok(#("\u{FFFD}", rest))
+    utf16.Scalar -> codepoint_to_string(cp) |> result.map(fn(s) { #(s, rest) })
   }
 }
 

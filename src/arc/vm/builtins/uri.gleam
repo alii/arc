@@ -148,17 +148,14 @@ fn take_unicode_escape(after_percent: List(Int)) -> Option(#(Int, List(Int))) {
     // 'u'
     [0x75, a, b, c, d, ..rest] -> {
       use unit <- option.map(hex4(a, b, c, d))
-      case utf16.is_high(unit) {
-        True ->
+      case utf16.classify(unit) {
+        utf16.High ->
           case take_low_surrogate_escape(rest) {
             Some(#(low, after_pair)) -> #(utf16.combine(unit, low), after_pair)
             None -> #(replacement_character, rest)
           }
-        False ->
-          case utf16.is_low(unit) {
-            True -> #(replacement_character, rest)
-            False -> #(unit, rest)
-          }
+        utf16.Low -> #(replacement_character, rest)
+        utf16.Scalar -> #(unit, rest)
       }
     }
     _ -> None
