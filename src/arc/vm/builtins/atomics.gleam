@@ -663,11 +663,7 @@ fn rmw(
   state: State(host),
   op: fn(Int, Int) -> Int,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use info, idx, state <- with_ta_and_index(
-    state,
-    args,
-    mode: RmwAccess,
-  )
+  use info, idx, state <- with_ta_and_index(state, args, mode: RmwAccess)
   use operand, state <- to_operand(state, info, helpers.arg_at(args, 2))
   use buf, state <- revalidate(state, info, idx)
   case info.storage {
@@ -695,11 +691,7 @@ fn compare_exchange(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use info, idx, state <- with_ta_and_index(
-    state,
-    args,
-    mode: RmwAccess,
-  )
+  use info, idx, state <- with_ta_and_index(state, args, mode: RmwAccess)
   use expected, state <- to_operand(state, info, helpers.arg_at(args, 2))
   use replacement, state <- to_operand(state, info, helpers.arg_at(args, 3))
   use buf, state <- revalidate(state, info, idx)
@@ -731,11 +723,7 @@ fn atomic_load(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use info, idx, state <- with_ta_and_index(
-    state,
-    args,
-    mode: LoadAccess,
-  )
+  use info, idx, state <- with_ta_and_index(state, args, mode: LoadAccess)
   // The index coercion may have run user code — revalidate (§25.4.10 step 2).
   use buf, state <- revalidate(state, info, idx)
   #(state, Ok(element_to_js(info, read_element(buf.bits, info, idx))))
@@ -747,11 +735,7 @@ fn atomic_store(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use info, idx, state <- with_ta_and_index(
-    state,
-    args,
-    mode: RmwAccess,
-  )
+  use info, idx, state <- with_ta_and_index(state, args, mode: RmwAccess)
   case info.elem_kind {
     value.BigKind(_) -> {
       use v, state <- coerce.try_to_bigint(state, helpers.arg_at(args, 2))
@@ -859,11 +843,7 @@ fn do_wait(
   state: State(host),
   sync sync: Bool,
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use info, idx, state <- with_ta_and_index(
-    state,
-    args,
-    mode: WaitAccess,
-  )
+  use info, idx, state <- with_ta_and_index(state, args, mode: WaitAccess)
   // Step 6/7: v = ToBigInt64(value) | ToInt32(value).
   use v, state <- wait_value(state, info, helpers.arg_at(args, 2))
   // Step 8/9: t = ToNumber(timeout); NaN/undefined → +∞; clamp ≥ 0.
@@ -898,7 +878,7 @@ fn do_wait(
     // wake it). Un-notified infinite waiters stay pending, like a pending
     // host task.
     False, _, AsyncWait -> {
-      let #(h, promise_ref, data_ref) =
+      let #(h, builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref)) =
         builtins_promise.create_promise(
           state.heap,
           state.builtins.promise.prototype,
@@ -1086,17 +1066,14 @@ fn wait_timeout(
   cont: fn(option.Option(Int), State(host)) ->
     #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case coerce.js_to_number(state, val) {
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-    Ok(#(num, state)) ->
-      case num {
-        NaN | Infinity -> cont(None, state)
-        NegInfinity -> cont(Some(0), state)
-        Finite(f) ->
-          case f <=. 0.0 {
-            True -> cont(Some(0), state)
-            False -> cont(Some(float.round(float.ceiling(f))), state)
-          }
+  use num, state <- coerce.try_to_number(state, val)
+  case num {
+    NaN | Infinity -> cont(None, state)
+    NegInfinity -> cont(Some(0), state)
+    Finite(f) ->
+      case f <=. 0.0 {
+        True -> cont(Some(0), state)
+        False -> cont(Some(float.round(float.ceiling(f))), state)
       }
   }
 }
@@ -1124,11 +1101,7 @@ fn notify(
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use info, idx, state <- with_ta_and_index(
-    state,
-    args,
-    mode: NotifyAccess,
-  )
+  use info, idx, state <- with_ta_and_index(state, args, mode: NotifyAccess)
   // Step 3: count — undefined → +∞, else ToIntegerOrInfinity clamped ≥ 0.
   // Coerced BEFORE the non-shared early return (observable, test262 checks).
   use count, state <- notify_count(state, helpers.arg_at(args, 2))

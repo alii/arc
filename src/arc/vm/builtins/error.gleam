@@ -274,41 +274,29 @@ fn aggregate_error_native(
     proto,
   )
   // Steps 3-4: message + cause, exactly as for a plain Error.
-  let #(state, created) = case message {
+  use ref, state <- state.try_then(case message {
     JsUndefined -> alloc_error(state, proto, None, options)
     _ -> {
       use msg, state <- coerce.try_to_string(state, message)
       alloc_error(state, proto, Some(msg), options)
     }
-  }
-  case created {
-    Error(thrown) -> #(state, Error(thrown))
-    // Steps 5-6: drain the iterable, install the "errors" array.
-    Ok(ref) -> {
-      use rec, state <- state.try_op(iter_protocol.get_iterator_sync(
-        state,
-        errors,
-      ))
-      use collected, state <- state.try_op(iter_protocol.iterator_to_list(
-        state,
-        rec,
-      ))
-      let #(heap, arr) =
-        common.alloc_array(
-          state.heap,
-          collected,
-          state.builtins.array.prototype,
-        )
-      let heap =
-        common.add_named_property(
-          heap,
-          ref,
-          "errors",
-          value.builtin_property(JsObject(arr)),
-        )
-      #(State(..state, heap:), Ok(JsObject(ref)))
-    }
-  }
+  })
+  // Steps 5-6: drain the iterable, install the "errors" array.
+  use rec, state <- state.try_op(iter_protocol.get_iterator_sync(state, errors))
+  use collected, state <- state.try_op(iter_protocol.iterator_to_list(
+    state,
+    rec,
+  ))
+  let #(heap, arr) =
+    common.alloc_array(state.heap, collected, state.builtins.array.prototype)
+  let heap =
+    common.add_named_property(
+      heap,
+      ref,
+      "errors",
+      value.builtin_property(JsObject(arr)),
+    )
+  #(State(..state, heap:), Ok(JsObject(ref)))
 }
 
 /// The error constructors all build a `Ref` internally; the dispatch surface

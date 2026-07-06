@@ -202,7 +202,7 @@ pub fn evaluate_import_call(
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
   // Step 4: NewPromiseCapability(%Promise%).
-  let #(heap, promise_ref, data_ref) =
+  let #(heap, builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref)) =
     builtins_promise.create_promise(
       state.heap,
       state.builtins.promise.prototype,
@@ -242,7 +242,7 @@ pub fn evaluate_defer_import_call(
   specifier: JsValue,
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  let #(heap, promise_ref, data_ref) =
+  let #(heap, builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref)) =
     builtins_promise.create_promise(
       state.heap,
       state.builtins.promise.prototype,
@@ -258,7 +258,7 @@ pub fn evaluate_defer_import_call(
       // up `then`) — hand the hook the resolving functions (4th/5th
       // arguments) so it can settle later without routing an intermediate
       // promise through an observable thenable adoption.
-      let #(heap, resolve_fn, reject_fn) =
+      let #(heap, builtins_promise.ResolvingFns(resolve: resolve_fn, reject: reject_fn)) =
         builtins_promise.create_resolving_functions(
           state.heap,
           state.builtins.function.prototype,
@@ -429,13 +429,16 @@ fn validate_options(
     JsUndefined -> Ok(state)
     JsObject(options_ref) -> {
       // Step 8.b-c: Get(options, "with"), abrupt → reject.
-      case object.get_value(state, options_ref, Named("with"), options) {
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-        Ok(#(JsUndefined, state)) -> Ok(state)
-        Ok(#(JsObject(attributes_ref), state)) ->
-          validate_attributes(state, attributes_ref)
-        Ok(#(_, state)) ->
-          state.type_error_op(state, "The 'with' option must be an object")
+      use #(val, state) <- result.try(object.get_value(
+        state,
+        options_ref,
+        Named("with"),
+        options,
+      ))
+      case val {
+        JsUndefined -> Ok(state)
+        JsObject(attributes_ref) -> validate_attributes(state, attributes_ref)
+        _ -> state.type_error_op(state, "The 'with' option must be an object")
       }
     }
     _ ->
@@ -465,17 +468,15 @@ fn validate_attributes(
   // must be a String.
   use state <- result.try(
     list.try_fold(keys, state, fn(state, key) {
-      case
-        object.get_value(
-          state,
-          attributes_ref,
-          key.canonical_key(key),
-          JsObject(attributes_ref),
-        )
-      {
-        Error(#(thrown, state)) -> Error(#(thrown, state))
-        Ok(#(JsString(_), state)) -> Ok(state)
-        Ok(#(_, state)) ->
+      use #(val, state) <- result.try(object.get_value(
+        state,
+        attributes_ref,
+        key.canonical_key(key),
+        JsObject(attributes_ref),
+      ))
+      case val {
+        JsString(_) -> Ok(state)
+        _ ->
           state.type_error_op(state, "Import attribute values must be strings")
       }
     }),

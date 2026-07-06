@@ -659,19 +659,14 @@ fn date_constructor(
       #(state, Ok(JsString(format_date(FmtLocal(DateAndTime), fields))))
     }
     _ -> {
-      let #(state, tv_result) = case args {
+      use tv, state <- state.try_then(case args {
         [] -> #(state, Ok(Finite(int.to_float(now_ms()))))
         [single] -> single_arg_time_value(state, single)
         many -> args_to_time_value(state, many, LocalTime)
-      }
-      case tv_result {
-        Error(e) -> #(state, Error(e))
-        Ok(tv) -> {
-          let #(heap, ref) =
-            common.alloc_wrapper(state.heap, DateObject(time_value: tv), proto)
-          #(State(..state, heap:), Ok(JsObject(ref)))
-        }
-      }
+      })
+      let #(heap, ref) =
+        common.alloc_wrapper(state.heap, DateObject(time_value: tv), proto)
+      #(State(..state, heap:), Ok(JsObject(ref)))
     }
   }
 }
@@ -685,17 +680,21 @@ fn single_arg_time_value(
   // §21.4.2.1 step 4.b: if value is a Date object, copy its [[DateValue]].
   case this_time_value(state, arg) {
     Some(#(_, tv)) -> #(state, Ok(time_clip(tv)))
-    None ->
+    None -> {
       // ToPrimitive(value) → string? parse : ToNumber+TimeClip
-      case coerce.to_primitive(state, arg, coerce.DefaultHint) {
-        Error(#(e, st)) -> #(st, Error(e))
-        Ok(#(JsString(s), st)) -> #(st, Ok(parse_date_string(s)))
-        Ok(#(prim, st)) ->
-          case coerce.js_to_number(st, prim) {
-            Error(#(e, st)) -> #(st, Error(e))
-            Ok(#(n, st)) -> #(st, Ok(time_clip(n)))
-          }
+      use prim, st <- state.try_op(coerce.to_primitive(
+        state,
+        arg,
+        coerce.DefaultHint,
+      ))
+      case prim {
+        JsString(s) -> #(st, Ok(parse_date_string(s)))
+        _ -> {
+          use n, st <- state.try_op(coerce.js_to_number(st, prim))
+          #(st, Ok(time_clip(n)))
+        }
       }
+    }
   }
 }
 

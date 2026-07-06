@@ -559,35 +559,32 @@ fn handle_exec_result(
   result: Result(#(Outcome, State(host)), state.VmError),
 ) -> Result(State(host), state.VmError) {
   let Run(data_ref:, req:, drive:, ..) = run
-  case result {
-    Ok(#(Suspended(completion.Yield, value), suspended)) -> {
+  use #(outcome, child) <- result.try(result)
+  let state = state.adopt_child(outer, child)
+  case outcome {
+    Suspended(completion.Yield, value) -> {
       // Body yielded — save suspended state, dequeue + resolve request, loop.
-      let state = state.adopt_child(outer, suspended)
-      let state = save_suspended(state, data_ref, suspended, AGSuspendedYield)
+      let state = save_suspended(state, data_ref, child, AGSuspendedYield)
       let state = settle_head(state, data_ref)
       let state = fulfill_iter(state, req.resolve, value, False)
       resume_next(state, data_ref, drive)
     }
-    Ok(#(Suspended(completion.Await, value), suspended)) -> {
+    Suspended(completion.Await, value) -> {
       // Body hit await — save state (still Executing), set up promise callback.
       // Do NOT dequeue — the same request stays at head until a yield/return/throw.
-      let state = state.adopt_child(outer, suspended)
-      let state = save_suspended(state, data_ref, suspended, AGExecuting)
+      let state = save_suspended(state, data_ref, child, AGExecuting)
       Ok(setup_await(state, data_ref, value, AGResumeBody))
     }
-    Ok(#(Completed(NormalCompletion(value)), final_state)) -> {
-      let state = state.adopt_child(outer, final_state)
+    Completed(NormalCompletion(value)) -> {
       let state = complete(state, data_ref)
       let state = fulfill_iter(state, req.resolve, value, True)
       resume_next(state, data_ref, drive)
     }
-    Ok(#(Completed(ThrowCompletion(thrown)), final_state)) -> {
-      let state = state.adopt_child(outer, final_state)
+    Completed(ThrowCompletion(thrown)) -> {
       let state = complete(state, data_ref)
       let state = reject_with(state, req.reject, thrown)
       resume_next(state, data_ref, drive)
     }
-    Error(vm_err) -> Error(vm_err)
   }
 }
 

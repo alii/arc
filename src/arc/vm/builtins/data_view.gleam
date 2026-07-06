@@ -603,11 +603,10 @@ fn encode_value(
       use n, state <- coerce.try_to_bigint(state, val)
       cont(encode_bigint(e, n), state)
     }
-    VNum(e) ->
-      case coerce.js_to_number(state, val) {
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-        Ok(#(num, state)) -> cont(encode_number(e, num), state)
-      }
+    VNum(e) -> {
+      use num, state <- coerce.try_to_number(state, val)
+      cont(encode_number(e, num), state)
+    }
   }
 }
 
