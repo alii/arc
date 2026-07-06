@@ -24,6 +24,11 @@ import gleam/option.{type Option, None, Some}
 import gleam/set
 import gleam/string
 
+/// Cap on rendered array elements / object properties before we elide with
+/// "… N more". Keeps `console.log(new Array(1e6))` from building a million-
+/// item string.
+const max_items = 100
+
 /// Produce a human-readable representation of a JS value (for REPL / console.log).
 /// Read-only — does NOT call toString/valueOf or any JS code.
 pub fn inspect(val: value.JsValue, heap: Heap(host)) -> String {
@@ -194,25 +199,20 @@ fn inspect_object(
         // The rawJSON box's only own property is "rawJSON", so render it as
         // the source text it stands for.
         value.RawJsonObject(raw:) -> "[RawJSON " <> raw <> "]"
+        // Error instances (the [[ErrorData]] slot) render as "Name: message"
+        // (or the captured stack). error_display can only return Some for
+        // ErrorObject, so unwrap is safe here.
+        value.ErrorObject(_) ->
+          error_display(heap, ref) |> option.unwrap("[Error]")
         // Host objects have no own properties; they render via their
         // prototype's Symbol.toStringTag (e.g. `Pid {}`), exactly like a
         // tagged ordinary object.
-        OrdinaryObject | value.ErrorObject(_) | value.HostObject(_) -> {
-          // Error instances render as "Name: message" (or the full stack, once
-          // we capture one); everything else as a plain object, prefixed with
-          // its Symbol.toStringTag when one is set.
-          case error_display(heap, ref) {
-            Some(s) -> s
-            None -> {
-              let body = inspect_plain_object(heap, properties, depth, visited)
-              case
-                list.key_find(symbol_properties, value.symbol_to_string_tag)
-              {
-                Ok(DataProperty(value: JsString(t), ..)) ->
-                  "Object [" <> t <> "] " <> body
-                _ -> body
-              }
-            }
+        OrdinaryObject | value.HostObject(_) -> {
+          let body = inspect_plain_object(heap, properties, depth, visited)
+          case list.key_find(symbol_properties, value.symbol_to_string_tag) {
+            Ok(DataProperty(value: JsString(t), ..)) ->
+              "Object [" <> t <> "] " <> body
+            _ -> body
           }
         }
       }
@@ -246,9 +246,14 @@ fn inspect_array_loop(
   visited: set.Set(Int),
   acc: List(String),
 ) -> List(String) {
-  case idx >= length {
-    True -> list.reverse(acc)
-    False -> {
+  case idx >= length, idx >= max_items {
+    True, _ -> list.reverse(acc)
+    False, True ->
+      list.reverse([
+        "… " <> int.to_string(length - max_items) <> " more items",
+        ..acc
+      ])
+    False, False -> {
       let item =
         elements.get_option(elements, idx)
         |> option.map(inspect_inner(_, heap, depth + 1, visited))
@@ -270,20 +275,33 @@ fn inspect_plain_object(
   case depth > 2 {
     True -> "[Object]"
     False -> {
-      let entries =
+      // Collect enumerable data properties without rendering yet, so we can
+      // cap the recursion at max_items.
+      let visible =
         value.ordered_property_pairs(properties)
         |> list.filter_map(fn(pair) {
-          let #(key, prop) = pair
-          case prop {
-            DataProperty(enumerable: True, value: val, ..) ->
-              Ok(
-                key.key_display_string(key)
-                <> ": "
-                <> inspect_inner(val, heap, depth + 1, visited),
-              )
+          case pair {
+            #(key, DataProperty(enumerable: True, value: val, ..)) ->
+              Ok(#(key, val))
             _ -> Error(Nil)
           }
         })
+      let total = list.length(visible)
+      let entries =
+        list.take(visible, max_items)
+        |> list.map(fn(pair) {
+          let #(key, val) = pair
+          key.key_display_string(key)
+          <> ": "
+          <> inspect_inner(val, heap, depth + 1, visited)
+        })
+      let entries = case total > max_items {
+        True ->
+          list.append(entries, [
+            "… " <> int.to_string(total - max_items) <> " more",
+          ])
+        False -> entries
+      }
       case entries {
         [] -> "{}"
         _ -> "{ " <> string.join(entries, ", ") <> " }"
@@ -305,64 +323,37 @@ pub fn format_error(val: value.JsValue, heap: Heap(host)) -> String {
   }
 }
 
-/// If `ref` is an Error instance, render it for display, else None.
+/// If `ref` is an Error instance (has the [[ErrorData]] internal slot), render
+/// it for display; else None.
 ///
 /// Errors with a captured trace render as that trace (it already embeds the
 /// "Name: message" header, V8-style); otherwise we synthesize the header from
-/// `name` and `message` per `Error.prototype.toString` (§20.5.3.4). The trace
-/// lives in the [[ErrorData]] slot (ErrorObject kind); an own `stack` data
-/// property (Error.captureStackTrace targets) is honored as a fallback.
+/// `name` and `message` per `Error.prototype.toString` (§20.5.3.4). An own
+/// `stack` data property (Error.captureStackTrace targets) is honored when the
+/// slot's trace is empty.
 fn error_display(heap: Heap(host), ref: value.Ref) -> Option(String) {
-  use <- bool.guard(!is_error(heap, ref), None)
-  let slot_stack = case heap.read(heap, ref) {
-    Some(ObjectSlot(kind: value.ErrorObject(stack:), ..)) if stack != "" ->
-      Some(stack)
-    _ -> None
-  }
-  case option.or(slot_stack, error_property(heap, ref, "stack", 100)) {
-    Some(stack) -> Some(stack)
-    None -> {
-      let name =
-        error_property(heap, ref, "name", 100) |> option.unwrap("Error")
-      let message =
-        error_property(heap, ref, "message", 100) |> option.unwrap("")
-      Some(case name, message {
-        "", _ -> message
-        _, "" -> name
-        _, _ -> name <> ": " <> message
+  case heap.read(heap, ref) {
+    Some(ObjectSlot(kind: value.ErrorObject(stack:), ..)) -> {
+      let slot_stack = case stack {
+        "" -> None
+        s -> Some(s)
+      }
+      Some(case option.or(slot_stack, error_property(heap, ref, "stack", 100)) {
+        Some(s) -> s
+        None -> {
+          let name =
+            error_property(heap, ref, "name", 100) |> option.unwrap("Error")
+          let message =
+            error_property(heap, ref, "message", 100) |> option.unwrap("")
+          case name, message {
+            "", _ -> message
+            _, "" -> name
+            _, _ -> name <> ": " <> message
+          }
+        }
       })
     }
-  }
-}
-
-/// Read-only test for whether `ref` is an Error instance: the [[ErrorData]]
-/// internal slot (ErrorObject kind), or — for error-shaped objects built
-/// without the slot — some object in its *prototype* chain owning a `message`
-/// property (the marker carried by `Error.prototype`). Checking the prototype
-/// chain (not the instance's own properties) correctly excludes plain objects
-/// like `{ message: "x" }`.
-fn is_error(heap: Heap(host), ref: value.Ref) -> Bool {
-  case heap.read(heap, ref) {
-    Some(ObjectSlot(kind: value.ErrorObject(_), ..)) -> True
-    Some(ObjectSlot(prototype: Some(proto_ref), ..)) ->
-      prototype_owns_message(heap, proto_ref, 100)
-    _ -> False
-  }
-}
-
-fn prototype_owns_message(heap: Heap(host), ref: value.Ref, fuel: Int) -> Bool {
-  use <- bool.guard(fuel <= 0, False)
-  case heap.read(heap, ref) {
-    Some(ObjectSlot(properties:, prototype:, ..)) ->
-      case dict.has_key(properties, Named("message")) {
-        True -> True
-        False ->
-          case prototype {
-            Some(parent) -> prototype_owns_message(heap, parent, fuel - 1)
-            None -> False
-          }
-      }
-    _ -> False
+    _ -> None
   }
 }
 
