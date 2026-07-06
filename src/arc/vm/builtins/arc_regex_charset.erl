@@ -25,7 +25,7 @@
 -module(arc_regex_charset).
 
 -export([vdigit/0, vword/0, vspace/0]).
--export([vnorm/1, vinter/2, vsubtract/2, vmember/2]).
+-export([vinter/2, vsubtract/2]).
 -export([vfold/2, vfold_str/2, vclose/1, character_complement/2, vsplit_singles/2]).
 -export([emit_complement/2, emit_vclass/2]).
 
@@ -59,10 +59,12 @@ vcomplement([{Lo, Hi} | Rest], Next) when Lo > Next ->
 vcomplement([{_Lo, Hi} | Rest], Next) ->
     vcomplement(Rest, max(Next, Hi + 1)).
 
-%% Intersection of two normalized range lists.
-vinter([], _B) -> [];
-vinter(_A, []) -> [];
-vinter([{ALo, AHi} | AR] = A, [{BLo, BHi} | BR] = B) ->
+%% Intersection (normalizes both sides).
+vinter(A, B) -> vinter_sorted(vnorm(A), vnorm(B)).
+
+vinter_sorted([], _B) -> [];
+vinter_sorted(_A, []) -> [];
+vinter_sorted([{ALo, AHi} | AR] = A, [{BLo, BHi} | BR] = B) ->
     Lo = max(ALo, BLo),
     Hi = min(AHi, BHi),
     Head = case Lo =< Hi of
@@ -70,12 +72,12 @@ vinter([{ALo, AHi} | AR] = A, [{BLo, BHi} | BR] = B) ->
                false -> []
            end,
     Head ++ case AHi =< BHi of
-                true -> vinter(AR, B);
-                false -> vinter(A, BR)
+                true -> vinter_sorted(AR, B);
+                false -> vinter_sorted(A, BR)
             end.
 
 %% Subtraction A -- B (normalizes both sides).
-vsubtract(A, B) -> vinter(vnorm(A), vcomplement(vnorm(B))).
+vsubtract(A, B) -> vinter_sorted(vnorm(A), vcomplement(vnorm(B))).
 
 %% Membership test on normalized (sorted, disjoint) ranges.
 vmember(_CP, []) -> false;
@@ -103,8 +105,8 @@ vfold(Ranges, false) -> Ranges;
 vfold(Ranges, true) ->
     N = vnorm(Ranges),
     Dom = scf_domain(),
-    Fixed = vinter(N, vcomplement(Dom)),
-    Folded = [{F, F} || {Lo, Hi} <- vinter(N, Dom),
+    Fixed = vinter_sorted(N, vcomplement(Dom)),
+    Folded = [{F, F} || {Lo, Hi} <- vinter_sorted(N, Dom),
                         C <- lists:seq(Lo, Hi),
                         F <- [scf(C)]],
     vnorm(Fixed ++ Folded).

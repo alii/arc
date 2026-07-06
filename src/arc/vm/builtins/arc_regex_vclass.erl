@@ -79,7 +79,7 @@ vchain(L, Op, R, S, CI) ->
     end.
 
 vapply(inter, R, S, R2, S2) ->
-    {?CS:vinter(?CS:vnorm(R), ?CS:vnorm(R2)),
+    {?CS:vinter(R, R2),
      ordsets:intersection(ordsets:from_list(S), ordsets:from_list(S2))};
 vapply(subtract, R, S, R2, S2) ->
     {?CS:vsubtract(R, R2),
