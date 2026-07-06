@@ -177,7 +177,7 @@ lone_char_set(Name) ->
             %% surrogates in a UTF pattern" constraint is applied once, at emit
             %% time, by arc_regex_charset:emit_vclass/2.
             case ranges_for(Key) of
-                {ok, Ranges} -> {ok, complement(Ranges)};
+                {ok, Ranges} -> {ok, arc_regex_charset:vcomplement(Ranges)};
                 {error, no_exact_data} -> {error, no_exact_data}
             end;
         {binary, Key, Pcre, false, _Supported} ->
@@ -248,45 +248,16 @@ expand(Key, Negated, InClass, PcreSupported, Fallback) ->
         none when PcreSupported -> {ok, Fallback};
         none -> error;
         Ranges ->
+            Body = fun arc_regex_charset:vrender_ranges/1,
             case {Negated, InClass} of
-                {false, false} -> {ok, [$[, render_ranges(Ranges), $]]};
-                {true, false} -> {ok, ["[^", render_ranges(Ranges), $]]};
-                {false, true} -> {ok, render_ranges(Ranges)};
+                {false, false} -> {ok, [$[, Body(Ranges), $]]};
+                {true, false} -> {ok, ["[^", Body(Ranges), $]]};
+                {false, true} -> {ok, Body(Ranges)};
                 {true, true} ->
-                    {ok, render_ranges(strip_surrogates(complement(Ranges)))}
+                    {ok, Body(arc_regex_charset:vstrip_surrogates(
+                                arc_regex_charset:vcomplement(Ranges)))}
             end
     end.
-
-render_ranges([]) -> [];
-render_ranges([{Lo, Lo} | Rest]) ->
-    ["\\x{", integer_to_list(Lo, 16), $} | render_ranges(Rest)];
-render_ranges([{Lo, Hi} | Rest]) ->
-    ["\\x{", integer_to_list(Lo, 16), "}-\\x{", integer_to_list(Hi, 16), $}
-     | render_ranges(Rest)].
-
-%% Complement of a sorted, disjoint range list over 0..10FFFF.
-complement(Ranges) -> complement(Ranges, 0).
-
-complement([], Next) when Next =< 16#10FFFF -> [{Next, 16#10FFFF}];
-complement([], _Next) -> [];
-complement([{Lo, Hi} | Rest], Next) when Lo > Next ->
-    [{Next, Lo - 1} | complement(Rest, Hi + 1)];
-complement([{_Lo, Hi} | Rest], Next) ->
-    complement(Rest, max(Next, Hi + 1)).
-
-strip_surrogates([]) -> [];
-strip_surrogates([{Lo, Hi} | Rest]) when Hi < 16#D800; Lo > 16#DFFF ->
-    [{Lo, Hi} | strip_surrogates(Rest)];
-strip_surrogates([{Lo, Hi} | Rest]) ->
-    Left = case Lo < 16#D800 of
-               true -> [{Lo, 16#D7FF}];
-               false -> []
-           end,
-    Right = case Hi > 16#DFFF of
-                true -> [{16#E000, Hi}];
-                false -> []
-            end,
-    Left ++ Right ++ strip_surrogates(Rest).
 
 %% ---- Binary properties of strings (ECMA-262 table-binary-unicode-properties-of-strings).
 %% Valid only with the v flag and only in \p (not \P) outside negated classes.

@@ -25,9 +25,9 @@
 -module(arc_regex_charset).
 
 -export([vdigit/0, vword/0, vspace/0]).
--export([vinter/2, vsubtract/2]).
+-export([vinter/2, vsubtract/2, vcomplement/1]).
 -export([vfold/2, vfold_str/2, vclose/1, character_complement/2, vsplit_singles/2]).
--export([emit_complement/2, emit_vclass/2]).
+-export([emit_complement/2, emit_vclass/2, vstrip_surrogates/1, vrender_ranges/1]).
 
 %% ---- The JS class-escape base sets --------------------------------------
 
@@ -195,19 +195,7 @@ scf_domain() ->
 
 %% PCRE2 rejects surrogate codepoints in UTF patterns, and valid-UTF-8
 %% subjects cannot contain them — drop them from emitted sets.
-vstrip_surrogates([]) -> [];
-vstrip_surrogates([{Lo, Hi} | Rest]) when Hi < 16#D800; Lo > 16#DFFF ->
-    [{Lo, Hi} | vstrip_surrogates(Rest)];
-vstrip_surrogates([{Lo, Hi} | Rest]) ->
-    Left = case Lo < 16#D800 of
-               true -> [{Lo, 16#D7FF}];
-               false -> []
-           end,
-    Right = case Hi > 16#DFFF of
-                true -> [{16#E000, Hi}];
-                false -> []
-            end,
-    Left ++ Right ++ vstrip_surrogates(Rest).
+vstrip_surrogates(Ranges) -> vsubtract(Ranges, [{16#D800, 16#DFFF}]).
 
 %% Class ITEMS for a negated JS class escape (\S, \W) spliced into a [...]:
 %% PCRE has no nested classes, so the complement set has to be written out.
