@@ -19,10 +19,11 @@
 /// ISODateTimeWithinLimits, IsValidDuration, ParseISODateTime).
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{
-  civil_from_days, days_from_year, days_in_month, days_in_year as days_in_iso_year,
-  floor_div, floor_mod as math_mod, is_leap_year,
+  civil_from_days, days_from_year, days_in_month,
+  days_in_year as days_in_iso_year, is_leap_year,
 }
 import arc/internal/host_time
+import arc/internal/int_math.{floor_div, floor_mod as math_mod}
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/temporal_tz
@@ -39,21 +40,23 @@ import arc/vm/value.{
   type PlainYearMonthMethod, type Ref, type TemporalDateGetter,
   type TemporalDateTimeGetter, type TemporalDurationGetter, type TemporalGetter,
   type TemporalInstantGetter, type TemporalKind, type TemporalMethodName,
-  type TemporalMonthDayGetter, type TemporalNativeFn, type TemporalProtos,
-  type TemporalTimeGetter, type TemporalYearMonthGetter,
-  type TemporalZonedGetter, type TimeZone, type ZonedDateTimeMethod,
-  DgCalendarId, DgDay, DgDayOfWeek, DgDayOfYear, DgDaysInMonth, DgDaysInWeek,
-  DgDaysInYear, DgEra, DgEraYear, DgInLeapYear, DgMonth, DgMonthCode,
-  DgMonthsInYear, DgWeekOfYear, DgYear, DgYearOfWeek, Dispatch, DmAbs, DmAdd,
-  DmNegated, DmRound, DmSubtract, DmToJson, DmToLocaleString, DmToString,
-  DmTotal, DmValueOf, DmWith, DrBlank, DrDays, DrHours, DrMicroseconds,
-  DrMilliseconds, DrMinutes, DrMonths, DrNanoseconds, DrSeconds, DrSign, DrWeeks,
-  DrYears, DtDate, DtTime, DurationGetter, DurationMethodName, Finite, ImAdd,
-  ImEquals, ImRound, ImSince, ImSubtract, ImToJson, ImToLocaleString, ImToString,
-  ImToZonedDateTimeIso, ImUntil, ImValueOf, InEpochMilliseconds,
-  InEpochNanoseconds, InstantGetter, InstantMethodName, JsBigInt, JsBool, JsNull,
-  JsNumber, JsObject, JsString, JsUndefined, MdCalendarId, MdDay, MdMonthCode,
-  NativeFunction, ObjectSlot, OrdinaryObject, PdAdd, PdEquals, PdSince,
+  type TemporalMonthDayGetter, type TemporalNativeFn, type TemporalNowName,
+  type TemporalProtos, type TemporalStaticName, type TemporalTimeGetter,
+  type TemporalYearMonthGetter, type TemporalZonedGetter, type TimeZone,
+  type ZonedDateTimeMethod, DgCalendarId, DgDay, DgDayOfWeek, DgDayOfYear,
+  DgDaysInMonth, DgDaysInWeek, DgDaysInYear, DgEra, DgEraYear, DgInLeapYear,
+  DgMonth, DgMonthCode, DgMonthsInYear, DgWeekOfYear, DgYear, DgYearOfWeek,
+  Dispatch, DmAbs, DmAdd, DmNegated, DmRound, DmSubtract, DmToJson,
+  DmToLocaleString, DmToString, DmTotal, DmValueOf, DmWith, DrBlank, DrDays,
+  DrHours, DrMicroseconds, DrMilliseconds, DrMinutes, DrMonths, DrNanoseconds,
+  DrSeconds, DrSign, DrWeeks, DrYears, DtDate, DtTime, DurationGetter,
+  DurationMethodName, Finite, ImAdd, ImEquals, ImRound, ImSince, ImSubtract,
+  ImToJson, ImToLocaleString, ImToString, ImToZonedDateTimeIso, ImUntil,
+  ImValueOf, InEpochMilliseconds, InEpochNanoseconds, InstantGetter,
+  InstantMethodName, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString,
+  JsUndefined, MdCalendarId, MdDay, MdMonthCode, NativeFunction, NowInstant,
+  NowPlainDateISO, NowPlainDateTimeISO, NowPlainTimeISO, NowTimeZoneId,
+  NowZonedDateTimeISO, ObjectSlot, OrdinaryObject, PdAdd, PdEquals, PdSince,
   PdSubtract, PdToJson, PdToLocaleString, PdToPlainDateTime, PdToPlainMonthDay,
   PdToPlainYearMonth, PdToString, PdToZonedDateTime, PdUntil, PdValueOf, PdWith,
   PdWithCalendar, PdtAdd, PdtEquals, PdtRound, PdtSince, PdtSubtract, PdtToJson,
@@ -74,7 +77,8 @@ import arc/vm/value.{
   TemporalPlainMonthDayKind, TemporalPlainTimeKind, TemporalPlainYearMonthKind,
   TemporalProtos, TemporalStatic, TemporalTimeSlot, TemporalYearMonthSlot,
   TemporalZonedDateTimeKind, TemporalZonedDateTimeSlot, TgHour, TgMicrosecond,
-  TgMillisecond, TgMinute, TgNanosecond, TgSecond, TzNamed, TzOffset, TzUtc,
+  TgMillisecond, TgMinute, TgNanosecond, TgSecond, TsCompare, TsFrom,
+  TsFromEpochMilliseconds, TsFromEpochNanoseconds, TzNamed, TzOffset, TzUtc,
   YmCalendarId, YmDaysInMonth, YmDaysInYear, YmEra, YmEraYear, YmInLeapYear,
   YmMonth, YmMonthCode, YmMonthsInYear, YmYear, ZgDate, ZgEpochMilliseconds,
   ZgEpochNanoseconds, ZgHoursInDay, ZgOffset, ZgOffsetNanoseconds, ZgTime,
@@ -196,7 +200,7 @@ pub fn init(
       "PlainDate",
       3,
       pd_proto,
-      [#("from", 1), #("compare", 2)],
+      [#("from", TsFrom, 1), #("compare", TsCompare, 2)],
       list.map(all_date_getters, PlainDateGetter),
       wrap_methods(
         [
@@ -230,7 +234,7 @@ pub fn init(
       "PlainTime",
       0,
       pt_proto,
-      [#("from", 1), #("compare", 2)],
+      [#("from", TsFrom, 1), #("compare", TsCompare, 2)],
       list.map(all_time_getters, PlainTimeGetter),
       wrap_methods(
         [
@@ -260,7 +264,7 @@ pub fn init(
       "PlainDateTime",
       3,
       pdt_proto,
-      [#("from", 1), #("compare", 2)],
+      [#("from", TsFrom, 1), #("compare", TsCompare, 2)],
       list.map(
         [
           DtDate(DgCalendarId),
@@ -321,7 +325,7 @@ pub fn init(
       "PlainYearMonth",
       2,
       pym_proto,
-      [#("from", 1), #("compare", 2)],
+      [#("from", TsFrom, 1), #("compare", TsCompare, 2)],
       list.map(
         [
           YmCalendarId,
@@ -365,7 +369,7 @@ pub fn init(
       "PlainMonthDay",
       2,
       pmd_proto,
-      [#("from", 1)],
+      [#("from", TsFrom, 1)],
       list.map([MdCalendarId, MdMonthCode, MdDay], PlainMonthDayGetter),
       wrap_methods(
         [
@@ -391,7 +395,7 @@ pub fn init(
       "Duration",
       0,
       dur_proto,
-      [#("from", 1), #("compare", 2)],
+      [#("from", TsFrom, 1), #("compare", TsCompare, 2)],
       list.map(
         [
           DrYears,
@@ -438,10 +442,10 @@ pub fn init(
       1,
       ins_proto,
       [
-        #("from", 1),
-        #("fromEpochMilliseconds", 1),
-        #("fromEpochNanoseconds", 1),
-        #("compare", 2),
+        #("from", TsFrom, 1),
+        #("fromEpochMilliseconds", TsFromEpochMilliseconds, 1),
+        #("fromEpochNanoseconds", TsFromEpochNanoseconds, 1),
+        #("compare", TsCompare, 2),
       ],
       list.map([InEpochMilliseconds, InEpochNanoseconds], InstantGetter),
       wrap_methods(
@@ -472,7 +476,7 @@ pub fn init(
       "ZonedDateTime",
       2,
       zdt_proto,
-      [#("from", 1), #("compare", 2)],
+      [#("from", TsFrom, 1), #("compare", TsCompare, 2)],
       list.map(
         [
           ZgDate(DgCalendarId),
@@ -542,15 +546,15 @@ pub fn init(
       function_proto,
       list.map(
         [
-          #("instant", 0),
-          #("timeZoneId", 0),
-          #("plainDateISO", 0),
-          #("plainDateTimeISO", 0),
-          #("plainTimeISO", 0),
-          #("zonedDateTimeISO", 0),
+          #("instant", NowInstant, 0),
+          #("timeZoneId", NowTimeZoneId, 0),
+          #("plainDateISO", NowPlainDateISO, 0),
+          #("plainDateTimeISO", NowPlainDateTimeISO, 0),
+          #("plainTimeISO", NowPlainTimeISO, 0),
+          #("zonedDateTimeISO", NowZonedDateTimeISO, 0),
         ],
         fn(spec) {
-          #(spec.0, TemporalNative(TemporalNowFn(spec.0, protos)), spec.1)
+          #(spec.0, TemporalNative(TemporalNowFn(spec.1, protos)), spec.2)
         },
       ),
     )
@@ -626,7 +630,7 @@ fn init_temporal_type(
   name: String,
   arity: Int,
   proto_ref: Ref,
-  statics: List(#(String, Int)),
+  statics: List(#(String, TemporalStaticName, Int)),
   getters: List(TemporalGetter),
   methods: List(#(TemporalMethodName, Int)),
   object_proto: Ref,
@@ -637,7 +641,7 @@ fn init_temporal_type(
       h,
       function_proto,
       list.map(statics, fn(s) {
-        #(s.0, TemporalNative(TemporalStatic(kind, s.0, protos)), s.1)
+        #(s.0, TemporalNative(TemporalStatic(kind, s.1, protos)), s.2)
       }),
     )
   let #(h, getter_props) =
@@ -645,7 +649,7 @@ fn init_temporal_type(
       h,
       function_proto,
       list.map(getters, fn(g) {
-        #(getter_name(g), TemporalNative(TemporalGetterFn(g, protos)))
+        #(getter_name(g), TemporalNative(TemporalGetterFn(g)))
       }),
     )
   let #(h, method_props) =
@@ -713,8 +717,7 @@ pub fn dispatch(
     TemporalCtor(kind:, protos:) -> ctor_dispatch(kind, protos, args, state)
     TemporalStatic(kind:, name:, protos:) ->
       static_dispatch(kind, name, protos, args, state)
-    TemporalGetterFn(getter:, protos:) ->
-      getter_dispatch(getter, protos, this, state)
+    TemporalGetterFn(getter:) -> getter_dispatch(getter, this, state)
     TemporalMethod(method:, protos:) ->
       method_dispatch(method, protos, this, args, state)
     TemporalNowFn(name:, protos:) -> now_dispatch(name, protos, args, state)
@@ -4342,129 +4345,18 @@ fn apply_dur_sign(d: DurRec, sign: Int) -> DurRec {
 
 fn static_dispatch(
   kind: TemporalKind,
-  name: String,
+  name: TemporalStaticName,
   protos: TemporalProtos,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case kind, name {
-    TemporalPlainDateKind, "from" -> {
-      use #(d, cal), state <- state.try_op(to_temporal_date(
-        state,
-        helpers.arg_at(args, 0),
-        helpers.arg_at(args, 1),
-      ))
-      let #(state, v) = make_date_cal(state, protos, d, cal)
-      #(state, Ok(v))
-    }
-    TemporalPlainDateKind, "compare" -> {
-      use #(a, _), state <- state.try_op(to_temporal_date(
-        state,
-        helpers.arg_at(args, 0),
-        JsUndefined,
-      ))
-      use #(b, _), state <- state.try_op(to_temporal_date(
-        state,
-        helpers.arg_at(args, 1),
-        JsUndefined,
-      ))
-      #(state, Ok(value.from_int(compare_iso_date(a, b))))
-    }
-    TemporalPlainTimeKind, "from" -> {
-      use t, state <- state.try_op(to_temporal_time(
-        state,
-        helpers.arg_at(args, 0),
-        helpers.arg_at(args, 1),
-      ))
-      let #(state, v) = make_time(state, protos, t)
-      #(state, Ok(v))
-    }
-    TemporalPlainTimeKind, "compare" -> {
-      use a, state <- state.try_op(to_temporal_time(
-        state,
-        helpers.arg_at(args, 0),
-        JsUndefined,
-      ))
-      use b, state <- state.try_op(to_temporal_time(
-        state,
-        helpers.arg_at(args, 1),
-        JsUndefined,
-      ))
-      #(state, Ok(value.from_int(int_sign(time_to_ns(a) - time_to_ns(b)))))
-    }
-    TemporalPlainDateTimeKind, "from" -> {
-      use #(d, t, cal), state <- state.try_op(to_temporal_date_time(
-        state,
-        helpers.arg_at(args, 0),
-        helpers.arg_at(args, 1),
-      ))
-      let #(state, v) = make_date_time_cal(state, protos, d, t, cal)
-      #(state, Ok(v))
-    }
-    TemporalPlainDateTimeKind, "compare" -> {
-      use #(ad, at, _), state <- state.try_op(to_temporal_date_time(
-        state,
-        helpers.arg_at(args, 0),
-        JsUndefined,
-      ))
-      use #(bd, bt, _), state <- state.try_op(to_temporal_date_time(
-        state,
-        helpers.arg_at(args, 1),
-        JsUndefined,
-      ))
-      #(state, Ok(value.from_int(compare_iso_date_time(#(ad, at), #(bd, bt)))))
-    }
-    TemporalPlainYearMonthKind, "from" -> {
-      use #(y, m, rd, cal), state <- state.try_op(to_temporal_year_month(
-        state,
-        helpers.arg_at(args, 0),
-        helpers.arg_at(args, 1),
-      ))
-      let #(state, v) = make_year_month_cal(state, protos, y, m, rd, cal)
-      #(state, Ok(v))
-    }
-    TemporalPlainYearMonthKind, "compare" -> {
-      use a, state <- state.try_op(to_temporal_year_month(
-        state,
-        helpers.arg_at(args, 0),
-        JsUndefined,
-      ))
-      use b, state <- state.try_op(to_temporal_year_month(
-        state,
-        helpers.arg_at(args, 1),
-        JsUndefined,
-      ))
-      // CompareISODate including the reference day.
-      let n = compare_iso_date(IsoDate(a.0, a.1, a.2), IsoDate(b.0, b.1, b.2))
-      #(state, Ok(value.from_int(n)))
-    }
-    TemporalPlainMonthDayKind, "from" -> {
-      use #(m, d, ry, cal), state <- state.try_op(to_temporal_month_day(
-        state,
-        helpers.arg_at(args, 0),
-        helpers.arg_at(args, 1),
-      ))
-      let #(state, v) = make_month_day_cal(state, protos, m, d, ry, cal)
-      #(state, Ok(v))
-    }
-    TemporalDurationKind, "from" -> {
-      use d, state <- state.try_op(to_temporal_duration(
-        state,
-        helpers.arg_at(args, 0),
-      ))
-      let #(state, v) = make_duration(state, protos, d)
-      #(state, Ok(v))
-    }
-    TemporalDurationKind, "compare" -> duration_compare(args, state)
-    TemporalInstantKind, "from" -> {
-      use ns, state <- state.try_op(to_temporal_instant(
-        state,
-        helpers.arg_at(args, 0),
-      ))
-      let #(state, v) = make_instant(state, protos, ns)
-      #(state, Ok(v))
-    }
-    TemporalInstantKind, "fromEpochMilliseconds" -> {
+  case name {
+    TsFrom -> static_from(kind, protos, args, state)
+    TsCompare -> static_compare(kind, args, state)
+    // Instant-only statics: init only ever pairs these with
+    // TemporalInstantKind, and the operation is intrinsically "make an
+    // Instant", so `kind` is not consulted.
+    TsFromEpochMilliseconds -> {
       use n, state <- state.try_op(coerce.js_to_number(
         state,
         helpers.arg_at(args, 0),
@@ -4490,7 +4382,7 @@ fn static_dispatch(
         _ -> state.range_error(state, "not a finite number")
       }
     }
-    TemporalInstantKind, "fromEpochNanoseconds" -> {
+    TsFromEpochNanoseconds -> {
       use ns, state <- state.try_op(coerce.to_bigint(
         state,
         helpers.arg_at(args, 0),
@@ -4503,7 +4395,153 @@ fn static_dispatch(
         }
       }
     }
-    TemporalInstantKind, "compare" -> {
+  }
+}
+
+/// `Temporal.<Type>.from(item, options?)` — every Temporal type has one.
+fn static_from(
+  kind: TemporalKind,
+  protos: TemporalProtos,
+  args: List(JsValue),
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case kind {
+    TemporalPlainDateKind -> {
+      use #(d, cal), state <- state.try_op(to_temporal_date(
+        state,
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
+      ))
+      let #(state, v) = make_date_cal(state, protos, d, cal)
+      #(state, Ok(v))
+    }
+    TemporalPlainTimeKind -> {
+      use t, state <- state.try_op(to_temporal_time(
+        state,
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
+      ))
+      let #(state, v) = make_time(state, protos, t)
+      #(state, Ok(v))
+    }
+    TemporalPlainDateTimeKind -> {
+      use #(d, t, cal), state <- state.try_op(to_temporal_date_time(
+        state,
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
+      ))
+      let #(state, v) = make_date_time_cal(state, protos, d, t, cal)
+      #(state, Ok(v))
+    }
+    TemporalPlainYearMonthKind -> {
+      use #(y, m, rd, cal), state <- state.try_op(to_temporal_year_month(
+        state,
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
+      ))
+      let #(state, v) = make_year_month_cal(state, protos, y, m, rd, cal)
+      #(state, Ok(v))
+    }
+    TemporalPlainMonthDayKind -> {
+      use #(m, d, ry, cal), state <- state.try_op(to_temporal_month_day(
+        state,
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
+      ))
+      let #(state, v) = make_month_day_cal(state, protos, m, d, ry, cal)
+      #(state, Ok(v))
+    }
+    TemporalDurationKind -> {
+      use d, state <- state.try_op(to_temporal_duration(
+        state,
+        helpers.arg_at(args, 0),
+      ))
+      let #(state, v) = make_duration(state, protos, d)
+      #(state, Ok(v))
+    }
+    TemporalInstantKind -> {
+      use ns, state <- state.try_op(to_temporal_instant(
+        state,
+        helpers.arg_at(args, 0),
+      ))
+      let #(state, v) = make_instant(state, protos, ns)
+      #(state, Ok(v))
+    }
+    TemporalZonedDateTimeKind -> {
+      use #(ns, tz, cal), state <- state.try_op(to_temporal_zoned(
+        state,
+        helpers.arg_at(args, 0),
+        helpers.arg_at(args, 1),
+      ))
+      let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
+      #(state, Ok(v))
+    }
+  }
+}
+
+/// `Temporal.<Type>.compare(a, b)` — every Temporal type except PlainMonthDay.
+fn static_compare(
+  kind: TemporalKind,
+  args: List(JsValue),
+  state: State(host),
+) -> #(State(host), Result(JsValue, JsValue)) {
+  case kind {
+    TemporalPlainDateKind -> {
+      use #(a, _), state <- state.try_op(to_temporal_date(
+        state,
+        helpers.arg_at(args, 0),
+        JsUndefined,
+      ))
+      use #(b, _), state <- state.try_op(to_temporal_date(
+        state,
+        helpers.arg_at(args, 1),
+        JsUndefined,
+      ))
+      #(state, Ok(value.from_int(compare_iso_date(a, b))))
+    }
+    TemporalPlainTimeKind -> {
+      use a, state <- state.try_op(to_temporal_time(
+        state,
+        helpers.arg_at(args, 0),
+        JsUndefined,
+      ))
+      use b, state <- state.try_op(to_temporal_time(
+        state,
+        helpers.arg_at(args, 1),
+        JsUndefined,
+      ))
+      #(state, Ok(value.from_int(int_sign(time_to_ns(a) - time_to_ns(b)))))
+    }
+    TemporalPlainDateTimeKind -> {
+      use #(ad, at, _), state <- state.try_op(to_temporal_date_time(
+        state,
+        helpers.arg_at(args, 0),
+        JsUndefined,
+      ))
+      use #(bd, bt, _), state <- state.try_op(to_temporal_date_time(
+        state,
+        helpers.arg_at(args, 1),
+        JsUndefined,
+      ))
+      #(state, Ok(value.from_int(compare_iso_date_time(#(ad, at), #(bd, bt)))))
+    }
+    TemporalPlainYearMonthKind -> {
+      use a, state <- state.try_op(to_temporal_year_month(
+        state,
+        helpers.arg_at(args, 0),
+        JsUndefined,
+      ))
+      use b, state <- state.try_op(to_temporal_year_month(
+        state,
+        helpers.arg_at(args, 1),
+        JsUndefined,
+      ))
+      // CompareISODate including the reference day.
+      let n = compare_iso_date(IsoDate(a.0, a.1, a.2), IsoDate(b.0, b.1, b.2))
+      #(state, Ok(value.from_int(n)))
+    }
+    TemporalDurationKind -> duration_compare(args, state)
+    TemporalInstantKind -> {
       use a, state <- state.try_op(to_temporal_instant(
         state,
         helpers.arg_at(args, 0),
@@ -4514,16 +4552,7 @@ fn static_dispatch(
       ))
       #(state, Ok(value.from_int(int_sign(a - b))))
     }
-    TemporalZonedDateTimeKind, "from" -> {
-      use #(ns, tz, cal), state <- state.try_op(to_temporal_zoned(
-        state,
-        helpers.arg_at(args, 0),
-        helpers.arg_at(args, 1),
-      ))
-      let #(state, v) = make_zoned_cal(state, protos, ns, tz, cal)
-      #(state, Ok(v))
-    }
-    TemporalZonedDateTimeKind, "compare" -> {
+    TemporalZonedDateTimeKind -> {
       use #(a, _, _), state <- state.try_op(to_temporal_zoned(
         state,
         helpers.arg_at(args, 0),
@@ -4536,7 +4565,11 @@ fn static_dispatch(
       ))
       #(state, Ok(value.from_int(int_sign(a - b))))
     }
-    _, _ -> state.type_error(state, "unknown Temporal static method")
+    // PlainMonthDay has no `compare` per spec; init never registers this
+    // pair, so this arm is structurally unreachable — kept only because
+    // `TemporalKind` is exhaustive here.
+    TemporalPlainMonthDayKind ->
+      state.type_error(state, "Temporal.PlainMonthDay has no compare")
   }
 }
 
@@ -5797,11 +5830,9 @@ fn negate_dur(d: DurRec) -> DurRec {
 
 fn getter_dispatch(
   getter: TemporalGetter,
-  protos: TemporalProtos,
   this: JsValue,
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  let _ = protos
   case getter {
     PlainDateGetter(g) ->
       case this_date(state, this) {
@@ -6190,44 +6221,43 @@ fn now_epoch_ns() -> Int {
 }
 
 fn now_dispatch(
-  name: String,
+  name: TemporalNowName,
   protos: TemporalProtos,
   args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case name {
-    "instant" -> {
+    NowInstant -> {
       let #(state, v) = make_instant(state, protos, now_epoch_ns())
       #(state, Ok(v))
     }
-    "timeZoneId" -> #(state, Ok(JsString("UTC")))
-    "plainDateISO" -> {
+    NowTimeZoneId -> #(state, Ok(JsString("UTC")))
+    NowPlainDateISO -> {
       use tz, state <- state.try_op(now_tz_arg(state, args))
       let nns = now_epoch_ns()
       use #(d, _) <- terr(state, epoch_ns_to_iso_in(tz, nns))
       let #(state, v) = make_date(state, protos, d)
       #(state, Ok(v))
     }
-    "plainDateTimeISO" -> {
+    NowPlainDateTimeISO -> {
       use tz, state <- state.try_op(now_tz_arg(state, args))
       let nns = now_epoch_ns()
       use #(d, t) <- terr(state, epoch_ns_to_iso_in(tz, nns))
       let #(state, v) = make_date_time(state, protos, d, t)
       #(state, Ok(v))
     }
-    "plainTimeISO" -> {
+    NowPlainTimeISO -> {
       use tz, state <- state.try_op(now_tz_arg(state, args))
       let nns = now_epoch_ns()
       use #(_, t) <- terr(state, epoch_ns_to_iso_in(tz, nns))
       let #(state, v) = make_time(state, protos, t)
       #(state, Ok(v))
     }
-    "zonedDateTimeISO" -> {
+    NowZonedDateTimeISO -> {
       use tz, state <- state.try_op(now_tz_arg(state, args))
       let #(state, v) = make_zoned(state, protos, now_epoch_ns(), tz)
       #(state, Ok(v))
     }
-    _ -> state.type_error(state, "unknown Temporal.Now function")
   }
 }
 
