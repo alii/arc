@@ -52,7 +52,8 @@ setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) ->
     list_to_tuple(locals_env(Env, Seeds, Args, Arity, LocalCount, Undef)).
 
 %% Non-arrow locals build. LexicalSlots arrives as one of the Gleam variants
-%% of arc/vm/opcode.LexicalSlots:
+%% of arc/vm/lexical.LexicalSlots (that module is the ordering source of truth
+%% — see lexical.all_lexical_refs / lexical.lexical_ref_offset):
 %%   {owned_lexical_slots, Base}                       — all four owned,
 %%       contiguous, in canonical order [this, active_func, home_object,
 %%       new_target] starting at Base (== length(Env)). This is the ordinary

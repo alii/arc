@@ -15,7 +15,7 @@ import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
-import arc/vm/opcode
+import arc/vm/lexical
 import arc/vm/ops/coerce
 import arc/vm/ops/mop
 import arc/vm/ops/object
@@ -506,7 +506,7 @@ fn read_local_slot(state: State(host), idx: Int) -> Result(JsValue, Int) {
 fn with_caller_box_refs(
   state: State(host),
   name_table: List(#(String, Int)),
-  parent_slots: opcode.LexicalSlots,
+  parent_slots: lexical.LexicalSlots,
   k: fn(List(JsValue)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let box_refs = {
@@ -514,9 +514,9 @@ fn with_caller_box_refs(
       list.try_map(name_table, fn(pair) { read_local_slot(state, pair.1) }),
     )
     use lexical <- result.map(
-      opcode.all_lexical_refs
+      lexical.all_lexical_refs
       |> list.filter_map(fn(ref) {
-        opcode.lexical_slot(parent_slots, ref) |> option.to_result(Nil)
+        lexical.lexical_slot(parent_slots, ref) |> option.to_result(Nil)
       })
       |> list.try_map(read_local_slot(state, _)),
     )
@@ -574,10 +574,10 @@ fn run_direct_eval(
     source,
     parser.parse_direct_eval(
       _,
-      allow_new_target: opcode.new_target_allowed(code_kind),
-      allow_super_property: opcode.super_prop_allowed(code_kind),
-      allow_super_call: opcode.super_call_allowed(code_kind),
-      allow_arguments: opcode.arguments_allowed(code_kind),
+      allow_new_target: lexical.new_target_allowed(code_kind),
+      allow_super_property: lexical.super_prop_allowed(code_kind),
+      allow_super_call: lexical.super_call_allowed(code_kind),
+      allow_arguments: lexical.arguments_allowed(code_kind),
       outer_private_names: private_names,
     ),
     fn(body, sb) { compiler.compile_eval_direct(body, sb, caller) },

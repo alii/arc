@@ -6,7 +6,7 @@
 import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/internal/tuple_array
-import arc/vm/opcode
+import arc/vm/lexical
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, JsNull, JsObject, JsUndefined,
@@ -36,7 +36,7 @@ pub fn init_top_level_locals(
   this_val: JsValue,
 ) -> tuple_array.TupleArray(JsValue) {
   let locals = tuple_array.repeat(JsUndefined, func.local_count)
-  case opcode.lexical_slot(func.lexical, opcode.RefThis) {
+  case lexical.lexical_slot(func.lexical, lexical.RefThis) {
     Some(idx) -> tuple_array.set_unchecked(idx, this_val, locals)
     None -> locals
   }
@@ -193,13 +193,13 @@ fn setup_locals_tuple(
 /// FFI: non-arrow locals build — see arc_vm_ffi:setup_locals_seeded/10.
 /// Seed values for the owned lexical slots are written in canonical
 /// `all_lexical_refs` order ([this, active_func, home_object, new_target]).
-/// `opcode.OwnedLexicalSlots` makes that contiguous canonical layout a fact
+/// `lexical.OwnedLexicalSlots` makes that contiguous canonical layout a fact
 /// of the type, so the FFI's fast clause writes the four seeds inline right
 /// after the env values with no intermediate seeds list.
 @external(erlang, "arc_vm_ffi", "setup_locals_seeded")
 fn setup_locals_seeded(
   env: List(JsValue),
-  lexical: opcode.LexicalSlots,
+  lexical: lexical.LexicalSlots,
   this_val: JsValue,
   fn_obj: JsValue,
   home: JsValue,

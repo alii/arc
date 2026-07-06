@@ -4,6 +4,7 @@ import arc/vm/exec/entry
 import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
+import arc/vm/lexical
 import arc/vm/opcode.{
   type Op, Add, BitAnd, BitNot, BitOr, BitXor, CatchOnly, DefineField, Div, Dup,
   Eq, Exp, GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue,
@@ -64,8 +65,8 @@ fn make_func(
     is_constructor: True,
     is_class_constructor: False,
     local_names: None,
-    lexical: opcode.NoLexicalSlots,
-    code_kind: opcode.ScriptCode,
+    lexical: lexical.NoLexicalSlots,
+    code_kind: lexical.ScriptCode,
   )
 }
 

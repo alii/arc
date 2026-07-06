@@ -24,7 +24,7 @@
 /// Pure non-escaping scratch (e.g. `using`-emission temporaries, the
 /// completion-value slot, with-ref base slots) is NOT a binding — the
 /// emitter mints those via `alloc_scratch` and gets back a bare `Int`.
-import arc/vm/opcode.{
+import arc/vm/lexical.{
   type LexicalRef, type LexicalRefs, type LexicalSlots, RefActiveFunc,
   RefHomeObject, RefNewTarget, RefThis,
 }
@@ -811,12 +811,12 @@ pub fn sb_ref(sb: ScopeBuilder, name: String) -> ScopeBuilder {
 pub fn sb_lexical_ref(sb: ScopeBuilder, ref: LexicalRef) -> ScopeBuilder {
   let own_lexical_refs =
     dict.upsert(sb.own_lexical_refs, sb.current_fn, fn(prev) {
-      let prev = option.unwrap(prev, opcode.no_lexical_refs)
+      let prev = option.unwrap(prev, lexical.no_lexical_refs)
       case ref {
-        RefThis -> opcode.LexicalRefs(..prev, this: True)
-        RefActiveFunc -> opcode.LexicalRefs(..prev, active_func: True)
-        RefHomeObject -> opcode.LexicalRefs(..prev, home_object: True)
-        RefNewTarget -> opcode.LexicalRefs(..prev, new_target: True)
+        RefThis -> lexical.LexicalRefs(..prev, this: True)
+        RefActiveFunc -> lexical.LexicalRefs(..prev, active_func: True)
+        RefHomeObject -> lexical.LexicalRefs(..prev, home_object: True)
+        RefNewTarget -> lexical.LexicalRefs(..prev, new_target: True)
       }
     })
   ScopeBuilder(..sb, own_lexical_refs:)
@@ -1476,8 +1476,8 @@ fn blank_function_info(
 ) -> FunctionInfo {
   FunctionInfo(
     local_count: 0,
-    lexical: opcode.NoLexicalSlots,
-    lexical_boxed: opcode.no_lexical_refs,
+    lexical: lexical.NoLexicalSlots,
+    lexical_boxed: lexical.no_lexical_refs,
     captures: [],
     lexical_captures: dict.new(),
     names: dict.new(),
@@ -1552,10 +1552,10 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   let script_root_owns_lexical = root_raw.kind == Script && root_base == 0
   let #(root_local_count, root_lexical) = case script_root_owns_lexical {
     True -> #(
-      root_base + opcode.owned_lexical_slot_count,
-      opcode.OwnedLexicalSlots(base: root_base),
+      root_base + lexical.owned_lexical_slot_count,
+      lexical.OwnedLexicalSlots(base: root_base),
     )
-    False -> #(root_base, opcode.NoLexicalSlots)
+    False -> #(root_base, lexical.NoLexicalSlots)
   }
   let root_fn =
     FunctionInfo(
@@ -2256,12 +2256,12 @@ pub fn lookup_lexical(
 ) -> SlotRef {
   let scope = get_scope(tree, scope_id)
   let info = function_info(tree, scope.function_scope)
-  case opcode.lexical_slot(info.lexical, ref) {
+  case lexical.lexical_slot(info.lexical, ref) {
     // Owned slot: boxed only when an inner arrow / direct-eval captures it
     // (FunctionInfo.lexical_boxed, populated by analyze_captures). A
     // non-captured `this` is a plain GetLocal, not a box deref.
     Some(slot) ->
-      SlotRef(slot:, boxed: opcode.lexical_refs_get(info.lexical_boxed, ref))
+      SlotRef(slot:, boxed: lexical.lexical_refs_get(info.lexical_boxed, ref))
     None ->
       case dict.get(info.lexical_captures, ref) {
         Ok(slot) -> SlotRef(slot:, boxed: True)
@@ -2477,7 +2477,7 @@ fn build_inputs_rec(
   let scope = get_scope(tree, fn_id)
   let own =
     dict.get(own_lexical_refs, fn_id)
-    |> result.unwrap(opcode.no_lexical_refs)
+    |> result.unwrap(lexical.no_lexical_refs)
   // CompiledChild.lexical_refs semantics: own ∪ (each arrow child's
   // lexical_refs). Non-arrow children own their lexical slots and do
   // not propagate (emit.gleam: `case child.is_arrow { True -> or(...) }`).
@@ -2486,7 +2486,7 @@ fn build_inputs_rec(
       let assert Ok(cinp) = dict.get(acc, cid)
         as "build_inputs_rec: child not in acc after post-order recursion"
       case cinp.is_arrow {
-        True -> opcode.lexical_refs_or(refs, cinp.lexical_refs)
+        True -> lexical.lexical_refs_or(refs, cinp.lexical_refs)
         False -> refs
       }
     })
@@ -2529,7 +2529,7 @@ fn analyze_captures(
       names: dict.new(),
       consts: set.new(),
       fn_names: set.new(),
-      lexical_available: opcode.no_lexical_refs,
+      lexical_available: lexical.no_lexical_refs,
     )
   compute_down(tree, inputs, by_fn, up, root_scope_id, root_parent)
 }
@@ -2659,8 +2659,8 @@ fn compute_down(
   let is_root = fn_id == root_scope_id
   let seeded_info = function_info(tree, fn_id)
   let seeded_root_owns_lexical = case seeded_info.lexical {
-    opcode.OwnedLexicalSlots(_) -> True
-    opcode.CapturedLexicalSlots(..) | opcode.NoLexicalSlots -> False
+    lexical.OwnedLexicalSlots(_) -> True
+    lexical.CapturedLexicalSlots(..) | lexical.NoLexicalSlots -> False
   }
   let script_root_owns =
     is_root && fn_scope_kind == Script && seeded_root_owns_lexical
@@ -2668,20 +2668,20 @@ fn compute_down(
     True, _ -> {
       let seeded = seeded_info.lexical_captures
       let available = case script_root_owns {
-        True -> all_lexical_refs_true
+        True -> lexical.every_lexical_ref
         False -> lexical_refs_present(seeded)
       }
       #(seeded, available)
     }
-    False, False -> #(dict.new(), all_lexical_refs_true)
+    False, False -> #(dict.new(), lexical.every_lexical_ref)
     False, True -> {
       let base = list.length(captures)
       let #(m, _next) =
-        list.fold(opcode.all_lexical_refs, #(dict.new(), base), fn(st, ref) {
+        list.fold(lexical.all_lexical_refs, #(dict.new(), base), fn(st, ref) {
           let #(m, i) = st
           let referenced =
-            up.eval_in_subtree || opcode.lexical_refs_get(inp.lexical_refs, ref)
-          let available = opcode.lexical_refs_get(parent.lexical_available, ref)
+            up.eval_in_subtree || lexical.lexical_refs_get(inp.lexical_refs, ref)
+          let available = lexical.lexical_refs_get(parent.lexical_available, ref)
           case referenced && available {
             True -> #(dict.insert(m, ref, i), i + 1)
             False -> st
@@ -2720,7 +2720,7 @@ fn compute_down(
     // and non-arrow non-owners `lexical_captures` is empty, so this
     // degenerates to `NoLexicalSlots`.
     False -> #(
-      opcode.captured_lexical_slots(
+      lexical.captured_lexical_slots(
         this: dict.get(lexical_captures, RefThis) |> option.from_result,
         active_func: dict.get(lexical_captures, RefActiveFunc)
           |> option.from_result,
@@ -2732,8 +2732,8 @@ fn compute_down(
       0,
     )
     True -> #(
-      opcode.OwnedLexicalSlots(base: lex_base),
-      opcode.owned_lexical_slot_count,
+      lexical.OwnedLexicalSlots(base: lex_base),
+      lexical.owned_lexical_slot_count,
     )
   }
 
@@ -2772,12 +2772,12 @@ fn compute_down(
   // (compile_child :676-679). Otherwise OR of arrow children's
   // lexical_refs (collect_arrow_lexical_refs).
   let lexical_captured = case up.eval_in_subtree {
-    True -> all_lexical_refs_true
+    True -> lexical.every_lexical_ref
     False ->
-      list.fold(children, opcode.no_lexical_refs, fn(refs, cid) {
+      list.fold(children, lexical.no_lexical_refs, fn(refs, cid) {
         let cinp = get_input(inputs, cid)
         case cinp.is_arrow {
-          True -> opcode.lexical_refs_or(refs, cinp.lexical_refs)
+          True -> lexical.lexical_refs_or(refs, cinp.lexical_refs)
           False -> refs
         }
       })
@@ -2791,7 +2791,7 @@ fn compute_down(
   let lexical_boxed = case owns_lexical {
     True -> lexical_captured
     False ->
-      opcode.lexical_refs_or(
+      lexical.lexical_refs_or(
         lexical_captured,
         lexical_refs_present(lexical_captures),
       )
@@ -3104,15 +3104,8 @@ fn update_function_info(
   ScopeTree(..tree, functions: dict.insert(tree.functions, fn_id, f(info)))
 }
 
-const all_lexical_refs_true = opcode.LexicalRefs(
-  this: True,
-  active_func: True,
-  home_object: True,
-  new_target: True,
-)
-
 fn lexical_refs_present(d: Dict(LexicalRef, a)) -> LexicalRefs {
-  opcode.LexicalRefs(
+  lexical.LexicalRefs(
     this: dict.has_key(d, RefThis),
     active_func: dict.has_key(d, RefActiveFunc),
     home_object: dict.has_key(d, RefHomeObject),
