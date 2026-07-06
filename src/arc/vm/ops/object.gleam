@@ -2718,7 +2718,17 @@ pub fn copy_data_properties_excluding(
         }
         _ -> Ok(state)
       }
-    // Step 1: source is undefined or null → return target (no-op).
+    // Step 2: ToObject on a String primitive yields a String exotic with one
+    // own enumerable index property per code unit (§10.4.3) and no other own
+    // enumerable keys — `{..."ab"}` is `{0: "a", 1: "b"}`.
+    JsString(s) -> {
+      let heap =
+        copy_string_element_range(state.heap, target_ref, s, excluded_keys)
+      Ok(State(..state, heap:))
+    }
+    // Step 1: source is undefined or null → return target (no-op). Other
+    // primitives (Number/Bool/Symbol/BigInt) box to a wrapper with no own
+    // enumerable keys — same no-op.
     _ -> Ok(state)
   }
 }

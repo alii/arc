@@ -1003,7 +1003,15 @@ fn define_properties_on(
     }
     // Step 1: ToObject throws TypeError on null/undefined.
     JsNull | JsUndefined -> state.type_error(state, cannot_convert)
-    // Step 1: ToObject on primitives → wrapper with no own enumerable props → no-op.
+    // Step 1: ToObject on a String primitive → String exotic with one own
+    // enumerable index property per code unit. A non-empty string therefore
+    // reaches step 4.b.ii ToPropertyDescriptor with a string-primitive
+    // descObj → TypeError. Empty string has no own enumerable keys → no-op.
+    JsString("") -> #(state, Ok(JsObject(target_ref)))
+    JsString(_) ->
+      state.type_error(state, "Property description must be an object")
+    // Step 1: ToObject on Number/Bool/Symbol/BigInt → wrapper with no own
+    // enumerable props → no-op.
     _ -> #(state, Ok(JsObject(target_ref)))
   }
 }
