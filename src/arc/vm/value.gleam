@@ -1968,20 +1968,44 @@ pub type TemporalMethodName {
   ZonedDateTimeMethodName(ZonedDateTimeMethod)
 }
 
-/// Temporal natives. Constructors and statics dispatch on `kind` (statics also
-/// on a name); getters and methods carry a closed enum that already names the
-/// Temporal type they belong to, so registration and dispatch cannot drift.
+/// Static methods on the Temporal type constructors. `TsFrom`/`TsCompare`
+/// are shared across kinds (dispatch pairs them with a `TemporalKind`); the
+/// two `TsFromEpoch*` variants are Instant-only.
+pub type TemporalStaticName {
+  TsFrom
+  TsCompare
+  TsFromEpochMilliseconds
+  TsFromEpochNanoseconds
+}
+
+/// Temporal.Now.* functions.
+pub type TemporalNowName {
+  NowInstant
+  NowTimeZoneId
+  NowPlainDateISO
+  NowPlainTimeISO
+  NowPlainDateTimeISO
+  NowZonedDateTimeISO
+}
+
+/// Temporal natives. Every variant carries a closed enum naming the target
+/// operation, so registration and dispatch cannot drift — a typo'd name is a
+/// compile error, not a runtime "unknown Temporal method" TypeError.
 pub type TemporalNativeFn {
   /// `new Temporal.<Type>(...)`
   TemporalCtor(kind: TemporalKind, protos: TemporalProtos)
   /// Static method, e.g. Temporal.PlainDate.from / .compare
-  TemporalStatic(kind: TemporalKind, name: String, protos: TemporalProtos)
+  TemporalStatic(
+    kind: TemporalKind,
+    name: TemporalStaticName,
+    protos: TemporalProtos,
+  )
   /// Prototype getter, e.g. get Temporal.PlainDate.prototype.year
-  TemporalGetterFn(getter: TemporalGetter, protos: TemporalProtos)
+  TemporalGetterFn(getter: TemporalGetter)
   /// Prototype method, e.g. Temporal.PlainDate.prototype.add
   TemporalMethod(method: TemporalMethodName, protos: TemporalProtos)
   /// Temporal.Now.* functions
-  TemporalNowFn(name: String, protos: TemporalProtos)
+  TemporalNowFn(name: TemporalNowName, protos: TemporalProtos)
 }
 
 /// What's stored in NativeFunction — either a dispatch-level or call-level native.
@@ -2858,6 +2882,12 @@ pub fn granularity_to_js_string(v: Granularity) -> String {
   }
 }
 
+/// One segment of a segmented string: its text, its UTF-16 start index in the
+/// input, and whether it is word-like (only meaningful for word granularity).
+pub type Segment {
+  Segment(text: String, index: Int, word_like: Bool)
+}
+
 /// Intl.DisplayNames resolved options (§12.1.2). `language_display` is only
 /// present for type "language".
 pub type DisplayNamesState {
@@ -3009,9 +3039,14 @@ pub type SegmentsState {
 }
 
 /// %SegmentIteratorPrototype% instance state: a `SegmentsState` plus the
-/// UTF-16 code-unit position the next segment starts at.
+/// segments not yet yielded. The full segmentation is computed once at
+/// iterator creation so `next()` is O(1) per step, not O(n).
 pub type SegmentIteratorState {
-  SegmentIteratorState(string: String, granularity: Granularity, position: Int)
+  SegmentIteratorState(
+    string: String,
+    granularity: Granularity,
+    remaining: List(Segment),
+  )
 }
 
 /// Identifies an Intl native function (ECMA-402).

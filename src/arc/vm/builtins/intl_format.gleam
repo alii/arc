@@ -13,18 +13,19 @@ import arc/vm/value.{
   type IntlUseGrouping, type ListFormatStyle, type ListFormatType,
   type NameWidth, type Notation, type NumStyle, type PluralType,
   type RoundingMode, type RoundingPriority, type RtfNumeric, type RtfStyle,
-  type SignDisplay, type TrailingZeroDisplay, type UnitDisplay, Cardinal,
-  CompactLong, CompactShort, Conjunction, CurAccounting, CurCode, CurName,
-  CurNarrowSymbol, CurStandard, CurSymbol, Disjunction, GGrapheme, GSentence,
-  GWord, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, LLong,
-  LNarrow, LShort, NotationCompact, NotationEngineering, NotationScientific,
-  NotationStandard, Ordinal, PriorityAuto, PriorityLessPrecision,
-  PriorityMorePrecision, RoundCeil, RoundExpand, RoundFloor, RoundHalfCeil,
-  RoundHalfEven, RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
-  RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort, SignAlways, SignAuto,
-  SignExceptZero, SignNegative, SignNever, StyleCurrency, StyleDecimal,
-  StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitList, UnitLong,
-  UnitNarrow, UnitShort, WLong, WNarrow, WShort,
+  type Segment, type SignDisplay, type TrailingZeroDisplay, type UnitDisplay,
+  Cardinal, CompactLong, CompactShort, Conjunction, CurAccounting, CurCode,
+  CurName, CurNarrowSymbol, CurStandard, CurSymbol, Disjunction, GGrapheme,
+  GSentence, GWord, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever,
+  LLong, LNarrow, LShort, NotationCompact, NotationEngineering,
+  NotationScientific, NotationStandard, Ordinal, PriorityAuto,
+  PriorityLessPrecision, PriorityMorePrecision, RoundCeil, RoundExpand,
+  RoundFloor, RoundHalfCeil, RoundHalfEven, RoundHalfExpand, RoundHalfFloor,
+  RoundHalfTrunc, RoundTrunc, RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort,
+  Segment, SignAlways, SignAuto, SignExceptZero, SignNegative, SignNever,
+  StyleCurrency, StyleDecimal, StylePercent, StyleUnit, TzdAuto,
+  TzdStripIfInteger, UnitList, UnitLong, UnitNarrow, UnitShort, WLong, WNarrow,
+  WShort,
 }
 import gleam/bool
 import gleam/float
@@ -1935,12 +1936,6 @@ pub fn pad2(n: Int) -> String {
 // ============================================================================
 // Segmentation (root rules, approximate)
 // ============================================================================
-
-/// One segment of a segmented string: its text, its UTF-16 start index in the
-/// input, and whether it is word-like (only meaningful for word granularity).
-pub type Segment {
-  Segment(text: String, index: Int, word_like: Bool)
-}
 
 /// The segments covering the string, in order.
 pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {

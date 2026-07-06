@@ -37,27 +37,28 @@ import arc/vm/value.{
   type LocaleGetterName, type LocaleMethodName, type LocaleState,
   type MonthWidth, type NameWidth, type Notation, type NumberFormatState,
   type NumericWidth, type PluralRulesState, type Ref,
-  type RelativeTimeFormatState, type SegmentIteratorState, type SegmenterState,
-  type SegmentsState, type TimeStyle, type TimeZoneNameWidth, BgCollator,
-  BgDateTimeFormat, BgNumberFormat, BigIntToLocaleString, BsDigital, BsLong,
-  BsNarrow, BsShort, Cardinal, CaseFirstFalse, CaseFirstLower, CaseFirstUpper,
-  CollatorData, CollatorState, CompactLong, CompactShort, Conjunction,
-  CsCollator, CsDateTimeFormat, CsDisplayNames, CsDurationFormat, CsListFormat,
-  CsLocale, CsNumberFormat, CsPluralRules, CsRelativeTimeFormat, CsSegmenter,
-  CurAccounting, CurCode, CurName, CurNarrowSymbol, CurStandard, CurSymbol,
-  DateTimeFormatData, DateTimeFormatState, DateToLocaleDateString,
-  DateToLocaleString, DateToLocaleTimeString, Disjunction, Dispatch,
-  DisplayAlways, DisplayAuto, DisplayNamesData, DisplayNamesState, DnCalendar,
-  DnCurrency, DnDateTimeField, DnLanguage, DnRegion, DnScript, DsFull, DsLong,
-  DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
-  DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
-  DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
-  DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
-  DurationUnitOptions, FbCode, FbNone, FixedZone, GGrapheme, GSentence, GWord,
-  GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, H11, H12, H23, H24,
-  HostZone, IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
-  IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
-  IntlFormat, IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
+  type RelativeTimeFormatState, type Segment, type SegmentIteratorState,
+  type SegmenterState, type SegmentsState, type TimeStyle,
+  type TimeZoneNameWidth, BgCollator, BgDateTimeFormat, BgNumberFormat,
+  BigIntToLocaleString, BsDigital, BsLong, BsNarrow, BsShort, Cardinal,
+  CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CollatorData, CollatorState,
+  CompactLong, CompactShort, Conjunction, CsCollator, CsDateTimeFormat,
+  CsDisplayNames, CsDurationFormat, CsListFormat, CsLocale, CsNumberFormat,
+  CsPluralRules, CsRelativeTimeFormat, CsSegmenter, CurAccounting, CurCode,
+  CurName, CurNarrowSymbol, CurStandard, CurSymbol, DateTimeFormatData,
+  DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
+  DateToLocaleTimeString, Disjunction, Dispatch, DisplayAlways, DisplayAuto,
+  DisplayNamesData, DisplayNamesState, DnCalendar, DnCurrency, DnDateTimeField,
+  DnLanguage, DnRegion, DnScript, DsFull, DsLong, DsMedium, DsShort,
+  DtfComponents, DtfDay, DtfDayPeriod, DtfEra, DtfFractionalSecondDigits,
+  DtfHour, DtfMinute, DtfMonth, DtfSecond, DtfTimeZoneName, DtfWeekday, DtfYear,
+  DurFractional, DurLong, DurNarrow, DurNumeric, DurShort, DurTwoDigit,
+  DurationFormatData, DurationFormatState, DurationUnitOptions, FbCode, FbNone,
+  FixedZone, GGrapheme, GSentence, GWord, GroupingAlways, GroupingAuto,
+  GroupingMin2, GroupingNever, H11, H12, H23, H24, HostZone, IntlBoundGetter,
+  IntlBoundMethod, IntlCollator, IntlConstructor, IntlDateTimeFormat,
+  IntlDigitOptions, IntlDisplayNames, IntlDurationFormat, IntlFormat,
+  IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
   IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat, IntlLocale,
   IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat,
   IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
@@ -6606,7 +6607,7 @@ fn segments_iterator(
       SegmentIteratorData(SegmentIteratorState(
         string: sg.string,
         granularity: sg.granularity,
-        position: 0,
+        remaining: fmt.segment_string(sg.string, sg.granularity),
       ))
     let #(heap, ref) =
       common.alloc_wrapper(state.heap, IntlObject(data: iter), iter_proto)
@@ -6618,7 +6619,7 @@ fn make_segment_data(
   state: State(host),
   input: String,
   granularity: Granularity,
-  seg: fmt.Segment,
+  seg: Segment,
 ) -> #(State(host), JsValue) {
   let base = [
     #("segment", JsString(seg.text)),
@@ -6650,7 +6651,7 @@ fn segments_containing(
     True -> Ok(#(JsUndefined, state))
     False -> {
       let found =
-        list.fold(segments, None, fn(acc, seg: fmt.Segment) {
+        list.fold(segments, None, fn(acc, seg: Segment) {
           case seg.index <= idx {
             True -> Some(seg)
             False -> acc
@@ -6672,27 +6673,21 @@ fn segment_iterator_next(
   ref: Ref,
   it: SegmentIteratorState,
 ) -> Result(#(JsValue, State(host)), Thrown(host)) {
-  let input = it.string
-  let granularity = it.granularity
-  let position = it.position
-  let segments = fmt.segment_string(input, granularity)
-  let next_seg =
-    list.find(segments, fn(seg: fmt.Segment) { seg.index >= position })
-  case next_seg {
-    Error(Nil) -> {
+  case it.remaining {
+    [] -> {
       let #(state, res) = iter_result(state, JsUndefined, True)
       Ok(#(res, state))
     }
-    Ok(seg) -> {
-      let new_pos = seg.index + fmt.utf16_len(seg.text)
+    [seg, ..rest] -> {
       let heap =
         write_intl_data(
           state.heap,
           ref,
-          SegmentIteratorData(SegmentIteratorState(..it, position: new_pos)),
+          SegmentIteratorData(SegmentIteratorState(..it, remaining: rest)),
         )
       let state = State(..state, heap:)
-      let #(state, data) = make_segment_data(state, input, granularity, seg)
+      let #(state, data) =
+        make_segment_data(state, it.string, it.granularity, seg)
       let #(state, res) = iter_result(state, data, False)
       Ok(#(res, state))
     }
