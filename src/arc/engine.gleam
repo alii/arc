@@ -325,7 +325,7 @@ pub fn with_state(
   engine: Engine(host),
   body: fn(state.State(host)) -> #(state.State(host), a),
 ) -> #(Engine(host), a) {
-  with_state_with(engine, body, event_loop.finish)
+  with_state_with(engine, body, event_loop.drain_jobs)
 }
 
 /// Like `with_state` but the caller supplies the post-body driver — the same
@@ -398,7 +398,7 @@ pub fn eval(
   engine: Engine(host),
   source: String,
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
-  eval_with(engine, source, event_loop.finish)
+  eval_with(engine, source, event_loop.drain_jobs)
 }
 
 /// Like `eval` but the caller supplies the post-script driver. `finish`
@@ -465,11 +465,18 @@ pub fn eval_module(
   resolve: module_host.ResolveFn,
   load: module_host.LoadFn,
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
-  eval_module_with(engine, specifier, source, resolve, load, event_loop.finish)
+  eval_module_with(
+    engine,
+    specifier,
+    source,
+    resolve,
+    load,
+    event_loop.drain_jobs,
+  )
 }
 
 /// Like `eval_module` but the caller supplies the post-evaluation driver
-/// (an embedder macrotask loop, or `event_loop.finish` for microtasks only).
+/// (an embedder macrotask loop, or `event_loop.drain_jobs` for microtasks only).
 ///
 /// Every module body in the bundle — including ones reached via dynamic
 /// `import()` — boots with the engine's `host_hooks`, so a module's top level
@@ -511,10 +518,10 @@ pub fn eval_module_with(
     )
   case result {
     Ok(module.EvaluatedBundle(value:, namespace:)) ->
-      Ok(#(ModuleReturned(value:, namespace: Namespace(namespace)), Engine(
-        ..engine,
-        heap:,
-      )))
+      Ok(#(
+        ModuleReturned(value:, namespace: Namespace(namespace)),
+        Engine(..engine, heap:),
+      ))
     // "The module's top level threw" is the same event `eval`/`call` report as
     // `Threw` — not an engine failure. The heap the throw left behind is
     // threaded forward, so the engine stays usable.
@@ -551,7 +558,7 @@ pub fn call(
   this: JsValue,
   args: List(JsValue),
 ) -> Result(#(Outcome, Engine(host)), state.VmError) {
-  call_with(engine, callee, this, args, event_loop.finish)
+  call_with(engine, callee, this, args, event_loop.drain_jobs)
 }
 
 /// Like `call` but the caller supplies the post-call driver.

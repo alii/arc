@@ -7902,7 +7902,13 @@ fn run_module(
     Error(err) -> Error("module error: " <> string.inspect(err))
     Ok(bundle) ->
       case
-        module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
+        module.evaluate_bundle(
+          bundle,
+          h,
+          b,
+          global_object,
+          event_loop.drain_jobs,
+        )
       {
         #(new_heap, Ok(module.EvaluatedBundle(value: val, ..))) ->
           Ok(#(Ok(val), new_heap))
@@ -8061,7 +8067,13 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   // Evaluate the module, passing in REPL globals
   case
-    module.evaluate_bundle(bundle, h, b, env.global_object, event_loop.finish)
+    module.evaluate_bundle(
+      bundle,
+      h,
+      b,
+      env.global_object,
+      event_loop.drain_jobs,
+    )
   {
     #(_heap, Ok(module.EvaluatedBundle(value: val, ..))) -> {
       let assert True = val == JsString("hello from harness")
@@ -8098,7 +8110,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       fn(_resolved) { Error(load_error.LoadForbidden) },
     )
   let assert #(h, Ok(module.EvaluatedBundle(namespace: ns_ref, ..))) =
-    module.evaluate_bundle(bundle, h, b, global_object, event_loop.finish)
+    module.evaluate_bundle(bundle, h, b, global_object, event_loop.drain_jobs)
   let namespace = value.JsObject(ns_ref)
 
   // Read `receive` off the namespace — no VM State needed.
@@ -8115,7 +8127,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       b,
       global_object,
       host_hooks.default_host_hooks(),
-      event_loop.finish,
+      event_loop.drain_jobs,
     )
   let assert True = v1 == value.from_int(5)
 
@@ -8129,7 +8141,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       b,
       global_object,
       host_hooks.default_host_hooks(),
-      event_loop.finish,
+      event_loop.drain_jobs,
     )
   let assert True = v2 == value.from_int(8)
 
@@ -8145,7 +8157,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       b,
       global_object,
       host_hooks.default_host_hooks(),
-      event_loop.finish,
+      event_loop.drain_jobs,
     )
   let assert True = v3 == value.from_int(8)
   Nil
@@ -8540,7 +8552,7 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
   let assert #(h, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
-    module.evaluate_bundle(first, h, b, global_object, event_loop.finish)
+    module.evaluate_bundle(first, h, b, global_object, event_loop.drain_jobs)
 
   // Same specifier, source has since gained an export.
   let assert Ok(second) =
@@ -8584,7 +8596,7 @@ pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
   let assert #(h, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
-    module.evaluate_bundle(first, h, b, global_object, event_loop.finish)
+    module.evaluate_bundle(first, h, b, global_object, event_loop.drain_jobs)
 
   // Same specifier, source has since gained `export { y } from './dep.js'`.
   let dep_resolve = fn(dep, _parent) {

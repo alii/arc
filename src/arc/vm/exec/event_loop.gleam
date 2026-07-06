@@ -23,11 +23,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// Drain the microtask queue.
-pub fn finish(state: State(host)) -> State(host) {
-  drain_jobs(state)
-}
-
 /// Print warnings for any promises that were rejected without a handler.
 /// Called after all jobs have been drained (like QuickJS's
 /// js_std_promise_rejection_check).
@@ -117,10 +112,8 @@ fn do_drain_jobs(state: State(host), yield_to_embedder: Bool) -> State(host) {
       // The list is threaded through untouched and reported by whichever
       // later drain reaches `finish_drain`.
       use <- hand_back_if(yield_to_embedder && embedder_wake_pending, state)
-      case earliest_deadline(state) {
-        Some(deadline) -> {
-          let wait_ms =
-            int.max(deadline - state.ctx.host_hooks.monotonic_now(), 0) + 1
+      case next_deadline_timeout(state) {
+        Some(wait_ms) -> {
           // Plain bounded sleep until the earliest deadline — never a
           // mailbox receive in core. A cross-process notify that lands
           // during the sleep sits in the owning embedder's mailbox
@@ -174,20 +167,12 @@ fn finish_drain(state: State(host)) -> State(host) {
   State(..state, unhandled_rejections: [])
 }
 
-/// Earliest pending Atomics.waitAsync waiter deadline, if any.
-fn earliest_deadline(state: State(host)) -> Option(Int) {
-  builtins_atomics.earliest_waiter_deadline(state)
-}
-
 /// Milliseconds until the earliest pending Atomics.waitAsync deadline, if any.
 /// Embedder macrotask loops that own a mailbox receive use this as their
 /// receive timeout so waitAsync deadlines and mailbox IO interleave correctly.
 pub fn next_deadline_timeout(state: State(host)) -> Option(Int) {
-  case earliest_deadline(state) {
-    Some(deadline) ->
-      Some(int.max(deadline - state.ctx.host_hooks.monotonic_now(), 0) + 1)
-    None -> None
-  }
+  use deadline <- option.map(builtins_atomics.earliest_waiter_deadline(state))
+  int.max(deadline - state.ctx.host_hooks.monotonic_now(), 0) + 1
 }
 
 /// Execute a single job from the promise job queue.

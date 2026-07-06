@@ -33,7 +33,7 @@ import gleam/set
 
 /// Result of module evaluation -- includes locals for export extraction.
 /// `jobs` carries any promise jobs still queued when the supplied `finish`
-/// driver returned — empty for draining drivers (`event_loop.finish`), the
+/// driver returned — empty for draining drivers (`event_loop.drain_jobs`), the
 /// leftover microtasks for a non-draining driver (dynamic import evaluates
 /// modules inside an already-running event loop and must hand jobs back to
 /// the host queue instead of draining them nested, where host continuations
@@ -94,13 +94,13 @@ pub fn run(
   builtins: Builtins,
   global_object: Ref,
 ) -> Result(#(Result(JsValue, JsValue), Heap(host)), VmError) {
-  run_with(func, heap, builtins, global_object, event_loop.finish)
+  run_with(func, heap, builtins, global_object, event_loop.drain_jobs)
 }
 
 /// Like `run` but the caller supplies the post-script driver. `finish`
 /// receives the State after the top-level script returns and is expected
 /// to drain microtasks plus whatever macrotask loop the embedder owns
-/// (e.g. `arc/beam.run`). Core's `event_loop.finish` is the no-macrotask
+/// (e.g. `arc/beam.run`). Core's `event_loop.drain_jobs` is the no-macrotask
 /// default. Boots with `host_hooks.default_host_hooks()`.
 pub fn run_with(
   func: FuncTemplate,
