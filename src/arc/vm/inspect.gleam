@@ -319,11 +319,13 @@ fn error_display(heap: Heap(host), ref: value.Ref) -> Option(String) {
       Some(stack)
     _ -> None
   }
-  case option.or(slot_stack, error_property(heap, ref, "stack")) {
+  case option.or(slot_stack, error_property(heap, ref, "stack", 100)) {
     Some(stack) -> Some(stack)
     None -> {
-      let name = error_property(heap, ref, "name") |> option.unwrap("Error")
-      let message = error_property(heap, ref, "message") |> option.unwrap("")
+      let name =
+        error_property(heap, ref, "name", 100) |> option.unwrap("Error")
+      let message =
+        error_property(heap, ref, "message", 100) |> option.unwrap("")
       Some(case name, message {
         "", _ -> message
         _, "" -> name
@@ -370,7 +372,9 @@ fn error_property(
   heap: Heap(host),
   ref: value.Ref,
   key: String,
+  fuel: Int,
 ) -> Option(String) {
+  use <- bool.guard(fuel <= 0, None)
   case heap.read(heap, ref) {
     Some(ObjectSlot(properties:, prototype:, ..)) ->
       case dict.get(properties, Named(key)) {
@@ -378,7 +382,7 @@ fn error_property(
         Ok(_) -> None
         Error(Nil) ->
           case prototype {
-            Some(parent) -> error_property(heap, parent, key)
+            Some(parent) -> error_property(heap, parent, key, fuel - 1)
             None -> None
           }
       }
