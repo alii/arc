@@ -10,32 +10,21 @@ encode(Str, PreserveUriChars) when is_binary(Str) ->
 
 encode_binary(<<>>, _Preserve, Acc) ->
     Acc;
-encode_binary(<<C, Rest/binary>>, Preserve, Acc) when
-    (C >= $A andalso C =< $Z);
-    (C >= $a andalso C =< $z);
-    (C >= $0 andalso C =< $9);
-    C =:= $-; C =:= $_; C =:= $.; C =:= $!; C =:= $~;
-    C =:= $*; C =:= $'; C =:= $(; C =:= $) ->
-    %% Unreserved chars — never encoded
-    encode_binary(Rest, Preserve, <<Acc/binary, C>>);
-encode_binary(<<C, Rest/binary>>, true, Acc) when
-    C =:= $;; C =:= $/; C =:= $?; C =:= $:; C =:= $@;
-    C =:= $&; C =:= $=; C =:= $+; C =:= $$; C =:= $,;
-    C =:= $# ->
-    %% URI reserved chars — only preserved by encodeURI
-    encode_binary(Rest, true, <<Acc/binary, C>>);
-encode_binary(Str, Preserve, Acc) ->
-    %% Get next UTF-8 codepoint and percent-encode all its bytes
-    case Str of
-        <<C/utf8, Rest/binary>> ->
-            Bytes = unicode:characters_to_binary([C], utf8),
-            Encoded = percent_encode_bytes(Bytes, <<>>),
-            encode_binary(Rest, Preserve, <<Acc/binary, Encoded/binary>>);
-        <<B, Rest/binary>> ->
-            %% Invalid UTF-8 byte — encode it raw
-            Hex = percent_encode_byte(B),
-            encode_binary(Rest, Preserve, <<Acc/binary, Hex/binary>>)
-    end.
+encode_binary(<<C, Rest/binary>>, Preserve, Acc) when C < 16#80 ->
+    case is_unreserved(C) orelse (Preserve andalso is_reserved(C)) of
+        true -> encode_binary(Rest, Preserve, <<Acc/binary, C>>);
+        false ->
+            encode_binary(Rest, Preserve, <<Acc/binary, (percent_encode_byte(C))/binary>>)
+    end;
+encode_binary(<<_/utf8, Rest/binary>> = Bin, Preserve, Acc) ->
+    %% Multi-byte UTF-8: slice the codepoint's bytes straight from the source
+    %% and percent-encode each. A non-UTF-8 byte matches no clause and
+    %% crashes with function_clause — see arc_string_ffi's INVALID UTF-8
+    %% POLICY: a JS string is always well-formed UTF-8, so a bad byte here is
+    %% a boundary bug and must not be silently encoded.
+    CpBytes = binary:part(Bin, 0, byte_size(Bin) - byte_size(Rest)),
+    Encoded = percent_encode_bytes(CpBytes, <<>>),
+    encode_binary(Rest, Preserve, <<Acc/binary, Encoded/binary>>).
 
 percent_encode_bytes(<<>>, Acc) ->
     Acc;
@@ -150,7 +139,25 @@ take_continuations(<<$%, Rest/binary>>, N, Acc) ->
 take_continuations(_, _, _) ->
     error.
 
-%% uriReserved plus '#': the escapes decodeURI must leave intact.
+%% uriUnescaped (§19.2.6.1): the characters both encodeURI and
+%% encodeURIComponent leave untouched.
+is_unreserved(C) when C >= $A, C =< $Z -> true;
+is_unreserved(C) when C >= $a, C =< $z -> true;
+is_unreserved(C) when C >= $0, C =< $9 -> true;
+is_unreserved($-) -> true;
+is_unreserved($_) -> true;
+is_unreserved($.) -> true;
+is_unreserved($!) -> true;
+is_unreserved($~) -> true;
+is_unreserved($*) -> true;
+is_unreserved($') -> true;
+is_unreserved($() -> true;
+is_unreserved($)) -> true;
+is_unreserved(_) -> false.
+
+%% uriReserved plus '#': the set encodeURI leaves untouched and decodeURI
+%% leaves as its literal `%XY` escape. One definition — Encode and Decode
+%% cannot drift.
 is_reserved($;) -> true;
 is_reserved($/) -> true;
 is_reserved($?) -> true;
