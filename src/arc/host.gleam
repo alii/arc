@@ -25,7 +25,7 @@ import arc/vm/heap
 import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/ops/operators
-import arc/vm/state.{type Heap, type HostFn, type State, State}
+import arc/vm/state.{type HostFn, type State, State}
 import arc/vm/value.{
   type JsValue, type Ref, Finite, HostObject, Infinity, JsBool, JsNumber,
   JsObject, JsString, NaN, NegInfinity, ObjectSlot,
@@ -228,12 +228,12 @@ pub opaque type Ticket {
 /// your host function so JS can `await` it; keep the `Ticket` to pass to
 /// `resume` once your external work completes.
 pub fn suspend(s: State(host)) -> #(State(host), JsValue, Ticket) {
-  let #(heap, obj_ref, data_ref) =
+  let #(heap, builtins_promise.PromiseRefs(promise:, data:)) =
     builtins_promise.create_promise(s.heap, s.builtins.promise.prototype)
   #(
     state.State(..s, heap:, outstanding: s.outstanding + 1),
-    JsObject(obj_ref),
-    Ticket(data_ref:),
+    JsObject(promise),
+    Ticket(data_ref: data),
   )
 }
 
@@ -260,8 +260,10 @@ pub fn resume(
     builtins_promise.settle_outcome(s, data_ref, outcome)
   case settle_outcome {
     // The one settle per suspend: balance the counter.
-    builtins_promise.Transitioned(_) ->
-      #(state.State(..s, outstanding: s.outstanding - 1), Resumed)
+    builtins_promise.Transitioned(_) -> #(
+      state.State(..s, outstanding: s.outstanding - 1),
+      Resumed,
+    )
     // A double resume of the same ticket: legitimately does nothing.
     builtins_promise.AlreadySettled -> #(s, AlreadySettled)
     // A stale ticket: the promise it named is gone, so nothing was settled
@@ -431,11 +433,16 @@ pub fn alloc_host_object(
 }
 
 /// Read the embedder value out of a host object — fully typed, no `Dynamic`,
-/// no coerce, no decode. `None` if `ref` is not a `HostObject`. The embedder
+/// no coerce, no decode. `None` if `val` is not a `HostObject`. The embedder
 /// `case`-matches the returned `host` with full exhaustiveness checking.
-pub fn read_host(h: Heap(host), ref: Ref) -> Option(host) {
-  case heap.read(h, ref) {
-    option.Some(ObjectSlot(kind: HostObject(value:), ..)) -> option.Some(value)
+pub fn read_host(s: State(host), val: JsValue) -> Option(host) {
+  case val {
+    JsObject(ref) ->
+      case heap.read(s.heap, ref) {
+        option.Some(ObjectSlot(kind: HostObject(value:), ..)) ->
+          option.Some(value)
+        _ -> option.None
+      }
     _ -> option.None
   }
 }

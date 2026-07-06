@@ -202,7 +202,10 @@ pub fn evaluate_import_call(
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
   // Step 4: NewPromiseCapability(%Promise%).
-  let #(heap, builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref)) =
+  let #(
+    heap,
+    builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref),
+  ) =
     builtins_promise.create_promise(
       state.heap,
       state.builtins.promise.prototype,
@@ -242,7 +245,10 @@ pub fn evaluate_defer_import_call(
   specifier: JsValue,
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  let #(heap, builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref)) =
+  let #(
+    heap,
+    builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref),
+  ) =
     builtins_promise.create_promise(
       state.heap,
       state.builtins.promise.prototype,
@@ -258,7 +264,10 @@ pub fn evaluate_defer_import_call(
       // up `then`) — hand the hook the resolving functions (4th/5th
       // arguments) so it can settle later without routing an intermediate
       // promise through an observable thenable adoption.
-      let #(heap, builtins_promise.ResolvingFns(resolve: resolve_fn, reject: reject_fn)) =
+      let #(
+        heap,
+        builtins_promise.ResolvingFns(resolve: resolve_fn, reject: reject_fn),
+      ) =
         builtins_promise.create_resolving_functions(
           state.heap,
           state.builtins.function.prototype,
@@ -294,7 +303,10 @@ pub fn evaluate_source_import_call(
   specifier: JsValue,
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
-  let #(heap, promise_ref, data_ref) =
+  let #(
+    heap,
+    builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref),
+  ) =
     builtins_promise.create_promise(
       state.heap,
       state.builtins.promise.prototype,
@@ -351,7 +363,10 @@ fn enqueue_import_job(
   data_ref: Ref,
   settle: fn(State(host)) -> #(State(host), Result(JsValue, JsValue)),
 ) -> State(host) {
-  let #(heap, resolve_fn, reject_fn) =
+  let #(
+    heap,
+    builtins_promise.ResolvingFns(resolve: resolve_fn, reject: reject_fn),
+  ) =
     builtins_promise.create_resolving_functions(
       state.heap,
       state.builtins.function.prototype,

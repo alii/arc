@@ -878,7 +878,10 @@ fn do_wait(
     // wake it). Un-notified infinite waiters stay pending, like a pending
     // host task.
     False, _, AsyncWait -> {
-      let #(h, builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref)) =
+      let #(
+        h,
+        builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref),
+      ) =
         builtins_promise.create_promise(
           state.heap,
           state.builtins.promise.prototype,

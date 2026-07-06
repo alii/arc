@@ -43,6 +43,41 @@ pub fn return_promise(
   )
 }
 
+/// Allocate a `CounterSlot` holding `count` — the promise combinators'
+/// remainingElementsCount Record { [[Value]]: n }.
+fn alloc_counter(h: Heap(host), count: Int) -> #(Heap(host), Ref) {
+  heap.alloc(h, value.CounterSlot(count:))
+}
+
+/// remainingElementsCount += 1. There is nothing to report: an increment can
+/// never take the counter to zero.
+fn increment_counter(h: Heap(host), ref: Ref) -> Heap(host) {
+  let #(h, _count) = adjust_counter(h, ref, 1)
+  h
+}
+
+/// remainingElementsCount -= 1, reporting whether it reached zero (i.e.
+/// whether this decrement is the one that settles the combinator's promise).
+fn decrement_counter(h: Heap(host), ref: Ref) -> #(Heap(host), Bool) {
+  let #(h, count) = adjust_counter(h, ref, -1)
+  #(h, count <= 0)
+}
+
+/// A counter ref that does not point at a `CounterSlot` is an engine bug —
+/// counter refs are only ever minted by `alloc_counter` and only ever handed
+/// to these functions, and the GC traces them from the element closures that
+/// hold them. Panicking beats the old silent no-op, which lost the decrement
+/// and left the combinator's promise pending forever.
+fn adjust_counter(h: Heap(host), ref: Ref, delta: Int) -> #(Heap(host), Int) {
+  case heap.read(h, ref) {
+    Some(value.CounterSlot(count:)) -> {
+      let count = count + delta
+      #(heap.write(h, ref, value.CounterSlot(count:)), count)
+    }
+    _ -> panic as "promises.adjust_counter: ref does not point to a CounterSlot"
+  }
+}
+
 // ============================================================================
 // Promise combinator machinery — spec records (ES2024 §27.2.4.1-.5)
 // ============================================================================
@@ -353,7 +388,7 @@ fn final_resolve_values(
   values_ref: Ref,
   resolve: JsValue,
 ) -> Result(State(host), CombinatorError(host)) {
-  let #(h, is_zero) = heap.decrement_counter(state.heap, remaining_ref)
+  let #(h, is_zero) = decrement_counter(state.heap, remaining_ref)
   let state = State(..state, heap: h)
   case is_zero {
     False -> Ok(state)
@@ -845,18 +880,18 @@ fn resolve_static_intrinsic(
     {
       // Create new promise and resolve it (thenable → job, throwing `then`
       // getter → reject, anything else → fulfill).
-      let #(h, promise_ref, data_ref) =
+      let #(h, builtins_promise.PromiseRefs(promise:, data:)) =
         builtins_promise.create_promise(
           state.heap,
           state.builtins.promise.prototype,
         )
       builtins_promise.resolve_promise(
         State(..state, heap: h),
-        promise_ref,
-        data_ref,
+        promise,
+        data,
         val,
       )
-      |> return_promise(promise_ref, rest_stack)
+      |> return_promise(promise, rest_stack)
     }
   }
 }
@@ -873,13 +908,13 @@ pub fn call_native_promise_reject_static(
   // custom constructors go through NewPromiseCapability + cap.[[Reject]].
   case this == JsObject(state.builtins.promise.constructor) {
     True -> {
-      let #(h, promise_ref, data_ref) =
+      let #(h, builtins_promise.PromiseRefs(promise:, data:)) =
         builtins_promise.create_promise(
           state.heap,
           state.builtins.promise.prototype,
         )
-      builtins_promise.reject_promise(State(..state, heap: h), data_ref, reason)
-      |> return_promise(promise_ref, rest_stack)
+      builtins_promise.reject_promise(State(..state, heap: h), data, reason)
+      |> return_promise(promise, rest_stack)
     }
     False ->
       case new_capability_from_constructor(state, this) {
@@ -920,7 +955,7 @@ pub fn call_native_promise_all(
   // §27.2.4.1.1 PerformPromiseAll
   let #(h, values_ref) =
     common.alloc_array(state.heap, [], state.builtins.array.prototype)
-  let #(h, remaining_ref) = heap.alloc_counter(h, 1)
+  let #(h, remaining_ref) = alloc_counter(h, 1)
   let b = state.builtins
   perform_combinator_loop(
     State(..state, heap: h),
@@ -948,7 +983,7 @@ pub fn call_native_promise_all(
           ),
         )
       // Step 4.r: remainingElementsCount += 1.
-      let h = heap.increment_counter(h, remaining_ref)
+      let h = increment_counter(h, remaining_ref)
       #(h, resolve_fn, cap.reject)
     },
     fn(state) {
@@ -1005,7 +1040,7 @@ pub fn call_native_promise_all_settled(
   // §27.2.4.2.1 PerformPromiseAllSettled
   let #(h, values_ref) =
     common.alloc_array(state.heap, [], state.builtins.array.prototype)
-  let #(h, remaining_ref) = heap.alloc_counter(h, 1)
+  let #(h, remaining_ref) = alloc_counter(h, 1)
   let b = state.builtins
   perform_combinator_loop(
     State(..state, heap: h),
@@ -1043,7 +1078,7 @@ pub fn call_native_promise_all_settled(
             resolve: cap.resolve,
           ),
         )
-      let h = heap.increment_counter(h, remaining_ref)
+      let h = increment_counter(h, remaining_ref)
       #(h, resolve_fn, reject_fn)
     },
     fn(state) {
@@ -1071,7 +1106,7 @@ pub fn call_native_promise_any(
   // §27.2.4.3.1 PerformPromiseAny
   let #(h, errors_ref) =
     common.alloc_array(state.heap, [], state.builtins.array.prototype)
-  let #(h, remaining_ref) = heap.alloc_counter(h, 1)
+  let #(h, remaining_ref) = alloc_counter(h, 1)
   let b = state.builtins
   perform_combinator_loop(
     State(..state, heap: h),
@@ -1096,13 +1131,13 @@ pub fn call_native_promise_any(
             reject: cap.reject,
           ),
         )
-      let h = heap.increment_counter(h, remaining_ref)
+      let h = increment_counter(h, remaining_ref)
       #(h, cap.resolve, reject_fn)
     },
     fn(state) {
       // Step 4.d.ii: remaining -= 1; at zero, throw AggregateError — the
       // abrupt completion reaches IfAbruptRejectPromise with [[Done]] = true.
-      let #(h, is_zero) = heap.decrement_counter(state.heap, remaining_ref)
+      let #(h, is_zero) = decrement_counter(state.heap, remaining_ref)
       let errors = heap.read_array_values(h, errors_ref)
       case is_zero {
         False -> Ok(State(..state, heap: h))
@@ -1174,7 +1209,7 @@ fn perform_promise_all_keyed(
         common.alloc_array(state.heap, [], state.builtins.array.prototype)
       let #(h, values_ref) =
         common.alloc_array(h, [], state.builtins.array.prototype)
-      let #(h, remaining_ref) = heap.alloc_counter(h, 1)
+      let #(h, remaining_ref) = alloc_counter(h, 1)
       let loop =
         KeyedLoop(
           c:,
@@ -1226,7 +1261,7 @@ fn perform_keyed_loop(
   case all_keys {
     [] -> {
       // Step 7: remainingElementsCount -= 1.
-      let #(h, is_zero) = heap.decrement_counter(state.heap, loop.remaining_ref)
+      let #(h, is_zero) = decrement_counter(state.heap, loop.remaining_ref)
       let state = State(..state, heap: h)
       case is_zero {
         False -> Ok(state)
@@ -1321,7 +1356,7 @@ fn perform_keyed_loop(
               )
           }
           // Step 6.b.xii: remainingElementsCount += 1.
-          let h = heap.increment_counter(h, loop.remaining_ref)
+          let h = increment_counter(h, loop.remaining_ref)
           let state = State(..state, heap: h)
           // Step 6.b.xiii: ? Invoke(nextPromise, "then",
           // «onFulfilled, onRejected»).
@@ -1565,7 +1600,7 @@ fn promise_combinator_decrement(
   remaining_ref: Ref,
   on_zero: fn(State(host)) -> Result(#(State(host), JsValue), StepExit(host)),
 ) -> Result(#(State(host), JsValue), StepExit(host)) {
-  let #(h, is_zero) = heap.decrement_counter(state.heap, remaining_ref)
+  let #(h, is_zero) = decrement_counter(state.heap, remaining_ref)
   let state = State(..state, heap: h)
   case is_zero {
     True -> on_zero(state)
@@ -1672,24 +1707,27 @@ pub fn setup_await(
     // must resolve through their own `then` (PromiseResolveThenableJob), a
     // throwing `then` getter rejects, plain values fulfill directly.
     None -> {
-      let #(h, promise_ref, dr) =
+      let #(h, builtins_promise.PromiseRefs(promise:, data:)) =
         builtins_promise.create_promise(state.heap, b.promise.prototype)
       let state =
         builtins_promise.resolve_promise(
           State(..state, heap: h),
-          promise_ref,
-          dr,
+          promise,
+          data,
           awaited,
         )
-      #(state, dr)
+      #(state, data)
     }
   }
   let h = state.heap
   let #(h, on_fulfill) = alloc_resume(h, b, make_resume(False))
   let #(h, on_reject) = alloc_resume(h, b, make_resume(True))
-  let #(h, child_ref, child_data) =
+  let #(h, builtins_promise.PromiseRefs(promise: child_ref, data: child_data)) =
     builtins_promise.create_promise(h, b.promise.prototype)
-  let #(h, child_resolve, child_reject) =
+  let #(
+    h,
+    builtins_promise.ResolvingFns(resolve: child_resolve, reject: child_reject),
+  ) =
     builtins_promise.create_resolving_functions(
       h,
       b.function.prototype,
@@ -1965,8 +2003,10 @@ fn promise_resolve_then_with_capability(
         cap_reject,
       )
     None -> {
-      let #(h, wrap_ref, wrap_data_ref) =
-        builtins_promise.create_promise(h, state.builtins.promise.prototype)
+      let #(
+        h,
+        builtins_promise.PromiseRefs(promise: wrap_ref, data: wrap_data_ref),
+      ) = builtins_promise.create_promise(h, state.builtins.promise.prototype)
       let state =
         builtins_promise.resolve_promise(
           State(..state, heap: h),

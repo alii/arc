@@ -1212,13 +1212,11 @@ fn copy_name_and_length(
       // Step 3: targetHasLength = ? HasOwnProperty(Target, "length") —
       // via [[GetOwnProperty]] so proxy getOwnPropertyDescriptor traps
       // (and revoked proxies) are observable.
-      use len_desc, state <- state.try_op(
-        mop.get_own_property_stateful(
-          state,
-          tref,
-          JsString("length"),
-        ),
-      )
+      use len_desc, state <- state.try_op(mop.get_own_property_stateful(
+        state,
+        tref,
+        JsString("length"),
+      ))
       let has_len = option.is_some(len_desc)
       // Step 4: if present, targetLen = ? Get(Target, "length").
       use len_val, state <- state.try_op(case has_len {
@@ -1443,12 +1441,9 @@ fn wrapped_function_call(
     into_target,
     this,
   ))
-  use wrapped_args, state <- state.try_then(wrap_all(
-    state,
-    into_target,
-    args,
-    [],
-  ))
+  use wrapped_args, state <- state.try_then(
+    wrap_all(state, into_target, args, []),
+  )
   // Step 8: Call(target, wrappedThisArgument, wrappedArgs) in the target
   // function's realm.
   let #(state, call_res) =
@@ -1531,14 +1526,14 @@ fn shadow_realm_import_value(
               "ShadowRealm.prototype.importValue: module loading is not "
                 <> "available in this host",
             )
-          let #(h, promise_ref, data_ref) =
+          let #(h, builtins_promise.PromiseRefs(promise:, data:)) =
             builtins_promise.create_promise(
               state.heap,
               caller_builtins.promise.prototype,
             )
           let state = State(..state, heap: h)
-          let state = builtins_promise.reject_promise(state, data_ref, err)
-          #(state, Ok(JsObject(promise_ref)))
+          let state = builtins_promise.reject_promise(state, data, err)
+          #(state, Ok(JsObject(promise)))
         }
         _ ->
           state.type_error_with_builtins(

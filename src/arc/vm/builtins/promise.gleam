@@ -6,8 +6,8 @@ import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{
-  type Job, type JsValue, type Ref, BoxSlot, Call, JsBool,
-  JsObject, PromiseCatch, PromiseConstructor, PromiseFinally, PromiseObject,
+  type Job, type JsValue, type Ref, BoxSlot, Call, JsBool, JsObject,
+  PromiseCatch, PromiseConstructor, PromiseFinally, PromiseObject,
   PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
 }
@@ -86,12 +86,10 @@ pub fn init(
 /// PromiseConstructor handler, not here. This function only creates
 /// the promise object. We split the internal slots into a separate PromiseSlot
 /// heap entry (data_ref) pointed to by the ObjectSlot's PromiseObject kind.
-///
-/// Returns (heap, object_ref, data_ref).
 pub fn create_promise(
   h: Heap(host),
   promise_proto: Ref,
-) -> #(Heap(host), Ref, Ref) {
+) -> #(Heap(host), PromiseRefs) {
   // Steps 4-7: Initialize internal slots
   let #(h, data_ref) =
     heap.alloc(
@@ -114,7 +112,21 @@ pub fn create_promise(
       PromiseObject(promise_data: data_ref),
       promise_proto,
     )
-  #(h, obj_ref, data_ref)
+  #(h, PromiseRefs(promise: obj_ref, data: data_ref))
+}
+
+/// The two heap refs `create_promise` allocates: the visible promise object
+/// and its internal PromiseSlot. Labelled fields so a promise/data swap is a
+/// compile error, not a silent bug the way `#(Heap, Ref, Ref)` allowed.
+pub type PromiseRefs {
+  PromiseRefs(promise: Ref, data: Ref)
+}
+
+/// The `{ [[Resolve]], [[Reject]] }` record `create_resolving_functions`
+/// returns (§27.2.1.3 step 13). Labelled fields so a resolve/reject swap is a
+/// compile error, not a silent bug the way `#(Heap, JsValue, JsValue)` allowed.
+pub type ResolvingFns {
+  ResolvingFns(resolve: JsValue, reject: JsValue)
 }
 
 /// ES2024 §27.2.1.3 CreateResolvingFunctions(promise)
@@ -137,14 +149,12 @@ pub fn create_promise(
 /// (mutable shared reference). The [[Promise]] slot is captured as both
 /// promise_ref (object) and data_ref (internal PromiseSlot) to avoid
 /// re-traversing the heap.
-///
-/// Returns (heap, resolve_value, reject_value).
 pub fn create_resolving_functions(
   h: Heap(host),
   function_proto: Ref,
   promise_ref: Ref,
   data_ref: Ref,
-) -> #(Heap(host), JsValue, JsValue) {
+) -> #(Heap(host), ResolvingFns) {
   // Step 1: Let alreadyResolved be the Record { [[Value]]: false }.
   let #(h, already_resolved_ref) = heap.alloc(h, BoxSlot(value: JsBool(False)))
 
@@ -171,7 +181,13 @@ pub fn create_resolving_functions(
     )
 
   // Step 13: Return the Record { [[Resolve]]: resolve, [[Reject]]: reject }.
-  #(h, JsObject(resolve_fn_ref), JsObject(reject_fn_ref))
+  #(
+    h,
+    ResolvingFns(
+      resolve: JsObject(resolve_fn_ref),
+      reject: JsObject(reject_fn_ref),
+    ),
+  )
 }
 
 /// ES2024 §27.2.1.5 PromiseCapability Record.
@@ -192,13 +208,11 @@ pub fn new_promise_capability(
   h: Heap(host),
   b: Builtins,
 ) -> #(Heap(host), PromiseCapability) {
-  let #(h, promise_ref, data_ref) = create_promise(h, b.promise.prototype)
-  let #(h, resolve, reject) =
-    create_resolving_functions(h, b.function.prototype, promise_ref, data_ref)
-  #(
-    h,
-    PromiseCapability(promise: promise_ref, data: data_ref, resolve:, reject:),
-  )
+  let #(h, PromiseRefs(promise:, data:)) =
+    create_promise(h, b.promise.prototype)
+  let #(h, ResolvingFns(resolve:, reject:)) =
+    create_resolving_functions(h, b.function.prototype, promise, data)
+  #(h, PromiseCapability(promise:, data:, resolve:, reject:))
 }
 
 /// ES2024 §27.2.1.4 FulfillPromise(promise, value)
@@ -664,7 +678,7 @@ pub fn resolve_promise(
   let #(lookup, state) = get_thenable_then(state, resolution)
   case lookup {
     Thenable(then_fn:) -> {
-      let #(h, resolve, reject) =
+      let #(h, ResolvingFns(resolve:, reject:)) =
         create_resolving_functions(
           state.heap,
           state.builtins.function.prototype,

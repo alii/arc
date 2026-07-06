@@ -13,10 +13,10 @@ import arc/vm/exec/generators
 import arc/vm/exec/interpreter
 import arc/vm/exec/promises
 import arc/vm/heap
+import arc/vm/host_hooks
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
 import arc/vm/realm
-import arc/vm/host_hooks
 import arc/vm/state.{type Heap, type State, type VmError, RealmCtx, State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot, JsObject,
@@ -207,7 +207,11 @@ pub fn run_module(
     }
     Ok(#(Completed(ThrowCompletion(val)), final_state)) -> {
       let drained = finish(final_state)
-      ModuleThrow(value: val, heap: drained.heap, jobs: job_queue.to_list(drained.job_queue))
+      ModuleThrow(
+        value: val,
+        heap: drained.heap,
+        jobs: job_queue.to_list(drained.job_queue),
+      )
     }
     // `yield` cannot occur outside a generator body — a module top level
     // yielding is an engine bug, reported on the VmError channel.
@@ -234,7 +238,7 @@ fn drive_top_level_await(
   suspended: State(host),
   finish: fn(State(host)) -> State(host),
 ) -> ModuleResult(host) {
-  let #(h, promise_ref, data_ref) =
+  let #(h, builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref)) =
     builtins_promise.create_promise(
       suspended.heap,
       suspended.builtins.promise.prototype,
@@ -242,7 +246,7 @@ fn drive_top_level_await(
   // The host always inspects this capability below — mark it handled so a
   // rejection isn't also reported as an unhandled promise rejection.
   let h = builtins_promise.mark_handled(h, data_ref)
-  let #(h, resolve, reject) =
+  let #(h, builtins_promise.ResolvingFns(resolve:, reject:)) =
     builtins_promise.create_resolving_functions(
       h,
       suspended.builtins.function.prototype,

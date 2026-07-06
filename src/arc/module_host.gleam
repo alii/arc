@@ -636,12 +636,18 @@ fn pending_module_promise(
   case registry.read_namespace(state.heap, state.ctx.global_object, resolved) {
     Some(namespace_ref) -> {
       let namespace = JsObject(namespace_ref)
-      let #(heap, ns_promise_ref, ns_data_ref) =
+      let #(
+        heap,
+        builtins_promise.PromiseRefs(promise: ns_promise_ref, data: ns_data_ref),
+      ) =
         builtins_promise.create_promise(
           state.heap,
           state.builtins.promise.prototype,
         )
-      let #(heap, ns_resolve, ns_reject) =
+      let #(
+        heap,
+        builtins_promise.ResolvingFns(resolve: ns_resolve, reject: ns_reject),
+      ) =
         builtins_promise.create_resolving_functions(
           heap,
           state.builtins.function.prototype,

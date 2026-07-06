@@ -230,7 +230,7 @@ pub fn dispatch(
             // a REJECTED promise that the desugared `await` then consumes,
             // so the error lands one Await hop later — never synchronously.
             True -> {
-              let #(h, promise_ref, data_ref) =
+              let #(h, builtins_promise.PromiseRefs(promise:, data:)) =
                 builtins_promise.create_promise(
                   state.heap,
                   state.builtins.promise.prototype,
@@ -238,10 +238,10 @@ pub fn dispatch(
               let state =
                 builtins_promise.reject_promise(
                   State(..state, heap: h),
-                  data_ref,
+                  data,
                   thrown,
                 )
-              #(state, Ok(JsObject(promise_ref)))
+              #(state, Ok(JsObject(promise)))
             }
             False -> #(state, Error(thrown))
           }
@@ -1041,7 +1041,7 @@ fn attach_await(
       // Functions steps 8-13 on it: a thenable is assimilated via
       // PromiseResolveThenableJob (its `then` drives settlement), a throwing
       // `then` getter rejects, anything else fulfills immediately.
-      let #(h, promise_ref, data_ref) =
+      let #(h, builtins_promise.PromiseRefs(promise:, data:)) =
         builtins_promise.create_promise(
           state.heap,
           state.builtins.promise.prototype,
@@ -1049,11 +1049,11 @@ fn attach_await(
       let state =
         builtins_promise.resolve_promise(
           State(..state, heap: h),
-          promise_ref,
-          data_ref,
+          promise,
+          data,
           awaited,
         )
-      attach_reactions(state, data_ref, rest, pending, resolve, reject)
+      attach_reactions(state, data, rest, pending, resolve, reject)
     }
   }
 }
@@ -1070,14 +1070,14 @@ fn attach_await_rejected(
   resolve: JsValue,
   reject: JsValue,
 ) -> State(host) {
-  let #(h, _promise_ref, data_ref) =
+  let #(h, builtins_promise.PromiseRefs(promise: _, data:)) =
     builtins_promise.create_promise(
       state.heap,
       state.builtins.promise.prototype,
     )
   let state =
-    builtins_promise.reject_promise(State(..state, heap: h), data_ref, thrown)
-  attach_reactions(state, data_ref, rest, pending, resolve, reject)
+    builtins_promise.reject_promise(State(..state, heap: h), data, thrown)
+  attach_reactions(state, data, rest, pending, resolve, reject)
 }
 
 /// Attach the AsyncDisposeContinue fulfill/reject reactions to a promise's

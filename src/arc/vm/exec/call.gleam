@@ -359,12 +359,15 @@ fn call_async_function(
   execute_inner: ExecuteInnerFn(host),
 ) -> Result(State(host), StepExit(host)) {
   // Create the outer promise that the async function returns
-  let #(h, promise_ref, data_ref) =
+  let #(h, builtins_promise.PromiseRefs(promise: promise_ref, data: data_ref)) =
     builtins_promise.create_promise(
       state.heap,
       state.builtins.promise.prototype,
     )
-  let #(h, resolve_fn, reject_fn) =
+  let #(
+    h,
+    builtins_promise.ResolvingFns(resolve: resolve_fn, reject: reject_fn),
+  ) =
     builtins_promise.create_resolving_functions(
       h,
       state.builtins.function.prototype,
@@ -962,7 +965,13 @@ pub fn call_native(
       )
     // Generator prototype methods
     value.Call(value.GeneratorNext) ->
-      generators.call_native_generator_next(state, this, args, rest_stack, drive)
+      generators.call_native_generator_next(
+        state,
+        this,
+        args,
+        rest_stack,
+        drive,
+      )
     value.Call(value.GeneratorReturn) ->
       generators.call_native_generator_return(
         state,
@@ -1144,123 +1153,6 @@ pub fn call_native(
         ),
       )
     }
-    // Symbol() constructor -- callable but NOT new-able
-    value.Call(value.SymbolConstructor) -> {
-      // §20.4.1.1 step 4: If description is undefined, descString is
-      // undefined; else descString = ? ToString(description). The coercion
-      // is observable — Symbol({toString(){throw x}}) must throw x.
-      use #(description, state) <- result.try(
-        case helpers.first_arg_or_undefined(args) {
-          JsUndefined -> Ok(#(None, state))
-          desc -> {
-            use #(s, state) <- result.map(
-              state.rethrow(coerce.js_to_string(state, desc)),
-            )
-            #(Some(s), state)
-          }
-        },
-      )
-      let sym_val = builtins_symbol.call_symbol(description)
-      Ok(State(..state, stack: [sym_val, ..rest_stack], pc: state.pc + 1))
-    }
-    // Symbol.for(key) -- global symbol registry
-    value.Call(value.SymbolFor) -> {
-      // Step 1: Let stringKey be ? ToString(key).
-      let key_val = helpers.first_arg_or_undefined(args)
-      use #(key_str, state) <- result.try(
-        state.rethrow(coerce.js_to_string(state, key_val)),
-      )
-      // Step 2-4: Look up in GlobalSymbolRegistry, return existing or create new.
-      case dict.get(state.ctx.symbol_registry, key_str) {
-        Ok(existing_id) ->
-          Ok(
-            State(
-              ..state,
-              stack: [value.JsSymbol(existing_id), ..rest_stack],
-              pc: state.pc + 1,
-            ),
-          )
-        Error(Nil) -> {
-          // §20.4.2.2 step 4.a: the registered symbol's [[Description]] IS
-          // the registry key.
-          let id = builtins_symbol.new_symbol(option.Some(key_str))
-          let new_registry = dict.insert(state.ctx.symbol_registry, key_str, id)
-          Ok(
-            State(
-              ..state,
-              stack: [value.JsSymbol(id), ..rest_stack],
-              pc: state.pc + 1,
-              ctx: state.RealmCtx(..state.ctx, symbol_registry: new_registry),
-            ),
-          )
-        }
-      }
-    }
-    // §20.4.3.3 Symbol.prototype.toString — SymbolDescriptiveString(thisSymbolValue)
-    value.Call(value.SymbolPrototypeToString) -> {
-      use #(id, state) <- result.try(this_symbol_value(state, this, "toString"))
-      let s = builtins_symbol.descriptive_string(id)
-      Ok(State(..state, stack: [JsString(s), ..rest_stack], pc: state.pc + 1))
-    }
-    // §20.4.3.4 Symbol.prototype.valueOf / §20.4.3.5 @@toPrimitive — both
-    // return thisSymbolValue (toPrimitive ignores its hint argument).
-    value.Call(value.SymbolPrototypeValueOf) -> {
-      use #(id, state) <- result.try(this_symbol_value(state, this, "valueOf"))
-      Ok(
-        State(
-          ..state,
-          stack: [value.JsSymbol(id), ..rest_stack],
-          pc: state.pc + 1,
-        ),
-      )
-    }
-    value.Call(value.SymbolPrototypeToPrimitive) -> {
-      use #(id, state) <- result.try(this_symbol_value(
-        state,
-        this,
-        "[Symbol.toPrimitive]",
-      ))
-      Ok(
-        State(
-          ..state,
-          stack: [value.JsSymbol(id), ..rest_stack],
-          pc: state.pc + 1,
-        ),
-      )
-    }
-    // §20.4.3.2 get Symbol.prototype.description — [[Description]] or undefined
-    value.Call(value.SymbolDescriptionGetter) -> {
-      use #(id, state) <- result.try(this_symbol_value(
-        state,
-        this,
-        "description",
-      ))
-      let val = case value.symbol_description(id) {
-        option.Some(s) -> JsString(s)
-        option.None -> JsUndefined
-      }
-      Ok(State(..state, stack: [val, ..rest_stack], pc: state.pc + 1))
-    }
-    // Symbol.keyFor(sym) -- reverse lookup in global registry
-    value.Call(value.SymbolKeyFor) -> {
-      case args {
-        [value.JsSymbol(id), ..] -> {
-          let result =
-            dict.to_list(state.ctx.symbol_registry)
-            |> list.find(fn(pair) { pair.1 == id })
-          let val = case result {
-            Ok(#(key, _)) -> value.JsString(key)
-            Error(Nil) -> value.JsUndefined
-          }
-          Ok(State(..state, stack: [val, ..rest_stack], pc: state.pc + 1))
-        }
-        _ ->
-          state.rethrow(state.type_error_op(
-            state,
-            "Symbol.keyFor requires a Symbol argument",
-          ))
-      }
-    }
     // String() constructor -- uses full ToString (ToPrimitive for objects).
     // §22.1.1.1 step 2.a: if NewTarget is undefined and value is a Symbol,
     // return SymbolDescriptiveString (does NOT throw — only implicit ToString
@@ -1276,7 +1168,7 @@ pub fn call_native(
             ),
           )
         [value.JsSymbol(id), ..] -> {
-          let s = builtins_symbol.descriptive_string(id)
+          let s = value.symbol_descriptive_string(id)
           Ok(
             State(..state, stack: [JsString(s), ..rest_stack], pc: state.pc + 1),
           )
@@ -1622,7 +1514,10 @@ pub fn do_construct(
     // §20.4.1.1: Symbol has [[Construct]] (so IsConstructor is true and it can
     // appear in `extends`), but invoking it as a constructor always throws.
     Some(ObjectSlot(
-      kind: NativeFunction(value.Call(value.SymbolConstructor), ..),
+      kind: NativeFunction(
+        value.Dispatch(value.SymbolNative(value.SymbolConstructor)),
+        ..,
+      ),
       ..,
     )) -> state.throw_type_error(state, "Symbol is not a constructor")
     // §20.1.1.1 step 1: when NewTarget is neither undefined nor the active
@@ -2241,6 +2136,7 @@ pub fn dispatch_native(
     value.StringNative(n) -> builtins_string.dispatch(n, args, this, state)
     value.NumberNative(n) -> builtins_number.dispatch(n, args, this, state)
     value.BooleanNative(n) -> builtins_boolean.dispatch(n, args, this, state)
+    value.SymbolNative(n) -> builtins_symbol.dispatch(n, args, this, state)
     value.MathNative(n) -> builtins_math.dispatch(n, args, this, state)
     value.ErrorNative(n) -> builtins_error.dispatch(n, args, this, state)
     value.ConsoleNative(n) -> builtins_console.dispatch(n, args, this, state)
@@ -2413,33 +2309,5 @@ fn throw_uri_error(
   // but if it ever did, the thrown value is still the right completion.
   case created {
     Ok(err) | Error(err) -> #(state, Error(err))
-  }
-}
-
-/// §20.4.3 thisSymbolValue(value): a Symbol primitive, or a Symbol wrapper
-/// object's [[SymbolData]]; anything else is a TypeError. Step-error shaped
-/// for use inside call_native.
-fn this_symbol_value(
-  state: State(host),
-  this: JsValue,
-  method: String,
-) -> Result(#(value.SymbolId, State(host)), StepExit(host)) {
-  case this {
-    value.JsSymbol(id) -> Ok(#(id, state))
-    JsObject(ref) ->
-      case heap.read(state.heap, ref) {
-        Some(ObjectSlot(kind: value.SymbolObject(value: id), ..)) ->
-          Ok(#(id, state))
-        _ ->
-          state.throw_type_error(
-            state,
-            "Symbol.prototype." <> method <> " requires that 'this' be a Symbol",
-          )
-      }
-    _ ->
-      state.throw_type_error(
-        state,
-        "Symbol.prototype." <> method <> " requires that 'this' be a Symbol",
-      )
   }
 }
