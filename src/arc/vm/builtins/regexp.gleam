@@ -13,6 +13,7 @@
 /// BYTE offsets into the UTF-8 subject (deviation: spec uses UTF-16 code
 /// units; identical for ASCII subjects).
 import arc/parser/regex
+import arc/parser/regex_error
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/regexp_ops
@@ -696,7 +697,8 @@ fn regexp_initialize(
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
-    Error(err) -> state.syntax_error(state, regex.pattern_error_message(err))
+    Error(err) ->
+      state.syntax_error(state, regex_error.pattern_error_message(err))
     Ok(Nil) -> {
       let #(heap, ref) = alloc_regexp(state.heap, proto, pattern, flags)
       #(State(..state, heap:), Ok(JsObject(ref)))
@@ -713,7 +715,7 @@ fn regexp_initialize(
 fn validate_flags_and_pattern(
   pattern: String,
   flags: String,
-) -> Result(Nil, regex.PatternError) {
+) -> Result(Nil, regex_error.PatternError) {
   use parsed <- result.try(regex.validate_flags(flags))
   let bytes = <<pattern:utf8>>
   regex.validate_pattern(bytes, 0, bit_array.byte_size(bytes), parsed)
@@ -1260,7 +1262,8 @@ fn do_compile(
   use pattern, state <- to_string_or_empty(state, p_val)
   use flags, state <- to_string_or_empty(state, f_val)
   case validate_flags_and_pattern(pattern, flags) {
-    Error(err) -> state.syntax_error(state, regex.pattern_error_message(err))
+    Error(err) ->
+      state.syntax_error(state, regex_error.pattern_error_message(err))
     Ok(Nil) -> {
       let heap =
         heap.update(state.heap, ref, fn(slot) {

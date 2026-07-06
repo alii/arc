@@ -4,9 +4,26 @@
 /// Parse error types and formatting.
 /// Split from parser.gleam — the ParseError type, string formatting, and
 /// position extraction live here so parser.gleam can focus on parsing logic.
-import arc/parser/lexer
+import arc/parser/lexer.{
+  type TokenKind, Ampersand, AmpersandAmpersand, AmpersandAmpersandEqual,
+  AmpersandEqual, Arrow, As, Async, Await, Bang, BangEqual, BangEqualEqual,
+  Break, Caret, CaretEqual, Case, Catch, Class, Colon, Comma, Const, Continue,
+  Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal, EqualEqual,
+  EqualEqualEqual, Export, Extends, Finally, For, From, Function, GreaterThan,
+  GreaterThanEqual, GreaterThanGreaterThan, GreaterThanGreaterThanEqual,
+  GreaterThanGreaterThanGreaterThan, GreaterThanGreaterThanGreaterThanEqual,
+  Identifier, If, Illegal, Import, In, Instanceof, KFalse, KString, KTrue,
+  LeftBrace, LeftBracket, LeftParen, LessThan, LessThanEqual, LessThanLessThan,
+  LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual, MinusMinus, New,
+  Null, Number, Of, Percent, PercentEqual, Pipe, PipeEqual, PipePipe,
+  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
+  QuestionQuestion, QuestionQuestionEqual, Return, RightBrace, RightBracket,
+  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
+  StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral, This,
+  Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
+}
 import arc/parser/number
-import arc/parser/regex
+import arc/parser/regex_error
 import gleam/option.{type Option, None, Some}
 
 /// EVERY variant carries `pos: Int` as its FIRST field, so `parse_error_pos`
@@ -23,13 +40,13 @@ pub type ParseError {
   /// directly.
   LexError(pos: Int, error: lexer.LexError)
   /// A regular-expression literal failed scanning or ECMAScript Pattern
-  /// validation. Carries `parser/regex`'s own typed error; its message comes
-  /// from `regex.pattern_error_message`.
+  /// validation. Carries `parser/regex_error`'s own typed error; its message
+  /// comes from `regex_error.pattern_error_message`.
   ///
-  /// INVARIANT: `pos` MUST equal `regex.pattern_error_pos(error)`. Build it
-  /// with `regexp_syntax_error/1`; do not call this constructor directly.
-  RegExpSyntaxError(pos: Int, error: regex.PatternError)
-  ExpectedToken(pos: Int, expected: String, got: String)
+  /// INVARIANT: `pos` MUST equal `regex_error.pattern_error_pos(error)`. Build
+  /// it with `regexp_syntax_error/1`; do not call this constructor directly.
+  RegExpSyntaxError(pos: Int, error: regex_error.PatternError)
+  ExpectedToken(pos: Int, expected: TokenKind, got: TokenKind)
   ExpectedIdentifier(pos: Int)
   ExpectedSemicolon(pos: Int)
   ExpectedBindingPattern(pos: Int)
@@ -41,7 +58,7 @@ pub type ParseError {
   UnexpectedExport(pos: Int)
   UnexpectedSuper(pos: Int)
   UnexpectedCloseParen(pos: Int)
-  UnexpectedToken(pos: Int, token: String)
+  UnexpectedToken(pos: Int, kind: TokenKind)
   /// A `Number` token whose text `parser/number` refuses (a digit the radix
   /// does not admit, a radix prefix with no digits, …). The lexer should
   /// never emit such a token; carrying `number`'s own typed error keeps the
@@ -194,9 +211,12 @@ pub type ParseError {
 pub fn parse_error_to_string(error: ParseError) -> String {
   case error {
     LexError(error:, ..) -> lexer.lex_error_to_string(error)
-    RegExpSyntaxError(error:, ..) -> regex.pattern_error_message(error)
+    RegExpSyntaxError(error:, ..) -> regex_error.pattern_error_message(error)
     ExpectedToken(expected:, got:, ..) ->
-      "Expected " <> expected <> " but got " <> got
+      "Expected "
+      <> token_kind_to_string(expected)
+      <> " but got "
+      <> token_kind_to_string(got)
     ExpectedIdentifier(_) -> "Expected identifier"
     ExpectedSemicolon(_) -> "Expected ';'"
     ExpectedBindingPattern(_) -> "Expected binding pattern"
@@ -208,7 +228,8 @@ pub fn parse_error_to_string(error: ParseError) -> String {
     UnexpectedExport(_) -> "Unexpected 'export'"
     UnexpectedSuper(_) -> "Unexpected 'super'"
     UnexpectedCloseParen(_) -> "Unexpected token ')'"
-    UnexpectedToken(token:, ..) -> "Unexpected token: " <> token
+    UnexpectedToken(kind:, ..) ->
+      "Unexpected token: " <> token_kind_to_string(kind)
     MalformedNumericLiteral(error:, ..) -> number.parse_error_message(error)
     ReturnOutsideFunction(_) -> "'return' outside of function"
     BreakOutsideLoopOrSwitch(_) -> "'break' outside of loop or switch"
@@ -415,6 +436,124 @@ pub fn lex_error(err: lexer.LexError) -> ParseError {
 /// scanner/validator itself reports. THE ONLY way to build a
 /// `RegExpSyntaxError` — going through this keeps `pos` and `error` from
 /// disagreeing.
-pub fn regexp_syntax_error(err: regex.PatternError) -> ParseError {
-  RegExpSyntaxError(regex.pattern_error_pos(err), err)
+pub fn regexp_syntax_error(err: regex_error.PatternError) -> ParseError {
+  RegExpSyntaxError(regex_error.pattern_error_pos(err), err)
+}
+
+/// Render a `TokenKind` as it should appear inside a parse-error message.
+/// Private on purpose: `ExpectedToken`/`UnexpectedToken` carry the typed
+/// `TokenKind` and this is called only at render time, so a caller can never
+/// build one of those variants with an arbitrary string that isn't a real
+/// token kind.
+fn token_kind_to_string(kind: TokenKind) -> String {
+  case kind {
+    Number -> "number"
+    KString -> "string"
+    TemplateLiteral -> "template"
+    TemplateHead -> "template"
+    Identifier -> "identifier"
+    Var -> "'var'"
+    Let -> "'let'"
+    Const -> "'const'"
+    Function -> "'function'"
+    Return -> "'return'"
+    If -> "'if'"
+    Else -> "'else'"
+    While -> "'while'"
+    Do -> "'do'"
+    For -> "'for'"
+    Break -> "'break'"
+    Continue -> "'continue'"
+    Switch -> "'switch'"
+    Case -> "'case'"
+    Default -> "'default'"
+    Throw -> "'throw'"
+    Try -> "'try'"
+    Catch -> "'catch'"
+    Finally -> "'finally'"
+    New -> "'new'"
+    Delete -> "'delete'"
+    Typeof -> "'typeof'"
+    Void -> "'void'"
+    In -> "'in'"
+    Instanceof -> "'instanceof'"
+    This -> "'this'"
+    Class -> "'class'"
+    Extends -> "'extends'"
+    Super -> "'super'"
+    Import -> "'import'"
+    Export -> "'export'"
+    From -> "'from'"
+    As -> "'as'"
+    Of -> "'of'"
+    Async -> "'async'"
+    Await -> "'await'"
+    Yield -> "'yield'"
+    Null -> "'null'"
+    Undefined -> "'undefined'"
+    KTrue -> "'true'"
+    KFalse -> "'false'"
+    Debugger -> "'debugger'"
+    With -> "'with'"
+    Static -> "'static'"
+    LeftParen -> "'('"
+    RightParen -> "')'"
+    LeftBrace -> "'{'"
+    RightBrace -> "'}'"
+    LeftBracket -> "'['"
+    RightBracket -> "']'"
+    Semicolon -> "';'"
+    Comma -> "','"
+    Dot -> "'.'"
+    DotDotDot -> "'...'"
+    QuestionDot -> "'?.'"
+    QuestionQuestion -> "'??'"
+    Arrow -> "'=>'"
+    Colon -> "':'"
+    Plus -> "'+'"
+    Minus -> "'-'"
+    Star -> "'*'"
+    StarStar -> "'**'"
+    Slash -> "'/'"
+    Percent -> "'%'"
+    Ampersand -> "'&'"
+    AmpersandAmpersand -> "'&&'"
+    Pipe -> "'|'"
+    PipePipe -> "'||'"
+    Caret -> "'^'"
+    Tilde -> "'~'"
+    Bang -> "'!'"
+    Equal -> "'='"
+    EqualEqual -> "'=='"
+    EqualEqualEqual -> "'==='"
+    BangEqual -> "'!='"
+    BangEqualEqual -> "'!=='"
+    LessThan -> "'<'"
+    LessThanEqual -> "'<='"
+    GreaterThan -> "'>'"
+    GreaterThanEqual -> "'>='"
+    LessThanLessThan -> "'<<'"
+    GreaterThanGreaterThan -> "'>>'"
+    GreaterThanGreaterThanGreaterThan -> "'>>>'"
+    PlusEqual -> "'+='"
+    MinusEqual -> "'-='"
+    StarEqual -> "'*='"
+    StarStarEqual -> "'**='"
+    SlashEqual -> "'/='"
+    PercentEqual -> "'%='"
+    AmpersandEqual -> "'&='"
+    AmpersandAmpersandEqual -> "'&&='"
+    PipeEqual -> "'|='"
+    PipePipeEqual -> "'||='"
+    CaretEqual -> "'^='"
+    QuestionQuestionEqual -> "'??='"
+    LessThanLessThanEqual -> "'<<='"
+    GreaterThanGreaterThanEqual -> "'>>='"
+    GreaterThanGreaterThanGreaterThanEqual -> "'>>>='"
+    PlusPlus -> "'++'"
+    MinusMinus -> "'--'"
+    Question -> "'?'"
+    Eof -> "end of file"
+    Illegal | LexFailure(_) -> "illegal token"
+  }
 }
