@@ -231,32 +231,50 @@ fn do_refs_in_slot(
       }
       let acc = push_option_ref(prototype, acc)
       case kind {
-        value.FunctionObject(env: env_ref, home_object: home, ..) ->
+        value.FunctionObject(func_template: _, env: env_ref, home_object: home) ->
           push_option_ref(home, [env_ref, ..acc])
         // Native functions: every dispatch/call payload is traced by the
         // exhaustive per-enum tracers below (native_fn_refs and friends), so
         // adding a Ref-carrying native-fn variant without teaching the GC
         // about it is a compile error, not a premature-collection bug.
-        value.NativeFunction(native:, ..) -> native_fn_refs(native, acc)
+        value.NativeFunction(native:, constructible: _) ->
+          native_fn_refs(native, acc)
         // ShadowRealm instances keep their realm record alive.
         value.ShadowRealmObject(realm_ref:) -> [realm_ref, ..acc]
-        value.ProxyObject(slots:, ..) ->
+        value.ProxyObject(slots:, callable: _, constructable: _) ->
           case slots {
-            Some(value.ProxySlots(target:, handler:)) -> [target, handler, ..acc]
+            Some(value.ProxySlots(target:, handler:)) -> [
+              target,
+              handler,
+              ..acc
+            ]
             None -> acc
           }
         value.PromiseObject(promise_data:) -> [promise_data, ..acc]
         value.GeneratorObject(generator_data:) -> [generator_data, ..acc]
         value.AsyncGeneratorObject(generator_data:) -> [generator_data, ..acc]
-        value.ArrayIteratorObject(source:, ..) -> [source, ..acc]
+        value.ArrayIteratorObject(source:, cursor: _, iter_kind: _) -> [
+          source,
+          ..acc
+        ]
         // The iterated matcher is the only heap reference the RegExp String
         // Iterator's internal state can hold; the rest is scalar.
-        value.RegExpStringIteratorObject(matcher:, ..) -> [matcher, ..acc]
-        value.SetIteratorObject(source:, ..)
-        | value.MapIteratorObject(source:, ..) -> [source, ..acc]
+        value.RegExpStringIteratorObject(
+          matcher:,
+          string: _,
+          global: _,
+          unicode: _,
+          done: _,
+        ) -> [matcher, ..acc]
+        value.SetIteratorObject(source:, cursor: _, done: _, kind: _)
+        | value.MapIteratorObject(source:, cursor: _, done: _, kind: _) -> [
+          source,
+          ..acc
+        ]
         value.AsyncFromSyncIteratorObject(sync_iter:, sync_next:) ->
           push_value_ref(sync_next, [sync_iter, ..acc])
-        value.IteratorHelperObject(body:, ..) -> helper_body_refs(body, acc)
+        value.IteratorHelperObject(gen_state: _, body:) ->
+          helper_body_refs(body, acc)
         value.WrapForValidIteratorObject(iterated:, next_method:)
         | value.IteratorRecordObject(iterated:, next_method:) ->
           push_value_ref(next_method, push_value_ref(iterated, acc))
@@ -295,9 +313,9 @@ fn do_refs_in_slot(
               None -> a
             }
           })
-        value.DisposableStackObject(state: value.Pending(resources:), ..) ->
+        value.DisposableStackObject(async: _, state: value.Pending(resources:)) ->
           push_dispose_resources(resources, acc)
-        value.DisposableStackObject(state: value.Disposed, ..) -> acc
+        value.DisposableStackObject(async: _, state: value.Disposed) -> acc
         // The namespace's live bindings are BoxSlot refs reachable via exports.
         value.ModuleNamespace(exports:) ->
           dict.fold(exports, acc, fn(a, _name, box_ref) { [box_ref, ..a] })
@@ -355,22 +373,61 @@ fn do_refs_in_slot(
         | value.BigIntObject(_)
         | value.SymbolObject(_)
         | value.DateObject(_)
-        | value.TemporalDateSlot(..)
-        | value.TemporalTimeSlot(..)
-        | value.TemporalDateTimeSlot(..)
-        | value.TemporalYearMonthSlot(..)
-        | value.TemporalMonthDaySlot(..)
-        | value.TemporalDurationSlot(..)
-        | value.TemporalInstantSlot(..)
-        | value.TemporalZonedDateTimeSlot(..)
-        | value.RegExpObject(..)
-        | value.ArrayBufferObject(..)
+        | value.TemporalDateSlot(year: _, month: _, day: _, calendar: _)
+        | value.TemporalTimeSlot(
+            hour: _,
+            minute: _,
+            second: _,
+            millisecond: _,
+            microsecond: _,
+            nanosecond: _,
+          )
+        | value.TemporalDateTimeSlot(
+            year: _,
+            month: _,
+            day: _,
+            hour: _,
+            minute: _,
+            second: _,
+            millisecond: _,
+            microsecond: _,
+            nanosecond: _,
+            calendar: _,
+          )
+        | value.TemporalYearMonthSlot(year: _, month: _, day: _, calendar: _)
+        | value.TemporalMonthDaySlot(month: _, day: _, ref_year: _, calendar: _)
+        | value.TemporalDurationSlot(
+            years: _,
+            months: _,
+            weeks: _,
+            days: _,
+            hours: _,
+            minutes: _,
+            seconds: _,
+            milliseconds: _,
+            microseconds: _,
+            nanoseconds: _,
+          )
+        | value.TemporalInstantSlot(epoch_ns: _)
+        | value.TemporalZonedDateTimeSlot(
+            epoch_ns: _,
+            time_zone: _,
+            calendar: _,
+          )
+        | value.RegExpObject(pattern: _, flags: _)
+        | value.ArrayBufferObject(storage: _)
         | // The rawJSON box's [[IsRawJSON]] payload is a plain String.
           value.RawJsonObject(_)
         | value.StringIteratorObject(_) -> acc
         // DataView keeps its viewed ArrayBuffer alive.
-        value.DataViewObject(buffer:, ..) -> [buffer, ..acc]
-        value.TypedArrayObject(buffer:, ..) -> [buffer, ..acc]
+        value.DataViewObject(buffer:, byte_offset: _, byte_length: _) -> [
+          buffer,
+          ..acc
+        ]
+        value.TypedArrayObject(buffer:, elem_kind: _, byte_offset: _, length: _) -> [
+          buffer,
+          ..acc
+        ]
       }
     }
     value.EnvSlot(slots:) ->
@@ -382,7 +439,12 @@ fn do_refs_in_slot(
       dict.fold(vars, acc, fn(a, _k, v) { push_value_ref(v, a) })
     value.ForInIteratorSlot(keys:) ->
       list.fold(keys, acc, fn(a, v) { push_value_ref(v, a) })
-    value.PromiseSlot(state:, fulfill_reactions:, reject_reactions:, ..) -> {
+    value.PromiseSlot(
+      state:,
+      fulfill_reactions:,
+      reject_reactions:,
+      is_handled: _,
+    ) -> {
       let acc = case state {
         value.PromiseFulfilled(value: v) -> push_value_ref(v, acc)
         value.PromiseRejected(reason:) -> push_value_ref(reason, acc)
@@ -404,9 +466,9 @@ fn do_refs_in_slot(
     // stopped being roots the moment it finished. A running one still does:
     // a nested drive replaces the live State, so its frame is all that roots
     // the body's values.
-    value.GeneratorSlot(gen_state:, env_ref:, ..) ->
+    value.GeneratorSlot(gen_state:, func_template: _, env_ref:) ->
       case gen_state {
-        value.GenSuspended(frame:, ..) | value.GenExecuting(frame:) ->
+        value.GenSuspended(at: _, frame:) | value.GenExecuting(frame:) ->
           push_suspended_frame_refs(frame, [env_ref, ..acc])
         value.GenCompleted -> [env_ref, ..acc]
       }
@@ -424,10 +486,11 @@ fn do_refs_in_slot(
       push_suspended_frame_refs(frame, acc)
     }
     value.AsyncGeneratorSlot(
+      gen_state: _,
       queue: #(queue_front, queue_back),
+      func_template: _,
       env_ref:,
       frame:,
-      ..,
     ) -> {
       // Both halves of the two-list FIFO hold live requests — walk both.
       let push_request = fn(a, r) {
@@ -1200,9 +1263,10 @@ fn temporal_native_refs(
     // Every Temporal native carries the eight sibling type prototypes.
     value.TemporalCtor(kind: _, protos:)
     | value.TemporalStatic(kind: _, name: _, protos:)
-    | value.TemporalGetterFn(getter: _, protos:)
     | value.TemporalMethod(method: _, protos:)
     | value.TemporalNowFn(name: _, protos:) -> temporal_protos_refs(protos, acc)
+    // A prototype getter carries no protos payload — nothing heap-reachable.
+    value.TemporalGetterFn(getter: _) -> acc
   }
 }
 
