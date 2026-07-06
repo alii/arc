@@ -6,7 +6,8 @@
 //// builtins layer turns parts into strings or {type, value} part objects.
 
 import arc/internal/digits
-import arc/internal/gregorian.{civil_from_days, floor_div}
+import arc/internal/gregorian.{civil_from_days}
+import arc/internal/int_math.{floor_div}
 import arc/vm/ops/numeric
 import arc/vm/value.{
   type CompactDisplay, type CurrencyDisplay, type Granularity,
@@ -1819,7 +1820,8 @@ pub type DateFields {
 /// Convert epoch milliseconds (+ offset minutes) to civil fields.
 pub fn fields_from_epoch_ms(ms: Float, offset_minutes: Int) -> DateFields {
   let total_ms = float_to_int_trunc(ms) + offset_minutes * 60_000
-  let #(days, ms_in_day) = divmod(total_ms, 86_400_000)
+  let days = floor_div(total_ms, 86_400_000)
+  let ms_in_day = total_ms - days * 86_400_000
   let millisecond = ms_in_day % 1000
   let total_seconds = ms_in_day / 1000
   let second = total_seconds % 60
@@ -1842,14 +1844,6 @@ pub fn fields_from_epoch_ms(ms: Float, offset_minutes: Int) -> DateFields {
 
 fn float_to_int_trunc(x: Float) -> Int {
   float.truncate(x)
-}
-
-fn divmod(a: Int, b: Int) -> #(Int, Int) {
-  let q = case a < 0 && a % b != 0 {
-    True -> a / b - 1
-    False -> a / b
-  }
-  #(q, a - q * b)
 }
 
 pub fn month_name(m: Int, width: NameWidth) -> String {

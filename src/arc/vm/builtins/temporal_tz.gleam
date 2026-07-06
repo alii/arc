@@ -10,7 +10,7 @@
 //// no query function can be handed an id that was never checked against the
 //// zone-name table.
 
-import arc/internal/gregorian.{floor_div}
+import arc/internal/int_math.{floor_div}
 import gleam/option.{type Option, None, Some}
 import gleam/result
 

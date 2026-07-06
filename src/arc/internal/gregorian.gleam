@@ -1,26 +1,14 @@
 //// Shared proleptic-Gregorian calendar math.
 ////
 //// Every date-shaped builtin (`Date`, `Temporal`, `Intl.DateTimeFormat`) needs
-//// the same handful of primitives: floor division/modulo, leap years, month
-//// lengths and Howard Hinnant's `days_from_civil`/`civil_from_days` pair.
-//// They live here so a fix lands once instead of drifting across five files.
+//// the same handful of primitives: leap years, month lengths and Howard
+//// Hinnant's `days_from_civil`/`civil_from_days` pair. They live here so a fix
+//// lands once instead of drifting across five files.
 ////
 //// Months are 1-based (January = 1). Callers with a 0-based month convention
 //// keep their own thin adapter.
 
-/// Integer division flooring toward -infinity. `b` must be non-zero.
-pub fn floor_div(a: Int, b: Int) -> Int {
-  let q = a / b
-  case a % b != 0 && { a < 0 } != { b < 0 } {
-    True -> q - 1
-    False -> q
-  }
-}
-
-/// Modulo whose result carries the sign of the divisor. `b` must be non-zero.
-pub fn floor_mod(a: Int, b: Int) -> Int {
-  a - floor_div(a, b) * b
-}
+import arc/internal/int_math.{floor_div, floor_mod}
 
 pub fn is_leap_year(y: Int) -> Bool {
   floor_mod(y, 4) == 0 && { floor_mod(y, 100) != 0 || floor_mod(y, 400) == 0 }

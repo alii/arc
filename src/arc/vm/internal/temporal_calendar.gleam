@@ -13,8 +13,9 @@
 
 import arc/internal/gregorian.{
   civil_from_days, days_from_civil, days_in_month as gregorian_days_in_month,
-  floor_div, floor_mod, is_leap_year as is_gregorian_leap,
+  is_leap_year as is_gregorian_leap,
 }
+import arc/internal/int_math.{floor_div, floor_mod}
 import arc/vm/internal/temporal_calendar_data.{
   chinese_data, dangi_data, umalqura_month_length, umalqura_year_start_fix,
 }
