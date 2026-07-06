@@ -22,7 +22,7 @@ import arc/vm/exec/promises
 import arc/vm/heap
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
-import arc/vm/opcode.{AsyncYieldStarNext}
+import arc/vm/opcode.{AsyncYieldStarNext, Pc}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
   type Heap, type HeapSlot, type State, type StepExit, InternalError, State,
@@ -251,22 +251,17 @@ fn build_exec_state(
   stack: List(JsValue),
   pc: Int,
 ) -> State(host) {
+  let restored = generators.restore_frame(state, frame.saved)
   State(
-    ..state,
+    ..restored,
     stack:,
     pc:,
-    locals: frame.saved.locals,
     func: frame.func_template,
     code: frame.func_template.bytecode,
     constants: frame.func_template.constants,
     call_stack: [],
-    try_stack: frame.saved.try_stack,
     new_target: JsUndefined,
     call_args: [],
-    // Per-frame fields: without these the body would inherit the RESUMER's
-    // eval_env (losing direct-eval `var`s across a yield) and its line number.
-    eval_env: frame.saved.eval_env,
-    current_line: frame.saved.line,
   )
 }
 
@@ -288,8 +283,8 @@ fn pair_delegate(
 /// instruction the delegation falls out to.
 /// saved_pc was a valid dispatch target — always in bounds.
 fn async_delegate_site(frame: AsyncGenFrame) -> Option(#(Ref, Int)) {
-  case tuple_array.unsafe_get(frame.saved.pc, frame.func_template.bytecode) {
-    AsyncYieldStarNext(after_pc:) ->
+  case tuple_array.get_unchecked(frame.saved.pc, frame.func_template.bytecode) {
+    AsyncYieldStarNext(after_pc: Pc(after_pc)) ->
       case frame.saved.stack {
         [JsObject(iter_ref), ..] -> Some(#(iter_ref, after_pc))
         _ -> None

@@ -22,8 +22,8 @@ pub fn get(index: Int, arr: TupleArray(a)) -> Option(a)
 /// Use only for compiler-generated indices (bytecode PC, constant pool,
 /// local slots, function table) where the invariant holds by construction.
 /// For untrusted indices use `get`, which returns Option.
-@external(erlang, "arc_tuple_array_ffi", "array_unsafe_get")
-pub fn unsafe_get(index: Int, arr: TupleArray(a)) -> a
+@external(erlang, "arc_tuple_array_ffi", "array_get_unchecked")
+pub fn get_unchecked(index: Int, arr: TupleArray(a)) -> a
 
 /// Write element at index with no bounds check. O(n) copy.
 ///

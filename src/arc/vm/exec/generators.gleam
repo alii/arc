@@ -365,15 +365,15 @@ fn build_resumed_state(
       gen.data_ref,
       gen_with_state(gen, value.GenExecuting(frame)),
     )
+  let restored = restore_frame(outer, frame)
   State(
-    ..outer,
+    ..restored,
     heap: h,
     stack:,
-    locals: frame.locals,
+    pc:,
     func: gen.func_template,
     code: gen.func_template.bytecode,
     constants: gen.func_template.constants,
-    pc:,
     call_stack: [],
     // A generator body is a RE-ENTRANT drive: the resumer's frames (its
     // locals, its operand stack, the generator object itself) live on the
@@ -383,13 +383,8 @@ fn build_resumed_state(
     // an empty `call_stack` at depth 0 would let a collection inside the body
     // free everything only the resumer holds.
     call_depth: outer.call_depth + 1,
-    try_stack: frame.try_stack,
     new_target: JsUndefined,
     call_args: [],
-    // Per-frame fields: without these the body would inherit the RESUMER's
-    // eval_env (losing direct-eval `var`s across a yield) and its line number.
-    eval_env: frame.eval_env,
-    current_line: frame.line,
   )
 }
 
@@ -398,7 +393,7 @@ fn build_resumed_state(
 /// exact — no extra delegate slot needed.
 fn delegate_iterator(gen: GenData, frame: value.SuspendedFrame) -> Option(Ref) {
   // saved_pc was a valid dispatch target — always in bounds.
-  case tuple_array.unsafe_get(frame.pc, gen.func_template.bytecode) {
+  case tuple_array.get_unchecked(frame.pc, gen.func_template.bytecode) {
     YieldStar ->
       case frame.stack {
         [JsObject(iter_ref), ..] -> Some(iter_ref)
@@ -794,4 +789,19 @@ pub fn suspended_frame(suspended: State(host)) -> value.SuspendedFrame {
     eval_env: suspended.eval_env,
     line: suspended.current_line,
   )
+}
+
+/// Inverse of `suspended_frame`: write a snapshot's fields back into a State.
+/// Exhaustive destructure so adding a field to `SuspendedFrame` is a compile
+/// error HERE and in `suspended_frame` above — not a silently-unrestored value
+/// at one of the resume sites. Callers that need a different `pc`/`stack`
+/// (e.g. a value pushed for the resumed `yield` to receive) override them in a
+/// subsequent `State(..restored, ...)` update.
+pub fn restore_frame(
+  into: State(host),
+  frame: value.SuspendedFrame,
+) -> State(host) {
+  let value.SuspendedFrame(pc:, locals:, stack:, try_stack:, eval_env:, line:) =
+    frame
+  State(..into, pc:, locals:, stack:, try_stack:, eval_env:, current_line: line)
 }

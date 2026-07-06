@@ -3,7 +3,7 @@
 %% frame locals, function tables. Reads dominate; writes are rare and copy.
 -module(arc_tuple_array_ffi).
 -export([array_get/2, array_repeat/2,
-         array_unsafe_get/2, array_set_unchecked/3]).
+         array_get_unchecked/2, array_set_unchecked/3]).
 
 array_get(Index, Tuple) ->
     case Index >= 0 andalso Index < tuple_size(Tuple) of
@@ -14,7 +14,7 @@ array_get(Index, Tuple) ->
 %% Unchecked variants for hot-path reads where the compiler guarantees
 %% the index is in bounds (bytecode fetch, constant pool, locals). No
 %% bounds check, no Option box — badarg on violation.
-array_unsafe_get(Index, Tuple) ->
+array_get_unchecked(Index, Tuple) ->
     element(Index + 1, Tuple).
 array_set_unchecked(Index, Value, Tuple) ->
     setelement(Index + 1, Tuple, Value).

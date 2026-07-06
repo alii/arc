@@ -24,7 +24,6 @@ import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
-import arc/vm/opcode
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State, vm_error_message}
 import arc/vm/value.{
@@ -418,6 +417,7 @@ fn compile_source_module(
     export_names:,
     hoisted_funcs:,
     export_seeds:,
+    has_tla:,
   ) = body
 
   // [[RequestedModules]] with the phase esm.analyze already merged, keyed by
@@ -439,16 +439,8 @@ fn compile_source_module(
     requested_modules:,
     export_seeds:,
     hoisted_funcs:,
-    has_tla: module_has_tla(template),
+    has_tla:,
   )
-}
-
-/// [[HasTLA]]: whether the module body contains a top-level `await`. `await`
-/// inside nested functions compiles into child templates, so an Await opcode
-/// in the module's own bytecode is exactly a top-level await.
-fn module_has_tla(template: value.FuncTemplate) -> Bool {
-  tuple_array.to_list(template.bytecode)
-  |> list.any(fn(op) { op == opcode.Await })
 }
 
 // =============================================================================
@@ -1549,10 +1541,10 @@ fn instantiate_hoisted_functions(
         Error(Nil) -> heap
         Ok(box) -> {
           let child =
-            tuple_array.unsafe_get(func_idx, compiled.template.functions)
+            tuple_array.get_unchecked(func_idx, compiled.template.functions)
           let captures =
             list.map(child.env_descriptors, fn(desc) {
-              tuple_array.unsafe_get(desc.parent_index, locals)
+              tuple_array.get_unchecked(desc.parent_index, locals)
             })
           let #(heap, closure) =
             interpreter.make_closure(heap, builtins, child, captures)

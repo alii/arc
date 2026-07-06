@@ -36,7 +36,7 @@ import arc/vm/opcode.{
   IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
   IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
   MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
-  ObjectSpread, Pop, PrivateInDyn, PushConst, PushTry, PutBoxed,
+  ObjectSpread, Pc, Pop, PrivateInDyn, PushConst, PushTry, PutBoxed,
   PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
   PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue, Return,
   Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar,
@@ -717,7 +717,7 @@ pub fn read_lexical_local(
   case opcode.lexical_slot(state.func.lexical, ref) {
     None -> JsUndefined
     Some(idx) ->
-      case tuple_array.unsafe_get(idx, state.locals) {
+      case tuple_array.get_unchecked(idx, state.locals) {
         JsObject(r) as raw ->
           case heap.read_box(state.heap, r) {
             Some(boxed) -> boxed
@@ -795,12 +795,12 @@ fn fast_loop(
   constants: tuple_array.TupleArray(JsValue),
   line: Int,
 ) -> Result(#(Outcome, State(host)), VmError) {
-  case tuple_array.unsafe_get(pc, code) {
+  case tuple_array.get_unchecked(pc, code) {
     SetLine(l) ->
       fast_loop(state, pc + 1, stack, locals, hp, code, constants, l)
 
     PushConst(index) -> {
-      let v = tuple_array.unsafe_get(index, constants)
+      let v = tuple_array.get_unchecked(index, constants)
       fast_loop(state, pc + 1, [v, ..stack], locals, hp, code, constants, line)
     }
 
@@ -844,7 +844,7 @@ fn fast_loop(
       }
 
     GetLocal(index) ->
-      case tuple_array.unsafe_get(index, locals) {
+      case tuple_array.get_unchecked(index, locals) {
         // TDZ — slow path rebuilds State and throws the ReferenceError.
         JsUninitialized -> dispatch_slow(state, pc, stack, locals, hp, line)
         v ->
@@ -877,7 +877,7 @@ fn fast_loop(
       }
 
     GetBoxed(index) ->
-      case tuple_array.unsafe_get(index, locals) {
+      case tuple_array.get_unchecked(index, locals) {
         JsObject(box_ref) ->
           case heap.read_box(hp, box_ref) {
             // TDZ / corrupt box — slow path throws.
@@ -901,7 +901,7 @@ fn fast_loop(
     PutBoxed(index) ->
       case stack {
         [new_value, ..rest] ->
-          case tuple_array.unsafe_get(index, locals) {
+          case tuple_array.get_unchecked(index, locals) {
             JsObject(box_ref) ->
               fast_loop(
                 state,
@@ -918,10 +918,10 @@ fn fast_loop(
         [] -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
 
-    Jump(target) ->
+    Jump(Pc(target)) ->
       fast_loop(state, target, stack, locals, hp, code, constants, line)
 
-    JumpIfFalse(target) ->
+    JumpIfFalse(Pc(target)) ->
       case stack {
         [top, ..rest] ->
           case value.is_truthy(top) {
@@ -933,7 +933,7 @@ fn fast_loop(
         [] -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
 
-    JumpIfTrue(target) ->
+    JumpIfTrue(Pc(target)) ->
       case stack {
         [top, ..rest] ->
           case value.is_truthy(top) {
@@ -945,7 +945,7 @@ fn fast_loop(
         [] -> dispatch_slow(state, pc, stack, locals, hp, line)
       }
 
-    JumpIfNullish(target) ->
+    JumpIfNullish(Pc(target)) ->
       case stack {
         [JsNull, ..rest] | [JsUndefined, ..rest] ->
           fast_loop(state, target, rest, locals, hp, code, constants, line)
@@ -1080,7 +1080,7 @@ fn fast_loop(
     // JsNumber, so only the Add/Sub needs to run. Non-numbers (objects,
     // strings, BigInt, TDZ) take the slow path's full coercion chain.
     IncLocal(index) ->
-      case tuple_array.unsafe_get(index, locals) {
+      case tuple_array.get_unchecked(index, locals) {
         value.JsNumber(_) as v ->
           case operators.num_binop(v, number_one, numeric.num_add) {
             Ok(result) ->
@@ -1100,7 +1100,7 @@ fn fast_loop(
       }
 
     DecLocal(index) ->
-      case tuple_array.unsafe_get(index, locals) {
+      case tuple_array.get_unchecked(index, locals) {
         value.JsNumber(_) as v ->
           case operators.exec_binop(binop.Sub, v, number_one) {
             Ok(result) ->
@@ -1122,9 +1122,9 @@ fn fast_loop(
     // Fused loop-condition compare-and-branch. Mirrors the BinOp fast
     // path's purity rules: objects (ToPrimitive can run user code) and
     // TDZ sentinels bail to the slow path.
-    CmpLocalLocalJump(left_idx, right_idx, kind, target) -> {
-      let left = tuple_array.unsafe_get(left_idx, locals)
-      let right = tuple_array.unsafe_get(right_idx, locals)
+    CmpLocalLocalJump(left_idx, right_idx, kind, Pc(target)) -> {
+      let left = tuple_array.get_unchecked(left_idx, locals)
+      let right = tuple_array.get_unchecked(right_idx, locals)
       case left, right {
         JsObject(_), _
         | _, JsObject(_)
@@ -1163,9 +1163,9 @@ fn fast_loop(
       }
     }
 
-    CmpLocalConstJump(left_idx, const_index, kind, target) -> {
-      let left = tuple_array.unsafe_get(left_idx, locals)
-      let right = tuple_array.unsafe_get(const_index, constants)
+    CmpLocalConstJump(left_idx, const_index, kind, Pc(target)) -> {
+      let left = tuple_array.get_unchecked(left_idx, locals)
+      let right = tuple_array.get_unchecked(const_index, constants)
       case left, right {
         JsObject(_), _
         | _, JsObject(_)
@@ -1546,7 +1546,7 @@ fn dispatch_slow(
   line: Int,
 ) -> Result(#(Outcome, State(host)), VmError) {
   let state = State(..state, pc:, stack:, locals:, heap: hp, current_line: line)
-  case step(state, tuple_array.unsafe_get(state.pc, state.code)) {
+  case step(state, tuple_array.get_unchecked(state.pc, state.code)) {
     Ok(new_state) -> execute_inner(new_state)
     Error(Returned(result, post)) ->
       Ok(#(Completed(NormalCompletion(result)), post))
@@ -1725,40 +1725,6 @@ fn private_get_found(
   State(..state, stack:, pc: state.pc + 1)
 }
 
-/// GetPrivateField / GetPrivateField2: [obj, ..] → [val, ..] (or [val, obj, ..]).
-/// Single chain walk: find the descriptor (brand check), then apply OrdinaryGet
-/// steps 3-7 to it — no second walk via get_value_of.
-fn private_get_static(
-  state: State(host),
-  name: String,
-  keep_receiver: Bool,
-) -> Result(State(host), StepExit(host)) {
-  case state.stack {
-    [JsObject(ref) as receiver, ..rest] ->
-      case find_private_element(state, ref, key.private_key(name)) {
-        Some(prop) ->
-          private_get_found(state, prop, receiver, rest, keep_receiver)
-        None ->
-          state.throw_type_error(
-            state,
-            "Cannot read private member "
-              <> name
-              <> " from an object whose class did not declare it",
-          )
-      }
-    [_, ..] ->
-      state.throw_type_error(
-        state,
-        "Cannot read private member " <> name <> " on non-object",
-      )
-    [] ->
-      underflow(state, case keep_receiver {
-        True -> "GetPrivateField2"
-        False -> "GetPrivateField"
-      })
-  }
-}
-
 /// §7.3.30 PrivateGet with a minted key: [key, obj, ..] → [val, ..] (or
 /// [val, obj, ..]). Own-only lookup — spec [[PrivateElements]] never inherit
 /// through the prototype chain.
@@ -1814,10 +1780,8 @@ fn private_get_dyn(
 /// §7.3.32 PrivateSet: kind ~method~ (non-writable data) or an accessor without
 /// a setter throws TypeError, regardless of strict mode.
 ///
-/// `key_text` is the key's storage text — the raw source name for a static
-/// access, a minted `name <> uid` for a dyn one. `private_display_name` strips
-/// the uid when there is one and is the identity otherwise, so both callers can
-/// hand it straight over; it is only walked on the two throwing paths.
+/// `key_text` is the key's minted storage text (`name <> uid`).
+/// `private_display_name` strips the uid for the two throwing-path messages.
 fn private_put_found(
   state: State(host),
   found: Option(value.Property),
@@ -1924,7 +1888,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
 
     // ---- Stack operations --------------------------------------------
     PushConst(index) -> {
-      let value = tuple_array.unsafe_get(index, state.constants)
+      let value = tuple_array.get_unchecked(index, state.constants)
       Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
     }
 
@@ -1971,7 +1935,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
 
     // ---- Local variable access ---------------------------------------
     GetLocal(index) -> {
-      case tuple_array.unsafe_get(index, state.locals) {
+      case tuple_array.get_unchecked(index, state.locals) {
         JsUninitialized ->
           state.throw_reference_error(
             state,
@@ -1996,7 +1960,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     PutLocalCheckInit(index) ->
       case state.stack {
         [value, ..rest] ->
-          case tuple_array.unsafe_get(index, state.locals) {
+          case tuple_array.get_unchecked(index, state.locals) {
             JsUninitialized -> {
               let locals = tuple_array.set_unchecked(index, value, state.locals)
               Ok(State(..state, stack: rest, locals:, pc: state.pc + 1))
@@ -2011,7 +1975,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       }
 
     BoxLocal(index) -> {
-      let current_value = tuple_array.unsafe_get(index, state.locals)
+      let current_value = tuple_array.get_unchecked(index, state.locals)
       let #(heap, box_ref) =
         heap.alloc(state.heap, value.BoxSlot(current_value))
       let locals =
@@ -2020,7 +1984,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     }
 
     GetBoxed(index) -> {
-      case tuple_array.unsafe_get(index, state.locals) {
+      case tuple_array.get_unchecked(index, state.locals) {
         JsObject(box_ref) ->
           case heap.read_box(state.heap, box_ref) {
             Some(JsUninitialized) ->
@@ -2044,7 +2008,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     PutBoxed(index) -> {
       case state.stack {
         [new_value, ..rest_stack] -> {
-          case tuple_array.unsafe_get(index, state.locals) {
+          case tuple_array.get_unchecked(index, state.locals) {
             JsObject(box_ref) -> {
               let heap =
                 heap.write(state.heap, box_ref, value.BoxSlot(new_value))
@@ -2065,7 +2029,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     PutBoxedCheckInit(index) ->
       case state.stack {
         [new_value, ..rest_stack] ->
-          case tuple_array.unsafe_get(index, state.locals) {
+          case tuple_array.get_unchecked(index, state.locals) {
             JsObject(box_ref) ->
               case heap.read_box(state.heap, box_ref) {
                 Some(JsUninitialized) -> {
@@ -2569,7 +2533,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     // §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against a with
     // object. Found: replace obj with the value and jump. Not found
     // (or @@unscopables-blocked): pop obj, fall through.
-    opcode.WithGetVar(name, target) ->
+    opcode.WithGetVar(name, Pc(target)) ->
       with_get_var(state, name, target, keep_this: False, op: "WithGetVar")
 
     // Like WithGetVar, but keeps the with object beneath the value as the
@@ -2577,13 +2541,13 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     // env record's WithBaseObject). Found: [obj, ..] → [value, obj, ..],
     // jump. Not found (or @@unscopables-blocked): pop obj, fall through to
     // the static path (which pushes undefined as receiver).
-    opcode.WithGetVarThis(name, target) ->
+    opcode.WithGetVarThis(name, Pc(target)) ->
       with_get_var(state, name, target, keep_this: True, op: "WithGetVarThis")
 
     // §9.1.1.2.5 SetMutableBinding against a with object. Stack:
     // [obj, value, ..]. Found: Set(obj, name, value), pop both, jump.
     // Not found: pop obj, fall through to the ordinary store.
-    opcode.WithPutVar(name, target) -> {
+    opcode.WithPutVar(name, Pc(target)) -> {
       case state.stack {
         [JsObject(ref) as obj, val, ..rest] -> {
           use #(bound, state) <- result.try(with_has_binding(state, ref, name))
@@ -2638,7 +2602,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
 
     // §9.1.1.2.7 DeleteBinding against a with object. Found: replace obj
     // with the [[Delete]] result and jump. Not found: pop obj, fall through.
-    opcode.WithDeleteVar(name, target) -> {
+    opcode.WithDeleteVar(name, Pc(target)) -> {
       case state.stack {
         [JsObject(ref), ..rest] -> {
           use #(bound, state) <- result.try(with_has_binding(state, ref, name))
@@ -2664,7 +2628,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     // §9.1.2.1 GetIdentifierReference at a with object — HasBinding only.
     // Bound: KEEP obj (it becomes the reference base) and jump. Not bound:
     // pop obj, fall through (next check or the undefined static sentinel).
-    opcode.WithMakeRef(name, target) -> {
+    opcode.WithMakeRef(name, Pc(target)) -> {
       case state.stack {
         [JsObject(ref) as obj, ..rest] -> {
           use #(bound, state) <- result.map(with_has_binding(state, ref, name))
@@ -2682,7 +2646,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     // §9.1.1.2.6 GetBindingValue on a made reference base. Object base:
     // HasProperty re-check (binding may have vanished) then Get; undefined
     // sentinel: pop, fall through to the static read.
-    opcode.WithGetRefValue(name, target) -> {
+    opcode.WithGetRefValue(name, Pc(target)) -> {
       case state.stack {
         [JsObject(ref) as obj, ..rest] -> {
           use #(still, state) <- result.try(
@@ -2715,7 +2679,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     // ORIGINAL base — even if the binding was deleted during the RHS, the
     // store recreates it there, §13.15.2 note). Undefined sentinel: pop,
     // fall through to the static store.
-    opcode.WithPutRefValue(name, target) -> {
+    opcode.WithPutRefValue(name, Pc(target)) -> {
       case state.stack {
         [JsObject(ref) as obj, val, ..rest] -> {
           use #(still, state) <- result.try(
@@ -3011,25 +2975,25 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     IncLocal(index) -> fused_update_local(state, index, FusedInc)
     DecLocal(index) -> fused_update_local(state, index, FusedDec)
 
-    CmpLocalLocalJump(left_idx, right_idx, kind, target) ->
-      case tuple_array.unsafe_get(left_idx, state.locals) {
+    CmpLocalLocalJump(left_idx, right_idx, kind, Pc(target)) ->
+      case tuple_array.get_unchecked(left_idx, state.locals) {
         JsUninitialized -> tdz_reference_error(state)
         left ->
-          case tuple_array.unsafe_get(right_idx, state.locals) {
+          case tuple_array.get_unchecked(right_idx, state.locals) {
             JsUninitialized -> tdz_reference_error(state)
             right -> fused_cmp_jump(state, kind, left, right, target)
           }
       }
 
-    CmpLocalConstJump(left_idx, const_index, kind, target) ->
-      case tuple_array.unsafe_get(left_idx, state.locals) {
+    CmpLocalConstJump(left_idx, const_index, kind, Pc(target)) ->
+      case tuple_array.get_unchecked(left_idx, state.locals) {
         JsUninitialized -> tdz_reference_error(state)
         left ->
           fused_cmp_jump(
             state,
             kind,
             left,
-            tuple_array.unsafe_get(const_index, state.constants),
+            tuple_array.get_unchecked(const_index, state.constants),
             target,
           )
       }
@@ -3130,16 +3094,16 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       }
     }
 
-    Jump(target) -> Ok(State(..state, pc: target))
+    Jump(Pc(target)) -> Ok(State(..state, pc: target))
 
-    JumpIfFalse(target) -> {
+    JumpIfFalse(Pc(target)) -> {
       use v <- conditional_jump(state, target)
       !value.is_truthy(v)
     }
 
-    JumpIfTrue(target) -> conditional_jump(state, target, value.is_truthy)
+    JumpIfTrue(Pc(target)) -> conditional_jump(state, target, value.is_truthy)
 
-    JumpIfNullish(target) -> {
+    JumpIfNullish(Pc(target)) -> {
       use v <- conditional_jump(state, target)
       case v {
         JsNull | JsUndefined -> True
@@ -3148,7 +3112,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     }
 
     // QuickJS OP_gosub: push return-PC as a tagged number, jump to finally body.
-    opcode.Gosub(target) ->
+    opcode.Gosub(Pc(target)) ->
       Ok(
         State(
           ..state,
@@ -3171,7 +3135,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       }
 
     // -- Exception handling --
-    PushTry(catch_target:, kind:) -> {
+    PushTry(catch_target: Pc(catch_target), kind:) -> {
       let frame =
         TryFrame(catch_target:, stack_depth: list.length(state.stack), kind:)
       Ok(
@@ -3312,55 +3276,6 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           }
         }
         _ -> underflow(state, "PutField")
-      }
-    }
-
-    GetPrivateField(name) -> private_get_static(state, name, False)
-
-    GetPrivateField2(name) -> private_get_static(state, name, True)
-
-    PutPrivateField(name) -> {
-      let key = key.private_key(name)
-      case state.stack {
-        [val, JsObject(ref) as receiver, ..rest] ->
-          // Single chain walk: find the descriptor (brand check), then apply
-          // OrdinarySetWithOwnDescriptor to it — no second walk via set_value.
-          private_put_found(
-            state,
-            find_private_element(state, ref, key),
-            receiver,
-            key,
-            name,
-            val,
-            rest,
-          )
-        [_, _, ..] ->
-          state.throw_type_error(
-            state,
-            "Cannot write private member " <> name <> " on non-object",
-          )
-        _ -> underflow(state, "PutPrivateField")
-      }
-    }
-
-    PrivateIn(name) -> {
-      let key = key.private_key(name)
-      case state.stack {
-        [JsObject(ref), ..rest] -> {
-          // Brand check via find_property (chain walk) — has_property hides
-          // private-name keys from ordinary [[HasProperty]], so it can't be
-          // used here.
-          let found = option.is_some(find_private_element(state, ref, key))
-          Ok(State(..state, stack: [JsBool(found), ..rest], pc: state.pc + 1))
-        }
-        [_, ..] ->
-          state.throw_type_error(
-            state,
-            "Cannot use 'in' operator to search for private name "
-              <> name
-              <> " in non-object",
-          )
-        [] -> underflow(state, "PrivateIn")
       }
     }
 
@@ -4539,13 +4454,13 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
     MakeClosure(func_index) -> {
       // Compiler-generated index into the function table — always in bounds.
       let child_template =
-        tuple_array.unsafe_get(func_index, state.func.functions)
+        tuple_array.get_unchecked(func_index, state.func.functions)
       // Capture values from current frame according to env_descriptors.
       // For boxed captured vars, the local holds a JsObject(box_ref) —
       // copying that ref means the closure shares the same BoxSlot.
       let captured_values =
         list.map(child_template.env_descriptors, fn(desc) {
-          tuple_array.unsafe_get(desc.parent_index, state.locals)
+          tuple_array.get_unchecked(desc.parent_index, state.locals)
         })
       let #(heap, closure_ref) =
         make_closure(
@@ -5072,7 +4987,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
         _ -> underflow(state, "AsyncYieldStarNext")
       }
 
-    AsyncYieldStarResume(next_pc:) ->
+    AsyncYieldStarResume(next_pc: Pc(next_pc)) ->
       // [result_obj, iter, ..rest]. done? → push value, pc+1 : Yielded(value).
       case state.stack {
         [res, _iter, ..rest] -> {
@@ -5829,7 +5744,7 @@ fn is_tail_call(state: State(host), callee: FuncTemplate) -> Bool {
   case frame_eligible {
     False -> False
     True ->
-      case tuple_array.unsafe_get(state.pc + 1, state.code) {
+      case tuple_array.get_unchecked(state.pc + 1, state.code) {
         Return -> True
         _ -> False
       }
@@ -6005,7 +5920,7 @@ fn fused_update_local(
   kind: FusedUpdate,
 ) -> Result(State(host), StepExit(host)) {
   let next_pc = state.pc + 1
-  case tuple_array.unsafe_get(index, state.locals) {
+  case tuple_array.get_unchecked(index, state.locals) {
     JsUninitialized -> tdz_reference_error(state)
     v -> {
       // UnaryOp(Pos): ToNumber, via ToPrimitive for objects — mirrors the

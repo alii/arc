@@ -8,18 +8,18 @@ import arc/vm/binop
 import arc/vm/internal/tuple_array
 import arc/vm/key
 import arc/vm/opcode.{
-  type IrOp, type Op, IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrBinOp,
-  IrCmpLocalConstJump, IrCmpLocalLocalJump, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
-  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
-  IrPutField, IrWithDeleteVar, IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis,
-  IrWithMakeRef, IrWithPutRefValue, IrWithPutVar,
+  type IrOp, type LabelId, type Op, type Pc, IrAsyncYieldStarNext,
+  IrAsyncYieldStarResume, IrBinOp, IrCmpLocalConstJump, IrCmpLocalLocalJump,
+  IrDefineAccessor, IrDefineField, IrDefineMethod, IrDeleteField, IrFinal,
+  IrGetField, IrGetField2, IrGosub, IrJump, IrJumpIfFalse, IrJumpIfNullish,
+  IrJumpIfTrue, IrLabel, IrPushTry, IrPutField, IrWithDeleteVar,
+  IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis, IrWithMakeRef,
+  IrWithPutRefValue, IrWithPutVar, Pc,
 }
 import arc/vm/value.{type JsValue}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/string
 
 /// Run Phase 3 over one function body's IR: peephole-fuse, then resolve label
 /// IDs to absolute PCs. Returns the runnable bytecode array plus the constant
@@ -208,20 +208,20 @@ fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
 }
 
 fn is_const_one(consts: tuple_array.TupleArray(JsValue), index: Int) -> Bool {
-  tuple_array.unsafe_get(index, consts) == value.JsNumber(value.Finite(1.0))
+  tuple_array.get_unchecked(index, consts) == value.JsNumber(value.Finite(1.0))
 }
 
 /// Pass 1: Walk the IR, counting real ops and recording label positions.
 fn build_label_map(
   code: List(IrOp),
   pc: Int,
-  map: Dict(Int, Int),
-) -> Dict(Int, Int) {
+  map: Dict(LabelId, Pc),
+) -> Dict(LabelId, Pc) {
   case code {
     [] -> map
     [IrLabel(id), ..rest] ->
       // Labels don't occupy a PC slot
-      build_label_map(rest, pc, dict.insert(map, id, pc))
+      build_label_map(rest, pc, dict.insert(map, id, Pc(pc)))
     [_, ..rest] ->
       // All other ops occupy one PC slot
       build_label_map(rest, pc + 1, map)
@@ -229,7 +229,7 @@ fn build_label_map(
 }
 
 /// Resolve a label id to its PC; crashes if the emitter forgot to place it.
-fn label_pc(labels: Dict(Int, Int), label: Int) -> Int {
+fn label_pc(labels: Dict(LabelId, Pc), label: LabelId) -> Pc {
   let assert Ok(pc) = dict.get(labels, label) as "unbound label"
   pc
 }
@@ -239,12 +239,11 @@ fn label_pc(labels: Dict(Int, Int), label: Int) -> Int {
 /// entry, resolved here like any other target; skipping this function is a
 /// type error, since `opcode.PushTry` accepts nothing but a `TryKind(Pc)`.
 fn resolve_try_kind(
-  labels: Dict(Int, Int),
-  kind: opcode.TryKind(opcode.LabelId),
-) -> opcode.TryKind(opcode.Pc) {
+  labels: Dict(LabelId, Pc),
+  kind: opcode.TryKind(LabelId),
+) -> opcode.TryKind(Pc) {
   case kind {
-    opcode.Finally(fin_label: opcode.LabelId(id)) ->
-      opcode.Finally(opcode.Pc(label_pc(labels, id)))
+    opcode.Finally(fin_label:) -> opcode.Finally(label_pc(labels, fin_label))
     opcode.CatchOnly -> opcode.CatchOnly
     opcode.IterCloseGuard -> opcode.IterCloseGuard
   }
@@ -260,7 +259,7 @@ fn resolve_try_kind(
 /// IR-only variants below.
 fn resolve_ops(
   code: List(IrOp),
-  labels: Dict(Int, Int),
+  labels: Dict(LabelId, Pc),
   acc: List(Op),
 ) -> List(Op) {
   case code {
@@ -270,18 +269,10 @@ fn resolve_ops(
     [IrLabel(_), ..rest] -> resolve_ops(rest, labels, acc)
 
     // Already-final: nothing to resolve. A PC-carrying op (Jump, PushTry, …)
-    // has no business here — its Int would be an unresolved label id, so it
-    // would silently jump to a garbage PC. Refuse it instead of miscompiling.
-    [IrFinal(op), ..rest] ->
-      case opcode.carries_pc(op) {
-        False -> resolve_ops(rest, labels, [op, ..acc])
-        True ->
-          panic as {
-            "IrFinal wraps a PC-carrying opcode (label id where a PC belongs); "
-            <> "emit its Ir* variant instead: "
-            <> string.inspect(op)
-          }
-      }
+    // is unrepresentable here — every such Op field is a `Pc`, and the emitter
+    // only ever holds `LabelId`s (via `emit.fresh_label`), so the type checker
+    // rejects an `IrFinal(Jump(..))` at the emit site.
+    [IrFinal(op), ..rest] -> resolve_ops(rest, labels, [op, ..acc])
 
     // Jump ops: resolve label → PC
     [IrJump(l), ..rest] ->
