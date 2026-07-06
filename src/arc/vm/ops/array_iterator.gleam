@@ -70,6 +70,9 @@ pub fn step(
 /// `slot` is the iterator's own heap slot, already read by `step` — threaded
 /// through so the cursor write never re-reads it (`heap.read` is the hottest
 /// function in the VM, and this is the inner loop of `for..of` over an array).
+/// The source slot is likewise read exactly once and its fields threaded
+/// through: the fast path of `for (const x of plainArray)` is one heap read
+/// per step, total.
 fn step_at(
   state: State(host),
   iter_ref: Ref,
@@ -126,67 +129,63 @@ fn step_at(
             }
           }
       }
-    _ ->
-      case heap.read_array_like(state.heap, source) {
-        // Array/Arguments source: `length` and the element block are right
-        // there in the slot, no [[Get]] needed for the length.
-        Some(#(length, elems)) ->
-          case index >= length {
-            True -> Ok(#(Exhausted, exhaust(state, iter_ref)))
-            False ->
-              // §23.1.5.1: Let elementValue be ? Get(array, elementKey). The
-              // elements store is only a fast path for plain data values —
-              // defineProperty can install accessor/attribute overrides at an
-              // index (kept in the properties dict), and holes consult the
-              // prototype chain, so fall back to the generic [[Get]] when the
-              // element store has no entry or an override exists.
-              case iter_kind {
-                value.ArrayIterKeys ->
-                  Ok(yield_at(state, iter_ref, iter_kind, index, JsUndefined))
-                _ -> {
-                  use #(elem, state) <- result.map(
-                    case
-                      element_without_override(state.heap, source, elems, index)
-                    {
-                      Some(v) -> Ok(#(v, state))
-                      None ->
-                        rethrow(object.get_value(
-                          state,
-                          source,
-                          Index(index),
-                          JsObject(source),
-                        ))
-                    },
-                  )
-                  yield_at(state, iter_ref, iter_kind, index, elem)
-                }
-              }
-          }
-        // Everything else — a Proxy, or any array-LIKE the iterator was
-        // borrowed onto (`Array.prototype.values.call({length: 2, 0: "a"})`) —
-        // is the spec's plain §23.1.5.1: ? Get(array, "length") then
-        // ? Get(array, ToString(index)), both of which run getters / fire
-        // proxy traps.
-        None -> {
-          use #(length, state) <- result.try(array_like_length(state, source))
-          // §7.1.20 clamps a hostile `{length: 1e300}` / `{length: Infinity}`
-          // to 2^53-1, which no `for..of` could ever drain — bail loudly rather
-          // than spin the VM for hours. Only array-LIKES reach here: real
-          // Arrays and typed arrays take the branches above, where `length` is
-          // bounded by what the heap actually holds, so a legal 20M-element
-          // array or view still iterates to completion.
-          use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-            rethrow(state.range_error_op(state, iteration_budget_msg))
-          })
-          case index >= length {
-            True -> Ok(#(Exhausted, exhaust(state, iter_ref)))
-            False ->
-              // §23.1.5.1 step 8.b.iii: a "key" iterator yields the index
-              // WITHOUT performing Get(array, elementKey) — no get trap fires.
-              case iter_kind {
-                value.ArrayIterKeys ->
-                  Ok(yield_at(state, iter_ref, iter_kind, index, JsUndefined))
-                _ -> {
+    // Array/Arguments source: `length`, the element block, and the properties
+    // dict are right there in the slot — no [[Get]] for the length, and the
+    // fast-path element read below needs no second heap lookup.
+    Some(ObjectSlot(
+      kind: value.ArrayObject(length:),
+      elements:,
+      properties:,
+      ..,
+    ))
+    | Some(ObjectSlot(
+        kind: value.ArgumentsObject(length:),
+        elements:,
+        properties:,
+        ..,
+      )) ->
+      case index >= length {
+        True ->
+          // No user code ran — the iterator slot from `step` is still current.
+          Ok(#(
+            Exhausted,
+            exhaust_direct(state, iter_ref, slot, source, iter_kind),
+          ))
+        False ->
+          // §23.1.5.1: Let elementValue be ? Get(array, elementKey). The
+          // elements store is only a fast path for plain data values —
+          // defineProperty can install accessor/attribute overrides at an
+          // index (kept in the properties dict), and holes consult the
+          // prototype chain, so fall back to the generic [[Get]] when the
+          // element store has no entry or an override exists.
+          case iter_kind {
+            value.ArrayIterKeys ->
+              Ok(yield_at_direct(
+                state,
+                iter_ref,
+                slot,
+                source,
+                iter_kind,
+                index,
+                JsUndefined,
+              ))
+            _ ->
+              case element_without_override(properties, elements, index) {
+                // Plain data element read straight from the store — no user
+                // code ran, so the iterator slot from `step` is still current.
+                Some(elem) ->
+                  Ok(yield_at_direct(
+                    state,
+                    iter_ref,
+                    slot,
+                    source,
+                    iter_kind,
+                    index,
+                    elem,
+                  ))
+                // Override or hole — [[Get]] runs getters / consults the
+                // prototype chain, so re-read the iterator slot afterwards.
+                None -> {
                   use #(elem, state) <- result.map(
                     rethrow(object.get_value(
                       state,
@@ -199,8 +198,44 @@ fn step_at(
                 }
               }
           }
-        }
       }
+    // Everything else — a Proxy, or any array-LIKE the iterator was borrowed
+    // onto (`Array.prototype.values.call({length: 2, 0: "a"})`) — is the spec's
+    // plain §23.1.5.1: ? Get(array, "length") then ? Get(array, ToString(index)),
+    // both of which run getters / fire proxy traps.
+    _ -> {
+      use #(length, state) <- result.try(array_like_length(state, source))
+      // §7.1.20 clamps a hostile `{length: 1e300}` / `{length: Infinity}`
+      // to 2^53-1, which no `for..of` could ever drain — bail loudly rather
+      // than spin the VM for hours. Only array-LIKES reach here: real
+      // Arrays and typed arrays take the branches above, where `length` is
+      // bounded by what the heap actually holds, so a legal 20M-element
+      // array or view still iterates to completion.
+      use <- bool.lazy_guard(length > limits.max_iteration, fn() {
+        rethrow(state.range_error_op(state, iteration_budget_msg))
+      })
+      case index >= length {
+        True -> Ok(#(Exhausted, exhaust(state, iter_ref)))
+        False ->
+          // §23.1.5.1 step 8.b.iii: a "key" iterator yields the index
+          // WITHOUT performing Get(array, elementKey) — no get trap fires.
+          case iter_kind {
+            value.ArrayIterKeys ->
+              Ok(yield_at(state, iter_ref, iter_kind, index, JsUndefined))
+            _ -> {
+              use #(elem, state) <- result.map(
+                rethrow(object.get_value(
+                  state,
+                  source,
+                  Index(index),
+                  JsObject(source),
+                )),
+              )
+              yield_at(state, iter_ref, iter_kind, index, elem)
+            }
+          }
+      }
+    }
   }
 }
 
@@ -336,9 +371,9 @@ fn set_cursor(
 }
 
 /// `set_cursor` for a caller that already holds the iterator's slot and knows
-/// no user code has run since it was read (the typed-array path reads the
-/// element straight out of the backing store) — saves a `heap.read`, the VM's
-/// hottest function, in the inner loop of `for (const x of typedArray)`.
+/// no user code has run since it was read (typed-array reads and plain-data
+/// Array/Arguments element reads never call into JS) — saves a `heap.read`,
+/// the VM's hottest function, in the inner loop of `for..of`.
 fn set_cursor_direct(
   h: state.Heap(host),
   iter_ref: Ref,
@@ -365,19 +400,15 @@ fn set_cursor_direct(
 /// Fast-path element read for the array iterator: Some(value) only when the
 /// index is a plain data value in the element store with no properties-dict
 /// override (defineProperty can install accessor/attribute overrides at an
-/// index). None → caller takes the generic [[Get]] path.
+/// index). None → caller takes the generic [[Get]] path. Operates on the
+/// already-destructured slot fields so the hot path never re-reads the heap.
 fn element_without_override(
-  h: state.Heap(host),
-  source: Ref,
+  properties: dict.Dict(key.PropertyKey, value.Property),
   elems: value.JsElements,
   index: Int,
 ) -> Option(JsValue) {
-  case heap.read(h, source) {
-    Some(ObjectSlot(properties:, ..)) ->
-      case dict.has_key(properties, Index(index)) {
-        True -> None
-        False -> elements.get_option(elems, index)
-      }
-    _ -> None
+  case dict.has_key(properties, Index(index)) {
+    True -> None
+    False -> elements.get_option(elems, index)
   }
 }
