@@ -1859,10 +1859,15 @@ fn proxy_get_own_property(
                           <> " which is configurable in the proxy target",
                       )
                     False ->
-                      // Step 16.b: writable:false requires target's
-                      // writable:false too.
-                      case parsed.writable, td {
-                        Some(False), DataProperty(writable: True, ..) ->
+                      // Step 16.b: IsDataDescriptor(resultDesc) with
+                      // writable:false requires target's writable:false too.
+                      // resultDesc is the COMPLETED descriptor from step 14 —
+                      // an absent [[Writable]] in the trap result defaults to
+                      // false and must still trip this invariant.
+                      case completed, td {
+                        DataProperty(writable: False, ..),
+                          DataProperty(writable: True, ..)
+                        ->
                           state.type_error_op(
                             state,
                             "'getOwnPropertyDescriptor' on proxy: trap reported non-writability for property "
