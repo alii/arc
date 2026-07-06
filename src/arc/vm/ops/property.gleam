@@ -133,13 +133,12 @@ pub fn put_elem_value(
 /// +Infinity and anything past 2^53-1 → 2^53-1. Never a raw truncation — an
 /// unclamped `float_to_int` on `{length: 1e300}` yields a bound no loop can
 /// ever reach.
-///
-/// `receiver` is the [[Get]] receiver (the spec's O — normally `JsObject(ref)`).
 pub fn length_of_array_like(
   state: State(host),
   ref: value.Ref,
-  receiver: JsValue,
 ) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
+  // §7.3.18 fixes the [[Get]] receiver to O itself — no caller may vary it.
+  let receiver = value.JsObject(ref)
   use #(len_val, state) <- result.try(object.get_value(
     state,
     ref,
@@ -174,7 +173,7 @@ pub fn create_list_from_array_like(
   case arg {
     JsObject(ref) -> {
       // Step 3: Let len be ? LengthOfArrayLike(obj).
-      use #(len, state) <- result.try(length_of_array_like(state, ref, arg))
+      use #(len, state) <- result.try(length_of_array_like(state, ref))
       case len > limits.max_iteration {
         True ->
           Error(state.range_error_value(

@@ -217,7 +217,7 @@ fn array_like_length(
   state: State(host),
   source: Ref,
 ) -> Result(#(Int, State(host)), StepExit(host)) {
-  rethrow(property.length_of_array_like(state, source, JsObject(source)))
+  rethrow(property.length_of_array_like(state, source))
 }
 
 /// Bump the cursor past `index`, then shape one iteration result for the

@@ -590,13 +590,12 @@ pub fn spread_into_array(
           Ok(State(..state, heap:))
         }
       }
-    // null/undefined/other primitives: not iterable.
-    _ -> {
-      state.throw_type_error(
-        state,
-        object.inspect(iterable, state.heap) <> " is not iterable",
-      )
-    }
+    // Remaining primitives (Bool/Number/BigInt/Symbol/null/undefined): §7.4.3
+    // GetIterator does GetV(@@iterator) through the primitive's prototype, so
+    // a user-installed `Boolean.prototype[Symbol.iterator]` makes `[...true]`
+    // iterate. get_iterator_sync yields JsUndefined for null/undefined and for
+    // an unpatched prototype → the "is not iterable" TypeError there.
+    _ -> spread_via_iterator(state, iterable, target_ref)
   }
 }
 
@@ -619,7 +618,9 @@ fn spread_array_generic(
   // the source mid-iteration. Going through [[Get]] (rather than the stored
   // ArrayObject/ArgumentsObject count) is what makes `arguments.length = 0;
   // [...arguments]` spread nothing.
-  use #(length, state) <- result.try(array_like_length(state, src_ref))
+  use #(length, state) <- result.try(
+    state.rethrow(property.length_of_array_like(state, src_ref)),
+  )
   case idx >= length {
     True -> Ok(state)
     False ->
@@ -636,15 +637,6 @@ fn spread_array_generic(
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
       }
   }
-}
-
-/// §7.1.20 LengthOfArrayLike(O), in this module's StepExit error shape — the
-/// implementation itself is `property.length_of_array_like`.
-fn array_like_length(
-  state: State(host),
-  ref: Ref,
-) -> Result(#(Int, State(host)), StepExit(host)) {
-  state.rethrow(property.length_of_array_like(state, ref, JsObject(ref)))
 }
 
 /// Raw drain of an ArrayIteratorObject whose @@iterator and `next` are still

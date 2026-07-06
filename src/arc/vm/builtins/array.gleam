@@ -1204,7 +1204,7 @@ fn length_of_properties(
     // (getters + prototype chain) then ToLength. Getter exceptions propagate;
     // getter side effects are kept via the threaded state (§7.3.18 step order
     // matters for test262).
-    _ -> property.length_of_array_like(state, ref, JsObject(ref))
+    _ -> property.length_of_array_like(state, ref)
   }
 }
 

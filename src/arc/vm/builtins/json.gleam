@@ -419,7 +419,10 @@ fn internalize_json_property(
       case is_arr {
         // Step 5.b: indices 0..len-1, len from LengthOfArrayLike.
         True -> {
-          use #(len, state) <- result.try(length_of_array_like(state, ref))
+          use #(len, state) <- result.try(property.length_of_array_like(
+            state,
+            ref,
+          ))
           internalize_elements(state, ctx, ref, 0, len, record_elements(node))
         }
         // Step 5.c: EnumerableOwnPropertyNames(val, key).
@@ -1467,7 +1470,10 @@ fn build_replacer(
             False -> Ok(#(NoReplacer, state))
             // Step 4.b.iii: build PropertyList from the array elements.
             True -> {
-              use #(len, state) <- result.try(length_of_array_like(state, ref))
+              use #(len, state) <- result.try(property.length_of_array_like(
+                state,
+                ref,
+              ))
               use #(items, state) <- result.map(
                 collect_property_list(state, ref, 0, len, set.new(), []),
               )
@@ -1601,15 +1607,6 @@ fn space_to_integer(n: value.JsNum) -> Int {
     value.Infinity -> 10
     NaN | NegInfinity -> 0
   }
-}
-
-/// LengthOfArrayLike (§7.3.18) — `property.length_of_array_like` is THE
-/// implementation; this only supplies the receiver.
-fn length_of_array_like(
-  state: State(host),
-  ref: Ref,
-) -> Result(#(Int, State(host)), #(JsValue, State(host))) {
-  property.length_of_array_like(state, ref, JsObject(ref))
 }
 
 /// SerializeJSONProperty (§25.5.2.1).
@@ -1858,7 +1855,7 @@ fn serialize_array(
       let stack = [ref.id, ..stack]
       let step_indent = indent <> ctx.gap
       // Step 6: len = ? LengthOfArrayLike(value).
-      use #(len, state) <- result.try(length_of_array_like(state, ref))
+      use #(len, state) <- result.try(property.length_of_array_like(state, ref))
       use #(partial, state) <- result.map(
         serialize_elements(state, ctx, stack, step_indent, ref, 0, len, []),
       )
