@@ -2,7 +2,7 @@ import arc/engine.{Returned, Threw}
 import arc/host
 import arc/vm/ops/coerce
 import arc/vm/state
-import arc/vm/value.{Finite, JsNumber, JsObject, JsString, JsUndefined}
+import arc/vm/value.{Finite, JsNumber, JsString, JsUndefined}
 import gleam/int
 import gleam/option
 import gleam/string
@@ -316,15 +316,11 @@ pub fn host_object_typed_roundtrip_test() {
       #(s, Ok(val))
     })
     |> engine.define_fn("readHost", 1, fn(args, _this, s) {
-      case args {
-        [JsObject(ref), ..] ->
-          case host.read_host(s.heap, ref) {
-            // typed, exhaustive — no Dynamic, no decode, no coerce
-            option.Some(Pid(n)) -> #(s, Ok(JsNumber(Finite(int.to_float(n)))))
-            option.Some(Socket(name)) -> #(s, Ok(JsString("socket:" <> name)))
-            option.None -> #(s, Ok(JsString("not-a-host-object")))
-          }
-        _ -> #(s, Ok(JsUndefined))
+      case host.read_host(s, host.first_arg(args)) {
+        // typed, exhaustive — no Dynamic, no decode, no coerce
+        option.Some(Pid(n)) -> #(s, Ok(JsNumber(Finite(int.to_float(n)))))
+        option.Some(Socket(name)) -> #(s, Ok(JsString("socket:" <> name)))
+        option.None -> #(s, Ok(JsString("not-a-host-object")))
       }
     })
 
