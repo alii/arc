@@ -440,7 +440,7 @@ pub fn stats(heap: Heap(ctx, host)) -> HeapStats {
 
 /// Run mark-and-sweep GC using only the persistent root set.
 pub fn collect(heap: Heap(ctx, host)) -> Heap(ctx, host) {
-  collect_with_roots(heap, set.new())
+  collect_with_roots(heap, [])
 }
 
 /// Mark-and-sweep with extra roots, then DROP the free list instead of
@@ -452,10 +452,9 @@ pub fn collect(heap: Heap(ctx, host)) -> Heap(ctx, host) {
 /// `next`, and ids are plain (arbitrary-precision) ints.
 pub fn compact(
   heap: Heap(ctx, host),
-  extra_roots: Set(Int),
+  extra_roots: List(Ref),
 ) -> Heap(ctx, host) {
-  let all_roots = set.union(heap.roots, extra_roots)
-  let live = mark_from(heap, all_roots)
+  let live = mark_from(heap, union_roots(heap.roots, extra_roots))
   let new_data = dict.filter(heap.data, fn(id, _) { set.contains(live, id) })
   Heap(..heap, data: new_data, free: [], last_collect_next: heap.next)
 }
@@ -470,11 +469,18 @@ pub fn grown_since_collect(heap: Heap(ctx, host)) -> Int {
 /// (e.g. stack refs the VM passes in).
 pub fn collect_with_roots(
   heap: Heap(ctx, host),
-  extra_roots: Set(Int),
+  extra_roots: List(Ref),
 ) -> Heap(ctx, host) {
-  let all_roots = set.union(heap.roots, extra_roots)
-  let live = mark_from(heap, all_roots)
+  let live = mark_from(heap, union_roots(heap.roots, extra_roots))
   Heap(..sweep(heap, live), last_collect_next: heap.next)
+}
+
+/// Fold a caller-supplied `List(Ref)` extra-root set into the persistent
+/// `Set(Int)` id set the mark phase walks. Unwrapping `.id` here — rather
+/// than at every call site — is what lets `state.reachable_root_refs` and
+/// `gc_trace` traffic exclusively in `Ref`.
+fn union_roots(persistent: Set(Int), extra: List(Ref)) -> Set(Int) {
+  list.fold(extra, persistent, fn(s, r) { set.insert(s, r.id) })
 }
 
 /// Mark phase: starting from a root set, return the set of all reachable slot IDs.

@@ -2,6 +2,7 @@ import arc/vm/builtins/common.{
   type Builtins, RangeErr, ReferenceErr, SyntaxErr, TypeErr,
 }
 import arc/vm/completion.{type SuspendKind}
+import arc/vm/gc_trace
 import arc/vm/heap
 import arc/vm/host_hooks
 import arc/vm/internal/job_queue.{type JobQueue}
@@ -177,8 +178,8 @@ pub type RealmCtx(host) {
 
 /// Every heap ref a `HostHooks` record can hold — the ENGINE-state values a
 /// GC must treat as reachable for as long as the hooks are installed (today:
-/// the dynamic-import hook's function object). Callers that build a root set
-/// by hand (`exec/entry.handoff_roots`) fold this in.
+/// the dynamic-import hook's function object). Folded into
+/// `reachable_root_refs` below.
 ///
 /// The destructure below is EXHAUSTIVE over `HostHooks` on purpose: adding a
 /// hook field is a compile error here until it has been classified as
@@ -196,6 +197,119 @@ pub fn host_hook_roots(hooks: host_hooks.HostHooks) -> List(JsValue) {
     import_hook:,
   ) = hooks
   option.values([import_hook])
+}
+
+/// The ONE canonical enumerator of every heap `Ref` reachable from a `State`
+/// but NOT already in the heap's persistent root set. Passed as `extra_roots`
+/// to `heap.compact` / `heap.collect_with_roots`. Replaces the two
+/// hand-maintained root walks that previously lived in
+/// `exec/interpreter.state_root_ids` and `exec/entry.handoff_roots` — each of
+/// which enumerated a slightly different subset, and neither of which the
+/// compiler checked.
+///
+/// SAFETY PROPERTY: both destructures below are EXHAUSTIVE over `State` and
+/// `RealmCtx` (no `..`). Adding a field to either record is a compile error
+/// here until the new field has been classified: root its refs, or bind it to
+/// `_` with a note. Every `JsValue → Ref` extraction goes through
+/// `gc_trace.push_value_ref` (whose own `case` is exhaustive over `JsValue`),
+/// so a new ref-carrying `JsValue` variant is caught there.
+pub fn reachable_root_refs(state: State(host)) -> List(Ref) {
+  let State(
+    stack:,
+    locals:,
+    // Compile-time literal pool: primitives only, never a heap ref.
+    constants: _,
+    // Bytecode/metadata — no heap refs.
+    func: _,
+    code: _,
+    heap: _,
+    pc: _,
+    // Saved caller frames. Both GC call sites gate on `call_stack == []`
+    // (a re-entrant/nested drive is never a collection point), so there is
+    // nothing to trace. Bound explicitly so a future caller that lifts that
+    // gate is forced to revisit this line.
+    call_stack: _,
+    // TryFrame is scalar (pc offsets + a stack-depth Int).
+    try_stack: _,
+    // Builtins refs are all persistent heap roots — traced by the mark phase.
+    builtins: _,
+    ctx:,
+    new_target:,
+    call_args:,
+    job_queue:,
+    unhandled_rejections:,
+    atomics_waiters:,
+    // Plain Int counters / booleans.
+    outstanding: _,
+    call_depth: _,
+    eval_env:,
+    current_line: _,
+    can_block: _,
+  ) = state
+  let RealmCtx(
+    lexical_globals:,
+    // Option(String) — no heap ref.
+    import_referrer: _,
+    global_object:,
+    // Dict(String, SymbolId) — SymbolId carries an ErlangRef, not a heap Ref.
+    symbol_registry: _,
+    template_objects:,
+    realms:,
+    // Re-entrant callback closures + coercion hooks — engine plumbing, no
+    // JsValue captured.
+    call_fn: _,
+    construct_fn: _,
+    to_number_fn: _,
+    to_bigint_fn: _,
+    get_own_property_fn: _,
+    // FuncTemplate — bytecode/metadata, no heap refs.
+    callback_sentinel: _,
+    host_hooks:,
+    // fn(Heap, Builtins, Ref) -> Heap — pure host closure.
+    extend_262: _,
+  ) = ctx
+  let acc = [global_object]
+  let acc =
+    dict.fold(lexical_globals, acc, fn(a, _name, g) {
+      gc_trace.push_value_ref(value.lexical_global_value(g), a)
+    })
+  let acc = dict.fold(template_objects, acc, fn(a, _site, ref) { [ref, ..a] })
+  let acc = dict.fold(realms, acc, fn(a, ref, _builtins) { [ref, ..a] })
+  let acc =
+    list.fold(host_hook_roots(host_hooks), acc, fn(a, v) {
+      gc_trace.push_value_ref(v, a)
+    })
+  let acc = list.fold(unhandled_rejections, acc, fn(a, ref) { [ref, ..a] })
+  let acc =
+    list.fold(atomics_waiters, acc, fn(a, w) {
+      // Full destructure so a new Ref-carrying AtomicsWaiter field is a
+      // compile error here.
+      let value.AtomicsWaiter(
+        key: _,
+        buffer:,
+        byte_offset: _,
+        promise_data:,
+        promise:,
+        deadline: _,
+      ) = w
+      [buffer, promise_data, promise, ..a]
+    })
+  let acc =
+    list.fold(job_queue.to_list(job_queue), acc, fn(a, job) {
+      gc_trace.push_job_refs(job, a)
+    })
+  let acc = case eval_env {
+    option.Some(ref) -> [ref, ..acc]
+    option.None -> acc
+  }
+  let acc = gc_trace.push_value_ref(new_target, acc)
+  let acc =
+    list.fold(call_args, acc, fn(a, v) { gc_trace.push_value_ref(v, a) })
+  let acc =
+    list.fold(tuple_array.to_list(locals), acc, fn(a, v) {
+      gc_trace.push_value_ref(v, a)
+    })
+  list.fold(stack, acc, fn(a, v) { gc_trace.push_value_ref(v, a) })
 }
 
 /// The internal VM executor state. Public so builtins can receive and return it,

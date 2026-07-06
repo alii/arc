@@ -12,6 +12,7 @@ import arc/vm/exec/frame
 import arc/vm/exec/generators
 import arc/vm/exec/interpreter
 import arc/vm/exec/promises
+import arc/vm/gc_trace
 import arc/vm/heap
 import arc/vm/host_hooks
 import arc/vm/internal/job_queue
@@ -22,10 +23,8 @@ import arc/vm/value.{
   type FuncTemplate, type JsValue, type Ref, AsyncFunctionSlot, JsObject,
 }
 import gleam/dict
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/set
 
 // ============================================================================
 // Public types
@@ -394,100 +393,25 @@ pub fn run_and_drain_repl_with(
 const handoff_gc_min_slots = 65_536
 
 /// GC the finished script's heap down to what the caller can still reach —
-/// the exact set `handoff_roots` enumerates (settled value, global object,
-/// lexical globals, realms, template objects, host hooks, leftover
-/// jobs/waiters/rejections, eval env, top-level locals and stack). Only used
-/// after execution has fully settled (empty stack/call stack), so there are
-/// no hidden VM roots. No-op below `handoff_gc_min_slots`.
+/// the settled value plus everything `state.reachable_root_refs` enumerates
+/// (the ONE canonical, exhaustive-over-State walk). Only used after execution
+/// has fully settled (empty call stack), so there are no hidden VM roots.
+/// No-op below `handoff_gc_min_slots`.
 fn shrink_for_handoff(
   settled: Result(JsValue, JsValue),
   state: State(host),
 ) -> Heap(host) {
   case heap.size(state.heap) >= handoff_gc_min_slots {
     False -> state.heap
-    True -> heap.compact(state.heap, handoff_roots(settled, state))
-  }
-}
-
-/// Every slot id the caller of a settled run can still reach from outside
-/// the heap. The persistent root set (builtins, global, realm slots) is
-/// added by `heap.compact` itself. ENGINE state hanging off `ctx.host_hooks`
-/// (the dynamic-import hook's function object) comes from
-/// `state.host_hook_roots`, which is exhaustive over the hook record so a new
-/// ref-carrying hook cannot silently miss this set.
-fn handoff_roots(
-  settled: Result(JsValue, JsValue),
-  state: State(host),
-) -> set.Set(Int) {
-  let acc =
-    set.new()
-    |> set.insert(state.ctx.global_object.id)
-    |> add_value_root(case settled {
-      Ok(v) -> v
-      Error(thrown) -> thrown
-    })
-  let acc =
-    dict.fold(state.ctx.lexical_globals, acc, fn(a, _name, g) {
-      add_value_root(a, value.lexical_global_value(g))
-    })
-  let acc =
-    dict.fold(state.ctx.template_objects, acc, fn(a, _site, ref: Ref) {
-      set.insert(a, ref.id)
-    })
-  let acc =
-    dict.fold(state.ctx.realms, acc, fn(a, ref: Ref, _b) {
-      set.insert(a, ref.id)
-    })
-  let acc =
-    list.fold(state.host_hook_roots(state.ctx.host_hooks), acc, add_value_root)
-  let acc =
-    list.fold(state.unhandled_rejections, acc, fn(a, ref: Ref) {
-      set.insert(a, ref.id)
-    })
-  let acc = list.fold(job_queue.to_list(state.job_queue), acc, add_job_roots)
-  let acc =
-    list.fold(state.atomics_waiters, acc, fn(a, w: value.AtomicsWaiter) {
-      a
-      |> set.insert(w.buffer.id)
-      |> set.insert(w.promise_data.id)
-      |> set.insert(w.promise.id)
-    })
-  let acc = case state.eval_env {
-    Some(ref) -> set.insert(acc, ref.id)
-    None -> acc
-  }
-  // Top-level locals (`this`, function declarations' cells) and any values
-  // left on the operand stack. The call stack is empty once settled.
-  let acc = list.fold(tuple_array.to_list(state.locals), acc, add_value_root)
-  list.fold(state.stack, acc, add_value_root)
-}
-
-fn add_value_root(acc: set.Set(Int), val: JsValue) -> set.Set(Int) {
-  case val {
-    JsObject(value.Ref(id)) -> set.insert(acc, id)
-    _ -> acc
-  }
-}
-
-fn add_job_roots(acc: set.Set(Int), job: value.Job) -> set.Set(Int) {
-  case job {
-    value.PromiseReactionJob(handler:, arg:, resolve:, reject:) -> {
-      let acc = case handler {
-        value.Handler(fun:) -> add_value_root(acc, fun)
-        value.IdentityPassThrough | value.ThrowerPassThrough -> acc
+    True -> {
+      let settled_value = case settled {
+        Ok(v) -> v
+        Error(thrown) -> thrown
       }
-      acc
-      |> add_value_root(arg)
-      |> add_value_root(resolve)
-      |> add_value_root(reject)
+      let roots =
+        gc_trace.push_value_ref(settled_value, state.reachable_root_refs(state))
+      heap.compact(state.heap, roots)
     }
-    value.PromiseResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
-      acc
-      |> add_value_root(thenable)
-      |> add_value_root(then_fn)
-      |> add_value_root(resolve)
-      |> add_value_root(reject)
-    value.HostJob(run:) -> add_value_root(acc, run)
   }
 }
 

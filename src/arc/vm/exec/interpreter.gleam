@@ -20,6 +20,7 @@ import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Index, Named, private_key_from_text}
+import arc/vm/lexical
 import arc/vm/opcode.{
   type Op, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread,
   AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
@@ -44,6 +45,7 @@ import arc/vm/opcode.{
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/array_iterator
 import arc/vm/ops/coerce
+import arc/vm/ops/instanceof
 import arc/vm/ops/mop
 import arc/vm/ops/numeric
 import arc/vm/ops/object
@@ -506,8 +508,8 @@ fn empty_template() -> FuncTemplate {
     is_constructor: False,
     is_class_constructor: False,
     local_names: None,
-    lexical: opcode.NoLexicalSlots,
-    code_kind: opcode.ScriptCode,
+    lexical: lexical.NoLexicalSlots,
+    code_kind: lexical.ScriptCode,
   )
 }
 
@@ -711,9 +713,9 @@ pub fn make_closure(
 /// its capture). Returns JsUndefined when the slot is None.
 pub fn read_lexical_local(
   state: State(host),
-  ref: opcode.LexicalRef,
+  ref: lexical.LexicalRef,
 ) -> JsValue {
-  case opcode.lexical_slot(state.func.lexical, ref) {
+  case lexical.lexical_slot(state.func.lexical, ref) {
     None -> JsUndefined
     Some(idx) ->
       case tuple_array.get_unchecked(idx, state.locals) {
@@ -729,7 +731,7 @@ pub fn read_lexical_local(
 
 /// Shorthand for `read_lexical_local(state, RefThis)`.
 pub fn read_this_local(state: State(host)) -> JsValue {
-  read_lexical_local(state, opcode.RefThis)
+  read_lexical_local(state, lexical.RefThis)
 }
 
 // ============================================================================
@@ -2882,7 +2884,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           case kind {
             opcode.InstanceOfOp -> {
               use #(result, state) <- result.map(
-                state.rethrow(coerce.js_instanceof(state, left, right)),
+                state.rethrow(instanceof.js_instanceof(state, left, right)),
               )
               State(..state, stack: [JsBool(result), ..rest], pc: state.pc + 1)
             }
@@ -4926,7 +4928,7 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       // Allocate an unmapped arguments object from state.call_args.
       let args = state.call_args
       let length = list.length(args)
-      let callee = read_lexical_local(state, opcode.RefActiveFunc)
+      let callee = read_lexical_local(state, lexical.RefActiveFunc)
       // §10.2.11 step 20: an UNMAPPED arguments object is created when the
       // function is strict OR its parameter list is non-simple (defaults,
       // destructuring, rest). §10.4.4.7 CreateUnmappedArgumentsObject step 8:
@@ -5282,8 +5284,7 @@ fn dispatch_call_op(
     _ ->
       state.throw_type_error(
         state,
-        object.inspect(JsObject(callee_ref), state.heap)
-          <> " is not a function",
+        object.inspect(JsObject(callee_ref), state.heap) <> " is not a function",
       )
   }
 }
@@ -5815,37 +5816,10 @@ fn maybe_collect_at_toplevel(state: State(host)) -> State(host) {
   case eligible {
     False -> state
     True ->
-      State(..state, heap: heap.compact(state.heap, state_root_ids(state)))
-  }
-}
-
-/// Heap refs reachable from this State but not in the heap's persistent root
-/// set: operand stack, locals, current args/new.target, the frame's sloppy
-/// direct-eval env, and global let/const bindings. call_stack is empty at the
-/// (gated) call site, so saved frames need no scan.
-fn state_root_ids(state: State(host)) -> set.Set(Int) {
-  let acc = value_root_ids(state.stack, [state.ctx.global_object.id])
-  let acc = value_root_ids(tuple_array.to_list(state.locals), acc)
-  let acc = value_root_ids([state.new_target, ..state.call_args], acc)
-  let acc = case state.eval_env {
-    Some(ref) -> [ref.id, ..acc]
-    None -> acc
-  }
-  let acc =
-    dict.fold(state.ctx.lexical_globals, acc, fn(a, _name, global) {
-      case value.lexical_global_value(global) {
-        JsObject(ref) -> [ref.id, ..a]
-        _ -> a
-      }
-    })
-  set.from_list(acc)
-}
-
-fn value_root_ids(values: List(JsValue), acc: List(Int)) -> List(Int) {
-  case values {
-    [] -> acc
-    [JsObject(ref), ..rest] -> value_root_ids(rest, [ref.id, ..acc])
-    [_, ..rest] -> value_root_ids(rest, acc)
+      State(
+        ..state,
+        heap: heap.compact(state.heap, state.reachable_root_refs(state)),
+      )
   }
 }
 

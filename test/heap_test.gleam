@@ -2,7 +2,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
-import arc/vm/opcode
+import arc/vm/lexical
 import arc/vm/value.{
   type FuncTemplate, type Ref, ArrayObject, BigInt, BoxSlot, EnvSlot, Finite,
   FuncTemplate, FunctionObject, HostObject, JsBigInt, JsNull, JsNumber, JsObject,
@@ -10,7 +10,6 @@ import arc/vm/value.{
 }
 import gleam/dict
 import gleam/option.{None, Some}
-import gleam/set
 
 fn dummy_template() -> FuncTemplate {
   FuncTemplate(
@@ -30,8 +29,8 @@ fn dummy_template() -> FuncTemplate {
     is_constructor: False,
     is_class_constructor: False,
     local_names: None,
-    lexical: opcode.NoLexicalSlots,
-    code_kind: opcode.ScriptCode,
+    lexical: lexical.NoLexicalSlots,
+    code_kind: lexical.ScriptCode,
   )
 }
 
@@ -272,7 +271,7 @@ pub fn collect_with_roots_test() {
   // Object not in persistent roots but passed as temporary root
   let h = heap.new()
   let #(h, ref) = heap.alloc(h, ordinary(dict.new()))
-  let h = heap.collect_with_roots(h, set.from_list([ref.id]))
+  let h = heap.collect_with_roots(h, [ref])
   assert heap.size(h) == 1
   let assert Some(_) = heap.read(h, ref)
   // Without temporary roots, it's collected
@@ -452,7 +451,7 @@ pub fn host_refs_hook_keeps_held_ref_alive_test() {
       ),
     )
   // Root only the holder. `target` is reachable ONLY through the host payload.
-  let h = heap.collect_with_roots(h, set.from_list([holder.id]))
+  let h = heap.collect_with_roots(h, [holder])
   assert heap.read(h, holder) != None
   assert heap.read(h, target) != None
 }
@@ -474,7 +473,7 @@ pub fn host_refs_default_collects_unheld_target_test() {
         extensible: True,
       ),
     )
-  let h = heap.collect_with_roots(h, set.from_list([holder.id]))
+  let h = heap.collect_with_roots(h, [holder])
   assert heap.read(h, holder) != None
   assert heap.read(h, target) == None
 }

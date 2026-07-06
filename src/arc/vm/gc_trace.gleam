@@ -51,11 +51,14 @@ fn push_property_refs(
   }
 }
 
-/// GC root tracing: prepend the heap ref carried by `value` (if any) onto `acc`.
-/// Zero-alloc for primitives.
-fn push_value_ref(val: value.JsValue, acc: List(value.Ref)) -> List(value.Ref) {
-  case val {
-    value.JsObject(ref) -> [ref, ..acc]
+/// The ONE `JsValue → Option(Ref)` extraction. Exhaustive with NO wildcard, so
+/// a new ref-carrying `JsValue` variant is a compile error here — never a
+/// silent GC leak in whichever hand-rolled `case v { JsObject(r) -> …; _ -> … }`
+/// a caller wrote instead. Every place that asks "does this value hold a heap
+/// ref?" goes through this.
+pub fn value_ref(v: value.JsValue) -> Option(value.Ref) {
+  case v {
+    value.JsObject(ref) -> Some(ref)
     value.JsUndefined
     | value.JsNull
     | value.JsBool(_)
@@ -63,7 +66,42 @@ fn push_value_ref(val: value.JsValue, acc: List(value.Ref)) -> List(value.Ref) {
     | value.JsString(_)
     | value.JsSymbol(_)
     | value.JsBigInt(_)
-    | value.JsUninitialized -> acc
+    | value.JsUninitialized -> None
+  }
+}
+
+/// GC root tracing: prepend the heap ref carried by `value` (if any) onto
+/// `acc`. Delegates to `value_ref` so there is exactly ONE exhaustive
+/// `JsValue` match to keep in sync.
+pub fn push_value_ref(
+  val: value.JsValue,
+  acc: List(value.Ref),
+) -> List(value.Ref) {
+  case value_ref(val) {
+    Some(ref) -> [ref, ..acc]
+    None -> acc
+  }
+}
+
+/// GC root tracing: prepend every heap ref reachable from a queued microtask
+/// job onto `acc`. Exhaustive over `Job` and each variant fully destructured,
+/// so a new job kind (or a new ref-carrying field on an existing one) is a
+/// compile error here.
+pub fn push_job_refs(job: value.Job, acc: List(value.Ref)) -> List(value.Ref) {
+  case job {
+    value.PromiseReactionJob(handler:, arg:, resolve:, reject:) ->
+      acc
+      |> push_reaction_handler_ref(handler, _)
+      |> push_value_ref(arg, _)
+      |> push_value_ref(resolve, _)
+      |> push_value_ref(reject, _)
+    value.PromiseResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
+      acc
+      |> push_value_ref(thenable, _)
+      |> push_value_ref(then_fn, _)
+      |> push_value_ref(resolve, _)
+      |> push_value_ref(reject, _)
+    value.HostJob(run:) -> push_value_ref(run, acc)
   }
 }
 
