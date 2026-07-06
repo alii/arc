@@ -1165,12 +1165,15 @@ fn parse_variable_declaration_decl(
   p: P,
 ) -> Result(#(P, ast.Declaration), ParseError) {
   // var/let/const — convert the head token to its ast.VariableKind ONCE here;
-  // everything downstream is typed on VariableKind so a wrong TokenKind can
-  // never silently fall through to `var`.
+  // everything downstream is typed on VariableKind. Callers only reach here
+  // with peek ∈ {Var, Let, Const}; assert it so a wrong head token panics
+  // instead of silently becoming `var`.
   let kind = case peek(p) {
     Let -> ast.Let
     Const -> ast.Const
-    _ -> ast.Var
+    Var -> ast.Var
+    _ ->
+      panic as "parser: parse_variable_declaration_decl entered with non-var/let/const head token"
   }
   let p2 = advance(p)
   let p2 = case kind {
@@ -2203,12 +2206,15 @@ fn parse_for_declaration(
   is_await: Bool,
 ) -> Result(#(P, ast.Statement), ParseError) {
   // var/let/const — convert the head token to its ast.VariableKind ONCE here;
-  // the rest of the for-head parse is typed on VariableKind so a wrong
-  // TokenKind can never silently fall through to `var`.
+  // the rest of the for-head parse is typed on VariableKind. Callers only
+  // reach here with peek ∈ {Var, Let, Const}; assert it so a wrong head token
+  // panics instead of silently becoming `var`.
   let kind = case peek(p) {
     Let -> ast.Let
     Const -> ast.Const
-    _ -> ast.Var
+    Var -> ast.Var
+    _ ->
+      panic as "parser: parse_for_declaration entered with non-var/let/const head token"
   }
   let p2 = advance(p)
   let is_destr = peek(p2) == LeftBrace || peek(p2) == LeftBracket
