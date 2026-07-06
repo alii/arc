@@ -202,12 +202,12 @@ pub fn run_module(
         value: val,
         heap: drained.heap,
         locals: drained.locals,
-        jobs: remaining_jobs(drained),
+        jobs: job_queue.to_list(drained.job_queue),
       )
     }
     Ok(#(Completed(ThrowCompletion(val)), final_state)) -> {
       let drained = finish(final_state)
-      ModuleThrow(value: val, heap: drained.heap, jobs: remaining_jobs(drained))
+      ModuleThrow(value: val, heap: drained.heap, jobs: job_queue.to_list(drained.job_queue))
     }
     // `yield` cannot occur outside a generator body — a module top level
     // yielding is an engine bug, reported on the VmError channel.
@@ -274,13 +274,13 @@ fn drive_top_level_await(
         value: val,
         heap: drained.heap,
         locals: drained.locals,
-        jobs: remaining_jobs(drained),
+        jobs: job_queue.to_list(drained.job_queue),
       )
     Some(value.PromiseRejected(reason)) ->
       ModuleThrow(
         value: reason,
         heap: drained.heap,
-        jobs: remaining_jobs(drained),
+        jobs: job_queue.to_list(drained.job_queue),
       )
     // Still pending after `finish` returned. For a draining driver this
     // means an awaited promise can never settle; for a non-draining driver
@@ -293,7 +293,7 @@ fn drive_top_level_await(
       ModulePending(
         promise_data_ref: data_ref,
         heap: drained.heap,
-        jobs: remaining_jobs(drained),
+        jobs: job_queue.to_list(drained.job_queue),
       )
     // The capability slot we allocated above is gone — internal invariant
     // breach, never a successful evaluation. Report it on the VmError
@@ -303,22 +303,6 @@ fn drive_top_level_await(
         "drive_top_level_await",
         "promise capability slot missing",
       ))
-  }
-}
-
-/// Jobs still queued on a state after its `finish` driver ran — what a
-/// non-draining driver leaves behind for the host's own event loop.
-fn remaining_jobs(state: State(host)) -> List(value.Job) {
-  do_remaining_jobs(state.job_queue, [])
-}
-
-fn do_remaining_jobs(
-  queue: job_queue.JobQueue(value.Job),
-  acc: List(value.Job),
-) -> List(value.Job) {
-  case job_queue.pop(queue) {
-    None -> list.reverse(acc)
-    Some(#(job, rest)) -> do_remaining_jobs(rest, [job, ..acc])
   }
 }
 
@@ -456,7 +440,7 @@ fn handoff_roots(
     list.fold(state.unhandled_rejections, acc, fn(a, ref: Ref) {
       set.insert(a, ref.id)
     })
-  let acc = list.fold(remaining_jobs(state), acc, add_job_roots)
+  let acc = list.fold(job_queue.to_list(state.job_queue), acc, add_job_roots)
   let acc =
     list.fold(state.atomics_waiters, acc, fn(a, w: value.AtomicsWaiter) {
       a

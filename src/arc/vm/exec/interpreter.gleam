@@ -30,15 +30,15 @@ import arc/vm/opcode.{
   DefineMethod, DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
   DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup, ForInNext,
   ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar,
-  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetPrivateField,
-  GetPrivateField2, GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf,
+  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetPrivateFieldDyn,
+  GetPrivateFieldDyn2, GetPrototypeOf,
   GetSuperValue, GetSuperValue2, IncLocal, InitGlobalLex, InitialYield,
   IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
   IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
   MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
-  ObjectSpread, Pop, PrivateIn, PrivateInDyn, PushConst, PushTry, PutBoxed,
+  ObjectSpread, Pop, PrivateInDyn, PushConst, PushTry, PutBoxed,
   PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
-  PutLocalCheckInit, PutPrivateField, PutPrivateFieldDyn, PutSuperValue, Return,
+  PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue, Return,
   Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar,
   TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
@@ -1703,21 +1703,6 @@ fn underflow(
   op: String,
 ) -> Result(State(host), StepExit(host)) {
   Error(VmFailed(StackUnderflow(op), state))
-}
-
-/// The chain walk behind `#x` (§7.3.31 PrivateGet / §7.3.32 PrivateSet /
-/// `#x in obj`). `find_property` is used rather than `has_property` because
-/// ordinary [[HasProperty]] deliberately hides private-name keys.
-///
-/// A Proxy on the chain answers **absent**: proxies own no [[PrivateElements]]
-/// and never inherit them, so there is no trap that could reveal one — `#x in
-/// proxy` is false and `proxy.#x` throws, exactly as V8 does.
-fn find_private_element(
-  state: State(host),
-  ref: Ref,
-  key: key.PropertyKey,
-) -> Option(value.Property) {
-  object.find_property(state.heap, ref, key) |> object.or_when_proxy(None)
 }
 
 /// Tail of every private-field read: apply OrdinaryGet steps 3-7 to an
@@ -5940,7 +5925,7 @@ fn maybe_collect_at_toplevel(state: State(host)) -> State(host) {
     && state.atomics_waiters == []
     && state.outstanding == 0
     && state.unhandled_rejections == []
-    && option.is_none(job_queue.pop(state.job_queue))
+    && job_queue.is_empty(state.job_queue)
   case eligible {
     False -> state
     True ->
