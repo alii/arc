@@ -1835,8 +1835,11 @@ fn emit_var_put(e: Emitter, name: String) -> Emitter {
 /// fallthrough). Mirrors QuickJS OP_scope_put_var_init. NOT an `arguments`
 /// reference — declaration init does not count as a body reference.
 fn emit_var_init(e: Emitter, name: String) -> Emitter {
-  let #(_crossed, fallback) = split_with_chain(resolve(e, name))
-  case fallback {
+  // Declaration init writes to a binding just declared in the current scope,
+  // so resolution never crosses a `with` scope to reach it.
+  let assert scope.Plain(direct) = resolve(e, name)
+    as "emit: var init crossed a with-scope"
+  case direct {
     scope.Local(slot:, boxed: True, ..) ->
       Emitter(..e, initialized: set.insert(e.initialized, slot))
       |> emit_op(opcode.PutBoxed(slot))
@@ -2015,8 +2018,11 @@ fn with_identifier_lref(
 /// is boxed; otherwise no-op (uncaptured per-iter copies are unobservable).
 /// NOT an `arguments` reference.
 fn emit_var_rebox(e: Emitter, name: String) -> Emitter {
-  let #(_crossed, fallback) = split_with_chain(resolve(e, name))
-  case fallback {
+  // Per-iteration copy targets a for-head `let` binding declared in the
+  // for's own scope, so resolution never crosses a `with` scope to reach it.
+  let assert scope.Plain(direct) = resolve(e, name)
+    as "emit: var rebox crossed a with-scope"
+  case direct {
     scope.Local(slot:, boxed: True, ..) ->
       e
       |> emit_op(opcode.GetBoxed(slot))

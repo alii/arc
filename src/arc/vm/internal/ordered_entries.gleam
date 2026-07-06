@@ -177,14 +177,14 @@ pub fn next_from(
     True -> None
     False ->
       case dict.get(store.order, cursor) {
-        Ok(k) ->
-          case dict.get(store.entries, k) {
-            Ok(#(_seq, v)) -> Some(#(cursor + 1, k, v))
-            // order/entries are kept in lockstep by construction; a missing
-            // key would mean a stale order entry — skip it rather than yield
-            // a dead record.
-            Error(Nil) -> next_from(store, cursor + 1)
-          }
+        Ok(k) -> {
+          // order/entries are kept in lockstep by construction — a key
+          // present in `order` but absent from `entries` is a data-structure
+          // desync, not a "deleted" gap.
+          let assert Ok(#(_seq, v)) = dict.get(store.entries, k)
+            as "ordered_entries: order/entries desync"
+          Some(#(cursor + 1, k, v))
+        }
         Error(Nil) -> next_from(store, cursor + 1)
       }
   }

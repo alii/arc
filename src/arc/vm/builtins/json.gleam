@@ -424,9 +424,10 @@ fn internalize_json_property(
         }
         // Step 5.c: EnumerableOwnPropertyNames(val, key).
         False -> {
-          use #(keys, state) <- result.try(
-            mop.enumerable_string_keys_stateful(state, ref),
-          )
+          use #(keys, state) <- result.try(mop.enumerable_string_keys_stateful(
+            state,
+            ref,
+          ))
           internalize_keys(state, ctx, ref, keys, record_members(node))
         }
       }
@@ -559,14 +560,12 @@ fn replace_or_delete(
       state
     }
     _ -> {
-      use #(state, _defined) <- result.map(
-        mop.create_data_property_bool(
-          state,
-          ref,
-          JsString(name),
-          new_element,
-        ),
-      )
+      use #(state, _defined) <- result.map(mop.create_data_property_bool(
+        state,
+        ref,
+        JsString(name),
+        new_element,
+      ))
       state
     }
   }
@@ -1707,7 +1706,7 @@ fn serialize_property(
       Ok(#(Some("null"), state))
     // Step 10: BigInt → TypeError.
     value.JsBigInt(_) ->
-      coerce.thrown_type_error(state, "Do not know how to serialize a BigInt")
+      state.type_error_op(state, "Do not know how to serialize a BigInt")
     // Step 11: non-callable objects recurse; callables are omitted (step 12).
     JsObject(ref) ->
       case helpers.is_callable(state.heap, val) {
@@ -1781,7 +1780,7 @@ fn serialize_object(
 ) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   // Steps 1-2: circular detection on the serialization stack.
   case list.contains(stack, ref.id) {
-    True -> coerce.thrown_type_error(state, circular_msg)
+    True -> state.type_error_op(state, circular_msg)
     False -> {
       let stack = [ref.id, ..stack]
       let step_indent = indent <> ctx.gap
@@ -1854,7 +1853,7 @@ fn serialize_array(
 ) -> Result(#(String, State(host)), #(JsValue, State(host))) {
   // Steps 1-2: circular detection.
   case list.contains(stack, ref.id) {
-    True -> coerce.thrown_type_error(state, circular_msg)
+    True -> state.type_error_op(state, circular_msg)
     False -> {
       let stack = [ref.id, ..stack]
       let step_indent = indent <> ctx.gap
@@ -2016,10 +2015,7 @@ fn append_span(acc: StringTree, bytes: BitArray, n: Int) -> StringTree {
 /// Format a codepoint as \uXXXX — four LOWERCASE hex digits, per
 /// QuoteJSONString's UnicodeEscape (§25.5.2.3).
 fn unicode_escape(code: Int) -> String {
-  let hex =
-    int.to_base_string(code, 16)
-    |> result.unwrap("0")
-    |> string.lowercase
-  let padded = string.pad_start(hex, to: 4, with: "0")
-  "\\u" <> padded
+  // to_base_string only fails for base < 2 or > 36 — 16 is in range.
+  let assert Ok(hex) = int.to_base_string(code, 16)
+  "\\u" <> string.pad_start(string.lowercase(hex), to: 4, with: "0")
 }

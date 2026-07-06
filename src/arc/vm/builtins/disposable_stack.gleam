@@ -1173,15 +1173,14 @@ fn async_dispose_continue(
 }
 
 /// Call the promise capability's resolve/reject function with one argument.
-/// Resolving functions never throw; if one somehow does, fold the state
-/// through and continue (the error has nowhere meaningful to go).
+/// The capability is always `NewPromiseCapability(%Promise%)` — its intrinsic
+/// resolving functions never throw (§27.2.1.3).
 fn settle_capability(
   state: State(host),
   fun: JsValue,
   arg: JsValue,
 ) -> State(host) {
-  case state.call(state, fun, JsUndefined, [arg]) {
-    Ok(#(_val, state)) -> state
-    Error(#(_thrown, state)) -> state
-  }
+  let assert Ok(#(_val, state)) = state.call(state, fun, JsUndefined, [arg])
+    as "disposable_stack: intrinsic resolving function threw"
+  state
 }

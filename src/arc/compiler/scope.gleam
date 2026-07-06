@@ -1819,26 +1819,22 @@ fn hoist_annexb_block_functions(
     list.fold(raw_fi.annexb_candidates, st, fn(st, cand) {
       let #(block_id, name) = cand
       case annexb_walk_blocked(sb, block_id, fn_id, name) {
-        True ->
+        True -> {
           // BLOCKED — mark the declaring block so emit's
           // `is_annexb_blocked` gate suppresses the promote AND the
           // name is excluded from the filtered candidate list (so
           // emit_top_level_body never emits IrDeclareGlobalVar for it).
-          case dict.get(st.scopes, block_id) {
-            Error(Nil) -> st
-            Ok(bs) ->
-              FinSt(
-                ..st,
-                scopes: dict.insert(
-                  st.scopes,
-                  block_id,
-                  Scope(
-                    ..bs,
-                    annexb_blocked: set.insert(bs.annexb_blocked, name),
-                  ),
-                ),
-              )
-          }
+          let assert Ok(bs) = dict.get(st.scopes, block_id)
+            as "scope: Annex-B block absent from finalized scopes"
+          FinSt(
+            ..st,
+            scopes: dict.insert(
+              st.scopes,
+              block_id,
+              Scope(..bs, annexb_blocked: set.insert(bs.annexb_blocked, name)),
+            ),
+          )
+        }
         False -> {
           let assert Ok(info) = dict.get(st.functions, fn_id)
             as "scope.hoist_annexb_block_functions: FunctionInfo missing"

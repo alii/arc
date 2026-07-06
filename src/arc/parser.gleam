@@ -1164,13 +1164,20 @@ fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
 fn parse_variable_declaration_decl(
   p: P,
 ) -> Result(#(P, ast.Declaration), ParseError) {
-  // var/let/const
-  let kind = peek(p)
+  // var/let/const — convert the head token to its ast.VariableKind ONCE here;
+  // everything downstream is typed on VariableKind so a wrong TokenKind can
+  // never silently fall through to `var`.
+  let kind = case peek(p) {
+    Let -> ast.Let
+    Const -> ast.Const
+    _ -> ast.Var
+  }
   let p2 = advance(p)
   let p2 = case kind {
-    Let -> enter_lexical_decl_context(p2, scope.LetBinding)
-    Const -> enter_lexical_decl_context(p2, scope.ConstBinding)
-    _ -> P(..p2, ctx: Ctx(..p2.ctx, binding_kind: BindingVar))
+    ast.Let -> enter_lexical_decl_context(p2, scope.LetBinding)
+    ast.Const | ast.Using | ast.AwaitUsing ->
+      enter_lexical_decl_context(p2, scope.ConstBinding)
+    ast.Var -> P(..p2, ctx: Ctx(..p2.ctx, binding_kind: BindingVar))
   }
   use #(p3, declarations) <- result.try(
     parse_variable_declarator_list(p2, kind, []),
@@ -1182,17 +1189,12 @@ fn parse_variable_declaration_decl(
       in_export_decl: False,
     ),
   ))
-  let ast_kind = case kind {
-    Let -> ast.Let
-    Const -> ast.Const
-    _ -> ast.Var
-  }
-  Ok(#(p4, ast.DeclVariable(kind: ast_kind, declarations:)))
+  Ok(#(p4, ast.DeclVariable(kind:, declarations:)))
 }
 
 fn parse_variable_declarator_list(
   p: P,
-  kind: TokenKind,
+  kind: ast.VariableKind,
   acc: List(ast.VariableDeclarator),
 ) -> Result(#(P, List(ast.VariableDeclarator)), ParseError) {
   use #(p2, decl) <- result.try(parse_variable_declarator(p, kind))
@@ -1204,7 +1206,7 @@ fn parse_variable_declarator_list(
 
 fn parse_variable_declarator(
   p: P,
-  kind: TokenKind,
+  kind: ast.VariableKind,
 ) -> Result(#(P, ast.VariableDeclarator), ParseError) {
   let is_destructuring = case peek(p) {
     LeftBracket | LeftBrace -> True
@@ -1235,7 +1237,7 @@ fn parse_variable_declarator(
     }
     _ -> {
       use <- bool.guard(
-        kind == Const,
+        kind == ast.Const,
         Error(MissingConstInitializer(pos_of(p2))),
       )
       use <- bool.guard(
@@ -2200,19 +2202,21 @@ fn parse_for_declaration(
   p: P,
   is_await: Bool,
 ) -> Result(#(P, ast.Statement), ParseError) {
-  let kind = peek(p)
-  let p2 = advance(p)
-  let is_destr = peek(p2) == LeftBrace || peek(p2) == LeftBracket
-  let p2 = case kind {
-    Let -> enter_lexical_decl_context(p2, scope.LetBinding)
-    Const -> enter_lexical_decl_context(p2, scope.ConstBinding)
-    _ -> P(..p2, ctx: Ctx(..p2.ctx, binding_kind: BindingVar))
-  }
-  let var_kind = case kind {
-    Var -> ast.Var
+  // var/let/const — convert the head token to its ast.VariableKind ONCE here;
+  // the rest of the for-head parse is typed on VariableKind so a wrong
+  // TokenKind can never silently fall through to `var`.
+  let kind = case peek(p) {
     Let -> ast.Let
     Const -> ast.Const
     _ -> ast.Var
+  }
+  let p2 = advance(p)
+  let is_destr = peek(p2) == LeftBrace || peek(p2) == LeftBracket
+  let p2 = case kind {
+    ast.Let -> enter_lexical_decl_context(p2, scope.LetBinding)
+    ast.Const | ast.Using | ast.AwaitUsing ->
+      enter_lexical_decl_context(p2, scope.ConstBinding)
+    ast.Var -> P(..p2, ctx: Ctx(..p2.ctx, binding_kind: BindingVar))
   }
   // B.3.4: a `for(var <pat> of …)` head's bound names must not collide
   // with an enclosing catch parameter. Only the names introduced BY this
@@ -2221,7 +2225,7 @@ fn parse_for_declaration(
   let catch_params = scope.sb_nearest_catch_params(p2.sb)
   use #(p3, pattern) <- result.try(parse_for_binding_or_declarator(p2))
   let decl =
-    ast.ForInitDeclaration(kind: var_kind, declarations: [
+    ast.ForInitDeclaration(kind:, declarations: [
       ast.VariableDeclarator(id: pattern, init: None),
     ])
   case peek(p3) {
@@ -2229,7 +2233,7 @@ fn parse_for_declaration(
     Of -> {
       // B.3.4: for-of var bindings must not shadow catch parameters
       use Nil <- result.try(case kind {
-        Var ->
+        ast.Var ->
           check_new_vars_vs_params(
             ast.pattern_bound_names(pattern),
             catch_params,
@@ -2241,12 +2245,11 @@ fn parse_for_declaration(
     }
     Semicolon | Comma ->
       case kind {
-        Const -> Error(MissingConstInitializer(pos_of(p3)))
+        ast.Const -> Error(MissingConstInitializer(pos_of(p3)))
         _ ->
           case is_destr {
             True -> Error(DestructuringMissingInitializer(pos_of(p3)))
-            False ->
-              finish_for_classic_decl(p3, p, var_kind, kind, pattern, None)
+            False -> finish_for_classic_decl(p3, p, kind, pattern, None)
           }
       }
     Equal -> {
@@ -2263,14 +2266,7 @@ fn parse_for_declaration(
           Error(ForInInitializer(pos_of(p5)))
         Of -> Error(ForOfInitializer(pos_of(p5)))
         Semicolon | Comma ->
-          finish_for_classic_decl(
-            p5,
-            p,
-            var_kind,
-            kind,
-            pattern,
-            Some(init_expr),
-          )
+          finish_for_classic_decl(p5, p, kind, pattern, Some(init_expr))
         _ -> Error(ExpectedForHeadSeparator(pos_of(p5)))
       }
     }
@@ -2289,8 +2285,7 @@ fn parse_for_declaration(
 fn finish_for_classic_decl(
   p: P,
   outer: P,
-  var_kind: ast.VariableKind,
-  kind: TokenKind,
+  kind: ast.VariableKind,
   pattern: ast.Pattern,
   init: Option(ast.Expression),
 ) -> Result(#(P, ast.Statement), ParseError) {
@@ -2299,8 +2294,7 @@ fn finish_for_classic_decl(
     use p <- with_allow_in(p, False)
     parse_remaining_declarators(p, kind, [])
   })
-  let decl =
-    ast.ForInitDeclaration(kind: var_kind, declarations: [first, ..rest])
+  let decl = ast.ForInitDeclaration(kind:, declarations: [first, ..rest])
   use p3 <- result.try(expect(p2, Semicolon))
   parse_for_classic_rest(exit_for_decl_context(p3, outer), Some(decl))
 }
@@ -2464,7 +2458,7 @@ fn parse_for_binding_or_declarator(
 /// is propagated rather than swallowed into a shorter declaration list.
 fn parse_remaining_declarators(
   p: P,
-  kind: TokenKind,
+  kind: ast.VariableKind,
   acc: List(ast.VariableDeclarator),
 ) -> Result(#(P, List(ast.VariableDeclarator)), ParseError) {
   case peek(p) {
@@ -6710,10 +6704,10 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       )
       // Extract pattern body and flags as strings
       // The body was scanned from `p.bytes` at code-point boundaries, so the
-      // slice is always text.
-      let pattern =
+      // slice is always in-bounds and valid text.
+      let assert Some(pattern) =
         source_bytes.slice(p.bytes, body_start, end_pos - 1 - body_start)
-        |> option.unwrap("")
+        as "parser: regex body slice out of range"
       // `flags.flags` is in source order, so this is the source text after `/`.
       let flags_str = string.join(flags.flags, "")
       // The token window at/past the `/` was lexed with no expression
@@ -7888,8 +7882,10 @@ fn template_continuation(p: P) -> P {
 /// the slice is byte-exact — with line-terminator sequences normalized
 /// (<CR><LF> and <CR> → <LF>).
 fn template_span_raw(p: P, trailing: Int) -> String {
-  source_bytes.slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
-  |> option.unwrap("")
+  let assert Some(raw) =
+    source_bytes.slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
+    as "parser: template quasi slice out of range"
+  raw
   |> string.replace("\r\n", "\n")
   |> string.replace("\r", "\n")
 }

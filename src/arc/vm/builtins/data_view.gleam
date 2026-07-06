@@ -239,12 +239,9 @@ fn get_view_value(
   let little = value.is_truthy(arg_at(args, 1))
   let elem_size = element_size(element)
   use data, pos, state <- checked_view_bytes(state, view, get_index, elem_size)
-  case bit_array.slice(data, pos, elem_size) {
-    Ok(chunk) -> #(state, Ok(decode(element, chunk, little)))
-    Error(Nil) ->
-      // Unreachable: bounds were validated above against the live buffer.
-      state.range_error(state, "Offset is outside the bounds of the DataView")
-  }
+  let assert Ok(chunk) = bit_array.slice(data, pos, elem_size)
+    as "data_view: checked_view_bytes let slice run past buffer"
+  #(state, Ok(decode(element, chunk, little)))
 }
 
 // ============================================================================

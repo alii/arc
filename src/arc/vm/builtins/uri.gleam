@@ -3,7 +3,6 @@ import arc/internal/utf16
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 
 // ============================================================================
@@ -69,13 +68,9 @@ fn is_escape_safe(cp: Int) -> Bool {
 
 /// Format an integer as uppercase hex with at least `width` digits.
 fn to_hex_upper(n: Int, width: Int) -> String {
-  let hex =
-    int.to_base_string(n, 16) |> result.unwrap("0") |> string.uppercase()
-  let pad = width - string.length(hex)
-  case pad > 0 {
-    True -> string.repeat("0", pad) <> hex
-    False -> hex
-  }
+  // to_base_string only fails for base < 2 or > 36 — 16 is in range.
+  let assert Ok(hex) = int.to_base_string(n, 16)
+  hex |> string.uppercase |> string.pad_start(to: width, with: "0")
 }
 
 /// ES AnnexB B.2.1.1 escape ( string )

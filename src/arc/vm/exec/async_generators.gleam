@@ -17,7 +17,7 @@ import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{
   type Outcome, Completed, NormalCompletion, Suspended, ThrowCompletion,
 }
-import arc/vm/exec/generators
+import arc/vm/exec/generators.{type Drive}
 import arc/vm/exec/promises
 import arc/vm/heap
 import arc/vm/internal/tuple_array
@@ -43,12 +43,6 @@ import gleam/pair
 import gleam/result
 import gleam/string
 
-pub type ExecuteInnerFn(host) =
-  fn(State(host)) -> Result(#(Outcome, State(host)), state.VmError)
-
-pub type UnwindToCatchFn(host) =
-  fn(State(host), JsValue) -> Option(State(host))
-
 /// Bundle of per-request context threaded through the body-execution helpers.
 ///
 /// `frame` is the suspended body snapshot and `req` the head request that was
@@ -60,8 +54,7 @@ type Run(host) {
     data_ref: Ref,
     frame: AsyncGenFrame,
     req: AsyncGenRequest,
-    execute_inner: ExecuteInnerFn(host),
-    unwind_to_catch: UnwindToCatchFn(host),
+    drive: Drive(host),
   )
 }
 
@@ -75,8 +68,7 @@ pub fn call_native_method(
   args: List(JsValue),
   rest_stack: List(JsValue),
   completion: AsyncGenCompletion,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   let arg = helpers.first_arg_or_undefined(args)
   let #(h, cap) =
@@ -118,7 +110,7 @@ pub fn call_native_method(
       let enqueued = enqueue(state, data_ref, req)
       let stepped = case gen_state {
         AGExecuting | AGAwaitingReturn -> Ok(enqueued)
-        _ -> resume_next(enqueued, data_ref, execute_inner, unwind_to_catch)
+        _ -> resume_next(enqueued, data_ref, drive)
       }
       case stepped {
         Ok(state) -> ret(state)
@@ -138,8 +130,7 @@ pub fn call_native_method(
 fn resume_next(
   state: State(host),
   data_ref: Ref,
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), state.VmError) {
   case option.map(read_slot(state.heap, data_ref), normalize_queue) {
     // The data_ref of a live async generator always holds an
@@ -151,7 +142,7 @@ fn resume_next(
     // user code (and move `gen_state` on to AGExecuting under them).
     Some(AsyncGenLive(queue_front: [], ..)) -> Ok(state)
     Some(AsyncGenLive(gen_state:, frame:, queue_front: [req, ..], ..)) -> {
-      let run = Run(data_ref:, frame:, req:, execute_inner:, unwind_to_catch:)
+      let run = Run(data_ref:, frame:, req:, drive:)
       case gen_state {
         AGExecuting | AGAwaitingReturn -> Ok(state)
 
@@ -161,12 +152,12 @@ fn resume_next(
               // Resolve {undefined, done:true}, dequeue, loop
               let state = settle_head(state, data_ref)
               let state = fulfill_iter(state, req.resolve, JsUndefined, True)
-              resume_next(state, data_ref, execute_inner, unwind_to_catch)
+              resume_next(state, data_ref, drive)
             }
             AGThrow -> {
               let state = settle_head(state, data_ref)
               let state = reject_with(state, req.reject, req.value)
-              resume_next(state, data_ref, execute_inner, unwind_to_catch)
+              resume_next(state, data_ref, drive)
             }
             AGReturn -> {
               // Spec: await Promise.resolve(value) first, then settle.
@@ -181,7 +172,7 @@ fn resume_next(
             // then fall through to the Completed logic above.
             AGReturn | AGThrow -> {
               let state = set_gen_state(state, data_ref, AGCompleted)
-              resume_next(state, data_ref, execute_inner, unwind_to_catch)
+              resume_next(state, data_ref, drive)
             }
             AGNext -> run_body(state, run, False)
           }
@@ -234,7 +225,7 @@ fn run_body(
           }
           let exec_state =
             build_exec_state(state, frame, gen_stack, frame.saved.pc)
-          handle_exec_result(state, run, run.execute_inner(exec_state))
+          handle_exec_result(state, run, run.drive.execute_inner(exec_state))
         }
         AGThrow -> throw_into_gen_body(state, run, req.value)
         AGReturn ->
@@ -317,8 +308,8 @@ fn async_delegate_iterator(frame: AsyncGenFrame) -> Option(Ref) {
 fn unwrap_record_ref(h: heap.Heap(State(host), host), ref: Ref) -> Ref {
   case iter_protocol.unwrap_record_value(h, JsObject(ref)) {
     JsObject(real) -> real
-    // Unreachable: an Iterator Record's [[Iterator]] is always an Object.
-    _ -> ref
+    _ ->
+      panic as "async_generators: Iterator Record [[Iterator]] is not an object (VM invariant)"
   }
 }
 
@@ -427,8 +418,8 @@ fn throw_into_gen_body(
       run.frame.saved.stack,
       run.frame.saved.pc,
     )
-  let exec_result = case run.unwind_to_catch(exec_state, thrown) {
-    Some(caught) -> run.execute_inner(caught)
+  let exec_result = case run.drive.unwind_to_catch(exec_state, thrown) {
+    Some(caught) -> run.drive.execute_inner(caught)
     None -> Ok(#(Completed(ThrowCompletion(thrown)), exec_state))
   }
   handle_exec_result(state, run, exec_result)
@@ -453,12 +444,7 @@ fn unwind_return_into_body(
   handle_exec_result(
     state,
     run,
-    generators.unwind_return(
-      exec_state,
-      value,
-      run.execute_inner,
-      run.unwind_to_catch,
-    ),
+    generators.unwind_return(exec_state, value, run.drive),
   )
 }
 
@@ -515,12 +501,7 @@ fn resume_after_delegate(
               live |> drop_head |> with_state(AGSuspendedYield)
             })
           let state = fulfill_iter(state, run.req.resolve, val, False)
-          resume_next(
-            state,
-            run.data_ref,
-            run.execute_inner,
-            run.unwind_to_catch,
-          )
+          resume_next(state, run.data_ref, run.drive)
         }
         Ok(#(True, val, state)) -> delegate_done(state, run, method, val)
       }
@@ -555,7 +536,7 @@ fn delegate_done(
             [] -> [val]
           }
           let exec_state = build_exec_state(state, frame, stack_after, after_pc)
-          handle_exec_result(state, run, run.execute_inner(exec_state))
+          handle_exec_result(state, run, run.drive.execute_inner(exec_state))
         }
       }
     DelegateReturn ->
@@ -577,7 +558,7 @@ fn handle_exec_result(
   run: Run(host),
   result: Result(#(Outcome, State(host)), state.VmError),
 ) -> Result(State(host), state.VmError) {
-  let Run(data_ref:, req:, execute_inner:, unwind_to_catch:, ..) = run
+  let Run(data_ref:, req:, drive:, ..) = run
   case result {
     Ok(#(Suspended(completion.Yield, value), suspended)) -> {
       // Body yielded — save suspended state, dequeue + resolve request, loop.
@@ -585,7 +566,7 @@ fn handle_exec_result(
       let state = save_suspended(state, data_ref, suspended, AGSuspendedYield)
       let state = settle_head(state, data_ref)
       let state = fulfill_iter(state, req.resolve, value, False)
-      resume_next(state, data_ref, execute_inner, unwind_to_catch)
+      resume_next(state, data_ref, drive)
     }
     Ok(#(Suspended(completion.Await, value), suspended)) -> {
       // Body hit await — save state (still Executing), set up promise callback.
@@ -598,13 +579,13 @@ fn handle_exec_result(
       let state = state.adopt_child(outer, final_state)
       let state = complete(state, data_ref)
       let state = fulfill_iter(state, req.resolve, value, True)
-      resume_next(state, data_ref, execute_inner, unwind_to_catch)
+      resume_next(state, data_ref, drive)
     }
     Ok(#(Completed(ThrowCompletion(thrown)), final_state)) -> {
       let state = state.adopt_child(outer, final_state)
       let state = complete(state, data_ref)
       let state = reject_with(state, req.reject, thrown)
-      resume_next(state, data_ref, execute_inner, unwind_to_catch)
+      resume_next(state, data_ref, drive)
     }
     Error(vm_err) -> Error(vm_err)
   }
@@ -620,8 +601,7 @@ pub fn call_native_resume(
   kind: AGResumeKind,
   args: List(JsValue),
   rest_stack: List(JsValue),
-  execute_inner: ExecuteInnerFn(host),
-  unwind_to_catch: UnwindToCatchFn(host),
+  drive: Drive(host),
 ) -> Result(State(host), StepExit(host)) {
   let settled = helpers.first_arg_or_undefined(args)
   let ret = fn(state: State(host)) {
@@ -636,7 +616,7 @@ pub fn call_native_resume(
     // Only `frame` and `req` escape the match — see resume_next.
     Some(AsyncGenLive(queue_front: [], ..)) -> ret(state)
     Some(AsyncGenLive(frame:, queue_front: [req, ..], ..)) -> {
-      let run = Run(data_ref:, frame:, req:, execute_inner:, unwind_to_catch:)
+      let run = Run(data_ref:, frame:, req:, drive:)
       let stepped = case kind {
         AGResumeAwaitingReturn -> {
           // AwaitingReturn callback: settle the head return request.
@@ -645,7 +625,7 @@ pub fn call_native_resume(
             False -> fulfill_iter(state, req.resolve, settled, True)
             True -> reject_with(state, req.reject, settled)
           }
-          resume_next(state, data_ref, execute_inner, unwind_to_catch)
+          resume_next(state, data_ref, drive)
         }
         AGResumeBody ->
           // Body await resumed — push settled value and run, or throw it in.
@@ -654,7 +634,7 @@ pub fn call_native_resume(
             False -> {
               let stack = [settled, ..frame.saved.stack]
               let es = build_exec_state(state, frame, stack, frame.saved.pc)
-              handle_exec_result(state, run, execute_inner(es))
+              handle_exec_result(state, run, drive.execute_inner(es))
             }
           }
         AGResumeDelegate(method) ->

@@ -15,6 +15,18 @@ import arc/vm/value.{
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
+/// Truncate the operand stack down to `depth` elements — the try-frame /
+/// finally-subroutine unwinder's shared primitive. Both interpreter throw
+/// unwinding and generator return unwinding restore the stack to a depth
+/// recorded at PushTry time.
+pub fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
+  let excess = list.length(stack) - depth
+  case excess > 0 {
+    True -> list.drop(stack, excess)
+    False -> stack
+  }
+}
+
 /// Build the locals array for a top-level (script/module/eval/REPL) template:
 /// JsUndefined everywhere, then seed the lexical-`this` slot if present.
 /// Function bodies use `setup_frame` instead — this is only for entries
@@ -80,7 +92,11 @@ pub fn setup_frame(
   // and tiny callbacks).
   let env_values = case callee_template.env_descriptors {
     [] -> []
-    _has_captures -> heap.read_env(state.heap, env_ref) |> option.unwrap([])
+    _has_captures -> {
+      let assert Some(env_values) = heap.read_env(state.heap, env_ref)
+        as "frame: closure with captures has dangling/non-EnvSlot env_ref"
+      env_values
+    }
   }
   case callee_template.is_arrow {
     // §10.2.1.2 step 2: thisMode is LEXICAL → arrows have no own `this`
