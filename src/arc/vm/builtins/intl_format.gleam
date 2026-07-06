@@ -5,28 +5,25 @@
 //// ECMA-402 (PartitionNumberPattern, PartitionDateTimePattern, …). The
 //// builtins layer turns parts into strings or {type, value} part objects.
 
-import arc/internal/digits
 import arc/internal/gregorian.{civil_from_days}
 import arc/internal/int_math.{floor_div}
 import arc/vm/ops/numeric
 import arc/vm/value.{
-  type CompactDisplay, type CurrencyDisplay, type Granularity,
-  type IntlUseGrouping, type ListFormatStyle, type ListFormatType,
-  type NameWidth, type Notation, type NumStyle, type PluralType,
-  type RoundingMode, type RoundingPriority, type RtfNumeric, type RtfStyle,
-  type Segment, type SignDisplay, type TrailingZeroDisplay, type UnitDisplay,
-  Cardinal, CompactLong, CompactShort, Conjunction, CurAccounting, CurCode,
-  CurName, CurNarrowSymbol, CurStandard, CurSymbol, Disjunction, GGrapheme,
-  GSentence, GWord, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever,
-  LLong, LNarrow, LShort, NotationCompact, NotationEngineering,
-  NotationScientific, NotationStandard, Ordinal, PriorityAuto,
-  PriorityLessPrecision, PriorityMorePrecision, RoundCeil, RoundExpand,
-  RoundFloor, RoundHalfCeil, RoundHalfEven, RoundHalfExpand, RoundHalfFloor,
-  RoundHalfTrunc, RoundTrunc, RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort,
-  Segment, SignAlways, SignAuto, SignExceptZero, SignNegative, SignNever,
-  StyleCurrency, StyleDecimal, StylePercent, StyleUnit, TzdAuto,
-  TzdStripIfInteger, UnitList, UnitLong, UnitNarrow, UnitShort, WLong, WNarrow,
-  WShort,
+  type CompactDisplay, type CurrencyDisplay, type IntlUseGrouping,
+  type ListFormatStyle, type ListFormatType, type NameWidth, type Notation,
+  type NumStyle, type PluralType, type RoundingMode, type RoundingPriority,
+  type RtfNumeric, type RtfStyle, type SignDisplay, type TrailingZeroDisplay,
+  type UnitDisplay, Cardinal, CompactLong, CompactShort, Conjunction,
+  CurAccounting, CurCode, CurName, CurNarrowSymbol, CurStandard, CurSymbol,
+  Disjunction, GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, LLong,
+  LNarrow, LShort, NotationCompact, NotationEngineering, NotationScientific,
+  NotationStandard, Ordinal, PriorityAuto, PriorityLessPrecision,
+  PriorityMorePrecision, RoundCeil, RoundExpand, RoundFloor, RoundHalfCeil,
+  RoundHalfEven, RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
+  RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort, SignAlways, SignAuto,
+  SignExceptZero, SignNegative, SignNever, StyleCurrency, StyleDecimal,
+  StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitList, UnitLong,
+  UnitNarrow, UnitShort, WLong, WNarrow, WShort,
 }
 import gleam/bool
 import gleam/float
@@ -1594,9 +1591,7 @@ pub fn plural_select_en(
   type_: PluralType,
   int_digits: String,
   frac_digits: String,
-  negative: Bool,
 ) -> PluralCategory {
-  let _ = negative
   case type_ {
     Ordinal -> {
       let n = int.parse(int_digits) |> option.from_result |> option.unwrap(0)
@@ -1716,7 +1711,13 @@ pub fn rtf_parts_en(
   // The unit property is only attached to numeric parts (never literals).
   let js3 = fn(p: Part, unit) { UnitPart(p.0, p.1, Some(unit)) }
   let literal3 = fn(text) { UnitPart(PLiteral, text, None) }
-  case is_auto, rtf_auto_name(unit, value +. 0.0) {
+  // -0 → +0 so `"second", 0.0 -> Some("now")` in rtf_auto_name matches on
+  // OTP≥27 (where a `0.0` literal pattern rejects -0.0).
+  let v = case numeric.is_neg_zero(value) {
+    True -> 0.0
+    False -> value
+  }
+  case is_auto, rtf_auto_name(unit, v) {
     True, Some(name) -> [literal3(name)]
     _, _ -> {
       let plural = case float.absolute_value(value) {
@@ -1925,148 +1926,6 @@ pub fn day_period_name(hour: Int, minute: Int, width: NameWidth) -> String {
 
 pub fn pad2(n: Int) -> String {
   string.pad_start(int.to_string(n), 2, "0")
-}
-
-// ============================================================================
-// Segmentation (root rules, approximate)
-// ============================================================================
-
-/// The segments covering the string, in order.
-pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {
-  case granularity {
-    GWord -> segment_words(s)
-    GSentence -> segment_sentences(s)
-    GGrapheme -> segment_graphemes(s)
-  }
-}
-
-fn segment_graphemes(s: String) -> List(Segment) {
-  string.to_graphemes(s)
-  |> list.fold(#([], 0), fn(acc, g) {
-    let #(parts, idx) = acc
-    #([Segment(g, idx, False), ..parts], idx + utf16_len(g))
-  })
-  |> fn(acc) { list.reverse(acc.0) }
-}
-
-pub fn utf16_len(s: String) -> Int {
-  string.to_utf_codepoints(s)
-  |> list.fold(0, fn(n, cp) {
-    case string.utf_codepoint_to_int(cp) > 0xffff {
-      True -> n + 2
-      False -> n + 1
-    }
-  })
-}
-
-fn is_word_char(g: String) -> Bool {
-  case string.to_utf_codepoints(g) {
-    [cp, ..] -> {
-      let c = string.utf_codepoint_to_int(cp)
-      digits.is_ascii_alnum_code(c) || c == 0x27 || c > 0x7f
-    }
-    [] -> False
-  }
-}
-
-fn segment_words(s: String) -> List(Segment) {
-  let graphemes = string.to_graphemes(s)
-  segment_words_loop(graphemes, 0, [], "", 0, None)
-}
-
-fn segment_words_loop(
-  rest: List(String),
-  idx: Int,
-  acc: List(Segment),
-  current: String,
-  current_start: Int,
-  current_kind: Option(Bool),
-) -> List(Segment) {
-  case rest {
-    [] ->
-      case current {
-        "" -> list.reverse(acc)
-        _ ->
-          list.reverse([
-            Segment(current, current_start, option.unwrap(current_kind, False)),
-            ..acc
-          ])
-      }
-    [g, ..gs] -> {
-      let kind = is_word_char(g)
-      case current_kind {
-        Some(k) if k == kind ->
-          segment_words_loop(
-            gs,
-            idx + utf16_len(g),
-            acc,
-            current <> g,
-            current_start,
-            current_kind,
-          )
-        Some(k) ->
-          segment_words_loop(
-            gs,
-            idx + utf16_len(g),
-            [Segment(current, current_start, k), ..acc],
-            g,
-            idx,
-            Some(kind),
-          )
-        None ->
-          segment_words_loop(gs, idx + utf16_len(g), acc, g, idx, Some(kind))
-      }
-    }
-  }
-}
-
-fn segment_sentences(s: String) -> List(Segment) {
-  case s {
-    "" -> []
-    _ -> segment_sentences_loop(string.to_graphemes(s), 0, [], "", 0, False)
-  }
-}
-
-fn segment_sentences_loop(
-  rest: List(String),
-  idx: Int,
-  acc: List(Segment),
-  current: String,
-  current_start: Int,
-  after_terminator: Bool,
-) -> List(Segment) {
-  case rest {
-    [] ->
-      case current {
-        "" -> list.reverse(acc)
-        _ -> list.reverse([Segment(current, current_start, False), ..acc])
-      }
-    [g, ..gs] -> {
-      let next_idx = idx + utf16_len(g)
-      let is_term = g == "." || g == "!" || g == "?"
-      case after_terminator && !is_term && g != " " && g != "\n" {
-        True ->
-          // Start a new sentence at this grapheme.
-          segment_sentences_loop(
-            gs,
-            next_idx,
-            [Segment(current, current_start, False), ..acc],
-            g,
-            idx,
-            False,
-          )
-        False ->
-          segment_sentences_loop(
-            gs,
-            next_idx,
-            acc,
-            current <> g,
-            current_start,
-            after_terminator || is_term,
-          )
-      }
-    }
-  }
 }
 
 // ============================================================================

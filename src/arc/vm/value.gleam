@@ -5,6 +5,7 @@ import arc/vm/internal/temporal_calendar.{type Calendar}
 import arc/vm/internal/tree_array.{type TreeArray}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/key.{type PropertyKey, Index, Named}
+import arc/vm/lexical
 import arc/vm/opcode.{type Op, type Pc, type TryKind}
 import gleam/bit_array
 import gleam/bool
@@ -213,12 +214,12 @@ pub type FuncTemplate {
     /// arrows that reference a given binding hold the env_descriptors capture
     /// index for it instead (setup_frame does NOT write — is_arrow guards
     /// that).
-    lexical: opcode.LexicalSlots,
+    lexical: lexical.LexicalSlots,
     /// What KIND of code this body is (§19.2.1.1 PerformEval step 6 derives
     /// the new.target/super/super()/arguments legality bits from it, for this
     /// body's direct eval and nested arrows). Mirrors QuickJS's
     /// JSFunctionBytecode.{new_target,super,super_call,arguments}_allowed.
-    code_kind: opcode.CodeKind,
+    code_kind: lexical.CodeKind,
   )
 }
 
@@ -4469,6 +4470,8 @@ pub fn same_value(left: JsValue, right: JsValue) -> Bool {
 }
 
 /// Erlang =:= on floats: exact term equality, distinguishes -0.0 from +0.0.
+/// Exists solely for SameValue's full term-identity comparison above — for
+/// "is this float -0.0" specifically, use `arc/vm/ops/numeric.is_neg_zero`.
 @external(erlang, "arc_vm_ffi", "float_same_term")
 fn float_same_term(a: Float, b: Float) -> Bool
 

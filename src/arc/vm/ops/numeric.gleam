@@ -82,22 +82,17 @@ pub fn num_div(a: JsNum, b: JsNum) -> JsNum {
         True -> Finite(0.0)
         False -> Finite(-0.0)
       }
-    // 0 / 0 = NaN (covers both ±0 / ±0)
-    Finite(0.0), Finite(0.0)
-    | Finite(-0.0), Finite(0.0)
-    | Finite(0.0), Finite(-0.0)
-    | Finite(-0.0), Finite(-0.0)
-    -> NaN
-    // x / ±0 = ±Infinity (sign depends on both operands)
-    Finite(x), Finite(0.0) ->
-      case x >. 0.0 {
-        True -> Infinity
-        False -> NegInfinity
-      }
-    Finite(x), Finite(-0.0) ->
-      case x >. 0.0 {
-        True -> NegInfinity
-        False -> Infinity
+    // x / ±0: 0/0 → NaN; nonzero/±0 → ±Infinity by XOR of the operand signs.
+    // Never pattern-match a `0.0`/`-0.0` literal for the divisor — on OTP < 27
+    // both literals match both zeros and `1 / -0` picks the +0 arm.
+    Finite(x), Finite(y) if y >=. 0.0 && y <=. 0.0 ->
+      case x >=. 0.0 && x <=. 0.0 {
+        True -> NaN
+        False ->
+          case is_negative_float(x) != is_neg_zero(y) {
+            True -> NegInfinity
+            False -> Infinity
+          }
       }
     Finite(x), Finite(y) -> Finite(x /. y)
   }

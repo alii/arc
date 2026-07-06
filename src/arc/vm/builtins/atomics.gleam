@@ -791,11 +791,9 @@ fn pause(
   case helpers.first_arg_or_undefined(args) {
     JsUndefined -> #(state, Ok(JsUndefined))
     JsNumber(Finite(f)) ->
-      // `+. 0.0` normalizes -0.0 to +0.0: Gleam's == is Erlang =:=, which
-      // distinguishes float zero signs, but -0 IS an integral Number.
-      case f +. 0.0 == int.to_float(value.float_to_int(f)) {
-        True -> #(state, Ok(JsUndefined))
-        False ->
+      case value.integral_int(f) {
+        Some(_) -> #(state, Ok(JsUndefined))
+        None ->
           state.type_error(state, "Atomics.pause: not an integral number")
       }
     _ -> state.type_error(state, "Atomics.pause: not an integral number")
