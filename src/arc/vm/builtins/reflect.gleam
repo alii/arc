@@ -113,10 +113,9 @@ fn reflect_apply(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let #(target, this_arg, args_list) = helpers.three_args_or_undefined(args)
   // Step 1: If IsCallable(target) is false, throw a TypeError.
-  use <- bool.guard(
-    !helpers.is_callable(state.heap, target),
-    state.type_error(state, "Reflect.apply: target is not a function"),
-  )
+  use <- bool.lazy_guard(!helpers.is_callable(state.heap, target), fn() {
+    state.type_error(state, "Reflect.apply: target is not a function")
+  })
   // Step 2: Let args be ? CreateListFromArrayLike(argumentsList) — the real
   // §7.3.19: length/element reads go through [[Get]] (proxy traps, accessors).
   use call_args, state <- state.try_op(property.create_list_from_array_like(
@@ -188,10 +187,7 @@ fn reflect_define_property(
   // then [[DefineOwnProperty]]. define_property_bool_value returns the raw
   // [[DefineOwnProperty]] boolean; proxy trap exceptions propagate, ordinary
   // validation failures → false.
-  case mop.define_property_bool_value(state, ref, key_val, desc_val) {
-    Ok(#(state, ok)) -> #(state, Ok(JsBool(ok)))
-    Error(#(thrown, state)) -> #(state, Error(thrown))
-  }
+  bool_mop_result(mop.define_property_bool_value(state, ref, key_val, desc_val))
 }
 
 /// Reflect.deleteProperty ( target, propertyKey ) — ES2024 §28.1.4
@@ -208,7 +204,7 @@ fn reflect_delete_property(
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
   use pk, state <- state.try_op(property.to_prop_key(state, key_val))
   // Step 3: Return ? target.[[Delete]](key) — trap-aware for proxies.
-  unwrap_set(object.delete_property_stateful(state, ref, pk))
+  bool_mop_result(object.delete_property_stateful(state, ref, pk))
 }
 
 /// Reflect.get ( target, propertyKey [ , receiver ] ) — ES2024 §28.1.5
@@ -349,7 +345,8 @@ fn reflect_prevent_extensions(
 ) -> #(State(host), Result(JsValue, JsValue)) {
   use ref, _rest, state <- require_object(args, state, "preventExtensions")
   // Step 2: trap-aware [[PreventExtensions]].
-  unwrap_set(object.prevent_extensions_stateful(state, ref))
+  use ok, state <- state.try_op(object.prevent_extensions_stateful(state, ref))
+  #(state, Ok(JsBool(ok)))
 }
 
 /// Reflect.set ( target, propertyKey, V [ , receiver ] ) — ES2024 §28.1.12
@@ -372,12 +369,13 @@ fn reflect_set(
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
   use pk, state <- state.try_op(property.to_prop_key(state, key_val))
   // Step 4: Return ? target.[[Set]](key, V, receiver).
-  unwrap_set(object.set_prop_value(state, ref, pk, val, receiver))
+  bool_mop_result(object.set_prop_value(state, ref, pk, val, receiver))
 }
 
-/// Adapt set_value/set_symbol_value's `Result(#(State, Bool), #(JsValue, State))`
-/// to the dispatch return shape.
-fn unwrap_set(
+/// Adapt a bool-returning [[MOP]] result
+/// (`Result(#(State, Bool), #(JsValue, State))`) to the dispatch return shape
+/// `#(State, Result(JsValue, JsValue))`.
+fn bool_mop_result(
   r: Result(#(State(host), Bool), #(JsValue, State(host))),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case r {
@@ -410,10 +408,13 @@ fn reflect_set_prototype_of(
       state.type_error(state, "Object prototype may only be an Object or null")
     // Step 3: ? target.[[SetPrototypeOf]](proto) — the proxy-vs-ordinary
     // dispatch lives in ops/mop; every refusal is just `false` here.
-    Ok(new_proto) ->
-      case mop.set_prototype_of_stateful(state, ref, new_proto) {
-        Ok(#(state, status)) -> #(state, Ok(JsBool(result.is_ok(status))))
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
+    Ok(new_proto) -> {
+      use status, state <- state.try_op(mop.set_prototype_of_stateful(
+        state,
+        ref,
+        new_proto,
+      ))
+      #(state, Ok(JsBool(result.is_ok(status))))
+    }
   }
 }
