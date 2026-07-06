@@ -7,7 +7,6 @@
 //// (see intl_format.gleam); tag parsing/canonicalization is in
 //// intl_locale.gleam.
 
-import arc/internal/digits
 import arc/internal/gregorian.{days_from_civil}
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div}
@@ -19,7 +18,8 @@ import arc/vm/builtins/intl_format.{
   PMonth, PSecond, PTimeZoneName, PWeekday, PYear,
 } as fmt
 import arc/vm/builtins/intl_locale as tags
-import arc/vm/builtins/temporal_tz
+import arc/vm/builtins/intl_segment as seg
+import arc/vm/builtins/intl_timezone as tz
 import arc/vm/heap
 import arc/vm/internal/temporal_calendar as tcal
 import arc/vm/key.{Index, Named}
@@ -33,10 +33,10 @@ import arc/vm/value.{
   type ConstructibleService, type CurrencyDisplay, type CurrencySign,
   type DateStyle, type DateTimeFormatState, type DisplayNamesFallback,
   type DisplayNamesState, type DisplayNamesType, type DtfComponent,
-  type DtfComponents, type DtfTimeZone, type DurationBaseStyle,
-  type DurationDisplay, type DurationFormatState, type DurationUnitOptions,
-  type DurationUnitStyle, type Granularity, type HostOverride, type HourCycle,
-  type IntlData, type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
+  type DtfComponents, type DurationBaseStyle, type DurationDisplay,
+  type DurationFormatState, type DurationUnitOptions, type DurationUnitStyle,
+  type Granularity, type HostOverride, type HourCycle, type IntlData,
+  type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
   type IntlService, type JsValue, type LanguageDisplay, type ListFormatState,
   type ListFormatStyle, type ListFormatType, type LocaleGetterName,
   type LocaleMethodName, type LocaleState, type MonthWidth, type NameWidth,
@@ -60,7 +60,7 @@ import arc/vm/value.{
   DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
   DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
   DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
-  DurationUnitOptions, FbCode, FbNone, FixedZone, GGrapheme, GSentence, GWord,
+  DurationUnitOptions, FbCode, FbNone, GGrapheme, GSentence, GWord,
   GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, H11, H12, H23, H24,
   HostZone, IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
   IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
@@ -79,24 +79,23 @@ import arc/vm/value.{
   LocaleGetTimeZones, LocaleGetWeekInfo, LocaleHourCycle, LocaleLanguage,
   LocaleMaximize, LocaleMinimize, LocaleNumberingSystem, LocaleNumeric,
   LocaleRegion, LocaleScript, LocaleState, LocaleToString, LocaleVariants,
-  MonthName, MonthNum, NamedZone, NotationCompact, NotationEngineering,
-  NotationScientific, NotationStandard, NumberFormatData, NumberFormatState,
-  NumberToLocaleString, ObjectSlot, Ordinal, PluralRulesData, PluralRulesState,
-  PriorityAuto, PriorityLessPrecision, PriorityMorePrecision,
-  RelativeTimeFormatData, RelativeTimeFormatState, RoundCeil, RoundExpand,
-  RoundFloor, RoundHalfCeil, RoundHalfEven, RoundHalfExpand, RoundHalfFloor,
-  RoundHalfTrunc, RoundTrunc, RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort,
-  SegmentIteratorData, SegmentIteratorState, SegmenterData, SegmenterState,
-  SegmentsData, SegmentsState, SensAccent, SensBase, SensCase, SensVariant,
-  SignAlways, SignAuto, SignExceptZero, SignNegative, SignNever,
-  StringLocaleCompare, StringToLocaleLowerCase, StringToLocaleUpperCase,
-  StyleCurrency, StyleDecimal, StylePercent, StyleUnit, TemporalDateSlot,
-  TemporalDateTimeSlot, TemporalInstantSlot, TemporalMonthDaySlot,
-  TemporalTimeSlot, TemporalYearMonthSlot, TemporalZonedDateTimeSlot, TsFull,
-  TsLong, TsMedium, TsShort, TzLong, TzLongGeneric, TzLongOffset, TzShort,
-  TzShortGeneric, TzShortOffset, TzdAuto, TzdStripIfInteger, UnitList, UnitLong,
-  UnitNarrow, UnitShort, UsageSearch, UsageSort, WLong, WNarrow, WNumeric,
-  WShort, WTwoDigit,
+  MonthName, MonthNum, NotationCompact, NotationEngineering, NotationScientific,
+  NotationStandard, NumberFormatData, NumberFormatState, NumberToLocaleString,
+  ObjectSlot, Ordinal, PluralRulesData, PluralRulesState, PriorityAuto,
+  PriorityLessPrecision, PriorityMorePrecision, RelativeTimeFormatData,
+  RelativeTimeFormatState, RoundCeil, RoundExpand, RoundFloor, RoundHalfCeil,
+  RoundHalfEven, RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
+  RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort, SegmentIteratorData,
+  SegmentIteratorState, SegmenterData, SegmenterState, SegmentsData,
+  SegmentsState, SensAccent, SensBase, SensCase, SensVariant, SignAlways,
+  SignAuto, SignExceptZero, SignNegative, SignNever, StringLocaleCompare,
+  StringToLocaleLowerCase, StringToLocaleUpperCase, StyleCurrency, StyleDecimal,
+  StylePercent, StyleUnit, TemporalDateSlot, TemporalDateTimeSlot,
+  TemporalInstantSlot, TemporalMonthDaySlot, TemporalTimeSlot,
+  TemporalYearMonthSlot, TemporalZonedDateTimeSlot, TsFull, TsLong, TsMedium,
+  TsShort, TzLong, TzLongGeneric, TzLongOffset, TzShort, TzShortGeneric,
+  TzShortOffset, TzdAuto, TzdStripIfInteger, UnitList, UnitLong, UnitNarrow,
+  UnitShort, UsageSearch, UsageSort, WLong, WNarrow, WNumeric, WShort, WTwoDigit,
 }
 
 //
@@ -1311,15 +1310,12 @@ fn supported_locales_of(
 /// requested tag (valid values only — callers overlay option values).
 fn resolve_locale(
   requested: List(String),
-) -> #(String, String, List(#(String, String))) {
+) -> #(String, List(#(String, String))) {
   case requested {
-    [] -> #(tags.default_locale(), tags.default_locale(), [])
+    [] -> #(tags.default_locale(), [])
     [tag, ..rest] ->
       case tags.best_available_locale(tags.strip_extensions(tag)) {
-        Some(available) -> {
-          let keywords = u_keywords_of(tag)
-          #(available, available, keywords)
-        }
+        Some(available) -> #(available, u_keywords_of(tag))
         None -> resolve_locale(rest)
       }
   }
@@ -1851,7 +1847,7 @@ fn resolve_nu_locale(
     None,
   ))
   use Nil <- result.map(require_type_seq(state, nu_opt, "numberingSystem"))
-  let #(_locale, data_locale, ext_kws) = resolve_locale(requested)
+  let #(data_locale, ext_kws) = resolve_locale(requested)
   let #(nu, nu_from_ext) =
     resolve_keyword(ext_kws, "nu", nu_opt, fmt.is_numbering_system, "latn")
   let locale = build_resolved_locale(data_locale, [#("nu", nu_from_ext, nu)])
@@ -1903,7 +1899,7 @@ fn collator_state(
     ],
     None,
   ))
-  let #(_locale, data_locale, ext_kws) = resolve_locale(requested)
+  let #(data_locale, ext_kws) = resolve_locale(requested)
   let #(collation, co_from_ext) =
     resolve_keyword(
       ext_kws,
@@ -2471,7 +2467,7 @@ fn date_time_format_state(
 /// produce (ToDateTimeOptions' `required` argument, §17):
 /// Date.prototype.toLocaleDateString needs date fields,
 /// toLocaleTimeString needs time fields, everything else accepts either.
-pub type DtfRequired {
+type DtfRequired {
   DateOnly
   TimeOnly
   DateAndTime
@@ -2578,7 +2574,7 @@ fn dtf_state_required(
     Some(_) -> None
     None -> hour_cycle_opt
   }
-  let #(_locale, data_locale, ext_kws) = resolve_locale(requested)
+  let #(data_locale, ext_kws) = resolve_locale(requested)
   let #(calendar, ca_from_ext) =
     resolve_keyword(
       ext_kws,
@@ -2627,7 +2623,7 @@ fn dtf_state_required(
     JsUndefined -> Ok(#(HostZone, state))
     _ -> {
       use #(s, state) <- result.try(coerce.js_to_string(state, tz_v))
-      case canonical_time_zone(s) {
+      case tz.canonical(s) {
         Some(tz) -> Ok(#(tz, state))
         None ->
           state.range_error_op(state, "Invalid time zone specified: " <> s)
@@ -3025,202 +3021,6 @@ fn time_style_components(style: Option(TimeStyle)) -> DtfComponents {
   }
 }
 
-/// IsValidTimeZoneName + identifier case normalization. Named zones are
-/// resolved against the system tzdata (Temporal's TZif backend), which is
-/// also what supplies their per-instant offset later; the remaining forms
-/// (UTC/GMT aliases, ±HH:MM, Etc/GMT±N) have an offset that never varies.
-fn canonical_time_zone(s: String) -> Option(DtfTimeZone) {
-  let lower = string.lowercase(s)
-  case lower {
-    "utc"
-    | "etc/universal"
-    | "etc/zulu"
-    | "universal"
-    | "zulu"
-    | "etc/utc"
-    | "etc/uct"
-    | "uct" ->
-      Some(FixedZone(
-        case lower {
-          "etc/utc" -> "Etc/UTC"
-          "etc/uct" -> "Etc/UCT"
-          "uct" -> "UCT"
-          _ -> "UTC"
-        },
-        0,
-      ))
-    "gmt" | "etc/greenwich" | "greenwich" -> Some(FixedZone("GMT", 0))
-    "etc/gmt" | "etc/gmt0" | "etc/gmt+0" | "etc/gmt-0" ->
-      Some(FixedZone("Etc/GMT", 0))
-    _ ->
-      case parse_offset_zone(s) {
-        Some(minutes) -> Some(FixedZone(format_offset_zone(minutes), minutes))
-        None ->
-          case etc_gmt_zone(lower) {
-            Some(res) -> Some(res)
-            None -> iana_zone(lower)
-          }
-      }
-  }
-}
-
-/// The UTC offset (minutes) a formatter's zone has at a given instant. The
-/// only place a DateTimeFormat offset ever comes from.
-fn zone_offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
-  case tz {
-    HostZone -> host_time.offset_at_utc_ms(instant_ms)
-    FixedZone(offset_minutes:, ..) -> offset_minutes
-    NamedZone(zone:) -> {
-      // `temporal_tz.lookup` already loaded this zone's TZif to mint the
-      // handle, so a failure here means the zoneinfo install vanished
-      // underneath us. Falling back to UTC would silently render every
-      // timestamp in the wrong zone — fail loudly instead.
-      let assert Ok(offset_ns) =
-        temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000)
-        as "intl: tzdata offset lookup failed for a zone lookup accepted"
-      offset_ns / 60_000_000_000
-    }
-  }
-}
-
-/// Etc/GMT+N (UTC-N) and Etc/GMT-N (UTC+N), N in 1..14.
-fn etc_gmt_zone(lower: String) -> Option(DtfTimeZone) {
-  case string.split_once(lower, "etc/gmt") {
-    Ok(#("", rest)) -> {
-      let #(sign, num) = case string.pop_grapheme(rest) {
-        Ok(#("+", n)) -> #(-1, n)
-        Ok(#("-", n)) -> #(1, n)
-        _ -> #(0, "")
-      }
-      case sign != 0, int.parse(num) {
-        True, Ok(n) if n >= 1 && n <= 14 -> {
-          let name = case sign < 0 {
-            True -> "Etc/GMT+" <> int.to_string(n)
-            False -> "Etc/GMT-" <> int.to_string(n)
-          }
-          case sign < 0 && n > 12 {
-            True -> None
-            False -> Some(FixedZone(name, sign * n * 60))
-          }
-        }
-        _, _ -> None
-      }
-    }
-    _ -> None
-  }
-}
-
-/// Named IANA zones: the abbreviation zones plus structurally-valid
-/// Area/Location identifiers. ECMA-402 §6.5: an implementation supporting
-/// named zones must accept every IANA Zone/Link name, so resolution goes
-/// through the system tzdata (Temporal's TZif backend) rather than a
-/// hardcoded table; names absent from tzdata get the caller's
-/// "Invalid time zone specified" RangeError instead of silently rendering as
-/// UTC (offset 0).
-fn iana_zone(lower: String) -> Option(DtfTimeZone) {
-  case lower {
-    "est"
-    | "cst6cdt"
-    | "est5edt"
-    | "mst7mdt"
-    | "pst8pdt"
-    | "mst"
-    | "hst"
-    | "cet"
-    | "eet"
-    | "met"
-    | "wet" -> tzdata_zone(lower)
-    _ ->
-      case string.split(lower, "/") {
-        [area, ..rest] if rest != [] -> {
-          let known_area =
-            list.contains(
-              [
-                "africa", "america", "antarctica", "arctic", "asia", "atlantic",
-                "australia", "europe", "indian", "pacific",
-              ],
-              area,
-            )
-          let parts_ok = list.all(rest, fn(p) { p != "" && is_zone_word(p) })
-          case known_area && parts_ok {
-            True -> tzdata_zone(lower)
-            False -> None
-          }
-        }
-        _ -> None
-      }
-  }
-}
-
-/// Resolve a zone id against the system tzdata. The `Zone` handle it returns
-/// is what supplies the offset at each formatted instant — no offset is
-/// snapshotted here. `None` when the name is not in tzdata.
-fn tzdata_zone(lower: String) -> Option(DtfTimeZone) {
-  temporal_tz.lookup(lower)
-  |> result.map(NamedZone)
-  |> option.from_result
-}
-
-fn is_zone_word(p: String) -> Bool {
-  tags.all_codepoints(p, fn(c) {
-    digits.is_ascii_alnum_code(c) || c == 0x5f || c == 0x2b || c == 0x2d
-  })
-}
-
-/// ±HH:MM offset time zones.
-fn parse_offset_zone(s: String) -> Option(Int) {
-  let #(sign, rest) = case string.pop_grapheme(s) {
-    Ok(#("+", rest)) -> #(1, rest)
-    Ok(#("-", rest)) -> #(-1, rest)
-    _ -> #(0, s)
-  }
-  case sign {
-    0 -> None
-    _ ->
-      case string.split(rest, ":") {
-        [hh, mm] -> {
-          // Guards can't contain function calls — bind the lengths first.
-          let hh_len = string.length(hh)
-          let mm_len = string.length(mm)
-          case int.parse(hh), int.parse(mm) {
-            Ok(h), Ok(m)
-              if h >= 0
-              && h <= 23
-              && m >= 0
-              && m <= 59
-              && hh_len == 2
-              && mm_len == 2
-            -> Some(sign * { h * 60 + m })
-            _, _ -> None
-          }
-        }
-        [hhmm] ->
-          case string.length(hhmm), int.parse(hhmm) {
-            2, Ok(h) if h >= 0 && h <= 23 -> Some(sign * h * 60)
-            4, Ok(v) -> {
-              let h = v / 100
-              let m = v % 100
-              case h <= 23 && m <= 59 {
-                True -> Some(sign * { h * 60 + m })
-                False -> None
-              }
-            }
-            _, _ -> None
-          }
-        _ -> None
-      }
-  }
-}
-
-fn format_offset_zone(minutes: Int) -> String {
-  let sign = case minutes < 0 {
-    True -> "-"
-    False -> "+"
-  }
-  let m = int.absolute_value(minutes)
-  sign <> fmt.pad2(m / 60) <> ":" <> fmt.pad2(m % 60)
-}
-
 // --- Intl.PluralRules ---
 
 fn plural_rules_state(
@@ -3249,7 +3049,7 @@ fn plural_rules_state(
     NkStandard,
   ))
   use #(notation, state) <- result.try(read_notation(state, opts, notation_kind))
-  let #(_locale, data_locale, _ext) = resolve_locale(requested)
+  let #(data_locale, _ext) = resolve_locale(requested)
   use #(digits, state) <- result.try(digit_options(
     state,
     opts,
@@ -3299,7 +3099,7 @@ fn list_format_state(
     list_format_style_variants(),
     LLong,
   ))
-  let #(_locale, data_locale, _ext) = resolve_locale(requested)
+  let #(data_locale, _ext) = resolve_locale(requested)
   Ok(#(ListFormatState(locale: data_locale, list_type: type_, style:), state))
 }
 
@@ -3369,7 +3169,7 @@ fn segmenter_state(
     ],
     GGrapheme,
   ))
-  let #(_locale, data_locale, _ext) = resolve_locale(requested)
+  let #(data_locale, _ext) = resolve_locale(requested)
   Ok(#(SegmenterState(locale: data_locale, granularity:), state))
 }
 
@@ -3429,7 +3229,7 @@ fn display_names_state(
     [#("dialect", LdDialect), #("standard", LdStandard)],
     LdDialect,
   ))
-  let #(_locale, data_locale, _ext) = resolve_locale(requested)
+  let #(data_locale, _ext) = resolve_locale(requested)
   Ok(#(
     DisplayNamesState(
       locale: data_locale,
@@ -3449,7 +3249,7 @@ fn display_names_state(
 
 /// A duration unit. The one place the ten unit names are written down: option
 /// key, DurationRecord field, and singular unit tag all derive from it.
-pub type DurationUnit {
+type DurationUnit {
   DuYears
   DuMonths
   DuWeeks
@@ -3510,7 +3310,7 @@ fn duration_unit_singular(u: DurationUnit) -> String {
 
 /// A duration's ten fields (ToDurationRecord / ParseTemporalDurationString).
 /// Field access replaces the string lookups with a silent zero default.
-pub type DurationRecord {
+type DurationRecord {
   DurationRecord(
     years: Float,
     months: Float,
@@ -3525,7 +3325,7 @@ pub type DurationRecord {
   )
 }
 
-pub const zero_duration = DurationRecord(
+const zero_duration = DurationRecord(
   years: 0.0,
   months: 0.0,
   weeks: 0.0,
@@ -5074,14 +4874,14 @@ fn dtf_temporal_fields(
   case t {
     AtInstant(epoch_ns:) -> {
       let ms = floor_div(epoch_ns, 1_000_000)
-      let offset = zone_offset_at(d.time_zone, ms)
+      let offset = tz.offset_at(d.time_zone, ms)
       #(fmt.fields_from_epoch_ms(int.to_float(ms), offset), offset)
     }
     // Plain types carry no instant, so a requested timeZoneName can only show
     // the zone's offset now.
     AtPlain(p) -> #(
       plain_temporal_fields(p),
-      zone_offset_at(d.time_zone, host_time.now_ms()),
+      tz.offset_at(d.time_zone, host_time.now_ms()),
     )
   }
 }
@@ -5196,12 +4996,7 @@ fn build_dtf_parts(
     True -> 1 - fields.year
     False -> fields.year
   }
-  let year_str = fn(width) {
-    case width {
-      WTwoDigit -> fmt.pad2(display_year % 100)
-      WNumeric -> int.to_string(display_year)
-    }
-  }
+  let year_str = fn(width) { numeric_width_str(width, display_year) }
   let weekday_parts = case weekday {
     Some(w) -> [#(PWeekday, fmt.weekday_name(fields.week_day, w))]
     None -> []
@@ -5211,7 +5006,10 @@ fn build_dtf_parts(
     Some(MonthName(mw)) -> {
       let m_part = [#(PMonth, fmt.month_name(fields.month, mw))]
       let d_part = case day {
-        Some(dw) -> [#(PLiteral, " "), #(PDay, day_str(dw, fields.day))]
+        Some(dw) -> [
+          #(PLiteral, " "),
+          #(PDay, numeric_width_str(dw, fields.day)),
+        ]
         None -> []
       }
       let y_part = case year {
@@ -5228,7 +5026,7 @@ fn build_dtf_parts(
     // "/"; German-style locales order D.M.Y with ".".
     Some(MonthNum(_)) | None -> {
       let month_num = case month {
-        Some(MonthNum(mw)) -> Some(month_num_str(mw, fields.month))
+        Some(MonthNum(mw)) -> Some(numeric_width_str(mw, fields.month))
         Some(MonthName(_)) | None -> None
       }
       let lang = case tags.parse(d.locale) {
@@ -5241,7 +5039,10 @@ fn build_dtf_parts(
           lang,
         )
       let m_pair = #(PMonth, month_num)
-      let d_pair = #(PDay, option.map(day, fn(dw) { day_str(dw, fields.day) }))
+      let d_pair = #(
+        PDay,
+        option.map(day, fn(dw) { numeric_width_str(dw, fields.day) }),
+      )
       let y_pair = #(PYear, option.map(year, year_str))
       let raw = case dotted {
         True -> [d_pair, m_pair, y_pair]
@@ -5356,7 +5157,7 @@ fn build_dtf_parts(
   }
   let tz_parts = case tz_name {
     Some(width) -> {
-      let name = tz_display(value.dtf_time_zone_id(d.time_zone), width, offset)
+      let name = tz.display(value.dtf_time_zone_id(d.time_zone), width, offset)
       [#(PLiteral, " "), #(PTimeZoneName, name)]
     }
     None -> []
@@ -5392,17 +5193,12 @@ fn am_pm(hour: Int) -> String {
   }
 }
 
-fn day_str(width: NumericWidth, day: Int) -> String {
+/// Render an integer under a `numeric`/`2-digit` width. `2-digit` truncates
+/// to the low two digits (per §11.5.8 for year/month/day).
+fn numeric_width_str(width: NumericWidth, n: Int) -> String {
   case width {
-    WTwoDigit -> fmt.pad2(day)
-    WNumeric -> int.to_string(day)
-  }
-}
-
-fn month_num_str(width: NumericWidth, month: Int) -> String {
-  case width {
-    WTwoDigit -> fmt.pad2(month)
-    WNumeric -> int.to_string(month)
+    WTwoDigit -> fmt.pad2(n % 100)
+    WNumeric -> int.to_string(n)
   }
 }
 
@@ -5412,42 +5208,6 @@ fn join_parts(pieces: List(fmt.Part), sep: String) -> List(fmt.Part) {
     [first, ..rest] ->
       list.fold(rest, [first], fn(acc, p) { [p, #(PLiteral, sep), ..acc] })
       |> list.reverse
-  }
-}
-
-/// Render a formatter's [[TimeZone]] under a timeZoneName width.
-fn tz_display(name: String, width: TimeZoneNameWidth, offset: Int) -> String {
-  case name, width {
-    "UTC", TzShort | "UTC", TzShortGeneric -> "UTC"
-    "UTC", TzLong | "UTC", TzLongGeneric -> "Coordinated Universal Time"
-    "UTC", TzShortOffset -> "GMT"
-    "UTC", TzLongOffset -> "GMT"
-    _, TzLong | _, TzLongOffset | _, TzLongGeneric -> gmt_offset(offset, True)
-    _, TzShort | _, TzShortOffset | _, TzShortGeneric ->
-      gmt_offset(offset, False)
-  }
-}
-
-fn gmt_offset(offset: Int, long: Bool) -> String {
-  case offset {
-    0 -> "GMT"
-    _ -> {
-      let sign = case offset < 0 {
-        True -> "-"
-        False -> "+"
-      }
-      let m = int.absolute_value(offset)
-      let h = m / 60
-      let mm = m % 60
-      case long {
-        True -> "GMT" <> sign <> fmt.pad2(h) <> ":" <> fmt.pad2(mm)
-        False ->
-          case mm {
-            0 -> "GMT" <> sign <> int.to_string(h)
-            _ -> "GMT" <> sign <> int.to_string(h) <> ":" <> fmt.pad2(mm)
-          }
-      }
-    }
   }
 }
 
@@ -5564,11 +5324,15 @@ fn dtf_collapsed_range(
                   fmt.RangePart(PLiteral, " ", fmt.SourceShared),
                   fmt.RangePart(
                     PDay,
-                    day_str(day_style, xf.day),
+                    numeric_width_str(day_style, xf.day),
                     fmt.SourceStart,
                   ),
                   fmt.RangePart(PLiteral, " – ", fmt.SourceShared),
-                  fmt.RangePart(PDay, day_str(day_style, yf.day), fmt.SourceEnd),
+                  fmt.RangePart(
+                    PDay,
+                    numeric_width_str(day_style, yf.day),
+                    fmt.SourceEnd,
+                  ),
                   fmt.RangePart(PLiteral, ", ", fmt.SourceShared),
                   fmt.RangePart(PYear, year_str, fmt.SourceShared),
                 ]
@@ -5580,13 +5344,17 @@ fn dtf_collapsed_range(
                   fmt.RangePart(PLiteral, " ", fmt.SourceStart),
                   fmt.RangePart(
                     PDay,
-                    day_str(day_style, xf.day),
+                    numeric_width_str(day_style, xf.day),
                     fmt.SourceStart,
                   ),
                   fmt.RangePart(PLiteral, " – ", fmt.SourceShared),
                   fmt.RangePart(PMonth, mname(yf.month), fmt.SourceEnd),
                   fmt.RangePart(PLiteral, " ", fmt.SourceEnd),
-                  fmt.RangePart(PDay, day_str(day_style, yf.day), fmt.SourceEnd),
+                  fmt.RangePart(
+                    PDay,
+                    numeric_width_str(day_style, yf.day),
+                    fmt.SourceEnd,
+                  ),
                   fmt.RangePart(PLiteral, ", ", fmt.SourceShared),
                   fmt.RangePart(PYear, year_str, fmt.SourceShared),
                 ]
@@ -5645,7 +5413,7 @@ fn dtf_fields_number(
     }
     _ -> state.range_error_op(state, "Invalid time value")
   })
-  let offset = zone_offset_at(d.time_zone, float.truncate(tv_f))
+  let offset = tz.offset_at(d.time_zone, float.truncate(tv_f))
   Ok(#(fmt.fields_from_epoch_ms(tv_f, offset), offset, state))
 }
 
@@ -5953,19 +5721,21 @@ fn turkic_case(s: String, upper: Bool) -> String {
   }
 }
 
+/// A single codepoint as a string; empty for a surrogate scalar value.
+fn codepoint_str(c: Int) -> String {
+  case string.utf_codepoint(c) {
+    Ok(cp) -> string.from_utf_codepoints([cp])
+    Error(Nil) -> ""
+  }
+}
+
 fn lower_turkic_cps(cps: List(Int), acc: List(String)) -> String {
   case cps {
     [] -> string.join(list.reverse(acc), "")
     [0x130, ..rest] -> lower_turkic_cps(rest, ["i", ..acc])
     [0x49, 0x307, ..rest] -> lower_turkic_cps(rest, ["i", ..acc])
     [0x49, ..rest] -> lower_turkic_cps(rest, ["ı", ..acc])
-    [c, ..rest] -> {
-      let g = case string.utf_codepoint(c) {
-        Ok(cp) -> string.from_utf_codepoints([cp])
-        Error(Nil) -> ""
-      }
-      lower_turkic_cps(rest, [g, ..acc])
-    }
+    [c, ..rest] -> lower_turkic_cps(rest, [codepoint_str(c), ..acc])
   }
 }
 
@@ -5985,13 +5755,7 @@ fn upper_lt_cps(cps: List(Int), acc: List(String)) -> String {
     [0x69, 0x307, ..rest] -> upper_lt_cps(rest, ["I", ..acc])
     [0x6a, 0x307, ..rest] -> upper_lt_cps(rest, ["J", ..acc])
     [0x12f, 0x307, ..rest] -> upper_lt_cps(rest, ["Į", ..acc])
-    [c, ..rest] -> {
-      let g = case string.utf_codepoint(c) {
-        Ok(cp) -> string.from_utf_codepoints([cp])
-        Error(Nil) -> ""
-      }
-      upper_lt_cps(rest, [g, ..acc])
-    }
+    [c, ..rest] -> upper_lt_cps(rest, [codepoint_str(c), ..acc])
   }
 }
 
@@ -6002,31 +5766,18 @@ fn lower_lt_cps(cps: List(Int), acc: List(String)) -> String {
     // I/J followed by a combining mark keep an explicit dot above.
     [0x49, m, ..rest] ->
       case is_mark(m) {
-        True -> lower_lt_cps(rest, [mark_str(m), "i\u{0307}", ..acc])
+        True -> lower_lt_cps(rest, [codepoint_str(m), "i\u{0307}", ..acc])
         False -> lower_lt_cps([m, ..rest], ["i", ..acc])
       }
     [0x4a, m, ..rest] ->
       case is_mark(m) {
-        True -> lower_lt_cps(rest, [mark_str(m), "j\u{0307}", ..acc])
+        True -> lower_lt_cps(rest, [codepoint_str(m), "j\u{0307}", ..acc])
         False -> lower_lt_cps([m, ..rest], ["j", ..acc])
       }
     [0xcc, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0300}", ..acc])
     [0xcd, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0301}", ..acc])
     [0x128, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0303}", ..acc])
-    [c, ..rest] -> {
-      let g = case string.utf_codepoint(c) {
-        Ok(cp) -> string.from_utf_codepoints([cp])
-        Error(Nil) -> ""
-      }
-      lower_lt_cps(rest, [g, ..acc])
-    }
-  }
-}
-
-fn mark_str(c: Int) -> String {
-  case string.utf_codepoint(c) {
-    Ok(cp) -> string.from_utf_codepoints([cp])
-    Error(Nil) -> ""
+    [c, ..rest] -> lower_lt_cps(rest, [codepoint_str(c), ..acc])
   }
 }
 
@@ -6080,7 +5831,7 @@ fn plural_select(p: PluralRulesState, n: value.JsNum) -> fmt.PluralCategory {
         )
       let #(int_digits, frac_digits) =
         fmt.plural_operands(fmt.format_number_parts(opts, f))
-      fmt.plural_select_en(p.plural_type, int_digits, frac_digits, f <. 0.0)
+      fmt.plural_select_en(p.plural_type, int_digits, frac_digits)
     }
     // NaN/Infinity have no operands.
     _ -> fmt.PcOther
@@ -6894,7 +6645,7 @@ fn segments_iterator(
       SegmentIteratorData(SegmentIteratorState(
         string: sg.string,
         granularity: sg.granularity,
-        remaining: fmt.segment_string(sg.string, sg.granularity),
+        remaining: seg.segment_string(sg.string, sg.granularity),
       ))
     let #(heap, ref) =
       common.alloc_wrapper(state.heap, IntlObject(data: iter), iter_proto)
@@ -6932,8 +6683,8 @@ fn segments_containing(
     value.Finite(f) -> float.truncate(f)
     _ -> 0
   }
-  let segments = fmt.segment_string(input, granularity)
-  let total = fmt.utf16_len(input)
+  let segments = seg.segment_string(input, granularity)
+  let total = seg.utf16_len(input)
   case idx < 0 || idx >= total {
     True -> Ok(#(JsUndefined, state))
     False -> {

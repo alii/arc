@@ -79,11 +79,7 @@ fn collator_levels(
   case sensitivity {
     SensBase -> 0
     SensAccent -> secondary()
-    SensCase ->
-      case tertiary() {
-        0 -> 0
-        n -> n
-      }
+    SensCase -> tertiary()
     SensVariant ->
       case secondary() {
         0 -> tertiary()
@@ -246,7 +242,7 @@ fn numeric_compare(a: List(String), b: List(String)) -> Int {
     [], [] -> 0
     [], _ -> -1
     _, [] -> 1
-    [ca, ..], [cb, ..] -> {
+    [ca, ..ta], [cb, ..tb] -> {
       let da = is_digit_str(ca)
       let db = is_digit_str(cb)
       case da, db {
@@ -262,13 +258,8 @@ fn numeric_compare(a: List(String), b: List(String)) -> Int {
           }
         }
         _, _ ->
-          case
-            string.compare(
-              option.unwrap(list.first(a) |> option.from_result, ""),
-              option.unwrap(list.first(b) |> option.from_result, ""),
-            )
-          {
-            order.Eq -> numeric_compare(list.drop(a, 1), list.drop(b, 1))
+          case string.compare(ca, cb) {
+            order.Eq -> numeric_compare(ta, tb)
             order.Lt -> -1
             order.Gt -> 1
           }
