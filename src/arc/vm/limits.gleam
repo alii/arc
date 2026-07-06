@@ -36,6 +36,14 @@ pub const max_string_bytes = 268_435_456
 /// Max VM call stack depth before "Maximum call stack size exceeded".
 pub const max_call_depth = 10_000
 
+/// Max prototype-chain hops a trap-aware walk (for-in over a Proxy) will take
+/// before giving up. A `getPrototypeOf` trap that returns a fresh proxy each
+/// call would otherwise spin `enumerate_chain` forever — the walk never
+/// re-enters the JS call stack, so `max_call_depth` never sees it. V8 stops
+/// silently at a similar bound; the spec allows an implementation-defined cap
+/// on EnumerateObjectProperties (§14.7.5.10 note).
+pub const max_prototype_depth = 1000
+
 /// Bounded string.repeat. Returns Error(Nil) if `byte_size(s) * count`
 /// would exceed max_string_bytes.
 pub fn repeat(s: String, count: Int) -> Result(String, Nil) {

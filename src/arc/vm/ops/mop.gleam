@@ -177,10 +177,6 @@ pub fn make_descriptor_object(
 ///   8. If Obj has "set", let setter = Get(Obj, "set"). If not callable and not undefined, throw TypeError. Set desc.[[Set]].
 ///   9. If desc has [[Get]] or [[Set]], and desc has [[Value]] or [[Writable]], throw TypeError.
 ///  10. Return desc.
-///
-/// TODO(Deviation): Does not fully check non-configurable constraints
-/// (e.g. redefining a non-configurable property's attributes should throw
-/// in some cases per ValidateAndApplyPropertyDescriptor).
 pub fn apply_descriptor(
   state: State(host),
   target_ref: Ref,
@@ -1894,6 +1890,30 @@ fn proxy_get_own_property(
   }
 }
 
+/// Trap-aware [[DefineOwnProperty]] returning the raw boolean status — the
+/// spec's `? O.[[DefineOwnProperty]](P, Desc)` expression. Proxies dispatch
+/// to the `defineProperty` trap (§10.5.6); ordinary/exotic objects go through
+/// `define_parsed`, with a validation-rejected result surfacing as `false`
+/// (not thrown) and genuine abrupt completions propagating. Callers decide
+/// whether `false` throws (DefinePropertyOrThrow) or is returned
+/// (Reflect.defineProperty, CreateDataProperty).
+pub fn define_own_property_bool(
+  state: State(host),
+  ref: Ref,
+  dkey: ObjectKey,
+  parsed: ParsedDesc,
+) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
+  case object.as_proxy(state.heap, ref) {
+    Some(slots) -> proxy_define_own_property(state, slots, dkey, parsed)
+    None ->
+      case define_parsed(state, ref, dkey, parsed) {
+        Ok(state) -> Ok(#(state, True))
+        Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
+        Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
+      }
+  }
+}
+
 /// §10.5.6 Proxy [[DefineOwnProperty]] ( P, Desc ). Returns the raw boolean —
 /// callers decide whether false throws (DefinePropertyOrThrow) or not
 /// (Reflect.defineProperty).
@@ -1914,16 +1934,7 @@ fn proxy_define_own_property(
     // `false` here (DefinePropertyOrThrow is applied by the CALLER of the
     // outermost proxy, not per level); genuine abrupt completions (e.g.
     // ArraySetLength's RangeError) propagate.
-    None ->
-      case object.as_proxy(state.heap, t) {
-        Some(inner) -> proxy_define_own_property(state, inner, key, parsed)
-        None ->
-          case define_parsed(state, t, key, parsed) {
-            Ok(state) -> Ok(#(state, True))
-            Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
-            Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
-          }
-      }
+    None -> define_own_property_bool(state, t, key, parsed)
     Some(trap_fn) -> {
       // Step 9: descObj = FromPropertyDescriptor(Desc) — a fresh object
       // carrying only the present fields.
@@ -2058,16 +2069,7 @@ pub fn define_property_bool_value(
 ) -> Result(#(State(host), Bool), #(JsValue, State(host))) {
   use #(dkey, state) <- result.try(property.to_prop_key(state, key_val))
   use #(parsed, state) <- result.try(parse_descriptor(state, desc_val))
-  case object.as_proxy(state.heap, ref) {
-    Some(slots) -> proxy_define_own_property(state, slots, dkey, parsed)
-    None ->
-      case define_parsed(state, ref, dkey, parsed) {
-        Ok(state) -> Ok(#(state, True))
-        // [[DefineOwnProperty]] validated to false → false (not rethrown).
-        Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
-        Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
-      }
-  }
+  define_own_property_bool(state, ref, dkey, parsed)
 }
 
 /// §7.3.7 CreateDataPropertyOrThrow ( O, P, V ) in the file's CPS shape.
@@ -2160,18 +2162,7 @@ fn create_data_property_dkey(
       enumerable: Some(True),
       configurable: Some(True),
     )
-  // Trap-aware [[DefineOwnProperty]] on the already-parsed record —
-  // the same tail define_property_bool dispatches to after parsing.
-  case object.as_proxy(state.heap, ref) {
-    Some(slots) -> proxy_define_own_property(state, slots, dkey, parsed)
-    None ->
-      case define_parsed(state, ref, dkey, parsed) {
-        Ok(state) -> Ok(#(state, True))
-        // [[DefineOwnProperty]] validated to false → false (not rethrown).
-        Error(#(DefineRejected(_), state)) -> Ok(#(state, False))
-        Error(#(DefineThrew(thrown), state)) -> Error(#(thrown, state))
-      }
-  }
+  define_own_property_bool(state, ref, dkey, parsed)
 }
 
 /// Trap-aware [[OwnPropertyKeys]] — §10.1.11 for ordinary objects, §10.5.11
@@ -2503,7 +2494,7 @@ pub fn enumerate_keys_stateful(
   ref: Ref,
 ) -> Result(#(List(String), State(host)), #(JsValue, State(host))) {
   use #(acc_rev, _seen, state) <- result.map(
-    enumerate_chain(state, ref, [], []),
+    enumerate_chain(state, ref, [], [], limits.max_prototype_depth),
   )
   #(list.reverse(acc_rev), state)
 }
@@ -2513,7 +2504,13 @@ fn enumerate_chain(
   ref: Ref,
   seen: List(String),
   acc_rev: List(String),
+  fuel: Int,
 ) -> Result(#(List(String), List(String), State(host)), #(JsValue, State(host))) {
+  // A `getPrototypeOf` trap can return a fresh proxy every hop, so this walk
+  // has no natural termination — bound it (`limits.max_prototype_depth`) and
+  // stop as if the chain ended. V8 does the same; the spec permits it
+  // (§14.7.5.10 note: iteration mechanics are implementation-defined).
+  use <- bool.guard(fuel <= 0, Ok(#(acc_rev, seen, state)))
   use #(keys, state) <- result.try(own_property_keys(state, ref))
   let string_keys = list.filter_map(keys, string_key_and_name)
   use #(seen, acc_rev, state) <- result.try(
@@ -2541,7 +2538,7 @@ fn enumerate_chain(
     ref,
   ))
   case proto_val {
-    JsObject(p) -> enumerate_chain(state, p, seen, acc_rev)
+    JsObject(p) -> enumerate_chain(state, p, seen, acc_rev, fuel - 1)
     _ -> Ok(#(acc_rev, seen, state))
   }
 }
