@@ -2561,7 +2561,13 @@ fn concat_item(
       #(#(copied, pos + length), state)
     }
     // Step 5c: not spreadable — append E as a single element.
-    _, _ -> Ok(#(#(elements.set(elems, pos, item), pos + 1), state))
+    _, _ -> {
+      // Step 5c.ii: If n ≥ 2^53 - 1, throw a TypeError exception.
+      use <- bool.lazy_guard(pos >= limits.max_safe_integer, fn() {
+        state.type_error_op(state, "Array length exceeds maximum safe integer")
+      })
+      Ok(#(#(elements.set(elems, pos, item), pos + 1), state))
+    }
   }
 }
 
@@ -2605,6 +2611,13 @@ fn concat_items_species(
         }
         // Step 5c: CreateDataPropertyOrThrow(A, ! ToString(𝔽(n)), E).
         _, _ -> {
+          // Step 5c.ii: If n ≥ 2^53 - 1, throw a TypeError exception.
+          use <- bool.lazy_guard(pos >= limits.max_safe_integer, fn() {
+            state.type_error_op(
+              state,
+              "Array length exceeds maximum safe integer",
+            )
+          })
           use state <- result.try(write_species_element(
             state,
             target,
