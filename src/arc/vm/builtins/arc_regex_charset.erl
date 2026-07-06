@@ -25,7 +25,7 @@
 -module(arc_regex_charset).
 
 -export([vdigit/0, vword/0, vspace/0]).
--export([vinter/2, vsubtract/2, vcomplement/1]).
+-export([vinter/2, vsubtract/2]).
 -export([vfold/2, vfold_str/2, vclose/1, character_complement/2, vsplit_singles/2]).
 -export([emit_complement/2, emit_vclass/2, vstrip_surrogates/1, vrender_ranges/1]).
 

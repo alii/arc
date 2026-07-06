@@ -177,7 +177,8 @@ lone_char_set(Name) ->
             %% surrogates in a UTF pattern" constraint is applied once, at emit
             %% time, by arc_regex_charset:emit_vclass/2.
             case ranges_for(Key) of
-                {ok, Ranges} -> {ok, arc_regex_charset:vcomplement(Ranges)};
+                {ok, Ranges} ->
+                    {ok, arc_regex_charset:character_complement(Ranges, false)};
                 {error, no_exact_data} -> {error, no_exact_data}
             end;
         {binary, Key, Pcre, false, _Supported} ->
@@ -254,8 +255,8 @@ expand(Key, Negated, InClass, PcreSupported, Fallback) ->
                 {true, false} -> {ok, ["[^", Body(Ranges), $]]};
                 {false, true} -> {ok, Body(Ranges)};
                 {true, true} ->
-                    {ok, Body(arc_regex_charset:vstrip_surrogates(
-                                arc_regex_charset:vcomplement(Ranges)))}
+                    Comp = arc_regex_charset:character_complement(Ranges, false),
+                    {ok, Body(arc_regex_charset:vstrip_surrogates(Comp))}
             end
     end.
 
