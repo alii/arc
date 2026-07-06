@@ -1383,7 +1383,7 @@ fn zip_collect(
           RejectPrimitives,
           "Iterator.zip input",
         ),
-        [input_rec.iterator, ..collected_iters(acc)],
+        fn() { [input_rec.iterator, ..collected_iters(acc)] },
       )
       zip_collect(state, input_rec, [rec, ..acc])
     }
@@ -1409,7 +1409,7 @@ fn zip_padding_iterated(
       let opened = list.map(iters, fn(rec) { rec.iterator })
       use pad_rec, state <- or_close_all(
         iter_protocol.get_iterator_sync(state, padding_option),
-        opened,
+        fn() { opened },
       )
       zip_padding_loop(state, pad_rec, opened, iter_count, [])
     }
@@ -1469,7 +1469,7 @@ fn zip_keyed_collect(
     [key, ..rest] -> {
       // IfAbruptCloseIterators for every read — the collected iterators are
       // already open, so any of the three Gets throwing must close them.
-      let opened = collected_iters(iters_acc)
+      let opened = fn() { collected_iters(iters_acc) }
       use desc, state <- or_close_all(
         mop.own_property_keyed(state, iterables_ref, key),
         opened,
@@ -1556,7 +1556,7 @@ fn zip_keyed_padding_loop(
     [key, ..rest] -> {
       use v, state <- or_close_all(
         object.get_keyed_value_of(state, padding_option, key),
-        opened,
+        fn() { opened },
       )
       zip_keyed_padding_loop(state, padding_option, opened, rest, [v, ..acc])
     }
@@ -1803,15 +1803,18 @@ fn open_members(members: List(ZipMember)) -> List(JsValue) {
 /// Unwrap an op result, or IteratorCloseAll with the thrown error — the
 /// plural sibling of `iter_protocol.or_close`. Every fallible step of the
 /// zip/zipKeyed setup that runs while `iters` are already open funnels through
-/// here, so no site can forget the IfAbruptCloseIterators cleanup.
+/// here, so no site can forget the IfAbruptCloseIterators cleanup. The iterator
+/// list is a thunk so happy-path callers in a per-element loop don't pay to
+/// build it (zip_collect / zip_keyed_collect would otherwise be O(N²) setup).
 fn or_close_all(
   res: Result(#(a, State(host)), #(JsValue, State(host))),
-  iters: List(JsValue),
+  iters: fn() -> List(JsValue),
   cont: fn(a, State(host)) -> Result(#(b, State(host)), #(JsValue, State(host))),
 ) -> Result(#(b, State(host)), #(JsValue, State(host))) {
   case res {
     Ok(#(v, state)) -> cont(v, state)
-    Error(#(thrown, state)) -> Error(close_all_and_throw(state, iters, thrown))
+    Error(#(thrown, state)) ->
+      Error(close_all_and_throw(state, iters(), thrown))
   }
 }
 
