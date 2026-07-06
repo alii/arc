@@ -4206,53 +4206,8 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       case pop_n(state.stack, arity) {
         Some(#(args, after_args)) -> {
           case after_args {
-            [JsObject(obj_ref), ..rest_stack] -> {
-              case heap.read(state.heap, obj_ref) {
-                Some(ObjectSlot(
-                  kind: FunctionObject(
-                    func_template:,
-                    env: env_ref,
-                    home_object:,
-                  ),
-                  ..,
-                )) -> {
-                  let result =
-                    call_function(
-                      state,
-                      obj_ref,
-                      env_ref,
-                      home_object,
-                      func_template,
-                      args,
-                      rest_stack,
-                      JsUndefined,
-                      None,
-                      JsUndefined,
-                    )
-                  case is_tail_call(state, func_template) {
-                    True -> elide_tail_frame(result)
-                    False -> result
-                  }
-                }
-                Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
-                  call_native(state, native, args, rest_stack, JsUndefined)
-                // Proxy [[Call]] (§10.5.12) — route through call.call_value,
-                // which holds the trap machinery.
-                Some(ObjectSlot(kind: value.ProxyObject(..), ..)) ->
-                  call_value(
-                    State(..state, stack: rest_stack),
-                    JsObject(obj_ref),
-                    args,
-                    JsUndefined,
-                  )
-                _ ->
-                  state.throw_type_error(
-                    state,
-                    object.inspect(JsObject(obj_ref), state.heap)
-                      <> " is not a function",
-                  )
-              }
-            }
+            [JsObject(obj_ref), ..rest_stack] ->
+              dispatch_call_op(state, obj_ref, args, rest_stack, JsUndefined)
             [non_func, ..] ->
               state.throw_type_error(
                 state,
@@ -4271,53 +4226,9 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
       case pop_n(state.stack, arity) {
         Some(#(args, after_args)) -> {
           case after_args {
-            [JsObject(method_ref), receiver, ..rest_stack] -> {
-              case heap.read(state.heap, method_ref) {
-                Some(ObjectSlot(
-                  kind: FunctionObject(
-                    func_template:,
-                    env: env_ref,
-                    home_object:,
-                  ),
-                  ..,
-                )) -> {
-                  let result =
-                    call_function(
-                      state,
-                      method_ref,
-                      env_ref,
-                      home_object,
-                      func_template,
-                      args,
-                      rest_stack,
-                      // Method call: this = receiver
-                      receiver,
-                      None,
-                      JsUndefined,
-                    )
-                  case is_tail_call(state, func_template) {
-                    True -> elide_tail_frame(result)
-                    False -> result
-                  }
-                }
-                Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
-                  call_native(state, native, args, rest_stack, receiver)
-                // Proxy [[Call]] (§10.5.12) — this = receiver.
-                Some(ObjectSlot(kind: value.ProxyObject(..), ..)) ->
-                  call_value(
-                    State(..state, stack: rest_stack),
-                    JsObject(method_ref),
-                    args,
-                    receiver,
-                  )
-                _ ->
-                  state.throw_type_error(
-                    state,
-                    object.inspect(JsObject(method_ref), state.heap)
-                      <> " is not a function",
-                  )
-              }
-            }
+            [JsObject(method_ref), receiver, ..rest_stack] ->
+              // Method call: this = receiver
+              dispatch_call_op(state, method_ref, args, rest_stack, receiver)
             [non_func, _, ..] ->
               state.throw_type_error(
                 state,
@@ -5316,6 +5227,66 @@ fn get_elem_on_primitive(
 // ============================================================================
 // Call helpers
 // ============================================================================
+
+/// Shared callable-kind dispatch for the plain-[[Call]] opcodes (Call and
+/// CallMethod). Given a callee ref that has already been popped from the
+/// stack, reads its heap slot and routes to the right call path:
+///
+///   FunctionObject → call_function (+ tail-call elision)
+///   NativeFunction → call_native
+///   ProxyObject    → call_value (holds the §10.5.12 trap machinery)
+///   anything else  → TypeError "is not a function"
+///
+/// Call passes `this_val = JsUndefined`; CallMethod passes the receiver.
+/// Adding a new callable ObjectKind (e.g. BoundFunction) is one match arm
+/// here rather than two that can drift.
+fn dispatch_call_op(
+  state: State(host),
+  callee_ref: Ref,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  this_val: JsValue,
+) -> Result(State(host), StepExit(host)) {
+  case heap.read(state.heap, callee_ref) {
+    Some(ObjectSlot(
+      kind: FunctionObject(func_template:, env: env_ref, home_object:),
+      ..,
+    )) -> {
+      let result =
+        call_function(
+          state,
+          callee_ref,
+          env_ref,
+          home_object,
+          func_template,
+          args,
+          rest_stack,
+          this_val,
+          None,
+          JsUndefined,
+        )
+      case is_tail_call(state, func_template) {
+        True -> elide_tail_frame(result)
+        False -> result
+      }
+    }
+    Some(ObjectSlot(kind: NativeFunction(native, ..), ..)) ->
+      call_native(state, native, args, rest_stack, this_val)
+    Some(ObjectSlot(kind: value.ProxyObject(..), ..)) ->
+      call_value(
+        State(..state, stack: rest_stack),
+        JsObject(callee_ref),
+        args,
+        this_val,
+      )
+    _ ->
+      state.throw_type_error(
+        state,
+        object.inspect(JsObject(callee_ref), state.heap)
+          <> " is not a function",
+      )
+  }
+}
 
 /// ES2024 §10.2.1.2 OrdinaryCallBindThis ( F, thisArgument )
 ///
