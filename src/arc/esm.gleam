@@ -75,7 +75,7 @@ pub fn resolved_text(r: Resolved) -> String {
 /// so a raw specifier taken from the same module's import/export entries always
 /// has an entry.
 pub opaque type SpecifierMap {
-  SpecifierMap(entries: Dict(String, String))
+  SpecifierMap(entries: Dict(Raw, Resolved))
 }
 
 /// A module with no dependencies (a host/synthetic module) resolves nothing.
@@ -89,8 +89,6 @@ pub fn insert_specifier(
   to: Resolved,
 ) -> SpecifierMap {
   let SpecifierMap(entries) = map
-  let Raw(from) = from
-  let Resolved(to) = to
   SpecifierMap(dict.insert(entries, from, to))
 }
 
@@ -101,8 +99,7 @@ pub fn insert_specifier(
 /// graph, and occasionally hit).
 pub fn resolve(map: SpecifierMap, r: Raw) -> Option(Resolved) {
   let SpecifierMap(entries) = map
-  let Raw(text) = r
-  dict.get(entries, text) |> option.from_result |> option.map(Resolved)
+  dict.get(entries, r) |> option.from_result
 }
 
 /// The phase of a namespace import. Deliberately narrower than the AST's
