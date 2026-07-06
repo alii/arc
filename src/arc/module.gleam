@@ -266,20 +266,14 @@ pub type LinkInvariantBroken {
   /// A module imports from a raw specifier its own `specifier_map` — which is
   /// TOTAL over the module's requests — does not cover.
   UnresolvedDependency(specifier: esm.Raw)
-  /// A module of the bundle has no export map. `build_linked` builds one per
-  /// `bundle.modules` key, so a miss is a linker bug — and the empty map that
-  /// used to stand in for it is the plausible lie "this module exports nothing".
-  MissingExportMap(specifier: String)
-  /// A module of the bundle has no local-binding map. `preallocate_local_boxes`
-  /// builds one per `bundle.modules` key; the empty map that used to stand in
-  /// silently unseeds every one of the module's own bindings.
-  MissingLocalBoxes(specifier: String)
+  /// A specifier that is a `bundle.modules` key has no `LinkedModule`.
+  /// `build_linked` produces one per `bundle.modules` key by construction
+  /// (`dict.map_values` over the bundle), so a miss means the caller looked up a
+  /// specifier the bundle does not contain.
+  ModuleNotLinked(specifier: String)
   /// The dependency's export map has no live cell for a name that
   /// `link.validate` already accepted.
   MissingExportCell(dep: String, name: String)
-  /// `import * as ns from dep`, but `dep` has no reserved namespace box —
-  /// `reserve_ns_boxes` covers every module in the bundle.
-  MissingNamespaceBox(dep: String)
   /// `import defer * as ns from dep`, but `dep` has no reserved deferred proxy
   /// — `needed_deferred_specs` collects exactly these imports.
   MissingDeferredBox(dep: String)
@@ -500,20 +494,30 @@ fn linkable_of_bundle(bundle: ModuleBundle) -> link.LinkableGraph {
 // Runtime Evaluation (evaluate_bundle)
 // =============================================================================
 
+/// One module's pre-allocated binding cells (§16.2 instantiation). One record
+/// per bundle module — the three maps a module always has travel together, so
+/// "present in `exports` but missing from `local_boxes`" is unrepresentable.
+pub type LinkedModule {
+  LinkedModule(
+    /// local binding name → BoxSlot ref (seeded TDZ/undefined).
+    local_boxes: Dict(String, Ref),
+    /// exported name → BoxSlot ref (LocalExport and re-exports resolved to the
+    /// owning module's cell; namespace re-exports → a box wrapping the target's
+    /// namespace object).
+    exports: Dict(String, Ref),
+    /// A BoxSlot wrapping this module's cached Module Namespace Exotic Object
+    /// (seeded for `import * as ns`).
+    namespace_box: Ref,
+  )
+}
+
 /// The result of linking: every module's binding cells, pre-allocated before
 /// any body runs (§16.2 instantiation) so cyclic/self imports reference the
 /// same live cells. Immutable once built; threaded read-only through the DFS.
 pub type Linked {
   Linked(
-    /// specifier → local binding name → BoxSlot ref (seeded TDZ/undefined).
-    local_boxes: Dict(String, Dict(String, Ref)),
-    /// specifier → exported name → BoxSlot ref (LocalExport and re-exports
-    /// resolved to the owning module's cell; namespace re-exports → a box
-    /// wrapping the target's namespace object).
-    exports: Dict(String, Dict(String, Ref)),
-    /// specifier → a BoxSlot wrapping that module's cached Module Namespace
-    /// Exotic Object (seeded for `import * as ns`).
-    namespace_boxes: Dict(String, Ref),
+    /// specifier → its `LinkedModule` — same key set as `bundle.modules`.
+    modules: Dict(String, LinkedModule),
     /// specifier → a BoxSlot wrapping that module's Deferred Module Namespace
     /// (seeded for `import defer * as ns`). Only present for modules some
     /// importer in the bundle defers, or that were already registered as
@@ -860,7 +864,10 @@ pub fn linked_namespaces(
   linked_bundle: LinkedBundle,
   heap: Heap(host),
 ) -> List(#(String, Ref)) {
-  read_box_dict(linked_bundle.linked.namespace_boxes, heap)
+  use acc, spec, lm <- dict.fold(linked_bundle.linked.modules, [])
+  let ns_ref =
+    read_namespace_box(heap, spec, lm.namespace_box) |> assert_link_invariant
+  [#(spec, ns_ref), ..acc]
 }
 
 /// Every Deferred Module Namespace in a linked bundle, for the registry: a
@@ -965,11 +972,11 @@ pub fn evaluate_bundle_with_hooks(
 /// reserves a namespace box for EVERY module of the bundle, entry included, so
 /// a missing box is a linker bug — never "this bundle has no namespace".
 fn entry_namespace(linked: Linked, entry: String, heap: Heap(host)) -> Ref {
-  let box =
-    dict.get(linked.namespace_boxes, entry)
-    |> result.replace_error(MissingNamespaceBox(entry))
+  let lm =
+    dict.get(linked.modules, entry)
+    |> result.replace_error(ModuleNotLinked(entry))
     |> assert_link_invariant
-  read_namespace_box(heap, entry, box) |> assert_link_invariant
+  read_namespace_box(heap, entry, lm.namespace_box) |> assert_link_invariant
 }
 
 /// Read a named export off a Module Namespace Exotic Object (the `namespace`
@@ -1342,13 +1349,14 @@ fn build_linked(
                   ))
                   |> assert_link_invariant
                   |> dict.insert(map, name, _)
-                link.ResolvedNamespace(target) ->
-                  dict.get(namespace_boxes, esm.resolved_text(target))
-                  |> result.replace_error(
-                    MissingNamespaceBox(esm.resolved_text(target)),
-                  )
-                  |> assert_link_invariant
-                  |> dict.insert(map, name, _)
+                link.ResolvedNamespace(target) -> {
+                  // `namespace_boxes` was reserved over `bundle.modules` keys
+                  // and `target` came from the linkable graph over the same
+                  // key set — a miss is unreachable by construction.
+                  let assert Ok(box) =
+                    dict.get(namespace_boxes, esm.resolved_text(target))
+                  dict.insert(map, name, box)
+                }
                 link.ResolvedDeferredNamespace(target) ->
                   dict.get(deferred_boxes, esm.resolved_text(target))
                   |> result.replace_error(
@@ -1367,19 +1375,22 @@ fn build_linked(
   let heap =
     list.fold(ns_to_fill, heap, fn(heap, entry) {
       let #(spec, obj) = entry
-      // `exports` was just folded over these very specifiers, so a miss is a
-      // linker bug — an empty namespace would read as "exports nothing".
-      let exp =
-        dict.get(exports, spec)
-        |> result.replace_error(MissingExportMap(spec))
-        |> assert_link_invariant
+      // `exports` was just folded over these very specifiers.
+      let assert Ok(exp) = dict.get(exports, spec)
       heap.write(heap, obj, namespace_slot(exp))
     })
-  #(
-    heap,
-    Linked(local_boxes:, exports:, namespace_boxes:, deferred_boxes:),
-    deferred_to_fill,
-  )
+  // Assemble one `LinkedModule` per bundle module. All three intermediate
+  // dicts were built over `bundle.modules` keys, so every lookup succeeds by
+  // construction — the three-way key desync the old `Linked` shape allowed is
+  // no longer representable.
+  let modules =
+    dict.map_values(bundle.modules, fn(spec, _bm) {
+      let assert Ok(lb) = dict.get(local_boxes, spec)
+      let assert Ok(exp) = dict.get(exports, spec)
+      let assert Ok(ns_box) = dict.get(namespace_boxes, spec)
+      LinkedModule(local_boxes: lb, exports: exp, namespace_box: ns_box)
+    })
+  #(heap, Linked(modules:, deferred_boxes:), deferred_to_fill)
 }
 
 /// GatherAsynchronousTransitiveDependencies ( module ): the modules in
@@ -1523,9 +1534,9 @@ fn instantiate_hoisted_functions(
     // A preexisting module's export cells hold their final values — don't
     // overwrite them with link-time placeholder closures.
     use <- bool.guard(set.contains(already_evaluated, spec), heap)
-    let local_boxes =
-      dict.get(linked.local_boxes, spec)
-      |> result.replace_error(MissingLocalBoxes(spec))
+    let lm =
+      dict.get(linked.modules, spec)
+      |> result.replace_error(ModuleNotLinked(spec))
       |> assert_link_invariant
     // Reconstruct the module's seeded frame so closures capture the same cells
     // a body run would (imports in slots 0..N-1, own exports in their slots).
@@ -1537,7 +1548,7 @@ fn instantiate_hoisted_functions(
     list.fold(compiled.hoisted_funcs, heap, fn(heap, hf) {
       let #(name, func_idx) = hf
       // Only exported functions have a shared cell; the rest are body-local.
-      case dict.get(local_boxes, name) {
+      case dict.get(lm.local_boxes, name) {
         Error(Nil) -> heap
         Ok(box) -> {
           let child =
@@ -1738,13 +1749,13 @@ fn fill_deferred_namespace(
   proxy_ref: Ref,
 ) -> Heap(host) {
   // Both callers only reach here for a `bundle.modules` key, and `build_linked`
-  // gives every one of those an export map.
-  let exports =
-    dict.get(linked.exports, spec)
-    |> result.replace_error(MissingExportMap(spec))
+  // gives every one of those a `LinkedModule`.
+  let lm =
+    dict.get(linked.modules, spec)
+    |> result.replace_error(ModuleNotLinked(spec))
     |> assert_link_invariant
   let #(h, target_ref) =
-    heap.alloc(h, namespace_slot_tagged(exports, "Deferred Module"))
+    heap.alloc(h, namespace_slot_tagged(lm.exports, "Deferred Module"))
   let h = heap.root(h, target_ref)
   let #(h, traps) =
     [
@@ -2012,26 +2023,24 @@ fn import_seeds(
         |> option.to_result(UnresolvedDependency(raw_dep)),
       )
       let dep = esm.resolved_text(dep)
-      // An empty export map here would turn every named import of `dep` into
-      // the far-away lie "no such export"; report the missing map instead.
-      use dep_exports <- result.try(
-        dict.get(linked.exports, dep)
-        |> result.replace_error(MissingExportMap(dep)),
+      // One lookup covers exports AND namespace box: `dep` is a resolved
+      // dependency of this module, so it is a `bundle.modules` key.
+      use lm <- result.try(
+        dict.get(linked.modules, dep)
+        |> result.replace_error(ModuleNotLinked(dep)),
       )
       // Every binding gets a slot: these are positional captures 0..N-1.
       list.try_map(bindings, fn(binding) {
         case binding {
           esm.NamedImport(imported:, ..) ->
-            forward_box(dep_exports, dep, imported)
-          esm.DefaultImport(..) -> forward_box(dep_exports, dep, "default")
+            forward_box(lm.exports, dep, imported)
+          esm.DefaultImport(..) -> forward_box(lm.exports, dep, "default")
           esm.NamespaceImport(phase: esm.Deferred, ..) ->
             dict.get(linked.deferred_boxes, dep)
             |> result.replace_error(MissingDeferredBox(dep))
             |> result.map(JsObject)
           esm.NamespaceImport(phase: esm.Evaluation, ..) ->
-            dict.get(linked.namespace_boxes, dep)
-            |> result.replace_error(MissingNamespaceBox(dep))
-            |> result.map(JsObject)
+            Ok(JsObject(lm.namespace_box))
         }
       })
     }),
@@ -2065,9 +2074,11 @@ fn own_export_seeds(
   let import_locals =
     esm.binding_local_names(compiled.import_bindings) |> set.from_list
   let spec = esm.resolved_text(compiled.specifier)
-  dict.get(linked.local_boxes, spec)
-  |> result.replace_error(MissingLocalBoxes(spec))
-  |> assert_link_invariant
+  let lm =
+    dict.get(linked.modules, spec)
+    |> result.replace_error(ModuleNotLinked(spec))
+    |> assert_link_invariant
+  lm.local_boxes
   |> dict.to_list
   |> list.filter_map(fn(pair) {
     let #(local_name, box) = pair
