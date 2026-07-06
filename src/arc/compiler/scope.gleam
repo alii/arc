@@ -203,13 +203,6 @@ pub type Scope {
     /// Gates Annex B §B.3.2 var-twin declaration (sloppy bodies only) and
     /// `annexb_blocked` computation. V8: `Scope::is_strict_`.
     is_strict: Bool,
-    /// §B.3.4: True for non-Catch scopes and for Catch scopes whose
-    /// parameter is a bare identifier (or absent). False for `catch ({e})`
-    /// — a destructured catch param BLOCKS Annex B promotion of a
-    /// same-named block-level FunctionDeclaration (`var f` in the catch
-    /// body would be an early error), so the emitter's Annex B target walk
-    /// only steps THROUGH a `CatchBinding` when this is True.
-    catch_param_simple: Bool,
     /// §10.2.11 step 28: this Block IS the body of a function whose
     /// parameter list is non-simple, and therefore the sink every body
     /// `var` / hoisted FunctionDeclaration binds in (see
@@ -978,7 +971,7 @@ pub fn sb_discard(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
   let scope = sb_scope(sb, id)
   let children_at = case scope.parent {
     Some(pid) -> {
-      let siblings = dict.get(sb.children_at, pid) |> result.unwrap([])
+      let siblings = sb_children_raw(sb, pid)
       dict.insert(sb.children_at, pid, list.filter(siblings, fn(c) { c != id }))
     }
     None -> sb.children_at
@@ -1005,9 +998,12 @@ fn sb_block_prunable(scope: RawScope) -> Bool {
 }
 
 /// V8 `Scope::FinalizeBlockScope`: if `id` is a Block scope with no
-/// bindings, splice it out — reparent its children to its grandparent in
-/// `children_at` (preserving order, replacing `id`'s slot in the
-/// grandparent's child list) and drop it from `scopes`.
+/// bindings, splice it out of `children_at` — reparent its children to its
+/// grandparent (preserving order, replacing `id`'s slot in the grandparent's
+/// child list). The `RawScope` STAYS in `sb.scopes` as a tombstone (see the
+/// PERF note below and `sb_discard`): `sb.scopes` is the address space every
+/// id the parser ever minted resolves through, so deleting from it would
+/// dangle refs still keyed to `id`.
 /// Keeps emit.gleam's `ast_util.block_has_declarations` elision in lockstep
 /// with the scope tree.
 pub fn sb_prune_empty_block(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
@@ -1035,12 +1031,10 @@ pub fn sb_prune_empty_block(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
           )
         }
       }
-      let own_children =
-        dict.get(sb.children_at, id) |> result.unwrap([]) |> list.reverse
+      let own_children = sb_children_raw(sb, id) |> list.reverse
       // Reparent: replace `id` in parent's (reverse-order) child list with
       // `id`'s own children, and rewrite each child's `parent` pointer.
-      let parent_children =
-        dict.get(sb.children_at, parent_id) |> result.unwrap([])
+      let parent_children = sb_children_raw(sb, parent_id)
       let spliced =
         list.flat_map(parent_children, fn(c) {
           case c == id {
@@ -1114,7 +1108,7 @@ pub fn sb_tag_children_since(
   marker: List(ScopeId),
   tag: SourceTag,
 ) -> ScopeBuilder {
-  let now = dict.get(sb.children_at, parent_id) |> result.unwrap([])
+  let now = sb_children_raw(sb, parent_id)
   let new_count = list.length(now) - list.length(marker)
   use <- bool.guard(new_count <= 0, sb)
   let new_ids = list.take(now, new_count)
@@ -1159,7 +1153,7 @@ pub fn sb_reorder_body_children(
   scope_id: ScopeId,
   marker: List(ScopeId),
 ) -> ScopeBuilder {
-  let rev = dict.get(sb.children_at, scope_id) |> result.unwrap([])
+  let rev = sb_children_raw(sb, scope_id)
   use <- bool.guard(rev == [], sb)
   let body_count = list.length(rev) - list.length(marker)
   // Pre-body children (param defaults, catch-param destructuring
@@ -1187,7 +1181,7 @@ pub fn sb_reorder_switch_children(
   sb: ScopeBuilder,
   switch_id: ScopeId,
 ) -> ScopeBuilder {
-  let rev = dict.get(sb.children_at, switch_id) |> result.unwrap([])
+  let rev = sb_children_raw(sb, switch_id)
   use <- bool.guard(rev == [], sb)
   let src_order = list.reverse(rev)
   let #(fn_decls, non_decl) =
@@ -1728,7 +1722,6 @@ fn finalize_scope(
       contains_direct_eval: raw.contains_direct_eval,
       annexb_blocked: raw.annexb_blocked,
       is_strict:,
-      catch_param_simple: raw.catch_param_simple,
       is_var_boundary: raw.is_var_boundary,
     )
   let st =
@@ -1739,7 +1732,7 @@ fn finalize_scope(
   // Recurse pre-order. A child Block/Catch/With/ClassBody shares
   // `fn_id`'s counter (just bumped above); a child Function/
   // ClassStaticBlock mints its own at the top of the next call.
-  let children = dict.get(sb.children_at, scope_id) |> result.unwrap([])
+  let children = sb_children_raw(sb, scope_id)
   list.fold(children, st, fn(st, child_id) {
     finalize_scope(sb, opts, st, child_id, dict.new(), is_strict)
   })
@@ -1940,7 +1933,10 @@ fn annexb_check_chain(
             // exactly the parameterNames check. Matches V8's
             // HoistSloppyBlockFunctions.
             ParamBinding -> True
-            CatchBinding -> !raw.catch_param_simple
+            // Unreachable: the parser records catch parameters as
+            // ParamBinding INSIDE a Catch scope (handled above); no
+            // RawBinding of kind CatchBinding is ever declared.
+            CatchBinding -> False
             VarBinding | CaptureBinding -> False
           }
       }
@@ -2601,6 +2597,29 @@ fn compute_up(
 
 // ---- Phase 2: top-down -----------------------------------------------------
 
+/// Per-function lexical-pseudo-slot layout as decided by
+/// `derive_lexical_layout`. Bundles every value the layout step produces so
+/// `compute_down` threads one named record instead of six loose lets.
+type LexLayout {
+  LexLayout(
+    /// `FunctionInfo.lexical` — Owned/Captured/No pseudo-slot table.
+    lexical: LexicalSlots,
+    /// `FunctionInfo.lexical_captures` — inherited refs → capture-slot idx.
+    lexical_captures: Dict(LexicalRef, Int),
+    /// `FunctionInfo.lexical_boxed` — which pseudo-slots read as boxed.
+    lexical_boxed: LexicalRefs,
+    /// Total captures-first prefix width (name captures + lexical captures
+    /// + owned pseudo-slots) — the shift `insert_captures` applies to
+    /// every own binding so captures occupy slots 0..cap_count-1.
+    cap_count: Int,
+    /// Refs THIS function can offer its arrow children (owned ∪ captured).
+    available: LexicalRefs,
+    /// A non-direct-eval Script root — its seeded `info.lexical` from
+    /// `finalize` is authoritative and must not be overwritten.
+    script_root_owns: Bool,
+  )
+}
+
 fn compute_down(
   tree: ScopeTree,
   inputs: Dict(ScopeId, FnAnalysisInput),
@@ -2611,13 +2630,112 @@ fn compute_down(
 ) -> ScopeTree {
   let inp = get_input(inputs, fn_id)
   let up = get_up(ups, fn_id)
+  let is_root = fn_id == root_scope_id
   let children = child_function_scopes(tree, fn_id)
   let own_scope_ids = fn_member_scopes(by_fn, fn_id)
   let declared = declared_in(list.map(own_scope_ids, get_scope(tree, _)))
+  let seeded_info = function_info(tree, fn_id)
+  let kind = { get_scope(tree, fn_id) }.kind
 
-  // captures: free names that exist in the parent's view. eval poisons
-  // free-var analysis → capture EVERY parent-visible name (compile_child
-  // :617-622). Sorted for slot-index determinism.
+  // (1) Name captures from the parent view.
+  let #(captures, const_captures, fn_name_captures) =
+    derive_name_captures(up, parent)
+
+  // (2) Lexical pseudo-slot layout (this / active_func / home_object /
+  //     new.target): capture vs own, boxed-ness, and total prefix width.
+  let lex =
+    derive_lexical_layout(
+      is_root,
+      kind,
+      inp,
+      up,
+      seeded_info,
+      parent,
+      list.length(captures),
+      children,
+      inputs,
+    )
+
+  // (3) Which own declared bindings must be heap-boxed.
+  let forced_box = case is_root {
+    True -> tree.linker_seeded
+    False -> set.new()
+  }
+  let vars_to_box = derive_vars_to_box(up, ups, children, declared, forced_box)
+
+  // (4) Frame-layout reconciliation: shift own bindings past the
+  //     captures-first prefix and insert CaptureBindings. Root is
+  //     pre-offset by `finalize`, so it is skipped.
+  let tree = case is_root || lex.cap_count == 0 {
+    True -> tree
+    False ->
+      insert_captures(
+        tree,
+        fn_id,
+        own_scope_ids,
+        lex.cap_count,
+        captures,
+        const_captures,
+        fn_name_captures,
+      )
+  }
+
+  // (5) Unresolved-name fallthrough (ToGlobal vs ToEvalEnv).
+  let fallthrough =
+    derive_fallthrough(is_root, seeded_info.fallthrough, up, inp)
+
+  // (6) Write back: Binding.is_boxed on every own scope, then the
+  //     FunctionInfo fields this pass decides.
+  let tree = apply_boxing(tree, own_scope_ids, vars_to_box)
+  let tree =
+    update_function_info(tree, fn_id, fn(info) {
+      // An OWNING Script root's `lexical` is authoritative from
+      // finalize — already offset past parent_names/with_stack. For
+      // every other root (Module, direct-eval Script) the locally
+      // computed `lexical` (derived from `lexical_captures`) is the
+      // correct value; finalize wrote `NoLexicalSlots` for those,
+      // and preserving it would strand a direct-eval child arrow's
+      // capture lookup at compiler.gleam:557.
+      let lexical = case lex.script_root_owns {
+        True -> info.lexical
+        False -> lex.lexical
+      }
+      FunctionInfo(
+        ..info,
+        captures:,
+        lexical:,
+        lexical_captures: lex.lexical_captures,
+        lexical_boxed: lex.lexical_boxed,
+        fallthrough:,
+        contains_direct_eval: up.own_eval,
+        eval_in_subtree: up.eval_in_subtree,
+      )
+    })
+
+  // (7) Recurse into children with THEIR parent view. Mirrors
+  //     compile_children passing resolved.closure_scopes/closure_consts/
+  //     closure_fn_names down.
+  list.fold(children, tree, fn(tree, cid) {
+    let view =
+      child_parent_view(
+        tree,
+        cid,
+        captures,
+        const_captures,
+        fn_name_captures,
+        lex.available,
+      )
+    compute_down(tree, inputs, by_fn, ups, cid, view)
+  })
+}
+
+/// captures: free names that exist in the parent's view. eval poisons
+/// free-var analysis → capture EVERY parent-visible name (compile_child
+/// :617-622). Sorted for slot-index determinism.
+fn derive_name_captures(
+  up: Up,
+  parent: ParentView,
+) -> #(List(#(String, Int)), Set(String), Set(String)) {
   let parent_name_set = set.from_list(dict.keys(parent.names))
   let captured_names = case up.eval_in_subtree {
     True -> parent_name_set
@@ -2636,57 +2754,75 @@ fn compute_down(
     })
   let const_captures = set.intersection(parent.consts, captured_names)
   let fn_name_captures = set.intersection(parent.fn_names, captured_names)
+  #(captures, const_captures, fn_name_captures)
+}
 
-  // lexical_captures: arrows capture lexical refs they (or eval) reference
-  // AND the parent has available; non-arrows own all four (compile_child
-  // :638-662). Slots are len(captures)..len(captures)+k in canonical order.
-  // The ROOT mostly captures nothing (it has no parent), but direct-eval
-  // seeds its FunctionInfo with `opts.lexical_captures` (the CALLER's
-  // boxed `this`/new.target/… slots) — preserve that seed; wiping it to
-  // `dict.new()` would route `eval('this')` to the no-slot `JsUndefined`
-  // fallback in get_lexical. A non-direct-eval Script root OWNS its own
-  // four pseudo-slots (see `owns_lexical` below), so it advertises ALL
-  // refs as available to arrow children even though it captures none.
-  //
-  // Root ownership is derived from the SEEDED `info.lexical` finalize
-  // already wrote (Some(root_base..) iff `root_base == 0`) — NOT from
-  // `dict.is_empty(lexical_captures)`. A direct-eval root can have empty
-  // lexical_captures with NON-empty parent_names (caller has locals but
-  // no lexical slots, e.g. an arrow at Module top-level); re-deriving
-  // ownership here from lex_base=0 would assign `this -> slot 0`,
-  // colliding with the first parent_names box ref.
-  let fn_scope_kind = { get_scope(tree, fn_id) }.kind
-  let is_root = fn_id == root_scope_id
-  let seeded_info = function_info(tree, fn_id)
-  let seeded_root_owns_lexical = case seeded_info.lexical {
+/// Decide the lexical pseudo-slot (this / active_func / home_object /
+/// new.target) layout for one function scope.
+///
+/// lexical_captures: arrows capture lexical refs they (or eval) reference
+/// AND the parent has available; non-arrows own all four (compile_child
+/// :638-662). Slots are name_cap_count..name_cap_count+k in canonical
+/// order. The ROOT mostly captures nothing (it has no parent), but
+/// direct-eval seeds its FunctionInfo with `opts.lexical_captures` (the
+/// CALLER's boxed `this`/new.target/… slots) — preserve that seed; wiping
+/// it to `dict.new()` would route `eval('this')` to the no-slot
+/// `JsUndefined` fallback in get_lexical. A non-direct-eval Script root
+/// OWNS its own four pseudo-slots (see `owns_lexical` below), so it
+/// advertises ALL refs as available to arrow children even though it
+/// captures none.
+///
+/// Root ownership is derived from the SEEDED `info.lexical` finalize
+/// already wrote (Some(root_base..) iff `root_base == 0`) — NOT from
+/// `dict.is_empty(lexical_captures)`. A direct-eval root can have empty
+/// lexical_captures with NON-empty parent_names (caller has locals but
+/// no lexical slots, e.g. an arrow at Module top-level); re-deriving
+/// ownership here from lex_base=0 would assign `this -> slot 0`,
+/// colliding with the first parent_names box ref.
+fn derive_lexical_layout(
+  is_root: Bool,
+  kind: ScopeKind,
+  inp: FnAnalysisInput,
+  up: Up,
+  seeded: FunctionInfo,
+  parent: ParentView,
+  name_cap_count: Int,
+  children: List(ScopeId),
+  inputs: Dict(ScopeId, FnAnalysisInput),
+) -> LexLayout {
+  let seeded_root_owns_lexical = case seeded.lexical {
     lexical.OwnedLexicalSlots(_) -> True
     lexical.CapturedLexicalSlots(..) | lexical.NoLexicalSlots -> False
   }
-  let script_root_owns =
-    is_root && fn_scope_kind == Script && seeded_root_owns_lexical
-  let #(lexical_captures, own_lexical_available) = case is_root, inp.is_arrow {
+  let script_root_owns = is_root && kind == Script && seeded_root_owns_lexical
+  let #(lexical_captures, available) = case is_root, inp.is_arrow {
     True, _ -> {
-      let seeded = seeded_info.lexical_captures
+      let seeded_caps = seeded.lexical_captures
       let available = case script_root_owns {
         True -> lexical.every_lexical_ref
-        False -> lexical_refs_present(seeded)
+        False -> lexical_refs_present(seeded_caps)
       }
-      #(seeded, available)
+      #(seeded_caps, available)
     }
     False, False -> #(dict.new(), lexical.every_lexical_ref)
     False, True -> {
-      let base = list.length(captures)
       let #(m, _next) =
-        list.fold(lexical.all_lexical_refs, #(dict.new(), base), fn(st, ref) {
-          let #(m, i) = st
-          let referenced =
-            up.eval_in_subtree || lexical.lexical_refs_get(inp.lexical_refs, ref)
-          let available = lexical.lexical_refs_get(parent.lexical_available, ref)
-          case referenced && available {
-            True -> #(dict.insert(m, ref, i), i + 1)
-            False -> st
-          }
-        })
+        list.fold(
+          lexical.all_lexical_refs,
+          #(dict.new(), name_cap_count),
+          fn(st, ref) {
+            let #(m, i) = st
+            let referenced =
+              up.eval_in_subtree
+              || lexical.lexical_refs_get(inp.lexical_refs, ref)
+            let available =
+              lexical.lexical_refs_get(parent.lexical_available, ref)
+            case referenced && available {
+              True -> #(dict.insert(m, ref, i), i + 1)
+              False -> st
+            }
+          },
+        )
       #(m, lexical_refs_present(m))
     }
   }
@@ -2704,14 +2840,14 @@ fn compute_down(
   // bindings, mirroring the legacy resolver's `DeclareLexical(RefThis/…)`
   // prologue order — CAPTURE_EVAL_SPEC.md §2.5 step (iii). Without this,
   // emit.resolve_lexical panics ("scope tree has no slot for lexical ref").
-  let lex_base = list.length(captures) + dict.size(lexical_captures)
-  let owns_lexical = case fn_scope_kind {
+  let lex_base = name_cap_count + dict.size(lexical_captures)
+  let owns_lexical = case kind {
     Function -> !inp.is_arrow
     ClassStaticBlock -> True
     Script -> script_root_owns
     Module | Block | Catch | With(_) | ClassBody -> False
   }
-  let #(lexical, own_lexical_count) = case owns_lexical {
+  let #(slots, own_lexical_count) = case owns_lexical {
     // Non-owners (arrows; Module/Script root) have no OWN lexical
     // pseudo-slots — but per CAPTURE_EVAL_SPEC.md §2.5 (ii) / §2.6
     // `F.lexical` must still expose the CAPTURED refs' slots so a
@@ -2735,37 +2871,6 @@ fn compute_down(
       lexical.OwnedLexicalSlots(base: lex_base),
       lexical.owned_lexical_slot_count,
     )
-  }
-
-  // vars_to_box: with eval in subtree, every declared local. Otherwise the
-  // union over children of (eval-child → every declared local; else
-  // child.transitive_free ∩ declared) — exactly collect_all_captured_vars.
-  // Note the intersection is with the FULL declared set, not visible-at-
-  // child: faithful to the old IR scan, which may over-box a same-named
-  // binding declared only in a sibling block.
-  //
-  // Module top-level exports (`linker_seeded`) are ALWAYS boxed regardless
-  // of capture — the linker pre-allocates each export's BoxSlot and seeds
-  // the slot with `JsObject(box)` before the body runs, so reads/writes
-  // MUST go through IrGetBoxed/IrPutBoxed to hit the shared cell
-  // (CAPTURE_EVAL_SPEC.md §2.3, old scope.gleam :458-459). Without this an
-  // un-captured export would emit IrPutLocal, writing the value into the
-  // local slot itself and leaving the linker's box stuck at its TDZ seed.
-  let vars_to_box = case up.eval_in_subtree {
-    True -> declared
-    False ->
-      list.fold(children, set.new(), fn(s, cid) {
-        let cu = get_up(ups, cid)
-        case cu.eval_in_subtree {
-          True -> set.union(s, declared)
-          False ->
-            set.intersection(cu.transitive_free, declared) |> set.union(s)
-        }
-      })
-  }
-  let vars_to_box = case fn_id == root_scope_id {
-    True -> set.union(vars_to_box, tree.linker_seeded)
-    False -> vars_to_box
   }
 
   // lexical_captured: which lexical slots THIS body must box. eval → all
@@ -2797,92 +2902,69 @@ fn compute_down(
       )
   }
 
-  // Frame layout reconciliation: `finalize_scope` allocated each
-  // non-root function's own bindings at slots 0.. (a `RawScope`'s
-  // FunctionInfo starts at `local_count: 0`), but `child_parent_view` /
-  // `do_lookup` assume the frame is laid out captures-FIRST: slots
-  // 0..N-1 = name captures (CaptureBinding), N..N+K-1 = lexical_captures,
-  // N+K..N+K+L-1 = owned lexical pseudo-slots (`lexical` above),
-  // N+K+L.. = own declared bindings. So shift every declared binding by
-  // N+K+L, bump local_count, and insert a CaptureBinding per capture name
-  // into the function-root scope. Without this, captures and own bindings
-  // collide at the same slot indices and grandchildren capture the wrong
-  // parent slot. The ROOT scope's bindings are already offset (`finalize`
-  // seeds its `local_count` past `opts.parent_names` +
-  // `opts.lexical_captures` and pre-inserts the parent-name CaptureBindings)
-  // so it is skipped — root captures are caller-supplied, not computed here.
-  let cap_count = lex_base + own_lexical_count
-  let tree = case fn_id == root_scope_id || cap_count == 0 {
-    True -> tree
-    False ->
-      insert_captures(
-        tree,
-        fn_id,
-        own_scope_ids,
-        cap_count,
-        captures,
-        const_captures,
-        fn_name_captures,
-      )
-  }
+  LexLayout(
+    lexical: slots,
+    lexical_captures:,
+    lexical_boxed:,
+    cap_count: lex_base + own_lexical_count,
+    available:,
+    script_root_owns:,
+  )
+}
 
-  // fallthrough: sloppy + eval-in-subtree → unresolved names check the
-  // eval_env first (compile_child :683-686). The ROOT's fallthrough is
-  // caller-supplied via `opts.fallthrough` (e.g. compile_eval_direct
-  // passes ToEvalEnv even when the eval'd source has no nested eval) —
-  // recomputing it here would clobber that with ToGlobal, so preserve it.
-  let own_fallthrough = case up.eval_in_subtree && !inp.is_strict {
+/// vars_to_box: with eval in subtree, every declared local. Otherwise the
+/// union over children of (eval-child → every declared local; else
+/// child.transitive_free ∩ declared) — exactly collect_all_captured_vars.
+/// Note the intersection is with the FULL declared set, not visible-at-
+/// child: faithful to the old IR scan, which may over-box a same-named
+/// binding declared only in a sibling block.
+///
+/// `forced_box` (module top-level exports — `linker_seeded`) are ALWAYS
+/// boxed regardless of capture — the linker pre-allocates each export's
+/// BoxSlot and seeds the slot with `JsObject(box)` before the body runs,
+/// so reads/writes MUST go through IrGetBoxed/IrPutBoxed to hit the
+/// shared cell (CAPTURE_EVAL_SPEC.md §2.3, old scope.gleam :458-459).
+/// Without this an un-captured export would emit IrPutLocal, writing the
+/// value into the local slot itself and leaving the linker's box stuck at
+/// its TDZ seed.
+fn derive_vars_to_box(
+  up: Up,
+  ups: Dict(ScopeId, Up),
+  children: List(ScopeId),
+  declared: Set(String),
+  forced_box: Set(String),
+) -> Set(String) {
+  let vars_to_box = case up.eval_in_subtree {
+    True -> declared
+    False ->
+      list.fold(children, set.new(), fn(s, cid) {
+        let cu = get_up(ups, cid)
+        case cu.eval_in_subtree {
+          True -> set.union(s, declared)
+          False ->
+            set.intersection(cu.transitive_free, declared) |> set.union(s)
+        }
+      })
+  }
+  set.union(vars_to_box, forced_box)
+}
+
+/// fallthrough: sloppy + eval-in-subtree → unresolved names check the
+/// eval_env first (compile_child :683-686). The ROOT's fallthrough is
+/// caller-supplied via `opts.fallthrough` (e.g. compile_eval_direct
+/// passes ToEvalEnv even when the eval'd source has no nested eval) —
+/// recomputing it here would clobber that with ToGlobal, so preserve it.
+fn derive_fallthrough(
+  is_root: Bool,
+  seeded: GlobalFallthrough,
+  up: Up,
+  inp: FnAnalysisInput,
+) -> GlobalFallthrough {
+  use <- bool.guard(is_root, seeded)
+  case up.eval_in_subtree && !inp.is_strict {
     True -> ToEvalEnv
     False -> ToGlobal
   }
-
-  // Write back into the tree: FunctionInfo.{captures, lexical_captures,
-  // fallthrough, contains_direct_eval, eval_in_subtree}; Binding.is_boxed
-  // for every binding in this body's scope subtree.
-  let tree = apply_boxing(tree, own_scope_ids, vars_to_box)
-  let tree =
-    update_function_info(tree, fn_id, fn(info) {
-      let fallthrough = case is_root {
-        True -> info.fallthrough
-        False -> own_fallthrough
-      }
-      // An OWNING Script root's `lexical` is authoritative from
-      // finalize — already offset past parent_names/with_stack. For
-      // every other root (Module, direct-eval Script) the locally
-      // computed `lexical` (derived from `lexical_captures`) is the
-      // correct value; finalize wrote `NoLexicalSlots` for those,
-      // and preserving it would strand a direct-eval child arrow's
-      // capture lookup at compiler.gleam:557.
-      let lexical = case script_root_owns {
-        True -> info.lexical
-        False -> lexical
-      }
-      FunctionInfo(
-        ..info,
-        captures:,
-        lexical:,
-        lexical_captures:,
-        lexical_boxed:,
-        fallthrough:,
-        contains_direct_eval: up.own_eval,
-        eval_in_subtree: up.eval_in_subtree,
-      )
-    })
-
-  // Recurse into children with THEIR parent view. Mirrors compile_children
-  // passing resolved.closure_scopes/closure_consts/closure_fn_names down.
-  list.fold(children, tree, fn(tree, cid) {
-    let view =
-      child_parent_view(
-        tree,
-        cid,
-        captures,
-        const_captures,
-        fn_name_captures,
-        own_lexical_available,
-      )
-    compute_down(tree, inputs, by_fn, ups, cid, view)
-  })
 }
 
 /// Reconcile the frame layout: shift every declared binding in `fn_id`'s
