@@ -18,7 +18,7 @@ import arc/vm/opcode.{
   IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor,
   IrDefineField, IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2,
   IrGosub, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrPushTry, IrPutField, IterCloseGuard, LabelId,
+  IrPushTry, IrPutField, IterCloseGuard,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -130,19 +130,19 @@ type Frame {
   /// first when a return value sits above iter). Everything else about a
   /// loop frame is transparent to a jump that crosses it.
   LoopFrame(
-    break_target: Int,
-    continue_target: Int,
+    break_target: LabelId,
+    continue_target: LabelId,
     label: Option(String),
     iterator: Bool,
   )
   /// Switch statement: a break target (labeled or unlabeled) but never a
   /// continue target — `continue` walks straight past it to the enclosing
   /// loop. Transparent when crossed.
-  SwitchFrame(break_target: Int, label: Option(String))
+  SwitchFrame(break_target: LabelId, label: Option(String))
   /// `foo: { … }` — a labeled non-loop block. Only a *labeled* break targets
   /// it; unlabeled `break` skips it (§14.8: targets the nearest
   /// IterationStatement or SwitchStatement only). Transparent when crossed.
-  LabeledBlockFrame(break_target: Int, label: String)
+  LabeledBlockFrame(break_target: LabelId, label: String)
   /// try / catch / finally body: never a target, only ever crossed. Makes
   /// break/continue/return that jump out emit the right cleanup:
   /// - `pop_try`: IrPopTry ops to keep try_stack balanced (QuickJS
@@ -155,7 +155,7 @@ type Frame {
   ///   so a break/continue/return inside finally never reaches IrRet —
   ///   spec-correct completion replacement (§14.15.3). Mirrors
   ///   BlockEnv.drop_count (quickjs.c:21325).
-  BarrierFrame(pop_try: Int, label_finally: Option(Int), drop_count: Int)
+  BarrierFrame(pop_try: Int, label_finally: Option(LabelId), drop_count: Int)
 }
 
 /// The emitter state, threaded through all emit functions.
@@ -898,7 +898,7 @@ fn emit_jump_unless_strict_neq(
   e: Emitter,
   slot: Int,
   constant: JsValue,
-  target: Int,
+  target: LabelId,
 ) -> Emitter {
   e
   |> emit_scratch_get(slot)
@@ -1760,11 +1760,10 @@ fn emit_ir(e: Emitter, op: IrOp) -> Emitter {
 /// `IrFinal` and copies it straight through, so a new pass-through opcode
 /// needs no `IrOp` variant and no `resolve` arm.
 ///
-/// The type can't stop you handing this a PC-carrying op (`opcode.Jump`,
-/// `opcode.PushTry`, …), but the emitter has no PCs — only label ids — so such
-/// an op would ride through `resolve` unresolved and jump to a garbage PC. Emit
-/// the matching `Ir*` variant for those; `resolve` panics if one slips through
-/// as `IrFinal` (see `opcode.carries_pc`).
+/// The emitter only ever holds `LabelId`s (via `fresh_label`), and every
+/// PC-carrying `Op` field is a `Pc`, so calling this with `opcode.Jump`,
+/// `opcode.PushTry`, … is a type error — emit the matching `Ir*` variant for
+/// those and `resolve` fills the PC in.
 fn emit_op(e: Emitter, op: opcode.Op) -> Emitter {
   emit_ir(e, IrFinal(op))
 }
@@ -2133,7 +2132,7 @@ fn emit_checked_put(e: Emitter, ref: scope.SlotRef) -> Emitter {
 fn emit_with_chain(
   e: Emitter,
   crossed: List(scope.SlotRef),
-  with_op: fn(Int) -> IrOp,
+  with_op: fn(LabelId) -> IrOp,
   fallback: fn(Emitter) -> Emitter,
 ) -> Emitter {
   case crossed {
@@ -2226,9 +2225,9 @@ fn emit_put_field(e: Emitter, name: String) -> Emitter {
   }
 }
 
-fn fresh_label(e: Emitter) -> #(Emitter, Int) {
+fn fresh_label(e: Emitter) -> #(Emitter, LabelId) {
   let label = e.next_label
-  #(Emitter(..e, next_label: label + 1), label)
+  #(Emitter(..e, next_label: label + 1), opcode.LabelId(label))
 }
 
 /// Mint a fresh emitter-internal scratch local slot. The slot comes from
@@ -2248,7 +2247,11 @@ fn push_frame(e: Emitter, frame: Frame) -> Emitter {
   Emitter(..e, frame_stack: [frame, ..e.frame_stack], pending_label: None)
 }
 
-fn push_loop(e: Emitter, break_target: Int, continue_target: Int) -> Emitter {
+fn push_loop(
+  e: Emitter,
+  break_target: LabelId,
+  continue_target: LabelId,
+) -> Emitter {
   push_frame(
     e,
     LoopFrame(
@@ -2264,8 +2267,8 @@ fn push_loop(e: Emitter, break_target: Int, continue_target: Int) -> Emitter {
 /// NB: must be called AFTER the F_body PushTry so the crossing PopTry lines up.
 fn push_loop_iter(
   e: Emitter,
-  break_target: Int,
-  continue_target: Int,
+  break_target: LabelId,
+  continue_target: LabelId,
 ) -> Emitter {
   push_frame(
     e,
@@ -2279,7 +2282,7 @@ fn push_loop_iter(
 }
 
 /// switch: a break target only. `continue` walks past it to the outer loop.
-fn push_switch(e: Emitter, break_target: Int) -> Emitter {
+fn push_switch(e: Emitter, break_target: LabelId) -> Emitter {
   push_frame(e, SwitchFrame(break_target:, label: e.pending_label))
 }
 
@@ -2294,7 +2297,7 @@ fn push_switch(e: Emitter, break_target: Int) -> Emitter {
 fn push_barrier(
   e: Emitter,
   pop_try pop_try: Int,
-  label_finally label_finally: Option(Int),
+  label_finally label_finally: Option(LabelId),
   drop drop: Int,
 ) -> Emitter {
   Emitter(..e, frame_stack: [
@@ -2332,7 +2335,7 @@ fn repeat_nip(e: Emitter, n: Int) -> Emitter {
 /// Normal-completion entry to a finally subroutine: dummy slot + Gosub + drop.
 /// Stack-neutral round trip. QuickJS: `OP_undefined; OP_gosub L; OP_drop`
 /// (quickjs.c:28839-28841, 28903-28905).
-fn emit_gosub_normal(e: Emitter, fin_label: Int) -> Emitter {
+fn emit_gosub_normal(e: Emitter, fin_label: LabelId) -> Emitter {
   e
   |> push_const(JsUndefined)
   |> emit_ir(IrGosub(fin_label))
@@ -2344,8 +2347,8 @@ fn emit_gosub_normal(e: Emitter, fin_label: Int) -> Emitter {
 /// Finally never supplies the completion value — runs out of completion-value mode.
 fn emit_finally_subroutine(
   e: Emitter,
-  throw_label: Int,
-  fin_label: Int,
+  throw_label: LabelId,
+  fin_label: LabelId,
   emit_finally: fn(Emitter) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
   let e = emit_ir(e, IrLabel(throw_label))
@@ -2372,7 +2375,7 @@ fn emit_try_catch_finally(
   e: Emitter,
   emit_body: fn(Emitter) -> Result(Emitter, EmitError),
   emit_finally: fn(Emitter) -> Result(Emitter, EmitError),
-  emit_catch: fn(Emitter, Int, Int) -> Result(Emitter, EmitError),
+  emit_catch: fn(Emitter, LabelId, LabelId) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
   let #(e, throw_label) = fresh_label(e)
   let #(e, catch_label) = fresh_label(e)
@@ -2380,7 +2383,7 @@ fn emit_try_catch_finally(
   let #(e, end_label) = fresh_label(e)
 
   // -- try body ----------------------------------------------------------
-  let e = emit_ir(e, IrPushTry(throw_label, Finally(LabelId(fin_label))))
+  let e = emit_ir(e, IrPushTry(throw_label, Finally(fin_label)))
   let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
   let e = push_barrier(e, pop_try: 2, label_finally: Some(fin_label), drop: 0)
   use e <- result.try(emit_body(e))
@@ -2415,7 +2418,7 @@ fn frame_target(
   frame: Frame,
   name: Option(String),
   is_cont: Bool,
-) -> Option(Int) {
+) -> Option(LabelId) {
   case frame {
     LoopFrame(break_target:, continue_target:, label:, ..) -> {
       let target = case is_cont {
@@ -3004,7 +3007,7 @@ fn emit_if(
 /// the cursor and desync every binding after it.
 fn emit_catch_clause(
   e: Emitter,
-  catch_label: Int,
+  catch_label: LabelId,
   param: Option(ast.Pattern),
   emit_body: fn(Emitter) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
@@ -3854,8 +3857,7 @@ fn emit_stmt_inner(
           let #(e, end_label) = fresh_label(e)
 
           // -- try body --------------------------------------------------
-          let e =
-            emit_ir(e, IrPushTry(throw_label, Finally(LabelId(fin_label))))
+          let e = emit_ir(e, IrPushTry(throw_label, Finally(fin_label)))
           let e =
             push_barrier(e, pop_try: 1, label_finally: Some(fin_label), drop: 0)
           use e <- result.try(emit_block(e, block, tail: False))
@@ -4084,8 +4086,8 @@ fn emit_chain_root(
 fn emit_chain(
   e: Emitter,
   expr: ast.Expression,
-  l1: Int,
-  l2: Int,
+  l1: LabelId,
+  l2: LabelId,
 ) -> Result(Emitter, EmitError) {
   use <- bool.lazy_guard(!ast_util.chain_has_optional(expr), fn() {
     emit_expr(e, expr)
@@ -4131,8 +4133,8 @@ fn chain_obj(
   e: Emitter,
   link: ast.Expression,
   obj: ast.Expression,
-  l1: Int,
-  l2: Int,
+  l1: LabelId,
+  l2: LabelId,
 ) -> Result(Emitter, EmitError) {
   use e <- result.map(emit_chain(e, obj, l1, l2))
   case link {
@@ -4148,8 +4150,8 @@ fn chain_obj(
 fn emit_chain_callee(
   e: Emitter,
   callee: ast.Expression,
-  l1: Int,
-  l2: Int,
+  l1: LabelId,
+  l2: LabelId,
 ) -> Result(#(Emitter, Bool), EmitError) {
   case callee {
     // super.m?.() / super[k]?.() — §13.3.7.3 super ref, lexical-this receiver.
@@ -4240,8 +4242,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Binary expressions
     // §13.10.1 RelationalExpression : PrivateIdentifier `in` ShiftExpression.
-    // LHS is a name, not a value — emit only RHS, then PrivateIn(name).
-    // Stack: [obj] → [bool].
+    // LHS is a name, not a value — emit RHS then load the minted key and
+    // PrivateInDyn. Stack: [obj] → [bool].
     ast.BinaryExpression(
       _,
       ast.In,
@@ -5131,11 +5133,11 @@ fn emit_switch(
 /// `found` trampoline label; a `default:` case never does — the pairing can't
 /// come apart.
 type CaseLabels {
-  TestCase(test_expr: ast.Expression, body: Int, found: Int)
-  TestlessCase(body: Int)
+  TestCase(test_expr: ast.Expression, body: LabelId, found: LabelId)
+  TestlessCase(body: LabelId)
 }
 
-fn case_body_label(labels: CaseLabels) -> Int {
+fn case_body_label(labels: CaseLabels) -> LabelId {
   case labels {
     TestCase(body:, ..) -> body
     TestlessCase(body:) -> body
@@ -5685,8 +5687,8 @@ fn emit_for_of_iter_body(
   e: Emitter,
   left: ast.ForInit,
   body: ast.Statement,
-  loop_continue: Int,
-  loop_start: Int,
+  loop_continue: LabelId,
+  loop_start: LabelId,
 ) -> Result(Emitter, EmitError) {
   // Fresh per-iteration bindings for a lexical head (§14.7.5.7 step 6.g).
   let e = emit_for_per_iteration_env(e, left)
@@ -5718,11 +5720,11 @@ fn emit_for_of_iter_body(
 /// e.g. `break_target` and `catch_body` — every field is named at both ends.
 type ForOfLabels {
   ForOfLabels(
-    loop_start: Int,
-    loop_continue: Int,
-    break_target: Int,
-    catch_body: Int,
-    end: Int,
+    loop_start: LabelId,
+    loop_continue: LabelId,
+    break_target: LabelId,
+    catch_body: LabelId,
+    end: LabelId,
   )
 }
 
@@ -6346,7 +6348,7 @@ fn emit_destructuring_assign(
 fn emit_array_assign_elements(
   e: Emitter,
   elements: List(Option(ast.Expression)),
-  close_throw: Int,
+  close_throw: LabelId,
 ) -> Result(#(Emitter, Bool), EmitError) {
   use e, el <- emit_array_pattern_elements(e, elements)
   case el {
@@ -6441,7 +6443,7 @@ fn emit_array_assign_element(
 fn emit_array_assign_rest(
   e: Emitter,
   target: ast.Expression,
-  close_throw: Int,
+  close_throw: LabelId,
 ) -> Result(#(Emitter, Bool), EmitError) {
   case ast_util.member_static_prop(target), target {
     // super.p / super[k] rest target — same routing as
@@ -6784,7 +6786,7 @@ fn object_prop_key_name(key: ast.PropertyKey) -> Option(String) {
 /// the close-on-throw guard (see emit_array_assign_rest).
 fn with_iterator_scaffold(
   e: Emitter,
-  emit_elements: fn(Emitter, Int) -> Result(#(Emitter, Bool), EmitError),
+  emit_elements: fn(Emitter, LabelId) -> Result(#(Emitter, Bool), EmitError),
 ) -> Result(Emitter, EmitError) {
   let #(e, close_throw) = fresh_label(e)
   let #(e, done_label) = fresh_label(e)
@@ -7015,7 +7017,7 @@ fn emit_logical_assign_member(
 fn emit_short_circuit_test(
   e: Emitter,
   op: ast.LogicalOp,
-  short_label: Int,
+  short_label: LabelId,
 ) -> Emitter {
   let e = emit_op(e, opcode.Dup)
   case op {

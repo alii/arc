@@ -31,16 +31,15 @@ import arc/vm/opcode.{
   DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup, ForInNext,
   ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar,
   GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetPrivateFieldDyn,
-  GetPrivateFieldDyn2, GetPrototypeOf,
-  GetSuperValue, GetSuperValue2, IncLocal, InitGlobalLex, InitialYield,
-  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
-  IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
-  ObjectSpread, Pc, Pop, PrivateInDyn, PushConst, PushTry, PutBoxed,
-  PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
-  PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue, Return,
-  Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar,
-  TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
+  GetPrivateFieldDyn2, GetPrototypeOf, GetSuperValue, GetSuperValue2, IncLocal,
+  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
+  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
+  JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod, NewObject,
+  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PrivateInDyn,
+  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutEvalVar, PutField,
+  PutGlobal, PutLocal, PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue,
+  Return, Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf,
+  TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/array_iterator
@@ -4902,9 +4901,10 @@ fn step(state: State(host), op: Op) -> Result(State(host), StepExit(host)) {
           // the saved stack slot, so swap in the real iterator up front.
           let #(iter_ref, state) = case heap.read(state.heap, orig_ref) {
             Some(ObjectSlot(
-              kind: value.IteratorRecordObject(
-                record: value.IteratorRecord(iterator: JsObject(real), ..),
-              ),
+              kind: value.IteratorRecordObject(record: value.IteratorRecord(
+                iterator: JsObject(real),
+                ..,
+              )),
               ..,
             )) -> #(real, State(..state, stack: [arg, JsObject(real), ..rest]))
             _ -> #(orig_ref, state)
@@ -6197,9 +6197,10 @@ fn push_iterator_record(
         heap.alloc(
           state.heap,
           ObjectSlot(
-            kind: value.IteratorRecordObject(
-              record: value.IteratorRecord(iterator: iter, next_method:),
-            ),
+            kind: value.IteratorRecordObject(record: value.IteratorRecord(
+              iterator: iter,
+              next_method:,
+            )),
             properties: dict.new(),
             elements: elements.new(),
             prototype: None,

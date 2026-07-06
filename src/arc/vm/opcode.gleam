@@ -232,6 +232,12 @@ pub type Pc {
   Pc(pc: Int)
 }
 
+/// Unwrap a `Pc` for the interpreter's `state.pc: Int` index arithmetic.
+pub fn pc_int(pc: Pc) -> Int {
+  let Pc(n) = pc
+  n
+}
+
 /// What a `PushTry` handler frame is FOR. Carried by both `IrPushTry` and
 /// `PushTry` (and mirrored onto `state.TryFrame` when the frame is pushed) so
 /// that unwinding a *return* completion out of a suspended generator
@@ -337,41 +343,41 @@ pub type Op {
   /// object. Stack: [obj, ..] — if obj has `name` (and it is not blocked by
   /// @@unscopables), replace obj with Get(obj, name) and jump to `target`;
   /// otherwise pop obj and fall through. Mirrors QuickJS OP_with_get_var.
-  WithGetVar(name: String, target: Int)
+  WithGetVar(name: String, target: Pc)
   /// Like WithGetVar, but KEEPS the with object beneath the value:
   /// [obj, ..] → [value, obj, ..] on hit. Used for `f()` where the callee
   /// identifier resolves through a with object — §13.3.6.2 EvaluateCall
   /// step 1.b.ii: thisValue is the env record's WithBaseObject(), i.e. the
   /// with object itself. The pair feeds CallMethod (this = receiver).
   /// Mirrors QuickJS OP_with_get_ref.
-  WithGetVarThis(name: String, target: Int)
+  WithGetVarThis(name: String, target: Pc)
   /// §9.1.1.2.5 SetMutableBinding against the with object. Stack:
   /// [obj, value, ..] — if obj has `name` (unscopables-checked), perform
   /// Set(obj, name, value, false), pop both, jump to `target`; otherwise pop
   /// obj only and fall through. Mirrors QuickJS OP_with_put_var.
-  WithPutVar(name: String, target: Int)
+  WithPutVar(name: String, target: Pc)
   /// §9.1.1.2.7 DeleteBinding against the with object. Stack: [obj, ..] — if
   /// obj has `name` (unscopables-checked), replace obj with the boolean
   /// result of [[Delete]] and jump to `target`; otherwise pop obj and fall
   /// through. Mirrors QuickJS OP_with_delete_var.
-  WithDeleteVar(name: String, target: Int)
+  WithDeleteVar(name: String, target: Pc)
   /// §9.1.2.1 GetIdentifierReference at a with object: HasBinding
   /// (unscopables-checked). Stack: [obj, ..] — if bound, KEEP obj (it
   /// becomes the reference base) and jump to `target`; otherwise pop obj
   /// and fall through. Mirrors QuickJS OP_with_make_ref.
-  WithMakeRef(name: String, target: Int)
+  WithMakeRef(name: String, target: Pc)
   /// §9.1.1.2.6 GetBindingValue on a previously made reference base.
   /// Stack: [base, ..] — if base is an object, replace it with Get(base,
   /// name) (HasProperty re-check; sloppy reads undefined, strict throws
   /// ReferenceError when gone) and jump to `target`. If base is the
   /// undefined sentinel ("static binding"), pop it and fall through.
-  WithGetRefValue(name: String, target: Int)
+  WithGetRefValue(name: String, target: Pc)
   /// §9.1.1.2.5 SetMutableBinding on a previously made reference base.
   /// Stack: [base, value, ..] — if base is an object, Set(base, name,
   /// value) (stillExists re-check, strict ReferenceError when gone), pop
   /// both, jump to `target`. If base is the undefined sentinel, pop it and
   /// fall through to the static store.
-  WithPutRefValue(name: String, target: Int)
+  WithPutRefValue(name: String, target: Pc)
 
   // -- Property Access --
   GetField(key: PropertyKey)
@@ -382,26 +388,6 @@ pub type Op {
   PutElem
   DeleteField(key: PropertyKey)
   DeleteElem
-  // The four static private-element ops carry the RAW private name ("#x").
-  // Private names live in their own PropertyKey variant (key.private_key)
-  // and are never canonicalized to array indices — carrying a String makes a
-  // private→public Index leak unrepresentable.
-  /// §7.3.31 PrivateGet. Stack: [obj, ..] → [val, ..]. Throws TypeError if
-  /// obj is not a JsObject or if obj lacks the private brand (has_property
-  /// returns False). Brand check uses proto-chain walk so private methods
-  /// stored on the prototype pass — pragmatic, not spec-pure PrivateName.
-  GetPrivateField(name: String)
-  /// Like GetPrivateField but keeps obj on stack: [obj, ..] → [val, obj, ..].
-  /// Used for `obj.#m(args)` method calls (mirrors GetField2).
-  GetPrivateField2(name: String)
-  /// §7.3.32 PrivateSet. Stack: [val, obj, ..] → [val, ..]. Throws TypeError
-  /// if obj is not a JsObject or lacks the brand.
-  PutPrivateField(name: String)
-  /// §13.10.1 `#x in obj`. Stack: [obj, ..] → [JsBool, ..]. Throws TypeError
-  /// if obj is not a JsObject (step 2). Name is encoded in the opcode, not
-  /// on the stack — unlike BinOp(In) which pops two operands.
-  PrivateIn(name: String)
-
   // -- Spec-shaped PrivateName ops (per-class-evaluation unique names) --
   /// §15.7.14 ClassDefinitionEvaluation step 5/6: mint a fresh PrivateName for
   /// `name` ("#m"). Pushes a JsString carrying the unique storage-key text
@@ -546,13 +532,13 @@ pub type Op {
   Return
 
   // -- Control Flow (absolute PC targets) --
-  Jump(target: Int)
-  JumpIfFalse(target: Int)
-  JumpIfTrue(target: Int)
-  JumpIfNullish(target: Int)
+  Jump(target: Pc)
+  JumpIfFalse(target: Pc)
+  JumpIfTrue(target: Pc)
+  JumpIfNullish(target: Pc)
   /// Push (pc+1) onto operand stack as return address, jump to target.
   /// QuickJS OP_gosub — used to enter the finally block as a subroutine.
-  Gosub(target: Int)
+  Gosub(target: Pc)
   /// Pop return address from operand stack, jump to it. QuickJS OP_ret —
   /// used to return from the finally block to the caller's continuation.
   Ret
@@ -573,7 +559,7 @@ pub type Op {
   /// Push an exception-handler frame. `kind` says what the frame is FOR, so
   /// the return-completion unwinder (generators.find_next_return_handler)
   /// never has to guess by disassembling whatever sits at `catch_target`.
-  PushTry(catch_target: Int, kind: TryKind(Pc))
+  PushTry(catch_target: Pc, kind: TryKind(Pc))
   PopTry
 
   // -- Closures --
@@ -612,10 +598,10 @@ pub type Op {
   /// Only emitted for the pure relational kinds (Lt/LtEq/Gt/GtEq) — hence the
   /// `PureBinOp` field: an `Add`/`In`/`InstanceOf` here would be a compile
   /// error, not a runtime surprise for `binop_direct`.
-  CmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, target: Int)
+  CmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, target: Pc)
   /// Same with a constant right operand:
   /// GetLocal(left); PushConst(const_index); BinOp(kind); JumpIfFalse(target).
-  CmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, target: Int)
+  CmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, target: Pc)
 
   // -- Iteration --
   ForInStart
@@ -690,13 +676,13 @@ pub type Op {
   /// yield* sequence. The async-generator driver resumes the body there when
   /// a forwarded `.throw()` makes the inner iterator report done, so nothing
   /// depends on how many opcodes the sequence lowers to.
-  AsyncYieldStarNext(after_pc: Int)
+  AsyncYieldStarNext(after_pc: Pc)
   /// Async-generator yield* — phase 2/2. Stack: [result_obj, iter, ..].
   /// IteratorComplete(result_obj): if done → pop both, push value, pc+1.
   /// If !done → Yielded(value); execute_inner's Yielded arm pops result_obj,
   /// keeps iter, sets pc to `next_pc` (the AsyncYieldStarNext op) so
   /// .next(v) resumes with [v, iter, ..]. ES §15.5.5 step 8.a.iv-vii.
-  AsyncYieldStarResume(next_pc: Int)
+  AsyncYieldStarResume(next_pc: Pc)
 
   // -- Async --
   /// Pop value from stack, wrap in Promise.resolve, suspend async function.
@@ -881,39 +867,37 @@ pub type UnaryOpKind {
 /// places, and forgetting the `resolve.gleam` arm was a silent miscompile.
 /// Now a new opcode is one `Op` variant and no `IrOp`/`resolve` change at all.
 ///
-/// The one invariant this shape gives up is that `IrFinal` is *typed* to accept
-/// any `Op`, including the ones whose `Int` field is an absolute PC that only
-/// Phase 3 can compute (`Jump`, `PushTry`, `WithGetVar`, …). Wrapping one of
-/// those in `IrFinal` compiles fine and produces a jump to a garbage PC.
-/// `carries_pc` names that set so the emitter and the resolver can reject it
-/// loudly instead of miscompiling silently — see `emit.emit_op`.
+/// `IrFinal` is *typed* to accept any `Op`, but every jump-carrying `Op` field
+/// is a `Pc` and every jump-carrying `Ir*` field is a `LabelId`; the emitter
+/// only ever holds `LabelId`s (via `emit.fresh_label`), so it CANNOT construct
+/// a `Jump`/`PushTry`/`With*`/… to wrap in `IrFinal` — the only route to those
+/// is through the `Ir*` twin below and `resolve`'s label→PC map.
 pub type IrOp {
   /// Already-final instruction: nothing left to resolve. `resolve` unwraps it.
-  /// Must never wrap an op for which `carries_pc` is True.
   IrFinal(op: Op)
 
   // -- Labels and jumps (label ids resolved to PCs in Phase 3) --
   /// A jump target marker. Occupies no PC slot; dropped by `resolve`.
-  IrLabel(id: Int)
-  IrJump(label: Int)
-  IrJumpIfFalse(label: Int)
-  IrJumpIfTrue(label: Int)
-  IrJumpIfNullish(label: Int)
-  IrPushTry(catch_label: Int, kind: TryKind(LabelId))
-  IrGosub(label: Int)
+  IrLabel(id: LabelId)
+  IrJump(label: LabelId)
+  IrJumpIfFalse(label: LabelId)
+  IrJumpIfTrue(label: LabelId)
+  IrJumpIfNullish(label: LabelId)
+  IrPushTry(catch_label: LabelId, kind: TryKind(LabelId))
+  IrGosub(label: LabelId)
   /// See Op.AsyncYieldStarNext — `after_label` becomes `after_pc`.
-  IrAsyncYieldStarNext(after_label: Int)
+  IrAsyncYieldStarNext(after_label: LabelId)
   /// See Op.AsyncYieldStarResume — `next_label` becomes `next_pc`.
-  IrAsyncYieldStarResume(next_label: Int)
+  IrAsyncYieldStarResume(next_label: LabelId)
 
   // -- `with` statement probes: name + a fall-through label --
-  IrWithGetVar(name: String, label: Int)
-  IrWithGetVarThis(name: String, label: Int)
-  IrWithPutVar(name: String, label: Int)
-  IrWithDeleteVar(name: String, label: Int)
-  IrWithMakeRef(name: String, label: Int)
-  IrWithGetRefValue(name: String, label: Int)
-  IrWithPutRefValue(name: String, label: Int)
+  IrWithGetVar(name: String, label: LabelId)
+  IrWithGetVarThis(name: String, label: LabelId)
+  IrWithPutVar(name: String, label: LabelId)
+  IrWithDeleteVar(name: String, label: LabelId)
+  IrWithMakeRef(name: String, label: LabelId)
+  IrWithGetRefValue(name: String, label: LabelId)
+  IrWithPutRefValue(name: String, label: LabelId)
 
   // -- Static property access: raw source name; `resolve` canonicalizes it
   // once via key.canonical_key into the final ops' `key.PropertyKey`. --
@@ -932,172 +916,11 @@ pub type IrOp {
 
   // -- Fused compare-and-branch superinstructions (produced by the resolver
   // peephole; label targets, hence not `IrFinal`). See the matching Ops. --
-  IrCmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, label: Int)
-  IrCmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, label: Int)
-}
-
-/// True for the ops that carry an absolute PC, i.e. the ops the emitter must
-/// NOT construct directly — it has no PCs, only label ids, so it has to emit
-/// the matching `Ir*` variant and let Phase 3 (`resolve`) fill the PC in.
-///
-/// Every one of these has an `Ir*` twin above; that twin is the only legal way
-/// to reach the corresponding `Op`. Wrapping the `Op` in `IrFinal` instead
-/// would ride through `resolve` untouched with a label id sitting where a PC
-/// belongs, so `emit_op`/`resolve` panic on it rather than miscompile.
-///
-/// Exhaustive on purpose — adding a new Op variant MUST force a decision here
-/// so IrFinal cannot smuggle a label-id-as-PC through resolve.
-pub fn carries_pc(op: Op) -> Bool {
-  case op {
-    Jump(..)
-    | JumpIfFalse(..)
-    | JumpIfTrue(..)
-    | JumpIfNullish(..)
-    | Gosub(..)
-    | PushTry(..)
-    | AsyncYieldStarNext(..)
-    | AsyncYieldStarResume(..)
-    | WithGetVar(..)
-    | WithGetVarThis(..)
-    | WithPutVar(..)
-    | WithDeleteVar(..)
-    | WithMakeRef(..)
-    | WithGetRefValue(..)
-    | WithPutRefValue(..)
-    | CmpLocalLocalJump(..)
-    | CmpLocalConstJump(..) -> True
-    // -- Source mapping --
-    SetLine(..)
-    | // -- Literals + Stack --
-      PushConst(..)
-    | Pop
-    | Dup
-    | Swap
-    | Rot3
-    | Unrot4
-    | // -- Variable Access (resolved) --
-      GetLocal(..)
-    | PutLocal(..)
-    | PutLocalCheckInit(..)
-    | GetGlobal(..)
-    | PutGlobal(..)
-    | DeleteGlobalVar(..)
-    | GetEvalVar(..)
-    | PutEvalVar(..)
-    | DeclareEvalVar(..)
-    | TypeofEvalVar(..)
-    | // -- `with` statement (non-PC probes) / coercion / template --
-      ToObject
-    | ToStringVal
-    | GetTemplateObject(..)
-    | // -- Property Access --
-      GetField(..)
-    | GetField2(..)
-    | PutField(..)
-    | GetElem
-    | GetElem2
-    | PutElem
-    | DeleteField(..)
-    | DeleteElem
-    | GetPrivateField(..)
-    | GetPrivateField2(..)
-    | PutPrivateField(..)
-    | PrivateIn(..)
-    | // -- Spec-shaped PrivateName ops --
-      NewPrivateName(..)
-    | GetPrivateFieldDyn
-    | GetPrivateFieldDyn2
-    | PutPrivateFieldDyn
-    | PrivateInDyn
-    | DefinePrivateField
-    | DefinePrivateMethod
-    | DefinePrivateAccessor(..)
-    | // -- Object/Array Construction --
-      NewObject
-    | DefineField(..)
-    | DefineFieldComputed
-    | ToPropertyKey
-    | DefineMethod(..)
-    | DefineMethodComputed
-    | DefineAccessor(..)
-    | DefineAccessorComputed(..)
-    | MakeMethod
-    | SetProto
-    | ObjectSpread
-    | ObjectRestCopy(..)
-    | ArrayFrom(..)
-    | ArrayFromWithHoles(..)
-    | ArrayPush
-    | ArrayPushHole
-    | ArraySpread
-    | // -- Calls --
-      Call(..)
-    | CallEval(..)
-    | CallMethod(..)
-    | CallConstructor(..)
-    | CallApply
-    | CallMethodApply
-    | CallConstructorApply
-    | Return
-    | // -- Control Flow (non-PC) --
-      Ret
-    | // -- Exception Handling (non-PC) --
-      Throw
-    | ThrowConstAssign(..)
-    | ThrowError(..)
-    | PopTry
-    | // -- Closures --
-      MakeClosure(..)
-    | BoxLocal(..)
-    | GetBoxed(..)
-    | PutBoxed(..)
-    | PutBoxedCheckInit(..)
-    | // -- Operators --
-      BinOp(..)
-    | UnaryOp(..)
-    | TypeOf
-    | TypeofGlobal(..)
-    | // -- Fused superinstructions (non-PC) --
-      IncLocal(..)
-    | DecLocal(..)
-    | // -- Iteration --
-      ForInStart
-    | ForInNext
-    | GetIterator
-    | GetAsyncIterator
-    | IteratorRecord
-    | IteratorNext
-    | IteratorClose
-    | IteratorCloseThrow
-    | IteratorCheckObject
-    | IteratorRest
-    | // -- Class Inheritance / Super --
-      SetupDerivedClass
-    | GetPrototypeOf
-    | GetSuperValue
-    | GetSuperValue2
-    | PutSuperValue
-    | // -- Generator (non-PC) --
-      InitialYield
-    | Yield
-    | YieldStar
-    | // -- Async --
-      Await
-    | // -- Arguments object --
-      CreateArguments(..)
-    | CreateRestArray(..)
-    | // -- RegExp --
-      NewRegExp
-    | // -- Dynamic import --
-      DynamicImport
-    | DynamicImportSource
-    | DynamicImportDefer
-    | // -- Global Environment Record --
-      DeclareGlobalVar(..)
-    | DeclareGlobalLex(..)
-    | InitGlobalLex(..)
-    | // -- Explicit Resource Management --
-      GetDisposer(..)
-    | MakeSuppressed -> False
-  }
+  IrCmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, label: LabelId)
+  IrCmpLocalConstJump(
+    left: Int,
+    const_index: Int,
+    kind: PureBinOp,
+    label: LabelId,
+  )
 }
