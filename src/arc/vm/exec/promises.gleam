@@ -614,20 +614,46 @@ pub fn call_native_promise_then(
   }
 }
 
-/// §7.3.20 Invoke(this, "then", args) — Get(this, "then") then Call it — then
-/// push the result and advance. §27.2.5.1 catch step 1 and §27.2.5.3 finally
-/// step 7 route through the receiver's own (possibly overridden) `then`, so a
-/// subclass that overrides `then` sees `.catch`/`.finally` traffic too; they
-/// never jump straight into the intrinsic PerformPromiseThen.
+/// §7.3.20 Invoke(this, "then", args), then push the result and advance.
+/// §27.2.5.1 catch step 1 and §27.2.5.3 finally step 7 route through the
+/// receiver's own (possibly overridden) `then`, so a subclass that overrides
+/// `then` sees `.catch`/`.finally` traffic too; they never jump straight into
+/// the intrinsic PerformPromiseThen.
+///
+/// Invoke = GetV then Call, and BOTH steps can throw a TypeError before any
+/// call happens: GetV starts with `? ToObject(V)` (null/undefined receiver),
+/// and Call step 3 rejects a non-callable func.
 pub fn invoke_then_push(
   state: State(host),
   this: JsValue,
   args: List(JsValue),
   rest_stack: List(JsValue),
 ) -> Result(State(host), StepExit(host)) {
+  // GetV step 1: ? ToObject(V). `object.get_value_of` returns undefined for a
+  // null/undefined receiver rather than throwing (its callers usually want the
+  // fast-path fallthrough), so guard here.
+  use Nil <- result.try(case this {
+    value.JsNull ->
+      state.rethrow(state.type_error_op(
+        state,
+        "Cannot read properties of null (reading 'then')",
+      ))
+    value.JsUndefined ->
+      state.rethrow(state.type_error_op(
+        state,
+        "Cannot read properties of undefined (reading 'then')",
+      ))
+    _ -> Ok(Nil)
+  })
   use #(then_fn, state) <- result.try(
     state.rethrow(object.get_value_of(state, this, Named("then"))),
   )
+  // Call step 3: If IsCallable(func) is false, throw TypeError.
+  use Nil <- result.try(case object.value_is_callable(state.heap, then_fn) {
+    True -> Ok(Nil)
+    False ->
+      state.rethrow(state.type_error_op(state, ".then is not a function"))
+  })
   use #(then_result, state) <- result.try(
     state.rethrow(state.call(state, then_fn, this, args)),
   )
