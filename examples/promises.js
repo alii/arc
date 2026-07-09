@@ -1,4 +1,3 @@
-// async/await + Promise.all, with microtask ordering.
 async function double(x) {
   return x * 2;
 }
