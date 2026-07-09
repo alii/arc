@@ -22554,6 +22554,7 @@ built-ins/TypedArray/prototype/slice/speciesctor-get-species-returns-throws.js
 built-ins/TypedArray/prototype/slice/speciesctor-get-species-use-default-ctor.js
 built-ins/TypedArray/prototype/slice/speciesctor-get-species.js
 built-ins/TypedArray/prototype/slice/speciesctor-resize.js
+built-ins/TypedArray/prototype/slice/speciesctor-return-same-buffer-with-offset.js
 built-ins/TypedArray/prototype/slice/this-is-not-object.js
 built-ins/TypedArray/prototype/slice/this-is-not-typedarray-instance.js
 built-ins/TypedArray/prototype/slice/tointeger-end.js
@@ -23323,6 +23324,7 @@ built-ins/TypedArrayConstructors/internals/GetOwnProperty/BigInt/detached-buffer
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/BigInt/detached-buffer-realm.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/BigInt/detached-buffer.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/BigInt/enumerate-detached-buffer.js
+built-ins/TypedArrayConstructors/internals/GetOwnProperty/BigInt/index-prop-desc.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/BigInt/key-is-minus-zero.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/BigInt/key-is-not-canonical-index.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/BigInt/key-is-not-integer.js
@@ -23334,6 +23336,7 @@ built-ins/TypedArrayConstructors/internals/GetOwnProperty/detached-buffer-key-is
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/detached-buffer-realm.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/detached-buffer.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/enumerate-detached-buffer.js
+built-ins/TypedArrayConstructors/internals/GetOwnProperty/index-prop-desc.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/key-is-minus-zero.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/key-is-not-canonical-index.js
 built-ins/TypedArrayConstructors/internals/GetOwnProperty/key-is-not-integer.js
@@ -23401,8 +23404,15 @@ built-ins/TypedArrayConstructors/internals/Set/BigInt/key-is-out-of-bounds.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/key-is-symbol.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/key-is-valid-index-prototype-chain-set.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/key-is-valid-index-reflect-set.js
+built-ins/TypedArrayConstructors/internals/Set/BigInt/null-tobigint.js
+built-ins/TypedArrayConstructors/internals/Set/BigInt/number-tobigint.js
+built-ins/TypedArrayConstructors/internals/Set/BigInt/string-nan-tobigint.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/string-tobigint.js
+built-ins/TypedArrayConstructors/internals/Set/BigInt/symbol-tobigint.js
 built-ins/TypedArrayConstructors/internals/Set/BigInt/tonumber-value-detached-buffer.js
+built-ins/TypedArrayConstructors/internals/Set/BigInt/tonumber-value-throws.js
+built-ins/TypedArrayConstructors/internals/Set/BigInt/undefined-tobigint.js
+built-ins/TypedArrayConstructors/internals/Set/bigint-tonumber.js
 built-ins/TypedArrayConstructors/internals/Set/conversion-operation-consistent-nan.js
 built-ins/TypedArrayConstructors/internals/Set/conversion-operation.js
 built-ins/TypedArrayConstructors/internals/Set/detached-buffer-key-is-not-numeric-index.js
@@ -23427,6 +23437,7 @@ built-ins/TypedArrayConstructors/internals/Set/key-is-valid-index-prototype-chai
 built-ins/TypedArrayConstructors/internals/Set/key-is-valid-index-reflect-set.js
 built-ins/TypedArrayConstructors/internals/Set/resized-out-of-bounds-to-in-bounds-index.js
 built-ins/TypedArrayConstructors/internals/Set/tonumber-value-detached-buffer.js
+built-ins/TypedArrayConstructors/internals/Set/tonumber-value-throws.js
 built-ins/TypedArrayConstructors/of/BigInt/argument-is-symbol-throws.js
 built-ins/TypedArrayConstructors/of/BigInt/argument-number-value-throws.js
 built-ins/TypedArrayConstructors/of/BigInt/custom-ctor-does-not-instantiate-ta-throws.js
