@@ -126,7 +126,10 @@ pub fn require_weak_key(
 ///
 /// Private: external callers reach entries only via `lookup`/`insert`/`delete`,
 /// so nothing outside this module can capture the whole dict as a snapshot.
-fn read_data(state: State(host), weak_ref: WeakRef(host, v)) -> Dict(JsValue, v) {
+fn read_data(
+  state: State(host),
+  weak_ref: WeakRef(host, v),
+) -> Dict(JsValue, v) {
   let WeakRef(ref:, kind:) = weak_ref
   // A heap slot's kind never changes after allocation, and a `WeakRef` can only
   // come from `require`, so anything else here is a wiring bug — crash rather

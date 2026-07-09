@@ -2493,9 +2493,13 @@ pub fn enumerate_keys_stateful(
   state: State(host),
   ref: Ref,
 ) -> Result(#(List(String), State(host)), #(JsValue, State(host))) {
-  use #(acc_rev, _seen, state) <- result.map(
-    enumerate_chain(state, ref, [], [], limits.max_prototype_depth),
-  )
+  use #(acc_rev, _seen, state) <- result.map(enumerate_chain(
+    state,
+    ref,
+    [],
+    [],
+    limits.max_prototype_depth,
+  ))
   #(list.reverse(acc_rev), state)
 }
 

@@ -37,7 +37,10 @@ pub type UnwindToCatchFn(host) =
 /// they travel as one arg and adding a third callback touches only this
 /// record and interpreter's `drive()`.
 pub type Drive(host) {
-  Drive(execute_inner: ExecuteInnerFn(host), unwind_to_catch: UnwindToCatchFn(host))
+  Drive(
+    execute_inner: ExecuteInnerFn(host),
+    unwind_to_catch: UnwindToCatchFn(host),
+  )
 }
 
 // ============================================================================
@@ -370,13 +373,13 @@ pub fn resumed_body_state(
     constants: func_template.constants,
     call_stack: [],
     // A coroutine body is a RE-ENTRANT drive: the resumer's frames (its
-    // locals, its operand stack, the generator/promise it's driving) live on
-    // the Gleam call stack, invisible to any GC that runs from this State.
-    // The interpreter's top-level collector treats `call_depth > 0` as
-    // exactly that condition, so the body must not resume at the resumer's
-    // depth — an empty `call_stack` at depth 0 would let a collection inside
-    // the body free everything only the resumer holds.
-    call_depth: outer.call_depth + 1,
+      // locals, its operand stack, the generator/promise it's driving) live on
+      // the Gleam call stack, invisible to any GC that runs from this State.
+      // The interpreter's top-level collector treats `call_depth > 0` as
+      // exactly that condition, so the body must not resume at the resumer's
+      // depth — an empty `call_stack` at depth 0 would let a collection inside
+      // the body free everything only the resumer holds.
+      call_depth: outer.call_depth + 1,
     new_target: JsUndefined,
     call_args: [],
   )

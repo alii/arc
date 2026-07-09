@@ -32,7 +32,13 @@ pub fn init(
 
   // Allocate Symbol.for and Symbol.keyFor static method function objects
   let #(h, for_ref) =
-    common.alloc_rooted_native_fn(h, function_proto, SymbolNative(SymbolFor), "for", 1)
+    common.alloc_rooted_native_fn(
+      h,
+      function_proto,
+      SymbolNative(SymbolFor),
+      "for",
+      1,
+    )
   let #(h, key_for_ref) =
     common.alloc_rooted_native_fn(
       h,
@@ -231,7 +237,10 @@ fn symbol_key_for(
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   case args {
-    [JsSymbol(value.RegisteredSymbol(key:, ..)), ..] -> #(state, Ok(JsString(key)))
+    [JsSymbol(value.RegisteredSymbol(key:, ..)), ..] -> #(
+      state,
+      Ok(JsString(key)),
+    )
     [JsSymbol(_), ..] -> #(state, Ok(JsUndefined))
     _ -> state.type_error(state, "Symbol.keyFor requires a Symbol argument")
   }

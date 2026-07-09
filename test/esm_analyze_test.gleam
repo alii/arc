@@ -10,9 +10,7 @@ import gleam/list
 fn requested(source: String) -> List(#(String, esm.Phase)) {
   let assert Ok(#(ast.Module(items), _sb)) = parser.parse(source, parser.Module)
   esm.analyze(items).requested
-  |> list.map(fn(request) {
-    #(esm.raw_text(request.specifier), request.phase)
-  })
+  |> list.map(fn(request) { #(esm.raw_text(request.specifier), request.phase) })
 }
 
 /// §16.2.1.3: `export {} from "m"` re-exports nothing but STILL requests `m`,
@@ -32,7 +30,9 @@ pub fn local_export_requests_nothing_test() {
 }
 
 pub fn export_star_requests_source_test() {
-  assert requested("export * from \"./m.mjs\";\nexport * as ns from \"./n.mjs\";\n")
+  assert requested(
+      "export * from \"./m.mjs\";\nexport * as ns from \"./n.mjs\";\n",
+    )
     == [#("./m.mjs", esm.Evaluation), #("./n.mjs", esm.Evaluation)]
 }
 

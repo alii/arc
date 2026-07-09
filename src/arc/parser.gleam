@@ -916,7 +916,11 @@ fn parse_using_declaration(
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
-      ctx: Ctx(..p3.ctx, binding_kind: p.ctx.binding_kind, in_export_decl: False),
+      ctx: Ctx(
+        ..p3.ctx,
+        binding_kind: p.ctx.binding_kind,
+        in_export_decl: False,
+      ),
     ),
   ))
   let kind = case is_await {
@@ -1187,7 +1191,11 @@ fn parse_variable_declaration_decl(
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
-      ctx: Ctx(..p3.ctx, binding_kind: p.ctx.binding_kind, in_export_decl: False),
+      ctx: Ctx(
+        ..p3.ctx,
+        binding_kind: p.ctx.binding_kind,
+        in_export_decl: False,
+      ),
     ),
   ))
   Ok(#(p4, ast.DeclVariable(kind:, declarations:)))

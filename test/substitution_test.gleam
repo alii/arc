@@ -35,7 +35,8 @@ pub fn capture_escape_before_a_combining_mark_still_matches_test() {
 }
 
 pub fn dollar_dollar_before_a_combining_mark_still_matches_test() {
-  assert tokenize("$$" <> combining_acute) == [LiteralSeg("$" <> combining_acute)]
+  assert tokenize("$$" <> combining_acute)
+    == [LiteralSeg("$" <> combining_acute)]
 }
 
 /// `"aXb".replaceAll("X", "$&" <> acute)` must be `"aX́b"`, not `"a$&́b"`.

@@ -1103,7 +1103,9 @@ fn fast_loop(
     DecLocal(index) ->
       case tuple_array.get_unchecked(index, locals) {
         value.JsNumber(_) as v ->
-          case operators.exec_binop(binop.Arith(binop.ArithSub), v, number_one) {
+          case
+            operators.exec_binop(binop.Arith(binop.ArithSub), v, number_one)
+          {
             Ok(result) ->
               fast_loop(
                 state,

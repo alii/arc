@@ -203,7 +203,13 @@ pub fn build_262(
       0,
     )
   let #(h, gc_fn) =
-    common.alloc_rooted_native_fn(h, func_proto, value.VmNative(value.Gc), "gc", 0)
+    common.alloc_rooted_native_fn(
+      h,
+      func_proto,
+      value.VmNative(value.Gc),
+      "gc",
+      0,
+    )
   let #(h, detach_fn) =
     common.alloc_rooted_native_fn(
       h,

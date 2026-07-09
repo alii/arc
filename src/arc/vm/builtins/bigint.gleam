@@ -184,7 +184,11 @@ pub fn bigint_proto_to_locale_string(
   _args: List(JsValue),
   state: State(host),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  use n, state <- state.try_then(this_bigint_value(state, this, "toLocaleString"))
+  use n, state <- state.try_then(this_bigint_value(
+    state,
+    this,
+    "toLocaleString",
+  ))
   #(state, Ok(JsString(int.to_string(n))))
 }
 

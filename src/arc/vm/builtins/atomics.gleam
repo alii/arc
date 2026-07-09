@@ -793,8 +793,7 @@ fn pause(
     JsNumber(Finite(f)) ->
       case value.integral_int(f) {
         Some(_) -> #(state, Ok(JsUndefined))
-        None ->
-          state.type_error(state, "Atomics.pause: not an integral number")
+        None -> state.type_error(state, "Atomics.pause: not an integral number")
       }
     _ -> state.type_error(state, "Atomics.pause: not an integral number")
   }

@@ -158,9 +158,9 @@ pub fn array_set_length_bounds_test() {
   assert eval(range_error("const a = []; a.length = -1")) == JsBool(True)
   assert eval(range_error("const a = []; a.length = 1.5")) == JsBool(True)
   // defineProperty agrees with the assignment path.
-  assert eval(
-      range_error("Object.defineProperty([], 'length', { value: 4294967296 })"),
-    )
+  assert eval(range_error(
+      "Object.defineProperty([], 'length', { value: 4294967296 })",
+    ))
     == JsBool(True)
 }
 

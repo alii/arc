@@ -124,7 +124,10 @@ fn weak_map_get(
   let key = first_arg_or_undefined(args)
   // A non-weakly-holdable key can never be present (`insert` demands a proved
   // `WeakKey`), so no separate CanBeHeldWeakly gate — mirrors `has`.
-  #(state, Ok(weak_collection.lookup(state, ref, key) |> option.unwrap(JsUndefined)))
+  #(
+    state,
+    Ok(weak_collection.lookup(state, ref, key) |> option.unwrap(JsUndefined)),
+  )
 }
 
 /// ES2024 §24.3.3.5 WeakMap.prototype.set ( key, value )
