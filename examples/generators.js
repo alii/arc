@@ -1,4 +1,3 @@
-// A lazy infinite sequence, consumed with a bounded take().
 function* naturals() {
   let n = 1;
   while (true) yield n++;
