@@ -1,4 +1,3 @@
-// Temporal: modern date/time, built in.
 const date = Temporal.PlainDate.from("2026-06-25");
 const later = date.add({ days: 40 });
 
