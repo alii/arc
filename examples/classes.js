@@ -1,4 +1,3 @@
-// Classes, inheritance, and super.
 class Shape {
   constructor(name) { this.name = name; }
   describe() { return `${this.name} with area ${this.area()}`; }
