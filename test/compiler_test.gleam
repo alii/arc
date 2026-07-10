@@ -5585,6 +5585,22 @@ pub fn string_trim_end_test() -> Nil {
   assert_normal("'  hello  '.trimEnd()", JsString("  hello"))
 }
 
+pub fn string_trim_left_alias_test() -> Nil {
+  assert_normal(
+    "String.prototype.trimLeft === String.prototype.trimStart
+     && String.prototype.trimLeft.name === 'trimStart'",
+    JsBool(True),
+  )
+}
+
+pub fn string_trim_right_alias_test() -> Nil {
+  assert_normal(
+    "String.prototype.trimRight === String.prototype.trimEnd
+     && String.prototype.trimRight.name === 'trimEnd'",
+    JsBool(True),
+  )
+}
+
 pub fn string_prototype_concat_test() -> Nil {
   assert_normal("'hello'.concat(' ', 'world')", JsString("hello world"))
 }
