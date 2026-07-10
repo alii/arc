@@ -48,7 +48,7 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap(host), BuiltinType) {
-  let #(h, proto_methods) =
+  let #(h, proto_methods_before_trim_aliases) =
     common.alloc_methods(h, function_proto, [
       #("charAt", StringNative(StringPrototypeCharAt), 1),
       #("charCodeAt", StringNative(StringPrototypeCharCodeAt), 1),
@@ -64,10 +64,34 @@ pub fn init(
       #("toLocaleLowerCase", StringNative(StringPrototypeToLocaleLowerCase), 0),
       #("toLocaleUpperCase", StringNative(StringPrototypeToLocaleUpperCase), 0),
       #("trim", StringNative(StringPrototypeTrim), 0),
-      #("trimStart", StringNative(StringPrototypeTrimStart), 0),
-      #("trimEnd", StringNative(StringPrototypeTrimEnd), 0),
-      #("trimLeft", StringNative(StringPrototypeTrimStart), 0),
-      #("trimRight", StringNative(StringPrototypeTrimEnd), 0),
+    ])
+  let #(h, trim_start_ref) =
+    common.alloc_rooted_native_fn(
+      h,
+      function_proto,
+      StringNative(StringPrototypeTrimStart),
+      "trimStart",
+      0,
+    )
+  let trim_start = value.builtin_property(JsObject(trim_start_ref))
+  let #(h, trim_end_ref) =
+    common.alloc_rooted_native_fn(
+      h,
+      function_proto,
+      StringNative(StringPrototypeTrimEnd),
+      "trimEnd",
+      0,
+    )
+  let trim_end = value.builtin_property(JsObject(trim_end_ref))
+  // Annex B aliases share the canonical function objects.
+  let trim_methods = [
+    #("trimStart", trim_start),
+    #("trimEnd", trim_end),
+    #("trimLeft", value.restamp(trim_start)),
+    #("trimRight", value.restamp(trim_end)),
+  ]
+  let #(h, proto_methods_after_trim_aliases) =
+    common.alloc_methods(h, function_proto, [
       #("split", StringNative(StringPrototypeSplit), 2),
       #("concat", StringNative(StringPrototypeConcat), 1),
       #("toString", StringNative(StringPrototypeToString), 0),
@@ -101,6 +125,12 @@ pub fn init(
       #("strike", StringNative(StringPrototypeStrike), 0),
       #("sub", StringNative(StringPrototypeSub), 0),
       #("sup", StringNative(StringPrototypeSup), 0),
+    ])
+  let proto_methods =
+    list.flatten([
+      proto_methods_before_trim_aliases,
+      trim_methods,
+      proto_methods_after_trim_aliases,
     ])
   // Static methods on the String constructor
   let #(h, static_methods) =
