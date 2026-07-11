@@ -1,5 +1,5 @@
 > [!NOTE]
-> arc is an **extremely early** research project, tread carefully!
+> arc is still a young project, tread carefully!
 
 # arc ⌒
 
