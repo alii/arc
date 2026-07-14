@@ -363,7 +363,14 @@ timeout_for(Name) ->
 %% default cap — so it gets a large one of its own.
 max_heap_for(Name) ->
     case binary:match(Name, <<"test262_run_test">>) of
-        nomatch -> 10000000;
+        nomatch ->
+            %% emit_2core_test:* diff-tests run a full JS→IR→Core→BEAM
+            %% compile in-process; the beam compiler alone can brush the
+            %% default 80MB cap on the longer fixtures.
+            case binary:match(Name, <<"emit_2core_test:">>) of
+                nomatch -> 10000000;
+                _ -> 30000000
+            end;
         _ -> 120000000
     end.
 

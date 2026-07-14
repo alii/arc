@@ -1,0 +1,311 @@
+//// GC-correctness probe (rdr unit `verify-correctness`).
+////
+//// (A) DIRECT: compile+run a program that allocates 100K closures and pins
+////     10 on globalThis.keep; take st, force `t_collect`, verify stats drop
+////     by ~100K and a second compiled snippet still reads keep[5](0)==50000.
+//// (B) IN-SITU: async program allocs 100K in first .then (crosses threshold),
+////     drain fires t_maybe_collect between jobs, second .then reads survivor.
+////     Check stdout=="50000\n" and since_gc was reset.
+//// (C) obj-literal smoke: does {x:i} compile+run today?
+////
+////     cd arc && gleam run -m emit_2core_gc_verify
+
+import arc/compiler/emit_2core
+import emit_2core_harness as harness
+import gleam/dynamic.{type Dynamic}
+import gleam/erlang/atom.{type Atom}
+import gleam/int
+import gleam/io
+import gleam/dict
+import gleam/list
+import gleam/option.{Some}
+import gleam/set
+import gleam/string
+import twocore/backend/build_beam
+import twocore/pipeline
+import twocore/runtime/profiles
+import twocore/runtime/rt_js_builtins
+import twocore/runtime/rt_js_gc.{type GcStats, GcStats}
+import twocore/runtime/rt_js_store
+import twocore/runtime/rt_state.{type InstanceState}
+
+@external(erlang, "twocore_rt_js_exec_ffi", "apply_js_main")
+fn ffi_apply_js_main(mod: Atom, st: InstanceState) -> #(Dynamic, InstanceState)
+
+// ── shared JS — 1 cell allocated per makeAdder(i) call. `%` is unimplemented
+// (rt_js_ops.t_modulo undef), so use a decrement counter for "every 10000th".
+const prelude = "function makeAdder(x){return function(y){return x+y}}"
+
+// A: sync alloc, keep 10 via globalThis.keep, log keep[5](0) → 50000
+const a_src = "function makeAdder(x){return function(y){return x+y}}globalThis.keep=[];let c=0;for(let i=0;i<100000;i++){let f=makeAdder(i);if(c==0){globalThis.keep.push(f);c=10000}c=c-1}console.log(globalThis.keep[5](0))"
+
+// A': second-snippet re-read of survivor after t_collect
+const a2_src = "console.log(globalThis.keep[5](0));console.log(globalThis.keep.length)"
+
+// B: async — first .then allocs 100K, second .then reads survivor
+const b_src = "function makeAdder(x){return function(y){return x+y}}globalThis.keep=[];Promise.resolve().then(function(){let c=0;for(let i=0;i<100000;i++){let f=makeAdder(i);if(c==0){globalThis.keep.push(f);c=10000}c=c-1}}).then(function(){console.log(globalThis.keep[5](0));console.log(globalThis.keep.length)})"
+
+// C: does {x:i} work? (sibling probe says no — verify)
+const c_src = "let o={x:42};console.log(o.x)"
+
+// C2: does [i] array-literal work?
+const c2_src = "let a=[42];console.log(a[0])"
+
+// D: N=3 for slot-shape dump
+const d_src = "function makeAdder(x){return function(y){return x+y}}globalThis.keep=[];for(let i=0;i<3;i++){let f=makeAdder(i);globalThis.keep.push(f)}console.log(globalThis.keep[1](0))"
+
+fn compile_load(source: String, name: String) -> Result(Atom, String) {
+  let opts =
+    emit_2core.CompileOpts(
+      module_name: name,
+      source_kind: emit_2core.AsScript,
+      entry_name: "js_main",
+    )
+  case emit_2core.compile_source(source, opts) {
+    Error(e) -> Error("emit_2core: " <> string.inspect(e))
+    Ok(unit) ->
+      case pipeline.compile_ir(unit.module, profiles.js_direct()) {
+        Error(e) -> Error("compile_ir: " <> string.inspect(e))
+        Ok(beam) ->
+          case build_beam.load_module(atom.create(name), name, beam) {
+            Error(e) -> Error("load: " <> e)
+            Ok(mod) -> Ok(mod)
+          }
+      }
+  }
+}
+
+fn seed() -> InstanceState {
+  let st =
+    rt_state.fresh_full(
+      rt_state.FullDecl(mems: [], globals: [], tables: [], ref_globals: []),
+    )
+  let st =
+    rt_state.t_with_js_store(
+      st,
+      rt_js_store.t_store_new(harness.twocore_test_hooks()),
+    )
+  let #(_realm, st) = rt_js_builtins.init_realm(st)
+  st
+}
+
+fn stats_str(s: GcStats) -> String {
+  let GcStats(live:, free:, next:, since_gc:) = s
+  "live="
+  <> int.to_string(live)
+  <> " free="
+  <> int.to_string(free)
+  <> " next="
+  <> int.to_string(next)
+  <> " since_gc="
+  <> int.to_string(since_gc)
+}
+
+fn pinned_count(st: InstanceState) -> Int {
+  let assert Some(js) = st.js_store
+  set.size(js.pinned_roots)
+}
+
+@external(erlang, "erlang", "term_to_binary")
+fn term_to_binary(t: a) -> BitArray
+
+fn dump_new_cells(st: InstanceState, from_id: Int) {
+  let assert Some(js) = st.js_store
+  dict.each(js.data, fn(id, slot) {
+    case id >= from_id {
+      True ->
+        io.println(
+          "    ["
+          <> int.to_string(id)
+          <> "] "
+          <> string.slice(string.inspect(slot), 0, 500),
+        )
+      False -> Nil
+    }
+  })
+}
+
+fn try_collect_each(st: InstanceState, from_id: Int) {
+  let assert Some(js) = st.js_store
+  list.range(from_id, js.next - 1)
+  |> list.each(fn(id) {
+    case dict.get(js.data, id) {
+      Error(_) -> Nil
+      Ok(slot) -> {
+        // Catch which slot crashes refs_in_cell
+        let _ = term_to_binary(slot)
+        case try_refs(slot) {
+          Ok(refs) ->
+            io.println(
+              "    ["
+              <> int.to_string(id)
+              <> "] refs="
+              <> string.inspect(refs)
+              <> "  slot="
+              <> string.slice(string.inspect(slot), 0, 250),
+            )
+          Error(reason) ->
+            io.println(
+              "    ["
+              <> int.to_string(id)
+              <> "] refs_in_cell CRASH: "
+              <> reason
+              <> "\n        slot="
+              <> string.inspect(slot),
+            )
+        }
+      }
+    }
+  })
+}
+
+@external(erlang, "emit_2core_gc_verify_ffi", "try_refs")
+fn try_refs(slot: a) -> Result(List(Int), String)
+
+pub fn main() {
+  let _ = prelude
+  io.println("═══ emit_2core GC correctness probe ═══")
+  io.println("")
+
+  // ── D: slot-shape dump ────────────────────────────────────────────────────
+  io.println("── (D) slot-shape dump (N=3, closures + array on globalThis) ──")
+  case compile_load(d_src, "arc_gcv_d") {
+    Error(e) -> io.println("  compile FAIL: " <> e)
+    Ok(m) -> {
+      let st0 = seed()
+      let seed_next = rt_js_gc.stats(st0).next
+      let #(outcome, st1) = ffi_apply_js_main(m, st0)
+      io.println(
+        "  [outcome]  " <> string.slice(string.inspect(outcome), 0, 120),
+      )
+      io.println(
+        "  [stdout]   " <> string.inspect(rt_js_store.t_console_bytes(st1)),
+      )
+      io.println("  [post-run] " <> stats_str(rt_js_gc.stats(st1)))
+      io.println("  new cells (id >= " <> int.to_string(seed_next) <> "):")
+      dump_new_cells(st1, seed_next)
+      io.println("  refs_in_cell per new cell:")
+      try_collect_each(st1, seed_next)
+    }
+  }
+  io.println("")
+
+  // ── C: obj-literal smoke ──────────────────────────────────────────────────
+  io.println("── (C) obj-literal {x:42} smoke ──")
+  case compile_load(c_src, "arc_gcv_c") {
+    Error(e) -> io.println("  compile FAIL: " <> e)
+    Ok(m) -> {
+      let #(outcome, st) = ffi_apply_js_main(m, seed())
+      io.println(
+        "  outcome=" <> string.slice(string.inspect(outcome), 0, 120),
+      )
+      io.println(
+        "  stdout=" <> string.inspect(rt_js_store.t_console_bytes(st)),
+      )
+    }
+  }
+  io.println("")
+
+  // ── A: direct t_collect ───────────────────────────────────────────────────
+  io.println("── (A) DIRECT: alloc 100K, keep 10 via globalThis, t_collect ──")
+  case compile_load(a_src, "arc_gcv_a") {
+    Error(e) -> io.println("  compile FAIL: " <> e)
+    Ok(m) -> {
+      let st0 = seed()
+      let s0 = rt_js_gc.stats(st0)
+      io.println("  [seed]     " <> stats_str(s0))
+      io.println("  [pinned]   " <> int.to_string(pinned_count(st0)))
+      let #(outcome, st1) = ffi_apply_js_main(m, st0)
+      io.println(
+        "  [outcome]  " <> string.slice(string.inspect(outcome), 0, 120),
+      )
+      io.println(
+        "  [stdout]   " <> string.inspect(rt_js_store.t_console_bytes(st1)),
+      )
+      let s1 = rt_js_gc.stats(st1)
+      io.println("  [post-run] " <> stats_str(s1))
+      io.println("  [pinned]   " <> int.to_string(pinned_count(st1)))
+      // ── force collect ──
+      let st2 = rt_js_gc.t_collect(st1, [])
+      let s2 = rt_js_gc.stats(st2)
+      io.println("  [post-gc]  " <> stats_str(s2))
+      let dropped = s1.live - s2.live
+      io.println(
+        "  Δlive="
+        <> int.to_string(dropped)
+        <> "  Δfree="
+        <> int.to_string(s2.free - s1.free)
+        <> "  (expect ≈99_990 dropped, 10 survivors + realm)",
+      )
+      // ── second snippet: re-read survivor in collected state ──
+      case compile_load(a2_src, "arc_gcv_a2") {
+        Error(e) -> io.println("  [re-read] compile FAIL: " <> e)
+        Ok(m2) -> {
+          let #(outcome2, st3) = ffi_apply_js_main(m2, st2)
+          io.println(
+            "  [re-read outcome] "
+            <> string.slice(string.inspect(outcome2), 0, 200),
+          )
+          io.println(
+            "  [re-read stdout]  "
+            <> string.inspect(rt_js_store.t_console_bytes(st3)),
+          )
+          let ok = case rt_js_store.t_console_bytes(st3) {
+            <<"50000\n50000\n10\n":utf8>> -> "PASS"
+            <<"50000\n":utf8, _:bits>> -> "PARTIAL — first read ok"
+            _ -> "FAIL — survivor unreadable after collect"
+          }
+          io.println("  [A verdict] " <> ok)
+        }
+      }
+    }
+  }
+  io.println("")
+
+  // ── B: in-situ async collect ──────────────────────────────────────────────
+  io.println(
+    "── (B) IN-SITU: alloc 100K in .then, drain fires t_maybe_collect ──",
+  )
+  case compile_load(b_src, "arc_gcv_b") {
+    Error(e) -> io.println("  compile FAIL: " <> e)
+    Ok(m) -> {
+      let st0 = seed()
+      let #(outcome, st1) = ffi_apply_js_main(m, st0)
+      io.println(
+        "  [outcome]  " <> string.slice(string.inspect(outcome), 0, 200),
+      )
+      io.println(
+        "  [stdout]   " <> string.inspect(rt_js_store.t_console_bytes(st1)),
+      )
+      let s1 = rt_js_gc.stats(st1)
+      io.println("  [post-run] " <> stats_str(s1))
+      let fired = case s1.since_gc < 65_536 {
+        True -> "YES (since_gc < threshold ⇒ t_collect ran)"
+        False -> "NO (since_gc ≥ threshold ⇒ never collected)"
+      }
+      io.println("  [collect fired between jobs?] " <> fired)
+      let ok = case rt_js_store.t_console_bytes(st1) {
+        <<"50000\n10\n":utf8>> -> "PASS — survivor read OK after in-situ collect"
+        <<>> -> "FAIL — no output (crash or throw before log)"
+        other -> "UNEXPECTED: " <> string.inspect(other)
+      }
+      io.println("  [B verdict] " <> ok)
+    }
+  }
+  io.println("")
+
+  // ── C2: array literal smoke ──────────────────────────────────────────────
+  io.println("── (C2) array-literal [42] smoke ──")
+  case compile_load(c2_src, "arc_gcv_c2") {
+    Error(e) -> io.println("  compile FAIL: " <> e)
+    Ok(m) -> {
+      let #(outcome, st) = ffi_apply_js_main(m, seed())
+      io.println(
+        "  outcome=" <> string.slice(string.inspect(outcome), 0, 120),
+      )
+      io.println(
+        "  stdout=" <> string.inspect(rt_js_store.t_console_bytes(st)),
+      )
+    }
+  }
+}
