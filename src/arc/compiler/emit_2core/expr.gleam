@@ -527,7 +527,11 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
     // num, str×str, cell×cell, bool×bool; on `miss` (any pair reaching
     // ToPrimitive or a cross-type coercion) fall to full JMut `eq`. Both
     // arms yield Int 0|1. `!=` inverts via the i32 result directly.
-    ast.Equal -> loose_eq(l, r)
+    // §7.2.14 IsLooselyEqual yields a Boolean — re-branch the i32 result.
+    ast.Equal -> {
+      use v <- anf.then(loose_eq(l, r))
+      anf.i32_to_js_bool(v)
+    }
     ast.NotEqual -> {
       use v <- anf.then(loose_eq(l, r))
       use rc <- anf.then(consts())
@@ -551,13 +555,22 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
     ast.BitwiseAnd -> int_const_bit("erl_band", "bitand_fast", "bitand", l, r)
     ast.BitwiseOr -> int_fast("bitor_fast", "bitor", l, r)
     ast.BitwiseXor -> int_fast("bitxor_fast", "bitxor", l, r)
-    ast.In -> anf.host("op_in", [l, r])
+    // §13.10.1 RelationalExpression `in` yields a Boolean; `t_in` returns the
+    // i32 truth value, so re-branch it before it escapes as a JS value.
+    ast.In -> {
+      use v <- anf.then(anf.host("op_in", [l, r]))
+      anf.i32_to_js_bool(v)
+    }
     // instanceof_fast (JRead, 0|1|miss) probes the ordinary proto-walk; on
-    // atom `miss` fall to full JMut instance_of. Both arms yield Int 0|1.
+    // atom `miss` fall to full JMut instance_of. Both arms yield Int 0|1, and
+    // §13.10.2 InstanceofOperator yields a Boolean — re-branch the result.
     ast.InstanceOf -> {
       use v <- anf.then(anf.host("instanceof_fast", [l, r]))
       use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
-      anf.bind_if(is_miss, anf.host("instance_of", [l, r]), anf.pure(v))
+      use i <- anf.then(
+        anf.bind_if(is_miss, anf.host("instance_of", [l, r]), anf.pure(v)),
+      )
+      anf.i32_to_js_bool(i)
     }
   }
 }

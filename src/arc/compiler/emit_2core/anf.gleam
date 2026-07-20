@@ -760,7 +760,26 @@ pub fn guarded_cmp(
   }
   case elided {
     True -> fast_arm
-    False -> bind_if(both, fast_arm, host(slow_op, [a, b]))
+    False ->
+      // The slow arm's host op (`t_lt`/`t_le`/…) returns the same i32 truth
+      // value as the fast arm's NumTerm, so it needs the identical re-branch.
+      bind_if(both, fast_arm, then(host(slow_op, [a, b]), i32_to_js_bool))
+  }
+}
+
+/// Re-branch a wasm-style i32 truth value (`0`/`1`) into the JS boolean it
+/// denotes. The IR's comparison ops and the `*_fast` probes yield TI32
+/// (gotcha #4) and the `t_lt`/`t_eq`/`t_in`/`t_instance_of` host ops return
+/// the same `0|1`, but the RESULT of a JS `<`/`==`/`in`/`instanceof` is a
+/// **Boolean** (§13.10.1, §13.10.2, §7.2.14). The difference is observable —
+/// `typeof (a instanceof B)` and `"" + (a in o)` — so an i32 must never
+/// escape as a JS value. Use at the seam where the truth value becomes the
+/// expression's result; NOT on a value headed straight for an `ir.If` cond
+/// (see `cond_cmp`, which deliberately keeps the raw i32).
+pub fn i32_to_js_bool(v: ir.Value) -> Build(ir.Value) {
+  fn(e: Emitter2, k) {
+    let rc = e.consts
+    bind_if(v, pure(rc.true_), pure(rc.false_))(e, k)
   }
 }
 
