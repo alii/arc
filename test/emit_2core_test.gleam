@@ -114,6 +114,21 @@ pub fn new_nonctor_diff_test() {
   assert c.stdout == i.stdout
 }
 
+// Truth-value RESULTS, not their truthiness. Every other operator test here
+// funnels the result through a ternary, where the number 1 and the boolean
+// `true` are indistinguishable — which is exactly how `instanceof`/`in`/`==`
+// shipped returning i32 `0|1` instead of Booleans. String-coerce and `typeof`
+// the result so the value itself is asserted (§13.10.1, §13.10.2, §7.2.14).
+const truth_value_src = "function A(){};function B(){};var a=new A();var o={p:1};var s='';s+=(a instanceof A)+','+(a instanceof B)+',';s+=('p' in o)+','+('zz' in o)+',';s+=(1==1)+','+(1==2)+',';s+=('a'<'b')+','+('b'<'a')+',';s+=typeof (a instanceof A)+','+typeof ('p' in o)+','+typeof ('a'<'b');console.log(s)"
+
+pub fn truth_value_results_are_booleans_diff_test() {
+  let i = harness.run_interpreted(truth_value_src)
+  let c = harness.run_compiled(truth_value_src)
+  assert i.stdout
+    == <<"true,false,true,false,true,false,true,false,boolean,boolean,boolean\n":utf8>>
+  assert c.stdout == i.stdout
+}
+
 const instanceof_chain_src = "function A(){};function B(){};B.prototype=new A();var b=new B();var s='';s+=(b instanceof B)?'y':'n';s+=(b instanceof A)?'y':'n';s+=({} instanceof A)?'y':'n';console.log(s)"
 
 pub fn instanceof_chain_diff_test() {
