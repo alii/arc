@@ -3,6 +3,7 @@
 //// warm-only probe actually hits. Run:
 ////   cd arc && gleam run -m emit_2core_objprop_probe
 
+import arc/compiler/emit_2core
 import emit_2core_bench.{obj_js}
 import emit_2core_harness as harness
 import gleam/dynamic.{type Dynamic}
@@ -16,7 +17,6 @@ import twocore/runtime/profiles
 import twocore/runtime/rt_js_builtins
 import twocore/runtime/rt_js_store
 import twocore/runtime/rt_state.{type InstanceState}
-import arc/compiler/emit_2core
 
 type TimeUnit {
   Microsecond
@@ -80,20 +80,43 @@ pub fn main() {
       let dt = monotonic_time(Microsecond) - t0
       int.min(acc, dt)
     })
-  io.println("obj_prop best-of-5: " <> int.to_string(best) <> " µs (target ≤11800)")
+  io.println(
+    "obj_prop best-of-5: " <> int.to_string(best) <> " µs (target ≤11800)",
+  )
   // one traced run for call counts
   trace_on(mod)
   ffi_apply_js_main(mod, seed)
   trace_off()
   let ffi = "twocore_rt_js_obj_ffi"
   let obj = "twocore@runtime@rt_js_obj"
-  io.println("  t_ic_warm_get/2       = " <> int.to_string(c(ffi, "t_ic_warm_get", 2)))
-  io.println("  t_ic_warm_set/3       = " <> int.to_string(c(ffi, "t_ic_warm_set", 3)))
-  io.println("  t_ic_get/4            = " <> int.to_string(c(ffi, "t_ic_get", 4)))
-  io.println("  t_ic_set/5            = " <> int.to_string(c(ffi, "t_ic_set", 5)))
-  io.println("  t_get_prop_own_data/3 = " <> int.to_string(c(ffi, "t_get_prop_own_data", 3)))
-  io.println("  t_set_prop_own_data/4 = " <> int.to_string(c(ffi, "t_set_prop_own_data", 4)))
-  io.println("  t_get_prop_any/3      = " <> int.to_string(c(obj, "t_get_prop_any", 3)))
-  io.println("  t_set_prop_any/4      = " <> int.to_string(c(obj, "t_set_prop_any", 4)))
-  io.println("  t_new_object_shaped/4 = " <> int.to_string(c(ffi, "t_new_object_shaped", 4)))
+  io.println(
+    "  t_ic_warm_get/2       = " <> int.to_string(c(ffi, "t_ic_warm_get", 2)),
+  )
+  io.println(
+    "  t_ic_warm_set/3       = " <> int.to_string(c(ffi, "t_ic_warm_set", 3)),
+  )
+  io.println(
+    "  t_ic_get/4            = " <> int.to_string(c(ffi, "t_ic_get", 4)),
+  )
+  io.println(
+    "  t_ic_set/5            = " <> int.to_string(c(ffi, "t_ic_set", 5)),
+  )
+  io.println(
+    "  t_get_prop_own_data/3 = "
+    <> int.to_string(c(ffi, "t_get_prop_own_data", 3)),
+  )
+  io.println(
+    "  t_set_prop_own_data/4 = "
+    <> int.to_string(c(ffi, "t_set_prop_own_data", 4)),
+  )
+  io.println(
+    "  t_get_prop_any/3      = " <> int.to_string(c(obj, "t_get_prop_any", 3)),
+  )
+  io.println(
+    "  t_set_prop_any/4      = " <> int.to_string(c(obj, "t_set_prop_any", 4)),
+  )
+  io.println(
+    "  t_new_object_shaped/4 = "
+    <> int.to_string(c(ffi, "t_new_object_shaped", 4)),
+  )
 }

@@ -199,7 +199,9 @@ fn print_row(r: Row) -> Nil {
 pub fn main() -> Nil {
   io.println("emit_2core GC memory probe (bytes/cell)")
   io.println("makeAdder(N): 1 store cell per call + ~4 setup")
-  io.println("cp0=after init_realm  cp1=after js_main (gc neutered)  cp2=after t_collect(st,[])")
+  io.println(
+    "cp0=after init_realm  cp1=after js_main (gc neutered)  cp2=after t_collect(st,[])",
+  )
   io.println("")
   io.println(
     hdr("N", 8)

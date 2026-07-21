@@ -72,14 +72,8 @@ pub fn main() {
     "fromString_manual",
     "setupEngine(am3,28);var arr=new Array();var t=0;var s='ff';var i=s.length;var sh=0;while(--i>=0){var x=intAt(s,i);if(sh==0)arr[t++]=x;else arr[t-1]|=x<<sh;sh+=4};console.log(String(t)+' '+String(arr[0]))",
   )
-  diff(
-    "typeof_string",
-    "console.log(typeof 'ff')",
-  )
-  diff(
-    "s_length",
-    "var s='ff';console.log(String(s.length))",
-  )
+  diff("typeof_string", "console.log(typeof 'ff')")
+  diff("s_length", "var s='ff';console.log(String(s.length))")
   diff(
     "predec_while",
     "var i=2;var n=0;while(--i>=0)n++;console.log(String(n))",
@@ -108,12 +102,6 @@ pub fn main() {
     "modpow",
     "setupEngine(am3,28);var a=new BigInteger('3',16);var e=new BigInteger('5',16);var m=new BigInteger('7',16);console.log(a.modPow(e,m).toString(16))",
   )
-  diff(
-    "encrypt",
-    "encrypt();console.log(encrypted.substring(0,40))",
-  )
-  diff(
-    "roundtrip",
-    "encrypt();decrypt();console.log('ok')",
-  )
+  diff("encrypt", "encrypt();console.log(encrypted.substring(0,40))")
+  diff("roundtrip", "encrypt();decrypt();console.log('ok')")
 }

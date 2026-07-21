@@ -206,7 +206,9 @@ fn run_a() {
           let #(out1, st1) = ffi_apply_js_main(m_alloc, st0)
           let s1 = rt_js_gc.stats(st1)
           io.println(stats_line("post-run: ", s1))
-          io.println("  outcome  : " <> string.slice(string.inspect(out1), 0, 80))
+          io.println(
+            "  outcome  : " <> string.slice(string.inspect(out1), 0, 80),
+          )
           io.println("  stdout   : " <> string.inspect(stdout_str(st1)))
           // 2. manual t_collect
           let st2 = rt_js_gc.t_collect(st1, [])
@@ -215,9 +217,10 @@ fn run_a() {
           let dropped = s1.live - s2.live
           let freed = s2.free - s1.free
           io.println(
-            "  dropped=" <> int.to_string(dropped) <> " freed=" <> int.to_string(
-              freed,
-            ),
+            "  dropped="
+            <> int.to_string(dropped)
+            <> " freed="
+            <> int.to_string(freed),
           )
           // Assertions on stats:
           //   ~100K garbage should be swept; ~10 survivor arrays + realm remain.

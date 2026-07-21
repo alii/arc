@@ -201,13 +201,16 @@ pub fn main() {
   )
   try_compile(
     "alloc+let-p-then ",
-    alloc_body <> "let p=Promise.resolve();p.then(function(){});console.log('done')",
+    alloc_body
+      <> "let p=Promise.resolve();p.then(function(){});console.log('done')",
   )
   try_compile("p2-original      ", p2)
   try_compile("p3-original      ", p3)
   io.println("")
 
-  io.println("── seed sanity: does JsStore(..store, gc_threshold:) break alloc_since_gc? ──")
+  io.println(
+    "── seed sanity: does JsStore(..store, gc_threshold:) break alloc_since_gc? ──",
+  )
   let sp = seed_plain()
   let sw = seed_with(65_536)
   print_stats("plain     : ", rt_js_gc.stats(sp))

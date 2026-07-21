@@ -1680,11 +1680,7 @@ fn seed_simple_this(
                 ir.TermOp(ir.TupleGet(1), [ir.Var(simple_this_param)]),
                 ir.Let(
                   [simple_this_c_param],
-                  ir.CallHost(
-                    "js",
-                    "pdict_get",
-                    [ir.Var(simple_this_id_param)],
-                  ),
+                  ir.CallHost("js", "pdict_get", [ir.Var(simple_this_id_param)]),
                   body,
                 ),
               )

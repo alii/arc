@@ -106,7 +106,10 @@ fn set_threshold(n: Int) -> Nil {
   let ns = int.to_string(n)
   let sed =
     "perl -pi -e 's/^-define\\(TC_ARR_MIN_LEN, \\d+\\)\\./"
-    <> "-define(TC_ARR_MIN_LEN, " <> ns <> ")./' " <> ffi_src
+    <> "-define(TC_ARR_MIN_LEN, "
+    <> ns
+    <> ")./' "
+    <> ffi_src
   os_cmd(charlist.from_string(sed))
   let erlc = "erlc -o " <> ffi_ebin <> " " <> ffi_src <> " 2>&1"
   let out = charlist.to_string(os_cmd(charlist.from_string(erlc)))
@@ -130,8 +133,12 @@ pub fn main() {
     let db_us = measure(db, 30)
     let cr_us = measure(cr, 4)
     io.println(
-      "SWEEP N=" <> int.to_string(n) <> "\tdeltablue=" <> int.to_string(db_us)
-      <> "\tcrypto=" <> int.to_string(cr_us),
+      "SWEEP N="
+      <> int.to_string(n)
+      <> "\tdeltablue="
+      <> int.to_string(db_us)
+      <> "\tcrypto="
+      <> int.to_string(cr_us),
     )
   })
   set_threshold(8)

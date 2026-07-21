@@ -65,7 +65,8 @@ fn run_at(label: String, mod: Atom, thr: Int) {
 
 pub fn main() {
   // P5: recursive step via microtask; step is a top-level fn decl.
-  let p5 = "function step(n){if(n==0){console.log('done');return}function m(x){return function(y){return x+y}}let a=m(5);let s=0;for(let i=0;i<1000;i++)s+=a(i);Promise.resolve().then(function(){step(n-1)})}step(100)"
+  let p5 =
+    "function step(n){if(n==0){console.log('done');return}function m(x){return function(y){return x+y}}let a=m(5);let s=0;for(let i=0;i<1000;i++)s+=a(i);Promise.resolve().then(function(){step(n-1)})}step(100)"
   let m5 = compile_load(p5, "arc_gccrash_p5")
   run_at("P5 (100 steps × 1K allocs)", m5, 1_000_000_000)
   run_at("P5 (100 steps × 1K allocs)", m5, 65_536)
@@ -73,31 +74,36 @@ pub fn main() {
 
   // P5b: minimal — 2 chained microtasks with a small alloc burst between.
   // If GC fires after job1, does job2 crash?
-  let p5b = "Promise.resolve().then(function(){function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i)}).then(function(){console.log('done')})"
+  let p5b =
+    "Promise.resolve().then(function(){function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i)}).then(function(){console.log('done')})"
   let m5b = compile_load(p5b, "arc_gccrash_p5b")
   run_at("P5b (2 chained .then, 2K allocs)", m5b, 1_000_000_000)
   run_at("P5b (2 chained .then, 2K allocs)", m5b, 1000)
 
   // P5c: minimal — just one .then that reads a global fn AFTER collect.
-  let p5c = "function g(){return 42}function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i);Promise.resolve().then(function(){console.log(g())})"
+  let p5c =
+    "function g(){return 42}function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i);Promise.resolve().then(function(){console.log(g())})"
   let m5c = compile_load(p5c, "arc_gccrash_p5c")
   run_at("P5c (top-level fn call in .then)", m5c, 1_000_000_000)
   run_at("P5c (top-level fn call in .then)", m5c, 1000)
 
   // P5d: minimal repro of P5 crash — closure captures outer PARAM `n`.
-  let p5d = "function step(n){function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i);Promise.resolve().then(function(){console.log(n)})}step(7)"
+  let p5d =
+    "function step(n){function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i);Promise.resolve().then(function(){console.log(n)})}step(7)"
   let m5d = compile_load(p5d, "arc_gccrash_p5d")
   run_at("P5d (capture param n=7)", m5d, 1_000_000_000)
   run_at("P5d (capture param n=7)", m5d, 1000)
 
   // P5e: closure captures a top-level fn (should be pinned root).
-  let p5e = "function step(n){function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i);Promise.resolve().then(function(){step})}step(7)"
+  let p5e =
+    "function step(n){function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i);Promise.resolve().then(function(){step})}step(7)"
   let m5e = compile_load(p5e, "arc_gccrash_p5e")
   run_at("P5e (capture step fn)", m5e, 1_000_000_000)
   run_at("P5e (capture step fn)", m5e, 1000)
 
   // P5f: P5 with n forced through explicit local — check if it's param-specific.
-  let p5f = "function step(n){let nn=n;function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i);Promise.resolve().then(function(){console.log(nn)})}step(7)"
+  let p5f =
+    "function step(n){let nn=n;function m(x){return function(y){return x+y}}let a=m(5);for(let i=0;i<2000;i++)a(i);Promise.resolve().then(function(){console.log(nn)})}step(7)"
   let m5f = compile_load(p5f, "arc_gccrash_p5f")
   run_at("P5f (capture local nn=7)", m5f, 1_000_000_000)
   run_at("P5f (capture local nn=7)", m5f, 1000)

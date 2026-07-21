@@ -86,6 +86,7 @@
 // carve-out + shaped_unflat LC → hand loop) alone are worth ~25% traced.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import arc/compiler/emit_2core
 import emit_2core_harness as harness
 import emit_2core_profile
 import gleam/erlang/atom.{type Atom}
@@ -97,7 +98,6 @@ import twocore/runtime/profiles
 import twocore/runtime/rt_js_builtins
 import twocore/runtime/rt_js_store
 import twocore/runtime/rt_state.{type InstanceState}
-import arc/compiler/emit_2core
 
 @external(erlang, "emit_2core_profile_ffi", "eprof_run")
 fn eprof_run(mod: Atom, st: InstanceState) -> Nil

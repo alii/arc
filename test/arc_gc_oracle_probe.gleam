@@ -54,9 +54,7 @@ fn obj_via_call(n: Int) -> String {
 /// only reached on fn return (interpreter.gleam:3079), so this should show
 /// checks=0 fires=0 regardless of N.
 fn obj_no_call(n: Int) -> String {
-  "let r; for(let i=0;i<"
-  <> int.to_string(n)
-  <> ";i++){r={x:i}} r.x"
+  "let r; for(let i=0;i<" <> int.to_string(n) <> ";i++){r={x:i}} r.x"
 }
 
 /// N objects, all kept live in an array. GC should fire but reclaim ~nothing;
@@ -64,7 +62,9 @@ fn obj_no_call(n: Int) -> String {
 fn obj_keep_all(n: Int) -> String {
   "function f(i){return {x:i}} let a=[]; for(let i=0;i<"
   <> int.to_string(n)
-  <> ";i++){a.push(f(i))} a[0].x + a[" <> int.to_string(n - 1) <> "].x"
+  <> ";i++){a.push(f(i))} a[0].x + a["
+  <> int.to_string(n - 1)
+  <> "].x"
 }
 
 fn programs() -> List(Prog) {

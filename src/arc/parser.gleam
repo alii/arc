@@ -2393,8 +2393,7 @@ fn sb_mark_assign_targets(
       list.fold(properties, sb, fn(sb, prop) {
         case prop {
           ast.InitProperty(value:, ..) -> sb_mark_assign_element(sb, value)
-          ast.SpreadProperty(argument:) ->
-            sb_mark_assign_targets(sb, argument)
+          ast.SpreadProperty(argument:) -> sb_mark_assign_targets(sb, argument)
           ast.MethodProperty(..) | ast.AccessorProperty(..) -> sb
         }
       })

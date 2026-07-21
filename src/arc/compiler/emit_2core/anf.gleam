@@ -380,7 +380,12 @@ pub fn share(
             // Pre-convert cold to Break(l_join) so a splice at a non-tail
             // If arm (which to_break won't descend into) is already terminal.
             let #(inlined, e) =
-              subst_break_with(body_tree, l_miss, to_break(cold_tree, l_join), e)
+              subst_break_with(
+                body_tree,
+                l_miss,
+                to_break(cold_tree, l_join),
+                e,
+              )
             let #(r, e) = state.fresh_var(e)
             ir.Let(
               [r],

@@ -676,12 +676,7 @@ fn store_declared(
     scope.Plain(scope.Global(_)) ->
       case dict.get(e.slotted_globals, name) {
         Ok(slot) ->
-          host_unit_(
-            e,
-            "cell_set",
-            [ir.Var(state.get_slot_var(e, slot)), v],
-            k,
-          )
+          host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
         Error(Nil) ->
           host_unit_(
             e,
@@ -1804,12 +1799,7 @@ fn for_lhs_ident_assign(
     scope.Plain(scope.Global(_)) ->
       case dict.get(e.slotted_globals, name) {
         Ok(slot) ->
-          host_unit_(
-            e,
-            "cell_set",
-            [ir.Var(state.get_slot_var(e, slot)), v],
-            k,
-          )
+          host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
         Error(Nil) ->
           host_unit_(
             e,
@@ -2767,7 +2757,8 @@ fn emit_for_classic(
       }),
     )
     let e = state.pop_frame(e)
-    let e = state.Emitter2(..e, hoisted_kfn: prev_hoisted, hoisted_arr_c: prev_arr_c)
+    let e =
+      state.Emitter2(..e, hoisted_kfn: prev_hoisted, hoisted_arr_c: prev_arr_c)
     let outer = ir.Block(brk, result_tys, ir.Loop(head, params, [], loop_body))
     let e = state.leave_for_scope(e, save)
     rebind_after_block(e, carried, outer, next)
@@ -3012,7 +3003,8 @@ fn emit_while(
     }),
   )
   let e = state.pop_frame(e)
-  let e = state.Emitter2(..e, hoisted_kfn: prev_hoisted, hoisted_arr_c: prev_arr_c)
+  let e =
+    state.Emitter2(..e, hoisted_kfn: prev_hoisted, hoisted_arr_c: prev_arr_c)
   let outer = ir.Block(brk, result_tys, ir.Loop(head, params, [], loop_body))
   rebind_after_block(e, carried, outer, next)
 }

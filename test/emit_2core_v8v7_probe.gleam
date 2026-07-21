@@ -479,8 +479,11 @@ fn bench_compiled(name: String, source: String) -> Outcome {
       let #(lower_us, lower_r) =
         time_us(fn() { pipeline.compile_ir(unit.module, emit_2core.binding()) })
       io.println(
-        "  compile: emit_2core=" <> int.to_string(emit_us) <> "µs ir_to_beam="
-        <> int.to_string(lower_us) <> "µs → "
+        "  compile: emit_2core="
+        <> int.to_string(emit_us)
+        <> "µs ir_to_beam="
+        <> int.to_string(lower_us)
+        <> "µs → "
         <> case lower_r {
           Ok(_) -> "OK (BEAM produced)"
           Error(e) -> "FAILED: " <> string.slice(string.inspect(e), 0, 200)
@@ -506,9 +509,7 @@ fn bench_compiled(name: String, source: String) -> Outcome {
                     <<"ok\n":utf8>> -> {
                       let reps = reps_for(warm_us)
                       let #(us, _) =
-                        time_us(fn() {
-                          repeat(reps, fn() { run_once(loaded) })
-                        })
+                        time_us(fn() { repeat(reps, fn() { run_once(loaded) }) })
                       Measured(us / reps, reps)
                     }
                     _ -> RunFailed("stdout mismatch", string.inspect(stdout))
@@ -593,8 +594,15 @@ fn one(name: String) {
       io.println("  ref qjs    : " <> int.to_string(qjs) <> " µs")
       io.println("  ref llint  : " <> int.to_string(llint) <> " µs")
       io.println(
-        "  ROW " <> name <> "\t" <> int.to_string(per_us(compiled)) <> "\t"
-        <> int.to_string(per_us(interp)) <> "\t" <> int.to_string(qjs) <> "\t"
+        "  ROW "
+        <> name
+        <> "\t"
+        <> int.to_string(per_us(compiled))
+        <> "\t"
+        <> int.to_string(per_us(interp))
+        <> "\t"
+        <> int.to_string(qjs)
+        <> "\t"
         <> int.to_string(llint),
       )
     }
