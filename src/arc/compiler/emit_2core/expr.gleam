@@ -567,9 +567,11 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
     ast.InstanceOf -> {
       use v <- anf.then(anf.host("instanceof_fast", [l, r]))
       use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
-      use i <- anf.then(
-        anf.bind_if(is_miss, anf.host("instance_of", [l, r]), anf.pure(v)),
-      )
+      use i <- anf.then(anf.bind_if(
+        is_miss,
+        anf.host("instance_of", [l, r]),
+        anf.pure(v),
+      ))
       anf.i32_to_js_bool(i)
     }
   }

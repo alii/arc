@@ -113,37 +113,59 @@ fn minimal_core(n: Int, letrec_wrap: Bool) -> String {
     idx
     |> list.map(fn(i) {
       let j = int.to_string({ i + 1 } % n)
-      "'f_" <> int.to_string(i) <> "'/2 = fun (_s, _x) -> "
+      "'f_"
+      <> int.to_string(i)
+      <> "'/2 = fun (_s, _x) -> "
       <> "let <_m> = case call 'erlang':'>'(_x, 0) of "
-      <> "<'true'> when 'true' -> 'f_" <> j <> "'/2 "
-      <> "<'false'> when 'true' -> 'f_" <> int.to_string(i) <> "'/2 end in "
-      <> "{_m, call 'erlang':'+'(_x, " <> int.to_string(i) <> ")}"
+      <> "<'true'> when 'true' -> 'f_"
+      <> j
+      <> "'/2 "
+      <> "<'false'> when 'true' -> 'f_"
+      <> int.to_string(i)
+      <> "'/2 end in "
+      <> "{_m, call 'erlang':'+'(_x, "
+      <> int.to_string(i)
+      <> ")}"
     })
     |> string.join("\n")
   let one_put = fn(i) {
-    "let <_v" <> int.to_string(i) <> "> = 'f_" <> int.to_string(i)
-    <> "'/2 in let <_p" <> int.to_string(i)
-    <> "> = call 'erlang':'put'(" <> int.to_string(i) <> ", _v"
-    <> int.to_string(i) <> ") in "
+    "let <_v"
+    <> int.to_string(i)
+    <> "> = 'f_"
+    <> int.to_string(i)
+    <> "'/2 in let <_p"
+    <> int.to_string(i)
+    <> "> = call 'erlang':'put'("
+    <> int.to_string(i)
+    <> ", _v"
+    <> int.to_string(i)
+    <> ") in "
   }
-  let body_tail =
-    "let <_g> = call 'erlang':'get'(0) in apply _g(_st, 0)"
+  let body_tail = "let <_g> = call 'erlang':'get'(0) in apply _g(_st, 0)"
   let body = case letrec_wrap {
-    False ->
-      { idx |> list.map(one_put) |> string.join("\n    ") } <> body_tail
+    False -> { idx |> list.map(one_put) |> string.join("\n    ") } <> body_tail
     True ->
       // Nest each put in its own `letrec 'k_I'/0 = fun() -> … in apply
       // 'k_I'/0()` spine so beam_ssa sees the fun-refs across many local
       // functions in one top-level body (the js_main shape).
       list.fold_right(idx, body_tail, fn(acc, i) {
-        "letrec 'k_" <> int.to_string(i) <> "'/0 = fun () -> "
-        <> one_put(i) <> acc <> " in apply 'k_" <> int.to_string(i) <> "'/0()"
+        "letrec 'k_"
+        <> int.to_string(i)
+        <> "'/0 = fun () -> "
+        <> one_put(i)
+        <> acc
+        <> " in apply 'k_"
+        <> int.to_string(i)
+        <> "'/0()"
       })
   }
   "module 'cfunref_spike_min' ['big'/1, 'module_info'/0, 'module_info'/1]\n"
   <> "    attributes []\n"
-  <> defs <> "\n"
-  <> "'big'/1 = fun (_st) ->\n    " <> body <> "\n"
+  <> defs
+  <> "\n"
+  <> "'big'/1 = fun (_st) ->\n    "
+  <> body
+  <> "\n"
   <> "'module_info'/0 = fun () -> "
   <> "call 'erlang':'get_module_info'('cfunref_spike_min')\n"
   <> "'module_info'/1 = fun (_k) -> "
@@ -175,8 +197,7 @@ fn matrix() -> List(#(String, List(CompileOpt))) {
 fn verdict_str(v: CompileVerdict) -> String {
   case v {
     Compiled(b) -> "compiled  (" <> int.to_string(b) <> " B)"
-    Rejected(ms) ->
-      "REJECTED  " <> { list.first(ms) |> unwrap_or("(no msg)") }
+    Rejected(ms) -> "REJECTED  " <> { list.first(ms) |> unwrap_or("(no msg)") }
     Crashed(_, head) -> "CRASHED   " <> string.slice(head, 0, 120)
   }
 }
@@ -189,8 +210,13 @@ fn unwrap_or(r: Result(a, b), d: a) -> a {
 }
 
 fn probe(label: String, core: BitArray) -> Nil {
-  io.println("── " <> label <> " ──  (funref values in .core: "
-    <> int.to_string(funref_count(core)) <> ")")
+  io.println(
+    "── "
+    <> label
+    <> " ──  (funref values in .core: "
+    <> int.to_string(funref_count(core))
+    <> ")",
+  )
   matrix()
   |> list.each(fn(row) {
     let #(name, opts) = row
@@ -226,11 +252,13 @@ fn richards_core() -> Result(String, String) {
 
 pub fn main() {
   io.println("═══ emit_2core CFunRef spike — OTP " <> otp_release() <> " ═══")
-  io.println("gate emit_core.perf5_cfunref_zero_capture = "
+  io.println(
+    "gate emit_core.perf5_cfunref_zero_capture = "
     <> case ec.perf5_cfunref_zero_capture {
       True -> "True  (CFunRef ENABLED — real-path rows below are live)"
       False -> "False (CFunRef disabled — real-path rows are the eta baseline)"
-    })
+    },
+  )
   io.println("")
 
   // 1. minimal repro at three sizes × two shapes — narrow whether the

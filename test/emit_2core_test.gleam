@@ -125,7 +125,9 @@ pub fn truth_value_results_are_booleans_diff_test() {
   let i = harness.run_interpreted(truth_value_src)
   let c = harness.run_compiled(truth_value_src)
   assert i.stdout
-    == <<"true,false,true,false,true,false,true,false,boolean,boolean,boolean\n":utf8>>
+    == <<
+      "true,false,true,false,true,false,true,false,boolean,boolean,boolean\n":utf8,
+    >>
   assert c.stdout == i.stdout
 }
 

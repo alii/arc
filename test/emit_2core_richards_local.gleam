@@ -54,6 +54,7 @@
 //// leaf (it IS — Return never reaches cont; the `all_breaks_local` Return
 //// veto at emit_core.gleam:5985 is over-strict for KValues cont).
 
+import arc/compiler/emit_2core
 import emit_2core_harness as harness
 import gleam/erlang/atom.{type Atom}
 import gleam/io
@@ -64,7 +65,6 @@ import twocore/runtime/profiles
 import twocore/runtime/rt_js_builtins
 import twocore/runtime/rt_js_store
 import twocore/runtime/rt_state.{type InstanceState}
-import arc/compiler/emit_2core
 
 @external(erlang, "emit_2core_profile_ffi", "eprof_run")
 fn eprof_run(mod: Atom, st: InstanceState) -> Nil

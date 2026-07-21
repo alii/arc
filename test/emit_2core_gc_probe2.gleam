@@ -74,7 +74,19 @@ pub fn main() {
   p("fn + 1 call  ", "function f(y){return y+1}f(5)", "gcp2_f1")
   p("fn + 3 calls ", "function f(y){return y+1}f(1);f(2);f(3)", "gcp2_f3")
   p("arrow + 3    ", "let f=(y)=>y+1;f(1);f(2);f(3)", "gcp2_a3")
-  p("makeAdder n=0", "function m(x){return function(y){return x+y}}let a=m(5)", "gcp2_m0")
-  p("makeAdder n=3", "function m(x){return function(y){return x+y}}let a=m(5);a(1);a(2);a(3)", "gcp2_m3")
-  p("call m 3x    ", "function m(x){return function(y){return x+y}}m(1);m(2);m(3)", "gcp2_mm3")
+  p(
+    "makeAdder n=0",
+    "function m(x){return function(y){return x+y}}let a=m(5)",
+    "gcp2_m0",
+  )
+  p(
+    "makeAdder n=3",
+    "function m(x){return function(y){return x+y}}let a=m(5);a(1);a(2);a(3)",
+    "gcp2_m3",
+  )
+  p(
+    "call m 3x    ",
+    "function m(x){return function(y){return x+y}}m(1);m(2);m(3)",
+    "gcp2_mm3",
+  )
 }

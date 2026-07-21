@@ -129,8 +129,7 @@ fn do_buf_read() -> BitArray
 /// fresh module atom so the BEAM code server never sees a re-register.
 pub fn run_compiled(source: String) -> DiffRun {
   buf_reset()
-  let mod_name =
-    "arc_emit2c_test_" <> int.to_string(unique_integer([Positive]))
+  let mod_name = "arc_emit2c_test_" <> int.to_string(unique_integer([Positive]))
   let opts =
     emit_2core.CompileOpts(
       module_name: mod_name,

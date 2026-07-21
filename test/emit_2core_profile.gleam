@@ -179,7 +179,11 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
 
   // fast-path probe: is CallClosure fast-path actually taken?
   let fast =
-    count_of(atom.create("twocore_rt_js_call_ffi"), atom.create("t_kfn_code"), 3)
+    count_of(
+      atom.create("twocore_rt_js_call_ffi"),
+      atom.create("t_kfn_code"),
+      3,
+    )
   let slow =
     count_of(
       atom.create("twocore@runtime@rt_js_call"),
@@ -224,7 +228,11 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
     }
     io.println(
       "    "
-      <> string.pad_end(short(m) <> ":" <> f <> "/" <> int.to_string(a), 55, " ")
+      <> string.pad_end(
+        short(m) <> ":" <> f <> "/" <> int.to_string(a),
+        55,
+        " ",
+      )
       <> string.pad_start(int.to_string(count), 12, " ")
       <> string.pad_start(int.to_string(us), 12, " ")
       <> string.pad_start(int.to_string(ns_call), 9, " ")
@@ -960,7 +968,11 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
     }
     io.println(
       "    "
-      <> string.pad_end(short(m) <> ":" <> f <> "/" <> int.to_string(a), 55, " ")
+      <> string.pad_end(
+        short(m) <> ":" <> f <> "/" <> int.to_string(a),
+        55,
+        " ",
+      )
       <> string.pad_start(int.to_string(count), 12, " ")
       <> string.pad_start(int.to_string(us), 12, " ")
       <> string.pad_start(int.to_string(ns_call), 9, " ")
@@ -1028,7 +1040,13 @@ fn bench_op(which: Atom, st: InstanceState, arg: Dynamic, n: Int) -> Int
 @external(erlang, "emit_2core_harness_ffi", "to_dynamic")
 fn to_dynamic(a: a) -> Dynamic
 
-fn micro(label: String, which: String, st: InstanceState, arg: Dynamic, n: Int) {
+fn micro(
+  label: String,
+  which: String,
+  st: InstanceState,
+  arg: Dynamic,
+  n: Int,
+) {
   let a = atom.create(which)
   bench_op(a, st, arg, n)
   // warm
@@ -1193,15 +1211,22 @@ fn correctness_gate(label: String, path: String) -> Bool {
     }
     pipeline.DiffRun(result: Ok(_), stdout:) -> {
       io.println(
-        "  ✗ " <> label <> " completed but stdout=" <> string.inspect(stdout)
+        "  ✗ "
+        <> label
+        <> " completed but stdout="
+        <> string.inspect(stdout)
         <> " (expected \"ok\\n\")",
       )
       False
     }
     pipeline.DiffRun(result: Error(e), stdout:) -> {
       io.println(
-        "  ✗ " <> label <> " FAILED: " <> string.slice(e, 0, 300)
-        <> " | stdout=" <> string.inspect(stdout),
+        "  ✗ "
+        <> label
+        <> " FAILED: "
+        <> string.slice(e, 0, 300)
+        <> " | stdout="
+        <> string.inspect(stdout),
       )
       False
     }
@@ -1303,7 +1328,11 @@ pub fn bench_verify() -> Bool {
     let delta = after - before
     io.println(
       "    "
-      <> string.pad_end(short(m) <> ":" <> f <> "/" <> int.to_string(a), 48, " ")
+      <> string.pad_end(
+        short(m) <> ":" <> f <> "/" <> int.to_string(a),
+        48,
+        " ",
+      )
       <> string.pad_start(int.to_string(before), 10, " ")
       <> string.pad_start(int.to_string(after), 10, " ")
       <> string.pad_start(
@@ -1436,7 +1465,11 @@ pub fn raytrace_apply_verify() -> Bool {
     }
     io.println(
       "    "
-      <> string.pad_end(short(m) <> ":" <> f <> "/" <> int.to_string(a), 55, " ")
+      <> string.pad_end(
+        short(m) <> ":" <> f <> "/" <> int.to_string(a),
+        55,
+        " ",
+      )
       <> string.pad_start(int.to_string(count), 12, " ")
       <> string.pad_start(int.to_string(us), 12, " ")
       <> string.pad_start(int.to_string(ns_call), 9, " "),
@@ -1447,8 +1480,7 @@ pub fn raytrace_apply_verify() -> Bool {
   let rt = fn(m: String) { atom.create("twocore@runtime@" <> m) }
   let ffi = fn(m: String) { atom.create("twocore_" <> m) }
   let n_new_args = count_of(rt("rt_js_obj"), atom.create("t_new_arguments"), 3)
-  let n_call_chk =
-    count_of(rt("rt_js_call"), atom.create("t_call_checked"), 4)
+  let n_call_chk = count_of(rt("rt_js_call"), atom.create("t_call_checked"), 4)
   let n_new_simple =
     count_of(ffi("rt_js_call_ffi"), atom.create("t_new_simple"), 3)
   let n_ns_apply =
@@ -1459,7 +1491,8 @@ pub fn raytrace_apply_verify() -> Bool {
   io.println("  ── targeted counts (per run) ──")
   let row = fn(name: String, n: Int) {
     io.println(
-      "    " <> string.pad_end(name, 40, " ")
+      "    "
+      <> string.pad_end(name, 40, " ")
       <> string.pad_start(int.to_string(n), 10, " "),
     )
   }
@@ -1482,30 +1515,43 @@ pub fn raytrace_apply_verify() -> Bool {
   io.println(
     "    (1) t_new_arguments ≈0:       "
     <> case args_ok {
-      True -> "✓ FIRES (perf7_args_elide elided; " <> int.to_string(n_new_args)
+      True ->
+        "✓ FIRES (perf7_args_elide elided; "
+        <> int.to_string(n_new_args)
         <> "/run)"
-      False -> "✗ REGRESSED (" <> int.to_string(n_new_args)
+      False ->
+        "✗ REGRESSED ("
+        <> int.to_string(n_new_args)
         <> "/run — needs_args_object carve-out not firing)"
     },
   )
   io.println(
     "    (2) t_call_checked ≈0:        "
     <> case chk_ok {
-      True -> "✓ FIRES (.apply → call_method_ic; " <> int.to_string(n_call_chk)
+      True ->
+        "✓ FIRES (.apply → call_method_ic; "
+        <> int.to_string(n_call_chk)
         <> "/run)"
-      False -> "✗ REGRESSED (" <> int.to_string(n_call_chk)
+      False ->
+        "✗ REGRESSED ("
+        <> int.to_string(n_call_chk)
         <> "/run — emit_apply_arguments miss)"
     },
   )
   io.println(
     "    (3) new_simple → emit_apply_arguments: "
     <> case reaches {
-      True -> "✓ REACHED (via compiled ctor body — "
-        <> int.to_string(n_ns_apply) <> " new_simple_apply, "
+      True ->
+        "✓ REACHED (via compiled ctor body — "
+        <> int.to_string(n_ns_apply)
+        <> " new_simple_apply, "
         <> int.to_string(n_method_ic)
         <> " method_ic incl. initialize)"
-      False -> "✗ NOT REACHED (method_ic " <> int.to_string(n_method_ic)
-        <> " < new_simple_apply " <> int.to_string(n_ns_apply)
+      False ->
+        "✗ NOT REACHED (method_ic "
+        <> int.to_string(n_method_ic)
+        <> " < new_simple_apply "
+        <> int.to_string(n_ns_apply)
         <> " — ctor bodies falling to slow path)"
     },
   )
@@ -1558,8 +1604,10 @@ pub fn crypto_am3_op_map() -> Nil {
   // 1× w_array[j] read, 1× w_array[j++]= write, 4× >>C, 1× <<C, 4× &C, 4× *,
   // 6× +, 1× --n. Any *_fast row >0 below means the erl_* inline arm was
   // REJECTED at runtime for that many operands.
-  io.println("  (4000 am3 inner iters; per-iter: 2 reads_c, 1 read_p,"
-    <> " 1 write_p, 4 >>C, 1 <<C, 4 &C, 4 *, 6 +)")
+  io.println(
+    "  (4000 am3 inner iters; per-iter: 2 reads_c, 1 read_p,"
+    <> " 1 write_p, 4 >>C, 1 <<C, 4 &C, 4 *, 6 +)",
+  )
   io.println("  ── top-10 by µs (call_time) ──")
   io.println(
     "    "
@@ -1576,7 +1624,11 @@ pub fn crypto_am3_op_map() -> Nil {
     }
     io.println(
       "    "
-      <> string.pad_end(short(m) <> ":" <> f <> "/" <> int.to_string(a), 55, " ")
+      <> string.pad_end(
+        short(m) <> ":" <> f <> "/" <> int.to_string(a),
+        55,
+        " ",
+      )
       <> string.pad_start(int.to_string(count), 12, " ")
       <> string.pad_start(int.to_string(us), 12, " ")
       <> string.pad_start(int.to_string(ns_call), 9, " "),
@@ -1590,11 +1642,23 @@ pub fn crypto_am3_op_map() -> Nil {
     // (host, arity, "op it backs", expected/4000-iter, verdict_if_zero)
     #(ffi("rt_js_ops_ffi"), "t_shr_fast", 2, ">>14/>>28 fallback", 0),
     #(ffi("rt_js_ops_ffi"), "t_shl_fast", 2, "<<14 fallback", 0),
-    #(ffi("rt_js_ops_ffi"), "t_bitand_fast", 2, "& 0x3fff/0xfffffff fallback", 0),
+    #(
+      ffi("rt_js_ops_ffi"),
+      "t_bitand_fast",
+      2,
+      "& 0x3fff/0xfffffff fallback",
+      0,
+    ),
     #(ffi("rt_js_ops_ffi"), "t_ushr_fast", 2, ">>> (am3 has none)", 0),
     #(rt("rt_js_ops"), "t_mul", 3, "* fallback (JMut)", 0),
     #(rt("rt_js_ops"), "t_add", 3, "+ fallback (JMut)", 0),
-    #(ffi("rt_js_obj_ffi"), "t_get_elem_fast_c", 4, "this_array[i] hoisted", 8000),
+    #(
+      ffi("rt_js_obj_ffi"),
+      "t_get_elem_fast_c",
+      4,
+      "this_array[i] hoisted",
+      8000,
+    ),
     #(ffi("rt_js_obj_ffi"), "t_get_elem_fast_p", 3, "w_array[j] read", 4000),
     #(ffi("rt_js_obj_ffi"), "t_set_elem_fast_p", 4, "w_array[j++]= write", 4000),
     #(ffi("rt_js_obj_ffi"), "t_arr_c_load", 1, "arr_c hoist (1/am3 call)", 100),
@@ -1613,11 +1677,15 @@ pub fn crypto_am3_op_map() -> Nil {
     let n = count_of(m, atom.create(f), a)
     io.println(
       "    "
-      <> string.pad_end(short(atom.to_string(m)) <> ":" <> f <> "/"
-        <> int.to_string(a), 42, " ")
+      <> string.pad_end(
+        short(atom.to_string(m)) <> ":" <> f <> "/" <> int.to_string(a),
+        42,
+        " ",
+      )
       <> string.pad_start(int.to_string(n), 8, " ")
       <> string.pad_start(int.to_string(expect), 8, " ")
-      <> "  " <> op,
+      <> "  "
+      <> op,
     )
   })
 }
