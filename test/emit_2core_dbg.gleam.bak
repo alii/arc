@@ -1,0 +1,33 @@
+import arc/compiler/emit_2core
+import gleam/io
+import gleam/string
+import simplifile
+import twocore/pipeline
+import twocore/runtime/profiles
+
+pub fn main() {
+  let assert Ok(full) = simplifile.read("bench/v8-v7/richards_run.js")
+  // Bisect: take first N chars.
+  let src = string.slice(full, 0, 16000)
+  let opts =
+    emit_2core.CompileOpts(
+      module_name: "irdbg",
+      source_kind: emit_2core.AsScript,
+      entry_name: "js_main",
+    )
+  case emit_2core.compile_source(src, opts) {
+    Error(e) -> io.println("!! FAILED: " <> string.inspect(e))
+    Ok(unit) ->
+      case pipeline.ir_to_core(unit.module, profiles.js_direct()) {
+        Error(e) -> io.println("!! ir_to_core FAILED: " <> string.inspect(e))
+        Ok(core) -> {
+          io.println(core)
+          case pipeline.compile_ir(unit.module, profiles.js_direct()) {
+            Error(e) ->
+              io.println("!! compile FAILED: " <> string.inspect(e))
+            Ok(_) -> io.println("compile OK")
+          }
+        }
+      }
+  }
+}

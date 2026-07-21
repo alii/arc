@@ -1237,6 +1237,7 @@ fn parse_variable_declarator(
       // a binding pattern, which never sets these flags), so a cover grammar
       // it left unconsumed is due now: `var x = {a = 1};` is a SyntaxError.
       use Nil <- result.try(check_cover_grammar_errors(p3, init_start))
+      let p3 = P(..p3, sb: sb_mark_pattern_assigned(p3.sb, pattern))
       Ok(#(p3, ast.VariableDeclarator(id: pattern, init: Some(init_expr))))
     }
     _ -> {
@@ -2234,8 +2235,18 @@ fn parse_for_declaration(
     ast.ForInitDeclaration(kind:, declarations: [
       ast.VariableDeclarator(id: pattern, init: None),
     ])
+  // for-in/of iteration writes the head binding each step (§14.7.5.9).
+  let mark_assigned = fn(px: P) {
+    P(..px, sb: sb_mark_pattern_assigned(px.sb, pattern))
+  }
   case peek(p3) {
-    In -> parse_for_in_of_rest(exit_for_decl_context(p3, p), decl, False, False)
+    In ->
+      parse_for_in_of_rest(
+        mark_assigned(exit_for_decl_context(p3, p)),
+        decl,
+        False,
+        False,
+      )
     Of -> {
       // B.3.4: for-of var bindings must not shadow catch parameters
       use Nil <- result.try(case kind {
@@ -2247,7 +2258,12 @@ fn parse_for_declaration(
           )
         _ -> Ok(Nil)
       })
-      parse_for_in_of_rest(exit_for_decl_context(p3, p), decl, True, is_await)
+      parse_for_in_of_rest(
+        mark_assigned(exit_for_decl_context(p3, p)),
+        decl,
+        True,
+        is_await,
+      )
     }
     Semicolon | Comma ->
       case kind {
@@ -2351,6 +2367,62 @@ fn pattern_element_has_eval_args_target(expr: ast.Expression) -> Bool {
   }
 }
 
+/// Record every leaf IDENTIFIER assignment target inside `lhs` via
+/// `scope.sb_assign_ref` so scope analysis can skip boxing never-
+/// reassigned captures. Walks a cover-grammar array/object literal the
+/// same way `pattern_has_eval_args_target` does; member expressions and
+/// non-identifier leaves are ignored (not variable writes).
+fn sb_mark_assign_targets(
+  sb: scope.ScopeBuilder,
+  lhs: ast.Expression,
+) -> scope.ScopeBuilder {
+  case lhs {
+    ast.Identifier(name:, ..) -> scope.sb_assign_ref(sb, name)
+    ast.ParenthesizedExpression(expression:, ..) ->
+      sb_mark_assign_targets(sb, expression)
+    ast.ArrayExpression(elements:, ..) ->
+      list.fold(elements, sb, fn(sb, elem) {
+        case elem {
+          None -> sb
+          Some(ast.SpreadElement(argument:, ..)) ->
+            sb_mark_assign_targets(sb, argument)
+          Some(e) -> sb_mark_assign_element(sb, e)
+        }
+      })
+    ast.ObjectExpression(properties:, ..) ->
+      list.fold(properties, sb, fn(sb, prop) {
+        case prop {
+          ast.InitProperty(value:, ..) -> sb_mark_assign_element(sb, value)
+          ast.SpreadProperty(argument:) -> sb_mark_assign_targets(sb, argument)
+          ast.MethodProperty(..) | ast.AccessorProperty(..) -> sb
+        }
+      })
+    _ -> sb
+  }
+}
+
+fn sb_mark_assign_element(
+  sb: scope.ScopeBuilder,
+  expr: ast.Expression,
+) -> scope.ScopeBuilder {
+  case expr {
+    ast.AssignmentExpression(operator: ast.Assign, left:, ..) ->
+      sb_mark_assign_targets(sb, left)
+    _ -> sb_mark_assign_targets(sb, expr)
+  }
+}
+
+/// `sb_assign_ref` every leaf name of a BINDING pattern. A declarator init
+/// (`var x = e`) or for-in/of head is a write to each bound name; when a
+/// `var` name collides with an outer ParamBinding the declare is a no-op,
+/// so this is the only signal `never_box_names` sees.
+fn sb_mark_pattern_assigned(
+  sb: scope.ScopeBuilder,
+  pattern: ast.Pattern,
+) -> scope.ScopeBuilder {
+  list.fold(ast.pattern_bound_names(pattern), sb, scope.sb_assign_ref)
+}
+
 /// DestructuringAssignmentTarget: a bare (possibly parenthesized)
 /// eval/arguments identifier is the early error; nested array/object
 /// literals recurse; member expressions (`eval.x`) are simple assignment
@@ -2427,6 +2499,7 @@ fn parse_for_expression(
                 let p2 =
                   P(
                     ..p2,
+                    sb: sb_mark_assign_targets(p2.sb, expr),
                     has_invalid_pattern: False,
                     ctx: Ctx(
                       ..p2.ctx,
@@ -4798,6 +4871,7 @@ fn finish_assignment(
   op: ast.AssignmentOp,
   last_is_assignment: Option(Bool),
 ) -> Result(#(P, ast.Expression), ParseError) {
+  let p2 = P(..p2, sb: sb_mark_assign_targets(p2.sb, lhs))
   let p3 = advance(P(..p2, ctx: Ctx(..p2.ctx, has_cover_initializer: False)))
   use #(p4, rhs) <- result.map(parse_assignment_expression(p3))
   let p_out = case last_is_assignment {
@@ -5518,7 +5592,11 @@ fn finish_update_expr(
           Error(StrictModeModification(err_pos, n))
         _, _ ->
           Ok(#(
-            P(..p, last_expr_assignable: False),
+            P(
+              ..p,
+              last_expr_assignable: False,
+              sb: sb_mark_assign_targets(p.sb, arg),
+            ),
             ast.UpdateExpression(
               operator: op,
               prefix:,
