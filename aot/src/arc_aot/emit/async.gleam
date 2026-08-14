@@ -37,10 +37,10 @@
 //// NOT snapshotted; only cur_scope/scope_cursor/child_fn_cursor are.
 
 import arc/compiler/ast_util
-import arc/compiler/emit_2core/anf
-import arc/compiler/emit_2core/state.{type Emitter2}
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
+import arc_aot/emit/anf
+import arc_aot/emit/state.{type Emitter2}
 import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/int

@@ -4,13 +4,11 @@
 //// SPEC row 1409/1410: array via get_iterator/iter_next/iter_rest/iter_close;
 //// object via require_object_coercible/get_prop/copy_data_props.
 
-import arc/compiler/emit_2core/anf.{type Build}
-import arc/compiler/emit_2core/expr
-import arc/compiler/emit_2core/state.{
-  type BindMode, type EmitError, type Emitter2,
-}
 import arc/compiler/scope
 import arc/parser/ast
+import arc_aot/emit/anf.{type Build}
+import arc_aot/emit/expr
+import arc_aot/emit/state.{type BindMode, type EmitError, type Emitter2}
 import gleam/bit_array
 import gleam/list
 import gleam/option.{type Option, None, Some}

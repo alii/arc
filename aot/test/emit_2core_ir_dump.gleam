@@ -3,11 +3,11 @@
 //// Erlang for each of the three bench kernels so per-iteration host-call
 //// cost can be counted by eye. Run with:
 ////
-////     cd arc && gleam run -m emit_2core_ir_dump 2>&1 | tee .local/ir_dump.txt
+////     cd aot && gleam run -m emit_2core_ir_dump 2>&1 | tee .local/ir_dump.txt
 ////
 //// Not a test — delete once the perf work lands.
 
-import arc/compiler/emit_2core
+import arc_aot/emit as emit_2core
 import emit_2core_bench.{adder_js, obj_js, sum_js}
 import gleam/int
 import gleam/io
@@ -81,7 +81,7 @@ fn dump_richards_node_counts() -> Nil {
   io.println("═══════════════════════════════════════════════════════════════")
   io.println("═══ richards — per-function ir.Expr node counts")
   io.println("═══════════════════════════════════════════════════════════════")
-  let assert Ok(src) = simplifile.read("bench/v8-v7/richards_run.js")
+  let assert Ok(src) = simplifile.read("../bench/v8-v7/richards_run.js")
   let opts =
     emit_2core.CompileOpts(
       module_name: "irdump_richards",

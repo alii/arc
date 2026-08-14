@@ -9,10 +9,10 @@
 //// Run standalone (NOT via `gleam test` — the arc runner is parallel and
 //// has a 10s per-test cap):
 ////
-////     cd arc && gleam run -m emit_2core_bench
+////     cd aot && gleam run -m emit_2core_bench
 
-import arc/compiler/emit_2core
 import arc/engine
+import arc_aot/emit as emit_2core
 import emit_2core_harness as harness
 import gleam/dynamic.{type Dynamic}
 import gleam/int

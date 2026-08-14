@@ -4,9 +4,9 @@
 //// units) both return `DiffRun` so the test file can `assert c.stdout ==
 //// i.stdout` without caring which path produced it.
 
-import arc/compiler/emit_2core
 import arc/engine
 import arc/vm/host_hooks
+import arc_aot/emit as emit_2core
 import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/string
@@ -116,6 +116,9 @@ fn do_buf_reset() -> Nil
 
 @external(erlang, "emit_2core_harness_ffi", "buf_read")
 fn do_buf_read() -> BitArray
+
+@external(erlang, "emit_2core_harness_ffi", "env_is_truthy")
+pub fn env_is_truthy(name: String) -> Bool
 
 // ----------------------------------------------------------------------------
 // Compiled path (emit_2core → 2core IR → Core Erlang → BEAM)

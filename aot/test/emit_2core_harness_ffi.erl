@@ -1,7 +1,15 @@
 -module(emit_2core_harness_ffi).
 -export([capture_stdout/1, to_dynamic/1,
          seed_random/1, next_random/0,
-         buf_reset/0, buf_push/1, buf_read/0]).
+         buf_reset/0, buf_push/1, buf_read/0,
+         env_is_truthy/1]).
+
+env_is_truthy(Name) ->
+    case os:getenv(binary_to_list(Name)) of
+        "1" -> true;
+        "true" -> true;
+        _ -> false
+    end.
 
 %% Identity cast: any Gleam value -> gleam/dynamic.Dynamic. On the Erlang
 %% target Dynamic is `term()`, so this is just identity.

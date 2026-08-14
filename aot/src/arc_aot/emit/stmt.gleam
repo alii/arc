@@ -5,17 +5,17 @@
 //// R12: user-reachable failures surface as Error(EmitError), never panic.
 
 import arc/compiler/ast_util
-import arc/compiler/emit_2core/anf
-import arc/compiler/emit_2core/exn
-import arc/compiler/emit_2core/expr
-import arc/compiler/emit_2core/state.{
-  type BarrierCleanup, type EmitError, type Emitter2, FnDecl, StmtBody,
-}
 import arc/compiler/scope.{
   type Binding, type ScopeId, CaptureBinding, CatchBinding, ConstBinding,
   FnNameBinding, LetBinding, ParamBinding, VarBinding,
 }
 import arc/parser/ast
+import arc_aot/emit/anf
+import arc_aot/emit/exn
+import arc_aot/emit/expr
+import arc_aot/emit/state.{
+  type BarrierCleanup, type EmitError, type Emitter2, FnDecl, StmtBody,
+}
 import gleam/bit_array
 import gleam/dict
 import gleam/int

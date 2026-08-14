@@ -12,9 +12,9 @@
 //// survivors on globalThis; `t_maybe_collect` fires between microtasks;
 //// `.then#2` reads a survivor. Verify stdout matches AND no panic.
 ////
-////     cd arc && gleam run -m emit_2core_gc_verify_x8k2
+////     cd aot && gleam run -m emit_2core_gc_verify_x8k2
 
-import arc/compiler/emit_2core
+import arc_aot/emit as emit_2core
 import emit_2core_harness as harness
 import gleam/bit_array
 import gleam/dynamic.{type Dynamic}

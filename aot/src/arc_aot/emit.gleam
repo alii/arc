@@ -1,19 +1,19 @@
-//// arc AST + scope tree -> twocore IR module. Façade over emit_2core/{state,anf}
+//// arc AST + scope tree -> twocore IR module. Façade over emit/{state,anf}
 //// and the M12-M18 emit_* passes; body is filled in by M19.
 
 import arc/compiler/ast_util
-import arc/compiler/emit_2core/anf
-import arc/compiler/emit_2core/async
-import arc/compiler/emit_2core/class
-import arc/compiler/emit_2core/destructure
-import arc/compiler/emit_2core/exn
-import arc/compiler/emit_2core/expr
-import arc/compiler/emit_2core/func
-import arc/compiler/emit_2core/state
-import arc/compiler/emit_2core/stmt
 import arc/compiler/scope
 import arc/parser
 import arc/parser/ast
+import arc_aot/emit/anf
+import arc_aot/emit/async
+import arc_aot/emit/class
+import arc_aot/emit/destructure
+import arc_aot/emit/exn
+import arc_aot/emit/expr
+import arc_aot/emit/func
+import arc_aot/emit/state
+import arc_aot/emit/stmt
 import gleam/bit_array
 import gleam/dict
 import gleam/int

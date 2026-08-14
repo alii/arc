@@ -6,12 +6,12 @@
 //// the pending one downstream. R2: js_exn tag. D2: NO St threading.
 
 import arc/compiler/ast_util
-import arc/compiler/emit_2core/state.{type EmitError, type Emitter2}
 import arc/compiler/scope.{
   type Binding, CaptureBinding, CatchBinding, ConstBinding, FnNameBinding,
   LetBinding, ParamBinding, VarBinding,
 }
 import arc/parser/ast
+import arc_aot/emit/state.{type EmitError, type Emitter2}
 import gleam/dict
 import gleam/int
 import gleam/list

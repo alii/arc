@@ -14,12 +14,12 @@
 //// Ok — the Result wrapper exists to satisfy state.EmitDispatch.emit_expr.
 
 import arc/compiler/ast_util
-import arc/compiler/emit_2core/anf.{type Build}
-import arc/compiler/emit_2core/state.{type EmitError, type Emitter2}
 import arc/compiler/scope
 import arc/parser/ast
 import arc/vm/key
 import arc/vm/lexical
+import arc_aot/emit/anf.{type Build}
+import arc_aot/emit/state.{type EmitError, type Emitter2}
 import gleam/bit_array
 import gleam/dict
 import gleam/float

@@ -5,11 +5,11 @@
 //// {M,F,A} by wall time. Also reports per-run wall clock and cell-alloc
 //// count (js_store.alloc_since_gc delta).
 ////
-////     cd arc && gleam run -m emit_2core_profile
+////     cd aot && gleam run -m emit_2core_profile
 ////
 //// Not a test — profiling harness only.
 
-import arc/compiler/emit_2core
+import arc_aot/emit as emit_2core
 import emit_2core_bench.{adder_js, obj_js, sum_js}
 import emit_2core_harness as harness
 import gleam/dynamic.{type Dynamic}
@@ -1245,15 +1245,15 @@ pub fn bench_verify() -> Bool {
   // (3) richards_run.js prints "ok" — the bench self-checks queueCount/
   //     holdCount and throws if wrong, so "ok" == semantic correctness.
   let richards_ok =
-    correctness_gate("richards_run.js", "bench/v8-v7/richards_run.js")
+    correctness_gate("richards_run.js", "../bench/v8-v7/richards_run.js")
   // (4) deltablue_run.js completes without error.
   let deltablue_ok =
-    correctness_gate("deltablue_run.js", "bench/v8-v7/deltablue_run.js")
+    correctness_gate("deltablue_run.js", "../bench/v8-v7/deltablue_run.js")
 
   // (2) richards µs/run ≤ richards_us_target — untraced wall-clock, best of
   //     the runs so a one-off GC pause doesn't fail the gate.
   trace_reset()
-  let assert Ok(src) = simplifile.read("bench/v8-v7/richards_run.js")
+  let assert Ok(src) = simplifile.read("../bench/v8-v7/richards_run.js")
   let #(mod, seed) = compile_and_seed(src, "arc_prof_gate_richards")
   ffi_apply_js_main(mod, seed)
   // warm
@@ -1436,7 +1436,7 @@ pub fn bench_verify() -> Bool {
 pub fn raytrace_apply_verify() -> Bool {
   io.println("")
   io.println("══════ perf8 CC: raytrace-apply-verify ══════")
-  let assert Ok(src) = simplifile.read("bench/v8-v7/raytrace_run.js")
+  let assert Ok(src) = simplifile.read("../bench/v8-v7/raytrace_run.js")
   trace_reset()
   let #(mod, seed) = compile_and_seed(src, "arc_prof_rt_cc")
   // 1 warm run untraced (JIT + shape-learn + IC install)

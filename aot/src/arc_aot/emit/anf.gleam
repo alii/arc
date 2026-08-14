@@ -2,10 +2,10 @@
 //// twocore/ir — bind/host/cons_list/bind_if/guarded_binop/object_key_lit.
 //// Invariant #3: `host` is the ONLY CallHost("js", ..) site in emit_2core/*.
 
-import arc/compiler/emit_2core/state.{type Emitter2, Emitter2}
 import arc/parser/ast
 import arc/vm/key
 import arc/vm/value
+import arc_aot/emit/state.{type Emitter2, Emitter2}
 import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/int

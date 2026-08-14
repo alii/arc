@@ -5,18 +5,18 @@
 //// R7: _frame TupleGet indices 0-based (this=0, af=1, ho=2, nt=3).
 
 import arc/compiler/ast_util
-import arc/compiler/emit_2core/anf
-import arc/compiler/emit_2core/state.{
-  type EmitError, type Emitter2, type FnBody, type FnShape, Arrow, ClassCtor,
-  ClassInitFn, Emitter2, ExprBody, FieldInitAfterSuper, FnDecl, FnExpr, Method,
-  NoFieldInit, StmtBody,
-}
 import arc/compiler/scope.{
   type Binding, type FunctionInfo, type ScopeId, CaptureBinding, CatchBinding,
   ConstBinding, FnNameBinding, LetBinding, ParamBinding, VarBinding,
 }
 import arc/parser/ast
 import arc/vm/lexical
+import arc_aot/emit/anf
+import arc_aot/emit/state.{
+  type EmitError, type Emitter2, type FnBody, type FnShape, Arrow, ClassCtor,
+  ClassInitFn, Emitter2, ExprBody, FieldInitAfterSuper, FnDecl, FnExpr, Method,
+  NoFieldInit, StmtBody,
+}
 import gleam/bit_array
 import gleam/dict
 import gleam/int

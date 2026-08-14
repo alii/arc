@@ -5,17 +5,15 @@
 //// R7: 0-based TupleGet. R14: emit_function returns #(ir.Expr, Emitter2).
 
 import arc/compiler/ast_util
-import arc/compiler/emit_2core/anf
-import arc/compiler/emit_2core/func
-import arc/compiler/emit_2core/state.{
-  type EmitError, type Emitter2, ClassCtx, Emitter2,
-}
 import arc/compiler/scope.{
   type Binding, type FunctionInfo, CaptureBinding, CatchBinding, ConstBinding,
   FnNameBinding, LetBinding, ParamBinding, VarBinding,
 }
 import arc/parser/ast
 import arc/vm/lexical
+import arc_aot/emit/anf
+import arc_aot/emit/func
+import arc_aot/emit/state.{type EmitError, type Emitter2, ClassCtx, Emitter2}
 import gleam/bit_array
 import gleam/dict
 import gleam/int

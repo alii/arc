@@ -1,0 +1,12 @@
+name = "arc_aot"
+version = "0.1.0"
+target = "erlang"
+
+[dependencies]
+arc = { path = ".." }
+twocore = { git = "https://github.com/hiett/2core", ref = "66b8f69f18b67b8df4fe4374284dd6b5d6dc753b" }
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+gleam_erlang = ">= 1.0.0 and < 2.0.0"
+simplifile = ">= 2.0.0 and < 3.0.0"
+
+[dev-dependencies]

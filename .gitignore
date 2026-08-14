@@ -11,3 +11,4 @@ node_modules
 .local
 .claude/worktrees/
 .idea/
+/aot/build

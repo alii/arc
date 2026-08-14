@@ -4,7 +4,7 @@
 //// wrapper stripped, `alert` shimmed to throw, entry called once, prints
 //// "ok"). Not a `_test` module — run standalone:
 ////
-////     cd arc && gleam run -m emit_2core_v8v7_probe
+////     cd aot && gleam run -m emit_2core_v8v7_probe
 ////
 //// A compile/run failure is REPORTED, not fatal: this is measurement.
 
@@ -357,7 +357,7 @@
 // 200µs threshold or erl-ABI-coupled with other-bench win.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import arc/compiler/emit_2core
+import arc_aot/emit as emit_2core
 import emit_2core_harness as harness
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
@@ -365,7 +365,6 @@ import gleam/int
 import gleam/io
 import gleam/string
 import simplifile
-import test_runner
 import twocore/backend/build_beam
 import twocore/pipeline
 import twocore/runtime/rt_js_builtins
@@ -571,7 +570,7 @@ fn ext_refs(name: String) -> #(Int, Int) {
 }
 
 fn one(name: String) {
-  let path = "bench/v8-v7/" <> name <> "_run.js"
+  let path = "../bench/v8-v7/" <> name <> "_run.js"
   io.println("")
   io.println("═══ " <> name <> " (" <> path <> ") ═══")
   case simplifile.read(path) {
@@ -585,7 +584,7 @@ fn one(name: String) {
       // PROBE_SKIP_INTERP=1 skips the interpreter column — flag-bisect flips
       // only emitter consts, so re-timing the (unchanged) interpreter per
       // combo just wastes ~5s/bench.
-      let interp = case test_runner.get_env_is_truthy("PROBE_SKIP_INTERP") {
+      let interp = case harness.env_is_truthy("PROBE_SKIP_INTERP") {
         True -> Measured(0, 0)
         False -> bench_interp(source)
       }
