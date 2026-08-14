@@ -584,6 +584,17 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
 /// (§7.2.14 steps 2-3+14: null/undef vs anything is 1 iff the other is
 /// null/undef); NAdd is safe (both can't be 1) and lowers to a BEAM `+`
 /// BIF, so the whole `x == null` cond is zero call_ext.
+/// `left == right` as the raw i32 0|1 for cond position (stmt.emit_cond_i32).
+/// `binop` re-branches this to a JS Boolean; a cond feeds `ir.If` directly.
+pub fn loose_eq_i32(
+  left: ast.Expression,
+  right: ast.Expression,
+) -> Build(ir.Value) {
+  use l <- anf.then(expr_operand(left))
+  use r <- anf.then(expr_operand(right))
+  loose_eq(l, r)
+}
+
 fn loose_eq(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   case is_nullish_const(l), is_nullish_const(r) {
     True, _ -> nul_eq_inline(r)

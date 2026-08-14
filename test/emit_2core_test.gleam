@@ -157,3 +157,12 @@ pub fn instanceof_has_instance_diff_test() {
   assert i.stdout == <<"yn\n":utf8>>
   assert c.stdout == i.stdout
 }
+
+const cond_eq_src = "var a=1,b=1,c=2,o={};function f(x,y){if(x==y)return 'y';else return 'n'}console.log(f(a,b),f(a,c),f(null,undefined),f(o,o),f('1',1));if(a!=c)console.log('ne');if(a!=b)console.log('bad');var i=0;while(i!=3)i++;console.log(i);for(var j=5;j==5;j++)console.log('once')"
+
+pub fn cond_eq_diff_test() {
+  let i = harness.run_interpreted(cond_eq_src)
+  let c = harness.run_compiled(cond_eq_src)
+  assert i.stdout == <<"y n y y y\nne\n3\nonce\n":utf8>>
+  assert c.stdout == i.stdout
+}

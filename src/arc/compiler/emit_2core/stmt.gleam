@@ -7,6 +7,7 @@
 import arc/compiler/ast_util
 import arc/compiler/emit_2core/anf
 import arc/compiler/emit_2core/exn
+import arc/compiler/emit_2core/expr
 import arc/compiler/emit_2core/state.{
   type BarrierCleanup, type EmitError, type Emitter2, FnDecl, StmtBody,
 }
@@ -2852,14 +2853,16 @@ fn emit_cond_i32(
   k: Rk(ir.Value),
 ) -> Result(ir.Expr, EmitError) {
   case ast_util.unwrap_parens(cond) {
-    // `==`: expr.binop → loose_eq → Int 0|1 already; use it as the cond.
-    ast.BinaryExpression(operator: ast.Equal, ..) -> expr_(e, cond, k)
+    // `==`: expr.loose_eq_i32 → Int 0|1 (not expr.binop, which re-branches
+    // to a JS Boolean); use it as the cond.
+    ast.BinaryExpression(operator: ast.Equal, left:, right:, ..) -> {
+      let #(tree, e) = anf.run(expr.loose_eq_i32(left, right), e)
+      let_(e, tree, k)
+    }
     // `!=`: emit as `==` (Int 0|1) then invert via `=:= 0` → 1|0.
-    ast.BinaryExpression(operator: ast.NotEqual, left:, right:, span:) -> {
-      use e, cv <- expr_(
-        e,
-        ast.BinaryExpression(span:, operator: ast.Equal, left:, right:),
-      )
+    ast.BinaryExpression(operator: ast.NotEqual, left:, right:, ..) -> {
+      let #(tree, e) = anf.run(expr.loose_eq_i32(left, right), e)
+      use e, cv <- let_(e, tree)
       let_(e, ir.NumTerm(ir.NEq, cv, ir.ConstI32(0)), k)
     }
     // Relational: inline NumTerm fast path (TermTest(IsNumber)×2 ∧ →
