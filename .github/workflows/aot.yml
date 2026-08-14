@@ -1,15 +1,28 @@
-name: test
+name: aot
 
 on:
   push:
     branches:
       - master
       - main
+    paths:
+      - 'aot/**'
+      - 'src/**'
+      - 'gleam.toml'
+      - '.github/workflows/aot.yml'
   pull_request:
+    paths:
+      - 'aot/**'
+      - 'src/**'
+      - 'gleam.toml'
+      - '.github/workflows/aot.yml'
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aot
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,9 +32,7 @@ jobs:
           otp-version: '29'
           gleam-version: '1.17'
           rebar3-version: '3'
-          # elixir-version: "1"
       - run: gleam deps download
+      - run: gleam build
       - run: gleam test
       - run: gleam format --check src test
-      - name: root package must not import twocore
-        run: "! grep -rn 'import twocore' src test"
