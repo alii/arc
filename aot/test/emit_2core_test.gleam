@@ -702,3 +702,24 @@ pub fn coroutine_prologue_diff_test() {
     "3 object\n5 2 7\nfunction,function\np,true\nf0 2\nh 13\nC\naf 8\nf 12\n1\nk\n",
   )
 }
+
+/// Class-valued default parameters and heritage expressions, static privates on
+/// a subclass receiver, setter-only and static accessors, defaults reading
+/// `this`, `super` inside async and generator methods, field initialization
+/// order.
+pub fn class_heritage_and_members_edge_cases_diff_test() {
+  diff(
+    "function mk(Base = class { who(){ return 'base' } }){ return class extends Base { who(){ return 'd>' + super.who() } } }\nconsole.log(new (mk())().who(), new (mk(class { who(){ return 'x' } }))().who());\nclass B extends (class { static s = 1; v(){ return 2 } }) { }\nconsole.log(B.s, new B().v(), Object.getOwnPropertyNames(B).join(), Object.getOwnPropertyNames(class { static z(){} static y = 1 }).join());\nclass P { static #count = 0; static inc(){ return ++this.#count } }\nclass Q extends P {}\nconsole.log(P.inc(), P.inc()); try { Q.inc() } catch (e) { console.log(e.constructor.name) }\nclass S { set only(v){ this._o = v } static get sg(){ return 'sg' } m(a = this.k, b = a + 1){ return a + b } k = 5 }\nvar s = new S(); s.only = 3; console.log(s._o, s.only, S.sg, s.m(), s.m(1));\nclass AM { m(){ return 'am' } *g(){ yield 'ag' } }\nclass AD extends AM { async m(){ await null; return 'd:' + super.m() } *g(){ yield* super.g(); yield 'dg' } }\nnew AD().m().then(v => console.log(v)); console.log([...new AD().g()].join());\nclass F { a = this.init(); init(){ return 'i' } b = this.a + '2' } console.log(new F().b);\nclass G { x = 1 } class H extends G { x = this.x + 1; y = super.x } var h = new H(); console.log(h.x, h.y, Object.keys(h).join());\nvar arrowCls = () => class { static n = this === undefined }; console.log(arrowCls().n);\nclass I { static make(){ return () => new this() } } class J extends I {} console.log(I.make.call(J)() instanceof J);\nconsole.log(typeof class {}.prototype.constructor, (class { constructor(){ return } }).length);",
+    "d>base d>x\n1 2 length,name,prototype length,name,prototype,z,y\n1 2\nTypeError\n3 undefined sg 11 3\nag,dg\ni2\n2 undefined x,y\nfalse\ntrue\nfunction 0\nd:am\n",
+  )
+}
+
+/// `super` accessors and static blocks, `Reflect.construct` with a foreign
+/// new.target, a Proxy heritage, well-known-symbol members, Error and Promise
+/// subclasses with species, arrows reading `this` before `super()`.
+pub fn class_super_and_protocols_diff_test() {
+  diff(
+    "var log = [];\nclass A { constructor(){ log.push('A:' + new.target.name) } set sx(v){ log.push('set:' + v) } get gx(){ return 'gx:' + this.tag } }\nclass B extends A { tag = 'b'; constructor(){ var early = () => this; try { early() } catch (e) { log.push(e.constructor.name) } super(); super.sx = 5; log.push(super.gx) } static { log.push('static:' + (super.constructor === Function.prototype.constructor)) } }\nnew B(); console.log(log.join());\nvar R = Reflect.construct(B, [], function NT(){}); console.log(Object.getPrototypeOf(R) === Object.prototype || Object.getPrototypeOf(R).constructor.name);\nvar px = new Proxy(A, {}); class C extends px { } console.log(new C() instanceof A, log.pop());\nclass D { static get [Symbol.toStringTag](){ return 'DD' } get [Symbol.toStringTag](){ return 'dd' } static [Symbol.iterator] = function*(){ yield 1 } }\nconsole.log(String(new D()), Object.prototype.toString.call(D), [...D].join());\nclass E extends Error { constructor(m){ super(m); this.extra = 1 } get name(){ return 'EE' } }\nvar e = new E('msg'); console.log(String(e), e.extra, e instanceof E, Object.prototype.hasOwnProperty.call(e, 'message'));\nclass Pr extends Promise { static get [Symbol.species](){ return Promise } }\nvar pr = Pr.resolve(1); console.log(pr instanceof Pr, pr.then(() => {}) instanceof Pr, Pr.all([pr]) instanceof Pr);\nclass St { static a = 1; static b = St.a + this.a; static c = () => this.a } console.log(St.b, St.c());\ntry { class X extends A { constructor(){ super(); super() } } new X() } catch (e2) { console.log('dbl', e2.constructor.name, log.length) }\nclass Sym { [Symbol.hasInstance](v){ return 'inst' } static [Symbol.hasInstance](v){ return v === 7 } } console.log(7 instanceof Sym, new Sym() instanceof Sym);",
+    "static:true,ReferenceError,A:B,set:5,gx:b\nNT\ntrue A:C\n[object dd] [object DD] 1\nEE: msg 1 true true\ntrue false true\n2 1\ndbl ReferenceError 11\ntrue false\n",
+  )
+}

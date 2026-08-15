@@ -219,12 +219,12 @@ fn resolve_method_key(
 /// Define a list of class methods on `target_h` (ctor.prototype when
 /// `is_static: False`, ctor itself when `True`). Port of emit.gleam:7388-7536
 /// emit_class_methods. For each method: pop its analyzer-assigned child fn
-/// scope; build the closure via dispatch.emit_function(Method(..)); wrap with
-/// make_method to record [[HomeObject]]=target (M7 C4); then install:
-///  - private + instance → stash closure in private_fn_const slot (field-init
+/// scope; build the closure via dispatch.emit_function(Method(..)); then:
+///  - private + instance → make_method records [[HomeObject]]=target once,
+///    and the closure is stashed in its private_fn_const slot (the field-init
 ///    fn installs it per-instance per §7.3.29 PrivateMethodOrAccessorAdd)
-///  - private + static  → define_private on ctor now
-///  - public            → define_method on target now
+///  - private + static  → make_method, then define_private on ctor now
+///  - public            → define_method on target now (sets [[HomeObject]])
 fn emit_methods(
   e: Emitter2,
   methods: List(ast_util.ClassMethodEl),
@@ -246,16 +246,13 @@ fn emit_methods(
     child_id,
   ))
   use e, fn_h <- let_(e, ctree)
-  // M7 C4 t_make_method is JMutUnit — mutates fn_h in place; result is fn_h.
-  use e <- host_unit_(e, "make_method", [fn_h, target_h])
   case key {
-    ast.KeyPrivate(name:, ..) if !is_static ->
-      // Instance private method/accessor: closure built once here at class
-      // definition time with [[HomeObject]] set; stash it in the hidden
-      // class-scope const for the field-init fn to install per-instance.
+    ast.KeyPrivate(name:, ..) if !is_static -> {
+      use e <- host_unit_(e, "make_method", [fn_h, target_h])
       store_class_const(e, ast_util.private_fn_const(kind, name), fn_h, next)
+    }
     ast.KeyPrivate(name:, ..) -> {
-      // Static private: install on the constructor right now.
+      use e <- host_unit_(e, "make_method", [fn_h, target_h])
       use e, pk <- read_class_const(e, name)
       host_unit_(
         e,
