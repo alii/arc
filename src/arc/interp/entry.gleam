@@ -228,8 +228,9 @@ pub fn run_script(
 // One embedder-visible turn = the top-level run, then the turn epilogue
 // (`safepoint.finish_turn`): collect if the store grew past its threshold,
 // then the ONE microtask drain (or the embedder's own loop, `finish`), with
-// the completion value rooted throughout. `engine.eval*` / `repl_eval` are
-// `script_turn`, `engine.call*` is `call_turn`.
+// the completion value rooted throughout. The engine's `eval*` / `repl_eval`
+// are `script_turn` and its `call*` is `call_turn`; a module body ends its
+// turn the same way inside `arc/module`.
 
 /// The post-run driver of a turn: `rt/async.drain`, or an embedder macrotask
 /// loop that drains as part of its own cycle.
@@ -258,14 +259,6 @@ pub fn script_turn(
   )
 }
 
-/// `script_turn` with the default driver: the one microtask drain.
-pub fn end_script(
-  agent: Agent,
-  template: FuncTemplate,
-) -> #(Completion, Agent) {
-  script_turn(agent, template, rt_async.drain)
-}
-
 /// Call a held function value as a whole turn: `callee(this, ...args)`
 /// through the runtime's one `[[Call]]` entry (any callable: bytecode,
 /// native, host, bound, proxy; a non-callable is a TypeError completion),
@@ -283,16 +276,6 @@ pub fn call_turn(
     completion,
     safepoint.finish_turn(agent, [completion_value(completion)], finish),
   )
-}
-
-/// `call_turn` with the default driver: the one microtask drain.
-pub fn end_call(
-  agent: Agent,
-  callee: JsVal,
-  this: JsVal,
-  args: List(JsVal),
-) -> #(Completion, Agent) {
-  call_turn(agent, callee, this, args, rt_async.drain)
 }
 
 // -- JsOps.call_bytecode / construct_bytecode ----------------------------------

@@ -11,6 +11,7 @@ import arc/compiler.{type ExportSeed}
 import arc/esm
 import arc/interp/entry
 import arc/interp/interpreter
+import arc/interp/safepoint
 import arc/interp/state.{type State, State}
 import arc/link
 import arc/module/graph
@@ -435,7 +436,9 @@ type ModuleEvalStatus {
 /// The post-body driver of one evaluation: `rt/async.drain` for the static
 /// entry points; identity for dynamic import and deferred triggers, which
 /// run inside a job or a body on the host's own microtask drain and must
-/// never drain re-entrantly.
+/// never drain re-entrantly. Either way it runs as the body's turn epilogue
+/// (`safepoint.finish_turn`): the body's completion value stays rooted while
+/// it collects and drains.
 pub type Finish =
   fn(Agent) -> Agent
 
@@ -956,15 +959,15 @@ fn run_module_turns(
   let #(step, st) =
     entry.run_turn(module_activation(st, compiled.template, seeds))
   case step {
-    StepReturn(v) -> #(BodyReturned(v), finish(st))
-    StepThrow(e) -> #(BodyThrew(e), finish(st))
+    StepReturn(v) -> #(BodyReturned(v), safepoint.finish_turn(st, [v], finish))
+    StepThrow(e) -> #(BodyThrew(e), safepoint.finish_turn(st, [e], finish))
     StepAwait(awaited, resume) ->
       drive_top_level_await(st, awaited, resume, finish)
     // `yield` cannot occur outside a generator body.
     StepYield(..) -> {
       let #(err, st) =
         new_error(st, TypeErr, "InternalError: module body yielded")
-      #(BodyThrew(err), finish(st))
+      #(BodyThrew(err), safepoint.finish_turn(st, [err], finish))
     }
   }
 }
@@ -991,7 +994,7 @@ fn drive_top_level_await(
   let st = rt_store.t_cell_set(st, data, SPromiseData(pstate, True))
   let #(ctx, st) = rt_store.t_cell_new(st, SAsyncContext(resume:, promise:))
   let st = rt_async.t_await(st, ctx, awaited)
-  let st = finish(st)
+  let st = safepoint.finish_turn(st, [], finish)
   case rt_async.promise_data(st, promise) {
     #(_, PromiseFulfilled(v), _) -> #(BodyReturned(v), st)
     #(_, PromiseRejected(reason), _) -> #(BodyThrew(reason), st)
