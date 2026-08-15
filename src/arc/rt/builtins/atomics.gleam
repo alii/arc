@@ -27,6 +27,7 @@
 ////   (detached → TypeError, shrunk → RangeError).
 
 import arc/host_hooks
+import arc/rt/async as rt_async
 import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -45,7 +46,7 @@ import arc/rt/types.{
   BigUint64Kind, Detached, Int16Kind, Int32Kind, Int8Kind, JFloat, JInt, JNan,
   JNegInf, JPosInf, KHandle, KNum, KUndef, NumKind, OwnerBlock, SObject, Shared,
   TypedArrayObj, Uint16Kind, Uint32Kind, Uint8Kind, classify, mk_bigint, mk_bool,
-  mk_number, mk_object, mk_string, mk_undefined,
+  mk_number, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -641,7 +642,7 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
     True, _ -> {
       let outcome =
         sab.wait_sync(owner, byte_off, expected, option.unwrap(timeout_ms, -1))
-      #(mk_string(sab.outcome_string(outcome)), st)
+      #(rt_async.wait_result_js(outcome), st)
     }
     // Async, t = 0 (steps 17-21): compare, then { async: false, value:
     // "not-equal" | "timed-out" } WITHOUT ever joining the WaiterList — a
@@ -649,10 +650,10 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
     False, Some(0) -> {
       let live = sab.read_part(owner, byte_off, elem_size(info))
       let outcome = case live == expected {
-        True -> sab.TimedOut
-        False -> sab.NotEqual
+        True -> rt_async.TimedOut
+        False -> rt_async.NotEqual
       }
-      wait_result_object(st, False, mk_string(sab.outcome_string(outcome)))
+      wait_result_object(st, False, rt_async.wait_result_js(outcome))
     }
     // Async (steps 22-32): compare-and-AddWaiter in the owner; the waiter
     // joins `st.waiters`, and this agent's drain wakes it (the owner's
@@ -667,7 +668,7 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
           wait_result_object(
             st,
             False,
-            mk_string(sab.outcome_string(sab.NotEqual)),
+            rt_async.wait_result_js(rt_async.NotEqual),
           )
       }
     }

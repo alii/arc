@@ -21,7 +21,7 @@
 //// in the owner ever races a timer: an expiring waiter withdraws with
 //// `cancel`, and `already_woken` means the wake is already in its mailbox.
 
-import arc/rt/async as rt_async
+import arc/rt/async.{type WaitResult} as rt_async
 import arc/rt/buffer
 import arc/rt/types.{
   type Agent, type Handle, type SabOwner, type WaiterRef, LocalBlock, OwnerBlock,
@@ -87,32 +87,17 @@ pub fn grow(owner: SabOwner, new_byte_length: Int) -> Result(Nil, Nil)
 
 // ── waiters ─────────────────────────────────────────────────────────────────
 
-/// How a wait ended (§25.4.3.14 DoWait's three result strings).
-pub type WaitOutcome {
-  Woken
-  TimedOut
-  NotEqual
-}
-
-/// The spec string for an outcome.
-pub fn outcome_string(outcome: WaitOutcome) -> String {
-  case outcome {
-    Woken -> "ok"
-    TimedOut -> "timed-out"
-    NotEqual -> "not-equal"
-  }
-}
-
 /// §25.4.3.14 DoWait, sync mode: if the `byte_size(expected)` bytes at
 /// `byte_offset` still equal `expected`, join the WaiterList and BLOCK this
 /// process until notified or `timeout_ms` elapses (negative = forever).
+/// The owner's reply atoms are `rt_async.WaitResult`'s constructors.
 @external(erlang, "arc_rt_sab_ffi", "wait_sync")
 pub fn wait_sync(
   owner: SabOwner,
   byte_offset: Int,
   expected: BitArray,
   timeout_ms: Int,
-) -> WaitOutcome
+) -> WaitResult
 
 /// §25.4.3.11 / Atomics.notify: wake up to `count` waiters at `byte_offset`,
 /// FIFO. Returns how many were woken.

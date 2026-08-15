@@ -34,7 +34,7 @@
 
 -export([spawn_owner/1, byte_length/1, read/1, read_part/3, write/3,
          update/4, grow/2, make_waiter_ref/0, wait_sync/4, wait_async/4,
-         cancel/2, notify/3, take_wake/1, await_wake/1]).
+         cancel/2, notify/3, take_wake/2, await_wake/1]).
 
 %% erlang `receive ... after` rejects timeouts above 16#FFFFFFFF.
 -define(MAX_RECV_MS, 16#FFFFFFFF).
@@ -189,11 +189,15 @@ cancel(Owner, WRef) -> call(Owner, {cancel, WRef}).
 
 notify(Owner, Off, Count) -> call(Owner, {notify, Off, Count}).
 
-%% Dequeue the oldest async wake addressed to this process, blocking at
-%% most TimeoutMs (negative = only what is already queued). A sync waiter's
-%% wake never sits here unclaimed: block/3 consumes its own, by ref.
-%% Gleam: Option(WaiterRef).
-take_wake(TimeoutMs) ->
+%% Dequeue the oldest async wake for one of Refs -- the calling agent's own
+%% pending registrations -- blocking at most TimeoutMs (negative = only
+%% what is already queued). Selective on Refs: a wake for a registration
+%% the caller does not hold (another agent drained from this same process)
+%% stays queued for its holder instead of being taken and dropped. A sync
+%% waiter's wake never sits here unclaimed: block/3 consumes its own, by
+%% ref. Gleam: Option(WaiterRef).
+take_wake(Refs, TimeoutMs) ->
+    Own = maps:from_keys(Refs, []),
     Timeout =
         if
             TimeoutMs < 0 -> 0;
@@ -201,7 +205,7 @@ take_wake(TimeoutMs) ->
             true -> TimeoutMs
         end,
     receive
-        {arc_sab_wake, WRef, async} -> {some, WRef}
+        {arc_sab_wake, WRef, async} when is_map_key(WRef, Own) -> {some, WRef}
     after Timeout ->
         none
     end.

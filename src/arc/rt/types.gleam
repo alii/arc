@@ -3648,6 +3648,8 @@ pub type Agent {
     /// (§25.4.3.14 DoWait, async mode): this agent's side of the WaiterLists
     /// its waiters joined in the blocks' owner processes. Rooted by `rt/gc`;
     /// settled by `rt/async.drain` (owner wake messages and timeout jobs).
+    /// The wakes are sent to the BEAM process that registered the waiter,
+    /// so an agent holding any is drained from that process.
     waiters: List(AsyncWaiter),
   )
 }

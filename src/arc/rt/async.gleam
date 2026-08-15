@@ -214,13 +214,15 @@ pub fn t_enqueue_job(st: Agent, job: Job) -> Agent {
 /// engine after each eval/call; NEVER mid-expression.
 ///
 /// Pending `Atomics.waitAsync` waiters are the drain's other event source
-/// (§9.9 forward progress): between jobs it applies every owner wake
-/// already delivered to this process and fires every timeout job whose
-/// deadline passed; when the queue runs dry with a timeout still armed it
-/// blocks in a receive for a wake until the earliest deadline instead of
-/// exiting. Waiters with no timeout do not hold the drain open: their wakes
-/// are picked up by the next drain (the embedder's loop decides when that
-/// runs), exactly like an unsettled host promise.
+/// (§9.9 forward progress): between jobs it applies every owner wake for
+/// one of this agent's waiters already delivered to this process and fires
+/// every timeout job whose deadline passed; when the queue runs dry with a
+/// timeout still armed it blocks in a receive for a wake until the earliest
+/// deadline instead of exiting. Waiters with no timeout do not hold the
+/// drain open: their wakes are picked up by the next drain (the embedder's
+/// loop decides when that runs), exactly like an unsettled host promise.
+/// Wakes are addressed to the BEAM process that registered the waiter, so
+/// an agent with waiters pending is drained from that same process.
 pub fn drain(st: Agent) -> Agent {
   let st = case st.waiters {
     [] -> st
@@ -229,8 +231,8 @@ pub fn drain(st: Agent) -> Agent {
   let js = require_js(st)
   case jq_pop(js.microtasks) {
     None ->
-      case next_deadline_timeout(st) {
-        Some(wait_ms) -> drain(await_wake_until(st, wait_ms))
+      case earliest_deadline(st) {
+        Some(deadline) -> drain(idle_until(st, deadline))
         None -> finish_drain(st)
       }
     Some(#(job, rest)) -> {
@@ -248,16 +250,25 @@ pub fn drain(st: Agent) -> Agent {
 // `arc_rt_sab_ffi`); `Agent.waiters` is this agent's side of it: which
 // registrations are still pending here, their promise capabilities and
 // deadlines. The owner wakes a registration by message
-// (`{arc_sab_wake, Ref, _}` to this process); the timeout job withdraws it
-// (`cancel`), and an `AlreadyWoken` answer means the wake beat the timeout
-// and is already in this mailbox — the notifier counted it, so it is "ok".
+// (`{arc_sab_wake, Ref, _}` to the process that registered it); the timeout
+// job withdraws it (`cancel`), and an `AlreadyWoken` answer means the wake
+// beat the timeout and is already in this mailbox: the notifier counted it,
+// so it is "ok".
+//
+// Process affinity. A wake goes to a mailbox, not to an `Agent` value, so an
+// agent's waiters are serviced by draining it in the process that
+// registered them. The drain only ever receives wakes for refs in its own
+// `waiters` (a selective receive), so a second agent drained from the same
+// process finds its wakes still queued rather than eaten.
 
 /// The three observable outcomes of a wait (§25.4.3.14 DoWait): woken,
-/// timed out, value mismatch. Every completion — a sync return value, a
-/// waitAsync result object, a promise settlement — goes through
+/// timed out, value mismatch. Every completion (the sync return value, a
+/// waitAsync result object, a promise settlement) goes through
 /// `wait_result_js`, so the spec's three result strings are spelled once.
+/// `rt/sab.wait_sync` returns one straight from the FFI, whose reply atoms
+/// are these constructors.
 pub type WaitResult {
-  WaitedOk
+  Woken
   TimedOut
   NotEqual
 }
@@ -265,11 +276,15 @@ pub type WaitResult {
 /// The spec string a `WaitResult` surfaces to JS as.
 pub fn wait_result_js(result: WaitResult) -> JsVal {
   mk_string(case result {
-    WaitedOk -> "ok"
+    Woken -> "ok"
     TimedOut -> "timed-out"
     NotEqual -> "not-equal"
   })
 }
+
+/// The longest a single `receive ... after` may wait (Erlang rejects a
+/// timeout above 16#FFFFFFFF ms); a longer idle goes round the drain again.
+const max_receive_ms = 0xFFFFFFFF
 
 /// The owner's answer to a timeout job withdrawing its registration.
 type Cancellation {
@@ -284,10 +299,11 @@ type Cancellation {
 @external(erlang, "arc_rt_sab_ffi", "cancel")
 fn cancel_waiter(owner: SabOwner, ref: WaiterRef) -> Cancellation
 
-/// The oldest owner wake delivered to this process, waiting at most
-/// `timeout_ms` for one (negative = only what is already here).
+/// The oldest owner wake for one of `refs` delivered to this process,
+/// waiting at most `timeout_ms` for one (negative = only what is already
+/// here). Wakes for any other ref are left in the mailbox.
 @external(erlang, "arc_rt_sab_ffi", "take_wake")
-fn take_wake(timeout_ms: Int) -> Option(WaiterRef)
+fn take_wake(refs: List(WaiterRef), timeout_ms: Int) -> Option(WaiterRef)
 
 /// Consume the wake for `ref` the owner reported `AlreadyWoken`.
 @external(erlang, "arc_rt_sab_ffi", "await_wake")
@@ -318,38 +334,52 @@ pub fn t_add_waiter(
 }
 
 /// Between jobs: apply every wake already delivered, then run the timeout
-/// jobs that are due.
+/// jobs that are due by the host clock.
 fn service_waiters(st: Agent) -> Agent {
-  fire_expired_waiters(apply_pending_wakes(st))
+  fire_due_waiters(apply_pending_wakes(st), st.hooks.monotonic_now())
 }
 
-/// Apply every owner wake already in this process's mailbox.
+/// The refs of this agent's pending registrations: the only wakes it takes.
+fn pending_refs(st: Agent) -> List(WaiterRef) {
+  list.map(st.waiters, fn(w) { w.ref })
+}
+
+/// Apply every wake for one of this agent's waiters already in this
+/// process's mailbox.
 fn apply_pending_wakes(st: Agent) -> Agent {
-  case take_wake(-1) {
+  case take_wake(pending_refs(st), -1) {
     None -> st
     Some(ref) -> apply_pending_wakes(t_wake_waiter(st, ref))
   }
 }
 
-/// Dry queue with a timeout job armed `wait_ms` from now: block for an
-/// owner wake until then. A wake that arrives is applied (its resolve job
-/// refills the queue); otherwise the deadline has come and the next pass
-/// fires the job.
-fn await_wake_until(st: Agent, wait_ms: Int) -> Agent {
-  case take_wake(wait_ms) {
-    None -> st
+/// Dry queue with a timeout job armed for `deadline`: block for a wake for
+/// one of this agent's waiters until then. A wake that arrives is applied
+/// (its resolve job refills the queue). Otherwise the whole span has passed
+/// on the BEAM's own clock, and every job armed for `deadline` runs now
+/// whatever `hooks.monotonic_now` reads: the receive waited in real time,
+/// so a host clock that does not advance by itself (virtualised, frozen)
+/// is not what decides the job is due, or the drain would idle here again
+/// and again with nothing able to move it on.
+fn idle_until(st: Agent, deadline: Int) -> Agent {
+  let wait_ms = int.max(deadline - st.hooks.monotonic_now(), 0) + 1
+  case take_wake(pending_refs(st), wait_ms) {
     Some(ref) -> t_wake_waiter(st, ref)
+    None if wait_ms <= max_receive_ms -> fire_due_waiters(st, deadline)
+    // One receive cannot wait that long: not there yet, go round again.
+    None -> st
   }
 }
 
 /// §25.4.3.12 NotifyWaiter as it lands on the waiting agent: the
 /// registration leaves `waiters` (which cancels its timeout job) and
 /// EnqueueResolveInAgentJob queues the job that resolves its promise with
-/// "ok" — a JOB, never a synchronous settle; drain afterwards. A wake
-/// naming no pending registration (already timed out and consumed) changes
-/// nothing. The drain takes wakes itself; this is for an embedder idle
-/// loop that received an `{arc_sab_wake, Ref, async}` message of its own
-/// accord while the agent had nothing to run.
+/// "ok": a JOB, never a synchronous settle; drain afterwards. A wake naming
+/// no registration pending on THIS agent changes nothing (and is lost to
+/// whichever agent it did belong to). The drain takes its own wakes; this
+/// is for an embedder idle loop that received an
+/// `{arc_sab_wake, Ref, async}` message of its own accord, in the process
+/// that registered the waiter, while the agent had nothing to run.
 pub fn t_wake_waiter(st: Agent, ref: WaiterRef) -> Agent {
   case list.partition(st.waiters, fn(w) { w.ref == ref }) {
     #([], _) -> st
@@ -362,29 +392,28 @@ fn enqueue_resolve_ok(st: Agent, w: AsyncWaiter) -> Agent {
     st,
     ReactionJob(
       handler: IdentityPassThrough,
-      arg: wait_result_js(WaitedOk),
+      arg: wait_result_js(Woken),
       resolve: w.resolve,
       reject: w.reject,
     ),
   )
 }
 
-/// Run every armed waitAsync timeout job whose deadline has passed
-/// (§25.4.3.14 step 29.b's job body): withdraw the registration from the
-/// owner and `! Call(promiseCapability.[[Resolve]], undefined,
+/// Run every armed waitAsync timeout job whose deadline is at or before
+/// `cutoff` (§25.4.3.14 step 29.b's job body): withdraw the registration
+/// from the owner and `! Call(promiseCapability.[[Resolve]], undefined,
 /// « "timed-out" »)` right here, between microtasks. If a notify got to
 /// the registration first the owner says so; that wake is consumed now and
 /// the waiter is woken instead, so a counted notify is never lost.
-fn fire_expired_waiters(st: Agent) -> Agent {
-  let now = st.hooks.monotonic_now()
-  let #(expired, pending) =
+fn fire_due_waiters(st: Agent, cutoff: Int) -> Agent {
+  let #(due, pending) =
     list.partition(st.waiters, fn(w) {
       case w.deadline {
-        Some(d) -> d <= now
+        Some(d) -> d <= cutoff
         None -> False
       }
     })
-  list.fold(expired, Agent(..st, waiters: pending), fn(st, w) {
+  list.fold(due, Agent(..st, waiters: pending), fn(st, w) {
     case cancel_waiter(w.owner, w.ref) {
       Cancelled -> call_settle(st, w.resolve, [wait_result_js(TimedOut)])
       AlreadyWoken -> {
@@ -395,18 +424,15 @@ fn fire_expired_waiters(st: Agent) -> Agent {
   })
 }
 
-/// Milliseconds until the earliest armed waitAsync timeout job, if any.
-fn next_deadline_timeout(st: Agent) -> Option(Int) {
-  let earliest =
-    list.fold(st.waiters, None, fn(acc, w) {
-      case acc, w.deadline {
-        None, d -> d
-        Some(a), Some(d) -> Some(int.min(a, d))
-        Some(a), None -> Some(a)
-      }
-    })
-  use deadline <- option.map(earliest)
-  int.max(deadline - st.hooks.monotonic_now(), 0) + 1
+/// The earliest deadline among the armed waitAsync timeout jobs, if any.
+fn earliest_deadline(st: Agent) -> Option(Int) {
+  list.fold(st.waiters, None, fn(acc, w) {
+    case acc, w.deadline {
+      None, d -> d
+      Some(a), Some(d) -> Some(int.min(a, d))
+      Some(a), None -> Some(a)
+    }
+  })
 }
 
 /// The drain's terminal exit: report every promise still rejected with no
