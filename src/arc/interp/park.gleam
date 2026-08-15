@@ -4,14 +4,14 @@
 
 import arc/interp/call
 import arc/interp/state.{type State, State}
-import arc/rt/bytecode.{type SuspendedFrame, SuspendedFrame}
+import arc/rt/bytecode.{type ParkedAt, type SuspendedFrame, SuspendedFrame}
 import arc/rt/types.{type Agent, JsCell, mk_undefined}
 import gleam/option
 
 /// Snapshot `state` (already fixed up by the suspending opcode) as a frame
-/// `JsOps.resume_frame` can rebuild from an `Agent` alone. `at_start` marks
-/// the `InitialYield` park, whose first resumption delivers no value.
-pub fn park(state: State, at_start: Bool) -> SuspendedFrame {
+/// `JsOps.resume_frame` can rebuild from an `Agent` alone. `parked` says
+/// how the next resumption is delivered to it.
+pub fn park(state: State, parked: ParkedAt) -> SuspendedFrame {
   SuspendedFrame(
     template: state.func,
     pc: state.pc,
@@ -22,7 +22,7 @@ pub fn park(state: State, at_start: Bool) -> SuspendedFrame {
     home_object: state.home_object,
     eval_env: option.map(state.eval_env, fn(h) { h.id }),
     line: call.current_line(state.agent),
-    at_start:,
+    parked:,
     call_args: state.call_args,
   )
 }
@@ -42,7 +42,7 @@ pub fn unpark(agent: Agent, frame: SuspendedFrame) -> State {
     home_object:,
     eval_env:,
     line:,
-    at_start: _,
+    parked: _,
     call_args:,
   ) = frame
   State(

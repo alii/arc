@@ -96,11 +96,31 @@ pub type TryFrame {
   TryFrame(catch_target: Int, stack_depth: Int, kind: TryKind(Pc))
 }
 
+/// Where a parked frame takes its next resumption (`sent = #(mode, value)`).
+pub type ParkedAt {
+  /// `InitialYield`, or an async body not yet run: the first sent value is
+  /// not delivered to the operand stack.
+  ParkedStart
+  /// A suspending instruction (`yield`, `await`, a `yield*` site): the sent
+  /// value is pushed for it, or a throw / return completion is injected
+  /// there. A frame parked at a `yield*` site forwards an injected throw or
+  /// return to the delegate iterator first (§27.5.3.8 steps 7.b/7.c).
+  ParkedOp
+  /// An async `yield*` site awaiting the delegate's forwarded `.return(v)`
+  /// result (§27.5.3.8 step 7.c.v): fulfilled and done ends the body with a
+  /// return completion, not done yields the value and stays delegating.
+  ParkedDelegateReturn
+  /// An async `yield*` site awaiting AsyncIteratorClose of a delegate that
+  /// has no `.throw` (§27.5.3.8 step 7.b.iii): once it settles to an object,
+  /// a TypeError is thrown at the site.
+  ParkedDelegateClose
+}
+
 /// A coroutine body parked at `InitialYield`/`yield`/`await`: everything
 /// `JsOps.resume_frame` needs to rebuild the activation from the `Agent`
 /// alone. The parking opcode has already applied its pc/stack fixup, so a
-/// resume restores these fields verbatim and, unless `at_start`, pushes the
-/// sent value for the resumed instruction to consume.
+/// resume restores these fields verbatim and delivers the sent value as
+/// `parked` says.
 pub type SuspendedFrame {
   SuspendedFrame(
     template: FuncTemplate,
@@ -114,9 +134,7 @@ pub type SuspendedFrame {
     eval_env: Option(Int),
     /// Source line the body was on when it parked.
     line: Int,
-    /// Parked by `InitialYield` before the body proper ran: the first
-    /// resumption's sent value is not delivered to the operand stack.
-    at_start: Bool,
+    parked: ParkedAt,
     /// The activation's argument list. An async function parks at pc 0
     /// before its prologue, so `arguments` / rest are built on resume.
     call_args: List(JsVal),

@@ -3229,16 +3229,17 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     // §7.4.3 GetIterator(obj, async): @@asyncIterator, else @@iterator
     // wrapped by CreateAsyncFromSyncIterator. Pushes the ITERATOR object;
-    // the emitter follows with IteratorRecord to cache `next`.
+    // `next` is read by what follows (IteratorRecord for `yield*`, each
+    // step of a for-await loop), not here.
     GetAsyncIterator ->
       case state.stack {
         [iterable, ..rest] -> {
-          use #(record, state) <- result.map(rt2(
+          use #(iterator, state) <- result.map(rt2(
             state,
-            iter_protocol.get_iterator_async,
+            async_iterator_object,
             iterable,
           ))
-          State(..state, stack: [record.iterator, ..rest], pc: state.pc + 1)
+          State(..state, stack: [iterator, ..rest], pc: state.pc + 1)
         }
         _ -> underflow(state, "GetAsyncIterator")
       }
@@ -3333,14 +3334,20 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // §7.4.11 normal-completion close. [rec, ..] → [..]. An undefined slot
-    // ([[Done]]) is a no-op.
+    // ([[Done]]) is a no-op. A for-await loop keeps the bare async iterator
+    // in its slot, closed the same way when a `return`/`break` crosses it.
     IteratorClose ->
       case state.stack {
         [rec, ..rest] -> {
           let state = State(..state, stack: rest, pc: state.pc + 1)
-          case is_undef(rec) {
-            True -> Ok(state)
-            False -> rt_unit3(state, rt_lang.t_iter_close, rec, False)
+          case is_undef(rec), rt_lang.record_parts(state.agent, rec) {
+            True, _ -> Ok(state)
+            False, Some(_) -> rt_unit3(state, rt_lang.t_iter_close, rec, False)
+            False, None ->
+              call.guarded_unit(state, iter_protocol.iterator_close_normal(
+                _,
+                rec,
+              ))
           }
         }
         [] -> underflow(state, "IteratorClose")
@@ -3352,14 +3359,25 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [thrown, rec, ..rest] -> {
           let state = State(..state, stack: rest)
-          case is_undef(rec) {
-            True -> Error(Threw(thrown, state))
-            False ->
-              case rt_unit3(state, rt_lang.t_iter_close, rec, True) {
-                Ok(state) -> Error(Threw(thrown, state))
-                Error(Threw(_, state)) -> Error(Threw(thrown, state))
-                Error(other) -> Error(other)
-              }
+          let closed = case
+            is_undef(rec),
+            rt_lang.record_parts(state.agent, rec)
+          {
+            True, _ -> Ok(state)
+            False, Some(_) -> rt_unit3(state, rt_lang.t_iter_close, rec, True)
+            False, None -> {
+              use #(_ignored, state) <- result.map(rt2(
+                state,
+                iter_protocol.call_return,
+                rec,
+              ))
+              state
+            }
+          }
+          case closed {
+            Ok(state) -> Error(Threw(thrown, state))
+            Error(Threw(_, state)) -> Error(Threw(thrown, state))
+            Error(other) -> Error(other)
           }
         }
         _ -> underflow(state, "IteratorCloseThrow")
@@ -3416,12 +3434,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> Error(Yielded(PlainYield, mk_undefined(), state))
       }
 
-    // Self-looping delegate: [arg, iter, ..]. Calls iter.next(arg); done →
-    // push value, pc+1; !done → yield the value with pc kept HERE so the
-    // resume re-enters with [resume_val, iter, ..]. `iter` may still be the
-    // Iterator Record GetIterator pushed: unwrap it to the real iterator in
-    // place first, so gen.return/.throw forwarding off the parked stack
-    // sees the iterator itself.
+    // Self-looping delegate: [arg, rec, ..]. Calls the record's cached
+    // `next` (§27.5.3.8 step 7.a.i); done → push value, pc+1; !done → yield
+    // the value with pc kept HERE so the resume re-enters with
+    // [resume_val, rec, ..]. `.throw`/`.return` reach the delegate through
+    // `entry.resume_frame`, which finds the record on the parked stack.
     YieldStar ->
       case state.stack {
         [arg, slot, ..rest] -> {
@@ -3429,7 +3446,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             state,
             slot,
           ))
-          let state = State(..state, stack: [arg, iterator, ..rest])
           use #(#(done, val), state) <- result.try(delegate_step(
             state,
             iterator,
@@ -3446,8 +3462,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     // [arg, rec, ..]: Call(rec.[[NextMethod]], rec.[[Iterator]], «arg»),
     // replace arg with the result → [result, rec, ..], pc+1. The following
-    // Await suspends on it. `after_pc` is only read by the async-generator
-    // driver when it resumes a delegation from outside.
+    // Await suspends on it. A `.throw`/`.return` arriving while parked here
+    // is forwarded to the delegate by `entry.resume_frame`.
     AsyncYieldStarNext(after_pc: _) ->
       case state.stack {
         [arg, slot, ..rest] -> {
@@ -4336,9 +4352,65 @@ fn get_super_value(
   }
 }
 
+/// §7.4.3 GetIterator(obj, async) up to the iterator OBJECT: the
+/// `@@asyncIterator` method's result (which must be an Object), or for a
+/// sync-only iterable the CreateAsyncFromSyncIterator wrapper (whose sync
+/// record does cache `next`, §7.4.3 step 1.b.ii). The async iterator's own
+/// `next` is left unread for the consumer.
+fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
+  let #(method, agent) =
+    rt_obj.t_get_prop(
+      agent,
+      iterable,
+      SymbolKey(rt_types.symbol_async_iterator),
+    )
+  case classify(method) {
+    // Step 1.b: GetMethod(obj, @@iterator), GetIteratorFromMethod, wrap.
+    KUndef | KNull -> {
+      let #(sync_method, agent) =
+        rt_obj.t_get_prop(agent, iterable, SymbolKey(rt_types.symbol_iterator))
+      case rt_call.is_callable(agent, sync_method) {
+        False -> {
+          let #(ty, agent) = rt_val.t_type_of(agent, iterable)
+          let #(err, agent) =
+            agent.store.ops.new_error(
+              agent,
+              rt_types.TypeErr,
+              ty <> " is not async iterable",
+            )
+          rt_store.t_throw(agent, err)
+        }
+        True -> {
+          let #(sync, agent) =
+            iter_protocol.get_iterator_from_method(agent, iterable, sync_method)
+          let #(record, agent) =
+            iter_protocol.create_async_from_sync(agent, sync)
+          #(record.iterator, agent)
+        }
+      }
+    }
+    _ -> {
+      let #(iterator, agent) =
+        rt_call.t_call_checked(agent, method, iterable, [])
+      case is_object(iterator) {
+        True -> #(iterator, agent)
+        False -> {
+          let #(err, agent) =
+            agent.store.ops.new_error(
+              agent,
+              rt_types.TypeErr,
+              "Result of the Symbol.asyncIterator method is not an object",
+            )
+          rt_store.t_throw(agent, err)
+        }
+      }
+    }
+  }
+}
+
 /// The iterator object and its `next` for a yield* delegation slot: the
-/// Iterator Record GetIterator pushed (first entry) or the bare iterator a
-/// previous turn left there.
+/// Iterator Record on the stack, or (defensively) a bare iterator whose
+/// `next` is read now.
 fn delegate_target(
   state: State,
   slot: JsVal,

@@ -17,21 +17,29 @@ import arc/interp/interpreter.{Completed, Suspended}
 import arc/interp/park
 import arc/interp/state.{type State, type VmError, State, SuspensionLeak}
 import arc/rt/async as rt_async
-import arc/rt/bytecode.{type FuncTemplate, type SuspendedFrame, TryFrame}
+import arc/rt/builtins/iter_protocol
+import arc/rt/bytecode.{
+  type FuncTemplate, type ParkedAt, type SuspendedFrame, ParkedDelegateClose,
+  ParkedDelegateReturn, ParkedOp, ParkedStart, TryFrame,
+}
 import arc/rt/call.{
   type Completion, type Frame, NormalCompletion, ThrowCompletion,
-} as _
+} as rt_call
 import arc/rt/lang as rt_lang
+import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type EvalKind, type FrameInfo, type Handle, type JsOps, type JsVal,
-  type Step, Agent, JInt, JsOps, JsStore, KHandle, ResumeFrame, StepAwait,
-  StepReturn, StepThrow, StepYield, TypeErr, classify, mk_number, mk_object,
-  mk_undefined,
+  type Agent, type EvalKind, type FrameInfo, type Handle, type IteratorRecord,
+  type JsOps, type JsVal, type Step, Agent, JInt, JsOps, JsStore, KHandle, KNull,
+  KUndef, Named, ResumeFrame, StepAwait, StepReturn, StepThrow, StepYield,
+  StringKey, TypeErr, classify, mk_number, mk_object, mk_undefined,
 }
+import arc/rt/val as rt_val
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/lexical
-import arc/vm/opcode.{CatchOnly, Finally, IterCloseGuard, Pc}
+import arc/vm/opcode.{
+  AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
+}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -382,7 +390,7 @@ fn start_coroutine(
   }
   case template.is_generator {
     False -> {
-      let frame = park.park(body, True)
+      let frame = park.park(body, ParkedStart)
       use #(promise, caller) <- result.try(ffi.guarded(
         ffi.guard2(rt_async.t_async_run, caller.agent, ResumeFrame(frame)),
         State(..caller, stack: rest_stack),
@@ -395,7 +403,7 @@ fn start_coroutine(
         State(..body, agent: call.push_frame_info(caller.agent, template))
       case execute(body) {
         Parked(state.Yield, _, s) -> {
-          let frame = ResumeFrame(park.park(s, True))
+          let frame = ResumeFrame(park.park(s, ParkedStart))
           let agent = settle(s.agent, m)
           let #(obj, agent) = case template.is_async {
             False -> rt_async.t_gen_new(agent, callee, frame)
@@ -435,8 +443,8 @@ pub fn eval_source(
 // -- JsOps.resume_frame ----------------------------------------------------------
 
 /// `JsOps.resume_frame`: continue the parked coroutine body `frame` with
-/// `sent` = `#(mode, value)` — 0 `.next(value)` / await fulfilled, 1
-/// `.throw(value)` / await rejected, 2 `.return(value)` — for one turn, and
+/// `sent` = `#(mode, value)`, mode 0 `.next(value)` / await fulfilled, 1
+/// `.throw(value)` / await rejected, 2 `.return(value)`, for one turn, and
 /// report how the turn ended; a turn that parks again hands back the new
 /// frame inside the `Step`. The driver (`rt/async`) owns the generator state
 /// transitions and the depth bracket; this owns the body's `Error.stack`
@@ -451,16 +459,18 @@ pub fn resume_frame(
   let #(mode, value) = sent
   let turn = fn(agent) {
     let s = park.unpark(agent, frame)
-    let outcome = case mode {
-      0 ->
-        execute(case frame.at_start {
-          True -> s
-          False -> State(..s, stack: [value, ..s.stack])
-        })
-      1 -> throw_into(s, value)
-      _ -> return_into(s, value)
+    case frame.parked, mode {
+      ParkedStart, 0 -> step_of(execute(s))
+      ParkedOp, 0 -> step_of(execute(State(..s, stack: [value, ..s.stack])))
+      ParkedOp, 1 -> inject_throw(s, value)
+      ParkedOp, _ -> inject_return(s, value)
+      ParkedDelegateReturn, 0 -> delegate_returned(s, value)
+      ParkedDelegateClose, 0 -> delegate_closed(s, value)
+      // A rejected delegate await (or an abrupt completion delivered before
+      // the body ran) lands at the parked point like any other.
+      _, 1 -> step_of(throw_into(s, value))
+      _, _ -> step_of(return_into(s, value))
     }
-    step_of(outcome)
   }
   backstopped(agent, m, turn, StepThrow)
 }
@@ -472,14 +482,16 @@ fn step_of(outcome: Outcome) -> #(Step, Agent) {
     Finished(Ok(v), s) -> #(StepReturn(v), s.agent)
     Finished(Error(e), s) -> #(StepThrow(e), s.agent)
     Parked(state.Yield, v, s) -> #(
-      StepYield(v, ResumeFrame(park.park(s, False))),
+      StepYield(v, ResumeFrame(park.park(s, ParkedOp))),
       s.agent,
     )
-    Parked(state.Await, v, s) -> #(
-      StepAwait(v, ResumeFrame(park.park(s, False))),
-      s.agent,
-    )
+    Parked(state.Await, v, s) -> await_at(s, v, ParkedOp)
   }
+}
+
+/// The turn ends awaiting `v`; its settlement resumes `s` as `parked` says.
+fn await_at(s: State, v: JsVal, parked: ParkedAt) -> #(Step, Agent) {
+  #(StepAwait(v, ResumeFrame(park.park(s, parked))), s.agent)
 }
 
 /// Run a prepared root activation for its first turn: until its call stack
@@ -500,6 +512,240 @@ fn throw_into(s: State, thrown: JsVal) -> Outcome {
   case interpreter.unwind_to_catch(s, thrown) {
     Some(caught) -> execute(caught)
     None -> Finished(Error(thrown), s)
+  }
+}
+
+/// `throw_into` with a fresh TypeError.
+fn throw_type_into(s: State, msg: String) -> #(Step, Agent) {
+  let #(e, s) = state.new_error(s, TypeErr, msg)
+  step_of(throw_into(s, e))
+}
+
+// -- yield* delegation (§27.5.3.8 steps 7.b / 7.c) -----------------------------
+// A body parked mid-`yield*` sits ON its delegation opcode with the delegate's
+// Iterator Record on top of the operand stack: `YieldStar` in a generator,
+// `AsyncYieldStarNext` (followed by `Await; AsyncYieldStarResume`) in an
+// async generator. `.next(v)` re-runs the opcode, which calls the delegate's
+// `next` itself; `.throw(v)` / `.return(v)` are forwarded to the delegate
+// here, since the opcode only ever sees normal resumptions.
+
+const missing_throw = "The iterator does not provide a 'throw' method."
+
+/// The delegation a parked body is in: the record, the stack under it, and
+/// for the async lowering the pc of the `Await` after the site.
+type DelegateSite {
+  SyncSite(record: IteratorRecord, rest: List(JsVal))
+  AsyncSite(record: IteratorRecord, rest: List(JsVal), await_pc: Int)
+}
+
+fn delegate_site(s: State) -> Option(DelegateSite) {
+  case tuple_array.get_unchecked(s.pc, s.code), s.stack {
+    YieldStar, [rec, ..rest] ->
+      rt_lang.record_parts(s.agent, rec)
+      |> option.map(SyncSite(_, rest))
+    AsyncYieldStarNext(..), [rec, ..rest] ->
+      rt_lang.record_parts(s.agent, rec)
+      |> option.map(AsyncSite(_, rest, s.pc + 1))
+    _, _ -> None
+  }
+}
+
+fn site_record(site: DelegateSite) -> IteratorRecord {
+  case site {
+    SyncSite(record:, ..) -> record
+    AsyncSite(record:, ..) -> record
+  }
+}
+
+/// §7.3.10 GetMethod(iterator, name) on the delegate: `Ok(None)` when the
+/// property is undefined or null. A callable check is left to the call.
+fn delegate_method(
+  s: State,
+  site: DelegateSite,
+  name: String,
+) -> Result(#(Option(JsVal), State), state.StepExit) {
+  let iterator = site_record(site).iterator
+  use #(method, s) <- result.map(ffi.guarded(
+    ffi.guard3(rt_obj.t_get_prop, s.agent, iterator, StringKey(Named(name))),
+    s,
+  ))
+  case classify(method) {
+    KUndef | KNull -> #(None, s)
+    _ -> #(Some(method), s)
+  }
+}
+
+/// Call(method, iterator, «value») on the delegate.
+fn call_delegate(
+  s: State,
+  site: DelegateSite,
+  method: JsVal,
+  value: JsVal,
+) -> Result(#(JsVal, State), state.StepExit) {
+  let iterator = site_record(site).iterator
+  ffi.guarded(
+    ffi.guard4(rt_call.t_call_checked, s.agent, method, iterator, [value]),
+    s,
+  )
+}
+
+/// A throw completion arriving at the body: forwarded to the delegate when
+/// parked mid-`yield*` (step 7.b), else delivered at the parked point.
+fn inject_throw(s: State, thrown: JsVal) -> #(Step, Agent) {
+  case delegate_site(s) {
+    None -> step_of(throw_into(s, thrown))
+    Some(site) -> forward_throw(s, site, thrown)
+  }
+}
+
+/// A return completion arriving at the body: forwarded to the delegate when
+/// parked mid-`yield*` (step 7.c), else unwound from the parked point.
+fn inject_return(s: State, value: JsVal) -> #(Step, Agent) {
+  case delegate_site(s) {
+    None -> step_of(return_into(s, value))
+    Some(site) -> forward_return(s, site, value)
+  }
+}
+
+/// A `StepExit` from a guarded delegate call: a throw becomes the `yield*`
+/// expression's completion inside the body; anything else cannot come out of
+/// a single guarded runtime call.
+fn delegate_exit(exit: state.StepExit) -> #(Step, Agent) {
+  case exit {
+    state.Threw(thrown, s) -> step_of(throw_into(s, thrown))
+    state.Returned(_, s)
+    | state.Yielded(_, _, s)
+    | state.Awaited(_, s)
+    | state.VmFailed(_, s) -> {
+      let #(res, s) =
+        fault(s, state.InternalError("yield* delegate", "unexpected step exit"))
+      step_of(Finished(res, s))
+    }
+  }
+}
+
+fn or_delegate_exit(
+  res: Result(a, state.StepExit),
+  k: fn(a) -> #(Step, Agent),
+) -> #(Step, Agent) {
+  case res {
+    Ok(v) -> k(v)
+    Error(exit) -> delegate_exit(exit)
+  }
+}
+
+/// Step 7.b: `throw = GetMethod(iterator, "throw")`.
+/// - present: `Call(throw, iterator, «thrown»)`; a generator reads the
+///   result now (done: the `yield*` evaluates to its value; not done: yield
+///   it and keep delegating); an async generator continues into the site's
+///   own `Await; AsyncYieldStarResume`, which do exactly that once the
+///   result settles.
+/// - absent: close the delegate (IteratorClose / AsyncIteratorClose with a
+///   normal completion, whose own errors win), then throw a TypeError at
+///   the site.
+fn forward_throw(
+  s: State,
+  site: DelegateSite,
+  thrown: JsVal,
+) -> #(Step, Agent) {
+  use #(method, s) <- or_delegate_exit(delegate_method(s, site, "throw"))
+  case method, site {
+    Some(method), SyncSite(rest:, ..) -> {
+      use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, thrown))
+      delegate_result(s, res, rest, fn(s, val) {
+        step_of(execute(State(..s, stack: [val, ..rest], pc: s.pc + 1)))
+      })
+    }
+    Some(method), AsyncSite(await_pc:, ..) -> {
+      use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, thrown))
+      step_of(execute(State(..s, stack: [res, ..s.stack], pc: await_pc)))
+    }
+    None, SyncSite(record:, ..) -> {
+      use s <- or_delegate_exit(
+        call.guarded_unit(s, iter_protocol.iterator_close_normal(
+          _,
+          record.iterator,
+        )),
+      )
+      throw_type_into(s, missing_throw)
+    }
+    None, AsyncSite(record:, ..) -> {
+      // AsyncIteratorClose steps 3-4: GetMethod + Call, both caught.
+      use #(closed, s) <- or_delegate_exit(
+        call.guarded(s, iter_protocol.call_return(_, record.iterator)),
+      )
+      case closed {
+        Ok(iter_protocol.NoReturnMethod) -> throw_type_into(s, missing_throw)
+        // Steps 5-7 run when the result settles.
+        Ok(iter_protocol.Returned(result)) ->
+          await_at(s, result, ParkedDelegateClose)
+        Error(thrown) -> step_of(throw_into(s, thrown))
+      }
+    }
+  }
+}
+
+/// Step 7.c: `return = GetMethod(iterator, "return")`.
+/// - absent: the return completion carries on out of the `yield*` (an async
+///   generator's driver has already awaited the value).
+/// - present: `Call(return, iterator, «value»)`; a generator reads the
+///   result now (done: return its value out of the body; not done: yield it
+///   and keep delegating); an async generator awaits it first.
+fn forward_return(
+  s: State,
+  site: DelegateSite,
+  value: JsVal,
+) -> #(Step, Agent) {
+  use #(method, s) <- or_delegate_exit(delegate_method(s, site, "return"))
+  case method, site {
+    None, _ -> step_of(return_into(s, value))
+    Some(method), SyncSite(rest:, ..) -> {
+      use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, value))
+      delegate_result(s, res, rest, fn(s, val) { step_of(return_into(s, val)) })
+    }
+    Some(method), AsyncSite(..) -> {
+      use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, value))
+      await_at(s, res, ParkedDelegateReturn)
+    }
+  }
+}
+
+/// IteratorComplete / IteratorValue on a forwarded call's result `res` with
+/// the body still parked at the site: not done yields the value and keeps
+/// delegating; done hands the value to `on_done`.
+fn delegate_result(
+  s: State,
+  res: JsVal,
+  rest: List(JsVal),
+  on_done: fn(State, JsVal) -> #(Step, Agent),
+) -> #(Step, Agent) {
+  use #(#(done, val), s) <- or_delegate_exit(ffi.guarded(
+    ffi.guard2(iter_protocol.read_iter_result, s.agent, res),
+    s,
+  ))
+  case done {
+    False -> step_of(Parked(state.Yield, val, s))
+    True -> on_done(State(..s, stack: rest), val)
+  }
+}
+
+/// The delegate's `.return(v)` result settled (step 7.c.v-viii): done ends
+/// the body with a return completion of its value, not done yields it.
+fn delegate_returned(s: State, settled: JsVal) -> #(Step, Agent) {
+  let rest = case s.stack {
+    [_rec, ..rest] -> rest
+    [] -> []
+  }
+  delegate_result(s, settled, rest, fn(s, val) { step_of(return_into(s, val)) })
+}
+
+/// AsyncIteratorClose settled after a missing `.throw` (steps 6-7 of
+/// §7.4.13, then step 7.b.iii.6): a non-object result is its own TypeError,
+/// otherwise the missing-method TypeError is thrown at the site.
+fn delegate_closed(s: State, settled: JsVal) -> #(Step, Agent) {
+  case rt_val.is_object(settled) {
+    True -> throw_type_into(s, missing_throw)
+    False -> throw_type_into(s, "Iterator result is not an object")
   }
 }
 

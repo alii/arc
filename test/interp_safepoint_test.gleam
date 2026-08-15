@@ -6,7 +6,9 @@
 import arc/interp/safepoint
 import arc/interp/state.{type State, SavedFrame, State}
 import arc/rt/async as rt_async
-import arc/rt/bytecode.{type FuncTemplate, FuncTemplate, SuspendedFrame}
+import arc/rt/bytecode.{
+  type FuncTemplate, FuncTemplate, ParkedOp, SuspendedFrame,
+}
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -213,7 +215,7 @@ pub fn parked_frame_roots_its_registers_test() {
       home_object: mk_undefined(),
       eval_env: Some(env_h.id),
       line: 1,
-      at_start: False,
+      parked: ParkedOp,
       call_args: [],
     )
   let #(gen_h, st) =

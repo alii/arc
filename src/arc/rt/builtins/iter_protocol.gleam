@@ -170,7 +170,7 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
 /// wrapper around a sync record. Proto MUST be `%AsyncFromSyncIteratorPrototype%`
 /// (owns next/return/throw per §27.1.6.2) — NOT `%AsyncIteratorPrototype%`. The
 /// returned Record's `next_method` is that proto's `next`, read from the wrapper.
-fn create_async_from_sync(
+pub fn create_async_from_sync(
   st: Agent,
   sync: IteratorRecord,
 ) -> #(IteratorRecord, Agent) {
