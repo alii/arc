@@ -306,8 +306,16 @@ fn alloc_regexp_with_proto(
   flags: String,
   proto: Handle,
 ) -> #(Handle, Agent) {
-  let #(li_prop, st) =
-    common.data_property(st, rt_types.mk_number(rt_types.JInt(0)))
+  // §22.2.3.1 RegExpAlloc step 2: lastIndex is {W: true, E: false, C: false}.
+  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  let li_prop =
+    rt_types.DataProperty(
+      value: mk_number(JInt(0)),
+      writable: True,
+      enumerable: False,
+      configurable: False,
+      seq:,
+    )
   rt_store.t_cell_new(
     st,
     SObject(
