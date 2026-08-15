@@ -654,7 +654,7 @@ pub fn class_computed_keys_and_accessors_diff_test() {
 pub fn class_generator_and_async_methods_diff_test() {
   diff(
     "class A { *g(){ yield 1; yield this.k } async am(){ return this.k } static *sg(){ yield 's' } static async sa(){ return 'sa' } async *ag(){ yield 1 } constructor(){ this.k = 'k' } }\nvar a = new A();\nconsole.log([...a.g()].join(), [...A.sg()].join(), typeof a.am().then, Object.getPrototypeOf(a.g()) === a.g.prototype, typeof A.prototype.g.prototype, A.prototype.am.prototype);\na.am().then(v => console.log('am', v)); A.sa().then(v => console.log('sa', v));\na.ag().next().then(r => console.log('ag', r.value, r.done));\nfunction* gf(){} var ge = function*(){}; async function af(){}\nconsole.log(Object.getPrototypeOf(gf()) === gf.prototype, Object.getPrototypeOf(gf.prototype) === Object.getPrototypeOf(function*(){}).prototype, gf.prototype !== ge.prototype, af.prototype, Object.getPrototypeOf(ge()) === ge.prototype, gf.hasOwnProperty('prototype'), Object.keys(gf).length);\nconsole.log(Object.getPrototypeOf(gf.prototype) === Object.getPrototypeOf(gf).prototype);\ntry { new a.g() } catch (e) { console.log(e.constructor.name) }",
-    "1,k s function false object undefined\nfalse true true undefined false true 0\ntrue\nTypeError\nam k\nsa sa\nag 1 false\n",
+    "1,k s function true object undefined\ntrue true true undefined true true 0\ntrue\nTypeError\nam k\nsa sa\nag 1 false\n",
   )
 }
 
@@ -721,5 +721,15 @@ pub fn class_super_and_protocols_diff_test() {
   diff(
     "var log = [];\nclass A { constructor(){ log.push('A:' + new.target.name) } set sx(v){ log.push('set:' + v) } get gx(){ return 'gx:' + this.tag } }\nclass B extends A { tag = 'b'; constructor(){ var early = () => this; try { early() } catch (e) { log.push(e.constructor.name) } super(); super.sx = 5; log.push(super.gx) } static { log.push('static:' + (super.constructor === Function.prototype.constructor)) } }\nnew B(); console.log(log.join());\nvar R = Reflect.construct(B, [], function NT(){}); console.log(Object.getPrototypeOf(R) === Object.prototype || Object.getPrototypeOf(R).constructor.name);\nvar px = new Proxy(A, {}); class C extends px { } console.log(new C() instanceof A, log.pop());\nclass D { static get [Symbol.toStringTag](){ return 'DD' } get [Symbol.toStringTag](){ return 'dd' } static [Symbol.iterator] = function*(){ yield 1 } }\nconsole.log(String(new D()), Object.prototype.toString.call(D), [...D].join());\nclass E extends Error { constructor(m){ super(m); this.extra = 1 } get name(){ return 'EE' } }\nvar e = new E('msg'); console.log(String(e), e.extra, e instanceof E, Object.prototype.hasOwnProperty.call(e, 'message'));\nclass Pr extends Promise { static get [Symbol.species](){ return Promise } }\nvar pr = Pr.resolve(1); console.log(pr instanceof Pr, pr.then(() => {}) instanceof Pr, Pr.all([pr]) instanceof Pr);\nclass St { static a = 1; static b = St.a + this.a; static c = () => this.a } console.log(St.b, St.c());\ntry { class X extends A { constructor(){ super(); super() } } new X() } catch (e2) { console.log('dbl', e2.constructor.name, log.length) }\nclass Sym { [Symbol.hasInstance](v){ return 'inst' } static [Symbol.hasInstance](v){ return v === 7 } } console.log(7 instanceof Sym, new Sym() instanceof Sym);",
     "static:true,ReferenceError,A:B,set:5,gx:b\nNT\ntrue A:C\n[object dd] [object DD] 1\nEE: msg 1 true true\ntrue false true\n2 1\ndbl ReferenceError 11\ntrue false\n",
+  )
+}
+
+/// Generator and async-generator objects inherit from their function's own
+/// `prototype` (declarations, expressions, methods), falling back to the realm
+/// prototype when that is not an object.
+pub fn generator_object_prototypes_diff_test() {
+  diff(
+    "function* gf(){} var ge = function*(){}; async function* ag(){}\nconsole.log(Object.getPrototypeOf(gf()) === gf.prototype, Object.getPrototypeOf(ge()) === ge.prototype, gf.prototype !== ge.prototype, Object.getPrototypeOf(ag()) === ag.prototype);\nclass A { *g(){} static async *sg(){} } var a = new A();\nconsole.log(Object.getPrototypeOf(a.g()) === A.prototype.g.prototype, Object.getPrototypeOf(A.sg()) === A.sg.prototype);\ngf.prototype = 5; console.log(Object.getPrototypeOf(gf()) === Object.getPrototypeOf(ge.prototype));\nvar o = { *m(){} }; console.log(Object.getPrototypeOf(o.m()) === o.m.prototype, Object.getPrototypeOf(gf).prototype === Object.getPrototypeOf(ge.prototype));",
+    "true true true true\ntrue true\ntrue\ntrue true\n",
   )
 }

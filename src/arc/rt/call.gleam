@@ -53,6 +53,14 @@ fn mk_frame(
   new_target: JsVal,
 ) -> Frame
 
+@external(erlang, "erlang", "element")
+fn frame_element(n: Int, frame: Frame) -> JsVal
+
+/// The active function of `frame` (the callee whose body it runs).
+pub fn frame_active_func(frame: Frame) -> JsVal {
+  frame_element(2, frame)
+}
+
 /// A JS call outcome — abrupt completions folded to just Throw (Return/Break/
 /// Continue never cross a call boundary). `t_call` returns this so a caller
 /// can observe a throw without a try/catch; `t_call_checked` re-raises Throw.

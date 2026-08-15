@@ -184,7 +184,12 @@ pub fn generator_object_is_extensible_with_own_props_test() {
     rt_async.t_gen_start(
       st,
       rt_helpers.counter_sm(),
-      rt_helpers.as_frame(#()),
+      rt_helpers.as_frame(#(
+        mk_undefined(),
+        mk_undefined(),
+        mk_undefined(),
+        mk_undefined(),
+      )),
       [],
       loc,
     )

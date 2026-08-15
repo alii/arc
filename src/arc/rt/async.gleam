@@ -415,15 +415,16 @@ fn set_gen_state(
 
 /// §27.5.1.2 GeneratorStart — allocate the generator for a call to a compiled
 /// generator function: the `SGenerator` data cell plus the JS-visible
-/// `GeneratorObj` whose prototype is `%GeneratorPrototype%`. Captures are
-/// already curried into `sm` by `MakeClosure` and args/frame are already
-/// packed into `loc0` by the outer prologue, so `_frame`/`_args` are accepted
-/// for parity with the op-table's 4-arg `gen_start` row but never read.
-/// Returns the object handle.
+/// `GeneratorObj`, whose prototype is the function's own `prototype` object
+/// (§27.3.3.1 EvaluateGeneratorBody: OrdinaryCreateFromConstructor), else
+/// `%GeneratorPrototype%`. Captures are already curried into `sm` by
+/// `MakeClosure` and the arguments are already packed into `loc0` by the
+/// outer prologue, so `_args` is accepted for parity with the op-table's
+/// 4-arg `gen_start` row but never read. Returns the object handle.
 pub fn t_gen_start(
   st: Agent,
   sm: SmFn,
-  _frame: Frame,
+  frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
@@ -435,7 +436,29 @@ pub fn t_gen_start(
         resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
       ),
     )
-  alloc_shell(st, GeneratorObj(data:), Some(st.realm.generator.prototype))
+  let proto = generator_prototype(st, frame, st.realm.generator.prototype)
+  alloc_shell(st, GeneratorObj(data:), Some(proto))
+}
+
+/// §10.1.14 GetPrototypeFromConstructor for a generator function's call:
+/// its own `prototype` data property when that holds an object, else the
+/// realm `fallback`. The property is non-configurable data, so the own-slot
+/// read is the whole of the observable Get.
+fn generator_prototype(st: Agent, frame: Frame, fallback: Handle) -> Handle {
+  case classify(call.frame_active_func(frame)) {
+    KHandle(fn_h) ->
+      case
+        rt_obj.t_ordinary_own_property(st, fn_h, StringKey(Named("prototype")))
+      {
+        Some(DataProperty(value:, ..)) ->
+          case classify(value) {
+            KHandle(p) -> p
+            _ -> fallback
+          }
+        _ -> fallback
+      }
+    _ -> fallback
+  }
 }
 
 /// §27.5.3.3 GeneratorResume — `Generator.prototype.next(value)` on the data
@@ -913,13 +936,14 @@ fn untrack_rejection(st: Agent, data: Handle) -> Agent {
 // arms here.
 
 /// §27.6.3.1 AsyncGeneratorStart. Alloc the `SAsyncGen` data cell in
-/// `SuspendedStart` plus the `AsyncGeneratorObj`. Frame/args accepted for
+/// `SuspendedStart` plus the `AsyncGeneratorObj`, whose prototype comes from
+/// the function's own `prototype` as for `t_gen_start`. Args accepted for
 /// op-table 4-arg parity, unused (already packed into loc0). Returns the
 /// object handle.
 pub fn t_asyncgen_start(
   st: Agent,
   sm: SmFn,
-  _frame: Frame,
+  frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
@@ -932,7 +956,8 @@ pub fn t_asyncgen_start(
         queue: #([], []),
       ),
     )
-  alloc_shell(st, AsyncGeneratorObj(data:), Some(st.realm.async_gen.prototype))
+  let proto = generator_prototype(st, frame, st.realm.async_gen.prototype)
+  alloc_shell(st, AsyncGeneratorObj(data:), Some(proto))
 }
 
 /// §27.6.1.2 `%AsyncGeneratorPrototype%.next(value)`. Returns a promise handle.

@@ -68,7 +68,8 @@ pub fn as_code(
 @external(erlang, "erlang", "element")
 pub fn frame_at(n: Int, frame: rt_call.Frame) -> JsVal
 
-/// An arbitrary term as a `Frame` / `Loc` for drivers that never read it.
+/// A `#(this, active_func, home_object, new_target)` tuple as a `Frame`, or
+/// an arbitrary term as a `Loc` for drivers that never read it.
 @external(erlang, "arc_rt_store_ffi", "identity")
 pub fn as_frame(t: a) -> rt_call.Frame
 

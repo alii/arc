@@ -122,6 +122,7 @@ pub fn call_function(
         True, is_async ->
           call_coroutine_function(
             State(..state, heap:),
+            fn_ref,
             callee_template,
             args,
             rest_stack,
@@ -249,9 +250,12 @@ fn coroutine_initial_state(
 /// prototype and the InternalError label — everything else, including the
 /// "can't have completed or awaited yet" impossibility arms, is identical.
 /// All four are derived from `is_async` here, so a mismatched slot/kind/
-/// prototype trio is unrepresentable at the call site.
+/// prototype trio is unrepresentable at the call site. The generator object
+/// inherits from the function's own `prototype` object (§27.3.3.1 / §27.4.3.1
+/// OrdinaryCreateFromConstructor), else the realm intrinsic.
 fn call_coroutine_function(
   state: State(host),
+  fn_ref: value.Ref,
   callee_template: FuncTemplate,
   args: List(JsValue),
   rest_stack: List(JsValue),
@@ -282,7 +286,7 @@ fn call_coroutine_function(
           )
       }
       let #(h, data_ref) = heap.alloc(suspended.heap, slot)
-      let #(kind, prototype) = case is_async {
+      let #(kind, intrinsic) = case is_async {
         True -> #(
           AsyncGeneratorObject(data_ref),
           state.builtins.async_generator.prototype,
@@ -292,6 +296,8 @@ fn call_coroutine_function(
           state.builtins.generator.prototype,
         )
       }
+      let prototype =
+        object.own_data_prototype(h, fn_ref) |> option.unwrap(intrinsic)
       let #(h, gen_obj_ref) = common.alloc_wrapper(h, kind, prototype)
       Ok(
         State(
