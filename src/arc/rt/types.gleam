@@ -10,7 +10,10 @@
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/rt/builtins/temporal_tz
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, type SuspendedFrame}
-import arc/rt/intl_data.{type IntlData, type IntlService}
+import arc/rt/intl_data.{
+  type BoundGetterService, type ConstructibleService, type IntlData,
+  type IntlService,
+}
 import arc/rt/wire
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/temporal_calendar.{type Calendar}
@@ -1998,44 +2001,110 @@ pub type BigIntNative {
 pub type IntlNative {
   /// Intl.getCanonicalLocales(locales)
   IntlGetCanonicalLocales
+  /// Intl.supportedValuesOf(key)
+  IntlSupportedValuesOf
   /// new Intl.<Service>(locales, options)
-  IntlConstructor(service: IntlService, proto: Handle)
+  IntlConstructor(service: ConstructibleService, proto: Handle)
   /// Intl.<Service>.supportedLocalesOf(locales, options)
   IntlSupportedLocalesOf(service: IntlService)
   /// Intl.<Service>.prototype.resolvedOptions()
   IntlResolvedOptions(service: IntlService)
-  /// Accessor getter for NumberFormat.prototype.format: returns (and caches
-  /// on the receiver) a bound method.
-  IntlBoundGetter(service: IntlService)
+  /// Accessor getter for NumberFormat/DateTimeFormat .format and Collator
+  /// .compare: returns (and caches on the receiver) a bound method.
+  IntlBoundGetter(service: BoundGetterService)
   /// The bound method produced by `IntlBoundGetter`; `target` is the instance.
-  IntlBoundMethod(service: IntlService, target: Handle)
-  /// Named prototype method (format/formatToParts/...). The receiver's brand
-  /// (`service`) plus `method` pick the implementation.
+  IntlBoundMethod(service: BoundGetterService, target: Handle)
+  /// Named prototype method (format/formatToParts/select/of/...). The
+  /// receiver's brand (`service`) plus `method` pick the implementation.
   IntlMethod(service: IntlService, method: IntlMethodName)
-  /// ECMA-402 §18 locale-sensitive overrides installed on Number.prototype /
-  /// BigInt.prototype: not Intl.* methods, no Intl brand check.
+  /// ECMA-402 §17-19 locale-sensitive overrides installed on the Number /
+  /// BigInt / String / Date prototypes: not Intl.* methods, no Intl brand
+  /// check.
   IntlHostOverride(which: IntlHostOverrideName)
+  /// Segmenter.prototype.segment — needs the %SegmentsPrototype% handle.
+  IntlSegmenterSegment(segments_proto: Handle)
+  /// %SegmentsPrototype%[Symbol.iterator] — needs %SegmentIteratorPrototype%.
+  IntlSegmentsIterator(iter_proto: Handle)
+  /// Intl.Locale.prototype getter (language/script/region/baseName/...).
+  IntlLocaleGetter(name: LocaleGetterName)
+  /// Intl.Locale.prototype method needing the Locale prototype to allocate
+  /// result Locale objects (maximize/minimize) or plain (toString).
+  IntlLocaleMethod(method: LocaleMethodName, proto: Handle)
 }
 
 /// The Intl.<Service>.prototype methods registered via `IntlMethod`: one
 /// variant per method name so a registration typo is a compile error.
 pub type IntlMethodName {
-  /// DurationFormat.prototype.format
+  /// ListFormat/RelativeTimeFormat/DurationFormat.prototype.format
   IntlFormat
-  /// NumberFormat/DurationFormat.prototype.formatToParts
+  /// NumberFormat/DateTimeFormat/ListFormat/RelativeTimeFormat/
+  /// DurationFormat.prototype.formatToParts
   IntlFormatToParts
-  /// NumberFormat.prototype.formatRange
+  /// NumberFormat/DateTimeFormat.prototype.formatRange
   IntlFormatRange
-  /// NumberFormat.prototype.formatRangeToParts
+  /// NumberFormat/DateTimeFormat.prototype.formatRangeToParts
   IntlFormatRangeToParts
+  /// PluralRules.prototype.select
+  IntlSelect
+  /// PluralRules.prototype.selectRange
+  IntlSelectRange
+  /// DisplayNames.prototype.of
+  IntlOf
+  /// %SegmentIteratorPrototype%.next
+  IntlSegmentIteratorNext
+  /// %SegmentsPrototype%.containing
+  IntlSegmentsContaining
 }
 
-/// The ECMA-402 host overrides (§18) installed at Intl init.
+/// The ECMA-402 host overrides (§17-19) installed on the Number / BigInt /
+/// String / Date prototypes at Intl init.
 pub type IntlHostOverrideName {
   /// Number.prototype.toLocaleString (§18.2.1)
   NumberToLocaleString
   /// BigInt.prototype.toLocaleString (§18.3.1)
   BigIntToLocaleString
+  /// String.prototype.localeCompare (§19.1.1)
+  StringLocaleCompare
+  /// String.prototype.toLocaleLowerCase (§19.1.2)
+  StringToLocaleLowerCase
+  /// String.prototype.toLocaleUpperCase (§19.1.3)
+  StringToLocaleUpperCase
+  /// Date.prototype.toLocaleString (§17.4.1)
+  DateToLocaleString
+  /// Date.prototype.toLocaleDateString (§17.4.2)
+  DateToLocaleDateString
+  /// Date.prototype.toLocaleTimeString (§17.4.3)
+  DateToLocaleTimeString
+}
+
+/// The Intl.Locale.prototype accessor getters.
+pub type LocaleGetterName {
+  LocaleBaseName
+  LocaleCalendar
+  LocaleCaseFirst
+  LocaleCollation
+  LocaleFirstDayOfWeek
+  LocaleHourCycle
+  LocaleNumeric
+  LocaleNumberingSystem
+  LocaleLanguage
+  LocaleScript
+  LocaleRegion
+  LocaleVariants
+}
+
+/// The Intl.Locale.prototype methods.
+pub type LocaleMethodName {
+  LocaleToString
+  LocaleMaximize
+  LocaleMinimize
+  LocaleGetCalendars
+  LocaleGetCollations
+  LocaleGetHourCycles
+  LocaleGetNumberingSystems
+  LocaleGetTimeZones
+  LocaleGetTextInfo
+  LocaleGetWeekInfo
 }
 
 /// Temporal natives (proposal-temporal §8 Temporal.Instant). `proto` is the
@@ -2726,12 +2795,17 @@ pub fn intl_native_refs(n: IntlNative) -> List(Handle) {
   case n {
     IntlConstructor(proto:, ..) -> [proto]
     IntlBoundMethod(target:, ..) -> [target]
+    IntlSegmenterSegment(segments_proto:) -> [segments_proto]
+    IntlSegmentsIterator(iter_proto:) -> [iter_proto]
+    IntlLocaleMethod(proto:, ..) -> [proto]
     IntlGetCanonicalLocales
+    | IntlSupportedValuesOf
     | IntlSupportedLocalesOf(_)
     | IntlResolvedOptions(_)
     | IntlBoundGetter(_)
     | IntlMethod(..)
-    | IntlHostOverride(_) -> []
+    | IntlHostOverride(_)
+    | IntlLocaleGetter(_) -> []
   }
 }
 

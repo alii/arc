@@ -191,10 +191,18 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       is_nan: nb.is_nan,
       is_finite: nb.is_finite,
     )
-  // 16. Intl (+ the ECMA-402 overrides on Number/BigInt prototypes) and
-  // Temporal.
+  // 16. Intl (+ the ECMA-402 overrides on the Number/BigInt/String/Date
+  // prototypes) and Temporal.
   let #(intl, st) =
-    b_intl.init(st, object_proto, fn_proto, number.prototype, bigint.prototype)
+    b_intl.init(
+      st,
+      object_proto,
+      fn_proto,
+      number.prototype,
+      bigint.prototype,
+      string.prototype,
+      date.prototype,
+    )
   let #(temporal, st) = b_temporal.init(st, object_proto, fn_proto)
   // 17. globalThis — allocated last so it can reference every constructor.
   let #(global_object, st) =

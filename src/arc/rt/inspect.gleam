@@ -180,10 +180,9 @@ fn inspect_object(
         // ErrorObj, so unwrap is safe here.
         ErrorObj(_) -> error_display(st, h) |> option.unwrap("[Error]")
         IntlObj(data:, ..) ->
-          case intl_data.intl_service(data) {
-            intl_data.IntlNumberFormat -> "[Intl.NumberFormat]"
-            intl_data.IntlDurationFormat -> "[Intl.DurationFormat]"
-          }
+          "[Intl."
+          <> intl_data.service_name(intl_data.intl_service(data))
+          <> "]"
         TemporalObj(data:) -> temporal_label(data)
         DisposableStackObj(async: False, ..) -> "DisposableStack {}"
         DisposableStackObj(async: True, ..) -> "AsyncDisposableStack {}"

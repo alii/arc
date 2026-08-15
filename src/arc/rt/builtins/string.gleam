@@ -1355,7 +1355,7 @@ fn codepoint_or_replacement(i: Int) -> UtfCodepoint {
 /// toLowercase per §22.1.3.27, including the SpecialCasing Final_Sigma rule:
 /// U+03A3 Σ → ς when preceded by a cased char (skipping case-ignorable chars)
 /// and not followed by one; else → σ. Erlang string:lowercase/1 does NOT.
-fn to_lower_case(s: String) -> String {
+pub fn to_lower_case(s: String) -> String {
   let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
   case list.contains(cps, 0x03A3) {
     False -> string.lowercase(s)
