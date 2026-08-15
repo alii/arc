@@ -1,9 +1,9 @@
 %% TZif files (RFC 8536): the binary format the IANA zoneinfo tree is compiled
 %% into, and the searches over the transition table it yields.
 %%
-%% A parsed zone is opaque-ish but flat, so it can live in a persistent_term:
-%% see tz(). Everything past its last recorded transition is governed by the
-%% POSIX footer, which arc_posix_tz owns.
+%% A parsed zone is a flat value the caller keeps and hands back: see tz().
+%% Everything past its last recorded transition is governed by the POSIX
+%% footer, which arc_posix_tz owns.
 -module(arc_tzif).
 
 -export([parse/1, offset_at/2, first_transition_after/2,

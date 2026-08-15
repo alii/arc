@@ -200,6 +200,11 @@ pub type HostHooks {
     /// Wall clock: milliseconds since the Unix epoch. Backs `Date.now` and
     /// `new Date()`. Defaults to `erlang:system_time(millisecond)`.
     wall_clock_ms: fn() -> Int,
+    /// The local time zone behind Date's LocalTZA (local getters/setters,
+    /// `getTimezoneOffset`, string rendering). Resolved once by the host and
+    /// carried as a value; defaults to the host's own zone
+    /// (`host_time.host_time_zone`: `TZ`, else /etc/localtime, else UTC).
+    time_zone: host_time.TimeZone,
     /// Uniform Float in [0, 1) behind `Math.random`. Defaults to
     /// `float.random`; a harness seeds a deterministic PRNG here.
     random: fn() -> Float,
@@ -233,6 +238,7 @@ pub fn default_host_hooks() -> HostHooks {
     report_uncaught: io.println_error,
     import_hook: option.None,
     wall_clock_ms: host_time.now_ms,
+    time_zone: host_time.host_time_zone(),
     random: float.random,
     print: default_print,
   )

@@ -196,6 +196,7 @@ pub fn host_hook_roots(hooks: host_hooks.HostHooks) -> List(JsValue) {
     // The one JsValue-carrying hook: %DynamicImportHook%'s function object.
     import_hook:,
     wall_clock_ms: _,
+    time_zone: _,
     random: _,
     print: _,
   ) = hooks

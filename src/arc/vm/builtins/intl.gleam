@@ -2620,7 +2620,7 @@ fn dtf_state_required(
   use #(time_zone, state) <- result.try(case tz_v {
     // DefaultTimeZone: the host environment zone. Its offset (like every
     // zone's) is resolved per formatted instant, not snapshotted here.
-    JsUndefined -> Ok(#(HostZone, state))
+    JsUndefined -> Ok(#(HostZone(state.ctx.host_hooks.time_zone), state))
     _ -> {
       use #(s, state) <- result.try(coerce.js_to_string(state, tz_v))
       case tz.canonical(s) {

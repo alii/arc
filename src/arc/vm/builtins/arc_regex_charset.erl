@@ -27,6 +27,7 @@
 -export([vdigit/0, vword/0, vspace/0]).
 -export([vinter/2, vsubtract/2]).
 -export([vfold/2, vfold_str/2, vclose/1, character_complement/2, vsplit_singles/2]).
+-export([scf/1]).
 -export([emit_complement/2, emit_vclass/2, vstrip_surrogates/1, vrender_ranges/1]).
 
 %% ---- The JS class-escape base sets --------------------------------------
@@ -164,32 +165,9 @@ scf(CP) ->
 
 %% The scf domain — codepoints with scf(c) =/= c — as normalized ranges.
 %% Derived from Changes_When_Casefolded (a superset: it also contains the
-%% F-only codepoints, which scf fixes; filter those out by applying scf).
-%%
-%% Cached in persistent_term, not the process dictionary: the table is derived
-%% from immutable generated data, so it is the same in every process, and the
-%% sibling caches of the same shape (arc_unicode_tables) already live there.
-%% A per-process cache re-derived the whole thing — a full
-%% lists:seq over every Changes_When_Casefolded range — once per agent process.
-%%
-%% The table carrying Changes_When_Casefolded is a hard invariant of this
-%% module: without it every case-insensitive class silently evaluates against
-%% an EMPTY fold domain and matches the wrong characters. Crash on a missing
-%% table rather than degrade forever.
-scf_domain() ->
-    Key = {?MODULE, scf_domain},
-    case persistent_term:get(Key, undefined) of
-        undefined ->
-            {ok, Cwcf} =
-                arc_regex_props_ffi:char_set(<<"Changes_When_Casefolded">>),
-            Dom = vnorm([{C, C} || {Lo, Hi} <- Cwcf,
-                                   C <- lists:seq(Lo, Hi),
-                                   scf(C) =/= C]),
-            persistent_term:put(Key, Dom),
-            Dom;
-        Dom ->
-            Dom
-    end.
+%% F-only codepoints, which scf fixes) by scripts/gen_unicode_tables.escript,
+%% and kept as a module literal next to the property tables it comes from.
+scf_domain() -> arc_regex_uni17_ffi:scf_domain().
 
 %% ---- Emitting a set back to PCRE ----------------------------------------
 

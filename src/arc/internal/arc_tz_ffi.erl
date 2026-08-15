@@ -1,10 +1,10 @@
 %% IANA time zone database access — the runtime's ONLY time zone engine.
 %% Both Temporal (explicit zones) and Date (the host zone) go through here.
 %%
-%% This module is the public API, the caches behind it, and the host-zone
-%% detection that Date's LocalTZA needs. The two file formats it reads live
-%% next door: `arc_tzif` (TZif binaries, RFC 8536) and `arc_posix_tz` (POSIX TZ
-%% strings, both as a TZif footer and as a bare $TZ). It answers four questions:
+%% This module is the public API and the host-zone detection that Date's
+%% LocalTZA needs. The two file formats it reads live next door: `arc_tzif`
+%% (TZif binaries, RFC 8536) and `arc_posix_tz` (POSIX TZ strings, both as a
+%% TZif footer and as a bare $TZ). It answers four questions:
 %%   * is this a valid zone identifier (case-insensitive), and what is its
 %%     properly-cased spelling?
 %%   * what is the UTC offset (in seconds) at a given epoch second?
@@ -16,14 +16,19 @@
 %% in winter is -28800 seconds / -480 minutes). JS `getTimezoneOffset` uses the
 %% opposite sign; that negation lives at that one call site, not here.
 %%
-%% Parsed zone data is cached in persistent_term (immutable, read-mostly).
-%% If no zoneinfo database exists on the host, lookups fail with `no_zoneinfo`
-%% and the runtime degrades to UTC + fixed-offset zones only.
+%% Nothing here is cached: every function is a plain function of its arguments
+%% and the zoneinfo files it reads, read through prim_file so concurrent
+%% agents never queue on the file server. A resolved zone is a value
+%% (`local_zone()`) the caller keeps and hands back; both runtimes hold the
+%% host's on their HostHooks. If no zoneinfo database exists on the host, lookups fail with
+%% `no_zoneinfo` and the runtime degrades to UTC + fixed-offset zones only.
 -module(arc_tz_ffi).
 
 -export([lookup/1, offset_at/2, next_transition/2, previous_transition/2,
-         canonical_id/1, host_zone/0, offset_at_utc_ms/1,
-         offset_at_local_ms/1]).
+         canonical_id/1, host_zone/0, zone_named/1, utc_zone/0, zone_id/1,
+         zone_offset_at_utc_ms/2, zone_offset_at_local_ms/2]).
+
+-export_type([local_zone/0]).
 
 %% Why a zone would not load. `no_zoneinfo` (the host has no tzdata at all) is
 %% expected on slim containers; the other two mean the database that *is* there
@@ -31,9 +36,11 @@
 %% below are the ones temporal_tz.gleam's `TzError` decodes.
 -type tz_error() :: no_zoneinfo | {unreadable, binary()} | {unparseable, binary()}.
 
-%% Where the host's local time comes from: a validated IANA id, a bare POSIX TZ
-%% rule, or nothing at all (in which case local time is UTC).
--type host_zone() :: binary() | {posix, arc_posix_tz:footer()} | none.
+%% Where local time comes from: a loaded IANA zone, a bare POSIX TZ rule, or
+%% nothing at all (in which case local time is UTC).
+-type local_zone() :: {tzif, binary(), arc_tzif:tz()}
+                    | {posix, arc_posix_tz:footer()}
+                    | none.
 
 %% Result of a next/previous transition query.
 -type transition() :: {found, integer()} | no_transition | {load_failed, tz_error()}.
@@ -45,9 +52,17 @@
 %% Case-insensitive zone id lookup. {ok, ProperlyCasedId} | {error, nil}.
 -spec lookup(binary()) -> {ok, binary()} | {error, nil}.
 lookup(Id) when is_binary(Id) ->
-    case maps:find(string:lowercase(Id), names()) of
-        {ok, Proper} -> {ok, Proper};
-        error -> {error, nil}
+    case root() of
+        none -> {error, nil};
+        Root ->
+            case maps:get(names, zi_tables(Root)) of
+                Names when map_size(Names) > 0 ->
+                    case maps:find(string:lowercase(Id), Names) of
+                        {ok, Proper} -> {ok, Proper};
+                        error -> {error, nil}
+                    end;
+                _NoZi -> resolve_in_tree(Root, Id)
+            end
     end.
 
 %% UTC offset in seconds at the given epoch second.
@@ -55,7 +70,7 @@ lookup(Id) when is_binary(Id) ->
 %% says which, so a missing database and a corrupt one stay distinguishable.
 -spec offset_at(binary(), integer()) -> {ok, integer()} | {error, tz_error()}.
 offset_at(Id, Sec) ->
-    case zone(Id) of
+    case load_zone(Id) of
         {error, Reason} -> {error, Reason};
         {ok, Zone} -> {ok, arc_tzif:offset_at(Zone, Sec)}
     end.
@@ -68,7 +83,7 @@ offset_at(Id, Sec) ->
 %% The last two used to be indistinguishable; they are different bugs.
 -spec next_transition(binary(), integer()) -> transition().
 next_transition(Id, Sec) ->
-    case zone(Id) of
+    case load_zone(Id) of
         {error, Reason} -> {load_failed, Reason};
         {ok, Zone} ->
             case arc_tzif:first_transition_after(Zone, Sec) of
@@ -81,7 +96,7 @@ next_transition(Id, Sec) ->
 %% Same three-way result as next_transition/2.
 -spec previous_transition(binary(), integer()) -> transition().
 previous_transition(Id, Sec) ->
-    case zone(Id) of
+    case load_zone(Id) of
         {error, Reason} -> {load_failed, Reason};
         {ok, Zone} ->
             case arc_tzif:last_transition_before(Zone, Sec) of
@@ -94,7 +109,10 @@ previous_transition(Id, Sec) ->
 %% canonical zone name. Identity for unknown ids or when no link data exists.
 -spec canonical_id(binary()) -> binary().
 canonical_id(Id) when is_binary(Id) ->
-    follow_links(Id, links(), 8).
+    case root() of
+        none -> Id;
+        Root -> follow_links(Id, maps:get(links, zi_tables(Root)), 8)
+    end.
 
 follow_links(Id, _Links, 0) -> Id;
 follow_links(Id, Links, N) ->
@@ -107,21 +125,42 @@ follow_links(Id, Links, N) ->
 %% Host time zone — Date's LocalTZA (ES2024 §21.4.1.25)
 %% ----------------------------------------------------------------------
 
-%% The host's time zone: an IANA zone id, a `{posix, Footer}` rule from a bare
-%% POSIX TZ string, or `none` when nothing resolves — in which case the
-%% runtime's local time simply is UTC. Cached in persistent_term alongside the
-%% zone tables; the host zone cannot change under a live VM.
--spec host_zone() -> host_zone().
-host_zone() ->
-    cached(host_zone, fun detect_host_zone/0).
-
+%% The host's time zone, resolved AND loaded: an IANA zone with its parsed
+%% TZif data, a `{posix, Footer}` rule from a bare POSIX TZ string, or `none`
+%% when nothing resolves (or the resolved zone's data cannot be loaded), in
+%% which case local time simply is UTC. Reads the environment and the
+%% zoneinfo tree every time it is called; the caller keeps the result.
+%%
 %% TZ overrides the host default (as it does for libc, and as node does);
 %% otherwise the /etc/localtime chain.
-detect_host_zone() ->
+-spec host_zone() -> local_zone().
+host_zone() ->
     case os:getenv("TZ") of
         false -> detect_localtime_zone();
         Raw -> zone_from_tz_env(Raw)
     end.
+
+%% A named IANA zone (case-insensitive), loaded. {error, nil} for an unknown
+%% id or one whose data cannot be loaded (load_zone/1 logs the latter).
+-spec zone_named(binary()) -> {ok, local_zone()} | {error, nil}.
+zone_named(Name) when is_binary(Name) ->
+    case lookup(Name) of
+        {error, nil} -> {error, nil};
+        {ok, Id} ->
+            case loaded(Id) of
+                none -> {error, nil};
+                Zone -> {ok, Zone}
+            end
+    end.
+
+%% The zone whose local time is UTC.
+-spec utc_zone() -> local_zone().
+utc_zone() -> none.
+
+%% The IANA id of a resolved zone, when it has one.
+-spec zone_id(local_zone()) -> {ok, binary()} | {error, nil}.
+zone_id({tzif, Id, _Tz}) -> {ok, Id};
+zone_id(_PosixOrNone) -> {error, nil}.
 
 %% /etc/localtime is a symlink into the zoneinfo tree on most hosts, but a
 %% plain copy of the TZif file on plenty of others (`cp` installs, RHEL,
@@ -157,14 +196,14 @@ warn_unresolved_host_zone() ->
     end.
 
 zone_from_localtime_link() ->
-    case file:read_link_all("/etc/localtime") of
+    case prim_file:read_link_all("/etc/localtime") of
         {ok, Target} -> zone_from_path(Target);
         {error, _NotASymlink} -> none
     end.
 
 %% Debian/Ubuntu record the bare zone id here ("Europe/London\n").
 zone_from_timezone_file() ->
-    case file:read_file("/etc/timezone") of
+    case prim_file:read_file("/etc/timezone") of
         {ok, Bin} -> known_zone(string:trim(binary_to_list(Bin)));
         {error, _NoSuchFile} -> none
     end.
@@ -172,7 +211,7 @@ zone_from_timezone_file() ->
 %% Last resort: /etc/localtime is a regular TZif file with no name attached to
 %% it. Its bytes identify the zone — find the zoneinfo file that matches.
 zone_from_localtime_contents() ->
-    case file:read_file("/etc/localtime") of
+    case prim_file:read_file("/etc/localtime") of
         {ok, Bin} -> zone_with_contents(Bin);
         {error, enoent} -> none;
         {error, Reason} ->
@@ -184,18 +223,20 @@ zone_from_localtime_contents() ->
 zone_with_contents(Bin) ->
     case root() of
         none -> none;
-        Root -> match_zone_contents(Root, Bin, maps:values(names()))
+        Root ->
+            Names = maps:values(maps:get(names, zi_tables(Root))),
+            match_zone_contents(Root, Bin, Names)
     end.
 
 match_zone_contents(_Root, _Bin, []) -> none;
 match_zone_contents(Root, Bin, [Id | Rest]) ->
     Path = filename:join(Root, binary_to_list(Id)),
-    case file:read_file(Path) of
-        {ok, Bin} -> Id;
+    case prim_file:read_file(Path) of
+        {ok, Bin} -> loaded(Id);
         _Miss -> match_zone_contents(Root, Bin, Rest)
     end.
 
-%% ".../zoneinfo/Europe/London" -> <<"Europe/London">>.
+%% ".../zoneinfo/Europe/London" -> the loaded Europe/London zone.
 zone_from_path(Path) ->
     case string:split(Path, "zoneinfo/", trailing) of
         [_, Id] -> known_zone(Id);
@@ -213,7 +254,7 @@ zone_from_tz_env(Raw) ->
     Tz = string:trim(Raw, leading, ":"),
     case known_zone(Tz) of
         none -> zone_from_path_or_posix(Tz);
-        Id -> Id
+        Zone -> Zone
     end.
 
 %% POSIX: TZ="" (or a bare ":") is UTC and says nothing about it.
@@ -221,7 +262,7 @@ zone_from_path_or_posix("") -> none;
 zone_from_path_or_posix(Tz) ->
     case zone_from_path(Tz) of
         none -> posix_zone_or_warn(Tz);
-        Id -> Id
+        Zone -> Zone
     end.
 
 posix_zone_or_warn(Tz) ->
@@ -243,106 +284,73 @@ posix_zone(Tz) ->
         Footer -> {posix, Footer}
     end.
 
-%% A named host zone must be one we can actually load.
+%% A named host zone must be one we can actually load. The name is taken as
+%% spelled (TZ and /etc/localtime carry the tree's own casing, as libc
+%% requires), so this is one file probe rather than a walk of the name table.
 known_zone("") -> none;
 known_zone(Name) ->
-    case lookup(unicode:characters_to_binary(Name)) of
-        {ok, Id} -> Id;
-        {error, nil} -> none
+    case root() of
+        none -> none;
+        Root ->
+            case safe_zone_name(Name) andalso
+                 is_tzif(filename:join(Root, Name)) of
+                true -> loaded(unicode:characters_to_binary(Name));
+                false -> none
+            end
     end.
 
-%% Local-minus-UTC offset in MINUTES at the UTC instant EpochMs.
-%% 0 when the host zone is unresolvable or its data cannot be loaded (the
-%% failure is logged by load_zone/1 for anything but a missing database).
--spec offset_at_utc_ms(integer()) -> integer().
-offset_at_utc_ms(EpochMs) when is_integer(EpochMs) ->
-    case host_zone() of
-        none -> 0;
-        Zone -> to_minutes(host_offset(Zone, floor_div(EpochMs, 1000)))
+%% A relative path that stays inside the zoneinfo tree and is not one of the
+%% tree's non-zone entries.
+safe_zone_name(Name) ->
+    valid_zone_name(Name) andalso
+        filename:pathtype(Name) =:= relative andalso
+        not lists:member("..", filename:split(Name)).
+
+%% The loaded zone for a properly-cased id, `none` when its data cannot be
+%% read (load_zone/1 logs anything but a missing database).
+loaded(Id) ->
+    case load_zone(Id) of
+        {ok, Tz} -> {tzif, Id, Tz};
+        {error, _Logged} -> none
     end.
 
-%% Local-minus-UTC offset in MINUTES for the local wall-clock time LocalMs
-%% (§21.4.1.25 LocalTZA with isUTC = false): a local time that a transition
-%% skips or repeats "must be interpreted using the time zone offset before the
-%% transition".
--spec offset_at_local_ms(integer()) -> integer().
-offset_at_local_ms(LocalMs) when is_integer(LocalMs) ->
-    case host_zone() of
-        none -> 0;
-        Zone -> to_minutes(memo(local, Zone, floor_div(LocalMs, 1000),
-                                fun resolve_local_offset/2))
-    end.
+%% Local-minus-UTC offset in MINUTES at the UTC instant EpochMs, in Zone.
+-spec zone_offset_at_utc_ms(local_zone(), integer()) -> integer().
+zone_offset_at_utc_ms(none, _EpochMs) -> 0;
+zone_offset_at_utc_ms(Zone, EpochMs) when is_integer(EpochMs) ->
+    to_minutes(zone_offset(Zone, floor_div(EpochMs, 1000))).
 
-resolve_local_offset(Zone, LocalSec) ->
+%% Local-minus-UTC offset in MINUTES for the local wall-clock time LocalMs in
+%% Zone (§21.4.1.25 LocalTZA with isUTC = false): a local time that a
+%% transition skips or repeats "must be interpreted using the time zone offset
+%% before the transition".
+-spec zone_offset_at_local_ms(local_zone(), integer()) -> integer().
+zone_offset_at_local_ms(none, _LocalMs) -> 0;
+zone_offset_at_local_ms(Zone, LocalMs) when is_integer(LocalMs) ->
+    LocalSec = floor_div(LocalMs, 1000),
     %% The instant a wall clock names is within a day of itself (all offsets
     %% are < 24h), so the offsets a day either side are the only two
     %% candidates.
-    Before = host_offset(Zone, LocalSec - 86400),
-    After = host_offset(Zone, LocalSec + 86400),
-    local_offset(Zone, LocalSec, Before, After).
+    Before = zone_offset(Zone, LocalSec - 86400),
+    After = zone_offset(Zone, LocalSec + 86400),
+    to_minutes(local_offset(Zone, LocalSec, Before, After)).
 
 %% An offset is a possible reading of the wall clock when the instant it
 %% produces really has that offset. Two possible (ambiguous) or none possible
 %% (skipped) both resolve to `Before`, the offset before the transition.
-local_offset(_Zone, _LocalSec, none, _After) -> none;
-local_offset(_Zone, _LocalSec, _Before, none) -> none;
 local_offset(Zone, LocalSec, Before, After) ->
-    case is_possible(Zone, LocalSec, Before) of
+    case zone_offset(Zone, LocalSec - Before) =:= Before of
         true -> Before;
         false ->
-            case is_possible(Zone, LocalSec, After) of
+            case zone_offset(Zone, LocalSec - After) =:= After of
                 true -> After;
                 false -> Before
             end
     end.
 
-is_possible(Zone, LocalSec, Off) ->
-    host_offset(Zone, LocalSec - Off) =:= Off.
+zone_offset({posix, Footer}, Sec) -> arc_posix_tz:offset_at(Footer, Sec);
+zone_offset({tzif, _Id, Tz}, Sec) -> arc_tzif:offset_at(Tz, Sec).
 
-host_offset(Zone, Sec) ->
-    memo(utc, Zone, Sec, fun resolve_host_offset/2).
-
-resolve_host_offset({posix, Footer}, Sec) -> arc_posix_tz:offset_at(Footer, Sec);
-resolve_host_offset(Zone, Sec) ->
-    case offset_at(Zone, Sec) of
-        {ok, Off} -> Off;
-        %% load_zone/1 has already logged anything but a missing database.
-        {error, _Reason} -> none
-    end.
-
-%% Per-instant offset memo, in the process dictionary. Date getters ask for the
-%% same instant over and over — `d.getFullYear(); d.getMonth(); d.getDate()` is
-%% three lookups of one epoch second, and every wall-clock resolution probes
-%% four instants — so an offset search per call is exactly what V8's DateCache
-%% and its SunSpider-era dst-offset-caching tests exist to avoid. Bounded, and
-%% dropped wholesale when full: the working set of a date-heavy program is
-%% small and clustered, so a cleared cache refills immediately.
--define(MEMO_LIMIT, 512).
-
-memo(Kind, Zone, Sec, Resolve) ->
-    Key = {Kind, Zone, Sec},
-    case memo_cache() of
-        #{Key := Off} -> Off;
-        _ ->
-            Off = Resolve(Zone, Sec),
-            %% Resolve may have memoized on its own (a wall-clock lookup probes
-            %% instants), so re-read rather than write back a stale snapshot.
-            Cache = memo_cache(),
-            Kept = case map_size(Cache) >= ?MEMO_LIMIT of
-                true -> #{};
-                false -> Cache
-            end,
-            put({?MODULE, memo}, Kept#{Key => Off}),
-            Off
-    end.
-
-memo_cache() ->
-    case get({?MODULE, memo}) of
-        undefined -> #{};
-        Cache -> Cache
-    end.
-
-to_minutes(none) -> 0;
 to_minutes(OffSec) -> floor_div(OffSec, 60).
 
 %% Erlang's `div` truncates toward zero; every division here is of a signed
@@ -357,78 +365,35 @@ floor_div(A, B) ->
 %% Zone name and link tables (one tzdata.zi read)
 %% ----------------------------------------------------------------------
 
-%% Read-mostly tables live in persistent_term, computed on first use.
-cached(Key, Build) ->
-    case persistent_term:get({?MODULE, Key}, undefined) of
-        undefined ->
-            V = Build(),
-            persistent_term:put({?MODULE, Key}, V),
-            V;
-        V -> V
-    end.
-
 root() ->
-    cached(root, fun() ->
-        find_root(["/usr/share/zoneinfo", "/usr/share/lib/zoneinfo",
-                   "/etc/zoneinfo"])
-    end).
+    find_root(["/usr/share/zoneinfo", "/usr/share/lib/zoneinfo",
+               "/etc/zoneinfo"]).
 
 find_root([]) -> none;
 find_root([D | Rest]) ->
-    case filelib:is_dir(D) of
-        true -> D;
-        false -> find_root(Rest)
-    end.
-
-names() ->
-    cached(names, fun build_names/0).
-
-%% "Asia/Calcutta" -> "Asia/Kolkata", from tzdata.zi's Link lines.
-links() ->
-    maps:get(links, zi_tables()).
-
-build_names() ->
-    case root() of
-        none -> #{};
-        Root ->
-            %% Prefer deriving names from tzdata.zi (one small file read,
-            %% ~2ms) over scanning the whole zoneinfo tree and opening every
-            %% file to sniff the TZif magic (~12s cold). The slow scan made
-            %% the first lookup miss stall long enough that parallel test
-            %% harness workers were killed before the cache was populated.
-            %% Zone data itself is still validated lazily in load_zone/1.
-            case maps:get(names, zi_tables()) of
-                Names when map_size(Names) > 0 -> Names;
-                _Empty -> names_from_scan(Root)
-            end
+    case prim_file:read_file_info(D) of
+        {ok, Info} when element(3, Info) =:= directory -> D;
+        _NotADir -> find_root(Rest)
     end.
 
 %% Zone names and links both come from tzdata.zi ("Z <name> ..." /
 %% "L <target> <name>"), so the file is read and walked exactly once and both
 %% tables fall out of the same fold. #{names => #{lower => Proper},
 %% links => #{lower => Target}}.
-zi_tables() ->
-    cached(zi_tables, fun build_zi_tables/0).
-
-build_zi_tables() ->
+zi_tables(Root) ->
     Empty = #{names => #{}, links => #{}},
-    case root() of
-        none -> Empty;
-        Root ->
-            Path = filename:join(Root, "tzdata.zi"),
-            case file:read_file(Path) of
-                {ok, Bin} ->
-                    Lines = binary:split(Bin, <<"\n">>, [global]),
-                    lists:foldl(fun add_zi_line/2, Empty, Lines);
-                {error, enoent} ->
-                    %% Zoneinfo trees without tzdata.zi are normal (macOS);
-                    %% names_from_scan/1 covers them and there are no links.
-                    Empty;
-                {error, Reason} ->
-                    logger:warning("arc_tz_ffi: cannot read ~ts: ~p",
-                                   [Path, Reason]),
-                    Empty
-            end
+    Path = filename:join(Root, "tzdata.zi"),
+    case prim_file:read_file(Path) of
+        {ok, Bin} ->
+            Lines = binary:split(Bin, <<"\n">>, [global]),
+            lists:foldl(fun add_zi_line/2, Empty, Lines);
+        {error, enoent} ->
+            %% Zoneinfo trees without tzdata.zi are normal (macOS);
+            %% resolve_in_tree/2 covers them and there are no links.
+            Empty;
+        {error, Reason} ->
+            logger:warning("arc_tz_ffi: cannot read ~ts: ~p", [Path, Reason]),
+            Empty
     end.
 
 add_zi_line(<<"Z ", Rest/binary>>, Acc) ->
@@ -460,21 +425,40 @@ add_zi_link(Target, LinkName, Acc0) ->
         false -> Acc
     end.
 
-%% Fallback for zoneinfo databases without tzdata.zi: scan the tree and
-%% TZif-sniff each regular file.
-names_from_scan(Root) ->
-    Files = filelib:wildcard("**", Root),
-    lists:foldl(
-      fun(F, Acc) ->
-          Path = filename:join(Root, F),
-          case valid_zone_name(F) andalso filelib:is_regular(Path)
-               andalso is_tzif(Path) of
-              true ->
-                  Bin = unicode:characters_to_binary(F),
-                  Acc#{string:lowercase(Bin) => Bin};
-              false -> Acc
-          end
-      end, #{}, Files).
+%% Zoneinfo trees without tzdata.zi (macOS): resolve the id one path component
+%% at a time against the directory listing, case-insensitively, so the answer
+%% carries the tree's own casing. A couple of list_dir calls per lookup instead
+%% of a TZif-sniffing scan of the whole tree.
+resolve_in_tree(Root, Id) ->
+    Name = unicode:characters_to_list(Id),
+    case safe_zone_name(Name) of
+        false -> {error, nil};
+        true ->
+            case resolve_components(Root, filename:split(Name), []) of
+                {ok, Parts} ->
+                    Rel = filename:join(Parts),
+                    case valid_zone_name(Rel) andalso
+                         is_tzif(filename:join(Root, Rel)) of
+                        true -> {ok, unicode:characters_to_binary(Rel)};
+                        false -> {error, nil}
+                    end;
+                error -> {error, nil}
+            end
+    end.
+
+resolve_components(_Dir, [], Acc) -> {ok, lists:reverse(Acc)};
+resolve_components(Dir, [Comp | Rest], Acc) ->
+    case prim_file:list_dir(Dir) of
+        {error, _NotADir} -> error;
+        {ok, Entries} ->
+            Lower = string:lowercase(Comp),
+            case [E || E <- Entries, string:lowercase(E) =:= Lower] of
+                [Proper | _] ->
+                    resolve_components(filename:join(Dir, Proper), Rest,
+                                       [Proper | Acc]);
+                [] -> error
+            end
+    end.
 
 valid_zone_name("posixrules") -> false;
 valid_zone_name("Factory") -> false;
@@ -496,20 +480,8 @@ is_tzif(Path) ->
     end.
 
 %% ----------------------------------------------------------------------
-%% Zone data cache
+%% Zone data
 %% ----------------------------------------------------------------------
-
-%% The parsed zone, cached forever. See arc_tzif:tz() for the shape.
--spec zone(binary()) -> {ok, arc_tzif:tz()} | {error, tz_error()}.
-zone(Id) ->
-    Key = {?MODULE, zone, Id},
-    case persistent_term:get(Key, undefined) of
-        undefined ->
-            Z = load_zone(Id),
-            persistent_term:put(Key, Z),
-            Z;
-        Z -> Z
-    end.
 
 %% "the host has no zoneinfo database" and "our TZif parser blew up on a file
 %% that does exist" are different problems; only the first is expected. Both
@@ -520,7 +492,7 @@ load_zone(Id) ->
         none -> {error, no_zoneinfo};
         Root ->
             Path = filename:join(Root, binary_to_list(Id)),
-            case file:read_file(Path) of
+            case prim_file:read_file(Path) of
                 {ok, Bin} ->
                     try {ok, arc_tzif:parse(Bin)}
                     catch Class:Reason:Stack ->

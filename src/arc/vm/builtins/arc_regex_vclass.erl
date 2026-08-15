@@ -79,11 +79,11 @@ vchain(L, Op, R, S, CI) ->
     end.
 
 vapply(inter, R, S, R2, S2) ->
-    {?CS:vinter(R, R2),
-     ordsets:intersection(ordsets:from_list(S), ordsets:from_list(S2))};
+    S2u = lists:usort(S2),
+    {?CS:vinter(R, R2), [X || X <- lists:usort(S), lists:member(X, S2u)]};
 vapply(subtract, R, S, R2, S2) ->
-    {?CS:vsubtract(R, R2),
-     ordsets:subtract(ordsets:from_list(S), ordsets:from_list(S2))}.
+    S2u = lists:usort(S2),
+    {?CS:vsubtract(R, R2), [X || X <- lists:usort(S), not lists:member(X, S2u)]}.
 
 %% One ClassSetOperand, possibly extended to a ClassSetRange (`a-z`).
 %% A trailing `--` is left unconsumed for the caller's operator dispatch.

@@ -1,3 +1,4 @@
+import arc/internal/host_time
 import arc/parser/number
 import arc/vm/builtins/temporal_tz
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
@@ -2547,10 +2548,10 @@ pub const empty_dtf_components = DtfComponents(
 /// (see `intl.zone_offset_at`). That makes "formatter built in January prints
 /// July with January's offset" unrepresentable.
 pub type DtfTimeZone {
-  /// The host environment's default zone. Its identifier is not observable,
-  /// so resolvedOptions reports "UTC"; the offset is the live host offset at
-  /// the formatted instant.
-  HostZone
+  /// The host environment's default zone (`HostHooks.time_zone`). Its
+  /// identifier is not observable, so resolvedOptions reports "UTC"; the
+  /// offset is that zone's offset at the formatted instant.
+  HostZone(zone: host_time.TimeZone)
   /// A named IANA zone, validated against the system tzdata. Its offset
   /// varies with the instant (DST). The zone handle *is* the identifier —
   /// `temporal_tz.zone_id` recovers it — so no separate id is stored and
@@ -2563,7 +2564,7 @@ pub type DtfTimeZone {
 /// The identifier resolvedOptions() reports for a formatter's time zone.
 pub fn dtf_time_zone_id(tz: DtfTimeZone) -> String {
   case tz {
-    HostZone -> "UTC"
+    HostZone(_) -> "UTC"
     NamedZone(zone:) -> temporal_tz.zone_id(zone)
     FixedZone(id:, ..) -> id
   }

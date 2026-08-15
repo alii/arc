@@ -63,7 +63,7 @@ pub fn canonical(s: String) -> Option(DtfTimeZone) {
 /// only place a DateTimeFormat offset ever comes from.
 pub fn offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
   case tz {
-    HostZone -> host_time.offset_at_utc_ms(instant_ms)
+    HostZone(zone:) -> host_time.zone_offset_at_utc_ms(zone, instant_ms)
     FixedZone(offset_minutes:, ..) -> offset_minutes
     NamedZone(zone:) -> {
       // `temporal_tz.lookup` already loaded this zone's TZif to mint the

@@ -366,7 +366,7 @@ translate_pat([$\\, P, ${ | Rest], InClass, Mode, CI, MS)
         none ->
             [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
     end;
-%% \s, \S -> the explicit JS sets: PCRE's own \s is ASCII-only and `ucp` \s both
+%% \s, \S -> the explicit JS sets. PCRE's own \s is ASCII-only and `ucp` \s both
 %% over- and under-shoots. \w, \W -> the explicit sets under u/v only; see
 %% word_atom/1. Outside a class the negated forms are their own negated bracket
 %% class; inside a class they must become class ITEMS (classes cannot nest), so
@@ -538,7 +538,7 @@ js_escape_cp($v) -> 16#0B;
 js_escape_cp(C) -> C.
 
 %% The HIGH endpoint of a class range, consumed as exactly one item so the state
-%% resets: whatever follows a completed range starts fresh, and a `-` there is a
+%% resets. Whatever follows a completed range starts fresh, and a `-` there is a
 %% literal rather than a second range operator (`[a-b-\uD800]`).
 %%
 %% Only `\u` needs care. A lone surrogate cannot be a PCRE range endpoint — its
