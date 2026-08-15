@@ -500,49 +500,40 @@ fn get_source(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn source_string(pattern: String) -> String {
   case pattern {
     "" -> "(?:)"
-    p ->
-      case
-        string.contains(p, "/")
-        || string.contains(p, "\n")
-        || string.contains(p, "\r")
-        || string.contains(p, "\u{2028}")
-        || string.contains(p, "\u{2029}")
-      {
-        False -> p
-        True -> escape_pattern(string.to_graphemes(p), "")
-      }
+    p -> escape_pattern(bit_array.from_string(p), "")
   }
 }
 
-fn escape_pattern(chars: List(String), acc: String) -> String {
+/// Walks code points, not grapheme clusters (`string.contains` and
+/// `string.to_graphemes` are cluster-based, so "/" followed by a combining
+/// mark would otherwise go unescaped); "\" pairs with exactly the next code
+/// point.
+fn escape_pattern(chars: BitArray, acc: String) -> String {
   case chars {
-    [] -> acc
     // Keep escape pairs together; an escaped line terminator is rewritten
     // to its escape-sequence form (same matcher semantics, single line).
-    ["\\", next, ..rest] ->
+    <<"\\":utf8, next:utf8_codepoint, rest:bits>> ->
       escape_pattern(rest, acc <> "\\" <> escape_terminator(next))
-    ["\\"] -> acc <> "\\"
-    ["/", ..rest] -> escape_pattern(rest, acc <> "\\/")
-    ["\n", ..rest] -> escape_pattern(rest, acc <> "\\n")
-    // "\r\n" is one grapheme cluster.
-    ["\r\n", ..rest] -> escape_pattern(rest, acc <> "\\r\\n")
-    ["\r", ..rest] -> escape_pattern(rest, acc <> "\\r")
-    ["\u{2028}", ..rest] -> escape_pattern(rest, acc <> "\\u2028")
-    ["\u{2029}", ..rest] -> escape_pattern(rest, acc <> "\\u2029")
-    [ch, ..rest] -> escape_pattern(rest, acc <> ch)
+    <<"/":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\/")
+    <<"\n":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\n")
+    <<"\r":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\r")
+    <<"\u{2028}":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\u2028")
+    <<"\u{2029}":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\u2029")
+    <<ch:utf8_codepoint, rest:bits>> ->
+      escape_pattern(rest, acc <> string.from_utf_codepoints([ch]))
+    _ -> acc
   }
 }
 
-/// The character following a backslash, rewritten if it is a literal line
+/// The code point following a backslash, rewritten if it is a literal line
 /// terminator ("\<LF>" → "\n" keeps the escape's meaning on one line).
-fn escape_terminator(ch: String) -> String {
-  case ch {
-    "\n" -> "n"
-    "\r\n" -> "r\\n"
-    "\r" -> "r"
-    "\u{2028}" -> "u2028"
-    "\u{2029}" -> "u2029"
-    other -> other
+fn escape_terminator(cp: UtfCodepoint) -> String {
+  case string.utf_codepoint_to_int(cp) {
+    0x0A -> "n"
+    0x0D -> "r"
+    0x2028 -> "u2028"
+    0x2029 -> "u2029"
+    _ -> string.from_utf_codepoints([cp])
   }
 }
 
