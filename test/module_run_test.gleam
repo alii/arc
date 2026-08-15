@@ -207,8 +207,7 @@ pub fn a_never_settling_await_is_reported_test() {
 fn run_script(st: Agent, source: String) -> Agent {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compiler.compile(body, sb)
-  let assert #(NormalCompletion(_), st) =
-    entry.run_script(st, compiler.shared_template(template))
+  let assert #(NormalCompletion(_), st) = entry.run_script(st, template)
   rt_async.drain(st)
 }
 
