@@ -683,13 +683,18 @@ fn do_async_from_sync(
   cap_resolve: JsVal,
   cap_reject: JsVal,
 ) -> #(JsVal, Agent) {
-  let sync_rec = require_async_from_sync(st, this)
-  let sync_iter = mk_object(sync_rec)
-  // §27.1.6.2.2/.3: return/throw look up per call. next uses the record's
-  // cached [[NextMethod]] — 2core's `AsyncFromSyncIterator` stores only the
-  // sync-iterator handle, so `.next` is fetched here (arc caches in the slot).
+  let sync =
+    iter_protocol.sync_iterator_record(st, require_async_from_sync(st, this))
+  let sync_iter = sync.iterator
+  let sync_rec = case classify(sync_iter) {
+    KHandle(h) -> h
+    _ -> throw_type_error(st, "not an Async-from-Sync Iterator")
+  }
+  // §27.1.6.2.1 .next() uses the sync iterator record's cached [[NextMethod]]
+  // (IteratorNext, §7.4.3) — no re-Get. return/throw are looked up per call
+  // (§27.1.6.2.2/.3 GetMethod).
   let #(method, st) = case kind {
-    AfsNext -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("next")))
+    AfsNext -> #(sync.next_method, st)
     AfsReturn -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("return")))
     AfsThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("throw")))
   }

@@ -29,8 +29,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, type JsVal, Agent, ArgumentsObj,
   ArrayObj, FrameInfo, FunctionApply, FunctionCall, FunctionN, JsStore, KBound,
-  KBytecode, KHandle, KNative, KNull, KTdz, KUndef, ReflectApply, ReflectN, SBox,
-  SObject, classify, mk_object, mk_tdz, mk_undefined,
+  KBytecode, KCompiled, KHandle, KNative, KNull, KTdz, KUndef, ProxyObj,
+  ReflectApply, ReflectN, SBox, SObject, classify, mk_object, mk_tdz,
+  mk_undefined,
 }
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/lexical
@@ -483,7 +484,7 @@ pub fn call(
             [] -> #(mk_undefined(), mk_undefined())
           }
           // Step 1: If IsCallable(func) is false, throw a TypeError.
-          use <- require_callable(state, this, rest_stack)
+          use <- require_callable(state, this)
           // Step 3: undefined/null argArray → no args. Step 4:
           // ? CreateListFromArrayLike(argArray).
           use #(call_args, state) <- result.try(case classify(arg_array) {
@@ -503,7 +504,7 @@ pub fn call(
             [t] -> #(t, mk_undefined(), mk_undefined())
             [] -> #(mk_undefined(), mk_undefined(), mk_undefined())
           }
-          use <- require_callable(state, target, rest_stack)
+          use <- require_callable(state, target)
           use #(call_args, state) <- result.try(
             guarded(State(..state, stack: rest_stack), fn(agent) {
               b_function.create_list_from_array_like(agent, args_list)
@@ -511,37 +512,41 @@ pub fn call(
           )
           call(state, target, this_arg, call_args, rest_stack, drive)
         }
-        _ -> call_nested(state, callee, this, args, rest_stack)
+        SObject(kind: KNative(..), ..)
+        | SObject(kind: KCompiled(..), ..)
+        | SObject(kind: ProxyObj(..), ..) ->
+          call_nested(state, callee, this, args, rest_stack)
+        _ -> not_a_function(state, callee)
       }
-    _ -> not_a_function(state, callee, rest_stack)
+    _ -> not_a_function(state, callee)
   }
 }
 
 fn require_callable(
   state: State,
   v: JsVal,
-  rest_stack: List(JsVal),
   k: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
   case rt_call.is_callable(state.agent, v) {
     True -> k()
-    False -> not_a_function(state, v, rest_stack)
+    False -> not_a_function(state, v)
   }
 }
 
-fn not_a_function(
-  state: State,
-  callee: JsVal,
-  rest_stack: List(JsVal),
-) -> Result(State, StepExit) {
+/// The not-callable TypeError is raised with the operand stack untouched
+/// (callee and arguments still on it): `unwind_to_catch` truncates to the
+/// handler's recorded depth, and open-coded close sequences (for-await's
+/// AsyncIteratorClose) record that depth above the popped operands.
+fn not_a_function(state: State, callee: JsVal) -> Result(State, StepExit) {
   state.throw_type_error(
-    State(..state, stack: rest_stack),
+    state,
     rt_inspect.inspect(state.agent, callee) <> " is not a function",
   )
 }
 
-/// One nested runtime call: natives, compiled functions, proxies (and the
-/// not-callable TypeError). `t_call` owns the depth bracket and the catch.
+/// One nested runtime call: natives, compiled functions, proxies (a revoked
+/// or non-callable proxy throws in there). `t_call` owns the depth bracket
+/// and the catch.
 fn call_nested(
   state: State,
   callee: JsVal,

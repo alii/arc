@@ -15,9 +15,9 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsOps, type JsVal, ArrayObj,
-  AsyncFromSyncIterator, Dense, Index, IteratorRecord, KHandle, KNull, KStr,
-  KUndef, Named, NoElements, SObject, StringKey, SymbolKey, TypeErr, classify,
-  mk_object, mk_undefined, symbol_async_iterator, symbol_iterator,
+  AsyncFromSyncIterator, DataProperty, Dense, Index, IteratorRecord, KHandle,
+  KNull, KStr, KUndef, Named, NoElements, SObject, StringKey, SymbolKey, TypeErr,
+  classify, mk_object, mk_undefined, symbol_async_iterator, symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
@@ -166,17 +166,42 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
   }
 }
 
+const k_iterator = StringKey(Named("iterator"))
+
+const k_next = StringKey(Named("next"))
+
 /// §27.1.6.1 CreateAsyncFromSyncIterator: allocate an `%AsyncFromSyncIterator%`
-/// wrapper around a sync record. Proto MUST be `%AsyncFromSyncIteratorPrototype%`
-/// (owns next/return/throw per §27.1.6.2) — NOT `%AsyncIteratorPrototype%`. The
-/// returned Record's `next_method` is that proto's `next`, read from the wrapper.
+/// wrapper whose [[SyncIteratorRecord]] is `sync`: the iterator AND its
+/// already-read `next` (§7.4.4 reads it once), held in an internal null-proto
+/// record cell so %AsyncFromSyncIteratorPrototype%.next never re-Gets it.
+/// Proto MUST be `%AsyncFromSyncIteratorPrototype%` (owns next/return/throw
+/// per §27.1.6.2) — NOT `%AsyncIteratorPrototype%`. The returned Record's
+/// `next_method` is that proto's `next`, read from the wrapper.
 pub fn create_async_from_sync(
   st: Agent,
   sync: IteratorRecord,
 ) -> #(IteratorRecord, Agent) {
-  // `sync.iterator` is provably an object — `get_iterator_from_method` routed
-  // it through `get_iterator_direct`, which threw for non-objects.
-  let assert KHandle(sync_rec) = classify(sync.iterator)
+  let #(sync_rec, st) = rt_obj.t_new_object(st, None)
+  let #(_, st) =
+    rt_obj.t_define_own_data(
+      st,
+      sync_rec,
+      k_iterator,
+      sync.iterator,
+      True,
+      True,
+      True,
+    )
+  let #(_, st) =
+    rt_obj.t_define_own_data(
+      st,
+      sync_rec,
+      k_next,
+      sync.next_method,
+      True,
+      True,
+      True,
+    )
   let #(wrapper_h, st) =
     rt_store.t_cell_new(
       st,
@@ -192,6 +217,20 @@ pub fn create_async_from_sync(
   let wrapper = mk_object(wrapper_h)
   let #(next, st) = rt_obj.t_get_prop(st, wrapper, StringKey(Named("next")))
   #(IteratorRecord(iterator: wrapper, next_method: next), st)
+}
+
+/// The [[SyncIteratorRecord]] held in an %AsyncFromSyncIterator%'s record
+/// cell (as written by `create_async_from_sync`).
+pub fn sync_iterator_record(st: Agent, sync_rec: Handle) -> IteratorRecord {
+  case
+    rt_obj.t_ordinary_own_property(st, sync_rec, k_iterator),
+    rt_obj.t_ordinary_own_property(st, sync_rec, k_next)
+  {
+    Some(DataProperty(value: iterator, ..)),
+      Some(DataProperty(value: next_method, ..))
+    -> IteratorRecord(iterator:, next_method:)
+    _, _ -> throw_type_error(st, "not an Async-from-Sync Iterator")
+  }
 }
 
 /// §7.4.13 GetIteratorFlattenable's two call sites, as a type: `Iterator.from`
