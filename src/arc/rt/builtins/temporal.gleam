@@ -26,6 +26,13 @@ import arc/rt/builtins/temporal_iso.{
   type Precision, AutoPrec, epoch_ns_to_iso, format_iso_date, format_iso_time,
   ns_max_instant, ns_per_day, ns_per_ms,
 }
+import arc/rt/builtins/temporal_duration
+import arc/rt/builtins/temporal_plain_date
+import arc/rt/builtins/temporal_plain_date_time
+import arc/rt/builtins/temporal_plain_month_day
+import arc/rt/builtins/temporal_plain_time
+import arc/rt/builtins/temporal_plain_year_month
+import arc/rt/builtins/temporal_zoned_date_time
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type InstantGetterName, type InstantMethodName,
@@ -38,10 +45,22 @@ import arc/rt/types.{
   InstantToZonedDateTimeIso, InstantUntil, InstantValueOf, JFloat, JInt, JNan,
   JNegInf, JPosInf, KStr, KUndef, Named, NowInstant, NowPlainDateISO,
   NowPlainDateTimeISO, NowPlainTimeISO, NowTimeZoneId, NowZonedDateTimeISO,
-  StringKey, TemporalInstantCtor, TemporalInstantGetter,
+  StringKey, TemporalDurationCtor, TemporalDurationGetter,
+  TemporalDurationMethod, TemporalDurationStatic, TemporalInstantCtor,
+  TemporalInstantGetter,
   TemporalInstantMethod, TemporalInstantStatic, TemporalN, TemporalNowFn,
-  TemporalProtos, classify, mk_bigint, mk_bool, mk_number, mk_object,
-  mk_string, mk_undefined,
+  TemporalPlainDateCtor, TemporalPlainDateGetter, TemporalPlainDateMethod,
+  TemporalPlainDateStatic, TemporalPlainDateTimeCtor,
+  TemporalPlainDateTimeGetter, TemporalPlainDateTimeMethod,
+  TemporalPlainDateTimeStatic, TemporalPlainMonthDayCtor,
+  TemporalPlainMonthDayGetter, TemporalPlainMonthDayMethod,
+  TemporalPlainMonthDayStatic, TemporalPlainTimeCtor, TemporalPlainTimeGetter,
+  TemporalPlainTimeMethod, TemporalPlainTimeStatic, TemporalPlainYearMonthCtor,
+  TemporalPlainYearMonthGetter, TemporalPlainYearMonthMethod,
+  TemporalPlainYearMonthStatic,
+  TemporalProtos, TemporalZonedDateTimeCtor, TemporalZonedDateTimeGetter,
+  TemporalZonedDateTimeMethod, TemporalZonedDateTimeStatic, classify,
+  mk_bigint, mk_bool, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -80,6 +99,84 @@ pub fn init(
       duration: dur_proto,
       instant: ins_proto,
       zoned_date_time: zdt_proto,
+    )
+
+  let #(pd_ctor, st) =
+    init_temporal_type(
+      st,
+      function_proto,
+      "PlainDate",
+      3,
+      pd_proto,
+      temporal_plain_date.ctor_token(protos),
+      temporal_plain_date.statics(protos),
+      temporal_plain_date.getters(),
+      temporal_plain_date.methods(protos),
+    )
+
+  let #(pt_ctor, st) =
+    init_temporal_type(
+      st,
+      function_proto,
+      "PlainTime",
+      0,
+      pt_proto,
+      temporal_plain_time.ctor_token(protos),
+      temporal_plain_time.statics(protos),
+      temporal_plain_time.getters(),
+      temporal_plain_time.methods(protos),
+    )
+
+  let #(pdt_ctor, st) =
+    init_temporal_type(
+      st,
+      function_proto,
+      "PlainDateTime",
+      3,
+      pdt_proto,
+      temporal_plain_date_time.ctor_token(protos),
+      temporal_plain_date_time.statics(protos),
+      temporal_plain_date_time.getters(),
+      temporal_plain_date_time.methods(protos),
+    )
+
+  let #(pym_ctor, st) =
+    init_temporal_type(
+      st,
+      function_proto,
+      "PlainYearMonth",
+      2,
+      pym_proto,
+      temporal_plain_year_month.ctor_token(protos),
+      temporal_plain_year_month.statics(protos),
+      temporal_plain_year_month.getters(),
+      temporal_plain_year_month.methods(protos),
+    )
+
+  let #(pmd_ctor, st) =
+    init_temporal_type(
+      st,
+      function_proto,
+      "PlainMonthDay",
+      2,
+      pmd_proto,
+      temporal_plain_month_day.ctor_token(protos),
+      temporal_plain_month_day.statics(protos),
+      temporal_plain_month_day.getters(),
+      temporal_plain_month_day.methods(protos),
+    )
+
+  let #(dur_ctor, st) =
+    init_temporal_type(
+      st,
+      function_proto,
+      "Duration",
+      0,
+      dur_proto,
+      temporal_duration.ctor_token(protos),
+      temporal_duration.statics(protos),
+      temporal_duration.getters(),
+      temporal_duration.methods(protos),
     )
 
   let #(ins_ctor, st) =
@@ -132,6 +229,19 @@ pub fn init(
       ),
     )
 
+  let #(zdt_ctor, st) =
+    init_temporal_type(
+      st,
+      function_proto,
+      "ZonedDateTime",
+      2,
+      zdt_proto,
+      temporal_zoned_date_time.ctor_token(protos),
+      temporal_zoned_date_time.statics(protos),
+      temporal_zoned_date_time.getters(),
+      temporal_zoned_date_time.methods(protos),
+    )
+
   // Temporal.Now namespace
   let #(now_props, st) =
     common.alloc_methods(
@@ -155,10 +265,24 @@ pub fn init(
   // Temporal namespace itself, in spec order: PlainDate, PlainTime,
   // PlainDateTime, PlainYearMonth, PlainMonthDay, Duration, Instant,
   // ZonedDateTime, Now.
+  let #(pd_prop, st) = common.builtin_property(st, mk_object(pd_ctor))
+  let #(pt_prop, st) = common.builtin_property(st, mk_object(pt_ctor))
+  let #(pdt_prop, st) = common.builtin_property(st, mk_object(pdt_ctor))
+  let #(pym_prop, st) = common.builtin_property(st, mk_object(pym_ctor))
+  let #(pmd_prop, st) = common.builtin_property(st, mk_object(pmd_ctor))
+  let #(dur_prop, st) = common.builtin_property(st, mk_object(dur_ctor))
   let #(ins_prop, st) = common.builtin_property(st, mk_object(ins_ctor))
+  let #(zdt_prop, st) = common.builtin_property(st, mk_object(zdt_ctor))
   let #(now_prop, st) = common.builtin_property(st, mk_object(now_h))
   common.init_namespace(st, object_proto, "Temporal", [
+    #("PlainDate", pd_prop),
+    #("PlainTime", pt_prop),
+    #("PlainDateTime", pdt_prop),
+    #("PlainYearMonth", pym_prop),
+    #("PlainMonthDay", pmd_prop),
+    #("Duration", dur_prop),
     #("Instant", ins_prop),
+    #("ZonedDateTime", zdt_prop),
     #("Now", now_prop),
   ])
 }
@@ -251,8 +375,50 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     // All Temporal constructors throw TypeError when called without `new`.
-    TemporalInstantCtor(..) ->
+    TemporalInstantCtor(..) | TemporalPlainTimeCtor(..) | TemporalPlainDateCtor(..) ->
       rt_val.t_throw_type_error(st, "Temporal constructor requires new")
+    TemporalPlainDateStatic(name:, protos:) ->
+      temporal_plain_date.static(st, name, protos, args)
+    TemporalPlainDateGetter(getter:) ->
+      temporal_plain_date.getter(st, getter, this)
+    TemporalPlainDateMethod(method:, protos:) ->
+      temporal_plain_date.method(st, method, protos, this, args)
+    TemporalPlainTimeStatic(name:, protos:) ->
+      temporal_plain_time.static(st, name, protos, args)
+    TemporalPlainTimeGetter(getter:) ->
+      temporal_plain_time.getter(st, getter, this)
+    TemporalPlainTimeMethod(method:, protos:) ->
+      temporal_plain_time.method(st, method, protos, this, args)
+    TemporalPlainDateTimeCtor(..) ->
+      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
+    TemporalPlainDateTimeStatic(name:, protos:) ->
+      temporal_plain_date_time.static(st, name, protos, args)
+    TemporalPlainDateTimeGetter(getter:) ->
+      temporal_plain_date_time.getter(st, getter, this)
+    TemporalPlainDateTimeMethod(method:, protos:) ->
+      temporal_plain_date_time.method(st, method, protos, this, args)
+    TemporalPlainYearMonthCtor(..) | TemporalPlainMonthDayCtor(..) ->
+      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
+    TemporalPlainYearMonthStatic(name:, protos:) ->
+      temporal_plain_year_month.static(st, name, protos, args)
+    TemporalPlainYearMonthGetter(getter:) ->
+      temporal_plain_year_month.getter(st, getter, this)
+    TemporalPlainYearMonthMethod(method:, protos:) ->
+      temporal_plain_year_month.method(st, method, protos, this, args)
+    TemporalPlainMonthDayStatic(name:, protos:) ->
+      temporal_plain_month_day.static(st, name, protos, args)
+    TemporalPlainMonthDayGetter(getter:) ->
+      temporal_plain_month_day.getter(st, getter, this)
+    TemporalPlainMonthDayMethod(method:, protos:) ->
+      temporal_plain_month_day.method(st, method, protos, this, args)
+    TemporalDurationCtor(..) ->
+      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
+    TemporalDurationStatic(name:, protos:) ->
+      temporal_duration.static(st, name, protos, args)
+    TemporalDurationGetter(getter:) ->
+      temporal_duration.getter(st, getter, this)
+    TemporalDurationMethod(method:, protos:) ->
+      temporal_duration.method(st, method, protos, this, args)
     TemporalInstantStatic(name:, protos:) ->
       instant_static(st, name, protos, args)
     TemporalInstantGetter(getter:) -> instant_getter(st, getter, this)
@@ -276,6 +442,30 @@ pub fn dispatch_construct(
   case native {
     TemporalInstantCtor(protos:) -> {
       let #(v, st) = instant_ctor(st, protos, args)
+      apply_new_target_proto(st, new_target, v)
+    }
+    TemporalPlainTimeCtor(protos:) -> {
+      let #(v, st) = temporal_plain_time.ctor(st, protos, args)
+      apply_new_target_proto(st, new_target, v)
+    }
+    TemporalPlainDateTimeCtor(protos:) -> {
+      let #(v, st) = temporal_plain_date_time.ctor(st, protos, args)
+      apply_new_target_proto(st, new_target, v)
+    }
+    TemporalPlainDateCtor(protos:) -> {
+      let #(v, st) = temporal_plain_date.ctor(st, protos, args)
+      apply_new_target_proto(st, new_target, v)
+    }
+    TemporalPlainYearMonthCtor(protos:) -> {
+      let #(v, st) = temporal_plain_year_month.ctor(st, protos, args)
+      apply_new_target_proto(st, new_target, v)
+    }
+    TemporalPlainMonthDayCtor(protos:) -> {
+      let #(v, st) = temporal_plain_month_day.ctor(st, protos, args)
+      apply_new_target_proto(st, new_target, v)
+    }
+    TemporalDurationCtor(protos:) -> {
+      let #(v, st) = temporal_duration.ctor(st, protos, args)
       apply_new_target_proto(st, new_target, v)
     }
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
