@@ -3,7 +3,8 @@
 //// element/2. A field reorder or insert in those records fails here.
 
 import arc/rt/builtins as rt_builtins
-import arc/rt/call.{NormalCompletion, ThrowCompletion}
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type HostHooks, type JsVal,
@@ -396,4 +397,44 @@ pub fn completion_test() {
   assert element(2, dyn(NormalCompletion(v))) == dyn(v)
   assert tag_of(ThrowCompletion(v)) == tag("COMPLETION_THROW")
   assert element(2, dyn(ThrowCompletion(v))) == dyn(v)
+}
+
+@external(erlang, "arc_rt_obj_ffi", "t_get_elem_fast")
+fn get_elem_fast(st: Agent, recv: JsVal, idx: Int) -> Dynamic
+
+@external(erlang, "arc_rt_obj_ffi", "t_set_elem_fast")
+fn set_elem_fast(st: Agent, recv: JsVal, idx: Int, v: JsVal) -> Dynamic
+
+@external(erlang, "arc_rt_obj_ffi", "t_get_prop_own_data")
+fn get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> Dynamic
+
+@external(erlang, "arc_rt_obj_ffi", "t_set_prop_own_data")
+fn set_prop_own_data(st: Agent, recv: JsVal, key: BitArray, v: JsVal) -> Dynamic
+
+type Probe {
+  Miss
+}
+
+/// Integer-indexed exotics never take the Erlang own-data / element fast
+/// paths: every probe on a TypedArray cell misses, so the exotic MOP arms in
+/// arc/rt/obj run.
+pub fn typed_array_fast_paths_miss_test() {
+  let st = seeded()
+  let #(ctor, st) = rt_obj.t_global_get(st, <<"Uint8Array">>)
+  let n = rt_types.mk_number(rt_types.JInt(4))
+  let #(h, st) = rt_call.t_construct(st, ctor, [n], ctor)
+  let ta = rt_types.mk_object(h)
+  let #(_, st) =
+    rt_obj.t_set_prop(
+      st,
+      ta,
+      StringKey(Named("extra")),
+      rt_types.mk_string("x"),
+    )
+  assert get_elem_fast(st, ta, 0) == dyn(Miss)
+  assert set_elem_fast(st, ta, 0, n) == dyn(Miss)
+  assert set_elem_fast(st, ta, 4, n) == dyn(Miss)
+  assert get_prop_own_data(st, ta, <<"length">>) == dyn(Miss)
+  assert get_prop_own_data(st, ta, <<"extra">>) == dyn(Miss)
+  assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
 }

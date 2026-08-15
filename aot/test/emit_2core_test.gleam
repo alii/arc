@@ -296,3 +296,40 @@ pub fn generator_and_collection_iteration_diff_test() {
     "1,2,2,1a,2b 5 2\n",
   )
 }
+
+// ── Buffer family: ArrayBuffer / TypedArray / DataView / Atomics ───────────
+
+pub fn typed_array_index_exotic_diff_test() {
+  diff(
+    "var a=new Uint8Array([1,2,300]);a[1]=7;a[9]=5;a['1.5']=5;var o={};console.log(a[0],a[1],a[2],a[9],a.length,Object.keys(a).join(),'1' in a,'3' in a,'-0' in a,delete a[0],delete a[9],JSON.stringify(Object.getOwnPropertyDescriptor(a,'0')),Reflect.set(a,0,4,o),o[0],a[0],JSON.stringify({...a}))",
+    "1 7 44 undefined 3 0,1,2 true false false false true {\"value\":1,\"writable\":true,\"enumerable\":true,\"configurable\":true} true 4 1 {\"0\":1,\"1\":7,\"2\":44}\n",
+  )
+}
+
+pub fn typed_array_over_buffer_and_resizable_diff_test() {
+  diff(
+    "var b=new ArrayBuffer(16);var f=new Float64Array(b,8);f[0]=1.5;console.log(f.length,f.byteOffset,f[0],new Uint8Array(b)[15]);var r=new ArrayBuffer(4,{maxByteLength:16});var v=new Uint8Array(r);var s=v.subarray(1);r.resize(12);console.log(v.length,s.length,r.resizable,r.maxByteLength);r.resize(2);console.log(v.length,s.length);var t=r.transfer(8);console.log(r.detached,v.length,t.byteLength,t.resizable);try{v.fill(1)}catch(e){console.log(e.name)}",
+    "1 8 1.5 63\n12 11 true 16\n2 1\ntrue 0 8 true\nTypeError\n",
+  )
+}
+
+pub fn typed_array_methods_diff_test() {
+  diff(
+    "var x=new Float32Array([5,1,4]);x.set([9],2);console.log(x.join(),x.subarray(1).join(),x.slice(0,2).join(),x.toSorted().join(),x.sort(function(a,b){return b-a}).join(),x.at(-1),x.indexOf(9),x.includes(NaN),x.map(function(v){return v*2}).join(),x.filter(function(v){return v>4}).length,x.reduce(function(a,b){return a+b}),x.findLast(function(v){return v<9}),x.with(0,7).join(),x.toReversed().join(),x.copyWithin(1,0,2).join(),[...x.entries()].join(';'),Uint8Array.from('123',function(c){return c*2}).join(),Int16Array.of(-1,'2').join(),new Uint8ClampedArray([1.5,2.5,-1,999]).join(),new Int8Array(new Float64Array([1.9,-2.9,130])).join())",
+    "5,1,9 1,9 5,1 1,5,9 9,5,1 1 0 false 18,10,2 2 15 1 7,5,1 1,5,9 9,9,5 0,9;1,9;2,5 2,4,6 -1,2 2,2,0,255 1,-2,-126\n",
+  )
+}
+
+pub fn data_view_and_bigint_diff_test() {
+  diff(
+    "var d=new DataView(new ArrayBuffer(16));d.setInt16(0,-2,true);d.setFloat16(2,1.5);d.setBigUint64(8,2n**64n-1n);console.log(d.getInt16(0,true),d.getInt16(0),d.getFloat16(2),d.getUint16(2),d.getBigInt64(8),d.getUint32(8,true),d.byteLength);try{d.getFloat64(12)}catch(e){console.log(e.name)}var g=new BigInt64Array(2);g[0]=-5n;g[1]=2n**63n;console.log(g[0],g[1],g.join());try{g[0]=1}catch(e){console.log(e.name)}",
+    "-2 -257 1.5 15872 -1n 4294967295 16\nRangeError\n-5n -9223372036854775808n -5,-9223372036854775808\nTypeError\n",
+  )
+}
+
+pub fn shared_buffer_and_atomics_diff_test() {
+  diff(
+    "var sab=new SharedArrayBuffer(8,{maxByteLength:16});var i=new Int32Array(sab);console.log(Atomics.add(i,0,5),Atomics.load(i,0),Atomics.compareExchange(i,0,5,9),Atomics.compareExchange(i,0,5,1),i[0],Atomics.exchange(i,1,-1),Atomics.and(i,1,12),Atomics.sub(i,1,2),Atomics.xor(i,1,3),Atomics.or(i,1,16),i[1],Atomics.store(i,0,-1/0),Atomics.notify(i,0),Atomics.isLockFree(8));sab.grow(16);console.log(sab.byteLength,i.length,sab.growable);try{Atomics.wait(i,0,0,0)}catch(e){console.log(e.name)}try{Atomics.load(i,9)}catch(e){console.log(e.name)}try{Atomics.add(new Float64Array(1),0,1)}catch(e){console.log(e.name)}",
+    "0 5 5 9 9 0 -1 12 10 9 25 -Infinity 0 true\n16 4 true\nTypeError\nRangeError\nTypeError\n",
+  )
+}
