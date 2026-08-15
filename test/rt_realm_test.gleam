@@ -43,8 +43,8 @@ pub fn create_realm_registers_a_distinct_realm_test() {
   assert st.realm.id == 0
   assert other.id == 1
   assert dict.size(st.realms) == 2
-  assert rt_realm.lookup(st, 1) == other
-  assert rt_realm.lookup(st, 0) == st.realm
+  assert rt_call.realm_by_id(st, 1) == other
+  assert rt_call.realm_by_id(st, 0) == st.realm
   // Fresh intrinsics and global, wired to each other, not to realm 0's.
   assert other.object.prototype != st.realm.object.prototype
   assert other.global_object != st.realm.global_object
@@ -91,7 +91,7 @@ pub fn lexical_globals_persist_across_switches_test() {
         )
       #(Nil, Agent(..st, realm:))
     })
-  assert dict.get(rt_realm.lookup(st, other.id).lexical_globals, "x")
+  assert dict.get(rt_call.realm_by_id(st, other.id).lexical_globals, "x")
     == Ok(types.Let(mk_string("v")))
   assert dict.get(st.realm.lexical_globals, "x") == Error(Nil)
 }
@@ -111,11 +111,11 @@ pub fn install_262_and_create_realm_test() {
   assert st.realm.id == 0
   assert dict.size(st.realms) == 2
   let child_global = get(st, child, "global")
-  assert child_global == mk_object(rt_realm.lookup(st, 1).global_object)
+  assert child_global == mk_object(rt_call.realm_by_id(st, 1).global_object)
   assert child_global != mk_object(st.realm.global_object)
   assert get(st, child_global, "$262") == child
   assert get(st, child, "agent") == agent_obj
-  assert proto_of(st, child) == rt_realm.lookup(st, 1).object.prototype
+  assert proto_of(st, child) == rt_call.realm_by_id(st, 1).object.prototype
   // gc is callable and inert.
   let #(r, st) = rt_helpers.call_method(st, child, "gc", [])
   assert r == mk_undefined()
@@ -261,4 +261,41 @@ pub fn species_create_ignores_a_foreign_array_constructor_test() {
   assert proto_of(st, mapped) == st.realm.array.prototype
   let #(concat, st) = rt_helpers.call_method(st, arr, "concat", [])
   assert proto_of(st, concat) == st.realm.array.prototype
+}
+
+pub fn construct_defaults_to_the_new_target_realm_intrinsic_test() {
+  let #(other, st) = two_realms()
+  // A bound function has no own `prototype`, and its realm is its target's:
+  // GetPrototypeFromConstructor falls to the intrinsic of `other`.
+  let #(new_target, st) =
+    rt_helpers.call_method(st, mk_object(other.array.constructor), "bind", [
+      mk_undefined(),
+    ])
+  let construct = fn(st: Agent, pair: types.BuiltinPair, args) {
+    let #(h, st) =
+      rt_call.t_construct(st, mk_object(pair.constructor), args, new_target)
+    #(mk_object(h), st)
+  }
+  let here = st.realm
+  let #(m, st) = construct(st, here.map, [])
+  assert proto_of(st, m) == other.map.prototype
+  let #(e, st) = construct(st, here.type_error, [])
+  assert proto_of(st, e) == other.type_error.prototype
+  let #(u, st) = construct(st, here.uri_error, [])
+  assert proto_of(st, u) == other.uri_error.prototype
+  let #(a, st) = construct(st, here.array, [])
+  assert proto_of(st, a) == other.array.prototype
+  let #(d, st) = construct(st, here.date, [])
+  assert proto_of(st, d) == other.date.prototype
+  let #(b, st) = construct(st, here.array_buffer, [mk_number(JInt(0))])
+  assert proto_of(st, b) == other.array_buffer.prototype
+  // An object `prototype` on newTarget still wins over any intrinsic.
+  let #(p, st) =
+    rt_call.t_construct(
+      st,
+      mk_object(here.map.constructor),
+      [],
+      mk_object(other.set.constructor),
+    )
+  assert proto_of(st, mk_object(p)) == other.set.prototype
 }

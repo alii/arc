@@ -1,17 +1,18 @@
-//// Multi-realm support (§9.3 Realms): the realm registry on `Agent`,
-//// entering another realm for the duration of a native's body, and the
-//// test262 host-defined `$262` object whose `createRealm`/`evalScript` are
-//// the only way script code reaches a second realm.
+//// Multi-realm support (§9.3 Realms): entering another realm for the
+//// duration of a native's body, and the test262 host-defined `$262` object
+//// whose `createRealm`/`evalScript` are the only way script code reaches a
+//// second realm.
 ////
 //// Model: `Agent.realm` is the running execution context's Realm Record and
-//// `Agent.realms` holds every realm by `Realm.id`. Function objects carry no
-//// [[Realm]] slot; a realm-attributed native (JSON, the `$262` methods, the
+//// `Agent.realms` holds every realm by `Realm.id` (read back with
+//// `rt_call.realm_by_id`; a function's realm with `rt_call.function_realm`).
+//// A realm-attributed native (JSON, the `$262` methods, the
 //// `Error.prototype.stack` setter) carries its realm id in its `NativeToken`
-//// and enters it with `with_realm`. `eval` and `Function` are not attributed:
-//// they run in whichever realm is current.
+//// and enters it with `with_realm`.
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -25,21 +26,6 @@ import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/option.{type Option, None, Some}
-
-// ── registry ────────────────────────────────────────────────────────────────
-
-/// The Realm Record for `id`. The current realm answers for its own id (its
-/// registry entry may be stale); any other id must be registered.
-pub fn lookup(st: Agent, id: Int) -> Realm {
-  use <- bool.guard(id == st.realm.id, st.realm)
-  case dict.get(st.realms, id) {
-    Ok(r) -> r
-    // Ids are only minted by `init_realm`, which registers them, and are
-    // never removed: an unknown id is a corrupt token, not a JS error.
-    Error(Nil) ->
-      panic as { "rt/realm.lookup: no realm with id " <> int.to_string(id) }
-  }
-}
 
 // ── entering a realm ────────────────────────────────────────────────────────
 
@@ -167,7 +153,7 @@ fn create_realm_262(
 ) -> #(JsVal, Agent) {
   let #(realm, st) = create_realm(st)
   let #(dollar, st) = install_262(st, realm)
-  let parent_global = lookup(st, parent).global_object
+  let parent_global = rt_call.realm_by_id(st, parent).global_object
   let agent =
     own_data(st, parent_global, "$262")
     |> option.then(as_handle)

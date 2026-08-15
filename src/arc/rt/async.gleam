@@ -18,7 +18,6 @@ import arc/rt/call.{
 import arc/rt/gc as rt_gc
 import arc/rt/inspect
 import arc/rt/obj as rt_obj
-import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type AGResumeKind, type Agent, type AsyncGenRequest, type AsyncGenState,
@@ -674,16 +673,12 @@ fn generator_prototype(
         Some(DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(p) -> p
-            _ -> intrinsic(function_realm(st, fn_h))
+            _ -> intrinsic(call.function_realm(st, fn_h))
           }
-        _ -> intrinsic(function_realm(st, fn_h))
+        _ -> intrinsic(call.function_realm(st, fn_h))
       }
     _ -> intrinsic(st.realm)
   }
-}
-
-fn function_realm(st: Agent, fn_h: Handle) -> rt_types.Realm {
-  rt_realm.lookup(st, call.get_function_realm(st, fn_h))
 }
 
 /// §27.5.3.3 GeneratorResume — `Generator.prototype.next(value)` on the data

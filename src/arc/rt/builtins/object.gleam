@@ -186,7 +186,11 @@ pub fn dispatch_construct(
       case classify(new_target) {
         KHandle(nt_h) if nt_h != r.object.constructor -> {
           let #(proto, st) =
-            proto_from_new_target(st, new_target, r.object.prototype)
+            rt_call.get_prototype_from_constructor(
+              st,
+              new_target,
+              rt_call.object_prototype,
+            )
           rt_obj.t_new_object(st, Some(proto))
         }
         // Steps 2-3: same as call semantics — always yields a handle.
@@ -198,20 +202,6 @@ pub fn dispatch_construct(
       }
     }
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with a per-type intrinsic fallback.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
   }
 }
 

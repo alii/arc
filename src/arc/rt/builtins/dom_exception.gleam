@@ -6,6 +6,7 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/helpers
+import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type BuiltinPair, type DomExceptionNative, type Handle, type JsVal,
@@ -74,7 +75,12 @@ fn construct(
     KUndef ->
       rt_val.t_throw_type_error(st, "Constructor DOMException requires 'new'")
     _ -> {
-      let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
+      // The realm record has no %DOMException% slot, so the intrinsic
+      // default is the constructor's own.
+      let #(proto, st) =
+        rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
+          fallback_proto
+        })
       let #(msg_arg, name_arg) = helpers.two_args_or_undefined(args)
       let #(message, st) = arg_string(st, msg_arg, "")
       let #(name, st) = arg_string(st, name_arg, "Error")
@@ -91,20 +97,6 @@ fn construct(
       let st = b_error.attach_stack(st, h, name, message)
       #(mk_object(h), st)
     }
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with the intrinsic fallback.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(p, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(p) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
   }
 }
 

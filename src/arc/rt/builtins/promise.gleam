@@ -211,7 +211,9 @@ pub fn dispatch_construct(
       // "%Promise.prototype%") + internal slots; step 8:
       // CreateResolvingFunctions.
       let #(proto, st) =
-        proto_from_new_target(st, new_target, st.realm.promise.prototype)
+        rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+          r.promise.prototype
+        })
       let #(promise_h, st) = rt_async.t_new_promise_with_proto(st, Some(proto))
       let #(#(resolve_h, reject_h), st) =
         rt_async.alloc_resolving_fns(st, promise_h)
@@ -1276,20 +1278,6 @@ fn require_promise(st: Agent, this: JsVal, name: String) -> Handle {
   case rt_async.as_promise(st, this) {
     Some(h) -> h
     None -> throw_type_error(st, name <> " called on non-promise")
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with the intrinsic fallback.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
   }
 }
 

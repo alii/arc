@@ -16,7 +16,7 @@ import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/rt/builtins/realm_ops
-import arc/rt/obj as rt_obj
+import arc/rt/call as rt_call
 import arc/rt/typed_array_ffi.{splice_clamped}
 import arc/rt/types.{
   type Agent, type BuiltinPair, type DataViewNative, type Handle, type JsNum,
@@ -24,9 +24,9 @@ import arc/rt/types.{
   type ViewNumElement, DataViewConstructor, DataViewGet, DataViewGetBuffer,
   DataViewGetByteLength, DataViewGetByteOffset, DataViewN, DataViewObj,
   DataViewSet, Detached, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KUndef,
-  Named, StringKey, VBig, VBigInt64, VBigUint64, VFloat16, VFloat32, VFloat64,
-  VInt16, VInt32, VInt8, VNum, VUint16, VUint32, VUint8, classify, mk_bigint,
-  mk_number, mk_object, mk_undefined,
+  VBig, VBigInt64, VBigUint64, VFloat16, VFloat32, VFloat64, VInt16, VInt32,
+  VInt8, VNum, VUint16, VUint32, VUint8, classify, mk_bigint, mk_number,
+  mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -117,7 +117,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    DataViewConstructor(proto:) -> construct(st, proto, args, new_target)
+    DataViewConstructor(..) -> construct(st, args, new_target)
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
   }
 }
@@ -128,7 +128,6 @@ pub fn dispatch_construct(
 
 fn construct(
   st: Agent,
-  fallback_proto: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
@@ -180,7 +179,10 @@ fn construct(
   }
   // Step 11: OrdinaryCreateFromConstructor — reads NewTarget.prototype,
   // which may run user code.
-  let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
+  let #(proto, st) =
+    rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+      r.data_view.prototype
+    })
   // Step 12-14: re-check detached and length against the CURRENT buffer.
   let #(buf_len, _) = live_buffer_info(st, buf_h)
   use Nil <- helpers.guard(
@@ -414,19 +416,6 @@ fn view_size(st: Agent, view: ViewRecord) -> Int {
             "DataView is outside the bounds of its buffer",
           )
       }
-  }
-}
-
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
   }
 }
 

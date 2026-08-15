@@ -868,7 +868,9 @@ pub fn dispatch_construct(
         False -> {
           // OrdinaryCreateFromConstructor(NewTarget, %Iterator.prototype%).
           let #(proto, st) =
-            proto_from_new_target(st, new_target, st.realm.iterator.prototype)
+            rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+              r.iterator.prototype
+            })
           rt_store.t_cell_new(
             st,
             SObject(
@@ -891,19 +893,6 @@ fn same_handle(a: JsVal, b: JsVal) -> Bool {
   case classify(a), classify(b) {
     KHandle(ha), KHandle(hb) -> ha.id == hb.id
     _, _ -> False
-  }
-}
-
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
   }
 }
 

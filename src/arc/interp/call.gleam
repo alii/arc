@@ -606,7 +606,11 @@ fn padded_elements(
 /// `? Get(newTarget, "prototype")` is observable and may raise.
 fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
   let #(proto, agent) =
-    rt_call.get_prototype_from_constructor(agent, new_target)
+    rt_call.get_prototype_from_constructor(
+      agent,
+      new_target,
+      rt_call.object_prototype,
+    )
   rt_obj.t_new_object(agent, Some(proto))
 }
 

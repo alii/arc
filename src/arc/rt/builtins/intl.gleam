@@ -1306,8 +1306,12 @@ fn construct_service(
     False -> {
       // §10.1.13 OrdinaryCreateFromConstructor: resolve the prototype from
       // NewTarget so `class Sub extends Intl.X` instances get Sub.prototype.
-      // Falls back to the intrinsic `proto` when called without `new`.
-      let #(proto, st) = proto_from_new_target(st, new_target, proto)
+      // The realm record has no Intl slots, so the intrinsic default (also
+      // taken when called without `new`) is the constructor's own `proto`.
+      let #(proto, st) =
+        rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
+          proto
+        })
       let arg0 = first_arg_or_undefined(args)
       let arg1 = helpers.arg_at(args, 1)
       let #(data, st) = case service {
@@ -1356,26 +1360,6 @@ fn construct_service(
         realm_ops.alloc_wrapper(st, IntlObj(data:, bound: None), proto)
       #(mk_object(h), st)
     }
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with the intrinsic fallback; an
-/// undefined NewTarget (plain call) takes the fallback without a lookup.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  case classify(new_target) {
-    KHandle(_) -> {
-      let #(proto, st) =
-        rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-      case classify(proto) {
-        KHandle(h) -> #(h, st)
-        _ -> #(fallback, st)
-      }
-    }
-    _ -> #(fallback, st)
   }
 }
 

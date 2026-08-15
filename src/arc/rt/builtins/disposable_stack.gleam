@@ -29,9 +29,9 @@ import arc/rt/types.{
   DisposableStackObj, DisposableStackPrototypeAdopt,
   DisposableStackPrototypeDefer, DisposableStackPrototypeDispose,
   DisposableStackPrototypeMove, DisposableStackPrototypeUse, DisposeCallback,
-  Disposed, KHandle, KNull, KUndef, MethodDispose, Named, NoElements,
-  NullDispose, Pending, SDisposeCapability, SObject, StringKey, SymbolKey,
-  TypeErr, classify, mk_bool, mk_object, mk_undefined,
+  Disposed, KHandle, KNull, KUndef, MethodDispose, NoElements, NullDispose,
+  Pending, SDisposeCapability, SObject, SymbolKey, TypeErr, classify, mk_bool,
+  mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -231,8 +231,11 @@ fn construct(
   new_target: JsVal,
   async async: Bool,
 ) -> #(Handle, Agent) {
-  // Step 2: GetPrototypeFromConstructor(NewTarget, intrinsic).
-  let #(proto_h, st) = proto_from_new_target(st, new_target, proto)
+  // Step 2: GetPrototypeFromConstructor(NewTarget, intrinsic). The realm
+  // record has no DisposableStack slots, so the intrinsic default is the
+  // constructor's own.
+  let #(proto_h, st) =
+    rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) { proto })
   // Steps 3-4: pending state, NewDisposeCapability()
   let #(capability, st) = new_capability(st)
   alloc_stack(st, proto_h, async:, disposable_state: Pending(capability:))
@@ -268,21 +271,6 @@ fn push_resource(st: Agent, cap: Handle, resource: DisposeResource) -> Agent {
     cap,
     SDisposeCapability(resources: [resource, ..resources]),
   )
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor: `Get(newTarget, "prototype")` or
-/// fall back to the intrinsic.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
-  }
 }
 
 /// Allocate a DisposableStackObj with the given brand and disposable state.

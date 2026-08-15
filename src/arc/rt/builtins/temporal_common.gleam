@@ -20,15 +20,16 @@ import arc/rt/builtins/temporal_iso.{
   parse_offset_part, pow10, take_some_digits, utc_epoch_ns,
 }
 import arc/rt/builtins/temporal_tz
+import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type TemporalProtos,
-  type TimeZone, HintString, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle,
-  KNum, KStr, KUndef, Named, SObject, StringKey, TemporalDate, TemporalDateTime,
-  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj,
-  TemporalTime, TemporalYearMonth, TemporalZonedDateTime, TzNamed, TzOffset,
-  TzUtc, classify, mk_object, mk_undefined,
+  type TimeZone, HintString, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNum,
+  KStr, KUndef, Named, SObject, StringKey, TemporalDate, TemporalDateTime,
+  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
+  TemporalYearMonth, TemporalZonedDateTime, TzNamed, TzOffset, TzUtc, classify,
+  mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import arc/vm/internal/temporal_calendar as tcal
@@ -120,7 +121,8 @@ pub fn time_slot_of(kind: ObjKind) -> Option(TimeRec) {
       millisecond:,
       microsecond:,
       nanosecond:,
-    )) -> Some(TimeRec(hour, minute, second, millisecond, microsecond, nanosecond))
+    )) ->
+      Some(TimeRec(hour, minute, second, millisecond, microsecond, nanosecond))
     _ -> None
   }
 }
@@ -228,7 +230,11 @@ fn alloc_value(
   #(mk_object(h), st)
 }
 
-pub fn make_date(st: Agent, protos: TemporalProtos, d: IsoDate) -> #(JsVal, Agent) {
+pub fn make_date(
+  st: Agent,
+  protos: TemporalProtos,
+  d: IsoDate,
+) -> #(JsVal, Agent) {
   make_date_cal(st, protos, d, tcal.Iso8601)
 }
 
@@ -245,7 +251,11 @@ pub fn make_date_cal(
   )
 }
 
-pub fn make_time(st: Agent, protos: TemporalProtos, t: TimeRec) -> #(JsVal, Agent) {
+pub fn make_time(
+  st: Agent,
+  protos: TemporalProtos,
+  t: TimeRec,
+) -> #(JsVal, Agent) {
   alloc_value(
     st,
     TemporalTime(
@@ -369,7 +379,11 @@ pub fn finish_duration(
   }
 }
 
-pub fn make_instant(st: Agent, protos: TemporalProtos, ns: Int) -> #(JsVal, Agent) {
+pub fn make_instant(
+  st: Agent,
+  protos: TemporalProtos,
+  ns: Int,
+) -> #(JsVal, Agent) {
   alloc_value(st, TemporalInstant(epoch_ns: ns), protos.instant)
 }
 
@@ -396,39 +410,32 @@ pub fn make_zoned_cal(
   )
 }
 
-/// GetPrototypeFromConstructor (via OrdinaryCreateFromConstructor): read
-/// newTarget.prototype (an observable Get that may throw) and re-point the
-/// created object at it when it is an object. The intrinsic default proto
-/// stays when newTarget.prototype is not an object.
+/// OrdinaryCreateFromConstructor for a Temporal constructor whose `ctor`
+/// already allocated `v` on its intrinsic prototype: re-point it at
+/// GetPrototypeFromConstructor(newTarget). The realm record has no Temporal
+/// slots, so the intrinsic default is the prototype `v` already has; the
+/// observable Get lands after argument validation, where the spec puts it.
 pub fn apply_new_target_proto(
   st: Agent,
   new_target: JsVal,
   v: JsVal,
 ) -> #(Handle, Agent) {
-  let obj = case classify(v) {
-    KHandle(h) -> h
-    _ -> rt_val.t_throw_type_error(st, "Temporal constructor produced no object")
-  }
-  case classify(new_target) {
-    KHandle(_) -> {
-      let #(proto_v, st) =
-        rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-      case classify(proto_v) {
-        KHandle(proto_h) -> {
-          let st =
-            rt_store.t_cell_update(st, obj, fn(slot) {
-              case slot {
-                SObject(..) -> SObject(..slot, proto: Some(proto_h))
-                other -> other
-              }
-            })
-          #(obj, st)
-        }
-        _ -> #(obj, st)
+  let assert KHandle(obj) = classify(v)
+    as "Temporal constructor produced no object"
+  let assert SObject(proto: Some(intrinsic), ..) = rt_store.t_cell_get(st, obj)
+    as "Temporal constructor produced an object with no prototype"
+  let #(proto, st) =
+    rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
+      intrinsic
+    })
+  let st =
+    rt_store.t_cell_update(st, obj, fn(slot) {
+      case slot {
+        SObject(..) -> SObject(..slot, proto: Some(proto))
+        other -> other
       }
-    }
-    _ -> #(obj, st)
-  }
+    })
+  #(obj, st)
 }
 
 // ============================================================================
@@ -478,7 +485,11 @@ pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
 }
 
 /// A missing positional argument is 0; anything else is ToIntegerIfIntegral.
-pub fn opt_integral_arg(st: Agent, args: List(JsVal), idx: Int) -> #(Int, Agent) {
+pub fn opt_integral_arg(
+  st: Agent,
+  args: List(JsVal),
+  idx: Int,
+) -> #(Int, Agent) {
   let v = helpers.arg_at(args, idx)
   case classify(v) {
     KUndef -> #(0, st)
@@ -524,7 +535,11 @@ pub fn get_options_object(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
 }
 
 /// Get(options, key), or undefined when there is no options object.
-pub fn opt_get(st: Agent, opts: Option(Handle), key: String) -> #(JsVal, Agent) {
+pub fn opt_get(
+  st: Agent,
+  opts: Option(Handle),
+  key: String,
+) -> #(JsVal, Agent) {
   case opts {
     None -> #(mk_undefined(), st)
     Some(h) -> rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(key)))
@@ -577,7 +592,10 @@ pub type OffsetOption {
 }
 
 /// GetTemporalOverflowOption: "constrain" (default) or "reject".
-pub fn get_overflow_option(st: Agent, opts: Option(Handle)) -> #(Overflow, Agent) {
+pub fn get_overflow_option(
+  st: Agent,
+  opts: Option(Handle),
+) -> #(Overflow, Agent) {
   get_enum_option(
     st,
     opts,
@@ -1082,7 +1100,8 @@ pub fn get_difference_settings(
   args: List(JsVal),
 ) -> #(#(Option(Unit), Option(Unit), Int, RoundingMode), Agent) {
   let #(opts, st) = get_options_object(st, helpers.arg_at(args, 1))
-  let #(largest, st) = get_unit_option(st, opts, "largestUnit", allow_auto: True)
+  let #(largest, st) =
+    get_unit_option(st, opts, "largestUnit", allow_auto: True)
   let #(inc, st) = get_rounding_increment_option(st, opts)
   let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
   let #(smallest, st) =
@@ -1171,7 +1190,8 @@ pub fn round_options(
       let opts = Some(h)
       let #(inc, st) = get_rounding_increment_option(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, HalfExpand)
-      let #(su, st) = get_unit_option(st, opts, "smallestUnit", allow_auto: False)
+      let #(su, st) =
+        get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       case su {
         None -> rt_val.t_throw_range_error(st, "smallestUnit is required")
         Some(u) ->
@@ -1402,7 +1422,9 @@ pub fn is_valid_duration(d: DurRec) -> Bool {
     d.us, d.ns,
   ]
   let consistent =
-    list.all(fields, fn(f) { { f >= 0 || sign <= 0 } && { f <= 0 || sign >= 0 } })
+    list.all(fields, fn(f) {
+      { f >= 0 || sign <= 0 } && { f <= 0 || sign >= 0 }
+    })
   let two32 = 4_294_967_296
   let cal_ok =
     int.absolute_value(d.years) < two32
@@ -1494,7 +1516,11 @@ pub fn read_bag_int_field(
 }
 
 /// `read_bag_int_field` with ToIntegerWithTruncation.
-pub fn read_int_field(st: Agent, bag: Handle, key: String) -> #(Option(Int), Agent) {
+pub fn read_int_field(
+  st: Agent,
+  bag: Handle,
+  key: String,
+) -> #(Option(Int), Agent) {
   read_bag_int_field(st, bag, key, to_integer_with_truncation)
 }
 
@@ -1562,7 +1588,10 @@ pub fn read_duration_fields(
 
 /// Overlay partial duration fields (in `read_duration_fields` order) on a base
 /// record.
-pub fn apply_duration_fields(base: DurRec, fields: List(Option(Int))) -> DurRec {
+pub fn apply_duration_fields(
+  base: DurRec,
+  fields: List(Option(Int)),
+) -> DurRec {
   case fields {
     [years, months, weeks, days, hours, minutes, seconds, ms, us, ns] ->
       DurRec(
@@ -1586,7 +1615,10 @@ pub fn duration_from_bag(st: Agent, bag: Handle) -> #(DurRec, Agent) {
   let #(fields, st) = read_duration_fields(st, bag)
   case list.all(fields, option.is_none) {
     True ->
-      rt_val.t_throw_type_error(st, "invalid property bag for Temporal.Duration")
+      rt_val.t_throw_type_error(
+        st,
+        "invalid property bag for Temporal.Duration",
+      )
     False -> {
       let d = apply_duration_fields(temporal_iso.zero_dur, fields)
       case is_valid_duration(d) {
@@ -1661,7 +1693,10 @@ fn parse_duration_date_units(s: String, sign: Int) -> Option(DurRec) {
 
 /// Integer (no fraction) date unit: returns the value if `s` starts with
 /// digits followed by one of `designators`.
-fn parse_dur_unit(s: String, designators: List(String)) -> #(Option(Int), String) {
+fn parse_dur_unit(
+  s: String,
+  designators: List(String),
+) -> #(Option(Int), String) {
   case take_some_digits(s, 16) {
     Some(#(v, _, rest)) ->
       case list.find(designators, fn(d) { string.starts_with(rest, d) }) {
@@ -1793,7 +1828,9 @@ pub type StrictTzError {
 }
 
 /// ParseTimeZoneIdentifier: bare identifiers only (UTC, offsets, IANA names).
-pub fn parse_time_zone_id_strict(id: String) -> Result(TimeZone, StrictTzError) {
+pub fn parse_time_zone_id_strict(
+  id: String,
+) -> Result(TimeZone, StrictTzError) {
   case string.uppercase(id) == "UTC" {
     True -> Ok(TzUtc)
     False ->
@@ -1967,10 +2004,10 @@ pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
     KStr(s) -> #(terr(st, parse_time_zone_id(s)), st)
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: TemporalObj(data: TemporalZonedDateTime(time_zone:, ..)), ..) -> #(
-          time_zone,
-          st,
-        )
+        SObject(
+          kind: TemporalObj(data: TemporalZonedDateTime(time_zone:, ..)),
+          ..,
+        ) -> #(time_zone, st)
         _ -> rt_val.t_throw_type_error(st, "timeZone must be a string")
       }
     _ -> rt_val.t_throw_type_error(st, "timeZone must be a string")
@@ -2007,10 +2044,10 @@ pub fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
           epoch_ns,
           st,
         )
-        SObject(kind: TemporalObj(data: TemporalZonedDateTime(epoch_ns:, ..)), ..) -> #(
-          epoch_ns,
-          st,
-        )
+        SObject(
+          kind: TemporalObj(data: TemporalZonedDateTime(epoch_ns:, ..)),
+          ..,
+        ) -> #(epoch_ns, st)
         _ -> {
           let #(prim, st) = rt_val.t_to_primitive(st, item, HintString)
           case classify(prim) {

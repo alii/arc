@@ -16,8 +16,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjKind,
-  type WeakKey, type WeakNative, KHandle, KNull, KSym, KUndef, Named, NoElements,
-  SObject, StringKey, WeakMapConstructor, WeakMapDelete, WeakMapGet,
+  type Realm, type WeakKey, type WeakNative, KHandle, KNull, KSym, KUndef, Named,
+  NoElements, SObject, StringKey, WeakMapConstructor, WeakMapDelete, WeakMapGet,
   WeakMapGetOrInsert, WeakMapGetOrInsertComputed, WeakMapHas, WeakMapObj,
   WeakMapSet, WeakN, WeakObjKey, WeakSetAdd, WeakSetConstructor, WeakSetDelete,
   WeakSetHas, WeakSetObj, WeakSymKey, classify, mk_bool, mk_object, mk_undefined,
@@ -109,10 +109,10 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case n {
-    WeakMapConstructor(proto:) ->
+    WeakMapConstructor(..) ->
       weak_construct(
         st,
-        proto,
+        fn(r: Realm) { r.weak_map.prototype },
         args,
         new_target,
         WeakMapObj(entries: dict.new()),
@@ -120,10 +120,10 @@ pub fn dispatch_construct(
         "set",
         iter_protocol.add_entries_from_iterable,
       )
-    WeakSetConstructor(proto:) ->
+    WeakSetConstructor(..) ->
       weak_construct(
         st,
-        proto,
+        fn(r: Realm) { r.weak_set.prototype },
         args,
         new_target,
         WeakSetObj(entries: set.new()),
@@ -139,7 +139,7 @@ pub fn dispatch_construct(
 
 fn weak_construct(
   st: Agent,
-  fallback_proto: Handle,
+  intrinsic: fn(Realm) -> Handle,
   args: List(JsVal),
   new_target: JsVal,
   empty_kind: ObjKind,
@@ -147,7 +147,8 @@ fn weak_construct(
   adder_name: String,
   add_from_iterable: fn(Agent, JsVal, JsVal, JsVal) -> #(JsVal, Agent),
 ) -> #(Handle, Agent) {
-  let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
+  let #(proto, st) =
+    rt_call.get_prototype_from_constructor(st, new_target, intrinsic)
   let #(coll_h, st) = alloc_kind_cell(st, empty_kind, proto)
   let coll = mk_object(coll_h)
   case classify(first_arg_or_undefined(args)) {
@@ -442,19 +443,6 @@ fn update_ws(
 }
 
 // ── shared allocation helpers ───────────────────────────────────────────────
-
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
-  }
-}
 
 fn alloc_kind_cell(
   st: Agent,

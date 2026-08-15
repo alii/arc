@@ -17,13 +17,12 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type MapIterKind,
-  type MapKey, type MapNative, type ObjKind, JInt, KHandle, KNull, KUndef,
-  MapClear, MapConstructor, MapDelete, MapEntries, MapForEach, MapGet,
-  MapGetOrInsert, MapGetOrInsertComputed, MapGetSize, MapGroupBy, MapHas,
-  MapIterEntries, MapIterKeys, MapIterValues, MapIterator, MapKeys, MapN, MapObj,
-  MapSet, MapValues, Named, NoElements, SObject, StringKey, classify,
-  js_to_map_key, map_key_to_js, mk_bool, mk_number, mk_object, mk_undefined,
-  symbol_iterator,
+  type MapKey, type MapNative, type ObjKind, JInt, KNull, KUndef, MapClear,
+  MapConstructor, MapDelete, MapEntries, MapForEach, MapGet, MapGetOrInsert,
+  MapGetOrInsertComputed, MapGetSize, MapGroupBy, MapHas, MapIterEntries,
+  MapIterKeys, MapIterValues, MapIterator, MapKeys, MapN, MapObj, MapSet,
+  MapValues, Named, NoElements, SObject, StringKey, classify, js_to_map_key,
+  map_key_to_js, mk_bool, mk_number, mk_object, mk_undefined, symbol_iterator,
 }
 import arc/rt/val as rt_val
 import arc/vm/internal/ordered_entries
@@ -123,7 +122,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case n {
-    MapConstructor(proto:) -> map_constructor(st, proto, args, new_target)
+    MapConstructor(..) -> map_constructor(st, args, new_target)
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
   }
 }
@@ -132,12 +131,14 @@ pub fn dispatch_construct(
 
 fn map_constructor(
   st: Agent,
-  fallback_proto: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   // Step 2: OrdinaryCreateFromConstructor — resolve new.target.prototype.
-  let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
+  let #(proto, st) =
+    rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+      r.map.prototype
+    })
   // Steps 2-3: allocate the map with an empty [[MapData]].
   let #(map_h, st) = alloc_map_cell(st, proto, ordered_entries.new())
   let map = mk_object(map_h)
@@ -487,22 +488,6 @@ fn update_map_data(
     let assert SObject(..) = slot
     SObject(..slot, kind: MapObj(entries:))
   })
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with a per-type intrinsic fallback
-/// — `? Get(newTarget, "prototype")`; if not an object, fall back to the
-/// captured `%Map.prototype%`.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
-  }
 }
 
 fn alloc_map_cell(

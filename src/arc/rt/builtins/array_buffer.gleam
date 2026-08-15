@@ -35,10 +35,11 @@ import arc/rt/types.{
   ArrayBufferSliceToImmutable, ArrayBufferTransfer,
   ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable, Bytes,
   DataViewObj, Detached, Immutable, JInt, KHandle, KUndef, LocalBlock, Named,
-  OwnerBlock, ReturnThis, SObject, Shared, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
-  SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
-  SharedArrayBufferGrow, SharedArrayBufferSlice, StringKey, TypedArrayObj,
-  classify, mk_bool, mk_number, mk_object, mk_undefined,
+  OwnerBlock, ReturnThis, SObject, Shared, SharedArrayBufferConstructor,
+  SharedArrayBufferGetByteLength, SharedArrayBufferGetGrowable,
+  SharedArrayBufferGetMaxByteLength, SharedArrayBufferGrow,
+  SharedArrayBufferSlice, StringKey, TypedArrayObj, classify, mk_bool, mk_number,
+  mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -212,10 +213,10 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    ArrayBufferConstructor(proto:) ->
-      constructor(st, proto, args, new_target, shared: False)
-    SharedArrayBufferConstructor(proto:) ->
-      constructor(st, proto, args, new_target, shared: True)
+    ArrayBufferConstructor(..) ->
+      constructor(st, args, new_target, shared: False)
+    SharedArrayBufferConstructor(..) ->
+      constructor(st, args, new_target, shared: True)
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
   }
 }
@@ -233,7 +234,6 @@ pub fn dispatch_construct(
 ///   4. Return ? AllocateArrayBuffer(NewTarget, byteLength, requestedMaxByteLength).
 fn constructor(
   st: Agent,
-  proto: Handle,
   args: List(JsVal),
   new_target: JsVal,
   shared shared: Bool,
@@ -248,7 +248,7 @@ fn constructor(
   // Step 3: GetArrayBufferMaxByteLengthOption(options)
   let #(max, st) = max_byte_length_option(st, helpers.arg_at(args, 1))
   // Step 4: AllocateArrayBuffer / AllocateSharedArrayBuffer
-  allocate(st, new_target, proto, byte_length, max, shared)
+  allocate(st, new_target, byte_length, max, shared)
 }
 
 /// §25.1.3.1 AllocateArrayBuffer ( constructor, byteLength [ , maxByteLength ] )
@@ -263,7 +263,6 @@ fn constructor(
 fn allocate(
   st: Agent,
   new_target: JsVal,
-  intrinsic_proto: Handle,
   byte_length: Int,
   max: Option(Int),
   shared: Bool,
@@ -278,7 +277,13 @@ fn allocate(
     _ -> {
       // Step 4: GetPrototypeFromConstructor(NewTarget, intrinsic) — must use
       // a real [[Get]] so accessor `prototype` properties are invoked.
-      let #(proto, st) = proto_from_new_target(st, new_target, intrinsic_proto)
+      let #(proto, st) =
+        rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+          case shared {
+            True -> r.shared_array_buffer.prototype
+            False -> r.array_buffer.prototype
+          }
+        })
       // Step 5 (+ step 6a for resizable): CreateByteDataBlock limits
       let max_ok = case max {
         Some(m) -> m <= max_buffer_byte_length
@@ -783,9 +788,10 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
           use <- bool.lazy_guard(new_len < current, invalid)
           let storage =
             Shared(
-              block: LocalBlock(
-                bytes: bit_array.append(bits, zero_block(new_len - current)),
-              ),
+              block: LocalBlock(bytes: bit_array.append(
+                bits,
+                zero_block(new_len - current),
+              )),
               max_byte_length: Some(max),
             )
           #(mk_undefined(), buffer.set_storage(st, buf.ref, storage))
@@ -1062,19 +1068,5 @@ fn species_constructor(
     }
     // Step 3: a present but non-object "constructor" is a TypeError.
     _ -> rt_val.t_throw_type_error(st, "constructor property is not an object")
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with the intrinsic fallback.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
   }
 }

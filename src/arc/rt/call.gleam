@@ -21,11 +21,11 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
-  type NativeToken, type ObjKind, type Property, ArrayObj, DataProperty, Dense,
-  JInt, JPosInf, KBound, KBytecode, KCompiled, KHandle, KNative, KNull, KNum,
-  KStr, KTdz, KUndef, Named, NoElements, ProxyObj, ReferenceErr, SObject,
-  StringKey, TypeErr, classify, mk_number, mk_object, mk_string, mk_tdz,
-  mk_undefined,
+  type NativeToken, type ObjKind, type Property, type Realm, ArrayObj,
+  DataProperty, Dense, JInt, JPosInf, KBound, KBytecode, KCompiled, KHandle,
+  KNative, KNull, KNum, KStr, KTdz, KUndef, Named, NoElements, ProxyObj,
+  ReferenceErr, SObject, StringKey, TypeErr, classify, mk_number, mk_object,
+  mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
@@ -509,7 +509,8 @@ fn construct_kfunction(
     // Base: §10.1.13 OrdinaryCreateFromConstructor, run field initializers,
     // then apply body.
     False -> {
-      let #(proto, st) = get_prototype_from_constructor(st, new_target)
+      let #(proto, st) =
+        get_prototype_from_constructor(st, new_target, object_prototype)
       let #(new_this, st) = rt_obj.t_new_object(st, Some(proto))
       let st = run_fields_init(st, fields_init, new_this)
       let frame = mk_frame(mk_object(new_this), callee_v, home, new_target)
@@ -583,19 +584,56 @@ fn derived_return_override(st: Agent, result: JsVal) -> #(Handle, Agent) {
   }
 }
 
-/// §10.1.13.2 GetPrototypeFromConstructor: `? Get(newTarget, "prototype")`;
-/// if not an object, fall back to `%Object.prototype%` (realm intrinsic via
-/// `st.realm`).
+/// §10.1.14 GetPrototypeFromConstructor(constructor, intrinsicDefaultProto).
+/// `? Get(constructor, "prototype")`; when that is not an object, the
+/// `intrinsic` of the constructor's realm (`? GetFunctionRealm`). The single
+/// implementation for `new F()`, `super()`, `Reflect.construct` and every
+/// native constructor's OrdinaryCreateFromConstructor preamble.
+///
+/// An `undefined` NewTarget (a plain [[Call]] of a native constructor whose
+/// spec text substitutes the active function object) skips the Get and takes
+/// the current realm's intrinsic. Constructors that must reject a missing
+/// NewTarget do so before calling this.
 pub fn get_prototype_from_constructor(
   st: Agent,
-  new_target: JsVal,
+  constructor: JsVal,
+  intrinsic: fn(Realm) -> Handle,
 ) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(st.realm.object.prototype, st)
+  case classify(constructor) {
+    KHandle(ctor_h) -> {
+      let #(proto, st) =
+        rt_obj.t_get_prop(st, constructor, StringKey(Named("prototype")))
+      case classify(proto) {
+        KHandle(h) -> #(h, st)
+        _ -> #(intrinsic(function_realm(st, ctor_h)), st)
+      }
+    }
+    _ -> #(intrinsic(st.realm), st)
   }
+}
+
+/// %Object.prototype% of `realm`: the intrinsic default for ordinary
+/// [[Construct]] (§10.2.2 step 5.a).
+pub fn object_prototype(realm: Realm) -> Handle {
+  realm.object.prototype
+}
+
+/// The Realm Record registered under `id`. The current realm answers for its
+/// own id (its registry entry may be stale); any other id must be registered.
+pub fn realm_by_id(st: Agent, id: Int) -> Realm {
+  use <- bool.guard(id == st.realm.id, st.realm)
+  case dict.get(st.realms, id) {
+    Ok(r) -> r
+    // Ids are only minted by `init_realm`, which registers them, and are
+    // never removed: an unknown id is a corrupt token, not a JS error.
+    Error(Nil) ->
+      panic as { "rt/call.realm_by_id: no realm with id " <> int.to_string(id) }
+  }
+}
+
+/// §7.3.24 GetFunctionRealm(obj), as the Realm Record.
+pub fn function_realm(st: Agent, obj: Handle) -> Realm {
+  realm_by_id(st, get_function_realm(st, obj))
 }
 
 /// §7.3.24 GetFunctionRealm(obj), as a realm id. A realm-attributed native

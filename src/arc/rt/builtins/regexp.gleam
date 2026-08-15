@@ -299,7 +299,9 @@ fn construct_regexp(
   }
   // Step 7: O = ? RegExpAlloc(newTarget).
   let #(proto, st) =
-    proto_from_new_target(st, new_target, st.realm.regexp.prototype)
+    rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+      r.regexp.prototype
+    })
   // Step 8: ? RegExpInitialize(O, P, F).
   let #(source, flags, st) = pattern_and_flags_from_strings(st, p, f)
   validate_pattern_and_flags(st, source, flags)
@@ -661,23 +663,6 @@ fn alloc_regexp_with_proto(
       extensible: True,
     ),
   )
-}
-
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(
-      st,
-      new_target,
-      rt_types.StringKey(rt_types.Named("prototype")),
-    )
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
-  }
 }
 
 /// §22.2.3.4 RegExpInitialize steps 5-8: validate the flags string, then

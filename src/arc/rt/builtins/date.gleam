@@ -291,7 +291,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    DateConstructor(proto:) -> date_constructor(st, proto, args, new_target)
+    DateConstructor(..) -> date_constructor(st, args, new_target)
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
   }
 }
@@ -680,7 +680,6 @@ fn set_this_time_value(st: Agent, h: Handle, tv: JsNum) -> Agent {
 /// comes from NewTarget (OrdinaryCreateFromConstructor).
 fn date_constructor(
   st: Agent,
-  fallback_proto: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
@@ -690,7 +689,10 @@ fn date_constructor(
     [single] -> single_arg_time_value(st, single, local)
     many -> args_to_time_value(st, many, local)
   }
-  let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
+  let #(proto, st) =
+    rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+      r.date.prototype
+    })
   realm_ops.alloc_wrapper(st, DateObj(ms: tv), proto)
 }
 
@@ -1495,18 +1497,4 @@ fn invoke_to_iso_string(st: Agent, obj: JsVal) -> #(JsVal, Agent) {
 
 fn now_ms(st: Agent) -> Int {
   st.hooks.wall_clock_ms()
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with the %Date.prototype% fallback.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
-  }
 }

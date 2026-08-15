@@ -24,11 +24,11 @@ import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{fill_clamped, splice_clamped, ta_zeroed}
 import arc/rt/types.{
   type Agent, type ArrayIterKind, type BuiltinPair, type Handle, type JsNum,
-  type JsVal, type TypedArrayKind, type TypedArrayNative, type TypedArrays,
-  ArrayIterEntries, ArrayIterKeys, ArrayIterValues, ArrayIterator, BigKind,
-  Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KHandle, KNull, KNum,
-  KUndef, Named, NumKind, ReturnThis, SObject, StringKey, SymbolKey,
-  TypedArrayConstructor, TypedArrayFrom, TypedArrayGetBuffer,
+  type JsVal, type Realm, type TypedArrayKind, type TypedArrayNative,
+  type TypedArrays, ArrayIterEntries, ArrayIterKeys, ArrayIterValues,
+  ArrayIterator, BigKind, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig,
+  KHandle, KNull, KNum, KUndef, Named, NumKind, ReturnThis, SObject, StringKey,
+  SymbolKey, TypedArrayConstructor, TypedArrayFrom, TypedArrayGetBuffer,
   TypedArrayGetByteLength, TypedArrayGetByteOffset, TypedArrayGetLength,
   TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor, TypedArrayN,
   TypedArrayObj, TypedArrayOf, TypedArrayPrototypeAt,
@@ -331,8 +331,7 @@ pub fn dispatch(
     TypedArrayPrototypeToReversed -> proto_to_reversed(st, this)
     TypedArrayPrototypeSort -> proto_sort(st, this, args)
     TypedArrayPrototypeToSorted -> proto_to_sorted(st, this, args)
-    TypedArrayPrototypeToLocaleString ->
-      proto_to_locale_string(st, this, args)
+    TypedArrayPrototypeToLocaleString -> proto_to_locale_string(st, this, args)
     TypedArrayPrototypeWith -> proto_with(st, this, args)
     TypedArrayFrom -> ta_from(st, this, args)
     TypedArrayOf -> ta_of(st, this, args)
@@ -360,8 +359,7 @@ pub fn dispatch_construct(
         st,
         "Abstract class TypedArray not directly constructable",
       )
-    TypedArrayConstructor(kind:, proto:) ->
-      ta_construct(st, kind, new_target, proto, args)
+    TypedArrayConstructor(kind:, ..) -> ta_construct(st, kind, new_target, args)
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
   }
 }
@@ -590,21 +588,19 @@ fn ta_construct(
   st: Agent,
   kind: TypedArrayKind,
   new_target: JsVal,
-  default_proto: Handle,
   args: List(JsVal),
 ) -> #(Handle, Agent) {
   case args {
     // Step 4: no args → AllocateTypedArray(0).
     [] -> {
-      let #(proto, st) = proto_from_new_target(st, new_target, default_proto)
+      let #(proto, st) = proto_from_new_target(st, new_target, kind)
       fresh_handle(alloc_ta_with_length(st, kind, proto, 0))
     }
     [first, ..rest] ->
       case classify(first) {
         // Step 6.a: firstArgument is an Object → AllocateTypedArray first.
         KHandle(ref) -> {
-          let #(proto, st) =
-            proto_from_new_target(st, new_target, default_proto)
+          let #(proto, st) = proto_from_new_target(st, new_target, kind)
           case rt_store.t_cell_get(st, ref) {
             SObject(kind: types.ArrayBufferObj(..), ..) ->
               from_buffer(st, kind, proto, ref, rest)
@@ -638,8 +634,7 @@ fn ta_construct(
         // Step 6.b-c: not an object → AllocateTypedArray(? ToIndex(arg)).
         _ -> {
           let #(len, st) = to_index(st, first)
-          let #(proto, st) =
-            proto_from_new_target(st, new_target, default_proto)
+          let #(proto, st) = proto_from_new_target(st, new_target, kind)
           fresh_handle(alloc_ta_with_length(st, kind, proto, len))
         }
       }
@@ -2899,7 +2894,11 @@ fn ta_species_create(
 /// total over `all_typed_array_kinds`, so there is no "kind not installed"
 /// case once `init` has run.
 fn typed_array_pair(st: Agent, kind: TypedArrayKind) -> BuiltinPair {
-  let assert Ok(bt) = dict.get(st.realm.typed_arrays.by_kind, kind)
+  pair_in(st.realm, kind)
+}
+
+fn pair_in(realm: Realm, kind: TypedArrayKind) -> BuiltinPair {
+  let assert Ok(bt) = dict.get(realm.typed_arrays.by_kind, kind)
     as "typed_array: kind missing from realm.typed_arrays"
   bt
 }
@@ -2909,16 +2908,14 @@ fn default_proto_for(st: Agent, kind: TypedArrayKind) -> Handle {
   typed_array_pair(st, kind).prototype
 }
 
-/// §10.1.13.2 GetPrototypeFromConstructor with the intrinsic fallback.
+/// §23.2.5.1.1 AllocateTypedArray step 1: GetPrototypeFromConstructor with
+/// the `kind` intrinsic of newTarget's realm as the default.
 fn proto_from_new_target(
   st: Agent,
   new_target: JsVal,
-  fallback: Handle,
+  kind: TypedArrayKind,
 ) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
-  }
+  rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+    pair_in(r, kind).prototype
+  })
 }

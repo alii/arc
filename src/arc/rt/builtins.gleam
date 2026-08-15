@@ -675,9 +675,10 @@ pub fn dispatch_native_construct(
     // b_array has no dispatch_construct yet (out-of-scope file), so allocate
     // via its call path then fix up [[Prototype]] before returning.
     ArrayN(n) -> {
-      let r = st.realm
       let #(proto, st) =
-        proto_from_new_target(st, new_target, r.array.prototype)
+        rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+          r.array.prototype
+        })
       let #(v, st) = b_array.dispatch(st, n, mk_undefined(), args)
       let #(h, st) = require_handle(st, v)
       let #(_ok, st) = rt_obj.t_set_prototype(st, h, Some(proto))
@@ -686,18 +687,18 @@ pub fn dispatch_native_construct(
     // §22.1.1.1 String — s = args ? ToString(value) : "" (no symbol special
     // case under [[Construct]]); StringCreate(s, proto-from-new.target).
     StringN(StringConstructor) -> {
-      let r = st.realm
       let #(s, st) = case args {
         [] -> #("", st)
         [v, ..] -> rt_val.t_to_string(st, v)
       }
       let #(proto, st) =
-        proto_from_new_target(st, new_target, r.string.prototype)
+        rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+          r.string.prototype
+        })
       realm_ops.alloc_wrapper(st, StringObj(s), proto)
     }
     // §21.1.1.1 Number — n = args ? ToNumeric (BigInt→𝔽) : +0; wrap.
     NumberN(NumberConstructor) -> {
-      let r = st.realm
       let #(v, st) =
         b_number.dispatch(st, NumberConstructor, mk_undefined(), args)
       let n = case classify(v) {
@@ -705,18 +706,21 @@ pub fn dispatch_native_construct(
         _ -> JInt(0)
       }
       let #(proto, st) =
-        proto_from_new_target(st, new_target, r.number.prototype)
+        rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+          r.number.prototype
+        })
       realm_ops.alloc_wrapper(st, NumberObj(n), proto)
     }
     // §20.3.1.1 Boolean — b = ToBoolean(value); wrap.
     BooleanN(BooleanConstructor) -> {
-      let r = st.realm
       let b = case args {
         [] -> False
         [v, ..] -> rt_val.to_boolean(v)
       }
       let #(proto, st) =
-        proto_from_new_target(st, new_target, r.boolean.prototype)
+        rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+          r.boolean.prototype
+        })
       realm_ops.alloc_wrapper(st, BooleanObj(b), proto)
     }
     // §20.4.1.1 step 1: NewTarget defined → TypeError.
@@ -759,20 +763,6 @@ pub fn dispatch_native_construct(
     | AtomicsN(_)
     | Test262N(_) ->
       panic as "dispatch_native_construct: non-constructible token reached [[Construct]]"
-  }
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor with a per-type intrinsic fallback.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
   }
 }
 

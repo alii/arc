@@ -11,17 +11,18 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
+import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type ErrorNative, type FrameInfo, type Handle,
-  type JsVal, AggregateErrorConstructor, DataProperty, ErrorCaptureStackTrace,
-  ErrorConstructor, ErrorIsError, ErrorN, ErrorObj, ErrorPrototypeToString,
-  ErrorStackGetter, ErrorStackSetter, FrameInfo, JFloat, JInt, JNan, JNegInf,
-  JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named, ParsedDesc, SObject,
-  StringKey, SuppressedErrorConstructor, classify, mk_bool, mk_number, mk_object,
-  mk_string, mk_undefined,
+  type JsVal, type Realm, AggregateErrorConstructor, DataProperty,
+  ErrorCaptureStackTrace, ErrorConstructor, ErrorIsError, ErrorN, ErrorObj,
+  ErrorPrototypeToString, ErrorStackGetter, ErrorStackSetter, FrameInfo, JFloat,
+  JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named,
+  ParsedDesc, SObject, StringKey, SuppressedErrorConstructor, classify, mk_bool,
+  mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -29,6 +30,7 @@ import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 
 /// All error-related builtin types (arc `error.gleam:22-34`). Maps onto the
@@ -304,24 +306,50 @@ pub fn make_suppressed_error(
   )
 }
 
-/// §10.1.13.2 GetPrototypeFromConstructor: `Get(newTarget, "prototype")` or
-/// fall back to the intrinsic. `newTarget` undefined → intrinsic directly.
+/// §20.5.1.1 / §20.5.6.1.1 steps 1-2: with NewTarget undefined, newTarget
+/// is the active function object, whose own `prototype` is the `home`
+/// intrinsic its token carries; otherwise GetPrototypeFromConstructor with
+/// the same %NativeError.prototype% of newTarget's realm as the default.
 fn proto_from_new_target(
   st: Agent,
   new_target: JsVal,
-  fallback: Handle,
+  home: Handle,
 ) -> #(Handle, Agent) {
   case classify(new_target) {
-    KUndef -> #(fallback, st)
-    _ -> {
-      let #(p, st) =
-        rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-      case classify(p) {
-        KHandle(h) -> #(h, st)
-        _ -> #(fallback, st)
-      }
-    }
+    KUndef -> #(home, st)
+    _ ->
+      rt_call.get_prototype_from_constructor(st, new_target, same_error_proto(
+        st,
+        home,
+        _,
+      ))
   }
+}
+
+/// The member of `realm`'s error family that `home` is of its own realm.
+/// The token carries only the handle, so `home` is matched against every
+/// registered realm's family to learn which member it is.
+fn same_error_proto(st: Agent, home: Handle, realm: Realm) -> Handle {
+  let wanted = error_protos(realm)
+  [st.realm, ..dict.values(st.realms)]
+  |> list.find_map(fn(r) {
+    list.key_find(list.zip(error_protos(r), wanted), home)
+  })
+  |> result.unwrap(home)
+}
+
+fn error_protos(r: Realm) -> List(Handle) {
+  [
+    r.error.prototype,
+    r.type_error.prototype,
+    r.reference_error.prototype,
+    r.range_error.prototype,
+    r.syntax_error.prototype,
+    r.eval_error.prototype,
+    r.uri_error.prototype,
+    r.aggregate_error.prototype,
+    r.suppressed_error.prototype,
+  ]
 }
 
 /// Allocate an error object with optional `message` and install `cause` from
@@ -550,7 +578,7 @@ fn stack_setter(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let proto = rt_realm.lookup(st, realm).error.prototype
+  let proto = rt_call.realm_by_id(st, realm).error.prototype
   case classify(this), classify(helpers.first_arg_or_undefined(args)) {
     KNull, _ | KUndef, _ ->
       throw_type_error_in(

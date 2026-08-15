@@ -108,13 +108,12 @@ fn construct(
   create_realm: fn(Agent) -> #(Realm, Agent),
 ) -> #(Handle, Agent) {
   // Step 2: OrdinaryCreateFromConstructor(NewTarget, "%ShadowRealm.prototype%",
-  // « [[ShadowRealm]] »).
+  // « [[ShadowRealm]] »). The realm record has no %ShadowRealm% slot, so the
+  // intrinsic default is the constructor's own.
   let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  let proto = case classify(proto) {
-    KHandle(h) -> h
-    _ -> fallback_proto
-  }
+    rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
+      fallback_proto
+    })
   // Steps 3-12: CreateRealm + SetRealmGlobalObject + SetDefaultGlobalBindings.
   let #(realm, st) = create_realm(st)
   realm_ops.alloc_wrapper(st, ShadowRealmObj(realm: realm.id), proto)
@@ -223,7 +222,7 @@ fn wrapped_function_create(
         "wrapped function could not copy target name and length",
       )
     NormalCompletion(#(name, length)) -> {
-      let fn_proto = rt_realm.lookup(st, into).function.prototype
+      let fn_proto = rt_call.realm_by_id(st, into).function.prototype
       let tag =
         ShadowRealmN(WrappedFunctionCall(
           target:,

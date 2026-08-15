@@ -122,7 +122,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case n {
-    SetConstructor(proto:) -> set_constructor(st, proto, args, new_target)
+    SetConstructor(..) -> set_constructor(st, args, new_target)
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
   }
 }
@@ -131,11 +131,13 @@ pub fn dispatch_construct(
 
 fn set_constructor(
   st: Agent,
-  fallback_proto: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
+  let #(proto, st) =
+    rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
+      r.set.prototype
+    })
   let #(set_h, st) =
     alloc_kind_cell(st, SetObj(entries: ordered_entries.new()), proto)
   let set_v = mk_object(set_h)
@@ -669,19 +671,6 @@ fn update_set(
     let assert SObject(..) = slot
     SObject(..slot, kind: SetObj(entries:))
   })
-}
-
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
-  }
 }
 
 fn alloc_kind_cell(

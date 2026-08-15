@@ -342,13 +342,9 @@ fn apply_new_target_prototype(
   new_target: JsVal,
 ) -> Agent {
   case classify(new_target) {
-    KHandle(nt) -> {
-      let #(p, st) =
-        rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-      let proto = case classify(p) {
-        KHandle(ph) -> ph
-        _ -> {
-          let realm = rt_realm.lookup(st, rt_call.get_function_realm(st, nt))
+    KHandle(_) -> {
+      let #(proto, st) =
+        rt_call.get_prototype_from_constructor(st, new_target, fn(realm) {
           case kind {
             DynamicNormal -> realm.function.prototype
             DynamicGenerator -> realm.generator_fn.prototype
@@ -356,8 +352,7 @@ fn apply_new_target_prototype(
             DynamicAsyncGenerator ->
               rt_call.async_generator_fn_prototype(st, realm)
           }
-        }
-      }
+        })
       // A fresh, extensible ordinary function cell: OrdinarySetPrototypeOf
       // cannot reject it.
       let #(_set, st) = rt_obj.t_set_prototype(st, h, Some(proto))

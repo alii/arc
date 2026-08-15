@@ -11,15 +11,14 @@
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{can_be_held_weakly}
-import arc/rt/obj as rt_obj
+import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type FinRegCell, type FinalizationRegistryNative,
   type Handle, type JsVal, FinRegCell, FinalizationRegistryConstructor,
   FinalizationRegistryN, FinalizationRegistryObj,
   FinalizationRegistryPrototypeRegister, FinalizationRegistryPrototypeUnregister,
-  KHandle, KUndef, Named, NoElements, SObject, StringKey, classify, mk_bool,
-  mk_undefined,
+  KUndef, NoElements, SObject, classify, mk_bool, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -121,9 +120,13 @@ fn construct(
   case callable {
     False -> rt_val.t_throw_type_error(st, "cleanup must be callable")
     True -> {
-      // Step 3: GetPrototypeFromConstructor(NewTarget, intrinsic) — must
-      // use a real [[Get]] so accessor `prototype` properties are invoked.
-      let #(proto_h, st) = proto_from_new_target(st, new_target, proto)
+      // Step 3: GetPrototypeFromConstructor(NewTarget, intrinsic). The realm
+      // record has no %FinalizationRegistry% slot, so the intrinsic default
+      // is the constructor's own.
+      let #(proto_h, st) =
+        rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
+          proto
+        })
       rt_store.t_cell_new(
         st,
         SObject(
@@ -265,19 +268,4 @@ fn update_cells(
       slot
     SObject(..slot, kind: FinalizationRegistryObj(callback:, cells: f(cells)))
   })
-}
-
-/// §10.1.13.2 GetPrototypeFromConstructor: `Get(newTarget, "prototype")` or
-/// fall back to the intrinsic.
-fn proto_from_new_target(
-  st: Agent,
-  new_target: JsVal,
-  fallback: Handle,
-) -> #(Handle, Agent) {
-  let #(proto, st) =
-    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
-  case classify(proto) {
-    KHandle(h) -> #(h, st)
-    _ -> #(fallback, st)
-  }
 }
