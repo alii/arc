@@ -1010,8 +1010,8 @@ fn test_integrity_level(
     KHandle(h) -> {
       let #(extensible, st) = rt_obj.t_is_extensible(st, h)
       use <- bool.guard(extensible, #(mk_bool(False), st))
-      // Step 7: NOTE — every key is examined; no early exit (each
-      // [[GetOwnProperty]] is an observable trap on a proxy).
+      // §7.3.17 step 6: stop at the first key that fails the level — its
+      // [[GetOwnProperty]] read is the last observable trap on a proxy.
       let #(keys, st) = rt_obj.t_own_keys(st, h)
       let #(ok, st) =
         list.fold(keys, #(True, st), fn(acc, k) {
