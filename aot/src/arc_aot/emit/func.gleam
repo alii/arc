@@ -1633,14 +1633,15 @@ fn emit_closure_site(
   e: Emitter2,
   fn_name: String,
   sf: ShapeFlags,
+  is_strict: Bool,
   js_name: Option(String),
   expected_length: Int,
   capture_vals: List(ir.Value),
   simple: Option(#(String, Int, Bool)),
 ) -> #(ir.Expr, Emitter2) {
   let rc = e.consts
-  // FnFlags wire tuple — MUST match rt_js_types.FnFlags field order exactly
-  // (ctor, class_ctor, derived, arrow, method, gen, async). Gleam-tagged.
+  // FnFlags wire tuple — MUST match arc/rt/types.FnFlags field order exactly
+  // (ctor, class_ctor, derived, arrow, method, gen, async, strict).
   let flags = [
     ir.ConstAtom("fn_flags"),
     atom_bool(rc, sf.is_constructor),
@@ -1650,6 +1651,7 @@ fn emit_closure_site(
     atom_bool(rc, sf.is_method),
     atom_bool(rc, sf.is_generator),
     atom_bool(rc, sf.is_async),
+    atom_bool(rc, is_strict),
   ]
   let name_bin = case js_name {
     Some(n) -> ir.ConstBinary(bit_array.from_string(n))
@@ -1844,6 +1846,7 @@ pub fn emit_function_tree(
         e,
         fn_name,
         sf,
+        child_strict,
         js_name,
         exp_len,
         capture_vals,

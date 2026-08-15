@@ -370,3 +370,12 @@ pub fn json_through_proxy_and_raw_json_diff_test() {
     "{\"a\":[1,{\"b\":2}],\"c\":\"x\"} {\"r\":99} true false [1,2] [object Function] {\"c\":\"x\"}\n",
   )
 }
+
+// ── §10.2.1.2 OrdinaryCallBindThis: strict vs sloppy `this` ─────────────────
+
+pub fn strict_and_sloppy_this_diff_test() {
+  diff(
+    "function sl(){return typeof this}function st(){'use strict';return typeof this}function slg(){return this===globalThis}function stu(){'use strict';return this}console.log(sl.call(5),st.call(5),sl.call('s'),st.call(true),slg(),stu(),slg.call(null),stu.call(null),sl.call(undefined));var o={m:sl,n:st};console.log(o.m(),o.n(),(0,o.m)(),(0,o.n)())",
+    "object number object boolean true undefined true null object\nobject object object undefined\n",
+  )
+}

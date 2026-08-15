@@ -28,6 +28,7 @@ import arc/rt/types.{
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
+import arc/vm/limits
 import gleam/bit_array
 import gleam/bool
 import gleam/dict
@@ -173,35 +174,28 @@ fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
 @external(erlang, "arc_rt_call_ffi", "t_kfn_code")
 pub fn t_kfn_code(st: Agent, callee: JsVal, this: JsVal) -> JsVal
 
-/// §10.2.1.2 OrdinaryCallBindThis for the fast path — mirrors the slow
-/// `call_kfunction` path's `resolve_this` so the fast-path Frame carries the
-/// same sloppy `undefined`/`null` → globalThis substitution. JRead.
-pub fn t_resolve_this(st: Agent, callee: JsVal, this: JsVal) -> JsVal {
-  case classify(callee) {
-    KHandle(h) ->
-      case read_obj_kind(st, h) {
-        Some(KFunction(flags:, ..)) -> resolve_this(st, flags, this)
-        _ -> this
-      }
-    _ -> this
-  }
-}
-
 // ── `t_call` — the ONE re-entry point (§10.2.1) ─────────────────────────────
 
 /// §10.2.1 `[[Call]]`. Applies `callee(this, ...args)`, catching a JS throw
 /// into `ThrowCompletion` — the ONE catching entry point every rt_js module
 /// that runs user code goes through. Bracketed with `t_enter_call` /
-/// `t_leave_call` so `call_depth > 0` gates the D11 GC safepoint.
+/// `t_leave_call` so `call_depth > 0` gates the D11 GC safepoint. At
+/// `limits.max_call_depth` the call is refused with a RangeError completion
+/// (arc `call.gleam:174-179`, thrown in the caller's frame).
 pub fn t_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
   args: List(JsVal),
 ) -> #(Completion, Agent) {
-  let st = rt_store.t_enter_call(st)
-  let #(c, st) = do_call(st, callee, this, args)
-  #(c, rt_store.t_leave_call(st))
+  case st.store.call_depth >= limits.max_call_depth {
+    True -> t_apply_protected(st, rt_store.stack_overflow)
+    False -> {
+      let st = rt_store.t_enter_call(st)
+      let #(c, st) = do_call(st, callee, this, args)
+      #(c, rt_store.t_leave_call(st))
+    }
+  }
 }
 
 fn do_call(
@@ -258,7 +252,7 @@ fn call_kfunction(
         Some(h) -> mk_object(h)
         None -> mk_undefined()
       }
-      let this_resolved = resolve_this(st, flags, this)
+      let #(this_resolved, st) = resolve_this(st, flags, this)
       let frame =
         mk_frame(this_resolved, mk_object(callee_h), home, mk_undefined())
       t_call_protected(st, code, frame, args)
@@ -267,21 +261,31 @@ fn call_kfunction(
 }
 
 /// §10.2.1.2 OrdinaryCallBindThis. SPEC §7.M-CALL invariant: `this`
-/// resolution (sloppy `undefined`/`null` → globalThis) happens HERE, not in
-/// the compiled prologue. `FnFlags` carries no `strict` bit (rt_types is
-/// FROZEN — assumption 6), so the substitution is gated on `is_arrow` only:
-/// arrows never rebind `this` (they capture the enclosing frame instead), and
-/// every other `KFunction` gets sloppy-mode substitution. Strict-mode
-/// pass-through lands when/if `FnFlags.strict` is added; until then module
-/// code (always strict) never observes the difference because M14 emits
-/// method/module callers with an object receiver.
-fn resolve_this(st: Agent, flags: FnFlags, this: JsVal) -> JsVal {
-  case flags.is_arrow {
-    True -> this
+/// resolution happens HERE, not in the compiled prologue. Port of arc
+/// `frame.bind_this` (`exec/frame.gleam:145-178`); arrows have lexical
+/// `this` (step 2) and keep the caller-supplied frame value.
+fn resolve_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
+  use <- bool.guard(flags.is_arrow, #(this, st))
+  case flags.is_strict {
+    // Step 5: thisMode is STRICT -> thisValue = thisArgument (no coercion).
+    True -> #(this, st)
+    // Step 6: Sloppy mode coercion.
     False ->
       case classify(this) {
-        KUndef | KNull -> mk_object(st.realm.global_object)
-        _ -> this
+        // Step 6a: undefined/null -> globalThis.
+        KUndef | KNull -> #(mk_object(st.realm.global_object), st)
+        // Step 6b: Objects pass through (ToObject is identity for objects).
+        KHandle(_) -> #(this, st)
+        // The TDZ sentinel is never a JS value: it is the OTHER input
+        // ToObject rejects, and it must be matched here rather than falling
+        // into the `_` arm below and escaping into user code as `this`.
+        KTdz -> panic as "TDZ sentinel escaped as `this` in resolve_this"
+        // Step 6b: Primitives -> ToObject wrapper (boxing). Every remaining
+        // variant (string/number/bool/symbol/bigint) boxes.
+        _ -> {
+          let #(h, st) = js_ops(st).to_object(st, this)
+          #(mk_object(h), st)
+        }
       }
   }
 }
@@ -667,14 +671,6 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
 // thread `t_next_prop_seq` per birth prop instead — two extra increments per
 // allocation, but preserves the §10.1.11 "birth props before any later prop"
 // ordering invariant without editing the frozen store.
-//
-// **FnFlags.strict resolution (SPEC §2.4 gap):** `FnFlags` has NO `strict`
-// field (`rt_types.gleam:513-523`), so §10.2.1.2 OrdinaryCallBindThis
-// (owned by `call_kfunction` above) CANNOT branch on strictness. 2core emits
-// ALL user code as strict-mode (D10 corpus posture), so the sloppy
-// `undefined → globalThis / primitive → box` coercion never applies — `this`
-// passes through as-is. `call_kfunction` already applies it (no `bind_this`
-// transform).
 
 /// §20.2.4.1 `length` own-property — `{W:F, E:F, C:T}`. `value` is a `JsVal`
 /// (not `Int`) so `t_bound_new` can install `+∞` per §20.2.3.2 step 6.b.ii.

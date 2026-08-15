@@ -40,15 +40,22 @@ t_kfn_code(St, {js_cell, Id}, This) ->
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
                     %% §10.2.1.2 OrdinaryCallBindThis inlined: arrow keeps
-                    %% caller `this`; sloppy undefined/null → globalThis.
-                    ThisR = case element(?FNFLAGS_IS_ARROW, Flags) of
-                        true -> This;
+                    %% caller `this`; strict passes it through; sloppy
+                    %% undefined/null → globalThis, object → itself. A
+                    %% sloppy primitive `this` must box (allocates), so it
+                    %% misses to the full path.
+                    case element(?FNFLAGS_IS_ARROW, Flags)
+                         orelse element(?FNFLAGS_IS_STRICT, Flags) of
+                        true -> {Code, This, Simple};
                         false when This =:= undefined; This =:= null ->
-                            element(?REALM_GLOBAL,
-                                    element(?AGENT_REALM, St));
-                        false -> This
-                    end,
-                    {Code, ThisR, Simple};
+                            {Code,
+                             element(?REALM_GLOBAL,
+                                     element(?AGENT_REALM, St)),
+                             Simple};
+                        false when element(1, This) =:= ?HANDLE_TAG ->
+                            {Code, This, Simple};
+                        false -> undefined
+                    end;
                 _ -> undefined
             end;
         _ -> undefined

@@ -806,8 +806,9 @@ fn cons_list_(
   }
 }
 
-/// FnFlags wire tuple for a ClassInitFn — every flag False. MUST match
-/// rt_js_types.FnFlags field order + tag exactly (func.gleam:757-765).
+/// FnFlags wire tuple for a ClassInitFn — strict (§15.7.1: class bodies are
+/// strict code), every other flag False. MUST match arc/rt/types.FnFlags
+/// field order + tag exactly (func.gleam emit_closure_site).
 fn init_fn_flags(rc: state.RealmConsts) -> List(ir.Value) {
   [
     ir.ConstAtom("fn_flags"),
@@ -818,6 +819,7 @@ fn init_fn_flags(rc: state.RealmConsts) -> List(ir.Value) {
     rc.false_,
     rc.false_,
     rc.false_,
+    rc.true_,
   ]
 }
 

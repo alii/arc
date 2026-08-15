@@ -187,6 +187,7 @@ pub fn t_class_create(
       is_method: False,
       is_generator: False,
       is_async: False,
+      is_strict: True,
     )
   let #(ctor, st) =
     rt_call.t_fn_new(

@@ -11,8 +11,9 @@
 
 import arc/rt/types.{
   type Agent, type Handle, type HostHooks, type JobQueue, type JsOps,
-  type JsSlot, type JsStore, type JsVal, Agent, JsCell, JsOps, JsStore,
+  type JsSlot, type JsStore, type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr,
 } as rt_types
+import arc/vm/limits
 import gleam/bit_array
 import gleam/dict
 import gleam/list
@@ -177,9 +178,30 @@ pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
 
 /// Enter a JS call: `++call_depth`. `t_maybe_collect` (M2) refuses to run
 /// while `call_depth > 0`, which is what makes fn-entry allocation GC-safe.
+/// Throws RangeError once `call_depth` reaches `limits.max_call_depth` (arc
+/// `call.gleam:174-179`): the one depth choke point for calls, constructs
+/// and coroutine resumes.
 pub fn t_enter_call(st: Agent) -> Agent {
   let js = require_js(st)
-  with_js(st, JsStore(..js, call_depth: js.call_depth + 1))
+  case js.call_depth >= limits.max_call_depth {
+    True -> {
+      let #(_, st) = stack_overflow(st)
+      st
+    }
+    False -> with_js(st, JsStore(..js, call_depth: js.call_depth + 1))
+  }
+}
+
+/// Raise RangeError "Maximum call stack size exceeded". Typed as an op body
+/// so `t_call` can run it under its catch and hand back a `ThrowCompletion`.
+pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
+  let #(e, st) =
+    require_js(st).ops.new_error(
+      st,
+      RangeErr,
+      "Maximum call stack size exceeded",
+    )
+  t_throw(st, e)
 }
 
 /// Leave a JS call: `--call_depth`. Paired with `t_enter_call` by M-CALL's

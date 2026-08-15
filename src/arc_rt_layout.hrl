@@ -105,7 +105,8 @@
 -define(FNFLAGS_IS_METHOD, 6).
 -define(FNFLAGS_IS_GEN, 7).
 -define(FNFLAGS_IS_ASYNC, 8).
--define(FNFLAGS_ARITY, 8).
+-define(FNFLAGS_IS_STRICT, 9).
+-define(FNFLAGS_ARITY, 9).
 
 %% arc/rt/types.Property
 -define(DATAPROP_TAG, data_property).

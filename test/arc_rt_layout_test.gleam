@@ -75,6 +75,7 @@ fn no_flags() -> FnFlags {
     is_method: False,
     is_generator: False,
     is_async: False,
+    is_strict: False,
   )
 }
 
@@ -258,7 +259,7 @@ pub fn fn_flags_test() {
   let names = [
     "FNFLAGS_IS_CTOR", "FNFLAGS_IS_CLASS_CTOR", "FNFLAGS_IS_DERIVED",
     "FNFLAGS_IS_ARROW", "FNFLAGS_IS_METHOD", "FNFLAGS_IS_GEN",
-    "FNFLAGS_IS_ASYNC",
+    "FNFLAGS_IS_ASYNC", "FNFLAGS_IS_STRICT",
   ]
   let one_hot = [
     #("FNFLAGS_IS_CTOR", FnFlags(..base, is_constructor: True)),
@@ -268,6 +269,7 @@ pub fn fn_flags_test() {
     #("FNFLAGS_IS_METHOD", FnFlags(..base, is_method: True)),
     #("FNFLAGS_IS_GEN", FnFlags(..base, is_generator: True)),
     #("FNFLAGS_IS_ASYNC", FnFlags(..base, is_async: True)),
+    #("FNFLAGS_IS_STRICT", FnFlags(..base, is_strict: True)),
   ]
   assert list.length(one_hot) == list.length(names)
   use #(set_name, flags) <- list.each(one_hot)

@@ -2759,6 +2759,7 @@ fn emit_outer_function(
   captures: List(ir.Value),
   layout: LocLayout,
   js_name: Option(String),
+  is_strict: Bool,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   let ncap = list.length(captures)
   let #(outer_name, e) = state.fresh_fn_name(e)
@@ -2766,7 +2767,7 @@ fn emit_outer_function(
     state.enter_function(
       e,
       fn_scope_id,
-      strict: e.strict,
+      strict: is_strict,
       is_async: kind_is_async(kind),
       is_generator: kind_is_gen(kind),
       is_arrow: False,
@@ -2797,7 +2798,15 @@ fn emit_outer_function(
     )
   let e = state.leave_function(e_child, save)
   // Closure site in PARENT frame — replicates func.gleam:745-784 locally (D13).
-  Ok(emit_closure_site(e, outer_name, kind, js_name, params, captures))
+  Ok(emit_closure_site(
+    e,
+    outer_name,
+    kind,
+    is_strict,
+    js_name,
+    params,
+    captures,
+  ))
 }
 
 /// Local replica of func.gleam:745-784 emit_closure_site (D13). Coroutines
@@ -2808,13 +2817,14 @@ fn emit_closure_site(
   e: Emitter2,
   outer_name: String,
   kind: state.CoroutineKind,
+  is_strict: Bool,
   js_name: Option(String),
   params: List(ast.Pattern),
   captures: List(ir.Value),
 ) -> #(ir.Expr, Emitter2) {
   let rc = e.consts
-  // FnFlags wire tuple — MUST match rt_js_types.FnFlags field order exactly
-  // (ctor, class_ctor, derived, arrow, method, gen, async). Gleam-tagged.
+  // FnFlags wire tuple — MUST match arc/rt/types.FnFlags field order exactly
+  // (ctor, class_ctor, derived, arrow, method, gen, async, strict).
   let flags = [
     ir.ConstAtom("fn_flags"),
     rc.false_,
@@ -2824,6 +2834,7 @@ fn emit_closure_site(
     rc.false_,
     atom_bool(rc, kind_is_gen(kind)),
     atom_bool(rc, kind_is_async(kind)),
+    atom_bool(rc, is_strict),
   ]
   let name_bin = case js_name {
     Some(n) -> ir.ConstBinary(bit_array.from_string(n))
@@ -4271,6 +4282,11 @@ pub fn emit_coroutine_fn(
   // (1) child FunctionInfo + capture arity
   let info = scope.function_info(e.tree, fn_scope_id)
   let ncap = list.length(captures)
+  let is_strict = case body {
+    state.StmtBody(stmts) ->
+      e.strict || ast_util.has_use_strict_directive(stmts)
+    state.ExprBody(_) -> e.strict
+  }
 
   // (2) allocate the sm name; outer name is minted inside emit_outer_function
   let #(sm_base, e) = state.fresh_fn_name(e)
@@ -4281,7 +4297,7 @@ pub fn emit_coroutine_fn(
     state.enter_function(
       e,
       fn_scope_id,
-      strict: e.strict,
+      strict: is_strict,
       is_async: kind_is_async(kind),
       is_generator: kind_is_gen(kind),
       is_arrow: False,
@@ -4322,6 +4338,7 @@ pub fn emit_coroutine_fn(
     captures,
     layout,
     None,
+    is_strict,
   )
 }
 

@@ -136,7 +136,6 @@ pub fn table() -> DirectHost {
       #("construct", HostOp(call, "t_construct", Mut)),
       #("new_simple", HostOp(call_ffi, "t_new_simple", Mut)),
       #("kfn_code", HostOp(call, "t_kfn_code", Read)),
-      #("resolve_this", HostOp(call, "t_resolve_this", Read)),
       #("new_private_name", HostOp(class, "t_new_private_name", Mut)),
       #("class_create", HostOp(class, "t_class_create", Mut)),
       #("define_method", HostOp(class, "t_define_method", MutUnit)),

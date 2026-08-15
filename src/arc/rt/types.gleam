@@ -685,6 +685,9 @@ pub type FnFlags {
     is_method: Bool,
     is_generator: Bool,
     is_async: Bool,
+    /// §10.2 [[ThisMode]] is strict: OrdinaryCallBindThis passes
+    /// thisArgument through uncoerced.
+    is_strict: Bool,
   )
 }
 

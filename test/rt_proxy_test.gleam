@@ -98,6 +98,7 @@ fn func(
       is_method: False,
       is_generator: False,
       is_async: False,
+      is_strict: True,
     )
   let code = as_code(fn(st, _frame, args) { body(st, args) })
   let #(h, st) = rt_call.t_fn_new(st, code, [], flags, "", 0, None, None)
