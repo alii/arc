@@ -198,9 +198,13 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     WeakSetObj(entries: _) -> acc
     DateObj(ms: _) -> acc
     RegExpObj(source: _, flags: _, last_index: _, compiled: _) -> acc
-    ArrayBufferObj(bytes: _, detached: _) -> acc
-    TypedArrayObj(buffer:, offset: _, len: _, kind: _) -> [buffer.id, ..acc]
-    DataViewObj(buffer:, offset: _, len: _) -> [buffer.id, ..acc]
+    // Storage is bytes-or-nothing in every variant: no handle refs.
+    ArrayBufferObj(storage: _) -> acc
+    TypedArrayObj(buffer:, elem_kind: _, byte_offset: _, length: _) -> [
+      buffer.id,
+      ..acc
+    ]
+    DataViewObj(buffer:, byte_offset: _, byte_length: _) -> [buffer.id, ..acc]
     ModuleNamespace(exports:) ->
       dict.fold(exports, acc, fn(a, _, v) { push_val_refs(v, a) })
     ProxyObj(target:, handler:, revoked: _) -> [target.id, handler.id, ..acc]

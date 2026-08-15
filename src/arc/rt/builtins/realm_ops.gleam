@@ -154,6 +154,7 @@ pub fn realm_handles(r: Realm) -> List(Handle) {
     pair(r.promise),
     pair(r.proxy),
     pair(r.array_buffer),
+    pair(r.shared_array_buffer),
     pair(r.data_view),
     pair(r.iterator),
     pair(r.generator),

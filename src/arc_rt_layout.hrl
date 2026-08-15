@@ -37,7 +37,7 @@
 -define(REALM_FUNCTION, 3).
 -define(REALM_ARRAY, 4).
 -define(REALM_GLOBAL, 49).
--define(REALM_ARITY, 49).
+-define(REALM_ARITY, 50).
 -define(PAIR_TAG, builtin_pair).
 -define(PAIR_PROTO, 2).
 -define(PAIR_CTOR, 3).

@@ -133,10 +133,11 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   // 13. Proxy.
   let #(proxy, st) = b_proxy.init(st, object_proto, fn_proto)
   // 14. Binary data.
-  let #(array_buffer, st) = b_array_buffer.init(st, object_proto, fn_proto)
+  let #(#(array_buffer, shared_array_buffer), st) =
+    b_array_buffer.init(st, object_proto, fn_proto)
   let #(data_view, st) = b_data_view.init(st, object_proto, fn_proto)
   let #(#(_ta_base, typed_arrays), st) =
-    b_typed_array.init(st, object_proto, fn_proto)
+    b_typed_array.init(st, object_proto, fn_proto, array)
   // 15. Global functions (eval, URI codecs). §21.1.2.12/.13:
   // `Number.parseInt === parseInt` etc — the four handles allocated by
   // `b_number.init` are reused rather than allocating twins.
@@ -175,6 +176,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
         iterator: iters.iterator,
         proxy:,
         array_buffer:,
+        shared_array_buffer:,
         data_view:,
         typed_arrays:,
         math:,
@@ -235,6 +237,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       async_gen:,
       throw_type_error:,
       global_object:,
+      shared_array_buffer:,
     )
   // 17. Pin every realm handle (idempotent — most are already pinned by
   // alloc_proto/init_type, this catches any that arrived by another route).
@@ -298,6 +301,7 @@ type GlobalRefs {
     iterator: BuiltinPair,
     proxy: BuiltinPair,
     array_buffer: BuiltinPair,
+    shared_array_buffer: BuiltinPair,
     data_view: BuiltinPair,
     typed_arrays: rt_types.TypedArrays,
     math: Handle,
@@ -358,6 +362,7 @@ fn alloc_global_object(
     Builtin("Iterator", ctor(r.iterator)),
     Builtin("Proxy", ctor(r.proxy)),
     Builtin("ArrayBuffer", ctor(r.array_buffer)),
+    Builtin("SharedArrayBuffer", ctor(r.shared_array_buffer)),
     Builtin("DataView", ctor(r.data_view)),
     // Namespace objects.
     Builtin("Math", ns(r.math)),
@@ -378,13 +383,16 @@ fn alloc_global_object(
     Builtin("escape", ns(gfns.escape)),
     Builtin("unescape", ns(gfns.unescape)),
   ]
-  // The 11 TypedArray constructors (Int8Array .. BigUint64Array).
+  // The 11 TypedArray constructors (Int8Array .. BigUint64Array), in
+  // `all_typed_array_kinds` order so the global's key order is stable.
   let entries =
     list.append(
       entries,
-      list.map(dict.to_list(r.typed_arrays.by_kind), fn(entry) {
-        let #(kind, bt) = entry
-        Builtin(b_typed_array.kind_name(kind), ctor(bt))
+      list.filter_map(rt_types.all_typed_array_kinds, fn(kind) {
+        case dict.get(r.typed_arrays.by_kind, kind) {
+          Ok(bt) -> Ok(Builtin(b_typed_array.kind_name(kind), ctor(bt)))
+          Error(Nil) -> Error(Nil)
+        }
       }),
     )
   // Materialise property descriptors with threaded seq stamps.

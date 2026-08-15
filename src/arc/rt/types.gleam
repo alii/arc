@@ -410,19 +410,186 @@ pub fn symbol_descriptive_string(id: SymbolId) -> String {
 // Property/ParsedDesc/JsElements/FnFlags/ObjKind/JsSlot — every type
 // reachable from `JsSlot` (arc value.gleam:3814-3890 + heap type surface).
 
-/// Typed-array element kind. 11 variants (ES2024 §23.2).
+/// The nine element types whose [[ContentType]] is Number — ES2024 §23.2
+/// Table 69. A value of this type is PROOF the element domain is JsNum.
+pub type NumberKind {
+  Int8Kind
+  Uint8Kind
+  Uint8ClampedKind
+  Int16Kind
+  Uint16Kind
+  Int32Kind
+  Uint32Kind
+  Float32Kind
+  Float64Kind
+}
+
+/// The two element types whose [[ContentType]] is BigInt — ES2024 §23.2
+/// Table 69. A value of this type is PROOF the element domain is BigInt.
+pub type BigIntKind {
+  BigInt64Kind
+  BigUint64Kind
+}
+
+/// Element type of a TypedArray — ES2024 §23.2 Table 69, split by
+/// [[ContentType]] so a `case` on the kind hands the arms a witness of the
+/// element domain. There is no boolean "is bigint" predicate: matching
+/// `NumKind(_)` / `BigKind(_)` is the ONE spelling of §23.2's ContentType.
 pub type TypedArrayKind {
-  Int8
-  Uint8
-  Uint8Clamped
-  Int16
-  Uint16
-  Int32
-  Uint32
-  Float32
-  Float64
-  BigInt64
-  BigUint64
+  NumKind(NumberKind)
+  BigKind(BigIntKind)
+}
+
+/// DataView element types whose JS value is a Number: SetViewValue coerces
+/// with ToNumber, GetViewValue produces a Number.
+pub type ViewNumElement {
+  VInt8
+  VUint8
+  VInt16
+  VUint16
+  VInt32
+  VUint32
+  VFloat16
+  VFloat32
+  VFloat64
+}
+
+/// DataView element types whose JS value is a BigInt: SetViewValue coerces
+/// with ToBigInt, GetViewValue produces a BigInt.
+pub type ViewBigElement {
+  VBigInt64
+  VBigUint64
+}
+
+/// Element type read/written by DataView.prototype get*/set* methods.
+/// The Number/BigInt split lives in the type rather than a comment: it decides
+/// which coercion (ToNumber vs ToBigInt) and which encoder each get*/set* uses,
+/// so a bigint element cannot reach the number encoder.
+pub type ViewElementType {
+  VNum(ViewNumElement)
+  VBig(ViewBigElement)
+}
+
+/// Backing storage of an ArrayBuffer/SharedArrayBuffer — the whole
+/// [[ArrayBufferData]] / [[ArrayBufferMaxByteLength]] / IsImmutableBuffer
+/// state as ONE sum type, so the four combinations the spec forbids
+/// (immutable+shared, immutable+resizable, immutable+detached,
+/// shared+detached) cannot be written down at all.
+///
+/// * `Detached` — [[ArrayBufferData]] is null (§25.1.3.5 DetachArrayBuffer).
+///   There is no leftover byte array to read; [[ArrayBufferMaxByteLength]]
+///   survives so the `resizable` getter keeps reporting true.
+/// * `Bytes` — a plain (non-shared, mutable) ArrayBuffer: an immutable BEAM
+///   binary. `max_byte_length: Some(_)` iff resizable.
+/// * `Immutable` — the TC39 Immutable ArrayBuffer proposal's
+///   IsImmutableBuffer state (transferToImmutable / sliceToImmutable
+///   results): never shared, never resizable, never detachable, and every
+///   write path (Atomics, TypedArray/DataView stores) rejects it.
+/// * `Shared` — a SharedArrayBuffer. Multi-agent sharing is not supported in
+///   this runtime: the bytes live in this agent's store exactly like `Bytes`
+///   (current [[ArrayBufferByteLength]] = `byte_size(bytes)`), so every
+///   Atomics operation on it is trivially sequentially consistent.
+///   `max_byte_length: Some(_)` iff growable.
+///
+/// Shared-ness is not a flag: a buffer is shared iff its storage is
+/// `Shared`. Detached-ness is not a flag: a buffer is detached iff its
+/// storage is `Detached`.
+pub type BufferStorage {
+  Detached(max_byte_length: Option(Int))
+  Bytes(bytes: BitArray, max_byte_length: Option(Int))
+  Immutable(bytes: BitArray)
+  Shared(bytes: BitArray, max_byte_length: Option(Int))
+}
+
+/// Whether the storage is a SharedArrayBuffer backing. This is THE definition
+/// of shared-ness — there is no separate flag.
+pub fn buffer_is_shared(storage: BufferStorage) -> Bool {
+  case storage {
+    Shared(..) -> True
+    Bytes(..) | Immutable(..) | Detached(..) -> False
+  }
+}
+
+/// IsDetachedBuffer(O) — [[ArrayBufferData]] is null.
+pub fn buffer_is_detached(storage: BufferStorage) -> Bool {
+  case storage {
+    Detached(..) -> True
+    Bytes(..) | Immutable(..) | Shared(..) -> False
+  }
+}
+
+/// IsImmutableBuffer(O) (immutable-arraybuffer proposal).
+pub fn buffer_is_immutable(storage: BufferStorage) -> Bool {
+  case storage {
+    Immutable(..) -> True
+    Bytes(..) | Shared(..) | Detached(..) -> False
+  }
+}
+
+/// [[ArrayBufferMaxByteLength]], absent for fixed-length buffers. An
+/// immutable buffer is fixed-length by construction, so it never has one.
+pub fn buffer_max_byte_length(storage: BufferStorage) -> Option(Int) {
+  case storage {
+    Detached(max_byte_length:)
+    | Bytes(max_byte_length:, ..)
+    | Shared(max_byte_length:, ..) -> max_byte_length
+    Immutable(..) -> None
+  }
+}
+
+/// [[ArrayBufferByteLength]] of a storage value — +0 for a detached buffer,
+/// which is exactly what §25.1.6.2 / §25.1.3.4 want.
+pub fn buffer_byte_size(storage: BufferStorage) -> Int {
+  case storage {
+    Detached(..) -> 0
+    Bytes(bytes:, ..) | Immutable(bytes:) | Shared(bytes:, ..) ->
+      bit_array.byte_size(bytes)
+  }
+}
+
+/// The live buffer contents, or None when the buffer is DETACHED — there are
+/// no bytes to hand out, and the compiler makes every reader say what it
+/// does about that. Zero cost: the (immutable) backing binary itself.
+pub fn buffer_bits(storage: BufferStorage) -> Option(BitArray) {
+  case storage {
+    Detached(..) -> None
+    Bytes(bytes:, ..) | Immutable(bytes:) | Shared(bytes:, ..) -> Some(bytes)
+  }
+}
+
+/// Persist a full-buffer image `new_bits`. `byte_offset`/`count` name the
+/// region the caller actually modified (§6.2.9.3 CopyDataBlockBytes writes
+/// exactly that range); with in-store shared bytes the whole image is the
+/// new storage either way, but the region MUST lie inside `new_bits`: every
+/// caller has already validated the write range against the live buffer, so
+/// an out-of-range region is an arithmetic bug in the caller — crash rather
+/// than silently drop the store.
+///
+/// `Detached` and `Immutable` storage have nothing to write into: every write
+/// path rejects them BEFORE getting here (a detached store is a spec no-op,
+/// an immutable store is a TypeError), so the store is dropped rather than
+/// forging bytes into a buffer that must not have any. Rebuilding the
+/// storage from its own variant is what makes "forgot to preserve
+/// max_byte_length on write-back" unwritable.
+pub fn buffer_store_region(
+  storage: BufferStorage,
+  new_bits: BitArray,
+  byte_offset: Int,
+  count: Int,
+) -> BufferStorage {
+  case storage {
+    Bytes(bytes: _, max_byte_length:) ->
+      Bytes(bytes: new_bits, max_byte_length:)
+    Shared(bytes: _, max_byte_length:) -> {
+      let assert True =
+        byte_offset >= 0
+        && count >= 0
+        && byte_offset + count <= bit_array.byte_size(new_bits)
+        as "buffer_store_region: write range outside the new buffer image"
+      Shared(bytes: new_bits, max_byte_length:)
+    }
+    Immutable(..) | Detached(..) -> storage
+  }
 }
 
 /// Compiled JS function body: BEAM `fun(St, Frame, Args) -> {V, St'}`
@@ -951,28 +1118,59 @@ pub type RegExpNative {
   RegExpStringIteratorNext
 }
 
-/// ArrayBuffer natives (arc `ArrayBufferNativeFn` value.gleam:1172-1215).
-/// SharedArrayBuffer is OUT of scope (Realm has no `shared_array_buffer` field).
+/// ArrayBuffer / SharedArrayBuffer methods — ES2024 §25.1/§25.2. One
+/// dispatch family covers both: the same internal slot layout
+/// (`ArrayBufferObj` exotic kind) backs both, distinguished by the storage
+/// kind (`buffer_is_shared(storage)`).
 pub type ArrayBufferNative {
-  /// §25.1.4.1 ArrayBuffer ( length [ , options ] ).
+  /// §25.1.4.1 ArrayBuffer ( length [ , options ] )
   ArrayBufferConstructor(proto: Handle)
-  /// §25.1.5.1 ArrayBuffer.isView ( arg ).
+  /// §25.1.5.1 ArrayBuffer.isView ( arg )
   ArrayBufferIsView
+  /// §25.1.6.2 get ArrayBuffer.prototype.byteLength
   ArrayBufferGetByteLength
+  /// §25.1.6.3 get ArrayBuffer.prototype.detached
   ArrayBufferGetDetached
+  /// §25.1.6.4 get ArrayBuffer.prototype.maxByteLength
   ArrayBufferGetMaxByteLength
+  /// §25.1.6.5 get ArrayBuffer.prototype.resizable
   ArrayBufferGetResizable
+  /// §25.1.6.7 ArrayBuffer.prototype.slice ( start, end )
   ArrayBufferSlice
+  /// §25.1.6.6 ArrayBuffer.prototype.resize ( newLength )
   ArrayBufferResize
+  /// §25.1.6.8 ArrayBuffer.prototype.transfer ( [ newLength ] )
   ArrayBufferTransfer
+  /// §25.1.6.9 ArrayBuffer.prototype.transferToFixedLength ( [ newLength ] )
   ArrayBufferTransferToFixedLength
+  /// Immutable ArrayBuffer proposal: get ArrayBuffer.prototype.immutable
+  ArrayBufferGetImmutable
+  /// Immutable ArrayBuffer proposal:
+  /// ArrayBuffer.prototype.sliceToImmutable ( start, end )
+  ArrayBufferSliceToImmutable
+  /// Immutable ArrayBuffer proposal:
+  /// ArrayBuffer.prototype.transferToImmutable ( [ newLength ] )
+  ArrayBufferTransferToImmutable
+  /// §25.2.3.1 SharedArrayBuffer ( length [ , options ] )
+  SharedArrayBufferConstructor(proto: Handle)
+  /// §25.2.5.2 get SharedArrayBuffer.prototype.byteLength
+  SharedArrayBufferGetByteLength
+  /// §25.2.5.3 SharedArrayBuffer.prototype.grow ( newLength )
+  SharedArrayBufferGrow
+  /// §25.2.5.4 get SharedArrayBuffer.prototype.growable
+  SharedArrayBufferGetGrowable
+  /// §25.2.5.5 get SharedArrayBuffer.prototype.maxByteLength
+  SharedArrayBufferGetMaxByteLength
+  /// §25.2.5.6 SharedArrayBuffer.prototype.slice ( start, end )
+  SharedArrayBufferSlice
 }
 
-/// TypedArray natives (arc `TypedArrayNativeFn` value.gleam:1217-1280).
+/// TypedArray natives — %TypedArray% intrinsic, the 11 concrete constructors,
+/// and %TypedArray%.prototype accessors/methods (arc `TypedArrayNativeFn`).
 pub type TypedArrayNative {
-  /// §23.2.1.1 %TypedArray% ( ) — abstract; always throws.
+  /// %TypedArray% — the abstract intrinsic. Constructing or calling throws.
   TypedArrayIntrinsicConstructor
-  /// §23.2.5.1 One of the 11 concrete constructors.
+  /// One of the 11 concrete constructors (Int8Array .. BigUint64Array).
   TypedArrayConstructor(kind: TypedArrayKind, proto: Handle)
   /// §23.2.2.1 %TypedArray%.from ( source [ , mapFn [ , thisArg ] ] ).
   TypedArrayFrom
@@ -1016,36 +1214,52 @@ pub type TypedArrayNative {
   TypedArrayPrototypeWith
 }
 
-/// DataView natives (arc `DataViewNativeFn` value.gleam:1282-1310). Get/Set are
-/// keyed by element kind — one variant per direction, not per width.
+/// DataView methods — ES2024 §25.3. Constructor, accessor getters, and the
+/// get/set methods parametrized by element type (arc `DataViewNativeFn`).
 pub type DataViewNative {
-  /// §25.3.2.1 DataView ( buffer [ , byteOffset [ , byteLength ] ] ).
+  /// §25.3.2.1 DataView ( buffer [ , byteOffset [ , byteLength ] ] )
   DataViewConstructor(proto: Handle)
+  /// §25.3.4.1 get DataView.prototype.buffer
   DataViewGetBuffer
+  /// §25.3.4.2 get DataView.prototype.byteLength
   DataViewGetByteLength
+  /// §25.3.4.3 get DataView.prototype.byteOffset
   DataViewGetByteOffset
-  /// §25.3.4.5-14 getInt8/getUint8/.../getBigUint64.
-  DataViewGet(elem: TypedArrayKind)
-  /// §25.3.4.15-24 setInt8/setUint8/.../setBigUint64.
-  DataViewSet(elem: TypedArrayKind)
+  /// DataView.prototype.get<Type> ( byteOffset [ , littleEndian ] )
+  DataViewGet(element: ViewElementType)
+  /// DataView.prototype.set<Type> ( byteOffset, value [ , littleEndian ] )
+  DataViewSet(element: ViewElementType)
 }
 
-/// Atomics natives (arc `AtomicsNativeFn` value.gleam:1312-1340). Namespace only
-/// — no constructor.
+/// Atomics namespace functions — ES2024 §25.4 (arc `AtomicsNativeFn`).
 pub type AtomicsNative {
+  /// §25.4.5 Atomics.add ( typedArray, index, value )
   AtomicsAdd
+  /// §25.4.6 Atomics.and ( typedArray, index, value )
   AtomicsAnd
+  /// §25.4.7 Atomics.compareExchange ( typedArray, index, expected, replacement )
   AtomicsCompareExchange
+  /// §25.4.8 Atomics.exchange ( typedArray, index, value )
   AtomicsExchange
+  /// §25.4.9 Atomics.isLockFree ( size )
   AtomicsIsLockFree
+  /// §25.4.10 Atomics.load ( typedArray, index )
   AtomicsLoad
+  /// §25.4.16 Atomics.notify ( typedArray, index, count )
   AtomicsNotify
+  /// §25.4.11 Atomics.or ( typedArray, index, value )
   AtomicsOr
+  /// Atomics.pause ( [ iterationNumber ] ) — microwait proposal.
   AtomicsPause
+  /// §25.4.12 Atomics.store ( typedArray, index, value )
   AtomicsStore
+  /// §25.4.13 Atomics.sub ( typedArray, index, value )
   AtomicsSub
+  /// §25.4.14 Atomics.wait ( typedArray, index, value, timeout )
   AtomicsWait
+  /// §25.4.15 Atomics.waitAsync ( typedArray, index, value, timeout )
   AtomicsWaitAsync
+  /// §25.4.17 Atomics.xor ( typedArray, index, value )
   AtomicsXor
 }
 
@@ -1151,46 +1365,41 @@ pub type GlobalNative {
   GlobalUnescape
 }
 
-/// §23.2 typed-array element byte size — total over `TypedArrayKind`.
-pub fn typed_array_elem_size(kind: TypedArrayKind) -> Int {
-  case kind {
-    Int8 | Uint8 | Uint8Clamped -> 1
-    Int16 | Uint16 -> 2
-    Int32 | Uint32 | Float32 -> 4
-    Float64 | BigInt64 | BigUint64 -> 8
-  }
-}
+// Element size in bytes (§23.2 Table 69) is NOT here: it lives in
+// arc/rt/typed_array_ffi as `elem_size`, derived from the same
+// `elem_of_kind` table the read/write codecs use. A second width table here
+// is exactly how a kind's width and its codec drift apart.
 
-/// §23.2.7 [[TypedArrayName]] — the constructor name for a kind.
+/// [[TypedArrayName]] — the constructor's global name.
 pub fn typed_array_name(kind: TypedArrayKind) -> String {
   case kind {
-    Int8 -> "Int8Array"
-    Uint8 -> "Uint8Array"
-    Uint8Clamped -> "Uint8ClampedArray"
-    Int16 -> "Int16Array"
-    Uint16 -> "Uint16Array"
-    Int32 -> "Int32Array"
-    Uint32 -> "Uint32Array"
-    Float32 -> "Float32Array"
-    Float64 -> "Float64Array"
-    BigInt64 -> "BigInt64Array"
-    BigUint64 -> "BigUint64Array"
+    NumKind(Int8Kind) -> "Int8Array"
+    NumKind(Uint8Kind) -> "Uint8Array"
+    NumKind(Uint8ClampedKind) -> "Uint8ClampedArray"
+    NumKind(Int16Kind) -> "Int16Array"
+    NumKind(Uint16Kind) -> "Uint16Array"
+    NumKind(Int32Kind) -> "Int32Array"
+    NumKind(Uint32Kind) -> "Uint32Array"
+    NumKind(Float32Kind) -> "Float32Array"
+    NumKind(Float64Kind) -> "Float64Array"
+    BigKind(BigInt64Kind) -> "BigInt64Array"
+    BigKind(BigUint64Kind) -> "BigUint64Array"
   }
 }
 
-/// All 11 typed-array kinds in global-installation order.
+/// All TypedArray kinds, in the order the global constructors are installed.
 pub const all_typed_array_kinds = [
-  Int8,
-  Uint8,
-  Uint8Clamped,
-  Int16,
-  Uint16,
-  Int32,
-  Uint32,
-  Float32,
-  Float64,
-  BigInt64,
-  BigUint64,
+  NumKind(Int8Kind),
+  NumKind(Uint8Kind),
+  NumKind(Uint8ClampedKind),
+  NumKind(Int16Kind),
+  NumKind(Uint16Kind),
+  NumKind(Int32Kind),
+  NumKind(Uint32Kind),
+  NumKind(Float32Kind),
+  NumKind(Float64Kind),
+  BigKind(BigInt64Kind),
+  BigKind(BigUint64Kind),
 ]
 
 /// §24.1 Map built-in dispatch tokens (arc `MapNativeFn`). `MapConstructor`
@@ -1629,7 +1838,9 @@ pub fn date_native_refs(n: DateNative) -> List(Handle) {
 /// its intrinsic prototype handle.
 pub fn array_buffer_native_refs(n: ArrayBufferNative) -> List(Handle) {
   case n {
-    ArrayBufferConstructor(proto:) -> [proto]
+    ArrayBufferConstructor(proto:) | SharedArrayBufferConstructor(proto:) -> [
+      proto,
+    ]
     _ -> []
   }
 }
@@ -1755,9 +1966,30 @@ pub type ObjKind {
     last_index: Int,
     compiled: CompiledRegExp,
   )
-  ArrayBufferObj(bytes: BitArray, detached: Bool)
-  TypedArrayObj(buffer: Handle, offset: Int, len: Int, kind: TypedArrayKind)
-  DataViewObj(buffer: Handle, offset: Int, len: Int)
+  /// ArrayBuffer / SharedArrayBuffer — ES2024 §25.1/§25.2. All of
+  /// [[ArrayBufferData]], [[ArrayBufferMaxByteLength]] and IsImmutableBuffer
+  /// live in ONE `BufferStorage` sum type: detached-ness, shared-ness and
+  /// immutability are variants, not flags, so the four spec-forbidden
+  /// combinations cannot be constructed. [[ArrayBufferByteLength]] is
+  /// derived (`buffer_byte_size(storage)`).
+  ArrayBufferObj(storage: BufferStorage)
+  /// Integer-Indexed (TypedArray) exotic object — ES2024 §10.4.5 / §23.2.
+  /// [[ViewedArrayBuffer]] is `buffer` (an ArrayBufferObj cell),
+  /// [[TypedArrayName]]/[[ContentType]] derive from `elem_kind`,
+  /// [[ByteOffset]] is `byte_offset`, [[ArrayLength]] is `length` (elements,
+  /// not bytes). `length: None` is [[ArrayLength]] = AUTO — a length-tracking
+  /// view over a resizable buffer whose element count follows the buffer's
+  /// live byte length (§10.4.5.13 TypedArrayLength).
+  TypedArrayObj(
+    buffer: Handle,
+    elem_kind: TypedArrayKind,
+    byte_offset: Int,
+    length: Option(Int),
+  )
+  /// DataView object — ES2024 §25.3. [[ViewedArrayBuffer]] is `buffer`,
+  /// [[ByteOffset]] is `byte_offset`. `byte_length: None` means byte-length
+  /// auto-tracking (view over a resizable buffer with no explicit length).
+  DataViewObj(buffer: Handle, byte_offset: Int, byte_length: Option(Int))
   ModuleNamespace(exports: Dict(String, JsVal))
   ProxyObj(target: Handle, handler: Handle, revoked: Bool)
   ForInIterator(remaining: List(String))
@@ -2019,6 +2251,8 @@ pub type Realm {
     async_gen: BuiltinPair,
     throw_type_error: Handle,
     global_object: Handle,
+    // APPENDED after `global_object` so `?REALM_GLOBAL` stays put.
+    shared_array_buffer: BuiltinPair,
   )
 }
 
@@ -2076,6 +2310,7 @@ pub fn unset_realm() -> Realm {
     async_gen: p,
     throw_type_error: h,
     global_object: h,
+    shared_array_buffer: p,
   )
 }
 

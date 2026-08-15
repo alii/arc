@@ -5,6 +5,7 @@
 //// Async-from-Sync dispatch, re-expressed over threaded `Agent` (R1).
 
 import arc/rt/async as rt_async
+import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/rt/builtins/iter_protocol.{IterateStrings, RejectPrimitives}
@@ -19,8 +20,8 @@ import arc/rt/types.{
   type GeneratorState, type Handle, type HelperBody, type IteratorHelperKind,
   type IteratorNative, type IteratorRecord, type JsVal, type MapIterKind,
   type NativeToken, type ObjKind, type ObjectKey, type SetIterKind,
-  type ZipMember, type ZipMode, ArgumentsObj, ArrayBufferObj, ArrayIterEntries,
-  ArrayIterKeys, ArrayIterValues, ArrayIterator, ArrayObj, AsyncFromSyncClose,
+  type ZipMember, type ZipMode, ArgumentsObj, ArrayIterEntries, ArrayIterKeys,
+  ArrayIterValues, ArrayIterator, ArrayObj, AsyncFromSyncClose,
   AsyncFromSyncIterator, AsyncFromSyncNext, AsyncFromSyncReturn,
   AsyncFromSyncThrow, AsyncFromSyncUnwrap, ClassicHelper, ConcatHelper,
   ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart, GenSuspendedYield,
@@ -442,14 +443,19 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
   case rt_store.t_cell_get(st, target) {
     SObject(kind: ArrayObj(length:), ..) -> #(length, st)
     SObject(kind: ArgumentsObj(length:, ..), ..) -> #(length, st)
-    SObject(kind: TypedArrayObj(buffer:, len:, ..), ..) ->
-      case rt_store.t_cell_get(st, buffer) {
-        SObject(kind: ArrayBufferObj(detached: True, ..), ..) ->
-          throw_type_error(
-            st,
-            "Cannot perform operation on a detached ArrayBuffer",
-          )
-        _ -> #(len, st)
+    SObject(kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:), ..) ->
+      case
+        rt_buffer.typed_array_iter_length(
+          st,
+          buffer,
+          elem_kind,
+          byte_offset,
+          length,
+        )
+      {
+        Ok(len) -> #(len, st)
+        Error(err) ->
+          throw_type_error(st, rt_buffer.view_witness_error_message(err))
       }
     _ -> {
       let #(len_v, st) =

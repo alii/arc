@@ -17,15 +17,17 @@
 //// step 1) seeds the concrete fn. Primitive auto-boxing likewise goes
 //// through `ops.to_object`.
 
+import arc/rt/buffer
+import arc/rt/elements
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsOps, type JsSlot,
   type JsStore, type JsVal, type ObjKind, type ObjectKey, type ParsedDesc,
-  type Property, type PropertyKey, type SymbolId, AccessorProperty, Agent,
-  ArgumentsObj, ArrayObj, DataProperty, Dense, Index, JsStore, KHandle, KNull,
-  KUndef, Named, NoElements, Ordinary, Private, ProxyObj, SAsyncGen, SBox,
-  SGenerator, SObject, SPromise, SShapedObject, ShapeDesc, Sparse, StringKey,
-  StringObj, SymbolKey, TypeErr,
+  type Property, type PropertyKey, type SymbolId, type TypedArrayKind,
+  AccessorProperty, Agent, ArgumentsObj, ArrayObj, DataProperty, Dense, Index,
+  JsStore, KHandle, KNull, KUndef, Named, NoElements, Ordinary, Private,
+  ProxyObj, SAsyncGen, SBox, SGenerator, SObject, SPromise, SShapedObject,
+  ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr, TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
@@ -128,7 +130,16 @@ fn read_own_and_proto(
   h: Handle,
   key: ObjectKey,
 ) -> #(Option(Property), Option(Handle)) {
-  case read_object(st, h) {
+  own_and_proto_of_slot(st, read_object(st, h), key)
+}
+
+/// `read_own_and_proto` on an already-read cell.
+fn own_and_proto_of_slot(
+  st: Agent,
+  slot: JsSlot,
+  key: ObjectKey,
+) -> #(Option(Property), Option(Handle)) {
+  case slot {
     SShapedObject(shape_id:, proto:, slots:) -> #(
       case key {
         StringKey(pk) -> own_property_shaped(st, shape_id, slots, pk)
@@ -138,13 +149,25 @@ fn read_own_and_proto(
     )
     SObject(kind:, proto:, props:, symbol_props:, elements:, ..) -> #(
       case key {
-        StringKey(pk) -> own_property_of(kind, props, elements, pk)
+        StringKey(pk) -> own_property_of(st, kind, props, elements, pk)
         SymbolKey(sym) -> own_symbol_property_of(symbol_props, sym)
       },
       proto,
     )
     // read_object only returns SObject | SShapedObject.
     _ -> #(None, None)
+  }
+}
+
+/// True when `key` is a canonical numeric index string on a TypedArray cell
+/// — such keys are fully resolved by the integer-indexed exotic behaviour
+/// (§10.4.5) and must never fall through to the prototype chain.
+fn typed_array_absorbs(slot: JsSlot, key: ObjectKey) -> Bool {
+  case slot, key {
+    SObject(kind: TypedArrayObj(..), ..), StringKey(Index(_)) -> True
+    SObject(kind: TypedArrayObj(..), ..), StringKey(Named(s)) ->
+      buffer.is_canonical_numeric_string(s)
+    _, _ -> False
   }
 }
 
@@ -214,87 +237,6 @@ fn resolve_object_handle(st: Agent, h: Handle) -> Handle {
   }
 }
 
-// ── private elements helpers (port arc/vm/internal/elements.gleam) ──────────
-// Minimal subset needed by the MOP: get/has/set/delete/indices/truncate.
-// Dense→Sparse promotion when a write would leave a large gap.
-
-/// After this many empty slots between the current dense end and a new index,
-/// promote to sparse (arc `elements.gleam:25`).
-const elem_max_gap = 1024
-
-/// The FFI `:array` backing tops out here (arc `limits.gleam:27`).
-const elem_max_dense_index = 10_000_000
-
-/// Read element at `i`. `None` for a hole or absent index.
-fn elem_get(elements: JsElements, i: Int) -> Option(JsVal) {
-  case elements {
-    NoElements -> None
-    Dense(data) -> tree_array.get_option(i, data)
-    Sparse(data) -> dict.get(data, i) |> option.from_result
-  }
-}
-
-/// True when index `i` holds a present element.
-fn elem_has(elements: JsElements, i: Int) -> Bool {
-  option.is_some(elem_get(elements, i))
-}
-
-/// Write `v` at `i`, promoting NoElements→Dense or Dense→Sparse as needed.
-fn elem_set(elements: JsElements, i: Int, v: JsVal) -> JsElements {
-  case elements {
-    NoElements -> elem_set(Dense(tree_array.new(rt_types.mk_undefined())), i, v)
-    Dense(data) -> {
-      let size = tree_array.size(data)
-      case i - size > elem_max_gap || i >= elem_max_dense_index {
-        True -> Sparse(dense_to_sparse(data) |> dict.insert(i, v))
-        False -> Dense(tree_array.set(i, v, data))
-      }
-    }
-    Sparse(data) -> Sparse(dict.insert(data, i, v))
-  }
-}
-
-/// Delete element at `i` (creates a hole). Stays dense.
-fn elem_delete(elements: JsElements, i: Int) -> JsElements {
-  case elements {
-    NoElements -> NoElements
-    Dense(data) -> Dense(tree_array.reset(i, data))
-    Sparse(data) -> Sparse(dict.delete(data, i))
-  }
-}
-
-/// Present indices in ascending order. Skips holes.
-fn elem_indices(elements: JsElements) -> List(Int) {
-  case elements {
-    NoElements -> []
-    Dense(data) ->
-      tree_array.sparse_fold(fn(i, _v, acc) { [i, ..acc] }, [], data)
-      |> list.reverse
-    Sparse(data) -> dict.keys(data) |> list.sort(int.compare)
-  }
-}
-
-/// Drop every element at index >= `new_len`.
-fn elem_truncate(elements: JsElements, new_len: Int) -> JsElements {
-  case elements {
-    NoElements -> NoElements
-    Dense(data) ->
-      case new_len >= tree_array.size(data) {
-        True -> elements
-        False -> Dense(tree_array.resize(data, new_len))
-      }
-    Sparse(data) -> Sparse(dict.filter(data, fn(idx, _v) { idx < new_len }))
-  }
-}
-
-fn dense_to_sparse(data: tree_array.TreeArray(JsVal)) -> Dict(Int, JsVal) {
-  tree_array.sparse_fold(
-    fn(i, v, acc) { dict.insert(acc, i, v) },
-    dict.new(),
-    data,
-  )
-}
-
 // ── private own-property / same_value helpers ───────────────────────────────
 
 /// A fresh `{value, W:T, E:T, C:T}` data property with a threaded creation
@@ -320,12 +262,58 @@ fn new_data_property(st: Agent, v: JsVal) -> #(Property, Agent) {
 /// is the fast-path data-value cache — check dict FIRST (arc invariant
 /// `object.gleam:436-592`).
 fn own_property_of(
+  st: Agent,
   kind: ObjKind,
   props: Dict(PropertyKey, Property),
   elements: JsElements,
   key: PropertyKey,
 ) -> Option(Property) {
   case kind, key {
+    // TypedArray (Integer-Indexed) exotic [[GetOwnProperty]] (§10.4.5.1):
+    // canonical numeric index keys map to buffer elements — in-bounds →
+    // { value, W:T, E:T, C:T }; out-of-bounds/detached → undefined WITHOUT
+    // consulting the ordinary table. Non-integral canonical numeric strings
+    // ("1.5", "-0", "NaN", …) are never valid indices, so they also yield
+    // undefined. Immutable ArrayBuffer proposal
+    // (sec-typedarray-getownproperty): over an immutable buffer the element
+    // descriptor is { value, W:F, E:T, C:F }.
+    TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:), Index(idx) ->
+      buffer.typed_array_element_live(
+        st,
+        buf,
+        elem_kind,
+        byte_offset,
+        length,
+        idx,
+      )
+      |> option.map(fn(v) {
+        // seq: 0 — Index keys enumerate numerically, never by seq.
+        case buffer.buffer_is_immutable(st, buf) {
+          True ->
+            DataProperty(
+              value: v,
+              writable: False,
+              enumerable: True,
+              configurable: False,
+              seq: 0,
+            )
+          False ->
+            DataProperty(
+              value: v,
+              writable: True,
+              enumerable: True,
+              configurable: True,
+              seq: 0,
+            )
+        }
+      })
+    TypedArrayObj(..), Named(s) ->
+      case buffer.is_canonical_numeric_string(s) {
+        True -> None
+        False -> dict.get(props, key) |> option.from_result
+      }
+    // Private elements are ordinary dict entries.
+    TypedArrayObj(..), Private(_) -> dict.get(props, key) |> option.from_result
     // Array exotic virtual "length" (§10.4.2): a dict override holds the
     // attributes after defineProperty made it non-writable; the value always
     // tracks `ArrayObj(length)`. seq: 0 — never enumerated by seq.
@@ -377,7 +365,7 @@ fn own_property_of(
       case dict.get(props, key) {
         Ok(prop) -> Some(prop)
         Error(Nil) ->
-          elem_get(elements, i)
+          elements.get_option(elements, i)
           |> option.map(fn(v) {
             // seq: 0 — Index keys enumerate numerically, never by seq.
             DataProperty(
@@ -389,8 +377,8 @@ fn own_property_of(
             )
           })
       }
-    // TODO(M6): StringObj/TypedArrayObj/ModuleNamespace/ProxyObj exotic
-    // [[GetOwnProperty]] — falls through to §10.1.5.1 OrdinaryGetOwnProperty.
+    // TODO(M6): ModuleNamespace/ProxyObj exotic [[GetOwnProperty]] — falls
+    // through to §10.1.5.1 OrdinaryGetOwnProperty.
     _, _ -> dict.get(props, key) |> option.from_result
   }
 }
@@ -581,10 +569,46 @@ fn get_from(
   key: ObjectKey,
   receiver: JsVal,
 ) -> #(JsVal, Agent) {
-  // TODO(M6): TypedArrayObj/ModuleNamespace/ProxyObj exotic [[Get]] dispatch
-  // on `kind` — currently falls through to ordinary via own_property_of.
+  // TODO(M6): ModuleNamespace/ProxyObj exotic [[Get]] dispatch on `kind`.
+  case read_object(st, h), key {
+    // TypedArray exotic [[Get]] (§10.4.5.4): a canonical numeric index is
+    // IntegerIndexedElementGet — element value or undefined, never the
+    // prototype chain.
+    SObject(
+      kind: TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:),
+      ..,
+    ),
+      StringKey(Index(idx))
+    -> #(
+      buffer.typed_array_element_live(
+        st,
+        buf,
+        elem_kind,
+        byte_offset,
+        length,
+        idx,
+      )
+        |> option.unwrap(rt_types.mk_undefined()),
+      st,
+    )
+    SObject(kind: TypedArrayObj(..), ..) as slot, StringKey(Named(s)) ->
+      case buffer.is_canonical_numeric_string(s) {
+        True -> #(rt_types.mk_undefined(), st)
+        False -> ordinary_get(st, slot, key, receiver)
+      }
+    slot, _ -> ordinary_get(st, slot, key, receiver)
+  }
+}
+
+/// §10.1.8.1 OrdinaryGet steps 1-3 on an already-read cell.
+fn ordinary_get(
+  st: Agent,
+  slot: JsSlot,
+  key: ObjectKey,
+  receiver: JsVal,
+) -> #(JsVal, Agent) {
   // Step 1: desc = O.[[GetOwnProperty]](P).
-  let #(own, proto) = read_own_and_proto(st, h, key)
+  let #(own, proto) = own_and_proto_of_slot(st, slot, key)
   case own {
     // Steps 3-7: found — read value or invoke getter.
     Some(prop) -> property_get_value(st, prop, receiver)
@@ -656,10 +680,87 @@ fn set_from(
   v: JsVal,
   receiver: JsVal,
 ) -> #(Bool, Agent) {
-  // TODO(M6): TypedArrayObj/ModuleNamespace/ProxyObj exotic [[Set]] dispatch
-  // on `kind` — currently falls through to ordinary via own_property_of.
+  // TODO(M6): ModuleNamespace/ProxyObj exotic [[Set]] dispatch on `kind`.
+  case read_object(st, h), key {
+    // TypedArray exotic [[Set]] (§10.4.5.5). Canonical numeric index,
+    // SameValue(O, Receiver) → IntegerIndexedElementSet (§10.4.5.16): convert
+    // the value (observable, may call user code), then store if the index is
+    // valid; out-of-bounds/detached writes are silent no-ops. Receiver
+    // differs from O (Reflect.set / prototype-chain set): step 1.b.ii —
+    // invalid index → true with NO value conversion; valid index →
+    // OrdinarySet creates the property on the Receiver, leaving the buffer
+    // untouched.
+    SObject(
+      kind: TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:),
+      ..,
+    ),
+      StringKey(Index(idx))
+    -> {
+      let view = buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:)
+      case same_receiver(receiver, h) {
+        True -> buffer.typed_array_store(st, view, Some(idx), v)
+        False ->
+          case
+            buffer.typed_array_element_live(
+              st,
+              buf,
+              elem_kind,
+              byte_offset,
+              length,
+              idx,
+            )
+          {
+            None -> #(True, st)
+            Some(_) -> set_on_receiver(st, receiver, key, v)
+          }
+      }
+    }
+    SObject(
+      kind: TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:),
+      ..,
+    ) as slot,
+      StringKey(Named(s))
+    ->
+      case buffer.is_canonical_numeric_string(s) {
+        // Canonical numeric but never a valid index ("1.5", "-0", "NaN"):
+        // with Receiver == O run the conversion for its side effects, then
+        // succeed silently; with a foreign Receiver return true without any
+        // conversion (§10.4.5.5 step 1.b.ii).
+        True ->
+          case same_receiver(receiver, h) {
+            True ->
+              buffer.typed_array_store(
+                st,
+                buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:),
+                None,
+                v,
+              )
+            False -> #(True, st)
+          }
+        False -> ordinary_set(st, slot, key, v, receiver)
+      }
+    slot, _ -> ordinary_set(st, slot, key, v, receiver)
+  }
+}
+
+/// SameValue(O, Receiver) for an object `O` at handle `h`.
+fn same_receiver(receiver: JsVal, h: Handle) -> Bool {
+  case rt_types.classify(receiver) {
+    KHandle(r) -> r == h
+    _ -> False
+  }
+}
+
+/// §10.1.9.2 OrdinarySetWithOwnDescriptor on an already-read cell.
+fn ordinary_set(
+  st: Agent,
+  slot: JsSlot,
+  key: ObjectKey,
+  v: JsVal,
+  receiver: JsVal,
+) -> #(Bool, Agent) {
   // Step 1: ownDesc = O.[[GetOwnProperty]](P).
-  let #(own, proto) = read_own_and_proto(st, h, key)
+  let #(own, proto) = own_and_proto_of_slot(st, slot, key)
   case own {
     // Step 1 (SetWithOwnDescriptor): ownDesc undefined → parent.[[Set]] or
     // fall through to receiver-write.
@@ -853,7 +954,7 @@ fn set_own_string(
             i >= length
             && { !extensible || !length_writable }
             || !extensible
-            && !elem_has(elements, i)
+            && !elements.has(elements, i)
           {
             True -> #(False, st)
             False -> {
@@ -864,7 +965,7 @@ fn set_own_string(
                   SObject(
                     ..slot,
                     kind: ArrayObj(new_len),
-                    elements: elem_set(e, i, v),
+                    elements: elements.set(e, i, v),
                   )
                 })
               #(True, st)
@@ -872,6 +973,38 @@ fn set_own_string(
           }
       }
     }
+    // Receiver is itself an Integer-Indexed object: the receiver half of
+    // OrdinarySet routes numeric index keys through the receiver's
+    // [[DefineOwnProperty]] (§10.4.5.3) → IntegerIndexedElementSet for a
+    // valid index, false (no conversion) for an invalid one. Non-numeric
+    // keys fall through to the ordinary dict write below.
+    TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:), Index(idx) ->
+      case
+        buffer.typed_array_element_live(
+          st,
+          buf,
+          elem_kind,
+          byte_offset,
+          length,
+          idx,
+        )
+      {
+        Some(_) ->
+          buffer.typed_array_store(
+            st,
+            buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:),
+            Some(idx),
+            v,
+          )
+        None -> #(False, st)
+      }
+    TypedArrayObj(..), Named(s) ->
+      case buffer.is_canonical_numeric_string(s) {
+        // Canonical numeric, never a valid index → CreateDataProperty →
+        // [[DefineOwnProperty]] → false, with no value conversion.
+        True -> #(False, st)
+        False -> set_ordinary_string(st, h, props, extensible, key, v)
+      }
     ArgumentsObj(..), Index(i) ->
       case dict.get(props, key) {
         Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
@@ -892,47 +1025,59 @@ fn set_own_string(
           )
         Ok(_) -> #(False, st)
         Error(Nil) ->
-          case !extensible && !elem_has(elements, i) {
+          case !extensible && !elements.has(elements, i) {
             True -> #(False, st)
             False -> {
               let st =
                 rt_store.t_cell_update(st, h, fn(slot) {
                   let assert SObject(elements: e, ..) = slot
-                  SObject(..slot, elements: elem_set(e, i, v))
+                  SObject(..slot, elements: elements.set(e, i, v))
                 })
               #(True, st)
             }
           }
       }
-    // TODO(M6): StringObj/TypedArrayObj/ModuleNamespace exotic receiver-write
-    // — falls through to §10.1.6.3 ordinary (arc `set_string_property`).
-    _, _ ->
-      case dict.get(props, key) {
-        Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
-          write_props(
-            st,
-            h,
-            dict.insert(
-              props,
-              key,
-              DataProperty(
-                value: v,
-                writable: True,
-                enumerable:,
-                configurable:,
-                seq:,
-              ),
-            ),
-          )
-        Ok(_) -> #(False, st)
-        Error(Nil) ->
-          case extensible {
-            False -> #(False, st)
-            True -> {
-              let #(prop, st) = new_data_property(st, v)
-              write_props(st, h, dict.insert(props, key, prop))
-            }
-          }
+    // TODO(M6): StringObj/ModuleNamespace exotic receiver-write — falls
+    // through to §10.1.6.3 ordinary (arc `set_string_property`).
+    _, _ -> set_ordinary_string(st, h, props, extensible, key, v)
+  }
+}
+
+/// §10.1.9.2 steps 2.c-2.h on the props dict: define/update an own data
+/// property under a string/private key.
+fn set_ordinary_string(
+  st: Agent,
+  h: Handle,
+  props: Dict(PropertyKey, Property),
+  extensible: Bool,
+  key: PropertyKey,
+  v: JsVal,
+) -> #(Bool, Agent) {
+  case dict.get(props, key) {
+    Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
+      write_props(
+        st,
+        h,
+        dict.insert(
+          props,
+          key,
+          DataProperty(
+            value: v,
+            writable: True,
+            enumerable:,
+            configurable:,
+            seq:,
+          ),
+        ),
+      )
+    Ok(_) -> #(False, st)
+    Error(Nil) ->
+      case extensible {
+        False -> #(False, st)
+        True -> {
+          let #(prop, st) = new_data_property(st, v)
+          write_props(st, h, dict.insert(props, key, prop))
+        }
       }
   }
 }
@@ -1071,7 +1216,7 @@ fn array_set_length(
                 _ -> True
               }
             }),
-            elements: elem_truncate(e, final_len),
+            elements: elements.truncate(e, final_len),
           )
         })
       #(option.is_none(blocked), st)
@@ -1103,13 +1248,18 @@ pub fn t_define_own_prop(
   let st = devolve(st, obj)
   let assert SObject(kind:, props:, symbol_props:, elements:, extensible:, ..) =
     read_object(st, obj)
+  // §10.4.5.3 TypedArray (Integer-Indexed) [[DefineOwnProperty]]: canonical
+  // numeric index keys never reach the ordinary property table — they
+  // validate against the fixed {W:T, E:T, C:T} element descriptor and store
+  // through IntegerIndexedElementSet. Everything else is ordinary.
+  use <- typed_array_define(st, kind, key, desc)
   let indexed_kind = case kind {
     ArrayObj(_) | ArgumentsObj(..) -> True
     _ -> False
   }
   // Step 1: current = O.[[GetOwnProperty]](P).
   let existing = case key {
-    StringKey(pk) -> own_property_of(kind, props, elements, pk)
+    StringKey(pk) -> own_property_of(st, kind, props, elements, pk)
     SymbolKey(sym) -> own_symbol_property_of(symbol_props, sym)
   }
   // Step 2 / steps 5-11: is the change permitted?
@@ -1172,13 +1322,13 @@ pub fn t_define_own_prop(
                   SObject(
                     ..slot,
                     props: dict.delete(p, pk),
-                    elements: elem_set(e, i, v),
+                    elements: elements.set(e, i, v),
                   )
                 _ ->
                   SObject(
                     ..slot,
                     props: dict.insert(p, pk, new_prop),
-                    elements: elem_delete(e, i),
+                    elements: elements.delete(e, i),
                   )
               }
             StringKey(pk) ->
@@ -1209,6 +1359,112 @@ pub fn t_define_prop(
   desc: ParsedDesc,
 ) -> #(Bool, Agent) {
   t_define_own_prop(st, obj, key, desc)
+}
+
+/// The §10.4.5.3 dispatch head of [[DefineOwnProperty]]: absorb canonical
+/// numeric index keys on a TypedArray, else continue with the ordinary body.
+fn typed_array_define(
+  st: Agent,
+  kind: ObjKind,
+  key: ObjectKey,
+  desc: ParsedDesc,
+  ordinary: fn() -> #(Bool, Agent),
+) -> #(Bool, Agent) {
+  case kind, key {
+    TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:),
+      StringKey(Index(idx))
+    ->
+      typed_array_define_index(
+        st,
+        buf,
+        elem_kind,
+        byte_offset,
+        length,
+        idx,
+        desc,
+      )
+    TypedArrayObj(..), StringKey(Named(s)) ->
+      case buffer.is_canonical_numeric_string(s) {
+        // Step 1.b.i: a canonical numeric string that survived
+        // canonical_key is never a valid integer index ("1.5", "-0",
+        // "NaN", "-1", "1e+21", …) → false, with NO value conversion.
+        True -> #(False, st)
+        False -> ordinary()
+      }
+    _, _ -> ordinary()
+  }
+}
+
+/// §10.4.5.3 TypedArray [[DefineOwnProperty]] — P is a canonical integer
+/// index. Steps 1.b.i-vii:
+///   i.   invalid index (out of bounds / detached / shrunk) → false
+///   ii.  [[Configurable]] present and false → false
+///   iii. [[Enumerable]] present and false → false
+///   iv.  accessor descriptor → false
+///   v.   [[Writable]] present and false → false
+///   vi.  [[Value]] present → ? IntegerIndexedElementSet (value conversion
+///        may run user code and throw; a buffer detached DURING conversion
+///        makes the store a silent no-op, still true). Immutable-buffer
+///        views never reach the element store: the define succeeds only if
+///        [[Value]] is SameValue to the current element and Desc asks for
+///        no [[Writable]]/[[Configurable]] upgrade; otherwise it is rejected.
+///   vii. true
+/// The checks run BEFORE any value conversion — an invalid index must not
+/// trigger observable ToNumber/ToBigInt side effects.
+fn typed_array_define_index(
+  st: Agent,
+  buf: Handle,
+  elem_kind: TypedArrayKind,
+  byte_offset: Int,
+  length: Option(Int),
+  idx: Int,
+  desc: ParsedDesc,
+) -> #(Bool, Agent) {
+  let current =
+    buffer.typed_array_element(
+      st,
+      buf,
+      elem_kind,
+      byte_offset,
+      buffer.typed_array_view_length(st, buf, elem_kind, byte_offset, length),
+      idx,
+    )
+  use <- bool.guard(option.is_none(current), #(False, st))
+  use <- bool.guard(desc.configurable == Some(False), #(False, st))
+  use <- bool.guard(desc.enumerable == Some(False), #(False, st))
+  use <- bool.guard(desc_is_accessor(desc), #(False, st))
+  use <- bool.guard(desc.writable == Some(False), #(False, st))
+  case desc.value {
+    None -> #(True, st)
+    Some(v) -> {
+      let #(stored, st) =
+        buffer.typed_array_store(
+          st,
+          buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:),
+          Some(idx),
+          v,
+        )
+      // Immutable ArrayBuffer proposal (sec-typedarray-defineownproperty):
+      // an immutable-buffer-backed element behaves as a {[[Writable]]:
+      // false, [[Enumerable]]: true, [[Configurable]]: false} data property,
+      // so ValidateAndApplyPropertyDescriptor returns true iff Desc.[[Value]]
+      // is SameValue to the current element AND Desc asks for no attribute
+      // upgrade; anything else is false. The store refused (False) BEFORE
+      // any ToNumber/ToBigInt conversion, so no user code ran and `current`
+      // (read at entry) is still live.
+      case stored {
+        True -> #(True, st)
+        False -> {
+          let unchanged =
+            option.map(current, same_value(v, _))
+            |> option.unwrap(False)
+          let widened =
+            desc.writable == Some(True) || desc.configurable == Some(True)
+          #(unchanged && !widened, st)
+        }
+      }
+    }
+  }
 }
 
 /// §10.1.6.2 IsCompatiblePropertyDescriptor — `desc` over a non-`None`
@@ -1386,15 +1642,26 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> Bool {
   case key {
     StringKey(Private(_)) -> False
     _ -> {
-      // TODO(M6): TypedArrayObj/ModuleNamespace/ProxyObj exotic [[HasProperty]]
-      // dispatch on `kind` — falls through to ordinary via own_property_of.
-      let #(own, proto) = read_own_and_proto(st, h, key)
+      // TODO(M6): ModuleNamespace/ProxyObj exotic [[HasProperty]] dispatch.
+      let slot = read_object(st, h)
+      // Step 1-2: Let hasOwn be O.[[GetOwnProperty]](P). If not undefined,
+      // return true.
+      let #(own, proto) = own_and_proto_of_slot(st, slot, key)
       case own {
         Some(_) -> True
+        // §10.4.5.2 TypedArray [[HasProperty]]: a canonical numeric index key
+        // answers IsValidIntegerIndex directly — own_property_of already said
+        // the index is invalid, so the answer is false WITHOUT consulting the
+        // prototype chain (TypedArray.prototype["1.5"] is unreachable).
         None ->
-          case proto {
-            Some(parent) -> has_from(st, parent, key)
-            None -> False
+          case typed_array_absorbs(slot, key) {
+            True -> False
+            False ->
+              // Step 3-5: parent.[[HasProperty]] or false.
+              case proto {
+                Some(parent) -> has_from(st, parent, key)
+                None -> False
+              }
           }
       }
     }
@@ -1421,7 +1688,19 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
           }
         Error(Nil) -> #(True, st)
       }
-    StringKey(pk) ->
+    StringKey(pk) -> {
+      // §10.1.10.1 OrdinaryDelete for the string/private-key case: shared by
+      // every exotic arm below that falls back to ordinary behavior.
+      let ordinary_delete = fn() {
+        case dict.get(props, pk) {
+          Ok(prop) ->
+            case rt_types.prop_configurable(prop) {
+              False -> #(False, st)
+              True -> write_props(st, obj, dict.delete(props, pk))
+            }
+          Error(Nil) -> #(True, st)
+        }
+      }
       case kind, pk {
         // Array virtual "length" is non-configurable.
         ArrayObj(_), Named("length") -> #(False, st)
@@ -1438,37 +1717,54 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
                       SObject(
                         ..slot,
                         props: dict.delete(p, pk),
-                        elements: elem_delete(e, i),
+                        elements: elements.delete(e, i),
                       )
                     })
                   #(True, st)
                 }
               }
             Error(Nil) ->
-              case elem_has(elements, i) {
+              case elements.has(elements, i) {
                 False -> #(True, st)
                 True -> {
                   let st =
                     rt_store.t_cell_update(st, obj, fn(slot) {
                       let assert SObject(elements: e, ..) = slot
-                      SObject(..slot, elements: elem_delete(e, i))
+                      SObject(..slot, elements: elements.delete(e, i))
                     })
                   #(True, st)
                 }
               }
           }
-        // TODO(M6): StringObj/TypedArrayObj/ModuleNamespace/ProxyObj exotic
-        // [[Delete]] — falls through to §10.1.10.1 OrdinaryDelete.
-        _, _ ->
-          case dict.get(props, pk) {
-            Ok(prop) ->
-              case rt_types.prop_configurable(prop) {
-                False -> #(False, st)
-                True -> write_props(st, obj, dict.delete(props, pk))
-              }
-            Error(Nil) -> #(True, st)
+        // §10.4.5.6 TypedArray [[Delete]]: canonical numeric index keys are
+        // deletable iff they are NOT valid indices (nothing to delete); a
+        // live element is non-configurable from delete's point of view.
+        TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:),
+          Index(idx)
+        ->
+          case
+            buffer.typed_array_element_live(
+              st,
+              buf,
+              elem_kind,
+              byte_offset,
+              length,
+              idx,
+            )
+          {
+            Some(_) -> #(False, st)
+            None -> #(True, st)
           }
+        TypedArrayObj(..), Named(s) ->
+          case buffer.is_canonical_numeric_string(s) {
+            True -> #(True, st)
+            False -> ordinary_delete()
+          }
+        // TODO(M6): StringObj/ModuleNamespace/ProxyObj exotic [[Delete]] —
+        // falls through to §10.1.10.1 OrdinaryDelete.
+        _, _ -> ordinary_delete()
       }
+    }
   }
 }
 
@@ -1488,12 +1784,18 @@ pub fn t_own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
     ArrayObj(_) -> True
     _ -> False
   }
-  // Elements-store indices — always own data properties.
+  // Elements-store indices — always own data properties. TypedArray
+  // synthesizes its live indices (§10.4.5.7 step 2.a).
   let elem_idx = case kind {
     ArrayObj(length:) | ArgumentsObj(length:, ..) ->
-      elem_indices(elements) |> list.filter(fn(i) { i < length })
-    // TODO(M6): StringObj/TypedArrayObj/ModuleNamespace exotic
-    // [[OwnPropertyKeys]] index-range synth — emits dict-only for those kinds.
+      elements.indices(elements) |> list.filter(fn(i) { i < length })
+    TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:) -> {
+      let n =
+        buffer.typed_array_live_count(st, buf, elem_kind, byte_offset, length)
+      int.range(from: n - 1, to: -1, with: [], run: fn(acc, i) { [i, ..acc] })
+    }
+    // TODO(M6): StringObj/ModuleNamespace exotic [[OwnPropertyKeys]]
+    // index-range synth — emits dict-only for those kinds.
     _ -> []
   }
   // Split dict entries. Array's dict "length" only tracks frozen attributes;
