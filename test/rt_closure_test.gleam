@@ -80,6 +80,69 @@ pub fn plain_function_shape_test() {
   assert flags.is_constructor && !flags.is_class_constructor
 }
 
+pub fn birth_props_precede_later_props_test() {
+  let #(f, st) = make("function Foo(a, b) {}", "Foo")
+  let assert Ok(proto) = own_handle(st, f, "prototype")
+  let assert Some(DataProperty(
+    writable: True,
+    enumerable: False,
+    configurable: True,
+    ..,
+  )) =
+    rt_obj.t_ordinary_own_property(st, proto, StringKey(Named("constructor")))
+  let #(_, st) =
+    rt_obj.t_define_own_data(
+      st,
+      f,
+      StringKey(Named("later")),
+      types.mk_undefined(),
+      True,
+      True,
+      True,
+    )
+  let #(_, st) =
+    rt_obj.t_define_own_data(
+      st,
+      proto,
+      StringKey(Named("method")),
+      types.mk_undefined(),
+      True,
+      True,
+      True,
+    )
+  let #(keys, st) = rt_obj.t_own_keys(st, f)
+  assert keys
+    == [
+      StringKey(Named("length")),
+      StringKey(Named("name")),
+      StringKey(Named("prototype")),
+      StringKey(Named("later")),
+    ]
+  let #(pkeys, st) = rt_obj.t_own_keys(st, proto)
+  assert pkeys == [StringKey(Named("constructor")), StringKey(Named("method"))]
+  let assert Ok(t) = find(compile("function Bar() {}"), "Bar")
+  let #(g, st) =
+    rt_closure.t_new_bytecode_function(st, t, bytecode.env_from_list([]))
+  let #(_, st) =
+    rt_obj.t_define_own_data(
+      st,
+      g,
+      StringKey(Named("z")),
+      types.mk_undefined(),
+      True,
+      True,
+      True,
+    )
+  let #(gkeys, _) = rt_obj.t_own_keys(st, g)
+  assert gkeys
+    == [
+      StringKey(Named("length")),
+      StringKey(Named("name")),
+      StringKey(Named("prototype")),
+      StringKey(Named("z")),
+    ]
+}
+
 pub fn class_constructor_prototype_not_writable_test() {
   let #(c, st) = make("class C { constructor() {} }", "C")
   let assert Some(DataProperty(writable: False, configurable: False, ..)) =

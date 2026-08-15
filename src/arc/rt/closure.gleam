@@ -7,13 +7,13 @@ import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type FnFlags, type Handle, type JsVal, type Property, DataProperty,
-  FnFlags, JInt, KBytecode, KHandle, Named, NoElements, SObject, StringKey,
-  classify, mk_number, mk_object, mk_string,
+  type Agent, type FnFlags, type Handle, type JsSlot, type JsVal, type Property,
+  type PropertyKey, Agent, DataProperty, FnFlags, JInt, JsStore, KBytecode,
+  KHandle, Named, NoElements, Ordinary, SObject, StringKey, classify, mk_number,
+  mk_object, mk_string,
 }
-import gleam/bool
 import gleam/dict
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 
 /// The `FnFlags` a closure over `template` carries. `is_method` is inferred:
 /// the only non-arrow, non-constructible, non-coroutine ECMAScript function
@@ -55,6 +55,12 @@ pub fn template_flags(template: FuncTemplate) -> FnFlags {
 /// `prototype` object exists it also becomes [[HomeObject]], so `super.x`
 /// inside a class constructor resolves against the parent prototype;
 /// `MakeMethod`/`DefineMethod` re-home concise methods afterwards.
+///
+/// This is the hottest allocation path in the interpreter, so both objects
+/// are built directly rather than through [[DefineOwnProperty]]: one counter
+/// bump reserves every birth-prop seq, the `prototype` object is allocated
+/// first so the function cell is written once complete, and only the
+/// `constructor` back-pointer costs a second write to the prototype cell.
 pub fn t_new_bytecode_function(
   st: Agent,
   template: FuncTemplate,
@@ -68,73 +74,99 @@ pub fn t_new_bytecode_function(
     False, True -> realm.async_fn.prototype
     False, False -> realm.function.prototype
   }
-  let #(length_prop, st) = fn_own_prop(st, mk_number(JInt(template.length)))
-  let #(name_prop, st) =
-    fn_own_prop(st, mk_string(option.unwrap(template.name, "")))
-  let #(h, st) =
-    rt_store.t_cell_new(
-      st,
-      SObject(
-        kind: KBytecode(
-          template:,
-          env:,
-          home_object: None,
-          flags:,
-          fields_init: None,
-        ),
-        proto: Some(fn_proto),
-        props: dict.from_list([
-          #(Named("length"), length_prop),
-          #(Named("name"), name_prop),
-        ]),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
-      ),
-    )
-  use <- bool.guard(!flags.is_constructor && !flags.is_generator, #(h, st))
-  let proto_parent = case flags.is_generator, flags.is_async {
-    True, True -> realm.async_gen.prototype
-    True, False -> realm.generator.prototype
-    False, _ -> realm.object.prototype
-  }
-  let #(proto, st) = rt_obj.t_new_object(st, Some(proto_parent))
-  let f = mk_object(h)
-  let st = case flags.is_constructor {
-    False -> st
+  let has_prototype = flags.is_constructor || flags.is_generator
+  let #(seq, st) =
+    reserve_prop_seqs(st, case has_prototype, flags.is_constructor {
+      False, _ -> 2
+      True, False -> 3
+      True, True -> 4
+    })
+  let birth_props = [
+    #(Named("length"), fn_own_prop(mk_number(JInt(template.length)), seq)),
+    #(
+      Named("name"),
+      fn_own_prop(mk_string(option.unwrap(template.name, "")), seq + 1),
+    ),
+  ]
+  case has_prototype {
+    False ->
+      rt_store.t_cell_new(
+        st,
+        fn_slot(template, env, flags, fn_proto, None, birth_props),
+      )
     True -> {
-      let #(_, st) =
-        rt_obj.t_define_own_data(
-          st,
-          proto,
-          StringKey(Named("constructor")),
-          f,
-          True,
-          False,
-          True,
+      let proto_parent = case flags.is_generator, flags.is_async {
+        True, True -> realm.async_gen.prototype
+        True, False -> realm.generator.prototype
+        False, _ -> realm.object.prototype
+      }
+      let #(proto, st) = rt_obj.t_new_object(st, Some(proto_parent))
+      let prototype_prop =
+        DataProperty(
+          value: mk_object(proto),
+          writable: !flags.is_class_constructor,
+          enumerable: False,
+          configurable: False,
+          seq: seq + 2,
         )
-      st
+      let #(h, st) =
+        rt_store.t_cell_new(
+          st,
+          fn_slot(template, env, flags, fn_proto, Some(proto), [
+            #(Named("prototype"), prototype_prop),
+            ..birth_props
+          ]),
+        )
+      case flags.is_constructor {
+        False -> #(h, st)
+        True -> {
+          let constructor_prop =
+            DataProperty(
+              value: mk_object(h),
+              writable: True,
+              enumerable: False,
+              configurable: True,
+              seq: seq + 3,
+            )
+          let proto_slot =
+            SObject(
+              kind: Ordinary,
+              proto: Some(proto_parent),
+              props: dict.from_list([#(Named("constructor"), constructor_prop)]),
+              symbol_props: [],
+              elements: NoElements,
+              extensible: True,
+            )
+          #(h, rt_store.t_cell_set(st, proto, proto_slot))
+        }
+      }
     }
   }
-  let #(_, st) =
-    rt_obj.t_define_own_data(
-      st,
-      h,
-      StringKey(Named("prototype")),
-      mk_object(proto),
-      !flags.is_class_constructor,
-      False,
-      False,
-    )
-  let st =
-    rt_store.t_cell_update(st, h, fn(slot) {
-      case slot {
-        SObject(kind: KBytecode(..) as k, ..) ->
-          SObject(..slot, kind: KBytecode(..k, home_object: Some(proto)))
-        _ -> slot
-      }
-    })
-  #(h, st)
+}
+
+fn fn_slot(
+  template: FuncTemplate,
+  env: EnvTuple,
+  flags: FnFlags,
+  fn_proto: Handle,
+  home_object: Option(Handle),
+  props: List(#(PropertyKey, Property)),
+) -> JsSlot {
+  SObject(
+    kind: KBytecode(template:, env:, home_object:, flags:, fields_init: None),
+    proto: Some(fn_proto),
+    props: dict.from_list(props),
+    symbol_props: [],
+    elements: NoElements,
+    extensible: True,
+  )
+}
+
+/// Reserve `n` consecutive `Property.seq` stamps with a single store write
+/// (`rt_store.t_next_prop_seq` × n in one step); returns the first.
+fn reserve_prop_seqs(st: Agent, n: Int) -> #(Int, Agent) {
+  let js = st.store
+  #(js.prop_seq, Agent(..st, store: JsStore(..js, prop_seq: js.prop_seq + n)))
 }
 
 /// %AsyncGeneratorFunction.prototype%: the realm record keeps only the
@@ -158,17 +190,13 @@ fn async_generator_fn_prototype(st: Agent) -> Handle {
   }
 }
 
-/// A §20.2.4 `length`/`name` own property: {W:F, E:F, C:T}, next seq.
-fn fn_own_prop(st: Agent, value: JsVal) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
-  #(
-    DataProperty(
-      value:,
-      writable: False,
-      enumerable: False,
-      configurable: True,
-      seq:,
-    ),
-    st,
+/// A §20.2.4 `length`/`name` own property: {W:F, E:F, C:T}.
+fn fn_own_prop(value: JsVal, seq: Int) -> Property {
+  DataProperty(
+    value:,
+    writable: False,
+    enumerable: False,
+    configurable: True,
+    seq:,
   )
 }
