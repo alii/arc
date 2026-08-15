@@ -8,7 +8,8 @@
 //// and compiles + loads + runs only its own body (globals the harness
 //// modules define persist on the Agent between `js_main` calls).
 ////
-//// Usage (from aot/):
+//// Usage (from aot/; a full run also needs ERL_FLAGS="+t 30000000", see
+//// `check_atom_headroom`):
 ////   TEST262_EXEC=1 gleam test                  — run and compare against snapshot
 ////   TEST262_EXEC=1 UPDATE_SNAPSHOT=1 gleam test — run and rewrite the snapshot
 ////   TEST262_EXEC=1 FAIL_LOG=path gleam test     — also write per-test failure reasons
@@ -101,6 +102,7 @@ pub fn setup() -> Setup {
   let snapshot = test262_suite.load_pass_list(snapshot_path)
   let files =
     test262_suite.list_test_files(test_dir) |> test262_suite.select_files
+  check_atom_headroom(list.length(files))
   let harness = compile_harness(harness_needed(files))
   let ctx =
     Ctx(harness:, update_mode:, has_snapshot: set.size(snapshot) > 0, fail_log:)
@@ -110,14 +112,44 @@ pub fn setup() -> Setup {
   )
 }
 
+/// Every compiled test costs the VM a few hundred permanent atoms: the BEAM
+/// compiler interns each distinct generated variable name, and 2core numbers
+/// a function's variables from a per-function-index offset, so the names
+/// differ from module to module. A full run needs ~250 atoms per file, far
+/// past the default 1M-entry atom table; refuse to start rather than crash
+/// the VM hours in.
+const atoms_per_file: Int = 400
+
+fn check_atom_headroom(file_count: Int) -> Nil {
+  let needed = file_count * atoms_per_file
+  let available = atom_limit() - atom_count()
+  case available < needed {
+    False -> Nil
+    True ->
+      panic as {
+        "test262 aot: "
+        <> int.to_string(file_count)
+        <> " files need ~"
+        <> int.to_string(needed)
+        <> " atoms but only "
+        <> int.to_string(available)
+        <> " are left; run with ERL_FLAGS=\"+t "
+        <> int.to_string(needed + atom_count() + 1_000_000)
+        <> "\""
+      }
+  }
+}
+
 /// The harness files to precompile. A small selection is scanned for its
 /// includes; a big one just takes every file in the harness directory.
 fn harness_needed(files: List(String)) -> List(String) {
   let always = ["assert.js", "sta.js", "doneprintHandle.js"]
   let named = case list.length(files) > 2000 {
     True ->
-      case simplifile.read_directory(harness_dir) {
-        Ok(names) -> list.filter(names, string.ends_with(_, ".js"))
+      case simplifile.get_files(harness_dir) {
+        Ok(paths) ->
+          list.filter(paths, string.ends_with(_, ".js"))
+          |> list.map(string.replace(_, harness_dir <> "/", ""))
         Error(err) ->
           panic as {
             "cannot list " <> harness_dir <> ": " <> string.inspect(err)
@@ -183,6 +215,7 @@ fn sanitize(name: String) -> String {
   string.replace(name, ".js", "")
   |> string.replace(".", "_")
   |> string.replace("-", "_")
+  |> string.replace("/", "_")
 }
 
 // --- per test ------------------------------------------------------------------
@@ -575,6 +608,12 @@ pub fn finish(ctx: Ctx, results: List(TestResult)) -> Int {
       skip_count,
     ),
   )
+  io.println(
+    "  atoms: "
+    <> int.to_string(atom_count())
+    <> " of "
+    <> int.to_string(atom_limit()),
+  )
   dict.to_list(skips)
   |> list.sort(fn(a, b) { int.compare(b.1, a.1) })
   |> list.each(fn(entry) {
@@ -676,3 +715,9 @@ fn count_mismatches(ctx: Ctx, results: List(TestResult)) -> Int {
 /// Map `f` over `items` in parallel (one process each), keeping order.
 @external(erlang, "arc_aot_test262_ffi", "pmap")
 fn pmap(items: List(a), f: fn(a) -> b) -> List(b)
+
+@external(erlang, "arc_aot_test262_ffi", "atom_count")
+fn atom_count() -> Int
+
+@external(erlang, "arc_aot_test262_ffi", "atom_limit")
+fn atom_limit() -> Int

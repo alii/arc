@@ -43,6 +43,11 @@ jobs:
         # failing on snapshot mismatches. The merge job reassembles the full
         # set and turns snapshot regressions back into a failure.
         working-directory: aot
+        env:
+          # Every compiled test interns a few hundred fresh atoms in the
+          # VM (generated variable names); the default 1M table is gone
+          # after ~4.5k files.
+          ERL_FLAGS: '+t 30000000'
         run: |
           TEST262_EXEC=1 UPDATE_SNAPSHOT=1 TEST262_SHARD='${{ matrix.shard }}/8' RESULTS_FILE='../results-aot-${{ matrix.shard }}.json' gleam test
           cp ../.github/test262/pass-aot.txt '../pass-aot-${{ matrix.shard }}.txt'
