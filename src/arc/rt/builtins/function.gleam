@@ -18,9 +18,9 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type FunctionNative, type Handle, type JsVal,
   DataProperty, FunctionApply, FunctionBind, FunctionCall, FunctionConstructor,
   FunctionHasInstance, FunctionN, FunctionPrototypeCall, FunctionToString, JInt,
-  KBound, KFunction, KHandle, KNative, KNull, KStr, KUndef, Named, NoElements,
-  ProxyObj, SObject, StringKey, ThrowTypeErrorFn, classify, mk_bool, mk_number,
-  mk_object, mk_string, mk_undefined,
+  KBound, KBytecode, KCompiled, KHandle, KNative, KNull, KStr, KUndef, Named,
+  NoElements, ProxyObj, SObject, StringKey, ThrowTypeErrorFn, classify, mk_bool,
+  mk_number, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -268,7 +268,8 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KFunction(..), props:, ..)
+        SObject(kind: KCompiled(..), props:, ..)
+        | SObject(kind: KBytecode(..), props:, ..)
         | SObject(kind: KNative(..), props:, ..) -> {
           let name = case dict.get(props, Named("name")) {
             Ok(DataProperty(value: v, ..)) ->
@@ -314,7 +315,8 @@ fn restricted_function_property(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let is_legacy = case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KFunction(flags:, ..), ..) ->
+        SObject(kind: KCompiled(flags:, ..), ..)
+        | SObject(kind: KBytecode(flags:, ..), ..) ->
           flags.is_constructor && !flags.is_class_constructor
         _ -> False
       }

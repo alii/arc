@@ -29,7 +29,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
   type MethodInstallKind, type ObjectKey, type Property, type PropertyKey,
-  AccessorProperty, DataProperty, FnFlags, KFunction, KHandle, KNull, KStr, KTdz,
+  AccessorProperty, DataProperty, FnFlags, KCompiled, KHandle, KNull, KStr, KTdz,
   MIGetter, MIMethod, MISetter, MIStatic, MIStaticGetter, MIStaticSetter, Named,
   Private, SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
   mk_undefined,
@@ -86,15 +86,15 @@ pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
 
 // ── C4: MakeMethod (§15.4.4) ────────────────────────────────────────────────
 
-/// §15.4.4 MakeMethod(F, homeObject) — set `fn_h`'s `KFunction.home_object`
+/// §15.4.4 MakeMethod(F, homeObject) — set `fn_h`'s `KCompiled.home_object`
 /// to `home` so `super.x` inside it resolves via the home's prototype. No-op
-/// on non-`KFunction` cells (native/bound). Port of arc `make_method`
+/// on non-`KCompiled` cells (native/bound). Port of arc `make_method`
 /// (interpreter.gleam:5504-5520). JMutUnit.
 pub fn t_make_method(st: Agent, fn_h: Handle, home: Handle) -> Agent {
   rt_store.t_cell_update(st, fn_h, fn(slot) {
     case slot {
-      SObject(kind: KFunction(..) as k, ..) ->
-        SObject(..slot, kind: KFunction(..k, home_object: Some(home)))
+      SObject(kind: KCompiled(..) as k, ..) ->
+        SObject(..slot, kind: KCompiled(..k, home_object: Some(home)))
       _ -> slot
     }
   })
@@ -106,8 +106,8 @@ pub fn t_make_method(st: Agent, fn_h: Handle, home: Handle) -> Agent {
 pub fn t_set_fields_init(st: Agent, ctor: Handle, init_h: Handle) -> Agent {
   rt_store.t_cell_update(st, ctor, fn(slot) {
     case slot {
-      SObject(kind: KFunction(..) as k, ..) ->
-        SObject(..slot, kind: KFunction(..k, fields_init: Some(init_h)))
+      SObject(kind: KCompiled(..) as k, ..) ->
+        SObject(..slot, kind: KCompiled(..k, fields_init: Some(init_h)))
       _ -> slot
     }
   })
@@ -177,7 +177,7 @@ pub fn t_class_create(
   }
   // ── alloc proto ──
   let #(proto, st) = rt_obj.t_new_object(st, proto_parent)
-  // ── alloc ctor: KFunction{home_object: Some(proto), is_class_constructor} ──
+  // ── alloc ctor: KCompiled{home_object: Some(proto), is_class_constructor} ──
   let flags =
     FnFlags(
       is_constructor: True,
@@ -338,7 +338,7 @@ fn set_fn_name_if_empty(
 ) -> Agent {
   rt_store.t_cell_update(st, fn_h, fn(slot) {
     case slot {
-      SObject(kind: KFunction(..), props:, ..) ->
+      SObject(kind: KCompiled(..), props:, ..) ->
         case dict.get(props, Named("name")) {
           Ok(DataProperty(value: v, seq:, ..)) ->
             case classify(v) {
@@ -733,23 +733,23 @@ pub fn t_super_call(
   }
 }
 
-// ── C14: KFunction slot readers (JRead) ─────────────────────────────────────
+// ── C14: KCompiled slot readers (JRead) ─────────────────────────────────────
 
-/// `[[HomeObject]]` of a `KFunction` cell, or `undefined` for non-functions /
+/// `[[HomeObject]]` of a `KCompiled` cell, or `undefined` for non-functions /
 /// unset home. JRead — for M14's prologue emission.
 pub fn t_fn_home_object(st: Agent, fn_h: Handle) -> JsVal {
   case rt_store.t_cell_get(st, fn_h) {
-    SObject(kind: KFunction(home_object: Some(h), ..), ..) -> mk_object(h)
+    SObject(kind: KCompiled(home_object: Some(h), ..), ..) -> mk_object(h)
     _ -> mk_undefined()
   }
 }
 
-/// `FnFlags` of a `KFunction` cell. Panics on a non-`KFunction` — a compiler-
+/// `FnFlags` of a `KCompiled` cell. Panics on a non-`KCompiled` — a compiler-
 /// emitted call site guarantees the handle is one. JRead.
 pub fn t_fn_flags(st: Agent, fn_h: Handle) -> FnFlags {
   case rt_store.t_cell_get(st, fn_h) {
-    SObject(kind: KFunction(flags:, ..), ..) -> flags
-    _ -> panic as "t_fn_flags: Handle is not a KFunction cell"
+    SObject(kind: KCompiled(flags:, ..), ..) -> flags
+    _ -> panic as "t_fn_flags: Handle is not a KCompiled cell"
   }
 }
 

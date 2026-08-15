@@ -71,8 +71,8 @@
 -define(SHAPE_TRANSITIONS, 4).
 -define(SHAPE_ARITY, 4).
 
-%% arc/rt/types.ObjKind: KFunction
--define(KFN_TAG, k_function).
+%% arc/rt/types.ObjKind: KCompiled
+-define(KFN_TAG, k_compiled).
 -define(KFN_CODE, 2).
 -define(KFN_HOME, 3).
 -define(KFN_FLAGS, 4).
@@ -80,6 +80,10 @@
 -define(KFN_CAPTURES, 6).
 -define(KFN_SIMPLE, 7).
 -define(KFN_ARITY, 7).
+
+%% arc/rt/types.ObjKind: KBytecode (tag only: an interpreted function never
+%% takes a compiled-code fast path; its [[Call]] goes through JsOps)
+-define(KBYTECODE_TAG, k_bytecode).
 
 %% arc/rt/types.ObjKind: KNative, ArrayObj, Ordinary
 -define(KNATIVE_TAG, k_native).

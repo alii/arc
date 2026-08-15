@@ -112,7 +112,7 @@ t_set_prop_own_data(_, _, _, _) -> miss.
 
 %% t_instanceof_fast(St, V, Ctor) -> 0 | 1 | miss
 %% JRead fast-path for §13.10.2 InstanceofOperator → §7.3.22
-%% OrdinaryHasInstance. Gate: `Ctor` is an s_object with `k_function` kind
+%% OrdinaryHasInstance. Gate: `Ctor` is an s_object with `k_compiled` kind
 %% (NOT k_bound / proxy) and empty own `symbol_props` — so no own
 %% @@hasInstance override; the inherited Function.prototype[@@hasInstance]
 %% IS OrdinaryHasInstance, which this inlines — holding an own "prototype"

@@ -83,6 +83,7 @@ tag(<<"SOBJECT_TAG">>) -> ?SOBJECT_TAG;
 tag(<<"SSHAPED_TAG">>) -> ?SSHAPED_TAG;
 tag(<<"SHAPE_TAG">>) -> ?SHAPE_TAG;
 tag(<<"KFN_TAG">>) -> ?KFN_TAG;
+tag(<<"KBYTECODE_TAG">>) -> ?KBYTECODE_TAG;
 tag(<<"KNATIVE_TAG">>) -> ?KNATIVE_TAG;
 tag(<<"ARRAYOBJ_TAG">>) -> ?ARRAYOBJ_TAG;
 tag(<<"ORDINARY">>) -> ?ORDINARY;

@@ -11,11 +11,11 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsNum, type JsOps, type JsVal,
   type ObjectKey, type ToPrimHint, HintDefault, HintNumber, HintString, Index,
-  JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound, KFunction, KHandle,
-  KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, Named, ProxyObj, RangeErr,
-  ReferenceErr, SObject, StringKey, SymbolKey, SyntaxErr, TypeErr,
-  array_index_of_float, canonical_key, classify, index_key, mk_number, mk_object,
-  mk_string, symbol_to_primitive,
+  JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound, KBytecode,
+  KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, Named,
+  ProxyObj, RangeErr, ReferenceErr, SObject, StringKey, SymbolKey, SyntaxErr,
+  TypeErr, array_index_of_float, canonical_key, classify, index_key, mk_number,
+  mk_object, mk_string, symbol_to_primitive,
 }
 import gleam/bit_array
 import gleam/float
@@ -172,7 +172,7 @@ pub fn nullish_label(v: JsVal) -> String {
 // ── §7.2.3 IsCallable (threaded — reads the heap) ───────────────────────────
 
 /// ES2024 §7.2.3 IsCallable(argument). An Object is callable iff its
-/// `ObjKind` carries a [[Call]] slot: `KFunction | KNative | KBound`, or a
+/// `ObjKind` carries a [[Call]] slot: `KCompiled | KNative | KBound`, or a
 /// `ProxyObj` whose target is callable. 2core's `ProxyObj` stores no cached
 /// `callable` flag, so recurse on `target` (§10.5.14 step 9.a) — [[Call]]
 /// survives revocation, so do NOT gate on `revoked`.
@@ -185,7 +185,8 @@ pub fn t_is_callable(st: Agent, v: JsVal) -> #(Bool, Agent) {
 
 fn handle_is_callable(st: Agent, h: Handle) -> Bool {
   case rt_store.t_cell_get(st, h) {
-    SObject(kind: KFunction(..), ..)
+    SObject(kind: KCompiled(..), ..)
+    | SObject(kind: KBytecode(..), ..)
     | SObject(kind: KNative(..), ..)
     | SObject(kind: KBound(..), ..) -> True
     SObject(kind: ProxyObj(target:, ..), ..) -> handle_is_callable(st, target)

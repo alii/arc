@@ -15,8 +15,8 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type ObjectNative, type ParsedDesc, type Property, AccessorProperty,
   ArgumentsObj, ArrayObj, BooleanObj, DataProperty, DateObj, ErrorObj, Index,
-  JInt, KBig, KBool, KFunction, KHandle, KNative, KNull, KNum, KStr, KSym,
-  KUndef, Named, NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
+  JInt, KBig, KBool, KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr,
+  KSym, KUndef, Named, NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
   ObjectDefineProperties, ObjectDefineProperty, ObjectEntries, ObjectFreeze,
   ObjectFromEntries, ObjectGetOwnPropertyDescriptor,
   ObjectGetOwnPropertyDescriptors, ObjectGetOwnPropertyNames,
@@ -777,7 +777,7 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
           case kind {
             ArrayObj(..) -> "Array"
             ArgumentsObj(..) -> "Arguments"
-            KFunction(..) | KNative(..) -> "Function"
+            KCompiled(..) | KBytecode(..) | KNative(..) -> "Function"
             rt_types.KBound(..) -> "Function"
             ProxyObj(target:, ..) ->
               case rt_call.is_callable(st, mk_object(target)) {

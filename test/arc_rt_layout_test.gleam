@@ -3,14 +3,15 @@
 //// element/2. A field reorder or insert in those records fails here.
 
 import arc/rt/builtins as rt_builtins
+import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type HostHooks, type JsVal,
   type ShapeSlots, AccessorProperty, ArrayObj, DataProperty, Dense, FnFlags,
-  HostHooks, Index, JsCell, JsStore, KFunction, KHandle, KNative, Named,
-  NativeUnseeded, NoElements, Ordinary, Private, ProxyObj, SBox, SObject,
+  HostHooks, Index, JsCell, JsStore, KBytecode, KCompiled, KHandle, KNative,
+  Named, NativeUnseeded, NoElements, Ordinary, Private, ProxyObj, SBox, SObject,
   SShapedObject, ShapeDesc, Sparse, StringKey, SymbolKey,
 } as rt_types
 import arc/vm/internal/tree_array
@@ -40,6 +41,12 @@ fn compiled_fn(label: String) -> CompiledFn
 
 @external(erlang, "arc_rt_layout_root_ffi", "slots")
 fn slots(vals: List(JsVal)) -> ShapeSlots
+
+@external(erlang, "arc_rt_layout_root_ffi", "dyn")
+fn template(label: String) -> FuncTemplate
+
+@external(erlang, "arc_rt_layout_root_ffi", "dyn")
+fn env(vals: List(JsVal)) -> EnvTuple
 
 fn at(record: a, name: String) -> Dynamic {
   element(idx(name), dyn(record))
@@ -279,12 +286,12 @@ pub fn fn_flags_test() {
   assert at(flags, name) == dyn(name == set_name)
 }
 
-pub fn kfunction_test() {
+pub fn kcompiled_test() {
   let code = compiled_fn("code")
   let code_s = compiled_fn("code_s")
   let flags = FnFlags(..no_flags(), is_arrow: True)
   let kfn =
-    KFunction(
+    KCompiled(
       code:,
       home_object: Some(JsCell(30)),
       flags:,
@@ -307,7 +314,7 @@ pub fn kfunction_test() {
   assert element(2, inner) == dyn(2)
   assert element(3, inner) == dyn(True)
   let bare =
-    KFunction(
+    KCompiled(
       code:,
       home_object: None,
       flags:,
@@ -426,6 +433,9 @@ fn call_method_mono(
   args: List(JsVal),
 ) -> #(Dynamic, Agent)
 
+@external(erlang, "arc_rt_call_ffi", "t_new_simple")
+fn new_simple(st: Agent, ctor: JsVal, args: List(JsVal)) -> #(Dynamic, Agent)
+
 type Probe {
   Miss
 }
@@ -507,4 +517,44 @@ pub fn string_object_fast_paths_miss_test() {
   assert get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
   assert get_prop_own_data(st, s, <<"extra">>) == dyn(Miss)
   assert set_prop_own_data(st, s, <<"extra">>, n) == dyn(Miss)
+}
+
+/// Interpreted functions never take a compiled-code fast path: the closure
+/// probe, the monomorphic method call, `new` and `instanceof` all miss on a
+/// KBytecode cell, so its [[Call]]/[[Construct]] reach `JsOps`.
+pub fn bytecode_function_fast_paths_miss_test() {
+  let st = seeded()
+  let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
+  let kind =
+    KBytecode(
+      template: template("tpl"),
+      env: env([]),
+      home_object: None,
+      flags:,
+      fields_init: None,
+    )
+  assert tag_of(kind) == tag("KBYTECODE_TAG")
+  let #(fh, st) =
+    rt_store.t_cell_new(
+      st,
+      SObject(
+        kind:,
+        proto: Some(st.realm.function.prototype),
+        props: dict.new(),
+        symbol_props: [],
+        elements: NoElements,
+        extensible: True,
+      ),
+    )
+  let f = rt_types.mk_object(fh)
+  let #(f, st) = rt_call.t_make_constructor(st, f)
+  assert rt_call.is_callable(st, f)
+  assert rt_call.is_constructor(st, f)
+  let undef = rt_types.mk_undefined()
+  assert dyn(rt_call.t_kfn_code(st, f, undef)) == dyn(undef)
+  let #(o, st) = rt_obj.t_new_object_literal(st)
+  let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("m")), f)
+  assert call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
+  assert new_simple(st, f, []).0 == dyn(Miss)
+  assert instanceof_fast(st, o, f) == dyn(Miss)
 }

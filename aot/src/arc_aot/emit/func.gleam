@@ -1663,7 +1663,7 @@ fn emit_closure_site(
       use flags_t <- anf.then(anf.make_tuple(flags))
       use caps_l <- anf.then(anf.cons_list(capture_vals))
       // 6th fn_new arg — Option(#(CompiledFn, Int, Bool)) wire term for
-      // KFunction.simple. `needs_this` bumps closure arity by 1 (_this param).
+      // KCompiled.simple. `needs_this` bumps closure arity by 1 (_this param).
       use simple_v <- anf.then(case simple {
         None -> anf.pure(ir.ConstAtom("none"))
         Some(#(sfn, arity, needs_this)) -> {
@@ -1720,7 +1720,7 @@ fn expected_length(fixed: List(ast.Pattern)) -> Int {
 // ── entry point ─────────────────────────────────────────────────────────────
 
 /// Lower one JS function. Emits the ir.Function to e.fns_acc; returns the
-/// PARENT-frame closure-site tree (Let-chain ending in the KFunction handle).
+/// PARENT-frame closure-site tree (Let-chain ending in the KCompiled handle).
 /// Callers Let-bind this tree to obtain the fn_h Value (see hoist_fn_decls).
 pub fn emit_function_tree(
   e: Emitter2,
@@ -1858,7 +1858,7 @@ pub fn emit_function_tree(
 
 /// EmitDispatch.emit_function entry point (state.gleam:221-228). Returns the
 /// parent-frame closure-site tree; callers Let-bind it via `bridge_expr` to
-/// obtain the KFunction handle Value (SPEC§7.M14:1388).
+/// obtain the KCompiled handle Value (SPEC§7.M14:1388).
 pub fn emit_function(
   e: Emitter2,
   shape: FnShape,

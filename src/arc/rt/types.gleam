@@ -7,6 +7,9 @@
 ////   value-ABI → keys/symbols → property/heap → ObjKind/JsSlot → async →
 ////   realm → HostHooks/JsOps/JsStore.
 
+import arc/rt/bytecode.{
+  type EnvTuple, type FrameStep, type FuncTemplate, type SuspendedFrame,
+}
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/tree_array.{type TreeArray}
 import gleam/bit_array
@@ -1943,7 +1946,7 @@ pub type ObjKind {
   BooleanObj(value: Bool)
   BigIntObj(value: Int)
   SymbolObj(value: SymbolId)
-  KFunction(
+  KCompiled(
     code: CompiledFn,
     home_object: Option(Handle),
     flags: FnFlags,
@@ -1953,6 +1956,17 @@ pub type ObjKind {
     /// a positional-args body that skips Frame/args-list build. `needs_this`
     /// True ⇒ closure is `fun(St,This,P0..Pn-1)`; False ⇒ `fun(St,P0..Pn-1)`.
     simple: Option(#(CompiledFn, Int, Bool)),
+  )
+  /// An interpreted function: bytecode `template` closed over `env`.
+  /// [[Call]]/[[Construct]] go through `JsOps.call_bytecode` /
+  /// `construct_bytecode`; everything else treats it exactly like
+  /// `KCompiled`.
+  KBytecode(
+    template: FuncTemplate,
+    env: EnvTuple,
+    home_object: Option(Handle),
+    flags: FnFlags,
+    fields_init: Option(Handle),
   )
   KNative(tag: NativeToken, name: String, length: Int, constructible: Bool)
   KBound(target: Handle, bound_this: JsVal, bound_args: List(JsVal))
@@ -2381,8 +2395,17 @@ pub type JsOps(st) {
     to_object: fn(st, JsVal) -> #(Handle, st),
     /// Allocate a native error of `kind` with `message` and stack.
     new_error: fn(st, ErrorKind, String) -> #(JsVal, st),
-    /// Indirect eval / `$262.evalScript` (M19). Harness-seeded.
+    /// Indirect eval / `Function()` / `$262.evalScript`: compile `source`
+    /// to bytecode on the shared heap and run it. Interpreter-seeded.
     eval_hook: fn(st, String) -> #(JsVal, st),
+    /// [[Call]] of a `KBytecode` cell: `(callee, this, args, new_target)`.
+    /// Runs a fresh activation to completion; re-raises a throw.
+    call_bytecode: fn(st, Handle, JsVal, List(JsVal), JsVal) -> #(JsVal, st),
+    /// [[Construct]] of a `KBytecode` cell: `(callee, args, new_target)`.
+    construct_bytecode: fn(st, Handle, List(JsVal), JsVal) -> #(Handle, st),
+    /// Resume a suspended interpreter frame with `sent` = `#(mode, value)`
+    /// (the coroutine driver's Sent pair).
+    resume_frame: fn(st, SuspendedFrame, #(Int, JsVal)) -> #(FrameStep, st),
   )
 }
 

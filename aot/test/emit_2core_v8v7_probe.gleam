@@ -64,7 +64,7 @@
 // cool runs; thermal drift ±5%). O eliminated the residual truthy sink
 // (to_boolean_i32 21k→~0 out of top-10); P shaved the ic warm-path
 // alloc. Spec-suggested "cache CodeS (simple-ABI)" was DEAD: every
-// richards proto method reads `this`, so KFunction.simple is `none`
+// richards proto method reads `this`, so KCompiled.simple is `none`
 // (arc func.gleam is_simple_abi_eligible rejects refs_frame_body).
 // Residual profile (emit_2core_profile top-4):
 //   call_ffi:t_call_method_ic/5  40,466/run  ~4,590µs — floor is now

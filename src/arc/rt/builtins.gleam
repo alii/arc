@@ -267,14 +267,24 @@ fn seed_ops(st: Agent) -> Agent {
         call: rt_call.t_call_checked,
         to_object: realm_ops.t_box_primitive,
         new_error: realm_ops.t_new_error,
-        eval_hook: unseeded_eval,
+        eval_hook: fn(_, _) { interpreter_not_linked("eval_hook") },
+        call_bytecode: fn(_, _, _, _, _) {
+          interpreter_not_linked("call_bytecode")
+        },
+        construct_bytecode: fn(_, _, _, _) {
+          interpreter_not_linked("construct_bytecode")
+        },
+        resume_frame: fn(_, _, _) { interpreter_not_linked("resume_frame") },
       ),
     ),
   )
 }
 
-fn unseeded_eval(_st: Agent, _src: String) -> #(JsVal, Agent) {
-  panic as "JsOps.eval_hook unseeded — M19 harness fills"
+/// The bytecode `JsOps` entries are seeded by the interpreter when it builds
+/// an engine; a bare runtime agent has none, and reaching one is a wiring
+/// bug rather than a JS error.
+fn interpreter_not_linked(op: String) -> a {
+  panic as { "JsOps." <> op <> ": interpreter not linked" }
 }
 
 // ── globalThis (arc builtins.gleam:489-635) ─────────────────────────────────

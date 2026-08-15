@@ -1478,7 +1478,7 @@ fn fold_args_spread(
 }
 
 /// D4: JS fn values are `{js_cell,N}` handles. Fast path: `kfn_code` reads the
-/// KFunction ONCE and returns `{code, resolved_this, simple}` (§10.2.1.2
+/// KCompiled ONCE and returns `{code, resolved_this, simple}` (§10.2.1.2
 /// bind-this folded in) → `TermTest(IsTuple)` guards `CallClosure`; else §8
 /// `t_call_checked`. One heap read per call, not two.
 pub fn emit_call(
@@ -1573,7 +1573,7 @@ pub fn emit_call_with_pair(
 
 /// Method call `o.prop(args)` with `o` already Let-bound (§13.3.6.2 this=obj).
 /// Static-dot ∧ spread-free → fused JMut `call_method_mono` (proto walk +
-/// KFunction apply in ONE FFI call, `miss` on any shape mismatch); miss and
+/// KCompiled apply in ONE FFI call, `miss` on any shape mismatch); miss and
 /// every non-fusable shape fall to `emit_member_get` → `kfn_code` →
 /// `emit_call_with_pair` with `Positional(pos)` so simple-ABI still applies.
 /// Args evaluate ONCE, before the probe — the miss arm re-uses `pos` (no
@@ -1941,7 +1941,7 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
     ast.MemberExpression(_, obj, prop) ->
       case math_direct_op(obj, prop, args) {
         // Math.sqrt/floor/abs/pow/min/max → JPure FFI (raytrace hot path).
-        // Skips the Math-object property lookup + KFunction dispatch. On
+        // Skips the Math-object property lookup + KCompiled dispatch. On
         // `miss` (non-number arg) coerce via ToNumber (§21.3.2 step 1) and
         // retry — args evaluate ONCE either way.
         Some(op) -> {

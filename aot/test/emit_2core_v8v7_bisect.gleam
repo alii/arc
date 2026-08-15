@@ -281,7 +281,7 @@ pub fn main() {
   )
   // perf8 ic_proto_get: warm-cache correctness. Loop warms the {PId,V}
   // SiteKey; second read must be identical (raytrace `.prototype` on
-  // KFunction — peek_get's ordinary gate rejects k_function).
+  // KCompiled — peek_get's ordinary gate rejects k_compiled).
   t(
     "pg_proto_warm_kfn",
     "function F(){};F.prototype.v=7;var s=0;for(var i=0;i<3;i++)s+=F.prototype.v;if(s!==21)throw s",

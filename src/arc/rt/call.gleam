@@ -22,9 +22,10 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
   type NativeToken, type ObjKind, type Property, ArrayObj, DataProperty, Dense,
-  JInt, JPosInf, KBound, KFunction, KHandle, KNative, KNull, KNum, KStr, KTdz,
-  KUndef, Named, NoElements, ProxyObj, ReferenceErr, SObject, StringKey, TypeErr,
-  classify, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
+  JInt, JPosInf, KBound, KBytecode, KCompiled, KHandle, KNative, KNull, KNum,
+  KStr, KTdz, KUndef, Named, NoElements, ProxyObj, ReferenceErr, SObject,
+  StringKey, TypeErr, classify, mk_number, mk_object, mk_string, mk_tdz,
+  mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
@@ -134,7 +135,7 @@ pub fn is_callable(st: Agent, v: JsVal) -> Bool {
   b
 }
 
-/// §7.2.4 IsConstructor. `KFunction` → `flags.is_constructor`; `KNative` →
+/// §7.2.4 IsConstructor. `KCompiled` → `flags.is_constructor`; `KNative` →
 /// `constructible`; `KBound` → recurse on target (§10.4.1.2); `ProxyObj` →
 /// recurse on target (§10.5.13; a revoked proxy has no `[[Construct]]`).
 /// R9: JRead — pure heap read.
@@ -147,7 +148,8 @@ pub fn is_constructor(st: Agent, v: JsVal) -> Bool {
 
 fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
   case read_obj_kind(st, h) {
-    Some(KFunction(flags:, ..)) -> flags.is_constructor
+    Some(KCompiled(flags:, ..)) | Some(KBytecode(flags:, ..)) ->
+      flags.is_constructor
     Some(KNative(constructible:, ..)) -> constructible
     Some(KBound(target:, ..)) -> handle_is_constructor(st, target)
     // §10.5.15 ProxyCreate step 7: [[Construct]] is installed iff the target
@@ -161,7 +163,7 @@ fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
 // ── `t_kfn_code` — CallClosure fast-path probe (JRead) ──────────────────────
 
 /// Fast-path probe for the M9 `CallClosure` lowering. Returns
-/// `{code, resolved_this}` iff `callee` is an ORDINARY user `KFunction` —
+/// `{code, resolved_this}` iff `callee` is an ORDINARY user `KCompiled` —
 /// not a class constructor, generator, async fn, or a method carrying a
 /// `[[HomeObject]]` (whose [[Call]] needs the full `t_call_checked` MOP so
 /// `super.x` resolves). Every other shape (native, bound, proxy, non-object,
@@ -207,8 +209,13 @@ fn do_call(
   case classify(callee) {
     KHandle(h) ->
       case read_obj_kind(st, h) {
-        Some(KFunction(code:, home_object:, flags:, ..)) ->
+        Some(KCompiled(code:, home_object:, flags:, ..)) ->
           call_kfunction(st, h, code, home_object, flags, this, args)
+        // Interpreted function: the interpreter runs a fresh activation.
+        Some(KBytecode(..)) ->
+          t_apply_protected(st, fn(st) {
+            js_ops(st).call_bytecode(st, h, this, args, mk_undefined())
+          })
         Some(KNative(tag:, ..)) ->
           t_apply_protected(st, fn(st) { dispatch_native(st, tag, this, args) })
         // §10.4.1.1: [[BoundThis]] replaces `this`; bound args prepend.
@@ -432,7 +439,7 @@ fn construct_by_kind(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case read_obj_kind(st, callee_h) {
-    Some(KFunction(code:, home_object:, flags:, fields_init:, ..)) ->
+    Some(KCompiled(code:, home_object:, flags:, fields_init:, ..)) ->
       construct_kfunction(
         st,
         callee_h,
@@ -443,6 +450,8 @@ fn construct_by_kind(
         args,
         new_target,
       )
+    Some(KBytecode(..)) ->
+      js_ops(st).construct_bytecode(st, callee_h, args, new_target)
     Some(KNative(tag:, ..)) ->
       dispatch_native_construct(st, tag, args, new_target)
     // §10.4.1.2 BoundFunction [[Construct]]: prepend bound args; if
@@ -457,7 +466,7 @@ fn construct_by_kind(
     // §10.5.13 Proxy [[Construct]].
     Some(ProxyObj(target:, handler:, revoked:)) ->
       construct_proxy(st, target, handler, revoked, args, new_target)
-    // Unreachable: IsConstructor admitted only the four kinds above.
+    // Unreachable: IsConstructor admitted only the five kinds above.
     _ ->
       panic as "t_construct: IsConstructor passed but ObjKind not constructible"
   }
@@ -733,8 +742,8 @@ fn alloc_fn_cell(
   )
 }
 
-/// Allocate a `KFunction` cell for a compiled user function (D4). An
-/// `SObject{kind: KFunction{code, home_object: home, flags, fields_init:
+/// Allocate a `KCompiled` cell for a compiled user function (D4). An
+/// `SObject{kind: KCompiled{code, home_object: home, flags, fields_init:
 /// None, captures}, proto: %Function.prototype%}` with own `length`/`name`
 /// per §20.2.4. Port of arc's function-object allocation shape via
 /// `alloc_fn_slot`. Does NOT allocate a `.prototype` own property — §10.2.5
@@ -754,7 +763,7 @@ pub fn t_fn_new(
   alloc_fn_cell(
     st,
     Some(st.realm.function.prototype),
-    KFunction(
+    KCompiled(
       code:,
       home_object: home,
       flags:,

@@ -19,9 +19,9 @@ import arc/rt/types.{
   ArrayBufferObj, ArrayIterator, ArrayObj, AsyncFromSyncIterator, BigIntObj,
   BooleanObj, DataProperty, DataViewObj, DateObj, Dense, ErrorObj, ForInIterator,
   Handler, IdentityPassThrough, IteratorHelperObj, JsCell, JsStore, KBound,
-  KFunction, KNative, MapIterator, MapObj, ModuleNamespace, NoElements,
-  NumberObj, Ordinary, PromiseFulfilled, PromisePending, PromiseReaction,
-  PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
+  KBytecode, KCompiled, KNative, MapIterator, MapObj, ModuleNamespace,
+  NoElements, NumberObj, Ordinary, PromiseFulfilled, PromisePending,
+  PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
   ResolveThenableJob, SAsyncGen, SBox, SGenerator, SObject, SPromise,
   SShapedObject, SetIterator, SetObj, Sparse, StringIterator, StringObj,
   SymbolObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakSetObj,
@@ -165,13 +165,21 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     BooleanObj(value: _) -> acc
     BigIntObj(value: _) -> acc
     SymbolObj(value: _) -> acc
-    KFunction(code:, home_object:, flags: _, fields_init:, captures:, simple:) -> {
+    KCompiled(code:, home_object:, flags: _, fields_init:, captures:, simple:) -> {
       let acc = push_opt_handle(home_object, acc)
       let acc = push_opt_handle(fields_init, acc)
       let acc = list.fold(captures, acc, fn(a, h) { [h.id, ..a] })
       // `code`/`simple` are opaque `CompiledFn`s; walk their captured env via FFI.
       let acc = push_term_refs(to_dynamic(code), acc)
       push_term_refs(to_dynamic(simple), acc)
+    }
+    KBytecode(template:, env:, home_object:, flags: _, fields_init:) -> {
+      let acc = push_opt_handle(home_object, acc)
+      let acc = push_opt_handle(fields_init, acc)
+      // The constant pool and the closed-over environment hold `JsVal`s
+      // inside interpreter-owned terms; walk them via the FFI term scanner.
+      let acc = push_term_refs(to_dynamic(template), acc)
+      push_term_refs(to_dynamic(env), acc)
     }
     KNative(tag:, name: _, length: _, constructible: _) -> {
       let acc = list.fold(native_token_refs(tag), acc, fn(a, h) { [h.id, ..a] })

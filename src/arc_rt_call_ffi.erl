@@ -27,7 +27,7 @@
 %% t_kfn_code(St, Callee, This) -> {Code, ResolvedThis, Simple} | undefined
 %% CallClosure fast-path probe (JRead). One heap read, no cross-module calls.
 %% Record indices come from arc_rt_layout.hrl (asserted by
-%% arc_rt_layout_test). The KFunction match is positional:
+%% arc_rt_layout_test). The KCompiled match is positional:
 %% {?KFN_TAG, Code, Home, Flags, FieldsInit, Captures, Simple}.
 %% Simple is the raw Option term: `none` | `{some,{CodeS,Arity}}`.
 t_kfn_code(St, {js_cell, Id}, This) ->
@@ -70,7 +70,7 @@ t_kfn_code(_, _, _) -> undefined.
 %% t_call_method_mono(St, Recv, KeyBin, Args) -> {V, St'} | {miss, St}
 %% JMut fast-path probe for `o.m(args)`. Folds the get_prop_any proto walk +
 %% t_kfn_code + CallClosure apply into ONE FFI call: own-then-proto data-prop
-%% lookup (up to ?MONO_PROTO_MAX hops) → gate on ordinary user KFunction or
+%% lookup (up to ?MONO_PROTO_MAX hops) → gate on ordinary user KCompiled or
 %% KNative → apply with `this=Recv`. Any shape miss → `{miss, St}` (St
 %% UNCHANGED — no side-effect precedes the apply) and the emitter falls back
 %% to the full path. NOTE the emitter guard is `V =:= miss`, NOT `IsAtom(V)`
@@ -146,11 +146,11 @@ mono_shaped_own(Store, RSlot, KeyBin) ->
         _ -> absent
     end.
 
-%% Gate + apply. Same KFunction gate as t_kfn_code (home_object=:=none so
+%% Gate + apply. Same KCompiled gate as t_kfn_code (home_object=:=none so
 %% super.x methods miss to the full MOR). KNative → dispatch_native (M6 seam)
 %% so `Array.prototype.push` etc. hit here too. `this` is Recv — always a
 %% cell, so no OrdinaryCallBindThis substitution. A this-ABI simple variant
-%% (KFunction.simple with needs_this=true) of matching arity is applied as
+%% (KCompiled.simple with needs_this=true) of matching arity is applied as
 %% CodeT(St, Recv, P0..Pn-1) with no Frame tuple; otherwise Frame per D5
 %% mk_frame.
 mono_apply(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, Args) ->
@@ -184,7 +184,7 @@ apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 
 %% t_new_simple(St, Ctor, Args) -> {Handle, St'} | {miss, St}
 %% JMut fast-path probe for `new F(args)` on a plain-function ctor
-%% (§10.2.2 base case). Gate: F is a KFunction with is_constructor,
+%% (§10.2.2 base case). Gate: F is a KCompiled with is_constructor,
 %% NOT class/derived/gen/async, home_object=fields_init=none, and its own
 %% "prototype" is a data-property Handle → inline OrdinaryCreateFromConstructor
 %% + `t_cell_new` + apply body + §10.2.2 step 13 base return-override

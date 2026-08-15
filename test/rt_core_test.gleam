@@ -3,15 +3,19 @@
 //// (integers past 2^53 - 1 widen to doubles; -0 survives).
 
 import arc/rt/builtins as rt_builtins
+import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type JsVal, Agent, FnFlags, FrameInfo, HostHooks,
-  JFloat, JInt, JNegInf, KBool, KHandle, KNum, KStr, StringKey, canonical_key,
-  classify, mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  JFloat, JInt, JNegInf, JsOps, JsStore, KBool, KBytecode, KHandle, KNum, KStr,
+  NoElements, SObject, StringKey, canonical_key, classify, mk_null, mk_number,
+  mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
+import gleam/dict
 import gleam/option.{None}
 
 @external(erlang, "arc_rt_store_ffi", "identity")
@@ -19,6 +23,12 @@ fn as_code(f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent)) -> CompiledFn
 
 @external(erlang, "erlang", "element")
 fn frame_at(n: Int, frame: Frame) -> JsVal
+
+@external(erlang, "arc_rt_store_ffi", "identity")
+fn template(label: String) -> FuncTemplate
+
+@external(erlang, "arc_rt_store_ffi", "identity")
+fn env(vals: List(JsVal)) -> EnvTuple
 
 fn agent() -> Agent {
   rt_builtins.new_agent(
@@ -231,4 +241,49 @@ pub fn error_stack_renders_frames_test() {
       int(1),
     )
   assert error_stack(st, "y") == "Error: y\n    at inner (script:3)"
+}
+
+// ── KBytecode cells dispatch through JsOps ───────────────────────────────────
+
+pub fn bytecode_call_and_construct_use_js_ops_test() {
+  let st = agent()
+  let ops =
+    JsOps(
+      ..st.store.ops,
+      call_bytecode: fn(st, _callee, this, args, _new_target) {
+        let assert [a] = args
+        let #(sum, st) = rt_ops.t_add(st, this, a)
+        #(sum, st)
+      },
+      construct_bytecode: fn(st: Agent, _callee, _args, _new_target) {
+        #(st.realm.array.prototype, st)
+      },
+    )
+  let st = Agent(..st, store: JsStore(..st.store, ops:))
+  let kind =
+    KBytecode(
+      template: template("tpl"),
+      env: env([]),
+      home_object: None,
+      flags: FnFlags(..flags(True), is_constructor: True),
+      fields_init: None,
+    )
+  let #(fh, st) =
+    rt_store.t_cell_new(
+      st,
+      SObject(
+        kind:,
+        proto: option.Some(st.realm.function.prototype),
+        props: dict.new(),
+        symbol_props: [],
+        elements: NoElements,
+        extensible: True,
+      ),
+    )
+  let f = mk_object(fh)
+  assert type_of(st, f) == "function"
+  let #(r, st) = rt_call.t_call_checked(st, f, int(40), [int(2)])
+  assert classify(r) == KNum(JInt(42))
+  let #(h, st) = rt_call.t_construct(st, f, [], f)
+  assert h == st.realm.array.prototype
 }
