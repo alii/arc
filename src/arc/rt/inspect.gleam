@@ -333,6 +333,21 @@ pub fn format_error(st: Agent, val: JsVal) -> String {
   }
 }
 
+/// Console rendering of a Temporal object: its type name (Node prints the
+/// ISO string too, but the label alone identifies the brand).
+fn temporal_label(data: TemporalData) -> String {
+  case data {
+    TemporalInstant(..) -> "Temporal.Instant {}"
+    TemporalDate(..) -> "Temporal.PlainDate {}"
+    TemporalTime(..) -> "Temporal.PlainTime {}"
+    TemporalDateTime(..) -> "Temporal.PlainDateTime {}"
+    TemporalYearMonth(..) -> "Temporal.PlainYearMonth {}"
+    TemporalMonthDay(..) -> "Temporal.PlainMonthDay {}"
+    TemporalDuration(..) -> "Temporal.Duration {}"
+    TemporalZonedDateTime(..) -> "Temporal.ZonedDateTime {}"
+  }
+}
+
 /// If `h` is an Error instance (has the [[ErrorData]] internal slot), render
 /// it for display; else None.
 ///
@@ -393,19 +408,5 @@ fn error_property(
           }
       }
     _ -> None
-  }
-}
-
-/// Console rendering of a Temporal object: its type name.
-fn temporal_label(data: TemporalData) -> String {
-  case data {
-    TemporalInstant(..) -> "Temporal.Instant {}"
-    TemporalDate(..) -> "Temporal.PlainDate {}"
-    TemporalTime(..) -> "Temporal.PlainTime {}"
-    TemporalDateTime(..) -> "Temporal.PlainDateTime {}"
-    TemporalYearMonth(..) -> "Temporal.PlainYearMonth {}"
-    TemporalMonthDay(..) -> "Temporal.PlainMonthDay {}"
-    TemporalDuration(..) -> "Temporal.Duration {}"
-    TemporalZonedDateTime(..) -> "Temporal.ZonedDateTime {}"
   }
 }
