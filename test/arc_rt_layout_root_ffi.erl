@@ -1,6 +1,5 @@
 -module(arc_rt_layout_root_ffi).
--export([idx/1, tag/1, element/2, tuple_size/1, dyn/1, slots/1,
-         pdict_get/1]).
+-export([idx/1, tag/1, element/2, tuple_size/1, dyn/1, slots/1]).
 
 -include("arc_rt_layout.hrl").
 
@@ -36,7 +35,6 @@ idx(<<"SSHAPED_SID">>) -> ?SSHAPED_SID;
 idx(<<"SSHAPED_PROTO">>) -> ?SSHAPED_PROTO;
 idx(<<"SSHAPED_SLOTS">>) -> ?SSHAPED_SLOTS;
 idx(<<"SSHAPED_ARITY">>) -> ?SSHAPED_ARITY;
-idx(<<"OVERLAY_OFF">>) -> ?OVERLAY_OFF;
 idx(<<"SHAPE_ARITY_F">>) -> ?SHAPE_ARITY_F;
 idx(<<"SHAPE_OFFSETS">>) -> ?SHAPE_OFFSETS;
 idx(<<"SHAPE_TRANSITIONS">>) -> ?SHAPE_TRANSITIONS;
@@ -111,4 +109,3 @@ dyn(X) -> X.
 %% ShapeSlots wire: a plain tuple.
 slots(L) -> list_to_tuple(L).
 
-pdict_get(K) -> get(K).

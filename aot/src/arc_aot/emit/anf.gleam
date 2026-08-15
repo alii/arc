@@ -337,12 +337,10 @@ pub const perf7_share_dup: Bool = True
 
 /// Emit `cold`'s IR ONCE, shared across every `miss` reference in `body`.
 /// Each `miss` use lowers to a single `ir.Break` (→ join-point `apply`), not
-/// a full copy of `cold`'s tree — get_prop_fast/set_prop_fast/emit_member_call
-/// pass `cold` to 5-8 bind_if else-arms; without this each re-emits the whole
-/// cold tier. Mechanism: nested Blocks — `body`'s hit leaves Break to l_join;
-/// each `miss` Breaks to l_miss whose continuation runs `cold` exactly once.
-/// Slot rebinds in either arm thread out through l_join (perf5 `_this_c`
-/// hoist — `body`'s hit updates it to `nc`; `cold` re-reads pdict).
+/// a full copy of `cold`'s tree, for callers that pass the same `cold` to
+/// several bind_if else-arms. Mechanism: nested Blocks — `body`'s hit leaves
+/// Break to l_join; each `miss` Breaks to l_miss whose continuation runs
+/// `cold` exactly once. Slot rebinds in either arm thread out through l_join.
 ///
 /// HIT-PATH COST: `to_break` sinks every `Let([r], If, Values([r]))` (bind_if's
 /// wrapper) into `If(·, …→Break l_join, …)` so emit_core's `materialize` sees
@@ -431,47 +429,6 @@ pub fn share(
         )
       }
     }
-  }
-}
-
-/// perf7 x-cold-outlined: emit `body_b` as a SEPARATE `ir.Function` (added
-/// via `state.add_function`) and yield its name for `ir.CallDirect`. Real IC
-/// shape — hit inline, miss = 1 same-module call — so the caller's fast path
-/// is pure nested `bind_if` with NO Block wrapper (every level let-cases).
-/// Body runs with cleared `slot_vars`/`this_c_cache` (aux fn is a fresh
-/// scope; caller slot names / `_this_c` are out-of-scope there).
-/// emit_core's state-reaching closure sees the body's JMut hosts and threads
-/// St through both the aux fn AND every `CallDirect` to it — mirrors the
-/// jsf_* body shape (func.gleam:1621), so no explicit `{V,St}` pairing here.
-pub fn aux_fn(
-  prefix: String,
-  params: List(#(String, ir.ValType)),
-  body_b: fn(List(ir.Value)) -> Build(ir.Value),
-) -> Build(String) {
-  fn(e: Emitter2, k) {
-    let name = prefix <> int.to_string(e.next_fn)
-    let e = Emitter2(..e, next_fn: e.next_fn + 1)
-    let sv0 = e.slot_vars
-    let tc0 = e.this_c_cache
-    let arg_vals = list.map(params, fn(p) { ir.Var(p.0) })
-    let #(body_tree, e_b) =
-      run_to(
-        body_b(arg_vals),
-        Emitter2(..e, slot_vars: dict.new(), this_c_cache: None),
-        fn(_, v) { ir.Return([v]) },
-      )
-    let e =
-      state.add_function(
-        Emitter2(..e_b, slot_vars: sv0, this_c_cache: tc0),
-        ir.Function(
-          name: name,
-          params: list.map(params, fn(p) { ir.Local(p.0, p.1) }),
-          result: [ir.TTerm],
-          locals: [],
-          body: body_tree,
-        ),
-      )
-    k(e, name)
   }
 }
 

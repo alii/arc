@@ -64,19 +64,14 @@ fn let_(
     ir.Values([v]) -> k(e, v)
     _ -> {
       let #(n, e) = state.fresh_var(e)
-      // Propagate known-number/known-handle through the alias so anf's marks
-      // survive the expr_→let_ re-bind into the Rk chain.
+      // Propagate known-number through the alias so anf's marks survive the
+      // expr_→let_ re-bind into the Rk chain.
       let e = case let_tail_value(rhs) {
-        Some(ir.Var(vn)) -> {
-          let e = case state.is_known_number(e, vn) {
+        Some(ir.Var(vn)) ->
+          case state.is_known_number(e, vn) {
             True -> state.mark_known_number(e, n)
             False -> e
           }
-          case state.is_known_handle(e, vn) {
-            True -> state.mark_known_handle(e, n)
-            False -> e
-          }
-        }
         _ -> e
       }
       use body <- result.map(k(e, ir.Var(n)))
@@ -647,19 +642,14 @@ fn store_declared(
           host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
         False -> {
           let #(n, e) = state.fresh_var(e)
-          // Propagate known-number/known-handle through the alias so a
-          // for-init `let i=0` / `let o={x:0}` seed carries the mark.
+          // Propagate known-number through the alias so a for-init `let i=0`
+          // seed carries the mark.
           let e = case v {
-            ir.Var(vn) -> {
-              let e = case state.is_known_number(e, vn) {
+            ir.Var(vn) ->
+              case state.is_known_number(e, vn) {
                 True -> state.mark_known_number(e, n)
                 False -> e
               }
-              case state.is_known_handle(e, vn) {
-                True -> state.mark_known_handle(e, n)
-                False -> e
-              }
-            }
             _ -> e
           }
           use body <- result.map(k(state.set_slot_var(e, slot, n)))
@@ -799,9 +789,7 @@ fn rebind_after_block(
 /// Unboxed local slots that `s` may re-assign, filtered to slots already bound
 /// OUTSIDE (present in `e.slot_vars` at loop-emit time). Deduped, sorted.
 /// Nested function/class bodies are NOT descended — their assignments target
-/// the child frame, not this one. Slot -1 (`_this_c` — perf5 this-c-hoist) is
-/// ALWAYS included when live: any `this.x = …` or user-JS call inside `s`
-/// rebinds it, and static detection is unsound (calls can alias `this`).
+/// the child frame, not this one.
 fn assigned_unboxed_slots(e: Emitter2, s: ast.Statement) -> List(Int) {
   stmt_assigned_names(s, [])
   |> list.unique
@@ -815,20 +803,7 @@ fn assigned_unboxed_slots(e: Emitter2, s: ast.Statement) -> List(Int) {
       _ -> Error(Nil)
     }
   })
-  |> with_this_c_slot(e)
-  |> list.unique
   |> list.sort(int.compare)
-}
-
-/// Prepend slot -1 (`_this_c`) when set — carried through every stmt-level
-/// join so a `this.x = …` / call inside a branch/loop body flows out. Slot
-/// -2 (`_this_sid`) is entry-seeded and NEVER rebound after (refresh_this_c
-/// leaves it), so it needs no join-carry.
-fn with_this_c_slot(slots: List(Int), e: Emitter2) -> List(Int) {
-  case dict.has_key(e.slot_vars, -1) {
-    True -> [-1, ..slots]
-    False -> slots
-  }
 }
 
 /// Union of assigned_unboxed_slots over a statement list — for switch cases,
@@ -924,83 +899,6 @@ pub fn loop_invariant_callees(
   })
   |> list.unique
   |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
-}
-
-/// expr.gleam mirrors this const — flip both.
-const perf8_arr_c_hoist: Bool = True
-
-/// perf8_arr_c_hoist: unboxed-local slots used as `name[…]` bracket-read bases
-/// ≥`min` times in body/cond/update, NOT re-bound by the loop (∉ `carried`),
-/// bound outside (∈ `e.slot_vars`), and with NO `name[…] = v` bracket write
-/// anywhere in the loop (a write via `set_elem_fast_p` re-`put`s the pdict
-/// overlay so a hoisted `arr_c` snapshot would go stale). Read-only bases
-/// only — crypto am3's `this_array` (~2.4M reads) qualifies; `w_array`
-/// (mixed read+write) is skipped so writeback stays live.
-pub fn loop_invariant_arr_bases(
-  e: Emitter2,
-  body: ast.Statement,
-  cond: Option(ast.Expression),
-  upd: Option(ast.Expression),
-  carried: List(Int),
-  min: Int,
-) -> List(Int) {
-  case perf8_arr_c_hoist {
-    False -> []
-    True -> {
-      let #(reads, writes) =
-        stmt_bracket_bases(body, #([], []))
-        |> opt_expr_bracket_bases(cond, _)
-        |> opt_expr_bracket_bases(upd, _)
-      reads
-      |> list.filter(fn(name) { !list.contains(writes, name) })
-      |> count_names
-      |> dict.to_list
-      |> list.filter_map(fn(nc) {
-        let #(name, n) = nc
-        case n >= min, state.resolve(e, name) {
-          True, scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
-            case
-              !list.contains(carried, slot) && dict.has_key(e.slot_vars, slot)
-            {
-              True -> Ok(slot)
-              False -> Error(Nil)
-            }
-          _, _ -> Error(Nil)
-        }
-      })
-      |> list.unique
-      |> list.sort(int.compare)
-    }
-  }
-}
-
-fn count_names(names: List(String)) -> dict.Dict(String, Int) {
-  use d, n <- list.fold(names, dict.new())
-  dict.upsert(d, n, fn(v) {
-    case v {
-      Some(c) -> c + 1
-      None -> 1
-    }
-  })
-}
-
-/// Emit `arr_c = arr_c_load(obj)` once per hoistable base slot, let-bound
-/// BEFORE the caller's ir.Loop, and record each in `e.hoisted_arr_c` keyed by
-/// the base's CURRENT slot-var name so `expr.get_elem_fast` looks it up
-/// directly from the emitted receiver `ir.Var` (loop-invariant → name stable).
-fn hoist_arr_c(
-  e: Emitter2,
-  slots: List(Int),
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
-  case slots {
-    [] -> k(e)
-    [slot, ..rest] -> {
-      let obj_name = state.get_slot_var(e, slot)
-      use e, arr_c <- host_(e, "arr_c_load", [ir.Var(obj_name)])
-      hoist_arr_c(state.set_hoisted_arr_c(e, obj_name, arr_c), rest, k)
-    }
-  }
 }
 
 // -- callee-identifier name collection (accumulator-passing walk) --
@@ -1523,139 +1421,6 @@ fn assign_target_names(ex: ast.Expression, acc: List(String)) -> List(String) {
     }
     ast.AssignmentExpression(left:, ..) -> assign_target_names(left, acc)
     ast.SpreadElement(argument:, ..) -> assign_target_names(argument, acc)
-    _ -> acc
-  }
-}
-
-// -- bracket-base identifier collection (perf8_arr_c_hoist) --
-// `#(reads, writes)`: identifier names appearing as `name[…]` bracket bases,
-// split by whether the MemberExpression is an assignment target. Undercount is
-// safe (hoist just doesn't fire) so uncommon nodes are treated as leaves.
-
-type BrAcc =
-  #(List(String), List(String))
-
-fn stmt_bracket_bases(s: ast.Statement, acc: BrAcc) -> BrAcc {
-  case s {
-    ast.ExpressionStatement(expression:, ..) ->
-      expr_bracket_bases(expression, acc)
-    ast.BlockStatement(body:) -> stmts_bracket_bases(body, acc)
-    ast.VariableDeclaration(declarations:, ..) -> {
-      use acc, d <- list.fold(declarations, acc)
-      opt_expr_bracket_bases(d.init, acc)
-    }
-    ast.ReturnStatement(argument:) -> opt_expr_bracket_bases(argument, acc)
-    ast.IfStatement(condition:, consequent:, alternate:) -> {
-      let acc = expr_bracket_bases(condition, acc)
-      let acc = stmt_bracket_bases(consequent, acc)
-      case alternate {
-        Some(a) -> stmt_bracket_bases(a, acc)
-        None -> acc
-      }
-    }
-    ast.WhileStatement(condition:, body:)
-    | ast.DoWhileStatement(condition:, body:) ->
-      stmt_bracket_bases(body, expr_bracket_bases(condition, acc))
-    ast.ForStatement(init:, condition:, update:, body:) -> {
-      let acc = case init {
-        Some(ast.ForInitExpression(ex)) -> expr_bracket_bases(ex, acc)
-        _ -> acc
-      }
-      let acc = opt_expr_bracket_bases(condition, acc)
-      let acc = opt_expr_bracket_bases(update, acc)
-      stmt_bracket_bases(body, acc)
-    }
-    ast.ThrowStatement(argument:) -> expr_bracket_bases(argument, acc)
-    ast.LabeledStatement(body:, ..) -> stmt_bracket_bases(body, acc)
-    // Nested fn bodies / rare stmts: leaves (undercount safe).
-    _ -> acc
-  }
-}
-
-fn stmts_bracket_bases(ss: List(ast.StmtWithLine), acc: BrAcc) -> BrAcc {
-  use acc, s <- list.fold(ss, acc)
-  stmt_bracket_bases(s.statement, acc)
-}
-
-fn opt_expr_bracket_bases(ex: Option(ast.Expression), acc: BrAcc) -> BrAcc {
-  case ex {
-    Some(e) -> expr_bracket_bases(e, acc)
-    None -> acc
-  }
-}
-
-fn expr_bracket_bases(ex: ast.Expression, acc: BrAcc) -> BrAcc {
-  case ex {
-    // `name[idx] = v` / `name[idx] += v` — record write; recurse into idx + rhs.
-    ast.AssignmentExpression(
-      left: ast.MemberExpression(
-        object: ast.Identifier(name:, ..),
-        property: ast.Bracket(expression: idx),
-        ..,
-      ),
-      right:,
-      ..,
-    ) -> {
-      let #(r, w) = expr_bracket_bases(right, expr_bracket_bases(idx, acc))
-      #(r, [name, ..w])
-    }
-    // `name[idx]++` — write.
-    ast.UpdateExpression(
-      argument: ast.MemberExpression(
-        object: ast.Identifier(name:, ..),
-        property: ast.Bracket(expression: idx),
-        ..,
-      ),
-      ..,
-    ) -> {
-      let #(r, w) = expr_bracket_bases(idx, acc)
-      #(r, [name, ..w])
-    }
-    // `name[idx]` in read position.
-    ast.MemberExpression(
-      object: ast.Identifier(name:, ..),
-      property: ast.Bracket(expression: idx),
-      ..,
-    ) -> {
-      let #(r, w) = expr_bracket_bases(idx, acc)
-      #([name, ..r], w)
-    }
-    ast.AssignmentExpression(left:, right:, ..) ->
-      expr_bracket_bases(right, expr_bracket_bases(left, acc))
-    ast.UpdateExpression(argument:, ..)
-    | ast.UnaryExpression(argument:, ..)
-    | ast.SpreadElement(argument:, ..)
-    | ast.AwaitExpression(argument:, ..) -> expr_bracket_bases(argument, acc)
-    ast.YieldExpression(argument:, ..) -> opt_expr_bracket_bases(argument, acc)
-    ast.BinaryExpression(left:, right:, ..)
-    | ast.LogicalExpression(left:, right:, ..) ->
-      expr_bracket_bases(right, expr_bracket_bases(left, acc))
-    ast.ParenthesizedExpression(expression:, ..) ->
-      expr_bracket_bases(expression, acc)
-    ast.ConditionalExpression(condition:, consequent:, alternate:, ..) ->
-      expr_bracket_bases(
-        alternate,
-        expr_bracket_bases(consequent, expr_bracket_bases(condition, acc)),
-      )
-    ast.CallExpression(callee:, arguments:, ..)
-    | ast.OptionalCallExpression(callee:, arguments:, ..)
-    | ast.NewExpression(callee:, arguments:, ..) -> {
-      use acc, a <- list.fold(arguments, expr_bracket_bases(callee, acc))
-      expr_bracket_bases(a, acc)
-    }
-    ast.MemberExpression(object:, property:, ..)
-    | ast.OptionalMemberExpression(object:, property:, ..) -> {
-      let acc = expr_bracket_bases(object, acc)
-      case property {
-        ast.Bracket(expression:) -> expr_bracket_bases(expression, acc)
-        ast.Dot(..) -> acc
-      }
-    }
-    ast.SequenceExpression(expressions:, ..) -> {
-      use acc, e <- list.fold(expressions, acc)
-      expr_bracket_bases(e, acc)
-    }
-    // Nested fn bodies + literals: leaves.
     _ -> acc
   }
 }
@@ -2694,10 +2459,6 @@ fn emit_for_classic(
     let hoist_slots = loop_invariant_callees(e, body, cond, upd, carried)
     let prev_hoisted = e.hoisted_kfn
     use e <- hoist_kfn_codes(e, hoist_slots)
-    // perf8_arr_c_hoist: same for `{tc_arr,Id}` overlay reads.
-    let arr_slots = loop_invariant_arr_bases(e, body, cond, upd, carried, 2)
-    let prev_arr_c = e.hoisted_arr_c
-    use e <- hoist_arr_c(e, arr_slots)
     let e = state.push_loop(e, brk, cont, carried, None)
     let emit_upd = fn(e: Emitter2, k) {
       case upd {
@@ -2751,8 +2512,7 @@ fn emit_for_classic(
       }),
     )
     let e = state.pop_frame(e)
-    let e =
-      state.Emitter2(..e, hoisted_kfn: prev_hoisted, hoisted_arr_c: prev_arr_c)
+    let e = state.Emitter2(..e, hoisted_kfn: prev_hoisted)
     let outer = ir.Block(brk, result_tys, ir.Loop(head, params, [], loop_body))
     let e = state.leave_for_scope(e, save)
     rebind_after_block(e, carried, outer, next)
@@ -2964,11 +2724,6 @@ fn emit_while(
   let hoist_slots = loop_invariant_callees(e, body, Some(cond), None, carried)
   let prev_hoisted = e.hoisted_kfn
   use e <- hoist_kfn_codes(e, hoist_slots)
-  // perf8_arr_c_hoist: same for `{tc_arr,Id}` overlay reads.
-  let arr_slots =
-    loop_invariant_arr_bases(e, body, Some(cond), None, carried, 2)
-  let prev_arr_c = e.hoisted_arr_c
-  use e <- hoist_arr_c(e, arr_slots)
   let e = state.push_loop(e, brk, cont, carried, None)
   use #(loop_body, e) <- result.try(
     run_rk(e, fn(e, done) {
@@ -2999,8 +2754,7 @@ fn emit_while(
     }),
   )
   let e = state.pop_frame(e)
-  let e =
-    state.Emitter2(..e, hoisted_kfn: prev_hoisted, hoisted_arr_c: prev_arr_c)
+  let e = state.Emitter2(..e, hoisted_kfn: prev_hoisted)
   let outer = ir.Block(brk, result_tys, ir.Loop(head, params, [], loop_body))
   rebind_after_block(e, carried, outer, next)
 }

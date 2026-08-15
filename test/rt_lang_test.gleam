@@ -73,9 +73,9 @@ pub fn object_rest_excludes_keys_test() {
 pub fn template_object_is_cached_per_site_test() {
   let st = agent()
   let cooked = [mk_string("a"), mk_undefined()]
-  let #(t1, st) = lang.t_get_template_object(st, 11, cooked, ["a", "\\u"])
-  let #(t2, st) = lang.t_get_template_object(st, 11, cooked, ["a", "\\u"])
-  let #(t3, st) = lang.t_get_template_object(st, 12, cooked, ["a", "\\u"])
+  let #(t1, st) = lang.t_get_template_object(st, "m#11", cooked, ["a", "\\u"])
+  let #(t2, st) = lang.t_get_template_object(st, "m#11", cooked, ["a", "\\u"])
+  let #(t3, st) = lang.t_get_template_object(st, "m#12", cooked, ["a", "\\u"])
   assert t1 == t2
   assert t1 != t3
   let #(raw, st) = rt_obj.t_get_prop(st, t1, StringKey(Named("raw")))

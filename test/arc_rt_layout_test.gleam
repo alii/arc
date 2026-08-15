@@ -40,23 +40,6 @@ fn compiled_fn(label: String) -> CompiledFn
 @external(erlang, "arc_rt_layout_root_ffi", "slots")
 fn slots(vals: List(JsVal)) -> ShapeSlots
 
-@external(erlang, "arc_rt_layout_root_ffi", "pdict_get")
-fn pdict_get(key: Dynamic) -> Dynamic
-
-@external(erlang, "arc_rt_obj_ffi", "t_new_object_shaped")
-fn t_new_object_shaped(
-  st: Agent,
-  site: BitArray,
-  keys: List(BitArray),
-  vals: List(JsVal),
-) -> #(JsVal, Agent)
-
-@external(erlang, "arc_rt_obj_ffi", "t_ic_get")
-fn t_ic_get(st: Agent, obj: JsVal, key: BitArray, site: BitArray) -> Dynamic
-
-@external(erlang, "arc_rt_obj_ffi", "jsv_clear")
-fn jsv_clear() -> Nil
-
 fn at(record: a, name: String) -> Dynamic {
   element(idx(name), dyn(record))
 }
@@ -413,36 +396,4 @@ pub fn completion_test() {
   assert element(2, dyn(NormalCompletion(v))) == dyn(v)
   assert tag_of(ThrowCompletion(v)) == tag("COMPLETION_THROW")
   assert element(2, dyn(ThrowCompletion(v))) == dyn(v)
-}
-
-pub fn overlay_test() {
-  jsv_clear()
-  let st = seeded()
-  let va = rt_types.mk_string("va")
-  let vb = rt_types.mk_string("vb")
-  let vc = rt_types.mk_string("vc")
-  let #(obj, st) =
-    t_new_object_shaped(
-      st,
-      <<"@layout-new":utf8>>,
-      [<<"a":utf8>>, <<"b":utf8>>, <<"c":utf8>>],
-      [va, vb, vc],
-    )
-  let assert KHandle(JsCell(id)) = rt_types.classify(obj)
-  let assert SShapedObject(shape_id: sid, proto:, slots: sl) =
-    rt_store.t_cell_get(st, JsCell(id))
-  assert rt_types.shape_slots_get(sl, 1) == vb
-  let site = <<"@layout-get":utf8>>
-  assert t_ic_get(st, obj, <<"b":utf8>>, site) == dyn(vb)
-  let off = idx("OVERLAY_OFF")
-  let flat = pdict_get(dyn(id))
-  assert tag_of(flat) == tag("SSHAPED_TAG")
-  assert element(idx("SSHAPED_SID"), flat) == dyn(sid)
-  assert element(idx("SSHAPED_PROTO"), flat) == dyn(proto)
-  assert tuple_size(flat) == off - 1 + 3
-  assert element(0 + off, flat) == dyn(va)
-  assert element(1 + off, flat) == dyn(vb)
-  assert element(2 + off, flat) == dyn(vc)
-  assert pdict_get(dyn(site)) == dyn(#(sid, 1 + off))
-  jsv_clear()
 }

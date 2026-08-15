@@ -128,10 +128,8 @@ pub type FnSave {
     class_stack: List(ClassCtx),
     // per-function slot mapping (slot indices are function-scope-local)
     slot_vars: Dict(Int, String),
-    this_c_cache: Option(String),
     initialized: Set(Int),
     hoisted_kfn: Dict(Int, ir.Value),
-    hoisted_arr_c: Dict(String, ir.Value),
     // M18: nested non-coroutine fn must NOT inherit the parent's SM intercept
     sm_abrupt: Option(SmAbrupt),
     raw_args_var: Option(String),
@@ -286,6 +284,9 @@ pub type Emitter2 {
     next_label: Int,
     /// module-monotone — survives enter_function
     next_fn: Int,
+    /// module-monotone tagged-template site counter (§13.2.8.4 cache key)
+    next_site: Int,
+    module_name: String,
     // ── control-flow stack (per-function; enter_function saves+clears) ──
     frame_stack: List(Frame2),
     /// Set by LabeledStatement (via set_pending_label) before emitting its body.
@@ -307,32 +308,15 @@ pub type Emitter2 {
     field_init: FieldInitMode,
     // ── slot mapping (unboxed-rebindable local → current IR var name) ──
     slot_vars: Dict(Int, String),
-    /// perf6 narrowed `_this_c` cache: entry-bound `pdict[_this_id]` var name,
-    /// or None once any `this.x=`/user-JS call may have mutated it. Threads
-    /// through anf.bind_if/share (unlike slot_vars, NOT snapshot-restored) so
-    /// invalidation in either arm sticks — read_this_c falls back to a fresh
-    /// pdict_get without slot -1 ever entering `carried`.
-    this_c_cache: Option(String),
     /// TDZ-elision (emit.gleam:1841)
     initialized: Set(Int),
     /// IR var names statically known to hold a BEAM number term (int|float).
     /// Seeded by anf.bind_number/mark_number; read by anf.guarded_binop/cmp
     /// to elide `is_number` TermTests on the M0 sum hot path.
     known_numbers: Set(String),
-    /// IR var names statically known to hold a `{js_cell,_}` handle. Seeded
-    /// by ObjectExpression/ArrayExpression/NewExpression emit + write_slot
-    /// propagation; read by is_known_handle to skip the receiver guard on
-    /// `.x` fast-paths (obj_prop hot path — `let o={x:0}` → `o` is a handle).
-    known_handles: Set(String),
     /// Unboxed-local slot → pre-computed `kfn_code` pair var, hoisted before a
     /// loop so calls in the body reuse it. Per-function; cleared on enter.
     hoisted_kfn: Dict(Int, ir.Value),
-    /// perf8_arr_c_hoist: obj IR var name → pre-loop `arr_c_load(obj)` result
-    /// (the `{tc_arr,Id}` overlay tuple, or `undefined`). Keyed by NAME (not
-    /// slot) so `get_elem_fast` can look it up directly from the emitted
-    /// receiver `ir.Var` — the base is loop-invariant so its slot_var name is
-    /// stable through the body. Per-function; cleared on enter.
-    hoisted_arr_c: Dict(String, ir.Value),
     /// Top-level `var NAME = <literal>` bindings NEVER reassigned in the
     /// script — reads inline the literal instead of a global-object lookup.
     /// Module-wide; computed once by expr.analyze_const_globals at compile
@@ -368,16 +352,6 @@ pub fn mark_known_number(e: Emitter2, name: String) -> Emitter2 {
 
 pub fn is_known_number(e: Emitter2, name: String) -> Bool {
   set.contains(e.known_numbers, name)
-}
-
-/// Record IR var `name` as holding a `{js_cell,_}` handle (same monotone
-/// contract as `mark_known_number`).
-pub fn mark_known_handle(e: Emitter2, name: String) -> Emitter2 {
-  Emitter2(..e, known_handles: set.insert(e.known_handles, name))
-}
-
-pub fn is_known_handle(e: Emitter2, name: String) -> Bool {
-  set.contains(e.known_handles, name)
 }
 
 pub fn set_const_globals(e: Emitter2, d: Dict(String, ir.Value)) -> Emitter2 {
@@ -451,12 +425,6 @@ pub fn set_slot_var(e: Emitter2, slot: Int, name: String) -> Emitter2 {
   Emitter2(..e, slot_vars: dict.insert(e.slot_vars, slot, name))
 }
 
-/// Invalidate the entry-bound `_this_c` cache — subsequent read_this_c falls
-/// back to a fresh pdict_get. Idempotent; monotone across bind_if/share.
-pub fn drop_this_c_cache(e: Emitter2) -> Emitter2 {
-  Emitter2(..e, this_c_cache: None)
-}
-
 /// Record `pair_var` as the hoisted `kfn_code` result for unboxed slot `slot`.
 /// M13 loop emitters call this before push_loop; expr.emit_call reads it back.
 pub fn set_hoisted_kfn(e: Emitter2, slot: Int, pair_var: ir.Value) -> Emitter2 {
@@ -477,26 +445,6 @@ pub fn clear_hoisted_kfn(e: Emitter2) -> Emitter2 {
   Emitter2(..e, hoisted_kfn: dict.new())
 }
 
-/// Record `arr_c` as the hoisted `{tc_arr,Id}` overlay for the receiver var
-/// `obj_name`. M13 loop emitters call this before push_loop; expr.get_elem_fast
-/// reads it back.
-pub fn set_hoisted_arr_c(
-  e: Emitter2,
-  obj_name: String,
-  arr_c: ir.Value,
-) -> Emitter2 {
-  Emitter2(..e, hoisted_arr_c: dict.insert(e.hoisted_arr_c, obj_name, arr_c))
-}
-
-/// Hoisted `{tc_arr,Id}` overlay var for receiver `obj_name`, or None when
-/// the base isn't loop-invariant / hoist wasn't emitted.
-pub fn lookup_hoisted_arr_c(e: Emitter2, obj_name: String) -> Option(ir.Value) {
-  case dict.get(e.hoisted_arr_c, obj_name) {
-    Ok(v) -> Some(v)
-    Error(_) -> None
-  }
-}
-
 @external(erlang, "erlang", "integer_to_binary")
 fn int_to_string(i: Int) -> String
 
@@ -509,9 +457,6 @@ pub fn push_frame(e: Emitter2, frame: Frame2) -> Emitter2 {
 }
 
 /// Iteration statement. Consumes pending_label into the frame's js_label.
-/// Drops `this_c_cache`: the body IR runs N times but is emitted once, so a
-/// cached entry `_this_c` would be stale on iteration ≥2 after any
-/// `this.x=`/call in the body — slot -1 is never carried under perf6.
 pub fn push_loop(
   e: Emitter2,
   ir_break: String,
@@ -520,7 +465,7 @@ pub fn push_loop(
   iter_close: Option(String),
 ) -> Emitter2 {
   push_frame(
-    drop_this_c_cache(e),
+    e,
     Loop2(
       ir_break:,
       ir_continue:,
@@ -704,6 +649,7 @@ pub fn new_emitter(
   tree: ScopeTree,
   root: ScopeId,
   strict: Bool,
+  module_name: String,
   dispatch: EmitDispatch,
 ) -> Emitter2 {
   Emitter2(
@@ -716,6 +662,8 @@ pub fn new_emitter(
     next_var: 0,
     next_label: 0,
     next_fn: 0,
+    next_site: 0,
+    module_name:,
     frame_stack: [],
     pending_label: None,
     fns_acc: [],
@@ -728,12 +676,9 @@ pub fn new_emitter(
     private_env: [],
     field_init: NoFieldInit,
     slot_vars: dict.new(),
-    this_c_cache: None,
     initialized: set.new(),
     known_numbers: set.new(),
-    known_handles: set.new(),
     hoisted_kfn: dict.new(),
-    hoisted_arr_c: dict.new(),
     const_globals: dict.new(),
     slotted_globals: dict.new(),
     class_stack: [],
@@ -890,10 +835,8 @@ pub fn enter_function(
       field_init: e.field_init,
       class_stack: e.class_stack,
       slot_vars: e.slot_vars,
-      this_c_cache: e.this_c_cache,
       initialized: e.initialized,
       hoisted_kfn: e.hoisted_kfn,
-      hoisted_arr_c: e.hoisted_arr_c,
       sm_abrupt: e.sm_abrupt,
       raw_args_var: e.raw_args_var,
     )
@@ -916,10 +859,8 @@ pub fn enter_function(
       field_init: NoFieldInit,
       class_stack: e.class_stack,
       slot_vars: dict.new(),
-      this_c_cache: None,
       initialized: set.new(),
       hoisted_kfn: dict.new(),
-      hoisted_arr_c: dict.new(),
       sm_abrupt: None,
       raw_args_var: None,
     )
@@ -947,10 +888,8 @@ pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
     field_init: save.field_init,
     class_stack: save.class_stack,
     slot_vars: save.slot_vars,
-    this_c_cache: save.this_c_cache,
     initialized: save.initialized,
     hoisted_kfn: save.hoisted_kfn,
-    hoisted_arr_c: save.hoisted_arr_c,
     sm_abrupt: save.sm_abrupt,
     raw_args_var: save.raw_args_var,
   )

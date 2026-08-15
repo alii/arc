@@ -50,12 +50,6 @@ pub fn push_term_refs(v: Dynamic, acc: List(Int)) -> List(Int)
 @external(erlang, "gleam_stdlib", "identity")
 fn to_dynamic(a: anything) -> Dynamic
 
-/// Merge every own-data-prop fast-path cache entry back into
-/// `st.store.data` and clear the overlay (see obj_ffi header). Cheap
-/// no-op when the overlay is empty.
-@external(erlang, "arc_rt_obj_ffi", "jsv_flush")
-fn jsv_flush(st: Agent) -> Agent
-
 /// `push_term_refs` on a `JsVal` (opaque wire term). Convenience for the
 /// per-variant cell tracers (gc-trace-cell).
 pub fn push_val_refs(v: JsVal, acc: List(Int)) -> List(Int) {
@@ -335,9 +329,6 @@ pub fn t_maybe_collect(st: Agent) -> Agent {
 /// Resets `alloc_since_gc`. NO id renumbering (SPEC §7.M2 invariant).
 /// Port of arc `heap.collect_with_roots` (heap.gleam:470-476).
 pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
-  // Merge the own-data-prop fast-path overlay into `js.data` first so
-  // mark sees any handle stored via `t_set_prop_own_data` as a root.
-  let st = jsv_flush(st)
   let js = require_js(st)
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })

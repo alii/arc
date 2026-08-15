@@ -1643,25 +1643,6 @@ fn unsafe_coerce(a: a) -> b
 @external(erlang, "erlang", "is_list")
 fn is_list(a: a) -> Bool
 
-/// SPEC§8 `get_prop_own_data` — JRead fast-path probe: own writable
-/// DataProperty on an ordinary SObject, or the atom `miss`. NO proto
-/// walk; the emitter's `IsAtom` guard falls back to `t_get_prop_any` on
-/// miss. Typed as `JsVal` (loosely — `miss` is an atom) like `t_kfn_code`.
-@external(erlang, "arc_rt_obj_ffi", "t_get_prop_own_data")
-pub fn t_get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> JsVal
-
-/// SPEC§8 `set_prop_own_data` — JRead fast-path probe: overwrite an
-/// EXISTING own writable DataProperty via the pdict overlay. Returns bare
-/// `ok`|`miss`; `st` is NEVER rebuilt (see `arc_rt_obj_ffi` header).
-/// Emitter falls back to `t_set_prop_any` on `miss`.
-@external(erlang, "arc_rt_obj_ffi", "t_set_prop_own_data")
-pub fn t_set_prop_own_data(
-  st: Agent,
-  recv: JsVal,
-  key: BitArray,
-  v: JsVal,
-) -> JsVal
-
 /// SPEC§8 `get_prop` — [[Get]] with a wire-form key (arc emits both bare
 /// `PropertyKey` for static `.x` and `ObjectKey` for computed `[e]`).
 pub fn t_get_prop_any(st: Agent, recv: JsVal, key: k) -> #(JsVal, Agent) {

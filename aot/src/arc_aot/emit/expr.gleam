@@ -16,7 +16,6 @@
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
-import arc/vm/key
 import arc/vm/lexical
 import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/state.{type EmitError, type Emitter2}
@@ -29,87 +28,13 @@ import gleam/option.{type Option, None, Some}
 import gleam/set
 import twocore/ir
 
-// ── perf5 feature gates (bisect-raytrace-perf5) ─────────────────────────────
-// Flip a gate to False → that feature falls straight through to its perf4
-// (3b198d8) path. Independent toggles for raytrace 287k→683k bisection via
-// `gleam run -m emit_2core_profile`. func.gleam mirrors perf5_code_t and
-// owns perf5_this_c_hoist — flip both files for those two.
+// ── feature gates (flag-bisect via `gleam run -m emit_2core_profile`) ──────
 
-/// (a) inline method-IC warm ladder → bare `call_method_ic` FFI.
-pub const perf5_inline_method_ic: Bool = True
-
-/// (S) task-S `method_ic_warm` FFI probe → perf5's original inline ladder.
-/// Separate from (a) so (a) bisects perf4↔perf5 exactly; this bisects
-/// perf5-ladder↔task-S. Only read when (a) is True.
-pub const perf5s_method_ic_ffi: Bool = True
-
-/// (b) `{k:v,…}` → SShapedObject direct alloc → always host `new_object`.
-pub const perf5_shape_obj_literals: Bool = True
-
-/// (d) `_t` simple-ABI SimpleT dispatch → always frame_path. Pair with
-/// func.gleam's perf5_code_t (skips the `_t` body emit).
-pub const perf5_code_t: Bool = True
-
-/// (e) known-handle dataflow → `is_known_handle_val` always False.
-pub const perf5_known_handle: Bool = True
-
-/// (f) JPure `to_property_key_fast` probe → always full JMut host.
+/// JPure `to_property_key_fast` probe → always full JMut host.
 pub const perf5_to_property_key_split: Bool = True
 
-/// perf6 richards-floor lever (b): mutable-slot `_this_c`. True → the pdict
-/// entry `pdict[_this_id]` IS the slot — read fresh (1 `get` BIF ≈3ns) per
-/// `this.x`; set/refresh are no-ops (set_prop_fast's own `pdict_put(id,nc)`
-/// and cold-tier jsv_install/evict already keep it current). NO slot_var(-1)
-/// rebind → anf.bind_if/share `carried=[]` → to_break sinks every If wrapper
-/// → the ~445k letrec-apply/run (≈1,780µs) slot-threading forced is gone.
-/// False → perf5's slot-var threading (0-op read; each rebind widens joins).
-/// With perf6_shaped_this_ffi=True the `_this` hot path bypasses read/set
-/// entirely, so True here just drops the now-dead refresh rebinds.
-/// func.gleam mirrors this const — flip both.
-pub const perf6_mut_this_c: Bool = True
-
-/// perf7 crypto lever (P-c, y3): array-element read+write via `{tc_arr,Id}`
-/// pdict overlay. True → `get_elem_fast_p`/`set_elem_fast_p` (read installs
-/// the overlay on cold; write is JPure — no St thread, no `{V,St'}` tuple;
-/// ~868k×~150ns saved on crypto's am3). Slow-path (t_cell_set→jsv_evict)
-/// writes back + erases. False → perf6 Store cascade / JMutMiss rebuild
-/// end-to-end (no pdict probe on either side).
-pub const perf7_arr_pdict: Bool = False
-
-/// perf7 richards-floor lever (x): outline the cold tier as a real
-/// `ir.Function` + `CallDirect` instead of `anf.share`'s nested-Block join.
-/// True → get_prop_fast/set_prop_fast emit a `jsf_cold_*` aux fn ONCE per
-/// site; every miss arm is a bare `CallDirect` (1 same-module apply). Hit
-/// path is pure nested `bind_if` with NO Block wrapper → every level
-/// let-cases (no l_miss letrec). False → perf6's `anf.share` Block/Break.
-pub const perf7_cold_outline: Bool = True
-
-/// perf8 crypto lever: hoist `get({tc_arr,Id})` before a for/while whose body
-/// has ≥`arr_c_hoist_min` bracket reads on the SAME loop-invariant identifier
-/// base with NO bracket writes on that base — `get_elem_fast_c(arr_c,obj,idx)`
-/// then reads via the hoisted overlay (0 pdict-get per read; falls to
-/// `get_elem_fast_p` on `undefined`/miss so cold install still fires once).
-/// crypto am3 `this_array[i]` ≈2.4M reads × ~3ns pdict-get saved. Write-
-/// containing bases (am3 `w_array`) are skipped so writeback stays live.
-/// stmt.gleam mirrors this const — flip both.
-pub const perf8_arr_c_hoist: Bool = True
-
-/// Min bracket-read count on a base before it's worth the pre-loop bind.
-pub const arr_c_hoist_min: Int = 2
-
-/// perf8 raytrace lever (own_property_of): proto-chain data-get tier between
-/// `t_ic_get` (own miss) and `t_get_prop_any`. Warm hit = one pdict compare
-/// on receiver's proto-id; cold walk installs {PId,V} at a per-site `@pgp`
-/// key + PathIds in TC_MC_DEPS. Targets rt_js_obj:get_from 416k×254ns +
-/// own_property_of 462k×201ns (raytrace `.prototype` on KFunction — rejected
-/// by peek_get's `ordinary` gate — and proto-default-field reads). False →
-/// perf7's 2-tier ic_get→get_prop_any.
-pub const perf8_ic_proto_get: Bool = True
-
-/// perf8 deltablue-drift gate (y2): `l >> C`/`l << C` int-literal RHS →
-/// inline erlang:bsr/bsl, `>>>` → int_fast("ushr_fast",…). False → perf6's
-/// bare int_fast/anf.host("ushr",…). Ungated in a7ebc74..f289f0c; deltablue
-/// has 0 shift ops (v8v7_probe:253 "no db effect") — gated for bisect only.
+/// `l >> C`/`l << C` int-literal RHS → inline erlang:bsr/bsl, `>>>` →
+/// int_fast("ushr_fast",…). False → bare int_fast/anf.host("ushr",…).
 pub const perf8_int_const_shift: Bool = True
 
 // ── Emitter2-access combinators (state monad over Build) ────────────────────
@@ -254,7 +179,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
     // for `obj.tag`x`` and arg lowering ride the CallExpression arm.
     // §13.3.11.1 note: never a direct eval — wrap a bare `eval` tag.
     ast.TaggedTemplateExpression(tag:, parts:, span:) -> {
-      let site = unique_positive_integer()
+      use site <- anf.then(next_template_site())
       let template =
         ast.IntrinsicTemplateObject(
           span:,
@@ -312,7 +237,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
         True -> emit_chain_root(ex)
         False -> {
           use ov <- anf.then(expr(object))
-          emit_member_get(ov, property, is_known_handle(object))
+          emit_member_get(ov, property)
         }
       }
     // Optional member — always a chain root.
@@ -1109,21 +1034,12 @@ fn float_bits(f: Float) -> Int {
 
 // ── Templates (u-template, port emit.gleam:4916,5016-5047,5059-5078) ────────
 
-/// Globally-unique id for a tagged-template call site (§13.2.8.4 template
-/// caching key). Port of emit.gleam:40 — a monotone erlang counter, so each
-/// compiled site reuses its cached template object at runtime.
-@external(erlang, "arc_vm_ffi", "unique_positive_integer")
-fn unique_positive_integer() -> Int
-
-/// Per-CALLSITE pdict key for the i-prop-ic / method-ic / obj-literal shape
-/// caches. An ATOM, not a binary — `erlang:get/1` on an immediate atom is
-/// ~2.8ns vs ~9.0ns for a heap binary (measured; pdict hashes the boxed
-/// term). At 161k `.x` reads/run for richards that's ~1ms; obj_prop pays it
-/// twice per iteration. Atoms are disjoint from the integer cell-id overlay
-/// key space so no `pdict[Id]` collision. Atom-table growth is bounded by
-/// static-site count (a few hundred per compiled module), not by iteration.
-fn ic_site_key(prefix: String) -> ir.Value {
-  ir.ConstAtom(prefix <> int.to_string(unique_positive_integer()))
+/// Next tagged-template call-site index in this module (§13.2.8.4 template
+/// caching key, qualified by the module name in `emit_template_object`).
+fn next_template_site() -> Build(Int) {
+  fn(e: Emitter2, k) {
+    k(state.Emitter2(..e, next_site: e.next_site + 1), e.next_site)
+  }
 }
 
 /// `` `a${x}b${y}c` `` is `TemplateParts("a", [#(x,"b"), #(y,"c")])`. §13.2.8.5
@@ -1146,13 +1062,15 @@ fn emit_template_literal(parts: ast.TemplateParts(String)) -> Build(ir.Value) {
 }
 
 /// GetTemplateObject (§13.2.8.4): the runtime caches a frozen array per
-/// `site`. `cooked=None` (invalid escape in a tagged template, §12.9.6.1) →
-/// `undefined`. Site is boxed W64 (unique_positive_integer is unbounded).
+/// site key `"<module>#<site>"`, unique across every module loaded into one
+/// agent. `cooked=None` (invalid escape in a tagged template, §12.9.6.1) →
+/// `undefined`.
 fn emit_template_object(
   site: Int,
   quasis: List(ast.TemplateQuasi),
 ) -> Build(ir.Value) {
-  use rc <- anf.then(consts())
+  use e <- anf.then(ask)
+  let rc = e.consts
   let cooked =
     list.map(quasis, fn(q) {
       case q.cooked {
@@ -1162,9 +1080,10 @@ fn emit_template_object(
     })
   let raw =
     list.map(quasis, fn(q) { ir.ConstBinary(bit_array.from_string(q.raw)) })
-  use site_v <- anf.then(
-    anf.bind(ir.Convert(ir.BoxInt(ir.W64), ir.ConstI64(site))),
-  )
+  let site_v =
+    ir.ConstBinary(bit_array.from_string(
+      e.module_name <> "#" <> int.to_string(site),
+    ))
   use cooked_l <- anf.then(anf.cons_list(cooked))
   use raw_l <- anf.then(anf.cons_list(raw))
   anf.host("get_template_object", [site_v, cooked_l, raw_l])
@@ -1209,10 +1128,9 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
             // script — inline the literal (analyze_const_globals proved it).
             Ok(lit) -> anf.pure(lit)
             Error(Nil) -> {
-              // global_get_fast (JRead) probes the global object's poly
-              // overlay for own-data props. IsAtom catches `miss` AND
-              // atom-valued globals — a perf-only conflation; full JMut
-              // `global_get` re-reads.
+              // global_get_fast (JRead) probes the global object's own
+              // data props. IsAtom catches `miss` AND atom-valued globals —
+              // a perf-only conflation; full JMut `global_get` re-reads.
               let kb = ir.ConstBinary(bit_array.from_string(g))
               use v <- anf.then(anf.host("global_get_fast", [kb]))
               use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
@@ -1381,41 +1299,6 @@ fn math_direct_op(
   }
 }
 
-/// True iff `e` evaluates to a value that is DEFINITELY a `{js_cell,_}`
-/// handle at runtime — so `get_prop_fast`/`set_prop_fast` can skip the
-/// `is_tuple ∧ element(1)=:=js_cell` receiver guard. `this` in a method body
-/// is `element(1, Frame)`, always the receiver handle. `new F(...)` returns
-/// a fresh handle. A parenthesized either is transparent.
-fn is_known_handle(e: ast.Expression) -> Bool {
-  case ast_util.unwrap_parens(e) {
-    ast.ThisExpression(..) -> True
-    ast.NewExpression(..) -> True
-    ast.ObjectExpression(..) -> True
-    ast.ArrayExpression(..) -> True
-    _ -> False
-  }
-}
-
-/// True iff `v` is an ir.Var known (via state.known_handles) to hold a
-/// `{js_cell,_}` handle — dataflow through `let`/write_slot for cases
-/// `is_known_handle` (AST-only) can't see (`let o={…}; o.x`).
-fn is_known_handle_val(e: Emitter2, v: ir.Value) -> Bool {
-  case perf5_known_handle, v {
-    True, ir.Var(name) -> state.is_known_handle(e, name)
-    _, _ -> False
-  }
-}
-
-/// Mark `v` (if a Var) as a known `{js_cell,_}` handle.
-fn mark_handle(v: ir.Value) -> Build(Nil) {
-  fn(e: Emitter2, k) {
-    case v {
-      ir.Var(name) -> k(state.mark_known_handle(e, name), Nil)
-      _ -> k(e, Nil)
-    }
-  }
-}
-
 /// Static `.name` key as a raw binary — the own-data-property fast-path
 /// discriminator. `#x` (private) and `[e]` (computed) are excluded.
 fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
@@ -1426,401 +1309,19 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   }
 }
 
-/// own-data-property READ fast path (SPEC i-prop-ic). Warm hit is INLINED —
-/// zero `call_ext`. Receiver guard `is_tuple ∧ element(1)=:=js_cell` (bare
-/// `is_tuple` admits `{js_bigint,N}`/`{js_sym,S}` whose element-2 collides
-/// with the integer cell-id key space). Then `pdict[id]`:
-///   * FLAT `{s_shaped_object,Sid,P,X0,…}` (i-prop-ic overlay) — check
-///     `pdict[SiteKey]={Sid,OffF}` → `element(OffF,c)` (single BIF; slots
-///     inlined at positions 4..N). SiteKey is a compile-time-unique
-///     ConstBinary (literal — zero alloc; disjoint from cell-id keys).
-///   * `#{KeyBin=>V}` map (SObject poly overlay) — direct `map_get`.
-/// Any miss → `t_ic_get` (installs shaped overlay + SiteKey; on non-shaped
-/// receivers subsumes the SObject own-data path) → full `get_prop`.
+/// Own-data-property READ fast path: one JRead probe (`get_prop_own_data`,
+/// arc_rt_obj_ffi) for an own DataProperty / shaped slot on the receiver;
+/// `=:= miss` (NOT IsAtom — undefined/null/true/false are legitimate
+/// values) falls to `slow`, the full `get_prop`. The probe does its own
+/// receiver check, so non-handle receivers need no guard here.
 fn get_prop_fast(
   obj: ir.Value,
   kb: BitArray,
-  known_handle: Bool,
   slow: Build(ir.Value),
 ) -> Build(ir.Value) {
-  let site_key = ic_site_key("@pg")
-  // `cold` is referenced from ~7 bind_if miss-arms. perf7: outline it as a
-  // real ir.Function + CallDirect (hit path = pure nested bind_if, no Block
-  // → every level let-cases). perf6 fallback: anf.share Block/Break join.
-  use cold <- with_cold_get(obj, kb, site_key, slow)
-  use id, simple_this <- with_receiver_id(obj, known_handle, or: cold)
-  // simple_this: use the threaded `_this_c` slot (0 pdict-get). Otherwise:
-  // fresh `pdict_get(id)`.
-  use c <- anf.then(case simple_this {
-    True -> read_this_c(id)
-    False -> anf.host("pdict_get", [id])
-  })
-  // Shaped inline hit — `sid` passed in so simple_this reuses the entry-
-  // hoisted `_this_sid`; general path derives from `c` after tag gate.
-  let shaped_hit = fn(c: ir.Value, sid: ir.Value) {
-    use sk <- anf.then(anf.host("pdict_get", [site_key]))
-    use is_skt <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, sk)))
-    anf.bind_if(
-      is_skt,
-      {
-        use csid <- anf.then(anf.bind(anf.tuple_get(sk, 0)))
-        use hit <- anf.then(anf.bind(ir.NumTerm(ir.NEq, csid, sid)))
-        anf.bind_if(
-          hit,
-          {
-            // FLAT pdict: `c = {tag,Sid,P,X0,…}`; SiteKey caches OffF
-            // (=Off+4) so the hit is a single element/2 on `c`.
-            use off_f <- anf.then(anf.bind(anf.tuple_get(sk, 1)))
-            anf.host("erl_element", [off_f, c])
-          },
-          cold,
-        )
-      },
-      cold,
-    )
-  }
-  // pdict[Id] shape is disjoint by tag: FLAT `{s_shaped_object,Sid,P,X0,…}`
-  // (i-prop-ic overlay) | MONO `{KeyBin,V}` (perf2 SObject 1-key cache —
-  // obj_prop hot path) | `#{Kb=>V}` map (SObject poly, ≥2 keys) | undefined.
-  case simple_this {
-    True -> {
-      // Sid derived per-site from `_this_c` (element 2 after the FLAT-shaped
-      // guard) — NOT threaded via a slot. Threading `_this_sid` would need
-      // refresh_this_c to re-derive it (an If → emit_core cont_inline_weight
-      // bails → +~100k letrec applies/run vs the ~3 BIFs saved here).
-      use is_ct <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, c)))
-      anf.bind_if(
-        is_ct,
-        {
-          use t0 <- anf.then(anf.bind(anf.tuple_get(c, 0)))
-          use is_shaped <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, t0)))
-          anf.bind_if(
-            is_shaped,
-            {
-              use sid <- anf.then(anf.bind(anf.tuple_get(c, 1)))
-              shaped_hit(c, sid)
-            },
-            cold,
-          )
-        },
-        cold,
-      )
-    }
-    False -> {
-      use is_ct <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, c)))
-      anf.bind_if(
-        is_ct,
-        {
-          // Mono `{KeyBin,V}` FIRST — element(1) IS the cached key binary.
-          // obj_prop hot hit = elem(1)+`=:=`+elem(2); shaped receivers pay
-          // one ~free atom-vs-binary tag-mismatch `=:=` then the shaped gate.
-          use t0 <- anf.then(anf.bind(anf.tuple_get(c, 0)))
-          use is_mono <- anf.then(
-            anf.bind(ir.NumTerm(ir.NEq, t0, ir.ConstBinary(kb))),
-          )
-          anf.bind_if(is_mono, anf.bind(anf.tuple_get(c, 1)), {
-            // Not mono — gate on `is_atom(t0)`: pdict[Id] tuple element(1)
-            // is either the atom tag or a mono key BINARY, so a single
-            // tag-test distinguishes shaped from diff-key mono (cheaper
-            // than `=:=` — one BEAM tag-bit test vs a term compare).
-            use is_shaped <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, t0)))
-            anf.bind_if(
-              is_shaped,
-              {
-                use sid <- anf.then(anf.bind(anf.tuple_get(c, 1)))
-                shaped_hit(c, sid)
-              },
-              cold,
-            )
-          })
-        },
-        {
-          use is_cm <- anf.then(anf.bind(ir.TermTest(ir.IsMap, c)))
-          anf.bind_if(
-            is_cm,
-            {
-              use has <- anf.then(
-                anf.bind(ir.MapOp(ir.MapHas, [c, ir.ConstBinary(kb)])),
-              )
-              anf.bind_if(
-                has,
-                anf.bind(
-                  ir.MapOp(ir.MapGet, [
-                    c,
-                    ir.ConstBinary(kb),
-                    ir.ConstAtom("undefined"),
-                  ]),
-                ),
-                cold,
-              )
-            },
-            cold,
-          )
-        },
-      )
-    }
-  }
-}
-
-/// perf5 this-id-hoist — when `obj` is the simple-ABI `_this` param
-/// (func.gleam simple_this_param), yield the entry-hoisted `_this_id` with
-/// NO receiver guard and `simple_this=True` (`_this` is always `{js_cell,_}`;
-/// its pdict overlay may be FLAT-shaped OR mono/map — emit_call_with_pair
-/// dispatches CodeT for any receiver, so callers still tag-gate on `c`).
-/// Otherwise: with_handle_id guard + fresh `id = element(2,obj)`.
-fn with_receiver_id(
-  obj: ir.Value,
-  known_handle: Bool,
-  or miss: Build(ir.Value),
-  then body: fn(ir.Value, Bool) -> Build(ir.Value),
-) -> Build(ir.Value) {
-  case obj {
-    // Strings match func.gleam simple_this_param / simple_this_id_param.
-    ir.Var("_this") -> body(ir.Var("_this_id"), True)
-    _ -> {
-      use <- with_handle_id(obj, known_handle, or: miss)
-      use id <- anf.then(anf.bind(anf.tuple_get(obj, 1)))
-      body(id, False)
-    }
-  }
-}
-
-// perf6 mut-this-c: `_this_c` = `pdict[_this_id]`. The pdict entry ITSELF is
-// the mutable slot — read fresh per `this.x` (1 `get` BIF); no slot_var(-1)
-// rebind so anf.bind_if/share never widen for it. perf5's slot-threading
-// (below, `perf6_mut_this_c=False`) kept 0-op reads but every set/refresh
-// rebound slot -1 → `carried=[-1]` at each surrounding join → to_break_wide
-// can't sink multi-binder Ifs → ~445k letrec-apply/run ≈1,780µs (richards).
-const this_c_slot = -1
-
-/// `pdict[_this_id]` — the mutable `_this_c` overlay. perf6 narrowed
-/// (deltablue): entry-bound `_this_c` var (0-op) while `this_c_cache` holds,
-/// else fresh pdict_get — cache invalidated (never rebound) on the first
-/// `this.x=`/user-JS so slot -1 stays out of `carried` (richards floor kept).
-/// perf5 fallback: threaded slot -1 var if inside a `_t` body.
-fn read_this_c(id: ir.Value) -> Build(ir.Value) {
-  use e <- anf.then(ask)
-  case perf6_mut_this_c, e.this_c_cache, dict.get(e.slot_vars, this_c_slot) {
-    True, Some(name), _ -> anf.pure(ir.Var(name))
-    False, _, Ok(name) -> anf.pure(ir.Var(name))
-    _, _, _ -> anf.host("pdict_get", [id])
-  }
-}
-
-/// perf6: drop `this_c_cache` — caller's `pdict_put(id,nc)` (immediately
-/// after) IS the store; next read_this_c falls back to a fresh pdict_get.
-/// No slot -1 rebind → `carried=[]`. perf5 fallback: rebind slot -1.
-fn set_this_c(nc: ir.Value) -> Build(Nil) {
-  fn(e: Emitter2, k) {
-    case perf6_mut_this_c, dict.has_key(e.slot_vars, this_c_slot) {
-      False, True -> {
-        let #(name, e) = state.fresh_var(e)
-        ir.Let(
-          [name],
-          ir.Values([nc]),
-          k(state.set_slot_var(e, this_c_slot, name), Nil),
-        )
-      }
-      True, _ -> k(state.drop_this_c_cache(e), Nil)
-      _, _ -> k(e, Nil)
-    }
-  }
-}
-
-/// perf6: drop `this_c_cache` — `pdict[_this_id]` is already current after
-/// any user-JS call (aliased writes → pdict_put; cold ops → jsv_install/
-/// evict); next read_this_c falls back to a fresh pdict_get. No slot -1
-/// rebind → `carried=[]`. perf5 fallback: re-read into a fresh slot -1
-/// binder (LINEAR 1-Let so cont_inline_weight ≤6 still fires).
-fn refresh_this_c() -> Build(Nil) {
-  fn(e: Emitter2, k) {
-    case perf6_mut_this_c, dict.has_key(e.slot_vars, this_c_slot) {
-      False, True -> {
-        let #(cn, e) = state.fresh_var(e)
-        let e = state.set_slot_var(e, this_c_slot, cn)
-        ir.Let(
-          [cn],
-          ir.CallHost("js", "pdict_get", [ir.Var("_this_id")]),
-          k(e, Nil),
-        )
-      }
-      True, _ -> k(state.drop_this_c_cache(e), Nil)
-      _, _ -> k(e, Nil)
-    }
-  }
-}
-
-/// Emit the receiver `is_tuple ∧ element(1)=:=js_cell` guard around `body`.
-/// `known_handle` (e.g. `this` inside a method body, `new F(...)`) skips the
-/// `element(1)=:=js_cell` tag check — the value is either `{js_cell,_}` or
-/// (Script-root `this`) `undefined`; `is_tuple` alone gates the latter.
-/// `body` runs with `obj` proven to be `{js_cell,_}`.
-fn with_handle_id(
-  obj: ir.Value,
-  known_handle: Bool,
-  or miss: Build(ir.Value),
-  then body: fn() -> Build(ir.Value),
-) -> Build(ir.Value) {
-  use e <- anf.then(ask)
-  // known_handles dataflow (`let o={x:0}` → o marked via new_object_literal
-  // result): DEFINITELY `{js_cell,_}` — skip both guards. `known_handle`
-  // (AST-level: ThisExpression/NewExpression) keeps `is_tuple` since script-
-  // root `this` may be `undefined` and NewExpression may throw-and-return.
-  case is_known_handle_val(e, obj) {
-    True -> body()
-    False -> {
-      use is_tup <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, obj)))
-      anf.bind_if(
-        is_tup,
-        case known_handle {
-          True -> body()
-          False -> {
-            use tag <- anf.then(anf.bind(anf.tuple_get(obj, 0)))
-            use is_h <- anf.then(
-              anf.bind(ir.NumTerm(ir.NEq, tag, ir.ConstAtom("js_cell"))),
-            )
-            anf.bind_if(is_h, body(), miss)
-          }
-        },
-        miss,
-      )
-    }
-  }
-}
-
-/// perf7 gate for get_prop_fast's cold arm. True → emit `get_prop_cold` (with
-/// its `slow` reconstructed against the aux fn's obj param — every caller's
-/// `slow` is `named_key_from_binary(kb) → get_prop`) as a jsf_cold_pg_*
-/// ir.Function; each miss = `CallDirect(name,[obj])`. False → `anf.share`.
-fn with_cold_get(
-  obj: ir.Value,
-  kb: BitArray,
-  site_key: ir.Value,
-  slow: Build(ir.Value),
-  body: fn(Build(ir.Value)) -> Build(ir.Value),
-) -> Build(ir.Value) {
-  case perf7_cold_outline {
-    False -> anf.share(get_prop_cold(obj, kb, site_key, slow), body)
-    True -> {
-      use name <- anf.then(
-        anf.aux_fn("jsf_cold_pg_", [#("_cold_obj", ir.TTerm)], fn(ps) {
-          let assert [o] = ps
-          use iv <- anf.then(
-            anf.host("ic_get", [o, ir.ConstBinary(kb), site_key]),
-          )
-          use ic_miss <- anf.then(
-            anf.bind(ir.NumTerm(ir.NEq, iv, ir.ConstAtom("miss"))),
-          )
-          anf.bind_if(
-            ic_miss,
-            get_prop_proto_tier(o, kb, {
-              use key <- anf.then(named_key_from_binary(kb))
-              anf.host("get_prop", [o, key])
-            }),
-            anf.pure(iv),
-          )
-        }),
-      )
-      // Mirror anf.share's over-approximation: cold's refresh_this_c
-      // (get_prop_cold:1727) drops this_c_cache for the OUTER continuation
-      // via e_c threading; the CallDirect Build doesn't, so drop it here.
-      use r <- anf.then(body(anf.bind(ir.CallDirect(name, [obj]))))
-      use _ <- anf.then(refresh_this_c())
-      anf.pure(r)
-    }
-  }
-}
-
-/// perf7 gate for set_prop_fast's cold arm. True → emit `set_prop_cold`
-/// (reconstructed against the aux fn's obj/v params) as a jsf_cold_ps_*
-/// ir.Function; each miss = `CallDirect(name,[obj,v])`. False → `anf.share`.
-fn with_cold_set(
-  obj: ir.Value,
-  kb: BitArray,
-  v: ir.Value,
-  site_key: ir.Value,
-  body: fn(Build(ir.Value)) -> Build(ir.Value),
-) -> Build(ir.Value) {
-  case perf7_cold_outline {
-    False -> anf.share(set_prop_cold(obj, kb, v, site_key), body)
-    True -> {
-      use name <- anf.then(
-        anf.aux_fn(
-          "jsf_cold_ps_",
-          [#("_cold_obj", ir.TTerm), #("_cold_v", ir.TTerm)],
-          fn(ps) {
-            let assert [o, cv] = ps
-            use r <- anf.then(
-              anf.host("ic_set", [o, ir.ConstBinary(kb), cv, site_key]),
-            )
-            use ic_miss <- anf.then(
-              anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))),
-            )
-            anf.bind_if(
-              ic_miss,
-              {
-                use key <- anf.then(named_key_from_binary(kb))
-                anf.host("set_prop", [o, key, cv])
-              },
-              anf.pure(r),
-            )
-          },
-        ),
-      )
-      // Mirror anf.share: set_prop_cold:1901's refresh_this_c drops cache
-      // for the outer continuation; CallDirect path must do the same.
-      use r <- anf.then(body(anf.bind(ir.CallDirect(name, [obj, v]))))
-      use _ <- anf.then(refresh_this_c())
-      anf.pure(r)
-    }
-  }
-}
-
-/// Cold tier: `t_ic_get` (installs shaped overlay + SiteKey; on non-shaped
-/// receivers tails into the SObject own-data path itself) → perf8 proto tier
-/// → full `get_prop`. `=:= miss` NOT IsAtom — undefined/null/true/false are
-/// legitimate slot values.
-fn get_prop_cold(
-  obj: ir.Value,
-  kb: BitArray,
-  site_key: ir.Value,
-  slow: Build(ir.Value),
-) -> Build(ir.Value) {
-  use iv <- anf.then(anf.host("ic_get", [obj, ir.ConstBinary(kb), site_key]))
-  // t_ic_get on `undefined` pdict[_this_id] installs the FLAT tuple (via
-  // shaped_flat_install); on `miss` t_get_prop_any → t_cell_get →
-  // jsv_overlay_slot may too. Either way `_this_c` is stale.
-  use _ <- anf.then(refresh_this_c())
-  use ic_miss <- anf.then(
-    anf.bind(ir.NumTerm(ir.NEq, iv, ir.ConstAtom("miss"))),
-  )
-  anf.bind_if(ic_miss, get_prop_proto_tier(obj, kb, slow), anf.pure(iv))
-}
-
-/// perf8 tier between `t_ic_get` own-miss and `t_get_prop_any`: proto-chain
-/// data-get via `t_ic_proto_get` (obj_ffi.erl). Warm hit resolves in one
-/// pdict compare (raytrace `.prototype` on KFunction, proto-default reads);
-/// `miss` (accessor / not found / no proto) falls to `slow`. Separate `@pgp`
-/// SiteKey — `@pg` already caches `{Sid,OffF}`. Emitted inside the SHARED
-/// cold arm so hot inline IR is unchanged.
-fn get_prop_proto_tier(
-  obj: ir.Value,
-  kb: BitArray,
-  slow: Build(ir.Value),
-) -> Build(ir.Value) {
-  case perf8_ic_proto_get {
-    False -> slow
-    True -> {
-      let pgp_key = ic_site_key("@pgp")
-      use pv <- anf.then(
-        anf.host("ic_proto_get", [obj, ir.ConstBinary(kb), pgp_key]),
-      )
-      use pmiss <- anf.then(
-        anf.bind(ir.NumTerm(ir.NEq, pv, ir.ConstAtom("miss"))),
-      )
-      anf.bind_if(pmiss, slow, anf.pure(pv))
-    }
-  }
+  use v <- anf.then(anf.host("get_prop_own_data", [obj, ir.ConstBinary(kb)]))
+  use is_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
+  anf.bind_if(is_miss, slow, anf.pure(v))
 }
 
 /// Build the wire `{string_key, {named, kb}}` PropertyKey from a raw binary
@@ -1838,160 +1339,23 @@ fn named_key_from_binary(kb: BitArray) -> Build(ir.Value) {
   anf.make_tuple([ir.ConstAtom("string_key"), inner])
 }
 
-/// own-data-property WRITE fast path (SPEC i-prop-ic). Warm hit is INLINED
-/// (zero `call_ext`) — same receiver + `pdict[id]` dispatch as
-/// `get_prop_fast`:
-///   * FLAT shaped overlay `{s_shaped_object,Sid,P,X0,…}` + `pdict[SiteKey]
-///     ={Sid,OffF}` → `put(id, setelement(OffF,c,v))` — ONE tuple alloc
-///     (BIFs only; St untouched — coherence via jsv_evict/flush/overlay_slot).
-///   * SObject poly-map overlay + key present → `put(id, maps:put(kb,v,c))`.
-/// Any miss → `t_ic_set` (JRead; installs; subsumes the SObject own-data
-/// write on non-shaped receivers) → full `t_set_prop_any`. Yields `v` (the
-/// assignment expression's own value).
-fn set_prop_fast(
-  obj: ir.Value,
-  kb: BitArray,
-  known_handle: Bool,
-  v: ir.Value,
-) -> Build(ir.Value) {
-  let site_key = ic_site_key("@pg")
-  use _ <- anf.then({
-    use cold <- with_cold_set(obj, kb, v, site_key)
-    use id, simple_this <- with_receiver_id(obj, known_handle, or: cold)
-    use c <- anf.then(case simple_this {
-      True -> read_this_c(id)
-      False -> anf.host("pdict_get", [id])
-    })
-    let shaped_hit = fn(c: ir.Value, sid: ir.Value, thread_nc: Bool) {
-      use sk <- anf.then(anf.host("pdict_get", [site_key]))
-      use is_skt <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, sk)))
-      anf.bind_if(
-        is_skt,
-        {
-          use csid <- anf.then(anf.bind(anf.tuple_get(sk, 0)))
-          use hit <- anf.then(anf.bind(ir.NumTerm(ir.NEq, csid, sid)))
-          anf.bind_if(
-            hit,
-            {
-              // FLAT pdict: `c = {tag,Sid,P,X0,…}`; write is ONE setelement
-              // on `c` — no nested Slots rebuild + wrapper alloc.
-              use off_f <- anf.then(anf.bind(anf.tuple_get(sk, 1)))
-              use nc <- anf.then(anf.host("erl_setelement", [off_f, c, v]))
-              // simple_this: rebind slot -1 to `nc` so the next `this.x`
-              // read sees it without a pdict_get.
-              use _ <- anf.then(case thread_nc {
-                True -> set_this_c(nc)
-                False -> anf.pure(Nil)
-              })
-              anf.host("pdict_put", [id, nc])
-            },
-            cold,
-          )
-        },
-        cold,
-      )
-    }
-    // Same disjoint pdict[Id] shape ladder as get_prop_fast; simple_this
-    // derives Sid per-site (see get_prop_fast comment).
-    case simple_this {
-      True -> {
-        use is_ct <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, c)))
-        anf.bind_if(
-          is_ct,
-          {
-            use t0 <- anf.then(anf.bind(anf.tuple_get(c, 0)))
-            use is_shaped <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, t0)))
-            anf.bind_if(
-              is_shaped,
-              {
-                use sid <- anf.then(anf.bind(anf.tuple_get(c, 1)))
-                shaped_hit(c, sid, True)
-              },
-              cold,
-            )
-          },
-          cold,
-        )
-      }
-      False -> {
-        use is_ct <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, c)))
-        anf.bind_if(
-          is_ct,
-          {
-            // Mono `{KeyBin,_}` FIRST — same ordering as get_prop_fast.
-            use t0 <- anf.then(anf.bind(anf.tuple_get(c, 0)))
-            use is_mono <- anf.then(
-              anf.bind(ir.NumTerm(ir.NEq, t0, ir.ConstBinary(kb))),
-            )
-            anf.bind_if(
-              is_mono,
-              {
-                use nc <- anf.then(anf.make_tuple([ir.ConstBinary(kb), v]))
-                anf.host("pdict_put", [id, nc])
-              },
-              {
-                // Shaped ⇔ is_atom(t0) — see get_prop_fast.
-                use is_shaped <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, t0)))
-                anf.bind_if(
-                  is_shaped,
-                  {
-                    use sid <- anf.then(anf.bind(anf.tuple_get(c, 1)))
-                    shaped_hit(c, sid, False)
-                  },
-                  cold,
-                )
-              },
-            )
-          },
-          {
-            use is_cm <- anf.then(anf.bind(ir.TermTest(ir.IsMap, c)))
-            anf.bind_if(
-              is_cm,
-              {
-                use has <- anf.then(
-                  anf.bind(ir.MapOp(ir.MapHas, [c, ir.ConstBinary(kb)])),
-                )
-                anf.bind_if(
-                  has,
-                  {
-                    use nc <- anf.then(
-                      anf.bind(ir.MapOp(ir.MapPut, [c, ir.ConstBinary(kb), v])),
-                    )
-                    anf.host("pdict_put", [id, nc])
-                  },
-                  cold,
-                )
-              },
-              cold,
-            )
-          },
-        )
-      }
-    }
-  })
-  anf.pure(v)
-}
-
-fn set_prop_cold(
-  obj: ir.Value,
-  kb: BitArray,
-  v: ir.Value,
-  site_key: ir.Value,
-) -> Build(ir.Value) {
-  use r <- anf.then(anf.host("ic_set", [obj, ir.ConstBinary(kb), v, site_key]))
-  use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))))
-  use r <- anf.then(anf.bind_if(
-    ic_miss,
+/// Own-data-property WRITE fast path: one JMutMiss probe
+/// (`set_prop_own_data`) that overwrites an existing own writable
+/// DataProperty / shaped slot and yields the rebound state (a tuple) or the
+/// atom `miss`; `IsAtom` routes the miss to the full `set_prop`. Yields `v`
+/// (the assignment expression's own value).
+fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
+  use r <- anf.then(anf.host("set_prop_own_data", [obj, ir.ConstBinary(kb), v]))
+  use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, r)))
+  use _ <- anf.then(anf.bind_if(
+    is_miss,
     {
       use key <- anf.then(named_key_from_binary(kb))
       anf.host("set_prop", [obj, key, v])
     },
-    anf.pure(r),
+    anf.pure(v),
   ))
-  // Either arm may have `put(_this_id, …)` (t_ic_set direct; t_set_prop_any
-  // → t_cell_set → jsv_evict). `_this_c` is stale on the cold path.
-  use _ <- anf.then(refresh_this_c())
-  anf.pure(r)
+  anf.pure(v)
 }
 
 /// Indexed-element READ fast path (SPEC array-index-fast-path). `idx` is
@@ -2006,24 +1370,7 @@ fn get_elem_fast(
   idx: ir.Value,
   slow: Build(ir.Value),
 ) -> Build(ir.Value) {
-  use e <- anf.then(ask)
-  // perf8_arr_c_hoist: if `obj` is a loop-invariant base whose `{tc_arr,Id}`
-  // overlay was pre-fetched into `arr_c` before the loop, read via that (0
-  // pdict-get per hit). `_c` FFI falls to `_p` on undefined so cold install
-  // still fires once. Only reachable when perf7_arr_pdict=True (stmt.gleam
-  // gates the hoist on both consts).
-  let hoisted = case perf8_arr_c_hoist, perf7_arr_pdict, obj {
-    True, True, ir.Var(name) -> state.lookup_hoisted_arr_c(e, name)
-    _, _, _ -> None
-  }
-  use v <- anf.then(case hoisted {
-    Some(arr_c) -> anf.host("get_elem_fast_c", [arr_c, obj, idx])
-    None ->
-      case perf7_arr_pdict {
-        True -> anf.host("get_elem_fast_p", [obj, idx])
-        False -> anf.host("get_elem_fast", [obj, idx])
-      }
-  })
+  use v <- anf.then(anf.host("get_elem_fast", [obj, idx]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
   anf.bind_if(is_miss, slow, anf.pure(v))
 }
@@ -2039,11 +1386,7 @@ fn set_elem_fast(
   v: ir.Value,
   slow: Build(ir.Value),
 ) -> Build(ir.Value) {
-  let host = case perf7_arr_pdict {
-    True -> "set_elem_fast_p"
-    False -> "set_elem_fast"
-  }
-  use r <- anf.then(anf.host(host, [obj, idx, v]))
+  use r <- anf.then(anf.host("set_elem_fast", [obj, idx, v]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, r)))
   use _ <- anf.then(anf.bind_if(is_miss, slow, anf.pure(v)))
   anf.pure(v)
@@ -2052,11 +1395,10 @@ fn set_elem_fast(
 pub fn emit_member_get(
   obj: ir.Value,
   prop: ast.MemberProperty,
-  known_handle: Bool,
 ) -> Build(ir.Value) {
   case static_dot_key(prop) {
     Some(kb) ->
-      get_prop_fast(obj, kb, known_handle, {
+      get_prop_fast(obj, kb, {
         use k <- anf.then(named_key_from_binary(kb))
         anf.host("get_prop", [obj, k])
       })
@@ -2211,16 +1553,10 @@ pub fn emit_call_with_pair(
       }
     }
   }
-  use r <- anf.then(
-    anf.bind_if(is_kfn, fast, {
-      use args_l <- anf.then(cons_args)
-      anf.host("call", [f, this, args_l])
-    }),
-  )
-  // User JS ran — `pdict[_this_id]` may have been rewritten (aliased write,
-  // jsv_evict via t_cell_set). Refresh the threaded `_this_c`.
-  use _ <- anf.then(refresh_this_c())
-  anf.pure(r)
+  anf.bind_if(is_kfn, fast, {
+    use args_l <- anf.then(cons_args)
+    anf.host("call", [f, this, args_l])
+  })
 }
 
 /// Method call `o.prop(args)` with `o` already Let-bound (§13.3.6.2 this=obj).
@@ -2234,12 +1570,11 @@ pub fn emit_call_with_pair(
 fn emit_member_call(
   o: ir.Value,
   prop: ast.MemberProperty,
-  known_handle: Bool,
   args: List(ast.Expression),
 ) -> Build(ir.Value) {
   case ast_util.has_spread_arg(args) {
     True -> {
-      use f <- anf.then(emit_member_get(o, prop, known_handle))
+      use f <- anf.then(emit_member_get(o, prop))
       use args_l <- anf.then(emit_args_list(args))
       emit_call(f, o, args_l)
     }
@@ -2247,257 +1582,31 @@ fn emit_member_call(
       case static_dot_key(prop) {
         None -> {
           // Computed / #private — key evals BEFORE args (§13.3.6 order).
-          use f <- anf.then(emit_member_get(o, prop, known_handle))
+          use f <- anf.then(emit_member_get(o, prop))
           use pos <- anf.then(anf.seq(list.map(args, expr)))
           use pair <- anf.then(anf.host("kfn_code", [f, o]))
           emit_call_with_pair(pair, f, o, Positional(pos))
         }
         Some(kb) -> {
-          // Per-CALLSITE polymorphic IC: SiteKey is a compile-time-unique
-          // ConstBinary pdict key (literal — zero runtime alloc; disjoint
-          // from the integer/atom overlay-key space). Cache format (see
-          // arc_rt_obj_ffi:tc_ic_install/6): mono `{{Sid,Proto},Code,
-          // FnH,SimpleT}` | poly `#{{Sid,Proto} => {Code,FnH,SimpleT}}` |
-          // `mega` | undefined. Keyed on the `{Sid,Proto}` PAIR — Sid alone
-          // is unsound (two ctors with identical field sequence share a Sid
-          // with different protos). Eviction rides tc_mc_clear (jsv_evict on
-          // any dep proto sweeps every SiteKey).
-          let site_key = ic_site_key("@ic")
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          let n_pos = list.length(pos)
-          // Dispatch a warm-hit entry `{Code,FnH,SimpleT}`. When SimpleT is
-          // `{CodeT,Arity}` (this-abi variant, needs_this=true) with Arity ==
-          // len(pos): CallClosure(CodeT, [o | pos]) — ZERO frame tuple, ZERO
-          // args cons (compose N+O). Otherwise fall to the frame path.
-          let dispatch_entry = fn(
-            code: ir.Value,
-            fnh: ir.Value,
-            simple_t: ir.Value,
-          ) -> Build(ir.Value) {
-            let frame_path = {
-              use rc <- anf.then(consts())
-              use args_l <- anf.then(anf.cons_list(pos))
-              use frame <- anf.then(
-                anf.make_tuple([o, fnh, rc.undef, rc.undef]),
-              )
-              anf.bind(ir.CallClosure(code, [frame, args_l]))
-            }
-            case perf5_code_t {
-              False -> {
-                let _ = simple_t
-                let _ = n_pos
-                frame_path
-              }
-              True -> {
-                // frame_path referenced from both bind_if miss-arms; share it
-                // (Block/Break join) so the cons_list+frame tuple emits once.
-                use frame_path <- anf.share(frame_path)
-                use is_st <- anf.then(
-                  anf.bind(ir.TermTest(ir.IsTuple, simple_t)),
-                )
-                anf.bind_if(
-                  is_st,
-                  {
-                    use code_t <- anf.then(anf.bind(anf.tuple_get(simple_t, 0)))
-                    use arity <- anf.then(anf.bind(anf.tuple_get(simple_t, 1)))
-                    use n <- anf.then(
-                      anf.bind(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(n_pos))),
-                    )
-                    use ok <- anf.then(anf.bind(ir.NumTerm(ir.NEq, arity, n)))
-                    anf.bind_if(
-                      ok,
-                      anf.bind(ir.CallClosure(code_t, [o, ..pos])),
-                      frame_path,
-                    )
-                  },
-                  frame_path,
-                )
-              }
-            }
-          }
-          // Warm hit via JPure FFI probe (SPEC S ffi-method-ic-hit) —
-          // t_method_ic_warm collapses the shaped-receiver + SiteKey mono/
-          // poly cache match to ONE native cascade: `{hit,Code,FnH,SimpleT}`
-          // on hit, atom `miss` on any guard fail (non-cell recv / pdict[RId]
-          // absent or non-shaped / SiteKey absent, mega, or shape-mismatch).
-          // ~8 IR ops + 1 call_ext replaces the prior ~25-BIF inline ladder;
-          // richards' 40k/run × ~13ns ≈ 526µs vs the ladder's contribution to
-          // ~486k local calls. Cold tier (proto-walk + SiteKey install) is the
-          // single miss arm. The CallClosure result is never the atom `miss`
-          // (unrepresentable from JS), so the post-probe `=:= miss` check only
-          // fires for the cold FFI's non-shaped/non-object miss.
-          let cold = {
-            use args_l <- anf.then(anf.cons_list(pos))
-            anf.host("call_method_ic", [
-              o,
-              ir.ConstBinary(kb),
-              args_l,
-              site_key,
-            ])
-          }
-          use r <- anf.then(case perf5_inline_method_ic {
-            False -> {
-              let _ = dispatch_entry
-              cold
-            }
-            True ->
-              case perf5s_method_ic_ffi {
-                True -> {
-                  use w <- anf.then(anf.host("method_ic_warm", [o, site_key]))
-                  use is_hit <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, w)))
-                  anf.bind_if(
-                    is_hit,
-                    {
-                      use code <- anf.then(anf.bind(anf.tuple_get(w, 1)))
-                      use fnh <- anf.then(anf.bind(anf.tuple_get(w, 2)))
-                      use st <- anf.then(anf.bind(anf.tuple_get(w, 3)))
-                      dispatch_entry(code, fnh, st)
-                    },
-                    cold,
-                  )
-                }
-                // perf5's ORIGINAL inline ladder (04c63b6) — restored so
-                // gate (a) bisects perf4↔perf5 exactly. anf.share emits
-                // `cold` once (Block/Break join) across the 7 miss-arms.
-                False -> {
-                  use cold <- anf.share(cold)
-                  use id, simple_this <- with_receiver_id(
-                    o,
-                    known_handle,
-                    or: cold,
-                  )
-                  use c <- anf.then(case simple_this {
-                    True -> read_this_c(id)
-                    False -> anf.host("pdict_get", [id])
-                  })
-                  use is_ct <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, c)))
-                  let _ = simple_this
-                  anf.bind_if(
-                    is_ct,
-                    {
-                      use t0 <- anf.then(anf.bind(anf.tuple_get(c, 0)))
-                      use is_shaped <- anf.then(
-                        anf.bind(ir.TermTest(ir.IsAtom, t0)),
-                      )
-                      anf.bind_if(
-                        is_shaped,
-                        {
-                          use sid <- anf.then(anf.bind(anf.tuple_get(c, 1)))
-                          use proto <- anf.then(anf.bind(anf.tuple_get(c, 2)))
-                          use sk <- anf.then(anf.host("pdict_get", [site_key]))
-                          use is_skt <- anf.then(
-                            anf.bind(ir.TermTest(ir.IsTuple, sk)),
-                          )
-                          let poly_arm = {
-                            use is_skm <- anf.then(
-                              anf.bind(ir.TermTest(ir.IsMap, sk)),
-                            )
-                            anf.bind_if(
-                              is_skm,
-                              {
-                                use key <- anf.then(
-                                  anf.make_tuple([sid, proto]),
-                                )
-                                use has <- anf.then(
-                                  anf.bind(ir.MapOp(ir.MapHas, [sk, key])),
-                                )
-                                anf.bind_if(
-                                  has,
-                                  {
-                                    use entry <- anf.then(
-                                      anf.bind(
-                                        ir.MapOp(ir.MapGet, [
-                                          sk,
-                                          key,
-                                          ir.ConstAtom("undefined"),
-                                        ]),
-                                      ),
-                                    )
-                                    use code <- anf.then(
-                                      anf.bind(anf.tuple_get(entry, 0)),
-                                    )
-                                    use fnh <- anf.then(
-                                      anf.bind(anf.tuple_get(entry, 1)),
-                                    )
-                                    use st <- anf.then(
-                                      anf.bind(anf.tuple_get(entry, 2)),
-                                    )
-                                    dispatch_entry(code, fnh, st)
-                                  },
-                                  cold,
-                                )
-                              },
-                              cold,
-                            )
-                          }
-                          anf.bind_if(
-                            is_skt,
-                            {
-                              use ck <- anf.then(anf.bind(anf.tuple_get(sk, 0)))
-                              use ck_sid <- anf.then(
-                                anf.bind(anf.tuple_get(ck, 0)),
-                              )
-                              use hit_s <- anf.then(
-                                anf.bind(ir.NumTerm(ir.NEq, ck_sid, sid)),
-                              )
-                              anf.bind_if(
-                                hit_s,
-                                {
-                                  use ck_p <- anf.then(
-                                    anf.bind(anf.tuple_get(ck, 1)),
-                                  )
-                                  use hit_p <- anf.then(
-                                    anf.bind(ir.NumTerm(ir.NEq, ck_p, proto)),
-                                  )
-                                  anf.bind_if(
-                                    hit_p,
-                                    {
-                                      use code <- anf.then(
-                                        anf.bind(anf.tuple_get(sk, 1)),
-                                      )
-                                      use fnh <- anf.then(
-                                        anf.bind(anf.tuple_get(sk, 2)),
-                                      )
-                                      use st <- anf.then(
-                                        anf.bind(anf.tuple_get(sk, 3)),
-                                      )
-                                      dispatch_entry(code, fnh, st)
-                                    },
-                                    cold,
-                                  )
-                                },
-                                cold,
-                              )
-                            },
-                            poly_arm,
-                          )
-                        },
-                        cold,
-                      )
-                    },
-                    cold,
-                  )
-                }
-              }
-          })
+          use args_l <- anf.then(anf.cons_list(pos))
+          use r <- anf.then(
+            anf.host("call_method_mono", [o, ir.ConstBinary(kb), args_l]),
+          )
           // `=:= miss` — NOT IsAtom: undefined/null/true/false are atoms and
           // are legitimate call results; an IsAtom guard would double-call.
           use is_miss <- anf.then(
             anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))),
           )
-          use r <- anf.then(anf.bind_if(
+          anf.bind_if(
             is_miss,
             {
-              use f <- anf.then(emit_member_get(o, prop, known_handle))
+              use f <- anf.then(emit_member_get(o, prop))
               use pair <- anf.then(anf.host("kfn_code", [f, o]))
               emit_call_with_pair(pair, f, o, Positional(pos))
             },
             anf.pure(r),
-          ))
-          // Inline warm hit ran user JS via CallClosure — `_this_c` stale.
-          // (miss arm already refreshed inside emit_call_with_pair.)
-          use _ <- anf.then(refresh_this_c())
-          anf.pure(r)
+          )
         }
       }
   }
@@ -2560,7 +1669,7 @@ fn emit_chain(
         ast.MemberExpression(_, obj, prop)
         | ast.OptionalMemberExpression(_, obj, prop) -> {
           use o <- anf.then(chain_obj(ex, obj, exit, undef))
-          emit_member_get(o, prop, False)
+          emit_member_get(o, prop)
         }
         ast.CallExpression(_, callee, args) ->
           case callee {
@@ -2572,7 +1681,7 @@ fn emit_chain(
             ast.MemberExpression(_, obj, prop)
             | ast.OptionalMemberExpression(_, obj, prop) -> {
               use o <- anf.then(chain_obj(callee, obj, exit, undef))
-              emit_member_call(o, prop, False, args)
+              emit_member_call(o, prop, args)
             }
             _ -> {
               use #(f, this) <- anf.then(emit_chain_callee(callee, exit, undef))
@@ -2628,7 +1737,7 @@ fn emit_chain_callee(
     ast.MemberExpression(_, obj, prop)
     | ast.OptionalMemberExpression(_, obj, prop) -> {
       use o <- anf.then(chain_obj(callee, obj, exit, undef))
-      use f <- anf.then(emit_member_get(o, prop, False))
+      use f <- anf.then(emit_member_get(o, prop))
       anf.pure(#(f, o))
     }
     _ -> {
@@ -2754,8 +1863,8 @@ fn emit_apply_raw_general(
 /// `X.apply(Y, arguments)` fast-path — forwards the frame's raw `_args`
 /// cons-list directly, eliding the arguments-object read + Function.prototype
 /// .apply reflection (raytrace `Class.create`: 66k× per run). The tighter
-/// `this.M.apply(this, arguments)` shape routes through `call_method_ic` so
-/// the proto-method IC still installs; miss falls to the general form.
+/// `this.M.apply(this, arguments)` shape routes through `call_method_mono`;
+/// miss falls to the general form.
 fn emit_apply_arguments(
   inner: ast.Expression,
   recv_arg: ast.Expression,
@@ -2766,30 +1875,22 @@ fn emit_apply_arguments(
     ->
       case static_dot_key(mprop) {
         Some(kb) -> {
-          let site_key = ic_site_key("@ic")
           use this <- anf.then(emit_lexical(lexical.RefThis))
           use r <- anf.then(
-            anf.host("call_method_ic", [
-              this,
-              ir.ConstBinary(kb),
-              raw_args,
-              site_key,
-            ]),
+            anf.host("call_method_mono", [this, ir.ConstBinary(kb), raw_args]),
           )
           use is_miss <- anf.then(
             anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))),
           )
-          use r <- anf.then(anf.bind_if(
+          anf.bind_if(
             is_miss,
             {
-              use f <- anf.then(emit_member_get(this, mprop, False))
+              use f <- anf.then(emit_member_get(this, mprop))
               use pair <- anf.then(anf.host("kfn_code", [f, this]))
               emit_call_with_pair(pair, f, this, ArgsList(raw_args))
             },
             anf.pure(r),
-          ))
-          use _ <- anf.then(refresh_this_c())
-          anf.pure(r)
+          )
         }
         None -> emit_apply_raw_general(inner, recv_arg, raw_args)
       }
@@ -2820,7 +1921,7 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
           emit_apply_arguments(inner, recv_arg, ir.Var(raw))
         _, _, _ -> {
           use o <- anf.then(expr(inner))
-          emit_member_call(o, prop, is_known_handle(inner), args)
+          emit_member_call(o, prop, args)
         }
       }
     }
@@ -2864,13 +1965,13 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
             // `Math` is shadowed or slotted — no fast path.
             _, _ -> {
               use o <- anf.then(expr(obj))
-              emit_member_call(o, prop, is_known_handle(obj), args)
+              emit_member_call(o, prop, args)
             }
           }
         }
         None -> {
           use o <- anf.then(expr(obj))
-          emit_member_call(o, prop, is_known_handle(obj), args)
+          emit_member_call(o, prop, args)
         }
       }
     // Direct-eval candidate — D15 UnsupportedFeature.
@@ -2945,11 +2046,6 @@ fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
         // (via read_slot → ir.Var(name)) still elides `is_number` guards.
         let e = case anf.is_known_number(e, v) {
           True -> state.mark_known_number(e, name)
-          False -> e
-        }
-        // Same propagation for known-handle (obj_prop: `let o={x:0}` → o).
-        let e = case is_known_handle_val(e, v) {
-          True -> state.mark_known_handle(e, name)
           False -> e
         }
         ir.Let([name], ir.Values([v]), k(state.set_slot_var(e, slot, name), v))
@@ -3052,7 +2148,6 @@ pub type LValue {
     is_private: Bool,
     own_key: Option(BitArray),
     elem_idx: Option(ir.Value),
-    known_handle: Bool,
   )
   LvSuper(home: ir.Value, this: ir.Value, key: ir.Value)
 }
@@ -3103,7 +2198,6 @@ pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
         is_private: is_private_prop(property),
         own_key:,
         elem_idx:,
-        known_handle: is_known_handle(object),
       ))
     }
     // Parser rejects every other assignment target as an early error; per
@@ -3125,8 +2219,8 @@ pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
     LvIdent(name:, direct:) -> emit_direct_get(direct, name)
     LvMember(obj:, key:, is_private: True, ..) ->
       anf.host("private_get", [obj, key])
-    LvMember(obj:, is_private: False, own_key: Some(kb), known_handle:, ..) ->
-      get_prop_fast(obj, kb, known_handle, {
+    LvMember(obj:, is_private: False, own_key: Some(kb), ..) ->
+      get_prop_fast(obj, kb, {
         use key <- anf.then(named_key_from_binary(kb))
         anf.host("get_prop", [obj, key])
       })
@@ -3135,7 +2229,7 @@ pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
         use k <- anf.then(to_property_key(idx))
         anf.host("get_prop", [obj, k])
       })
-    LvMember(obj:, key:, is_private: False, own_key: None, elem_idx: None, ..) ->
+    LvMember(obj:, key:, is_private: False, own_key: None, elem_idx: None) ->
       anf.host("get_prop", [obj, key])
     LvSuper(home:, this:, key:) -> anf.host("super_get", [home, this, key])
   }
@@ -3150,14 +2244,14 @@ pub fn lvalue_put(lv: LValue, v: ir.Value) -> Build(ir.Value) {
       use _ <- anf.then(anf.host("private_set", [obj, key, v]))
       anf.pure(v)
     }
-    LvMember(obj:, is_private: False, own_key: Some(kb), known_handle:, ..) ->
-      set_prop_fast(obj, kb, known_handle, v)
+    LvMember(obj:, is_private: False, own_key: Some(kb), ..) ->
+      set_prop_fast(obj, kb, v)
     LvMember(obj:, is_private: False, elem_idx: Some(idx), ..) ->
       set_elem_fast(obj, idx, v, {
         use k <- anf.then(to_property_key(idx))
         anf.host("set_prop", [obj, k, v])
       })
-    LvMember(obj:, key:, is_private: False, own_key: None, elem_idx: None, ..) -> {
+    LvMember(obj:, key:, is_private: False, own_key: None, elem_idx: None) -> {
       use _ <- anf.then(anf.host("set_prop", [obj, key, v]))
       anf.pure(v)
     }
@@ -3346,97 +2440,8 @@ fn emit_object(
   properties: List(ast.Property),
   _named: Option(String),
 ) -> Build(ir.Value) {
-  let plain_path = {
-    use obj <- anf.then(anf.host("new_object", []))
-    fold_build(properties, obj, emit_object_property)
-  }
-  use obj <- anf.then(case perf5_shape_obj_literals {
-    False -> plain_path
-    True ->
-      case shapeable_literal_keys(properties, []) {
-        // All-plain named-key data props with ≥2 keys: allocate an
-        // SShapedObject directly so subsequent `.k` reads hit the shaped IC.
-        // Single-key `{x:v}` stays on the SObject path — the shaped WRITE hit
-        // rebuilds two tuples (`setelement(off,Slots,v)` + wrapper) per write;
-        // the map-overlay write is one `maps:put`, and obj_prop measured
-        // shaped 23k vs SObject-map 20k.
-        Some(#([_, _, ..] as keys, vs)) -> {
-          let site = ic_site_key("@ol")
-          use vals <- anf.then(anf.seq(vs))
-          use keys_l <- anf.then(anf.cons_list(list.map(keys, ir.ConstBinary)))
-          use vals_l <- anf.then(anf.cons_list(vals))
-          anf.host("new_object_shaped", [site, keys_l, vals_l])
-        }
-        _ -> plain_path
-      }
-  })
-  // Result is always a fresh `{js_cell,_}` — mark so `.x` on a `let o={…}`
-  // binding skips the receiver guard (obj_prop hot path).
-  use _ <- anf.then(mark_handle(obj))
-  anf.pure(obj)
-}
-
-/// Return `Some(#(keys, value_builds))` when every property is a plain
-/// `InitProperty` with a static Named string key (no computed / index /
-/// __proto__ / method / accessor / spread) AND all keys are distinct — i.e.
-/// the literal maps 1-1 to an SShapedObject slot tuple. Empty `{}` is
-/// excluded (nothing to fast-read; first add would devolve). `seen` dedups.
-fn shapeable_literal_keys(
-  ps: List(ast.Property),
-  seen: List(BitArray),
-) -> Option(#(List(BitArray), List(Build(ir.Value)))) {
-  case ps {
-    [] ->
-      case seen {
-        [] -> None
-        _ -> Some(#([], []))
-      }
-    // Function-valued props (`{initialize: function(){…}}` — raytrace's
-    // prototype literals) reject the WHOLE literal: a shaped proto sends
-    // ic_proto_walk through shape-table own_property_of instead of maps:get
-    // and regressed raytrace 287k→683k. Pure-data `{x:0,y:0}` still shapes.
-    [ast.InitProperty(value: ast.FunctionExpression(..), ..), ..]
-    | [ast.InitProperty(value: ast.ArrowFunctionExpression(..), ..), ..] -> None
-    [ast.InitProperty(key:, value:, ..), ..rest] ->
-      case shapeable_key(key) {
-        None -> None
-        Some(kb) ->
-          case list.contains(seen, kb) {
-            True -> None
-            False ->
-              case shapeable_literal_keys(rest, [kb, ..seen]) {
-                None -> None
-                Some(#(kbs, vs)) ->
-                  Some(
-                    #([kb, ..kbs], [
-                      emit(value, ast.property_key_static_name(key)),
-                      ..vs
-                    ]),
-                  )
-              }
-          }
-      }
-    _ -> None
-  }
-}
-
-/// A shapeable literal key is a static string that canonicalizes to `Named`
-/// (never `Index`) and is not `__proto__` (Annex B [[SetPrototypeOf]] arm).
-fn shapeable_key(k: ast.PropertyKey) -> Option(BitArray) {
-  case k {
-    ast.KeyIdentifier(name: "__proto__", ..)
-    | ast.KeyString(value: "__proto__", ..) -> None
-    ast.KeyIdentifier(name:, ..) -> Some(bit_array.from_string(name))
-    ast.KeyString(value: s, ..) ->
-      case key.canonical_key(s) {
-        key.Named(name) -> Some(bit_array.from_string(name))
-        key.Index(..) | key.Private(..) -> None
-      }
-    ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyPrivate(..)
-    | ast.KeyComputed(..) -> None
-  }
+  use obj <- anf.then(anf.host("new_object", []))
+  fold_build(properties, obj, emit_object_property)
 }
 
 /// §13.2.4 ArrayExpression. Port of emit.gleam:4865-4875.

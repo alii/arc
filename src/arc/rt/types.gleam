@@ -1820,19 +1820,11 @@ pub fn shape_slots_fold(
 /// (utf8 BitArray) → slot index; `transitions` maps an added key → the
 /// successor shape_id.
 ///
-/// SHAPE-TABLE SOURCE OF TRUTH (h-shape-design-reconcile): the shape table
-/// lives on `JsStore.shapes` (Erlang element 17) + `JsStore.next_shape`
-/// (element 18), NOT in `pdict[?SHAPES]`. The two spec interpretations
-/// disagreed; JsStore is chosen because shapes are pure structural metadata
-/// (no Handle refs, GC-invisible) that must persist across seed-state reuse
-/// in the bench harness, and threading them through JsStore keeps
-/// Agent self-contained. Writes (`shape_transition`) are cold-path
-/// only — first add of a key to a shape — so the setelement cost is fine.
-/// The pdict holds only DERIVED caches over this table: per-site
-/// `{Sid,Off}` IC entries (`t_ic_get`/`t_ic_set`, swept by `jsv_clear` via
-/// `?TC_IC_IDS`) and the `{shape_off,Sid,Kb}→Off` memo
-/// (`shape_offset_cached`, process-lifetime — valid because a ShapeDesc is
-/// immutable once created); both are rebuildable from `JsStore.shapes`.
+/// The shape table lives on `JsStore.shapes` (Erlang element 17) +
+/// `JsStore.next_shape` (element 18): shapes are pure structural metadata
+/// (no Handle refs, GC-invisible) threaded with the store so an Agent stays
+/// self-contained. A ShapeDesc is immutable once created except for
+/// `transitions` gaining an edge.
 pub type ShapeDesc {
   ShapeDesc(
     arity: Int,
@@ -2197,6 +2189,6 @@ pub type Agent {
     store: JsStore(Agent),
     realm: Realm,
     /// §13.2.8.4 [[TemplateMap]]: site id -> pinned template array.
-    template_objects: Dict(Int, Handle),
+    template_objects: Dict(String, Handle),
   )
 }

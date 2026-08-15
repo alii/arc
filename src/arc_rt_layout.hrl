@@ -19,7 +19,6 @@
 %%   Resume {Sm, Rs, Loc}                                   (async_ffi)
 %%   KFN_SIMPLE payload {some, {Code, Arity, NeedsFrame}}   (call_ffi)
 %%   ShapeSlots: bare tuple, 0-based Off reads element(Off + 1, Slots)
-%%   pdict IC entries {Sid, OffF} / {Sid, Fn} / {ProtoId, Sid, OffF}
 
 %% arc/rt/types.JsStore
 -define(STORE_TAG, js_store).
@@ -64,11 +63,6 @@
 -define(SSHAPED_PROTO, 3).
 -define(SSHAPED_SLOTS, 4).
 -define(SSHAPED_ARITY, 4).
-
-%% Flat pdict overlay {s_shaped_object, Sid, P, X0, .., Xn-1}: the shaped
-%% record with Slots spliced in place, so slot Off lives at Off + OVERLAY_OFF
-%% and per-site ICs cache OffF = Off + OVERLAY_OFF.
--define(OVERLAY_OFF, ?SSHAPED_SLOTS).
 
 %% arc/rt/types.ShapeDesc
 -define(SHAPE_TAG, shape_desc).

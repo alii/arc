@@ -116,19 +116,12 @@ pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
 @external(erlang, "arc_rt_store_ffi", "t_cell_get")
 pub fn t_cell_get(st: Agent, h: Handle) -> JsSlot
 
-/// Drop every fast-path prop-value cache entry for cell `id` (see
-/// `arc_rt_obj_ffi` header). Side-effect only; `Nil` return.
-@external(erlang, "arc_rt_obj_ffi", "jsv_evict")
-fn jsv_evict(id: Int) -> Nil
-
 /// Overwrite the slot at `h` with `slot`, returning the updated state. The
 /// handle must be live (`t_cell_new`-minted, not freed); a write to a dead id
-/// silently resurrects it, so callers uphold the invariant. Evicts the
-/// fast-path prop cache for `h` first so a shape change re-forces validation.
+/// silently resurrects it, so callers uphold the invariant.
 pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
   let js = require_js(st)
   let JsCell(id) = h
-  jsv_evict(id)
   with_js(st, JsStore(..js, data: dict.insert(js.data, id, slot)))
 }
 

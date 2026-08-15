@@ -23,28 +23,11 @@
 
 %% t_cell_get(St, {js_cell, Id}) -> JsSlot
 %% Hot-path cell read — inlines require_js + dict:get so emitted code and
-%% internal callers pay one map lookup, not two cross-module calls. The
-%% returned Slot has any `t_set_prop_own_data` fast-path writes overlaid
-%% (see arc_rt_obj_ffi header) so the general path never observes a
-%% stale prop value. perf8 U2: array-overlay probe gates on the constant-
-%% atom ?TC_ARR_IDS tracker (obj_ffi.erl:86) instead of `get({tc_arr,Id})`
-%% — deltablue's hot path (nothing overlaid) pays zero tuple alloc. The
-%% tracker is a superset (jsv_evict leaves stale entries) so a false hit
-%% falls through jsv_overlay_slot's own undefined arm — correct, just slow.
+%% internal callers pay one map lookup, not two cross-module calls.
 t_cell_get(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
     case element(?STORE_DATA, Store) of
-        #{Id := Slot} ->
-            case get(Id) of
-                undefined ->
-                    case get(arc_rt_tc_arr_ids) of
-                        #{Id := _} ->
-                            arc_rt_obj_ffi:jsv_overlay_slot(
-                              Id, Slot);
-                        _ -> Slot
-                    end;
-                _ -> arc_rt_obj_ffi:jsv_overlay_slot(Id, Slot)
-            end;
+        #{Id := Slot} -> Slot;
         _ -> erlang:error(#{gleam_error => panic, message =>
             <<"t_cell_get: dangling Handle (use-after-free)"/utf8>>})
     end.

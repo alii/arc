@@ -25,30 +25,12 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import twocore/ir
 
-// ── perf5 feature gates (bisect-raytrace-perf5) — see expr.gleam ────────────
+// ── feature gates — see expr.gleam ───────────────────────────────────────────
 
-/// (c) `_this_c`/sid/proto entry-hoist prelude → keep only `_this_id`;
-/// expr.gleam's read/set/refresh_this_c degrade to pdict_get/no-op via the
-/// unset slot-var.
-pub const perf5_this_c_hoist: Bool = True
-
-/// perf6 richards-floor lever (b): mutable-slot `_this_c` — mirrors
-/// expr.gleam's const. True → `pdict[_this_id]` IS the slot; seed only
-/// `_this_id` (slot -1 unset → read/set/refresh degrade to pdict_get/no-op
-/// so bind_if/share never carry it → ~445k letrec-apply/run gone). False →
-/// perf5 slot-var threading. Flip both files.
-pub const perf6_mut_this_c: Bool = True
-
-/// (d) `_t` (needs_this) simple-ABI body emit → reject at
-/// is_simple_abi_eligible so only `_s` survives (perf4 shape). Pair with
-/// expr.gleam's perf5_code_t (dispatch_entry SimpleT arm).
+/// `_t` (needs_this) simple-ABI body emit → reject at is_simple_abi_eligible
+/// so only `_s` survives. Pair with expr.gleam's emit_call_with_pair
+/// needs_this arm.
 pub const perf5_code_t: Bool = True
-
-/// perf7 deltablue-bisect: entry-bind `_this_c` in the `_t` prelude and stash
-/// its name in `this_c_cache` so read_this_c is 0-op until the first
-/// `this.x=`/user-JS drops it. False → perf6's `True,True` arm (bind
-/// `_this_id` only; every read_this_c is a fresh pdict_get).
-pub const perf7_this_c_cache: Bool = False
 
 /// perf7 raytrace lever (z): gate `init_arguments` on needs_args_object_*
 /// (elides t_new_arguments when every `arguments` ref is
@@ -1549,21 +1531,6 @@ fn simple_param_name(i: Int) -> String {
 /// IR-param name for the positional `this` in a `_t`-variant simple body.
 pub const simple_this_param = "_this"
 
-/// Hoisted `element(2, _this)` — bound once at method entry so every `this.x`
-/// skips the per-read `is_tuple` receiver guard + tuple_get. `_this` is always
-/// `{js_cell,_}` (CodeT dispatch only fires for shaped receivers).
-pub const simple_this_id_param = "_this_id"
-
-/// perf5 this-c-hoist: `pdict[_this_id]` (the FLAT `{s_shaped_object,Sid,P,
-/// X0,…}` tuple) read ONCE at method entry and threaded via slot -1. Every
-/// `this.x` read/write reuses it (0 pdict-get on `_this_id`); writes rebind
-/// the slot to `nc = setelement(…)`; user-JS calls re-read pdict.
-pub const simple_this_c_param = "_this_c"
-
-/// Reserved slot-id for the `_this_c` overlay tuple (negative — never
-/// collides with a real ScopeInfo slot).
-pub const this_c_slot = -1
-
 fn build_simple_ir_params(
   i: Int,
   ncap: Int,
@@ -1639,72 +1606,7 @@ fn seed_simple_this(
   case needs_this, info.lexical {
     True, lexical.OwnedLexicalSlots(base:) -> {
       let slot = base + lexical.lexical_ref_offset(lexical.RefThis)
-      let e = state.set_slot_var(e, slot, simple_this_param)
-      // perf6 mut-this-c takes precedence: `pdict[_this_id]` IS the mutable
-      // slot, so bind only `_this_id` and leave slot -1 UNSET — expr.gleam's
-      // read/set/refresh_this_c see has_key(-1)=False (and perf6_mut_this_c
-      // =True) → pdict_get/no-op → bind_if/share `carried` never includes -1
-      // → to_break sinks every If wrapper (the ~445k letrec-apply floor).
-      case perf5_this_c_hoist, perf6_mut_this_c {
-        False, _ -> {
-          use body <- result.map(k(e))
-          ir.Let(
-            [simple_this_id_param],
-            ir.TermOp(ir.TupleGet(1), [ir.Var(simple_this_param)]),
-            body,
-          )
-        }
-        True, True ->
-          case perf7_this_c_cache {
-            False -> {
-              // perf6: bind `_this_id` only; slot -1 unset → read/set/
-              // refresh_this_c degrade to pdict_get/no-op (baseline a7ebc74).
-              use body <- result.map(k(e))
-              ir.Let(
-                [simple_this_id_param],
-                ir.TermOp(ir.TupleGet(1), [ir.Var(simple_this_param)]),
-                body,
-              )
-            }
-            True -> {
-              // perf6 narrowed (deltablue): bind `_this_c` once at entry and
-              // cache its NAME in `this_c_cache` (NOT slot -1 — so anf.bind_if
-              // `carried` and stmt.with_this_c_slot never widen for it).
-              // read_this_c uses the 0-op cached var until the first
-              // `this.x=`/user-JS invalidates it.
-              let e =
-                state.Emitter2(..e, this_c_cache: Some(simple_this_c_param))
-              use body <- result.map(k(e))
-              ir.Let(
-                [simple_this_id_param],
-                ir.TermOp(ir.TupleGet(1), [ir.Var(simple_this_param)]),
-                ir.Let(
-                  [simple_this_c_param],
-                  ir.CallHost("js", "pdict_get", [ir.Var(simple_this_id_param)]),
-                  body,
-                ),
-              )
-            }
-          }
-        True, False -> {
-          // perf5 this-id/c-hoist (slot-var threaded): bind `_this_id =
-          // element(2, _this)` and `_this_c = pdict_get(_this_id)` once;
-          // `_this_c` threads via slot -1 (rebound on writes / after user-JS
-          // calls). NO `_this_sid` slot — its refresh If breaks cont_inline
-          // (+~100k letrec applies/run; measured net-negative, reverted).
-          let e = state.set_slot_var(e, this_c_slot, simple_this_c_param)
-          use body <- result.map(k(e))
-          ir.Let(
-            [simple_this_id_param],
-            ir.TermOp(ir.TupleGet(1), [ir.Var(simple_this_param)]),
-            ir.Let(
-              [simple_this_c_param],
-              ir.CallHost("js", "pdict_get", [ir.Var(simple_this_id_param)]),
-              body,
-            ),
-          )
-        }
-      }
+      k(state.set_slot_var(e, slot, simple_this_param))
     }
     _, _ -> k(e)
   }

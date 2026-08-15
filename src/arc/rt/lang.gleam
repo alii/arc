@@ -251,12 +251,12 @@ pub fn t_regexp_new(
 }
 
 /// §13.2.8.4 GetTemplateObject. `site` is unique per tagged-template source
-/// position; the frozen template array (with its frozen `raw`) is built once,
-/// pinned, and cached on the agent. `cooked` holds `undefined` for quasis
-/// with invalid escapes.
+/// position (the emitter qualifies it with the module name); the frozen
+/// template array (with its frozen `raw`) is built once, pinned, and cached
+/// on the agent. `cooked` holds `undefined` for quasis with invalid escapes.
 pub fn t_get_template_object(
   st: Agent,
-  site: Int,
+  site: String,
   cooked: List(JsVal),
   raw: List(String),
 ) -> #(JsVal, Agent) {

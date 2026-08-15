@@ -411,9 +411,8 @@ fn repeat(n: Int, f: fn() -> a) -> Nil {
 // comparable to the qjs/llint refs — not compile+load+realm-init per rep.
 
 /// A compiled+loaded JS module plus the seeded agent each apply starts
-/// from. `Agent` is a pure threaded record and `apply_main` clears its
-/// process-dict overlay on entry, so re-applying the SAME `seed` observes an
-/// identical fresh realm every rep.
+/// from. `Agent` is a pure threaded record, so re-applying the SAME `seed`
+/// observes an identical fresh realm every rep.
 type Loaded {
   Loaded(mod: Atom, seed: Agent)
 }

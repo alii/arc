@@ -66,7 +66,11 @@ pub fn binding() -> instance.Binding {
 /// SPEC§19.2 / R13: wire the M12-M18 emit_* modules into the mutual-recursion
 /// dispatch table, then build the initial Emitter2 rooted at the script scope.
 /// `is_module` seeds strict mode (ESM top-level is always strict).
-fn init_emitter(tree: scope.ScopeTree, is_module: Bool) -> state.Emitter2 {
+fn init_emitter(
+  tree: scope.ScopeTree,
+  is_module: Bool,
+  module_name: String,
+) -> state.Emitter2 {
   let dispatch =
     state.EmitDispatch(
       emit_expr: expr.emit_expr,
@@ -77,7 +81,7 @@ fn init_emitter(tree: scope.ScopeTree, is_module: Bool) -> state.Emitter2 {
       emit_class: class.emit_class,
       emit_async_body: async.emit_coroutine_fn,
     )
-  state.new_emitter(tree, scope.root_scope_id, is_module, dispatch)
+  state.new_emitter(tree, scope.root_scope_id, is_module, module_name, dispatch)
 }
 
 /// Optimization G: seed every root-scope local binding (top-level `var` /
@@ -228,11 +232,11 @@ pub fn compile_source(
         strict: is_strict,
         top_lex: scope.LexLocal,
         // Optimization G DISABLED (g-cell-get-regress): boxed-cell reads route
-        // through rt_js_store.t_cell_get (JsStore Dict lookup, 62-76ns), not
-        // the ~3ns pdict-ref the spec assumed. richards baseline had only
-        // 65/run global_get_fast (const-globals already inline the 41k), so G
-        // traded 55 cheap reads for +40,910 cell_get/run ≈ +2.9ms. Re-enable
-        // only for a bench where profile shows >1k/run t_global_get_fast.
+        // through rt_store.t_cell_get (JsStore Dict lookup, 62-76ns).
+        // richards baseline had only 65/run global_get_fast (const-globals
+        // already inline the 41k), so G traded 55 cheap reads for +40,910
+        // cell_get/run ≈ +2.9ms. Re-enable only for a bench where profile
+        // shows >1k/run t_global_get_fast.
         module_slot_globals: False,
       ),
     )
@@ -257,7 +261,7 @@ pub fn compile(
   // (1) init emitter at root; strict iff Module goal (compile_source seeds
   // AnalyzeOpts.strict from the same flag; "use strict" directives are
   // per-function and handled by func.emit_function).
-  let e = init_emitter(tree, opts.source_kind == AsModule)
+  let e = init_emitter(tree, opts.source_kind == AsModule, opts.module_name)
   let e = state.set_const_globals(e, expr.analyze_const_globals(body))
   // Optimization G: allocate boxed cells for every root-scope Local binding
   // (top-level `var`/`function` under module_slot_globals) BEFORE hoists so
