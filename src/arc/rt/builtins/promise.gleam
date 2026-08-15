@@ -22,19 +22,24 @@ import arc/rt/call.{
 } as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
+import arc/rt/elements
 import arc/rt/types.{
-  type Agent, type BuiltinPair, type Handle, type JsVal, type PromiseNative,
-  ArrayObj, Dense, JInt, KHandle, Named, PromiseAllResolveElement,
-  PromiseAllSettledElement, PromiseAllSettledStatic, PromiseAllStatic,
+  type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
+  type PromiseKeyedKind, type PromiseNative, ArrayObj, Dense, JInt, KHandle,
+  KeyedFulfilled, KeyedRejected, KeyedValue, Named, NoElements, Ordinary,
+  PromiseAllKeyedStatic, PromiseAllResolveElement, PromiseAllSettledElement,
+  PromiseAllSettledKeyedStatic, PromiseAllSettledStatic, PromiseAllStatic,
   PromiseAnyRejectElement, PromiseAnyStatic, PromiseCapabilityExecutor,
   PromiseCatch, PromiseConstructor, PromiseFinally, PromiseFinallyFn,
-  PromiseFinallyThrower, PromiseFinallyValueThunk, PromiseN, PromiseRaceStatic,
-  PromiseRejectStatic, PromiseResolveStatic, PromiseThen, ReturnThis, SBox,
-  SObject, StringKey, TypeErr, classify, mk_bool, mk_number, mk_object,
-  mk_string, mk_undefined,
+  PromiseFinallyThrower, PromiseFinallyValueThunk, PromiseKeyedElement, PromiseN,
+  PromiseRaceStatic, PromiseRejectStatic, PromiseResolveStatic, PromiseThen,
+  ReturnThis, SBox, SObject, StringKey, SymbolKey, TypeErr, classify, mk_bool,
+  mk_number, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/vm/internal/tree_array
+import gleam/dict
 import gleam/int
+import gleam/list
 import gleam/option.{None, Some}
 
 // ── init (arc builtins/promise.gleam:22-72) ─────────────────────────────────
@@ -61,6 +66,9 @@ pub fn init(
       #("race", PromiseN(PromiseRaceStatic), 1),
       #("allSettled", PromiseN(PromiseAllSettledStatic), 1),
       #("any", PromiseN(PromiseAnyStatic), 1),
+      // Await-dictionary proposal: keyed promise combinators.
+      #("allKeyed", PromiseN(PromiseAllKeyedStatic), 1),
+      #("allSettledKeyed", PromiseN(PromiseAllSettledKeyedStatic), 1),
     ])
   let #(bt, st) =
     common.init_type(
@@ -111,6 +119,9 @@ pub fn dispatch(
     PromiseRaceStatic -> combinator(st, this, args, CombRace)
     PromiseAllSettledStatic -> combinator(st, this, args, CombAllSettled)
     PromiseAnyStatic -> combinator(st, this, args, CombAny)
+    PromiseAllKeyedStatic -> keyed_combinator(st, this, args, settled: False)
+    PromiseAllSettledKeyedStatic ->
+      keyed_combinator(st, this, args, settled: True)
     // ── minted-closure natives ───────────────────────────────────────────────
     PromiseCapabilityExecutor(resolve_box:, reject_box:) ->
       capability_executor(st, resolve_box, reject_box, args)
@@ -155,6 +166,26 @@ pub fn dispatch(
         errors,
         already_called,
         reject,
+      )
+    PromiseKeyedElement(
+      kind:,
+      index:,
+      remaining:,
+      keys:,
+      values:,
+      already_called:,
+      resolve:,
+    ) ->
+      keyed_element(
+        st,
+        args,
+        kind,
+        index,
+        remaining,
+        keys,
+        values,
+        already_called,
+        resolve,
       )
     PromiseFinallyFn(rejecting:, on_finally:, constructor:) ->
       finally_wrapper(st, args, rejecting, on_finally, constructor)
@@ -617,6 +648,265 @@ fn final_reject_aggregate(
   }
 }
 
+// ── Promise.allKeyed / Promise.allSettledKeyed (await-dictionary proposal) ──
+
+/// Shared per-call context of the PerformPromiseAllKeyed key loop.
+type KeyedLoop {
+  KeyedLoop(
+    c: JsVal,
+    promises: JsVal,
+    promises_h: Handle,
+    cap: Capability,
+    promise_resolve: JsVal,
+    settled: Bool,
+    keys_h: Handle,
+    values_h: Handle,
+    remaining_h: Handle,
+  )
+}
+
+/// Await-dictionary proposal: Promise.allKeyed(promises) and
+/// Promise.allSettledKeyed(promises).
+///
+/// Spec steps (both methods, `settled` selects the ~all-settled~ variant):
+///   1. Let ctor be the this value.
+///   2. Let promiseCapability be ? NewPromiseCapability(ctor).
+///   3. Let promiseResolve be Completion(GetPromiseResolve(ctor)).
+///   4. IfAbruptRejectPromise(promiseResolve, promiseCapability).
+///   5. If promises is not an Object, reject with a TypeError.
+///   6. Let result be Completion(PerformPromiseAllKeyed(variant, promises,
+///      ctor, promiseCapability, promiseResolve)).
+///   7. IfAbruptRejectPromise(result, promiseCapability).
+///   8. Return promiseCapability.[[Promise]].
+fn keyed_combinator(
+  st: Agent,
+  this: JsVal,
+  args: List(JsVal),
+  settled settled: Bool,
+) -> #(JsVal, Agent) {
+  // Step 2: an abrupt NewPromiseCapability throws synchronously.
+  let #(cap, st) = new_capability_from_constructor(st, this)
+  let promises = first_arg_or_undefined(args)
+  // Steps 3-7: any later abrupt completion rejects the capability.
+  let #(outcome, st) =
+    protected(st, fn(st) { perform_all_keyed(st, this, promises, cap, settled) })
+  let st = case outcome {
+    NormalCompletion(_) -> st
+    ThrowCompletion(e) -> {
+      // IfAbruptRejectPromise: ? Call(cap.[[Reject]], undefined, «e»).
+      let #(_, st) = t_call_checked(st, cap.reject, mk_undefined(), [e])
+      st
+    }
+  }
+  #(cap.promise, st)
+}
+
+/// PerformPromiseAllKeyed steps 1-5 plus the method's steps 3 and 5
+/// (GetPromiseResolve and the is-Object check): collect [[OwnPropertyKeys]],
+/// allocate the shared keys/values stores and remaining counter, then run
+/// the per-key loop.
+fn perform_all_keyed(
+  st: Agent,
+  c: JsVal,
+  promises: JsVal,
+  cap: Capability,
+  settled: Bool,
+) -> #(JsVal, Agent) {
+  // Method step 3: GetPromiseResolve(ctor).
+  let #(promise_resolve, st) = get_promise_resolve(st, c)
+  case classify(promises) {
+    KHandle(promises_h) -> {
+      // Step 1: Let allKeys be ? promises.[[OwnPropertyKeys]]() — trap-aware.
+      let #(all_keys, st) = rt_obj.t_own_keys(st, promises_h)
+      // Steps 2-4: keys/values lists (shared, mutable from element fns) and
+      // the Record { [[Value]]: 1 } remaining-elements counter.
+      let realm = st.realm
+      let #(keys_h, st) = alloc_empty_array(st, realm.array.prototype)
+      let #(values_h, st) = alloc_empty_array(st, realm.array.prototype)
+      let #(remaining_h, st) = alloc_counter(st, 1)
+      let loop =
+        KeyedLoop(
+          c:,
+          promises:,
+          promises_h:,
+          cap:,
+          promise_resolve:,
+          settled:,
+          keys_h:,
+          values_h:,
+          remaining_h:,
+        )
+      keyed_loop(st, loop, all_keys, 0)
+    }
+    // Method step 5: promises is not an Object — reject with TypeError.
+    _ ->
+      throw_type_error(
+        st,
+        "Promise keyed combinator argument must be an object",
+      )
+  }
+}
+
+/// PerformPromiseAllKeyed steps 6-8: for each own key, check the descriptor
+/// is present and enumerable, Get the value, wrap via promiseResolve, attach
+/// the keyed element handlers, then on loop exit decrement the counter and
+/// resolve with the keyed result object if it hit zero.
+fn keyed_loop(
+  st: Agent,
+  loop: KeyedLoop,
+  all_keys: List(ObjectKey),
+  index: Int,
+) -> #(JsVal, Agent) {
+  case all_keys {
+    // Steps 7-8: remainingElementsCount -= 1; at zero resolve with the
+    // CreateKeyedPromiseCombinatorResultObject(keys, values).
+    [] ->
+      keyed_final_resolve(
+        st,
+        loop.remaining_h,
+        loop.keys_h,
+        loop.values_h,
+        loop.cap.resolve,
+      )
+    [key, ..rest] -> {
+      // Step 6.a: Let propertyDesc be ? promises.[[GetOwnProperty]](key).
+      let #(desc, st) = rt_obj.t_get_own_property(st, loop.promises_h, key)
+      // Step 6.b: skip absent / non-enumerable properties.
+      let enumerable =
+        option.map(desc, rt_types.prop_enumerable) |> option.unwrap(False)
+      case enumerable {
+        False -> keyed_loop(st, loop, rest, index)
+        True -> {
+          // Step 6.b.i: Let propertyValue be ? Get(promises, key).
+          let #(prop_value, st) = rt_obj.t_get_prop(st, loop.promises, key)
+          // Steps 6.b.ii-iii: append key to keys, undefined to values.
+          let st =
+            set_array_element(
+              st,
+              loop.keys_h,
+              index,
+              rt_obj.object_key_value(key),
+            )
+          let st = set_array_element(st, loop.values_h, index, mk_undefined())
+          // Step 6.b.iv: nextPromise = ? Call(promiseResolve, ctor,
+          // «propertyValue»).
+          let #(next_promise, st) =
+            t_call_checked(st, loop.promise_resolve, loop.c, [prop_value])
+          // Steps 6.b.v-ix: alreadyCalled record + onFulfilled closure.
+          let #(already_called, st) = alloc_box(st, mk_bool(False))
+          let element = fn(st, kind) {
+            alloc_closure(
+              st,
+              PromiseN(PromiseKeyedElement(
+                kind:,
+                index:,
+                remaining: loop.remaining_h,
+                keys: loop.keys_h,
+                values: loop.values_h,
+                already_called:,
+                resolve: loop.cap.resolve,
+              )),
+            )
+          }
+          let fulfilled_kind = case loop.settled {
+            True -> KeyedFulfilled
+            False -> KeyedValue
+          }
+          let #(on_fulfilled, st) = element(st, fulfilled_kind)
+          // Steps 6.b.x-xi: onRejected is cap.[[Reject]] for ~all~, a keyed
+          // rejected-element closure (same alreadyCalled record) for
+          // ~all-settled~.
+          let #(on_rejected, st) = case loop.settled {
+            False -> #(loop.cap.reject, st)
+            True -> element(st, KeyedRejected)
+          }
+          // Step 6.b.xii: remainingElementsCount += 1.
+          let st = increment_counter(st, loop.remaining_h)
+          // Step 6.b.xiii: ? Invoke(nextPromise, "then",
+          // «onFulfilled, onRejected»).
+          let #(_, st) =
+            t_call_method(st, next_promise, StringKey(Named("then")), [
+              on_fulfilled,
+              on_rejected,
+            ])
+          // Step 6.b.xiv: index += 1.
+          keyed_loop(st, loop, rest, index + 1)
+        }
+      }
+    }
+  }
+}
+
+/// remainingElementsCount -= 1; at zero,
+/// ? Call(cap.[[Resolve]], undefined, «keyed result object»).
+fn keyed_final_resolve(
+  st: Agent,
+  remaining_h: Handle,
+  keys_h: Handle,
+  values_h: Handle,
+  resolve: JsVal,
+) -> #(JsVal, Agent) {
+  let #(is_zero, st) = decrement_counter(st, remaining_h)
+  case is_zero {
+    False -> #(mk_undefined(), st)
+    True -> {
+      let #(result_h, st) = create_keyed_result(st, keys_h, values_h)
+      t_call_checked(st, resolve, mk_undefined(), [mk_object(result_h)])
+    }
+  }
+}
+
+/// CreateKeyedPromiseCombinatorResultObject(keys, values): a null-prototype
+/// ordinary object with one enumerable data property per collected key,
+/// defined in keys-list order so [[OwnPropertyKeys]] round-trips it.
+fn create_keyed_result(
+  st: Agent,
+  keys_h: Handle,
+  values_h: Handle,
+) -> #(Handle, Agent) {
+  let keys = read_array_values(st, keys_h)
+  let values = read_array_values(st, values_h)
+  // Step 2: Let obj be OrdinaryObjectCreate(null).
+  let #(h, st) =
+    rt_store.t_cell_new(
+      st,
+      SObject(
+        kind: Ordinary,
+        proto: None,
+        props: dict.new(),
+        symbol_props: [],
+        elements: NoElements,
+        extensible: True,
+      ),
+    )
+  // Step 3: ! CreateDataPropertyOrThrow(obj, keys[i], values[i]) for each i.
+  let st =
+    list.zip(keys, values)
+    |> list.fold(st, fn(st, kv) {
+      let #(k, v) = kv
+      case key_of_value(k) {
+        Some(key) -> {
+          let #(_created, st) =
+            rt_obj.t_define_own_data(st, h, key, v, True, True, True)
+          st
+        }
+        // Keys come from [[OwnPropertyKeys]] — String/Symbol only.
+        None -> st
+      }
+    })
+  #(h, st)
+}
+
+/// Inverse of `rt_obj.object_key_value` for the String/Symbol keys the
+/// keys list holds.
+fn key_of_value(v: JsVal) -> option.Option(ObjectKey) {
+  case classify(v) {
+    rt_types.KStr(s) -> Some(StringKey(rt_types.canonical_key(s)))
+    rt_types.KSym(sym) -> Some(SymbolKey(sym))
+    _ -> None
+  }
+}
+
 // ── element functions (per-index closures the combinators mint) ─────────────
 
 fn all_element(
@@ -644,18 +934,51 @@ fn all_settled_element(
   resolve: JsVal,
 ) -> #(JsVal, Agent) {
   use val, st <- with_element_once(st, args, already_called)
-  let realm = st.realm
+  let #(record, st) = settled_record(st, fulfilled, val)
+  let st = set_array_element(st, values, index, record)
+  final_resolve_values(st, remaining, values, resolve)
+}
+
+/// `{status: "fulfilled", value}` / `{status: "rejected", reason}` with
+/// %Object.prototype% (§27.2.4.2.2 steps 9-11 / §27.2.4.2.3 steps 9-11).
+fn settled_record(st: Agent, fulfilled: Bool, val: JsVal) -> #(JsVal, Agent) {
   let #(status, field) = case fulfilled {
     True -> #("fulfilled", "value")
     False -> #("rejected", "reason")
   }
   let #(obj_h, st) =
-    common.alloc_pojo(st, realm.object.prototype, [
+    common.alloc_pojo(st, st.realm.object.prototype, [
       #("status", mk_string(status)),
       #(field, val),
     ])
-  let st = set_array_element(st, values, index, mk_object(obj_h))
-  final_resolve_values(st, remaining, values, resolve)
+  #(mk_object(obj_h), st)
+}
+
+/// Keyed combinator element handler (the fulfilledSteps / rejectedSteps
+/// closures of PerformPromiseAllKeyed): once-only, store the (possibly
+/// status-wrapped) value at the captured index, decrement the counter, and
+/// at zero resolve the capability with the keyed result object.
+fn keyed_element(
+  st: Agent,
+  args: List(JsVal),
+  kind: PromiseKeyedKind,
+  index: Int,
+  remaining: Handle,
+  keys: Handle,
+  values: Handle,
+  already_called: Handle,
+  resolve: JsVal,
+) -> #(JsVal, Agent) {
+  use val, st <- with_element_once(st, args, already_called)
+  // ~all~ stores the raw value; ~all-settled~ wraps it in
+  // {status, value/reason} with %Object.prototype%.
+  let #(stored, st) = case kind {
+    KeyedValue -> #(val, st)
+    KeyedFulfilled -> settled_record(st, True, val)
+    KeyedRejected -> settled_record(st, False, val)
+  }
+  let st = set_array_element(st, values, index, stored)
+  keyed_final_resolve(st, remaining, keys, values, resolve)
 }
 
 fn any_reject_element(
@@ -914,6 +1237,26 @@ fn set_array_element(
       other -> other
     }
   })
+}
+
+/// Elements `0..length-1` of a heap `ArrayObj`, holes read as undefined.
+fn read_array_values(st: Agent, arr_h: Handle) -> List(JsVal) {
+  case rt_store.t_cell_get(st, arr_h) {
+    SObject(kind: ArrayObj(length:), elements: els, ..) ->
+      collect_elements(els, length - 1, [])
+    _ -> []
+  }
+}
+
+fn collect_elements(
+  els: rt_types.JsElements,
+  i: Int,
+  acc: List(JsVal),
+) -> List(JsVal) {
+  case i < 0 {
+    True -> acc
+    False -> collect_elements(els, i - 1, [elements.get(els, i), ..acc])
+  }
 }
 
 fn make_aggregate_error(st: Agent, errors_h: Handle) -> #(JsVal, Agent) {

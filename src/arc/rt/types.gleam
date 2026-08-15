@@ -882,6 +882,9 @@ pub type PromiseNative {
   PromiseRaceStatic
   PromiseAllSettledStatic
   PromiseAnyStatic
+  /// Await-dictionary proposal: Promise.allKeyed / Promise.allSettledKeyed.
+  PromiseAllKeyedStatic
+  PromiseAllSettledKeyedStatic
   /// §27.2.1.5.1 GetCapabilitiesExecutor — writes into two `SBox` cells.
   PromiseCapabilityExecutor(resolve_box: Handle, reject_box: Handle)
   /// §27.2.4.1.3 Promise.all Resolve Element (per-index closure).
@@ -909,12 +912,34 @@ pub type PromiseNative {
     already_called: Handle,
     reject: JsVal,
   )
+  /// PerformPromiseAllKeyed fulfilledSteps / rejectedSteps closure. `keys`
+  /// and `values` are the shared array cells; `kind` selects raw value
+  /// (~all~) or the {status, value/reason} wrap (~all-settled~).
+  PromiseKeyedElement(
+    kind: PromiseKeyedKind,
+    index: Int,
+    remaining: Handle,
+    keys: Handle,
+    values: Handle,
+    already_called: Handle,
+    resolve: JsVal,
+  )
   /// §27.2.5.3.1/.2 finally wrapper — captures onFinally + species C.
   PromiseFinallyFn(rejecting: Bool, on_finally: JsVal, constructor: JsVal)
   /// §27.2.5.3.1 step 4 value thunk — `() => value`.
   PromiseFinallyValueThunk(value: JsVal)
   /// §27.2.5.3.2 step 4 thrower — `() => { throw reason }`.
   PromiseFinallyThrower(reason: JsVal)
+}
+
+/// What a `PromiseKeyedElement` stores at its index.
+pub type PromiseKeyedKind {
+  /// Promise.allKeyed onFulfilled — the value as-is.
+  KeyedValue
+  /// Promise.allSettledKeyed onFulfilled — `{status: "fulfilled", value}`.
+  KeyedFulfilled
+  /// Promise.allSettledKeyed onRejected — `{status: "rejected", reason}`.
+  KeyedRejected
 }
 
 /// §27.1 Iteration built-in dispatch tokens. Scoped to the base
@@ -1925,6 +1950,12 @@ pub fn promise_native_refs(n: PromiseNative) -> List(Handle) {
       errors,
       already_called,
     ]
+    PromiseKeyedElement(remaining:, keys:, values:, already_called:, ..) -> [
+      remaining,
+      keys,
+      values,
+      already_called,
+    ]
     PromiseConstructor
     | PromiseThen
     | PromiseCatch
@@ -1935,6 +1966,8 @@ pub fn promise_native_refs(n: PromiseNative) -> List(Handle) {
     | PromiseRaceStatic
     | PromiseAllSettledStatic
     | PromiseAnyStatic
+    | PromiseAllKeyedStatic
+    | PromiseAllSettledKeyedStatic
     | PromiseFinallyFn(..)
     | PromiseFinallyValueThunk(..)
     | PromiseFinallyThrower(..) -> []
