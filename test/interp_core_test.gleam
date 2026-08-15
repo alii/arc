@@ -10,9 +10,11 @@ import arc/parser
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{
-  type Agent, type JsVal, JFloat, JInt, KHandle, KNum, KStr, classify,
+  type Agent, type JsVal, Agent, JFloat, JInt, JsStore, KHandle, KNum, KStr,
+  classify,
 }
 import gleam/int
 import gleam/list
@@ -308,4 +310,98 @@ pub fn async_functions_resume_parked_frames_test() {
       "acc.join()",
     )
     == "1,2"
+}
+
+pub fn async_bodies_see_their_arguments_test() {
+  // An async function parks before its prologue runs, so `arguments` and a
+  // rest parameter are built from the frame's saved argument list on the
+  // first turn: in-loop, as an arrow, and entered from a native.
+  assert drained(
+      "var out = []; async function f(a, ...rest) { return [arguments.length, rest.length, rest.join('')].join('/') } f(1, 2, 3).then(v => out.push(v)); (async function () { return arguments[0] })('x').then(v => out.push(v)); (async (...r) => r.length)(1, 2, 3, 4).then(v => out.push(v)); [0].map(async function (a, ...r) { return arguments.length + ':' + r.length })[0].then(v => out.push(v))",
+      "out.join()",
+    )
+    == "3/2/23,x,4,3:2"
+}
+
+/// One run of `source` on an agent whose collector trips after a few dozen
+/// allocations, so a safepoint inside the script really collects.
+fn eval_small_heap(source: String) -> String {
+  let st = rt_gc.t_collect(agent(), [])
+  let st = Agent(..st, store: JsStore(..st.store, gc_threshold: 64))
+  case run_on(st, source) {
+    #(NormalCompletion(v), st) ->
+      case classify(v) {
+        KStr(s) -> s
+        _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+      }
+    #(ThrowCompletion(e), st) ->
+      panic as { source <> " threw " <> rt_inspect.inspect(st, e) }
+  }
+}
+
+pub fn nested_starts_keep_the_caller_rooted_test() {
+  // A generator prologue, an async function's first turn and a proxied
+  // constructor body all run as nested activations straight out of the
+  // top-level frame. Each allocates past the threshold and returns through
+  // its own root; the caller's locals (and the async result promise) must
+  // survive.
+  let prelude =
+    "let keep = {tag: 'kept'}; let onstack = {o: 1}; function churn() { for (let i = 0; i < 300; i++) { let x = {i, a: [i]} } } "
+  assert eval_small_heap(
+      prelude
+      <> "function* g(a = churn()) { yield a } g(); [onstack.o, keep.tag].join()",
+    )
+    == "1,kept"
+  assert eval_small_heap(
+      prelude
+      <> "async function f() { churn(); return 1 } f(); [onstack.o, keep.tag].join()",
+    )
+    == "1,kept"
+  assert eval_small_heap(
+      prelude
+      <> "async function* ag(a = churn()) { yield a } ag(); [onstack.o, keep.tag].join()",
+    )
+    == "1,kept"
+  assert eval_small_heap(
+      prelude
+      <> "function F() { churn(); this.v = 1 } const P = new Proxy(F, {}); new P(); [onstack.o, keep.tag].join()",
+    )
+    == "1,kept"
+}
+
+pub fn nested_starts_are_depth_bounded_test() {
+  // Recursion through a coroutine start or a proxied [[Construct]] counts
+  // against the call-depth limit like any other call.
+  assert eval_string(
+      "var out; function* g(x = g()) { yield 1 } try { g(); out = 'unbounded' } catch (e) { out = e.constructor.name } out",
+    )
+    == "RangeError"
+  assert eval_string(
+      "var out; function F() { new P() } var P = new Proxy(F, {}); try { new P(); out = 'unbounded' } catch (e) { out = e.constructor.name } out",
+    )
+    == "RangeError"
+}
+
+pub fn coroutine_roots_push_one_stack_frame_test() {
+  // A generator / async body entered from a native names itself once in
+  // `Error.stack`, the same as when it is called in-loop.
+  let count = fn(stack: String, name: String) {
+    list.length(string.split(stack, "at " <> name <> " ")) - 1
+  }
+  let #(v, _) =
+    eval("var s; [0].map(async function af() { s = new Error('e').stack }); s")
+  let assert KStr(s) = classify(v)
+  assert count(s, "af") == 1
+  let #(v, _) =
+    eval("var s; (async function af() { s = new Error('e').stack })(); s")
+  let assert KStr(s) = classify(v)
+  assert count(s, "af") == 1
+  assert eval_int(
+      "[undefined].map(function* gd(x = new Error('e').stack) { yield x })[0].next().value.split('at gd ').length - 1",
+    )
+    == 1
+  assert eval_int(
+      "var s; new Promise(async function ex(res) { s = new Error('e').stack; res() }); s.split('at ex ').length - 1",
+    )
+    == 1
 }

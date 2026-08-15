@@ -31,12 +31,13 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type FrameInfo, type Handle, type IteratorRecord,
   type JsOps, type JsVal, type Step, Agent, JInt, JsOps, JsStore, KHandle, KNull,
-  KUndef, Named, ResumeFrame, StepAwait, StepReturn, StepThrow, StepYield,
-  StringKey, TypeErr, classify, mk_number, mk_object, mk_undefined,
+  KUndef, Named, RangeErr, ResumeFrame, StepAwait, StepReturn, StepThrow,
+  StepYield, StringKey, TypeErr, classify, mk_number, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/lexical
+import arc/vm/limits
 import arc/vm/opcode.{
   AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
 }
@@ -243,8 +244,9 @@ pub fn run_bytecode(
 /// receiver `enter_root` creates, with the constructor return rules applied
 /// to the result. A generator or async body is started through the
 /// coroutine driver and completes with its generator object / promise. The
-/// enclosing `t_call` owns the depth bracket; `enter_root`/`finish_root`
-/// own the `Error.stack` frame; this owns the backstop.
+/// enclosing `t_call` (or `construct_bytecode`) owns the depth bracket;
+/// `enter_root`/`finish_root` own the `Error.stack` frame; this owns the
+/// backstop.
 fn run_root(
   st: Agent,
   cell: Handle,
@@ -255,30 +257,41 @@ fn run_root(
   let m = mark(st)
   case call.enter_root(st, cell, this, args, new_target) {
     Error(#(thrown, agent)) -> #(ThrowCompletion(thrown), settle(agent, m))
-    Ok(#(state, kind, coroutine)) -> {
-      let body = fn(agent) {
-        let state = State(..state, agent:)
-        let #(res, s) = case state.func.is_generator || state.func.is_async {
-          True -> start_coroutine_root(state, coroutine)
-          False -> complete(state, "run_bytecode")
+    Ok(#(state, kind, coroutine)) ->
+      case state.func.is_generator || state.func.is_async {
+        // `start_coroutine` gives the body its own `Error.stack` frame:
+        // drop the one `enter_root` pushed rather than show it twice.
+        True -> {
+          let agent = call.pop_frame_info(state.agent)
+          let body = fn(agent) {
+            let #(res, s) =
+              start_coroutine_root(State(..state, agent:), coroutine)
+            #(to_completion(res), s.agent)
+          }
+          backstopped(agent, m, body, ThrowCompletion)
         }
-        let finished = case res {
-          Ok(v) -> call.finish_root(kind, v, s)
-          Error(e) -> Error(#(e, call.pop_frame_info(s.agent)))
-        }
-        case finished {
-          Ok(#(v, agent)) -> #(NormalCompletion(v), agent)
-          Error(#(e, agent)) -> #(ThrowCompletion(e), agent)
+        False -> {
+          let body = fn(agent) {
+            let #(res, s) = complete(State(..state, agent:), "run_bytecode")
+            let finished = case res {
+              Ok(v) -> call.finish_root(kind, v, s)
+              Error(e) -> Error(#(e, call.pop_frame_info(s.agent)))
+            }
+            case finished {
+              Ok(#(v, agent)) -> #(NormalCompletion(v), agent)
+              Error(#(e, agent)) -> #(ThrowCompletion(e), agent)
+            }
+          }
+          backstopped(state.agent, m, body, ThrowCompletion)
         }
       }
-      backstopped(state.agent, m, body, ThrowCompletion)
-    }
   }
 }
 
-/// A generator / async root call: the driver turns the laid-out frame into
-/// its generator object or promise and pushes it onto the (empty) root
-/// stack; the body itself never runs to a Return here.
+/// A generator / async root call (never a [[Construct]]: neither kind is a
+/// constructor): the driver turns the laid-out frame into its generator
+/// object or promise and pushes it onto the (empty) root stack; the body
+/// itself never runs to a Return here.
 fn start_coroutine_root(
   st: State,
   coroutine: call.CoroutineCall,
@@ -301,7 +314,8 @@ fn start_coroutine_root(
 
 /// `JsOps.call_bytecode`: [[Call]] (or, with `new_target` set, the body of
 /// a [[Construct]]) of the bytecode cell `fn_h`, re-raising a throw so it
-/// propagates through the runtime like any other.
+/// propagates through the runtime like any other. Runs inside the caller's
+/// `t_call` bracket.
 pub fn call_bytecode(
   st: Agent,
   fn_h: Handle,
@@ -316,16 +330,26 @@ pub fn call_bytecode(
 }
 
 /// `JsOps.construct_bytecode`: §10.2.2 [[Construct]] of the bytecode cell
-/// `fn_h` (IsConstructor already checked by `t_construct`). The result is
-/// always an object: `enter_root`/`finish_root` create the receiver and
-/// apply the return override, so a non-object here is an engine fault.
+/// `fn_h` (IsConstructor already checked by `t_construct`). `t_construct`
+/// dispatches here unbracketed, so the construct's unit of `call_depth` is
+/// taken here, as `rt/call.apply_ctor` does for a compiled constructor:
+/// RangeError at `limits.max_call_depth`, and the body's root-`Return`
+/// safepoint kept shut over the caller's registers. The result is always an
+/// object: `enter_root`/`finish_root` create the receiver and apply the
+/// return override, so a non-object here is an engine fault.
 pub fn construct_bytecode(
   st: Agent,
   fn_h: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  let #(v, st) = call_bytecode(st, fn_h, mk_undefined(), args, new_target)
+  let st = rt_store.t_enter_call(st)
+  let #(completion, st) = run_root(st, fn_h, mk_undefined(), args, new_target)
+  let st = rt_store.t_leave_call(st)
+  let #(v, st) = case completion {
+    NormalCompletion(v) -> #(v, st)
+    ThrowCompletion(e) -> rt_store.t_throw(st, e)
+  }
   case classify(v) {
     KHandle(h) -> #(h, st)
     _ -> {
@@ -354,6 +378,10 @@ pub fn construct_bytecode(
 /// - async function (§27.7.5.1 AsyncFunctionStart): the frame is parked at
 ///   pc 0 unrun and handed to `t_async_run`, which runs the first turn
 ///   through `resume_frame` and returns the result promise.
+///
+/// Either way that first stretch of the body is a nested activation run
+/// while the caller's registers live only in Gleam variables, so it holds
+/// one unit of `call_depth` (`nested`), given back by settling to the mark.
 fn start_coroutine(
   caller: State,
   c: call.CoroutineCall,
@@ -367,9 +395,12 @@ fn start_coroutine(
     args:,
     rest_stack:,
   ) = c
+  let caller = State(..caller, stack: rest_stack)
+  let m = mark(caller.agent)
+  use agent <- nested(caller)
   let body =
     State(
-      agent: caller.agent,
+      agent:,
       pc: 0,
       stack: [],
       locals:,
@@ -385,22 +416,23 @@ fn start_coroutine(
       eval_env: None,
     )
   let callee = mk_object(fn_h)
-  let resume = fn(caller: State, agent: Agent, value: JsVal) {
+  let resume = fn(agent: Agent, value: JsVal) {
+    let agent = settle(agent, m)
     Ok(State(..caller, agent:, stack: [value, ..rest_stack], pc: caller.pc + 1))
+  }
+  let threw = fn(agent: Agent, thrown: JsVal) {
+    Error(state.Threw(thrown, State(..caller, agent: settle(agent, m))))
   }
   case template.is_generator {
     False -> {
       let frame = park.park(body, ParkedStart)
-      use #(promise, caller) <- result.try(ffi.guarded(
-        ffi.guard2(rt_async.t_async_run, caller.agent, ResumeFrame(frame)),
-        State(..caller, stack: rest_stack),
-      ))
-      resume(caller, caller.agent, mk_object(promise))
+      case ffi.guard2(rt_async.t_async_run, agent, ResumeFrame(frame)) {
+        ffi.Ok(value: promise, agent:) -> resume(agent, mk_object(promise))
+        ffi.Threw(agent:, thrown:) -> threw(agent, thrown)
+      }
     }
     True -> {
-      let m = mark(caller.agent)
-      let body =
-        State(..body, agent: call.push_frame_info(caller.agent, template))
+      let body = State(..body, agent: call.push_frame_info(agent, template))
       case execute(body) {
         Parked(state.Yield, _, s) -> {
           let frame = ResumeFrame(park.park(s, ParkedStart))
@@ -409,22 +441,45 @@ fn start_coroutine(
             False -> rt_async.t_gen_new(agent, callee, frame)
             True -> rt_async.t_asyncgen_new(agent, callee, frame)
           }
-          resume(caller, agent, mk_object(obj))
+          resume(agent, mk_object(obj))
         }
-        Finished(Error(thrown), s) ->
-          Error(state.Threw(
-            thrown,
-            State(..caller, agent: settle(s.agent, m), stack: rest_stack),
-          ))
+        Finished(Error(thrown), s) -> threw(s.agent, thrown)
         // InitialYield is the body's first suspension point: it can neither
         // complete nor await before reaching it.
         Finished(Ok(_), s) | Parked(state.Await, _, s) ->
           Error(state.VmFailed(
             state.InternalError("start_coroutine", "body missed InitialYield"),
-            State(..caller, agent: settle(s.agent, m), stack: rest_stack),
+            State(..caller, agent: settle(s.agent, m)),
           ))
       }
     }
+  }
+}
+
+/// Take one unit of `call_depth` for a nested activation entered straight
+/// from an opcode arm (the convention `eval.run_bracketed` states): the
+/// caller's frame is not among the collector's roots while it runs, and a
+/// positive depth is what keeps the root-`Return` safepoint shut. The same
+/// unit bounds recursion through such entries: at `limits.max_call_depth`
+/// the entry is refused with a RangeError thrown in the caller.
+fn nested(
+  caller: State,
+  k: fn(Agent) -> Result(State, state.StepExit),
+) -> Result(State, state.StepExit) {
+  let store = caller.agent.store
+  case store.call_depth >= limits.max_call_depth {
+    True -> {
+      let #(err, caller) =
+        state.new_error(caller, RangeErr, "Maximum call stack size exceeded")
+      Error(state.Threw(err, caller))
+    }
+    False ->
+      k(
+        Agent(
+          ..caller.agent,
+          store: JsStore(..store, call_depth: store.call_depth + 1),
+        ),
+      )
   }
 }
 
