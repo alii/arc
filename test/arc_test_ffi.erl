@@ -17,6 +17,14 @@ main() ->
                         not lists:member(M, Excluded),
                         has_test_functions(M)],
 
+    %% Load the engine up front. On-demand loading prepares a module inside
+    %% the calling process, so a test that happened to be first to touch a
+    %% large module would have that charged against its max_heap_size.
+    Ebin = filename:dirname(code:which(?MODULE)),
+    ok = code:ensure_modules_loaded(
+           [list_to_atom(filename:rootname(B))
+            || B <- filelib:wildcard("*.beam", Ebin)]),
+
     %% Collect unit test functions: {Name, Fun}
     UnitTests = lists:flatmap(fun(M) ->
         [{format_test_name(M, F), fun() -> M:F(), ok end}
