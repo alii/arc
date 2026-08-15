@@ -10,10 +10,10 @@ import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type JsVal, HostJob, JInt, KBool, KHandle, KNum, KStr, Named,
-  StringKey, classify, mk_number, mk_object, mk_string, mk_undefined,
+  type Agent, type JsVal, FnFlags, HostJob, JInt, KBool, KHandle, KNum, KStr,
+  Named, StringKey, classify, mk_number, mk_object, mk_string, mk_undefined,
 }
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import rt_helpers
 
 /// An agent whose uncaught-report sink records into the test mailbox.
@@ -141,8 +141,20 @@ pub fn promise_subclass_test() {
       let #(h, st) = rt_class.t_super_call(st, active, args, new_target)
       #(mk_object(h), st)
     })
-  let #(#(p_ctor_h, p_proto_h), st) =
-    rt_class.t_class_create(st, ctor_code, "P", 1, promise)
+  let flags =
+    FnFlags(
+      is_constructor: True,
+      is_class_constructor: True,
+      is_derived_constructor: True,
+      is_arrow: False,
+      is_method: False,
+      is_generator: False,
+      is_async: False,
+      is_strict: True,
+    )
+  let #(p_ctor_h, st) =
+    rt_call.t_fn_new(st, ctor_code, flags, "P", 1, None, None)
+  let #(p_proto_h, st) = rt_class.t_class_setup(st, p_ctor_h, promise)
   let p_ctor = mk_object(p_ctor_h)
   let #(executor, st) =
     rt_helpers.func(st, fn(st, args) {

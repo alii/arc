@@ -40,6 +40,7 @@ import arc/compiler/ast_util
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
 import arc_aot/emit/anf
+import arc_aot/emit/func
 import arc_aot/emit/state.{type Emitter2}
 import gleam/bit_array
 import gleam/dict.{type Dict}
@@ -2259,11 +2260,10 @@ fn ana_try(
 /// carries the scope-cursor snapshot at its resume point. Pure AST→data.
 fn analyze_splits(
   tree: ScopeTree,
-  fn_scope: ScopeId,
+  cur0: ArmCursor,
   body: state.FnBody,
   kind: state.CoroutineKind,
 ) -> SplitPlan {
-  let cur0 = root_cursor(tree, fn_scope)
   let init =
     Ana(
       tree:,
@@ -2338,16 +2338,13 @@ pub fn for_await_iter_key(head: Int) -> String {
   "iter_fa_" <> int.to_string(head)
 }
 
-/// §18.3: assign every hoisted local slot a stable loc-tuple index, then
-/// reserve extra indices for try-region pending/caught and yield*-delegate
-/// bookkeeping. Conservative v1: when the body has ANY split (`n_states>1`)
-/// hoist EVERY local slot 0..local_count-1 — precise live-across-split is a
-/// later optimisation the SPEC permits skipping. Zero splits ⇒ empty layout.
+/// §18.3: assign every local slot a stable loc-tuple index (the call-time
+/// prologue seeds them all into `loc0`), then reserve extra indices for
+/// try-region pending/caught and yield*-delegate bookkeeping. Precise
+/// live-across-split hoisting is a later optimisation the SPEC permits
+/// skipping.
 fn compute_loc_layout(info: scope.FunctionInfo, plan: SplitPlan) -> LocLayout {
-  let hoist_count = case plan.n_states > 1 {
-    True -> info.local_count
-    False -> 0
-  }
+  let hoist_count = info.local_count
   let slot_to_idx = index_identity_map(hoist_count)
   // Extras laid out contiguously past the hoisted-locals block, in
   // deterministic order (try pending → try caught → per-delegate iter/inner/
@@ -2745,78 +2742,31 @@ fn kind_is_gen(kind: state.CoroutineKind) -> Bool {
   }
 }
 
-/// Emit the outer `jsf_N` wrapper (body: loc0=MakeTuple(initial); sm=
-/// MakeClosure(sm_name,caps,3); h=host(<kind>_start,[sm,_frame,_args,loc0]);
-/// Return([h])) into e.fns_acc, then return the PARENT-frame closure-site
-/// Let-chain (FnFlags + MakeClosure(outer,captures,2) + host("fn_new",…)).
-/// Mirrors func.gleam:838-873 (body) + :745-784 (closure site) locally per D13.
-fn emit_outer_function(
+/// The call-time `loc0`: each local slot's value as the prologue left it
+/// (params, `arguments`, hoisted functions, TDZ seeds, cells for boxed
+/// bindings; `undefined` for block-scoped slots not yet entered), then the
+/// layout's own initial extras.
+fn initial_loc_values(
   e: Emitter2,
-  kind: state.CoroutineKind,
-  sm_name: String,
-  fn_scope_id: ScopeId,
-  params: List(ast.Pattern),
-  captures: List(ir.Value),
   layout: LocLayout,
-  js_name: Option(String),
-  is_strict: Bool,
-) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
-  let ncap = list.length(captures)
-  let #(outer_name, e) = state.fresh_fn_name(e)
-  let #(e_child, save) =
-    state.enter_function(
-      e,
-      fn_scope_id,
-      strict: is_strict,
-      is_async: kind_is_async(kind),
-      is_generator: kind_is_gen(kind),
-      is_arrow: False,
-    )
-  // Outer body — SPEC.md:1490-1494 / §9:1752-1756. All caps forwarded to sm.
-  let #(body_expr, e_child) =
-    anf.run_to(
-      {
-        use loc0 <- anf.then(anf.make_tuple(layout.initial_values))
-        use sm <- anf.then(
-          anf.bind(ir.MakeClosure(sm_name, cap_vars(0, ncap), 3)),
-        )
-        anf.host(start_op(kind), [sm, ir.Var("_frame"), ir.Var("_args"), loc0])
-      },
-      e_child,
-      fn(_e, h) { ir.Return([h]) },
-    )
-  let e_child =
-    state.add_function(
-      e_child,
-      ir.Function(
-        name: outer_name,
-        params: build_outer_params(0, ncap),
-        result: [ir.TTerm],
-        locals: [],
-        body: body_expr,
-      ),
-    )
-  let e = state.leave_function(e_child, save)
-  // Closure site in PARENT frame — replicates func.gleam:745-784 locally (D13).
-  Ok(emit_closure_site(
-    e,
-    outer_name,
-    kind,
-    is_strict,
-    js_name,
-    params,
-    captures,
-  ))
+  n_locals: Int,
+) -> List(ir.Value) {
+  list.index_map(layout.initial_values, fn(v, i) {
+    case i < n_locals, dict.get(e.slot_vars, i) {
+      True, Ok(name) -> ir.Var(name)
+      _, _ -> v
+    }
+  })
 }
 
-/// Local replica of func.gleam:745-784 emit_closure_site (D13). Coroutines
-/// are never constructors; is_arrow/is_method are not threaded through the
-/// dispatch signature (state.gleam:237-244) so are False here — u-sig-seam
-/// may widen the seam if async arrows/methods need distinct FnFlags.
+/// Closure site in the PARENT frame, as func.gleam's: FnFlags +
+/// MakeClosure(outer,captures,2) + host("fn_new",…). Coroutines are never
+/// constructors and get no simple-ABI variant.
 fn emit_closure_site(
   e: Emitter2,
   outer_name: String,
   kind: state.CoroutineKind,
+  shape: state.FnShape,
   is_strict: Bool,
   js_name: Option(String),
   params: List(ast.Pattern),
@@ -2830,8 +2780,8 @@ fn emit_closure_site(
     rc.false_,
     rc.false_,
     rc.false_,
-    rc.false_,
-    rc.false_,
+    atom_bool(rc, func.shape_is_arrow(shape)),
+    atom_bool(rc, func.shape_is_method(shape)),
     atom_bool(rc, kind_is_gen(kind)),
     atom_bool(rc, kind_is_async(kind)),
     atom_bool(rc, is_strict),
@@ -3541,7 +3491,10 @@ fn emit_catch_arm(
               catch_body,
               k_tail,
             ))
-            #(ir.Let([dn], dtree, body_tree), state.leave_scope(e, save))
+            #(
+              state.splice_let(dtree, dn, body_tree),
+              state.leave_scope(e, save),
+            )
           }
           None -> e.dispatch.emit_stmts(e, catch_body, k_tail)
         })
@@ -3607,7 +3560,7 @@ fn emit_arm_body(
           k_tail,
         ))
         case arm.resume {
-          Some(ResumeBind(..)) -> #(ir.Let([pre_n], prelude, frag), e2)
+          Some(ResumeBind(..)) -> #(state.splice_let(prelude, pre_n, frag), e2)
           _ -> #(frag, e2)
         }
       }
@@ -3863,7 +3816,7 @@ fn emit_for_of_step(
             ir.Let(
               [val_n],
               ir.CallHost("js", "get_prop", [ir.Var(res_n), ir.Var(vk_n)]),
-              ir.Let([tmp], bind_tree, t),
+              state.splice_let(bind_tree, tmp, t),
             )
           },
         )
@@ -4269,75 +4222,125 @@ fn build_switch_arms(
 /// EmitDispatch.emit_async_body entry. Compiles a coroutine body into an
 /// outer `jsf_N` wrapper + `jsf_N__sm` state machine (both appended to
 /// `e.fns_acc`) and returns the parent-frame closure-site Let-chain.
+///
+/// The wrapper runs the ordinary function prologue at call time (§27.3.3.1
+/// EvaluateGeneratorBody: FunctionDeclarationInstantiation precedes
+/// GeneratorStart), packs the resulting locals into `loc0`, and hands
+/// `MakeClosure(sm)` + `loc0` to the runtime's `<kind>_start`. The state
+/// machine and its split analysis start from the scope cursor the prologue
+/// left, so parameter-default closures, hoisted declarations and the
+/// non-simple parameter body scope line up with the analyzer's order.
 pub fn emit_coroutine_fn(
   e: Emitter2,
-  kind: state.CoroutineKind,
+  shape: state.FnShape,
   js_name: Option(String),
   params: List(ast.Pattern),
   body: state.FnBody,
   fn_scope_id: ScopeId,
   captures: List(ir.Value),
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
-  // (1) child FunctionInfo + capture arity
+  let assert Some(kind) = func.shape_coroutine(shape)
+    as "emit_coroutine_fn: shape is not a coroutine"
   let info = scope.function_info(e.tree, fn_scope_id)
   let ncap = list.length(captures)
-  let is_strict = case body {
-    state.StmtBody(stmts) ->
-      e.strict || ast_util.has_use_strict_directive(stmts)
-    state.ExprBody(_) -> e.strict
-  }
-
-  // (2) allocate the sm name; outer name is minted inside emit_outer_function
+  let stmts = func.body_stmts(body)
+  let is_strict = e.strict || ast_util.has_use_strict_directive(stmts)
   let #(sm_base, e) = state.fresh_fn_name(e)
   let sm_name = sm_base <> "__sm"
-
-  // (3) enter the coroutine body's function scope for arm emission
-  let #(e, save) =
+  let #(outer_name, e) = state.fresh_fn_name(e)
+  let enter = fn(e) {
     state.enter_function(
       e,
       fn_scope_id,
       strict: is_strict,
       is_async: kind_is_async(kind),
       is_generator: kind_is_gen(kind),
-      is_arrow: False,
+      is_arrow: func.shape_is_arrow(shape),
     )
-
-  // (4) two analysis passes — split points, then stable loc-tuple layout
-  let plan = analyze_splits(e.tree, fn_scope_id, body, kind)
-  let layout = compute_loc_layout(info, plan)
-  // analyze_splits leaves TryEntry.{pending,caught}_loc_idx as placeholder 0 —
-  // fill them from layout.extras before ctx/arm-emit read them.
-  let plan =
-    SplitPlan(..plan, try_entries: enrich_try_entries(plan.try_entries, layout))
-
-  // (5) resume-loop label + shared arm context (binder names match
-  //     emit_sm_function's fixed Let/Loop names)
-  let #(lresume, e) = state.fresh_label(e)
-  let ctx = new_sm_ctx(kind, layout, lresume, plan)
-
-  // (6) build every SwitchArm
-  use #(arms, e) <- result.try(build_switch_arms(e, ctx, plan))
-
-  // (7) assemble + register the sm ir.Function
-  let #(default, e) = sm_default_arm(e)
-  let e = emit_sm_function(e, sm_name, ncap, lresume, arms, default)
-
-  // (8) restore parent frame
-  let e = state.leave_function(e, save)
-
-  // (9) outer wrapper ir.Function + parent-frame closure-site tree, named
-  //     as func.gleam names a plain function (own name or NamedEvaluation).
-  emit_outer_function(
+  }
+  // Outer wrapper frame: prologue, then (nested) the state machine, then
+  // loc0 + start.
+  let #(e_outer, save) = enter(e)
+  let e_outer = func.seed_capture_slots(e_outer, info)
+  use #(body_expr, e_outer) <- result.try({
+    use e_pro, finish <- func.emit_prologue(
+      e_outer,
+      func.shape_self_name(shape),
+      func.shape_is_arrow(shape),
+      False,
+      params,
+      stmts,
+      info,
+    )
+    let cur0 = capture_cursor(e_pro)
+    let plan = analyze_splits(e_pro.tree, cur0, body, kind)
+    let layout = compute_loc_layout(info, plan)
+    // analyze_splits leaves TryEntry.{pending,caught}_loc_idx as placeholder
+    // 0 — fill them from layout.extras before ctx/arm-emit read them.
+    let plan =
+      SplitPlan(
+        ..plan,
+        try_entries: enrich_try_entries(plan.try_entries, layout),
+      )
+    // The state machine: a sibling function emitted from inside the wrapper
+    // frame so `fns_acc`/`next_var` keep threading; its cursor and the set
+    // of bindings already initialized are the post-prologue ones.
+    let #(e_sm, sm_save) = enter(e_pro)
+    let e_sm =
+      state.Emitter2(
+        ..install_cursor(e_sm, cur0),
+        initialized: e_pro.initialized,
+      )
+    let #(lresume, e_sm) = state.fresh_label(e_sm)
+    let ctx = new_sm_ctx(kind, layout, lresume, plan)
+    use #(arms, e_sm) <- result.try(build_switch_arms(e_sm, ctx, plan))
+    let #(default, e_sm) = sm_default_arm(e_sm)
+    let e_sm = emit_sm_function(e_sm, sm_name, ncap, lresume, arms, default)
+    let e_pro = state.leave_function(e_sm, sm_save)
+    // loc0 + start (SPEC.md:1490-1494 / §9:1752-1756). All caps forwarded.
+    let #(tree, e_pro) =
+      anf.run_to(
+        {
+          use loc0 <- anf.then(
+            anf.make_tuple(initial_loc_values(e_pro, layout, info.local_count)),
+          )
+          use sm <- anf.then(
+            anf.bind(ir.MakeClosure(sm_name, cap_vars(0, ncap), 3)),
+          )
+          anf.host(start_op(kind), [
+            sm,
+            ir.Var("_frame"),
+            ir.Var("_args"),
+            loc0,
+          ])
+        },
+        e_pro,
+        fn(_e, h) { ir.Return([h]) },
+      )
+    Ok(#(tree, finish(e_pro)))
+  })
+  let e_outer =
+    state.add_function(
+      e_outer,
+      ir.Function(
+        name: outer_name,
+        params: build_outer_params(0, ncap),
+        result: [ir.TTerm],
+        locals: [],
+        body: body_expr,
+      ),
+    )
+  let e = state.leave_function(e_outer, save)
+  Ok(emit_closure_site(
     e,
+    outer_name,
     kind,
-    sm_name,
-    fn_scope_id,
+    shape,
+    is_strict,
+    js_name,
     params,
     captures,
-    layout,
-    js_name,
-    is_strict,
-  )
+  ))
 }
 
 // ── for-await-of + §18.7 async-gen yield emission (u-for-await) ─────────────
@@ -4396,7 +4399,7 @@ fn emit_for_await_check(
     ))
     let #(drop, e) = state.fresh_var(e)
     let #(body_jump, e) = jump_state(e, ctx, fap.body_s, dict.new())
-    let not_done = ir.Let([drop], bind_tree, body_jump)
+    let not_done = state.splice_let(bind_tree, drop, body_jump)
     // Outer chain: sent_v is the iterresult; project done/value; branch.
     let #(chain, e) =
       run_terminal(

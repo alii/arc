@@ -74,6 +74,7 @@ fn init_emitter(
   let dispatch =
     state.EmitDispatch(
       emit_expr: expr.emit_expr,
+      emit_expr_named: expr.emit_expr_named,
       emit_stmts: stmt.emit_stmts,
       emit_pattern: destructure.emit_pattern,
       emit_destructure: destructure.emit_pattern,

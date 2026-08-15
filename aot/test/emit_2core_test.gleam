@@ -548,3 +548,157 @@ pub fn promise_subclass_via_new_target_diff_test() {
     "true true true true\nv 7\n",
   )
 }
+
+// ── Classes, function prologues and NamedEvaluation ────────────────────────
+
+/// Reads of `let`/`const`/class bindings before their declaration ran throw; a
+/// named function expression sees itself.
+pub fn lexical_tdz_reads_diff_test() {
+  diff(
+    "try { console.log(x); } catch (e) { console.log('tdz:', e.constructor.name) }\nlet x = 1;\n{ try { z } catch (e) { console.log('tdz3:', e.constructor.name) } const z = 3; console.log(z) }\nfunction g(){ try { w } catch (e) { console.log('tdz4:', e.constructor.name) } let w = 4; return w } console.log(g());\ntry { new K() } catch (e) { console.log('class:', e.constructor.name) } class K {}\nvar f = function self(){ return typeof self }; console.log(f());",
+    "tdz: ReferenceError\ntdz3: ReferenceError\n3\ntdz4: ReferenceError\n4\nclass: ReferenceError\nfunction\n",
+  )
+}
+
+/// Methods, accessors, statics, `name`/`length`, the non-writable `prototype`,
+/// non-enumerable members and the no-`new` TypeError.
+pub fn class_basics_diff_test() {
+  diff(
+    "class A { constructor(x){ this.x = x } get(){ return this.x } static s(){ return 's' } get g(){ return this.x*2 } set g(v){ this.x = v } }\nvar a = new A(3);\nconsole.log(a.get(), A.s(), a.g, typeof A, A.name, A.length, a instanceof A, Object.getPrototypeOf(a) === A.prototype);\na.g = 10; console.log(a.x, a.get());\nconsole.log(Object.keys(A.prototype).length, Object.getOwnPropertyNames(A.prototype).join(), JSON.stringify(Object.getOwnPropertyDescriptor(A,'prototype')));\nconsole.log(A.prototype.get.name, A.s.name, Object.getOwnPropertyDescriptor(A.prototype,'g').get.name, A.prototype.get.length);\ntry { A() } catch (e) { console.log(e.constructor.name) }\ntry { new a.get() } catch (e) { console.log(e.constructor.name) }\nclass B {}\nconsole.log(new B() instanceof B, B.name, B.length, typeof B.prototype.constructor, B.prototype.constructor === B);",
+    "3 s 6 function A 1 true true\n10 10\n0 constructor,get,g {\"value\":{},\"writable\":false,\"enumerable\":false,\"configurable\":false}\nget s get g 0\nTypeError\nTypeError\ntrue B 0 function true\n",
+  )
+}
+
+/// NamedEvaluation for class/function/arrow expressions in declarators,
+/// assignments and object literals; object literal members are enumerable.
+pub fn named_evaluation_diff_test() {
+  diff(
+    "let C = class {};\nvar D = class Inner { static n(){ return Inner.name } };\nconst E = class { static m(){} };\nvar o = { F: class {} };\nconsole.log(C.name, D.name, D.n(), E.name, o.F.name, (class {}).name, (class Z {}).name);\nvar f = function(){}; let g = () => 1; const h = function named(){};\nvar o2 = { i: function(){}, j: () => 0, k(){}, ['l' + 1]: function(){} };\nconsole.log(f.name, g.name, h.name, o2.i.name, o2.j.name, o2.k.name, o2.l1.name);\nvar m; m = function(){}; var n2; n2 = () => {}; var p; p = class {};\nconsole.log(m.name, n2.name, p.name);\nconsole.log(Object.keys(o2).join(), JSON.stringify(Object.getOwnPropertyDescriptor(o2,'k'), ['writable','enumerable','configurable']));",
+    "C Inner Inner E F  Z\nf g named i j k \nm n2 p\ni,j,k,l1 {\"writable\":true,\"enumerable\":true,\"configurable\":true}\n",
+  )
+}
+
+/// `extends` a class, a plain function and null; `super.m()` in instance and
+/// static methods; heritage validation.
+pub fn class_extends_diff_test() {
+  diff(
+    "class A { constructor(x){ this.x = x; this.tag = 'A' } m(){ return 'A.m:' + this.x } static sm(){ return 'A.sm' } }\nclass B extends A { constructor(x, y){ super(x); this.y = y } m(){ return 'B>' + super.m() + ':' + this.y } static sm(){ return 'B>' + super.sm() } }\nvar b = new B(1, 2);\nconsole.log(b.m(), B.sm(), b instanceof A, b instanceof B, b.tag, Object.getPrototypeOf(B) === A, Object.getPrototypeOf(B.prototype) === A.prototype);\nclass C extends A {}\nvar c = new C(7); console.log(c.x, c.m(), C.length);\nclass N extends null { constructor(){ return Object.create(N.prototype) } }\nconsole.log(Object.getPrototypeOf(N.prototype), new N() instanceof N, Object.getPrototypeOf(N) === Function.prototype);\ntry { class X extends 3 {} } catch (e) { console.log(e.constructor.name) }\nfunction F(){ this.f = 1 } F.prototype.fm = function(){ return 'fm' };\nclass G extends F { constructor(){ super(); this.g = 2 } }\nvar g = new G(); console.log(g.f, g.g, g.fm());",
+    "B>A.m:1:2 B>A.sm true true A true true\n7 A.m:7 0\nnull true true\nTypeError\n1 2 fm\n",
+  )
+}
+
+/// `this` before `super()`, double `super()`, missing `super()`, and derived
+/// return-override rules.
+pub fn derived_constructor_this_diff_test() {
+  diff(
+    "class A { constructor(){ this.a = 1 } }\nclass B extends A { constructor(){ try { this.x = 1 } catch (e) { console.log('before:', e.constructor.name) } super(); console.log('after', this.a); try { super() } catch (e) { console.log('double:', e.constructor.name) } } }\nnew B();\nclass C extends A { constructor(){ } }\ntry { new C() } catch (e) { console.log('nosuper:', e.constructor.name) }\nclass D extends A { constructor(){ return 5 } }\ntry { new D() } catch (e) { console.log('prim:', e.constructor.name) }\nclass E extends A { constructor(){ return {z:1} } }\nconsole.log(new E().z, new E() instanceof E);\nclass F2 extends A { constructor(){ super(); return undefined } }\nconsole.log(new F2().a);\nclass G extends A { constructor(){ var f = () => this; var s = () => super(); s(); console.log('arrow', f().a) } }\nnew G();",
+    "before: ReferenceError\nafter 1\ndouble: ReferenceError\nnosuper: ReferenceError\nprim: TypeError\n1 false\n1\narrow 1\n",
+  )
+}
+
+/// Subclassing Array, Error, Map, Promise, Uint8Array, TypeError and Object.
+pub fn class_extends_natives_diff_test() {
+  diff(
+    "class MyArr extends Array { sum(){ return this.reduce((a,b)=>a+b, 0) } }\nvar m = new MyArr(); m.push(1,2,3);\nconsole.log(m.length, m.sum(), Array.isArray(m), m instanceof MyArr, m instanceof Array, MyArr.from([1]) instanceof MyArr);\nclass MyErr extends Error { constructor(msg){ super(msg); this.name = 'MyErr' } }\nvar e = new MyErr('boom');\nconsole.log(e.message, e.name, e instanceof Error, e instanceof MyErr, String(e), Object.prototype.toString.call(e));\ntry { throw new MyErr('t') } catch (x) { console.log(x instanceof MyErr, x.message) }\nclass MyMap extends Map { setx(k,v){ return super.set(k, v*2) } }\nvar mm = new MyMap([[1,1]]); mm.setx(2, 5); console.log(mm.get(1), mm.get(2), mm.size, mm instanceof Map);\nclass P extends Promise { }\nvar p = new P(function(r){ r(3) }); console.log(p instanceof P, p instanceof Promise, p.then(function(){}) instanceof P);\np.then(function(v){ console.log('v', v) });\nclass U extends Uint8Array { }\nvar u = new U(3); u[0] = 300; console.log(u.length, u[0], u instanceof U, u instanceof Uint8Array);\nclass TE extends TypeError {}\nconsole.log(new TE('x').name, new TE('x') instanceof TypeError, Object.getPrototypeOf(TE) === TypeError);\nclass O extends Object { constructor(){ super(); this.q = 1 } }\nconsole.log(new O().q);",
+    "3 6 true true true false\nboom MyErr true true MyErr: boom [object Error]\ntrue t\n1 10 2 true\ntrue true true\n3 44 true true\nTypeError true true\n1\nv 3\n",
+  )
+}
+
+/// Instance and static public fields: computed keys, `this` in initializers,
+/// arrows capturing `this`, evaluation order, initializer names.
+pub fn class_fields_diff_test() {
+  diff(
+    "var k = 'comp';\nclass A { x = 1; y = this.x + 1; [k] = 3; [k + '2'] = this.y; static s = 10; static t = A.s + 1; static u = this.s + 2; f = () => this.x; 'q r' = 5; 42 = 'n'; z; }\nvar a = new A();\nconsole.log(a.x, a.y, a.comp, a.comp2, A.s, A.t, A.u, a.f(), a['q r'], a[42], 'z' in a, a.z, Object.keys(a).join());\nclass B extends A { w = this.x + 100; constructor(){ super(); this.after = this.w } }\nvar b = new B(); console.log(b.w, b.after, b.x);\nclass C { fn = function(){}; arrow = () => {}; cls = class {}; static sf = function(){}; }\nvar c = new C(); console.log(c.fn.name, c.arrow.name, c.cls.name, C.sf.name);\nvar i = 0; class D { [i++] = i++; [i++] = i++; } var d = new D(); console.log(Object.keys(d).join(), d[0], d[1], i);",
+    "1 2 3 2 10 11 12 1 5 n true undefined 42,x,y,comp,comp2,f,q r,z\n101 101 1\nfn arrow cls sf\n0,1 2 3 4\n",
+  )
+}
+
+/// Private fields, methods, accessors and statics; `#x in o` brand checks;
+/// wrong-receiver TypeErrors; fresh names per class evaluation.
+pub fn class_private_members_diff_test() {
+  diff(
+    "class A {\n  #x = 1; #y; static #s = 's';\n  #m(){ return '#m' + this.#x }\n  get #g(){ return this.#x * 10 } set #g(v){ this.#x = v }\n  static #sm(){ return A.#s }\n  read(){ return [this.#x, this.#y, this.#m(), this.#g, A.#sm()].join() }\n  write(){ this.#g = 5; this.#y = 'y'; this.#x++; return this.read() }\n  static has(o){ return #x in o }\n  static readOther(o){ return o.#x }\n}\nvar a = new A();\nconsole.log(a.read()); console.log(a.write());\nconsole.log(A.has(a), A.has({}), Object.keys(a).length, Object.getOwnPropertyNames(a).length);\ntry { A.readOther({}) } catch (e) { console.log(e.constructor.name) }\ntry { A.has(1) } catch (e) { console.log(e.constructor.name) }\nclass B { #v; constructor(v){ this.#v = v } static eq(a, b){ return a.#v === b.#v } }\nconsole.log(B.eq(new B(1), new B(1)), B.eq(new B(1), new B(2)));\nfunction mk(){ return class { #p = 1; static has(o){ return #p in o } } }\nvar K1 = mk(), K2 = mk();\nconsole.log(K1.has(new K1()), K1.has(new K2()), K2.has(new K2()));\nclass M { #meth(){} static test(o){ try { o.#meth; return true } catch (e) { return e.constructor.name } } }\nconsole.log(M.test(new M()), M.test({}));\nclass W { #w = 1; static setOn(o){ try { o.#w = 2; return 'ok' } catch(e){ return e.constructor.name } } #ro(){} static callSet(o){ try { o.#ro = 1; return 'ok' } catch(e){ return e.constructor.name } } }\nconsole.log(W.setOn(new W()), W.setOn({}), W.callSet(new W()));",
+    "1,,#m1,10,s\n6,y,#m6,60,s\ntrue false 0 0\nTypeError\nTypeError\ntrue false\ntrue false true\ntrue TypeError\nok TypeError TypeError\n",
+  )
+}
+
+/// Static blocks interleaved with static fields, `this` and private access
+/// inside them.
+pub fn class_static_blocks_diff_test() {
+  diff(
+    "var log = [];\nclass A { static x = 1; static { log.push('blk1:' + this.x); this.y = 2 } static z = 3; static { log.push('blk2:' + this.y + this.z); A.w = 4 } }\nconsole.log(log.join(), A.w, A.y);\nclass B { static #p = 5; static { log.push(B.#p) } }\nconsole.log(log.join());\nclass C { static { var inner = 1; log.push(typeof inner) } }\nconsole.log(log.join(), typeof inner);",
+    "blk1:1,blk2:23 4 2\nblk1:1,blk2:23,5\nblk1:1,blk2:23,5,number undefined\n",
+  )
+}
+
+/// `new.target` in constructors, functions and arrows; `Symbol.hasInstance`;
+/// `Reflect.construct` with a foreign new.target.
+pub fn new_target_and_has_instance_diff_test() {
+  diff(
+    "class A { constructor(){ this.nt = new.target.name } }\nclass B extends A {}\nconsole.log(new A().nt, new B().nt);\nfunction F(){ return new.target } console.log(F() === undefined, new F() instanceof F ? 'obj' : 'nt');\nfunction G(){ this.v = new.target === G } console.log(new G().v);\nclass H { static [Symbol.hasInstance](v){ return v === 1 } }\nconsole.log(1 instanceof H, {} instanceof H, new H() instanceof H);\nclass I {} console.log(I[Symbol.hasInstance] === Function.prototype[Symbol.hasInstance]);\nvar R = Reflect.construct(A, [], B); console.log(R.nt, R instanceof B);\nclass J { constructor(){ this.t = typeof new.target; var f = () => new.target; this.a = f() === J } }\nconsole.log(new J().t, new J().a);",
+    "A B\ntrue nt\ntrue\ntrue false false\ntrue\nB true\nfunction true\n",
+  )
+}
+
+/// Computed method/accessor keys and their names, accessor pair merging across
+/// a hierarchy, `static prototype` rejection.
+pub fn class_computed_keys_and_accessors_diff_test() {
+  diff(
+    "var s = Symbol('sym'); var n = 0;\nclass A { ['a' + 'b'](){ return 'ab' } get [s](){ return 'gs' } static ['st' + (++n)](){ return n } [1 + 1](){ return 2 } get x(){ return this._x } set x(v){ this._x = v } static get y(){ return 'Y' } static set y(v){ A._y = v } }\nvar a = new A();\nconsole.log(a.ab(), a[s], A.st1(), a[2](), A.prototype.ab.name, Object.getOwnPropertyDescriptor(A.prototype, s).get.name, A.st1.name, A.prototype[2].name);\na.x = 4; console.log(a.x, A.y); A.y = 9; console.log(A._y);\nvar d = Object.getOwnPropertyDescriptor(A.prototype, 'x'); console.log(typeof d.get, typeof d.set, d.enumerable, d.configurable);\nclass B { get v(){ return 1 } } class C extends B { set v(x){ this._v = x } }\nvar c = new C(); c.v = 3; console.log(c.v, c._v);\nvar key = { toString(){ return 'dyn' } };\nclass D { [key](){ return 'd' } static [key] = 1; [key] = 2 }\nconsole.log(new D().dyn, D.dyn, typeof D.prototype.dyn);\ntry { class E { static ['prototype'](){} } } catch (e) { console.log(e.constructor.name) }\nclass F { static ['constructor'](){ return 'sc' } ['constructor'](){ return 'pc' } }\nconsole.log(F.constructor(), new F().constructor === F, F.prototype.hasOwnProperty('constructor'));",
+    "ab gs 1 2 ab get [sym] st1 2\n4 Y\n9\nfunction function false true\nundefined 3\n2 1 function\nTypeError\nsc false true\n",
+  )
+}
+
+/// Generator, async and async-generator methods; generator functions get their
+/// own `prototype` object.
+pub fn class_generator_and_async_methods_diff_test() {
+  diff(
+    "class A { *g(){ yield 1; yield this.k } async am(){ return this.k } static *sg(){ yield 's' } static async sa(){ return 'sa' } async *ag(){ yield 1 } constructor(){ this.k = 'k' } }\nvar a = new A();\nconsole.log([...a.g()].join(), [...A.sg()].join(), typeof a.am().then, Object.getPrototypeOf(a.g()) === a.g.prototype, typeof A.prototype.g.prototype, A.prototype.am.prototype);\na.am().then(v => console.log('am', v)); A.sa().then(v => console.log('sa', v));\na.ag().next().then(r => console.log('ag', r.value, r.done));\nfunction* gf(){} var ge = function*(){}; async function af(){}\nconsole.log(Object.getPrototypeOf(gf()) === gf.prototype, Object.getPrototypeOf(gf.prototype) === Object.getPrototypeOf(function*(){}).prototype, gf.prototype !== ge.prototype, af.prototype, Object.getPrototypeOf(ge()) === ge.prototype, gf.hasOwnProperty('prototype'), Object.keys(gf).length);\nconsole.log(Object.getPrototypeOf(gf.prototype) === Object.getPrototypeOf(gf).prototype);\ntry { new a.g() } catch (e) { console.log(e.constructor.name) }",
+    "1,k s function false object undefined\nfalse true true undefined false true 0\ntrue\nTypeError\nam k\nsa sa\nag 1 false\n",
+  )
+}
+
+/// Class `toString`, per-iteration class evaluation, `new this()`, the
+/// immutable inner name binding.
+pub fn class_identity_and_scoping_diff_test() {
+  diff(
+    "class A { m(){} }\nconsole.log(String(A).slice(0, 9), typeof A.toString(), Object.prototype.toString.call(A), Object.prototype.toString.call(new A()));\nclass B { constructor(a, b = 1, ...c){} }\nconsole.log(B.length);\nfor (var i = 0, cs = []; i < 3; i++) cs.push(class { static i = i; #p = i; static get(o){ return o.#p } });\nconsole.log(cs[0].i, cs[2].i, cs[1].get(new cs[1]()), cs[0] === cs[1]);\ntry { cs[0].get(new cs[1]()) } catch (e) { console.log(e.constructor.name) }\nclass C { static create(){ return new this() } who(){ return 'C' } }\nclass D extends C { who(){ return 'D' } }\nconsole.log(D.create().who(), C.create().who());\nvar E = class Named { self(){ return Named } };\nconsole.log(new E().self() === E, typeof Named);\ntry { E = class { [E2](){} }; var E2 } catch(e){ console.log(e.constructor.name) }\nclass F { static m(){ F = null } }\ntry { F.m() } catch (e) { console.log('inner-const:', e.constructor.name) }\nclass G {} G = 1; console.log(G);\nconsole.log(typeof class {}, (class { static x(){ return this } }).x().name);",
+    "function  string [object Function] [object Object]\n1\n0 2 3 false\nTypeError\nD C\ntrue undefined\ninner-const: TypeError\n1\nfunction \n",
+  )
+}
+
+/// The default derived constructor forwards arguments without iterating them;
+/// `super.x` reads and writes; object literal `super`.
+pub fn derived_default_constructor_and_super_property_diff_test() {
+  diff(
+    "class A { constructor(...args){ this.args = args } }\nclass B extends A {}\nconsole.log(new B(1,2,3).args.join(), B.length);\nvar log = [];\nvar iter = Array.prototype[Symbol.iterator];\nArray.prototype[Symbol.iterator] = function(){ log.push('iter'); return iter.call(this) };\nnew B(4,5);\nArray.prototype[Symbol.iterator] = iter;\nconsole.log(log.length);\nclass C extends B { constructor(){ super(...[7,8]) } }\nconsole.log(new C().args.join());\nclass M { m(){ return 'm' } }\nclass N extends M { m(){ var f = () => super.m(); return 'n' + f() } set p(v){ super.p = v } get hp(){ return super.hasOwnProperty('p') } }\nvar n = new N(); n.p = 3; console.log(n.m(), n.p, n.hp, Object.keys(n).join());\nvar o = { __proto__: { base(){ return 'b' } }, m(){ return super.base() } };\nconsole.log(o.m());\nclass S { static sm(){ return 'S' } } class T extends S { static sm(){ return super.sm() + 'T' } static f = super.sm() }\nconsole.log(T.sm(), T.f);",
+    "1,2,3 0\n0\n7,8\nnm 3 true p\nb\nST S\n",
+  )
+}
+
+/// Which binding positions name an anonymous function: parameter and
+/// destructuring defaults, private and string-keyed fields, logical assignment.
+pub fn named_evaluation_positions_diff_test() {
+  diff(
+    "function d(a = function(){}, [b = () => 1] = [], {c = class {}} = {}){ return [a.name, b.name, c.name].join('|') }\nconsole.log(d());\nvar {x = function(){}} = {}; var [y = () => 0] = []; console.log(x.name, y.name);\nvar z; ({z = function(){}} = {}); console.log(z.name);\nclass K { #p = function(){}; 42 = function(){}; 'str' = () => 1; ['comp'] = function(){}; static #sp = class {}; names(){ return [this.#p.name, this[42].name, this.str.name, this.comp.name, K.#sp.name].join('|') } }\nconsole.log(new K().names());\nvar o = { 5: function(){}, 'a b': () => 1, get g(){ return 1 }, [Symbol.iterator]: function(){}, [Symbol('d')]() {} };\nconsole.log(o[5].name, o['a b'].name, Object.getOwnPropertyDescriptor(o, 'g').get.name, o[Symbol.iterator].name);\nvar w = (1, function(){}); var v = (function(){}); console.log('seq:', w.name, 'paren:', v.name);\nvar l1 = function(){} || 1; console.log('log:', typeof l1, l1.name);\nx ||= function(){}; var u; u ??= () => 1; console.log(u.name);",
+    "a|b|c\nx y\nz\n#p||str||#sp\n a b get g \nseq:  paren: v\nlog: function \nu\n",
+  )
+}
+
+/// `arguments` is iterable with a `callee`; rest parameters, destructuring and
+/// defaults in functions; `??` and `?.`.
+pub fn parameters_and_arguments_diff_test() {
+  diff(
+    "function f(){ return [...arguments].join() } console.log(f(1,2));\nfunction g(){ 'use strict'; return [...arguments].join() + typeof arguments[Symbol.iterator] } console.log(g(3,4));\nfunction h(a,b){ return arguments.callee === h } console.log(h(1)); try { (function(){ 'use strict'; return arguments.callee })() } catch (e) { console.log(e.constructor.name) }\nfunction r(...a){ return a.length } console.log(r(1,2));\nvar r2 = function(x, ...rest){ return x + ':' + rest.join() }; console.log(r2(1,2,3));\nfunction d(){ var [a,b] = [1,2]; let {c} = {c:3}; return a+b+c } console.log(d());\nfunction d2([a,b],{c}){ return a+b+c } console.log(d2([1,2],{c:3}));\nfunction d3(x=5){ return x } console.log(d3(), d3(1));\nfunction d4(x = 1, {y} = {y:2}){ function inner(){ return x + y } return inner() } console.log(d4());\nvar o=null; console.log(o?.x, o ?? 1, 0 ?? 2, ({a:1})?.a, JSON.stringify(({a:1}) ?? 3));\nvar [q=7] = []; var [w=7] = [1]; console.log(q, w);\nvar s, t; [s=8] = []; [t=8] = [2]; console.log(s, t);",
+    "1,2\n3,4function\ntrue\nTypeError\n2\n1:2,3\n6\n6\n5 1\n3\nundefined 1 0 1 {\"a\":1}\n7 1\n8 2\n",
+  )
+}
+
+/// Generators and async functions bind parameters, `this`, `arguments`, hoisted
+/// declarations and closed-over locals at call time.
+pub fn coroutine_prologue_diff_test() {
+  diff(
+    "function* g(a, b){ yield a + b; var t = this; yield typeof t } var it = g.call({}, 1, 2); console.log(it.next().value, it.next().value);\nasync function af(x){ await null; return x * 2 } af(4).then(v => console.log('af', v));\nasync function f0(x){ return x } f0(2).then(v => console.log('f0', v));\nasync function h(x){ var y = x + 1; return this.k + y } h.call({k:10}, 2).then(v => console.log('h', v));\nasync function f(x = 1, {y} = {y:2}, ...r) { var z = 3; function inner(){ return z } await null; return x + y + r.length + inner() + arguments.length }\nf(undefined, undefined, 9, 9).then(v => console.log('f', v));\nfunction* g2(){ var v = 1; var arrow = () => v; v = 5; yield arrow(); let w = yield 2; yield w }\nvar it2 = g2(); console.log(it2.next().value, it2.next().value, it2.next(7).value);\nvar o = { async *ag(a){ yield a; yield this.k }, k: 'k' };\nvar ai = o.ag(1); ai.next().then(r => { console.log(r.value); return ai.next() }).then(r => console.log(r.value));\nvar named = function* self(n){ yield typeof self; if (n) yield* self(0) }; console.log([...named(1)].join());\nclass C { static async s(){ return this.name } *gm(p){ yield p; yield this instanceof C } }\nC.s().then(v => console.log(v)); console.log([...new C().gm('p')].join());",
+    "3 object\n5 2 7\nfunction,function\np,true\nf0 2\nh 13\nC\naf 8\nf 12\n1\nk\n",
+  )
+}

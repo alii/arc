@@ -988,7 +988,7 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
     #(ffi("rt_obj_ffi"), "t_ic_get", 4),
     #(ffi("rt_obj_ffi"), "t_ic_set", 5),
     // perf8 CC: raytrace `.apply(this,arguments)` chain
-    #(rt("obj"), "t_new_arguments", 3),
+    #(rt("obj"), "t_new_arguments", 4),
     #(ffi("rt_call_ffi"), "new_simple_apply", 7),
     #(ffi("rt_call_ffi"), "t_method_ic_warm", 2),
   ]
@@ -1451,7 +1451,7 @@ pub fn raytrace_apply_verify() -> Bool {
   // Targeted counts — the four rows that prove/disprove the .apply chain.
   let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
-  let n_new_args = count_of(rt("obj"), atom.create("t_new_arguments"), 3)
+  let n_new_args = count_of(rt("obj"), atom.create("t_new_arguments"), 4)
   let n_call_chk = count_of(rt("call"), atom.create("t_call_checked"), 4)
   let n_new_simple =
     count_of(ffi("rt_call_ffi"), atom.create("t_new_simple"), 3)
@@ -1468,7 +1468,7 @@ pub fn raytrace_apply_verify() -> Bool {
       <> string.pad_start(int.to_string(n), 10, " "),
     )
   }
-  row("t_new_arguments/3", n_new_args)
+  row("t_new_arguments/4", n_new_args)
   row("t_call_checked/4", n_call_chk)
   row("t_new_simple/3", n_new_simple)
   row("new_simple_apply/7", n_ns_apply)

@@ -4,6 +4,7 @@
 
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
+import arc/vm/lexical
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -125,6 +126,9 @@ pub type FnSave {
     with_stack: List(String),
     private_env: List(String),
     field_init: FieldInitMode,
+    derived_ctor: Bool,
+    default_ctor: Bool,
+    this_tdz: Bool,
     class_stack: List(ClassCtx),
     // per-function slot mapping (slot indices are function-scope-local)
     slot_vars: Dict(Int, String),
@@ -180,7 +184,7 @@ pub type BarrierCleanup {
   CatchOnly
 }
 
-// ── EmitDispatch (R13: 7 fields, NOT opaque, defined here) ──────────────────
+// ── EmitDispatch (defined here to break the emit_* import cycle) ─────────────
 
 /// Terminal continuation of a statement fold: builds the tail expression and
 /// hands back the emitter it finished with.
@@ -210,7 +214,9 @@ pub type FnShape {
   FnExpr(self_name: Option(String), is_gen: Bool, is_async: Bool)
   Arrow(is_async: Bool)
   Method(is_gen: Bool, is_async: Bool)
-  ClassCtor(derived: Bool, has_field_init: Bool)
+  /// `default`: the synthesized constructor of a class with none, whose
+  /// derived form forwards its arguments to the parent unobservably.
+  ClassCtor(derived: Bool, has_field_init: Bool, default: Bool)
   ClassInitFn
 }
 
@@ -242,10 +248,13 @@ pub type SmAbrupt {
 
 /// D13 mutual-recursion break. R12: every field is Result-wrapped so early
 /// errors surface as `Error(EarlySyntaxError(..))`, never `panic`.
-/// R14: emit_function returns `#(ir.Expr, Emitter2)` (frozen sig unsatisfiable).
 pub type EmitDispatch {
   EmitDispatch(
     emit_expr: fn(Emitter2, ast.Expression) ->
+      Result(#(ir.Expr, Emitter2), EmitError),
+    /// `emit_expr` under NamedEvaluation (§8.4.5): the name an anonymous
+    /// function/class expression takes from its binding position.
+    emit_expr_named: fn(Emitter2, ast.Expression, Option(String)) ->
       Result(#(ir.Expr, Emitter2), EmitError),
     emit_stmts: fn(Emitter2, List(ast.StmtWithLine), K) ->
       Result(#(ir.Expr, Emitter2), EmitError),
@@ -268,7 +277,7 @@ pub type EmitDispatch {
     ) -> Result(#(ir.Expr, Emitter2), EmitError),
     emit_async_body: fn(
       Emitter2,
-      CoroutineKind,
+      FnShape,
       Option(String),
       List(ast.Pattern),
       FnBody,
@@ -321,6 +330,15 @@ pub type Emitter2 {
     with_stack: List(String),
     private_env: List(String),
     field_init: FieldInitMode,
+    /// This body is a derived class constructor: `return` yields `this`
+    /// for an undefined result (§10.2.2 steps 10-12).
+    derived_ctor: Bool,
+    /// This body is a synthesized default constructor (§15.7.14 step 14.a):
+    /// `super` receives the incoming argument list as-is, with no spread.
+    default_ctor: Bool,
+    /// `this` may still be unbound here (a derived constructor, or an arrow
+    /// nested in one), so reads of it are checked.
+    this_tdz: Bool,
     // ── slot mapping (unboxed-rebindable local → current IR var name) ──
     slot_vars: Dict(Int, String),
     /// TDZ-elision (emit.gleam:1841)
@@ -389,6 +407,63 @@ pub fn lookup_slotted_global(e: Emitter2, name: String) -> Option(Int) {
 
 pub fn fresh_var(e: Emitter2) -> #(String, Emitter2) {
   #("_t" <> int_to_string(e.next_var), Emitter2(..e, next_var: e.next_var + 1))
+}
+
+/// Tail Value of a straight `Let…Values([v])` chain (the shape `emit_expr`
+/// returns for identifiers/literals). None for If/Block/multi-Values tails.
+fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
+  case rhs {
+    ir.Values([v]) -> Some(v)
+    ir.Let(_, _, body) -> let_tail_value(body)
+    _ -> None
+  }
+}
+
+/// `rhs`'s Let-spine wrapped around `body` with the tail value discarded:
+/// the tree-level form of `let_` for callers that already hold the body.
+pub fn splice_let(rhs: ir.Expr, drop: String, body: ir.Expr) -> ir.Expr {
+  case rhs {
+    ir.Let(names, inner, rest) ->
+      ir.Let(names, inner, splice_let(rest, drop, body))
+    ir.Values([_]) -> body
+    _ -> ir.Let([drop], rhs, body)
+  }
+}
+
+/// Bind the value of an `anf.run` tree and continue with `k`. The tree binds
+/// fresh names (write_slot's unboxed rebind, bind_if's join var, a
+/// destructuring store) that `e.slot_vars` leaks to `k`; wrapping the whole
+/// tree as one Let-RHS would scope those names to the RHS, where dead-let
+/// elimination erases them. So the tree's Let-spine is spliced into the
+/// outer chain instead: every top-level Let in `rhs` becomes an outer Let and
+/// its name stays in scope for `k`.
+pub fn let_(
+  e: Emitter2,
+  rhs: ir.Expr,
+  k: fn(Emitter2, ir.Value) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  case rhs {
+    ir.Let(names, inner_rhs, inner_body) -> {
+      use tail <- map_tree(let_(e, inner_body, k))
+      ir.Let(names, inner_rhs, tail)
+    }
+    ir.Values([v]) -> k(e, v)
+    _ -> {
+      let #(n, e) = fresh_var(e)
+      // Propagate known-number through the alias so anf's marks survive the
+      // re-bind into the outer chain.
+      let e = case let_tail_value(rhs) {
+        Some(ir.Var(vn)) ->
+          case is_known_number(e, vn) {
+            True -> mark_known_number(e, n)
+            False -> e
+          }
+        _ -> e
+      }
+      use body <- map_tree(k(e, ir.Var(n)))
+      ir.Let([n], rhs, body)
+    }
+  }
 }
 
 pub fn fresh_label(e: Emitter2) -> #(String, Emitter2) {
@@ -690,6 +765,9 @@ pub fn new_emitter(
     with_stack: [],
     private_env: [],
     field_init: NoFieldInit,
+    derived_ctor: False,
+    default_ctor: False,
+    this_tdz: False,
     slot_vars: dict.new(),
     initialized: set.new(),
     known_numbers: set.new(),
@@ -709,6 +787,19 @@ pub fn new_emitter(
 /// Port of emit.gleam:1350-1352.
 pub fn fn_info(e: Emitter2) -> scope.FunctionInfo {
   scope.function_info(e.tree, e.fn_scope)
+}
+
+/// Whether this body's OWNED lexical slot for `ref` holds a cell: when an
+/// inner arrow captures it (the analyzer's `lexical_boxed`), and always for
+/// `this` in a derived constructor, whose `super()` may bind it inside any
+/// nested control structure.
+pub fn lexical_is_boxed(
+  e: Emitter2,
+  info: scope.FunctionInfo,
+  ref: lexical.LexicalRef,
+) -> Bool {
+  lexical.lexical_refs_get(info.lexical_boxed, ref)
+  || { ref == lexical.RefThis && e.derived_ctor }
 }
 
 /// Resolve `name` from the current scope. Delegates entirely to the analyzer
@@ -848,6 +939,9 @@ pub fn enter_function(
       with_stack: e.with_stack,
       private_env: e.private_env,
       field_init: e.field_init,
+      derived_ctor: e.derived_ctor,
+      default_ctor: e.default_ctor,
+      this_tdz: e.this_tdz,
       class_stack: e.class_stack,
       slot_vars: e.slot_vars,
       initialized: e.initialized,
@@ -872,6 +966,9 @@ pub fn enter_function(
       with_stack: [],
       private_env: e.private_env,
       field_init: NoFieldInit,
+      derived_ctor: False,
+      default_ctor: False,
+      this_tdz: is_arrow && e.this_tdz,
       class_stack: e.class_stack,
       slot_vars: dict.new(),
       initialized: set.new(),
@@ -901,6 +998,9 @@ pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
     with_stack: save.with_stack,
     private_env: save.private_env,
     field_init: save.field_init,
+    derived_ctor: save.derived_ctor,
+    default_ctor: save.default_ctor,
+    this_tdz: save.this_tdz,
     class_stack: save.class_stack,
     slot_vars: save.slot_vars,
     initialized: save.initialized,

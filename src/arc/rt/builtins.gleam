@@ -554,7 +554,7 @@ pub fn dispatch_native_construct(
         proto_from_new_target(st, new_target, r.array.prototype)
       let #(v, st) = b_array.dispatch(st, n, mk_undefined(), args)
       let #(h, st) = require_handle(st, v)
-      let #(_ok, st) = rt_obj.t_set_proto(st, h, Some(proto))
+      let #(_ok, st) = rt_obj.t_set_prototype(st, h, Some(proto))
       #(h, st)
     }
     // §22.1.1.1 String — s = args ? ToString(value) : "" (no symbol special

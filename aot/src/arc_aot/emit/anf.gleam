@@ -297,13 +297,29 @@ pub fn truthy_if(
   then(truthy_i32(v), bind_if(_, t, f))
 }
 
+/// i32 1 iff `v` is the atom `true`. An `ir.If` tests its condition against
+/// 0, so the Bool result of a host op (`strict_eq`, `is_nullish`) must go
+/// through this before it can be a condition: a bare `false` atom is not 0.
+pub fn is_true_expr(v: ir.Value) -> ir.Expr {
+  ir.NumTerm(ir.NEq, v, ir.ConstAtom("true"))
+}
+
+pub fn is_true(v: ir.Value) -> Build(ir.Value) {
+  bind(is_true_expr(v))
+}
+
+/// `host(op, args)` for a Bool-returning op, as an i32 condition.
+pub fn host_bool(op: String, args: List(ir.Value)) -> Build(ir.Value) {
+  then(host(op, args), is_true)
+}
+
 /// `if (v is null|undefined) then t else f`.
 pub fn nullish_if(
   v: ir.Value,
   t: Build(ir.Value),
   f: Build(ir.Value),
 ) -> Build(ir.Value) {
-  then(host("is_nullish", [v]), bind_if(_, t, f))
+  then(host_bool("is_nullish", [v]), bind_if(_, t, f))
 }
 
 pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {

@@ -12,6 +12,7 @@ import arc/compiler/scope.{
 import arc/parser/ast
 import arc/vm/lexical
 import arc_aot/emit/anf
+import arc_aot/emit/expr
 import arc_aot/emit/state.{
   type EmitError, type Emitter2, type FnBody, type FnShape, Arrow, ClassCtor,
   ClassInitFn, Emitter2, ExprBody, FieldInitAfterSuper, FnDecl, FnExpr, Method,
@@ -23,6 +24,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/set
 import twocore/ir
 
 // ── feature gates — see expr.gleam ───────────────────────────────────────────
@@ -50,9 +52,7 @@ fn let_(
   rhs: ir.Expr,
   k: Rk(ir.Value),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let #(n, e) = state.fresh_var(e)
-  use body <- state.map_tree(k(e, ir.Var(n)))
-  ir.Let([n], rhs, body)
+  state.let_(e, rhs, k)
 }
 
 fn host_(
@@ -87,26 +87,6 @@ fn cons_list_(
       let_(e, ir.TermOp(ir.MakeCons, [head, tail]), k)
     }
   }
-}
-
-/// Result-aware bind_if. Arm shape = dispatch return shape (#(Expr, E2)) so
-/// `e.dispatch.emit_expr` is a valid arm directly; pure arm = `pure_arm(v)`.
-fn if_(
-  e: Emitter2,
-  cond: ir.Value,
-  t: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-  f: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  use #(tt, e) <- result.try(t(e))
-  use #(ft, e) <- result.try(f(e))
-  let_(e, ir.If(cond, [ir.TTerm], tt, ft), k)
-}
-
-fn pure_arm(
-  v: ir.Value,
-) -> fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  fn(e) { Ok(#(ir.Values([v]), e)) }
 }
 
 /// Right-fold `step` over `items`, threading e, building nested Lets.
@@ -197,6 +177,23 @@ fn coroutine_kind(sf: ShapeFlags) -> Option(state.CoroutineKind) {
   }
 }
 
+/// The coroutine kind of a generator/async shape, None for a plain body.
+pub fn shape_coroutine(shape: FnShape) -> Option(state.CoroutineKind) {
+  coroutine_kind(derive_flags(shape))
+}
+
+pub fn shape_is_arrow(shape: FnShape) -> Bool {
+  derive_flags(shape).is_arrow
+}
+
+pub fn shape_is_method(shape: FnShape) -> Bool {
+  derive_flags(shape).is_method
+}
+
+pub fn shape_self_name(shape: FnShape) -> Option(String) {
+  derive_flags(shape).self_name
+}
+
 /// FieldInitMode for the child body. FieldInitAtStart is NOT set — base-ctor
 /// field-init is called by t_construct runtime (SPEC.md:782), not by M14.
 fn derive_field_init(
@@ -209,7 +206,7 @@ fn derive_field_init(
         FieldInitAfterSuper -> FieldInitAfterSuper
         _ -> NoFieldInit
       }
-    ClassCtor(derived: True, has_field_init: True) -> FieldInitAfterSuper
+    ClassCtor(derived: True, has_field_init: True, ..) -> FieldInitAfterSuper
     _ -> NoFieldInit
   }
 }
@@ -253,7 +250,7 @@ pub fn build_capture_values(
 
 /// Seed slot_vars in the CHILD frame so reads of a captured name resolve to
 /// the corresponding cap_i IR-param.
-fn seed_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
+pub fn seed_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
   let #(e, i) =
     list.fold(info.captures, #(e, 0), fn(acc, c) {
       let #(e, i) = acc
@@ -275,7 +272,8 @@ fn seed_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
   e
 }
 
-fn build_ir_params(i: Int, n: Int) -> List(ir.Local) {
+/// D5 uniform IR-param shape: `[cap_0.., _frame, _args]`.
+pub fn build_ir_params(i: Int, n: Int) -> List(ir.Local) {
   case i < n {
     False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
     True -> [ir.Local(cap_param_name(i), ir.TTerm), ..build_ir_params(i + 1, n)]
@@ -306,7 +304,7 @@ fn store_slot(
 /// Non-arrow: destructure the R7 _frame 4-tuple into the four owned lexical
 /// slots; box each whose `lexical_boxed` bit is set (u-call-abi_1.md:70-76).
 /// Arrow: skip — its lexical reads resolve via cap_i (seed_capture_slots).
-fn unpack_frame(
+pub fn unpack_frame(
   e: Emitter2,
   is_arrow: Bool,
   info: FunctionInfo,
@@ -318,7 +316,7 @@ fn unpack_frame(
       let idx = lexical.lexical_ref_offset(ref)
       let slot = base + idx
       use e, raw <- let_(e, ir.TermOp(ir.TupleGet(idx), [ir.Var("_frame")]))
-      case lexical.lexical_refs_get(info.lexical_boxed, ref) {
+      case state.lexical_is_boxed(e, info, ref) {
         False -> {
           let name = state.slot_var_name(slot)
           use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
@@ -340,7 +338,7 @@ fn unpack_frame(
 /// binding of `scope_id` in slot order, seed by kind (Var→undef, Let/Const/
 /// FnName→tdz, Param/Catch/Capture→skip seed) then cell_new if boxed &&
 /// !Capture. Params are handled by unpack_args, captures by seed_capture_slots.
-fn binding_prologue(
+pub fn binding_prologue(
   e: Emitter2,
   scope_id: ScopeId,
   k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
@@ -448,6 +446,7 @@ fn init_self_name(
           let assert Some(af_slot) =
             lexical.lexical_slot(info.lexical, lexical.RefActiveFunc)
           let af = ir.Var(state.get_slot_var(e, af_slot))
+          let e = Emitter2(..e, initialized: set.insert(e.initialized, b.slot))
           store_slot(e, b, af, k)
         }
         _ -> k(e)
@@ -529,41 +528,17 @@ fn bind_one_param(
         }
       }
     }
-    // Non-simple: real names are LetBindings (tdz-seeded+boxed by
-    // binding_prologue); apply default then destructure via M15.
+    // Non-simple: real names are LetBindings (tdz-seeded by
+    // binding_prologue); defaults and destructuring go through M15.
     True -> {
-      let #(inner, default) = peel_default(p)
-      use e, val <- apply_default(e, raw, default)
       use #(dtree, e) <- result.try(e.dispatch.emit_destructure(
         e,
-        inner,
-        val,
+        p,
+        raw,
         state.BindLet,
       ))
       use e, _ <- let_(e, dtree)
       k(e)
-    }
-  }
-}
-
-fn peel_default(p: ast.Pattern) -> #(ast.Pattern, Option(ast.Expression)) {
-  case p {
-    ast.AssignmentPattern(left:, right:) -> #(left, Some(right))
-    _ -> #(p, None)
-  }
-}
-
-fn apply_default(
-  e: Emitter2,
-  raw: ir.Value,
-  default: Option(ast.Expression),
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  case default {
-    None -> k(e, raw)
-    Some(d) -> {
-      use e, is_undef <- host_(e, "strict_eq", [raw, e.consts.undef])
-      if_(e, is_undef, fn(e) { e.dispatch.emit_expr(e, d) }, pure_arm(raw), k)
     }
   }
 }
@@ -1363,7 +1338,15 @@ fn init_arguments(
         Ok(b) -> {
           // Mapped only for sloppy simple param lists (§10.2.11 step 18).
           use e, mapped <- build_mapped_cells(e, fixed, non_simple || has_rest)
-          use e, args_obj <- host_(e, "new_arguments", [ir.Var("_args"), mapped])
+          use e, callee <- let_(
+            e,
+            ir.TermOp(ir.TupleGet(1), [ir.Var("_frame")]),
+          )
+          use e, args_obj <- host_(e, "new_arguments", [
+            ir.Var("_args"),
+            mapped,
+            callee,
+          ])
           store_slot(e, b, args_obj, k)
         }
       }
@@ -1420,7 +1403,12 @@ fn hoist_fn_decls(
         child_id,
       ))
       use e, fn_h <- let_(e, ctree)
-      store_slot(e, fn_scope_binding(e, name), fn_h, next)
+      // The var-scope: the function scope, or the parameter-body scope of
+      // a non-simple parameter list (§10.2.11 step 28).
+      let assert Ok(b) =
+        dict.get(scope.get_scope(e.tree, e.cur_scope).bindings, name)
+        as "emit_2core/fn: hoisted function missing from var-scope bindings"
+      store_slot(e, b, fn_h, next)
     }
     _ -> next(e)
   }
@@ -1435,17 +1423,34 @@ fn fn_scope_binding(e: Emitter2, name: String) -> Binding {
 
 // ── body orchestration ──────────────────────────────────────────────────────
 
-fn emit_body(
-  e: Emitter2,
-  sf: ShapeFlags,
-  params: List(ast.Pattern),
-  body: FnBody,
-  info: FunctionInfo,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let stmts = case body {
+/// Body statements of a function; an arrow's expression body returns it.
+pub fn body_stmts(body: FnBody) -> List(ast.StmtWithLine) {
+  case body {
     StmtBody(s) -> s
     ExprBody(x) -> [ast.StmtWithLine(0, ast.ReturnStatement(Some(x)))]
   }
+}
+
+/// §10.2.11 FunctionDeclarationInstantiation for a frame-ABI body: unpack
+/// `_frame`, seed the function scope's bindings and the named-expression
+/// self binding, bind params/rest/`arguments`, enter the parameter-body var
+/// scope for a non-simple list, and hoist function declarations. `k`
+/// receives the emitter positioned for the body statements plus the step
+/// that undoes the var-scope entry on the body's final emitter. The
+/// coroutine wrapper runs this once at call time and snapshots the locals it
+/// leaves; `own_args` is False there since the resumed body has no `_args`
+/// list to forward, so every `arguments` reference materializes the object.
+pub fn emit_prologue(
+  e: Emitter2,
+  self_name: Option(String),
+  is_arrow: Bool,
+  own_args: Bool,
+  params: List(ast.Pattern),
+  stmts: List(ast.StmtWithLine),
+  info: FunctionInfo,
+  k: fn(Emitter2, fn(Emitter2) -> Emitter2) ->
+    Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let #(fixed, rest_param) = ast_util.split_trailing_rest(params)
   let non_simple = !ast_util.all_simple_params(fixed)
   // needs_args_object_* (not refs_args_*): a body whose only `arguments` refs
@@ -1453,55 +1458,82 @@ fn emit_body(
   // emit-side fast-path forwards raw `_args`. Param defaults keep the strict
   // walker (fast-path shape inside a default is exotic; over-reject is safe).
   let uses_args =
-    !sf.is_arrow
+    !is_arrow
     && {
       list.any(params, refs_args_pattern)
-      || case perf7_args_elide {
+      || case perf7_args_elide && own_args {
         True -> needs_args_object_stmts(stmts)
         False -> refs_args_stmts(stmts)
       }
     }
-  let ret_undef = fn(ef: Emitter2) { Ok(#(ir.Return([ef.consts.undef]), ef)) }
   // Expose the raw incoming args cons-list to expr.gleam so
   // `X.apply(Y, arguments)` lowers to a direct call passing `_args`
   // verbatim. Arrows inherit `arguments` via captures — their own `_args`
   // param is the arrow's args, not the value `arguments` resolves to.
-  let e = case sf.is_arrow {
+  let e = case is_arrow || !own_args {
     True -> e
     False -> Emitter2(..e, raw_args_var: Some("_args"))
   }
-  run_rk(e, fn(e, done) {
-    use e <- unpack_frame(e, sf.is_arrow, info)
-    use e <- binding_prologue(e, e.fn_scope)
-    use e <- init_self_name(e, sf.self_name, info)
-    use e, tail <- unpack_args(e, fixed, non_simple)
-    use e <- bind_rest(e, rest_param, tail, non_simple)
-    use e <- init_arguments(
-      e,
-      sf.is_arrow,
-      uses_args,
-      fixed,
-      non_simple,
-      rest_param != None,
-    )
-    // §10.2.11 step 28: non-simple params get a body var-boundary Block scope.
-    case non_simple {
-      False -> {
-        use e <- hoist_fn_decls(e, stmts)
-        use #(tree, ef) <- result.try(e.dispatch.emit_stmts(e, stmts, ret_undef))
-        done(ef, tree)
-      }
+  use e <- unpack_frame(e, is_arrow, info)
+  use e <- binding_prologue(e, e.fn_scope)
+  use e <- init_self_name(e, self_name, info)
+  use e, tail <- unpack_args(e, fixed, non_simple)
+  use e <- bind_rest(e, rest_param, tail, non_simple)
+  use e <- init_arguments(
+    e,
+    is_arrow,
+    uses_args,
+    fixed,
+    non_simple,
+    rest_param != None,
+  )
+  // §10.2.11 step 28: non-simple params get a body var-boundary Block scope.
+  case non_simple {
+    False -> {
+      use e <- hoist_fn_decls(e, stmts)
+      k(e, fn(ef) { ef })
+    }
+    True -> {
+      let #(e, save) = state.enter_scope(e, in_block: False)
+      use e <- binding_prologue(e, e.cur_scope)
+      let param_names = list.flat_map(params, ast.pattern_bound_names)
+      use e <- body_param_copies(e, param_names, is_arrow, stmts)
+      use e <- hoist_fn_decls(e, stmts)
+      k(e, state.leave_scope(_, save))
+    }
+  }
+}
+
+fn emit_body(
+  e: Emitter2,
+  sf: ShapeFlags,
+  params: List(ast.Pattern),
+  body: FnBody,
+  info: FunctionInfo,
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  let stmts = body_stmts(body)
+  let ret_undef = fn(ef: Emitter2) {
+    case ef.derived_ctor {
+      False -> Ok(#(ir.Return([ef.consts.undef]), ef))
       True -> {
-        let #(e, save) = state.enter_scope(e, in_block: False)
-        use e <- binding_prologue(e, e.cur_scope)
-        let param_names = list.flat_map(params, ast.pattern_bound_names)
-        use e <- body_param_copies(e, param_names, sf.is_arrow, stmts)
-        use e <- hoist_fn_decls(e, stmts)
-        use #(tree, ef) <- result.try(e.dispatch.emit_stmts(e, stmts, ret_undef))
-        done(state.leave_scope(ef, save), tree)
+        let #(tree, ef) =
+          anf.run(expr.derived_return_value(ef.consts.undef), ef)
+        use ef, v <- let_(ef, tree)
+        Ok(#(ir.Return([v]), ef))
       }
     }
-  })
+  }
+  use e, finish <- emit_prologue(
+    e,
+    sf.self_name,
+    sf.is_arrow,
+    True,
+    params,
+    stmts,
+    info,
+  )
+  use #(tree, ef) <- result.map(e.dispatch.emit_stmts(e, stmts, ret_undef))
+  #(tree, finish(ef))
 }
 
 // ── simple-ABI body: positional params, no _frame/_args ─────────────────────
@@ -1693,7 +1725,7 @@ fn emit_closure_site(
         ]),
       )
       // §10.2.5 MakeConstructor — only FnDecl/FnExpr (!gen && !async) get an
-      // own writable .prototype; class ctors set theirs via t_class_create.
+      // own writable .prototype; class ctors get theirs from class_setup.
       case sf.is_constructor && !sf.is_class_constructor {
         True -> anf.host("make_constructor", [fn_h])
         False -> anf.pure(fn_h)
@@ -1742,10 +1774,10 @@ pub fn emit_function_tree(
 
   // gen|async → M18 owns the state-machine body; already tree-shaped (R14).
   case coroutine_kind(sf) {
-    Some(kind) ->
+    Some(_) ->
       e.dispatch.emit_async_body(
         e,
-        kind,
+        shape,
         js_name,
         params,
         body,
@@ -1764,7 +1796,19 @@ pub fn emit_function_tree(
           is_generator: False,
           is_arrow: sf.is_arrow,
         )
-      let e_child = Emitter2(..e_child, field_init:)
+      let derived_ctor = sf.is_derived_constructor
+      let default_ctor = case shape {
+        ClassCtor(default:, ..) -> default
+        _ -> False
+      }
+      let e_child =
+        Emitter2(
+          ..e_child,
+          field_init:,
+          derived_ctor:,
+          default_ctor:,
+          this_tdz: derived_ctor || e_child.this_tdz,
+        )
       let e_child = seed_capture_slots(e_child, child_info)
       use #(body_expr, e_child) <- result.try(emit_body(
         e_child,

@@ -42,15 +42,18 @@ fn go(pat: ast.Pattern, source: ir.Value, mode: BindMode) -> Build(Nil) {
     ast.ObjectPattern(properties:) ->
       emit_object_pattern(properties, source, mode)
     ast.AssignmentPattern(left:, right: default_expr) -> {
-      // §8.6.3 Initializer: evaluate default only when source === undefined.
-      // R14 name-hint gap (matches stmt.gleam:598): dispatch.emit_expr has no
-      // NamedEvaluation slot, so anonymous-fn defaults get name "" (accepted).
+      // §8.6.3 Initializer: evaluate default only when source === undefined;
+      // a single-name binding's default gets NamedEvaluation.
+      let named = case left {
+        ast.IdentifierPattern(name:, ..) -> Some(name)
+        _ -> None
+      }
       use rc <- anf.then(expr.consts())
-      use is_undef <- anf.then(anf.host("strict_eq", [source, rc.undef]))
+      use is_undef <- anf.then(anf.host_bool("strict_eq", [source, rc.undef]))
       use v <- anf.then(anf.bind_if(
         is_undef,
         expr.bridge_expr(fn(e: Emitter2) {
-          e.dispatch.emit_expr(e, default_expr)
+          e.dispatch.emit_expr_named(e, default_expr, named)
         }),
         anf.pure(source),
       ))

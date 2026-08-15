@@ -406,6 +406,15 @@ pub fn emit_expr(
   Ok(anf.run(expr(ex), e))
 }
 
+/// `emit_expr` with the NamedEvaluation hint for an anonymous fn/class `ex`.
+pub fn emit_expr_named(
+  e: Emitter2,
+  ex: ast.Expression,
+  named: Option(String),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  Ok(anf.run(emit(ex, named), e))
+}
+
 // ── Identifier read (u-identifier-lexical) ──────────────────────────────────
 // Port of emit.gleam:1800-1810. D15: WithChain resolutions surface as a
 // runtime UnsupportedFeature throw. Slot/lexical helpers live below.
@@ -817,12 +826,24 @@ fn class_body_assigned(
 ) -> set.Set(String) {
   list.fold(body, acc, fn(acc, el) {
     case el {
-      ast.ClassMethod(value: ast.FunctionLiteral(body:, ..), ..) ->
-        list.fold(body, acc, stmt_assigned_globals)
-      ast.ClassField(value:, ..) -> opt_ex_assigned(acc, value)
+      ast.ClassMethod(key:, value: ast.FunctionLiteral(body:, params:, ..), ..) ->
+        list.fold(
+          body,
+          list.fold(params, key_assigned(acc, key), pat_default_assigned),
+          stmt_assigned_globals,
+        )
+      ast.ClassField(key:, value:, ..) ->
+        opt_ex_assigned(key_assigned(acc, key), value)
       ast.StaticBlock(body:) -> list.fold(body, acc, stmt_assigned_globals)
     }
   })
+}
+
+fn key_assigned(acc: set.Set(String), key: ast.PropertyKey) -> set.Set(String) {
+  case key {
+    ast.KeyComputed(expression:) -> ex_assigned(acc, expression)
+    _ -> acc
+  }
 }
 
 fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
@@ -896,11 +917,23 @@ fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
     ast.ObjectExpression(properties:, ..) ->
       list.fold(properties, acc, fn(acc, p) {
         case p {
-          ast.InitProperty(value:, ..) -> ex_assigned(acc, value)
+          ast.InitProperty(key:, value:, ..) ->
+            ex_assigned(key_assigned(acc, key), value)
           ast.SpreadProperty(argument:) -> ex_assigned(acc, argument)
-          ast.MethodProperty(value: ast.FunctionLiteral(body:, ..), ..)
-          | ast.AccessorProperty(value: ast.FunctionLiteral(body:, ..), ..) ->
-            list.fold(body, acc, stmt_assigned_globals)
+          ast.MethodProperty(
+            key:,
+            value: ast.FunctionLiteral(body:, params:, ..),
+          )
+          | ast.AccessorProperty(
+              key:,
+              value: ast.FunctionLiteral(body:, params:, ..),
+              ..,
+            ) ->
+            list.fold(
+              body,
+              list.fold(params, key_assigned(acc, key), pat_default_assigned),
+              stmt_assigned_globals,
+            )
         }
       })
     ast.TemplateLiteral(parts:, ..) ->
@@ -1126,7 +1159,31 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
         Error(Nil) -> read_slot(slot, boxed)
       }
     }
-    scope.Local(slot:, boxed:, ..) -> read_slot(slot, boxed)
+    // §9.1.1.1.6 GetBindingValue: a lexical binding read before its
+    // declaration ran throws. Elided once this function body has emitted the
+    // initialization (straight-line source order); a capture of an outer
+    // lexical can never prove that, so it always checks.
+    scope.Local(slot:, boxed:, origin_kind:, ..) -> {
+      use v <- anf.then(read_slot(slot, boxed))
+      use e <- anf.then(ask)
+      let checked = case origin_kind {
+        scope.LetBinding | scope.ConstBinding | scope.FnNameBinding ->
+          !set.contains(e.initialized, slot)
+        _ -> False
+      }
+      case checked {
+        False -> anf.pure(v)
+        True -> {
+          use _ <- anf.then(
+            anf.host("tdz_check", [
+              v,
+              ir.ConstBinary(bit_array.from_string(name)),
+            ]),
+          )
+          anf.pure(v)
+        }
+      }
+    }
     scope.Global(name: g) -> {
       use e <- anf.then(ask)
       // Optimization G: top-level `var`/`function` declared name → boxed
@@ -1167,8 +1224,7 @@ fn resolve_lexical(
 ) -> Option(#(Int, Bool)) {
   let info = state.fn_info(e)
   case lexical.lexical_slot(info.lexical, ref) {
-    Some(slot) ->
-      Some(#(slot, lexical.lexical_refs_get(info.lexical_boxed, ref)))
+    Some(slot) -> Some(#(slot, state.lexical_is_boxed(e, info, ref)))
     None ->
       case dict.get(info.lexical_captures, ref) {
         Ok(slot) -> Some(#(slot, True))
@@ -1178,8 +1234,22 @@ fn resolve_lexical(
 }
 
 /// Read a lexical pseudo-binding (`this`, `new.target`, home_object,
-/// active_func). None → `undefined` (Script/Module root, §16.1.6).
+/// active_func). None → `undefined` (Script/Module root, §16.1.6). Where
+/// `this` may still be unbound (§9.1.1.3.4 GetThisBinding in a derived
+/// constructor before `super()`), the read is checked.
 pub fn emit_lexical(ref: lexical.LexicalRef) -> Build(ir.Value) {
+  use e <- anf.then(ask)
+  use v <- anf.then(lexical_value(ref))
+  case ref, e.this_tdz {
+    lexical.RefThis, True -> {
+      use _ <- anf.then(anf.host("check_this", [v]))
+      anf.pure(v)
+    }
+    _, _ -> anf.pure(v)
+  }
+}
+
+fn lexical_value(ref: lexical.LexicalRef) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case resolve_lexical(e, ref) {
     Some(#(slot, boxed)) -> read_slot(slot, boxed)
@@ -1187,32 +1257,27 @@ pub fn emit_lexical(ref: lexical.LexicalRef) -> Build(ir.Value) {
   }
 }
 
+/// §10.2.2 steps 10-12 for a derived constructor: an `undefined` result
+/// yields the raw `this` binding, which `[[Construct]]` rejects with a
+/// ReferenceError when `super()` never ran.
+pub fn derived_return_value(v: ir.Value) -> Build(ir.Value) {
+  use rc <- anf.then(consts())
+  use is_undef <- anf.then(anf.host_bool("strict_eq", [v, rc.undef]))
+  anf.bind_if(is_undef, lexical_value(lexical.RefThis), anf.pure(v))
+}
+
 /// Write `v` into the lexical `this` slot after `super()` — §10.2.4
 /// BindThisValue step 3 throws ReferenceError if already initialized (second
-/// `super()`). Port of emit.gleam:2620 set_this → Put*CheckInit; no
-/// `cell_set_check_init` op in SPEC §8 so the guard is open-coded here.
+/// `super()`). The slot is always a cell here: `super()` only occurs in a
+/// derived constructor (whose `this` is boxed, `state.lexical_is_boxed`) or
+/// an arrow capturing it.
 fn set_lexical_this(v: ir.Value) -> Build(Nil) {
-  fn(e: Emitter2, k) {
-    case resolve_lexical(e, lexical.RefThis) {
-      None -> k(e, Nil)
-      Some(#(slot, boxed)) ->
-        this_check_init(slot, boxed)(e, fn(e, _) {
-          case boxed {
-            True ->
-              anf.host("cell_set", [ir.Var(state.get_slot_var(e, slot)), v])(
-                e,
-                fn(e, _) { k(e, Nil) },
-              )
-            False -> {
-              let #(name, e) = state.fresh_var(e)
-              anf.wrap(k(state.set_slot_var(e, slot, name), Nil), ir.Let(
-                [name],
-                ir.Values([v]),
-                _,
-              ))
-            }
-          }
-        })
+  use e <- anf.then(ask)
+  case resolve_lexical(e, lexical.RefThis) {
+    None -> anf.pure(Nil)
+    Some(#(slot, boxed)) -> {
+      use _ <- anf.then(this_check_init(slot, boxed))
+      anf.host_unit("cell_set", [ir.Var(state.get_slot_var(e, slot)), v])
     }
   }
 }
@@ -1223,11 +1288,16 @@ fn set_lexical_this(v: ir.Value) -> Build(Nil) {
 fn this_check_init(slot: Int, boxed: Bool) -> Build(Nil) {
   use rc <- anf.then(consts())
   use cur <- anf.then(read_slot(slot, boxed))
-  use is_tdz <- anf.then(anf.host("strict_eq", [cur, rc.tdz]))
+  // Term identity, not `strict_eq`: the sentinel is not a JS value and is
+  // never IsStrictlyEqual to anything, itself included.
+  use is_tdz <- anf.then(anf.bind(ir.NumTerm(ir.NEq, cur, rc.tdz)))
   use _ <- anf.then(anf.bind_if(
     is_tdz,
     anf.pure(rc.undef),
-    throw_at_rt("throw_reference_error", "'this' is already bound"),
+    throw_at_rt(
+      "throw_reference_error",
+      "Super constructor may only be called once",
+    ),
   ))
   anf.pure(Nil)
 }
@@ -1643,10 +1713,15 @@ fn emit_field_init_call() -> Build(Nil) {
 /// §13.3.7.1 SuperCall. host("super_call",[active_func, argsL, new_target])
 /// (SPEC §8 t_super_call arg order) performs GetPrototypeOf(active_func) +
 /// [[Construct]]; result is bound as `this` (step 8) then field-init (step 12).
+/// A default constructor passes its own argument list through.
 fn emit_super_call(args: List(ast.Expression)) -> Build(ir.Value) {
   use af <- anf.then(emit_lexical(lexical.RefActiveFunc))
   use nt <- anf.then(emit_lexical(lexical.RefNewTarget))
-  use args_l <- anf.then(emit_args_list(args))
+  use e <- anf.then(ask)
+  use args_l <- anf.then(case e.default_ctor, e.raw_args_var {
+    True, Some(raw) -> anf.pure(ir.Var(raw))
+    _, _ -> emit_args_list(args)
+  })
   use inst <- anf.then(anf.host("super_call", [af, args_l, nt]))
   use _ <- anf.then(set_lexical_this(inst))
   use e <- anf.then(ask)
@@ -1716,7 +1791,7 @@ fn emit_chain(
 
 /// If `v` is nullish, Break `exit` with undefined; else yield `v` unchanged.
 fn chain_guard(v: ir.Value, exit: String, undef: ir.Value) -> Build(ir.Value) {
-  use is_nul <- anf.then(anf.host("is_nullish", [v]))
+  use is_nul <- anf.then(anf.host_bool("is_nullish", [v]))
   anf.bind_if(is_nul, fn(e, _k) { #(ir.Break(exit, [undef]), e) }, anf.pure(v))
 }
 
@@ -2272,7 +2347,12 @@ pub fn lvalue_put(lv: LValue, v: ir.Value) -> Build(ir.Value) {
       anf.pure(v)
     }
     LvSuper(home:, this:, key:) -> {
-      use _ <- anf.then(anf.host("super_set", [home, this, key, v]))
+      use e <- anf.then(ask)
+      let strict = case e.strict {
+        True -> e.consts.true_
+        False -> e.consts.false_
+      }
+      use _ <- anf.then(anf.host("super_set", [home, this, key, v, strict]))
       anf.pure(v)
     }
   }
@@ -2365,8 +2445,15 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
         value,
         ast.property_key_static_name(key),
       ))
+      use rc <- anf.then(consts())
       use _ <- anf.then(
-        anf.host("define_method", [obj, k, f, ir.ConstAtom("m_i_method")]),
+        anf.host("define_method", [
+          obj,
+          k,
+          f,
+          ir.ConstAtom("m_i_method"),
+          rc.true_,
+        ]),
       )
       anf.pure(obj)
     }
@@ -2378,7 +2465,8 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
         option.map(ast.property_key_static_name(key), fn(n) { prefix <> n })
       use k <- anf.then(emit_key(key))
       use f <- anf.then(emit_method_closure(value, name))
-      use _ <- anf.then(anf.host("define_method", [obj, k, f, tag]))
+      use rc <- anf.then(consts())
+      use _ <- anf.then(anf.host("define_method", [obj, k, f, tag, rc.true_]))
       anf.pure(obj)
     }
 
@@ -2682,7 +2770,7 @@ pub fn emit_destructuring_assign(
         ast.Identifier(name:, ..) -> Some(name)
         _ -> None
       }
-      use is_undef <- anf.then(anf.host("strict_eq", [src, rc.undef]))
+      use is_undef <- anf.then(anf.host_bool("strict_eq", [src, rc.undef]))
       use v <- anf.then(anf.bind_if(
         is_undef,
         emit(default_expr, named),

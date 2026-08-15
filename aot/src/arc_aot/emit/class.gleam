@@ -5,10 +5,7 @@
 //// R7: 0-based TupleGet. R14: emit_function returns #(ir.Expr, Emitter2).
 
 import arc/compiler/ast_util
-import arc/compiler/scope.{
-  type Binding, type FunctionInfo, CaptureBinding, CatchBinding, ConstBinding,
-  FnNameBinding, LetBinding, ParamBinding, VarBinding,
-}
+import arc/compiler/scope.{type Binding}
 import arc/parser/ast
 import arc/vm/lexical
 import arc_aot/emit/anf
@@ -16,7 +13,6 @@ import arc_aot/emit/func
 import arc_aot/emit/state.{type EmitError, type Emitter2, ClassCtx, Emitter2}
 import gleam/bit_array
 import gleam/dict
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -36,9 +32,7 @@ fn let_(
   rhs: ir.Expr,
   k: Rk(ir.Value),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let #(n, e) = state.fresh_var(e)
-  use body <- state.map_tree(k(e, ir.Var(n)))
-  ir.Let([n], rhs, body)
+  state.let_(e, rhs, k)
 }
 
 fn host_(
@@ -76,26 +70,6 @@ fn each_(
     [] -> k(e)
     [x, ..rest] -> step(e, x, fn(e) { each_(e, rest, k, step) })
   }
-}
-
-/// Result-aware bind_if. Arm shape = dispatch return shape (#(Expr, E2)) so
-/// `e.dispatch.emit_expr` is a valid arm directly; pure arm = `pure_arm(v)`.
-fn if_(
-  e: Emitter2,
-  cond: ir.Value,
-  t: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-  f: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  use #(tt, e) <- result.try(t(e))
-  use #(ft, e) <- result.try(f(e))
-  let_(e, ir.If(cond, [ir.TTerm], tt, ft), k)
-}
-
-fn pure_arm(
-  v: ir.Value,
-) -> fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  fn(e) { Ok(#(ir.Values([v]), e)) }
 }
 
 /// Run an Rk chain whose leaf calls `done(ef, tree)`.
@@ -295,28 +269,20 @@ fn emit_methods(
       host_unit_(
         e,
         "define_method",
-        [target_h, kv, fn_h, method_install_atom(kind, is_static)],
+        [
+          target_h,
+          kv,
+          fn_h,
+          method_install_atom(kind, is_static),
+          e.consts.false_,
+        ],
         next,
       )
     }
   }
 }
 
-// ── §15.7.14 steps 8-14: constructor + class_create (port emit.gleam:7159-7290) ──
-
-/// §15.1.5 ExpectedArgumentCount — leading params before the first default
-/// or rest. Local copy of func.gleam:788 (private there).
-fn ctor_expected_length(params: List(ast.Pattern)) -> Int {
-  let #(fixed, _) = ast_util.split_trailing_rest(params)
-  fixed
-  |> list.take_while(fn(p) {
-    case p {
-      ast.AssignmentPattern(..) -> False
-      _ -> True
-    }
-  })
-  |> list.length
-}
+// ── §15.7.14 steps 8-14: constructor + class_setup (port emit.gleam:7159-7290) ──
 
 /// True when `parts` will yield a non-empty instance field-initializer fn —
 /// instance fields OR any private instance method (installed per-instance per
@@ -333,11 +299,11 @@ fn has_instance_field_init(parts: ast_util.ClassBodyParts) -> Bool {
 }
 
 /// Build the constructor closure (explicit or spec-default synthesized), then
-/// call M7 `class_create` to allocate the [ctor, proto] pair, wire heritage,
-/// and populate the ClassCtx home-object cells. Port of emit.gleam:7182-7250.
-/// Heritage expression is evaluated by the scaffold BEFORE this call (into
-/// `super_v`); class_create validates heritage-is-constructor-or-null at
-/// runtime. `k` receives `#(ctor_h, proto_h)`.
+/// call `class_setup` to validate the heritage, allocate the prototype and
+/// wire it to the constructor, and populate the ClassCtx home-object cells.
+/// The heritage expression is evaluated by the scaffold BEFORE this call
+/// (into `super_v`, the `tdz` sentinel when there is no `extends`). `k`
+/// receives `#(ctor_h, proto_h)`.
 fn emit_ctor_and_create(
   e: Emitter2,
   parts: ast_util.ClassBodyParts,
@@ -348,35 +314,23 @@ fn emit_ctor_and_create(
   ctor_child_id: scope.ScopeId,
   k: Rk(#(ir.Value, ir.Value)),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let #(ctor_params, ctor_body) = case parts.constructor {
+  let #(ctor_params, ctor_body, default) = case parts.constructor {
     Some(ast_util.ClassMethodEl(
       fun: ast.FunctionLiteral(params:, body:, ..),
       ..,
-    )) -> #(params, body)
-    None -> #([], default_ctor_body(is_derived))
+    )) -> #(params, body, False)
+    None -> #([], default_ctor_body(is_derived), True)
   }
   use #(ctor_tree, e) <- result.try(e.dispatch.emit_function(
     e,
-    state.ClassCtor(derived: is_derived, has_field_init:),
+    state.ClassCtor(derived: is_derived, has_field_init:, default:),
     display_name,
     ctor_params,
     state.StmtBody(ctor_body),
     ctor_child_id,
   ))
-  use e, ctor_code_h <- let_(e, ctor_tree)
-  let name_bin = case display_name {
-    Some(n) -> ir.ConstBinary(bit_array.from_string(n))
-    None -> e.consts.empty_bin
-  }
-  // Arg order: [ctor_code, name, length, super] → {ctor, proto}.
-  use e, pair <- host_(e, "class_create", [
-    ctor_code_h,
-    name_bin,
-    ir.ConstI32(ctor_expected_length(ctor_params)),
-    super_v,
-  ])
-  use e, ctor_h <- let_(e, anf.tuple_get(pair, 0))
-  use e, proto_h <- let_(e, anf.tuple_get(pair, 1))
+  use e, ctor_h <- let_(e, ctor_tree)
+  use e, proto_h <- host_(e, "class_setup", [ctor_h, super_v])
   // Populate ClassCtx cells NOW so method/field-init closures capturing them
   // (via home-object / ctor-self) see the allocated proto/ctor.
   let assert [ctx, ..] = e.class_stack
@@ -387,10 +341,9 @@ fn emit_ctor_and_create(
   k(e, #(ctor_h, proto_h))
 }
 
-/// Spec default constructor body: `super(...arguments)` for derived classes,
-/// empty for base classes. Verbatim port of emit.gleam:7295-7322 (span
-/// synthesized here since the twocore path receives only `is_derived` — the
-/// heritage expression is pre-evaluated by the scaffold).
+/// §15.7.14 step 14.a default constructor body: empty for a base class; for
+/// a derived class a `super()` call which, under `default_ctor`, forwards the
+/// incoming argument list without iterating it.
 fn default_ctor_body(is_derived: Bool) -> List(ast.StmtWithLine) {
   case is_derived {
     False -> []
@@ -403,55 +356,13 @@ fn default_ctor_body(is_derived: Bool) -> List(ast.StmtWithLine) {
             expression: ast.CallExpression(
               span:,
               callee: ast.SuperExpression(span:),
-              arguments: [
-                ast.SpreadElement(
-                  span:,
-                  argument: ast.Identifier(span:, name: "arguments"),
-                ),
-              ],
+              arguments: [],
             ),
             directive: None,
           ),
         ),
       ]
     }
-  }
-}
-
-// ── ClassBody-scope binding prologue (copied from stmt.gleam:415-444) ────────
-
-/// Seed every binding owned by `scope_id` (the just-entered ClassBody scope)
-/// in slot order — every ast_util.class_body_bindings entry is a ConstBinding
-/// so seeds to tdz. Verbatim port of stmt.binding_prologue re-scoped here so
-/// class.gleam has no cross-module dependency on stmt.
-fn binding_prologue(
-  e: Emitter2,
-  scope_id: scope.ScopeId,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let bindings =
-    dict.to_list(scope.get_scope(e.tree, scope_id).bindings)
-    |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
-  use e, entry, next <- each_(e, bindings, then: k)
-  let #(_, b): #(String, Binding) = entry
-  let name = state.slot_var_name(b.slot)
-  let seed = fn(e: Emitter2, init) {
-    case b.is_boxed {
-      False -> {
-        use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
-        ir.Let([name], ir.Values([init]), body)
-      }
-      True -> {
-        use e, cell <- host_(e, "cell_new", [init])
-        use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
-        ir.Let([name], ir.Values([cell]), body)
-      }
-    }
-  }
-  case b.kind {
-    VarBinding -> seed(e, e.consts.undef)
-    LetBinding | ConstBinding | FnNameBinding -> seed(e, e.consts.tdz)
-    ParamBinding | CatchBinding | CaptureBinding -> next(e)
   }
 }
 
@@ -488,7 +399,7 @@ pub fn emit_class(
   // `class C extends C {}` TDZs on the inner C, and so every child closure's
   // MakeClosure snapshot sees the slots for capture.
   let #(e, save) = state.enter_scope(e, in_block: e.in_block)
-  use e <- binding_prologue(e, e.cur_scope)
+  use e <- func.binding_prologue(e, e.cur_scope)
   // (3) §15.7.14 steps 5/6: mint each PrivateName NOW (after declaration,
   // before any child closure) so each class evaluation gets distinct keys and
   // methods/field-inits capture them via ordinary lexical scoping.
@@ -555,7 +466,7 @@ pub fn emit_class(
         use #(tree, e) <- result.try(e.dispatch.emit_expr(e, h))
         let_(e, tree, k)
       }
-      None -> k(e, e.consts.undef)
+      None -> k(e, e.consts.tdz)
     }
   }
   use e, super_v <- with_super(e)
@@ -588,11 +499,13 @@ pub fn emit_class(
   use e <- with_inner_name(e)
   // (12) §15.7.14 step 25: attach [[Fields]] initializer to ctor; then run
   // static elements (fields + blocks) with `this = ctor`.
-  let init_v = case init_h {
-    Some(v) -> v
-    None -> e.consts.undef
+  let with_fields_init = fn(e, then) {
+    case init_h {
+      Some(v) -> host_unit_(e, "set_fields_init", [ctor_h, v], then)
+      None -> then(e)
+    }
   }
-  use e <- host_unit_(e, "set_fields_init", [ctor_h, init_v])
+  use e <- with_fields_init(e)
   use e <- emit_static_init(e, parts, ctor_h)
   // (13) Pop ClassCtx, leave ClassBody scope, restore enclosing strict/private.
   let assert [_, ..outer_class_stack] = e.class_stack
@@ -607,10 +520,9 @@ pub fn emit_class(
 }
 
 // ── §15.7.14 [[Fields]] / static-init closures (port emit.gleam:7310-7726) ──
-// state.FnBody is frozen at StmtBody|ExprBody (state.gleam:202) with no
-// FieldInitsBody variant, so these two functions build the ir.Function DIRECTLY
-// (mirroring func.emit_function_tree:804-875 shape locally) rather than routing
-// through dispatch.emit_function.
+// A field-initializer body is a list of FieldInits, not statements, so these
+// build the ir.Function directly from func's prologue pieces rather than
+// routing through dispatch.emit_function.
 
 /// One element of a class-init function body. Verbatim port of arc
 /// emit.gleam:331-358 FieldInit.
@@ -707,82 +619,6 @@ fn static_block_iife(body: List(ast.StmtWithLine)) -> ast.Expression {
   )
 }
 
-// ── direct ir.Function build helpers (local mirrors of func.gleam:230-289) ──
-// func.build_capture_values / func.cap_param_name are pub; the rest are private
-// so are re-derived here to keep func.gleam's surface unchanged.
-
-fn init_capture_count(info: FunctionInfo) -> Int {
-  list.length(info.captures) + dict.size(info.lexical_captures)
-}
-
-fn init_ir_params(i: Int, n: Int) -> List(ir.Local) {
-  case i < n {
-    False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
-    True -> [
-      ir.Local(func.cap_param_name(i), ir.TTerm),
-      ..init_ir_params(i + 1, n)
-    ]
-  }
-}
-
-/// Seed slot_vars in the CHILD frame so reads of captured names resolve to the
-/// corresponding cap_i IR-param. Local mirror of func.seed_capture_slots.
-fn seed_init_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
-  let #(e, i) =
-    list.fold(info.captures, #(e, 0), fn(acc, c) {
-      let #(e, i) = acc
-      let assert Ok(child_slot) = dict.get(info.names, c.0)
-        as "emit_2core/class: capture name missing from FunctionInfo.names"
-      #(state.set_slot_var(e, child_slot, func.cap_param_name(i)), i + 1)
-    })
-  let #(e, _) =
-    list.fold(lexical.all_lexical_refs, #(e, i), fn(acc, ref) {
-      let #(e, i) = acc
-      case dict.get(info.lexical_captures, ref) {
-        Ok(child_slot) -> #(
-          state.set_slot_var(e, child_slot, func.cap_param_name(i)),
-          i + 1,
-        )
-        Error(_) -> #(e, i)
-      }
-    })
-  e
-}
-
-/// Non-arrow: destructure the R7 _frame 4-tuple into the four owned lexical
-/// slots (this=0, active_func=1, home_object=2, new_target=3), boxing per
-/// `lexical_boxed`. Local mirror of func.unpack_frame (is_arrow = False).
-fn unpack_init_frame(
-  e: Emitter2,
-  info: FunctionInfo,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  case info.lexical {
-    lexical.OwnedLexicalSlots(base:) -> {
-      use e, ref, next <- each_(e, lexical.all_lexical_refs, then: k)
-      let idx = lexical.lexical_ref_offset(ref)
-      let slot = base + idx
-      use e, raw <- let_(e, ir.TermOp(ir.TupleGet(idx), [ir.Var("_frame")]))
-      case lexical.lexical_refs_get(info.lexical_boxed, ref) {
-        False -> {
-          let name = state.slot_var_name(slot)
-          use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
-          ir.Let([name], ir.Values([raw]), body)
-        }
-        True -> {
-          use e, cell <- host_(e, "cell_new", [raw])
-          let name = state.slot_var_name(slot)
-          use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
-          ir.Let([name], ir.Values([cell]), body)
-        }
-      }
-    }
-    // Analyzer marks ClassInitFn shells as owning lexicals; other shapes are
-    // an analyzer/parser desync.
-    lexical.CapturedLexicalSlots(..) | lexical.NoLexicalSlots -> k(e)
-  }
-}
-
 /// FnFlags wire tuple for a ClassInitFn — strict (§15.7.1: class bodies are
 /// strict code), every other flag False. MUST match arc/rt/types.FnFlags
 /// field order + tag exactly (func.gleam emit_closure_site).
@@ -865,8 +701,11 @@ fn emit_one_init(
     }
     PrivateFieldInit(name:, init:) -> {
       use e, pk <- read_captured_const(e, name)
-      // R14 name-hint gap accepted (matches stmt.gleam:599 precedent).
-      use #(tree, e) <- result.try(e.dispatch.emit_expr(e, init))
+      use #(tree, e) <- result.try(e.dispatch.emit_expr_named(
+        e,
+        init,
+        Some(name),
+      ))
       use e, v <- let_(e, tree)
       host_unit_(e, "private_define", [this_v, pk, v], next)
     }
@@ -877,7 +716,11 @@ fn emit_one_init(
           e,
         )
       use e, kv <- let_(e, ktree)
-      use #(tree, e) <- result.try(e.dispatch.emit_expr(e, init))
+      use #(tree, e) <- result.try(e.dispatch.emit_expr_named(
+        e,
+        init,
+        Some(name),
+      ))
       use e, v <- let_(e, tree)
       host_unit_(e, "define_prop", [this_v, kv, v], next)
     }
@@ -914,8 +757,8 @@ fn emit_one_init(
 
 /// Compile `inits` into a synthetic ClassInitFn ir.Function, register it, and
 /// build the parent-frame closure (MakeClosure → fn_new → make_method(home_h)).
-/// Mirrors func.emit_function_tree:804-875 shape. Port of emit.gleam:7330-7348
-/// + emit_attach_field_init/emit_call_static_init.
+/// Port of emit.gleam:7330-7348 + emit_attach_field_init/
+/// emit_call_static_init.
 fn build_class_init_closure(
   e: Emitter2,
   child_id: scope.ScopeId,
@@ -936,26 +779,21 @@ fn build_class_init_closure(
       is_generator: False,
       is_arrow: False,
     )
-  let e_child = seed_init_capture_slots(e_child, child_info)
+  let e_child = func.seed_capture_slots(e_child, child_info)
   // Body: unpack _frame → seed lexical slots (this at idx 0, R7) → prologue for
   // any own bindings of the shell scope → each_ emit_one_init → Return([undef]).
   use #(body_expr, e_child) <- result.try(
     run_rk(e_child, fn(ec, done) {
-      use ec <- unpack_init_frame(ec, child_info)
-      use ec <- binding_prologue(ec, ec.fn_scope)
+      use ec <- func.unpack_frame(ec, False, child_info)
+      use ec <- func.binding_prologue(ec, ec.fn_scope)
       // this_v is the define_prop/private_define target. When RefThis is boxed
-      // (an arrow initializer captures `this`) unpack_init_frame maps the slot
-      // to the CELL — unbox so this_v is the raw instance/ctor (emit.gleam:2601).
+      // (an arrow initializer captures `this`) unpack_frame maps the slot to
+      // the CELL — unbox so this_v is the raw instance/ctor (emit.gleam:2601).
       let with_this = fn(ec, k) {
         case lexical.lexical_slot(child_info.lexical, lexical.RefThis) {
           Some(slot) -> {
             let v = ir.Var(state.get_slot_var(ec, slot))
-            case
-              lexical.lexical_refs_get(
-                child_info.lexical_boxed,
-                lexical.RefThis,
-              )
-            {
+            case state.lexical_is_boxed(ec, child_info, lexical.RefThis) {
               True -> host_(ec, "cell_get", [v], k)
               False -> k(ec, v)
             }
@@ -972,13 +810,14 @@ fn build_class_init_closure(
       )
     }),
   )
-  let ncap = init_capture_count(child_info)
+  let ncap =
+    list.length(child_info.captures) + dict.size(child_info.lexical_captures)
   let e_child =
     state.add_function(
       e_child,
       ir.Function(
         name: fn_name,
-        params: init_ir_params(0, ncap),
+        params: func.build_ir_params(0, ncap),
         result: [ir.TTerm],
         locals: [],
         body: body_expr,

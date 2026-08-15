@@ -36,9 +36,7 @@ fn let_(
   rhs: ir.Expr,
   k: Rk(ir.Value),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let #(n, e) = state.fresh_var(e)
-  use body <- state.map_tree(k(e, ir.Var(n)))
-  ir.Let([n], rhs, body)
+  state.let_(e, rhs, k)
 }
 
 fn host_(

@@ -558,13 +558,14 @@ pub fn t_get_proto(st: Agent, obj: Handle) -> #(Option(Handle), Agent) {
   t_get_prototype_of(st, obj)
 }
 
-/// SPEC §8 op-table spelling — thin alias for `t_set_prototype`.
-pub fn t_set_proto(
-  st: Agent,
-  obj: Handle,
-  new_proto: Option(Handle),
-) -> #(Bool, Agent) {
-  t_set_prototype(st, obj, new_proto)
+/// Annex B §B.3.1 `__proto__: v` in an object literal (step 6.a): an object
+/// or null `v` becomes the [[Prototype]]; anything else is ignored.
+pub fn t_set_proto(st: Agent, obj: Handle, v: JsVal) -> #(Bool, Agent) {
+  case rt_types.classify(v) {
+    KHandle(p) -> t_set_prototype(st, obj, Some(p))
+    KNull -> t_set_prototype(st, obj, None)
+    _ -> #(False, st)
+  }
 }
 
 /// §10.1.2.1 step 7: walk `new_proto`'s chain; if it reaches `target`, adding
@@ -3545,14 +3546,17 @@ fn binary_key(name: BitArray) -> PropertyKey {
 
 /// SPEC§8 `new_arguments` (M14) — allocate an Arguments exotic object.
 /// `args` is the raw incoming `_args` list; `mapped` is either `undefined`
-/// (unmapped/strict) or a cons-list of parameter cell handles (sloppy simple
-/// param list, §10.4.4). Elements are the args in creation order; `length`
-/// is a data prop; `mapped` cell aliasing is handled by [[Get]]/[[Set]] via
-/// the `ArgumentsObj` kind. Returns the object handle as a `JsVal`.
+/// (unmapped: strict or non-simple params, §10.4.4.7) or a cons-list of
+/// parameter cell handles (mapped, §10.4.4.6). Elements are the args in
+/// creation order; `length` and `callee` are ordinary own props (`callee`
+/// is the %ThrowTypeError% accessor when unmapped); `@@iterator` is
+/// %Array.prototype.values%. `mapped` cell aliasing is handled by
+/// [[Get]]/[[Set]] via the `ArgumentsObj` kind.
 pub fn t_new_arguments(
   st: Agent,
   args: List(JsVal),
   mapped: m,
+  callee: JsVal,
 ) -> #(JsVal, Agent) {
   let len = list.length(args)
   // `mapped` is either the atom `undefined` (unmapped/strict) or a cons-list
@@ -3563,23 +3567,51 @@ pub fn t_new_arguments(
     False -> None
   }
   let elements = tree_array.from_list(args, rt_types.mk_hole())
-  // §10.4.4.6/7 step 20/21: "length" is an ORDINARY own data prop
-  // {W:T,E:F,C:T} seeded at construction (arc interpreter.gleam:4947) — not
-  // synthesized in [[GetOwnProperty]], so delete + own-keys behave ordinarily.
   let #(seq, st) = rt_store.t_next_prop_seq(st)
+  let length_prop =
+    DataProperty(
+      value: rt_types.mk_number(rt_types.JInt(len)),
+      writable: True,
+      enumerable: False,
+      configurable: True,
+      seq:,
+    )
+  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  let callee_prop = case mapped_cells {
+    Some(_) ->
+      DataProperty(
+        value: callee,
+        writable: True,
+        enumerable: False,
+        configurable: True,
+        seq:,
+      )
+    None -> {
+      let thrower = Some(rt_types.mk_object(st.realm.throw_type_error))
+      AccessorProperty(
+        get: thrower,
+        set: thrower,
+        enumerable: False,
+        configurable: False,
+        seq:,
+      )
+    }
+  }
   let props =
     dict.from_list([
-      #(
-        Named("length"),
-        DataProperty(
-          value: rt_types.mk_number(rt_types.JInt(len)),
-          writable: True,
-          enumerable: False,
-          configurable: True,
-          seq:,
-        ),
-      ),
+      #(Named("length"), length_prop),
+      #(Named("callee"), callee_prop),
     ])
+  let symbol_props = case
+    t_ordinary_own_property(
+      st,
+      st.realm.array.prototype,
+      SymbolKey(rt_types.symbol_iterator),
+    )
+  {
+    Some(values_prop) -> [#(rt_types.symbol_iterator, values_prop)]
+    None -> []
+  }
   let #(h, st) =
     rt_store.t_cell_new(
       st,
@@ -3587,7 +3619,7 @@ pub fn t_new_arguments(
         kind: ArgumentsObj(length: len, mapped: mapped_cells),
         proto: Some(st.realm.object.prototype),
         props:,
-        symbol_props: [],
+        symbol_props:,
         elements: Dense(elements),
         extensible: True,
       ),

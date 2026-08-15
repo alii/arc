@@ -34,49 +34,12 @@ import twocore/ir
 type Rk(a) =
   fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
 
-/// Tail Value of a straight `Let…Values([v])` chain (the shape `emit_expr`
-/// returns for identifiers/literals). None for If/Block/multi-Values tails.
-fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
-  case rhs {
-    ir.Values([v]) -> Some(v)
-    ir.Let(_, _, body) -> let_tail_value(body)
-    _ -> None
-  }
-}
-
 fn let_(
   e: Emitter2,
   rhs: ir.Expr,
   k: Rk(ir.Value),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  // SPEC§9.12 letrec-fusion: an anf.run tree binds fresh names (write_slot's
-  // unboxed rebind, bind_if's join var) that e.slot_vars leaks to k. Wrapping
-  // the whole tree as one Let-RHS scopes those names to the RHS, so Baseline's
-  // propagate/dead-let erases them before emit_core CPS-linearises. Splice the
-  // tree's Let-spine into the outer Rk chain instead — every top-level Let in
-  // rhs becomes an outer Let, so its name is in ir-scope for k(e, ·).
-  case rhs {
-    ir.Let(names, inner_rhs, inner_body) -> {
-      use tail <- state.map_tree(let_(e, inner_body, k))
-      ir.Let(names, inner_rhs, tail)
-    }
-    ir.Values([v]) -> k(e, v)
-    _ -> {
-      let #(n, e) = state.fresh_var(e)
-      // Propagate known-number through the alias so anf's marks survive the
-      // expr_→let_ re-bind into the Rk chain.
-      let e = case let_tail_value(rhs) {
-        Some(ir.Var(vn)) ->
-          case state.is_known_number(e, vn) {
-            True -> state.mark_known_number(e, n)
-            False -> e
-          }
-        _ -> e
-      }
-      use body <- state.map_tree(k(e, ir.Var(n)))
-      ir.Let([n], rhs, body)
-    }
-  }
+  state.let_(e, rhs, k)
 }
 
 fn host_(
@@ -309,6 +272,22 @@ fn sm_goto(
   }
 }
 
+/// In a derived constructor an `undefined` return value becomes `this`, read
+/// after the crossed `finally` blocks have run.
+fn derived_return(
+  e: Emitter2,
+  v: ir.Value,
+  k: Rk(ir.Value),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  case e.derived_ctor {
+    False -> k(e, v)
+    True -> {
+      let #(tree, e) = anf.run(expr.derived_return_value(v), e)
+      let_(e, tree, k)
+    }
+  }
+}
+
 /// `return [arg]`. Port of emit.gleam:3860-3868. Evaluates `arg` (or undef),
 /// inlines every crossed cleanup, then ir.Return([v]) — bare 1-value per D2
 /// Arch-A (emit_core wraps {V, St'}).
@@ -322,6 +301,7 @@ fn emit_return(
     // inline first; the SM hook then owns split-spanning try routing.
     let frames = e.frame_stack
     use e <- inline_cleanups(e, return_cleanups(e.frame_stack))
+    use e, v <- derived_return(e, v)
     case e.sm_abrupt {
       Some(sm) -> sm.on_return(e, v)
       None -> Ok(#(ir.Return([v]), e))
@@ -644,8 +624,8 @@ fn store_declared(
 }
 
 /// `var/let/const … = …`. Port of emit.gleam:3727-3776. Per declarator:
-/// IdentifierPattern + init → eval init (via dispatch — R14 name-hint gap
-/// accepted per spec), store; IdentifierPattern no init → var skips (prologue
+/// IdentifierPattern + init → eval init under NamedEvaluation, store;
+/// IdentifierPattern no init → var skips (prologue
 /// seeded undef), lexical stores undef (§14.3.1.2 ends TDZ); other patterns →
 /// dispatch.emit_destructure with the kind's BindMode.
 fn emit_var_decl(
@@ -666,7 +646,12 @@ fn emit_var_decl(
     ast.IdentifierPattern(name:, ..) ->
       case init {
         Some(init_expr) -> {
-          use e, v <- expr_(e, init_expr)
+          use #(tree, e) <- result.try(e.dispatch.emit_expr_named(
+            e,
+            init_expr,
+            Some(name),
+          ))
+          use e, v <- let_(e, tree)
           store_declared(e, name, v, lexical, next)
         }
         None ->
@@ -2042,8 +2027,12 @@ fn emit_class_decl(
       ))
       use e, ctor_h <- let_(e, tree)
       // Class names are block-scoped (like let); resolve in the current
-      // scope and store the constructor handle into that binding's slot.
-      store_slot(e, cur_scope_binding(e, n), ctor_h, next)
+      // scope and store the constructor handle into that binding's slot,
+      // which ends its TDZ.
+      let b = cur_scope_binding(e, n)
+      let e =
+        state.Emitter2(..e, initialized: set.insert(e.initialized, b.slot))
+      store_slot(e, b, ctor_h, next)
     }
     // Statement-position `class` requires a name; anonymous
     // `export default class {}` is a ClassExpression before it reaches here.

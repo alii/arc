@@ -65,10 +65,23 @@ fn proto_slot(
   has_constructor: Bool,
   object_proto: Ref,
 ) -> HeapSlot(ctx, host) {
+  // §10.2.5 MakeConstructor defines `constructor` at the prototype's birth,
+  // before any method can land on it, so it takes a constant seq from the
+  // reserved birth-time range (see `common.fn_name_property`) rather than a
+  // counter value read at synthesis time.
   let properties = case has_constructor {
     True ->
       dict.from_list([
-        #(Named("constructor"), value.builtin_property(value.JsObject(fn_ref))),
+        #(
+          Named("constructor"),
+          value.DataProperty(
+            value: value.JsObject(fn_ref),
+            writable: True,
+            enumerable: False,
+            configurable: True,
+            seq: 0,
+          ),
+        ),
       ])
     False -> dict.new()
   }

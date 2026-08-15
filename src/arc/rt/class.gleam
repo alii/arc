@@ -27,9 +27,9 @@ import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
+  type Agent, type FnFlags, type Handle, type JsOps, type JsVal,
   type MethodInstallKind, type ObjectKey, type Property, type PropertyKey,
-  AccessorProperty, DataProperty, FnFlags, KCompiled, KHandle, KNull, KStr, KTdz,
+  AccessorProperty, DataProperty, KCompiled, KHandle, KNull, KStr, KTdz,
   MIGetter, MIMethod, MISetter, MIStatic, MIStaticGetter, MIStaticSetter, Named,
   Private, SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
   mk_undefined,
@@ -113,41 +113,18 @@ pub fn t_set_fields_init(st: Agent, ctor: Handle, init_h: Handle) -> Agent {
   })
 }
 
-// ── C2: class create (§15.7.14 ClassDefinitionEvaluation) ───────────────────
+// ── C2: class setup (§15.7.14 ClassDefinitionEvaluation) ────────────────────
 
-/// §15.7.14 ClassDefinitionEvaluation steps 5-15: heritage validation, alloc
-/// `proto` + `ctor`, wire `prototype`/`constructor`/static-inheritance links.
-/// Fusion of arc `MakeClosure` (the .prototype allocation) + `SetupDerivedClass`
-/// (interpreter.gleam:3875-3958). Returns `#(#(ctor, proto), st)`.
-///
-/// `super` encodes the three heritage cases via `classify` (D16):
-///   `KTdz`       — no `extends` clause (base class);
-///   `KNull`      — `extends null` (derived; proto→null, ctor.__proto__→%F.p%);
-///   `KHandle(h)` — `extends h` (derived; validated by `IsConstructor`);
-///   anything else → TypeError "not a constructor or null".
-/// M16 emits `mk_tdz()` for the no-heritage case; a real `extends undefined`
-/// arrives as `KUndef` and correctly hits the TypeError arm.
-pub fn t_class_create(
-  st: Agent,
-  ctor_code: CompiledFn,
-  name: String,
-  len: Int,
-  super: JsVal,
-) -> #(#(Handle, Handle), Agent) {
+/// §15.7.14 steps 8-9: validate the heritage value and resolve
+/// `#(protoParent, constructorParent)`. `super` encodes the three cases:
+/// `KTdz` no `extends` clause; `KNull` `extends null`; `KHandle` `extends h`
+/// (must be a constructor whose `.prototype` is an object or null). Anything
+/// else, including a real `extends undefined`, is a TypeError.
+fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
   let realm = st.realm
-  // ── heritage validation (before any alloc — F2 validate-first) ──
-  let #(is_derived, proto_parent, ctor_parent, st) = case classify(super) {
-    // No `extends` clause: base class.
-    KTdz -> #(
-      False,
-      Some(realm.object.prototype),
-      Some(realm.function.prototype),
-      st,
-    )
-    // `extends null`: derived; proto has no prototype; ctor.__proto__ stays
-    // %Function.prototype% (arc interpreter.gleam:3933-3950).
-    KNull -> #(True, None, Some(realm.function.prototype), st)
-    // `extends <expr>` — must be a constructor.
+  case classify(super) {
+    KTdz -> #(Some(realm.object.prototype), realm.function.prototype, st)
+    KNull -> #(None, realm.function.prototype, st)
     KHandle(parent_h) ->
       case rt_call.is_constructor(st, super) {
         False ->
@@ -156,13 +133,11 @@ pub fn t_class_create(
             "Class extends value is not a constructor or null",
           )
         True -> {
-          // §15.7.14 step 5.g: protoParent = ? Get(superclass, "prototype").
-          // Observable — may re-enter user code (proxy trap / accessor).
           let #(pp, st) =
             rt_obj.t_get_prop(st, super, StringKey(Named("prototype")))
           case classify(pp) {
-            KHandle(pph) -> #(True, Some(pph), Some(parent_h), st)
-            KNull -> #(True, None, Some(parent_h), st)
+            KHandle(pph) -> #(Some(pph), parent_h, st)
+            KNull -> #(None, parent_h, st)
             _ ->
               throw_type_error(
                 st,
@@ -174,33 +149,33 @@ pub fn t_class_create(
     _ ->
       throw_type_error(st, "Class extends value is not a constructor or null")
   }
-  // ── alloc proto ──
+}
+
+/// §15.7.14 steps 8-18 for an already allocated constructor closure `ctor`
+/// (its flags, `name` and `length` come from the closure site): validate the
+/// heritage, allocate `proto`, then wire `ctor.[[HomeObject]] = proto`,
+/// `ctor.[[Prototype]] = constructorParent`, the non-writable
+/// `ctor.prototype` and `proto.constructor`. Returns `proto`. Port of arc
+/// `SetupDerivedClass` plus the class arm of `MakeClosure`.
+pub fn t_class_setup(
+  st: Agent,
+  ctor: Handle,
+  super: JsVal,
+) -> #(Handle, Agent) {
+  let #(proto_parent, ctor_parent, st) = class_heritage(st, super)
   let #(proto, st) = rt_obj.t_new_object(st, proto_parent)
-  // ── alloc ctor: KCompiled{home_object: Some(proto), is_class_constructor} ──
-  let flags =
-    FnFlags(
-      is_constructor: True,
-      is_class_constructor: True,
-      is_derived_constructor: is_derived,
-      is_arrow: False,
-      is_method: False,
-      is_generator: False,
-      is_async: False,
-      is_strict: True,
-    )
-  let #(ctor, st) =
-    rt_call.t_fn_new(st, ctor_code, flags, name, len, Some(proto), None)
-  // Static inheritance: ctor.[[Prototype]] = super (or %Function.prototype%).
-  // `t_fn_new` already set %F.p%; overwrite only when different (derived).
-  let st = case ctor_parent {
-    Some(cp) if cp != realm.function.prototype -> {
-      let #(_, st) = rt_obj.t_set_prototype(st, ctor, Some(cp))
-      st
-    }
-    _ -> st
-  }
-  // ctor own `prototype`: {W:F, E:F, C:F} — non-writable for classes (§15.7.14
-  // step 14, unlike plain functions' writable .prototype).
+  let st =
+    rt_store.t_cell_update(st, ctor, fn(slot) {
+      case slot {
+        SObject(kind: KCompiled(..) as k, ..) ->
+          SObject(
+            ..slot,
+            kind: KCompiled(..k, home_object: Some(proto)),
+            proto: Some(ctor_parent),
+          )
+        _ -> slot
+      }
+    })
   let #(_, st) =
     rt_obj.t_define_own_data(
       st,
@@ -211,7 +186,6 @@ pub fn t_class_create(
       False,
       False,
     )
-  // proto own `constructor`: {W:T, E:F, C:T} (§15.7.14 step 15).
   let #(_, st) =
     rt_obj.t_define_own_data(
       st,
@@ -222,25 +196,27 @@ pub fn t_class_create(
       False,
       True,
     )
-  #(#(ctor, proto), st)
+  #(proto, st)
 }
 
 // ── C3: define method (§14.3.9) ─────────────────────────────────────────────
 
-/// Install a class method/accessor on `target` (proto for instance members,
-/// ctor for `MIStatic*`). Port of arc `DefineMethod`/`DefineMethodComputed`/
-/// `DefineAccessor`/`DefineAccessorComputed` (interpreter.gleam:3473-3600).
-/// M16 has already canonicalized `key` (G9) and evaluated the closure. Sets
-/// `[[HomeObject]]`, fills the fn's `name` if empty, then defines a
-/// non-enumerable data/accessor property (accessor halves merge). Throws
-/// TypeError on a non-configurable existing own prop (`static ['prototype']`).
-/// JMutUnit.
+/// Install a method/accessor on `target` (proto for instance members, ctor
+/// for `MIStatic*`, the object for an object literal). Port of arc
+/// `DefineMethod`/`DefineMethodComputed`/`DefineAccessor`/
+/// `DefineAccessorComputed` (interpreter.gleam:3473-3600). The caller has
+/// canonicalized `key` and evaluated the closure. Sets `[[HomeObject]]`,
+/// fills the fn's `name` if empty, then defines a configurable data/accessor
+/// property (accessor halves merge), enumerable for object literal members
+/// (§13.2.5.5) and not for class members (§15.4.5). Throws TypeError on a
+/// non-configurable existing own prop (`static ['prototype']`). JMutUnit.
 pub fn t_define_method(
   st: Agent,
   target: Handle,
   key: ObjectKey,
   fn_h: Handle,
   kind: MethodInstallKind,
+  enumerable: Bool,
 ) -> Agent {
   // §14.3.9 step 11 DefinePropertyOrThrow: an existing non-configurable own
   // (only `prototype` on the ctor) is a TypeError, not a silent False.
@@ -266,12 +242,11 @@ pub fn t_define_method(
     MIMethod | MIStatic -> ""
   }
   let st = set_fn_name_if_empty(st, fn_h, prefix, key_fn_name(key))
-  // Install: enumerable:False, configurable:True (arc `builtin_property`).
   let fn_v = mk_object(fn_h)
   case kind {
     MIMethod | MIStatic -> {
       let #(_, st) =
-        rt_obj.t_define_own_data(st, target, key, fn_v, True, False, True)
+        rt_obj.t_define_own_data(st, target, key, fn_v, True, enumerable, True)
       st
     }
     MIGetter | MIStaticGetter -> {
@@ -282,7 +257,7 @@ pub fn t_define_method(
           key,
           Some(fn_v),
           None,
-          False,
+          enumerable,
           True,
         )
       st
@@ -295,7 +270,7 @@ pub fn t_define_method(
           key,
           None,
           Some(fn_v),
-          False,
+          enumerable,
           True,
         )
       st
@@ -712,7 +687,7 @@ pub fn t_super_call(
   case rt_obj.t_get_proto(st, active_func) {
     #(Some(parent), st) ->
       rt_call.t_construct(st, mk_object(parent), args, new_target)
-    // A derived ctor's [[Prototype]] was set by `t_class_create`; `null` here
+    // A derived ctor's [[Prototype]] was set by `t_class_setup`; `null` here
     // means user code did `Object.setPrototypeOf(Ctor, null)` — TypeError per
     // §13.3.7.1 step 5 (GetSuperConstructor's IsConstructor gate).
     #(None, st) ->

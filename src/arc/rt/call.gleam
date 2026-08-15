@@ -748,8 +748,8 @@ fn alloc_fn_cell(
 /// per §20.2.4. Port of arc's function-object allocation shape via
 /// `alloc_fn_slot`. Does NOT allocate a `.prototype` own property — §10.2.5
 /// MakeConstructor is a separate step (M7/M14 responsibility). `fields_init`
-/// starts `None`; M7 `t_class_create` rewrites it on the constructor after
-/// class-body evaluation.
+/// starts `None`; `rt_class.t_set_fields_init` sets it on a class
+/// constructor after class-body evaluation.
 pub fn t_fn_new(
   st: Agent,
   code: CompiledFn,
@@ -768,12 +768,16 @@ pub fn t_fn_new(
   )
 }
 
-/// SPEC§8 `fn_new` — emit-time arg order `(code, flags, name, len, simple)`.
-/// `name` arrives as the raw `BitArray` (arc's `ir.ConstBinary`);
-/// `len` is a boxed `Int` from `ConstI32`. `home` is always `None` at the
-/// closure site — M7 rewrites it on methods via `t_make_method`. Returns the
-/// handle wrapped as a `JsVal` so arc's `let_`/`store_slot` chain sees a
-/// value it can `t_global_set` / `t_cell_set` directly.
+/// SPEC§8 `fn_new` — the closure site of every compiled function; arg order
+/// `(code, flags, name, len, simple)`. `name` arrives as the raw `BitArray`
+/// (arc's `ir.ConstBinary`); `len` is a boxed `Int` from `ConstI32`.
+/// `[[HomeObject]]` starts unset (`t_make_method` fills it for methods). The
+/// function's [[Prototype]] follows its kind (§27.3.3 %GeneratorFunction
+/// .prototype%, §27.4.3 %AsyncGeneratorFunction.prototype%, §27.7.3
+/// %AsyncFunction.prototype%, else %Function.prototype%), and a generator
+/// function also gets its own writable `prototype` object, inheriting from
+/// %GeneratorPrototype% / %AsyncGeneratorPrototype% with no `constructor`
+/// back-link (§15.5.3 / §15.6.3).
 pub fn t_new_function(
   st: Agent,
   code: CompiledFn,
@@ -786,7 +790,56 @@ pub fn t_new_function(
     Ok(s) -> s
     Error(Nil) -> ""
   }
-  let #(h, st) = t_fn_new(st, code, flags, name_s, len, None, simple)
+  let realm = st.realm
+  let proto = case flags.is_generator, flags.is_async {
+    True, False -> realm.generator_fn.prototype
+    True, True ->
+      case
+        rt_obj.t_ordinary_own_property(
+          st,
+          realm.async_gen.constructor,
+          StringKey(Named("prototype")),
+        )
+      {
+        Some(DataProperty(value:, ..)) ->
+          case classify(value) {
+            KHandle(p) -> p
+            _ -> realm.function.prototype
+          }
+        _ -> realm.function.prototype
+      }
+    False, True -> realm.async_fn.prototype
+    False, False -> realm.function.prototype
+  }
+  let #(h, st) =
+    alloc_fn_cell(
+      st,
+      Some(proto),
+      KCompiled(code:, home_object: None, flags:, fields_init: None, simple:),
+      mk_number(JInt(len)),
+      name_s,
+    )
+  let st = case flags.is_generator {
+    False -> st
+    True -> {
+      let gen_proto = case flags.is_async {
+        True -> realm.async_gen.prototype
+        False -> realm.generator.prototype
+      }
+      let #(own_proto, st) = rt_obj.t_new_object(st, Some(gen_proto))
+      let #(_, st) =
+        rt_obj.t_define_own_data(
+          st,
+          h,
+          StringKey(Named("prototype")),
+          mk_object(own_proto),
+          True,
+          False,
+          False,
+        )
+      st
+    }
+  }
   #(mk_object(h), st)
 }
 
@@ -796,7 +849,7 @@ pub fn t_new_function(
 /// is `%Object.prototype%`, with own `constructor` → `f` {W:T,E:F,C:T}. `f`
 /// gains own `prototype` → `proto` {W:T,E:F,C:F} — writable, unlike a class
 /// constructor's non-writable `.prototype` (§15.7.14 step 14; see
-/// `rt_class.t_class_create`). JMut pass-through: returns `f` unchanged so
+/// `rt_class.t_class_setup`). JMut pass-through: returns `f` unchanged so
 /// M14's `emit_closure_site` can tail-call this after `fn_new`.
 pub fn t_make_constructor(st: Agent, f: JsVal) -> #(JsVal, Agent) {
   let assert KHandle(fh) = classify(f)

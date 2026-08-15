@@ -56,15 +56,31 @@ pub fn t_throw_syntax_error(st: Agent, msg: String) -> a {
   t_throw_error(st, SyntaxErr, msg)
 }
 
-/// SPEC§8 `tdz_check` — §9.1.1.1.5 step 5. If `v` is the TDZ sentinel, throw
-/// `ReferenceError: <name> is not defined`; else return `st` unchanged. arc's
-/// M12 emits this before every checked lexical write (`write_slot_checked`).
+/// SPEC§8 `tdz_check` — §9.1.1.1.5/6: a lexical binding read or written
+/// while `v` is still the TDZ sentinel throws a ReferenceError; else `st` is
+/// returned unchanged.
 pub fn t_tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
   case classify(v) {
     KTdz -> {
       let n = bit_array.to_string(name) |> result.unwrap("<name>")
-      t_throw_reference_error(st, n <> " is not defined")
+      t_throw_reference_error(
+        st,
+        "Cannot access '" <> n <> "' before initialization",
+      )
     }
+    _ -> st
+  }
+}
+
+/// §9.1.1.3.4 GetThisBinding: `this` in a derived constructor is unbound
+/// (the TDZ sentinel) until `super()` returns.
+pub fn t_check_this(st: Agent, v: JsVal) -> Agent {
+  case classify(v) {
+    KTdz ->
+      t_throw_reference_error(
+        st,
+        "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+      )
     _ -> st
   }
 }
