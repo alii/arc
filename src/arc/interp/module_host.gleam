@@ -16,7 +16,7 @@
 //// repeated imports yield the identical namespace / error.
 
 import arc/interp/dynamic_import
-import arc/interp/module.{type BootCtx, type ModuleVm, BootCtx}
+import arc/interp/module
 import arc/interp/module_registry as registry
 import arc/module/graph
 import arc/module/load_error
@@ -70,8 +70,7 @@ pub fn forbid_load(_resolved: String) -> Result(String, LoadError) {
 /// Install the dynamic-import host hook on `st`. `referrer` is the path of
 /// the entry script/module (relative specifiers resolve against it when no
 /// module body is active); `resolve` maps specifiers to module identities
-/// and `load` reads their sources (a cached import never calls `load`); `vm`
-/// is the interpreter the imported bodies run on.
+/// and `load` reads their sources (a cached import never calls `load`).
 ///
 /// The hook is ENGINE state: an `Agent.host_fns` entry that no function
 /// object carries, so it is agent-wide (every realm and activation reaches
@@ -79,14 +78,13 @@ pub fn forbid_load(_resolved: String) -> Result(String, LoadError) {
 /// and invisible to guest JS.
 pub fn install_import_hook(
   st: Agent,
-  vm: ModuleVm,
   referrer: String,
   resolve: ResolveFn,
   load: LoadFn,
 ) -> Agent {
   let hook =
     HostFnEntry(name: "%DynamicImportHook%", call: fn(st, args, _this, _nt) {
-      import_module(args, st, vm, referrer, resolve, load)
+      import_module(args, st, referrer, resolve, load)
     })
   Agent(
     ..st,
@@ -96,8 +94,8 @@ pub fn install_import_hook(
 
 /// A dynamic-import evaluation runs inside a promise job on the host's own
 /// microtask drain, so its bodies never drain nested.
-fn boot(vm: ModuleVm) -> BootCtx {
-  BootCtx(vm:, finish: fn(st) { st })
+fn no_drain(st: Agent) -> Agent {
+  st
 }
 
 fn type_error(st: Agent, msg: String) -> #(Agent, Result(JsVal, JsVal)) {
@@ -118,7 +116,6 @@ fn syntax_error(st: Agent, msg: String) -> #(Agent, Result(JsVal, JsVal)) {
 fn import_module(
   args: List(JsVal),
   st: Agent,
-  vm: ModuleVm,
   entry_referrer: String,
   resolve: ResolveFn,
   load: LoadFn,
@@ -140,7 +137,6 @@ fn import_module(
             dynamic_import.DeferPhase(resolve_fn:, reject_fn:) ->
               defer_import_module(
                 st,
-                vm,
                 resolved,
                 resolve,
                 load,
@@ -148,7 +144,7 @@ fn import_module(
                 reject_fn,
               )
             dynamic_import.EagerPhase ->
-              eager_import_module(st, vm, resolved, resolve, load)
+              eager_import_module(st, resolved, resolve, load)
           }
       }
     }
@@ -159,7 +155,6 @@ fn import_module(
 /// in-flight) result, else load + evaluate the graph.
 fn eager_import_module(
   st: Agent,
-  vm: ModuleVm,
   resolved: String,
   resolve: ResolveFn,
   load: LoadFn,
@@ -176,13 +171,12 @@ fn eager_import_module(
     // A registered namespace alone is not enough: linking (an earlier
     // `import.defer()`) registers namespaces WITHOUT evaluating.
     registry.LinkedOnly(..) | registry.Absent(..) ->
-      evaluate_module(st, vm, resolved, resolve, load)
+      evaluate_module(st, resolved, resolve, load)
   }
 }
 
 fn evaluate_module(
   st: Agent,
-  vm: ModuleVm,
   resolved: String,
   resolve: ResolveFn,
   load: LoadFn,
@@ -194,7 +188,7 @@ fn evaluate_module(
       // Evaluate WITHOUT draining: this hook runs inside a promise job on the
       // host's own drain. Bodies parked on top-level await surface as
       // EvaluationPending rather than blocking.
-      let #(st, res) = evaluate_bundle_with_registry(st, bundle, boot(vm))
+      let #(st, res) = evaluate_bundle_with_registry(st, bundle, no_drain)
       case res {
         Ok(module.EvaluatedBundle(value: _, namespace:)) -> #(
           st,
@@ -230,7 +224,6 @@ fn evaluate_module(
 /// nothing.
 fn defer_import_module(
   st: Agent,
-  vm: ModuleVm,
   resolved: String,
   resolve: ResolveFn,
   load: LoadFn,
@@ -252,7 +245,7 @@ fn defer_import_module(
       case module.compile_bundle(resolved, source, resolve, load) {
         Error(err) -> compile_bundle_rejection(st, err)
         Ok(bundle) ->
-          case link_bundle_with_registry(st, bundle, vm) {
+          case link_bundle_with_registry(st, bundle) {
             #(st, Error(module.EvaluationError(value: thrown))) -> #(
               st,
               Error(thrown),
@@ -270,7 +263,6 @@ fn defer_import_module(
                 module.get_or_create_deferred_namespace(
                   st,
                   linked_bundle,
-                  vm,
                   resolved,
                 )
               {
@@ -278,7 +270,6 @@ fn defer_import_module(
                   let st = registry.write_deferred_namespace(st, resolved, ns)
                   evaluate_deferred_async_deps(
                     st,
-                    vm,
                     resolved,
                     mk_object(ns),
                     linked_bundle,
@@ -321,14 +312,13 @@ fn with_loaded_source(
 /// deferred namespace only after their top-level promises settle.
 fn evaluate_deferred_async_deps(
   st: Agent,
-  vm: ModuleVm,
   resolved: String,
   ns: JsVal,
   linked_bundle: module.LinkedBundle,
   resolve_fn: JsVal,
   reject_fn: JsVal,
 ) -> #(Agent, Result(JsVal, JsVal)) {
-  case module.evaluate_async_transitive_deps(linked_bundle, st, boot(vm)) {
+  case module.evaluate_async_transitive_deps(linked_bundle, st, no_drain) {
     // No async dependency parked on top-level await: resolve immediately.
     #(st, Ok([])) -> settle_defer_import(st, resolve_fn, ns)
     #(st, Ok(pendings)) -> #(
@@ -434,7 +424,6 @@ fn call_import_settle_fn(st: Agent, settle_fn: JsVal, arg: JsVal) -> Agent {
 fn link_bundle_with_registry(
   st: Agent,
   bundle: module.ModuleBundle,
-  vm: ModuleVm,
 ) -> #(Agent, Result(module.LinkedBundle, module.ModuleError)) {
   let specs = dict.keys(bundle.modules)
   let preexisting = registered(st, specs, registry.read_namespace)
@@ -444,7 +433,6 @@ fn link_bundle_with_registry(
     module.link_for_evaluation_reusing(
       bundle,
       st,
-      vm,
       preexisting,
       preexisting_deferred,
     )
@@ -567,13 +555,13 @@ fn pending_module_promise(
 pub fn evaluate_bundle_with_registry(
   st: Agent,
   bundle: module.ModuleBundle,
-  boot: BootCtx,
+  finish: module.Finish,
 ) -> #(Agent, Result(module.EvaluatedBundle, module.ModuleError)) {
   let specs = dict.keys(bundle.modules)
   let preexisting = registered(st, specs, registry.read_namespace)
   // Link + register every NEW module's namespace (and deferred namespace)
   // before any body runs.
-  case link_bundle_with_registry(st, bundle, boot.vm) {
+  case link_bundle_with_registry(st, bundle) {
     #(st, Error(err)) -> #(st, Error(err))
     #(st, Ok(linked_bundle)) -> {
       // Already-evaluated = exactly the modules whose bodies have completed;
@@ -590,7 +578,7 @@ pub fn evaluate_bundle_with_registry(
         module.evaluate_linked_tracking(
           linked_bundle,
           st,
-          boot,
+          finish,
           already_evaluated,
         )
       case res {

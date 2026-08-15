@@ -9,6 +9,8 @@
 
 import arc/compiler
 import arc/esm
+import arc/interp/entry
+import arc/interp/interpreter
 import arc/interp/module_registry as registry
 import arc/interp/state.{type State, State}
 import arc/link
@@ -24,8 +26,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type Handle, type JsVal, type ReflectNative,
-  type Step, DataProperty, FnFlags, KHandle, KStr, KTdz, ModuleNamespace,
-  NoElements, PromiseFulfilled, PromisePending, PromiseRejected, ProxyObj,
+  DataProperty, FnFlags, KHandle, KStr, KTdz, ModuleNamespace, NoElements,
+  PromiseFulfilled, PromisePending, PromiseRejected, ProxyObj,
   ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
   ReflectGetOwnPropertyDescriptor, ReflectHas, ReflectOwnKeys, SAsyncContext,
   SBox, SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield,
@@ -449,32 +451,12 @@ type ModuleEvalStatus {
   Failed(value: JsVal)
 }
 
-/// Runs a prepared module-body activation until it returns, throws, or
-/// first parks on a top-level `await`, reporting that turn as a `Step` whose
-/// `StepAwait` carries the parked frame's `Resume` (the interpreter entry).
-pub type RunBody =
-  fn(State) -> #(Step, Agent)
-
-/// The interpreter's MakeClosure (shared with its MakeClosure opcode):
-/// instantiate `template` as a function object over the captured values, in
-/// `env_descriptors` order.
-pub type MakeClosure =
-  fn(Agent, FuncTemplate, List(JsVal)) -> #(Handle, Agent)
-
-/// The interpreter entry points the module system drives bodies and
-/// instantiates closures with. Linking captures it into deferred-namespace
-/// traps, which evaluate a subgraph synchronously long after the link call.
-pub type ModuleVm {
-  ModuleVm(run_body: RunBody, make_closure: MakeClosure)
-}
-
-/// What one evaluation needs: the interpreter plus the post-body driver
-/// (`rt/async.drain` for the static entry points; identity for dynamic
-/// import and deferred triggers, which run inside a job or a body on the
-/// host's own microtask drain and must never drain re-entrantly).
-pub type BootCtx {
-  BootCtx(vm: ModuleVm, finish: fn(Agent) -> Agent)
-}
+/// The post-body driver of one evaluation: `rt/async.drain` for the static
+/// entry points; identity for dynamic import and deferred triggers, which
+/// run inside a job or a body on the host's own microtask drain and must
+/// never drain re-entrantly.
+pub type Finish =
+  fn(Agent) -> Agent
 
 fn no_drain(st: Agent) -> Agent {
   st
@@ -565,9 +547,8 @@ pub fn entry_namespace_of(linked_bundle: LinkedBundle, st: Agent) -> Handle {
 pub fn link_for_evaluation(
   bundle: ModuleBundle,
   st: Agent,
-  vm: ModuleVm,
 ) -> #(Agent, Result(LinkedBundle, ModuleError)) {
-  link_for_evaluation_reusing(bundle, st, vm, dict.new(), dict.new())
+  link_for_evaluation_reusing(bundle, st, dict.new(), dict.new())
 }
 
 /// `link_for_evaluation` with a registry of already-instantiated modules:
@@ -577,7 +558,6 @@ pub fn link_for_evaluation(
 pub fn link_for_evaluation_reusing(
   bundle: ModuleBundle,
   st: Agent,
-  vm: ModuleVm,
   preexisting: Dict(String, Handle),
   preexisting_deferred: Dict(String, Handle),
 ) -> #(Agent, Result(LinkedBundle, ModuleError)) {
@@ -621,13 +601,12 @@ pub fn link_for_evaluation_reusing(
           let st =
             list.fold(deferred_to_fill, st, fn(st, pair) {
               let #(spec, proxy) = pair
-              fill_deferred_namespace(st, bundle, linked, vm, spec, proxy)
+              fill_deferred_namespace(st, bundle, linked, spec, proxy)
             })
           let st =
             instantiate_hoisted_functions(
               bundle,
               linked,
-              vm.make_closure,
               st,
               set.from_list(dict.keys(pre)),
             )
@@ -644,10 +623,10 @@ pub fn link_for_evaluation_reusing(
 pub fn evaluate_linked(
   linked_bundle: LinkedBundle,
   st: Agent,
-  boot: BootCtx,
+  finish: Finish,
 ) -> #(Agent, Result(EvaluatedBundle, ModuleError)) {
   let #(st, _evaluated, res) =
-    evaluate_linked_tracking(linked_bundle, st, boot, set.new())
+    evaluate_linked_tracking(linked_bundle, st, finish, set.new())
   case res {
     Error(EvaluationPending(promise: _)) -> {
       let #(err, st) = new_error(st, TypeErr, tla_never_settled_message)
@@ -663,7 +642,7 @@ pub fn evaluate_linked(
 pub fn evaluate_linked_tracking(
   linked_bundle: LinkedBundle,
   st: Agent,
-  boot: BootCtx,
+  finish: Finish,
   already_evaluated: Set(String),
 ) -> #(Agent, Set(String), Result(EvaluatedBundle, ModuleError)) {
   let LinkedBundle(bundle:, linked:) = linked_bundle
@@ -672,7 +651,7 @@ pub fn evaluate_linked_tracking(
       dict.insert(acc, spec, Evaluated)
     })
   let es = EvalState(agent: st, modules:)
-  let #(es, res) = eval_module_inner(bundle, linked, es, bundle.entry, boot)
+  let #(es, res) = eval_module_inner(bundle, linked, es, bundle.entry, finish)
   // Surface the entry namespace alongside the completion value (post-eval,
   // so its bindings are initialized).
   let res = {
@@ -743,7 +722,6 @@ pub type DeferredNamespaceError {
 pub fn get_or_create_deferred_namespace(
   st: Agent,
   linked_bundle: LinkedBundle,
-  vm: ModuleVm,
   spec: String,
 ) -> #(Agent, Result(Handle, DeferredNamespaceError)) {
   let LinkedBundle(bundle:, linked:) = linked_bundle
@@ -757,7 +735,7 @@ pub fn get_or_create_deferred_namespace(
     )
     Error(Nil) -> {
       let #(proxy, st) = reserve_cell(st)
-      let st = fill_deferred_namespace(st, bundle, linked, vm, spec, proxy)
+      let st = fill_deferred_namespace(st, bundle, linked, spec, proxy)
       #(st, Ok(proxy))
     }
   }
@@ -768,11 +746,11 @@ pub fn get_or_create_deferred_namespace(
 pub fn evaluate_bundle(
   bundle: ModuleBundle,
   st: Agent,
-  boot: BootCtx,
+  finish: Finish,
 ) -> #(Agent, Result(EvaluatedBundle, ModuleError)) {
-  case link_for_evaluation(bundle, st, boot.vm) {
+  case link_for_evaluation(bundle, st) {
     #(st, Error(err)) -> #(st, Error(err))
-    #(st, Ok(linked_bundle)) -> evaluate_linked(linked_bundle, st, boot)
+    #(st, Ok(linked_bundle)) -> evaluate_linked(linked_bundle, st, finish)
   }
 }
 
@@ -814,7 +792,7 @@ fn eval_module_inner(
   linked: Linked,
   es: EvalState,
   specifier: String,
-  boot: BootCtx,
+  finish: Finish,
 ) -> #(EvalState, Result(JsVal, ModuleError)) {
   case dict.get(bundle.modules, specifier) {
     Error(Nil) -> #(es, Error(NotInBundle(specifier:)))
@@ -829,7 +807,8 @@ fn eval_module_inner(
         Some(Failed(err)) -> #(es, Error(EvaluationError(err)))
         // Circular dependency: return without re-entering.
         Some(Evaluating) -> #(es, Ok(mk_undefined()))
-        None -> eval_module_body(bundle, linked, es, specifier, compiled, boot)
+        None ->
+          eval_module_body(bundle, linked, es, specifier, compiled, finish)
       }
   }
 }
@@ -841,7 +820,7 @@ fn eval_module_body(
   es: EvalState,
   specifier: String,
   compiled: CompiledModule,
-  boot: BootCtx,
+  finish: Finish,
 ) -> #(EvalState, Result(JsVal, ModuleError)) {
   let es = set_eval_status(es, specifier, Evaluating)
 
@@ -862,7 +841,7 @@ fn eval_module_body(
         gather_async_transitive_deps(bundle, es, dep_specifier, set.new()).0
     }
     use es, Nil, dep <- try_fold_state(to_evaluate, es, Nil)
-    let #(es, r) = eval_module_inner(bundle, linked, es, dep, boot)
+    let #(es, r) = eval_module_inner(bundle, linked, es, dep, finish)
     #(es, result.replace(r, Nil))
   }
 
@@ -895,7 +874,8 @@ fn eval_module_body(
       // namespace trigger firing inside this body observes the cycle.
       let st =
         registry.write_module_status(es.agent, specifier, registry.Evaluating)
-      let #(outcome, st) = run_module_body(st, specifier, compiled, seeds, boot)
+      let #(outcome, st) =
+        run_module_body(st, specifier, compiled, seeds, finish)
       case outcome {
         BodyThrew(thrown) -> {
           let st =
@@ -976,23 +956,23 @@ fn run_module_body(
   specifier: String,
   compiled: CompiledModule,
   seeds: List(#(Int, JsVal)),
-  boot: BootCtx,
+  finish: Finish,
 ) -> #(BodyOutcome, Agent) {
   let outer_referrer = registry.read_active_referrer(st)
   let st = registry.write_active_referrer(st, Some(specifier))
   let #(step, st) =
-    boot.vm.run_body(module_activation(st, compiled.template, seeds))
+    entry.run_turn(module_activation(st, compiled.template, seeds))
   let st = registry.write_active_referrer(st, outer_referrer)
   case step {
-    StepReturn(v) -> #(BodyReturned(v), boot.finish(st))
-    StepThrow(e) -> #(BodyThrew(e), boot.finish(st))
+    StepReturn(v) -> #(BodyReturned(v), finish(st))
+    StepThrow(e) -> #(BodyThrew(e), finish(st))
     StepAwait(awaited, resume) ->
-      drive_top_level_await(st, awaited, resume, boot)
+      drive_top_level_await(st, awaited, resume, finish)
     // `yield` cannot occur outside a generator body.
     StepYield(..) -> {
       let #(err, st) =
         new_error(st, TypeErr, "InternalError: module body yielded")
-      #(BodyThrew(err), boot.finish(st))
+      #(BodyThrew(err), finish(st))
     }
   }
 }
@@ -1007,7 +987,7 @@ fn drive_top_level_await(
   st: Agent,
   awaited: JsVal,
   resume: types.Resume,
-  boot: BootCtx,
+  finish: Finish,
 ) -> #(BodyOutcome, Agent) {
   let #(promise, st) = rt_async.t_new_promise(st)
   // Held past drains from Gleam only: pin so a between-jobs collection with
@@ -1019,7 +999,7 @@ fn drive_top_level_await(
   let st = rt_store.t_cell_set(st, data, SPromiseData(pstate, True))
   let #(ctx, st) = rt_store.t_cell_new(st, SAsyncContext(resume:, promise:))
   let st = rt_async.t_await(st, ctx, awaited)
-  let st = boot.finish(st)
+  let st = finish(st)
   case rt_async.promise_data(st, promise) {
     #(_, PromiseFulfilled(v), _) -> #(BodyReturned(v), st)
     #(_, PromiseRejected(reason), _) -> #(BodyThrew(reason), st)
@@ -1212,7 +1192,7 @@ fn gather_async_transitive_deps(
 pub fn evaluate_async_transitive_deps(
   linked_bundle: LinkedBundle,
   st: Agent,
-  boot: BootCtx,
+  finish: Finish,
 ) -> #(Agent, Result(List(#(String, Handle)), ModuleError)) {
   let LinkedBundle(bundle:, linked:) = linked_bundle
   let es = EvalState(agent: st, modules: dict.new())
@@ -1220,7 +1200,7 @@ pub fn evaluate_async_transitive_deps(
     gather_async_transitive_deps(bundle, es, bundle.entry, set.new())
   let #(es, res) = {
     use es, pendings, dep <- try_fold_state(to_evaluate, es, [])
-    case eval_module_inner(bundle, linked, es, dep, boot) {
+    case eval_module_inner(bundle, linked, es, dep, finish) {
       #(es, Ok(_)) -> #(es, Ok(pendings))
       #(es, Error(EvaluationPending(promise:))) -> #(
         es,
@@ -1264,7 +1244,6 @@ fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
 fn instantiate_hoisted_functions(
   bundle: ModuleBundle,
   linked: Linked,
-  make_closure: MakeClosure,
   st: Agent,
   already_evaluated: Set(String),
 ) -> Agent {
@@ -1295,7 +1274,7 @@ fn instantiate_hoisted_functions(
             list.map(child.env_descriptors, fn(desc) {
               tuple_array.get_unchecked(desc.parent_index, locals)
             })
-          let #(closure, st) = make_closure(st, child, captured)
+          let #(closure, st) = interpreter.make_closure(st, child, captured)
           rt_store.t_cell_set(st, box, SBox(mk_object(closure)))
         }
       }
@@ -1482,7 +1461,6 @@ fn fill_deferred_namespace(
   st: Agent,
   bundle: ModuleBundle,
   linked: Linked,
-  vm: ModuleVm,
   spec: String,
   proxy: Handle,
 ) -> Agent {
@@ -1503,7 +1481,7 @@ fn fill_deferred_namespace(
       #("ownKeys", 1, ReflectOwnKeys, True),
     ]
     |> list.fold(st, fn(st, t) {
-      let #(fn_h, st) = alloc_deferred_trap(st, t, bundle, linked, vm, spec)
+      let #(fn_h, st) = alloc_deferred_trap(st, t, bundle, linked, spec)
       let #(_, st) =
         rt_obj.t_define_own_data(
           st,
@@ -1543,7 +1521,6 @@ fn alloc_deferred_trap(
   trap: #(String, Int, ReflectNative, Bool),
   bundle: ModuleBundle,
   linked: Linked,
-  vm: ModuleVm,
   spec: String,
 ) -> #(Handle, Agent) {
   let #(name, arity, native, always_triggers) = trap
@@ -1575,7 +1552,7 @@ fn alloc_deferred_trap(
     False, ReflectGet, Some("then") -> #(mk_undefined(), st)
     False, _, _ -> rt_reflect.dispatch(st, native, mk_undefined(), args)
     True, _, _ -> {
-      let st = ensure_deferred_evaluated(st, bundle, linked, vm, spec)
+      let st = ensure_deferred_evaluated(st, bundle, linked, spec)
       rt_reflect.dispatch(st, native, mk_undefined(), args)
     }
   }
@@ -1589,7 +1566,6 @@ fn ensure_deferred_evaluated(
   st: Agent,
   bundle: ModuleBundle,
   linked: Linked,
-  vm: ModuleVm,
   spec: String,
 ) -> Agent {
   use <- bool.guard(
@@ -1607,7 +1583,7 @@ fn ensure_deferred_evaluated(
               <> spec
               <> "' is still evaluating or has an unevaluated async dependency",
           )
-        True -> evaluate_deferred_subgraph(st, bundle, linked, vm, spec)
+        True -> evaluate_deferred_subgraph(st, bundle, linked, spec)
       }
   }
 }
@@ -1663,12 +1639,10 @@ fn evaluate_deferred_subgraph(
   st: Agent,
   bundle: ModuleBundle,
   linked: Linked,
-  vm: ModuleVm,
   spec: String,
 ) -> Agent {
-  let boot = BootCtx(vm:, finish: no_drain)
   let es = EvalState(agent: st, modules: dict.new())
-  case eval_module_inner(bundle, linked, es, spec, boot) {
+  case eval_module_inner(bundle, linked, es, spec, no_drain) {
     #(es, Ok(_)) -> es.agent
     #(es, Error(EvaluationError(value:))) -> rt_store.t_throw(es.agent, value)
     // A deferred subgraph is only entered when ReadyForSyncExecution said yes,

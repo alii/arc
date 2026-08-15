@@ -1,11 +1,10 @@
-//// The module system on the shared runtime: linking, namespaces, the realm
-//// registry, deferred namespaces and the ImportCall front half, driven at
-//// the `Agent` level. Bodies here are stand-ins supplied through `ModuleVm`,
-//// so these cover everything around body execution; end-to-end runs live
-//// with the engine tests.
+//// The module system on the shared runtime at the `Agent` level: linking,
+//// namespaces, the realm registry, deferred namespaces and the ImportCall
+//// front half.
 
 import arc/interp/dynamic_import
-import arc/interp/module.{type ModuleVm, BootCtx, ModuleVm}
+import arc/interp/entry
+import arc/interp/module
 import arc/interp/module_host
 import arc/interp/module_registry as registry
 import arc/module/load_error
@@ -15,8 +14,8 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type JsVal, JInt, KNum, KStr, KUndef, Named, PromiseFulfilled,
-  PromiseRejected, StepReturn, StepThrow, StringKey, SymbolKey, classify,
-  mk_number, mk_object, mk_string, mk_undefined,
+  PromiseRejected, StringKey, SymbolKey, classify, mk_number, mk_object,
+  mk_string, mk_undefined,
 }
 import gleam/dict
 import gleam/list
@@ -25,24 +24,7 @@ import gleam/string
 import rt_helpers
 
 fn agent() -> Agent {
-  rt_builtins.new_agent(rt_helpers.quiet_hooks())
-}
-
-/// A vm whose bodies complete at once with `undefined` and which is never
-/// asked for a closure (no test module exports a hoisted function).
-fn returning_vm() -> ModuleVm {
-  ModuleVm(
-    run_body: fn(s) { #(StepReturn(mk_undefined()), s.agent) },
-    make_closure: fn(_, _, _) { panic as "make_closure not expected" },
-  )
-}
-
-/// A vm whose bodies throw the string "boom".
-fn throwing_vm() -> ModuleVm {
-  ModuleVm(
-    run_body: fn(s) { #(StepThrow(mk_string("boom")), s.agent) },
-    make_closure: fn(_, _, _) { panic as "make_closure not expected" },
-  )
+  rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
 }
 
 fn no_drain(st: Agent) -> Agent {
@@ -83,8 +65,7 @@ fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
 
 pub fn link_builds_namespaces_over_live_cells_test() {
   let b = bundle("import { greet } from 'dance'; export const r = greet;")
-  let assert #(st, Ok(linked)) =
-    module.link_for_evaluation(b, agent(), returning_vm())
+  let assert #(st, Ok(linked)) = module.link_for_evaluation(b, agent())
   let namespaces = module.linked_namespaces(linked, st) |> dict.from_list
   let assert Ok(dance_ns) = dict.get(namespaces, "dance")
   let assert Ok(entry_ns) = dict.get(namespaces, "entry")
@@ -108,7 +89,7 @@ pub fn link_builds_namespaces_over_live_cells_test() {
 pub fn missing_import_is_a_link_time_syntax_error_test() {
   let b = bundle("import { nope } from 'dance';")
   let assert #(st, Error(module.EvaluationError(err))) =
-    module.link_for_evaluation(b, agent(), returning_vm())
+    module.link_for_evaluation(b, agent())
   assert string.starts_with(rt_inspect.format_error(st, err), "SyntaxError")
 }
 
@@ -116,19 +97,17 @@ pub fn missing_import_is_a_link_time_syntax_error_test() {
 
 pub fn evaluation_marks_the_registry_test() {
   let b = bundle("import { greet } from 'dance'; export const r = greet;")
-  let boot = BootCtx(vm: returning_vm(), finish: no_drain)
   let assert #(st, Ok(module.EvaluatedBundle(value:, namespace: _))) =
-    module.evaluate_bundle(b, agent(), boot)
+    module.evaluate_bundle(b, agent(), no_drain)
   assert classify(value) == KUndef
   assert registry.read_module_status(st, "entry") == Some(registry.Evaluated)
   assert registry.read_module_error(st, "entry") == None
 }
 
 pub fn a_throwing_body_caches_its_error_test() {
-  let b = bundle("export const r = 1;")
-  let boot = BootCtx(vm: throwing_vm(), finish: no_drain)
+  let b = bundle("throw 'boom'; export const r = 1;")
   let assert #(st, Error(module.EvaluationError(thrown))) =
-    module.evaluate_bundle(b, agent(), boot)
+    module.evaluate_bundle(b, agent(), no_drain)
   assert classify(thrown) == KStr("boom")
   assert registry.read_module_status(st, "entry") == None
   let assert Some(cached) = registry.read_module_error(st, "entry")
@@ -139,9 +118,8 @@ pub fn a_throwing_body_caches_its_error_test() {
 
 fn deferred_namespace_of(spec: String) {
   let b = bundle("import { greet } from 'dance'; export const r = greet;")
-  let vm = returning_vm()
-  let assert #(st, Ok(linked)) = module.link_for_evaluation(b, agent(), vm)
-  let #(st, res) = module.get_or_create_deferred_namespace(st, linked, vm, spec)
+  let assert #(st, Ok(linked)) = module.link_for_evaluation(b, agent())
+  let #(st, res) = module.get_or_create_deferred_namespace(st, linked, spec)
   #(st, res)
 }
 
@@ -217,12 +195,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
       _ -> Error(load_error.ResolveNotFound)
     }
   }
-  let vm =
-    ModuleVm(..returning_vm(), make_closure: fn(st, _template, _captured) {
-      rt_obj.t_new_object(st, None)
-    })
-  let st =
-    module_host.install_import_hook(agent(), vm, "/main.js", resolve, load)
+  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
   let #(p, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
   let st = rt_async.drain(st)
@@ -238,7 +211,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
   let assert types.KHandle(_) = classify(f)
   // Second import: same namespace, loader not consulted (it would fail).
   let st =
-    module_host.install_import_hook(st, vm, "/main.js", resolve, fn(_) {
+    module_host.install_import_hook(st, "/main.js", resolve, fn(_) {
       Error(load_error.LoadNotFound)
     })
   let #(p2, st) =
@@ -250,14 +223,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
 
 pub fn import_of_an_unresolvable_specifier_rejects_test() {
   let #(resolve, load) = module_host.no_imports()
-  let st =
-    module_host.install_import_hook(
-      agent(),
-      returning_vm(),
-      "/main.js",
-      resolve,
-      load,
-    )
+  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
   let #(p, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
   let st = rt_async.drain(st)
