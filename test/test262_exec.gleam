@@ -22,6 +22,7 @@ import arc/host
 import arc/host_hooks
 import arc/internal/path
 import arc/interp/entry
+import arc/interp/safepoint
 import arc/module
 import arc/module/load_error
 import arc/module_host
@@ -826,10 +827,16 @@ fn do_run_script_with_harness(
 }
 
 /// Run one compiled script in `st`'s current realm and drive its turn to
-/// quiescence.
+/// quiescence. The completion value stays rooted across the turn-end
+/// collect and the drain (which collects between jobs), since the outcome
+/// is read off it afterwards.
 fn run_settled(st: Agent, template: FuncTemplate) -> Settled {
   let #(completion, st) = entry.run_script(st, template)
-  let st = settle_pending_wakes(st)
+  let held = case completion {
+    NormalCompletion(v) -> v
+    ThrowCompletion(e) -> e
+  }
+  let st = safepoint.finish_turn(st, [held], settle_pending_wakes)
   case completion {
     NormalCompletion(v) -> #(Ok(v), st)
     ThrowCompletion(e) -> #(Error(e), st)
@@ -915,7 +922,12 @@ fn print_native(
   let #(str, st) = rt_val.t_to_string(s.agent, host.first_arg(args))
   let global = mk_object(st.realm.global_object)
   let #(_ok, st) =
-    rt_obj.t_set_prop(st, global, StringKey(Named(print_output)), mk_string(str))
+    rt_obj.t_set_prop(
+      st,
+      global,
+      StringKey(Named(print_output)),
+      mk_string(str),
+    )
   done(s, st)
 }
 
