@@ -284,7 +284,10 @@ pub fn create_dynamic_function(
 /// §7.3.19 CreateListFromArrayLike(obj) — used by Function.prototype.apply
 /// and Reflect.apply/construct. Elements are read via `[[Get]]` for indices
 /// [0, ToLength(Get(obj, "length"))).
-fn create_list_from_array_like(st: Agent, arr: JsVal) -> #(List(JsVal), Agent) {
+pub fn create_list_from_array_like(
+  st: Agent,
+  arr: JsVal,
+) -> #(List(JsVal), Agent) {
   case classify(arr) {
     KHandle(_) -> {
       let #(len_v, st) = rt_obj.t_get_prop(st, arr, StringKey(Named("length")))

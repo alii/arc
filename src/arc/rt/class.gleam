@@ -29,9 +29,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, type JsOps, type JsVal,
   type MethodInstallKind, type ObjectKey, type Property, type PropertyKey,
-  AccessorProperty, DataProperty, KCompiled, KHandle, KNull, KStr, KTdz,
-  MIGetter, MIMethod, MISetter, MIStatic, MIStaticGetter, MIStaticSetter, Named,
-  Private, SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
+  AccessorProperty, DataProperty, KBytecode, KCompiled, KHandle, KNull, KStr,
+  KTdz, MIGetter, MIMethod, MISetter, MIStatic, MIStaticGetter, MIStaticSetter,
+  Named, Private, SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
   mk_undefined,
 } as rt_types
 import gleam/bit_array
@@ -86,15 +86,17 @@ pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
 
 // ── C4: MakeMethod (§15.4.4) ────────────────────────────────────────────────
 
-/// §15.4.4 MakeMethod(F, homeObject) — set `fn_h`'s `KCompiled.home_object`
-/// to `home` so `super.x` inside it resolves via the home's prototype. No-op
-/// on non-`KCompiled` cells (native/bound). Port of arc `make_method`
+/// §15.4.4 MakeMethod(F, homeObject) — set the function cell's
+/// `home_object` to `home` so `super.x` inside it resolves via the home's
+/// prototype. No-op on native/bound cells. Port of arc `make_method`
 /// (interpreter.gleam:5504-5520). JMutUnit.
 pub fn t_make_method(st: Agent, fn_h: Handle, home: Handle) -> Agent {
   rt_store.t_cell_update(st, fn_h, fn(slot) {
     case slot {
       SObject(kind: KCompiled(..) as k, ..) ->
         SObject(..slot, kind: KCompiled(..k, home_object: Some(home)))
+      SObject(kind: KBytecode(..) as k, ..) ->
+        SObject(..slot, kind: KBytecode(..k, home_object: Some(home)))
       _ -> slot
     }
   })
@@ -108,6 +110,8 @@ pub fn t_set_fields_init(st: Agent, ctor: Handle, init_h: Handle) -> Agent {
     case slot {
       SObject(kind: KCompiled(..) as k, ..) ->
         SObject(..slot, kind: KCompiled(..k, fields_init: Some(init_h)))
+      SObject(kind: KBytecode(..) as k, ..) ->
+        SObject(..slot, kind: KBytecode(..k, fields_init: Some(init_h)))
       _ -> slot
     }
   })
@@ -171,6 +175,12 @@ pub fn t_class_setup(
           SObject(
             ..slot,
             kind: KCompiled(..k, home_object: Some(proto)),
+            proto: Some(ctor_parent),
+          )
+        SObject(kind: KBytecode(..) as k, ..) ->
+          SObject(
+            ..slot,
+            kind: KBytecode(..k, home_object: Some(proto)),
             proto: Some(ctor_parent),
           )
         _ -> slot
@@ -303,7 +313,8 @@ fn set_fn_name_if_empty(
 ) -> Agent {
   rt_store.t_cell_update(st, fn_h, fn(slot) {
     case slot {
-      SObject(kind: KCompiled(..), props:, ..) ->
+      SObject(kind: KCompiled(..), props:, ..)
+      | SObject(kind: KBytecode(..), props:, ..) ->
         case dict.get(props, Named("name")) {
           Ok(DataProperty(value: v, seq:, ..)) ->
             case classify(v) {
@@ -700,21 +711,23 @@ pub fn t_super_call(
 
 // ── C14: KCompiled slot readers (JRead) ─────────────────────────────────────
 
-/// `[[HomeObject]]` of a `KCompiled` cell, or `undefined` for non-functions /
+/// `[[HomeObject]]` of a function cell, or `undefined` for non-functions /
 /// unset home. JRead — for M14's prologue emission.
 pub fn t_fn_home_object(st: Agent, fn_h: Handle) -> JsVal {
   case rt_store.t_cell_get(st, fn_h) {
-    SObject(kind: KCompiled(home_object: Some(h), ..), ..) -> mk_object(h)
+    SObject(kind: KCompiled(home_object: Some(h), ..), ..)
+    | SObject(kind: KBytecode(home_object: Some(h), ..), ..) -> mk_object(h)
     _ -> mk_undefined()
   }
 }
 
-/// `FnFlags` of a `KCompiled` cell. Panics on a non-`KCompiled` — a compiler-
-/// emitted call site guarantees the handle is one. JRead.
+/// `FnFlags` of a function cell. Panics on a native/bound handle — a
+/// compiler-emitted call site guarantees the handle is a closure. JRead.
 pub fn t_fn_flags(st: Agent, fn_h: Handle) -> FnFlags {
   case rt_store.t_cell_get(st, fn_h) {
-    SObject(kind: KCompiled(flags:, ..), ..) -> flags
-    _ -> panic as "t_fn_flags: Handle is not a KCompiled cell"
+    SObject(kind: KCompiled(flags:, ..), ..)
+    | SObject(kind: KBytecode(flags:, ..), ..) -> flags
+    _ -> panic as "t_fn_flags: Handle is not a function closure cell"
   }
 }
 

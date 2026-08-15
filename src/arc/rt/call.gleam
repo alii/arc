@@ -279,7 +279,11 @@ fn call_kfunction(
 /// resolution happens HERE, not in the compiled prologue. Port of arc
 /// `frame.bind_this` (`exec/frame.gleam:145-178`); arrows have lexical
 /// `this` (step 2) and keep the caller-supplied frame value.
-fn resolve_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
+pub fn resolve_this(
+  st: Agent,
+  flags: FnFlags,
+  this: JsVal,
+) -> #(JsVal, Agent) {
   use <- bool.guard(flags.is_arrow, #(this, st))
   case flags.is_strict {
     // Step 5: thisMode is STRICT -> thisValue = thisArgument (no coercion).
@@ -586,7 +590,7 @@ fn derived_return_override(st: Agent, result: JsVal) -> #(Handle, Agent) {
 /// §10.1.13.2 GetPrototypeFromConstructor: `? Get(newTarget, "prototype")`;
 /// if not an object, fall back to `%Object.prototype%` (realm intrinsic via
 /// `st.realm`).
-fn get_prototype_from_constructor(
+pub fn get_prototype_from_constructor(
   st: Agent,
   new_target: JsVal,
 ) -> #(Handle, Agent) {
