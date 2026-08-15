@@ -1155,7 +1155,7 @@ fn untrack_rejection(st: Agent, data: Handle) -> Agent {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Async-generator driver — ES2024 §27.6 (port arc/vm/exec/async_generators.gleam)
+// Async-generator driver — ES2024 §27.6
 // ════════════════════════════════════════════════════════════════════════════
 //
 // Unlike sync generators (`.next()` runs the body synchronously), async gens

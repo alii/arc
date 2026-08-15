@@ -19,7 +19,7 @@
 import arc/compiler
 import arc/esm
 import arc/host
-import arc/host_hooks
+import arc/host_hooks.{HostHooks}
 import arc/internal/path
 import arc/interp/entry
 import arc/interp/safepoint
@@ -139,7 +139,7 @@ fn warm_caches() -> Nil {
 fn boot_agent(metadata: TestMetadata) -> Agent {
   let agent = boot_base_agent()
   case list.contains(metadata.flags, "CanBlockIsFalse") {
-    True -> Agent(..agent, hooks: host_hooks.with_can_block(agent.hooks, False))
+    True -> Agent(..agent, hooks: HostHooks(..agent.hooks, can_block: False))
     False -> agent
   }
 }
@@ -1032,8 +1032,8 @@ fn inspect_thrown(val: JsVal, st: Agent) -> String {
 // $262.agent.* is test262 HOST machinery (INTERPRETING.md), so it lives in
 // the harness — the embedder — not in the runtime: agent processes block on
 // their BEAM mailboxes for broadcasts, acks and reports, and mailbox
-// receives are embedder territory (the same boundary as the Atomics host
-// capabilities; see the contract in arc/host_hooks.gleam). The harness hangs
+// receives are embedder territory (see the [[CanBlock]] contract in
+// arc/host_hooks.gleam). The harness hangs
 // the `agent` object off every `$262` it installs; `$262.createRealm()`
 // carries it over to child realms, and every spawned agent child installs
 // its own.
@@ -1544,7 +1544,7 @@ fn ffi_take_report() -> Result(String, Nil) {
 /// park in a sync `Atomics.wait`. A CanBlockIsFalse test strips it again in
 /// `boot_agent`.
 fn harness_host_hooks() -> host.HostHooks {
-  host_hooks.with_can_block(host.default_host_hooks(), True)
+  HostHooks(..host.default_host_hooks(), can_block: True)
 }
 
 /// The harness's post-script driver: one microtask checkpoint through the

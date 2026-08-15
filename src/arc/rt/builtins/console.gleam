@@ -1,6 +1,5 @@
 //// The `console` global (WHATWG Console).
 ////
-//// Faithful port of arc/vm/builtins/console.gleam over the threaded Agent.
 //// Output goes through `HostHooks.print` with the method's level; the
 //// default hook writes log/info/debug to stdout and warn/error to stderr.
 //// Return-tuple order is `#(JsVal, Agent)` (R1); a user

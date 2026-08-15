@@ -1,7 +1,7 @@
 //// `rt_types` — LEAF module holding every type reachable from `JsSlot`
 //// (SPEC §2.2-§2.5, D8/D16/D17). Imports ONLY `gleam/*` + arc internals so
 //// `rt_store`, `rt_gc`, `rt_obj`, `rt_async` can all import it
-//// without cycles. arc precedent: `arc/vm/value.gleam` (4884-line leaf).
+//// without cycles.
 ////
 //// Section order (readability; Gleam allows forward type refs in-module):
 ////   value-ABI → keys/symbols → property/heap → ObjKind/JsSlot → async →
@@ -139,9 +139,8 @@ pub type IterHint {
 // (bakes canonical keys into GetField/PutField opcodes) and the runtime
 // (dynamic `obj[expr]` access, JSON, Object.keys). One implementation is
 // load-bearing: if compile-time and runtime canonicalized differently, the
-// same property would land in two dict slots. Faithful port of
-// arc/bytecode/key.gleam:19-219 (D9: `Private(BitArray)`) + arc/vm/value.gleam:37-168
-// (D14: `UserSymbol` uid is a threaded `Int`, not `ErlangRef`).
+// same property would land in two dict slots. Keys are `arc/bytecode/key`
+// (D9: `Private(BitArray)`); D14: `UserSymbol` uid is a threaded `Int`.
 
 /// Largest valid array index (§6.1.7): an array index is an integer in
 /// [0, 2^32-1), i.e. at most 2^32 - 2. Anything larger is an ordinary
@@ -865,10 +864,9 @@ pub type MethodInstallKind {
 /// R10/G20: `KNative` dispatch key. NOT `Int`. Full ~180-variant body is
 /// enumerated by M6 (one per built-in native); the type lives here so
 /// `ObjKind` can reference it. Variants that CLOSE OVER heap state carry
-/// `Handle`/`JsVal` fields (M6.md §2 / arc `value.gleam:2956-3055`) — traced
-/// via `native_token_refs` below. M6 appends the full enumeration.
+/// `Handle`/`JsVal` fields (M6.md §2) — traced via `native_token_refs`
+/// below. M6 appends the full enumeration.
 pub type NativeToken {
-  NativeUnseeded
   /// §27.2.1.3.2 Promise Resolve Function — `[[Promise]]` + shared
   /// `[[AlreadyResolved]]` box (an `SBox(mk_bool)` cell).
   PromiseResolveFn(promise: Handle, already_resolved: Handle)
@@ -1699,9 +1697,8 @@ pub type ConsoleNative {
 }
 
 /// §19.2 Global function natives — eval/parseInt/parseFloat/isNaN/isFinite
-/// plus the §19.2.6 URI codecs and Annex B escape/unescape (arc splits these
-/// across `NumberNativeFn` + `arc/vm/exec/call` URI wrappers; 2core unifies
-/// them under one `GlobalN` wrapper). No Handle-carrying variants.
+/// plus the §19.2.6 URI codecs and Annex B escape/unescape, all under one
+/// `GlobalN` wrapper. No Handle-carrying variants.
 pub type GlobalNative {
   /// §19.2.1 eval(x) reached through [[Call]] — always an INDIRECT eval
   /// (`JsOps.eval_hook`), run in `realm`: the id of the realm this %eval%
@@ -2550,7 +2547,6 @@ pub type AGResumeKind {
 /// `rt_gc.push_term_refs` on the whole tag.
 pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
   case tok {
-    NativeUnseeded -> []
     PromiseResolveFn(promise:, already_resolved:)
     | PromiseRejectFn(promise:, already_resolved:) -> [
       promise,
@@ -3594,7 +3590,7 @@ pub type JsStore(st) {
     /// gate — only collects at `call_depth == 0` (D11).
     call_depth: Int,
     // ── threaded counters (D9, D14) ──
-    /// Property creation-order stamp (replaces arc_vm_ffi:next_prop_seq).
+    /// Property creation-order stamp.
     prop_seq: Int,
     /// `t_new_private_name` counter (D9).
     private_uid: Int,

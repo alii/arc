@@ -10,10 +10,10 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type JsVal, type ShapeSlots,
   AccessorProperty, ArrayObj, DataProperty, Dense, FnFlags, Index, JsCell,
-  JsStore, KBytecode, KCompiled, KHandle, KNative, Named, NativeUnseeded,
-  NoElements, Ordinary, Private, ProxyObj, ResumeCompiled, ResumeFrame, SBox,
-  SObject, SShapedObject, ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow,
-  StepYield, StringKey, SymbolKey,
+  JsStore, KBytecode, KCompiled, KHandle, KNative, Named, NoElements, Ordinary,
+  Private, ProxyObj, ResumeCompiled, ResumeFrame, ReturnThis, SBox, SObject,
+  SShapedObject, ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow, StepYield,
+  StringKey, SymbolKey,
 } as rt_types
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
@@ -325,11 +325,10 @@ pub fn kcompiled_test() {
 }
 
 pub fn knative_test() {
-  let kn =
-    KNative(tag: NativeUnseeded, name: "nm", length: 3, constructible: True)
+  let kn = KNative(tag: ReturnThis, name: "nm", length: 3, constructible: True)
   assert tag_of(kn) == tag("KNATIVE_TAG")
   assert arity(kn) == idx("KNATIVE_ARITY")
-  assert at(kn, "KNATIVE_TOKEN") == dyn(NativeUnseeded)
+  assert at(kn, "KNATIVE_TOKEN") == dyn(ReturnThis)
   assert at(kn, "KNATIVE_NAME") == dyn("nm")
   assert at(kn, "KNATIVE_LENGTH") == dyn(3)
   assert at(kn, "KNATIVE_CONSTRUCTIBLE") == dyn(True)

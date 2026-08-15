@@ -3,8 +3,7 @@
 //// Read-only rendering: never invokes JS (no toString/valueOf, no getters,
 //// no proxy traps), so it is safe to call from error paths without observable
 //// side effects or re-entry. Shared by console.log, uncaught-rejection
-//// reporting, and diagnostic messages ("x is not a function"). Renders the
-//// same text as arc/vm/inspect over the old heap.
+//// reporting, and diagnostic messages ("x is not a function").
 
 import arc/internal/ordered_entries
 import arc/rt/buffer

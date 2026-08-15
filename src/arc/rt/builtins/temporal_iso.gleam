@@ -2,10 +2,9 @@
 ////
 //// Everything the Temporal builtins need to describe, parse, format, and do
 //// arithmetic on ISO calendar values lives here so it can be unit-tested
-//// without spinning up a VM heap. `arc/vm/builtins/temporal` imports this
-//// unqualified (matching how it already pulls in `gregorian` and `int_math`)
-//// and layers the property-bag / options-object / brand-check machinery on
-//// top.
+//// without spinning up a heap. The `temporal_*` builtins import this
+//// unqualified (matching how they pull in `gregorian` and `int_math`) and
+//// layer the property-bag / options-object / brand-check machinery on top.
 
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{

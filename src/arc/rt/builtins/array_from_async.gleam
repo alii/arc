@@ -6,7 +6,6 @@
 //// state), the same machinery as `AsyncResume` / the AsyncFromSync wrappers.
 //// Continuation handlers run with a throwaway result capability, so they
 //// route every failure through the captured `reject` function explicitly.
-//// Port of arc `vm/exec/array_from_async.gleam` under D7 (raise, not Result).
 
 import arc/rt/async as rt_async
 import arc/rt/builtins/helpers

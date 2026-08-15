@@ -23,7 +23,7 @@
 %%%     `is_miss/1` before touching the result.
 %%%
 %%%  3. setup_locals_tuple/6, setup_locals_seeded/10 — the one-pass locals
-%%%     tuple build for a call prologue (formerly arc_vm_ffi).
+%%%     tuple build for a call prologue.
 -module(arc_interp_ffi).
 
 -export([guard1/2, guard2/3, guard3/4, guard4/5, guard5/6, guard6/7,

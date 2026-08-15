@@ -433,63 +433,16 @@ fn is_promise(st: Agent, h: Handle) -> Bool {
 
 // -- Host hooks --------------------------------------------------------------
 
-/// Re-export: one blocking sync Atomics.wait handed to the embedder.
-pub type WaitRequest =
-  host_hooks.WaitRequest
-
-/// Re-export: result of an embedder blocking wait.
-pub type WaitOutcome =
-  host_hooks.WaitOutcome
-
-/// Re-export: the blocking-wait capability, `fn(WaitRequest) -> WaitOutcome`.
-pub type SyncWaitFn =
-  host_hooks.SyncWaitFn
-
-/// Re-export: the wake-delivery capability for claimed remote waiters.
-pub type DeliverWakeFn =
-  host_hooks.DeliverWakeFn
-
-/// Re-export: opaque claimed-waiter term (pid + ref + key + byte index).
-pub type ClaimedWaiter =
-  host_hooks.ClaimedWaiter
-
-/// Re-export: opaque cross-process WaiterList identity.
-pub type WaiterKey =
-  host_hooks.WaiterKey
-
-/// Re-export: opaque handle to one registered waiterlist entry.
-pub type WaiterHandle =
-  host_hooks.WaiterHandle
-
-/// Re-export: the bundled blocking-wait + wake-delivery capability pair.
-pub type AtomicsCapabilities =
-  host_hooks.AtomicsCapabilities
-
 /// Re-export: the embedder host-capability record. Start from
-/// `default_host_hooks()`, add capabilities, hand it to the engine once.
+/// `default_host_hooks()`, override fields, hand it to the engine once.
 pub type HostHooks =
   host_hooks.HostHooks
 
-/// The capability-free default: no Atomics capabilities (sync `Atomics.wait`
-/// throws instead of hanging), no dynamic-import hook, and the real BEAM
-/// monotonic clock / sleep.
+/// The default: [[CanBlock]] false (sync `Atomics.wait` throws instead of
+/// hanging), no dynamic-import hook, and the real BEAM monotonic clock /
+/// sleep.
 pub fn default_host_hooks() -> HostHooks {
   host_hooks.default_host_hooks()
-}
-
-/// Install the Atomics blocking-wait + wake-delivery capabilities on `hooks`,
-/// leaving every other hook as configured. Both together, always: a host
-/// that blocks but cannot deliver wakes (or vice versa) deadlocks its peer
-/// agents, so `HostHooks.atomics` is one `Option(AtomicsCapabilities)`.
-pub fn with_atomics(
-  hooks: HostHooks,
-  sync_wait sync_wait: SyncWaitFn,
-  deliver_wake deliver_wake: DeliverWakeFn,
-) -> HostHooks {
-  host_hooks.HostHooks(
-    ..hooks,
-    atomics: Some(host_hooks.AtomicsCapabilities(sync_wait:, deliver_wake:)),
-  )
 }
 
 // -- Constructors ------------------------------------------------------------

@@ -1,7 +1,6 @@
 //// `rt_builtins/number` — Number constructor + %Number.prototype% + the
 //// four coercing global functions parseInt/parseFloat/isNaN/isFinite
-//// (ES2024 §21.1 / §19.2). Port of `arc/vm/builtins/number.gleam` over the
-//// threaded `Agent` model (D7/R1).
+//// (ES2024 §21.1 / §19.2) over the threaded `Agent` model (D7/R1).
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers

@@ -1,7 +1,6 @@
 //// WebIDL §2.8.1 DOMException: Error-like with a `name` drawn from a fixed
 //// table that maps to a legacy integer `code`. The prototype chain goes
-//// through %Error.prototype% so `instanceof Error` holds. Port of
-//// `arc/vm/builtins/dom_exception.gleam` onto the threaded `Agent`.
+//// through %Error.prototype% so `instanceof Error` holds.
 
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error

@@ -1,10 +1,9 @@
 //// `rt_builtins` — realm bootstrap + native-method dispatch (SPEC §7.M6).
 ////
-//// Port of `arc/vm/builtins.gleam:54-635` (`init` + `globals`) over the
-//// threaded `Agent` model. `init_realm` allocates every intrinsic
-//// prototype/constructor into the store, seeds the concrete `JsOps` upcall
-//// table (D17), pins every realm handle as a permanent GC root, allocates
-//// `globalThis`, and returns the populated `Realm` record + updated state.
+//// `init_realm` allocates every intrinsic prototype/constructor into the
+//// store, seeds the concrete `JsOps` upcall table (D17), pins every realm
+//// handle as a permanent GC root, allocates `globalThis`, and returns the
+//// populated `Realm` record + updated state.
 ////
 //// `dispatch_native` / `dispatch_native_construct` are the M4→M6 seam:
 //// `rt_call.gleam:83-98` forward-declares them via
@@ -60,10 +59,10 @@ import arc/rt/types.{
   DataViewN, DateN, DisposableStackN, DomExceptionN, ErrorN,
   FinalizationRegistryN, FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry,
   IntlN, IteratorN, JInt, JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN,
-  MathN, Named, NativeUnseeded, NoElements, NumberConstructor, NumberN,
-  NumberObj, ObjectN, Ordinary, PromiseN, PromiseRejectFn, PromiseResolveFn,
-  ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SObject, SetN, StringConstructor,
-  StringKey, StringN, StringObj, SymbolConstructor, SymbolN, TemporalN, Test262N,
+  MathN, Named, NoElements, NumberConstructor, NumberN, NumberObj, ObjectN,
+  Ordinary, PromiseN, PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN,
+  RegExpN, ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN,
+  StringObj, SymbolConstructor, SymbolN, TemporalN, Test262N,
   ThrowTypeErrorPoison, TypedArrayN, WeakN, classify, mk_number, mk_object,
   mk_undefined,
 } as rt_types
@@ -580,8 +579,6 @@ pub fn dispatch_native(
     ReturnThis -> #(this, st)
     ThrowTypeErrorPoison ->
       b_function.dispatch(st, rt_types.ThrowTypeErrorFn, this, args)
-    NativeUnseeded ->
-      panic as "dispatch_native: NativeUnseeded token reached (unimplemented builtin)"
     // ── embedder natives: plain [[Call]], NewTarget undefined (§10.2.1) ─────
     HostFn(id:) -> call_host_fn(st, id, this, args, mk_undefined())
     // ── per-module wrapper variants ─────────────────────────────────────────
@@ -754,7 +751,6 @@ pub fn dispatch_native_construct(
     | AsyncGenResume(..)
     | ReturnThis
     | ThrowTypeErrorPoison
-    | NativeUnseeded
     | MathN(_)
     | JsonN(_)
     | ReflectN(_)

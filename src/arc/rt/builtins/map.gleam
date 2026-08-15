@@ -1,4 +1,4 @@
-//// ES2024 §24.1 Map Objects — port of `arc/vm/builtins/map.gleam`.
+//// ES2024 §24.1 Map Objects.
 ////
 //// Storage: an `OrderedEntries(MapKey, JsVal)` store (see
 //// `rt_ordered_entries`) — O(log n) get/set/has/delete plus the spec's

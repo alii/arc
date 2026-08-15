@@ -18,11 +18,10 @@ import arc/rt/gc as rt_gc
 import arc/rt/types.{type Agent, type JsVal}
 
 /// Root-activation `Return` safepoint, run by the `Return` arm once it has
-/// popped back into the outermost frame (port of the old interpreter's
-/// `maybe_collect_at_toplevel`). Collects when the store has grown past its
-/// threshold AND `call_depth == 0`, i.e. this activation is the one the
-/// engine entered: a nested `run_bytecode` under a native (an array callback,
-/// a generator body driven by `.next()`) runs above the caller's
+/// popped back into the outermost frame. Collects when the store has grown
+/// past its threshold AND `call_depth == 0`, i.e. this activation is the one
+/// the engine entered: a nested `run_bytecode` under a native (an array
+/// callback, a generator body driven by `.next()`) runs above the caller's
 /// `t_enter_call`, whose registers this `State` cannot see, so it never
 /// collects. Roots = the store's own + this frame's registers.
 pub fn maybe_collect_at_toplevel(state: State) -> State {

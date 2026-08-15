@@ -8,22 +8,16 @@
 //// dynamic-import host function is engine state on `Agent.import_hook` (see
 //// `arc/module_host.install_import_hook`), not a hook here.
 ////
-//// Atomics on the shared runtime (`arc/rt`) needs nothing from the embedder
-//// but that policy: a SharedArrayBuffer another agent can see lives in an
-//// owner process (`arc/rt/sab`) with its WaiterList, a sync `Atomics.wait`
-//// blocks the calling BEAM process in a receive, and `Atomics.notify` has the
-//// owner message the waiters it wakes. The `AtomicsCapabilities` closures
-//// (`sync_wait` / `deliver_wake` and the `WaitRequest` family) are the
-//// retired bytecode VM's protocol (`arc/vm/builtins/atomics`), where the
-//// EMBEDDER did the blocking and the wake delivery; they stay only while
-//// that tree still compiles, and the shared runtime never calls them. What
-//// it reads is whether the record is installed at all — `can_block`.
+//// Atomics needs nothing from the embedder but that policy: a
+//// SharedArrayBuffer another agent can see lives in an owner process
+//// (`arc/rt/sab`) with its WaiterList, a sync `Atomics.wait` blocks the
+//// calling BEAM process in a receive, and `Atomics.notify` has the owner
+//// message the waiters it wakes.
 
 import arc/internal/clock
 import arc/internal/host_time
 import gleam/float
 import gleam/io
-import gleam/option.{type Option, None, Some}
 
 /// Which `console` method produced a line. The default `print` hook sends
 /// `LogLevel`/`InfoLevel`/`DebugLevel` to stdout and `WarnLevel`/`ErrorLevel`
@@ -36,70 +30,22 @@ pub type ConsoleLevel {
   DebugLevel
 }
 
-/// Retired-VM protocol: opaque WaiterList identity of a buffer, as the old
-/// bytecode VM keyed it. Never produced on the shared runtime.
-pub type WaiterKey
-
-/// Retired-VM protocol: opaque handle to one WaiterList entry the old VM
-/// registered before handing the block to the embedder.
-pub type WaiterHandle
-
-/// Retired-VM protocol: a remote waiter the old VM's `Atomics.notify`
-/// claimed and handed to the embedder for wake delivery.
-pub type ClaimedWaiter
-
-/// Retired-VM protocol: one blocking sync `Atomics.wait` the old VM handed
-/// to the embedder's `SyncWaitFn` after registering `handle`.
-pub type WaitRequest {
-  WaitRequest(
-    handle: WaiterHandle,
-    key: WaiterKey,
-    /// Byte offset within the buffer (matches the notify side).
-    byte_index: Int,
-    /// Milliseconds to block; `None` = infinite.
-    timeout_ms: Option(Int),
-  )
-}
-
-/// Retired-VM protocol: how an embedder-side blocking wait ended ("ok" /
-/// "timed-out"; "not-equal" was decided before the embedder was called).
-pub type WaitOutcome {
-  WaitOk
-  WaitTimedOut
-}
-
-/// Retired-VM protocol: block the calling agent on `WaitRequest.handle`.
-pub type SyncWaitFn =
-  fn(WaitRequest) -> WaitOutcome
-
-/// Retired-VM protocol: deliver wake messages to claimed remote waiters.
-pub type DeliverWakeFn =
-  fn(List(ClaimedWaiter)) -> Nil
-
-/// The Atomics record on `HostHooks.atomics`. Its PRESENCE is the agent's
-/// [[CanBlock]] (§9.7): read it with `can_block`, set it with
-/// `with_can_block`. The two closures are the retired bytecode VM's
-/// embedder-driven wait/wake protocol and are never called by the shared
-/// runtime, whose blocking and waking happen in the SharedArrayBuffer's
-/// owner process (`arc/rt/sab`); they remain fields only while `arc/vm`
-/// still compiles against this record.
-pub type AtomicsCapabilities {
-  AtomicsCapabilities(sync_wait: SyncWaitFn, deliver_wake: DeliverWakeFn)
-}
-
 /// The embedder's host capabilities, bundled into one record carried on
 /// `Agent.hooks`. Supplied exactly once at engine construction
 /// (`rt/builtins.new_agent(hooks)`) and shared by everything that runs on that
 /// agent. NOT generic over `host`: no field mentions a JS value type.
 pub type HostHooks {
   HostHooks(
-    /// Agent Record [[CanBlock]] (§9.7): `Some(_)` = this agent may be
-    /// suspended by a sync `Atomics.wait` (§25.4.3.14 DoWait step 10,
-    /// AgentCanSuspend); `None` = it may not, and a sync wait throws a
-    /// TypeError after its argument coercions. `Atomics.waitAsync` and
-    /// `Atomics.notify` never consult it. Use `can_block` / `with_can_block`
-    /// rather than the record itself (see `AtomicsCapabilities`).
-    atomics: Option(AtomicsCapabilities),
+    /// Agent Record [[CanBlock]] (§9.7): whether this agent may be suspended
+    /// by a sync `Atomics.wait` (§25.4.3.14 DoWait step 10, AgentCanSuspend).
+    /// When `False` a sync wait throws a TypeError after its argument
+    /// coercions; `Atomics.waitAsync` and `Atomics.notify` never consult it.
+    /// A blocking agent parks its BEAM process inside `Atomics.wait` until
+    /// another agent sharing the buffer notifies it or the timeout passes,
+    /// so grant it only to agents running on a process the embedder can
+    /// afford to have blocked (test262's main and `$262.agent` workers; not
+    /// a server's request scheduler).
+    can_block: Bool,
     /// Monotonic clock in milliseconds: `Atomics.waitAsync` deadlines and the
     /// embedder's timers. NOT optional — every host has a clock — so it
     /// defaults to the BEAM monotonic clock
@@ -151,7 +97,7 @@ pub fn default_print(level: ConsoleLevel, line: String) -> Nil {
 /// stdout/stderr sinks.
 pub fn default_host_hooks() -> HostHooks {
   HostHooks(
-    atomics: None,
+    can_block: False,
     monotonic_now: clock.monotonic_now,
     sleep_ms: clock.sleep_ms,
     report_uncaught: io.println_error,
@@ -159,36 +105,5 @@ pub fn default_host_hooks() -> HostHooks {
     time_zone: host_time.host_time_zone(),
     random: float.random,
     print: default_print,
-  )
-}
-
-/// Agent Record [[CanBlock]] (§9.7): whether a sync `Atomics.wait` may
-/// suspend this agent (AgentCanSuspend, §25.4.3.14 DoWait step 10).
-pub fn can_block(hooks: HostHooks) -> Bool {
-  option.is_some(hooks.atomics)
-}
-
-/// `hooks` with [[CanBlock]] set to `can_block`, every other hook unchanged.
-/// A blocking agent parks its BEAM process inside `Atomics.wait` until
-/// another agent sharing the buffer notifies it or the timeout passes, so
-/// grant it only to agents running on a process the embedder can afford to
-/// have blocked (test262's main and `$262.agent` workers; not a server's
-/// request scheduler).
-pub fn with_can_block(hooks: HostHooks, can_block: Bool) -> HostHooks {
-  let atomics = case can_block {
-    True -> Some(blocking_agent())
-    False -> None
-  }
-  HostHooks(..hooks, atomics:)
-}
-
-/// The [[CanBlock]] = true marker. Its closures belong to the retired VM's
-/// protocol (see `AtomicsCapabilities`) and are unreachable from the shared
-/// runtime; should that VM ever run on these hooks they answer "nobody woke
-/// you" and deliver nothing, which is safe.
-fn blocking_agent() -> AtomicsCapabilities {
-  AtomicsCapabilities(
-    sync_wait: fn(_request) { WaitTimedOut },
-    deliver_wake: fn(_claimed) { Nil },
   )
 }

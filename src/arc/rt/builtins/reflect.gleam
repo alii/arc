@@ -1,7 +1,6 @@
 //// The `Reflect` global namespace (ES2024 §28.1).
 ////
-//// Faithful port of arc/vm/builtins/reflect.gleam over 2core's threaded
-//// Agent. Return-tuple order is `#(JsVal, Agent)` (R1).
+//// Return-tuple order is `#(JsVal, Agent)` (R1).
 //// Unlike Object.*, every Reflect method throws TypeError on a non-object
 //// target (never coerces) and returns Bool where Object.* would throw.
 

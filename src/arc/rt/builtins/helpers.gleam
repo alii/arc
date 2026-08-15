@@ -1,9 +1,8 @@
 //// `rt_builtins/helpers` — argument extraction + brand-check utilities
 //// shared by every per-module builtin (SPEC §7.M6 common-and-scaffold(2)).
 ////
-//// Port of `arc/vm/builtins/helpers.gleam` argument helpers + brand checks,
-//// re-expressed over the threaded `Agent` model. Errors go through
-//// `rt_val.t_throw_type_error` (D7 — raise, never `Result`).
+//// Argument helpers + brand checks over the threaded `Agent` model. Errors
+//// go through `rt_val.t_throw_type_error` (D7 — raise, never `Result`).
 
 import arc/rt/store as rt_store
 import arc/rt/types.{

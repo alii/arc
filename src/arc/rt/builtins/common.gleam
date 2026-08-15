@@ -1,13 +1,12 @@
 //// `rt_builtins/common` — shared allocation substrate for realm bootstrap
 //// (SPEC §7.M6 common-and-scaffold(1)).
 ////
-//// Port of `arc/vm/builtins/common.gleam:291-1030` alloc helpers, re-expressed
-//// over the threaded `Agent` model. Uses ONLY `rt_store` /
+//// Alloc helpers over the threaded `Agent` model. Uses ONLY `rt_store` /
 //// `rt_types` / `rt_call.t_native_new` so per-module builtin files can
 //// import this without cycles.
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Property-builder
-//// helpers thread `t_next_prop_seq` per-prop (arc used a global counter).
+//// helpers thread `t_next_prop_seq` per-prop.
 
 import arc/internal/tree_array
 import arc/rt/call as rt_call

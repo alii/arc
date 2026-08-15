@@ -1,18 +1,13 @@
 //// `rt_builtins/array` — Array constructor + Array.prototype (SPEC §7.M6).
 ////
-//// FAITHFUL PORT of `arc/vm/builtins/array.gleam` (5970 lines) with the D7/R1
-//// state-threading transform: arc's `#(State, Result(v, e))` → 2core's
-//// `#(v, Agent)` + `t_throw` on `Error(e)`. Semantics, error messages,
-//// allocation order, and property attributes copy arc byte-for-byte.
-////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Errors RAISE via
 //// `rt_val.t_throw_type_error/t_throw_range_error` (D7 — never `Result`).
 ////
 //// `init` builds Array.prototype + Array (constructor) via `common.init_type`;
 //// `dispatch` routes every `ArrayNative` token to its impl. Shared iteration
 //// / element helpers (SkipHoles/VisitHoles, `iterate_array`, `fold_array`,
-//// `move_range`, JsElements ops) are local — arc's fast-path bulk-mutate
-//// pattern (one heap read, one JsElements transform, one heap write) is kept.
+//// `move_range`, JsElements ops) are local and follow a fast-path bulk-mutate
+//// pattern: one heap read, one JsElements transform, one heap write.
 
 import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common

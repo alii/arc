@@ -1,7 +1,6 @@
 //// `rt_builtins/generator` — %Generator% / %AsyncGenerator% /
 //// %GeneratorFunction% / %AsyncGeneratorFunction% / %AsyncFunction% intrinsics
-//// (SPEC §7.M6 builtin-control; port of `arc/vm/builtins/generator.gleam` +
-//// `arc/vm/builtins/async_generator.gleam` + `common.init_generator_function`).
+//// (SPEC §7.M6 builtin-control).
 ////
 //// `next`/`return`/`throw` bodies live in `rt_async` (`t_gen_next` /
 //// `t_gen_return` / `t_gen_throw` over the data cell `generator_data`

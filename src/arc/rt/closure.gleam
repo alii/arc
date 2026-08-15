@@ -1,7 +1,6 @@
 //// Allocation of interpreted function objects: the `KBytecode` twin of
-//// `rt/call.t_new_function`. Port of arc `interpreter.make_closure`
-//// (`vm/exec/interpreter.gleam:576-709`) minus the lazy-prototype autoinit:
-//// the `prototype` object is allocated eagerly.
+//// `rt/call.t_new_function`. The `prototype` object is allocated eagerly,
+//// not lazily on first read.
 
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/obj as rt_obj

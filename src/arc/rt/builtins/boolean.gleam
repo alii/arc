@@ -1,6 +1,5 @@
 //// `rt_builtins/boolean` — Boolean constructor + %Boolean.prototype%
-//// (ES2024 §20.3). Port of `arc/vm/builtins/boolean.gleam` over the
-//// threaded `Agent` model (D7/R1).
+//// (ES2024 §20.3) over the threaded `Agent` model (D7/R1).
 
 import arc/rt/builtins/common
 import arc/rt/store as rt_store

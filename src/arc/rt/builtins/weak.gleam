@@ -1,5 +1,4 @@
-//// ES2024 §24.3 WeakMap + §24.4 WeakSet — port of `arc/vm/builtins/
-//// {weak_collection,weak_map,weak_set}.gleam`, merged into one module.
+//// ES2024 §24.3 WeakMap + §24.4 WeakSet in one module.
 ////
 //// Storage: `WeakMapObj(entries: Dict(WeakKey, JsVal))` and
 //// `WeakSetObj(entries: Set(WeakKey))`, keyed by object cell id or by

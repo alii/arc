@@ -1,9 +1,8 @@
 //// The `Math` global namespace (ES2024 §21.3).
 ////
-//// Faithful port of arc/vm/builtins/math.gleam over 2core's threaded
-//// Agent + JsNum shape (`JInt|JFloat|JNan|JPosInf|JNegInf` — arc's
-//// single `Finite(Float)` splits into `JInt|JFloat`; every finite arm here
-//// widens through `finite_to_float` so the arithmetic stays on Floats).
+//// Works over the threaded Agent + JsNum shape
+//// (`JInt|JFloat|JNan|JPosInf|JNegInf`); every finite arm widens through
+//// `finite_to_float` so the arithmetic stays on Floats.
 //// Return-tuple order is `#(JsVal, Agent)` (R1); an argument's
 //// ToNumber TypeError (Symbol/BigInt) diverges via `t_throw` inside
 //// `t_to_number` (D7).

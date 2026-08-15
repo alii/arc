@@ -1071,7 +1071,7 @@ fn number_literal(n: ast.LiteralNumber) -> Build(ir.Value) {
 }
 
 /// Raw IEEE-754 binary64 bit pattern of `f` as a non-negative Int in
-/// `[0, 2⁶⁴)`. Bit-array round-trip per src/arc/vm/value.gleam:419.
+/// `[0, 2⁶⁴)`, via a bit-array round-trip.
 fn float_bits(f: Float) -> Int {
   let assert <<bits:size(64)>> = <<f:float-size(64)>>
   bits

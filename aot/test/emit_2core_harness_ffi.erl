@@ -21,7 +21,7 @@ to_dynamic(X) -> X.
 %% Returns {CapturedBytes :: binary(), ThunkResult}.
 %%
 %% Used by emit_2core_harness.run_interpreted so arc's console.log output
-%% (arc/vm/builtins/console.gleam -> io.println) can be diffed against the
+%% (the default print hook -> io.println) can be diffed against the
 %% compiled path's captured console bytes.
 capture_stdout(Thunk) ->
     OldGL = erlang:group_leader(),

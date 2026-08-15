@@ -1,8 +1,7 @@
 //// `rt_builtins/symbol` — Symbol constructor, well-known symbol
-//// properties, and %Symbol.prototype% (ES2024 §20.4). Port of
-//// `arc/vm/builtins/symbol.gleam` over the threaded `Agent` model
-//// (D7/R1). D14: user symbols carry a threaded Int uid instead of arc's
-//// `make_ref`; registered symbols are structural (`RegisteredSymbol(key)`),
+//// properties, and %Symbol.prototype% (ES2024 §20.4) over the threaded
+//// `Agent` model (D7/R1). D14: user symbols carry a threaded Int uid;
+//// registered symbols are structural (`RegisteredSymbol(key)`),
 //// so `Symbol.for("x") === Symbol.for("x")` by term equality with NO
 //// registry dict on `JsStore`.
 

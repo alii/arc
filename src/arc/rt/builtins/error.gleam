@@ -2,9 +2,8 @@
 //// Error.prototype.toString / stack accessor (SPEC §7.M6
 //// builtins-object-function-error).
 ////
-//// Port of `arc/vm/builtins/error.gleam` init + dispatch, re-expressed over
-//// the threaded `Agent` model. arc's `#(State, Result(v,e))` becomes
-//// `#(JsVal, Agent)` with `Error(e)` → `t_throw(st, e)` (D7).
+//// Init + dispatch over the threaded `Agent` model; JS errors raise via
+//// `t_throw(st, e)` (D7).
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
 

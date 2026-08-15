@@ -1,8 +1,8 @@
 //// `rt_call` — the JS `[[Call]]`/`[[Construct]]` MOP (SPEC §7.M-CALL).
 ////
-//// Port of `arc/vm/exec/call.gleam:1258-1716` (`do_construct`/`call_value`) +
-//// the constructor return-override rules from `arc/vm/exec/interpreter.gleam:
-//// 3034-3071`, re-expressed over the threaded `Agent` model.
+//// `[[Call]]`/`[[Construct]]` dispatch over every callable `ObjKind`, plus
+//// the derived/base constructor return-override rules, over the threaded
+//// `Agent` model.
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
 ////

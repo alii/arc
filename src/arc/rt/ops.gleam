@@ -1,8 +1,8 @@
 //// `rt_ops` — ES2024 §13 operator surface (SPEC §7.M5, M5.md).
 ////
-//// Port of `arc/src/arc/vm/ops/{operators,numeric,instanceof}.gleam`
-//// re-expressed over the threaded `Agent` and `classify`-based value
-//// model. Every threaded op returns `#(V, Agent)` — value FIRST (R1).
+//// Arithmetic, comparison, equality, `typeof`/`instanceof`/`in` over the
+//// threaded `Agent` and `classify`-based value model. Every threaded op
+//// returns `#(V, Agent)` — value FIRST (R1).
 //// D7: throwing ops RAISE via `rt_val.t_throw_*` (never `Result`).
 //// D17: reaches `t_call_checked` ONLY via `js_ops(st).call` (no direct
 //// `rt_call` import — cycle). R8: `strict_eq`/`strict_ne` are JPure

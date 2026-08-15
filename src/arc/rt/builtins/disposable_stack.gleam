@@ -1,7 +1,6 @@
 //// DisposableStack / AsyncDisposableStack Objects — Explicit Resource
 //// Management proposal §12.3 / §12.4
-//// (https://tc39.es/proposal-explicit-resource-management/). Port of
-//// `arc/vm/builtins/disposable_stack.gleam`.
+//// (https://tc39.es/proposal-explicit-resource-management/).
 ////
 //// Both stacks hold a disposable state (pending | disposed) and, while
 //// pending, a handle to their [[DisposeCapability]]: an `SDisposeCapability`

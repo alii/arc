@@ -1,6 +1,5 @@
 //// `rt_builtins/string` — String constructor + %String.prototype%
-//// (ES2024 §22.1). Port of `arc/vm/builtins/string.gleam` over the threaded
-//// `Agent` model (D7/R1).
+//// (ES2024 §22.1) over the threaded `Agent` model (D7/R1).
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers

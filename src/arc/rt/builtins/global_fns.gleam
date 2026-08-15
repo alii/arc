@@ -2,10 +2,7 @@
 //// isNaN / isFinite / encodeURI / encodeURIComponent / decodeURI /
 //// decodeURIComponent / escape / unescape.
 ////
-//// Faithful port of arc/vm/builtins/number.gleam (parseInt/parseFloat/isNaN/
-//// isFinite) + arc/vm/builtins/uri.gleam (URI codecs + escape/unescape) over
-//// 2core's threaded Agent. Return-tuple order is `#(JsVal,
-//// Agent)` (R1).
+//// Return-tuple order is `#(JsVal, Agent)` (R1).
 ////
 //// `init` returns the function handles that are ALSO installed as
 //// `Number.parseInt`/`Number.parseFloat` (ES2024 §21.1.2.13/§21.1.2.12

@@ -1,5 +1,5 @@
 /// §7.1.5 ToIntegerOrInfinity conformance tests for the single canonical
-/// implementation in `arc/vm/ops/coerce`. These pin the two properties the
+/// implementation in `arc/rt/val`. These pin the two properties the
 /// per-module copies used to violate:
 ///   - ±∞/NaN must reach a builtin's range guard (saturated, not replaced by
 ///     a caller-chosen default), so the spec-mandated RangeErrors fire.

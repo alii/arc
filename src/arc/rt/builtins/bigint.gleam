@@ -1,6 +1,6 @@
 //// `rt_builtins/bigint` — BigInt global function + %BigInt.prototype%
-//// (ES2024 §21.2). Port of `arc/vm/builtins/bigint.gleam` over the threaded
-//// `Agent` model (D7/R1), plus `BigInt.asIntN`/`asUintN` (§21.2.2).
+//// (ES2024 §21.2) over the threaded `Agent` model (D7/R1), including
+//// `BigInt.asIntN`/`asUintN` (§21.2.2).
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers

@@ -1,4 +1,4 @@
-//// ES2024 §24.2 Set Objects — port of `arc/vm/builtins/set.gleam`.
+//// ES2024 §24.2 Set Objects.
 ////
 //// Stores values in an `OrderedEntries(MapKey, JsVal)` mapping normalized
 //// MapKey → original JsVal, which also models the spec's append-only

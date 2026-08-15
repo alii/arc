@@ -1,9 +1,8 @@
-//// `rt_builtins/object` — Object constructor + prototype (§20.1).
-//// Port of `arc/vm/builtins/object.gleam` init + dispatch (SPEC §7.M6
-//// builtins-object-function-error).
+//// `rt_builtins/object` — Object constructor + prototype (§20.1), init +
+//// dispatch (SPEC §7.M6 builtins-object-function-error).
 ////
-//// arc's `#(State, Result(v,e))` becomes `#(JsVal, Agent)` with
-//// `Error(e)` → `t_throw(st, e)` (D7). Return-tuple order `#(V, St')` (R1).
+//// JS errors raise via `t_throw(st, e)` (D7). Return-tuple order
+//// `#(V, St')` (R1).
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}

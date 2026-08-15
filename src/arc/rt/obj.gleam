@@ -1,9 +1,7 @@
 //// `rt_obj` — object allocation + property MOP (SPEC §7.M4).
 ////
-//// Port of `arc/vm/ops/object.gleam` OrdinaryGet/Set/Has/Delete +
-//// `arc/vm/ops/mop.gleam` [[DefineOwnProperty]]/[[OwnPropertyKeys]]/
-//// [[SetPrototypeOf]], re-expressed over the threaded `Agent` and
-//// `rt_store` cell ops.
+//// OrdinaryGet/Set/Has/Delete + [[DefineOwnProperty]]/[[OwnPropertyKeys]]/
+//// [[SetPrototypeOf]] over the threaded `Agent` and `rt_store` cell ops.
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
 ////

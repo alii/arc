@@ -16,7 +16,7 @@
 //// or runs its timeout job, settling the promise.
 ////
 //// AgentCanSuspend() (§25.4.3.14 step 10) is the agent's [[CanBlock]],
-//// `host_hooks.can_block(st.hooks)`: an embedder that cannot afford to have
+//// `st.hooks.can_block`: an embedder that cannot afford to have
 //// this process parked leaves it false and a sync wait throws instead.
 ////
 //// Validation order follows the spec (cross-checked against QuickJS
@@ -26,7 +26,6 @@
 ////   bounds (RangeError) → value coercion (user code!) → revalidate
 ////   (detached → TypeError, shrunk → RangeError).
 
-import arc/host_hooks
 import arc/rt/async as rt_async
 import arc/rt/buffer
 import arc/rt/builtins/common
@@ -620,7 +619,7 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
   // coercions (steps 6-9) per the current spec text; the position is
   // observable via valueOf side effects. waitAsync never blocks, so async
   // mode is exempt.
-  use Nil <- helpers.guard(!sync || host_hooks.can_block(st.hooks), fn() {
+  use Nil <- helpers.guard(!sync || st.hooks.can_block, fn() {
     rt_val.t_throw_type_error(st, "Atomics.wait cannot be called in this agent")
   })
   // SharedArrayBuffers are never detached and never shrink, so this cannot

@@ -1,5 +1,4 @@
-//// ES2021 §26.2 FinalizationRegistry Objects — port of
-//// `arc/vm/builtins/finalization_registry.gleam`.
+//// ES2021 §26.2 FinalizationRegistry Objects.
 ////
 //// A FinalizationRegistry lets code request a cleanup callback when a
 //// registered target is garbage collected. Each cell's [[WeakRefTarget]] and

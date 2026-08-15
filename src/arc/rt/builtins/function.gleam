@@ -1,10 +1,9 @@
 //// `rt_builtins/function` — Function.prototype + Function constructor +
 //// %ThrowTypeError% (SPEC §7.M6 builtins-object-function-error).
 ////
-//// Port of `arc/vm/builtins/function.gleam` init + the Function-native
-//// dispatch arms of `arc/vm/exec/call.gleam:566-706,1989-2101,2174-2215`,
-//// re-expressed over the threaded `Agent` model with D7 raise
-//// semantics (`t_throw` instead of `#(State, Result)`).
+//// Init + the Function-native dispatch arms (`call`/`apply`/`bind`/
+//// `toString`/`Symbol.hasInstance`, the `Function` constructor) over the
+//// threaded `Agent` model with D7 raise semantics (`t_throw`).
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
 

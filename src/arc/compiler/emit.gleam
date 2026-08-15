@@ -3427,8 +3427,8 @@ fn compile_function_body(
   // non-simple lists route EVERY fixed param through a `<paramN>` shim
   // binding (scope.param_shim) so the real names can be TDZ-declared and
   // initialized in order. The shim is NOT pure scratch: the runtime locals
-  // layout is [captures, lexical_seeds, args, undef] (frame.gleam:57 /
-  // arc_vm_ffi.erl setup_locals_tuple), so positional arg N lands at slot
+  // layout is [captures, lexical_seeds, args, undef]
+  // (arc_interp_ffi:setup_locals_tuple), so positional arg N lands at slot
   // len(captures)+len(lexical_seeds)+N — never raw N. The analyzer
   // (scope.gleam add_binding) allocates the shim's slot at that offset, so
   // we resolve it by name via scope.lookup rather than hardcoding an index.

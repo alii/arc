@@ -153,8 +153,8 @@ pub fn t_pin_root(st: Agent, h: Handle) -> Agent {
 
 // ── threaded counters (D9, D14) ─────────────────────────────────────────────
 
-/// Next `Property.seq` stamp — the threaded replacement for arc's global
-/// `arc_vm_ffi:next_prop_seq` atomic (D14). Returns `#(seq, st')` (R1).
+/// Next `Property.seq` stamp, threaded through the store (D14). Returns
+/// `#(seq, st')` (R1).
 pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.prop_seq, with_js(st, JsStore(..js, prop_seq: js.prop_seq + 1)))

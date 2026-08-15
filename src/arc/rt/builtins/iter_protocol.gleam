@@ -3,9 +3,8 @@
 //// Every "consume an iterable" site in the runtime funnels through the real
 //// iterator protocol here instead of reaching into a concrete collection's
 //// heap storage. Sits BELOW `rt_builtins/{iterator,object,map,set}` so
-//// none of them import each other for §7.4 ops. Faithful port of arc
-//// `vm/builtins/iter_protocol.gleam` re-expressed under D7 (throwing ops
-//// diverge via `t_throw`; catching sites use `t_apply_protected`).
+//// none of them import each other for §7.4 ops. Throwing ops diverge via
+//// `t_throw` (D7); catching sites use `t_apply_protected`.
 
 import arc/internal/tree_array
 import arc/rt/call.{

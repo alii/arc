@@ -1,7 +1,6 @@
 //// proposal-shadowrealm: `ShadowRealm ( )`, `ShadowRealm.prototype.
 //// evaluate` / `importValue`, and the wrapped function exotic objects that
-//// carry callables across the realm boundary. Port of the ShadowRealm half
-//// of arc/vm/realm.gleam onto `Agent.realms`.
+//// carry callables across the realm boundary, over `Agent.realms`.
 ////
 //// A ShadowRealm instance owns a fresh realm (`ShadowRealmObj(realm:)` is
 //// the [[ShadowRealm]] slot, as a realm id). `evaluate` runs eval code in

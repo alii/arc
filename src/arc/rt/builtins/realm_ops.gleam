@@ -1,9 +1,8 @@
 //// `rt_builtins/realm_ops` — realm-aware allocators + the concrete `JsOps`
 //// bodies (SPEC §7.M6 common-and-scaffold(3)).
 ////
-//// Port of `arc/vm/builtins/common.gleam:1044-1200` (`make_error`/`to_object`
-//// / `alloc_array` / `create_iter_result`) re-expressed over the threaded
-//// `Agent` model. Realm access is via `st.realm` (R15).
+//// `make_error` / `to_object` / `alloc_array` / `create_iter_result` over the
+//// threaded `Agent` model. Realm access is via `st.realm` (R15).
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Undefined/null
 //// paths in `t_box_primitive` RAISE via `rt_val.t_throw_type_error` (D7).

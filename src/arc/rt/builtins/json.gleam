@@ -4,7 +4,6 @@
 //// unmodified primitive, and `JSON.rawJSON` / `JSON.isRawJSON` box verbatim
 //// JSON text for `JSON.stringify`.
 ////
-//// Port of arc/vm/builtins/json.gleam over the threaded Agent.
 //// Return-tuple order is `#(JsVal, Agent)` (R1).
 ////
 //// Realms: everything a JSON builtin allocates — thrown errors, the parsed
