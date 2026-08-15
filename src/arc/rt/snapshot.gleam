@@ -50,6 +50,9 @@ pub type SnapshotError {
   SnapshotContainsCompiledCode(cell: Handle)
   /// A `HostJob` closure is still queued; drain microtasks first.
   SnapshotContainsHostJob
+  /// An `Atomics.waitAsync` waiter with no timeout is still parked; its
+  /// wake source (a later `Atomics.notify`) does not survive the image.
+  SnapshotContainsWaiter
 }
 
 /// Why `deserialize` rejected a binary.
@@ -111,7 +114,12 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     host_fns: _,
     realms:,
     import_hook: _,
+    waiters:,
   ) = st
+  use Nil <- result.try(case waiters {
+    [] -> Ok(Nil)
+    [_, ..] -> Error(SnapshotContainsWaiter)
+  })
   let JsStore(
     data:,
     free:,
@@ -171,6 +179,7 @@ pub fn deserialize(
     host_fns: dict.new(),
     realms:,
     import_hook: None,
+    waiters: [],
   )
   |> rt_builtins.seed_ops
 }

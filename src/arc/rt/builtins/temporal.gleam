@@ -14,19 +14,18 @@ import arc/rt/builtins/temporal_common.{
   Hour, Nanosecond, Second, Trunc, apply_new_target_proto, apply_since_mode,
   apply_since_ns, as_if_positive_mode, balance_time_ns, check_diff_setup,
   epoch_ns_to_iso_in, get_difference_settings, get_fractional_digits,
-  get_options_object, get_rounding_mode_option, get_unit_option,
-  instant_slot_of, make_date, make_date_time, make_duration, make_instant,
-  make_time, make_zoned, max_unit, parse_time_zone_id, require_temporal,
-  require_time_unit, round_options, round_to_increment,
-  seconds_string_precision, system_time_zone, terr, time_only_ns, time_unit_ns,
-  time_zone_id, to_temporal_duration, to_temporal_instant,
-  to_temporal_time_zone, tz_offset_ns_at, unit_rank,
+  get_options_object, get_rounding_mode_option, get_unit_option, instant_slot_of,
+  make_date, make_date_time, make_duration, make_instant, make_time, make_zoned,
+  max_unit, require_temporal, require_time_unit, round_options,
+  round_to_increment, seconds_string_precision, system_time_zone, terr,
+  time_only_ns, time_unit_ns, time_zone_id, to_temporal_duration,
+  to_temporal_instant, to_temporal_time_zone, tz_offset_ns_at, unit_rank,
 }
+import arc/rt/builtins/temporal_duration
 import arc/rt/builtins/temporal_iso.{
   type Precision, AutoPrec, epoch_ns_to_iso, format_iso_date, format_iso_time,
   ns_max_instant, ns_per_day, ns_per_ms,
 }
-import arc/rt/builtins/temporal_duration
 import arc/rt/builtins/temporal_plain_date
 import arc/rt/builtins/temporal_plain_date_time
 import arc/rt/builtins/temporal_plain_month_day
@@ -43,24 +42,23 @@ import arc/rt/types.{
   InstantFromEpochNanoseconds, InstantRound, InstantSince, InstantSubtract,
   InstantToJson, InstantToLocaleString, InstantToString,
   InstantToZonedDateTimeIso, InstantUntil, InstantValueOf, JFloat, JInt, JNan,
-  JNegInf, JPosInf, KStr, KUndef, Named, NowInstant, NowPlainDateISO,
+  JNegInf, JPosInf, KUndef, Named, NowInstant, NowPlainDateISO,
   NowPlainDateTimeISO, NowPlainTimeISO, NowTimeZoneId, NowZonedDateTimeISO,
   StringKey, TemporalDurationCtor, TemporalDurationGetter,
   TemporalDurationMethod, TemporalDurationStatic, TemporalInstantCtor,
-  TemporalInstantGetter,
-  TemporalInstantMethod, TemporalInstantStatic, TemporalN, TemporalNowFn,
-  TemporalPlainDateCtor, TemporalPlainDateGetter, TemporalPlainDateMethod,
-  TemporalPlainDateStatic, TemporalPlainDateTimeCtor,
+  TemporalInstantGetter, TemporalInstantMethod, TemporalInstantStatic, TemporalN,
+  TemporalNowFn, TemporalPlainDateCtor, TemporalPlainDateGetter,
+  TemporalPlainDateMethod, TemporalPlainDateStatic, TemporalPlainDateTimeCtor,
   TemporalPlainDateTimeGetter, TemporalPlainDateTimeMethod,
   TemporalPlainDateTimeStatic, TemporalPlainMonthDayCtor,
   TemporalPlainMonthDayGetter, TemporalPlainMonthDayMethod,
   TemporalPlainMonthDayStatic, TemporalPlainTimeCtor, TemporalPlainTimeGetter,
   TemporalPlainTimeMethod, TemporalPlainTimeStatic, TemporalPlainYearMonthCtor,
   TemporalPlainYearMonthGetter, TemporalPlainYearMonthMethod,
-  TemporalPlainYearMonthStatic,
-  TemporalProtos, TemporalZonedDateTimeCtor, TemporalZonedDateTimeGetter,
-  TemporalZonedDateTimeMethod, TemporalZonedDateTimeStatic, classify,
-  mk_bigint, mk_bool, mk_number, mk_object, mk_string, mk_undefined,
+  TemporalPlainYearMonthStatic, TemporalProtos, TemporalZonedDateTimeCtor,
+  TemporalZonedDateTimeGetter, TemporalZonedDateTimeMethod,
+  TemporalZonedDateTimeStatic, classify, mk_bigint, mk_bool, mk_number,
+  mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -375,7 +373,9 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     // All Temporal constructors throw TypeError when called without `new`.
-    TemporalInstantCtor(..) | TemporalPlainTimeCtor(..) | TemporalPlainDateCtor(..) ->
+    TemporalInstantCtor(..)
+    | TemporalPlainTimeCtor(..)
+    | TemporalPlainDateCtor(..) ->
       rt_val.t_throw_type_error(st, "Temporal constructor requires new")
     TemporalPlainDateStatic(name:, protos:) ->
       temporal_plain_date.static(st, name, protos, args)
@@ -617,8 +617,8 @@ fn instant_method(
       }
       case classify(tz_opt) {
         KUndef -> #(mk_string(format_instant(rounded, prec)), st)
-        KStr(tz_str) -> {
-          let tz = terr(st, parse_time_zone_id(tz_str))
+        _ -> {
+          let #(tz, st) = to_temporal_time_zone(st, tz_opt)
           let off = terr(st, tz_offset_ns_at(tz, rounded))
           let #(d, t) = epoch_ns_to_iso(rounded, off)
           let s =
@@ -628,7 +628,6 @@ fn instant_method(
             <> temporal_common.format_offset_rounded(off)
           #(mk_string(s), st)
         }
-        _ -> rt_val.t_throw_type_error(st, "timeZone must be a string")
       }
     }
     InstantValueOf ->
@@ -690,15 +689,8 @@ fn instant_method(
       instant_until_since(st, protos, ns, other, args, m == InstantSince)
     }
     InstantToZonedDateTimeIso -> {
-      let arg = helpers.arg_at(args, 0)
-      case classify(arg) {
-        KStr(tz_str) -> {
-          let tz = terr(st, parse_time_zone_id(tz_str))
-          make_zoned(st, protos, ns, tz)
-        }
-        KUndef -> rt_val.t_throw_type_error(st, "time zone is required")
-        _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
-      }
+      let #(tz, st) = to_temporal_time_zone(st, helpers.arg_at(args, 0))
+      make_zoned(st, protos, ns, tz)
     }
   }
 }
@@ -722,7 +714,8 @@ fn instant_until_since(
   let smallest = option.unwrap(smallest, Nanosecond)
   let largest = option.unwrap(largest, max_unit(smallest, Second))
   case
-    unit_rank(smallest) > unit_rank(Hour) || unit_rank(largest) > unit_rank(Hour)
+    unit_rank(smallest) > unit_rank(Hour)
+    || unit_rank(largest) > unit_rank(Hour)
   {
     True ->
       rt_val.t_throw_range_error(st, "units must be time units for Instant")
