@@ -133,11 +133,18 @@ follow_links(Id, Links, N) ->
 %%
 %% TZ overrides the host default (as it does for libc, and as node does);
 %% otherwise the /etc/localtime chain.
+%%
+%% A host without the file primitives at all (the AtomVM/WASM playground has
+%% no prim_file) has no zoneinfo to find: that is UTC, not a crash at hook
+%% construction.
 -spec host_zone() -> local_zone().
 host_zone() ->
-    case os:getenv("TZ") of
-        false -> detect_localtime_zone();
-        Raw -> zone_from_tz_env(Raw)
+    try
+        case os:getenv("TZ") of
+            false -> detect_localtime_zone();
+            Raw -> zone_from_tz_env(Raw)
+        end
+    catch error:undef -> none
     end.
 
 %% A named IANA zone (case-insensitive), loaded. {error, nil} for an unknown
