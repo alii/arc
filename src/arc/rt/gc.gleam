@@ -26,17 +26,17 @@ import arc/rt/types.{
   type WeakKey, AccessorProperty, Agent, ArgumentsObj, ArrayBufferObj,
   ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGenRequest,
   AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty, DataViewObj, DateObj,
-  Dense, DisposableStackObj, ErrorObj, ForInIterator, GeneratorObj, Handler,
-  HostJob, IdentityPassThrough, IntlObj, IteratorHelperObj, JsCell, JsStore,
-  KBound, KBytecode, KCompiled, KHost, KNative, MapIterator, MapObj,
-  ModuleNamespace, NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj,
-  PromisePending, PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj,
-  ReactionJob, RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame,
-  SAsyncContext, SAsyncGen, SBox, SGenerator, SObject, SPromiseData,
-  SShapedObject, SetIterator, SetObj, Sparse, StringIterator, StringObj,
-  SymbolObj, TemporalObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj,
-  WeakObjKey, WeakSetObj, WeakSymKey, WrapForValidIteratorObj, jq_to_list,
-  native_token_refs,
+  Dense, DisposableStackObj, ErrorObj, FinRegCell, FinalizationRegistryObj,
+  ForInIterator, GeneratorObj, Handler, HostJob, IdentityPassThrough, IntlObj,
+  IteratorHelperObj, JsCell, JsStore, KBound, KBytecode, KCompiled, KHandle,
+  KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements, NumberObj,
+  Ordinary, PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction,
+  PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
+  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
+  SBox, SGenerator, SObject, SPromiseData, SShapedObject, SetIterator, SetObj,
+  Sparse, StringIterator, StringObj, SymbolObj, TemporalObj, ThrowerPassThrough,
+  TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj, WeakSymKey,
+  WrapForValidIteratorObj, classify, jq_to_list, native_token_refs,
 } as rt_types
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array as rt_tree_array
@@ -293,14 +293,7 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       let acc = push_term_refs(to_dynamic(code), acc)
       push_term_refs(to_dynamic(simple), acc)
     }
-    KBytecode(
-      template:,
-      env:,
-      home_object:,
-      flags: _,
-      fields_init:,
-      realm: _,
-    ) -> {
+    KBytecode(template:, env:, home_object:, flags: _, fields_init:, realm: _) -> {
       let acc = push_opt_handle(home_object, acc)
       let acc = push_opt_handle(fields_init, acc)
       let acc = push_template_refs(template, acc)
@@ -370,6 +363,13 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     // argument lists — all `JsVal`s; walk the whole state term.
     DisposableStackObj(async: _, state:) ->
       push_term_refs(to_dynamic(state), acc)
+    // [[CleanupCallback]] and every cell's [[HeldValue]] are strong; the
+    // [[WeakRefTarget]] and [[UnregisterToken]] are weak (§26.2.1.1) and NOT
+    // traced — a cell whose target dies is dropped in `prune_weak`.
+    FinalizationRegistryObj(callback:, cells:) ->
+      list.fold(cells, push_val_refs(callback, acc), fn(a, cell) {
+        push_val_refs(cell.held, a)
+      })
     // A realm id: the realm's intrinsics are pinned roots already.
     rt_types.ShadowRealmObj(realm: _) -> acc
   }
@@ -585,12 +585,28 @@ fn sweep(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
 /// entries whose key-id ∉ `live`. Weak keys are NOT traced during mark, so a
 /// key held ONLY by a weak container is swept, and its entry (value
 /// included) disappears here in the same collection. Symbol keys are not
-/// heap cells and are never pruned.
+/// heap cells and are never pruned. A `FinalizationRegistryObj` cell whose
+/// [[WeakRefTarget]] died is dropped (§9.10.3: the target is set to empty and
+/// the cleanup job — which this runtime never enqueues — would remove it); a
+/// surviving cell whose [[UnregisterToken]] died has the token emptied so a
+/// recycled cell id can never match it.
 fn prune_weak(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
   let keep = fn(k: WeakKey) {
     case k {
       WeakObjKey(id:) -> set.contains(live, id)
       WeakSymKey(_) -> True
+    }
+  }
+  // A weakly-held value after the sweep: itself when still usable (a live
+  // cell, or a symbol — not a heap cell), None when its cell was swept.
+  let weak_live = fn(v: JsVal) -> Option(JsVal) {
+    case classify(v) {
+      KHandle(JsCell(id)) ->
+        case set.contains(live, id) {
+          True -> Some(v)
+          False -> None
+        }
+      _ -> Some(v)
     }
   }
   dict.map_values(data, fn(_, slot) {
@@ -602,6 +618,14 @@ fn prune_weak(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
         )
       SObject(kind: WeakSetObj(entries:), ..) ->
         SObject(..slot, kind: WeakSetObj(entries: set.filter(entries, keep)))
+      SObject(kind: FinalizationRegistryObj(callback:, cells:), ..) -> {
+        let cells =
+          list.filter(cells, fn(c) { option.is_some(weak_live(c.target)) })
+          |> list.map(fn(c) {
+            FinRegCell(..c, token: option.then(c.token, weak_live))
+          })
+        SObject(..slot, kind: FinalizationRegistryObj(callback:, cells:))
+      }
       _ -> slot
     }
   })

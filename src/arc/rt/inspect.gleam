@@ -16,14 +16,15 @@ import arc/rt/types.{
   type PropertyKey, type TemporalData, ArgumentsObj, ArrayBufferObj,
   ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj,
   BooleanObj, DataProperty, DataViewObj, DateObj, DisposableStackObj, ErrorObj,
-  ForInIterator, GeneratorObj, Index, IntlObj, IteratorHelperObj, KBig, KBool,
-  KBound, KBytecode, KCompiled, KHandle, KHost, KNative, KNull, KNum, KStr, KSym,
-  KTdz, KUndef, MapIterator, MapObj, ModuleNamespace, Named, NumberObj, Ordinary,
-  Private, PromiseObj, ProxyObj, RawJsonObj, RegExpObj, SObject, SetIterator,
-  SetObj, Shared, StringIterator, StringObj, SymbolObj, TemporalDate,
-  TemporalDateTime, TemporalDuration, TemporalInstant, TemporalMonthDay,
-  TemporalObj, TemporalTime, TemporalYearMonth, TemporalZonedDateTime,
-  TypedArrayObj, WeakMapObj, WeakSetObj, WrapForValidIteratorObj, classify,
+  FinalizationRegistryObj, ForInIterator, GeneratorObj, Index, IntlObj,
+  IteratorHelperObj, KBig, KBool, KBound, KBytecode, KCompiled, KHandle, KHost,
+  KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, MapIterator, MapObj,
+  ModuleNamespace, Named, NumberObj, Ordinary, Private, PromiseObj, ProxyObj,
+  RawJsonObj, RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator,
+  StringObj, SymbolObj, TemporalDate, TemporalDateTime, TemporalDuration,
+  TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
+  TemporalYearMonth, TemporalZonedDateTime, TypedArrayObj, WeakMapObj,
+  WeakSetObj, WrapForValidIteratorObj, classify,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/ordered_entries
@@ -186,6 +187,7 @@ fn inspect_object(
         TemporalObj(data:) -> temporal_label(data)
         DisposableStackObj(async: False, ..) -> "DisposableStack {}"
         DisposableStackObj(async: True, ..) -> "AsyncDisposableStack {}"
+        FinalizationRegistryObj(..) -> "FinalizationRegistry {}"
         rt_types.ShadowRealmObj(..) -> "ShadowRealm {}"
         // A tagged ordinary object renders via its Symbol.toStringTag
         // (`Object [Tag] { ... }`). Host objects have no own properties and

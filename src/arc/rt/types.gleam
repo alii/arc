@@ -923,7 +923,25 @@ pub type NativeToken {
   IntlN(IntlNative)
   TemporalN(TemporalNative)
   DisposableStackN(DisposableStackNative)
+  FinalizationRegistryN(FinalizationRegistryNative)
   ShadowRealmN(ShadowRealmNative)
+}
+
+/// §26.2 FinalizationRegistry natives. The constructor closes over the
+/// intrinsic %FinalizationRegistry.prototype% fallback.
+pub type FinalizationRegistryNative {
+  FinalizationRegistryConstructor(proto: Handle)
+  FinalizationRegistryPrototypeRegister
+  FinalizationRegistryPrototypeUnregister
+}
+
+/// One [[Cells]] record of a FinalizationRegistry (§26.2.1.1):
+/// [[WeakRefTarget]], [[HeldValue]], [[UnregisterToken]] (`None` = empty).
+/// `target` and `token` passed CanBeHeldWeakly and are held WEAKLY (GC does
+/// not trace them; a cell whose target died is pruned post-sweep); `held` is
+/// held strongly.
+pub type FinRegCell {
+  FinRegCell(target: JsVal, held: JsVal, token: Option(JsVal))
 }
 
 /// DisposableStack / AsyncDisposableStack natives (Explicit Resource
@@ -2544,6 +2562,9 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     IntlN(n) -> intl_native_refs(n)
     TemporalN(n) -> temporal_native_refs(n)
     DisposableStackN(n) -> disposable_stack_native_refs(n)
+    FinalizationRegistryN(FinalizationRegistryConstructor(proto:)) -> [proto]
+    FinalizationRegistryN(FinalizationRegistryPrototypeRegister)
+    | FinalizationRegistryN(FinalizationRegistryPrototypeUnregister) -> []
     ShadowRealmN(n) -> shadow_realm_native_refs(n)
     DateN(n) -> date_native_refs(n)
     RegExpN(n) -> regexp_native_refs(n)
@@ -3084,6 +3105,9 @@ pub type ObjKind {
   /// — Explicit Resource Management §12.3/§12.4. `async` is the brand;
   /// `state` is [[DisposableState]] plus the [[DisposeCapability]] resources.
   DisposableStackObj(async: Bool, state: DisposableState)
+  /// §26.2 FinalizationRegistry — [[CleanupCallback]] (held strongly) and
+  /// [[Cells]] (newest first; each cell's target/token weak, held strong).
+  FinalizationRegistryObj(callback: JsVal, cells: List(FinRegCell))
   /// A ShadowRealm instance (proposal-shadowrealm). `realm` is the
   /// [[ShadowRealm]] slot: the id of the realm the constructor made for it.
   ShadowRealmObj(realm: Int)

@@ -25,6 +25,7 @@ import arc/rt/builtins/date as b_date
 import arc/rt/builtins/disposable_stack as b_disposable_stack
 import arc/rt/builtins/dom_exception as b_dom_exception
 import arc/rt/builtins/error as b_error
+import arc/rt/builtins/finalization_registry as b_finalization_registry
 import arc/rt/builtins/function as b_function
 import arc/rt/builtins/generator as b_generator
 import arc/rt/builtins/global_fns as b_global_fns
@@ -56,14 +57,15 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
   type Realm, Agent, ArrayBufferN, ArrayN, AsyncGenResume, AsyncResume, AtomicsN,
   BigIntN, BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty,
-  DataViewN, DateN, DisposableStackN, DomExceptionN, ErrorN, FunctionN,
-  GeneratorN, GlobalN, HostFn, HostFnEntry, IntlN, IteratorN, JInt, JNan,
-  JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, Named, NativeUnseeded,
-  NoElements, NumberConstructor, NumberN, NumberObj, ObjectN, Ordinary, PromiseN,
-  PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN,
-  ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN, StringObj,
-  SymbolConstructor, SymbolN, TemporalN, Test262N, ThrowTypeErrorPoison,
-  TypedArrayN, WeakN, classify, mk_number, mk_object, mk_undefined,
+  DataViewN, DateN, DisposableStackN, DomExceptionN, ErrorN,
+  FinalizationRegistryN, FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry,
+  IntlN, IteratorN, JInt, JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN,
+  MathN, Named, NativeUnseeded, NoElements, NumberConstructor, NumberN,
+  NumberObj, ObjectN, Ordinary, PromiseN, PromiseRejectFn, PromiseResolveFn,
+  ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SObject, SetN, StringConstructor,
+  StringKey, StringN, StringObj, SymbolConstructor, SymbolN, TemporalN, Test262N,
+  ThrowTypeErrorPoison, TypedArrayN, WeakN, classify, mk_number, mk_object,
+  mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -163,6 +165,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   let #(map, st) = b_map.init(st, object_proto, fn_proto)
   let #(set, st) = b_set.init(st, object_proto, fn_proto)
   let #(#(weak_map, weak_set), st) = b_weak.init(st, object_proto, fn_proto)
+  let #(finalization_registry, st) =
+    b_finalization_registry.init(st, object_proto, fn_proto)
   // DisposableStack / AsyncDisposableStack constructors + prototypes.
   let #(disposable_stack, st) =
     b_disposable_stack.init(st, object_proto, fn_proto)
@@ -226,6 +230,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
         weak_map:,
         weak_set:,
         disposable_stack:,
+        finalization_registry:,
         async_disposable_stack:,
         shadow_realm:,
         date:,
@@ -389,6 +394,7 @@ type GlobalRefs {
     set: BuiltinPair,
     weak_map: BuiltinPair,
     weak_set: BuiltinPair,
+    finalization_registry: BuiltinPair,
     disposable_stack: BuiltinPair,
     async_disposable_stack: BuiltinPair,
     shadow_realm: BuiltinPair,
@@ -457,6 +463,7 @@ fn alloc_global_object(
     Builtin("Set", ctor(r.set)),
     Builtin("WeakMap", ctor(r.weak_map)),
     Builtin("WeakSet", ctor(r.weak_set)),
+    Builtin("FinalizationRegistry", ctor(r.finalization_registry)),
     Builtin("DisposableStack", ctor(r.disposable_stack)),
     Builtin("AsyncDisposableStack", ctor(r.async_disposable_stack)),
     Builtin("ShadowRealm", ctor(r.shadow_realm)),
@@ -602,6 +609,8 @@ pub fn dispatch_native(
     MapN(n) -> b_map.dispatch(st, n, this, args)
     SetN(n) -> b_set.dispatch(st, n, this, args)
     WeakN(n) -> b_weak.dispatch(st, n, this, args)
+    FinalizationRegistryN(n) ->
+      b_finalization_registry.dispatch(st, n, this, args)
     DisposableStackN(n) -> b_disposable_stack.dispatch(st, n, this, args)
     rt_types.ShadowRealmN(n) -> b_shadow_realm.dispatch(st, n, this, args)
     ArrayBufferN(n) -> b_array_buffer.dispatch(st, n, this, args)
@@ -645,6 +654,8 @@ pub fn dispatch_native_construct(
     MapN(n) -> b_map.dispatch_construct(st, n, args, new_target)
     SetN(n) -> b_set.dispatch_construct(st, n, args, new_target)
     WeakN(n) -> b_weak.dispatch_construct(st, n, args, new_target)
+    FinalizationRegistryN(n) ->
+      b_finalization_registry.dispatch_construct(st, n, args, new_target)
     DisposableStackN(n) ->
       b_disposable_stack.dispatch_construct(st, n, args, new_target)
     rt_types.ShadowRealmN(n) ->
