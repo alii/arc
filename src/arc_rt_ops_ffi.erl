@@ -1,0 +1,104 @@
+%%% Total (badarith-safe) float pow/fmod for rt_ops's numeric kernels.
+%%% Return values are the JsNum wire encoding (arc_rt_val_ffi
+%%% mk_number/1): {j_float,F} | j_nan | j_pos_inf | j_neg_inf.
+-module(arc_rt_ops_ffi).
+-export([pow_total/2, fmod_total/2, t_eq_fast/2, nul_eq/1,
+         t_bitand_fast/2, t_bitor_fast/2, t_bitxor_fast/2,
+         t_shl_fast/2, t_shr_fast/2, t_ushr_fast/2, t_bitnot_fast/1]).
+
+%% t_eq_fast(A, B) -> 0 | 1 | miss
+%% JPure §7.2.14 IsLooselyEqual fast path for the operand pairs richards
+%% actually hits (~64k/run): x==null, int×int, object identity. Any pair
+%% that reaches ToPrimitive (object×prim) or a cross-type coercion
+%% (bool×num, num×str, bigint, non-finite) → `miss`; the emitter falls
+%% back to full JMut t_eq/3. NOTE: null/undef vs anything (incl object)
+%% is 0 by step 14 — never coerces — so those arms return 0, not miss.
+t_eq_fast(undefined, B) -> nul_eq(B);
+t_eq_fast(null, B) -> nul_eq(B);
+t_eq_fast(A, undefined) -> nul_eq(A);
+t_eq_fast(A, null) -> nul_eq(A);
+t_eq_fast(A, B) when is_number(A), is_number(B) ->
+    case A == B of true -> 1; false -> 0 end;
+t_eq_fast(A, B) when is_binary(A), is_binary(B) ->
+    case A =:= B of true -> 1; false -> 0 end;
+t_eq_fast({js_cell, A}, {js_cell, B}) ->
+    case A =:= B of true -> 1; false -> 0 end;
+t_eq_fast(A, B) when is_boolean(A), is_boolean(B) ->
+    case A =:= B of true -> 1; false -> 0 end;
+t_eq_fast(_, _) -> miss.
+
+%% nul_eq(V) -> 0 | 1
+%% JPure `V == null` (§7.2.14 steps 2-3 + 14). Also called directly by
+%% the emitter when one `==` operand is a literal null/undefined — total,
+%% never `miss` (null/undef vs anything, incl objects, never coerces).
+nul_eq(undefined) -> 1;
+nul_eq(null) -> 1;
+nul_eq(_) -> 0.
+
+%% JPure §13.12 bitwise fast paths (richards: ~19k/run int32_binop, each
+%% dragging 2×ToPrimitive + 2×ToNumeric behind it). Gate on both bare
+%% integers (JInt wire form); do ToInt32 wrap + BIF op inline. Any
+%% float/nan/±inf/bigint/object → `miss`; the emitter falls back to full
+%% JMut t_bit*/t_sh*. band/bor/bxor on i32-range operands stay i32-range
+%% under Erlang's infinite two's-complement, so only the OPERANDS wrap.
+%% w32 is force-inlined — the self-call showed at 34ns/call × 2 = a third
+%% of the probe's wall time.
+-compile({inline, [w32/1]}).
+w32(I) ->
+    case I band 16#FFFFFFFF of
+        U when U > 16#7FFFFFFF -> U - 16#100000000;
+        U -> U
+    end.
+
+t_bitand_fast(A, B) when is_integer(A), is_integer(B) ->
+    w32(A) band w32(B);
+t_bitand_fast(_, _) -> miss.
+t_bitor_fast(A, B) when is_integer(A), is_integer(B) ->
+    w32(A) bor w32(B);
+t_bitor_fast(_, _) -> miss.
+t_bitxor_fast(A, B) when is_integer(A), is_integer(B) ->
+    w32(A) bxor w32(B);
+t_bitxor_fast(_, _) -> miss.
+%% §13.9.2: >> is arithmetic (sign-extend), shift count = ToUint32(b) & 31.
+t_shr_fast(A, B) when is_integer(A), is_integer(B) ->
+    w32(A) bsr (B band 31);
+t_shr_fast(_, _) -> miss.
+%% §13.9.1: << wraps the result (1<<31 = -2147483648).
+t_shl_fast(A, B) when is_integer(A), is_integer(B) ->
+    w32(w32(A) bsl (B band 31));
+t_shl_fast(_, _) -> miss.
+%% §13.9.3: >>> is ToUint32 (unsigned) — band strips the sign so bsr on the
+%% non-negative operand is logical; result stays in [0, 2^32).
+t_ushr_fast(A, B) when is_integer(A), is_integer(B) ->
+    (A band 16#FFFFFFFF) bsr (B band 31);
+t_ushr_fast(_, _) -> miss.
+%% §13.5.8: ~a = -(ToInt32(a)+1). Erlang `bnot` on an i32-range int stays
+%% i32-range (bnot X = -X-1).
+t_bitnot_fast(A) when is_integer(A) -> bnot w32(A);
+t_bitnot_fast(_) -> miss.
+
+%% math:pow/2 raises badarith on overflow or on negative-base with a
+%% non-integer exponent (no real result). Callers (num_exp) pre-filter ±0
+%% base and the neg-base+non-integer case, so overflow gets the sign the
+%% real result would have had — negative iff base < 0 and the integer
+%% exponent is odd (§6.1.6.1.3). Port of arc_math_ffi:pow/2.
+pow_total(Base, Exp) ->
+    try {j_float, math:pow(Base, Exp)}
+    catch error:badarith ->
+        case Base < 0.0 of
+            false -> j_pos_inf;
+            true ->
+                T = trunc(Exp),
+                if
+                    T /= Exp -> j_nan;
+                    T rem 2 =:= 0 -> j_pos_inf;
+                    true -> j_neg_inf
+                end
+        end
+    end.
+
+%% math:fmod with badarith (bignum-beyond-double, or platform quirk) → NaN.
+fmod_total(A, B) ->
+    try {j_float, math:fmod(A, B)}
+    catch error:badarith -> j_nan
+    end.

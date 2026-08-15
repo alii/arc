@@ -1,0 +1,898 @@
+//// `rt_call` — the JS `[[Call]]`/`[[Construct]]` MOP (SPEC §7.M-CALL).
+////
+//// Port of `arc/vm/exec/call.gleam:1258-1716` (`do_construct`/`call_value`) +
+//// the constructor return-override rules from `arc/vm/exec/interpreter.gleam:
+//// 3034-3071`, re-expressed over the threaded `Agent` model.
+////
+//// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
+////
+//// **D7:** ops that throw JS errors RAISE via `rt_store.t_throw` (never
+//// `Result`). `t_call` alone CATCHES the raise into a `Completion` so callers
+//// (promise-reaction jobs, iterator drivers) can inspect the outcome without
+//// installing their own try/catch; `t_call_checked` re-raises so a throw
+//// propagates unchanged, and is the fn `init_realm` seeds into `JsOps.call`.
+////
+//// **D5 / R7:** `Frame` at the wire level is the plain untagged Erlang
+//// 4-tuple `{This, ActiveFunc, HomeObject, NewTarget}` — the compiled
+//// function prologue reads it via `element(N, Frame)` with 0-based logical
+//// indices (R7). It is opaque to Gleam and built via the FFI `mk_frame/4`.
+
+import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
+import arc/rt/types.{
+  type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
+  type NativeToken, type ObjKind, type Property, ArrayObj, DataProperty, Dense,
+  JInt, JPosInf, KBound, KFunction, KHandle, KNative, KNull, KNum, KStr, KTdz,
+  KUndef, Named, NoElements, ProxyObj, ReferenceErr, SObject, StringKey, TypeErr,
+  classify, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
+} as rt_types
+import arc/rt/val as rt_val
+import arc/vm/internal/tree_array
+import gleam/bit_array
+import gleam/dict
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
+
+// ── Frame / Completion ──────────────────────────────────────────────────────
+
+/// Opaque call-frame. Wire = plain Erlang 4-tuple `{This, ActiveFunc,
+/// HomeObject, NewTarget}` (D5/R7) — NOT a tagged Gleam record, so the
+/// compiled prologue's `element(1..4, Frame)` reads fields directly.
+pub type Frame
+
+/// Build a Frame at wire level. All four positions are `JsVal` wire terms.
+@external(erlang, "arc_rt_call_ffi", "mk_frame")
+fn mk_frame(
+  this: JsVal,
+  active_func: JsVal,
+  home_object: JsVal,
+  new_target: JsVal,
+) -> Frame
+
+/// A JS call outcome — abrupt completions folded to just Throw (Return/Break/
+/// Continue never cross a call boundary). `t_call` returns this so a caller
+/// can observe a throw without a try/catch; `t_call_checked` re-raises Throw.
+pub type Completion {
+  NormalCompletion(JsVal)
+  ThrowCompletion(JsVal)
+}
+
+// ── FFI seams ───────────────────────────────────────────────────────────────
+
+/// Apply a `CompiledFn` under a try/catch, folding a `{wasm_exn,0,[St,V]}`
+/// raise into `ThrowCompletion` (SPEC §7.M-CALL FFI; R2 payload order).
+@external(erlang, "arc_rt_call_ffi", "t_call_protected")
+fn t_call_protected(
+  st: Agent,
+  code: CompiledFn,
+  frame: Frame,
+  args: List(JsVal),
+) -> #(Completion, Agent)
+
+/// Run a Gleam thunk under the same try/catch as `t_call_protected` — for
+/// native/bound/proxy dispatch, whose bodies may `t_throw` mid-evaluation.
+@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
+fn t_apply_protected(
+  st: Agent,
+  body: fn(Agent) -> #(JsVal, Agent),
+) -> #(Completion, Agent)
+
+/// M6 native-method dispatch (giant `case tag`). Forward-declared: gleam
+/// check does not resolve `@external` targets (SPEC assumption).
+@external(erlang, "arc_rt_builtins_ffi", "dispatch_native")
+fn dispatch_native(
+  st: Agent,
+  tag: NativeToken,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent)
+
+/// M6 native-constructor dispatch (`new Map()` etc). Forward-declared.
+@external(erlang, "arc_rt_builtins_ffi", "dispatch_native_construct")
+fn dispatch_native_construct(
+  st: Agent,
+  tag: NativeToken,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(Handle, Agent)
+
+// ── private access / throw helpers ──────────────────────────────────────────
+//
+// Realm intrinsics (u-gap-decisions / G18): `JsStore` has NO `realm` field; the
+// `Realm` handle-record lives on `Agent.realm`, seeded once by `init_realm`.
+
+/// The seeded `JsOps` upcall table (D17).
+fn js_ops(st: Agent) -> JsOps(Agent) {
+  st.store.ops
+}
+
+/// Allocate a native error of `kind(msg)` and RAISE it (D7). Never returns.
+fn throw_error(st: Agent, kind: rt_types.ErrorKind, msg: String) -> a {
+  let #(e, st) = js_ops(st).new_error(st, kind, msg)
+  rt_store.t_throw(st, e)
+}
+
+/// `SObject(kind:)` at `h`, or `None` for a non-`SObject` cell (SBox/SPromise/
+/// SGenerator/SAsyncGen — never callable/constructible).
+fn read_obj_kind(st: Agent, h: Handle) -> Option(ObjKind) {
+  case rt_store.t_cell_get(st, h) {
+    SObject(kind:, ..) -> Some(kind)
+    rt_types.SShapedObject(..) -> Some(rt_types.Ordinary)
+    _ -> None
+  }
+}
+
+// ── §7.2.3 IsCallable / §7.2.4 IsConstructor ────────────────────────────────
+
+/// §7.2.3 IsCallable — thin wrapper over `rt_val.t_is_callable` returning
+/// a bare Bool (R9: JRead).
+pub fn is_callable(st: Agent, v: JsVal) -> Bool {
+  let #(b, _) = rt_val.t_is_callable(st, v)
+  b
+}
+
+/// §7.2.4 IsConstructor. `KFunction` → `flags.is_constructor`; `KNative` →
+/// `constructible`; `KBound` → recurse on target (§10.4.1.2); `ProxyObj` →
+/// recurse on target (§10.5.13; a revoked proxy has no `[[Construct]]`).
+/// R9: JRead — pure heap read.
+pub fn is_constructor(st: Agent, v: JsVal) -> Bool {
+  case classify(v) {
+    KHandle(h) -> handle_is_constructor(st, h)
+    _ -> False
+  }
+}
+
+fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
+  case read_obj_kind(st, h) {
+    Some(KFunction(flags:, ..)) -> flags.is_constructor
+    Some(KNative(constructible:, ..)) -> constructible
+    Some(KBound(target:, ..)) -> handle_is_constructor(st, target)
+    // §10.5.15 ProxyCreate step 7: [[Construct]] is installed iff the target
+    // has it — and STAYS installed after revocation (arc `object.gleam:
+    // 3106-3107`); §10.5.13 step 2 makes the CALL throw, not IsConstructor.
+    Some(ProxyObj(target:, ..)) -> handle_is_constructor(st, target)
+    _ -> False
+  }
+}
+
+// ── `t_kfn_code` — CallClosure fast-path probe (JRead) ──────────────────────
+
+/// Fast-path probe for the M9 `CallClosure` lowering. Returns
+/// `{code, resolved_this}` iff `callee` is an ORDINARY user `KFunction` —
+/// not a class constructor, generator, async fn, or a method carrying a
+/// `[[HomeObject]]` (whose [[Call]] needs the full `t_call_checked` MOP so
+/// `super.x` resolves). Every other shape (native, bound, proxy, non-object,
+/// non-callable) → `undefined`, and the emitted `TermTest(IsTuple, ·)` guard
+/// falls back to `host("call")`. Folds §10.2.1.2 OrdinaryCallBindThis into
+/// the SAME heap read so the fast path pays one `t_cell_get`, not two.
+/// JRead — pure heap read, no St mutation. Implemented as an FFI so the
+/// per-call hot path is one dict lookup + native pattern matches, no
+/// cross-module `classify`/`t_realm`/`mk_object` chain.
+@external(erlang, "arc_rt_call_ffi", "t_kfn_code")
+pub fn t_kfn_code(st: Agent, callee: JsVal, this: JsVal) -> JsVal
+
+/// §10.2.1.2 OrdinaryCallBindThis for the fast path — mirrors the slow
+/// `call_kfunction` path's `resolve_this` so the fast-path Frame carries the
+/// same sloppy `undefined`/`null` → globalThis substitution. JRead.
+pub fn t_resolve_this(st: Agent, callee: JsVal, this: JsVal) -> JsVal {
+  case classify(callee) {
+    KHandle(h) ->
+      case read_obj_kind(st, h) {
+        Some(KFunction(flags:, ..)) -> resolve_this(st, flags, this)
+        _ -> this
+      }
+    _ -> this
+  }
+}
+
+// ── `t_call` — the ONE re-entry point (§10.2.1) ─────────────────────────────
+
+/// §10.2.1 `[[Call]]`. Applies `callee(this, ...args)`, catching a JS throw
+/// into `ThrowCompletion` — the ONE catching entry point every rt_js module
+/// that runs user code goes through. Bracketed with `t_enter_call` /
+/// `t_leave_call` so `call_depth > 0` gates the D11 GC safepoint.
+pub fn t_call(
+  st: Agent,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(Completion, Agent) {
+  let st = rt_store.t_enter_call(st)
+  let #(c, st) = do_call(st, callee, this, args)
+  #(c, rt_store.t_leave_call(st))
+}
+
+fn do_call(
+  st: Agent,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(Completion, Agent) {
+  case classify(callee) {
+    KHandle(h) ->
+      case read_obj_kind(st, h) {
+        Some(KFunction(code:, home_object:, flags:, ..)) ->
+          call_kfunction(st, h, code, home_object, flags, this, args)
+        Some(KNative(tag:, ..)) ->
+          t_apply_protected(st, fn(st) { dispatch_native(st, tag, this, args) })
+        // §10.4.1.1: [[BoundThis]] replaces `this`; bound args prepend.
+        Some(KBound(target:, bound_this:, bound_args:)) ->
+          do_call(
+            st,
+            mk_object(target),
+            bound_this,
+            list.append(bound_args, args),
+          )
+        // §10.5.12 Proxy [[Call]].
+        Some(ProxyObj(target:, handler:, revoked:)) ->
+          call_proxy(st, callee, target, handler, revoked, this, args)
+        _ -> not_a_function(st, callee)
+      }
+    _ -> not_a_function(st, callee)
+  }
+}
+
+fn call_kfunction(
+  st: Agent,
+  callee_h: Handle,
+  code: CompiledFn,
+  home_object: Option(Handle),
+  flags: FnFlags,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(Completion, Agent) {
+  // §10.2.1 step 2: class constructors have no [[Call]] behaviour.
+  case flags.is_class_constructor {
+    True ->
+      t_apply_protected(st, fn(st) {
+        throw_error(
+          st,
+          TypeErr,
+          "Class constructor cannot be invoked without 'new'",
+        )
+      })
+    False -> {
+      let home = case home_object {
+        Some(h) -> mk_object(h)
+        None -> mk_undefined()
+      }
+      let this_resolved = resolve_this(st, flags, this)
+      let frame =
+        mk_frame(this_resolved, mk_object(callee_h), home, mk_undefined())
+      t_call_protected(st, code, frame, args)
+    }
+  }
+}
+
+/// §10.2.1.2 OrdinaryCallBindThis. SPEC §7.M-CALL invariant: `this`
+/// resolution (sloppy `undefined`/`null` → globalThis) happens HERE, not in
+/// the compiled prologue. `FnFlags` carries no `strict` bit (rt_types is
+/// FROZEN — assumption 6), so the substitution is gated on `is_arrow` only:
+/// arrows never rebind `this` (they capture the enclosing frame instead), and
+/// every other `KFunction` gets sloppy-mode substitution. Strict-mode
+/// pass-through lands when/if `FnFlags.strict` is added; until then module
+/// code (always strict) never observes the difference because M14 emits
+/// method/module callers with an object receiver.
+fn resolve_this(st: Agent, flags: FnFlags, this: JsVal) -> JsVal {
+  case flags.is_arrow {
+    True -> this
+    False ->
+      case classify(this) {
+        KUndef | KNull -> mk_object(st.realm.global_object)
+        _ -> this
+      }
+  }
+}
+
+/// §10.5.12 Proxy `[[Call]]`.
+fn call_proxy(
+  st: Agent,
+  callee: JsVal,
+  target: Handle,
+  handler: Handle,
+  revoked: Bool,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(Completion, Agent) {
+  t_apply_protected(st, fn(st) {
+    case revoked {
+      True ->
+        throw_error(st, TypeErr, "Cannot perform 'apply' on a revoked proxy")
+      False ->
+        // §10.5.12 step 1: only a proxy whose target is callable HAS
+        // [[Call]] (installed at ProxyCreate time).
+        case is_callable(st, mk_object(target)) {
+          False -> not_a_function_raise(st, callee)
+          True -> {
+            // Step 5: GetMethod(handler, "apply").
+            let #(trap, st) =
+              rt_obj.t_get_prop(
+                st,
+                mk_object(handler),
+                StringKey(Named("apply")),
+              )
+            case is_callable(st, trap) {
+              // Step 7: no trap → Call(target, this, args).
+              False -> t_call_checked(st, mk_object(target), this, args)
+              // Steps 8-9: Call(trap, handler, «target, this, argArray»).
+              True -> {
+                let #(args_arr, st) = alloc_args_array(st, args)
+                t_call_checked(st, trap, mk_object(handler), [
+                  mk_object(target),
+                  this,
+                  mk_object(args_arr),
+                ])
+              }
+            }
+          }
+        }
+    }
+  })
+}
+
+fn not_a_function(st: Agent, callee: JsVal) -> #(Completion, Agent) {
+  t_apply_protected(st, fn(st) { not_a_function_raise(st, callee) })
+}
+
+fn not_a_function_raise(st: Agent, callee: JsVal) -> a {
+  let #(ty, _) = rt_val.t_type_of(st, callee)
+  throw_error(st, TypeErr, ty <> " is not a function")
+}
+
+/// `t_call`, then on `ThrowCompletion` re-raise via `t_throw` so the throw
+/// propagates unchanged. This is the fn seeded into `JsOps.call` (D17) — its
+/// `#(JsVal, st)` shape matches the field type.
+pub fn t_call_checked(
+  st: Agent,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  case t_call(st, callee, this, args) {
+    #(NormalCompletion(v), st) -> #(v, st)
+    #(ThrowCompletion(e), st) -> rt_store.t_throw(st, e)
+  }
+}
+
+/// §7.3.21 Invoke — `t_get_prop(recv, key)` then `t_call_checked` with
+/// `this = recv`.
+pub fn t_call_method(
+  st: Agent,
+  recv: JsVal,
+  key: rt_types.ObjectKey,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  let #(callee, st) = rt_obj.t_get_prop(st, recv, key)
+  t_call_checked(st, callee, recv, args)
+}
+
+// ── `t_construct` — §10.2.2 [[Construct]] + return-override ─────────────────
+
+/// §10.2.2 `[[Construct]]`. Gates on `IsConstructor` (§7.2.4) FIRST, then
+/// dispatches on the callee's `ObjKind`. Return type is `#(Handle, St')` —
+/// `[[Construct]]` always yields an object (§6.1.7.2), so a non-object
+/// completion is coerced per the return-override rules and any residual
+/// non-object is a TypeError.
+pub fn t_construct(
+  st: Agent,
+  callee: JsVal,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  case classify(callee) {
+    KHandle(callee_h) ->
+      case handle_is_constructor(st, callee_h) {
+        False -> not_a_constructor(st, callee)
+        True -> construct_by_kind(st, callee_h, args, new_target)
+      }
+    _ -> not_a_constructor(st, callee)
+  }
+}
+
+fn not_a_constructor(st: Agent, callee: JsVal) -> a {
+  let #(ty, _) = rt_val.t_type_of(st, callee)
+  throw_error(st, TypeErr, ty <> " is not a constructor")
+}
+
+/// Dispatch after the IsConstructor gate — every branch runs with
+/// IsConstructor(callee) already true.
+fn construct_by_kind(
+  st: Agent,
+  callee_h: Handle,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  case read_obj_kind(st, callee_h) {
+    Some(KFunction(code:, home_object:, flags:, fields_init:, ..)) ->
+      construct_kfunction(
+        st,
+        callee_h,
+        code,
+        home_object,
+        flags,
+        fields_init,
+        args,
+        new_target,
+      )
+    Some(KNative(tag:, ..)) ->
+      dispatch_native_construct(st, tag, args, new_target)
+    // §10.4.1.2 BoundFunction [[Construct]]: prepend bound args; if
+    // SameValue(F, newTarget) then newTarget ← target.
+    Some(KBound(target:, bound_args:, ..)) -> {
+      let nt = case classify(new_target) {
+        KHandle(nt_h) if nt_h == callee_h -> mk_object(target)
+        _ -> new_target
+      }
+      t_construct(st, mk_object(target), list.append(bound_args, args), nt)
+    }
+    // §10.5.13 Proxy [[Construct]].
+    Some(ProxyObj(target:, handler:, revoked:)) ->
+      construct_proxy(st, target, handler, revoked, args, new_target)
+    // Unreachable: IsConstructor admitted only the four kinds above.
+    _ ->
+      panic as "t_construct: IsConstructor passed but ObjKind not constructible"
+  }
+}
+
+/// §10.2.2 ordinary-function [[Construct]] + the return-override rules from
+/// arc `interpreter.gleam:3034-3071`.
+fn construct_kfunction(
+  st: Agent,
+  callee_h: Handle,
+  code: CompiledFn,
+  home_object: Option(Handle),
+  flags: FnFlags,
+  fields_init: Option(Handle),
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  let callee_v = mk_object(callee_h)
+  // arc `call.gleam:1286/1298/1336`: [[Construct]] threads home_object into
+  // the frame just like [[Call]] — `super.m()` in a ctor body reads it.
+  let home = case home_object {
+    Some(h) -> mk_object(h)
+    None -> mk_undefined()
+  }
+  case flags.is_derived_constructor {
+    // Derived: `this` starts in TDZ; `super()` (via SuperCall op) writes it.
+    True -> {
+      let frame = mk_frame(mk_tdz(), callee_v, home, new_target)
+      let #(c, st) = apply_ctor(st, code, frame, args)
+      derived_return_override(st, c)
+    }
+    // Base: §10.1.13 OrdinaryCreateFromConstructor, run field initializers,
+    // then apply body.
+    False -> {
+      let #(proto, st) = get_prototype_from_constructor(st, new_target)
+      let #(new_this, st) = rt_obj.t_new_object(st, Some(proto))
+      let st = run_fields_init(st, fields_init, new_this)
+      let frame = mk_frame(mk_object(new_this), callee_v, home, new_target)
+      let #(c, st) = apply_ctor(st, code, frame, args)
+      base_return_override(st, c, new_this)
+    }
+  }
+}
+
+/// Apply a constructor body under `t_call_protected`, bracketed with the D11
+/// call-depth guard, and re-raise a Throw. Returns the body's `[[Value]]` as
+/// a Completion so the caller applies return-override BEFORE re-raising —
+/// but a Throw here IS re-raised (constructors never observe their own body
+/// throw as a return-override input).
+fn apply_ctor(
+  st: Agent,
+  code: CompiledFn,
+  frame: Frame,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  let st = rt_store.t_enter_call(st)
+  let #(c, st) = t_call_protected(st, code, frame, args)
+  let st = rt_store.t_leave_call(st)
+  case c {
+    NormalCompletion(v) -> #(v, st)
+    ThrowCompletion(e) -> rt_store.t_throw(st, e)
+  }
+}
+
+/// Base-constructor return override (§10.2.2 step 13 + arc
+/// `interpreter.gleam:3037-3046`): an object result overrides `this`;
+/// anything else — including `undefined` — yields the freshly allocated
+/// `this`.
+fn base_return_override(
+  st: Agent,
+  result: JsVal,
+  new_this: Handle,
+) -> #(Handle, Agent) {
+  case classify(result) {
+    KHandle(h) -> #(h, st)
+    _ -> #(new_this, st)
+  }
+}
+
+/// Derived-constructor return override (§10.2.2 steps 11-13 + arc
+/// `interpreter.gleam:3048-3066`). M18 contract: emit lowers EVERY derived-
+/// ctor return — bare `return;`, fall-through, AND `return <expr>` — to
+/// `return is_undefined(v) ? this_local : v`, so the value here is always
+/// the body's `this` binding or a non-undefined explicit return. Object →
+/// return it; TDZ → ReferenceError (super never called); other primitive →
+/// TypeError.
+fn derived_return_override(st: Agent, result: JsVal) -> #(Handle, Agent) {
+  case classify(result) {
+    KHandle(h) -> #(h, st)
+    KTdz ->
+      throw_error(
+        st,
+        ReferenceErr,
+        "Must call super constructor in derived class before returning from derived constructor",
+      )
+    // Unreachable under the M18 contract above — KUndef arriving here means
+    // emit failed to substitute `this_local` for an undefined return.
+    KUndef ->
+      panic as "derived ctor returned KUndef — M18 return-lowering contract violated"
+    _ ->
+      throw_error(
+        st,
+        TypeErr,
+        "Derived constructors may only return object or undefined",
+      )
+  }
+}
+
+/// §10.1.13.2 GetPrototypeFromConstructor: `? Get(newTarget, "prototype")`;
+/// if not an object, fall back to `%Object.prototype%` (realm intrinsic via
+/// `st.realm`).
+fn get_prototype_from_constructor(
+  st: Agent,
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  let #(proto, st) =
+    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
+  case classify(proto) {
+    KHandle(h) -> #(h, st)
+    _ -> #(st.realm.object.prototype, st)
+  }
+}
+
+/// §7.3.33 InitializeInstanceElements — call the class's synthesized
+/// field-initializer function (if any) with `this = new_this`.
+fn run_fields_init(
+  st: Agent,
+  fields_init: Option(Handle),
+  new_this: Handle,
+) -> Agent {
+  case fields_init {
+    None -> st
+    Some(init_h) -> {
+      let #(_, st) =
+        t_call_checked(st, mk_object(init_h), mk_object(new_this), [])
+      st
+    }
+  }
+}
+
+/// §10.5.13 Proxy `[[Construct]]`.
+fn construct_proxy(
+  st: Agent,
+  target: Handle,
+  handler: Handle,
+  revoked: Bool,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  case revoked {
+    True ->
+      throw_error(st, TypeErr, "Cannot perform 'construct' on a revoked proxy")
+    False -> {
+      // Step 5: GetMethod(handler, "construct").
+      let #(trap, st) =
+        rt_obj.t_get_prop(st, mk_object(handler), StringKey(Named("construct")))
+      case is_callable(st, trap) {
+        // Step 7: no trap → Construct(target, args, newTarget).
+        False -> t_construct(st, mk_object(target), args, new_target)
+        True -> {
+          // Steps 8-9: Call(trap, handler, «target, argArray, newTarget»).
+          let #(args_arr, st) = alloc_args_array(st, args)
+          let #(res, st) =
+            t_call_checked(st, trap, mk_object(handler), [
+              mk_object(target),
+              mk_object(args_arr),
+              new_target,
+            ])
+          // Step 10: newObj must be an Object.
+          case classify(res) {
+            KHandle(h) -> #(h, st)
+            _ ->
+              throw_error(
+                st,
+                TypeErr,
+                "'construct' on proxy: trap returned non-object",
+              )
+          }
+        }
+      }
+    }
+  }
+}
+
+// ── local helpers ───────────────────────────────────────────────────────────
+
+/// Allocate a fresh dense `Array` holding `items` (proxy trap arg-arrays).
+/// Proto = `%Array.prototype%` via `st.realm`.
+fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
+  let len = list.length(items)
+  let elements = case items {
+    [] -> NoElements
+    _ -> Dense(tree_array.from_list(items, mk_undefined()))
+  }
+  rt_store.t_cell_new(
+    st,
+    SObject(
+      kind: ArrayObj(length: len),
+      proto: Some(st.realm.array.prototype),
+      props: dict.new(),
+      symbol_props: [],
+      elements:,
+      extensible: True,
+    ),
+  )
+}
+
+// ── function-object allocation (u-fn-alloc; arc common.gleam:380-560) ───────
+// `t_fn_new` / `t_native_new` / `t_bound_new` allocate an `SObject` cell whose
+// `ObjKind` carries the [[Call]] slot, with the standard §20.2.4 `name` /
+// `length` own properties. Do NOT root — lifetime is normal GC reachability
+// (M6 pins intrinsics via `t_pin_root` after `t_native_new`).
+//
+// Birth-time property `seq`: arc uses constants 0/1/2 in a reserved range
+// below its +16-offset counter (arc `common.gleam:528-536`). 2core's
+// `prop_seq` starts at 0 with NO offset (`rt_store.gleam:49`), so a
+// constant 0/1 would collide with the first user-added property's seq. We
+// thread `t_next_prop_seq` per birth prop instead — two extra increments per
+// allocation, but preserves the §10.1.11 "birth props before any later prop"
+// ordering invariant without editing the frozen store.
+//
+// **FnFlags.strict resolution (SPEC §2.4 gap):** `FnFlags` has NO `strict`
+// field (`rt_types.gleam:513-523`), so §10.2.1.2 OrdinaryCallBindThis
+// (owned by `call_kfunction` above) CANNOT branch on strictness. 2core emits
+// ALL user code as strict-mode (D10 corpus posture), so the sloppy
+// `undefined → globalThis / primitive → box` coercion never applies — `this`
+// passes through as-is. `call_kfunction` already applies it (no `bind_this`
+// transform).
+
+/// §20.2.4.1 `length` own-property — `{W:F, E:F, C:T}`. `value` is a `JsVal`
+/// (not `Int`) so `t_bound_new` can install `+∞` per §20.2.3.2 step 6.b.ii.
+fn fn_length_prop(st: Agent, value: JsVal) -> #(Property, Agent) {
+  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  #(
+    DataProperty(
+      value:,
+      writable: False,
+      enumerable: False,
+      configurable: True,
+      seq:,
+    ),
+    st,
+  )
+}
+
+/// §20.2.4.2 `name` own-property — `{W:F, E:F, C:T}`.
+fn fn_name_prop(st: Agent, name: String) -> #(Property, Agent) {
+  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  #(
+    DataProperty(
+      value: mk_string(name),
+      writable: False,
+      enumerable: False,
+      configurable: True,
+      seq:,
+    ),
+    st,
+  )
+}
+
+/// Shared allocator core: an `SObject` with the given callable `ObjKind`,
+/// `proto`, and `length`+`name` own props (§10.2.9 SetFunctionLength runs
+/// before §10.2.8 SetFunctionName in every OrdinaryFunctionCreate path, so
+/// `length` gets the earlier seq). Port of arc `alloc_fn_slot`
+/// (`common.gleam:479-495`). Does NOT root.
+fn alloc_fn_cell(
+  st: Agent,
+  proto: Option(Handle),
+  kind: ObjKind,
+  length_v: JsVal,
+  name: String,
+) -> #(Handle, Agent) {
+  let #(length_prop, st) = fn_length_prop(st, length_v)
+  let #(name_prop, st) = fn_name_prop(st, name)
+  rt_store.t_cell_new(
+    st,
+    SObject(
+      kind:,
+      proto:,
+      props: dict.from_list([
+        #(Named("length"), length_prop),
+        #(Named("name"), name_prop),
+      ]),
+      symbol_props: [],
+      elements: NoElements,
+      extensible: True,
+    ),
+  )
+}
+
+/// Allocate a `KFunction` cell for a compiled user function (D4). An
+/// `SObject{kind: KFunction{code, home_object: home, flags, fields_init:
+/// None, captures}, proto: %Function.prototype%}` with own `length`/`name`
+/// per §20.2.4. Port of arc's function-object allocation shape via
+/// `alloc_fn_slot`. Does NOT allocate a `.prototype` own property — §10.2.5
+/// MakeConstructor is a separate step (M7/M14 responsibility). `fields_init`
+/// starts `None`; M7 `t_class_create` rewrites it on the constructor after
+/// class-body evaluation.
+pub fn t_fn_new(
+  st: Agent,
+  code: CompiledFn,
+  captures: List(Handle),
+  flags: FnFlags,
+  name: String,
+  len: Int,
+  home: Option(Handle),
+  simple: Option(#(CompiledFn, Int, Bool)),
+) -> #(Handle, Agent) {
+  alloc_fn_cell(
+    st,
+    Some(st.realm.function.prototype),
+    KFunction(
+      code:,
+      home_object: home,
+      flags:,
+      fields_init: None,
+      captures:,
+      simple:,
+    ),
+    mk_number(JInt(len)),
+    name,
+  )
+}
+
+/// SPEC§8 `fn_new` — arc's M14 emit-time arg order `(code, flags, name, len,
+/// captures)`. `name` arrives as the raw `BitArray` (arc's `ir.ConstBinary`);
+/// `len` is a boxed `Int` from `ConstI32`. `home` is always `None` at the
+/// closure site — M7 rewrites it on methods via `t_make_method`. Returns the
+/// handle wrapped as a `JsVal` so arc's `let_`/`store_slot` chain sees a
+/// value it can `t_global_set` / `t_cell_set` directly.
+pub fn t_new_function(
+  st: Agent,
+  code: CompiledFn,
+  flags: FnFlags,
+  name: BitArray,
+  len: Int,
+  captures: List(Handle),
+  simple: Option(#(CompiledFn, Int, Bool)),
+) -> #(JsVal, Agent) {
+  let name_s = case bit_array.to_string(name) {
+    Ok(s) -> s
+    Error(_) -> ""
+  }
+  let #(h, st) = t_fn_new(st, code, captures, flags, name_s, len, None, simple)
+  #(mk_object(h), st)
+}
+
+/// ES2024 §10.2.5 MakeConstructor — allocate an own writable `.prototype`
+/// object on a plain function (FnDecl/FnExpr only; arrows/methods/class-ctors
+/// never reach here). `proto` is a fresh ordinary object whose [[Prototype]]
+/// is `%Object.prototype%`, with own `constructor` → `f` {W:T,E:F,C:T}. `f`
+/// gains own `prototype` → `proto` {W:T,E:F,C:F} — writable, unlike a class
+/// constructor's non-writable `.prototype` (§15.7.14 step 14; see
+/// `rt_class.t_class_create`). JMut pass-through: returns `f` unchanged so
+/// M14's `emit_closure_site` can tail-call this after `fn_new`.
+pub fn t_make_constructor(st: Agent, f: JsVal) -> #(JsVal, Agent) {
+  let assert KHandle(fh) = classify(f)
+  let #(proto, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+  let #(_, st) =
+    rt_obj.t_define_own_data(
+      st,
+      proto,
+      StringKey(Named("constructor")),
+      f,
+      True,
+      False,
+      True,
+    )
+  let #(_, st) =
+    rt_obj.t_define_own_data(
+      st,
+      fh,
+      StringKey(Named("prototype")),
+      mk_object(proto),
+      True,
+      False,
+      False,
+    )
+  #(f, st)
+}
+
+/// Allocate a `KNative` cell for a built-in function (M6 realm bootstrap).
+/// Port of arc `alloc_call_fn` / `alloc_native_fn_props` (`common.gleam:
+/// 431-475`). `constructible` is the [[Construct]] capability — `True` for
+/// constructor intrinsics, `False` for methods/standalone functions. `proto`
+/// is explicit (NOT the realm accessor) because M6 calls this DURING
+/// bootstrap when `%Function.prototype%` is itself being allocated — the
+/// caller passes `Some(function_proto_h)` once it exists, or `None` for
+/// `%Function.prototype%` itself (whose [[Prototype]] is `%Object.prototype%`,
+/// wired separately). Does NOT root; M6 pins via `t_pin_root`.
+pub fn t_native_new(
+  st: Agent,
+  proto: Option(Handle),
+  tag: NativeToken,
+  name: String,
+  len: Int,
+  constructible: Bool,
+) -> #(Handle, Agent) {
+  alloc_fn_cell(
+    st,
+    proto,
+    KNative(tag:, name:, length: len, constructible:),
+    mk_number(JInt(len)),
+    name,
+  )
+}
+
+/// ES2024 §20.2.3.2 Function.prototype.bind steps 3-10 — allocate a `KBound`
+/// cell. Port of arc `call.gleam:609-680`. Step 2's IsCallable gate is the
+/// CALLER's responsibility (the `FunctionBind` native, M6 — it throws
+/// TypeError before reaching here). Computes `length` per steps 4-6 and
+/// `name` per steps 8-10; may re-enter user code via `[[Get]]` on `target`
+/// (Proxy traps / accessors on `length`/`name`), which can throw —
+/// propagates via `t_throw` (D7).
+pub fn t_bound_new(
+  st: Agent,
+  target: Handle,
+  bound_this: JsVal,
+  bound_args: List(JsVal),
+) -> #(Handle, Agent) {
+  let target_v = mk_object(target)
+  // Steps 4-6: L. Step 5 is `? HasOwnProperty(Target, "length")` — for the
+  // ordinary case (KFunction/KNative/KBound target) that's a props-dict read.
+  // A ProxyObj target's `getOwnPropertyDescriptor` trap is NOT fired here
+  // (rt_obj does not yet export a trap-aware `t_own_property_of` — matches
+  // its own TODO(M6) at `rt_obj.gleam:230`); the step-6.a Get IS
+  // trap-aware via `t_get_prop`.
+  let has_own_length = case rt_store.t_cell_get(st, target) {
+    SObject(props:, ..) -> dict.has_key(props, Named("length"))
+    _ -> False
+  }
+  let #(target_len, st) = case has_own_length {
+    True -> rt_obj.t_get_prop(st, target_v, StringKey(Named("length")))
+    False -> #(mk_undefined(), st)
+  }
+  let n_args = list.length(bound_args)
+  let length_v = case classify(target_len) {
+    // Step 6.b.ii: +∞ → L = +∞.
+    KNum(JPosInf) -> mk_number(JPosInf)
+    // Step 6.b.iii-iv: L = max(ToIntegerOrInfinity(targetLen) - argCount, 0).
+    // NaN / -∞ → 0 via `jsnum_to_integer_or_infinity`.
+    KNum(n) ->
+      mk_number(
+        JInt(int.max(rt_val.jsnum_to_integer_or_infinity(n) - n_args, 0)),
+      )
+    // Step 6.b: non-Number → L stays 0 (from step 4).
+    _ -> mk_number(JInt(0))
+  }
+  // Steps 8-10: targetName = ? Get(Target, "name"); non-String → "".
+  let #(target_name, st) =
+    rt_obj.t_get_prop(st, target_v, StringKey(Named("name")))
+  let bound_name = case classify(target_name) {
+    KStr(s) -> "bound " <> s
+    _ -> "bound "
+  }
+  // Step 3: BoundFunctionCreate. Proto = %Function.prototype% (§10.4.1.3
+  // step 2 uses the target's [[Prototype]] — for every callable that IS
+  // %Function.prototype%; a Proxy-of-function corner case is M6 territory).
+  alloc_fn_cell(
+    st,
+    Some(st.realm.function.prototype),
+    KBound(target:, bound_this:, bound_args:),
+    length_v,
+    bound_name,
+  )
+}

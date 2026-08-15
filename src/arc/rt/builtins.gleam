@@ -1,0 +1,633 @@
+//// `rt_builtins` — realm bootstrap + native-method dispatch (SPEC §7.M6).
+////
+//// Port of `arc/vm/builtins.gleam:54-635` (`init` + `globals`) over the
+//// threaded `Agent` model. `init_realm` allocates every intrinsic
+//// prototype/constructor into the store, seeds the concrete `JsOps` upcall
+//// table (D17), pins every realm handle as a permanent GC root, allocates
+//// `globalThis`, and returns the populated `Realm` record + updated state.
+////
+//// `dispatch_native` / `dispatch_native_construct` are the M4→M6 seam:
+//// `rt_call.gleam:83-98` forward-declares them via
+//// `@external(erlang, "arc_rt_builtins_ffi", ...)`; the FFI shim
+//// forwards straight to this module. Return-tuple order `#(V, St')` (R1).
+
+import arc/rt/async as rt_async
+import arc/rt/builtins/array as b_array
+import arc/rt/builtins/array_buffer as b_array_buffer
+import arc/rt/builtins/atomics as b_atomics
+import arc/rt/builtins/bigint as b_bigint
+import arc/rt/builtins/boolean as b_boolean
+import arc/rt/builtins/common
+import arc/rt/builtins/console as b_console
+import arc/rt/builtins/data_view as b_data_view
+import arc/rt/builtins/date as b_date
+import arc/rt/builtins/error as b_error
+import arc/rt/builtins/function as b_function
+import arc/rt/builtins/generator as b_generator
+import arc/rt/builtins/global_fns as b_global_fns
+import arc/rt/builtins/helpers.{first_arg_or_undefined}
+import arc/rt/builtins/iterator as b_iterator
+import arc/rt/builtins/json as b_json
+import arc/rt/builtins/map as b_map
+import arc/rt/builtins/math as b_math
+import arc/rt/builtins/number as b_number
+import arc/rt/builtins/object as b_object
+import arc/rt/builtins/promise as b_promise
+import arc/rt/builtins/proxy as b_proxy
+import arc/rt/builtins/realm_ops
+import arc/rt/builtins/reflect as b_reflect
+import arc/rt/builtins/regexp as b_regexp
+import arc/rt/builtins/set as b_set
+import arc/rt/builtins/string as b_string
+import arc/rt/builtins/symbol as b_symbol
+import arc/rt/builtins/typed_array as b_typed_array
+import arc/rt/builtins/weak as b_weak
+import arc/rt/call as rt_call
+import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
+import arc/rt/types.{
+  type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
+  type Realm, Agent, ArrayBufferN, ArrayN, AsyncGenResume, AsyncResume, AtomicsN,
+  BigIntN, BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataViewN, DateN,
+  ErrorN, FunctionN, GeneratorN, GlobalN, IteratorN, JInt, JNan, JPosInf, JsOps,
+  JsStore, JsonN, KHandle, MapN, MathN, Named, NativeUnseeded, NoElements,
+  NumberConstructor, NumberN, NumberObj, ObjectN, Ordinary, PromiseN,
+  PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN,
+  ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN, StringObj,
+  SymbolConstructor, SymbolN, ThrowTypeErrorPoison, TypedArrayN, WeakN, classify,
+  mk_number, mk_object, mk_undefined,
+} as rt_types
+import arc/rt/val as rt_val
+import gleam/dict
+import gleam/list
+import gleam/option.{None, Some}
+
+// ───────────────────────────────── init_realm ───────────────────────────────
+
+/// A fresh `Agent` with an empty store seeded from `hooks` and a fully
+/// initialised realm.
+pub fn new_agent(hooks: rt_types.HostHooks) -> Agent {
+  let st =
+    Agent(store: rt_store.t_store_new(hooks), realm: rt_types.unset_realm())
+  let #(_realm, st) = init_realm(st)
+  st
+}
+
+/// Allocate and root every built-in intrinsic into the store, seed `JsOps`,
+/// build `globalThis`, and return the populated `Realm` (SPEC §7.M6 / §2.5).
+///
+/// Precondition: `st.store` is a fresh `t_store_new`. The returned `st` has
+/// `store` populated with all intrinsic cells + pinned roots + seeded ops,
+/// AND `realm` set so downstream `st.realm` reads succeed.
+///
+/// Allocation order mirrors arc `builtins.gleam:54-456` — prototype-chain
+/// wiring depends on it (Object.prototype first, then Function.prototype,
+/// then everything else). Deterministic: same handle ids every run.
+pub fn init_realm(st: Agent) -> #(Realm, Agent) {
+  // 1. Object.prototype — the root of all prototype chains (proto: None).
+  let #(object_proto, st) = common.alloc_proto(st, None, dict.new())
+  // 2. Function.prototype + %Function% + %ThrowTypeError%.
+  let #(#(function, throw_type_error), st) = b_function.init(st, object_proto)
+  let fn_proto = function.prototype
+  let fn_ctor = function.constructor
+  // 3. Object constructor + Object.prototype methods (fills object_proto).
+  let #(object, st) = b_object.init(st, object_proto, fn_proto)
+  // 4. Array.
+  let #(array, st) = b_array.init(st, object_proto, fn_proto)
+  // 5. Error family (Error + 7 NativeError subclasses).
+  let #(errors, st) = b_error.init(st, object_proto, fn_proto)
+  // 6. Namespace objects (Math, JSON, Reflect, console, Atomics).
+  let #(math, st) = b_math.init(st, object_proto, fn_proto)
+  let #(json, st) = b_json.init(st, object_proto, fn_proto)
+  let #(reflect, st) = b_reflect.init(st, object_proto, fn_proto)
+  let #(console, st) = b_console.init(st, object_proto, fn_proto)
+  let #(atomics, st) = b_atomics.init(st, object_proto, fn_proto)
+  // 7. Primitive wrapper types.
+  let #(string, st) = b_string.init(st, object_proto, fn_proto)
+  let #(nb, st) = b_number.init(st, object_proto, fn_proto)
+  let number = nb.pair
+  let #(boolean, st) = b_boolean.init(st, object_proto, fn_proto)
+  let #(symbol, st) = b_symbol.init(st, object_proto, fn_proto)
+  let #(bigint, st) = b_bigint.init(st, object_proto, fn_proto)
+  // 8. RegExp, Date.
+  let #(regexp, st) = b_regexp.init(st, object_proto, fn_proto)
+  let #(date, st) = b_date.init(st, object_proto, fn_proto)
+  // 9. Promise.
+  let #(promise, st) = b_promise.init(st, object_proto, fn_proto)
+  // 10. Iterator prototypes (%IteratorPrototype% + per-kind + async).
+  let #(iters, st) = b_iterator.init(st, object_proto, fn_proto)
+  // 11. Generator / AsyncGenerator / AsyncFunction intrinsics.
+  let #(#(generator, generator_fn), st) =
+    b_generator.init(st, iters.iterator_proto, fn_proto, fn_ctor)
+  let #(#(async_gen, _async_gen_fn), st) =
+    b_generator.init_async(st, iters.async_iterator_proto, fn_proto, fn_ctor)
+  let #(async_fn, st) = b_generator.init_async_function(st, fn_proto, fn_ctor)
+  // 12. Collections.
+  let #(map, st) = b_map.init(st, object_proto, fn_proto)
+  let #(set, st) = b_set.init(st, object_proto, fn_proto)
+  let #(#(weak_map, weak_set), st) = b_weak.init(st, object_proto, fn_proto)
+  // 13. Proxy.
+  let #(proxy, st) = b_proxy.init(st, object_proto, fn_proto)
+  // 14. Binary data.
+  let #(array_buffer, st) = b_array_buffer.init(st, object_proto, fn_proto)
+  let #(data_view, st) = b_data_view.init(st, object_proto, fn_proto)
+  let #(#(_ta_base, typed_arrays), st) =
+    b_typed_array.init(st, object_proto, fn_proto)
+  // 15. Global functions (eval, URI codecs). §21.1.2.12/.13:
+  // `Number.parseInt === parseInt` etc — the four handles allocated by
+  // `b_number.init` are reused rather than allocating twins.
+  let #(gfns, st) =
+    b_global_fns.init(
+      st,
+      fn_proto,
+      parse_int: nb.parse_int,
+      parse_float: nb.parse_float,
+      is_nan: nb.is_nan,
+      is_finite: nb.is_finite,
+    )
+  // 16. globalThis — allocated last so it can reference every constructor.
+  let #(global_object, st) =
+    alloc_global_object(
+      st,
+      object_proto,
+      gfns,
+      GlobalRefs(
+        object:,
+        function:,
+        array:,
+        string:,
+        number:,
+        boolean:,
+        symbol:,
+        bigint:,
+        errors:,
+        map:,
+        set:,
+        weak_map:,
+        weak_set:,
+        date:,
+        regexp:,
+        promise:,
+        iterator: iters.iterator,
+        proxy:,
+        array_buffer:,
+        data_view:,
+        typed_arrays:,
+        math:,
+        json:,
+        reflect:,
+        console:,
+        atomics:,
+      ),
+    )
+  // Assemble the Realm record — every field populated, no Options.
+  let realm =
+    Realm(
+      object:,
+      function:,
+      array:,
+      string:,
+      number:,
+      boolean:,
+      symbol:,
+      bigint:,
+      error: errors.error,
+      type_error: errors.type_error,
+      reference_error: errors.reference_error,
+      range_error: errors.range_error,
+      syntax_error: errors.syntax_error,
+      eval_error: errors.eval_error,
+      uri_error: errors.uri_error,
+      aggregate_error: errors.aggregate_error,
+      map:,
+      set:,
+      weak_map:,
+      weak_set:,
+      date:,
+      regexp:,
+      promise:,
+      proxy:,
+      array_buffer:,
+      data_view:,
+      typed_arrays:,
+      math:,
+      json:,
+      reflect:,
+      console:,
+      atomics:,
+      iterator_proto: iters.iterator_proto,
+      array_iter_proto: iters.array_iter_proto,
+      string_iter_proto: iters.string_iter_proto,
+      map_iter_proto: iters.map_iter_proto,
+      set_iter_proto: iters.set_iter_proto,
+      async_iterator_proto: iters.async_iterator_proto,
+      async_from_sync_proto: iters.async_from_sync_proto,
+      iterator: iters.iterator,
+      iterator_helper_proto: iters.iterator_helper_proto,
+      wrap_for_valid_proto: iters.wrap_for_valid_proto,
+      generator:,
+      generator_fn:,
+      async_fn:,
+      async_gen:,
+      throw_type_error:,
+      global_object:,
+    )
+  // 17. Pin every realm handle (idempotent — most are already pinned by
+  // alloc_proto/init_type, this catches any that arrived by another route).
+  let st =
+    list.fold(realm_ops.realm_handles(realm), st, fn(st, h) {
+      rt_store.t_pin_root(st, h)
+    })
+  // 18. Seed the concrete JsOps (D17) so rt_val/rt_obj upcalls resolve.
+  let st = seed_ops(st)
+  // 19. Install the realm on Agent so `st.realm` reads succeed
+  // from here on (the JsOps bodies + every native call rely on it).
+  let st = Agent(..st, realm:)
+  #(realm, st)
+}
+
+/// Rebind `st.store.ops` to the concrete M4/M-CALL bodies. `t_store_new`
+/// starts with a panic-stub `unseeded_ops`; this is `init_realm` step 1.
+fn seed_ops(st: Agent) -> Agent {
+  let js = st.store
+  Agent(
+    ..st,
+    store: JsStore(
+      ..js,
+      ops: JsOps(
+        get_prop: rt_obj.t_get_prop,
+        call: rt_call.t_call_checked,
+        to_object: realm_ops.t_box_primitive,
+        new_error: realm_ops.t_new_error,
+        eval_hook: unseeded_eval,
+      ),
+    ),
+  )
+}
+
+fn unseeded_eval(_st: Agent, _src: String) -> #(JsVal, Agent) {
+  panic as "JsOps.eval_hook unseeded — M19 harness fills"
+}
+
+// ── globalThis (arc builtins.gleam:489-635) ─────────────────────────────────
+
+/// The constructor/namespace handles `alloc_global_object` binds — internal
+/// bundle so `init_realm` doesn't pass 25 positional args.
+type GlobalRefs {
+  GlobalRefs(
+    object: BuiltinPair,
+    function: BuiltinPair,
+    array: BuiltinPair,
+    string: BuiltinPair,
+    number: BuiltinPair,
+    boolean: BuiltinPair,
+    symbol: BuiltinPair,
+    bigint: BuiltinPair,
+    errors: b_error.ErrorFamily,
+    map: BuiltinPair,
+    set: BuiltinPair,
+    weak_map: BuiltinPair,
+    weak_set: BuiltinPair,
+    date: BuiltinPair,
+    regexp: BuiltinPair,
+    promise: BuiltinPair,
+    iterator: BuiltinPair,
+    proxy: BuiltinPair,
+    array_buffer: BuiltinPair,
+    data_view: BuiltinPair,
+    typed_arrays: rt_types.TypedArrays,
+    math: Handle,
+    json: Handle,
+    reflect: Handle,
+    console: Handle,
+    atomics: Handle,
+  )
+}
+
+/// A global entry: name + value + descriptor shape.
+type GlobalEntry {
+  /// §19.1: NaN, Infinity, undefined — {W:F, E:F, C:F}.
+  Immutable(name: String, val: JsVal)
+  /// Normal builtin — {W:T, E:F, C:T}.
+  Builtin(name: String, val: JsVal)
+}
+
+/// Allocate the `globalThis` object with every §19.1-§19.3 binding installed.
+/// Port of arc `builtins.gleam:489-635`.
+fn alloc_global_object(
+  st: Agent,
+  object_proto: Handle,
+  gfns: b_global_fns.GlobalFns,
+  r: GlobalRefs,
+) -> #(Handle, Agent) {
+  let ctor = fn(bt: BuiltinPair) { mk_object(bt.constructor) }
+  let ns = fn(h: Handle) { mk_object(h) }
+  let entries = [
+    // §19.1: {W:F, E:F, C:F}.
+    Immutable("NaN", mk_number(JNan)),
+    Immutable("Infinity", mk_number(JPosInf)),
+    Immutable("undefined", mk_undefined()),
+    // Constructors.
+    Builtin("Object", ctor(r.object)),
+    Builtin("Function", ctor(r.function)),
+    Builtin("Array", ctor(r.array)),
+    Builtin("String", ctor(r.string)),
+    Builtin("Number", ctor(r.number)),
+    Builtin("Boolean", ctor(r.boolean)),
+    Builtin("Symbol", ctor(r.symbol)),
+    Builtin("BigInt", ctor(r.bigint)),
+    Builtin("Error", ctor(r.errors.error)),
+    Builtin("TypeError", ctor(r.errors.type_error)),
+    Builtin("ReferenceError", ctor(r.errors.reference_error)),
+    Builtin("RangeError", ctor(r.errors.range_error)),
+    Builtin("SyntaxError", ctor(r.errors.syntax_error)),
+    Builtin("EvalError", ctor(r.errors.eval_error)),
+    Builtin("URIError", ctor(r.errors.uri_error)),
+    Builtin("AggregateError", ctor(r.errors.aggregate_error)),
+    Builtin("Map", ctor(r.map)),
+    Builtin("Set", ctor(r.set)),
+    Builtin("WeakMap", ctor(r.weak_map)),
+    Builtin("WeakSet", ctor(r.weak_set)),
+    Builtin("Date", ctor(r.date)),
+    Builtin("RegExp", ctor(r.regexp)),
+    Builtin("Promise", ctor(r.promise)),
+    Builtin("Iterator", ctor(r.iterator)),
+    Builtin("Proxy", ctor(r.proxy)),
+    Builtin("ArrayBuffer", ctor(r.array_buffer)),
+    Builtin("DataView", ctor(r.data_view)),
+    // Namespace objects.
+    Builtin("Math", ns(r.math)),
+    Builtin("JSON", ns(r.json)),
+    Builtin("Reflect", ns(r.reflect)),
+    Builtin("console", ns(r.console)),
+    Builtin("Atomics", ns(r.atomics)),
+    // Global functions (§19.2).
+    Builtin("eval", ns(gfns.eval)),
+    Builtin("parseInt", ns(gfns.parse_int)),
+    Builtin("parseFloat", ns(gfns.parse_float)),
+    Builtin("isNaN", ns(gfns.is_nan)),
+    Builtin("isFinite", ns(gfns.is_finite)),
+    Builtin("decodeURI", ns(gfns.decode_uri)),
+    Builtin("encodeURI", ns(gfns.encode_uri)),
+    Builtin("decodeURIComponent", ns(gfns.decode_uri_component)),
+    Builtin("encodeURIComponent", ns(gfns.encode_uri_component)),
+    Builtin("escape", ns(gfns.escape)),
+    Builtin("unescape", ns(gfns.unescape)),
+  ]
+  // The 11 TypedArray constructors (Int8Array .. BigUint64Array).
+  let entries =
+    list.append(
+      entries,
+      list.map(dict.to_list(r.typed_arrays.by_kind), fn(entry) {
+        let #(kind, bt) = entry
+        Builtin(b_typed_array.kind_name(kind), ctor(bt))
+      }),
+    )
+  // Materialise property descriptors with threaded seq stamps.
+  let #(props, st) =
+    list.fold(entries, #([], st), fn(acc, e) {
+      let #(props, st) = acc
+      case e {
+        Immutable(name:, val:) -> {
+          let #(p, st) = common.data_prop(st, val)
+          #([#(name, p), ..props], st)
+        }
+        Builtin(name:, val:) -> {
+          let #(p, st) = common.builtin_property(st, val)
+          #([#(name, p), ..props], st)
+        }
+      }
+    })
+  let #(global_h, st) =
+    rt_store.t_cell_new(
+      st,
+      SObject(
+        kind: Ordinary,
+        proto: Some(object_proto),
+        props: common.named_props(list.reverse(props)),
+        symbol_props: [],
+        elements: NoElements,
+        extensible: True,
+      ),
+    )
+  let st = rt_store.t_pin_root(st, global_h)
+  // globalThis self-reference {W:T, E:F, C:T}.
+  let #(self_prop, st) = common.builtin_property(st, mk_object(global_h))
+  let st = common.add_named_property(st, global_h, "globalThis", self_prop)
+  #(global_h, st)
+}
+
+// ───────────────────────── dispatch_native (M4→M6 seam) ─────────────────────
+
+/// The single native-method dispatcher — port of arc's per-module `dispatch`
+/// fan-out. Called by `rt_call.do_call` for `KNative(tag:)` cells via the
+/// `arc_rt_builtins_ffi` shim. D7: throws RAISE via `t_throw` (never
+/// `Result`); the caller wraps in `t_apply_protected`.
+///
+/// Exhaustive over the CURRENT `NativeToken` variant set — a new wrapper
+/// variant added by the native-tokens unit is a compile error here by design.
+pub fn dispatch_native(
+  st: Agent,
+  tag: NativeToken,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  case tag {
+    // ── async closures (bodies live in rt_async) ─────────────────────────
+    PromiseResolveFn(promise:, already_resolved:) ->
+      rt_async.do_resolve_fn(st, promise, already_resolved, args)
+    PromiseRejectFn(promise:, already_resolved:) ->
+      rt_async.do_reject_fn(st, promise, already_resolved, args)
+    AsyncResume(gen:, is_throw:) ->
+      rt_async.do_async_resume(st, gen, is_throw, args)
+    AsyncGenResume(gen:, is_throw:, kind:) -> #(
+      mk_undefined(),
+      rt_async.t_asyncgen_resume(
+        st,
+        gen,
+        is_throw,
+        kind,
+        first_arg_or_undefined(args),
+      ),
+    )
+    // ── shared helpers ──────────────────────────────────────────────────────
+    ReturnThis -> #(this, st)
+    ThrowTypeErrorPoison ->
+      b_function.dispatch(st, rt_types.ThrowTypeErrorFn, this, args)
+    NativeUnseeded ->
+      panic as "dispatch_native: NativeUnseeded token reached (unimplemented builtin)"
+    // ── per-module wrapper variants ─────────────────────────────────────────
+    ObjectN(n) -> b_object.dispatch(st, n, this, args)
+    FunctionN(n) -> b_function.dispatch(st, n, this, args)
+    ErrorN(n) -> b_error.dispatch(st, n, this, args, mk_undefined())
+    ArrayN(n) -> b_array.dispatch(st, n, this, args)
+    StringN(n) -> b_string.dispatch(st, n, this, args)
+    NumberN(n) -> b_number.dispatch(st, n, this, args)
+    BooleanN(n) -> b_boolean.dispatch(st, n, this, args)
+    SymbolN(n) -> b_symbol.dispatch(st, n, this, args)
+    BigIntN(n) -> b_bigint.dispatch(st, n, this, args)
+    MathN(n) -> b_math.dispatch(st, n, this, args)
+    JsonN(n) -> b_json.dispatch(st, n, this, args)
+    ReflectN(n) -> b_reflect.dispatch(st, n, this, args)
+    ConsoleN(n) -> b_console.dispatch(st, n, this, args)
+    GlobalN(n) -> b_global_fns.dispatch(st, n, this, args)
+    DateN(n) -> b_date.dispatch(st, n, this, args)
+    RegExpN(n) -> b_regexp.dispatch(st, n, this, args)
+    PromiseN(n) -> b_promise.dispatch(st, n, this, args)
+    ProxyN(n) -> b_proxy.dispatch(st, n, this, args)
+    IteratorN(n) -> b_iterator.dispatch(st, n, this, args)
+    GeneratorN(n) -> b_generator.dispatch(st, n, this, args)
+    MapN(n) -> b_map.dispatch(st, n, this, args)
+    SetN(n) -> b_set.dispatch(st, n, this, args)
+    WeakN(n) -> b_weak.dispatch(st, n, this, args)
+    ArrayBufferN(n) -> b_array_buffer.dispatch(st, n, this, args)
+    DataViewN(n) -> b_data_view.dispatch(st, n, this, args)
+    TypedArrayN(n) -> b_typed_array.dispatch(st, n, this, args)
+    AtomicsN(n) -> b_atomics.dispatch(st, n, this, args)
+  }
+}
+
+/// Native-constructor dispatch — port of arc's `[[Construct]]` fan-out. Called
+/// by `rt_call.construct_by_kind` for `KNative(constructible: True)` cells.
+/// `new_target` is the original `new.target` (may differ from callee under
+/// `Reflect.construct` / `super`). Returns the allocated instance handle.
+///
+/// arc unifies call/construct via an `Option(new_target)` param; 2core's
+/// rt_call splits them (rt_call.gleam:83-98 forward-decls) so this
+/// routes to per-module `dispatch_construct` (or an inline
+/// OrdinaryCreateFromConstructor) for every constructor that needs
+/// `new_target`. Exhaustive: every `constructible: True` token has an arm.
+pub fn dispatch_native_construct(
+  st: Agent,
+  tag: NativeToken,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  case tag {
+    ObjectN(n) -> b_object.dispatch_construct(st, n, args, new_target)
+    ErrorN(n) -> {
+      let #(v, st) = b_error.dispatch(st, n, mk_undefined(), args, new_target)
+      require_handle(st, v)
+    }
+    MapN(n) -> b_map.dispatch_construct(st, n, args, new_target)
+    SetN(n) -> b_set.dispatch_construct(st, n, args, new_target)
+    WeakN(n) -> b_weak.dispatch_construct(st, n, args, new_target)
+    DateN(n) -> b_date.dispatch_construct(st, n, args, new_target)
+    RegExpN(n) -> b_regexp.dispatch_construct(st, n, args, new_target)
+    ProxyN(n) -> b_proxy.dispatch_construct(st, n, args, new_target)
+    PromiseN(_) -> b_promise.dispatch_construct(st, args, new_target)
+    ArrayBufferN(n) ->
+      b_array_buffer.dispatch_construct(st, n, args, new_target)
+    DataViewN(n) -> b_data_view.dispatch_construct(st, n, args, new_target)
+    TypedArrayN(n) -> b_typed_array.dispatch_construct(st, n, args, new_target)
+    // §22.1.1 Array — proto derived from new.target, then ArrayCreate.
+    // b_array has no dispatch_construct yet (out-of-scope file), so allocate
+    // via its call path then fix up [[Prototype]] before returning.
+    ArrayN(n) -> {
+      let r = st.realm
+      let #(proto, st) =
+        proto_from_new_target(st, new_target, r.array.prototype)
+      let #(v, st) = b_array.dispatch(st, n, mk_undefined(), args)
+      let #(h, st) = require_handle(st, v)
+      let #(_ok, st) = rt_obj.t_set_proto(st, h, Some(proto))
+      #(h, st)
+    }
+    // §22.1.1.1 String — s = args ? ToString(value) : "" (no symbol special
+    // case under [[Construct]]); StringCreate(s, proto-from-new.target).
+    StringN(StringConstructor) -> {
+      let r = st.realm
+      let #(s, st) = case args {
+        [] -> #("", st)
+        [v, ..] -> rt_val.t_to_string(st, v)
+      }
+      let #(proto, st) =
+        proto_from_new_target(st, new_target, r.string.prototype)
+      realm_ops.alloc_wrapper(st, StringObj(s), proto)
+    }
+    // §21.1.1.1 Number — n = args ? ToNumeric (BigInt→𝔽) : +0; wrap.
+    NumberN(NumberConstructor) -> {
+      let r = st.realm
+      let #(v, st) =
+        b_number.dispatch(st, NumberConstructor, mk_undefined(), args)
+      let n = case classify(v) {
+        rt_types.KNum(n) -> n
+        _ -> JInt(0)
+      }
+      let #(proto, st) =
+        proto_from_new_target(st, new_target, r.number.prototype)
+      realm_ops.alloc_wrapper(st, NumberObj(n), proto)
+    }
+    // §20.3.1.1 Boolean — b = ToBoolean(value); wrap.
+    BooleanN(BooleanConstructor) -> {
+      let r = st.realm
+      let b = case args {
+        [] -> False
+        [v, ..] -> rt_val.to_boolean(v)
+      }
+      let #(proto, st) =
+        proto_from_new_target(st, new_target, r.boolean.prototype)
+      realm_ops.alloc_wrapper(st, BooleanObj(b), proto)
+    }
+    // §20.4.1.1 step 1: NewTarget defined → TypeError.
+    SymbolN(SymbolConstructor) ->
+      rt_val.t_throw_type_error(st, "Symbol is not a constructor")
+    // §21.2.1.1 step 1: NewTarget defined → TypeError. Unreachable in
+    // practice (`constructible: False`) but explicit so `require_handle`
+    // never sees a primitive BigInt.
+    BigIntN(_) -> rt_val.t_throw_type_error(st, "BigInt is not a constructor")
+    // §20.2.1.1 / §27.3.1.1 dynamic Function-family constructors — bodies
+    // throw ("not supported") until M19 seeds eval; new_target is unused.
+    FunctionN(n) -> {
+      let #(v, st) = b_function.dispatch(st, n, mk_undefined(), args)
+      require_handle(st, v)
+    }
+    GeneratorN(n) -> {
+      let #(v, st) = b_generator.dispatch(st, n, mk_undefined(), args)
+      require_handle(st, v)
+    }
+    // Non-constructor method tokens on constructible types.
+    StringN(_) | NumberN(_) | BooleanN(_) | SymbolN(_) ->
+      rt_val.t_throw_type_error(st, "not a constructor")
+    // Every remaining token is `constructible: False` — construct_by_kind
+    // never routes it here. Reaching this arm is an engine bug.
+    // §27.1.1.1 Iterator — abstract constructor (only IteratorConstructor is
+    // constructible; every other IteratorN token is `constructible: False`).
+    IteratorN(n) -> b_iterator.dispatch_construct(st, n, args, new_target)
+    PromiseResolveFn(..)
+    | PromiseRejectFn(..)
+    | AsyncResume(..)
+    | AsyncGenResume(..)
+    | ReturnThis
+    | ThrowTypeErrorPoison
+    | NativeUnseeded
+    | MathN(_)
+    | JsonN(_)
+    | ReflectN(_)
+    | ConsoleN(_)
+    | GlobalN(_)
+    | AtomicsN(_) ->
+      panic as "dispatch_native_construct: non-constructible token reached [[Construct]]"
+  }
+}
+
+/// §10.1.13.2 GetPrototypeFromConstructor with a per-type intrinsic fallback.
+fn proto_from_new_target(
+  st: Agent,
+  new_target: JsVal,
+  fallback: Handle,
+) -> #(Handle, Agent) {
+  let #(proto, st) =
+    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
+  case classify(proto) {
+    KHandle(h) -> #(h, st)
+    _ -> #(fallback, st)
+  }
+}
+
+fn require_handle(st: Agent, v: JsVal) -> #(Handle, Agent) {
+  case classify(v) {
+    KHandle(h) -> #(h, st)
+    _ ->
+      panic as "dispatch_native_construct: native constructor returned non-object"
+  }
+}
