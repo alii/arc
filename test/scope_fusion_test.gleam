@@ -18,36 +18,42 @@
 ////   -      sloppy-mode Annex-B fn-in-block var promotion
 
 import arc/compiler
+import arc/engine.{type JsValueKind, Finite, JsNumber, JsString}
+import arc/host_hooks
+import arc/interp/entry
+import arc/interp/safepoint
 import arc/parser
-import arc/vm/builtins
-import arc/vm/exec/entry
-import arc/vm/heap
-import arc/vm/value.{Finite, JsNumber, JsString}
+import arc/rt/builtins as rt_builtins
+import arc/rt/call.{NormalCompletion, ThrowCompletion}
+import arc/rt/inspect as rt_inspect
 import gleam/string
 
 // ── helpers ────────────────────────────────────────────────────────────
 
-fn run(source: String) -> Result(value.JsValue, String) {
+fn run(source: String) -> Result(JsValueKind, String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
       case compiler.compile(body, sb) {
         Error(ce) -> Error("compile: " <> string.inspect(ce))
         Ok(template) -> {
-          let h = heap.new()
-          let #(h, b) = builtins.init(h)
-          let #(h, global_object) = builtins.globals(b, h)
-          case entry.run(template, h, b, global_object) {
-            Ok(#(Ok(v), _)) -> Ok(v)
-            Ok(#(Error(v), _)) -> Error("threw: " <> string.inspect(v))
-            Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
+          let st =
+            rt_builtins.new_agent(host_hooks.default_host_hooks())
+            |> entry.link
+          case entry.run_script(st, template) {
+            #(NormalCompletion(v), st) -> {
+              let _st = safepoint.end_turn(st, [v])
+              Ok(engine.classify(v))
+            }
+            #(ThrowCompletion(v), st) ->
+              Error("threw: " <> rt_inspect.inspect(st, v))
           }
         }
       }
   }
 }
 
-fn expect(source: String, want: value.JsValue) -> Nil {
+fn expect(source: String, want: JsValueKind) -> Nil {
   case run(source) {
     Ok(got) ->
       case got == want {
@@ -67,7 +73,7 @@ fn expect(source: String, want: value.JsValue) -> Nil {
   }
 }
 
-fn n(f: Float) -> value.JsValue {
+fn n(f: Float) -> JsValueKind {
   JsNumber(Finite(f))
 }
 

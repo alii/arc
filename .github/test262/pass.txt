@@ -4526,6 +4526,7 @@ built-ins/AsyncGeneratorFunction/prototype/extensibility.js
 built-ins/AsyncGeneratorFunction/prototype/not-callable.js
 built-ins/AsyncGeneratorFunction/prototype/prop-desc.js
 built-ins/AsyncGeneratorFunction/prototype/prototype.js
+built-ins/AsyncGeneratorPrototype/Symbol.toStringTag.js
 built-ins/AsyncGeneratorPrototype/constructor.js
 built-ins/AsyncGeneratorPrototype/next/iterator-result-prototype.js
 built-ins/AsyncGeneratorPrototype/next/length.js
@@ -6932,6 +6933,7 @@ built-ins/GeneratorFunction/prototype/extensibility.js
 built-ins/GeneratorFunction/prototype/not-callable.js
 built-ins/GeneratorFunction/prototype/prop-desc.js
 built-ins/GeneratorFunction/prototype/prototype.js
+built-ins/GeneratorPrototype/Symbol.toStringTag.js
 built-ins/GeneratorPrototype/constructor.js
 built-ins/GeneratorPrototype/next/consecutive-yields.js
 built-ins/GeneratorPrototype/next/context-method-invocation.js
@@ -8246,6 +8248,7 @@ built-ins/Number/MAX_SAFE_INTEGER.js
 built-ins/Number/MAX_VALUE/S15.7.3.2_A2.js
 built-ins/Number/MAX_VALUE/S15.7.3.2_A3.js
 built-ins/Number/MAX_VALUE/S15.7.3.2_A4.js
+built-ins/Number/MAX_VALUE/value.js
 built-ins/Number/MIN_SAFE_INTEGER.js
 built-ins/Number/MIN_VALUE/S15.7.3.3_A2.js
 built-ins/Number/MIN_VALUE/S15.7.3.3_A3.js
@@ -27973,6 +27976,10 @@ language/computed-property-names/class/method/constructor-duplicate-1.js
 language/computed-property-names/class/method/constructor-duplicate-2.js
 language/computed-property-names/class/method/constructor-duplicate-3.js
 language/computed-property-names/class/method/constructor.js
+language/computed-property-names/class/method/generator.js
+language/computed-property-names/class/method/number.js
+language/computed-property-names/class/method/string.js
+language/computed-property-names/class/method/symbol.js
 language/computed-property-names/class/static/generator-constructor.js
 language/computed-property-names/class/static/generator-prototype.js
 language/computed-property-names/class/static/getter-constructor.js
@@ -27999,6 +28006,8 @@ language/computed-property-names/object/method/string.js
 language/computed-property-names/object/method/super.js
 language/computed-property-names/object/method/symbol.js
 language/computed-property-names/object/property/number-duplicates.js
+language/computed-property-names/to-name-side-effects/class.js
+language/computed-property-names/to-name-side-effects/numbers-class.js
 language/computed-property-names/to-name-side-effects/numbers-object.js
 language/computed-property-names/to-name-side-effects/object.js
 language/destructuring/binding/initialization-requires-object-coercible-null.js
@@ -28433,6 +28442,8 @@ language/expressions/addition/S11.6.1_A4_T4.js
 language/expressions/addition/S11.6.1_A4_T5.js
 language/expressions/addition/S11.6.1_A4_T6.js
 language/expressions/addition/S11.6.1_A4_T7.js
+language/expressions/addition/S11.6.1_A4_T8.js
+language/expressions/addition/S11.6.1_A4_T9.js
 language/expressions/addition/bigint-and-number.js
 language/expressions/addition/bigint-arithmetic.js
 language/expressions/addition/bigint-errors.js
@@ -35255,6 +35266,7 @@ language/expressions/division/S11.5.2_A4_T5.js
 language/expressions/division/S11.5.2_A4_T6.js
 language/expressions/division/S11.5.2_A4_T7.js
 language/expressions/division/S11.5.2_A4_T8.js
+language/expressions/division/S11.5.2_A4_T9.js
 language/expressions/division/bigint-and-number.js
 language/expressions/division/bigint-arithmetic.js
 language/expressions/division/bigint-complex-infinity.js
@@ -36850,6 +36862,7 @@ language/expressions/generators/forbidden-ext/b2/gen-func-expr-forbidden-ext-ind
 language/expressions/generators/forbidden-ext/b2/gen-func-expr-forbidden-ext-indirect-access-own-prop-caller-value.js
 language/expressions/generators/forbidden-ext/b2/gen-func-expr-forbidden-ext-indirect-access-prop-caller.js
 language/expressions/generators/generator-created-after-decl-inst.js
+language/expressions/generators/has-instance.js
 language/expressions/generators/implicit-name.js
 language/expressions/generators/invoke-as-constructor.js
 language/expressions/generators/length-dflt.js
@@ -36885,6 +36898,7 @@ language/expressions/generators/prototype-property-descriptor.js
 language/expressions/generators/prototype-relation-to-function.js
 language/expressions/generators/prototype-typeof.js
 language/expressions/generators/prototype-uniqueness.js
+language/expressions/generators/prototype-value.js
 language/expressions/generators/rest-param-strict-body.js
 language/expressions/generators/rest-params-trailing-comma-early-error.js
 language/expressions/generators/return.js
@@ -37452,7 +37466,9 @@ language/expressions/multiplication/S11.5.1_A4_T2.js
 language/expressions/multiplication/S11.5.1_A4_T3.js
 language/expressions/multiplication/S11.5.1_A4_T4.js
 language/expressions/multiplication/S11.5.1_A4_T5.js
+language/expressions/multiplication/S11.5.1_A4_T6.js
 language/expressions/multiplication/S11.5.1_A4_T7.js
+language/expressions/multiplication/S11.5.1_A4_T8.js
 language/expressions/multiplication/bigint-and-number.js
 language/expressions/multiplication/bigint-arithmetic.js
 language/expressions/multiplication/bigint-errors.js
@@ -38994,6 +39010,7 @@ language/expressions/subtraction/S11.6.2_A4_T4.js
 language/expressions/subtraction/S11.6.2_A4_T5.js
 language/expressions/subtraction/S11.6.2_A4_T6.js
 language/expressions/subtraction/S11.6.2_A4_T7.js
+language/expressions/subtraction/S11.6.2_A4_T8.js
 language/expressions/subtraction/bigint-and-number.js
 language/expressions/subtraction/bigint-arithmetic.js
 language/expressions/subtraction/bigint-errors.js
@@ -49498,6 +49515,7 @@ language/statements/generators/forbidden-ext/b2/gen-func-decl-forbidden-ext-indi
 language/statements/generators/forbidden-ext/b2/gen-func-decl-forbidden-ext-indirect-access-own-prop-caller-value.js
 language/statements/generators/forbidden-ext/b2/gen-func-decl-forbidden-ext-indirect-access-prop-caller.js
 language/statements/generators/generator-created-after-decl-inst.js
+language/statements/generators/has-instance.js
 language/statements/generators/invoke-as-constructor.js
 language/statements/generators/length-dflt.js
 language/statements/generators/length-property-descriptor.js
@@ -49514,6 +49532,7 @@ language/statements/generators/prototype-property-descriptor.js
 language/statements/generators/prototype-relation-to-function.js
 language/statements/generators/prototype-typeof.js
 language/statements/generators/prototype-uniqueness.js
+language/statements/generators/prototype-value.js
 language/statements/generators/rest-param-strict-body.js
 language/statements/generators/rest-params-trailing-comma-early-error.js
 language/statements/generators/restricted-properties.js
@@ -50602,6 +50621,8 @@ language/types/number/S8.5_A11_T2.js
 language/types/number/S8.5_A12.1.js
 language/types/number/S8.5_A12.2.js
 language/types/number/S8.5_A13_T2.js
+language/types/number/S8.5_A14_T1.js
+language/types/number/S8.5_A14_T2.js
 language/types/number/S8.5_A2.1.js
 language/types/number/S8.5_A2.2.js
 language/types/number/S8.5_A3.js
@@ -51448,6 +51469,7 @@ staging/sm/TypedArray/constructor-typedarray-species-other-global.js
 staging/sm/TypedArray/constructor-undefined-args.js
 staging/sm/TypedArray/constructor_bad-args.js
 staging/sm/TypedArray/detached-array-buffer-checks.js
+staging/sm/TypedArray/element-setting-converts-using-ToNumber.js
 staging/sm/TypedArray/entries.js
 staging/sm/TypedArray/every-and-some.js
 staging/sm/TypedArray/fill-detached.js
@@ -51736,6 +51758,7 @@ staging/sm/generators/delegating-yield-8.js
 staging/sm/generators/delegating-yield-9.js
 staging/sm/generators/gen-with-call-obj.js
 staging/sm/generators/iterator-next-non-object.js
+staging/sm/generators/objects.js
 staging/sm/generators/regress-366941.js
 staging/sm/generators/return-finally.js
 staging/sm/generators/syntax.js

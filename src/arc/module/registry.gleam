@@ -1,84 +1,108 @@
-//// Realm-wide module registry — the heap-resident caches the module system
-//// keeps on PRIVATE-keyed global-object properties, invisible to guest JS.
+//// Realm-wide module registry: the caches the module system keeps on
+//// PRIVATE-keyed global-object properties, invisible to guest JS.
 ////
-//// Module evaluation state must be observable by three parties that cannot
-//// share Gleam data (it's immutable): the link-time DFS evaluator
-//// (`arc/module`), a deferred namespace's proxy traps (which fire while some
-//// other module's body is mid-execution), and the dynamic-import host hook
-//// (`arc/module_host`). So that state lives in the heap: one hidden object
-//// per cache on the realm's global object, keyed by resolved specifier.
+//// Module evaluation state must be observable by the link-time DFS evaluator
+//// (`arc/module`), a deferred namespace's proxy traps (which fire
+//// while some other module's body is mid-execution), and the dynamic-import
+//// continuation (`arc/module_host`). All three thread the same
+//// `Agent`, so the state lives in its heap: one hidden object per cache on
+//// the realm's global object, keyed by resolved specifier. Being heap data it
+//// is per-realm, GC-traced and serialized with the store.
 ////
 //// This module is the ONLY reader and writer of those private properties.
-//// Each cache has a typed accessor pair, so the heap encoding of an entry —
-//// and what "absent" means for it — is decided in exactly one place:
 ////
-////   - status:    specifier → `ModuleStatus` (JsString-encoded).
+////   - status:    specifier → `ModuleStatus` (string-encoded).
 ////   - errors:    specifier → the value the module's evaluation threw.
-////                Sticky — later imports / deferred triggers rethrow it
-////                (§16.2.1.5.3). Presence of the KEY marks a cached error,
-////                so a legal `throw undefined` is cached and rethrown like
-////                any other value; the stored value is never compared to
-////                `JsUndefined` to decide presence.
+////                Sticky (§16.2.1.5.3). Presence of the KEY marks a cached
+////                error, so a legal `throw undefined` is cached and rethrown
+////                like any other value.
 ////   - namespace: specifier → Module Namespace Exotic Object.
 ////   - deferred:  specifier → Deferred Module Namespace ([[DeferredNamespace]]
 ////                is per module record, so identity must be cached).
 ////   - pending:   specifier → in-flight namespace promise for a module
 ////                parked on top-level await ([[TopLevelCapability]]).
+////   - referrer:  the resolved specifier of the module whose body is running
+////                right now (§16.2.1.8 referencingScriptOrModule), one slot.
 
-import arc/vm/heap
-import arc/vm/internal/elements
-import arc/vm/key.{type PropertyKey, Named}
-import arc/vm/ops/object
-import arc/vm/state.{type Heap}
-import arc/vm/value.{
-  type JsValue, type Ref, DataProperty, JsObject, JsString, ObjectSlot,
-  OrdinaryObject,
+import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
+import arc/rt/types.{
+  type Agent, type Handle, type JsVal, type PropertyKey, DataProperty, KHandle,
+  KStr, Named, SObject, StringKey, classify, mk_object, mk_string,
 }
 import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 // =============================================================================
-// Hidden global-object property keys — one per cache, private to this module.
+// Hidden global-object property keys, one per cache.
 //
-// Each cache hangs off the realm's global object under a NUL-marker PRIVATE
-// key (`key.private_key`, the same hidden namespace class private elements
-// live in). Every reflection surface — ownKeys, spread, `in`, has_property,
-// for-in, JSON, freeze — filters those out (`value.is_private_name`), so guest
-// JS can neither enumerate, read, overwrite nor delete the module registry.
+// Each cache hangs off the realm's global object under a PRIVATE key (the
+// same hidden namespace class private elements live in). Every reflection
+// surface filters those out (`types.is_private_key`), so guest JS can neither
+// enumerate, read, overwrite nor delete the module registry.
 // =============================================================================
 
-/// Resolved specifier → the module's `ModuleStatus`.
 fn status_property() -> PropertyKey {
-  key.private_key("arc_module_status")
+  types.private_key("arc_module_status")
 }
 
-/// Resolved specifier → the value the module's evaluation threw.
 fn error_cache_property() -> PropertyKey {
-  key.private_key("arc_module_errors")
+  types.private_key("arc_module_errors")
 }
 
-/// Resolved specifier → the module's Module Namespace Exotic Object.
 fn namespace_cache_property() -> PropertyKey {
-  key.private_key("arc_module_cache")
+  types.private_key("arc_module_cache")
 }
 
-/// Resolved specifier → the module's Deferred Module Namespace.
 fn deferred_cache_property() -> PropertyKey {
-  key.private_key("arc_module_deferred")
+  types.private_key("arc_module_deferred")
 }
 
-/// Resolved specifier → in-flight namespace promise (top-level await).
 fn pending_cache_property() -> PropertyKey {
-  key.private_key("arc_module_pending")
+  types.private_key("arc_module_pending")
+}
+
+fn referrer_property() -> PropertyKey {
+  types.private_key("arc_module_referrer")
+}
+
+/// The one key of the referrer cache object.
+const referrer_key = "active"
+
+// =============================================================================
+// Referrer: §16.2.1.8 referencingScriptOrModule of the running module body
+// =============================================================================
+
+/// The resolved specifier of the module whose body is executing, if one is:
+/// what an ImportCall captures so a nested `import()` resolves relative to
+/// the importing MODULE. `None` is script code (the host falls back to its
+/// entry referrer). It lives in the heap rather than on an activation so a
+/// bytecode callback re-entered from a builtin during the body still sees it.
+pub fn read_active_referrer(st: Agent) -> Option(String) {
+  use v <- option.then(read_entry(st, referrer_property(), referrer_key))
+  case classify(v) {
+    KStr(spec) -> Some(spec)
+    _ -> None
+  }
+}
+
+/// Set (or with `None`, clear) the running module body's specifier. The
+/// evaluator brackets each body with the previous value so nested
+/// evaluations (a deferred-namespace trigger mid-body) restore correctly.
+pub fn write_active_referrer(st: Agent, referrer: Option(String)) -> Agent {
+  case referrer {
+    Some(spec) ->
+      write_entry(st, referrer_property(), referrer_key, mk_string(spec))
+    None -> clear_entry(st, referrer_property(), referrer_key)
+  }
 }
 
 // =============================================================================
-// Status — [[Status]] of a module record (§16.2.1.5)
+// Status: [[Status]] of a module record (§16.2.1.5)
 // =============================================================================
 
-/// A module's evaluation status in the registry. The absence of a status
-/// (`None` from `read_module_status`) means the body has not started
-/// ([[Status]] ~linked~).
+/// A module's evaluation status in the registry. No status (`None` from
+/// `read_module_status`) means the body has not started ([[Status]] ~linked~).
 pub type ModuleStatus {
   /// The body is running or is parked on top-level await.
   Evaluating
@@ -86,259 +110,159 @@ pub type ModuleStatus {
   Evaluated
 }
 
-// The JsString encoding of `ModuleStatus` is private to the next two
-// functions: `write_module_status` is the only writer, and a cleared status is
-// a DELETED key, so the catch-all arm of `read_module_status` is unreachable —
-// it is there to keep the match total.
-
-/// The module's evaluation status: `Some(Evaluated)` once its body completed,
-/// `Some(Evaluating)` while it runs (or is parked on top-level await), `None`
-/// when it has not started.
-pub fn read_module_status(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Option(ModuleStatus) {
-  case read_entry(h, global_object, status_property(), spec) {
-    Some(JsString("evaluating")) -> Some(Evaluating)
-    Some(JsString("evaluated")) -> Some(Evaluated)
-    Some(_) | None -> None
+/// `Some(Evaluated)` once the body completed, `Some(Evaluating)` while it
+/// runs (or is parked on top-level await), `None` when it has not started.
+pub fn read_module_status(st: Agent, spec: String) -> Option(ModuleStatus) {
+  use v <- option.then(read_entry(st, status_property(), spec))
+  case classify(v) {
+    KStr("evaluating") -> Some(Evaluating)
+    KStr("evaluated") -> Some(Evaluated)
+    _ -> None
   }
 }
 
 pub fn write_module_status(
-  h: Heap(host),
-  global_object: Ref,
+  st: Agent,
   spec: String,
   status: ModuleStatus,
-) -> Heap(host) {
+) -> Agent {
   let encoded = case status {
     Evaluating -> "evaluating"
     Evaluated -> "evaluated"
   }
-  write_entry(h, global_object, status_property(), spec, JsString(encoded))
+  write_entry(st, status_property(), spec, mk_string(encoded))
 }
 
-/// Forget the module's status (back to "not started") — a failed body clears
+/// Forget the module's status (back to "not started"): a failed body clears
 /// its ~evaluating~ mark. The error cache, not the status, is what makes the
 /// failure sticky.
-pub fn clear_module_status(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Heap(host) {
-  clear_entry(h, global_object, status_property(), spec)
+pub fn clear_module_status(st: Agent, spec: String) -> Agent {
+  clear_entry(st, status_property(), spec)
 }
 
 // =============================================================================
-// Errors — the sticky evaluation error of a module record
+// Errors: the sticky evaluation error of a module record
 // =============================================================================
 
 /// The value the module's evaluation threw, if it threw. Presence is decided
-/// by the cache KEY existing, never by inspecting the stored value — so a
-/// module whose top level did `throw undefined` reads back as
-/// `Some(JsUndefined)`, a cached error to rethrow, not as "no error".
-pub fn read_module_error(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Option(JsValue) {
-  read_entry(h, global_object, error_cache_property(), spec)
+/// by the cache KEY existing, never by inspecting the stored value.
+pub fn read_module_error(st: Agent, spec: String) -> Option(JsVal) {
+  read_entry(st, error_cache_property(), spec)
 }
 
 /// Record the value the module's evaluation threw. Every later import or
 /// deferred-namespace trigger of `spec` rethrows exactly this value.
-pub fn write_module_error(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-  err: JsValue,
-) -> Heap(host) {
-  write_entry(h, global_object, error_cache_property(), spec, err)
+pub fn write_module_error(st: Agent, spec: String, err: JsVal) -> Agent {
+  write_entry(st, error_cache_property(), spec, err)
 }
 
 // =============================================================================
-// Namespaces — Module Namespace Exotic Objects (§10.4.6)
+// Namespaces: Module Namespace Exotic Objects (§10.4.6)
 // =============================================================================
 
 /// The module's registered Module Namespace Exotic Object, if any.
-pub fn read_namespace(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Option(Ref) {
-  read_object_entry(h, global_object, namespace_cache_property(), spec)
+pub fn read_namespace(st: Agent, spec: String) -> Option(Handle) {
+  read_object_entry(st, namespace_cache_property(), spec)
 }
 
-/// Register the module's Module Namespace Exotic Object so later imports
-/// (static or dynamic) resolve to the same module record (§16.2.1.8).
-pub fn write_namespace(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-  namespace: Ref,
-) -> Heap(host) {
-  write_entry(
-    h,
-    global_object,
-    namespace_cache_property(),
-    spec,
-    JsObject(namespace),
-  )
+/// Register the module's namespace so later imports (static or dynamic)
+/// resolve to the same module record (§16.2.1.8).
+pub fn write_namespace(st: Agent, spec: String, namespace: Handle) -> Agent {
+  write_entry(st, namespace_cache_property(), spec, mk_object(namespace))
 }
 
-/// Roll back a namespace registration for a module whose body never
-/// completed — it may be (re-)evaluated by a later import. Private: the only
-/// blessed rollback is `clear_module_registrations`, which drops every
-/// registration together.
-fn clear_namespace(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Heap(host) {
-  clear_entry(h, global_object, namespace_cache_property(), spec)
+fn clear_namespace(st: Agent, spec: String) -> Agent {
+  clear_entry(st, namespace_cache_property(), spec)
 }
 
 /// The module's registered Deferred Module Namespace, if any.
-pub fn read_deferred_namespace(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Option(Ref) {
-  read_object_entry(h, global_object, deferred_cache_property(), spec)
+pub fn read_deferred_namespace(st: Agent, spec: String) -> Option(Handle) {
+  read_object_entry(st, deferred_cache_property(), spec)
 }
 
 /// Register the module's Deferred Module Namespace: `import defer` /
 /// `import.defer()` of the same module must yield the identical object.
 pub fn write_deferred_namespace(
-  h: Heap(host),
-  global_object: Ref,
+  st: Agent,
   spec: String,
-  namespace: Ref,
-) -> Heap(host) {
-  write_entry(
-    h,
-    global_object,
-    deferred_cache_property(),
-    spec,
-    JsObject(namespace),
-  )
+  namespace: Handle,
+) -> Agent {
+  write_entry(st, deferred_cache_property(), spec, mk_object(namespace))
 }
 
-/// Roll back a deferred-namespace registration for a module whose body never
-/// completed — its exports would read uninitialized cells, and a later
-/// `import defer` must build a fresh namespace over a re-evaluated module.
-/// Private for the same reason as `clear_namespace`.
-fn clear_deferred_namespace(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Heap(host) {
-  clear_entry(h, global_object, deferred_cache_property(), spec)
+fn clear_deferred_namespace(st: Agent, spec: String) -> Agent {
+  clear_entry(st, deferred_cache_property(), spec)
 }
 
 // =============================================================================
-// Pending — in-flight top-level-await namespace promises
+// Pending: in-flight top-level-await namespace promises
 // =============================================================================
 
-/// The in-flight namespace promise of a module parked on top-level await, if
-/// one is registered. A re-import of an ~evaluating-async~ module returns
-/// this same promise (Evaluate() step 4 — [[TopLevelCapability]]).
-pub fn read_pending_promise(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Option(Ref) {
-  read_object_entry(h, global_object, pending_cache_property(), spec)
+/// The in-flight namespace promise of a module parked on top-level await. A
+/// re-import of an ~evaluating-async~ module returns this same promise
+/// (Evaluate() step 4, [[TopLevelCapability]]).
+pub fn read_pending_promise(st: Agent, spec: String) -> Option(Handle) {
+  read_object_entry(st, pending_cache_property(), spec)
 }
 
 pub fn write_pending_promise(
-  h: Heap(host),
-  global_object: Ref,
+  st: Agent,
   spec: String,
-  promise_ref: Ref,
-) -> Heap(host) {
-  write_entry(
-    h,
-    global_object,
-    pending_cache_property(),
-    spec,
-    JsObject(promise_ref),
-  )
+  promise: Handle,
+) -> Agent {
+  write_entry(st, pending_cache_property(), spec, mk_object(promise))
 }
 
-/// Drop the in-flight promise once the module's evaluation settled — future
-/// imports read the namespace or error cache instead.
-pub fn clear_pending_promise(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Heap(host) {
-  clear_entry(h, global_object, pending_cache_property(), spec)
+/// Drop the in-flight promise once the module's evaluation settled.
+pub fn clear_pending_promise(st: Agent, spec: String) -> Agent {
+  clear_entry(st, pending_cache_property(), spec)
 }
 
 // =============================================================================
-// The combined view — one precedence ladder over all five caches
+// The combined view: one precedence ladder over all five caches
 // =============================================================================
 
-/// Everything the caches say about one module, as ONE value with the
-/// precedence rules baked in. Both dynamic-import hook arms (`import()` and
-/// `import.defer()`) read the registry through this, so they cannot grow two
-/// subtly different ladders over the same five caches.
+/// Everything the caches say about one module, with the precedence rules
+/// baked in. Both dynamic-import arms (`import()` and `import.defer()`) read
+/// the registry through this.
 ///
 /// Precedence, highest first:
-///   1. the sticky evaluation error (§16.2.1.5.3) — a namespace may have been
+///   1. the sticky evaluation error (§16.2.1.5.3): a namespace may have been
 ///      pre-published before the body threw, so the error must win;
-///   2. the in-flight top-level-await promise (Evaluate() step 4) — a re-import
+///   2. the in-flight top-level-await promise (Evaluate() step 4): a re-import
 ///      chains onto the same evaluation instead of re-running the body;
 ///   3. the module namespace, split by whether the body has started.
 ///
 /// The Deferred Module Namespace rides along on every state that can have one:
-/// its identity is per module record ([[DeferredNamespace]]) and is valid
-/// whatever the body's status, so an `import.defer()` can hand it back without
-/// re-deriving the ladder.
+/// its identity is per module record and valid whatever the body's status.
 pub type CacheState {
   /// The module's evaluation threw; every later import rethrows this value.
-  Failed(error: JsValue)
+  Failed(error: JsVal)
   /// The body is parked on top-level await; `promise` is its in-flight
   /// namespace promise.
-  Pending(promise: Ref, deferred: Option(Ref))
-  /// The body has started (it is running, parked, or completed) — an eager
-  /// import must NOT run it again and resolves with `namespace`.
-  Started(namespace: Ref, deferred: Option(Ref))
-  /// Linked (so the namespace exists) but the body never started — an eager
-  /// import still has to evaluate it. This is what an earlier `import.defer()`
-  /// leaves behind.
-  LinkedOnly(namespace: Ref, deferred: Option(Ref))
-  /// No namespace registered. `deferred` is `None` in every reachable case (a
-  /// deferred namespace is only ever registered alongside a namespace, and
-  /// `clear_module_registrations` drops both together); it is carried anyway so
-  /// this type is a LOSSLESS view of the caches rather than one that quietly
-  /// forgets an entry.
-  Absent(deferred: Option(Ref))
+  Pending(promise: Handle, deferred: Option(Handle))
+  /// The body has started (running, parked, or completed): an eager import
+  /// must NOT run it again and resolves with `namespace`.
+  Started(namespace: Handle, deferred: Option(Handle))
+  /// Linked (so the namespace exists) but the body never started: an eager
+  /// import still has to evaluate it. What an earlier `import.defer()` leaves.
+  LinkedOnly(namespace: Handle, deferred: Option(Handle))
+  /// No namespace registered.
+  Absent(deferred: Option(Handle))
 }
 
-/// Everything the five caches say about `spec`, collapsed to one `CacheState`.
-pub fn read_cache_state(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> CacheState {
-  case read_module_error(h, global_object, spec) {
+pub fn read_cache_state(st: Agent, spec: String) -> CacheState {
+  case read_module_error(st, spec) {
     Some(error) -> Failed(error:)
     None -> {
-      let deferred = read_deferred_namespace(h, global_object, spec)
-      case read_pending_promise(h, global_object, spec) {
-        Some(promise) -> Pending(promise:, deferred:)
-        None ->
-          case read_namespace(h, global_object, spec) {
-            None -> Absent(deferred:)
-            Some(namespace) ->
-              case read_module_status(h, global_object, spec) {
-                Some(Evaluating) | Some(Evaluated) ->
-                  Started(namespace:, deferred:)
-                None -> LinkedOnly(namespace:, deferred:)
-              }
+      let deferred = read_deferred_namespace(st, spec)
+      case read_pending_promise(st, spec), read_namespace(st, spec) {
+        Some(promise), _ -> Pending(promise:, deferred:)
+        None, None -> Absent(deferred:)
+        None, Some(namespace) ->
+          case read_module_status(st, spec) {
+            Some(Evaluating) | Some(Evaluated) -> Started(namespace:, deferred:)
+            None -> LinkedOnly(namespace:, deferred:)
           }
       }
     }
@@ -349,139 +273,140 @@ pub fn read_cache_state(
 // Whole-module rollback
 // =============================================================================
 
-/// Un-register a module whose body never completed: the registrations a bundle
-/// publishes for it (status, namespace, deferred namespace) are dropped
-/// together, so a later import re-links and re-evaluates it from scratch. The
-/// single counterpart to registration — a partially rolled-back module (say,
-/// namespace cleared but the deferred namespace still live over uninitialized
-/// cells) is not expressible.
+/// Un-register a module whose body never completed: status, namespace and
+/// deferred namespace are dropped together, so a later import re-links and
+/// re-evaluates it from scratch.
 ///
-/// The error cache is deliberately untouched: an evaluation error is sticky
-/// (§16.2.1.5.3) and must be rethrown, not re-run.
-///
-/// The in-flight promise is deliberately untouched too: a module parked on top-
-/// level await must keep handing back the same promise (§16.2.1.8), and its
-/// %FinishDynamicImport% continuation owns the settle-time cleanup. Dropping it
-/// here would let a later `import()` re-link and re-run a body that is still
-/// running, executing its side effects twice.
-pub fn clear_module_registrations(
-  h: Heap(host),
-  global_object: Ref,
-  spec: String,
-) -> Heap(host) {
-  h
-  |> clear_module_status(global_object, spec)
-  |> clear_namespace(global_object, spec)
-  |> clear_deferred_namespace(global_object, spec)
+/// The error cache is untouched: an evaluation error is sticky (§16.2.1.5.3).
+/// The in-flight promise is untouched too: a module parked on top-level await
+/// keeps handing back the same promise (§16.2.1.8), and its
+/// %FinishDynamicImport% continuation owns the settle-time cleanup.
+pub fn clear_module_registrations(st: Agent, spec: String) -> Agent {
+  st
+  |> clear_module_status(spec)
+  |> clear_namespace(spec)
+  |> clear_deferred_namespace(spec)
 }
 
 // =============================================================================
 // The hidden-cache protocol (private)
 // =============================================================================
 
-/// Read `key` off the hidden cache object `property` on the global. `Some` iff
-/// the cache object exists AND owns the key (whatever value it holds) — which
-/// is exactly "registered", because `clear_entry` DELETES the key rather than
-/// overwriting it with a sentinel.
-fn read_entry(
-  h: Heap(host),
-  global_object: Ref,
-  property: PropertyKey,
-  key: String,
-) -> Option(JsValue) {
-  case object.get_own_property(h, global_object, property) {
-    Some(DataProperty(value: JsObject(cache_ref), ..)) ->
-      case object.get_own_property(h, cache_ref, Named(key)) {
-        Some(DataProperty(value: cached, ..)) -> Some(cached)
+/// The hidden cache object `property` on the global, if it exists yet.
+fn cache_object(st: Agent, property: PropertyKey) -> Option(Handle) {
+  case
+    rt_obj.t_ordinary_own_property(
+      st,
+      st.realm.global_object,
+      StringKey(property),
+    )
+  {
+    Some(DataProperty(value:, ..)) ->
+      case classify(value) {
+        KHandle(h) -> Some(h)
         _ -> None
       }
     _ -> None
   }
 }
 
-/// `read_entry` narrowed to entries holding an object — the shape of the
-/// namespace / deferred / pending caches. Only `write_*` fills these caches and
-/// each writes a `JsObject`, so the non-object arm is unreachable; it exists to
-/// keep the match total, not to tolerate a sentinel.
+/// Read `key` off the hidden cache object `property`. `Some` iff the cache
+/// object exists AND owns the key (whatever value it holds), which is exactly
+/// "registered": `clear_entry` DELETES the key rather than overwriting it.
+fn read_entry(st: Agent, property: PropertyKey, key: String) -> Option(JsVal) {
+  use cache <- option.then(cache_object(st, property))
+  case rt_obj.t_ordinary_own_property(st, cache, StringKey(Named(key))) {
+    Some(DataProperty(value:, ..)) -> Some(value)
+    _ -> None
+  }
+}
+
+/// `read_entry` narrowed to entries holding an object: the shape of the
+/// namespace / deferred / pending caches. Only `write_*` fills these caches
+/// and each writes an object, so the non-object arm is unreachable; it keeps
+/// the match total.
 fn read_object_entry(
-  h: Heap(host),
-  global_object: Ref,
+  st: Agent,
   property: PropertyKey,
   key: String,
-) -> Option(Ref) {
-  case read_entry(h, global_object, property, key) {
-    Some(JsObject(ref)) -> Some(ref)
-    Some(_) | None -> None
+) -> Option(Handle) {
+  use v <- option.then(read_entry(st, property, key))
+  case classify(v) {
+    KHandle(h) -> Some(h)
+    _ -> None
   }
 }
 
 /// Write `key` → `val` into the hidden cache object `property` on the global,
-/// creating the cache object on first use.
-///
-/// Both writes go through the TOTAL define path (`define_method_property`),
-/// never `set_property`: an ordinary [[Set]] returns a success Bool that a
-/// caller can drop on the floor, and a refused registry write must not be able
-/// to pass silently.
+/// creating the (null-prototype) cache object on first use.
 fn write_entry(
-  h: Heap(host),
-  global_object: Ref,
+  st: Agent,
   property: PropertyKey,
   key: String,
-  val: JsValue,
-) -> Heap(host) {
-  let #(h, cache_ref) = case
-    object.get_own_property(h, global_object, property)
-  {
-    Some(DataProperty(value: JsObject(cache_ref), ..)) -> #(h, cache_ref)
-    _ -> {
-      let #(h, cache_ref) =
-        heap.alloc(
-          h,
-          ObjectSlot(
-            kind: OrdinaryObject,
-            properties: dict.new(),
-            elements: elements.new(),
-            prototype: None,
-            symbol_properties: [],
-            extensible: True,
-          ),
-        )
-      let h =
-        object.define_method_property(
-          h,
-          global_object,
-          property,
-          JsObject(cache_ref),
-        )
-      #(h, cache_ref)
+  val: JsVal,
+) -> Agent {
+  let #(cache, st) = case cache_object(st, property) {
+    Some(cache) -> #(cache, st)
+    None -> {
+      let #(cache, st) = rt_obj.t_new_object(st, None)
+      let st =
+        put_hidden_slot(st, st.realm.global_object, property, mk_object(cache))
+      #(cache, st)
     }
   }
-  object.define_method_property(h, cache_ref, Named(key), val)
+  put_hidden_slot(st, cache, Named(key), val)
 }
 
-/// Un-register `key` from the hidden cache object `property` on the global.
-///
-/// Every cache clears the SAME way — by deleting the key — so "absent" has one
-/// meaning (`read_entry` returns `None`) rather than two, and no reader has to
-/// recognise a sentinel value as secretly meaning "not registered". `write_entry`
-/// defines cache entries as configurable data properties on an ordinary object,
-/// so [[Delete]] cannot refuse: a `False` here is a broken invariant, not a case
-/// to swallow.
-fn clear_entry(
-  h: Heap(host),
-  global_object: Ref,
-  property: PropertyKey,
-  key: String,
-) -> Heap(host) {
-  case object.get_own_property(h, global_object, property) {
-    Some(DataProperty(value: JsObject(cache_ref), ..)) -> {
-      let #(h, deleted) = object.delete_property(h, cache_ref, Named(key))
+/// Install (or replace) `key` as a raw own data slot of `target`, bypassing
+/// [[DefineOwnProperty]]: like a class private element, a registry slot is
+/// engine bookkeeping invisible to integrity levels, so a guest that froze or
+/// sealed `globalThis` cannot make the loader refuse to record its state.
+fn put_hidden_slot(
+  st: Agent,
+  target: Handle,
+  key: PropertyKey,
+  val: JsVal,
+) -> Agent {
+  let st = rt_obj.devolve(st, target)
+  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  use slot <- rt_store.t_cell_update(st, target)
+  case slot {
+    SObject(props:, ..) ->
+      SObject(
+        ..slot,
+        props: dict.insert(
+          props,
+          key,
+          DataProperty(
+            value: val,
+            writable: True,
+            enumerable: False,
+            configurable: True,
+            seq:,
+          ),
+        ),
+      )
+    // `devolve` left an object cell an `SObject`; the global and the cache
+    // objects are never data cells.
+    _ -> panic as "arc/module/registry: hidden slot target is not an object"
+  }
+}
+
+/// Un-register `key` from the hidden cache object `property`. Every cache
+/// clears by deleting the key, so "absent" has one meaning. Entries are
+/// configurable data properties on an ordinary object, so [[Delete]] cannot
+/// refuse: `False` is a broken invariant.
+fn clear_entry(st: Agent, property: PropertyKey, key: String) -> Agent {
+  case cache_object(st, property) {
+    // The cache object does not exist yet, so nothing is registered under it.
+    None -> st
+    Some(cache) -> {
+      let #(deleted, st) =
+        rt_obj.t_delete_prop(st, cache, StringKey(Named(key)))
       case deleted {
-        True -> h
+        True -> st
         False -> panic as "arc/module/registry: cache entry refused deletion"
       }
     }
-    // The cache object does not exist yet, so nothing is registered under it.
-    _ -> h
   }
 }

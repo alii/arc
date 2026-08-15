@@ -1,6 +1,6 @@
 %% CLI-only FFI: stdin and argv. Bound exclusively by src/arc.gleam (the
-%% REPL / `arc <file>` entry point). Nothing under src/arc/vm/ may touch
-%% stdin or the command line — the VM is an embeddable library.
+%% REPL / `arc <file>` entry point). Nothing in the engine may touch stdin
+%% or the command line: it is an embeddable library.
 -module(arc_cli_ffi).
 -export([read_line/1]).
 -export([get_script_args/0]).

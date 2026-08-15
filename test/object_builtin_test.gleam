@@ -1,5 +1,4 @@
-import arc/engine.{Returned}
-import arc/vm/value.{JsString}
+import arc/engine.{type JsValueKind, JsString, Returned}
 
 // ----------------------------------------------------------------------------
 // Object builtins that funnel result properties through
@@ -8,9 +7,9 @@ import arc/vm/value.{JsString}
 // ----------------------------------------------------------------------------
 
 /// Helper: eval on a fresh engine, assert normal completion, return the value.
-fn eval_js(source: String) -> value.JsValue {
+fn eval_js(source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  value
+  engine.classify(value)
 }
 
 pub fn group_by_keys_are_enumerable_test() {

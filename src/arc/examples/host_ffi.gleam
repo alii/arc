@@ -2,9 +2,10 @@
 ////
 //// Run with: gleam run -m arc/examples/host_ffi
 
-import arc/engine.{Returned}
+import arc/engine.{JsString, Returned}
 import arc/host
-import arc/vm/value.{JsString, JsUndefined}
+import arc/rt/inspect as rt_inspect
+import arc/rt/types.{JInt, mk_number, mk_string, mk_undefined}
 import gleam/io
 import gleam/list
 import gleam/string
@@ -29,14 +30,14 @@ pub fn main() -> Nil {
   Nil
 }
 
-fn print(args, _this, s) {
-  io.println(list.map(args, display) |> string.join(" "))
-  #(s, Ok(JsUndefined))
+fn print(args, _this, s: host.State(Nil)) {
+  io.println(list.map(args, display(s, _)) |> string.join(" "))
+  #(s, Ok(mk_undefined()))
 }
 
 fn uppercase(args, _this, s) {
   use str, s <- host.validate_string(s, host.first_arg(args), "str")
-  #(s, Ok(JsString(string.uppercase(str))))
+  #(s, Ok(mk_string(string.uppercase(str))))
 }
 
 fn map_range(args, _this, s) {
@@ -51,17 +52,17 @@ fn map_range_loop(s, cb, i, n, acc) {
       #(s, Ok(arr))
     }
     False -> {
-      use r, s <- host.try_call(s, cb, "callback", JsUndefined, [
-        value.from_int(i),
+      use r, s <- host.try_call(s, cb, "callback", mk_undefined(), [
+        mk_number(JInt(i)),
       ])
       map_range_loop(s, cb, i + 1, n, [r, ..acc])
     }
   }
 }
 
-fn display(v) {
-  case v {
-    JsString(s) -> s
-    _ -> string.inspect(v)
+fn display(s: host.State(Nil), v) {
+  case engine.classify(v) {
+    JsString(str) -> str
+    _ -> rt_inspect.inspect(s.agent, v)
   }
 }

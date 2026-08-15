@@ -19,13 +19,84 @@
 /// Nested functions are printed after their parent, depth-first, labelled
 /// with their path in the function tree (`[0]`, `[0.1]`, ...) — the same
 /// index `MakeClosure` refers to.
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/opcode.{type Op}
-import arc/vm/value.{type FuncTemplate, type JsValue}
+import arc/bytecode/opcode.{type Op}
+import arc/compiler
+import arc/esm
+import arc/internal/tuple_array.{type TupleArray}
+import arc/parser
+import arc/rt/bytecode.{type FuncTemplate}
+import arc/rt/types.{type JsVal}
+import arc/rt/val
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
+
+/// Which goal symbol a source is parsed and compiled under. Each has its own
+/// parse and compile entry point in `parser`/`compiler`; this names the
+/// choice so a caller states it once.
+pub type Goal {
+  /// A classic script.
+  Script
+  /// An ES module.
+  Module
+  /// One REPL input: a script whose top-level `let`/`const`/`class` target
+  /// the persistent global lexical record, as `engine.repl_eval` runs it.
+  ReplInput
+}
+
+/// A source that never made it to bytecode. Nothing ran, so it renders with
+/// no engine in hand.
+pub type SourceError {
+  Syntax(parser.ParseError)
+  Compile(compiler.CompileError)
+}
+
+pub fn format_source_error(err: SourceError) -> String {
+  case err {
+    Syntax(parse_err) ->
+      "SyntaxError: " <> parser.parse_error_to_string(parse_err)
+    Compile(compile_err) ->
+      "compile error: " <> compiler.error_message(compile_err)
+  }
+}
+
+/// Parse and compile `source` under `goal`, without running it.
+pub fn compile(
+  goal: Goal,
+  source: String,
+) -> Result(FuncTemplate, SourceError) {
+  case goal {
+    Script -> {
+      use #(body, sb) <- result.try(
+        parser.parse_script(source) |> result.map_error(Syntax),
+      )
+      compiler.compile(body, sb) |> result.map_error(Compile)
+    }
+    ReplInput -> {
+      use #(body, sb) <- result.try(
+        parser.parse_script(source) |> result.map_error(Syntax),
+      )
+      compiler.compile_repl(body, sb) |> result.map_error(Compile)
+    }
+    Module -> {
+      use #(items, sb) <- result.try(
+        parser.parse_module(source) |> result.map_error(Syntax),
+      )
+      use compiled <- result.map(
+        compiler.compile_module(items, sb, esm.analyze(items))
+        |> result.map_error(Compile),
+      )
+      compiled.template
+    }
+  }
+}
+
+/// Compile `source` under `goal` and disassemble the result.
+pub fn source(goal: Goal, source: String) -> Result(String, SourceError) {
+  compile(goal, source) |> result.map(disassemble)
+}
 
 /// Disassemble a compiled template (and, recursively, every function nested
 /// inside it) into one printable string.
@@ -140,26 +211,25 @@ fn resolve(
 }
 
 /// Compile-time constants are always primitives (the constant pool never
-/// holds object refs), so this stays pure — no Heap needed. Every variant is
+/// holds heap handles), so this stays pure — no store needed. Every kind is
 /// matched explicitly: a catch-all `string.inspect(other)` would render a
-/// `JsBigInt` (which the emitter really does intern) as Gleam internals.
-/// `string.inspect` on the String arm gives JS-ish quoting/escaping for free.
-fn constant_to_string(constant: JsValue) -> String {
-  case constant {
-    value.JsString(text) -> string.inspect(text)
-    value.JsNumber(number) -> value.format_number(number)
-    value.JsBigInt(value.BigInt(n)) -> int.to_string(n) <> "n"
-    value.JsBool(True) -> "true"
-    value.JsBool(False) -> "false"
-    value.JsNull -> "null"
-    value.JsUndefined -> "undefined"
+/// bigint (which the emitter really does intern) as the raw wire term.
+/// `string.inspect` on the string arm gives JS-ish quoting/escaping for free.
+fn constant_to_string(constant: JsVal) -> String {
+  case types.classify(constant) {
+    types.KStr(text) -> string.inspect(text)
+    types.KNum(number) -> val.jsnum_to_string(number)
+    types.KBig(n) -> int.to_string(n) <> "n"
+    types.KBool(True) -> "true"
+    types.KBool(False) -> "false"
+    types.KNull -> "null"
+    types.KUndef -> "undefined"
     // The TDZ sentinel the emitter seeds `let`/`const` slots with.
-    value.JsUninitialized -> "<uninitialized>"
-    value.JsSymbol(id) ->
-      "Symbol(" <> option.unwrap(value.symbol_description(id), "") <> ")"
-    // Unreachable: nothing interns a heap ref in the constant pool. Marked
+    types.KTdz -> "<uninitialized>"
+    types.KSym(id) -> types.symbol_descriptive_string(id)
+    // Unreachable: nothing interns a heap handle in the constant pool. Marked
     // rather than crashed, since this is a debugging aid.
-    value.JsObject(_) -> "<object ref>"
+    types.KHandle(_) -> "<object ref>"
   }
 }
 

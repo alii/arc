@@ -496,7 +496,7 @@ pub type Expression {
   /// Internal-only — never produced by the parser. Synthesized by the
   /// compiler when lowering TaggedTemplateExpression: evaluates to the
   /// per-site cached template object (GetTemplateObject, §13.2.8.4).
-  /// `site` is a globally unique call-site id baked in at compile time.
+  /// `site` is the call site's index within the compilation unit.
   IntrinsicTemplateObject(span: Span, site: Int, quasis: List(TemplateQuasi))
 }
 

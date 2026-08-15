@@ -1,7 +1,7 @@
 %% Unicode property escape POLICY for JS RegExp \p{...} / \P{...}: which key a
 %% property name resolves to, and how it is rendered. Hand-written; the tables
 %% it reads are generated (arc_regex_prop_tables_ffi for the name aliases,
-%% arc_regex_uni17_ffi via arc_unicode_tables for the codepoint data).
+%% arc_regex_uni17_ffi for the codepoint data).
 %%
 %% Used by:
 %%  - the parser (via arc/parser/regex.gleam) to strictly validate property
@@ -213,7 +213,7 @@ pair_char_set(Name, Value) ->
     end.
 
 ranges_for(Key) ->
-    case arc_unicode_tables:decoded_ranges(Key) of
+    case arc_regex_uni17_ffi:ranges(Key) of
         none -> {error, no_exact_data};
         Ranges -> {ok, Ranges}
     end.
@@ -227,7 +227,7 @@ string_list(Name) ->
     case string_prop(Name) of
         false -> {error, unknown_property};
         true ->
-            case arc_unicode_tables:string_members(Name) of
+            case arc_regex_uni17_ffi:string_members(Name) of
                 none -> {error, no_exact_data};
                 Members -> {ok, Members}
             end
@@ -245,7 +245,7 @@ string_list(Name) ->
 %% The complement excludes the surrogate block: PCRE2 rejects surrogate
 %% codepoints in UTF patterns, and valid-UTF-8 subjects cannot contain them.
 expand(Key, Negated, InClass, PcreSupported, Fallback) ->
-    case arc_unicode_tables:decoded_ranges(Key) of
+    case arc_regex_uni17_ffi:ranges(Key) of
         none when PcreSupported -> {ok, Fallback};
         none -> error;
         Ranges ->

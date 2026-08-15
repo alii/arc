@@ -1,300 +1,361 @@
-import arc/engine.{Returned, Threw}
+import arc/compiler
 import arc/host
-import arc/vm/ops/coerce
-import arc/vm/state
-import arc/vm/value.{Finite, JsNumber, JsString, JsUndefined}
+import arc/interp/entry
+import arc/parser
+import arc/rt/async as rt_async
+import arc/rt/builtins as rt_builtins
+import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion}
+import arc/rt/inspect as rt_inspect
+import arc/rt/types.{
+  type Agent, type JsVal, JFloat, JInt, KBool, KNum, KStr, classify, mk_number,
+  mk_string, mk_undefined,
+}
+import arc/rt/val as rt_val
 import gleam/int
 import gleam/option
 import gleam/string
+import rt_helpers
 
-fn extract_error_message(eng, source) -> String {
-  let assert Ok(#(Returned(value: JsString(msg)), _)) =
-    engine.eval(eng, "try { " <> source <> " } catch (e) { e.message }")
-  msg
+/// A fresh linked agent as a host function's `State` sees it.
+fn new_state() -> host.State(host) {
+  rt_builtins.new_agent(rt_helpers.quiet_hooks())
+  |> entry.link
+  |> host.from_agent(host.new_key())
 }
 
-/// Engine with a single host fn `name` that passes its first argument to
+/// Run `source` as a script on the agent behind `s`, then drain microtasks
+/// (the engine's turn epilogue).
+fn run(s: host.State(host), source: String) -> #(Completion, Agent) {
+  let assert Ok(#(body, sb)) = parser.parse_script(source)
+    as { "parse failed: " <> source }
+  let assert Ok(template) = compiler.compile(body, sb)
+    as { "compile failed: " <> source }
+  let #(completion, st) = entry.run_script(s.agent, template)
+  #(completion, rt_async.drain(st))
+}
+
+fn eval_value(s: host.State(host), source: String) -> JsVal {
+  case run(s, source) {
+    #(NormalCompletion(v), _) -> v
+    #(ThrowCompletion(e), st) ->
+      panic as { source <> " threw " <> rt_inspect.inspect(st, e) }
+  }
+}
+
+fn eval_string(s: host.State(host), source: String) -> String {
+  let v = eval_value(s, source)
+  case classify(v) {
+    KStr(str) -> str
+    other -> panic as { source <> " gave " <> string.inspect(other) }
+  }
+}
+
+fn eval_number(s: host.State(host), source: String) -> Float {
+  let v = eval_value(s, source)
+  case classify(v) {
+    KNum(JInt(i)) -> int.to_float(i)
+    KNum(JFloat(f)) -> f
+    other -> panic as { source <> " gave " <> string.inspect(other) }
+  }
+}
+
+fn eval_bool(s: host.State(host), source: String) -> Bool {
+  let v = eval_value(s, source)
+  case classify(v) {
+    KBool(b) -> b
+    other -> panic as { source <> " gave " <> string.inspect(other) }
+  }
+}
+
+fn extract_error_message(s: host.State(host), source: String) -> String {
+  eval_string(s, "try { " <> source <> " } catch (e) { e.message }")
+}
+
+/// State with a single host fn `name` that passes its first argument to
 /// `validate`, returning `undefined` when called with no arguments.
-fn engine_with_validator(name, validate) {
-  engine.new()
-  |> engine.define_fn(name, 1, fn(args, _, s) {
+fn state_with_validator(name, validate) -> host.State(host) {
+  new_state()
+  |> host.define_fn(name, 1, fn(args, _, s) {
     case args {
       [v, ..] -> validate(v, s)
-      _ -> #(s, Ok(JsUndefined))
+      _ -> #(s, Ok(mk_undefined()))
     }
   })
-}
-
-fn eval_value(eng, source) {
-  let assert Ok(#(Returned(value:), _)) = engine.eval(eng, source)
-  value
 }
 
 // -- validate_string ---------------------------------------------------------
 
 pub fn validate_string_accepts_string_test() {
-  let eng =
-    engine_with_validator("upper", fn(v, s) {
+  let s =
+    state_with_validator("upper", fn(v, s) {
       use str, s <- host.validate_string(s, v, "input")
-      #(s, Ok(JsString(string.uppercase(str))))
+      #(s, Ok(mk_string(string.uppercase(str))))
     })
-  assert eval_value(eng, "upper('abc')") == JsString("ABC")
+  assert eval_string(s, "upper('abc')") == "ABC"
 }
 
 pub fn validate_string_rejects_number_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use _, s <- host.validate_string(s, v, "name")
-      #(s, Ok(JsUndefined))
+      #(s, Ok(mk_undefined()))
     })
-  assert extract_error_message(eng, "f(42)")
+  assert extract_error_message(s, "f(42)")
     == "The \"name\" argument must be of type string. Received type number"
 }
 
 pub fn validate_string_rejects_null_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use _, s <- host.validate_string(s, v, "name")
-      #(s, Ok(JsUndefined))
+      #(s, Ok(mk_undefined()))
     })
-  assert extract_error_message(eng, "f(null)")
+  assert extract_error_message(s, "f(null)")
     == "The \"name\" argument must be of type string. Received type object"
 }
 
 // -- validate_function -------------------------------------------------------
 
 pub fn validate_function_accepts_arrow_test() {
-  let eng =
-    engine_with_validator("callIt", fn(v, s) {
+  let s =
+    state_with_validator("callIt", fn(v, s) {
       use cb, s <- host.validate_function(s, v, "callback")
-      state.try_call(s, cb, JsUndefined, [], fn(r, s) { #(s, Ok(r)) })
+      host.try_call(s, cb, "callback", mk_undefined(), [], fn(r, s) {
+        #(s, Ok(r))
+      })
     })
-  assert eval_value(eng, "callIt(() => 42)") == JsNumber(Finite(42.0))
+  assert eval_number(s, "callIt(() => 42)") == 42.0
 }
 
 pub fn validate_function_rejects_string_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use _, s <- host.validate_function(s, v, "callback")
-      #(s, Ok(JsUndefined))
+      #(s, Ok(mk_undefined()))
     })
-  assert extract_error_message(eng, "f('nope')")
+  assert extract_error_message(s, "f('nope')")
     == "The \"callback\" argument must be of type function. Received type string"
 }
 
 pub fn validate_function_accepts_builtin_test() {
-  let eng =
-    engine_with_validator("check", fn(v, s) {
+  let s =
+    state_with_validator("check", fn(v, s) {
       use _, s <- host.validate_function(s, v, "fn")
-      #(s, Ok(JsString("ok")))
+      #(s, Ok(mk_string("ok")))
     })
-  assert eval_value(eng, "check(Math.abs)") == JsString("ok")
+  assert eval_string(s, "check(Math.abs)") == "ok"
 }
 
 // -- validate_integer --------------------------------------------------------
 
 pub fn validate_integer_accepts_in_range_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use n, s <- host.validate_integer(s, v, "port", 0, 65_535)
-      #(s, Ok(JsNumber(Finite(int.to_float(n)))))
+      #(s, Ok(mk_number(JInt(n))))
     })
-  assert eval_value(eng, "f(8080)") == JsNumber(Finite(8080.0))
+  assert eval_number(s, "f(8080)") == 8080.0
 }
 
 pub fn validate_integer_rejects_out_of_range_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use _, s <- host.validate_integer(s, v, "port", 0, 65_535)
-      #(s, Ok(JsUndefined))
+      #(s, Ok(mk_undefined()))
     })
-  assert extract_error_message(eng, "f(70000)")
+  assert extract_error_message(s, "f(70000)")
     == "The value of \"port\" is out of range. It must be >= 0 and <= 65535. Received 70000"
 }
 
 pub fn validate_integer_rejects_float_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use _, s <- host.validate_integer(s, v, "n", 0, 100)
-      #(s, Ok(JsUndefined))
+      #(s, Ok(mk_undefined()))
     })
   // A number that isn't an integer is a RANGE error, not a type error: the
   // type (number) is exactly right, the value isn't in the integer domain.
-  assert extract_error_message(eng, "f(3.14)")
+  assert extract_error_message(s, "f(3.14)")
     == "The value of \"n\" is out of range. It must be an integer. Received 3.14"
-  assert extract_error_message(eng, "f(NaN)")
+  assert extract_error_message(s, "f(NaN)")
     == "The value of \"n\" is out of range. It must be an integer. Received NaN"
-  assert extract_error_message(eng, "f(Infinity)")
+  assert extract_error_message(s, "f(Infinity)")
     == "The value of \"n\" is out of range. It must be an integer. Received Infinity"
-  assert eval_value(
-      eng,
+  assert eval_string(
+      s,
       "try { f(3.14) } catch (e) { e instanceof RangeError ? 'range' : 'other' }",
     )
-    == JsString("range")
+    == "range"
 }
 
 pub fn validate_integer_rejects_non_number_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use _, s <- host.validate_integer(s, v, "n", 0, 100)
-      #(s, Ok(JsUndefined))
+      #(s, Ok(mk_undefined()))
     })
-  assert extract_error_message(eng, "f('3')")
+  assert extract_error_message(s, "f('3')")
     == "The \"n\" argument must be of type integer. Received type string"
-  assert eval_value(
-      eng,
+  assert eval_string(
+      s,
       "try { f('3') } catch (e) { e instanceof TypeError ? 'type' : 'other' }",
     )
-    == JsString("type")
+    == "type"
 }
 
 pub fn validate_integer_range_error_is_rangeerror_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use _, s <- host.validate_integer(s, v, "n", 0, 10)
-      #(s, Ok(JsUndefined))
+      #(s, Ok(mk_undefined()))
     })
-  assert eval_value(
-      eng,
+  assert eval_string(
+      s,
       "try { f(99) } catch (e) { e instanceof RangeError ? 'range' : 'other' }",
     )
-    == JsString("range")
+    == "range"
 }
 
 // -- try_call ----------------------------------------------------------------
 
 pub fn try_call_invokes_callable_test() {
-  let eng =
-    engine.new()
-    |> engine.define_fn("apply", 2, fn(args, _, s) {
+  let s =
+    new_state()
+    |> host.define_fn("apply", 2, fn(args, _, s) {
       case args {
         [cb, x, ..] -> {
-          use result, s <- host.try_call(s, cb, "fn", JsUndefined, [x])
+          use result, s <- host.try_call(s, cb, "fn", mk_undefined(), [x])
           #(s, Ok(result))
         }
-        _ -> #(s, Ok(JsUndefined))
+        _ -> #(s, Ok(mk_undefined()))
       }
     })
-  assert eval_value(eng, "apply(x => x + 1, 9)") == JsNumber(Finite(10.0))
+  assert eval_number(s, "apply(x => x + 1, 9)") == 10.0
 }
 
 pub fn try_call_rejects_noncallable_with_arg_name_test() {
-  let eng =
-    engine.new()
-    |> engine.define_fn("apply", 2, fn(args, _, s) {
+  let s =
+    new_state()
+    |> host.define_fn("apply", 2, fn(args, _, s) {
       case args {
         [cb, x, ..] -> {
-          use result, s <- host.try_call(s, cb, "fn", JsUndefined, [x])
+          use result, s <- host.try_call(s, cb, "fn", mk_undefined(), [x])
           #(s, Ok(result))
         }
-        _ -> #(s, Ok(JsUndefined))
+        _ -> #(s, Ok(mk_undefined()))
       }
     })
-  assert extract_error_message(eng, "apply(42, 1)")
+  assert extract_error_message(s, "apply(42, 1)")
     == "The \"fn\" argument must be of type function. Received type number"
 }
 
 pub fn try_call_propagates_callback_throw_test() {
-  let eng =
-    engine_with_validator("apply", fn(cb, s) {
-      use result, s <- host.try_call(s, cb, "fn", JsUndefined, [])
+  let s =
+    state_with_validator("apply", fn(cb, s) {
+      use result, s <- host.try_call(s, cb, "fn", mk_undefined(), [])
       #(s, Ok(result))
     })
-  assert eval_value(
-      eng,
+  assert eval_string(
+      s,
       "try { apply(() => { throw new Error('from cb') }) } catch (e) { e.message }",
     )
-    == JsString("from cb")
+    == "from cb"
 }
 
 // -- validate_boolean --------------------------------------------------------
 
 pub fn validate_boolean_accepts_true_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use b, s <- host.validate_boolean(s, v, "flag")
       #(
         s,
         Ok(
-          JsString(case b {
+          mk_string(case b {
             True -> "yes"
             False -> "no"
           }),
         ),
       )
     })
-  assert eval_value(eng, "f(true)") == JsString("yes")
+  assert eval_string(s, "f(true)") == "yes"
 }
 
 pub fn validate_boolean_rejects_truthy_test() {
-  let eng =
-    engine_with_validator("f", fn(v, s) {
+  let s =
+    state_with_validator("f", fn(v, s) {
       use _, s <- host.validate_boolean(s, v, "flag")
-      #(s, Ok(JsUndefined))
+      #(s, Ok(mk_undefined()))
     })
-  assert extract_error_message(eng, "f(1)")
+  assert extract_error_message(s, "f(1)")
     == "The \"flag\" argument must be of type boolean. Received type number"
 }
 
 // -- host.array --------------------------------------------------------------
 
 pub fn array_builds_real_js_array_test() {
-  let eng =
-    engine_with_validator("triple", fn(v, s) {
+  let s =
+    state_with_validator("triple", fn(v, s) {
       let #(s, arr) = host.array(s, [v, v, v])
       #(s, Ok(arr))
     })
-  assert eval_value(eng, "Array.isArray(triple(7)) && triple(7).join('-')")
-    == JsString("7-7-7")
+  assert eval_string(s, "Array.isArray(triple(7)) && triple(7).join('-')")
+    == "7-7-7"
 }
 
 // -- host.object -------------------------------------------------------------
 
 pub fn object_builds_plain_object_test() {
-  let eng =
-    engine.new()
-    |> engine.define_fn("point", 2, fn(args, _, s) {
+  let s =
+    new_state()
+    |> host.define_fn("point", 2, fn(args, _, s) {
       case args {
         [x, y, ..] -> {
           let #(s, obj) = host.object(s, [#("x", x), #("y", y)])
           #(s, Ok(obj))
         }
-        _ -> #(s, Ok(JsUndefined))
+        _ -> #(s, Ok(mk_undefined()))
       }
     })
-  assert eval_value(eng, "let p = point(3, 4); p.x + ',' + p.y")
-    == JsString("3,4")
+  assert eval_string(s, "let p = point(3, 4); p.x + ',' + p.y") == "3,4"
 }
 
 // -- to_string (coercing) ----------------------------------------------------
+//
+// ToString on the shared runtime raises its throw; out of a host function the
+// raise propagates to the JS caller like any other abrupt completion.
+
+fn to_string(s: host.State(host), v: JsVal) -> #(String, host.State(host)) {
+  let #(str, st) = rt_val.t_to_string(s.agent, v)
+  #(str, host.State(..s, agent: st))
+}
 
 pub fn to_string_coerces_number_test() {
-  let eng =
-    engine_with_validator("str", fn(v, s) {
-      use str, s <- coerce.try_to_string(s, v)
-      #(s, Ok(JsString("got:" <> str)))
+  let s =
+    state_with_validator("str", fn(v, s) {
+      let #(str, s) = to_string(s, v)
+      #(s, Ok(mk_string("got:" <> str)))
     })
-  assert eval_value(eng, "str(42)") == JsString("got:42")
+  assert eval_string(s, "str(42)") == "got:42"
 }
 
 pub fn to_string_calls_user_tostring_test() {
-  let eng =
-    engine_with_validator("str", fn(v, s) {
-      use str, s <- coerce.try_to_string(s, v)
-      #(s, Ok(JsString(str)))
+  let s =
+    state_with_validator("str", fn(v, s) {
+      let #(str, s) = to_string(s, v)
+      #(s, Ok(mk_string(str)))
     })
-  assert eval_value(eng, "str({ toString() { return 'custom' } })")
-    == JsString("custom")
+  assert eval_string(s, "str({ toString() { return 'custom' } })") == "custom"
 }
 
 pub fn to_string_propagates_throw_test() {
-  let eng =
-    engine_with_validator("str", fn(v, s) {
-      use str, s <- coerce.try_to_string(s, v)
-      #(s, Ok(JsString(str)))
+  let s =
+    state_with_validator("str", fn(v, s) {
+      let #(str, s) = to_string(s, v)
+      #(s, Ok(mk_string(str)))
     })
-  let assert Ok(#(Threw(_), _)) =
-    engine.eval(eng, "str({ toString() { throw new Error('nope') } })")
+  let assert #(ThrowCompletion(_), _) =
+    run(s, "str({ toString() { throw new Error('nope') } })")
 }
 
 // -- Opaque host values (HostObject) -----------------------------------------
@@ -309,25 +370,25 @@ type MyHost {
 }
 
 pub fn host_object_typed_roundtrip_test() {
-  let eng =
-    engine.new()
-    |> engine.define_fn("makePid", 0, fn(_args, _this, s) {
+  let s: host.State(MyHost) =
+    new_state()
+    |> host.define_fn("makePid", 0, fn(_args, _this, s) {
       let #(s, val) = host.alloc_host_object(s, Pid(42), option.None)
       #(s, Ok(val))
     })
-    |> engine.define_fn("readHost", 1, fn(args, _this, s) {
+    |> host.define_fn("readHost", 1, fn(args, _this, s) {
       case host.read_host(s, host.first_arg(args)) {
         // typed, exhaustive — no Dynamic, no decode, no coerce
-        option.Some(Pid(n)) -> #(s, Ok(JsNumber(Finite(int.to_float(n)))))
-        option.Some(Socket(name)) -> #(s, Ok(JsString("socket:" <> name)))
-        option.None -> #(s, Ok(JsString("not-a-host-object")))
+        option.Some(Pid(n)) -> #(s, Ok(mk_number(JInt(n))))
+        option.Some(Socket(name)) -> #(s, Ok(mk_string("socket:" <> name)))
+        option.None -> #(s, Ok(mk_string("not-a-host-object")))
       }
     })
 
   // round-trips the embedder's typed value through JS and back
-  assert eval_value(eng, "readHost(makePid())") == JsNumber(Finite(42.0))
+  assert eval_number(s, "readHost(makePid())") == 42.0
   // a plain JS object is not a host object
-  assert eval_value(eng, "readHost({})") == JsString("not-a-host-object")
+  assert eval_string(s, "readHost({})") == "not-a-host-object"
   // the host object is a real, identity-comparable JS object
-  assert eval_value(eng, "var p = makePid(); p === p") == value.JsBool(True)
+  assert eval_bool(s, "var p = makePid(); p === p") == True
 }

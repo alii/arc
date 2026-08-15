@@ -2,14 +2,11 @@
 
 -export([init_stats/0, record_pass/0, record_fail/0, record_skip/0,
          get_stats/0, record_pass_path/1, get_pass_paths/0,
-         list_test_files/1,
          init_config/3, get_update_mode/0, get_has_snapshot/0, get_fail_log/0,
          init_snapshot_set/1, snapshot_contains/1,
          cache_get/1, cache_put/2,
-         spawn_agent/1, agent_children/0, agent_parent/0,
-         send_broadcast/2, await_acks/1, await_broadcast_or_notify/0,
-         send_report/2, take_report/0,
-         await_notify/2, deliver_wakes/1, wait_for_notify/1]).
+         spawn_agent/1, broadcast/2, await_broadcast_or_wake/1,
+         send_report/2, take_report/0]).
 
 %% ETS-backed atomic counters for pass/fail/skip across parallel tests.
 
@@ -37,14 +34,6 @@ record_pass_path(Path) ->
 
 get_pass_paths() ->
     lists:sort([P || {P} <- ets:tab2list(test262_passes)]).
-
-%% Fast recursive listing of .js test files under Dir.
-list_test_files(Dir) ->
-    DirStr = binary_to_list(Dir),
-    AllJs = filelib:wildcard("**/*.js", DirStr),
-    Filtered = lists:sort([list_to_binary(F) || F <- AllJs,
-                           string:find(F, "_FIXTURE") =:= nomatch]),
-    Filtered.
 
 %% --- Config stored in ETS so run_file can access it ---
 
@@ -94,47 +83,49 @@ cache_put(Key, Value) ->
 %% --- $262.agent — real BEAM child processes (harness host layer) ---
 %%
 %% Each $262.agent.start(script) spawns a genuine child process that boots a
-%% FRESH realm (own heap, own builtins, own globals) and runs the agent
+%% FRESH agent (own store, own intrinsics, own globals) and runs the agent
 %% script. Cross-agent communication:
 %%
-%%   parent -> child   {arc_agent_broadcast, Payload}
-%%   child  -> parent  {arc_agent_ack, ChildPid}      (on broadcast receipt)
-%%   child  -> parent  {arc_agent_report, Utf8Binary} ($262.agent.report)
+%%   parent -> child   {arc_agent_broadcast, ParentPid, Ref, Payload}
+%%   child  -> parent  {arc_agent_ack, Ref}             (on broadcast receipt)
+%%   child  -> parent  {arc_agent_report, Utf8Binary}   ($262.agent.report)
 %%
-%% SharedArrayBuffer payloads carry the BufShared atomics ref (see
-%% arc_sab_ffi.erl) — atomics refs pass between processes BY REFERENCE, so
-%% the child's reconstructed SAB aliases the very same mutable cells as the
-%% parent's. That is what makes Atomics.* writes in an agent visible to the
-%% main agent and vice versa.
+%% A SharedArrayBuffer payload carries the buffer's storage after its block
+%% has been handed to an owner process (arc/rt/sab, arc_rt_sab_ffi): that
+%% storage is an ordinary pid, so the child's reconstructed SAB aliases the
+%% very same block as the parent's, and every Atomics read, write, wait and
+%% notify in one agent is a message to the one owner every other agent
+%% talks to.
 %%
-%% This lives in the test harness FFI, not under src/arc/vm/: agent
+%% This lives in the test harness FFI, not under src/: agent
 %% spawn/broadcast/ack/report is test262 HOST machinery (INTERPRETING.md),
-%% and its mailbox receives belong to the embedder layer — the same
-%% boundary as arc_beam_ffi.erl (see the contract in arc/host.gleam).
+%% and its mailbox receives belong to the embedder layer (see the contract
+%% in arc/host.gleam).
 %%
-%% Bookkeeping lives in the process dictionary, which is naturally scoped to
-%% the per-test worker process the test262 runner spawns:
-%%   arc_agent_children — pids of children this (parent) process started
-%%   arc_agent_parent   — set in a child: the pid that spawned it
+%% Nothing is remembered here between calls. The parent keeps the pids of
+%% the children it started in its own agent state (the Gleam side stores
+%% them on its $262.agent object) and hands them to broadcast/2; a child is
+%% handed its parent's pid as the argument of its body and threads it to
+%% await_broadcast_or_wake/1 and send_report/2.
 %%
 %% Liveness/cleanup:
-%%   * the parent monitors each child (spawn_monitor), so await_acks/1 can
-%%     treat a 'DOWN' as the ack a dead child will never send (a dead agent
-%%     has trivially "received" the broadcast in the only sense available);
+%%   * broadcast/2 monitors each child for the span of one broadcast, so a
+%%     'DOWN' stands in for the ack a dead child will never send (a dead
+%%     agent has trivially "received" the broadcast in the only sense
+%%     available);
 %%   * each child monitors its parent, so a child idling in
-%%     await_broadcast_or_notify/0 exits normally when the per-test worker
+%%     await_broadcast_or_wake/1 exits normally when the per-test worker
 %%     process goes away.
 
-%% Spawn a child agent process running Body (a 0-arity Gleam closure that
-%% boots the fresh realm, executes the agent script, and then loops in the
-%% broadcast loop). Registers the child in this process's children list.
+%% Spawn a child agent process running Body (a 1-arity Gleam closure given
+%% the parent's pid; it boots the fresh agent, executes the agent script,
+%% and then loops in the broadcast loop). Returns the child's pid.
 spawn_agent(Body) ->
     Parent = self(),
-    {Pid, _MRef} = erlang:spawn_monitor(fun() ->
-        erlang:put(arc_agent_parent, Parent),
+    spawn(fun() ->
         erlang:monitor(process, Parent),
         try
-            Body()
+            Body(Parent)
         catch
             Class:Reason:Stack ->
                 io:format(
@@ -143,66 +134,53 @@ spawn_agent(Body) ->
                     [Class, Reason, Stack]
                 )
         end
-    end),
-    erlang:put(arc_agent_children, agent_children() ++ [Pid]),
-    nil.
+    end).
 
-%% Children started by this process, in start order.
-agent_children() ->
-    case erlang:get(arc_agent_children) of
-        undefined -> [];
-        Pids -> Pids
-    end.
+%% Parent side: hand Payload to every child in Pids, then block until each
+%% has acked it. test262 INTERPRETING.md: "broadcast blocks until all agents
+%% have received". Children ack on RECEIPT (before invoking their
+%% receiveBroadcast callbacks), so a callback that blocks in Atomics.wait
+%% cannot deadlock broadcast. Each child is monitored for this one
+%% broadcast; the ack names that monitor ref, and a 'DOWN' on it counts as
+%% the ack the dead child can never send.
+broadcast(Pids, Payload) ->
+    Parent = self(),
+    Pending =
+        [begin
+             MRef = erlang:monitor(process, Pid),
+             Pid ! {arc_agent_broadcast, Parent, MRef, Payload},
+             MRef
+         end || Pid <- Pids],
+    await_acks(Pending).
 
-%% In a child: the spawning parent's pid. {error, nil} in the main agent.
-agent_parent() ->
-    case erlang:get(arc_agent_parent) of
-        undefined -> {error, nil};
-        Pid -> {ok, Pid}
-    end.
-
-%% Parent side: hand a broadcast payload to one child.
-send_broadcast(Pid, Payload) ->
-    Pid ! {arc_agent_broadcast, Payload},
-    nil.
-
-%% Parent side: block until every pid in Pids has acked the broadcast.
-%% test262 INTERPRETING.md: "broadcast blocks until all agents have received".
-%% Children ack on RECEIPT (before invoking their receiveBroadcast callbacks),
-%% so a callback that blocks in Atomics.wait cannot deadlock broadcast.
-%% A 'DOWN' for a pending pid counts as its ack (it can never receive), and
-%% the dead child is pruned so later broadcasts skip it.
 await_acks([]) ->
     nil;
-await_acks(Pids) ->
+await_acks([MRef | Rest]) ->
     receive
-        {arc_agent_ack, Pid} ->
-            await_acks(lists:delete(Pid, Pids));
-        {'DOWN', _MRef, process, Pid, _Reason} ->
-            erlang:put(arc_agent_children, lists:delete(Pid, agent_children())),
-            await_acks(lists:delete(Pid, Pids))
-    end.
+        {arc_agent_ack, MRef} ->
+            erlang:demonitor(MRef, [flush]);
+        {'DOWN', MRef, process, _Pid, _Reason} ->
+            ok
+    end,
+    await_acks(Rest).
 
-%% Child side: block until the next broadcast arrives (ack the parent and
-%% return {agent_wake_broadcast, Payload}), OR a cross-process Atomics.notify
-%% lands ({agent_wake_notify, SabKey, ByteIndex} — the caller settles its
-%% matching waitAsync State waiter via event_loop.inject_notify).
-%% Without the arc_notify clause an agent idling here with a pending
-%% infinite-timeout Atomics.waitAsync waiter would never consume the notify
-%% message and the waiter would never settle. Returns agent_wake_parent_down
-%% when the parent died — the caller ends its loop and the child process
-%% exits normally.
-await_broadcast_or_notify() ->
+%% Child side: block until the next broadcast arrives (ack the sender and
+%% return {agent_wake_broadcast, Payload}), OR the owner of a block this
+%% agent has a deadline-free Atomics.waitAsync waiter on wakes it
+%% ({agent_wake_sab, WRef} -- the async wake of arc_rt_sab_ffi; the caller
+%% hands it to arc/rt/async:t_wake_waiter and drains). Without the wake
+%% clause an agent idling here with a pending waiter would never consume
+%% its wake and the waiter's promise would never settle. Returns
+%% agent_wake_parent_down when Parent died -- the caller ends its loop and
+%% the child process exits normally.
+await_broadcast_or_wake(Parent) ->
     receive
-        {arc_agent_broadcast, Payload} ->
-            case erlang:get(arc_agent_parent) of
-                undefined -> ok;
-                Parent -> Parent ! {arc_agent_ack, self()}
-            end,
+        {arc_agent_broadcast, From, Ref, Payload} ->
+            From ! {arc_agent_ack, Ref},
             {agent_wake_broadcast, Payload};
-        {arc_notify, _Ref, SabKey, ByteIndex} ->
-            {agent_wake_notify, SabKey, ByteIndex};
-        {'DOWN', _MRef, process, _Pid, _Reason} ->
+        {arc_sab_wake, WRef, async} ->
+            {agent_wake_sab, WRef};
+        {'DOWN', _MRef, process, Parent, _Reason} ->
             agent_wake_parent_down
     end.
 
@@ -219,96 +197,4 @@ take_report() ->
         {arc_agent_report, Report} -> {ok, Report}
     after 0 ->
         {error, nil}
-    end.
-
-%% -- Atomics host capabilities (contract: arc/host.gleam, clauses 1-4) ------
-%%
-%% The harness IS an embedder, so the blocking-receive / wake-send half of
-%% the Atomics contract lives here, in test FFI. The waiterlist registry
-%% itself (the named public ETS table) is DATA-ONLY core, owned by
-%% src/arc/vm/builtins/arc_waiter_ffi.erl. Every event-driven receive/send
-%% of its {arc_notify, Ref, Key, ByteIndex} wake protocol happens HERE.
-%% Waiter handles are the {EtsKey, MsgRef} pairs produced by
-%% arc_waiter_ffi:insert_waiter.
-
-%% The waiterlist table (created and owned by arc_waiter_ffi:start_registry,
-%% run once at realm boot; by the time any function below can be reached, a
-%% waiter has been inserted into it).
--define(WAITER_TAB, arc_atomics_waiterlist).
-%% Safety valve for the "a notifier claimed our entry but its message never
-%% arrived" case (the notifying process died between take and send).
--define(FLUSH_SAFETY_MS, 1000).
-%% erlang `receive ... after` rejects timeouts >= 2^32; clamp (49 days).
--define(MAX_RECV_MS, 4294967294).
-
-%% The `sync_wait` capability: block the calling agent until its waiterlist entry is
-%% notified, or TimeoutMs elapses (negative -> infinity). Returns the JS
-%% result strings <<"ok">> | <<"timed-out">>. The notify-vs-timeout race is
-%% resolved lock-free via ets:take of our OWN entry on timeout: we removed
-%% it ourselves -> nobody claimed us -> "timed-out"; it is gone -> a
-%% notifier claimed (and counted) us and its wake message is in flight ->
-%% bounded flush-receive, then "ok".
-%%
-%% TimeoutMs = 0 doubles as the cancel flush: core's
-%% sync_block "not-equal" path calls the sync_wait capability with a
-%% zero timeout exactly when its data-only cancel found the entry already
-%% claimed by a notifier, so the claimed branch below consumes the
-%% in-flight wake (safety-bounded) and it cannot pollute a later receive.
-await_notify({Key, Ref}, TimeoutMs) ->
-    Timeout =
-        if
-            TimeoutMs < 0 -> infinity;
-            TimeoutMs > ?MAX_RECV_MS -> ?MAX_RECV_MS;
-            true -> TimeoutMs
-        end,
-    receive
-        {arc_notify, Ref, _, _} -> <<"ok">>
-    after Timeout ->
-        case ets:take(?WAITER_TAB, Key) of
-            [_] ->
-                %% We removed our own entry: no notifier claimed us.
-                <<"timed-out">>;
-            [] ->
-                %% Timeout raced a notifier that already took our entry —
-                %% its message is (about to be) in our mailbox. Per spec
-                %% the notifier counted us as woken, so report "ok".
-                receive
-                    {arc_notify, Ref, _, _} -> <<"ok">>
-                after ?FLUSH_SAFETY_MS ->
-                    <<"timed-out">>
-                end
-        end
-    end.
-
-%% The `deliver_wake` capability: deliver one wake message per remote waiter claimed by
-%% Atomics.notify's waiterlist take. Claiming (the atomic ets:take in
-%% arc_waiter_ffi:take_waiters) already counted the waiter as woken; only
-%% the claimer may message it, so each entry is delivered at most once.
-%% Claimed terms are {Pid, Ref, Key, ByteIndex} (opaque host_hooks.ClaimedWaiter
-%% on the Gleam side).
-deliver_wakes(Claimed) ->
-    lists:foreach(
-        fun({Pid, Ref, Key, ByteIndex}) ->
-            Pid ! {arc_notify, Ref, Key, ByteIndex}
-        end,
-        Claimed),
-    nil.
-
-%% The bounded dry-queue receive for cross-process
-%% Atomics.notify wakes. Blocks at most Ms (negative -> poll, clamped to
-%% the BEAM receive cap) for an {arc_notify, Ref, Key, ByteIndex} message
-%% sent by a notifier's wake delivery; returns {some, {Key, ByteIndex}} |
-%% none (gleam Option) for injection into core via
-%% event_loop.inject_notify.
-wait_for_notify(Ms) ->
-    Timeout =
-        if
-            Ms < 0 -> 0;
-            Ms > ?MAX_RECV_MS -> ?MAX_RECV_MS;
-            true -> Ms
-        end,
-    receive
-        {arc_notify, _Ref, SabKey, ByteIndex} -> {some, {SabKey, ByteIndex}}
-    after Timeout ->
-        none
     end.

@@ -1,94 +1,151 @@
 //// The embed-Arc library facade.
 ////
-//// Hides the heap/builtins/globals bootstrapping dance behind a small API and
-//// is the single front door for embedders: stand up an engine, compose host
-//// functions onto it, then run JS — as a script (`eval`), as an ES module
+//// The single front door for embedders: stand up an engine, compose host
+//// functions onto it, then run JS as a script (`eval`), as an ES module
 //// (`eval_module`), or by invoking a value you already hold (`call`).
 ////
-//// `Engine` is the named `heap + builtins + global` triple that every lower
-//// layer (`entry`, `module`, the binding helpers) threads through. Callers who
-//// just want to run some JS should go through here instead of wiring up heap +
-//// builtins + entry directly.
+//// An `Engine` is one `Agent` of the shared runtime (`arc/rt`: store,
+//// realms, microtask queue, host hooks, host-function table) with the
+//// bytecode interpreter (`arc/interp`) linked into it, plus the embedder's
+//// payload key and host modules. Every entry point threads the agent forward
+//// and hands back a new `Engine`; each ends its turn the same way: one
+//// microtask drain and one GC safepoint (`interp/safepoint.finish_turn`).
+////
+//// Values cross the boundary as the opaque `JsValue`. Read one with
+//// `classify`; build primitives with `arc/rt/types` (`mk_string`,
+//// `mk_number`, `mk_bool`, ...) and objects through `arc/host` inside a host
+//// function or `with_state`.
 
 import arc/compiler
+import arc/compiler/compile_task
+import arc/host
+import arc/host_hooks
+import arc/interp/entry
+import arc/interp/safepoint
 import arc/module
 import arc/module_host
 import arc/parser
-import arc/vm/builtins
-import arc/vm/builtins/common.{type Builtins}
-import arc/vm/compile_task
-import arc/vm/exec/entry
-import arc/vm/exec/event_loop
-import arc/vm/exec/interpreter
-import arc/vm/heap
-import arc/vm/host_hooks
-import arc/vm/key.{Named}
-import arc/vm/ops/object
-import arc/vm/state.{type Heap, type HostFn}
-import arc/vm/value.{type JsValue, type Ref, JsObject}
+import arc/rt/async as rt_async
+import arc/rt/builtins as rt_builtins
+import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/gc as rt_gc
+import arc/rt/inspect as rt_inspect
+import arc/rt/snapshot
+import arc/rt/store as rt_store
+import arc/rt/types.{
+  type Agent, type Handle, type JsVal, type Realm, Agent, JFloat, JInt, JNan,
+  JNegInf, JPosInf, JsCell, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz,
+  KUndef, mk_object,
+}
 import gleam/dict.{type Dict}
+import gleam/dynamic.{type Dynamic}
+import gleam/int
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+
+// ----------------------------------------------------------------------------
+// Values
+// ----------------------------------------------------------------------------
+
+/// A JS value as the engine hands it out and takes it back: the runtime's
+/// opaque wire value. Never match on it; `classify` it.
+pub type JsValue =
+  JsVal
+
+/// A heap object reference (the payload of `JsObject`).
+pub type Ref =
+  Handle
+
+/// A JS Number as `classify` reports it.
+pub type Number {
+  Finite(Float)
+  NaN
+  Infinity
+  NegInfinity
+}
+
+/// What a `JsValue` is, for embedder code to branch on.
+pub type JsValueKind {
+  JsUndefined
+  JsNull
+  JsBool(Bool)
+  JsNumber(Number)
+  JsString(String)
+  JsObject(Ref)
+  JsSymbol
+  JsBigInt(Int)
+}
+
+/// Decode a `JsValue`. Integral and fractional numbers both come back as
+/// `Finite`.
+pub fn classify(value: JsValue) -> JsValueKind {
+  case types.classify(value) {
+    KUndef -> JsUndefined
+    KNull -> JsNull
+    KBool(b) -> JsBool(b)
+    KNum(JInt(i)) -> JsNumber(Finite(int.to_float(i)))
+    KNum(JFloat(f)) -> JsNumber(Finite(f))
+    KNum(JNan) -> JsNumber(NaN)
+    KNum(JPosInf) -> JsNumber(Infinity)
+    KNum(JNegInf) -> JsNumber(NegInfinity)
+    KStr(s) -> JsString(s)
+    KBig(n) -> JsBigInt(n)
+    KSym(_) -> JsSymbol
+    KHandle(h) -> JsObject(h)
+    // The TDZ sentinel never leaves the runtime: no entry point returns it
+    // and `read_export` filters it.
+    KTdz -> panic as "arc/engine.classify: uninitialized binding sentinel"
+  }
+}
 
 // ----------------------------------------------------------------------------
 // Engine type
 // ----------------------------------------------------------------------------
 
-/// An initialized JS engine — heap, builtins, global object, host hooks.
+/// An initialized JS engine.
 ///
 /// Opaque so callers can't reach inside and mutate pieces independently;
-/// advance an engine via `eval`/`eval_module`/`call`, which thread the heap
-/// forward and hand back a new `Engine`. Read-only access to the parts is via
-/// the `heap`/`builtins`/`global` accessors.
+/// advance an engine via `eval`/`eval_module`/`call`/`with_state`, which
+/// thread the agent forward and hand back a new `Engine`.
 ///
-/// `host_hooks` carries the embedder's host capabilities (e.g. the Atomics
-/// blocking-wait / wake-delivery contract). Supplied once via
-/// `with_host_hooks` at construction time, it is threaded into every State the
-/// engine boots — scripts, module bodies (static and dynamic imports), calls
-/// into held values — and inherited by every derived realm.
+/// `Agent` is not generic over the embedder's payload type, so `host` is
+/// pinned by `key` (see `arc/host.Key`): every host function this engine
+/// registers and every `with_state` body sees a `host.State(host)` carrying
+/// it, and host objects are written and read under it.
 pub opaque type Engine(host) {
   Engine(
-    heap: Heap(host),
-    builtins: Builtins,
-    global: Ref,
-    host_hooks: host_hooks.HostHooks,
+    agent: Agent,
+    key: host.Key(host),
     /// Embedder-provided native (synthetic) modules, keyed by specifier. An
-    /// `import … from "<specifier>"` in any module evaluated through this engine
-    /// resolves here instead of being loaded as source. Set via
+    /// `import … from "<specifier>"` in any module evaluated through this
+    /// engine resolves here instead of being loaded as source. Set via
     /// `register_host_module`; see `module.HostModule`.
     host_modules: Dict(String, module.HostModule),
   )
 }
 
 /// Errors from the parse → compile → run pipeline, across both the script
-/// (`eval`) and module (`eval_module`) paths.
+/// (`eval`) and module (`eval_module`) paths. A run that reaches bytecode
+/// always completes: engine faults inside it surface as a thrown TypeError.
 pub type EvalError(host) {
   ParseError(parser.ParseError)
   CompileError(compiler.CompileError)
-  VmError(state.VmError)
   /// AOT compilation of a module graph failed (parse / resolve / load /
-  /// bytecode). Carries no heap — nothing has been allocated yet.
+  /// bytecode). Nothing has been allocated yet.
   ModuleCompileError(module.CompileBundleError)
   /// Linking a module graph failed, or its evaluation could not settle. A
   /// module whose top level THREW is not this: it comes back as an
   /// `Ok(ModuleThrew(..))`, like every other run.
   ///
-  /// `heap` is the heap the failing call handed back beside its `ModuleError`
-  /// — the `ModuleError` itself carries none, and rendering it needs one.
-  ModuleError(error: module.ModuleError, heap: state.Heap(host))
+  /// `engine` is the engine as the failing call left it: rendering the
+  /// `ModuleError` needs it, and it stays usable.
+  ModuleError(error: module.ModuleError, engine: Engine(host))
 }
 
-/// How a top-level run of JS ended, once every VM-internal state has been
-/// driven to rest: the script (or called function) returned a value, or it
-/// threw one.
-///
-/// These are the only two ways a settled top-level run can end — the entry
-/// layer proves that before handing the result back (an internal Yield/Await
-/// completion escaping to the top is a compiler bug and panics there). Keeping
-/// the public boundary at exactly two variants means an embedder never has to
-/// write a dead "unexpected completion" arm.
+/// How a top-level run of JS ended once the turn has settled: the script
+/// (or called function) returned a value, or it threw one.
 pub type Outcome {
   /// Normal completion: the top-level value.
   Returned(value: JsValue)
@@ -99,17 +156,14 @@ pub type Outcome {
 
 /// A module's Module Namespace object (§10.4.6), as minted by `eval_module` /
 /// `eval_module_with`. Opaque and unforgeable: `read_export` cannot be handed
-/// something that isn't a namespace, so "read an export off an arbitrary
-/// JsValue" is not expressible.
+/// something that isn't a namespace.
 pub opaque type Namespace {
   Namespace(ref: Ref)
 }
 
 /// The result of evaluating an ES module: either the entry module's top level
-/// completed normally — carrying its return value and Module Namespace object
-/// (read named exports off it with `read_export`) — or it threw. A two-variant
-/// sum, so a caller never has to unwrap an `Option(Namespace)` that is always
-/// `Some` on the returned path and always `None` on the threw path.
+/// completed normally, carrying its return value and Module Namespace object
+/// (read named exports off it with `read_export`), or it threw.
 pub type EvaluatedModule {
   ModuleReturned(value: JsValue, namespace: Namespace)
   ModuleThrew(error: JsValue)
@@ -119,256 +173,177 @@ pub type EvaluatedModule {
 // Constructors
 // ----------------------------------------------------------------------------
 
-/// Create a fresh engine with a new heap and all builtins installed. The single
-/// bootstrap site — every other entry point threads an existing engine.
-///
-/// The engine starts with `host_hooks.default_host_hooks()` (no capabilities — an
-/// agent that cannot block). Embedders that need to grant host capabilities
-/// (e.g. a real blocking `Atomics.wait`) compose `with_host_hooks` on top.
-///
-/// Host values are assumed to hold no engine refs; use `new_with_host_refs`
-/// if your `HostObject` payloads point back into the JS heap.
+/// Create a fresh engine: a new agent with realm 0 fully initialised, the
+/// interpreter linked in, `host_hooks.default_host_hooks()` (no capabilities:
+/// an agent that cannot block) and a fresh payload key. Embedders that need
+/// host capabilities compose `with_host_hooks` on top.
 pub fn new() -> Engine(host) {
-  new_from_heap(heap.new())
+  from_agent(rt_builtins.new_agent(host_hooks.default_host_hooks()))
 }
 
-/// Like `new`, but installs the GC hook that reports the engine refs reachable
-/// from a host value. Use this when your `HostObject` payloads point back into
-/// the JS heap, so GC traces them explicitly instead of relying on a "refs go
-/// in properties" convention.
+/// Like `new`. The collector traces heap references inside host payloads on
+/// its own (`arc/rt/gc` walks every term a `KHost` cell holds), so
+/// `host_refs` is no longer consulted; the signature stays for embedders
+/// written against the tracing-hook contract.
 pub fn new_with_host_refs(host_refs: fn(host) -> List(Ref)) -> Engine(host) {
-  new_from_heap(heap.new_with_host_refs(host_refs))
+  let _unused = host_refs
+  new()
 }
 
-fn new_from_heap(h: state.Heap(host)) -> Engine(host) {
-  let #(h, b) = builtins.init(h)
-  let #(h, global) = builtins.globals(b, h)
+fn from_agent(agent: Agent) -> Engine(host) {
   Engine(
-    heap: h,
-    builtins: b,
-    global:,
-    host_hooks: host_hooks.default_host_hooks(),
+    agent: entry.link(agent),
+    key: host.new_key(),
     host_modules: dict.new(),
   )
 }
 
-/// Install the embedder's host capabilities on the engine.
-///
-/// This is the single injection point for `host_hooks.HostHooks` — set them once
-/// here, before running any JS, and every State the engine subsequently boots
-/// (scripts via `eval`, module bodies via `eval_module` including dynamic
-/// `import()`, calls via `call`, plus all derived realms: `eval`/`Function`
-/// realms, `$262.createRealm` children, agents, ShadowRealms) inherits them.
-/// There is no per-call install to forget.
+/// Install the embedder's host capabilities on the engine. The hooks live on
+/// the agent, so everything the engine subsequently runs (scripts, module
+/// bodies including dynamic `import()`, calls, every realm) sees them.
 pub fn with_host_hooks(
   engine: Engine(host),
   hooks: host_hooks.HostHooks,
 ) -> Engine(host) {
-  Engine(..engine, host_hooks: hooks)
+  let agent = engine.agent
+  Engine(..engine, agent: Agent(..agent, hooks:))
 }
 
 // ----------------------------------------------------------------------------
 // Host FFI — extend the engine with embedder-provided globals
 // ----------------------------------------------------------------------------
 
+/// The engine's agent as host code sees it outside a call: no [[Construct]]
+/// in progress, this engine's payload key.
+fn host_state(engine: Engine(host)) -> host.State(host) {
+  host.from_agent(engine.agent, engine.key)
+}
+
+fn adopt(engine: Engine(host), s: host.State(host)) -> Engine(host) {
+  Engine(..engine, agent: s.agent)
+}
+
 /// Add a top-level global native function.
 ///
 /// The function becomes callable from JS as `name(...)`. `arity` is the
 /// reported `.length` property; the impl still receives all passed args.
-/// Exactly `host_fn` + `define_global` — the mint-and-install convenience.
+/// Exactly `host_fn` + `define_global`.
 pub fn define_fn(
   engine: Engine(host),
   name: String,
   arity: Int,
-  impl: HostFn(host),
+  impl: host.HostFn(host),
 ) -> Engine(host) {
-  let #(engine, val) = host_fn(engine, name, arity, impl)
-  define_global(engine, name, val)
+  adopt(engine, host.define_fn(host_state(engine), name, arity, impl))
 }
 
 /// Add a top-level namespace object (like `Math` or `JSON`) with methods.
-///
-/// Creates a tagged object at the given global name whose own properties are
-/// the supplied methods. Each method spec is `#(name, arity, impl)`. Routed
-/// through `common.init_namespace` so the namespace carries `@@toStringTag`
-/// (`Object.prototype.toString.call(ns)` → `"[object name]"`), matching every
-/// built-in namespace.
+/// Each method spec is `#(name, arity, impl)`; the namespace carries
+/// `@@toStringTag = name` like every built-in namespace.
 pub fn define_namespace(
   engine: Engine(host),
   name: String,
-  methods: List(#(String, Int, HostFn(host))),
+  methods: List(#(String, Int, host.HostFn(host))),
 ) -> Engine(host) {
-  let #(h, props) =
-    common.alloc_host_methods(
-      engine.heap,
-      engine.builtins.function.prototype,
-      methods,
-    )
-  let #(h, ns_ref) =
-    common.init_namespace(h, engine.builtins.object.prototype, name, props)
-  set_global(engine, h, name, JsObject(ns_ref))
+  adopt(engine, host.define_namespace(host_state(engine), name, methods))
 }
 
-/// Add a raw JsValue as a top-level global binding.
-///
-/// For constants or pre-built objects that don't fit `define_fn` or
-/// `define_namespace`. The value is installed as a writable, configurable,
-/// non-enumerable data property on `globalThis`.
+/// Add a raw JsValue as a top-level global binding: a writable,
+/// configurable, non-enumerable data property on `globalThis`.
 pub fn define_global(
   engine: Engine(host),
   name: String,
   val: JsValue,
 ) -> Engine(host) {
-  set_global(engine, engine.heap, name, val)
+  adopt(engine, host.define_global(host_state(engine), name, val))
 }
 
-/// Install `val` as a builtin property `name` on the engine's global object,
-/// returning the engine with the updated heap. The one place global bindings
-/// are written — reuses the canonical `object.define_method_property` primitive.
-fn set_global(
-  engine: Engine(host),
-  h: Heap(host),
-  name: String,
-  val: JsValue,
-) -> Engine(host) {
-  Engine(
-    ..engine,
-    heap: object.define_method_property(h, engine.global, Named(name), val),
-  )
-}
-
-/// Mint a host-provided native function ref into the engine's heap and hand back
-/// its value — WITHOUT installing it as a global. The "return me the ref" twin of
-/// `define_fn`, for building values to place elsewhere (e.g. as host-module
-/// exports via `register_host_module`, or methods on a `host_class`). The ref
-/// is GC-rooted by `alloc_rooted_host_fn`.
+/// Mint a host-provided native function and hand back its value WITHOUT
+/// installing it as a global, for building values to place elsewhere (a
+/// `register_host_module` export, a method table). Its closure lives on the
+/// agent's host-function table under the next id (`NativeToken.HostFn(id)`);
+/// the object is GC-rooted.
 pub fn host_fn(
   engine: Engine(host),
   name: String,
   arity: Int,
-  impl: HostFn(host),
+  impl: host.HostFn(host),
 ) -> #(Engine(host), JsValue) {
-  let #(h, fn_ref) =
-    common.alloc_rooted_host_fn(
-      engine.heap,
-      engine.builtins.function.prototype,
-      impl,
-      name,
-      arity,
-    )
-  #(Engine(..engine, heap: h), JsObject(fn_ref))
+  let #(s, f) = host.function(host_state(engine), name, arity, impl)
+  #(adopt(engine, s), f)
 }
 
-/// Build a host-defined, **constructible** JS class — a base class that embedder
-/// JS can `extends` — and hand back its constructor value.
-///
-/// `constructor` is the class's `[[Construct]]` body. Like any host fn it
-/// receives `(args, this, state)`; it reads `state.new_target` to learn the leaf
-/// subclass (for `class Sub extends This {}`, `new_target` is `Sub`), allocates
-/// and returns the `this` object (e.g. via
-/// `ops/object.proto_from_new_target(state, new_target, proto, ...)` +
-/// `common.alloc_pojo`), and the
-/// engine re-prototypes the result to the subclass's `prototype`. `methods` are
-/// installed on the class prototype; `statics` on the constructor itself (and so
-/// inherited by subclasses — a static can read `this.name`).
-///
-/// Unlike `define_fn`/`define_namespace`, this does NOT install a global: it
-/// returns the constructor so the caller places it (e.g. a `register_host_module`
-/// export). The constructor and its prototype are GC-rooted by `init_type`.
+/// Build a host-defined, constructible JS class (a base class embedder JS
+/// can `extends`) and hand back its constructor value; nothing is installed
+/// on the global. See `host.class` for the constructor contract
+/// (`host.new_target`, re-prototyping of the returned instance). `methods`
+/// go on the prototype, `statics` on the constructor.
 pub fn host_class(
   engine: Engine(host),
   name: String,
   arity: Int,
-  constructor: HostFn(host),
-  methods: List(#(String, Int, HostFn(host))),
-  statics: List(#(String, Int, HostFn(host))),
+  constructor: host.HostFn(host),
+  methods: List(#(String, Int, host.HostFn(host))),
+  statics: List(#(String, Int, host.HostFn(host))),
 ) -> #(Engine(host), JsValue) {
-  let #(h, proto_props) =
-    common.alloc_host_methods(
-      engine.heap,
-      engine.builtins.function.prototype,
-      methods,
-    )
-  let #(h, static_props) =
-    common.alloc_host_methods(h, engine.builtins.function.prototype, statics)
-  let #(h, bt) =
-    common.init_type(
-      h,
-      engine.builtins.object.prototype,
-      engine.builtins.function.prototype,
-      proto_props,
-      fn(_proto) { value.Host(constructor) },
-      name,
-      arity,
-      static_props,
-    )
-  #(Engine(..engine, heap: h), JsObject(bt.constructor))
+  let #(s, ctor) =
+    host.class(host_state(engine), name, arity, constructor, methods, statics)
+  #(adopt(engine, s), ctor)
 }
 
-/// Run host-side `body` against a live `State` — the escape hatch for an
-/// embedder that needs to allocate JS values, invoke held functions via
-/// `state.call`/`state.construct`, and marshal data in/out, all of which require
-/// a `State` the public API otherwise only exposes inside a host fn.
-///
-/// Stands up a fresh root frame (via `interpreter.root_state`), runs `body`,
-/// drains the microtask queue, then folds the resulting heap back into the
-/// engine and returns `body`'s value directly. Replaces the older
-/// "install a one-shot global shim and call it, smuggling the result out through
-/// a side channel" idiom — no global is touched.
+/// Run host-side `body` against a live `host.State`: allocate JS values,
+/// invoke held functions via `host.call`, marshal data in/out. Ends the
+/// turn like `eval` (microtask drain, GC safepoint) and returns `body`'s
+/// value directly. Heap references inside that value are kept alive through
+/// the epilogue; make them reachable (`define_global`, a host module) before
+/// the next turn.
 pub fn with_state(
   engine: Engine(host),
-  body: fn(state.State(host)) -> #(state.State(host), a),
+  body: fn(host.State(host)) -> #(host.State(host), a),
 ) -> #(Engine(host), a) {
-  with_state_with(engine, body, event_loop.drain_jobs)
+  with_state_with(engine, body, rt_async.drain)
 }
 
-/// Like `with_state` but the caller supplies the post-body driver — the same
-/// pairing every other run entry point has (`eval`/`eval_with`,
-/// `eval_module`/`eval_module_with`, `call`/`call_with`), so an embedder whose
-/// host functions suspend can drive its own macrotask loop here too.
+/// Like `with_state` but the caller supplies the turn-end driver, as with
+/// `eval_with`.
 pub fn with_state_with(
   engine: Engine(host),
-  body: fn(state.State(host)) -> #(state.State(host), a),
-  finish: fn(state.State(host)) -> state.State(host),
+  body: fn(host.State(host)) -> #(host.State(host), a),
+  finish: fn(Agent) -> Agent,
 ) -> #(Engine(host), a) {
-  let s =
-    interpreter.root_state(
-      engine.heap,
-      engine.builtins,
-      engine.global,
-      engine.host_hooks,
-    )
-  let #(s, result) = body(s)
-  let s = finish(s)
-  #(Engine(..engine, heap: s.heap), result)
+  let #(s, result) = body(host_state(engine))
+  let held =
+    rt_gc.push_term_refs(to_dynamic(result), [])
+    |> list.map(fn(id) { mk_object(JsCell(id)) })
+  let agent = safepoint.finish_turn(s.agent, held, finish)
+  #(Engine(..engine, agent:), result)
 }
+
+@external(erlang, "gleam_stdlib", "identity")
+fn to_dynamic(a: anything) -> Dynamic
 
 /// Register an embedder-provided native (synthetic) module under `specifier`.
 ///
-/// `exports` are `(name, value)` pairs — typically `host_class` constructors
-/// and `host_fn` values. Afterwards, any module evaluated through this engine
-/// that does `import { name } from "<specifier>"` (or `import * as ns from
-/// "<specifier>"`) binds straight to these values, with NO source loaded for
-/// `specifier`. The export refs are GC-rooted here: they are held only on the
-/// engine (Gleam-side), which the heap collector does not otherwise trace.
-///
-/// First cut: static imports only. A dynamic `import("<specifier>")` is not
-/// resolved to a host module.
+/// `exports` are `(name, value)` pairs, typically `host_class` constructors
+/// and `host_fn` values. Afterwards any module evaluated through this engine
+/// that does `import { name } from "<specifier>"` binds straight to these
+/// values, with no source loaded for `specifier`. Object exports are pinned
+/// as GC roots: until a module imports them they are held only here.
 pub fn register_host_module(
   engine: Engine(host),
   specifier: String,
   exports: List(#(String, JsValue)),
 ) -> Engine(host) {
-  let heap =
-    list.fold(exports, engine.heap, fn(h, export) {
-      case export.1 {
-        JsObject(ref) -> heap.root(h, ref)
-        _ -> h
+  let agent =
+    list.fold(exports, engine.agent, fn(agent, export) {
+      case types.classify(export.1) {
+        KHandle(h) -> rt_store.t_pin_root(agent, h)
+        _ -> agent
       }
     })
   Engine(
     ..engine,
-    heap:,
+    agent:,
     host_modules: dict.insert(
       engine.host_modules,
       specifier,
@@ -378,80 +353,77 @@ pub fn register_host_module(
 }
 
 // ----------------------------------------------------------------------------
+// Turn epilogue
+// ----------------------------------------------------------------------------
+
+/// The one turn end: hold the completion value, collect if due, run
+/// `finish` (the microtask drain, or an embedder loop that drains), release.
+fn settle(
+  engine: Engine(host),
+  completion: Completion,
+  agent: Agent,
+  finish: fn(Agent) -> Agent,
+) -> #(Outcome, Engine(host)) {
+  let #(outcome, held) = case completion {
+    NormalCompletion(v) -> #(Returned(v), v)
+    ThrowCompletion(e) -> #(Threw(e), e)
+  }
+  let agent = safepoint.finish_turn(agent, [held], finish)
+  #(outcome, Engine(..engine, agent:))
+}
+
+// ----------------------------------------------------------------------------
 // Script evaluation
 // ----------------------------------------------------------------------------
 
-/// Parse, compile, and run a JS source string. Returns the outcome
-/// (`Returned(value)` or `Threw(error)`) plus a new engine carrying the
-/// updated heap.
-///
-/// Drains the microtask queue only — there is no macrotask loop in core.
-/// If your host functions use `host.suspend`, drive your own loop via
-/// `eval_with`, passing an embedder-supplied `finish` driver.
+/// Parse, compile, and run a JS source string in the engine's current realm
+/// (§16.1.6 ScriptEvaluation), then drain microtasks. Consecutive scripts
+/// share one global environment. There is no macrotask loop in core: if
+/// your host functions use `host.suspend`, drive your own loop via
+/// `eval_with`.
 pub fn eval(
   engine: Engine(host),
   source: String,
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
-  eval_with(engine, source, event_loop.drain_jobs)
+  eval_with(engine, source, rt_async.drain)
 }
 
-/// Like `eval` but the caller supplies the post-script driver. `finish`
-/// is handed the State after the top-level script returns and must drain
-/// microtasks plus whatever macrotask loop the embedder owns.
-///
-/// The freshly booted State carries the engine's `host_hooks`, so host
-/// capabilities (e.g. the Atomics blocking-wait/wake-delivery contract in
-/// `arc/host`) are present from the first instruction — a top-level blocking
-/// `Atomics.wait` works without any per-call install. Set them once with
-/// `with_host_hooks`.
+/// Like `eval` but the caller supplies the turn-end driver. `finish` is
+/// handed the agent after the top-level script returns and must drain
+/// microtasks (`rt/async.drain`) plus whatever macrotask loop the embedder
+/// owns.
 pub fn eval_with(
   engine: Engine(host),
   source: String,
-  finish: fn(state.State(host)) -> state.State(host),
+  finish: fn(Agent) -> Agent,
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   // Big sources parse+compile in a heap-sized scratch process (see
-  // arc/vm/compile_task): the AST / scope tree / IR are large transients
-  // the copying GC would otherwise re-copy many times as the live set
-  // grows; only the compact FuncTemplate (or error) crosses back.
-  use template <- result.try(
+  // arc/compiler/compile_task); only the compact FuncTemplate (or error) crosses
+  // back.
+  use template <- result.map(
     compile_task.run(string.byte_size(source), fn() {
       use #(body, sb) <- result.try(
-        parser.parse_script(source)
-        |> result.map_error(ParseError),
+        parser.parse_script(source) |> result.map_error(ParseError),
       )
-      compiler.compile(body, sb)
-      |> result.map_error(CompileError)
+      compiler.compile(body, sb) |> result.map_error(CompileError)
     }),
   )
-  use #(settled, heap) <- result.map(
-    entry.run_with_hooks(
-      template,
-      engine.heap,
-      engine.builtins,
-      engine.global,
-      engine.host_hooks,
-      finish,
-    )
-    |> result.map_error(VmError),
-  )
-  #(outcome_of(settled), Engine(..engine, heap:))
+  let #(completion, agent) = entry.run_script(engine.agent, template)
+  settle(engine, completion, agent, finish)
 }
 
 // ----------------------------------------------------------------------------
 // Module evaluation
 // ----------------------------------------------------------------------------
 
-/// Compile and evaluate an ES module bundle, draining microtasks afterwards.
-/// `resolve` maps (raw, referrer) to the dependency's canonical specifier and
-/// `load` reads a resolved specifier's source (called once per unique
-/// module); they fail with a `module_host.ResolveError` / `module_host.LoadError`
-/// category, never a bare string a loader could accidentally return as a success. Returns the
-/// entry module's outcome + namespace, plus a new engine carrying the updated
-/// heap.
+/// Compile and evaluate an ES module bundle, draining microtasks after each
+/// module body. `resolve` maps (raw, referrer) to the dependency's canonical
+/// specifier and `load` reads a resolved specifier's source (once per unique
+/// module). Returns the entry module's outcome + namespace and the engine.
 ///
-/// A module that throws at top level is a normal `Ok(ModuleThrew(value))` —
-/// the module analogue of `eval`/`call`'s `Threw`. `Error(ModuleError(..))` is
-/// reserved for genuine engine/link failures.
+/// A module that throws at top level is a normal `Ok(ModuleThrew(value))`;
+/// `Error(ModuleError(..))` is reserved for link failures and evaluations
+/// that cannot settle.
 pub fn eval_module(
   engine: Engine(host),
   specifier: String,
@@ -459,34 +431,20 @@ pub fn eval_module(
   resolve: module_host.ResolveFn,
   load: module_host.LoadFn,
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
-  eval_module_with(
-    engine,
-    specifier,
-    source,
-    resolve,
-    load,
-    event_loop.drain_jobs,
-  )
+  eval_module_with(engine, specifier, source, resolve, load, rt_async.drain)
 }
 
-/// Like `eval_module` but the caller supplies the post-evaluation driver
-/// (an embedder macrotask loop, or `event_loop.drain_jobs` for microtasks only).
-///
-/// Every module body in the bundle — including ones reached via dynamic
-/// `import()` — boots with the engine's `host_hooks`, so a module's top level
-/// may hit a blocking `Atomics.wait` before any host function has run. Set the
-/// hooks once with `with_host_hooks`.
+/// Like `eval_module` but the caller supplies the driver each module body's
+/// turn ends with (`rt/async.drain`, or an embedder loop that drains).
 pub fn eval_module_with(
   engine: Engine(host),
   specifier: String,
   source: String,
   resolve: module_host.ResolveFn,
   load: module_host.LoadFn,
-  finish: fn(state.State(host)) -> state.State(host),
+  finish: fn(Agent) -> Agent,
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(
-    // The embedder's typed resolve/load categories flow straight into the
-    // graph walk — nothing along the way sees a rendered message.
     module.compile_bundle_with_hosts(
       specifier,
       source,
@@ -496,32 +454,16 @@ pub fn eval_module_with(
     )
     |> result.map_error(ModuleCompileError),
   )
-  // The heap comes back beside the result and is the live one on every path.
-  let #(heap, result) =
-    module.evaluate_bundle_with_hooks(
-      bundle,
-      engine.heap,
-      module.BootCtx(
-        builtins: engine.builtins,
-        global_object: engine.global,
-        host_hooks: engine.host_hooks,
-        can_block: True,
-        extend_262: option.None,
-        finish:,
-      ),
-    )
-  case result {
+  // Each module body ends its own turn through `finish` (see
+  // `module.Finish`), so no further epilogue runs here.
+  let #(agent, res) = module.evaluate_bundle(bundle, engine.agent, finish)
+  let engine = Engine(..engine, agent:)
+  case res {
     Ok(module.EvaluatedBundle(value:, namespace:)) ->
-      Ok(#(
-        ModuleReturned(value:, namespace: Namespace(namespace)),
-        Engine(..engine, heap:),
-      ))
-    // "The module's top level threw" is the same event `eval`/`call` report as
-    // `Threw` — not an engine failure. The heap the throw left behind is
-    // threaded forward, so the engine stays usable.
+      Ok(#(ModuleReturned(value:, namespace: Namespace(namespace)), engine))
     Error(module.EvaluationError(value: thrown)) ->
-      Ok(#(ModuleThrew(error: thrown), Engine(..engine, heap:)))
-    Error(err) -> Error(ModuleError(error: err, heap:))
+      Ok(#(ModuleThrew(error: thrown), engine))
+    Error(err) -> Error(ModuleError(error: err, engine:))
   }
 }
 
@@ -533,211 +475,186 @@ pub fn read_export(
   namespace: Namespace,
   name: String,
 ) -> Option(JsValue) {
-  module.read_export(engine.heap, JsObject(namespace.ref), name)
+  module.read_export(engine.agent, mk_object(namespace.ref), name)
+}
+
+// ----------------------------------------------------------------------------
+// REPL sessions
+// ----------------------------------------------------------------------------
+
+/// An engine driven one input at a time. Inputs compile in REPL mode, so
+/// top-level `let`/`const`/`class` declarations land in the realm's global
+/// lexical record (`Realm.lexical_globals`) and later inputs see them.
+pub opaque type Repl(host) {
+  Repl(engine: Engine(host))
+}
+
+/// Start a REPL session on `engine`. Host functions, hooks and modules
+/// already installed on the engine are visible to every input.
+pub fn repl(engine: Engine(host)) -> Repl(host) {
+  Repl(engine:)
+}
+
+/// The session's engine as of the last input, for rendering values the
+/// session produced (`inspect`, `format_error`, `dump_object`).
+pub fn repl_engine(repl: Repl(host)) -> Engine(host) {
+  repl.engine
+}
+
+/// Parse, compile (in REPL mode) and run one input, draining microtasks.
+/// The outcome is the input's completion value, so `1 + 1` is
+/// `Returned(2)`. On `Error` nothing ran and the session passed in is still
+/// the current one.
+pub fn repl_eval(
+  repl: Repl(host),
+  source: String,
+) -> Result(#(Outcome, Repl(host)), EvalError(host)) {
+  use #(body, sb) <- result.try(
+    parser.parse_script(source) |> result.map_error(ParseError),
+  )
+  use template <- result.map(
+    compiler.compile_repl(body, sb) |> result.map_error(CompileError),
+  )
+  let engine = repl.engine
+  let #(completion, agent) = entry.run_script(engine.agent, template)
+  let #(outcome, engine) = settle(engine, completion, agent, rt_async.drain)
+  #(outcome, Repl(engine:))
 }
 
 // ----------------------------------------------------------------------------
 // Calling a held value
 // ----------------------------------------------------------------------------
 
-/// Call a JS function value with `this` and `args`, draining microtasks. The
-/// counterpart to `eval` for a callable you already hold — e.g. a `receive`
-/// export read off a module namespace — invoked repeatedly across turns, each
-/// call threading the heap forward via the returned engine. A thrown value is
-/// `Threw(error)`; there is nothing to parse or compile, so the only engine
-/// failure is a `state.VmError` — render it with `state.vm_error_message`.
+/// Call a JS function value with `this` and `args`, then drain microtasks:
+/// the counterpart to `eval` for a callable you already hold (a module
+/// export, say), each call threading the agent forward via the returned
+/// engine. A non-callable `callee` is a thrown TypeError like any other
+/// `Threw`.
 pub fn call(
   engine: Engine(host),
   callee: JsValue,
   this: JsValue,
   args: List(JsValue),
-) -> Result(#(Outcome, Engine(host)), state.VmError) {
-  call_with(engine, callee, this, args, event_loop.drain_jobs)
+) -> #(Outcome, Engine(host)) {
+  call_with(engine, callee, this, args, rt_async.drain)
 }
 
-/// Like `call` but the caller supplies the post-call driver.
+/// Like `call` but the caller supplies the turn-end driver.
 pub fn call_with(
   engine: Engine(host),
   callee: JsValue,
   this: JsValue,
   args: List(JsValue),
-  finish: fn(state.State(host)) -> state.State(host),
-) -> Result(#(Outcome, Engine(host)), state.VmError) {
-  use #(settled, heap) <- result.map(entry.run_export(
-    callee,
-    this,
-    args,
-    engine.heap,
-    engine.builtins,
-    engine.global,
-    engine.host_hooks,
-    finish,
-  ))
-  #(outcome_of(settled), Engine(..engine, heap:))
+  finish: fn(Agent) -> Agent,
+) -> #(Outcome, Engine(host)) {
+  let #(completion, agent) = rt_call.t_call(engine.agent, callee, this, args)
+  settle(engine, completion, agent, finish)
 }
 
 // ----------------------------------------------------------------------------
 // Serialization
 // ----------------------------------------------------------------------------
 
-/// The version stamped into the plain-bytes header `arc_snapshot_ffi` wraps
-/// every `serialize` payload in (`<<"arc-engine", Version:32, Term/binary>>`).
-/// Bump it whenever the shape of the serialized state changes; `deserialize`
-/// then rejects older snapshots as `IncompatibleSnapshot` — by matching the
-/// header, before the term is decoded — instead of misreading them.
+/// Serialize the entire engine state to a binary (`arc/rt/snapshot`).
 ///
-/// Version history:
-///   1 — initial versioned envelope.
-///   2 — `value.SymbolId`'s well-known variant carries a `WellKnown` sum
-///       member instead of an Int, changing the serialized term shape of
-///       every well-known symbol in the heap.
-///   3 — the tag/version envelope moved OUT of the term into a plain-bytes
-///       header, so a foreign binary is rejected before it is decoded.
-const snapshot_version = 3
-
-/// Why `deserialize` rejected a binary.
-pub type DeserializeError {
-  /// The bytes do not carry the snapshot header at all — random bytes, a bare
-  /// Erlang term, or an unaligned bit array. Nothing was decoded.
-  MalformedBinary
-  /// The bytes ARE a snapshot container, but not one this build understands:
-  /// a different `snapshot_version`, or a corrupt/forged payload behind a
-  /// valid header.
-  IncompatibleSnapshot
-}
-
-/// Wrap a snapshot payload in the plain-bytes header. Monomorphic on the
-/// payload — Erlang's `term_to_binary` is not exposed to the rest of the tree.
-@external(erlang, "arc_snapshot_ffi", "encode")
-fn encode_snapshot(
-  version: Int,
-  snapshot: #(Heap(host), Builtins, Ref),
-) -> BitArray
-
-/// Unwrap a snapshot binary, or say why not. Implemented in Erlang so the
-/// header check happens on the RAW BYTES: `binary_to_term` only ever runs on a
-/// payload already proved to carry our tag and our exact version, and neither
-/// of its failure modes (badarg on garbage, a term of the wrong shape) can
-/// surface in Gleam as a badmatch.
-@external(erlang, "arc_snapshot_ffi", "decode")
-fn decode_snapshot(
-  version: Int,
-  data: BitArray,
-) -> Result(#(Heap(host), Builtins, Ref), DeserializeError)
-
-/// Serialize the entire engine state to a binary.
-///
-/// The payload is wrapped in a versioned header so `deserialize` can tell a
-/// stale or foreign binary apart from a current one without decoding it.
-///
-/// Host function closures stored in the heap will NOT survive — their Ref
-/// slots persist but the Erlang closure data is lost. Embedders must
-/// re-register host functions after `deserialize`. `host_hooks` are closures
-/// too and are deliberately NOT serialized.
-pub fn serialize(engine: Engine(host)) -> BitArray {
-  encode_snapshot(snapshot_version, #(
-    engine.heap,
-    engine.builtins,
-    engine.global,
-  ))
+/// Not written, and re-bound after `deserialize`: host functions (their
+/// objects survive, the closures do not; re-register them in the same
+/// order), host hooks, the dynamic-import hook, host modules. Fails with
+/// `SnapshotContainsCompiledCode` when the heap holds a function whose body
+/// is compiled BEAM code, and with `SnapshotContainsHostJob` while a
+/// `host.resume` settlement is still queued.
+pub fn serialize(
+  engine: Engine(host),
+) -> Result(BitArray, snapshot.SnapshotError) {
+  snapshot.serialize(engine.agent)
 }
 
 /// Restore an engine from a binary produced by `serialize`.
 ///
-/// Fails with `MalformedBinary` if the bytes carry no snapshot header, and with
-/// `IncompatibleSnapshot` if they do but name a different `snapshot_version`
-/// (e.g. a snapshot written by an older or newer build) or hide a corrupt
-/// payload behind it.
-///
-/// The restored engine carries `host_hooks.default_host_hooks()` and no host modules
-/// — both hold embedder closures that cannot round-trip through `serialize`.
-/// Re-install hooks with `with_host_hooks` and host modules with
-/// `register_host_module`, alongside re-registering host functions.
-pub fn deserialize(data: BitArray) -> Result(Engine(host), DeserializeError) {
-  use #(heap, builtins, global) <- result.map(decode_snapshot(
-    snapshot_version,
-    data,
-  ))
-  Engine(
-    heap:,
-    builtins:,
-    global:,
-    host_hooks: host_hooks.default_host_hooks(),
-    host_modules: dict.new(),
-  )
+/// Fails with `MalformedBinary` if the bytes carry no snapshot header, and
+/// with `IncompatibleSnapshot` if they name a different ABI version or hide a
+/// corrupt payload. The restored engine carries the default host hooks, no
+/// host functions, no dynamic-import hook, no host modules and a fresh
+/// payload key: re-install them with `with_host_hooks`, `define_fn`/`host_fn`
+/// (in the original order: that alone decides which closure a surviving
+/// function object reaches), `module_host.install_import_hook` and
+/// `register_host_module`, each independently of the others. Host objects
+/// written under the old key read as `None`.
+pub fn deserialize(
+  data: BitArray,
+) -> Result(Engine(host), snapshot.DeserializeError) {
+  snapshot.deserialize(data, host_hooks.default_host_hooks())
+  |> result.map(from_agent)
 }
 
 // ----------------------------------------------------------------------------
 // Inspecting values
 // ----------------------------------------------------------------------------
 
-/// Render a `JsValue` produced by this engine as a human-readable string
-/// (REPL / `console.log` style), resolving heap refs against the engine's
-/// heap. Read-only — never re-enters JS (no `toString`/`valueOf` calls).
-///
-/// This is the supported way for an embedder to display values from
-/// `Returned`/`Threw`; there is no need to reach into `arc/vm/ops/object`
-/// with the raw heap.
+/// Render a value as a human-readable string (REPL / `console.log` style).
+/// Read-only: never re-enters JS.
 pub fn inspect(engine: Engine(host), value: JsValue) -> String {
-  object.inspect(value, engine.heap)
+  rt_inspect.inspect(engine.agent, value)
 }
 
-/// Format a thrown value (a `Threw(error)`) the way an uncaught-exception
-/// report would: `Error` instances become `"Name: message"` (or their stack),
-/// thrown strings are shown raw, anything else falls back to `inspect`.
-/// Read-only — never re-enters JS.
+/// Format a thrown value the way an uncaught-exception report would:
+/// `Error` instances become `"Name: message"` (or their stack), thrown
+/// strings are shown raw, anything else falls back to `inspect`.
 pub fn format_error(engine: Engine(host), error: JsValue) -> String {
-  object.format_error(error, engine.heap)
+  rt_inspect.format_error(engine.agent, error)
+}
+
+/// The raw store slot behind an object value, rendered as the Gleam term: a
+/// debugging view (the CLI's `/heap`). `None` when `val` is not an object; a
+/// dangling reference reads `<collected>`.
+pub fn dump_object(engine: Engine(host), val: JsValue) -> Option(String) {
+  case types.classify(val) {
+    KHandle(h) ->
+      case rt_gc.t_is_live(engine.agent, h) {
+        True -> Some(string.inspect(rt_store.t_cell_get(engine.agent, h)))
+        False -> Some("<collected>")
+      }
+    _ -> None
+  }
 }
 
 // ----------------------------------------------------------------------------
 // Accessors
 // ----------------------------------------------------------------------------
 
-/// Peek at the engine's heap. Useful for inspecting returned JsValues
-/// (since most are heap refs).
-pub fn heap(engine: Engine(host)) -> Heap(host) {
-  engine.heap
+/// The engine's agent: store, realms, microtask queue, hooks. What every
+/// `arc/rt` operation takes.
+pub fn heap(engine: Engine(host)) -> Agent {
+  engine.agent
 }
 
-/// The engine's builtins registry (prototypes + constructors). Needed by
-/// callers that drop to the lower `entry`/`module` layers with the raw triple.
-pub fn builtins(engine: Engine(host)) -> Builtins {
-  engine.builtins
+/// The current realm's intrinsics (prototypes, constructors, global object).
+pub fn builtins(engine: Engine(host)) -> Realm {
+  engine.agent.realm
 }
 
-/// The engine's global object ref (`globalThis`).
+/// The current realm's global object (`globalThis`).
 pub fn global(engine: Engine(host)) -> Ref {
-  engine.global
+  engine.agent.realm.global_object
 }
 
-/// The engine's host hooks (whatever `with_host_hooks` installed, or
-/// `host_hooks.default_host_hooks()`). Needed by callers that drop to the lower
-/// `entry`/`module` layers and must thread the hooks themselves.
+/// The engine's host hooks (whatever `with_host_hooks` installed, or the
+/// defaults).
 pub fn host_hooks(engine: Engine(host)) -> host_hooks.HostHooks {
-  engine.host_hooks
+  engine.agent.hooks
 }
 
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
 
-/// Narrow the entry layer's settled `Result(value, thrown)` into the public
-/// `Outcome`.
-fn outcome_of(settled: Result(JsValue, JsValue)) -> Outcome {
-  case settled {
-    Ok(value) -> Returned(value)
-    Error(thrown) -> Threw(thrown)
-  }
-}
-
 pub fn eval_error_message(err: EvalError(host)) -> String {
   case err {
     ParseError(e) -> parser.parse_error_to_string(e)
     CompileError(e) -> compiler.error_message(e)
-    VmError(e) -> state.vm_error_message(e)
     ModuleCompileError(e) -> module.format_compile_bundle_error(e)
-    ModuleError(error:, heap:) ->
-      module.module_error_phase(error) <> module.error_message(error, heap)
+    ModuleError(error:, engine:) ->
+      module.module_error_phase(error)
+      <> module.error_message(error, engine.agent)
   }
 }

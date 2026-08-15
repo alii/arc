@@ -9,22 +9,25 @@
 ////   2. IsCallable recognizes callable proxies, so a Proxy-wrapped valueOf
 ////      participates in OrdinaryToPrimitive.
 
-import arc/engine
-import arc/vm/key.{Named}
-import arc/vm/ops/object
-import arc/vm/value.{DataProperty, Finite, JsNumber, JsString}
+import arc/engine.{type JsValueKind, Finite, JsNumber, JsString}
+import arc/rt/obj as rt_obj
+import arc/rt/types.{DataProperty, Named, StringKey}
 import gleam/option.{Some}
 
 /// Run `source` on a fresh engine and return the value of the global
 /// variable `name` afterwards. Asserting on a global (rather than the
 /// completion value) keeps the test independent of the engine.eval
 /// completion type.
-fn global_after(source: String, name: String) -> value.JsValue {
+fn global_after(source: String, name: String) -> JsValueKind {
   let eng = engine.new()
   let assert Ok(#(_, eng)) = engine.eval(eng, source)
-  let assert Some(DataProperty(value: v, ..)) =
-    object.get_own_property(engine.heap(eng), engine.global(eng), Named(name))
-  v
+  let assert #(Some(DataProperty(value: v, ..)), _) =
+    rt_obj.t_get_own_property(
+      engine.heap(eng),
+      engine.global(eng),
+      StringKey(Named(name)),
+    )
+  engine.classify(v)
 }
 
 pub fn bigint_store_accepts_radix_prefixed_strings_test() {

@@ -4,10 +4,9 @@
 /// Two-pass algorithm:
 ///   Pass 1: Walk IR, skip IrLabel markers, build Dict(label_id → PC)
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
-import arc/vm/binop
-import arc/vm/internal/tuple_array
-import arc/vm/key
-import arc/vm/opcode.{
+import arc/bytecode/binop
+import arc/bytecode/key
+import arc/bytecode/opcode.{
   type IrOp, type LabelId, type Op, type Pc, IrAsyncYieldStarNext,
   IrAsyncYieldStarResume, IrBinOp, IrCmpLocalConstJump, IrCmpLocalLocalJump,
   IrDefineAccessor, IrDefineField, IrDefineMethod, IrDeleteField, IrFinal,
@@ -16,7 +15,8 @@ import arc/vm/opcode.{
   IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis, IrWithMakeRef,
   IrWithPutRefValue, IrWithPutVar, Pc,
 }
-import arc/vm/value.{type JsValue}
+import arc/internal/tuple_array
+import arc/rt/types.{type JsVal, JInt}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -32,14 +32,14 @@ import gleam/option.{type Option, None, Some}
 /// its catch target and a `Finally` kind's subroutine entry) still need
 /// label→PC resolution.
 ///
-/// Assembling the surrounding `value.FuncTemplate` is the CALLER's job
+/// Assembling the surrounding `FuncTemplate` is the CALLER's job
 /// (`compiler.resolve_top_level` / `compiler.compile_child`): they own the
 /// scope-analysis metadata every other template field comes from, so this
 /// module never has to thread sixteen values through untouched.
 pub fn resolve(
   code: List(IrOp),
-  constants: List(JsValue),
-) -> #(tuple_array.TupleArray(Op), tuple_array.TupleArray(JsValue)) {
+  constants: List(JsVal),
+) -> #(tuple_array.TupleArray(Op), tuple_array.TupleArray(JsVal)) {
   let const_arr = tuple_array.from_list(constants)
   let code = peephole(code, const_arr, [])
   let label_map = build_label_map(code, 0, dict.new())
@@ -65,7 +65,7 @@ pub fn resolve(
 ///      BinOp Lt|LtEq|Gt|GtEq; JumpIfFalse) → CmpLocal*Jump.
 fn peephole(
   code: List(IrOp),
-  consts: tuple_array.TupleArray(JsValue),
+  consts: tuple_array.TupleArray(JsVal),
   acc: List(IrOp),
 ) -> List(IrOp) {
   case code {
@@ -207,8 +207,8 @@ fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
   }
 }
 
-fn is_const_one(consts: tuple_array.TupleArray(JsValue), index: Int) -> Bool {
-  tuple_array.get_unchecked(index, consts) == value.JsNumber(value.Finite(1.0))
+fn is_const_one(consts: tuple_array.TupleArray(JsVal), index: Int) -> Bool {
+  tuple_array.get_unchecked(index, consts) == types.mk_number(JInt(1))
 }
 
 /// Pass 1: Walk the IR, counting real ops and recording label positions.

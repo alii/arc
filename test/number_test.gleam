@@ -1,15 +1,17 @@
 /// Numeric-literal and string-escape cooking tests.
-import arc/engine.{Returned}
+import arc/engine.{
+  type JsValueKind, Finite, Infinity, JsBool, JsNumber, JsString, NaN,
+  NegInfinity, Returned,
+}
 import arc/parser/ast.{FiniteNumber, InfiniteNumber}
 import arc/parser/number.{BigIntValue, NumberValue}
-import arc/vm/value.{Finite, Infinity, JsNumber, JsString, NaN, NegInfinity}
 import gleam/string
 
 /// Helper: eval source on a fresh engine, assert normal completion, return
 /// the completion value.
-fn eval(source: String) -> value.JsValue {
+fn eval(source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  value
+  engine.classify(value)
 }
 
 /// Helper: the Float a numeric literal denotes, asserting it is finite.
@@ -118,7 +120,7 @@ pub fn eval_dot_exponent_literal_test() {
 pub fn eval_overflowing_literal_test() {
   // §12.9.3: `1e400` IS Infinity — not Number.MAX_VALUE, and not 0.
   assert eval("1e400") == JsNumber(Infinity)
-  assert eval("1e400 === Number.MAX_VALUE") == value.JsBool(False)
+  assert eval("1e400 === Number.MAX_VALUE") == JsBool(False)
   assert eval("(1e400).toString()") == JsString("Infinity")
 }
 
@@ -209,7 +211,7 @@ pub fn eval_intl_number_format_huge_bigint_test() {
   let src =
     "var nf = new Intl.NumberFormat('en');"
     <> " nf.format(10n ** 400n) === nf.format(Infinity)"
-  assert eval(src) == value.JsBool(True)
+  assert eval(src) == JsBool(True)
 }
 
 // ----------------------------------------------------------------------------

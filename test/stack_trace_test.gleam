@@ -1,28 +1,27 @@
 import arc/compiler
+import arc/interp/entry
 import arc/parser
-import arc/vm/builtins
-import arc/vm/exec/entry
-import arc/vm/heap
-import arc/vm/value.{JsString}
+import arc/rt/builtins as rt_builtins
+import arc/rt/call.{NormalCompletion, ThrowCompletion}
+import arc/rt/inspect as rt_inspect
+import arc/rt/types.{type JsVal, KStr, classify}
 import gleam/string
+import rt_helpers
 
-/// Parse + compile + run JS source, return the settled outcome
-/// (Ok(value) / Error(thrown)).
-fn run_js(
-  source: String,
-) -> Result(Result(value.JsValue, value.JsValue), String) {
+/// Parse + compile + run JS source on a fresh linked agent, return the
+/// settled outcome (Ok(value) / Error(thrown)) rendered where it is not the
+/// value itself.
+fn run_js(source: String) -> Result(Result(JsVal, String), String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
       case compiler.compile(body, sb) {
         Error(e) -> Error("compile error: " <> string.inspect(e))
         Ok(template) -> {
-          let h = heap.new()
-          let #(h, b) = builtins.init(h)
-          let #(h, global_object) = builtins.globals(b, h)
-          case entry.run(template, h, b, global_object) {
-            Ok(#(settled, _heap)) -> Ok(settled)
-            Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
+          let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
+          case entry.run_script(st, template) {
+            #(NormalCompletion(v), _st) -> Ok(Ok(v))
+            #(ThrowCompletion(e), st) -> Ok(Error(rt_inspect.inspect(st, e)))
           }
         }
       }
@@ -32,7 +31,14 @@ fn run_js(
 /// Run JS whose final expression is a string, return that string.
 fn eval_string(source: String) -> String {
   case run_js(source) {
-    Ok(Ok(JsString(s))) -> s
+    Ok(Ok(v)) ->
+      case classify(v) {
+        KStr(s) -> s
+        _ ->
+          panic as {
+            "expected string completion, got " <> string.inspect(classify(v))
+          }
+      }
     other ->
       panic as { "expected string completion, got " <> string.inspect(other) }
   }
@@ -60,6 +66,30 @@ pub fn nested_frames_have_lines_test() {
   assert string.contains(s, "at inner (script:1)")
   assert string.contains(s, "at outer (script:2)")
   assert string.contains(s, "at script:3")
+}
+
+/// A stack captured in a callee before its first SetLine (a default
+/// parameter initialiser) must not report the caller's line for the callee
+/// frame, whatever kind of function the callee is.
+pub fn prologue_frame_does_not_inherit_caller_line_test() {
+  let run = fn(decl, name) {
+    let src =
+      "var captured; function g() { captured = new Error('x').stack; }\n"
+      <> decl
+      <> "\n"
+      <> "\n"
+      <> name
+      <> "(); captured"
+    eval_string(src)
+  }
+  let sync = run("function f(a = g()) {}", "f")
+  let gen = run("function* gen(a = g()) {}", "gen")
+  let af = run("async function af(a = g()) {}", "af")
+  assert string.contains(sync, "at f (script)\n")
+  assert string.contains(gen, "at gen (script)\n")
+  assert string.contains(af, "at af (script)\n")
+  assert !string.contains(af, "at af (script:4)")
+  assert string.contains(af, "at script:4")
 }
 
 pub fn stack_is_non_enumerable_test() {

@@ -8,13 +8,24 @@
 /// The recurring trap: on the BEAM `-0.0 >=. 0.0` is True, `-0.0 <. 0.0` is
 /// False, and `0.0 =:= -0.0` is False. So a bare comparison reads -0 as
 /// POSITIVE, while a bare `=:=` reads -0 as NON-INTEGRAL.
-import arc/engine.{Returned}
-import arc/vm/value.{JsBool}
+import arc/engine.{type JsValueKind, JsBool, Returned}
 
 /// Eval `source` on a fresh engine, asserting normal completion.
-fn eval(source: String) -> value.JsValue {
+fn eval(source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  value
+  engine.classify(value)
+}
+
+/// Plain `+ - * /` past 1.8e308 is ±Infinity by the operands' signs; the
+/// finite kernels used to `badarith` there and take the process down.
+pub fn arithmetic_overflow_is_infinity_test() {
+  assert eval("1e308 * 10 === Infinity") == JsBool(True)
+  assert eval("-1e308 * 10 === -Infinity") == JsBool(True)
+  assert eval("1e308 + 1e308 === Infinity") == JsBool(True)
+  assert eval("-1e308 - 1e308 === -Infinity") == JsBool(True)
+  assert eval("Number.MAX_VALUE * 2 === Infinity") == JsBool(True)
+  assert eval("1e308 / -1e-10 === -Infinity") == JsBool(True)
+  assert eval("var x = 1e308; x *= -10; x === -Infinity") == JsBool(True)
 }
 
 /// §21.3.2.18 Math.hypot. The old fold squared and summed raw Floats inline,

@@ -1,0 +1,42 @@
+%%% Top-level protected apply of a compiled module's `js_main/3`, plus the
+%%% turn-end epilogue (drain microtasks, GC safepoint) the runner owns.
+-module(arc_aot_exec_ffi).
+-export([apply_js_main/2, unload/1]).
+
+%% apply_js_main(Mod, St) -> {JsExecOutcome, St'}
+%%   {js_returned, V} normal completion of js_main and the epilogue
+%%   {js_threw, E}    uncaught JS throw from js_main or from a microtask
+%%   {js_crashed, R}  any other error; St' is the input St
+apply_js_main(Mod, St) ->
+    Frame = {undefined, undefined, undefined, undefined},
+    try
+        {Outcome, St2} =
+            try Mod:js_main(St, Frame, []) of
+                {V, St1} -> {{js_returned, V}, St1}
+            catch
+                error:{wasm_exn, 0, [St1, E1]} -> {{js_threw, E1}, St1}
+            end,
+        {Outcome, epilogue(St2)}
+    catch
+        error:{wasm_exn, 0, [St4, E2]} ->
+            {{js_threw, E2}, St4};
+        Class:Reason:Stk ->
+            {{js_crashed, render_reason(Class, Reason, Stk)}, St}
+    end.
+
+epilogue(St0) ->
+    St1 = 'arc@rt@async':drain(St0),
+    'arc@rt@gc':t_maybe_collect(St1).
+
+render_reason(Class, Reason, Stk) ->
+    Top = case Stk of [H | _] -> H; [] -> no_stack end,
+    unicode:characters_to_binary(
+        io_lib:format("~0p:~0p at ~0p", [Class, Reason, Top])).
+
+%% Purge any old code, delete the current code, purge again so nothing of
+%% Mod stays resident. Idempotent for a module that was never loaded.
+unload(Mod) ->
+    _ = code:purge(Mod),
+    _ = code:delete(Mod),
+    _ = code:purge(Mod),
+    nil.

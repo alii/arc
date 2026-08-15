@@ -1,35 +1,69 @@
-import arc/engine.{ModuleReturned, Returned}
+import arc/engine.{
+  type JsValueKind, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
+  ModuleReturned, Returned,
+}
+import arc/host.{State}
 import arc/module/load_error
-import arc/vm/builtins/console
-import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
+import arc/module_host
+import arc/rt/builtins/console
+import arc/rt/snapshot.{IncompatibleSnapshot, MalformedBinary}
+import arc/rt/types.{
+  type JsVal, JFloat, JInt, mk_bool, mk_null, mk_number, mk_string, mk_undefined,
+}
+import gleam/int
+import gleam/list
 import gleam/option.{Some}
+
+// ----------------------------------------------------------------------------
+// Values in and out
+// ----------------------------------------------------------------------------
+
+/// A JS number to hand the engine; integral floats take the integer wire
+/// form, the one the runtime itself produces for them.
+fn num(f: Float) -> JsVal {
+  let i = truncate(f)
+  case int.to_float(i) == f {
+    True -> mk_number(JInt(i))
+    False -> mk_number(JFloat(f))
+  }
+}
+
+@external(erlang, "erlang", "trunc")
+fn truncate(f: Float) -> Int
+
+/// The arguments of a host call, classified for matching.
+fn kinds(args: List(JsVal)) -> List(JsValueKind) {
+  list.map(args, engine.classify)
+}
 
 // ----------------------------------------------------------------------------
 // Serialization — roundtrip
 // ----------------------------------------------------------------------------
 
-/// Helper: eval on engine, assert normal completion, return value.
-fn assert_eval(eng: engine.Engine(host), source: String) -> value.JsValue {
+/// Helper: eval on engine, assert normal completion, return the value
+/// classified.
+fn assert_eval(eng: engine.Engine(host), source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(eng, source)
-  value
+  engine.classify(value)
 }
 
 /// Helper: serialize then deserialize an engine.
 fn roundtrip(eng: engine.Engine(host)) -> engine.Engine(host) {
-  let assert Ok(eng) = eng |> engine.serialize |> engine.deserialize
+  let assert Ok(bin) = engine.serialize(eng)
+  let assert Ok(eng) = engine.deserialize(bin)
   eng
 }
 
 pub fn deserialize_rejects_garbage_bytes_test() {
   let result: Result(engine.Engine(Nil), _) =
     engine.deserialize(<<"definitely not a snapshot":utf8>>)
-  assert result == Error(engine.MalformedBinary)
+  assert result == Error(MalformedBinary)
 }
 
 pub fn deserialize_rejects_unaligned_bits_test() {
   // A BitArray that isn't even byte-aligned, let alone a serialized term.
   let result: Result(engine.Engine(Nil), _) = engine.deserialize(<<1:size(3)>>)
-  assert result == Error(engine.MalformedBinary)
+  assert result == Error(MalformedBinary)
 }
 
 pub fn deserialize_rejects_foreign_term_test() {
@@ -38,28 +72,28 @@ pub fn deserialize_rejects_foreign_term_test() {
   // snapshot. Rejected on the bytes; nothing is ever decoded.
   let result: Result(engine.Engine(Nil), _) =
     engine.deserialize(<<131, 104, 3, 97, 1, 97, 2, 97, 3>>)
-  assert result == Error(engine.MalformedBinary)
+  assert result == Error(MalformedBinary)
 }
 
 pub fn deserialize_rejects_wrong_version_test() {
   // Our tag, a version no build will ever carry.
   let result: Result(engine.Engine(Nil), _) =
     engine.deserialize(<<"arc-engine":utf8, 999_999:32, 131, 106>>)
-  assert result == Error(engine.IncompatibleSnapshot)
+  assert result == Error(IncompatibleSnapshot)
 }
 
 pub fn deserialize_rejects_corrupt_payload_behind_header_test() {
   // A well-formed header whose payload is not an external term at all: the
   // decoder must fail closed rather than crash out of `binary_to_term`.
   let result: Result(engine.Engine(Nil), _) =
-    engine.deserialize(<<"arc-engine":utf8, 3:32, 1, 2, 3>>)
-  assert result == Error(engine.IncompatibleSnapshot)
+    engine.deserialize(<<"arc-engine":utf8, 4:32, 1, 2, 3>>)
+  assert result == Error(IncompatibleSnapshot)
 }
 
 pub fn serialize_roundtrip_number_test() {
   let eng =
     engine.new()
-    |> engine.define_global("x", JsNumber(Finite(42.0)))
+    |> engine.define_global("x", num(42.0))
 
   assert assert_eval(roundtrip(eng), "x") == JsNumber(Finite(42.0))
 }
@@ -67,7 +101,7 @@ pub fn serialize_roundtrip_number_test() {
 pub fn serialize_roundtrip_string_test() {
   let eng =
     engine.new()
-    |> engine.define_global("s", JsString("hello"))
+    |> engine.define_global("s", mk_string("hello"))
 
   assert assert_eval(roundtrip(eng), "s") == JsString("hello")
 }
@@ -75,7 +109,7 @@ pub fn serialize_roundtrip_string_test() {
 pub fn serialize_roundtrip_bool_test() {
   let eng =
     engine.new()
-    |> engine.define_global("b", JsBool(True))
+    |> engine.define_global("b", mk_bool(True))
 
   assert assert_eval(roundtrip(eng), "b") == JsBool(True)
 }
@@ -83,7 +117,7 @@ pub fn serialize_roundtrip_bool_test() {
 pub fn serialize_roundtrip_null_test() {
   let eng =
     engine.new()
-    |> engine.define_global("n", JsNull)
+    |> engine.define_global("n", mk_null())
 
   assert assert_eval(roundtrip(eng), "n") == JsNull
 }
@@ -91,7 +125,7 @@ pub fn serialize_roundtrip_null_test() {
 pub fn serialize_roundtrip_undefined_test() {
   let eng =
     engine.new()
-    |> engine.define_global("u", JsUndefined)
+    |> engine.define_global("u", mk_undefined())
 
   assert assert_eval(roundtrip(eng), "u") == JsUndefined
 }
@@ -155,7 +189,7 @@ pub fn serialize_preserves_mutable_closure_test() {
   assert assert_eval(restored, "count") == JsNumber(Finite(3.0))
   // calling inc again on the restored engine should continue from 3
   let assert Ok(#(Returned(value:), _)) = engine.eval(restored, "inc()")
-  assert value == JsNumber(Finite(4.0))
+  assert engine.classify(value) == JsNumber(Finite(4.0))
 }
 
 pub fn serialize_preserves_prototype_chain_test() {
@@ -215,9 +249,9 @@ pub fn serialize_host_fn_reregister_test() {
   let eng =
     engine.new()
     |> engine.define_fn("double", 1, fn(args, _this, state) {
-      case args {
-        [JsNumber(Finite(n)), ..] -> #(state, Ok(JsNumber(Finite(n *. 2.0))))
-        _ -> #(state, Ok(JsUndefined))
+      case kinds(args) {
+        [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
+        _ -> #(state, Ok(mk_undefined()))
       }
     })
 
@@ -228,13 +262,91 @@ pub fn serialize_host_fn_reregister_test() {
   let restored =
     roundtrip(eng)
     |> engine.define_fn("double", 1, fn(args, _this, state) {
-      case args {
-        [JsNumber(Finite(n)), ..] -> #(state, Ok(JsNumber(Finite(n *. 2.0))))
-        _ -> #(state, Ok(JsUndefined))
+      case kinds(args) {
+        [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
+        _ -> #(state, Ok(mk_undefined()))
       }
     })
 
   assert assert_eval(restored, "double(5)") == JsNumber(Finite(10.0))
+}
+
+/// Install the dynamic-import hook through the engine, resolving every
+/// specifier to itself and loading `source` for it.
+fn with_import_hook(
+  eng: engine.Engine(host),
+  source: String,
+) -> engine.Engine(host) {
+  let #(eng, Nil) =
+    engine.with_state(eng, fn(s) {
+      let agent =
+        module_host.install_import_hook(
+          s.agent,
+          "/main.js",
+          fn(raw, _referrer) { Ok(raw) },
+          fn(_resolved) { Ok(source) },
+        )
+      #(State(..s, agent:), Nil)
+    })
+  eng
+}
+
+pub fn serialize_host_fn_reregister_around_import_hook_test() {
+  // Host-function ids come from the embedder's registrations alone, so WHEN
+  // the dynamic-import hook is installed relative to them is irrelevant:
+  // here it goes between the two natives originally and before both on the
+  // restored engine. `d`/`n` hold the ORIGINAL function objects across the
+  // roundtrip, so they dispatch on the ids minted before serialization, not
+  // on the fresh globals the re-registration also defines.
+  let double = fn(args, _this, state) {
+    case kinds(args) {
+      [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
+      _ -> #(state, Ok(mk_undefined()))
+    }
+  }
+  let negate = fn(args, _this, state) {
+    case kinds(args) {
+      [JsNumber(Finite(n)), ..] -> #(state, Ok(num(0.0 -. n)))
+      _ -> #(state, Ok(mk_undefined()))
+    }
+  }
+  let eng =
+    engine.new()
+    |> engine.define_fn("double", 1, double)
+    |> with_import_hook("export const tag = 'before';")
+    |> engine.define_fn("negate", 1, negate)
+  let assert Ok(#(_, eng)) = engine.eval(eng, "var d = double, n = negate;")
+  assert assert_eval(eng, "d(5)") == JsNumber(Finite(10.0))
+  assert assert_eval(eng, "n(5)") == JsNumber(Finite(-5.0))
+
+  let restored =
+    roundtrip(eng)
+    |> with_import_hook("export const tag = 'after';")
+    |> engine.define_fn("double", 1, double)
+    |> engine.define_fn("negate", 1, negate)
+  assert assert_eval(restored, "d(5)") == JsNumber(Finite(10.0))
+  assert assert_eval(restored, "n(5)") == JsNumber(Finite(-5.0))
+  // The re-installed hook is the one import() reaches.
+  let assert Ok(#(Returned(_), restored)) =
+    engine.eval(
+      restored,
+      "var tag = 'unset'; import('/m.js').then(ns => { tag = ns.tag; });",
+    )
+  assert assert_eval(restored, "tag") == JsString("after")
+}
+
+pub fn import_without_hook_rejects_after_deserialize_test() {
+  // The hook is not written: until it is re-installed, import() on the
+  // restored engine rejects like on a fresh one.
+  let eng = with_import_hook(engine.new(), "export const tag = 'x';")
+  let restored = roundtrip(eng)
+  let assert Ok(#(Returned(_), restored)) =
+    engine.eval(
+      restored,
+      "var msg = 'unset'; import('/m.js').catch(e => { msg = e.message; });",
+    )
+  assert assert_eval(restored, "msg")
+    == JsString("Dynamic import is not supported in this context")
 }
 
 pub fn serialize_constructor_and_instances_test() {
@@ -264,26 +376,26 @@ pub fn define_fn_callable_from_js_test() {
   let eng =
     engine.new()
     |> engine.define_fn("double", 1, fn(args, _this, state) {
-      case args {
-        [JsNumber(Finite(n)), ..] -> #(state, Ok(JsNumber(Finite(n *. 2.0))))
-        _ -> #(state, Ok(JsUndefined))
+      case kinds(args) {
+        [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
+        _ -> #(state, Ok(mk_undefined()))
       }
     })
 
   let assert Ok(#(Returned(value:), _)) = engine.eval(eng, "double(21)")
-  assert value == JsNumber(Finite(42.0))
+  assert engine.classify(value) == JsNumber(Finite(42.0))
 }
 
 pub fn define_fn_has_name_and_length_test() {
   let eng =
     engine.new()
     |> engine.define_fn("myFunc", 3, fn(_args, _this, state) {
-      #(state, Ok(JsUndefined))
+      #(state, Ok(mk_undefined()))
     })
 
   let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "myFunc.name + ':' + myFunc.length")
-  assert value == JsString("myFunc:3")
+  assert engine.classify(value) == JsString("myFunc:3")
 }
 
 pub fn define_namespace_creates_object_with_methods_test() {
@@ -291,25 +403,22 @@ pub fn define_namespace_creates_object_with_methods_test() {
     engine.new()
     |> engine.define_namespace("math2", [
       #("square", 1, fn(args, _this, state) {
-        case args {
-          [JsNumber(Finite(n)), ..] -> #(state, Ok(JsNumber(Finite(n *. n))))
-          _ -> #(state, Ok(JsUndefined))
+        case kinds(args) {
+          [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. n)))
+          _ -> #(state, Ok(mk_undefined()))
         }
       }),
       #("cube", 1, fn(args, _this, state) {
-        case args {
-          [JsNumber(Finite(n)), ..] -> #(
-            state,
-            Ok(JsNumber(Finite(n *. n *. n))),
-          )
-          _ -> #(state, Ok(JsUndefined))
+        case kinds(args) {
+          [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. n *. n)))
+          _ -> #(state, Ok(mk_undefined()))
         }
       }),
     ])
 
   let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "math2.square(4) + math2.cube(2)")
-  assert value == JsNumber(Finite(24.0))
+  assert engine.classify(value) == JsNumber(Finite(24.0))
 }
 
 pub fn define_namespace_has_tostringtag_test() {
@@ -318,48 +427,48 @@ pub fn define_namespace_has_tostringtag_test() {
   let eng =
     engine.new()
     |> engine.define_namespace("widgets", [
-      #("noop", 0, fn(_args, _this, state) { #(state, Ok(JsUndefined)) }),
+      #("noop", 0, fn(_args, _this, state) { #(state, Ok(mk_undefined())) }),
     ])
 
   let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "Object.prototype.toString.call(widgets)")
-  assert value == JsString("[object widgets]")
+  assert engine.classify(value) == JsString("[object widgets]")
 }
 
 pub fn define_global_installs_value_test() {
   let eng =
     engine.new()
-    |> engine.define_global("MY_CONST", JsString("hello"))
+    |> engine.define_global("MY_CONST", mk_string("hello"))
 
   let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "MY_CONST + ' world'")
-  assert value == JsString("hello world")
+  assert engine.classify(value) == JsString("hello world")
 }
 
 pub fn host_fn_receives_this_test() {
   let eng =
     engine.new()
     |> engine.define_fn("whoami", 0, fn(_args, this, state) {
-      case this {
-        JsString(s) -> #(state, Ok(JsString("this=" <> s)))
-        _ -> #(state, Ok(JsString("this=other")))
+      case engine.classify(this) {
+        JsString(s) -> #(state, Ok(mk_string("this=" <> s)))
+        _ -> #(state, Ok(mk_string("this=other")))
       }
     })
 
   let assert Ok(#(Returned(value:), _)) = engine.eval(eng, "whoami.call('abc')")
-  assert value == JsString("this=abc")
+  assert engine.classify(value) == JsString("this=abc")
 }
 
 pub fn host_fn_can_throw_test() {
   let eng =
     engine.new()
     |> engine.define_fn("boom", 0, fn(_args, _this, state) {
-      #(state, Error(JsString("kaboom")))
+      #(state, Error(mk_string("kaboom")))
     })
 
   let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "try { boom() } catch (e) { 'caught:' + e }")
-  assert value == JsString("caught:kaboom")
+  assert engine.classify(value) == JsString("caught:kaboom")
 }
 
 // ----------------------------------------------------------------------------
@@ -375,6 +484,11 @@ fn reject_loads(_resolved: String) {
   Error(load_error.LoadForbidden)
 }
 
+/// `engine.read_export`, classified.
+fn read_export(eng, ns, name: String) -> option.Option(JsValueKind) {
+  engine.read_export(eng, ns, name) |> option.map(engine.classify)
+}
+
 pub fn eval_module_reads_export_test() {
   let eng = engine.new()
   let assert Ok(#(evaluated, eng)) =
@@ -386,9 +500,9 @@ pub fn eval_module_reads_export_test() {
       reject_loads,
     )
   let assert ModuleReturned(namespace: ns, ..) = evaluated
-  assert engine.read_export(eng, ns, "answer") == Some(JsNumber(Finite(42.0)))
+  assert read_export(eng, ns, "answer") == Some(JsNumber(Finite(42.0)))
   // Missing exports are None, not an error.
-  assert engine.read_export(eng, ns, "missing") == option.None
+  assert read_export(eng, ns, "missing") == option.None
 }
 
 pub fn call_export_threads_module_state_test() {
@@ -408,13 +522,13 @@ pub fn call_export_threads_module_state_test() {
   let assert ModuleReturned(namespace: ns, ..) = evaluated
   let assert Some(bump) = engine.read_export(eng, ns, "bump")
 
-  let assert Ok(#(Returned(value:), eng)) =
-    engine.call(eng, bump, JsUndefined, [JsNumber(Finite(5.0))])
-  assert value == JsNumber(Finite(5.0))
+  let assert #(Returned(value:), eng) =
+    engine.call(eng, bump, mk_undefined(), [num(5.0)])
+  assert engine.classify(value) == JsNumber(Finite(5.0))
 
-  let assert Ok(#(Returned(value:), _eng)) =
-    engine.call(eng, bump, JsUndefined, [JsNumber(Finite(3.0))])
-  assert value == JsNumber(Finite(8.0))
+  let assert #(Returned(value:), _eng) =
+    engine.call(eng, bump, mk_undefined(), [num(3.0)])
+  assert engine.classify(value) == JsNumber(Finite(8.0))
 }
 
 pub fn destructured_declaration_exports_test() {
@@ -448,13 +562,13 @@ pub fn destructured_declaration_exports_test() {
     )
   let assert ModuleReturned(namespace: ns, ..) = evaluated
   // a=1, c (renamed from b)=2, x=10 — every destructured binding linked.
-  assert engine.read_export(eng, ns, "sum") == Some(JsNumber(Finite(13.0)))
+  assert read_export(eng, ns, "sum") == Some(JsNumber(Finite(13.0)))
   // Rest element: `r` is `{ extra: 3 }`.
-  assert engine.read_export(eng, ns, "rest") == Some(JsNumber(Finite(3.0)))
+  assert read_export(eng, ns, "rest") == Some(JsNumber(Finite(3.0)))
   // Elision + default: `[x, , y = 1]` over a 2-element array leaves y = 1.
-  assert engine.read_export(eng, ns, "gap") == Some(JsNumber(Finite(1.0)))
+  assert read_export(eng, ns, "gap") == Some(JsNumber(Finite(1.0)))
   // §10.4.6.11 [[OwnPropertyKeys]]: exported names in sorted code-unit order.
-  assert engine.read_export(eng, ns, "keys") == Some(JsString("a,c,r,x,y"))
+  assert read_export(eng, ns, "keys") == Some(JsString("a,c,r,x,y"))
 }
 
 pub fn eval_module_syntax_error_test() {
@@ -481,10 +595,8 @@ pub fn eval_module_syntax_error_test() {
 fn fmt_engine() -> engine.Engine(host) {
   engine.new()
   |> engine.define_fn("fmt", 0, fn(args, _this, s) {
-    case console.format(args, s) {
-      Ok(#(line, s)) -> #(s, Ok(JsString(line)))
-      Error(#(thrown, s)) -> #(s, Error(thrown))
-    }
+    let #(line, agent) = console.format(s.agent, args)
+    #(State(..s, agent:), Ok(mk_string(line)))
   })
 }
 
@@ -639,8 +751,8 @@ pub fn promise_job_user_capability_resolve_throw_test() {
   // `Promise.prototype.then` builds the child capability with
   // NewPromiseCapability(SpeciesConstructor(this)), so `cap.resolve` can be
   // an arbitrary user function. When it throws inside the reaction job there
-  // is no caller to catch it: the drain reports it to stderr
-  // (event_loop.call_for_job, "Uncaught (in promise job) ...") and MUST keep
+  // is no caller to catch it: the drain reports it through the
+  // `report_uncaught` hook ("Uncaught (in promise job) ...") and MUST keep
   // draining — the second, independent chain below still has to run. stderr
   // isn't capturable here, so this pins the "keeps draining" half.
   let eng = engine.new()
@@ -712,7 +824,7 @@ pub fn regexp_flags_canonical_order_test() {
 // ----------------------------------------------------------------------------
 
 /// Run a script (draining microtasks), then read the global `log` array.
-fn eval_then_read_log(source: String) -> value.JsValue {
+fn eval_then_read_log(source: String) -> JsValueKind {
   let eng = engine.new()
   let assert Ok(#(Returned(_), eng)) = engine.eval(eng, source)
   assert_eval(eng, "log.join('|')")
@@ -814,9 +926,12 @@ pub fn async_yield_star_missing_return_awaits_value_test() {
 }
 
 pub fn async_yield_star_missing_return_rejected_value_test() {
-  // §27.5.3.8 step 7.c.ii.2: if the Await of the .return() argument rejects,
-  // the abrupt completion replaces the return completion — it is thrown into
-  // the body (running the finally) and the .return() promise REJECTS.
+  // §27.6.3.7 AsyncGeneratorUnwrapYieldResumption: the .return() argument is
+  // Await-ed at the yield and its rejection becomes a THROW completion. yield*
+  // then looks for inner.throw, finds none, closes the inner iterator and
+  // throws a TypeError (§14.4.14 step 7.b.iii) into the body: the finally runs
+  // and the .return() promise REJECTS with that TypeError, not 'boom'. (JSC and
+  // engine262 agree; V8 resolves without running the finally.)
   let log =
     eval_then_read_log(
       "var log = [];
@@ -838,10 +953,10 @@ pub fn async_yield_star_missing_return_rejected_value_test() {
        }).then(function (r) {
          log.push('unexpected:' + r.value);
        }, function (e) {
-         log.push('rej:' + e);
+         log.push('rej:' + (e instanceof TypeError));
        });",
     )
-  assert log == JsString("n:x,false|fin|rej:boom")
+  assert log == JsString("n:x,false|fin|rej:true")
 }
 
 pub fn async_yield_star_delegated_return_runs_outer_finally_test() {
@@ -942,7 +1057,7 @@ pub fn sync_yield_star_delegated_return_runs_outer_finally_test() {
 }
 
 // ----------------------------------------------------------------------------
-// Agent-wide symbol tables survive child executions (state.merge_globals).
+// Agent-wide symbol tables survive child executions.
 // Symbol descriptions and the Symbol.for registry are agent-wide: a Symbol
 // created (or registered) inside an eval / generator child execution must keep
 // its description and registry entry after control returns to the caller.
@@ -967,9 +1082,9 @@ pub fn eval_child_preserves_symbol_tables_test() {
 
 pub fn generator_child_preserves_symbol_tables_test() {
   let eng = engine.new()
-  // Symbols created inside the generator body (a child execution merged back
-  // via merge_globals on each resume) must keep their description / registry
-  // entry in the outer frame.
+  // Symbols created inside the generator body (a suspended activation resumed
+  // on the caller's agent) must keep their description / registry entry in
+  // the outer frame.
   assert assert_eval(
       eng,
       "function* g() { yield Symbol('gd'); yield Symbol.for('gk'); }

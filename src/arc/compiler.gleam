@@ -13,20 +13,20 @@
 /// pass over the IR. Per-function metadata (local_count, captures, lexical
 /// slots, name table, eval flags) lives in `scope.FunctionInfo`, looked up
 /// by the function's scope_id in the tree.
+import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
+import arc/bytecode/opcode
 import arc/compiler/ast_util
 import arc/compiler/emit
 import arc/compiler/resolve
 import arc/compiler/scope
 import arc/esm
+import arc/internal/tuple_array
 import arc/parser/ast
-import arc/vm/internal/tuple_array
-import arc/vm/lexical.{type CodeKind, type LexicalSlots}
-import arc/vm/opcode
-import arc/vm/value.{
-  type EvalNameTable, type FuncTemplate, type JsValue, type VarEnvKind,
-  CaptureLocal, EvalNameTable, FuncTemplate, GlobalVarEnv, JsUndefined,
-  JsUninitialized,
+import arc/rt/bytecode.{
+  type EvalNameTable, type FuncTemplate, type VarEnvKind, CaptureLocal,
+  EvalNameTable, FrameVarEnv, FuncTemplate, GlobalVarEnv,
 }
+import arc/rt/types.{type JsVal}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -118,7 +118,7 @@ pub type DirectEvalCaller {
 /// arity, no env captures, and not an arrow/constructor/generator/async.
 fn resolve_top_level(
   code: List(opcode.IrOp),
-  constants: List(JsValue),
+  constants: List(JsVal),
   info: scope.FunctionInfo,
   child_templates: List(FuncTemplate),
   is_strict: Bool,
@@ -181,11 +181,9 @@ pub type CompiledModuleBody {
     /// `template.functions`, in source order. The linker instantiates the
     /// exported ones before evaluation so importers observe the closures.
     hoisted_funcs: List(#(String, Int)),
-    /// Exported local name → the value the linker pre-seeds into its BoxSlot
-    /// before the body runs (§16.2 instantiation): `undefined` for var and
-    /// function declarations (hoisted, never TDZ), `uninitialized` for
-    /// let/const/class and the default export (TDZ until initialized).
-    export_seeds: Dict(String, JsValue),
+    /// Exported local name → how the linker pre-seeds its cell before the
+    /// body runs (§16.2 instantiation).
+    export_seeds: Dict(String, ExportSeed),
     /// [[HasTLA]] (§16.2.1.5): the module body contains a top-level `await`.
     /// An `await` inside a nested function compiles into that function's own
     /// child template, so an Await opcode in the module-root bytecode is
@@ -193,6 +191,15 @@ pub type CompiledModuleBody {
     /// so callers never scan bytecode.
     has_tla: Bool,
   )
+}
+
+/// The value the linker seeds into an exported local's cell before the body
+/// runs (§16.2 instantiation).
+pub type ExportSeed {
+  /// var/function: hoisted, never TDZ.
+  SeedUndefined
+  /// let/const/class and the default export: TDZ until initialized.
+  SeedUninitialized
 }
 
 /// Compile a module body to a `CompiledModuleBody`.
@@ -224,15 +231,15 @@ fn local_export_names(exports: List(esm.ExportEntry)) -> List(String) {
   })
 }
 
-/// The value the linker pre-seeds into each exported local's BoxSlot before the
-/// module body runs (§16.2 instantiation): `undefined` for var and function
-/// declarations (hoisted, never TDZ), `uninitialized` for let/const/class and
-/// the default export (TDZ until the body initializes them). Computed here,
-/// alongside the bytecode, and handed to the linker on `CompiledModuleBody`.
+/// The seed for each exported local's cell before the module body runs
+/// (§16.2 instantiation): `undefined` for var and function declarations
+/// (hoisted, never TDZ), `uninitialized` for let/const/class and the default
+/// export (TDZ until the body initializes them). Computed here, alongside the
+/// bytecode, and handed to the linker on `CompiledModuleBody`.
 fn module_export_seeds(
   items: List(ast.ModuleItem),
   exports: List(esm.ExportEntry),
-) -> Dict(String, JsValue) {
+) -> Dict(String, ExportSeed) {
   // The `undefined`-seeded names are exactly the module-level VarDeclaredNames
   // plus the top-level FunctionDeclarations — the same ast_util helpers the
   // emitter drives instantiation from, so `export {x}; if (c) var x` sees `x`
@@ -258,8 +265,8 @@ fn module_export_seeds(
   local_export_names(exports)
   |> list.fold(dict.new(), fn(acc, name) {
     let seed = case set.contains(undef, name) {
-      True -> JsUndefined
-      False -> JsUninitialized
+      True -> SeedUndefined
+      False -> SeedUninitialized
     }
     dict.insert(acc, name, seed)
   })
@@ -628,10 +635,7 @@ fn compile_child(
   // A child function's VariableEnvironment is always its own frame.
   let local_names = case info.eval_in_subtree {
     True ->
-      Some(EvalNameTable(
-        var_env: value.FrameVarEnv,
-        names: dict.to_list(info.names),
-      ))
+      Some(EvalNameTable(var_env: FrameVarEnv, names: dict.to_list(info.names)))
     False -> None
   }
 
