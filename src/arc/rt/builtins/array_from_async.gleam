@@ -424,41 +424,52 @@ fn from_async_close_then_reject(
   err: JsVal,
   reject: JsVal,
 ) -> Agent {
+  case call_return_method(st, iter) {
+    #(None, st) -> settle(st, reject, err)
+    #(Some(inner), st) -> {
+      // Await(innerResult), then reject with the original error whichever
+      // way it settles.
+      let #(rw, st) =
+        alloc_closure(st, ArrayN(ArrayFromAsyncRejectWith(error: err, reject:)))
+      let #(inner_h, st) = rt_async.promise_resolve_static(st, inner)
+      let #(_child, st) = rt_async.t_promise_then(st, inner_h, rw, rw)
+      st
+    }
+  }
+}
+
+/// §7.4.13 steps 3-4 under a throw completion: GetMethod(iterator, "return")
+/// and Call it. `None` when there is nothing to await (not an object, no
+/// callable return, or GetMethod/return() threw, since the original error
+/// wins); `Some(innerResult)` when return() completed normally.
+fn call_return_method(st: Agent, iter: JsVal) -> #(Option(JsVal), Agent) {
   case classify(iter) {
-    KHandle(_) ->
-      case
+    KHandle(_) -> {
+      let got =
         attempt_value(st, fn(st) {
           rt_obj.t_get_prop(st, iter, StringKey(Named("return")))
         })
-      {
-        // GetMethod threw — original error wins (§7.4.13 step 4).
-        Error(#(_inner_thrown, st)) -> settle(st, reject, err)
-        Ok(#(ret_fn, st)) ->
-          case rt_call.is_callable(st, ret_fn) {
-            False -> settle(st, reject, err)
-            True ->
-              case rt_call.t_call(st, ret_fn, iter, []) {
-                // return() threw — original error wins (§7.4.13 step 4).
-                #(rt_call.ThrowCompletion(_inner_thrown), st) ->
-                  settle(st, reject, err)
-                #(rt_call.NormalCompletion(inner), st) -> {
-                  // Await(innerResult), then reject with the original error
-                  // whichever way it settles.
-                  let #(rw, st) =
-                    alloc_closure(
-                      st,
-                      ArrayN(ArrayFromAsyncRejectWith(error: err, reject:)),
-                    )
-                  let #(inner_h, st) =
-                    rt_async.promise_resolve_static(st, inner)
-                  let #(_child, st) =
-                    rt_async.t_promise_then(st, inner_h, rw, rw)
-                  st
-                }
-              }
-          }
+      case got {
+        Error(#(_inner_thrown, st)) -> #(None, st)
+        Ok(#(ret_fn, st)) -> call_if_callable(st, ret_fn, iter)
       }
-    _ -> settle(st, reject, err)
+    }
+    _ -> #(None, st)
+  }
+}
+
+fn call_if_callable(
+  st: Agent,
+  ret_fn: JsVal,
+  iter: JsVal,
+) -> #(Option(JsVal), Agent) {
+  case rt_call.is_callable(st, ret_fn) {
+    False -> #(None, st)
+    True ->
+      case rt_call.t_call(st, ret_fn, iter, []) {
+        #(rt_call.ThrowCompletion(_inner_thrown), st) -> #(None, st)
+        #(rt_call.NormalCompletion(inner), st) -> #(Some(inner), st)
+      }
   }
 }
 
