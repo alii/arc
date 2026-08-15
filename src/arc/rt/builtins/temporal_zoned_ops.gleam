@@ -14,8 +14,8 @@ import arc/rt/builtins/temporal_common.{
   IgnoreOffset, Later, RejectDisambiguation, RejectOffset, UseOffset,
   epoch_ns_to_iso_in, get_disambiguation_option, get_offset_option,
   get_options_object, get_overflow_option, parse_time_zone_id, read_int_field,
-  read_pos_int_field, round_to_increment, terr, time_only_ns, time_zone_id,
-  to_temporal_time_zone, tz_offset_ns_at, validate_epoch_ns,
+  read_pos_int_field, round_to_increment, terr, time_only_ns,
+  to_temporal_time_zone, tz_offset_ns_at, unloadable_tz, validate_epoch_ns,
 }
 import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, calendar_date_add, check_parsed_calendar,
@@ -56,17 +56,6 @@ pub fn check_iso_days_range(d: IsoDate) -> Result(Nil, TErr) {
     True -> Ok(Nil)
     False -> Error(RangeE("date outside of supported range"))
   }
-}
-
-/// A zone whose name we accepted but whose tzdata will not load is a broken
-/// install, not an unknown identifier: same RangeError, but the reason says so.
-pub fn unloadable_tz(tz: TimeZone, error: temporal_tz.TzError) -> TErr {
-  RangeE(
-    "time zone "
-    <> time_zone_id(tz)
-    <> " cannot be loaded: "
-    <> temporal_tz.describe(error),
-  )
 }
 
 /// GetPossibleEpochNanoseconds — ascending epoch instants whose local time

@@ -23,8 +23,8 @@ import arc/rt/builtins/temporal_common.{
   make_zoned_cal, max_unit, parse_time_zone_id_strict, require_temporal,
   require_time_unit, round_options, round_to_increment, seconds_string_precision,
   terr, throw_terr, time_only_ns, time_unit_ns, time_zone_equals, time_zone_id,
-  to_temporal_time_zone, tz_offset_ns_at, unit_rank, valid_time_increment,
-  zoned_slot_of,
+  to_temporal_time_zone, tz_offset_ns_at, unit_rank, unloadable_tz,
+  valid_time_increment, zoned_slot_of,
 }
 import arc/rt/builtins/temporal_diff.{diff_date_time_core}
 import arc/rt/builtins/temporal_fields.{
@@ -45,7 +45,7 @@ import arc/rt/builtins/temporal_plain_time.{
 import arc/rt/builtins/temporal_tz
 import arc/rt/builtins/temporal_zoned_ops.{
   OptionOffset, date_time_fields_all_none, get_epoch_ns_for, interpret_offset,
-  read_date_time_fields, start_of_day_ns, to_temporal_zoned, unloadable_tz,
+  read_date_time_fields, start_of_day_ns, to_temporal_zoned,
 }
 import arc/rt/types.{
   type Agent, type JsVal, type NativeToken, type TemporalProtos,
