@@ -26,16 +26,17 @@ import arc/rt/types.{
   type WeakKey, AccessorProperty, Agent, ArgumentsObj, ArrayBufferObj,
   ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGenRequest,
   AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty, DataViewObj, DateObj,
-  Dense, ErrorObj, ForInIterator, GeneratorObj, Handler, HostJob,
-  IdentityPassThrough, IntlObj, IteratorHelperObj, JsCell, JsStore, KBound,
-  KBytecode, KCompiled, KHost, KNative, MapIterator, MapObj, ModuleNamespace,
-  NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
-  PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
-  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
-  SBox, SGenerator, SObject, SPromiseData, SShapedObject, SetIterator, SetObj,
-  Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
-  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj,
-  WeakSymKey, WrapForValidIteratorObj, jq_to_list, native_token_refs,
+  Dense, DisposableStackObj, ErrorObj, ForInIterator, GeneratorObj, Handler,
+  HostJob, IdentityPassThrough, IntlObj, IteratorHelperObj, JsCell, JsStore,
+  KBound, KBytecode, KCompiled, KHost, KNative, MapIterator, MapObj,
+  ModuleNamespace, NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj,
+  PromisePending, PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj,
+  ReactionJob, RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame,
+  SAsyncContext, SAsyncGen, SBox, SGenerator, SObject, SPromiseData,
+  SShapedObject, SetIterator, SetObj, Sparse, StringIterator, StringObj,
+  SymbolObj, TemporalObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj,
+  WeakObjKey, WeakSetObj, WeakSymKey, WrapForValidIteratorObj, jq_to_list,
+  native_token_refs,
 } as rt_types
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array as rt_tree_array
@@ -358,6 +359,10 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     // Temporal internal slots are plain integers, calendars and resolved
     // time zones: no handles.
     TemporalObj(data: _) -> acc
+    // The resource stack holds user values, dispose methods and callback
+    // argument lists — all `JsVal`s; walk the whole state term.
+    DisposableStackObj(async: _, state:) ->
+      push_term_refs(to_dynamic(state), acc)
   }
 }
 

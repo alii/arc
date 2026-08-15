@@ -861,6 +861,61 @@ pub type NativeToken {
   DomExceptionN(DomExceptionNative)
   IntlN(IntlNative)
   TemporalN(TemporalNative)
+  DisposableStackN(DisposableStackNative)
+}
+
+/// DisposableStack / AsyncDisposableStack natives (Explicit Resource
+/// Management §12.3 / §12.4). Constructors and `move` close over the
+/// intrinsic prototype; `AsyncDisposeContinue` is the promise reaction that
+/// resumes the async DisposeResources loop after an Await settles.
+pub type DisposableStackNative {
+  DisposableStackConstructor(proto: Handle)
+  DisposableStackPrototypeDispose
+  DisposableStackPrototypeUse
+  DisposableStackPrototypeAdopt
+  DisposableStackPrototypeDefer
+  DisposableStackPrototypeMove(proto: Handle)
+  DisposableStackDisposedGetter
+  AsyncDisposableStackConstructor(proto: Handle)
+  AsyncDisposableStackPrototypeDisposeAsync
+  AsyncDisposableStackPrototypeUse
+  AsyncDisposableStackPrototypeAdopt
+  AsyncDisposableStackPrototypeDefer
+  AsyncDisposableStackPrototypeMove(proto: Handle)
+  AsyncDisposableStackDisposedGetter
+  /// Reaction handler continuing AsyncDisposableStack.prototype.disposeAsync
+  /// after an awaited disposer result settles. `pending` is the throw
+  /// completion accumulated so far (SuppressedError chain).
+  AsyncDisposeContinue(
+    remaining: List(DisposeResource),
+    pending: Option(JsVal),
+    resolve: JsVal,
+    reject: JsVal,
+    is_reject: Bool,
+  )
+}
+
+/// A DisposableResource record on a (Async)DisposableStack's
+/// [[DisposableResourceStack]]. The variant fixes how Dispose invokes it.
+pub type DisposeResource {
+  /// use(value): Call(method, value). `method` undefined only for the async
+  /// null/undefined resource, which is `NullDispose` instead.
+  MethodDispose(value: JsVal, method: JsVal)
+  /// adopt(value, onDispose) / defer(onDispose): Call(callback, undefined, args).
+  DisposeCallback(callback: JsVal, args: List(JsVal))
+  /// async use(value) whose @@asyncDispose was missing: GetDisposeMethod step
+  /// 1.b.ii wrapper — Call(method, value), discard the result, Await(undefined).
+  AsyncFallbackDispose(value: JsVal, method: JsVal)
+  /// async use(null/undefined): no method, only forces one Await(undefined).
+  NullDispose
+}
+
+/// [[DisposableState]] / [[AsyncDisposableState]] together with the
+/// [[DisposeCapability]]'s resource stack (newest first). `Disposed` drops the
+/// resources structurally.
+pub type DisposableState {
+  Pending(resources: List(DisposeResource))
+  Disposed
 }
 
 /// WebIDL §2.8.1 DOMException natives. `proto` is the intrinsic prototype
@@ -1959,10 +2014,7 @@ pub type TemporalNative {
   /// new Temporal.PlainYearMonth(year, month [, calendar [, referenceISODay]])
   TemporalPlainYearMonthCtor(protos: TemporalProtos)
   /// Temporal.PlainYearMonth.from / compare
-  TemporalPlainYearMonthStatic(
-    name: TemporalStaticName,
-    protos: TemporalProtos,
-  )
+  TemporalPlainYearMonthStatic(name: TemporalStaticName, protos: TemporalProtos)
   /// get Temporal.PlainYearMonth.prototype.<field>
   TemporalPlainYearMonthGetter(getter: TemporalYearMonthGetter)
   /// Temporal.PlainYearMonth.prototype methods
@@ -2298,6 +2350,7 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     DomExceptionN(DomExceptionGetCode) -> []
     IntlN(n) -> intl_native_refs(n)
     TemporalN(n) -> temporal_native_refs(n)
+    DisposableStackN(n) -> disposable_stack_native_refs(n)
     DateN(n) -> date_native_refs(n)
     RegExpN(n) -> regexp_native_refs(n)
     AtomicsN(_) -> []
@@ -2486,6 +2539,30 @@ pub fn error_native_refs(n: ErrorNative) -> List(Handle) {
     | ErrorStackGetter
     | ErrorStackSetter(_)
     | ErrorIsError -> []
+  }
+}
+
+/// GC-trace hook for `DisposableStackNative`: constructors and `move` close
+/// over the intrinsic prototype. `AsyncDisposeContinue` carries `JsVal`s only
+/// (its resource list, pending error and capability functions), which the
+/// whole-tag term walk traces.
+pub fn disposable_stack_native_refs(n: DisposableStackNative) -> List(Handle) {
+  case n {
+    DisposableStackConstructor(proto:)
+    | DisposableStackPrototypeMove(proto:)
+    | AsyncDisposableStackConstructor(proto:)
+    | AsyncDisposableStackPrototypeMove(proto:) -> [proto]
+    DisposableStackPrototypeDispose
+    | DisposableStackPrototypeUse
+    | DisposableStackPrototypeAdopt
+    | DisposableStackPrototypeDefer
+    | DisposableStackDisposedGetter
+    | AsyncDisposableStackPrototypeDisposeAsync
+    | AsyncDisposableStackPrototypeUse
+    | AsyncDisposableStackPrototypeAdopt
+    | AsyncDisposableStackPrototypeDefer
+    | AsyncDisposableStackDisposedGetter
+    | AsyncDisposeContinue(..) -> []
   }
 }
 
@@ -2786,6 +2863,10 @@ pub type ObjKind {
   IntlObj(data: IntlData, bound: Option(Handle))
   /// A Temporal object; `data` carries its internal slots.
   TemporalObj(data: TemporalData)
+  /// DisposableStack (`async: False`) / AsyncDisposableStack (`async: True`)
+  /// — Explicit Resource Management §12.3/§12.4. `async` is the brand;
+  /// `state` is [[DisposableState]] plus the [[DisposeCapability]] resources.
+  DisposableStackObj(async: Bool, state: DisposableState)
 }
 
 /// A heap cell's contents. `SObject`/`SShapedObject` are the JS-visible
@@ -3103,6 +3184,9 @@ pub type Realm {
     id: Int,
     /// Global `let`/`const`/`class` bindings (§9.1.1.4 [[DeclarativeRecord]]).
     lexical_globals: Dict(String, LexicalGlobal),
+    /// %SuppressedError% — DisposeResources folds a second disposal error
+    /// into `new SuppressedError(error, suppressed)` of the running realm.
+    suppressed_error: BuiltinPair,
   )
 }
 
@@ -3163,6 +3247,7 @@ pub fn unset_realm() -> Realm {
     shared_array_buffer: p,
     id: -1,
     lexical_globals: dict.new(),
+    suppressed_error: p,
   )
 }
 

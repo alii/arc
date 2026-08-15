@@ -20,6 +20,8 @@ import arc/interp/state.{
   StackUnderflow, State, SuspensionLeak, Threw, VmFailed, Yielded,
 }
 import arc/rt/async as rt_async
+import arc/rt/builtins/disposable_stack
+import arc/rt/builtins/error as rt_error
 import arc/rt/builtins/global_fns
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/regexp as b_regexp
@@ -354,74 +356,26 @@ fn make_method(agent: Agent, func: JsVal, target: Handle) -> Agent {
 /// again at dispose time. Raises TypeError for a primitive or method-less
 /// resource.
 fn using_disposer(agent: Agent, val: JsVal, is_async: Bool) -> #(JsVal, Agent) {
-  case classify(val), is_async {
+  case classify(val) {
     // Step 1.a: V is null or undefined → method undefined.
-    KUndef, _ | KNull, _ -> #(mk_undefined(), agent)
-    // sync-dispose: GetMethod(V, @@dispose).
-    KHandle(_), False -> {
-      let #(method, agent) = dispose_method(agent, val, rt_types.symbol_dispose)
-      case method {
-        Some(m) -> direct_disposer(agent, m, val)
-        None ->
-          rt_val.t_throw_type_error(
-            agent,
-            "Object does not have a [Symbol.dispose] method",
-          )
-      }
-    }
-    // async-dispose: GetMethod(V, @@asyncDispose), falling back to the
-    // GetDisposeMethod step 1.b.ii wrapper around GetMethod(V, @@dispose).
-    KHandle(_), True -> {
+    KUndef | KNull -> #(mk_undefined(), agent)
+    // GetDisposeMethod(V, hint): sync-dispose reads @@dispose; async-dispose
+    // reads @@asyncDispose, falling back to the step 1.b.ii wrapper around
+    // @@dispose. A missing method is a TypeError.
+    KHandle(_) -> {
       let #(method, agent) =
-        dispose_method(agent, val, rt_types.symbol_async_dispose)
+        disposable_stack.get_dispose_method(agent, val, is_async:)
       case method {
-        Some(m) -> direct_disposer(agent, m, val)
-        None -> {
-          let #(sync_method, agent) =
-            dispose_method(agent, val, rt_types.symbol_dispose)
-          case sync_method {
-            Some(m) -> sync_fallback_disposer(agent, m, val)
-            None ->
-              rt_val.t_throw_type_error(
-                agent,
-                "Object does not have a [Symbol.asyncDispose] or [Symbol.dispose] method",
-              )
-          }
-        }
+        disposable_stack.DirectDispose(m) -> direct_disposer(agent, m, val)
+        disposable_stack.SyncFallbackDispose(m) ->
+          sync_fallback_disposer(agent, m, val)
       }
     }
     // Step 1.b.i: a primitive resource is a TypeError.
-    _, _ ->
-      rt_val.t_throw_type_error(
-        agent,
-        "using declaration initializer is not an object, null, or undefined",
-      )
-  }
-}
-
-/// §7.3.11 GetMethod(V, @@symbol): undefined/null → None; a non-callable
-/// value is a TypeError.
-fn dispose_method(
-  agent: Agent,
-  val: JsVal,
-  symbol: rt_types.SymbolId,
-) -> #(Option(Handle), Agent) {
-  let #(method, agent) = rt_obj.t_get_prop(agent, val, SymbolKey(symbol))
-  case classify(method) {
-    KUndef | KNull -> #(None, agent)
-    KHandle(h) ->
-      case rt_call.is_callable(agent, method) {
-        True -> #(Some(h), agent)
-        False ->
-          rt_val.t_throw_type_error(
-            agent,
-            "Dispose method property is not callable",
-          )
-      }
     _ ->
       rt_val.t_throw_type_error(
         agent,
-        "Dispose method property is not callable",
+        "using declaration initializer is not an object, null, or undefined",
       )
   }
 }
@@ -2080,13 +2034,24 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "GetDisposer")
       }
 
-    // `using` / `await using` desugar: DisposeResources error folding needs
-    // %SuppressedError%, which this realm does not carry yet.
+    // `using` / `await using` desugar: DisposeResources error folding — pop
+    // suppressed, pop error, push new SuppressedError(error, suppressed).
     opcode.MakeSuppressed ->
-      state.throw_type_error(
-        state,
-        "SuppressedError is not supported in this environment",
-      )
+      case state.stack {
+        [suppressed, err, ..rest] -> {
+          let #(suppressed_error, agent) =
+            rt_error.make_suppressed_error(state.agent, err, suppressed)
+          Ok(
+            State(
+              ..state,
+              agent:,
+              stack: [suppressed_error, ..rest],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        _ -> underflow(state, "MakeSuppressed")
+      }
 
     TypeOf ->
       case state.stack {

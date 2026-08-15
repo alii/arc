@@ -43,6 +43,7 @@ pub type ErrorFamily {
     eval_error: BuiltinPair,
     uri_error: BuiltinPair,
     aggregate_error: BuiltinPair,
+    suppressed_error: BuiltinPair,
   )
 }
 
@@ -106,6 +107,9 @@ pub fn init(
   // AggregateError ( errors, message [ , options ] ) — §20.5.7.1.1.
   let #(aggregate_error, st) =
     subclass(st, error, "AggregateError", 2, AggregateErrorConstructor)
+  // SuppressedError ( error, suppressed, message ) — Explicit Resource Mgmt.
+  let #(suppressed_error, st) =
+    subclass(st, error, "SuppressedError", 3, SuppressedErrorConstructor)
   #(
     ErrorFamily(
       error:,
@@ -116,6 +120,7 @@ pub fn init(
       eval_error:,
       uri_error:,
       aggregate_error:,
+      suppressed_error:,
     ),
     st,
   )
@@ -224,7 +229,17 @@ fn aggregate_error_ctor(
   #(mk_object(h), st)
 }
 
-/// SuppressedError ( error, suppressed, message ) — Explicit Resource Mgmt.
+/// SuppressedError ( error, suppressed, message ) — Explicit Resource
+/// Management proposal.
+///
+///   1. If NewTarget is undefined, let newTarget be the active function object.
+///   2. Let O be ? OrdinaryCreateFromConstructor(newTarget, "%SuppressedError.prototype%").
+///   3. If message is not undefined, then
+///      a. Let msg be ? ToString(message).
+///      b. Perform CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
+///   4. Perform ! CreateNonEnumerableDataPropertyOrThrow(O, "error", error).
+///   5. Perform ! CreateNonEnumerableDataPropertyOrThrow(O, "suppressed", suppressed).
+///   6. Return O.
 fn suppressed_error_ctor(
   st: Agent,
   fallback_proto: Handle,
@@ -232,27 +247,61 @@ fn suppressed_error_ctor(
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
   let #(err, suppressed, message) = helpers.three_args_or_undefined(args)
+  // Steps 1-2: OrdinaryCreateFromConstructor(newTarget, ...).
   let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
   let #(msg_opt, st) = case classify(message) {
+    // Step 3: message is undefined — no "message" property
     KUndef -> #(None, st)
     _ -> {
       let #(s, st) = rt_val.t_to_string(st, message)
       #(Some(s), st)
     }
   }
-  let #(err_prop, st) = common.builtin_property(st, err)
-  let #(sup_prop, st) = common.builtin_property(st, suppressed)
-  let base = [#("error", err_prop), #("suppressed", sup_prop)]
-  let #(props, st) = case msg_opt {
+  alloc_suppressed(st, proto, msg_opt, err, suppressed)
+}
+
+/// Allocate a SuppressedError instance with non-enumerable error/suppressed
+/// (and optional message) data properties, plus a stack trace.
+fn alloc_suppressed(
+  st: Agent,
+  proto: Handle,
+  message: Option(String),
+  err: JsVal,
+  suppressed: JsVal,
+) -> #(JsVal, Agent) {
+  // Steps 3-5 define "message" (when present) before "error"/"suppressed";
+  // property creation order is the seq-stamp order.
+  let #(msg_props, st) = case message {
     Some(msg) -> {
       let #(mp, st) = common.builtin_property(st, mk_string(msg))
-      #([#("message", mp), ..base], st)
+      #([#("message", mp)], st)
     }
-    None -> #(base, st)
+    None -> #([], st)
   }
+  let #(err_prop, st) = common.builtin_property(st, err)
+  let #(sup_prop, st) = common.builtin_property(st, suppressed)
+  let props =
+    list.append(msg_props, [#("error", err_prop), #("suppressed", sup_prop)])
   let #(h, st) = common.alloc_error_slot(st, proto, props)
-  let st = attach_stack(st, h, "SuppressedError", option.unwrap(msg_opt, ""))
+  let st = attach_stack(st, h, "SuppressedError", option.unwrap(message, ""))
   #(mk_object(h), st)
+}
+
+/// DisposeResources step 1.b.i: "Let error be a newly created SuppressedError
+/// object" with non-enumerable "error" (the new exception) and "suppressed"
+/// (the previously pending exception) properties, in the running realm.
+pub fn make_suppressed_error(
+  st: Agent,
+  err: JsVal,
+  suppressed: JsVal,
+) -> #(JsVal, Agent) {
+  alloc_suppressed(
+    st,
+    st.realm.suppressed_error.prototype,
+    None,
+    err,
+    suppressed,
+  )
 }
 
 /// §10.1.13.2 GetPrototypeFromConstructor: `Get(newTarget, "prototype")` or

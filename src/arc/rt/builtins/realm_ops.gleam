@@ -149,6 +149,7 @@ pub fn realm_handles(r: Realm) -> List(Handle) {
     pair(r.eval_error),
     pair(r.uri_error),
     pair(r.aggregate_error),
+    pair(r.suppressed_error),
     pair(r.map),
     pair(r.set),
     pair(r.weak_map),

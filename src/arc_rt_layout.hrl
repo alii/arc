@@ -49,7 +49,7 @@
 -define(REALM_ARRAY, 4).
 -define(REALM_GLOBAL, 49).
 -define(REALM_ID, 51).
--define(REALM_ARITY, 52).
+-define(REALM_ARITY, 53).
 -define(PAIR_TAG, builtin_pair).
 -define(PAIR_PROTO, 2).
 -define(PAIR_CTOR, 3).

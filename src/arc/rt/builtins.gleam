@@ -22,6 +22,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/console as b_console
 import arc/rt/builtins/data_view as b_data_view
 import arc/rt/builtins/date as b_date
+import arc/rt/builtins/disposable_stack as b_disposable_stack
 import arc/rt/builtins/dom_exception as b_dom_exception
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/function as b_function
@@ -54,10 +55,10 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
   type Realm, Agent, ArrayBufferN, ArrayN, AsyncGenResume, AsyncResume, AtomicsN,
   BigIntN, BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty,
-  DataViewN, DateN, DomExceptionN, ErrorN, FunctionN, GeneratorN, GlobalN,
-  HostFn, HostFnEntry, IntlN, IteratorN, JInt, JNan, JPosInf, JsOps, JsStore,
-  JsonN, KHandle, MapN, MathN, Named, NativeUnseeded, NoElements,
-  NumberConstructor, NumberN, NumberObj, ObjectN, Ordinary, PromiseN,
+  DataViewN, DateN, DisposableStackN, DomExceptionN, ErrorN, FunctionN,
+  GeneratorN, GlobalN, HostFn, HostFnEntry, IntlN, IteratorN, JInt, JNan,
+  JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, Named, NativeUnseeded,
+  NoElements, NumberConstructor, NumberN, NumberObj, ObjectN, Ordinary, PromiseN,
   PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN,
   ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN, StringObj,
   SymbolConstructor, SymbolN, TemporalN, Test262N, ThrowTypeErrorPoison,
@@ -153,6 +154,11 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   let #(map, st) = b_map.init(st, object_proto, fn_proto)
   let #(set, st) = b_set.init(st, object_proto, fn_proto)
   let #(#(weak_map, weak_set), st) = b_weak.init(st, object_proto, fn_proto)
+  // DisposableStack / AsyncDisposableStack constructors + prototypes.
+  let #(disposable_stack, st) =
+    b_disposable_stack.init(st, object_proto, fn_proto)
+  let #(async_disposable_stack, st) =
+    b_disposable_stack.init_async(st, object_proto, fn_proto)
   // 13. Proxy.
   let #(proxy, st) = b_proxy.init(st, object_proto, fn_proto)
   // 14. Binary data.
@@ -200,6 +206,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
         set:,
         weak_map:,
         weak_set:,
+        disposable_stack:,
+        async_disposable_stack:,
         date:,
         regexp:,
         promise:,
@@ -272,6 +280,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       shared_array_buffer:,
       id:,
       lexical_globals: dict.new(),
+      suppressed_error: errors.suppressed_error,
     )
   // 18. Pin every realm handle (idempotent — most are already pinned by
   // alloc_proto/init_type, this catches any that arrived by another route).
@@ -360,6 +369,8 @@ type GlobalRefs {
     set: BuiltinPair,
     weak_map: BuiltinPair,
     weak_set: BuiltinPair,
+    disposable_stack: BuiltinPair,
+    async_disposable_stack: BuiltinPair,
     date: BuiltinPair,
     regexp: BuiltinPair,
     promise: BuiltinPair,
@@ -419,11 +430,14 @@ fn alloc_global_object(
     Builtin("EvalError", ctor(r.errors.eval_error)),
     Builtin("URIError", ctor(r.errors.uri_error)),
     Builtin("AggregateError", ctor(r.errors.aggregate_error)),
+    Builtin("SuppressedError", ctor(r.errors.suppressed_error)),
     Builtin("DOMException", ctor(r.dom_exception)),
     Builtin("Map", ctor(r.map)),
     Builtin("Set", ctor(r.set)),
     Builtin("WeakMap", ctor(r.weak_map)),
     Builtin("WeakSet", ctor(r.weak_set)),
+    Builtin("DisposableStack", ctor(r.disposable_stack)),
+    Builtin("AsyncDisposableStack", ctor(r.async_disposable_stack)),
     Builtin("Date", ctor(r.date)),
     Builtin("RegExp", ctor(r.regexp)),
     Builtin("Promise", ctor(r.promise)),
@@ -566,6 +580,7 @@ pub fn dispatch_native(
     MapN(n) -> b_map.dispatch(st, n, this, args)
     SetN(n) -> b_set.dispatch(st, n, this, args)
     WeakN(n) -> b_weak.dispatch(st, n, this, args)
+    DisposableStackN(n) -> b_disposable_stack.dispatch(st, n, this, args)
     ArrayBufferN(n) -> b_array_buffer.dispatch(st, n, this, args)
     DataViewN(n) -> b_data_view.dispatch(st, n, this, args)
     TypedArrayN(n) -> b_typed_array.dispatch(st, n, this, args)
@@ -607,6 +622,8 @@ pub fn dispatch_native_construct(
     MapN(n) -> b_map.dispatch_construct(st, n, args, new_target)
     SetN(n) -> b_set.dispatch_construct(st, n, args, new_target)
     WeakN(n) -> b_weak.dispatch_construct(st, n, args, new_target)
+    DisposableStackN(n) ->
+      b_disposable_stack.dispatch_construct(st, n, args, new_target)
     DateN(n) -> b_date.dispatch_construct(st, n, args, new_target)
     RegExpN(n) -> b_regexp.dispatch_construct(st, n, args, new_target)
     ProxyN(n) -> b_proxy.dispatch_construct(st, n, args, new_target)
