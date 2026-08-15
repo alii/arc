@@ -357,15 +357,13 @@ timeout_for(Name) ->
             end
     end.
 
-%% Per-test heap cap (words). The default ~256MB kills pathological exec
-%% tests while leaving room for a major GC, which briefly holds both the old
-%% and the new heap (a 10k-frame recursion test keeps ~6M live words); the
-%% TEST262=1 parser sweep is ONE test that parses ~53k files —
+%% Per-test heap cap (words). The default ~80MB kills pathological exec
+%% tests; the TEST262=1 parser sweep is ONE test that parses ~53k files —
 %% several are multi-megabyte source files whose ASTs alone exceed the
 %% default cap — so it gets a large one of its own.
 max_heap_for(Name) ->
     case binary:match(Name, <<"test262_run_test">>) of
-        nomatch -> 32000000;
+        nomatch -> 10000000;
         _ -> 120000000
     end.
 
