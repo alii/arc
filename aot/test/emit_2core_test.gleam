@@ -395,3 +395,16 @@ pub fn minus_zero_is_preserved_diff_test() {
     "-0 -0 -0 -0 0 -0 -0 0 0 -0 0 -0 -0 -0\nfalse true -Infinity 0 0 [0] 0 true true Infinity\n0\n-0 0\n-1 true 5 -0 0\n",
   )
 }
+
+/// A user species constructor can hand the reaction job a throwing
+/// `resolve`; the job has no caller, so the throw is reported to the host
+/// sink instead of vanishing.
+pub fn throwing_species_resolve_is_reported_test() {
+  let c =
+    harness.run_compiled(
+      "var p=Promise.resolve(1);function C(ex){ex(function(){throw new Error('boom')},function(){})}C[Symbol.species]=C;Promise.prototype.constructor=C;p.then(function(v){console.log('ran',v);return v})",
+    )
+  assert c.stdout == <<"ran 1\n":utf8>>
+  assert harness.buf_read()
+    == <<"ran 1\nUncaught (in promise job) Error: boom\n":utf8>>
+}

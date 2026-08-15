@@ -32,17 +32,19 @@ import arc/rt/types.{
   type ReactionHandler, AGAwaitingReturn, AGCompleted, AGExecuting,
   AGResumeAwaitingReturn, AGResumeBody, AGResumeReturnUnwind, AGSuspendedStart,
   AGSuspendedYield, Agent, AsyncGenRequest, AsyncGenResume, AsyncResume,
-  DataProperty, GenCompleted, GenExecuting, GenNext, GenReturn,
+  DataProperty, ErrorObj, GenCompleted, GenExecuting, GenNext, GenReturn,
   GenSuspendedStart, GenSuspendedYield, GenThrow, Handler, IdentityPassThrough,
-  JsCell, JsStore, KHandle, KNative, Named, NoElements, Ordinary,
+  JsCell, JsStore, KHandle, KNative, KStr, KSym, Named, NoElements, Ordinary,
   PromiseFulfilled, PromisePending, PromiseReaction, PromiseRejectFn,
   PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob, SAsyncGen,
   SBox, SGenerator, SObject, SPromise, StringKey, ThrowerPassThrough, TypeErr,
   classify, jq_pop, jq_push, mk_bool, mk_object, mk_undefined,
 } as rt_types
+import arc/rt/val as rt_val
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 
 // ── Step protocol (SPEC §7.M18 wire type) ───────────────────────────────────
 
@@ -277,14 +279,47 @@ pub fn t_drain_microtasks(st: Agent) -> Agent {
 }
 
 /// Fire-and-forget invoke of a promise-capability resolve/reject fn during
-/// job execution. There is no continuation to hand the return value to, and
-/// a job has no caller to propagate an abrupt completion to. Port of arc
-/// `event_loop.call_for_job`: arc reports a throwing user-species
-/// resolve/reject to stderr; 2core discards the throw here (host-report
-/// hook is M19 harness scope, not M8).
+/// job execution: the return value is discarded (a job has no continuation
+/// to hand it to) and an abrupt completion is reported rather than
+/// propagated (a job has no caller to propagate to). Port of arc
+/// `job_call.call_settlement_fn`.
 fn call_settle(st: Agent, target: JsVal, args: List(JsVal)) -> Agent {
-  let #(_, st) = t_call(st, target, mk_undefined(), args)
-  st
+  case t_call(st, target, mk_undefined(), args) {
+    #(NormalCompletion(_), st) -> st
+    // `target` is typically a promise-capability resolve/reject function. The
+    // native ones never throw, but `Promise.prototype.then` builds the child
+    // capability with NewPromiseCapability(SpeciesConstructor(this)), so a
+    // user species constructor hands us arbitrary user callables here. There
+    // is no promise to blame the throw on (it happened AFTER the reaction
+    // settled), so `unhandled_rejections` cannot carry it; report it through
+    // the host sink instead of letting it vanish.
+    #(ThrowCompletion(thrown), st) -> {
+      require_js(st).host_hooks.print(
+        "Uncaught (in promise job) " <> describe_thrown(st, thrown),
+      )
+      st
+    }
+  }
+}
+
+/// Render a thrown value for a host report without running user code: an
+/// Error's recorded stack (its `name: message` header), a string as-is,
+/// anything else by its primitive rendering.
+fn describe_thrown(st: Agent, thrown: JsVal) -> String {
+  case classify(thrown) {
+    KStr(s) -> s
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: ErrorObj(stack:), ..) if stack != "" -> stack
+        _ -> "[object Object]"
+      }
+    KSym(id) -> rt_types.symbol_descriptive_string(id)
+    _ ->
+      case rt_val.prim_to_string(thrown) {
+        Ok(s) -> s
+        Error(e) -> string.inspect(e)
+      }
+  }
 }
 
 /// Run one microtask job. Port of arc `event_loop.execute_job` +

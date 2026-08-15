@@ -14,16 +14,21 @@ import arc/rt/builtins/iter_protocol
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type BuiltinPair, type ErrorNative, type Handle, type JsVal,
-  AggregateErrorConstructor, DataProperty, ErrorCaptureStackTrace,
+  type Agent, type BuiltinPair, type ErrorNative, type FrameInfo, type Handle,
+  type JsVal, AggregateErrorConstructor, DataProperty, ErrorCaptureStackTrace,
   ErrorConstructor, ErrorIsError, ErrorN, ErrorObj, ErrorPrototypeToString,
-  ErrorStackGetter, ErrorStackSetter, JFloat, KHandle, KNull, KStr, KUndef,
-  Named, ParsedDesc, SObject, StringKey, SuppressedErrorConstructor, classify,
-  mk_bool, mk_number, mk_object, mk_string, mk_undefined,
+  ErrorStackGetter, ErrorStackSetter, FrameInfo, JFloat, JInt, JNan, JNegInf,
+  JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named, ParsedDesc, SObject,
+  StringKey, SuppressedErrorConstructor, classify, mk_bool, mk_number, mk_object,
+  mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
+import gleam/float
+import gleam/int
+import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 
 /// All error-related builtin types (arc `error.gleam:22-34`). Maps onto the
 /// `Realm` record's error/type_error/.. fields.
@@ -333,22 +338,83 @@ fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
   }
 }
 
-/// Write the `[[ErrorData]]` stack string. 2core has no call-stack
-/// introspection yet (M-CALL threads no frame stack), so the stack is the
-/// header line only.
+/// Default Error.stackTraceLimit (V8 parity). Used when the constructor's
+/// `stackTraceLimit` property is missing or not a number.
+const default_stack_limit = 10
+
+/// Build a V8-style stack-trace string. `header` is the first line — the
+/// error's `name: message` (or just `name`). The frames are `Agent.frames`
+/// at the moment the error is constructed: the executing function first,
+/// then its callers. Honors Error.stackTraceLimit. Port of arc
+/// `state.build_stack_trace` (`state.gleam:764-790`). Lines look like:
+///
+///   TypeError: x is not a function
+///       at inner (script:3)
+///       at outer (script:7)
+///       at script:10
+///
+fn build_stack_trace(st: Agent, header: String) -> String {
+  let frames = list.take(st.frames, stack_trace_limit(st))
+  case list.map(frames, format_frame) {
+    [] -> header
+    lines -> header <> "\n" <> string.join(lines, "\n")
+  }
+}
+
+/// Format one frame: `    at name (script:line)`, or `    at script:line`
+/// when the function is anonymous (e.g. the top-level script body).
+fn format_frame(frame: FrameInfo) -> String {
+  let FrameInfo(name:, script:, line:) = frame
+  let loc = case line {
+    0 -> script
+    _ -> script <> ":" <> int.to_string(line)
+  }
+  case name {
+    "" -> "    at " <> loc
+    _ -> "    at " <> name <> " (" <> loc <> ")"
+  }
+}
+
+/// Read Error.stackTraceLimit off the Error constructor. Non-numbers fall
+/// back to the default; Infinity means "no limit"; negatives and NaN clamp to
+/// 0 (no frames). Port of arc `state.stack_trace_limit`.
+fn stack_trace_limit(st: Agent) -> Int {
+  let ctor = rt_store.t_cell_get(st, st.realm.error.constructor)
+  case rt_obj.as_sobject(st, ctor) {
+    SObject(props:, ..) ->
+      case dict.get(props, Named("stackTraceLimit")) {
+        Ok(DataProperty(value: v, ..)) ->
+          case classify(v) {
+            KNum(JInt(n)) -> int.max(0, n)
+            KNum(JFloat(f)) -> int.max(0, float.truncate(f))
+            // Effectively unbounded — far above any real call depth.
+            KNum(JPosInf) -> 1_000_000
+            // -Infinity is a negative limit; NaN's ToIntegerOrInfinity is 0.
+            KNum(JNegInf) | KNum(JNan) -> 0
+            _ -> default_stack_limit
+          }
+        _ -> default_stack_limit
+      }
+    _ -> default_stack_limit
+  }
+}
+
+/// Write the `[[ErrorData]]` stack string: the header plus one line per
+/// `Agent.frames` entry (header-only when no frames are recorded).
 fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
   let header = case msg {
     "" -> name
     _ -> name <> ": " <> msg
   }
+  let trace = build_stack_trace(st, header)
   // Non-error objects (Error.captureStackTrace targets) get a non-enumerable
   // own `stack` data property, matching V8. arc state.gleam:821-849.
-  let #(stack_prop, st) = common.builtin_property(st, mk_string(header))
+  let #(stack_prop, st) = common.builtin_property(st, mk_string(trace))
   let st = rt_obj.devolve(st, h)
   rt_store.t_cell_update(st, h, fn(slot) {
     case slot {
       SObject(kind: ErrorObj(..), ..) as s ->
-        SObject(..s, kind: ErrorObj(stack: header))
+        SObject(..s, kind: ErrorObj(stack: trace))
       SObject(props:, ..) as s ->
         SObject(..s, props: dict.insert(props, Named("stack"), stack_prop))
       other -> other

@@ -2450,5 +2450,15 @@ pub type Agent {
     realm: Realm,
     /// §13.2.8.4 [[TemplateMap]]: site id -> pinned template array.
     template_objects: Dict(String, Handle),
+    /// Active call chain, innermost first, as the interpreter pushes it on
+    /// Call and pops it on Return. `Error` construction renders it into
+    /// `stack`. Compiled code keeps it empty.
+    frames: List(FrameInfo),
   )
+}
+
+/// One `Error.prototype.stack` frame: `at name (script:line)`. `name` is ""
+/// for anonymous code (the top-level script body); `line` 0 is unknown.
+pub type FrameInfo {
+  FrameInfo(name: String, script: String, line: Int)
 }

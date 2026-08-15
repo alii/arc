@@ -5,12 +5,12 @@
 -ifndef(ARC_RT_LAYOUT_HRL).
 -define(ARC_RT_LAYOUT_HRL, true).
 
-%% arc/rt/types.Agent: {agent, Store, Realm, ..appended}. Both fields bare
-%% (no Option wrapper).
+%% arc/rt/types.Agent: {agent, Store, Realm, TemplateObjects, Frames}. Both
+%% indexed fields bare (no Option wrapper).
 -define(AGENT_TAG, agent).
 -define(AGENT_STORE, 2).
 -define(AGENT_REALM, 3).
--define(AGENT_ARITY, 4).
+-define(AGENT_ARITY, 5).
 -define(SOME, some).
 -define(NONE, none).
 

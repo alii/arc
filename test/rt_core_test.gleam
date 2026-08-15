@@ -7,9 +7,9 @@ import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/types.{
-  type Agent, type CompiledFn, type JsVal, FnFlags, HostHooks, JFloat, JInt,
-  JNegInf, KBool, KHandle, KNum, KStr, StringKey, canonical_key, classify,
-  mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  type Agent, type CompiledFn, type JsVal, Agent, FnFlags, FrameInfo, HostHooks,
+  JFloat, JInt, JNegInf, KBool, KHandle, KNum, KStr, StringKey, canonical_key,
+  classify, mk_null, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/option.{None}
@@ -197,4 +197,38 @@ fn global(st: Agent, name: String) -> JsVal {
 
 fn get(st: Agent, obj: JsVal, name: String) -> JsVal {
   rt_obj.t_get_prop(st, obj, StringKey(canonical_key(name))).0
+}
+
+// ── Error.stack from Agent.frames ────────────────────────────────────────────
+
+fn error_stack(st: Agent, msg: String) -> String {
+  let ctor = global(st, "Error")
+  let #(h, st) = rt_call.t_construct(st, ctor, [mk_string(msg)], ctor)
+  let assert KStr(stack) = classify(get(st, mk_object(h), "stack"))
+  stack
+}
+
+pub fn error_stack_renders_frames_test() {
+  let st = agent()
+  assert error_stack(st, "x") == "Error: x"
+  let st =
+    Agent(..st, frames: [
+      FrameInfo(name: "inner", script: "script", line: 3),
+      FrameInfo(name: "", script: "script", line: 10),
+    ])
+  assert error_stack(st, "x")
+    == "Error: x\n    at inner (script:3)\n    at script:10"
+  let type_error = global(st, "TypeError")
+  let #(h, st2) = rt_call.t_construct(st, type_error, [], type_error)
+  assert classify(get(st2, mk_object(h), "stack"))
+    == KStr("TypeError\n    at inner (script:3)\n    at script:10")
+  // Error.stackTraceLimit caps the frame count.
+  let #(_, st) =
+    rt_obj.t_set_prop(
+      st,
+      global(st, "Error"),
+      StringKey(canonical_key("stackTraceLimit")),
+      int(1),
+    )
+  assert error_stack(st, "y") == "Error: y\n    at inner (script:3)"
 }
