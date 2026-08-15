@@ -378,6 +378,13 @@ pub fn json_through_proxy_and_raw_json_diff_test() {
   )
 }
 
+pub fn json_parse_reviver_context_source_diff_test() {
+  diff(
+    "var l=[];JSON.parse('{\"a\":[1.5,\"s\\\\n\",{\"b\":null}],\"c\":true}',function(k,v,c){l.push(k+':'+(c&&c.source));return v});console.log(l.join());var m=[];JSON.parse('[1,2,{\"p\":3}]',function(k,v,c){m.push(k+':'+(c&&c.source));if(k==='0')this[1]=9;if(k==='1')this[2]={q:4};return this[k]});console.log(m.join())",
+    "0:1.5,1:\"s\\n\",b:null,2:undefined,a:undefined,c:true,:undefined\n0:1,1:undefined,q:undefined,2:undefined,:undefined\n",
+  )
+}
+
 // ── §10.2.1.2 OrdinaryCallBindThis: strict vs sloppy `this` ─────────────────
 
 pub fn strict_and_sloppy_this_diff_test() {
