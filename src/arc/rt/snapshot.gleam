@@ -42,7 +42,8 @@ import gleam/set.{type Set}
 ///   1..3  interpreter-heap snapshots (`arc/engine` before the shared store)
 ///   4     interpreter heap inside the `{arc_snapshot, ..}` term
 ///   5     shared-store image
-pub const abi_version = 5
+///   6     parse ids: `unit_uid` counter, `unit` on closures and frames
+pub const abi_version = 6
 
 /// Why `serialize` refused to write the agent.
 pub type SnapshotError {
@@ -83,6 +84,7 @@ type StoreImage {
     unhandled_rejections: List(Int),
     shapes: Dict(Int, ShapeDesc),
     next_shape: Int,
+    unit_uid: Int,
   )
 }
 
@@ -137,6 +139,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     unhandled_rejections:,
     shapes:,
     next_shape:,
+    unit_uid:,
   ) = store
   let microtasks = types.jq_to_list(microtasks)
   use Nil <- result.try(check_cells(data))
@@ -156,6 +159,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       unhandled_rejections:,
       shapes:,
       next_shape:,
+      unit_uid:,
     )
   let realms = RealmImage(current: realm, realms:, template_objects:)
   Ok(encode(abi_version, store, realms))
@@ -200,6 +204,7 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     unhandled_rejections:,
     shapes:,
     next_shape:,
+    unit_uid:,
   ) = image
   JsStore(
     data:,
@@ -217,6 +222,7 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     unhandled_rejections:,
     shapes:,
     next_shape:,
+    unit_uid:,
   )
 }
 

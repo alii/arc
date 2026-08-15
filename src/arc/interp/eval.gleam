@@ -91,7 +91,9 @@ fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   }
 }
 
-/// A root activation of `template` over `locals`: empty stacks, pc 0.
+/// A root activation of `template` over `locals`: empty stacks, pc 0. Eval
+/// code and a dynamic function's body are each a fresh parse (§19.2.1.1
+/// step 11, §20.2.1.1.1), so the activation takes a new parse id.
 fn activation(
   agent: Agent,
   template: FuncTemplate,
@@ -99,6 +101,7 @@ fn activation(
   this: JsVal,
   eval_env: Option(Handle),
 ) -> State {
+  let #(unit, agent) = rt_store.t_next_unit_uid(agent)
   State(
     agent:,
     pc: 0,
@@ -107,6 +110,7 @@ fn activation(
     code: template.bytecode,
     constants: template.constants,
     func: template,
+    unit:,
     call_stack: [],
     try_stack: [],
     this:,

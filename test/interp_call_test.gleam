@@ -274,6 +274,47 @@ pub fn tagged_templates_test() {
   assert eval_bool(
     "function id(s) { return s } Object.isFrozen(id`q`) && Object.isFrozen(id`q`.raw)",
   )
+  // Distinct sites are distinct objects even with identical text; each
+  // eval / Function body is a fresh parse, so its sites are fresh too.
+  assert eval_bool("function id(s) { return s } id`x` !== id`x`")
+  assert eval_bool(
+    "function id(s) { return s } eval('id`x`') !== eval('id`x`')",
+  )
+  assert eval_bool(
+    "function id(s) { return s } Function('return id`x`')() !== Function('return id`x`')()",
+  )
+  assert eval_bool(
+    "function id(s) { return s } var f = Function('return id`x`'); f() === f()",
+  )
+}
+
+/// Two scripts evaluated on one agent are two parses: their sites never
+/// share a template object, while a closure keeps its own script's sites
+/// wherever it is called from.
+pub fn template_objects_do_not_collide_across_scripts_test() {
+  let #(_, st) =
+    run_on(
+      agent(),
+      "function id(s) { return s } function f() { return id`x` } var first = f()",
+    )
+  let check = fn(source) {
+    let #(c, st2) = run_on(st, source)
+    case c {
+      NormalCompletion(v) -> classify(v) == KBool(True)
+      ThrowCompletion(e) ->
+        panic as { source <> " threw " <> rt_inspect.inspect(st2, e) }
+    }
+  }
+  assert check("id`y`.raw[0] === 'y'")
+  assert check("id`x` !== first")
+  assert check("f() === first")
+  // The same compiled script run twice is evaluated twice: fresh sites.
+  let source = "id`z`"
+  let assert Ok(#(body, sb)) = parser.parse_script(source)
+  let assert Ok(template) = compiler.compile(body, sb)
+  let assert #(NormalCompletion(z1), st) = entry.run_script(st, template)
+  let assert #(NormalCompletion(z2), _) = entry.run_script(st, template)
+  assert z1 != z2
 }
 
 // -- native ⇄ bytecode re-entry --------------------------------------------------------

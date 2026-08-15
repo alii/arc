@@ -191,9 +191,11 @@ fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
 }
 
 /// A root activation of `template` in the current realm's global environment
-/// (§16.1.6 ScriptEvaluation steps 1-11): `this` is the global object.
+/// (§16.1.6 ScriptEvaluation steps 1-11): `this` is the global object. Each
+/// call is a fresh evaluation of the script, so it takes a new parse id.
 pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
   let this = mk_object(agent.realm.global_object)
+  let #(unit, agent) = rt_store.t_next_unit_uid(agent)
   State(
     agent:,
     pc: 0,
@@ -202,6 +204,7 @@ pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
     code: template.bytecode,
     constants: template.constants,
     func: template,
+    unit:,
     call_stack: [],
     try_stack: [],
     this:,
@@ -447,6 +450,7 @@ fn start_coroutine(
   let call.CoroutineCall(
     fn_h:,
     template:,
+    unit:,
     locals:,
     this:,
     home_object:,
@@ -467,6 +471,7 @@ fn start_coroutine(
       code: template.bytecode,
       constants: template.constants,
       func: template,
+      unit:,
       call_stack: [],
       try_stack: [],
       this:,

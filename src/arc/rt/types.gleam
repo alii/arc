@@ -3011,6 +3011,10 @@ pub type ObjKind {
     /// [[Realm]] (§10.2 table 30): the id of the realm the closure was
     /// created in. [[Call]] runs with that realm current.
     realm: Int,
+    /// Parse id of the unit `template` came from (the activation that
+    /// created the closure), like [[ScriptOrModule]] but one per parse:
+    /// [[Call]] runs with it as the activation's `unit`.
+    unit: Int,
   )
   KNative(tag: NativeToken, name: String, length: Int, constructible: Bool)
   KBound(target: Handle, bound_this: JsVal, bound_args: List(JsVal))
@@ -3609,6 +3613,10 @@ pub type JsStore(st) {
     shapes: Dict(Int, ShapeDesc),
     /// Next never-used shape_id.
     next_shape: Int,
+    /// Next parse id (`t_next_unit_uid`): one per script, module, eval or
+    /// dynamic-function body loaded into the agent. Qualifies per-site
+    /// caches whose spec key is a Parse Node (§13.2.8.4 [[TemplateMap]]).
+    unit_uid: Int,
   )
 }
 

@@ -35,21 +35,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 
-/// Globally unique id for a tagged-template call site (GetTemplateObject
-/// cache key). Baked into bytecode at compile time so re-executing the same
-/// compiled site reuses its template object while each fresh compilation
-/// (repeated eval / new Function) gets distinct sites.
-fn unique_positive_integer() -> Int {
-  unique_integer([Positive])
-}
-
-type UniqueIntegerModifier {
-  Positive
-}
-
-@external(erlang, "erlang", "unique_integer")
-fn unique_integer(modifiers: List(UniqueIntegerModifier)) -> Int
-
 // ============================================================================
 // Types
 // ============================================================================
@@ -328,6 +313,12 @@ pub opaque type Emitter {
     /// list matches the order `collect_hoisted_funcs` + in-place emission
     /// pop it.
     child_fn_cursor: List(ScopeId),
+    /// Next tagged-template call-site index (§13.2.8.4 [[TemplateMap]]
+    /// key). Counts across the whole compilation unit: a child emitter
+    /// starts from the parent's value and hands its own back, so every
+    /// site in one unit is distinct and the numbering depends only on the
+    /// source. The runtime qualifies it with the unit's parse id.
+    next_site: Int,
   )
 }
 
@@ -1346,6 +1337,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     completion_var: None,
     ref_free: [],
     initialized: set.new(),
+    next_site: 0,
   )
 }
 
@@ -3366,12 +3358,14 @@ fn compile_function_body(
   // Fresh emitter wired to the parent's whole-program scope tree and
   // positioned at this child's function-kind scope so emit_var_* /
   // get_lexical / set_this resolve against the analyzer's slot/box
-  // decisions for THIS frame. Inherits only the label counter (for
-  // uniqueness), strictness, and the lexically-scoped with/private envs.
+  // decisions for THIS frame. Inherits only the label and template-site
+  // counters (for uniqueness), strictness, and the lexically-scoped
+  // with/private envs.
   let e =
     Emitter(
       ..new_emitter(parent.scope_tree, fn_id),
       next_label: parent.next_label,
+      next_site: parent.next_site,
       strict: child_strict,
       is_async:,
       is_arrow:,
@@ -3707,8 +3701,12 @@ fn compile_function_body(
   // touching the parent's own FunctionInfo. Without this, compiler.gleam
   // reads a stale local_count and the runtime locals tuple is allocated
   // too small — IrPutLocal on a scratch slot then crashes with
-  // `badarg setelement` past the tuple end.
-  Ok(#(Emitter(..parent, scope_tree: e.scope_tree), child))
+  // `badarg setelement` past the tuple end. The site counter comes back too
+  // so sibling functions never reuse this child's template-site indices.
+  Ok(#(
+    Emitter(..parent, scope_tree: e.scope_tree, next_site: e.next_site),
+    child,
+  ))
 }
 
 // §13.2.5.5: Some(n) only for a NAMED function expression — binds `n` in
@@ -5078,7 +5076,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // regular CallExpression paths so this-binding works (obj.tag`x` calls
     // tag with this = obj, §13.3.6.2 EvaluateCall).
     ast.TaggedTemplateExpression(tag:, parts:, span:) -> {
-      let site = unique_positive_integer()
+      let site = e.next_site
+      let e = Emitter(..e, next_site: site + 1)
       let template =
         ast.IntrinsicTemplateObject(
           site:,

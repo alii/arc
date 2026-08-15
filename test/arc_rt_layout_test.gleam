@@ -550,6 +550,7 @@ pub fn bytecode_function_fast_paths_miss_test() {
       flags:,
       fields_init: None,
       realm: 0,
+      unit: 0,
     )
   assert tag_of(kind) == tag("KBYTECODE_TAG")
   let #(fh, st) =

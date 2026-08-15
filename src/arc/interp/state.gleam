@@ -41,6 +41,12 @@ pub type State {
     constants: TupleArray(JsVal),
     /// The template this activation is executing.
     func: FuncTemplate,
+    /// Parse id of the unit `func` belongs to (the execution context's
+    /// ScriptOrModule, but one per parse: each eval / dynamic function body
+    /// is its own). A root activation of freshly loaded code takes the next
+    /// `store.unit_uid`; a call adopts the callee closure's; closures created
+    /// here inherit it. Qualifies GetTemplateObject's site key.
+    unit: Int,
     /// Caller frames of THIS activation, innermost first. A nested
     /// `run_bytecode` entered from a builtin starts a fresh, empty list.
     call_stack: List(SavedFrame),
@@ -70,6 +76,7 @@ pub type State {
 pub type SavedFrame {
   SavedFrame(
     func: FuncTemplate,
+    unit: Int,
     locals: TupleArray(JsVal),
     stack: List(JsVal),
     /// Where the caller resumes (the instruction after its Call).
@@ -119,6 +126,8 @@ pub fn frame_roots(state: State) -> List(Handle) {
     constants: _,
     // Template metadata: no heap handles.
     func: _,
+    // Plain id.
+    unit: _,
     call_stack:,
     // Scalar: pc offsets and a stack depth.
     try_stack: _,
@@ -144,6 +153,7 @@ pub fn frame_roots(state: State) -> List(Handle) {
 fn push_saved_frame(acc: List(Int), frame: SavedFrame) -> List(Int) {
   let SavedFrame(
     func: _,
+    unit: _,
     locals:,
     stack:,
     pc: _,

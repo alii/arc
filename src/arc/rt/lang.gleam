@@ -276,8 +276,9 @@ pub fn t_regexp_new(
   b_regexp.regexp_create_literal(st, pattern, flags)
 }
 
-/// §13.2.8.4 GetTemplateObject. `site` is unique per tagged-template source
-/// position (the emitter qualifies it with the module name); the frozen
+/// §13.2.8.4 GetTemplateObject. `site` is `"<unit>#<index>"`, unique per
+/// tagged-template source position: compiled code qualifies the index with
+/// its module name, the interpreter with the activation's parse id. The frozen
 /// template array (with its frozen `raw`) is built once per realm (the
 /// [[TemplateMap]] is a Realm Record field), pinned, and cached on the agent
 /// under the current realm's id. `cooked` holds `undefined` for quasis with

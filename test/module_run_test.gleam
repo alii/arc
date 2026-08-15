@@ -101,6 +101,31 @@ pub fn imported_binding_is_read_through_the_live_cell_test() {
   assert classify(export(st, evaluated, "y")) == KNum(JInt(42))
 }
 
+/// Each module body is its own parse: site 0 of `/dep.js` and site 0 of
+/// `/main.js` are different template objects, and a hoisted exported
+/// function (instantiated at link time) shares its module's sites.
+pub fn template_objects_are_per_module_test() {
+  let assert #(st, Ok(evaluated)) =
+    evaluate(
+      [
+        #(
+          "/main.js",
+          "import { id, dep, site } from '/dep.js';
+           const mine = id`main`;
+           export const r = [mine.raw[0], dep.raw[0], mine !== dep, site() === site(), site() !== mine].join();",
+        ),
+        #(
+          "/dep.js",
+          "export function id(s) { return s }
+           export function site() { return id`s` }
+           export const dep = id`dep`;",
+        ),
+      ],
+      rt_async.drain,
+    )
+  assert classify(export(st, evaluated, "r")) == KStr("main,dep,true,true,true")
+}
+
 pub fn cyclic_function_imports_are_callable_test() {
   let assert #(st, Ok(evaluated)) =
     evaluate(

@@ -84,6 +84,7 @@ fn root_state(agent: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
     code: func.bytecode,
     constants: func.constants,
     func:,
+    unit: 0,
     call_stack: [],
     try_stack: [],
     this: mk_undefined(),
@@ -132,6 +133,7 @@ pub fn inner_frame_return_never_collects_test() {
   let caller =
     SavedFrame(
       func: s.func,
+      unit: s.unit,
       locals: s.locals,
       stack: [],
       pc: 0,
@@ -218,6 +220,7 @@ pub fn parked_frame_roots_its_registers_test() {
       parked: ParkedOp,
       call_args: [],
       realm: st.realm.id,
+      unit: 0,
     )
   let #(gen_h, st) =
     rt_store.t_cell_new(
@@ -265,6 +268,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
           flags:,
           fields_init: None,
           realm: 0,
+          unit: 0,
         ),
         proto: None,
         props: dict.new(),

@@ -3,6 +3,7 @@
 //// range as the int row, everything else finite as the float row, the same
 //// rule compiled code uses), nested function templates included.
 
+import arc/bytecode/opcode
 import arc/compiler
 import arc/internal/tuple_array
 import arc/parser
@@ -11,6 +12,7 @@ import arc/rt/types.{
   type JsValKind, JFloat, JInt, KHandle, KNum, KStr, KSym, KTdz, KUndef,
   classify,
 }
+import gleam/int
 import gleam/list
 import gleam/option.{Some}
 
@@ -87,4 +89,46 @@ pub fn constant_pool_never_holds_heap_references_test() {
       _ -> True
     }
   })
+}
+
+/// GetTemplateObject site indices of `t` and every nested template, depth
+/// first.
+fn all_template_sites(t: FuncTemplate) -> List(Int) {
+  let own =
+    tuple_array.to_list(t.bytecode)
+    |> list.filter_map(fn(op) {
+      case op {
+        opcode.GetTemplateObject(site:, ..) -> Ok(site)
+        _ -> Error(Nil)
+      }
+    })
+  list.flatten([
+    own,
+    ..list.map(tuple_array.to_list(t.functions), all_template_sites)
+  ])
+}
+
+const tagged_source = "
+  function id(s) { return s }
+  var a = id`top`;
+  function f(x) { return [id`f0${x}`, () => id`arrow`] }
+  class C { m() { return id`m` } static s = id`static`; #p = id`field` }
+  var g = function* () { yield id`gen` }
+  var h = async () => id`async${await 0}done`
+"
+
+pub fn compiling_twice_gives_equal_templates_test() {
+  // Nothing in the compiler reads VM-global state: the same source yields
+  // the same template tree, nested children and template sites included.
+  assert compile(tagged_source) == compile(tagged_source)
+  assert compile("eval('1'); new Function('return id`x`')")
+    == compile("eval('1'); new Function('return id`x`')")
+}
+
+pub fn template_sites_number_the_unit_in_source_order_test() {
+  // One counter threads through every nested function of the unit, so no
+  // two sites share an index and the numbering is dense from 0.
+  let sites = all_template_sites(compile(tagged_source))
+  assert list.length(sites) == 8
+  assert list.sort(sites, int.compare) == [0, 1, 2, 3, 4, 5, 6, 7]
 }

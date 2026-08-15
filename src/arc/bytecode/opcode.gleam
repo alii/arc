@@ -141,10 +141,11 @@ pub type Op {
   ToStringVal
   /// §13.2.8.4 GetTemplateObject — push the cached template object for this
   /// tagged-template call site, creating + caching it on first evaluation.
-  /// `site` is a globally unique id baked in at compile time, so each parse
-  /// of the same source (e.g. repeated eval) gets distinct template objects
-  /// while re-execution of the same compiled site reuses one. Each quasi
-  /// pairs the template value (None → undefined for an invalid escape
+  /// `site` is the call site's index within its compilation unit; the
+  /// interpreter qualifies it with the running activation's parse id, so
+  /// each parse of the same source (e.g. repeated eval) gets distinct
+  /// template objects while re-execution of the same site reuses one. Each
+  /// quasi pairs the template value (None → undefined for an invalid escape
   /// sequence) with its verbatim raw text.
   GetTemplateObject(site: Int, quasis: List(TemplateQuasi))
   /// §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against the with

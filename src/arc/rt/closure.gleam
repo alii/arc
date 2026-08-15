@@ -34,8 +34,9 @@ pub fn template_flags(template: FuncTemplate) -> FnFlags {
 }
 
 /// Allocate the function object for `template` closed over `env` (the values
-/// captured per `template.env_descriptors`, already packed). Shared by the
-/// `MakeClosure` opcode and module link-time hoisting. Does NOT root.
+/// captured per `template.env_descriptors`, already packed), created by code
+/// of parse `unit`. Shared by the `MakeClosure` opcode and module link-time
+/// hoisting. Does NOT root.
 ///
 /// The cell is `KBytecode` with own `length` then `name` (§10.2.9
 /// SetFunctionLength precedes §10.2.10 SetFunctionName; named keys enumerate
@@ -64,6 +65,7 @@ pub fn t_new_bytecode_function(
   st: Agent,
   template: FuncTemplate,
   env: EnvTuple,
+  unit: Int,
 ) -> #(Handle, Agent) {
   let flags = template_flags(template)
   let realm = st.realm
@@ -91,7 +93,16 @@ pub fn t_new_bytecode_function(
     False ->
       rt_store.t_cell_new(
         st,
-        fn_slot(realm.id, template, env, flags, fn_proto, None, birth_props),
+        fn_slot(
+          realm.id,
+          unit,
+          template,
+          env,
+          flags,
+          fn_proto,
+          None,
+          birth_props,
+        ),
       )
     True -> {
       let proto_parent = case flags.is_generator, flags.is_async {
@@ -111,7 +122,7 @@ pub fn t_new_bytecode_function(
       let #(h, st) =
         rt_store.t_cell_new(
           st,
-          fn_slot(realm.id, template, env, flags, fn_proto, Some(proto), [
+          fn_slot(realm.id, unit, template, env, flags, fn_proto, Some(proto), [
             #(Named("prototype"), prototype_prop),
             ..birth_props
           ]),
@@ -145,6 +156,7 @@ pub fn t_new_bytecode_function(
 
 fn fn_slot(
   realm: Int,
+  unit: Int,
   template: FuncTemplate,
   env: EnvTuple,
   flags: FnFlags,
@@ -160,6 +172,7 @@ fn fn_slot(
       flags:,
       fields_init: None,
       realm:,
+      unit:,
     ),
     proto: Some(fn_proto),
     props: dict.from_list(props),

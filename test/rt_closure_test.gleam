@@ -34,6 +34,7 @@ fn make(source: String, name: String) -> #(Handle, Agent) {
     rt_helpers.agent(),
     t,
     bytecode.env_from_list([]),
+    0,
   )
 }
 
@@ -122,7 +123,7 @@ pub fn birth_props_precede_later_props_test() {
   assert pkeys == [StringKey(Named("constructor")), StringKey(Named("method"))]
   let assert Ok(t) = find(compile("function Bar() {}"), "Bar")
   let #(g, st) =
-    rt_closure.t_new_bytecode_function(st, t, bytecode.env_from_list([]))
+    rt_closure.t_new_bytecode_function(st, t, bytecode.env_from_list([]), 0)
   let #(_, st) =
     rt_obj.t_define_own_data(
       st,

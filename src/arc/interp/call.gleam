@@ -154,6 +154,8 @@ pub type CoroutineCall {
   CoroutineCall(
     fn_h: Handle,
     template: FuncTemplate,
+    /// The closure's parse id, the body activation's `unit`.
+    unit: Int,
     locals: TupleArray(JsVal),
     this: JsVal,
     home_object: JsVal,
@@ -241,6 +243,7 @@ pub fn call_function(
   state: State,
   fn_h: Handle,
   template: FuncTemplate,
+  unit: Int,
   env: EnvTuple,
   home_object: Option(Handle),
   flags: FnFlags,
@@ -285,6 +288,7 @@ pub fn call_function(
             CoroutineCall(
               fn_h:,
               template:,
+              unit:,
               locals:,
               this: this_val,
               home_object: home,
@@ -296,6 +300,7 @@ pub fn call_function(
           call_regular_function(
             state,
             template,
+            unit,
             args,
             rest_stack,
             locals,
@@ -312,6 +317,7 @@ pub fn call_function(
 fn call_regular_function(
   state: State,
   template: FuncTemplate,
+  unit: Int,
   args: List(JsVal),
   rest_stack: List(JsVal),
   locals: TupleArray(JsVal),
@@ -330,6 +336,7 @@ fn call_regular_function(
       let saved =
         SavedFrame(
           func: state.func,
+          unit: state.unit,
           locals: state.locals,
           stack: rest_stack,
           pc: state.pc + 1,
@@ -346,6 +353,7 @@ fn call_regular_function(
         stack: [],
         locals:,
         func: template,
+        unit:,
         code: template.bytecode,
         constants: template.constants,
         pc: 0,
@@ -438,7 +446,15 @@ pub fn call(
     KHandle(h) ->
       case rt_store.t_cell_get(state.agent, h) {
         SObject(
-          kind: KBytecode(template:, env:, home_object:, flags:, realm:, ..),
+          kind: KBytecode(
+            template:,
+            env:,
+            home_object:,
+            flags:,
+            realm:,
+            unit:,
+            ..,
+          ),
           ..,
         )
           if realm == state.agent.realm.id
@@ -448,6 +464,7 @@ pub fn call(
               state,
               h,
               template,
+              unit,
               env,
               home_object,
               flags,
@@ -650,7 +667,7 @@ fn construct_handle(
 ) -> Result(State, StepExit) {
   case rt_store.t_cell_get(state.agent, ctor_h) {
     SObject(
-      kind: KBytecode(template:, env:, home_object:, flags:, realm:, ..),
+      kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
       ..,
     )
       if realm == state.agent.realm.id
@@ -663,6 +680,7 @@ fn construct_handle(
             state,
             ctor_h,
             template,
+            unit,
             env,
             home_object,
             flags,
@@ -685,6 +703,7 @@ fn construct_handle(
             state,
             ctor_h,
             template,
+            unit,
             env,
             home_object,
             flags,
@@ -831,6 +850,7 @@ fn restore_frame(
 ) -> State {
   let SavedFrame(
     func:,
+    unit:,
     locals:,
     stack:,
     pc:,
@@ -847,6 +867,7 @@ fn restore_frame(
     stack:,
     locals:,
     func:,
+    unit:,
     code: func.bytecode,
     constants: func.constants,
     pc:,
@@ -952,7 +973,7 @@ pub fn enter_root(
   new_target: JsVal,
 ) -> Result(#(State, CoroutineCall), #(JsVal, Agent)) {
   let assert SObject(
-    kind: KBytecode(template:, env:, home_object:, flags:, ..),
+    kind: KBytecode(template:, env:, home_object:, flags:, unit:, ..),
     ..,
   ) = rt_store.t_cell_get(agent, fn_h)
     as "enter_root: handle is not a KBytecode cell"
@@ -987,6 +1008,7 @@ pub fn enter_root(
       code: template.bytecode,
       constants: template.constants,
       func: template,
+      unit:,
       call_stack: [],
       try_stack: [],
       this: this_val,
@@ -1000,6 +1022,7 @@ pub fn enter_root(
     CoroutineCall(
       fn_h:,
       template:,
+      unit:,
       locals:,
       this: this_val,
       home_object: home,

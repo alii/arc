@@ -26,6 +26,7 @@ pub fn park(state: State, parked: ParkedAt) -> SuspendedFrame {
     parked:,
     call_args: state.call_args,
     realm: state.agent.realm.id,
+    unit: state.unit,
   )
 }
 
@@ -47,6 +48,7 @@ pub fn unpark(agent: Agent, frame: SuspendedFrame) -> State {
     parked: _,
     call_args:,
     realm: _,
+    unit:,
   ) = frame
   State(
     agent: call.set_line(agent, line),
@@ -56,6 +58,7 @@ pub fn unpark(agent: Agent, frame: SuspendedFrame) -> State {
     code: template.bytecode,
     constants: template.constants,
     func: template,
+    unit:,
     call_stack: [],
     try_stack:,
     this:,

@@ -305,17 +305,19 @@ fn inspect(state: State, v: JsVal) -> String {
 // ============================================================================
 
 /// Allocate the function object for `template` closed over `captured`
-/// (gathered per the template's `env_descriptors`). Shared by the
-/// MakeClosure opcode and module link-time hoisting.
+/// (gathered per the template's `env_descriptors`), created by code of parse
+/// `unit`. Shared by the MakeClosure opcode and module link-time hoisting.
 pub fn make_closure(
   agent: Agent,
   template: FuncTemplate,
   captured: List(JsVal),
+  unit: Int,
 ) -> #(Handle, Agent) {
   closure.t_new_bytecode_function(
     agent,
     template,
     bytecode.env_from_list(captured),
+    unit,
   )
 }
 
@@ -354,8 +356,13 @@ fn make_method(agent: Agent, func: JsVal, target: Handle) -> Agent {
 /// resource, else the 0-argument callable the lowered dispose sequence
 /// invokes. GetDisposeMethod(V, hint) reads the method once, here, never
 /// again at dispose time. Raises TypeError for a primitive or method-less
-/// resource.
-fn using_disposer(agent: Agent, val: JsVal, is_async: Bool) -> #(JsVal, Agent) {
+/// resource. `unit` is the running activation's, for the fallback closure.
+fn using_disposer(
+  agent: Agent,
+  val: JsVal,
+  is_async: Bool,
+  unit: Int,
+) -> #(JsVal, Agent) {
   case classify(val) {
     // Step 1.a: V is null or undefined → method undefined.
     KUndef | KNull -> #(mk_undefined(), agent)
@@ -368,7 +375,7 @@ fn using_disposer(agent: Agent, val: JsVal, is_async: Bool) -> #(JsVal, Agent) {
       case method {
         disposable_stack.DirectDispose(m) -> direct_disposer(agent, m, val)
         disposable_stack.SyncFallbackDispose(m) ->
-          sync_fallback_disposer(agent, m, val)
+          sync_fallback_disposer(agent, m, val, unit)
       }
     }
     // Step 1.b.i: a primitive resource is a TypeError.
@@ -412,9 +419,15 @@ fn sync_fallback_disposer(
   agent: Agent,
   method: Handle,
   val: JsVal,
+  unit: Int,
 ) -> #(JsVal, Agent) {
   let #(h, agent) =
-    make_closure(agent, sync_fallback_template(), [mk_object(method), val])
+    make_closure(
+      agent,
+      sync_fallback_template(),
+      [mk_object(method), val],
+      unit,
+    )
   #(mk_object(h), agent)
 }
 
@@ -1774,7 +1787,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // §13.2.8.4 GetTemplateObject: the per-site cached frozen template
-    // array (with its frozen `raw`), created on first evaluation.
+    // array (with its frozen `raw`), created on first evaluation. The site
+    // key is `"<unit>#<site>"`, the shape compiled modules use with their
+    // module name as the unit.
     opcode.GetTemplateObject(site, quasis) -> {
       let cooked =
         list.map(quasis, fn(q) {
@@ -1784,7 +1799,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       let #(tpl, agent) =
         rt_lang.t_get_template_object(
           state.agent,
-          int.to_string(site),
+          int.to_string(state.unit) <> "#" <> int.to_string(site),
           cooked,
           raw,
         )
@@ -2023,11 +2038,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [val, ..rest] -> {
           let state = State(..state, stack: rest, pc: state.pc + 1)
-          use #(disposer, state) <- result.map(rt3(
+          use #(disposer, state) <- result.map(rt4(
             state,
             using_disposer,
             val,
             is_async,
+            state.unit,
           ))
           State(..state, stack: [disposer, ..state.stack])
         }
@@ -3255,7 +3271,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         list.map(template.env_descriptors, fn(desc) {
           tuple_array.get_unchecked(desc.parent_index, state.locals)
         })
-      let #(fn_h, agent) = make_closure(state.agent, template, captured)
+      let #(fn_h, agent) =
+        make_closure(state.agent, template, captured, state.unit)
       Ok(
         State(
           ..state,

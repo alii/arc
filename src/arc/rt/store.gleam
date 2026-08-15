@@ -49,6 +49,7 @@ pub fn t_store_new() -> JsStore(Agent) {
       #(0, rt_types.ShapeDesc(0, dict.new(), dict.new())),
     ]),
     next_shape: 1,
+    unit_uid: 0,
   )
 }
 
@@ -171,6 +172,14 @@ pub fn t_next_private_uid(st: Agent) -> #(Int, Agent) {
 pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.symbol_uid, with_js(st, JsStore(..js, symbol_uid: js.symbol_uid + 1)))
+}
+
+/// Next parse id: taken once by each root activation of freshly loaded code
+/// (script, module body, eval, dynamic function) and carried by every
+/// closure that code creates.
+pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
+  let js = require_js(st)
+  #(js.unit_uid, with_js(st, JsStore(..js, unit_uid: js.unit_uid + 1)))
 }
 
 // ── call-depth (D11 gate) ───────────────────────────────────────────────────

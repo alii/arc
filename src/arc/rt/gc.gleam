@@ -119,6 +119,8 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     // ── hidden-class table — Int/BitArray only, no handles ──
     shapes: _,
     next_shape: _,
+    // Parse-id counter — no roots.
+    unit_uid: _,
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
@@ -213,6 +215,8 @@ pub fn push_suspended_frame_refs(
     call_args:,
     // Realm id: realms are registry entries, rooted in their own right.
     realm: _,
+    // Plain id.
+    unit: _,
   ) = frame
   let acc = push_template_refs(template, acc)
   let acc = push_vals_tuple_refs(locals, acc)
@@ -302,7 +306,15 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       let acc = push_term_refs(to_dynamic(code), acc)
       push_term_refs(to_dynamic(simple), acc)
     }
-    KBytecode(template:, env:, home_object:, flags: _, fields_init:, realm: _) -> {
+    KBytecode(
+      template:,
+      env:,
+      home_object:,
+      flags: _,
+      fields_init:,
+      realm: _,
+      unit: _,
+    ) -> {
       let acc = push_opt_handle(home_object, acc)
       let acc = push_opt_handle(fields_init, acc)
       let acc = push_template_refs(template, acc)

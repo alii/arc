@@ -9,7 +9,7 @@
 
 import arc/compiler.{type ExportSeed}
 import arc/esm
-import arc/internal/tuple_array
+import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/entry
 import arc/interp/interpreter
 import arc/interp/safepoint
@@ -410,6 +410,9 @@ pub type LinkedModule {
     /// A box wrapping this module's Module Namespace Exotic Object (seeded
     /// for `import * as ns`).
     namespace_box: Handle,
+    /// Parse id of this module's body, taken at link time so the closures
+    /// hoisted then and the body activation later share it.
+    unit: Int,
   )
 }
 
@@ -850,16 +853,17 @@ fn eval_module_body(
       // Seed the slots: imports as boxed captures in slots 0..N-1 (each the
       // *exporter's* live cell), plus this module's own export cells in their
       // declared slots.
+      let lm = linked_module(linked, compiled)
       let seeds =
         import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
         |> assert_link_invariant
-        |> list.append(own_export_seeds(linked, compiled))
+        |> list.append(own_export_seeds(lm, compiled))
       // Publish [[Status]] = ~evaluating~ in the registry so a deferred
       // namespace trigger firing inside this body observes the cycle.
       let st =
         registry.write_module_status(es.agent, specifier, registry.Evaluating)
       let #(outcome, st) =
-        run_module_body(st, specifier, compiled, seeds, finish)
+        run_module_body(st, specifier, compiled, lm.unit, seeds, finish)
       case outcome {
         BodyThrew(thrown) -> {
           let st =
@@ -899,27 +903,37 @@ type BodyOutcome {
   BodyPending(Handle)
 }
 
-/// A root activation of the module `template` over `locals`. Module `this` is
+/// The module body's initial locals: `undefined` everywhere but the seeded
+/// import / export cell slots.
+fn module_locals(
+  template: FuncTemplate,
+  seeds: List(#(Int, JsVal)),
+) -> TupleArray(JsVal) {
+  list.fold(
+    seeds,
+    tuple_array.repeat(mk_undefined(), template.local_count),
+    fn(acc, seed) { tuple_array.set_unchecked(seed.0, seed.1, acc) },
+  )
+}
+
+/// A root activation of the module `template` over its seeded locals, under
+/// the parse id `unit` its `LinkedModule` was given. Module `this` is
 /// undefined (§16.2.1.5.2).
 fn module_activation(
   agent: Agent,
   template: FuncTemplate,
+  unit: Int,
   seeds: List(#(Int, JsVal)),
 ) -> State {
-  let locals =
-    list.fold(
-      seeds,
-      tuple_array.repeat(mk_undefined(), template.local_count),
-      fn(acc, seed) { tuple_array.set_unchecked(seed.0, seed.1, acc) },
-    )
   State(
     agent:,
     pc: 0,
     stack: [],
-    locals:,
+    locals: module_locals(template, seeds),
     code: template.bytecode,
     constants: template.constants,
     func: template,
+    unit:,
     call_stack: [],
     try_stack: [],
     this: mk_undefined(),
@@ -941,23 +955,25 @@ fn run_module_body(
   st: Agent,
   specifier: String,
   compiled: CompiledModule,
+  unit: Int,
   seeds: List(#(Int, JsVal)),
   finish: Finish,
 ) -> #(BodyOutcome, Agent) {
   let outer_referrer = registry.read_active_referrer(st)
   let st = registry.write_active_referrer(st, Some(specifier))
-  let #(outcome, st) = run_module_turns(st, compiled, seeds, finish)
+  let #(outcome, st) = run_module_turns(st, compiled, unit, seeds, finish)
   #(outcome, registry.write_active_referrer(st, outer_referrer))
 }
 
 fn run_module_turns(
   st: Agent,
   compiled: CompiledModule,
+  unit: Int,
   seeds: List(#(Int, JsVal)),
   finish: Finish,
 ) -> #(BodyOutcome, Agent) {
   let #(step, st) =
-    entry.run_turn(module_activation(st, compiled.template, seeds))
+    entry.run_turn(module_activation(st, compiled.template, unit, seeds))
   case step {
     StepReturn(v) -> #(BodyReturned(v), safepoint.finish_turn(st, [v], finish))
     StepThrow(e) -> #(BodyThrew(e), safepoint.finish_turn(st, [e], finish))
@@ -1129,12 +1145,21 @@ fn build_linked(
       let assert Ok(exp) = dict.get(exports, spec)
       rt_store.t_cell_set(st, obj, namespace_slot(exp, "Module"))
     })
-  let modules =
-    dict.map_values(bundle.modules, fn(spec, _bm) {
+  let #(st, modules) =
+    list.fold(specs, #(st, dict.new()), fn(acc, spec) {
+      let #(st, modules) = acc
       let assert Ok(lb) = dict.get(local_boxes, spec)
       let assert Ok(exp) = dict.get(exports, spec)
       let assert Ok(ns_box) = dict.get(namespace_boxes, spec)
-      LinkedModule(local_boxes: lb, exports: exp, namespace_box: ns_box)
+      let #(unit, st) = rt_store.t_next_unit_uid(st)
+      let lm =
+        LinkedModule(
+          local_boxes: lb,
+          exports: exp,
+          namespace_box: ns_box,
+          unit:,
+        )
+      #(st, dict.insert(modules, spec, lm))
     })
   #(st, Linked(modules:, deferred_boxes:), deferred_to_fill)
 }
@@ -1246,17 +1271,14 @@ fn instantiate_hoisted_functions(
     use compiled <- with_source_module(bundle_module, st)
     // A preexisting module's export cells hold their final values.
     use <- bool.guard(set.contains(already_evaluated, spec), st)
-    let lm =
-      dict.get(linked.modules, spec)
-      |> result.replace_error(ModuleNotLinked(spec))
-      |> assert_link_invariant
+    let lm = linked_module(linked, compiled)
     // Reconstruct the module's seeded frame so closures capture the same
     // cells a body run would.
     let seeds =
       import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
       |> assert_link_invariant
-      |> list.append(own_export_seeds(linked, compiled))
-    let locals = module_activation(st, compiled.template, seeds).locals
+      |> list.append(own_export_seeds(lm, compiled))
+    let locals = module_locals(compiled.template, seeds)
     list.fold(compiled.hoisted_funcs, st, fn(st, hf) {
       let #(name, func_idx) = hf
       // Only exported functions have a shared cell; the rest are body-local.
@@ -1269,7 +1291,8 @@ fn instantiate_hoisted_functions(
             list.map(child.env_descriptors, fn(desc) {
               tuple_array.get_unchecked(desc.parent_index, locals)
             })
-          let #(closure, st) = interpreter.make_closure(st, child, captured)
+          let #(closure, st) =
+            interpreter.make_closure(st, child, captured, lm.unit)
           rt_store.t_cell_set(st, box, SBox(mk_object(closure)))
         }
       }
@@ -1709,21 +1732,25 @@ fn forward_box(
   |> result.map(mk_object)
 }
 
+/// The `LinkedModule` of `compiled`: present for every bundle module once
+/// `build_linked` ran.
+fn linked_module(linked: Linked, compiled: CompiledModule) -> LinkedModule {
+  let spec = esm.resolved_text(compiled.specifier)
+  dict.get(linked.modules, spec)
+  |> result.replace_error(ModuleNotLinked(spec))
+  |> assert_link_invariant
+}
+
 /// This module's own export cells, placed into their declared local slots.
 /// Locals that are IMPORT bindings (`import * as ns ...; export { ns }`) are
 /// excluded: their slot keeps the import seed, and importers resolve such
 /// exports through the dependency anyway.
 fn own_export_seeds(
-  linked: Linked,
+  lm: LinkedModule,
   compiled: CompiledModule,
 ) -> List(#(Int, JsVal)) {
   let import_locals =
     esm.binding_local_names(compiled.import_bindings) |> set.from_list
-  let spec = esm.resolved_text(compiled.specifier)
-  let lm =
-    dict.get(linked.modules, spec)
-    |> result.replace_error(ModuleNotLinked(spec))
-    |> assert_link_invariant
   lm.local_boxes
   |> dict.to_list
   |> list.filter_map(fn(pair) {
