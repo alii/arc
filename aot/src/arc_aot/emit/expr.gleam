@@ -2282,8 +2282,8 @@ pub fn lvalue_put(lv: LValue, v: ir.Value) -> Build(ir.Value) {
 // Port of emit.gleam:5341-5563. SPEC §8 op names: new_array, new_object,
 // spread_into_list, define_prop, define_method, copy_data_props.
 
-/// Elision sentinel (`[1,,3]`). t_new_array recognises it and leaves the index
-/// absent (sparse), matching emit.gleam's ArrayFromWithHoles path.
+/// Elision marker (`[1,,3]`): the runtime's dense element store default
+/// (`arc/rt/types.mk_hole`), so t_new_array leaves the index absent.
 const js_hole: ir.Value = ir.ConstAtom("js_hole")
 
 /// No-spread path (dense or with elisions): evaluate elements L-to-R, then

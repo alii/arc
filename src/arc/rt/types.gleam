@@ -69,6 +69,13 @@ pub fn classify(v: JsVal) -> JsValKind
 @external(erlang, "arc_rt_val_ffi", "mk_undefined")
 pub fn mk_undefined() -> JsVal
 
+/// The dense element store's marker for an absent index (a hole). Typed as a
+/// `JsVal` only so it can sit in a `TreeArray(JsVal)` as the default; it is
+/// not a JS value (`classify` rejects it) and element readers surface it as
+/// `None`. An array-literal elision arrives from compiled code as this term.
+@external(erlang, "arc_rt_val_ffi", "mk_hole")
+pub fn mk_hole() -> JsVal
+
 /// The `null` value.
 @external(erlang, "arc_rt_val_ffi", "mk_null")
 pub fn mk_null() -> JsVal

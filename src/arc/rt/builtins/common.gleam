@@ -15,7 +15,7 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
   type ObjKind, type Property, type PropertyKey, type SymbolId, AccessorProperty,
   ArrayObj, BuiltinPair, DataProperty, Dense, ErrorObj, JInt, KNative, Named,
-  NoElements, Ordinary, SObject, mk_number, mk_object, mk_string, mk_undefined,
+  NoElements, Ordinary, SObject, mk_number, mk_object, mk_string,
 } as rt_types
 import arc/vm/internal/tree_array
 import gleam/dict.{type Dict}
@@ -596,7 +596,7 @@ pub fn alloc_array(
   let len = list.length(values)
   let elements = case values {
     [] -> NoElements
-    _ -> Dense(tree_array.from_list(values, mk_undefined()))
+    _ -> Dense(tree_array.from_list(values, rt_types.mk_hole()))
   }
   rt_store.t_cell_new(
     st,

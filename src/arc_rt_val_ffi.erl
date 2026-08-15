@@ -24,7 +24,7 @@
 
 -export([
     classify/1,
-    mk_undefined/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
+    mk_undefined/0, mk_hole/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
     to_boolean_i32/1,
     t_to_property_key_fast/1,
@@ -116,6 +116,12 @@ canonical_key_bin(<<C, _/binary>> = B) when C >= $0, C =< $9 ->
     catch _:_ -> {named, B}
     end;
 canonical_key_bin(B) -> {named, B}.
+
+%% mk_hole() -> the dense element store's default: an ABSENT index. Not a
+%% JsVal — classify/1 has no clause for it — so a hole can never escape as a
+%% value; readers turn it into `none`. The AOT emitter passes the same atom
+%% for an array-literal elision.
+mk_hole() -> js_hole.
 
 %% mk_undefined() -> JsVal
 %% The `undefined` wire term.

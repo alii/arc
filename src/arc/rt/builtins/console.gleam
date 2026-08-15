@@ -12,6 +12,7 @@ import arc/host_hooks.{
 }
 import arc/rt/builtins/common
 import arc/rt/builtins/global_fns
+import arc/rt/inspect
 import arc/rt/types.{
   type Agent, type ConsoleNative, type Handle, type JsNum, type JsVal, ConsoleN,
   ConsolePrint, JFloat, JInt, KBig, KStr, KSym, classify, mk_number,
@@ -154,7 +155,7 @@ fn spec(
         }
       }
     "o", [head, ..rest] | "O", [head, ..rest] ->
-      Some(#(display(st, head), rest, st))
+      Some(#(inspect.inspect(st, head), rest, st))
     // %c is CSS styling — meaningless on a terminal, so it consumes its arg
     // and emits nothing, like Node.
     "c", [_, ..rest] -> Some(#("", rest, st))
@@ -175,19 +176,12 @@ fn number_substitution(n: JsNum) -> String {
 }
 
 /// "Optimally useful" rendering for one Printer arg. Top-level strings are
-/// raw; everything else uses jsnum_to_string / a minimal inspector.
+/// raw (no quotes — `console.log("a")` prints `a`); everything else uses the
+/// REPL inspector so objects/arrays read as `{ a: 1 }` / `[1, 2]` instead of
+/// `[object Object]`.
 fn display(st: Agent, val: JsVal) -> String {
-  let _ = st
   case classify(val) {
     KStr(s) -> s
-    rt_types.KUndef -> "undefined"
-    rt_types.KNull -> "null"
-    rt_types.KBool(True) -> "true"
-    rt_types.KBool(False) -> "false"
-    rt_types.KNum(n) -> rt_val.jsnum_to_string(n)
-    KBig(n) -> int.to_string(n) <> "n"
-    KSym(id) -> rt_types.symbol_descriptive_string(id)
-    rt_types.KHandle(_) -> "[object Object]"
-    rt_types.KTdz -> "<uninitialized>"
+    _ -> inspect.inspect(st, val)
   }
 }

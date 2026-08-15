@@ -431,6 +431,48 @@ pub fn console_levels_split_test() {
   assert harness.err_read() == <<"b\nc 1\n":utf8>>
 }
 
+// ── console.log rendering (arc/rt/inspect) ─────────────────────────────────
+
+pub fn console_renders_values_diff_test() {
+  diff(
+    "console.log({a:1,b:[1,2]}, new Map([[1,2]]), function f(){}, Symbol('s'), 12n, -0, 'str', [ , 1])",
+    "{ a: 1, b: [ 1, 2 ] } Map(1) [Function: f] Symbol(s) 12n 0 str [ <empty>, 1 ]\n",
+  )
+}
+
+pub fn console_renders_nested_and_cyclic_diff_test() {
+  diff(
+    "var o={x:1};o.self=o;var a=[1];a.push(a);console.log(o, a, {n:{m:{k:{j:1}}}}, [[[[1]]]], {s:'q\\'x\\n'}, ['t'], null, undefined, true, 1.5, NaN, -Infinity)",
+    "{ x: 1, self: [Circular] } [ 1, [Circular] ] { n: { m: { k: [Object] } } } [ [ [ [Array] ] ] ] { s: 'q\\'x\\n' } [ 't' ] null undefined true 1.5 NaN -Infinity\n",
+  )
+}
+
+pub fn console_renders_exotics_diff_test() {
+  diff(
+    "console.log(new Set([1,2,3]), new WeakMap, /a/g, new RegExp(''), new Date(0), new Date(NaN), ()=>1, async function af(){}, function*gg(){}, (function*(){})(), Promise.resolve(1));console.log([1,2,3].values(), new Map().entries(), 'ab'[Symbol.iterator](), new Set().values(), Object.create(null), {[Symbol.toStringTag]:'Tag',v:1}, {get g(){return 1},e:2}, Object.defineProperty({},'h',{value:1}), new Proxy({},{}), new Proxy(function(){},{}))",
+    "Set(3) WeakMap {} /a/g /(?:)/ Date(0) Invalid Date [Function (anonymous)] [Function: af] [Function: gg] Object [Generator] {} Promise {}\nObject [Array Iterator] {} Object [Map Iterator] {} Object [String Iterator] {} Object [Set Iterator] {} {} Object [Tag] { v: 1 } { e: 2 } {} Proxy {} [Function (Proxy)]\n",
+  )
+  diff(
+    "console.log(new Number(3), new String('s'), new Boolean(false), Object(1n), Object(Symbol('q')), new ArrayBuffer(8), new Uint8Array(4), new DataView(new ArrayBuffer(2)), new SharedArrayBuffer(4), (function(){return arguments})(1,2), JSON.rawJSON('7'), {0:'z',b:1,1:'y'}, [1,,3], new Array(5), Object.assign([1],{p:2}));console.log('%o and %O and %s', 'q', [1], {a:'b'}, {c:1});console.log([function(){}, Math.max], {['k y']:1, 3:2})",
+    "[Number: 3] [String: 's'] [Boolean: false] [BigInt: 1n] [Symbol: Symbol(q)] ArrayBuffer { byteLength: 8 } Uint8Array(4) DataView {} SharedArrayBuffer { byteLength: 4 } [Arguments] [ 1, 2 ] [RawJSON 7] { 0: 'z', 1: 'y', b: 1 } [ 1, <empty>, 3 ] [ <empty>, <empty>, <empty>, <empty>, <empty> ] [ 1 ]\n'q' and [ 1 ] and [object Object] { c: 1 }\n[ [Function (anonymous)], [Function: max] ] { 3: 2, k y: 1 }\n",
+  )
+}
+
+/// Errors render as their captured stack. Compiled code records no frames,
+/// so only the `Name: message` header appears (the interpreter adds
+/// `at script:N` lines, hence no differential here).
+pub fn console_renders_errors_test() {
+  let c =
+    harness.run_compiled(
+      "var e=new Error('m');e.name='';console.log(new Error('e'), new TypeError, e, Object.assign(new Error('x'),{name:'N'}), new AggregateError([],'agg'), [new RangeError('r')]);Promise.reject({code:4})",
+    )
+  assert c.stdout
+    == <<
+      "Error: e TypeError Error: m Error: x AggregateError: agg [ RangeError: r ]\n":utf8,
+    >>
+  assert harness.err_read() == <<"Uncaught (in promise) { code: 4 }\n":utf8>>
+}
+
 /// `Date.now()` and `new Date()` read the wall-clock hook, which the harness
 /// pins to `fixed_now_ms`.
 pub fn date_now_reads_wall_clock_hook_test() {

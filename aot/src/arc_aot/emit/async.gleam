@@ -4272,6 +4272,7 @@ fn build_switch_arms(
 pub fn emit_coroutine_fn(
   e: Emitter2,
   kind: state.CoroutineKind,
+  js_name: Option(String),
   params: List(ast.Pattern),
   body: state.FnBody,
   fn_scope_id: ScopeId,
@@ -4324,9 +4325,8 @@ pub fn emit_coroutine_fn(
   // (8) restore parent frame
   let e = state.leave_function(e, save)
 
-  // (9) outer wrapper ir.Function + parent-frame closure-site tree.
-  //     js_name is not threaded through the dispatch seam; func.gleam applies
-  //     NamedEvaluation on the returned handle when needed.
+  // (9) outer wrapper ir.Function + parent-frame closure-site tree, named
+  //     as func.gleam names a plain function (own name or NamedEvaluation).
   emit_outer_function(
     e,
     kind,
@@ -4335,7 +4335,7 @@ pub fn emit_coroutine_fn(
     params,
     captures,
     layout,
-    None,
+    js_name,
     is_strict,
   )
 }

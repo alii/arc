@@ -21,11 +21,12 @@ pub fn new() -> JsElements {
   NoElements
 }
 
-/// Dense elements from a list of values; `[]` stays `NoElements`.
+/// Dense elements from a list of values; `[]` stays `NoElements`. A
+/// `types.mk_hole()` item is an absent index.
 pub fn from_list(items: List(JsVal)) -> JsElements {
   case items {
     [] -> NoElements
-    _ -> Dense(tree_array.from_list(items, types.mk_undefined()))
+    _ -> Dense(tree_array.from_list(items, types.mk_hole()))
   }
 }
 
@@ -64,7 +65,7 @@ pub fn is_empty(elements: JsElements) -> Bool {
 /// needed.
 pub fn set(elements: JsElements, i: Int, v: JsVal) -> JsElements {
   case elements {
-    NoElements -> set(Dense(tree_array.new(types.mk_undefined())), i, v)
+    NoElements -> set(Dense(tree_array.new(types.mk_hole())), i, v)
     Dense(data) -> {
       let size = tree_array.size(data)
       case i - size > max_gap || i >= max_dense_index {

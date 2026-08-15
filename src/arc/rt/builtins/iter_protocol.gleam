@@ -72,7 +72,7 @@ fn alloc_array(st: Agent, elems: List(JsVal)) -> #(Handle, Agent) {
   let len = list.length(elems)
   let elements = case elems {
     [] -> NoElements
-    _ -> Dense(tree_array.from_list(elems, mk_undefined()))
+    _ -> Dense(tree_array.from_list(elems, rt_types.mk_hole()))
   }
   rt_store.t_cell_new(
     st,

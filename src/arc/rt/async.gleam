@@ -16,6 +16,7 @@ import arc/rt/call.{
   t_call,
 }
 import arc/rt/gc as rt_gc
+import arc/rt/inspect
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -26,21 +27,19 @@ import arc/rt/types.{
   AGAwaitingReturn, AGCompleted, AGExecuting, AGResumeAwaitingReturn,
   AGResumeBody, AGResumeReturnUnwind, AGSuspendedStart, AGSuspendedYield, Agent,
   AsyncGenRequest, AsyncGenResume, AsyncGeneratorObj, AsyncResume, DataProperty,
-  ErrorObj, GenCompleted, GenExecuting, GenNext, GenReturn, GenSuspendedStart,
+  GenCompleted, GenExecuting, GenNext, GenReturn, GenSuspendedStart,
   GenSuspendedYield, GenThrow, GeneratorObj, Handler, HostJob,
-  IdentityPassThrough, JsCell, JsStore, KHandle, KNative, KStr, KSym, Named,
-  NoElements, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
-  PromiseReaction, PromiseRejectFn, PromiseRejected, PromiseResolveFn,
-  ReactionJob, ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext,
-  SAsyncGen, SBox, SGenerator, SObject, SPromiseData, StepAwait, StepReturn,
-  StepThrow, StepYield, StringKey, ThrowerPassThrough, TypeErr, classify, jq_pop,
-  jq_push, mk_bool, mk_object, mk_undefined,
+  IdentityPassThrough, JsCell, JsStore, KHandle, KNative, Named, NoElements,
+  Ordinary, PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction,
+  PromiseRejectFn, PromiseRejected, PromiseResolveFn, ReactionJob,
+  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
+  SBox, SGenerator, SObject, SPromiseData, StepAwait, StepReturn, StepThrow,
+  StepYield, StringKey, ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push,
+  mk_bool, mk_object, mk_undefined,
 } as rt_types
-import arc/rt/val as rt_val
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/string
 
 // ── Sent modes ──────────────────────────────────────────────────────────────
 
@@ -275,20 +274,7 @@ fn report_job_throw(outcome: #(Completion, Agent)) -> Agent {
 /// Error's recorded stack (its `name: message` header), a string as-is,
 /// anything else by its primitive rendering.
 fn describe_thrown(st: Agent, thrown: JsVal) -> String {
-  case classify(thrown) {
-    KStr(s) -> s
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: ErrorObj(stack:), ..) if stack != "" -> stack
-        _ -> "[object Object]"
-      }
-    KSym(id) -> rt_types.symbol_descriptive_string(id)
-    _ ->
-      case rt_val.prim_to_string(thrown) {
-        Ok(s) -> s
-        Error(e) -> string.inspect(e)
-      }
-  }
+  inspect.format_error(st, thrown)
 }
 
 /// Run one microtask job. Port of arc `event_loop.execute_job` +

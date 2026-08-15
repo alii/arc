@@ -652,7 +652,7 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
   let len = list.length(items)
   let elements = case items {
     [] -> NoElements
-    _ -> Dense(tree_array.from_list(items, mk_undefined()))
+    _ -> Dense(tree_array.from_list(items, rt_types.mk_hole()))
   }
   rt_store.t_cell_new(
     st,

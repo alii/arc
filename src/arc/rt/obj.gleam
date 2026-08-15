@@ -3562,7 +3562,7 @@ pub fn t_new_arguments(
     True -> Some(unsafe_coerce(mapped))
     False -> None
   }
-  let elements = tree_array.from_list(args, rt_types.mk_undefined())
+  let elements = tree_array.from_list(args, rt_types.mk_hole())
   // §10.4.4.6/7 step 20/21: "length" is an ORDINARY own data prop
   // {W:T,E:F,C:T} seeded at construction (arc interpreter.gleam:4947) — not
   // synthesized in [[GetOwnProperty]], so delete + own-keys behave ordinarily.
@@ -3596,10 +3596,11 @@ pub fn t_new_arguments(
 }
 
 /// SPEC§8 `new_array` (M12 array literal) — allocate an Array exotic with
-/// `elems` as its dense elements and `length: |elems|`.
+/// `elems` as its dense elements and `length: |elems|`. An elision arrives as
+/// `mk_hole()`, the store's own absent-index marker, and stays a hole.
 pub fn t_new_array(st: Agent, elems: List(JsVal)) -> #(JsVal, Agent) {
   let len = list.length(elems)
-  let elements = tree_array.from_list(elems, rt_types.mk_undefined())
+  let elements = tree_array.from_list(elems, rt_types.mk_hole())
   let #(h, st) =
     rt_store.t_cell_new(
       st,

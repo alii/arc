@@ -1746,6 +1746,7 @@ pub fn emit_function_tree(
       e.dispatch.emit_async_body(
         e,
         kind,
+        js_name,
         params,
         body,
         fn_scope_id,

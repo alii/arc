@@ -269,6 +269,7 @@ pub type EmitDispatch {
     emit_async_body: fn(
       Emitter2,
       CoroutineKind,
+      Option(String),
       List(ast.Pattern),
       FnBody,
       ScopeId,
