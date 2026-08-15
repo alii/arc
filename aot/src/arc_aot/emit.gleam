@@ -60,11 +60,7 @@ pub const js_exn_tag = exn.js_exn_tag
 /// The 2core `Binding` every arc→BEAM compile uses: threaded state on the
 /// portable tiers, no metering, and arc's own runtime as the `"js"` host.
 pub fn binding() -> instance.Binding {
-  instance.Binding(
-    ..profiles.portable(),
-    direct_host: Some(host_ops.table()),
-    meter: instance.MeterOff,
-  )
+  profiles.direct(host_ops.table())
 }
 
 /// SPEC§19.2 / R13: wire the M12-M18 emit_* modules into the mutual-recursion
