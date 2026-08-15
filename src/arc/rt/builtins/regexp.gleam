@@ -664,37 +664,19 @@ fn ffi_regexp_exec_info(
 )
 
 /// O(1) sub-binary by byte offsets — regexp indices are bytes (re:run).
-@external(erlang, "binary", "part")
+/// Offsets are clamped into the string and never raise: a user `exec` may
+/// hand back a `matched`/`index` that points past the end of the subject.
+@external(erlang, "arc_bytes_ffi", "unsafe_slice")
 fn byte_slice(s: String, start: Int, len: Int) -> String
 
-fn byte_drop_start(s: String, start: Int) -> String {
-  byte_slice(s, start, string.byte_size(s) - start)
-}
+/// O(1) suffix from a byte offset (clamped).
+@external(erlang, "arc_bytes_ffi", "drop_start")
+fn byte_drop_start(s: String, start: Int) -> String
 
-/// Smallest UTF-8 char boundary strictly > `pos` (AdvanceStringIndex).
-fn next_char_boundary(s: String, pos: Int) -> Int {
-  let len = string.byte_size(s)
-  case pos >= len {
-    True -> pos + 1
-    False -> {
-      let head = pos + 1
-      advance_past_continuations(s, head, len)
-    }
-  }
-}
-
-fn advance_past_continuations(s: String, i: Int, len: Int) -> Int {
-  case i >= len {
-    True -> i
-    False -> {
-      let assert <<_:bytes-size(i), b:8, _:bits>> = <<s:utf8>>
-      case b >= 0x80 && b < 0xC0 {
-        True -> advance_past_continuations(s, i + 1, len)
-        False -> i
-      }
-    }
-  }
-}
+/// Smallest UTF-8 char boundary strictly > `pos` (AdvanceStringIndex). May
+/// return past the end of the string, which loops use as termination.
+@external(erlang, "arc_bytes_ffi", "next_char_boundary")
+fn next_char_boundary(s: String, pos: Int) -> Int
 
 /// ? Get(O, P) via the observable protocol.
 fn try_get(st: Agent, o: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
@@ -1368,11 +1350,14 @@ fn compute_replacement(
           capture: fn(idx) { capture_or_empty(captures, idx) },
           m: n_captures,
         )
+      // 14.l.i: namedCaptures (when present) is ? ToObject'd.
       case classify(named_captures) {
+        // No `groups`: the template was tokenized without named references,
+        // so nothing here is observable — resolve it in one pass.
         KUndef ->
           finish_replacement(
             st,
-            substitution.resolve_plain_parts(without_named, ctx),
+            list.reverse(substitution.resolve_plain_parts(without_named, ctx)),
           )
         KNull -> rt_val.t_throw_type_error(st, "Cannot convert null to object")
         _ -> resolve_segments(st, with_named, ctx, named_captures, [])
