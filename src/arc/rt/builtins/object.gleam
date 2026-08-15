@@ -859,14 +859,12 @@ fn set_prototype_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         "Object prototype may only be an Object or null",
       )
     KHandle(h), Ok(new_proto) -> {
-      let #(ok, st) = rt_obj.t_set_prototype(st, h, new_proto)
-      case ok {
-        True -> #(target, st)
-        False ->
-          rt_val.t_throw_type_error(
-            st,
-            "Cyclic __proto__ value or object is not extensible",
-          )
+      // §20.1.2.23 steps 4-5: O.[[SetPrototypeOf]](proto); throw if false.
+      let #(status, st) = rt_obj.t_set_prototype_of(st, h, new_proto)
+      case status {
+        Ok(Nil) -> #(target, st)
+        Error(fail) ->
+          rt_val.t_throw_type_error(st, rt_obj.set_proto_fail_message(fail))
       }
     }
     _, Ok(_) -> #(target, st)

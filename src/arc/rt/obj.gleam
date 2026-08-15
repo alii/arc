@@ -518,39 +518,79 @@ pub fn t_get_prototype_of(st: Agent, obj: Handle) -> #(Option(Handle), Agent) {
   }
 }
 
+/// Why an object's [[SetPrototypeOf]] returned **false**. Callers that must
+/// throw (Object.setPrototypeOf) turn each variant into its own TypeError;
+/// callers that report a flag (Reflect.setPrototypeOf) collapse them all.
+pub type SetProtoFail {
+  NotExtensible
+  Cyclic
+  Immutable
+  /// A proxy's `setPrototypeOf` trap returned falsish (§10.5.2 step 8).
+  TrapRefused
+}
+
+/// The TypeError message Object.setPrototypeOf raises for each refusal.
+pub fn set_proto_fail_message(fail: SetProtoFail) -> String {
+  case fail {
+    NotExtensible -> "Cannot set prototype of a non-extensible object"
+    Cyclic -> "Cyclic __proto__ value"
+    Immutable -> "Immutable prototype object cannot have its prototype set"
+    TrapRefused -> "'setPrototypeOf' on proxy: trap returned falsish"
+  }
+}
+
 /// **[[SetPrototypeOf]] ( V )** — §10.5.2 for proxies, §10.1.2.1
 /// OrdinarySetPrototypeOf otherwise (with the §10.4.7 SetImmutablePrototype
-/// check for %Object.prototype%). Returns `#(True, st')` on success,
-/// `#(False, st)` when rejected (non-extensible, cycle, immutable, or a
-/// proxy trap returning falsish). THE single dispatch: `Object
-/// .setPrototypeOf`, `Reflect.setPrototypeOf` and `__proto__`'s setter all
-/// route through it, so a proxy is never handed to the ordinary algorithm.
-/// Port of arc `mop.set_prototype_of_stateful` (`mop.gleam:1242-1327`).
-pub fn t_set_prototype(
+/// check for %Object.prototype%). `Ok(Nil)` on success, `Error(reason)` when
+/// rejected. THE single dispatch: `Object.setPrototypeOf`,
+/// `Reflect.setPrototypeOf` and `__proto__`'s setter all route through it,
+/// so a proxy is never handed to the ordinary algorithm. Port of arc
+/// `mop.set_prototype_of_stateful` (`mop.gleam:1242-1327`).
+pub fn t_set_prototype_of(
   st: Agent,
   obj: Handle,
   new_proto: Option(Handle),
-) -> #(Bool, Agent) {
+) -> #(Result(Nil, SetProtoFail), Agent) {
   let st = devolve(st, obj)
   let assert SObject(kind:, proto: current, extensible:, ..) =
     read_object(st, obj)
-  use <- proxy_or(kind, proxy_set_prototype_of(st, _, new_proto))
+  use <- proxy_or(kind, fn(p) {
+    let #(ok, st) = proxy_set_prototype_of(st, p, new_proto)
+    case ok {
+      True -> #(Ok(Nil), st)
+      False -> #(Error(TrapRefused), st)
+    }
+  })
   // Step 4: SameValue(V, current) → true (no-op).
-  use <- bool.guard(new_proto == current, #(True, st))
+  use <- bool.guard(new_proto == current, #(Ok(Nil), st))
   // §10.4.7.2 SetImmutablePrototype — Object.prototype is an Immutable
   // Prototype Exotic Object (§20.1.3): any change is rejected.
-  use <- bool.guard(obj == st.realm.object.prototype, #(False, st))
+  use <- bool.guard(obj == st.realm.object.prototype, #(Error(Immutable), st))
   // Step 5: extensible false → false.
-  use <- bool.guard(!extensible, #(False, st))
+  use <- bool.guard(!extensible, #(Error(NotExtensible), st))
   // Step 7: cycle check.
-  use <- bool.guard(would_create_cycle(st, obj, new_proto), #(False, st))
+  use <- bool.guard(would_create_cycle(st, obj, new_proto), #(Error(Cyclic), st))
   // Step 8: set [[Prototype]] to V.
   let st =
     rt_store.t_cell_update(st, obj, fn(slot) {
       let assert SObject(..) = slot
       SObject(..slot, proto: new_proto)
     })
-  #(True, st)
+  #(Ok(Nil), st)
+}
+
+/// `t_set_prototype_of` collapsed to the spec's Boolean: what
+/// Reflect.setPrototypeOf, `__proto__` and a proxy's missing trap report.
+pub fn t_set_prototype(
+  st: Agent,
+  obj: Handle,
+  new_proto: Option(Handle),
+) -> #(Bool, Agent) {
+  let #(res, st) = t_set_prototype_of(st, obj, new_proto)
+  case res {
+    Ok(Nil) -> #(True, st)
+    Error(_refused) -> #(False, st)
+  }
 }
 
 /// SPEC §8 op-table spelling — thin alias for `t_get_prototype_of`.

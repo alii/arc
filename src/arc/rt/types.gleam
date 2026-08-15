@@ -855,6 +855,16 @@ pub type NativeToken {
   HostFn(id: Int)
   /// The test262 host-defined `$262` methods (INTERPRETING.md).
   Test262N(Test262Native)
+  DomExceptionN(DomExceptionNative)
+}
+
+/// WebIDL §2.8.1 DOMException natives. `proto` is the intrinsic prototype
+/// fallback for OrdinaryCreateFromConstructor.
+pub type DomExceptionNative {
+  /// new DOMException ( message, name ).
+  DomExceptionConstructor(proto: Handle)
+  /// get DOMException.prototype.code — the legacy code for `this.name`.
+  DomExceptionGetCode
 }
 
 /// `$262` methods. `realm` is the id of the realm whose `$262` object the
@@ -1837,6 +1847,8 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     AsyncResume(gen:, is_throw: _) | AsyncGenResume(gen:, ..) -> [gen]
     ObjectN(_) | FunctionN(_) | ReturnThis -> []
     ErrorN(n) -> error_native_refs(n)
+    DomExceptionN(DomExceptionConstructor(proto:)) -> [proto]
+    DomExceptionN(DomExceptionGetCode) -> []
     DateN(n) -> date_native_refs(n)
     RegExpN(n) -> regexp_native_refs(n)
     AtomicsN(_) -> []

@@ -1,18 +1,23 @@
 import arc/compiler
+import arc/engine.{
+  type JsValueKind, Finite, Infinity, JsBool, JsNull, JsNumber, JsObject,
+  JsString, JsUndefined, NaN, NegInfinity,
+}
 import arc/host_hooks
+import arc/interp/entry
+import arc/interp/safepoint
+import arc/module
 import arc/module/load_error
 import arc/parser
-import arc/vm/builtins
-import arc/vm/builtins/common
-import arc/vm/exec/entry
-import arc/vm/exec/event_loop
-import arc/vm/heap
-import arc/vm/key.{Named}
-import arc/vm/module
-import arc/vm/ops/object
-import arc/vm/state
-import arc/vm/value.{
-  Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN, NegInfinity,
+import arc/rt/async as rt_async
+import arc/rt/builtins as rt_builtins
+import arc/rt/bytecode.{type FuncTemplate}
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/inspect as rt_inspect
+import arc/rt/obj as rt_obj
+import arc/rt/types.{
+  type Agent, type JsVal, JInt, Named, PromiseFulfilled, PromisePending,
+  PromiseRejected, StringKey, mk_number, mk_object, mk_undefined,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -23,26 +28,81 @@ import gleam/string
 // Test helpers
 // ============================================================================
 
+/// A fresh agent with realm 0 initialised and the interpreter linked in, on
+/// the default host hooks (what `engine.new` boots).
+fn agent() -> Agent {
+  rt_builtins.new_agent(host_hooks.default_host_hooks()) |> entry.link
+}
+
+/// A settled top-level run, both arms classified for matching.
+fn classify_outcome(
+  completion: rt_call.Completion,
+) -> Result(JsValueKind, JsValueKind) {
+  case completion {
+    NormalCompletion(v) -> Ok(engine.classify(v))
+    ThrowCompletion(e) -> Error(engine.classify(e))
+  }
+}
+
+fn completion_value(completion: rt_call.Completion) -> JsVal {
+  case completion {
+    NormalCompletion(v) -> v
+    ThrowCompletion(e) -> e
+  }
+}
+
+/// A classified value for panic messages: objects (thrown errors) rendered
+/// through the runtime, everything else as the Gleam term.
+fn render(st: Agent, val: JsValueKind) -> String {
+  case val {
+    JsObject(h) -> rt_inspect.format_error(st, mk_object(h))
+    _ -> string.inspect(val)
+  }
+}
+
+/// Run a compiled script on `st` and end its turn: one microtask drain with
+/// the completion value held.
+fn run_template(
+  st: Agent,
+  template: FuncTemplate,
+) -> #(Result(JsValueKind, JsValueKind), Agent) {
+  let #(completion, st) = entry.run_script(st, template)
+  let st = safepoint.end_turn(st, [completion_value(completion)])
+  #(classify_outcome(completion), st)
+}
+
 /// Parse + compile + run JS source, return the settled outcome
-/// (Ok(value) / Error(thrown)) plus the final heap.
+/// (Ok(value) / Error(thrown)) plus the final agent.
 fn run_js(
   source: String,
-) -> Result(#(Result(value.JsValue, value.JsValue), state.Heap(host)), String) {
+) -> Result(#(Result(JsValueKind, JsValueKind), Agent), String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
       case compiler.compile(body, sb) {
         Error(err) -> Error("compile error: " <> compiler.error_message(err))
-        Ok(template) -> {
-          let h = heap.new()
-          let #(h, b) = builtins.init(h)
-          let #(h, global_object) = builtins.globals(b, h)
-          case entry.run(template, h, b, global_object) {
-            Ok(outcome) -> Ok(outcome)
-            Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
-          }
-        }
+        Ok(template) -> Ok(run_template(agent(), template))
       }
+  }
+}
+
+/// How a promise value has settled: `Some(Ok(value))` if fulfilled,
+/// `Some(Error(reason))` if rejected, `None` if it is not a promise or is
+/// still pending. The Ok/Error split matters: callers asserting on a
+/// rejection must not silently accept a fulfillment with the same value.
+fn promise_settlement(
+  st: Agent,
+  val: JsValueKind,
+) -> option.Option(Result(JsValueKind, JsValueKind)) {
+  use ref <- option.then(case val {
+    JsObject(ref) -> Some(ref)
+    _ -> None
+  })
+  use promise <- option.then(rt_async.as_promise(st, mk_object(ref)))
+  case rt_async.promise_data(st, promise) {
+    #(_, PromiseFulfilled(v), _) -> Some(Ok(engine.classify(v)))
+    #(_, PromiseRejected(r), _) -> Some(Error(engine.classify(r)))
+    #(_, PromisePending(_), _) -> None
   }
 }
 
@@ -51,12 +111,12 @@ fn run_js(
 /// panic messages.
 fn assert_promise_settles(
   source: String,
-  expected: Result(value.JsValue, value.JsValue),
+  expected: Result(JsValueKind, JsValueKind),
   label: String,
 ) -> Nil {
   case run_js(source) {
-    Ok(#(Ok(val), h)) ->
-      case entry.promise_settlement(h, val) {
+    Ok(#(Ok(val), st)) ->
+      case promise_settlement(st, val) {
         Some(settled) -> {
           assert settled == expected
         }
@@ -81,21 +141,15 @@ fn assert_promise_settles(
   }
 }
 
-fn assert_promise_resolves(source: String, expected: value.JsValue) -> Nil {
+fn assert_promise_resolves(source: String, expected: JsValueKind) -> Nil {
   assert_promise_settles(source, Ok(expected), "fulfilled")
 }
 
-fn assert_promise_rejects(source: String, expected: value.JsValue) -> Nil {
+fn assert_promise_rejects(source: String, expected: JsValueKind) -> Nil {
   assert_promise_settles(source, Error(expected), "rejected")
 }
 
-/// The canonical rendering lives in `state.vm_error_message` — go through it so
-/// a new `VmError` variant needs no test-side arm.
-fn inspect_vm_error(err: state.VmError) -> String {
-  state.vm_error_message(err)
-}
-
-fn assert_normal(source: String, expected: value.JsValue) -> Nil {
+fn assert_normal(source: String, expected: JsValueKind) -> Nil {
   case run_js(source) {
     Ok(#(Ok(val), _)) -> {
       assert val == expected
@@ -366,7 +420,7 @@ pub fn ternary_false_test() -> Nil {
 pub fn empty_object_test() -> Nil {
   // Just test that it doesn't crash — the result is an object ref
   case run_js("({})") {
-    Ok(#(Ok(value.JsObject(_)), _)) -> Nil
+    Ok(#(Ok(JsObject(_)), _)) -> Nil
     _other -> panic as { "expected object, got something else" }
   }
 }
@@ -1366,7 +1420,7 @@ pub fn closure_nested_block_shadow_test() -> Nil {
 pub fn array_literal_test() -> Nil {
   // Array literal produces an object
   case run_js("[1, 2, 3]") {
-    Ok(#(Ok(value.JsObject(_)), _)) -> Nil
+    Ok(#(Ok(JsObject(_)), _)) -> Nil
     _other -> panic as "expected array object"
   }
 }
@@ -2953,10 +3007,10 @@ pub fn class_static_field_derived_test() -> Nil {
 
 pub fn class_static_field_this_is_ctor_test() -> Nil {
   // §15.7.14: static field initializers run with `this` = the constructor.
-  assert_normal("class C { static x = this }; C.x === C", value.JsBool(True))
+  assert_normal("class C { static x = this }; C.x === C", JsBool(True))
   assert_normal(
     "class A {}; class B extends A { static x = this }; B.x === B",
-    value.JsBool(True),
+    JsBool(True),
   )
 }
 
@@ -2980,7 +3034,7 @@ pub fn class_static_elements_source_order_test() -> Nil {
   // order.
   assert_normal(
     "var s=''; class C { static { s+='a' } static x = (s+='b',1); static { s+='c' } }; s",
-    value.JsString("abc"),
+    JsString("abc"),
   )
 }
 
@@ -5701,11 +5755,11 @@ pub fn math_min_test() -> Nil {
 }
 
 pub fn math_max_no_args_test() -> Nil {
-  assert_normal("Math.max()", JsNumber(value.NegInfinity))
+  assert_normal("Math.max()", JsNumber(NegInfinity))
 }
 
 pub fn math_min_no_args_test() -> Nil {
-  assert_normal("Math.min()", JsNumber(value.Infinity))
+  assert_normal("Math.min()", JsNumber(Infinity))
 }
 
 // ============================================================================
@@ -5737,47 +5791,47 @@ pub fn math_pi_computation_test() -> Nil {
 // ============================================================================
 
 pub fn math_exp_overflow_test() -> Nil {
-  assert_normal("Math.exp(1000)", JsNumber(value.Infinity))
+  assert_normal("Math.exp(1000)", JsNumber(Infinity))
 }
 
 pub fn math_pow_overflow_test() -> Nil {
-  assert_normal("Math.pow(1e300, 2)", JsNumber(value.Infinity))
+  assert_normal("Math.pow(1e300, 2)", JsNumber(Infinity))
 }
 
 pub fn exp_operator_overflow_test() -> Nil {
   // The `**` operator routes through the same Number::exponentiate.
-  assert_normal("1e300 ** 2", JsNumber(value.Infinity))
+  assert_normal("1e300 ** 2", JsNumber(Infinity))
 }
 
 pub fn exp_operator_overflow_negative_odd_test() -> Nil {
   // Negative base with an odd integer exponent: the overflow keeps the sign.
-  assert_normal("(-1e300) ** 3", JsNumber(value.NegInfinity))
+  assert_normal("(-1e300) ** 3", JsNumber(NegInfinity))
 }
 
 pub fn math_cosh_overflow_test() -> Nil {
-  assert_normal("Math.cosh(1000)", JsNumber(value.Infinity))
+  assert_normal("Math.cosh(1000)", JsNumber(Infinity))
 }
 
 pub fn math_sinh_overflow_test() -> Nil {
-  assert_normal("Math.sinh(1000)", JsNumber(value.Infinity))
+  assert_normal("Math.sinh(1000)", JsNumber(Infinity))
 }
 
 pub fn math_sinh_overflow_negative_test() -> Nil {
   // sinh is odd, so a large-magnitude negative argument overflows to -∞.
-  assert_normal("Math.sinh(-1000)", JsNumber(value.NegInfinity))
+  assert_normal("Math.sinh(-1000)", JsNumber(NegInfinity))
 }
 
 pub fn math_expm1_overflow_test() -> Nil {
-  assert_normal("Math.expm1(1000)", JsNumber(value.Infinity))
+  assert_normal("Math.expm1(1000)", JsNumber(Infinity))
 }
 
 pub fn math_fround_overflow_test() -> Nil {
   // 1e300 is beyond the float32 range, so it rounds to +Infinity.
-  assert_normal("Math.fround(1e300)", JsNumber(value.Infinity))
+  assert_normal("Math.fround(1e300)", JsNumber(Infinity))
 }
 
 pub fn math_fround_overflow_negative_test() -> Nil {
-  assert_normal("Math.fround(-1e300)", JsNumber(value.NegInfinity))
+  assert_normal("Math.fround(-1e300)", JsNumber(NegInfinity))
 }
 
 pub fn math_fround_finite_test() -> Nil {
@@ -7347,99 +7401,81 @@ pub fn promise_ordering_finally_timing_test() -> Nil {
 // REPL mode tests
 // ============================================================================
 
+/// Compile one input in REPL mode and run it on `st`, draining microtasks.
+/// Top-level lexical declarations land in the realm's global lexical record,
+/// so later inputs on the returned agent see them.
+fn run_repl_input(
+  source: String,
+  st: Agent,
+) -> Result(#(Result(JsValueKind, JsValueKind), Agent), String) {
+  case parser.parse_script(source) {
+    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
+    Ok(#(body, sb)) ->
+      case compiler.compile_repl(body, sb) {
+        Error(err) -> Error("compile error: " <> compiler.error_message(err))
+        Ok(template) -> Ok(run_template(st, template))
+      }
+  }
+}
+
 /// Evaluate multiple REPL lines in sequence, returning the result of the last line.
 fn run_repl_lines(
   lines: List(String),
-) -> Result(#(value.JsValue, state.Heap(host)), String) {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  run_repl_lines_loop(lines, h, b, entry.new_repl_env(global_object))
+) -> Result(#(JsValueKind, Agent), String) {
+  run_repl_lines_loop(lines, agent())
 }
 
 fn run_repl_lines_loop(
   lines: List(String),
-  h: state.Heap(host),
-  b: common.Builtins,
-  env: entry.ReplEnv,
-) -> Result(#(value.JsValue, state.Heap(host)), String) {
+  st: Agent,
+) -> Result(#(JsValueKind, Agent), String) {
   case lines {
     [] -> Error("no lines to evaluate")
-    [line] -> {
+    [line] ->
       // Last line — return its result
-      use #(val, new_h, _new_env) <- result.map(eval_repl_line(line, h, b, env))
-      #(val, new_h)
-    }
+      eval_repl_line(line, st)
     [line, ..rest] -> {
-      use #(_val, new_h, new_env) <- result.try(eval_repl_line(line, h, b, env))
-      run_repl_lines_loop(rest, new_h, b, new_env)
+      use #(_val, st) <- result.try(eval_repl_line(line, st))
+      run_repl_lines_loop(rest, st)
     }
   }
 }
 
 fn eval_repl_line(
   source: String,
-  h: state.Heap(host),
-  b: common.Builtins,
-  env: entry.ReplEnv,
-) -> Result(#(value.JsValue, state.Heap(host), entry.ReplEnv), String) {
-  case parser.parse_script(source) {
-    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(#(body, sb)) ->
-      case compiler.compile_repl(body, sb) {
-        Error(err) -> Error("compile error: " <> compiler.error_message(err))
-        Ok(template) ->
-          case entry.run_and_drain_repl(template, h, b, env) {
-            Ok(#(Ok(val), new_h, new_env)) -> Ok(#(val, new_h, new_env))
-            Ok(#(Error(val), _, _)) -> Error("throw: " <> string.inspect(val))
-            Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
-          }
-      }
+  st: Agent,
+) -> Result(#(JsValueKind, Agent), String) {
+  use #(outcome, st) <- result.try(run_repl_input(source, st))
+  case outcome {
+    Ok(val) -> Ok(#(val, st))
+    Error(val) -> Error("throw: " <> string.inspect(val))
   }
 }
 
 /// Evaluate REPL lines where the last line is expected to throw.
 fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-  run_repl_throw_loop(lines, h, b, entry.new_repl_env(global_object))
+  run_repl_throw_loop(lines, agent())
 }
 
-fn run_repl_throw_loop(
-  lines: List(String),
-  h: state.Heap(host),
-  b: common.Builtins,
-  env: entry.ReplEnv,
-) -> Result(Nil, String) {
+fn run_repl_throw_loop(lines: List(String), st: Agent) -> Result(Nil, String) {
   case lines {
     [] -> Error("no lines to evaluate")
     [line] -> {
       // Last line — expect it to throw
-      case parser.parse_script(line) {
-        Error(err) ->
-          Error("parse error: " <> parser.parse_error_to_string(err))
-        Ok(#(body, sb)) ->
-          case compiler.compile_repl(body, sb) {
-            Error(_) -> Error("compile error on last line")
-            Ok(template) ->
-              case entry.run_and_drain_repl(template, h, b, env) {
-                Ok(#(Error(_), _, _)) -> Ok(Nil)
-                Ok(#(Ok(val), _, _)) ->
-                  Error("expected throw, got normal: " <> string.inspect(val))
-                Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
-              }
-          }
+      use #(outcome, _st) <- result.try(run_repl_input(line, st))
+      case outcome {
+        Error(_) -> Ok(Nil)
+        Ok(val) -> Error("expected throw, got normal: " <> string.inspect(val))
       }
     }
     [line, ..rest] -> {
-      use #(_val, new_h, new_env) <- result.try(eval_repl_line(line, h, b, env))
-      run_repl_throw_loop(rest, new_h, b, new_env)
+      use #(_val, st) <- result.try(eval_repl_line(line, st))
+      run_repl_throw_loop(rest, st)
     }
   }
 }
 
-fn assert_repl(lines: List(String), expected: value.JsValue) -> Nil {
+fn assert_repl(lines: List(String), expected: JsValueKind) -> Nil {
   case run_repl_lines(lines) {
     Ok(#(val, _h)) -> {
       assert val == expected
@@ -7469,7 +7505,7 @@ pub fn repl_function_persistence_test() -> Nil {
 
 pub fn repl_delete_lexical_global_test() -> Nil {
   // §9.1.1.4.7 step 1: at LexGlobal top level a `let` lives in the global
-  // declarative record (state.ctx.lexical_globals) and is never deletable,
+  // declarative record (Realm.lexical_globals) and is never deletable,
   // so DeleteGlobalVar answers false without touching the global object.
   assert_repl(["let dq = 1", "[delete dq, dq].join()"], JsString("false,1"))
 }
@@ -7730,7 +7766,7 @@ pub fn arguments_length_in_test() -> Nil {
 pub fn arguments_delete_index_test() -> Nil {
   assert_normal(
     "function f() { delete arguments[1]; return arguments[1]; } f(1, 2, 3)",
-    value.JsUndefined,
+    JsUndefined,
   )
 }
 
@@ -7882,13 +7918,10 @@ pub fn strict_reference_error_type_test() -> Nil {
 // ============================================================================
 
 /// Parse + compile + run JS module source via the bundle system. Returns the
-/// settled outcome (Ok(value) / Error(thrown)) plus the final heap.
+/// settled outcome (Ok(value) / Error(thrown)) plus the final agent.
 fn run_module(
   source: String,
-) -> Result(#(Result(value.JsValue, value.JsValue), state.Heap(host)), String) {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
+) -> Result(#(Result(JsValueKind, JsValueKind), Agent), String) {
   let specifier = "<test>"
 
   case
@@ -7901,37 +7934,26 @@ fn run_module(
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
     Ok(bundle) ->
-      case
-        module.evaluate_bundle(
-          bundle,
-          h,
-          b,
-          global_object,
-          event_loop.drain_jobs,
-        )
-      {
-        #(new_heap, Ok(module.EvaluatedBundle(value: val, ..))) ->
-          Ok(#(Ok(val), new_heap))
-        #(new_heap, Error(module.EvaluationError(value: val))) ->
-          Ok(#(Error(val), new_heap))
-        #(_new_heap, Error(err)) ->
-          Error("module error: " <> string.inspect(err))
+      case module.evaluate_bundle(bundle, agent(), rt_async.drain) {
+        #(st, Ok(module.EvaluatedBundle(value: val, ..))) ->
+          Ok(#(Ok(engine.classify(val)), st))
+        #(st, Error(module.EvaluationError(value: val))) ->
+          Ok(#(Error(engine.classify(val)), st))
+        #(st, Error(err)) ->
+          Error("module error: " <> module.error_message(err, st))
       }
   }
 }
 
-fn assert_module_normal(source: String, expected: value.JsValue) -> Nil {
+fn assert_module_normal(source: String, expected: JsValueKind) -> Nil {
   case run_module(source) {
     Ok(#(Ok(value), _)) -> {
       let assert True = value == expected
       Nil
     }
-    Ok(#(Error(thrown), heap)) ->
+    Ok(#(Error(thrown), st)) ->
       panic as {
-        "Expected normal completion but got throw: "
-        <> string.inspect(thrown)
-        <> " heap="
-        <> string.inspect(heap)
+        "Expected normal completion but got throw: " <> render(st, thrown)
       }
     Error(err) -> panic as { "run_module failed: " <> err }
   }
@@ -8034,9 +8056,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
   // Test the REPL→module globals flow:
   // 1. Evaluate a REPL script that defines a function
   // 2. Run a module that accesses that function via GetGlobal
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
+  let st = agent()
 
   // Step 1: Compile and run harness script in REPL mode
   let harness_source =
@@ -8046,13 +8066,12 @@ pub fn module_repl_harness_globals_test() -> Nil {
   let assert Ok(harness_template) =
     compiler.compile_repl(harness_body, harness_sb)
 
-  let env = entry.new_repl_env(global_object)
-  let assert Ok(#(Ok(_), h, env)) =
-    entry.run_and_drain_repl(harness_template, h, b, env)
+  let assert #(Ok(_), st) = run_template(st, harness_template)
 
   // Verify greetFromHarness is on globalThis object
-  let assert object.Answered(True) =
-    object.has_property(h, env.global_object, Named("greetFromHarness"))
+  let global_object = mk_object(st.realm.global_object)
+  let assert #(True, st) =
+    rt_obj.t_has_prop(st, global_object, StringKey(Named("greetFromHarness")))
 
   // Step 2: Compile and run a module that uses the harness function
   let module_source = "greetFromHarness()"
@@ -8065,34 +8084,38 @@ pub fn module_repl_harness_globals_test() -> Nil {
       fn(_resolved) { Error(load_error.LoadForbidden) },
     )
 
-  // Evaluate the module, passing in REPL globals
-  case
-    module.evaluate_bundle(
-      bundle,
-      h,
-      b,
-      env.global_object,
-      event_loop.drain_jobs,
-    )
-  {
-    #(_heap, Ok(module.EvaluatedBundle(value: val, ..))) -> {
-      let assert True = val == JsString("hello from harness")
+  // Evaluate the module on the same agent: it sees the REPL globals
+  case module.evaluate_bundle(bundle, st, rt_async.drain) {
+    #(_st, Ok(module.EvaluatedBundle(value: val, ..))) -> {
+      let assert True = engine.classify(val) == JsString("hello from harness")
       Nil
     }
-    #(_heap, Error(err)) ->
-      panic as { "module failed: " <> string.inspect(err) }
+    #(st, Error(err)) ->
+      panic as { "module failed: " <> module.error_message(err, st) }
   }
+}
+
+/// Call `callee` with `this = undefined` and `args` on `st`, then end the
+/// turn (one microtask drain): the embedder's `engine.call` at agent level.
+fn run_export(
+  st: Agent,
+  callee: JsVal,
+  args: List(JsVal),
+) -> #(Result(JsValueKind, JsValueKind), Agent) {
+  let #(completion, st) = rt_call.t_call(st, callee, mk_undefined(), args)
+  let st = safepoint.end_turn(st, [completion_value(completion)])
+  #(classify_outcome(completion), st)
+}
+
+fn from_int(n: Int) -> JsVal {
+  mk_number(JInt(n))
 }
 
 pub fn run_export_namespace_call_test() -> Nil {
   // End-to-end embedder path: evaluate a module, read an export off its
-  // namespace (GetModuleNamespace), and invoke it with entry.run_export, which
+  // namespace (GetModuleNamespace), and invoke it with run_export, which
   // calls the function AND drains the microtask queue. Mirrors how a host
   // dispatches each message to a module's `receive` export.
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
-
   let source =
     "let total = 0;
      let drained = 0;
@@ -8109,57 +8132,27 @@ pub fn run_export_namespace_call_test() -> Nil {
       fn(_d, _p) { Error(load_error.ResolveForbidden) },
       fn(_resolved) { Error(load_error.LoadForbidden) },
     )
-  let assert #(h, Ok(module.EvaluatedBundle(namespace: ns_ref, ..))) =
-    module.evaluate_bundle(bundle, h, b, global_object, event_loop.drain_jobs)
-  let namespace = value.JsObject(ns_ref)
+  let assert #(st, Ok(module.EvaluatedBundle(namespace: ns_ref, ..))) =
+    module.evaluate_bundle(bundle, agent(), rt_async.drain)
+  let namespace = mk_object(ns_ref)
 
-  // Read `receive` off the namespace — no VM State needed.
-  let assert Some(receive) = module.read_export(h, namespace, "receive")
+  // Read `receive` off the namespace — no interpreter State needed.
+  let assert Some(receive) = module.read_export(st, namespace, "receive")
 
   // receive(5): returns `total` (5) synchronously; the .then microtask is
   // drained by run_export, bumping `drained` to 5.
-  let assert Ok(#(Ok(v1), h)) =
-    entry.run_export(
-      receive,
-      JsUndefined,
-      [value.from_int(5)],
-      h,
-      b,
-      global_object,
-      host_hooks.default_host_hooks(),
-      event_loop.drain_jobs,
-    )
-  let assert True = v1 == value.from_int(5)
+  let assert #(Ok(v1), st) = run_export(st, receive, [from_int(5)])
+  let assert True = v1 == JsNumber(Finite(5.0))
 
-  // receive(3): module-scoped state persisted on the threaded heap → total 8.
-  let assert Ok(#(Ok(v2), h)) =
-    entry.run_export(
-      receive,
-      JsUndefined,
-      [value.from_int(3)],
-      h,
-      b,
-      global_object,
-      host_hooks.default_host_hooks(),
-      event_loop.drain_jobs,
-    )
-  let assert True = v2 == value.from_int(8)
+  // receive(3): module-scoped state persisted on the threaded agent → total 8.
+  let assert #(Ok(v2), st) = run_export(st, receive, [from_int(3)])
+  let assert True = v2 == JsNumber(Finite(8.0))
 
   // Both .then microtasks ran (5 + 3), proving the queue was drained on each
   // call: getDrained() == 8.
-  let assert Some(get_drained) = module.read_export(h, namespace, "getDrained")
-  let assert Ok(#(Ok(v3), _)) =
-    entry.run_export(
-      get_drained,
-      JsUndefined,
-      [],
-      h,
-      b,
-      global_object,
-      host_hooks.default_host_hooks(),
-      event_loop.drain_jobs,
-    )
-  let assert True = v3 == value.from_int(8)
+  let assert Some(get_drained) = module.read_export(st, namespace, "getDrained")
+  let assert #(Ok(v3), _) = run_export(st, get_drained, [])
+  let assert True = v3 == JsNumber(Finite(8.0))
   Nil
 }
 
@@ -8447,7 +8440,7 @@ pub fn default_derived_ctor_does_not_iterate_test() -> Nil {
     try { new C(3, 4); } catch (e) { explicitThrew = true; }
     '' + b.sum + ':' + hitsAfterDefault + ':' + explicitThrew;
     ",
-    value.JsString("3:0:true"),
+    JsString("3:0:true"),
   )
 }
 
@@ -8471,7 +8464,7 @@ pub fn super_member_destructuring_targets_test() -> Nil {
     new B().m();
     log.join('|');
     ",
-    value.JsString("x=1|x=2|x=3,4|x=5|x=k|body"),
+    JsString("x=1|x=2|x=3,4|x=5|x=k|body"),
   )
 }
 
@@ -8485,7 +8478,7 @@ pub fn template_quasi_combining_mark_after_substitution_test() -> Nil {
     function tag(s) { return '' + s.raw[1].length + s[1].length; }
     tag`a${0}\u{0301}e`;
     ",
-    value.JsString("22"),
+    JsString("22"),
   )
 }
 
@@ -8532,7 +8525,7 @@ pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
     var ok = (gg === 9) && (delete gg === true) && (typeof gg === 'undefined');
     ok;
     ",
-    value.JsBool(True),
+    JsBool(True),
   )
 }
 
@@ -8542,17 +8535,14 @@ pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
 /// host-contract violation, so it must surface as a link-time SyntaxError —
 /// never crash the linker on the missing cell.
 pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
   let spec = "/shared.js"
   let no_resolve = fn(_dep, _parent) { Error(load_error.ResolveForbidden) }
   let no_load = fn(_resolved) { Error(load_error.LoadForbidden) }
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
-  let assert #(h, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
-    module.evaluate_bundle(first, h, b, global_object, event_loop.drain_jobs)
+  let assert #(st, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
+    module.evaluate_bundle(first, agent(), rt_async.drain)
 
   // Same specifier, source has since gained an export.
   let assert Ok(second) =
@@ -8562,18 +8552,17 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
       no_resolve,
       no_load,
     )
-  let assert #(h, Error(err)) =
+  let assert #(st, Error(err)) =
     module.link_for_evaluation_reusing(
       second,
-      h,
-      b,
+      st,
       dict.from_list([#(spec, ns)]),
       dict.new(),
     )
   let assert True = case err {
     module.EvaluationError(..) ->
       string.contains(
-        module.error_message(err, h),
+        module.error_message(err, st),
         "was re-loaded with an export",
       )
     _ -> False
@@ -8586,17 +8575,14 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
 /// it either, so it is the same guest-visible link error — never a linker panic
 /// on the missing cell.
 pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_object) = builtins.globals(b, h)
   let spec = "/shared.js"
   let no_resolve = fn(_dep, _parent) { Error(load_error.ResolveForbidden) }
   let no_load = fn(_resolved) { Error(load_error.LoadForbidden) }
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
-  let assert #(h, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
-    module.evaluate_bundle(first, h, b, global_object, event_loop.drain_jobs)
+  let assert #(st, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
+    module.evaluate_bundle(first, agent(), rt_async.drain)
 
   // Same specifier, source has since gained `export { y } from './dep.js'`.
   let dep_resolve = fn(dep, _parent) {
@@ -8618,18 +8604,17 @@ pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
       dep_resolve,
       dep_load,
     )
-  let assert #(h, Error(err)) =
+  let assert #(st, Error(err)) =
     module.link_for_evaluation_reusing(
       second,
-      h,
-      b,
+      st,
       dict.from_list([#(spec, ns)]),
       dict.new(),
     )
   let assert True = case err {
     module.EvaluationError(..) ->
       string.contains(
-        module.error_message(err, h),
+        module.error_message(err, st),
         "was re-loaded with an export",
       )
     _ -> False

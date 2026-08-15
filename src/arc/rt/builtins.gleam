@@ -22,6 +22,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/console as b_console
 import arc/rt/builtins/data_view as b_data_view
 import arc/rt/builtins/date as b_date
+import arc/rt/builtins/dom_exception as b_dom_exception
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/function as b_function
 import arc/rt/builtins/generator as b_generator
@@ -51,13 +52,14 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
   type Realm, Agent, ArrayBufferN, ArrayN, AsyncGenResume, AsyncResume, AtomicsN,
   BigIntN, BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty,
-  DataViewN, DateN, ErrorN, FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry,
-  IteratorN, JInt, JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN,
-  Named, NativeUnseeded, NoElements, NumberConstructor, NumberN, NumberObj,
-  ObjectN, Ordinary, PromiseN, PromiseRejectFn, PromiseResolveFn, ProxyN, Realm,
-  ReflectN, RegExpN, ReturnThis, SObject, SetN, StringConstructor, StringKey,
-  StringN, StringObj, SymbolConstructor, SymbolN, Test262N, ThrowTypeErrorPoison,
-  TypedArrayN, WeakN, classify, mk_number, mk_object, mk_undefined,
+  DataViewN, DateN, DomExceptionN, ErrorN, FunctionN, GeneratorN, GlobalN,
+  HostFn, HostFnEntry, IteratorN, JInt, JNan, JPosInf, JsOps, JsStore, JsonN,
+  KHandle, MapN, MathN, Named, NativeUnseeded, NoElements, NumberConstructor,
+  NumberN, NumberObj, ObjectN, Ordinary, PromiseN, PromiseRejectFn,
+  PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SObject, SetN,
+  StringConstructor, StringKey, StringN, StringObj, SymbolConstructor, SymbolN,
+  Test262N, ThrowTypeErrorPoison, TypedArrayN, WeakN, classify, mk_number,
+  mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -116,6 +118,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   let #(array, st) = b_array.init(st, object_proto, fn_proto)
   // 5. Error family (Error + 7 NativeError subclasses).
   let #(errors, st) = b_error.init(st, object_proto, fn_proto, id)
+  let #(dom_exception, st) =
+    b_dom_exception.init(st, fn_proto, errors.error.prototype)
   // 6. Namespace objects (Math, JSON, Reflect, console, Atomics).
   let #(math, st) = b_math.init(st, object_proto, fn_proto)
   let #(json, st) = b_json.init(st, object_proto, fn_proto, id)
@@ -183,6 +187,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
         symbol:,
         bigint:,
         errors:,
+        dom_exception:,
         map:,
         set:,
         weak_map:,
@@ -340,6 +345,7 @@ type GlobalRefs {
     symbol: BuiltinPair,
     bigint: BuiltinPair,
     errors: b_error.ErrorFamily,
+    dom_exception: BuiltinPair,
     map: BuiltinPair,
     set: BuiltinPair,
     weak_map: BuiltinPair,
@@ -401,6 +407,7 @@ fn alloc_global_object(
     Builtin("EvalError", ctor(r.errors.eval_error)),
     Builtin("URIError", ctor(r.errors.uri_error)),
     Builtin("AggregateError", ctor(r.errors.aggregate_error)),
+    Builtin("DOMException", ctor(r.dom_exception)),
     Builtin("Map", ctor(r.map)),
     Builtin("Set", ctor(r.set)),
     Builtin("WeakMap", ctor(r.weak_map)),
@@ -523,6 +530,8 @@ pub fn dispatch_native(
     ObjectN(n) -> b_object.dispatch(st, n, this, args)
     FunctionN(n) -> b_function.dispatch(st, n, this, args)
     ErrorN(n) -> b_error.dispatch(st, n, this, args, mk_undefined())
+    DomExceptionN(n) ->
+      b_dom_exception.dispatch(st, n, this, args, mk_undefined())
     ArrayN(n) -> b_array.dispatch(st, n, this, args)
     StringN(n) -> b_string.dispatch(st, n, this, args)
     NumberN(n) -> b_number.dispatch(st, n, this, args)
@@ -571,6 +580,11 @@ pub fn dispatch_native_construct(
     ObjectN(n) -> b_object.dispatch_construct(st, n, args, new_target)
     ErrorN(n) -> {
       let #(v, st) = b_error.dispatch(st, n, mk_undefined(), args, new_target)
+      require_handle(st, v)
+    }
+    DomExceptionN(n) -> {
+      let #(v, st) =
+        b_dom_exception.dispatch(st, n, mk_undefined(), args, new_target)
       require_handle(st, v)
     }
     HostFn(id:) -> construct_host_fn(st, id, args, new_target)
