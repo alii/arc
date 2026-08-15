@@ -8,12 +8,14 @@ on:
     paths:
       - 'aot/**'
       - 'src/**'
+      - 'testkit/**'
       - 'gleam.toml'
       - '.github/workflows/aot.yml'
   pull_request:
     paths:
       - 'aot/**'
       - 'src/**'
+      - 'testkit/**'
       - 'gleam.toml'
       - '.github/workflows/aot.yml'
 

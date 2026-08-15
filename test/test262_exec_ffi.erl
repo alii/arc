@@ -2,7 +2,6 @@
 
 -export([init_stats/0, record_pass/0, record_fail/0, record_skip/0,
          get_stats/0, record_pass_path/1, get_pass_paths/0,
-         list_test_files/1,
          init_config/3, get_update_mode/0, get_has_snapshot/0, get_fail_log/0,
          init_snapshot_set/1, snapshot_contains/1,
          cache_get/1, cache_put/2,
@@ -35,14 +34,6 @@ record_pass_path(Path) ->
 
 get_pass_paths() ->
     lists:sort([P || {P} <- ets:tab2list(test262_passes)]).
-
-%% Fast recursive listing of .js test files under Dir.
-list_test_files(Dir) ->
-    DirStr = binary_to_list(Dir),
-    AllJs = filelib:wildcard("**/*.js", DirStr),
-    Filtered = lists:sort([list_to_binary(F) || F <- AllJs,
-                           string:find(F, "_FIXTURE") =:= nomatch]),
-    Filtered.
 
 %% --- Config stored in ETS so run_file can access it ---
 

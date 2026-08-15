@@ -1,7 +1,14 @@
 -module(test_runner_ffi).
 
--export([get_env/1, run_with_timeout/2, list_files/1, run_parallel/2,
-         counter_reset/1, counter_bump/1, counter_read/1]).
+-export([get_env/1, run_with_timeout/2, list_files/1, list_test_files/1,
+         run_parallel/2, counter_reset/1, counter_bump/1, counter_read/1]).
+
+%% Fast recursive listing of .js test files under Dir (relative, sorted,
+%% _FIXTURE files excluded).
+list_test_files(Dir) ->
+    AllJs = filelib:wildcard("**/*.js", binary_to_list(Dir)),
+    lists:sort([list_to_binary(F) || F <- AllJs,
+                string:find(F, "_FIXTURE") =:= nomatch]).
 
 %% Read an environment variable. Returns {ok, Value} or {error, nil}.
 get_env(Name) ->
