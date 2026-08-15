@@ -15,7 +15,6 @@ import arc/interp/eval
 import arc/interp/ffi
 import arc/interp/interpreter.{Completed, Suspended}
 import arc/interp/park
-import arc/interp/safepoint
 import arc/interp/state.{type State, type VmError, State, SuspensionLeak}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
@@ -222,60 +221,6 @@ pub fn run_script(
 ) -> #(Completion, Agent) {
   let #(res, agent) = run(script_state(agent, template))
   #(to_completion(res), agent)
-}
-
-// -- Engine turns ----------------------------------------------------------------
-// One embedder-visible turn = the top-level run, then the turn epilogue
-// (`safepoint.finish_turn`): collect if the store grew past its threshold,
-// then the ONE microtask drain (or the embedder's own loop, `finish`), with
-// the completion value rooted throughout. The engine's `eval*` / `repl_eval`
-// are `script_turn` and its `call*` is `call_turn`; a module body ends its
-// turn the same way inside `arc/module`.
-
-/// The post-run driver of a turn: `rt/async.drain`, or an embedder macrotask
-/// loop that drains as part of its own cycle.
-pub type Finish =
-  fn(Agent) -> Agent
-
-fn completion_value(completion: Completion) -> JsVal {
-  case completion {
-    NormalCompletion(v) -> v
-    ThrowCompletion(e) -> e
-  }
-}
-
-/// `run_script` as a whole turn: the script, then the epilogue. A REPL input
-/// is the same turn over a `compile_repl` template; its top-level lexical
-/// declarations persist on the realm like any script's.
-pub fn script_turn(
-  agent: Agent,
-  template: FuncTemplate,
-  finish: Finish,
-) -> #(Completion, Agent) {
-  let #(completion, agent) = run_script(agent, template)
-  #(
-    completion,
-    safepoint.finish_turn(agent, [completion_value(completion)], finish),
-  )
-}
-
-/// Call a held function value as a whole turn: `callee(this, ...args)`
-/// through the runtime's one `[[Call]]` entry (any callable: bytecode,
-/// native, host, bound, proxy; a non-callable is a TypeError completion),
-/// then the epilogue. The host-call-then-drain pattern for a value read off
-/// a module namespace or handed out by an earlier turn.
-pub fn call_turn(
-  agent: Agent,
-  callee: JsVal,
-  this: JsVal,
-  args: List(JsVal),
-  finish: Finish,
-) -> #(Completion, Agent) {
-  let #(completion, agent) = rt_call.t_call(agent, callee, this, args)
-  #(
-    completion,
-    safepoint.finish_turn(agent, [completion_value(completion)], finish),
-  )
 }
 
 // -- JsOps.call_bytecode / construct_bytecode ----------------------------------
