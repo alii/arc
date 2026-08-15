@@ -635,7 +635,13 @@ fn native_realm(tag: NativeToken) -> Option(Int) {
     | rt_types.JsonN(rt_types.JsonIsRawJson(realm:))
     | rt_types.ErrorN(rt_types.ErrorStackSetter(realm:))
     | rt_types.Test262N(rt_types.Test262EvalScript(realm:))
-    | rt_types.Test262N(rt_types.Test262CreateRealm(realm:)) -> Some(realm)
+    | rt_types.Test262N(rt_types.Test262CreateRealm(realm:))
+    | rt_types.ShadowRealmN(rt_types.ShadowRealmEvaluate(realm:))
+    | rt_types.ShadowRealmN(rt_types.ShadowRealmImportValue(realm:))
+    | rt_types.ShadowRealmN(rt_types.WrappedFunctionCall(
+        caller_realm: realm,
+        ..,
+      )) -> Some(realm)
     _ -> None
   }
 }
@@ -987,6 +993,30 @@ pub fn t_native_new(
     proto,
     KNative(tag:, name:, length: len, constructible:),
     mk_number(JInt(len)),
+    name,
+  )
+}
+
+/// A non-constructible native whose `length` own-property is an already
+/// computed value rather than its arity: proposal-shadowrealm §2.2
+/// WrappedFunctionCreate installs CopyNameAndLength's result, which may be
+/// `+∞`. The `KNative.length` arity is that value clamped to an Int.
+pub fn t_native_new_computed_length(
+  st: Agent,
+  proto: Option(Handle),
+  tag: NativeToken,
+  name: String,
+  length_v: JsVal,
+) -> #(Handle, Agent) {
+  let length = case classify(length_v) {
+    KNum(JInt(n)) -> n
+    _ -> 0
+  }
+  alloc_fn_cell(
+    st,
+    proto,
+    KNative(tag:, name:, length:, constructible: False),
+    length_v,
     name,
   )
 }

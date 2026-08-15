@@ -920,6 +920,7 @@ pub type NativeToken {
   IntlN(IntlNative)
   TemporalN(TemporalNative)
   DisposableStackN(DisposableStackNative)
+  ShadowRealmN(ShadowRealmNative)
 }
 
 /// DisposableStack / AsyncDisposableStack natives (Explicit Resource
@@ -995,6 +996,22 @@ pub type Test262Native {
   Test262CreateRealm(realm: Int)
   /// `$262.gc()` — a hint; collection only happens at safepoints.
   Test262Gc
+}
+
+/// proposal-shadowrealm natives. `realm` is the id of the realm whose
+/// %ShadowRealm.prototype% the method sits on: the spec's callerRealm, whose
+/// intrinsics brand every error and wrapper the method produces.
+pub type ShadowRealmNative {
+  /// ShadowRealm ( ) — closes over the intrinsic prototype fallback.
+  ShadowRealmConstructor(proto: Handle)
+  /// ShadowRealm.prototype.evaluate ( sourceText )
+  ShadowRealmEvaluate(realm: Int)
+  /// ShadowRealm.prototype.importValue ( specifier, exportName )
+  ShadowRealmImportValue(realm: Int)
+  /// [[Call]] of a wrapped function exotic object (§2.1): `target` is
+  /// [[WrappedTargetFunction]], `caller_realm` is [[Realm]] and
+  /// `target_realm` the realm `target` came from, entered to run it.
+  WrappedFunctionCall(target: Handle, caller_realm: Int, target_realm: Int)
 }
 
 /// §27.2 Promise built-in dispatch tokens. Handle-carrying variants are the
@@ -2456,6 +2473,7 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     IntlN(n) -> intl_native_refs(n)
     TemporalN(n) -> temporal_native_refs(n)
     DisposableStackN(n) -> disposable_stack_native_refs(n)
+    ShadowRealmN(n) -> shadow_realm_native_refs(n)
     DateN(n) -> date_native_refs(n)
     RegExpN(n) -> regexp_native_refs(n)
     AtomicsN(_) -> []
@@ -2484,6 +2502,17 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     | ThrowTypeErrorPoison
     | HostFn(_)
     | Test262N(_) -> []
+  }
+}
+
+/// GC-trace hook for `ShadowRealmNative`: the constructor's prototype and a
+/// wrapped function's [[WrappedTargetFunction]]. Realm ids name registered
+/// realms, whose intrinsics are pinned for the agent's lifetime.
+pub fn shadow_realm_native_refs(n: ShadowRealmNative) -> List(Handle) {
+  case n {
+    ShadowRealmConstructor(proto:) -> [proto]
+    WrappedFunctionCall(target:, ..) -> [target]
+    ShadowRealmEvaluate(_) | ShadowRealmImportValue(_) -> []
   }
 }
 
@@ -2976,6 +3005,9 @@ pub type ObjKind {
   /// — Explicit Resource Management §12.3/§12.4. `async` is the brand;
   /// `state` is [[DisposableState]] plus the [[DisposeCapability]] resources.
   DisposableStackObj(async: Bool, state: DisposableState)
+  /// A ShadowRealm instance (proposal-shadowrealm). `realm` is the
+  /// [[ShadowRealm]] slot: the id of the realm the constructor made for it.
+  ShadowRealmObj(realm: Int)
 }
 
 /// A heap cell's contents. `SObject`/`SShapedObject` are the JS-visible

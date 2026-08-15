@@ -363,6 +363,8 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     // argument lists — all `JsVal`s; walk the whole state term.
     DisposableStackObj(async: _, state:) ->
       push_term_refs(to_dynamic(state), acc)
+    // A realm id: the realm's intrinsics are pinned roots already.
+    rt_types.ShadowRealmObj(realm: _) -> acc
   }
 }
 

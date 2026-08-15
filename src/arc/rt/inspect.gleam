@@ -187,6 +187,7 @@ fn inspect_object(
         TemporalObj(data:) -> temporal_label(data)
         DisposableStackObj(async: False, ..) -> "DisposableStack {}"
         DisposableStackObj(async: True, ..) -> "AsyncDisposableStack {}"
+        rt_types.ShadowRealmObj(..) -> "ShadowRealm {}"
         // A tagged ordinary object renders via its Symbol.toStringTag
         // (`Object [Tag] { ... }`). Host objects have no own properties and
         // render through their prototype's tag the same way.

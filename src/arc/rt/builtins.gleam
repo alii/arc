@@ -42,6 +42,7 @@ import arc/rt/builtins/realm_ops
 import arc/rt/builtins/reflect as b_reflect
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/builtins/set as b_set
+import arc/rt/builtins/shadow_realm as b_shadow_realm
 import arc/rt/builtins/string as b_string
 import arc/rt/builtins/symbol as b_symbol
 import arc/rt/builtins/temporal as b_temporal
@@ -159,6 +160,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
     b_disposable_stack.init(st, object_proto, fn_proto)
   let #(async_disposable_stack, st) =
     b_disposable_stack.init_async(st, object_proto, fn_proto)
+  // ShadowRealm constructor + prototype (proposal-shadowrealm).
+  let #(shadow_realm, st) = b_shadow_realm.init(st, object_proto, fn_proto, id)
   // 13. Proxy.
   let #(proxy, st) = b_proxy.init(st, object_proto, fn_proto)
   // 14. Binary data.
@@ -208,6 +211,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
         weak_set:,
         disposable_stack:,
         async_disposable_stack:,
+        shadow_realm:,
         date:,
         regexp:,
         promise:,
@@ -371,6 +375,7 @@ type GlobalRefs {
     weak_set: BuiltinPair,
     disposable_stack: BuiltinPair,
     async_disposable_stack: BuiltinPair,
+    shadow_realm: BuiltinPair,
     date: BuiltinPair,
     regexp: BuiltinPair,
     promise: BuiltinPair,
@@ -438,6 +443,7 @@ fn alloc_global_object(
     Builtin("WeakSet", ctor(r.weak_set)),
     Builtin("DisposableStack", ctor(r.disposable_stack)),
     Builtin("AsyncDisposableStack", ctor(r.async_disposable_stack)),
+    Builtin("ShadowRealm", ctor(r.shadow_realm)),
     Builtin("Date", ctor(r.date)),
     Builtin("RegExp", ctor(r.regexp)),
     Builtin("Promise", ctor(r.promise)),
@@ -581,6 +587,7 @@ pub fn dispatch_native(
     SetN(n) -> b_set.dispatch(st, n, this, args)
     WeakN(n) -> b_weak.dispatch(st, n, this, args)
     DisposableStackN(n) -> b_disposable_stack.dispatch(st, n, this, args)
+    rt_types.ShadowRealmN(n) -> b_shadow_realm.dispatch(st, n, this, args)
     ArrayBufferN(n) -> b_array_buffer.dispatch(st, n, this, args)
     DataViewN(n) -> b_data_view.dispatch(st, n, this, args)
     TypedArrayN(n) -> b_typed_array.dispatch(st, n, this, args)
@@ -624,6 +631,8 @@ pub fn dispatch_native_construct(
     WeakN(n) -> b_weak.dispatch_construct(st, n, args, new_target)
     DisposableStackN(n) ->
       b_disposable_stack.dispatch_construct(st, n, args, new_target)
+    rt_types.ShadowRealmN(n) ->
+      b_shadow_realm.dispatch_construct(st, n, new_target, create_realm)
     DateN(n) -> b_date.dispatch_construct(st, n, args, new_target)
     RegExpN(n) -> b_regexp.dispatch_construct(st, n, args, new_target)
     ProxyN(n) -> b_proxy.dispatch_construct(st, n, args, new_target)
