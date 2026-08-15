@@ -593,15 +593,19 @@ put_field(Store, {?HANDLE_TAG, Id}, KeyBin, V) ->
 put_field(_, _, _, _) -> miss.
 
 %% put_elem(Store, V, Idx, Val) -> Store2 | miss
-%% `V[Idx] = Val` on an extensible Array cell for a non-negative integer
-%% Idx in [0, Length]. Overwriting a present element is a write to an own
-%% writable data property. Filling a hole or appending at Idx == Length
-%% creates a property, so it first needs the prototype chain to hold
-%% nothing at Idx (a setter or read-only index up the chain takes the store,
-%% §10.1.9.2 step 2) and, for the append, a writable "length" (§10.4.2.1
-%% step 2.h). An {index,Idx} props override, a non-extensible or non-array
-%% receiver, or a dense fill past the allocated size misses.
-put_elem(Store, {?HANDLE_TAG, Id}, Idx, V) when is_integer(Idx), Idx >= 0 ->
+%% `V[Idx] = Val` on an extensible Array cell for an array index Idx
+%% (0 =< Idx =< 2^32-2, rt_types.max_array_index) in [0, Length].
+%% Overwriting a present element is a write to an own writable data
+%% property. Filling a hole or appending at Idx == Length creates a
+%% property, so it first needs the prototype chain to hold nothing at Idx
+%% (a setter or read-only index up the chain takes the store, §10.1.9.2
+%% step 2) and, for the append, a writable "length" (§10.4.2.1 step 2.h).
+%% An {index,Idx} props override, a non-extensible or non-array receiver,
+%% a key past the array-index range (2^32-1 is a Named key and never moves
+%% "length"), or a dense fill past the allocated size misses.
+-define(MAX_ARRAY_INDEX, 4294967294).
+put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
+  when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     Data = element(?STORE_DATA, Store),
     case Data of
         #{Id := Slot}
