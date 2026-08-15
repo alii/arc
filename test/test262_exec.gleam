@@ -21,28 +21,31 @@ import arc/esm
 import arc/host
 import arc/host_hooks
 import arc/internal/path
+import arc/interp/entry
+import arc/module
 import arc/module/load_error
+import arc/module_host
 import arc/parser
+import arc/rt/async as rt_async
+import arc/rt/buffer
+import arc/rt/builtins as rt_builtins
+import arc/rt/builtins/common
+import arc/rt/builtins/realm_ops
 import arc/rt/bytecode.{type FuncTemplate}
-import arc/vm/builtins
-import arc/vm/builtins/common
-import arc/vm/completion.{ThrowCompletion}
-import arc/vm/exec/entry
-import arc/vm/exec/event_loop
-import arc/vm/exec/frame
-import arc/vm/exec/interpreter
-import arc/vm/heap
-import arc/vm/internal/clock_ffi
-import arc/vm/internal/elements
-import arc/vm/key.{Named}
-import arc/vm/legacy
-import arc/vm/module
-import arc/vm/module_host
-import arc/vm/ops/coerce
-import arc/vm/ops/object
-import arc/vm/state.{type Heap, type State, RealmCtx, State}
-import arc/vm/value
-import gleam/dict
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/elements
+import arc/rt/inspect as rt_inspect
+import arc/rt/obj as rt_obj
+import arc/rt/realm as rt_realm
+import arc/rt/store as rt_store
+import arc/rt/types.{
+  type Agent, type BufferStorage, type Handle, type JsVal, ArrayBufferObj,
+  ArrayObj, DataProperty, Detached, JFloat, JInt, KHandle, KStr, KUndef, Named,
+  NoElements, Ordinary, ProxyObj, SObject, SShapedObject, StringKey, classify,
+  mk_null, mk_number, mk_object, mk_string, mk_undefined,
+}
+import arc/rt/val as rt_val
+import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
@@ -55,15 +58,21 @@ import test262_metadata.{type TestMetadata, Parse, Resolution, Runtime}
 import test_runner
 
 /// A settled top-level run: `Ok(value)` for a normal completion,
-/// `Error(thrown)` for an uncaught throw, paired with the drained heap.
-type Settled(host) =
-  #(Result(value.JsValue, value.JsValue), Heap(host))
+/// `Error(thrown)` for an uncaught throw, paired with the drained agent.
+type Settled =
+  #(Result(JsVal, JsVal), Agent)
+
+/// The state the harness's host functions thread. The harness keeps no typed
+/// host payloads, so the payload type is `Nil`.
+type HostState =
+  host.State(Nil)
 
 const test_dir: String = "vendor/test262/test"
 
-/// JS preamble: defines `print` which captures output for async test protocol.
-/// $262 is installed natively via entry.build_262 instead.
-const print_preamble: String = "var __print_output__; function print(x) { __print_output__ = '' + x; }"
+/// Global the `print` host function writes: the async test protocol
+/// (doneprintHandle.js) reports through `print`, and the runner reads the
+/// last printed line back from here.
+const print_output: String = "__print_output__"
 
 const harness_dir: String = "vendor/test262/harness"
 
@@ -97,18 +106,19 @@ pub fn init() -> Nil {
 
 // --- Cross-test caches ---
 //
-// The booted base realm (heap + builtins + global object) and compiled
-// harness templates are immutable Gleam data, so they can be computed once
-// and shared across all per-test worker processes via persistent_term
-// (zero-copy reads). Each test starts from the shared snapshot and forks its
-// own heap on mutation, so tests stay fully isolated.
+// The booted base agent (store + realm 0 intrinsics + global object, with
+// the interpreter linked) and the compiled harness templates are immutable
+// Gleam data, so they are computed once and shared across all per-test
+// worker processes via persistent_term (zero-copy reads). Each test starts
+// from the shared agent and forks its own store on mutation, so tests stay
+// fully isolated.
 
-const realm_cache_key = "base_realm"
+const agent_cache_key = "base_agent"
 
-/// Warm the realm and common-harness caches from the main process before
+/// Warm the agent and common-harness caches from the main process before
 /// workers spawn, so parallel first uses don't race on cache_put.
 fn warm_caches() -> Nil {
-  let _ = boot_base_realm()
+  let _ = boot_base_agent()
   list.each(["assert.js", "sta.js", "doneprintHandle.js"], fn(filename) {
     case harness_template(filename, fn() { read_harness_file(filename) }) {
       Ok(_) -> Nil
@@ -117,17 +127,15 @@ fn warm_caches() -> Nil {
   })
 }
 
-/// Boot (or fetch the cached) base realm: heap + builtins + global object.
-fn boot_base_realm() -> #(Heap(host), common.Builtins, value.Ref) {
-  case realm_cache_get(realm_cache_key) {
-    Some(snapshot) -> snapshot
+/// Boot (or fetch the cached) base agent: a fresh realm on the harness's
+/// host hooks with the bytecode interpreter linked into its `JsOps`.
+fn boot_base_agent() -> Agent {
+  case agent_cache_get(agent_cache_key) {
+    Some(agent) -> agent
     None -> {
-      let h = heap.new()
-      let #(h, b) = builtins.init(h)
-      let #(h, global_object) = builtins.globals(b, h)
-      let snapshot = #(h, b, global_object)
-      realm_cache_put(realm_cache_key, snapshot)
-      snapshot
+      let agent = rt_builtins.new_agent(harness_host_hooks()) |> entry.link
+      agent_cache_put(agent_cache_key, agent)
+      agent
     }
   }
 }
@@ -493,53 +501,21 @@ fn run_test_completion(
   variant: StrictnessVariant,
   is_async: Bool,
   on_error: fn(String) -> TestOutcome,
-  completion_outcome: fn(Settled(host)) -> TestOutcome,
-  async_outcome: fn(Settled(host), value.Ref) -> TestOutcome,
+  completion_outcome: fn(Settled) -> TestOutcome,
+  async_outcome: fn(Settled) -> TestOutcome,
 ) -> TestOutcome {
-  // test262 CanBlockIsFalse flag: the test must run in an agent whose
-  // [[CanBlock]] is false (sync Atomics.wait throws a TypeError). Threaded
-  // to the freshly booted State's `can_block` field. True for every other
-  // test.
-  let can_block = !list.contains(metadata.flags, "CanBlockIsFalse")
-  case is_module {
-    True ->
-      case
-        test_runner.run_with_timeout(
-          fn() { do_run_module(metadata, source, path, is_async, can_block) },
-          test_timeout_ms,
-        )
-        |> result.flatten
-      {
-        Ok(#(completion, global_ref)) ->
-          case is_async {
-            False -> completion_outcome(completion)
-            True -> async_outcome(completion, global_ref)
-          }
-        Error(reason) -> on_error(reason)
-      }
-    False ->
-      case
-        test_runner.run_with_timeout(
-          fn() {
-            do_run_script_with_harness(
-              metadata,
-              source,
-              path,
-              variant,
-              is_async,
-              can_block,
-            )
-          },
-          test_timeout_ms,
-        )
-        |> result.flatten
-      {
-        Error(reason) -> on_error(reason)
-        Ok(#(completion, global_ref)) ->
-          case is_async {
-            False -> completion_outcome(completion)
-            True -> async_outcome(completion, global_ref)
-          }
+  let run = case is_module {
+    True -> fn() { do_run_module(metadata, source, path, is_async) }
+    False -> fn() {
+      do_run_script_with_harness(metadata, source, path, variant, is_async)
+    }
+  }
+  case test_runner.run_with_timeout(run, test_timeout_ms) |> result.flatten {
+    Error(reason) -> on_error(reason)
+    Ok(settled) ->
+      case is_async {
+        False -> completion_outcome(settled)
+        True -> async_outcome(settled)
       }
   }
 }
@@ -561,9 +537,9 @@ fn run_runtime_negative_test(
     is_async,
     fn(reason) { Fail("expected runtime throw but got: " <> reason) },
     negative_completion_outcome(metadata, _),
-    fn(completion, global_ref) {
+    fn(settled) {
       // For async negative tests, $DONE reports via print
-      case check_async_completion(completion, global_ref) {
+      case check_async_completion(settled) {
         Ok(Nil) ->
           // Test completed successfully — but we expected a throw
           Fail("expected runtime throw but async test completed")
@@ -585,8 +561,8 @@ fn run_runtime_negative_test(
 /// any code executes: a dependency's parse error, a resolver rejection, or a
 /// link failure. Those surface here as a Gleam-level `module.compile_bundle`
 /// error (stringified via `do_run_module`), not a JS throw. A JS throw is
-/// still accepted — some resolution-phase errors reach evaluation as a
-/// realm-built SyntaxError.
+/// still accepted — link errors reach evaluation as a realm-built
+/// SyntaxError.
 fn run_resolution_negative_test(
   metadata: TestMetadata,
   source: String,
@@ -604,7 +580,7 @@ fn run_resolution_negative_test(
     is_async,
     resolution_error_outcome(metadata, _),
     negative_completion_outcome(metadata, _),
-    fn(_completion, _global_ref) {
+    fn(_settled) {
       Fail("expected resolution-phase error but async test ran to $DONE")
     },
   )
@@ -641,21 +617,21 @@ fn resolution_error_outcome(
 /// only a throw (of the expected error type) passes.
 fn negative_completion_outcome(
   metadata: TestMetadata,
-  settled: Settled(host),
+  settled: Settled,
 ) -> TestOutcome {
   case settled {
-    #(Error(thrown), heap) -> verify_negative_type(metadata, thrown, heap)
+    #(Error(thrown), st) -> verify_negative_type(metadata, thrown, st)
     #(Ok(_), _) -> Fail("expected runtime throw but completed normally")
   }
 }
 
 /// Map a settled run to the outcome for a positive test:
 /// only a normal completion passes.
-fn positive_completion_outcome(settled: Settled(host)) -> TestOutcome {
+fn positive_completion_outcome(settled: Settled) -> TestOutcome {
   case settled {
     #(Ok(_), _) -> Pass
-    #(Error(thrown), heap) ->
-      Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
+    #(Error(thrown), st) ->
+      Fail("unexpected throw: " <> inspect_thrown(thrown, st))
   }
 }
 
@@ -682,11 +658,8 @@ fn run_positive_test(
 
 /// Check async test completion for positive tests.
 /// Reads __print_output__ from the global object to determine pass/fail.
-fn check_async_positive(
-  settled: Settled(host),
-  global_ref: value.Ref,
-) -> TestOutcome {
-  case check_async_completion(settled, global_ref) {
+fn check_async_positive(settled: Settled) -> TestOutcome {
+  case check_async_completion(settled) {
     Ok(Nil) -> Pass
     Error(reason) -> Fail(reason)
   }
@@ -694,69 +667,58 @@ fn check_async_positive(
 
 /// Core async completion check. Returns Ok(Nil) for "Test262:AsyncTestComplete",
 /// Error with reason for everything else.
-fn check_async_completion(
-  settled: Settled(host),
-  global_ref: value.Ref,
-) -> Result(Nil, String) {
+fn check_async_completion(settled: Settled) -> Result(Nil, String) {
   case settled {
-    #(Error(thrown), heap) ->
-      Error("unexpected throw: " <> inspect_thrown(thrown, heap))
-    #(Ok(_), heap) -> {
-      case get_data(heap, global_ref, "__print_output__") {
-        Ok(value.JsString(output)) ->
-          case output {
-            "Test262:AsyncTestComplete" -> Ok(Nil)
+    #(Error(thrown), st) ->
+      Error("unexpected throw: " <> inspect_thrown(thrown, st))
+    #(Ok(_), st) ->
+      case get_data(st, st.realm.global_object, print_output) {
+        None -> Error("async test did not call $DONE (no __print_output__)")
+        Some(output) ->
+          case classify(output) {
+            KStr("Test262:AsyncTestComplete") -> Ok(Nil)
+            KStr("Test262:AsyncTestFailure:" <> msg) ->
+              Error("async failure: " <> msg)
+            KStr(other) -> Error("unexpected print output: " <> other)
+            KUndef -> Error("async test did not call $DONE")
             _ ->
-              case string.starts_with(output, "Test262:AsyncTestFailure:") {
-                True -> {
-                  let msg =
-                    string.drop_start(
-                      output,
-                      string.length("Test262:AsyncTestFailure:"),
-                    )
-                  Error("async failure: " <> msg)
-                }
-                False -> Error("unexpected print output: " <> output)
-              }
+              Error(
+                "unexpected __print_output__: "
+                <> rt_inspect.inspect(st, output),
+              )
           }
-        Ok(value.JsUndefined) -> Error("async test did not call $DONE")
-        Ok(other) ->
-          Error("unexpected __print_output__: " <> string.inspect(other))
-        Error(Nil) ->
-          Error("async test did not call $DONE (no __print_output__)")
       }
-    }
   }
 }
 
 fn verify_negative_type(
   metadata: TestMetadata,
-  thrown: value.JsValue,
-  heap: Heap(host),
+  thrown: JsVal,
+  st: Agent,
 ) -> TestOutcome {
   case metadata.negative_type {
     None -> Pass
     Some(expected_type) -> {
-      let actual_name = case thrown {
-        value.JsObject(ref) ->
-          case get_data(heap, ref, "name") {
-            Ok(value.JsString(n)) -> Ok(n)
-            _ -> Error(Nil)
-          }
-        _ -> Error(Nil)
+      let actual_name = {
+        use h <- option.then(as_handle(thrown))
+        use name <- option.then(get_data(st, h, "name"))
+        case classify(name) {
+          KStr(n) -> Some(n)
+          _ -> None
+        }
       }
       case actual_name {
-        Ok(name) if name == expected_type -> Pass
-        Ok(name) ->
+        Some(name) if name == expected_type -> Pass
+        Some(name) ->
           Fail(
             "expected "
             <> expected_type
             <> " but got "
             <> name
             <> ": "
-            <> inspect_thrown(thrown, heap),
+            <> inspect_thrown(thrown, st),
           )
-        Error(Nil) -> Pass
+        None -> Pass
       }
     }
   }
@@ -769,21 +731,10 @@ fn do_run_module(
   source: String,
   path: String,
   is_async: Bool,
-  can_block: Bool,
-) -> Result(#(Settled(host), value.Ref), String) {
-  let #(h, b, global_object) = boot_base_realm()
-
+) -> Result(Settled, String) {
   // Evaluate harness files as REPL scripts to populate globals. Async module
   // tests use the same $DONE/print protocol as scripts (doneprintHandle.js).
-  use #(h, env, test_hooks) <- result.try(eval_harness(
-    metadata,
-    h,
-    b,
-    global_object,
-    path,
-    is_async,
-  ))
-  let global_object = env.global_object
+  use st <- result.try(eval_harness(metadata, boot_base_agent(), path, is_async))
 
   case module.compile_bundle(path, source, test262_resolve, test262_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
@@ -791,39 +742,26 @@ fn do_run_module(
       // Evaluate through the realm-wide module registry so a dynamic
       // import() of any module in this static graph (including the test file
       // itself) resolves to the same module record instead of re-evaluating
-      // it (§16.2.1.8).
-      // Top-level driver is the notify-consuming embedder loop
-      // (settle_pending_wakes — drains microtasks, then consumes
-      // cross-process arc_notify wakes bounded by the earliest pending
-      // deadline), so leftover jobs are always empty here.
-      let #(new_heap, _jobs, result) =
+      // it (§16.2.1.8). The post-body driver drains microtasks, so leftover
+      // jobs are always empty here.
+      let #(st, res) =
         module_host.evaluate_bundle_with_registry(
-          h,
-          b,
-          global_object,
+          st,
           bundle,
-          test_hooks,
-          can_block,
-          Some(extend_262_with_agent),
           settle_pending_wakes,
         )
-      case result {
-        Ok(module.EvaluatedBundle(value: val, ..)) ->
-          Ok(#(#(Ok(val), new_heap), global_object))
-        Error(module.EvaluationError(value: val)) ->
-          Ok(#(#(Error(val), new_heap), global_object))
+      case res {
+        Ok(module.EvaluatedBundle(value: val, ..)) -> Ok(#(Ok(val), st))
+        Error(module.EvaluationError(value: val)) -> Ok(#(Error(val), st))
         // Entry module still parked on top-level await after a full drain:
-        // an awaited promise can never settle. Same outcome as the
-        // pre-EvaluationPending behavior (a host-level throw).
-        Error(module.EvaluationPending(promise_data_ref: _)) ->
+        // an awaited promise can never settle. Reported as a host-level
+        // throw.
+        Error(module.EvaluationPending(promise: _)) ->
           Ok(#(
-            #(
-              Error(value.JsString(
-                "module evaluation never completed: top-level await promise never settled",
-              )),
-              new_heap,
-            ),
-            global_object,
+            Error(mk_string(
+              "module evaluation never completed: top-level await promise never settled",
+            )),
+            st,
           ))
         Error(err) -> Error("module: " <> string.inspect(err))
       }
@@ -863,19 +801,9 @@ fn do_run_script_with_harness(
   path: String,
   variant: StrictnessVariant,
   is_async: Bool,
-  can_block: Bool,
-) -> Result(#(Settled(host), value.Ref), String) {
-  let #(h, b, global_object) = boot_base_realm()
-
+) -> Result(Settled, String) {
   // Evaluate harness files as REPL scripts to populate globals
-  use #(h, env, test_hooks) <- result.try(eval_harness(
-    metadata,
-    h,
-    b,
-    global_object,
-    path,
-    is_async,
-  ))
+  use st <- result.try(eval_harness(metadata, boot_base_agent(), path, is_async))
 
   // Prepend "use strict" to test source only (not harness) when strict
   let test_source = case variant {
@@ -888,104 +816,57 @@ fn do_run_script_with_harness(
     Ok(#(body, sb)) ->
       case compiler.compile_repl(body, sb) {
         Error(err) -> Error("compile: " <> string.inspect(err))
-        Ok(template) ->
-          // The test source runs with the harness's host capabilities
-          // supplied at State construction (sync Atomics.wait blocking /
-          // notify wake delivery — contract in arc/host.gleam) and the
-          // notify-consuming embedder loop as its post-script driver, so
-          // cross-agent waitAsync wakes landing in this worker's mailbox
-          // settle before their deadline.
-          case
-            entry.run_and_drain_repl_with(
-              template,
-              h,
-              b,
-              env,
-              test_hooks,
-              can_block,
-              Some(extend_262_with_agent),
-              settle_pending_wakes,
-            )
-          {
-            Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
-            Ok(#(settled, final_heap, final_env)) ->
-              Ok(#(#(settled, final_heap), final_env.global_object))
-          }
+        // §16.1.6 ScriptEvaluation in the harness's realm, then the
+        // post-script driver (microtask checkpoint) so promise reactions,
+        // and with them the async $DONE protocol, settle before the
+        // outcome is read.
+        Ok(template) -> Ok(run_settled(st, template))
       }
+  }
+}
+
+/// Run one compiled script in `st`'s current realm and drive its turn to
+/// quiescence.
+fn run_settled(st: Agent, template: FuncTemplate) -> Settled {
+  let #(completion, st) = entry.run_script(st, template)
+  let st = settle_pending_wakes(st)
+  case completion {
+    NormalCompletion(v) -> #(Ok(v), st)
+    ThrowCompletion(e) -> #(Error(e), st)
   }
 }
 
 /// Evaluate harness files as REPL scripts to populate globals.
 /// This is the spec-correct approach: harness is evaluated in the realm
-/// before the test module runs, making harness functions (assert, etc.)
-/// available as globals.
+/// before the test runs, making harness functions (assert, etc.) available
+/// as globals; top-level `let`/`const` persist as the realm's lexical
+/// globals across scripts.
 ///
-/// Also hands back the `HostHooks` the TEST source must be booted with:
-/// the harness's Atomics capabilities plus the dynamic-import host hook —
-/// engine state, not a globalThis property, so it has to be threaded into
-/// the State that runs the test rather than installed on the realm's global.
+/// Also installs the engine-side state the TEST needs on the agent: the
+/// dynamic-import host hook (relative to the test file), `$262` (with the
+/// harness's `agent` API) and the `print` protocol.
 fn eval_harness(
   metadata: TestMetadata,
-  h: Heap(host),
-  b: common.Builtins,
-  global_object: value.Ref,
+  st: Agent,
   path: String,
   is_async: Bool,
-) -> Result(#(Heap(host), entry.ReplEnv, host.HostHooks), String) {
+) -> Result(Agent, String) {
   let is_raw = list.contains(metadata.flags, "raw")
   case is_raw {
-    True -> {
-      // Raw tests get no harness and no import hook — import() rejects.
-      Ok(#(h, entry.new_repl_env(global_object), harness_host_hooks()))
-    }
+    // Raw tests get no harness and no import hook — import() rejects.
+    True -> Ok(st)
     False -> {
-      // Build the dynamic-import host hook: import() resolves specifiers
-      // relative to the test file and loads fixtures from disk. It rides on
-      // `HostHooks.import_hook`, never on globalThis.
-      let #(h, import_hook) =
-        module_host.install_import_hook(
-          h,
-          b,
-          path,
-          test262_resolve,
-          test262_load,
-        )
-      let test_hooks =
-        host_hooks.HostHooks(
-          ..harness_host_hooks(),
-          import_hook: Some(import_hook),
-        )
-      // Install native $262 object on the global
-      let #(h, realm_ref) =
-        heap.alloc(
-          h,
-          value.RealmSlot(
-            global_object:,
-            lexical_globals: dict.new(),
-            symbol_registry: dict.new(),
-          ),
-        )
-      let h = heap.root(h, realm_ref)
-      let #(h, dollar_262_ref) =
-        entry.build_262(
-          h,
-          b,
-          global_object,
-          realm_ref,
-          Some(extend_262_with_agent),
-        )
-      let #(h, _) =
-        object.set_property(
-          h,
-          global_object,
-          Named("$262"),
-          value.JsObject(dollar_262_ref),
-        )
+      // The dynamic-import host hook: import() resolves specifiers relative
+      // to the test file and loads fixtures from disk. It is engine state on
+      // the agent, never a globalThis property.
+      let st =
+        module_host.install_import_hook(st, path, test262_resolve, test262_load)
+      // Native $262 (global/evalScript/createRealm/gc/detachArrayBuffer) on
+      // the global, extended with the harness's `agent` API and `print`.
+      let st = install_host_api(st)
 
-      let realms = dict.from_list([#(realm_ref, b)])
-
-      // Harness file order: print preamble → assert.js → sta.js →
-      // doneprintHandle.js (if async) → extra includes
+      // Harness file order: assert.js → sta.js → doneprintHandle.js (if
+      // async) → extra includes
       let default_harness = ["assert.js", "sta.js"]
       let async_harness = case is_async {
         True -> ["doneprintHandle.js"]
@@ -999,113 +880,126 @@ fn eval_harness(
       let harness_files =
         list.flatten([default_harness, async_harness, extra_includes])
 
-      let env =
-        entry.ReplEnv(
-          global_object:,
-          lexical_globals: dict.new(),
-          symbol_registry: dict.new(),
-          realms:,
+      list.try_fold(harness_files, st, fn(st, filename) {
+        use template <- result.try(
+          harness_template(filename, fn() { read_harness_file(filename) }),
         )
-
-      // Evaluate print preamble first (defines print + __print_output__)
-      use preamble <- result.try(
-        harness_template("__print_preamble__", fn() { Ok(print_preamble) }),
-      )
-      use #(h, env) <- result.try(eval_harness_template(preamble, h, b, env))
-
-      use #(h, env) <- result.map(
-        list.try_fold(harness_files, #(h, env), fn(acc, filename) {
-          let #(heap, env) = acc
-          use template <- result.try(
-            harness_template(filename, fn() { read_harness_file(filename) }),
-          )
-          eval_harness_template(template, heap, b, env)
-        }),
-      )
-      #(h, env, test_hooks)
+        eval_harness_template(template, st)
+      })
     }
   }
+}
+
+/// `$262` plus the harness host functions (`$262.agent.*`, `print`) on the
+/// current realm of `st`.
+fn install_host_api(st: Agent) -> Agent {
+  let #(dollar_262, st) = rt_realm.install_262(st, st.realm)
+  let s = host.from_agent(st, host.new_key())
+  let s = extend_262_with_agent(s, dollar_262)
+  let s = install_print(s)
+  s.agent
+}
+
+/// `print(x)` stores ToString(x) in the `__print_output__` global (initially
+/// `undefined`): the capture side of the async $DONE protocol.
+fn install_print(s: HostState) -> HostState {
+  let s = host.define_global(s, print_output, mk_undefined())
+  host.define_fn(s, "print", 1, print_native)
+}
+
+fn print_native(
+  args: List(JsVal),
+  _this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  let #(str, st) = rt_val.t_to_string(s.agent, host.first_arg(args))
+  let global = mk_object(st.realm.global_object)
+  let #(_ok, st) =
+    rt_obj.t_set_prop(st, global, StringKey(Named(print_output)), mk_string(str))
+  done(s, st)
 }
 
 /// Evaluate a compiled harness template as a REPL script.
 fn eval_harness_template(
   template: FuncTemplate,
-  h: Heap(host),
-  b: common.Builtins,
-  env: entry.ReplEnv,
-) -> Result(#(Heap(host), entry.ReplEnv), String) {
-  case entry.run_and_drain_repl(template, h, b, env) {
-    Error(vm_err) -> Error("harness vm: " <> string.inspect(vm_err))
-    Ok(#(Ok(_), new_heap, new_env)) -> Ok(#(new_heap, new_env))
-    Ok(#(Error(thrown), new_heap, _)) ->
-      Error("harness threw: " <> inspect_thrown(thrown, new_heap))
+  st: Agent,
+) -> Result(Agent, String) {
+  case run_settled(st, template) {
+    #(Ok(_), st) -> Ok(st)
+    #(Error(thrown), st) ->
+      Error("harness threw: " <> inspect_thrown(thrown, st))
   }
 }
 
-fn get_data(
-  h: Heap(host),
-  ref: value.Ref,
-  key: String,
-) -> Result(value.JsValue, Nil) {
-  case object.get_own_property(h, ref, Named(key)) {
-    Some(value.DataProperty(value: val, ..)) -> Ok(val)
-    Some(_) -> Error(Nil)
-    None ->
-      case heap.read(h, ref) {
-        Some(value.ObjectSlot(prototype: Some(proto_ref), ..)) ->
-          get_data(h, proto_ref, key)
-        _ -> Error(Nil)
-      }
+fn as_handle(v: JsVal) -> Option(Handle) {
+  case classify(v) {
+    KHandle(h) -> Some(h)
+    _ -> None
   }
 }
 
-fn inspect_thrown(val: value.JsValue, heap: Heap(host)) -> String {
-  case val {
-    value.JsObject(ref) -> {
-      case get_data(heap, ref, "message") {
-        Ok(value.JsString(msg)) -> {
-          let name = case get_data(heap, ref, "name") {
-            Ok(value.JsString(n)) -> n
-            _ -> "Error"
-          }
-          name <> ": " <> msg
+/// `[[Prototype]]` of an ordinary object without running user code: a Proxy
+/// (whose trap could throw) or a non-object cell has none here.
+fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
+  case rt_store.t_cell_get(st, h) {
+    SObject(kind: ProxyObj(..), ..) -> None
+    SObject(proto:, ..) | SShapedObject(proto:, ..) -> proto
+    _ -> None
+  }
+}
+
+/// The value of the DATA property `key` on `h` or its prototype chain,
+/// without getters or traps.
+fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
+  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(key))) {
+    Some(DataProperty(value: val, ..)) -> Some(val)
+    Some(_) -> None
+    None -> option.then(ordinary_proto(st, h), get_data(st, _, key))
+  }
+}
+
+fn inspect_thrown(val: JsVal, st: Agent) -> String {
+  let described = {
+    use h <- option.then(as_handle(val))
+    use message <- option.then(get_data(st, h, "message"))
+    case classify(message) {
+      KStr(msg) -> {
+        let name = case option.map(get_data(st, h, "name"), classify) {
+          Some(KStr(n)) -> n
+          _ -> "Error"
         }
-        _ -> object.inspect(val, heap)
+        Some(name <> ": " <> msg)
       }
+      _ -> None
     }
-    _ -> object.inspect(val, heap)
   }
+  option.lazy_unwrap(described, fn() { rt_inspect.inspect(st, val) })
 }
 
 // ============================================================================
 // $262.agent — real BEAM-process test262 agent cluster (harness host layer)
 //
 // $262.agent.* is test262 HOST machinery (INTERPRETING.md), so it lives in
-// the harness — the embedder — not in VM core: agent processes block on
-// their BEAM mailboxes for broadcasts, acks, reports and Atomics wake
-// messages, and mailbox receives are embedder territory (the same boundary
-// as the Atomics host capabilities; see the contract in arc/host.gleam).
-// The harness injects the `agent` object onto every $262 via the
-// `extend_262_with_agent` hook, threaded to each realm boot and to
-// `entry.build_262` directly (initial + createRealm children + spawned
-// agent children all receive it).
+// the harness — the embedder — not in the runtime: agent processes block on
+// their BEAM mailboxes for broadcasts, acks and reports, and mailbox
+// receives are embedder territory (the same boundary as the Atomics host
+// capabilities; see the contract in arc/host_hooks.gleam). The harness hangs
+// the `agent` object off every `$262` it installs; `$262.createRealm()`
+// carries it over to child realms, and every spawned agent child installs
+// its own.
 //
 // `$262.agent.start(script)` spawns a REAL BEAM child process
-// (test262_exec_ffi.erl) that boots a completely fresh realm — its own
-// heap, builtins, globals, and $262 — compiles the (NOT IIFE-wrapped: the
+// (test262_exec_ffi.erl) that boots a completely fresh agent — its own
+// store, intrinsics, globals, and $262 — compiles the (NOT IIFE-wrapped: the
 // child owns its realm globals) agent source, executes it, drains its
-// event loop, and then parks in a broadcast loop.
+// microtasks, and then parks in a broadcast loop.
 //
-// `broadcast(sab)` serializes the SharedArrayBuffer's backing storage and
-// sends it to every child, blocking until each child acknowledges receipt
-// (the ack is sent BEFORE the child invokes its receiveBroadcast callbacks,
-// so a callback blocking in a sync Atomics.wait cannot deadlock broadcast).
-// Because shared buffers are backed by an Erlang `atomics` array
-// (value.Shared — see arc_sab_ffi.erl) and atomics refs cross process
-// boundaries by reference, the SAB the child reconstructs aliases the very
-// same mutable cells as the parent's: Atomics writes in an agent are
-// genuinely visible to the main agent and vice versa, and a child blocked
-// in Atomics.wait can really be woken by the main agent's Atomics.notify.
+// `broadcast(sab)` ships the SharedArrayBuffer's backing storage to every
+// child, blocking until each child acknowledges receipt (the ack is sent
+// BEFORE the child invokes its receiveBroadcast callbacks, so a callback
+// blocking in a sync Atomics.wait cannot deadlock broadcast). Buffer storage
+// in this runtime is a byte image held in the agent's own store, so the
+// child receives a copy: cross-agent Atomics.wait/notify is not wired yet.
 //
 // `report(str)` in a child posts the string to the parent's mailbox;
 // `getReport()` in the parent drains that mailbox non-blockingly. The
@@ -1115,35 +1009,21 @@ fn inspect_thrown(val: value.JsValue, heap: Heap(host)) -> String {
 // degenerate same-process case (the main agent reporting to itself).
 // ============================================================================
 
-/// The harness's $262 extension hook: build the agent object and hang it off
-/// the fresh $262. Threaded (as `Some(extend_262_with_agent)`) to every realm
-/// boot and `entry.build_262` call in the harness so the initial $262, every
-/// `$262.createRealm()` child, and every spawned agent process's realm all
-/// receive it.
-fn extend_262_with_agent(
-  h: Heap(host),
-  b: common.Builtins,
-  dollar_262: value.Ref,
-) -> Heap(host) {
-  let #(h, agent_ref) = build_agent(h, b)
-  // builtin_property attributes (enumerable:False) — matches how the rest of
-  // the $262 surface is defined and keeps "agent" out of Object.keys($262).
-  object.define_method_property(
-    h,
-    dollar_262,
-    Named("agent"),
-    value.JsObject(agent_ref),
-  )
+/// Build the agent object and hang it off `$262` with builtin_property
+/// attributes (enumerable:False), which matches the rest of the $262 surface
+/// and keeps "agent" out of Object.keys($262).
+fn extend_262_with_agent(s: HostState, dollar_262: Handle) -> HostState {
+  let #(s, agent) = build_agent(s)
+  let #(prop, st) = common.builtin_property(s.agent, agent)
+  let st = common.add_named_property(st, dollar_262, "agent", prop)
+  host.State(..s, agent: st)
 }
 
-/// Allocate the $262.agent object: host-closure methods plus two hidden
+/// Allocate the $262.agent object: host-function methods plus two hidden
 /// array-backed queues — __reports__ (strings posted by $262.agent.report,
 /// consumed by getReport) and __agents__ (callbacks registered by
 /// receiveBroadcast, invoked by the child's broadcast loop).
-fn build_agent(h: Heap(host), b: common.Builtins) -> #(Heap(host), value.Ref) {
-  let func_proto = b.function.prototype
-  let #(h, reports_ref) = common.alloc_array(h, [], b.array.prototype)
-  let #(h, agents_ref) = common.alloc_array(h, [], b.array.prototype)
+fn build_agent(s: HostState) -> #(HostState, JsVal) {
   let methods = [
     #("start", agent_start_native, 1),
     #("broadcast", agent_broadcast_native, 2),
@@ -1154,133 +1034,105 @@ fn build_agent(h: Heap(host), b: common.Builtins) -> #(Heap(host), value.Ref) {
     #("leaving", agent_leaving_native, 0),
     #("receiveBroadcast", agent_receive_broadcast_native, 1),
   ]
-  let #(h, method_props) =
-    list.fold(methods, #(h, []), fn(acc, method) {
-      let #(h, props) = acc
+  let #(s, method_props) =
+    list.fold(methods, #(s, []), fn(acc, method) {
+      let #(s, props) = acc
       let #(name, impl, arity) = method
-      let #(h, fn_ref) =
-        common.alloc_rooted_host_fn(h, func_proto, impl, name, arity)
-      #(h, [
-        #(Named(name), value.builtin_property(value.JsObject(fn_ref))),
-        ..props
-      ])
+      let #(s, f) = host.function(s, name, arity, impl)
+      let #(prop, st) = common.builtin_property(s.agent, f)
+      #(host.State(..s, agent: st), [#(name, prop), ..props])
     })
+  let st = s.agent
+  let array_proto = st.realm.array.prototype
+  let #(reports, st) = common.alloc_array(st, [], array_proto)
+  let #(agents, st) = common.alloc_array(st, [], array_proto)
+  let #(reports_prop, st) = common.data_prop(st, mk_object(reports))
+  let #(agents_prop, st) = common.data_prop(st, mk_object(agents))
   let hidden = [
-    #(
-      Named("__reports__"),
-      value.data(value.JsObject(reports_ref)) |> value.configurable(),
-    ),
-    #(
-      Named("__agents__"),
-      value.data(value.JsObject(agents_ref)) |> value.configurable(),
-    ),
+    #("__reports__", common.configurable(reports_prop)),
+    #("__agents__", common.configurable(agents_prop)),
   ]
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      value.ObjectSlot(
-        kind: value.OrdinaryObject,
-        properties: dict.from_list(list.append(method_props, hidden)),
-        symbol_properties: [],
-        elements: elements.new(),
-        prototype: Some(b.object.prototype),
+  let #(h, st) =
+    rt_store.t_cell_new(
+      st,
+      SObject(
+        kind: Ordinary,
+        proto: Some(st.realm.object.prototype),
+        props: common.named_props(list.append(method_props, hidden)),
+        symbol_props: [],
+        elements: NoElements,
         extensible: True,
       ),
     )
-  #(h, ref)
+  #(host.State(..s, agent: st), mk_object(h))
 }
 
 /// A BEAM agent child process pid (opaque — see test262_exec_ffi.erl).
 type AgentPid
 
-/// The term `broadcast` ships to each child process. SharedArrayBuffers
-/// travel as their raw `value.BufferStorage`: for `value.Shared` the atomics
-/// ref is shared by reference (true shared memory); a byte-backed payload
-/// would arrive as a copy (non-shared buffers have no cross-agent identity
-/// to preserve). Non-object primitives pass through as-is — they are
-/// heap-independent.
+/// The term `broadcast` ships to each child process. (Shared)ArrayBuffers
+/// travel as their raw `BufferStorage`; primitives pass through as-is —
+/// they are store-independent.
 type AgentPayload {
-  /// Shared-ness is derived from the storage variant
-  /// (`value.buffer_is_shared`), not a separate flag — `value.Shared` is
-  /// shared, the byte-backed variants are not.
-  AgentSabPayload(storage: value.BufferStorage)
-  AgentValuePayload(value: value.JsValue)
+  /// Shared-ness is derived from the storage variant (`buffer_is_shared`),
+  /// not a separate flag.
+  AgentSabPayload(storage: BufferStorage)
+  AgentValuePayload(value: JsVal)
 }
 
 /// What woke an idle agent child process (see test262_exec_ffi.erl):
-/// a parent broadcast, a cross-process Atomics.notify for one of this
-/// agent's pending waitAsync waiters, or the parent process dying.
+/// a parent broadcast, a cross-process Atomics.notify addressed to this
+/// agent, or the parent process dying.
 type AgentWake {
   AgentWakeBroadcast(payload: AgentPayload)
   AgentWakeNotify(key: host_hooks.WaiterKey, byte_index: Int)
   AgentWakeParentDown
 }
 
+/// The `undefined` normal completion of a host function that only mutates
+/// the agent.
+fn done(s: HostState, st: Agent) -> #(HostState, Result(JsVal, JsVal)) {
+  #(host.State(..s, agent: st), Ok(mk_undefined()))
+}
+
 /// $262.agent.start(script) — spawn a REAL BEAM child process that boots a
-/// fresh realm and runs the agent script there. The source is NOT
+/// fresh agent and runs the agent script there. The source is NOT
 /// IIFE-wrapped: the child has its own realm, so its top-level declarations
 /// are its own realm globals (several tests start N agents with identical
 /// scripts — separate realms keep them from colliding).
 fn agent_start_native(
-  args: List(value.JsValue),
-  _this: value.JsValue,
-  st: State(host),
-) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  let source = case args {
-    [s, ..] -> s
-    [] -> value.JsUndefined
-  }
-  use source_str, st <- coerce.try_to_string(st, source)
-  let Nil = ffi_spawn_agent(fn() { run_agent_child(source_str) })
-  #(st, Ok(value.JsUndefined))
+  args: List(JsVal),
+  _this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  let #(source, st) = rt_val.t_to_string(s.agent, host.first_arg(args))
+  let Nil = ffi_spawn_agent(fn() { run_agent_child(source) })
+  done(s, st)
 }
 
-/// Child-process body: boot a fresh realm (own heap/builtins/globals/$262),
-/// compile + execute the agent script, drain the event loop, then park in
-/// the broadcast loop until the parent broadcasts or goes away. Runs INSIDE
-/// the spawned BEAM process — errors are reported to stderr, never thrown
-/// back (there is no JS frame to throw into).
+/// Child-process body: boot a fresh agent (own store/intrinsics/globals/
+/// $262), compile + execute the agent script, drain, then park in the
+/// broadcast loop until the parent broadcasts or goes away. Runs INSIDE the
+/// spawned BEAM process — errors are reported to stderr, never thrown back
+/// (there is no JS frame to throw into).
 fn run_agent_child(source: String) -> Nil {
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, global_ref) = builtins.globals(b, h)
-  let #(h, realm_ref) =
-    heap.alloc(
-      h,
-      value.RealmSlot(
-        global_object: global_ref,
-        lexical_globals: dict.new(),
-        symbol_registry: dict.new(),
-      ),
-    )
-  let h = heap.root(h, realm_ref)
-  let #(h, dollar_262_ref) =
-    entry.build_262(h, b, global_ref, realm_ref, Some(extend_262_with_agent))
-  let #(h, _) =
-    object.set_property(
-      h,
-      global_ref,
-      Named("$262"),
-      value.JsObject(dollar_262_ref),
-    )
+  let st = install_host_api(boot_base_agent())
   // The child's $262.agent object — its __agents__ queue collects the
   // receiveBroadcast callbacks the script registers; the broadcast loop
   // below invokes them.
-  let agent_this = case
-    object.get_own_property(h, dollar_262_ref, Named("agent"))
-  {
-    Some(value.DataProperty(value: v, ..)) -> v
-    _ -> value.JsUndefined
-  }
+  let agent_this =
+    {
+      use dollar <- option.then(get_data(st, st.realm.global_object, "$262"))
+      use dollar <- option.then(as_handle(dollar))
+      get_data(st, dollar, "agent")
+    }
+    |> option.unwrap(mk_undefined())
   let compiled =
     ffi_run_compile_task(string.byte_size(source), fn() {
       case parser.parse_script(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
         Ok(#(body, sb)) ->
-          case compiler.compile_eval(body, sb) {
-            Error(err) -> Error(string.inspect(err))
-            Ok(template) -> Ok(legacy.legacy_template(template))
-          }
+          compiler.compile_eval(body, sb) |> result.map_error(string.inspect)
       }
     })
   case compiled {
@@ -1289,191 +1141,121 @@ fn run_agent_child(source: String) -> Nil {
         "$262.agent.start: agent script did not compile: " <> msg,
       )
     Ok(template) -> {
-      let locals =
-        frame.init_top_level_locals(template, value.JsObject(global_ref))
-      // The agent child is an embedder-driven State of its own: it blocks
-      // in sync Atomics.wait and delivers notify wakes from THIS process,
-      // so its realm is constructed with the harness host capabilities.
-      let st =
-        interpreter.new_state(
-          template,
-          locals,
-          h,
-          b,
-          global_ref,
-          dict.new(),
-          dict.new(),
-          harness_host_hooks(),
-          // Spawned agents may block (§9.7 [[CanBlock]] defaults to true).
-          True,
-          Some(extend_262_with_agent),
-        )
-      let st =
-        State(
-          ..st,
-          ctx: RealmCtx(
-            ..st.ctx,
-            realms: dict.insert(st.ctx.realms, realm_ref, b),
-          ),
-        )
-      // Agent scripts are plain top-level scripts (non-coroutine frames):
-      // the narrowed loop reports a leaked suspension as a VmError.
-      case interpreter.execute_to_completion(st, "test262 agent script") {
-        Error(vm_err) ->
+      let #(completion, st) = entry.run_script(st, template)
+      let Nil = case completion {
+        ThrowCompletion(thrown) ->
           io.println_error(
-            "$262.agent: agent VM error: " <> string.inspect(vm_err),
+            "$262.agent: agent script threw: "
+            <> rt_inspect.format_error(st, thrown),
           )
-        Ok(#(completion, st)) -> {
-          let Nil = case completion {
-            ThrowCompletion(thrown) ->
-              io.println_error(
-                "$262.agent: agent script threw: "
-                <> object.format_error(thrown, st.heap),
-              )
-            _ -> Nil
-          }
-          let st = settle_pending_wakes(st)
-          agent_child_loop(st, agent_this)
-        }
+        NormalCompletion(_) -> Nil
       }
+      let st = settle_pending_wakes(st)
+      agent_child_loop(st, agent_this)
     }
   }
 }
 
 /// Child broadcast loop: block until the parent broadcasts (the receipt ack
 /// is sent by await_broadcast_or_notify BEFORE we run any JS), materialize
-/// the payload in the child heap, invoke every registered receiveBroadcast
-/// callback, drive the embedder loop (`settle_pending_wakes` — drain, then
-/// consume `arc_notify` wakes bounded by the earliest pending deadline, so a
-/// finite-timeout waitAsync settles "ok" instead of sleeping blindly to its
-/// deadline), repeat. A cross-process Atomics.notify can also wake the loop:
-/// an infinite-timeout waitAsync waiter has no deadline, so the drive
-/// returns with it still pending and the notify message must be consumed
-/// HERE — inject the wake and re-drive so its reaction jobs (e.g.
-/// $262.agent.report) run. Ends — and the child process exits — when the
-/// parent process goes away.
-fn agent_child_loop(st: State(host), agent_this: value.JsValue) -> Nil {
+/// the payload in the child's store, invoke every registered
+/// receiveBroadcast callback, drain, repeat. A cross-process notify wake has
+/// no waiter to settle in this runtime yet, so it only re-drives the drain.
+/// Ends — and the child process exits — when the parent process goes away.
+fn agent_child_loop(st: Agent, agent_this: JsVal) -> Nil {
   case ffi_await_broadcast_or_notify() {
     AgentWakeParentDown -> Nil
-    AgentWakeNotify(key, byte_index) -> {
-      let st = event_loop.inject_notify(st, key, byte_index)
-      let st = settle_pending_wakes(st)
-      agent_child_loop(st, agent_this)
-    }
+    AgentWakeNotify(_key, _byte_index) ->
+      agent_child_loop(settle_pending_wakes(st), agent_this)
     AgentWakeBroadcast(payload) -> {
       let #(st, msg) = payload_to_value(st, payload)
       let st = case agent_queue(st, agent_this, "__agents__") {
-        Ok(#(_arr_ref, callbacks)) ->
+        Some(#(_arr, callbacks)) ->
           list.fold(callbacks, st, fn(st, cb) {
-            case state.call(st, cb, value.JsUndefined, [msg]) {
-              Ok(#(_, st)) -> st
-              Error(#(thrown, st)) -> {
+            case rt_call.t_call(st, cb, mk_undefined(), [msg]) {
+              #(NormalCompletion(_), st) -> st
+              #(ThrowCompletion(thrown), st) -> {
                 io.println_error(
                   "$262.agent: broadcast callback threw: "
-                  <> object.format_error(thrown, st.heap),
+                  <> rt_inspect.format_error(st, thrown),
                 )
                 st
               }
             }
           })
-        Error(Nil) -> st
+        None -> st
       }
-      let st = settle_pending_wakes(st)
-      agent_child_loop(st, agent_this)
+      agent_child_loop(settle_pending_wakes(st), agent_this)
     }
   }
 }
 
-/// Rebuild a broadcast payload as a JsValue in the child's heap. A
-/// `value.Shared` payload aliases the parent's atomics cells — this IS the
-/// shared memory, not a copy.
-fn payload_to_value(
-  st: State(host),
-  payload: AgentPayload,
-) -> #(State(host), value.JsValue) {
+/// Rebuild a broadcast payload as a value in the child's store.
+fn payload_to_value(st: Agent, payload: AgentPayload) -> #(Agent, JsVal) {
   case payload {
     AgentValuePayload(v) -> #(st, v)
     AgentSabPayload(storage:) -> {
-      let proto = case value.buffer_is_shared(storage) {
-        True -> st.builtins.shared_array_buffer.prototype
-        False -> st.builtins.array_buffer.prototype
+      let proto = case types.buffer_is_shared(storage) {
+        True -> st.realm.shared_array_buffer.prototype
+        False -> st.realm.array_buffer.prototype
       }
-      let #(heap, ref) =
-        common.alloc_wrapper(st.heap, value.ArrayBufferObject(storage:), proto)
-      #(State(..st, heap:), value.JsObject(ref))
+      let #(h, st) =
+        realm_ops.alloc_wrapper(st, ArrayBufferObj(storage:), proto)
+      #(st, mk_object(h))
     }
   }
 }
 
 /// $262.agent.receiveBroadcast(callback) — register for the next broadcast.
 fn agent_receive_broadcast_native(
-  args: List(value.JsValue),
-  this: value.JsValue,
-  st: State(host),
-) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  let cb = case args {
-    [f, ..] -> f
-    [] -> value.JsUndefined
-  }
-  case agent_queue(st, this, "__agents__") {
-    Ok(#(arr_ref, callbacks)) -> {
-      let st = agent_queue_write(st, arr_ref, list.append(callbacks, [cb]))
-      #(st, Ok(value.JsUndefined))
-    }
-    Error(Nil) ->
-      state.type_error(st, "receiveBroadcast: $262.agent state missing")
+  args: List(JsVal),
+  this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  let cb = host.first_arg(args)
+  case agent_queue(s.agent, this, "__agents__") {
+    Some(#(arr, callbacks)) ->
+      done(s, agent_queue_write(s.agent, arr, list.append(callbacks, [cb])))
+    None -> host.type_error(s, "receiveBroadcast: $262.agent state missing")
   }
 }
 
 /// $262.agent.broadcast(sab) — ship the buffer to every child agent process
 /// and block until all of them have RECEIVED it (test262 INTERPRETING.md).
 /// Children ack on receipt, before invoking their receiveBroadcast
-/// callbacks, so a callback that immediately blocks in a sync Atomics.wait
-/// cannot deadlock the broadcaster.
+/// callbacks, so a callback that immediately blocks cannot deadlock the
+/// broadcaster.
 fn agent_broadcast_native(
-  args: List(value.JsValue),
-  _this: value.JsValue,
-  st: State(host),
-) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  let sab = case args {
-    [v, ..] -> v
-    [] -> value.JsUndefined
-  }
-  case make_broadcast_payload(st, sab) {
-    Error(Nil) ->
-      state.type_error(
-        st,
+  args: List(JsVal),
+  _this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  case make_broadcast_payload(s.agent, host.first_arg(args)) {
+    None ->
+      host.type_error(
+        s,
         "$262.agent.broadcast: argument must be a (Shared)ArrayBuffer or a primitive",
       )
-    Ok(payload) -> {
+    Some(payload) -> {
       let children = ffi_agent_children()
       let Nil = list.each(children, ffi_send_broadcast(_, payload))
       let Nil = ffi_await_acks(children)
-      #(st, Ok(value.JsUndefined))
+      done(s, s.agent)
     }
   }
 }
 
 /// Serialize a broadcast argument. (Shared)ArrayBuffers travel as their
-/// backing storage (atomics ref for shared — aliased, not copied);
-/// primitives travel as-is; any other object has no cross-heap meaning.
-fn make_broadcast_payload(
-  st: State(host),
-  v: value.JsValue,
-) -> Result(AgentPayload, Nil) {
-  case v {
-    value.JsObject(ref) ->
-      case heap.read(st.heap, ref) {
-        // A detached buffer has no storage to ship.
-        Some(value.ObjectSlot(
-          kind: value.ArrayBufferObject(storage: value.Detached(..)),
-          ..,
-        )) -> Error(Nil)
-        Some(value.ObjectSlot(kind: value.ArrayBufferObject(storage:), ..)) ->
-          Ok(AgentSabPayload(storage:))
-        _ -> Error(Nil)
+/// backing storage; primitives travel as-is; any other object has no
+/// cross-store meaning, and a detached buffer has no storage to ship.
+fn make_broadcast_payload(st: Agent, v: JsVal) -> Option(AgentPayload) {
+  case classify(v) {
+    KHandle(h) ->
+      case buffer.buffer_storage(st, h) {
+        Some(Detached(..)) | None -> None
+        Some(storage) -> Some(AgentSabPayload(storage:))
       }
-    other -> Ok(AgentValuePayload(other))
+    _ -> Some(AgentValuePayload(v))
   }
 }
 
@@ -1481,32 +1263,28 @@ fn make_broadcast_payload(
 /// to the parent's mailbox; in the main agent, push onto the local
 /// __reports__ queue (degenerate self-report).
 fn agent_report_native(
-  args: List(value.JsValue),
-  this: value.JsValue,
-  st: State(host),
-) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  let val = case args {
-    [v, ..] -> v
-    [] -> value.JsUndefined
-  }
-  use str, st <- coerce.try_to_string(st, val)
+  args: List(JsVal),
+  this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  let #(str, st) = rt_val.t_to_string(s.agent, host.first_arg(args))
   case ffi_agent_parent() {
     Ok(parent) -> {
       let Nil = ffi_send_report(parent, str)
-      #(st, Ok(value.JsUndefined))
+      done(s, st)
     }
     Error(Nil) ->
       case agent_queue(st, this, "__reports__") {
-        Ok(#(arr_ref, reports)) -> {
-          let st =
-            agent_queue_write(
-              st,
-              arr_ref,
-              list.append(reports, [value.JsString(str)]),
-            )
-          #(st, Ok(value.JsUndefined))
-        }
-        Error(Nil) -> state.type_error(st, "report: $262.agent state missing")
+        Some(#(arr, reports)) ->
+          done(
+            s,
+            agent_queue_write(st, arr, list.append(reports, [mk_string(str)])),
+          )
+        None ->
+          host.type_error(
+            host.State(..s, agent: st),
+            "report: $262.agent state missing",
+          )
       }
   }
 }
@@ -1515,121 +1293,107 @@ fn agent_report_native(
 /// pending. Local (same-process) reports first, then the mailbox of reports
 /// posted by child agent processes.
 fn agent_get_report_native(
-  _args: List(value.JsValue),
-  this: value.JsValue,
-  st: State(host),
-) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  case agent_queue(st, this, "__reports__") {
-    Ok(#(arr_ref, reports)) ->
+  _args: List(JsVal),
+  this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  case agent_queue(s.agent, this, "__reports__") {
+    Some(#(arr, reports)) ->
       case reports {
         [] ->
           case ffi_take_report() {
-            Ok(report) -> #(st, Ok(value.JsString(report)))
-            Error(Nil) -> #(st, Ok(value.JsNull))
+            Ok(report) -> #(s, Ok(mk_string(report)))
+            Error(Nil) -> #(s, Ok(mk_null()))
           }
-        [head, ..rest] -> {
-          let st = agent_queue_write(st, arr_ref, rest)
-          #(st, Ok(head))
-        }
+        [head, ..rest] -> #(
+          host.State(..s, agent: agent_queue_write(s.agent, arr, rest)),
+          Ok(head),
+        )
       }
-    Error(Nil) -> state.type_error(st, "getReport: $262.agent state missing")
+    None -> host.type_error(s, "getReport: $262.agent state missing")
   }
 }
 
 /// $262.agent.sleep(ms) — block the (single) BEAM scheduler thread running
-/// this VM for ms milliseconds.
+/// this agent for ms milliseconds, through the host's `sleep_ms` hook.
 fn agent_sleep_native(
-  args: List(value.JsValue),
-  _this: value.JsValue,
-  st: State(host),
-) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  let val = case args {
-    [v, ..] -> v
-    [] -> value.JsUndefined
+  args: List(JsVal),
+  _this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  let #(num, st) = rt_val.t_to_number(s.agent, host.first_arg(args))
+  let ms = case num {
+    JInt(i) -> i
+    JFloat(f) -> float.truncate(f)
+    _ -> 0
   }
-  case coerce.js_to_number(st, val) {
-    Error(#(thrown, st)) -> #(st, Error(thrown))
-    Ok(#(num, st)) -> {
-      let ms = case num {
-        value.Finite(f) -> value.float_to_int(f)
-        _ -> 0
-      }
-      let Nil = clock_ffi.sleep_ms(ms)
-      #(st, Ok(value.JsUndefined))
-    }
-  }
+  let Nil = st.hooks.sleep_ms(ms)
+  done(s, st)
 }
 
-/// $262.agent.monotonicNow() — monotonic milliseconds (same clock as the
-/// waitAsync deadline bookkeeping).
+/// $262.agent.monotonicNow() — monotonic milliseconds from the host's clock
+/// hook (the same clock the runtime's own timing reads).
 fn agent_monotonic_now_native(
-  _args: List(value.JsValue),
-  _this: value.JsValue,
-  st: State(host),
-) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  #(st, Ok(value.from_int(clock_ffi.monotonic_now())))
+  _args: List(JsVal),
+  _this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  #(s, Ok(mk_number(JInt(s.agent.hooks.monotonic_now()))))
 }
 
 /// $262.agent.leaving() — agent termination hint. The child process exits
 /// when its parent goes away (parent monitor), so this is a no-op.
 fn agent_leaving_native(
-  _args: List(value.JsValue),
-  _this: value.JsValue,
-  st: State(host),
-) -> #(State(host), Result(value.JsValue, value.JsValue)) {
-  #(st, Ok(value.JsUndefined))
+  _args: List(JsVal),
+  _this: JsVal,
+  s: HostState,
+) -> #(HostState, Result(JsVal, JsVal)) {
+  #(s, Ok(mk_undefined()))
 }
 
-/// Read a hidden JsObject-valued own property off the agent object.
-fn agent_hidden_ref(
-  st: State(host),
-  this: value.JsValue,
-  name: String,
-) -> Result(value.Ref, Nil) {
-  case this {
-    value.JsObject(this_ref) ->
-      case object.get_own_property(st.heap, this_ref, Named(name)) {
-        Some(value.DataProperty(value: value.JsObject(ref), ..)) -> Ok(ref)
-        _ -> Error(Nil)
-      }
-    _ -> Error(Nil)
+/// Read a hidden object-valued own data property off the agent object.
+fn agent_hidden_ref(st: Agent, this: JsVal, name: String) -> Option(Handle) {
+  use this_h <- option.then(as_handle(this))
+  case rt_obj.t_ordinary_own_property(st, this_h, StringKey(Named(name))) {
+    Some(DataProperty(value:, ..)) -> as_handle(value)
+    _ -> None
   }
 }
 
-/// Read an agent queue array as #(ref, values). Error(Nil) if missing.
+/// Read an agent queue array as #(handle, values). None if missing.
 fn agent_queue(
-  st: State(host),
-  this: value.JsValue,
+  st: Agent,
+  this: JsVal,
   name: String,
-) -> Result(#(value.Ref, List(value.JsValue)), Nil) {
-  use arr_ref <- result.try(agent_hidden_ref(st, this, name))
-  case heap.read(st.heap, arr_ref) {
-    Some(value.ObjectSlot(kind: value.ArrayObject(length), elements: els, ..)) ->
-      Ok(#(arr_ref, elements.to_list_padded(els, length)))
-    _ -> Error(Nil)
+) -> Option(#(Handle, List(JsVal))) {
+  use arr <- option.then(agent_hidden_ref(st, this, name))
+  case rt_store.t_cell_get(st, arr) {
+    SObject(kind: ArrayObj(length:), elements: els, ..) -> {
+      let values =
+        int.range(from: length - 1, to: -1, with: [], run: fn(acc, i) {
+          [elements.get(els, i), ..acc]
+        })
+      Some(#(arr, values))
+    }
+    _ -> None
   }
 }
 
 /// Overwrite an agent queue array's contents in place.
-fn agent_queue_write(
-  st: State(host),
-  arr_ref: value.Ref,
-  values: List(value.JsValue),
-) -> State(host) {
-  let heap = case heap.read(st.heap, arr_ref) {
-    Some(value.ObjectSlot(kind: value.ArrayObject(_), ..) as slot) ->
-      heap.write(
-        st.heap,
-        arr_ref,
-        value.ObjectSlot(
+fn agent_queue_write(st: Agent, arr: Handle, values: List(JsVal)) -> Agent {
+  case rt_store.t_cell_get(st, arr) {
+    SObject(kind: ArrayObj(_), ..) as slot ->
+      rt_store.t_cell_set(
+        st,
+        arr,
+        SObject(
           ..slot,
-          kind: value.ArrayObject(list.length(values)),
+          kind: ArrayObj(length: list.length(values)),
           elements: elements.from_list(values),
         ),
       )
-    _ -> st.heap
+    _ -> st
   }
-  State(..st, heap:)
 }
 
 // -- Agent FFI (test262_exec_ffi.erl) --
@@ -1677,12 +1441,9 @@ fn ffi_take_report() -> Result(String, Nil) {
 // -- Atomics host capabilities (harness as embedder) --
 //
 // The embedder side of the capability contract in arc/host_hooks.gleam:
-// `sync_wait` (blocking sync wait) and `deliver_wake` (wake delivery) supplied
-// as the `HostHooks.atomics` value every State the harness boots is
-// constructed with, plus the bounded mailbox receive that feeds
-// event_loop.inject_notify as the post-script driver. Core
-// registers waiterlist entries and claims waiters as pure ETS data
-// (arc_waiter_ffi); every receive of — and every send into — the
+// `sync_wait` (blocking sync wait) and `deliver_wake` (wake delivery)
+// supplied as the `HostHooks.atomics` value of every agent the harness
+// boots. Every receive of — and every send into — the
 // `{arc_notify, Ref, Key, ByteIndex}` wake protocol happens HERE, via
 // test262_exec_ffi.erl. This is test262 HOST machinery (INTERPRETING.md):
 // agents and blocking waits are the host's job, the same engine/platform
@@ -1706,19 +1467,12 @@ fn ffi_deliver_wakes(_claimed: List(host_hooks.ClaimedWaiter)) -> Nil {
   panic as beam_only_test
 }
 
-/// The bounded dry-queue receive for arc_notify messages, feeding
-/// `event_loop.inject_notify`.
-@external(erlang, "test262_exec_ffi", "wait_for_notify")
-fn ffi_wait_for_notify(_ms: Int) -> Option(#(host_hooks.WaiterKey, Int)) {
-  panic as beam_only_test
-}
-
 /// Blocking-wait capability (`AtomicsCapabilities.sync_wait` on
-/// `HostHooks.atomics`):
-/// suspend this worker process in a selective receive until the registered
-/// waiterlist entry is woken or the timeout elapses. `timeout_ms: None` =
-/// wait forever (the FFI clamps to the BEAM receive ceiling). A `Some(0)`
-/// timeout doubles as the cancel flush — see await_notify's doc.
+/// `HostHooks.atomics`): suspend this worker process in a selective receive
+/// until the registered waiterlist entry is woken or the timeout elapses.
+/// `timeout_ms: None` = wait forever (the FFI clamps to the BEAM receive
+/// ceiling). A `Some(0)` timeout doubles as the cancel flush — see
+/// await_notify's doc.
 fn atomics_sync_wait(req: host_hooks.WaitRequest) -> host_hooks.WaitOutcome {
   let host_hooks.WaitRequest(handle:, timeout_ms:, key: _, byte_index: _) = req
   case ffi_await_notify(handle, option.unwrap(timeout_ms, -1)) {
@@ -1729,12 +1483,11 @@ fn atomics_sync_wait(req: host_hooks.WaitRequest) -> host_hooks.WaitOutcome {
 
 /// The harness's host capabilities — both Atomics capabilities together,
 /// as `AtomicsCapabilities` demands (a host that can block but not deliver
-/// wakes, or vice versa, deadlocks its peers). Supplied ONCE wherever the harness
-/// boots a realm (entry/module/agent State construction); every derived
-/// State — eval/Function realms, $262.createRealm children, $262.agent
-/// children, module bodies including dynamic import() — inherits them.
-/// Leaves `State.can_block` untouched — that is per-agent spec policy (the
-/// CanBlockIsFalse flag), not capability presence.
+/// wakes, or vice versa, deadlocks its peers). Supplied ONCE, when the
+/// harness boots an agent; every realm and activation of that agent —
+/// eval/Function code, $262.createRealm children, module bodies including
+/// dynamic import() — reads the same record, and $262.agent children boot
+/// with it too.
 fn harness_host_hooks() -> host.HostHooks {
   host.with_atomics(
     host.default_host_hooks(),
@@ -1743,40 +1496,11 @@ fn harness_host_hooks() -> host.HostHooks {
   )
 }
 
-/// One bounded wait-settle-drain step (the wake-injection side): block at most
-/// `timeout_ms` for a cross-process `arc_notify` message; if one arrives,
-/// settle this agent's first matching waitAsync waiter with "ok" and
-/// re-drain microtasks. `False` = the timeout elapsed, i.e. a deadline is
-/// due — the caller's next drain fires it.
-fn wait_settle_step(s: State(host), timeout_ms: Int) -> #(State(host), Bool) {
-  case ffi_wait_for_notify(timeout_ms) {
-    Some(#(key, byte_index)) -> {
-      let s = event_loop.inject_notify(s, key, byte_index)
-      #(event_loop.drain_jobs_yielding(s), True)
-    }
-    None -> #(s, False)
-  }
-}
-
-/// The harness's post-script driver: drain, then loop `wait_settle_step`
-/// bounded by the earliest pending deadline until no settleable deadline
-/// remains. Mirrors event_loop.drain_jobs' dry-queue semantics: when only
-/// deadline-free (infinite) waiters remain and no wake arrives, the loop
-/// returns — a mailbox loop cannot distinguish a never-notified infinite
-/// waiter from quiescence, and parking forever here would hang the worker.
-fn settle_pending_wakes(s: State(host)) -> State(host) {
-  let s = event_loop.drain_jobs_yielding(s)
-  case s.atomics_waiters {
-    [] -> s
-    _ ->
-      case event_loop.next_deadline_timeout(s) {
-        None -> s
-        Some(timeout) -> {
-          let #(s, _woke) = wait_settle_step(s, timeout)
-          settle_pending_wakes(s)
-        }
-      }
-  }
+/// The harness's post-script driver: one microtask checkpoint through the
+/// shared drain, so promise reactions (and the async $DONE protocol) settle
+/// before an outcome is read.
+fn settle_pending_wakes(st: Agent) -> Agent {
+  rt_async.drain(st)
 }
 
 /// See arc_compile_task_ffi:run_compile_task/2 — runs the compile in a
@@ -1796,27 +1520,22 @@ fn init_stats() -> Nil {
   panic as beam_only_test
 }
 
-// The realm/template caches share one persistent_term-backed store keyed by
-// string; the two typed views below must use disjoint keys (realm_cache_key
+// The agent/template caches share one persistent_term-backed store keyed by
+// string; the two typed views below must use disjoint keys (agent_cache_key
 // vs harness filenames) since FFI bypasses the type checker.
 
 @external(erlang, "test262_exec_ffi", "cache_get")
-fn realm_cache_get(
-  _key: String,
-) -> option.Option(#(Heap(host), common.Builtins, value.Ref)) {
+fn agent_cache_get(_key: String) -> Option(Agent) {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "cache_put")
-fn realm_cache_put(
-  _key: String,
-  _snapshot: #(Heap(host), common.Builtins, value.Ref),
-) -> Nil {
+fn agent_cache_put(_key: String, _agent: Agent) -> Nil {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "cache_get")
-fn template_cache_get(_key: String) -> option.Option(FuncTemplate) {
+fn template_cache_get(_key: String) -> Option(FuncTemplate) {
   panic as beam_only_test
 }
 
@@ -1829,7 +1548,7 @@ fn template_cache_put(_key: String, _template: FuncTemplate) -> Nil {
 fn init_config(
   _update_mode: Bool,
   _has_snapshot: Bool,
-  _fail_log: option.Option(String),
+  _fail_log: Option(String),
 ) -> Nil {
   panic as beam_only_test
 }
@@ -1850,7 +1569,7 @@ fn get_has_snapshot() -> Bool {
 }
 
 @external(erlang, "test262_exec_ffi", "get_fail_log")
-fn get_fail_log() -> option.Option(String) {
+fn get_fail_log() -> Option(String) {
   panic as beam_only_test
 }
 
