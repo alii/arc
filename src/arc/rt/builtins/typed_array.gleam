@@ -331,7 +331,8 @@ pub fn dispatch(
     TypedArrayPrototypeToReversed -> proto_to_reversed(st, this)
     TypedArrayPrototypeSort -> proto_sort(st, this, args)
     TypedArrayPrototypeToSorted -> proto_to_sorted(st, this, args)
-    TypedArrayPrototypeToLocaleString -> proto_to_locale_string(st, this)
+    TypedArrayPrototypeToLocaleString ->
+      proto_to_locale_string(st, this, args)
     TypedArrayPrototypeWith -> proto_with(st, this, args)
     TypedArrayFrom -> ta_from(st, this, args)
     TypedArrayOf -> ta_of(st, this, args)
@@ -2753,18 +2754,33 @@ fn proto_to_sorted(
 }
 
 // ============================================================================
-// toLocaleString — §23.2.3.31
+// toLocaleString — §23.2.3.31 / ECMA-402 §18.5.1
 // ============================================================================
 
-fn proto_to_locale_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+/// Same algorithm as the ECMA-402 Array.prototype.toLocaleString: each
+/// element's own `toLocaleString` is invoked with « locales, options ».
+fn proto_to_locale_string(
+  st: Agent,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  locale_loop(st, view, 0, [])
+  locale_loop(
+    st,
+    view,
+    0,
+    helpers.first_arg_or_undefined(args),
+    helpers.arg_at(args, 1),
+    [],
+  )
 }
 
 fn locale_loop(
   st: Agent,
   view: TaWitness,
   k: Int,
+  locales_v: JsVal,
+  options_v: JsVal,
   acc: List(String),
 ) -> #(JsVal, Agent) {
   use <- bool.guard(k >= view.length, #(
@@ -2773,13 +2789,13 @@ fn locale_loop(
   ))
   let el = ta_get(st, view.ref, k)
   case rt_val.is_nullish(el) {
-    True -> locale_loop(st, view, k + 1, ["", ..acc])
+    True -> locale_loop(st, view, k + 1, locales_v, options_v, ["", ..acc])
     False -> {
       let #(m, st) =
         rt_obj.t_get_prop(st, el, StringKey(Named("toLocaleString")))
-      let #(res, st) = call(st, m, el, [])
+      let #(res, st) = call(st, m, el, [locales_v, options_v])
       let #(s, st) = rt_val.t_to_string(st, res)
-      locale_loop(st, view, k + 1, [s, ..acc])
+      locale_loop(st, view, k + 1, locales_v, options_v, [s, ..acc])
     }
   }
 }
