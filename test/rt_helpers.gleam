@@ -4,7 +4,10 @@ import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
-import arc/rt/types.{type Agent, type JsVal, Named, StringKey}
+import arc/rt/types.{
+  type Agent, type CompiledFn, type JsVal, FnFlags, Named, StringKey,
+}
+import gleam/option.{None}
 
 /// Deterministic hooks that print nothing: fixed clocks, fixed PRNG.
 pub fn quiet_hooks() -> HostHooks {
@@ -53,3 +56,29 @@ pub fn record(term: a) -> Nil
 /// names the element type; every term recorded in one test has it.
 @external(erlang, "rt_helpers_ffi", "recorded")
 pub fn recorded() -> List(a)
+
+@external(erlang, "arc_rt_store_ffi", "identity")
+fn as_code(
+  f: fn(Agent, rt_call.Frame, List(JsVal)) -> #(JsVal, Agent),
+) -> CompiledFn
+
+/// A JS function object whose body is the Gleam `body(st, args)`.
+pub fn func(
+  st: Agent,
+  body: fn(Agent, List(JsVal)) -> #(JsVal, Agent),
+) -> #(JsVal, Agent) {
+  let flags =
+    FnFlags(
+      is_constructor: False,
+      is_class_constructor: False,
+      is_derived_constructor: False,
+      is_arrow: True,
+      is_method: False,
+      is_generator: False,
+      is_async: False,
+      is_strict: True,
+    )
+  let code = as_code(fn(st, _frame, args) { body(st, args) })
+  let #(h, st) = rt_call.t_fn_new(st, code, [], flags, "f", 0, None, None)
+  #(types.mk_object(h), st)
+}

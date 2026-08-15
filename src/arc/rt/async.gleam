@@ -33,12 +33,13 @@ import arc/rt/types.{
   AGResumeAwaitingReturn, AGResumeBody, AGResumeReturnUnwind, AGSuspendedStart,
   AGSuspendedYield, Agent, AsyncGenRequest, AsyncGenResume, AsyncResume,
   DataProperty, ErrorObj, GenCompleted, GenExecuting, GenNext, GenReturn,
-  GenSuspendedStart, GenSuspendedYield, GenThrow, Handler, IdentityPassThrough,
-  JsCell, JsStore, KHandle, KNative, KStr, KSym, Named, NoElements, Ordinary,
-  PromiseFulfilled, PromisePending, PromiseReaction, PromiseRejectFn,
-  PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob, SAsyncGen,
-  SBox, SGenerator, SObject, SPromise, StringKey, ThrowerPassThrough, TypeErr,
-  classify, jq_pop, jq_push, mk_bool, mk_object, mk_undefined,
+  GenSuspendedStart, GenSuspendedYield, GenThrow, Handler, HostJob,
+  IdentityPassThrough, JsCell, JsStore, KHandle, KNative, KStr, KSym, Named,
+  NoElements, Ordinary, PromiseFulfilled, PromisePending, PromiseReaction,
+  PromiseRejectFn, PromiseRejected, PromiseResolveFn, ReactionJob,
+  ResolveThenableJob, SAsyncGen, SBox, SGenerator, SObject, SPromise, StringKey,
+  ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push, mk_bool, mk_object,
+  mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -259,23 +260,40 @@ pub fn t_enqueue_job(st: Agent, job: Job) -> Agent {
 }
 
 /// Drain the microtask queue to empty (§8.6 "perform a microtask
-/// checkpoint"). Port of arc `event_loop.do_drain_jobs` reduced to the
-/// SPEC §7.M8 shape — no atomics-waiter / embedder-yield handling here.
-/// Between-jobs `t_maybe_collect` is THE D11 GC safepoint: `call_depth`
-/// is zero at this point, so a collection can only fire between jobs.
-/// Called by M19 `js_main` after top-level eval and by the host after
-/// each callback; NEVER mid-expression.
-pub fn t_drain_microtasks(st: Agent) -> Agent {
+/// checkpoint"), then report and clear unhandled rejections. Port of arc
+/// `event_loop.drain_jobs` + `finish_drain` minus the atomics-waiter
+/// deadlines. Between-jobs `t_maybe_collect` is THE D11 GC safepoint:
+/// `call_depth` is zero here, so a collection can only fire between jobs.
+/// Called by the runner after `js_main` and by the engine after each
+/// eval/call; NEVER mid-expression.
+pub fn drain(st: Agent) -> Agent {
   let js = require_js(st)
   case jq_pop(js.microtasks) {
-    None -> st
+    None -> finish_drain(st)
     Some(#(job, rest)) -> {
       let st = with_js(st, JsStore(..js, microtasks: rest))
       let st = execute_job(st, job)
       let st = rt_gc.t_maybe_collect(st)
-      t_drain_microtasks(st)
+      drain(st)
     }
   }
+}
+
+/// The drain's terminal exit: report every promise still rejected with no
+/// handler (newest first, as tracked) and clear the list. Port of arc
+/// `event_loop.finish_drain` / `report_unhandled_rejections`.
+fn finish_drain(st: Agent) -> Agent {
+  let js = require_js(st)
+  list.each(js.unhandled_rejections, fn(id) {
+    case rt_store.t_cell_get(st, JsCell(id)) {
+      SPromise(state: PromiseRejected(reason), ..) ->
+        st.hooks.report_uncaught(
+          "Uncaught (in promise) " <> describe_thrown(st, reason),
+        )
+      _ -> Nil
+    }
+  })
+  with_js(st, JsStore(..js, unhandled_rejections: []))
 }
 
 /// Fire-and-forget invoke of a promise-capability resolve/reject fn during
@@ -284,15 +302,19 @@ pub fn t_drain_microtasks(st: Agent) -> Agent {
 /// propagated (a job has no caller to propagate to). Port of arc
 /// `job_call.call_settlement_fn`.
 fn call_settle(st: Agent, target: JsVal, args: List(JsVal)) -> Agent {
-  case t_call(st, target, mk_undefined(), args) {
+  report_job_throw(t_call(st, target, mk_undefined(), args))
+}
+
+/// `target` in `call_settle` is typically a promise-capability resolve/reject
+/// function. The native ones never throw, but `Promise.prototype.then` builds
+/// the child capability with NewPromiseCapability(SpeciesConstructor(this)),
+/// so a user species constructor hands us arbitrary user callables. There is
+/// no promise to blame the throw on (it happened AFTER the reaction settled),
+/// so `unhandled_rejections` cannot carry it; report it through the host sink
+/// instead of letting it vanish. A throwing `HostJob` lands here too.
+fn report_job_throw(outcome: #(Completion, Agent)) -> Agent {
+  case outcome {
     #(NormalCompletion(_), st) -> st
-    // `target` is typically a promise-capability resolve/reject function. The
-    // native ones never throw, but `Promise.prototype.then` builds the child
-    // capability with NewPromiseCapability(SpeciesConstructor(this)), so a
-    // user species constructor hands us arbitrary user callables here. There
-    // is no promise to blame the throw on (it happened AFTER the reaction
-    // settled), so `unhandled_rejections` cannot carry it; report it through
-    // the host sink instead of letting it vanish.
     #(ThrowCompletion(thrown), st) -> {
       st.hooks.report_uncaught(
         "Uncaught (in promise job) " <> describe_thrown(st, thrown),
@@ -323,7 +345,7 @@ fn describe_thrown(st: Agent, thrown: JsVal) -> String {
 }
 
 /// Run one microtask job. Port of arc `event_loop.execute_job` +
-/// `execute_reaction_job` + `execute_thenable_job`.
+/// `execute_reaction_job` + `execute_thenable_job` + `execute_host_job`.
 fn execute_job(st: Agent, job: Job) -> Agent {
   case job {
     // §27.2.2.1 NewPromiseReactionJob.
@@ -343,6 +365,8 @@ fn execute_job(st: Agent, job: Job) -> Agent {
         #(NormalCompletion(_), st) -> st
         #(ThrowCompletion(e), st) -> call_settle(st, reject, [e])
       }
+    HostJob(run:) ->
+      report_job_throw(protected(st, fn(st) { #(mk_undefined(), run(st)) }))
   }
 }
 

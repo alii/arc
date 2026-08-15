@@ -25,7 +25,7 @@ apply_js_main(Mod, St) ->
     end.
 
 epilogue(St0) ->
-    St1 = 'arc@rt@async':t_drain_microtasks(St0),
+    St1 = 'arc@rt@async':drain(St0),
     'arc@rt@gc':t_maybe_collect(St1).
 
 render_reason(Class, Reason, Stk) ->

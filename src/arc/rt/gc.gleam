@@ -18,8 +18,8 @@ import arc/rt/types.{
   type Property, type ReactionHandler, AccessorProperty, Agent, ArgumentsObj,
   ArrayBufferObj, ArrayIterator, ArrayObj, AsyncFromSyncIterator, BigIntObj,
   BooleanObj, DataProperty, DataViewObj, DateObj, Dense, ErrorObj, ForInIterator,
-  Handler, IdentityPassThrough, IteratorHelperObj, JsCell, JsStore, KBound,
-  KBytecode, KCompiled, KNative, MapIterator, MapObj, ModuleNamespace,
+  Handler, HostJob, IdentityPassThrough, IteratorHelperObj, JsCell, JsStore,
+  KBound, KBytecode, KCompiled, KNative, MapIterator, MapObj, ModuleNamespace,
   NoElements, NumberObj, Ordinary, PromiseFulfilled, PromisePending,
   PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
   ResolveThenableJob, SAsyncGen, SBox, SGenerator, SObject, SPromise,
@@ -291,6 +291,8 @@ pub fn push_job_refs(job: Job, acc: List(Int)) -> List(Int) {
       |> push_val_refs(then_fn, _)
       |> push_val_refs(resolve, _)
       |> push_val_refs(reject, _)
+    // Handles the closure captured live in its fun env.
+    HostJob(run:) -> push_term_refs(to_dynamic(run), acc)
   }
 }
 

@@ -2161,6 +2161,9 @@ pub type Job {
     resolve: JsVal,
     reject: JsVal,
   )
+  /// An embedder/interpreter step interleaved FIFO with promise jobs. Any
+  /// handle it closes over is traced through the closure environment.
+  HostJob(run: fn(Agent) -> Agent)
 }
 
 /// Which method a queued (async-)generator request represents.

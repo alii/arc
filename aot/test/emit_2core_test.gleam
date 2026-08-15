@@ -431,3 +431,22 @@ pub fn date_now_reads_wall_clock_hook_test() {
     )
   assert c.stdout == <<"1700000000000 true\n":utf8>>
 }
+
+/// A promise left rejected at the end of the drain is reported once through
+/// `report_uncaught`, with the same text on both paths (an Error reason would
+/// differ only by the interpreter's `at script:N` trace lines).
+pub fn unhandled_rejection_report_diff_test() {
+  let src =
+    "Promise.reject('nobody');var p=Promise.reject('later');Promise.resolve().then(function(){p.catch(function(){})});console.log('main')"
+  harness.buf_reset()
+  let i = harness.run_interpreted(src)
+  let i_err = harness.err_read()
+  let c = harness.run_compiled(src)
+  assert i.stdout == <<"main\n":utf8>>
+  assert c.stdout == i.stdout
+  assert i_err == <<"Uncaught (in promise) nobody\n":utf8>>
+  assert harness.err_read() == i_err
+  let c = harness.run_compiled("Promise.reject(new RangeError('e'))")
+  let assert Ok(_) = c.result
+  assert harness.err_read() == <<"Uncaught (in promise) RangeError: e\n":utf8>>
+}
