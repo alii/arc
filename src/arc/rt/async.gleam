@@ -469,12 +469,25 @@ fn generator_prototype(st: Agent, callee: JsVal, fallback: Handle) -> Handle {
 
 /// §27.5.3.3 GeneratorResume — `Generator.prototype.next(value)` on the data
 /// cell `gen_h`. Returns a fresh iter-result `{value, done}` handle. Port of
-/// arc `resume_generator_next` + `alloc_iter_result` (arc:52-113).
+/// arc `call_native_generator_next` (arc:52-62).
 pub fn t_gen_next(st: Agent, gen_h: Handle, sent: JsVal) -> #(Handle, Agent) {
+  let #(#(done, v), st) = t_gen_step(st, gen_h, sent)
+  alloc_iter_result(st, v, done)
+}
+
+/// GeneratorResume as a bare `#(done, value)`: what `t_gen_next` builds its
+/// result object from. The interpreter's `for..of` / `yield*` over a native
+/// generator take this directly instead of allocating the object and reading
+/// it straight back. Port of arc `resume_generator_next` (arc:71-102).
+pub fn t_gen_step(
+  st: Agent,
+  gen_h: Handle,
+  sent: JsVal,
+) -> #(#(Bool, JsVal), Agent) {
   let gen = read_generator(st, gen_h)
   let assert SGenerator(state:, resume:) = gen
   case state {
-    GenCompleted -> alloc_iter_result(st, mk_undefined(), True)
+    GenCompleted -> #(#(True, mk_undefined()), st)
     GenExecuting -> throw_type_error(st, "Generator is already running")
     // SuspendedStart: the first turn ignores `sent` but is otherwise a
     // normal resume.
@@ -498,7 +511,11 @@ pub fn t_gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
       let st = set_gen_state(st, gen_h, gen, GenCompleted)
       alloc_iter_result(st, v, True)
     }
-    GenSuspendedYield -> gen_resume(st, gen_h, gen, resume, #(sent_return, v))
+    GenSuspendedYield -> {
+      let #(#(done, v), st) =
+        gen_resume(st, gen_h, gen, resume, #(sent_return, v))
+      alloc_iter_result(st, v, done)
+    }
   }
 }
 
@@ -517,22 +534,26 @@ pub fn t_gen_throw(st: Agent, gen_h: Handle, e: JsVal) -> #(Handle, Agent) {
       let st = set_gen_state(st, gen_h, gen, GenCompleted)
       rt_store.t_throw(st, e)
     }
-    GenSuspendedYield -> gen_resume(st, gen_h, gen, resume, #(sent_throw, e))
+    GenSuspendedYield -> {
+      let #(#(done, v), st) =
+        gen_resume(st, gen_h, gen, resume, #(sent_throw, e))
+      alloc_iter_result(st, v, done)
+    }
   }
 }
 
 /// Resume a suspended generator with `sent` and marshal the `Step` back into
-/// the sync-driver convention. Port of arc `build_resumed_state` +
-/// `run_to_completion` + `settle_completion` (arc:388-610). Bracketed with
-/// `t_enter_call`/`t_leave_call` — arc bumps `call_depth` for the exact same
-/// D11 reason (arc:382).
+/// the sync-driver convention as `#(done, value)`. Port of arc
+/// `build_resumed_state` + `run_to_completion` + `settle_completion`
+/// (arc:388-610). Bracketed with `t_enter_call`/`t_leave_call` — arc bumps
+/// `call_depth` for the exact same D11 reason (arc:382).
 fn gen_resume(
   st: Agent,
   gen_h: Handle,
   gen: JsSlot,
   resume: Resume,
   sent: #(Int, JsVal),
-) -> #(Handle, Agent) {
+) -> #(#(Bool, JsVal), Agent) {
   let st = set_gen_state(st, gen_h, gen, GenExecuting)
   let st = rt_store.t_enter_call(st)
   let #(step, st) = apply_resume(st, resume, sent)
@@ -541,8 +562,7 @@ fn gen_resume(
     st,
     StepCtx(
       on_return: fn(st, v) {
-        let st = set_gen_state(st, gen_h, gen, GenCompleted)
-        alloc_iter_result(st, v, True)
+        #(#(True, v), set_gen_state(st, gen_h, gen, GenCompleted))
       },
       on_throw: fn(st, e) {
         let st = set_gen_state(st, gen_h, gen, GenCompleted)
@@ -555,7 +575,7 @@ fn gen_resume(
             gen_h,
             SGenerator(state: GenSuspendedYield, resume:),
           )
-        alloc_iter_result(st, v, False)
+        #(#(False, v), st)
       },
       on_await: step_unreachable,
     ),

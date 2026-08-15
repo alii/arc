@@ -19,6 +19,7 @@ import arc/interp/state.{
   DelegateYield, InitialSuspend, InternalError, PlainYield, Returned,
   StackUnderflow, State, SuspensionLeak, Threw, VmFailed, Yielded,
 }
+import arc/rt/async as rt_async
 import arc/rt/builtins/global_fns
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/regexp as b_regexp
@@ -3305,7 +3306,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   )
                 }
                 None ->
-                  case rt2(state, rt_lang.t_iter_next, rec) {
+                  case iter_step(state, rec) {
                     Ok(#(#(done, val), state)) -> {
                       let slot = case done {
                         True -> mk_undefined()
@@ -3429,15 +3430,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             slot,
           ))
           let state = State(..state, stack: [arg, iterator, ..rest])
-          use #(res, state) <- result.try(
-            rt4(state, rt_call.t_call_checked, next_fn, iterator, [arg]),
-          )
-          // §27.5.3.x yield*: IteratorComplete then IteratorValue (value IS
-          // read when done).
-          use #(#(done, val), state) <- result.try(rt2(
+          use #(#(done, val), state) <- result.try(delegate_step(
             state,
-            iter_protocol.read_iter_result,
-            res,
+            iterator,
+            next_fn,
+            arg,
           ))
           case done {
             True -> Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
@@ -4126,6 +4123,71 @@ fn fill_holes(
               ])
           }
       }
+  }
+}
+
+/// IteratorNext for a record that is not the plain-Array shape, as
+/// `#(done, value)`. A generator whose `next` is the intrinsic
+/// %GeneratorPrototype%.next is resumed for one turn and answers the pair
+/// itself: no `{value, done}` object is built per step only to be read
+/// straight back. Anything else runs the protocol call.
+fn iter_step(
+  state: State,
+  rec: JsVal,
+) -> Result(#(#(Bool, JsVal), State), StepExit) {
+  let native =
+    rt_lang.record_parts(state.agent, rec)
+    |> option.then(fn(record) {
+      native_generator(state.agent, record.iterator, record.next_method)
+    })
+  case native {
+    Some(data) -> rt3(state, rt_async.t_gen_step, data, mk_undefined())
+    None -> rt2(state, rt_lang.t_iter_next, rec)
+  }
+}
+
+/// One `next(arg)` turn of a yield* delegate as `#(done, value)` (§27.5.3.8
+/// step 7.a: `value` IS read when done). A native generator is resumed
+/// directly, skipping the result object; any other iterator is called and
+/// its result read.
+fn delegate_step(
+  state: State,
+  iterator: JsVal,
+  next_fn: JsVal,
+  arg: JsVal,
+) -> Result(#(#(Bool, JsVal), State), StepExit) {
+  case native_generator(state.agent, iterator, next_fn) {
+    Some(data) -> rt3(state, rt_async.t_gen_step, data, arg)
+    None -> {
+      use #(res, state) <- result.try(
+        rt4(state, rt_call.t_call_checked, next_fn, iterator, [arg]),
+      )
+      rt2(state, iter_protocol.read_iter_result, res)
+    }
+  }
+}
+
+/// The `SGenerator` data cell behind `iterator` when it is a generator
+/// object and `next_fn` the unmodified %GeneratorPrototype%.next, i.e. when
+/// calling `next_fn` could do nothing but resume that generator.
+fn native_generator(
+  agent: Agent,
+  iterator: JsVal,
+  next_fn: JsVal,
+) -> Option(Handle) {
+  use next_h <- option.then(handle_of(next_fn))
+  use iter_h <- option.then(handle_of(iterator))
+  case rt_store.t_cell_get(agent, next_h), rt_store.t_cell_get(agent, iter_h) {
+    SObject(
+      kind: rt_types.KNative(
+        tag: rt_types.GeneratorN(rt_types.GeneratorNext),
+        ..,
+      ),
+      ..,
+    ),
+      SObject(kind: rt_types.GeneratorObj(data:), ..)
+    -> Some(data)
+    _, _ -> None
   }
 }
 
