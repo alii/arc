@@ -1,7 +1,5 @@
 //// The embedder capability contract: everything a host supplies ONCE at
-//// engine/realm construction. The interpreter carries it on
-//// `state.RealmCtx.host_hooks`; the shared runtime carries it on
-//// `Agent.hooks`. One record for both.
+//// engine construction, carried on `Agent.hooks`.
 ////
 //// Core never blocks on the BEAM mailbox and never sends wake messages
 //// itself. Both event-driven sides of `Atomics.wait`/`notify` are inverted
@@ -9,18 +7,17 @@
 //// `host.suspend`/`host.resume` for promises), and the clocks, the PRNG and
 //// the console sink are hooks so a host can virtualise them.
 ////
-//// This module is deliberately tiny and dependency-light — it sits BELOW
-//// `arc/vm/state` and `arc/rt/types` and is re-exported by `arc/host` for
-//// embedders.
+//// This module is a dependency-light leaf below `arc/rt/types`, re-exported
+//// by `arc/host` for embedders. No field mentions a JS value type; the
+//// dynamic-import host function is engine state on `Agent.host_fns` (see
+//// `arc/module_host.install_import_hook`), not a hook here.
 ////
 //// The opaque terms (`WaiterKey`, `WaiterHandle`, `ClaimedWaiter`) are
-//// produced exclusively by the data-only ETS registry
-//// `arc/vm/builtins/arc_waiter_ffi.erl` and are safe to send between
-//// processes.
+//// Erlang terms produced by the Atomics waiter FFI and are safe to send
+//// between processes.
 
 import arc/internal/host_time
 import arc/vm/internal/clock_ffi
-import arc/vm/value.{type JsValue}
 import gleam/float
 import gleam/io
 import gleam/option.{type Option}
@@ -39,13 +36,9 @@ pub type ConsoleLevel {
 /// Opaque cross-process identity of a buffer's WaiterList (an Erlang term:
 /// the SAB's atomics ref for shared storage, a pid-scoped heap id
 /// otherwise — see arc_waiter_ffi:shared_buffer_key/local_buffer_key).
-/// Compared structurally; safe to send between processes.
-///
-/// Alias of `value.WaiterKey`: `value.AtomicsWaiter` stores one, so the type
-/// has to be declared where the waiter record can see it. Named here as well
-/// because it is part of the host-capability contract (`WaitRequest.key`).
-pub type WaiterKey =
-  value.WaiterKey
+/// Compared structurally; safe to send between processes. Part of the
+/// host-capability contract (`WaitRequest.key`).
+pub type WaiterKey
 
 /// Opaque handle to one registered waiterlist entry (its ETS key plus the
 /// unique message ref a notifier will address). Produced by
@@ -148,10 +141,9 @@ pub type AtomicsCapabilities {
 }
 
 /// The embedder's host capabilities, bundled into one record carried on
-/// `state.RealmCtx.host_hooks`. Supplied exactly once at engine/realm
-/// construction (an explicit argument to `interpreter.new_state`) and
-/// inherited by every derived State via the `RealmCtx(..spread)`s. NOT
-/// generic over `host`: no field mentions the embedder's heap-value type.
+/// `Agent.hooks`. Supplied exactly once at engine construction
+/// (`rt/builtins.new_agent(hooks)`) and shared by everything that runs on that
+/// agent. NOT generic over `host`: no field mentions a JS value type.
 pub type HostHooks {
   HostHooks(
     /// The Atomics blocking-wait + wake-delivery capability pair
@@ -180,23 +172,6 @@ pub type HostHooks {
     /// `io.println_error`; an embedder overrides it to capture reports (test
     /// harness assertions, structured logging) instead of writing to stderr.
     report_uncaught: fn(String) -> Nil,
-    /// §16.2.1.8 HostLoadImportedModule: the embedder's dynamic-import host
-    /// hook — a host function (see `arc/module_host.install_import_hook`)
-    /// called with `(specifier, referrer?, phase?, resolve?, reject?)` that
-    /// loads/links/evaluates the requested module graph. `None` = this host
-    /// does not support dynamic import: `import()` rejects with a TypeError.
-    ///
-    /// For the eager phase the hook's return value settles the import
-    /// promise. For the `defer` phase the hook is handed the promise's
-    /// resolving functions and MUST settle through them itself — its return
-    /// value is ignored (see `arc/vm/exec/dynamic_import.DeferHookOutcome`
-    /// for the full contract, and `throw` to reject in either phase).
-    ///
-    /// This is ENGINE state, not a globalThis property: guest JS can neither
-    /// read nor replace it. The `Ref` inside the `JsValue` is pinned with
-    /// `heap.root` at install time (like `RealmCtx.template_objects` entries),
-    /// because nothing else in the heap reaches it.
-    import_hook: Option(JsValue),
     /// Wall clock: milliseconds since the Unix epoch. Backs `Date.now` and
     /// `new Date()`. Defaults to `erlang:system_time(millisecond)`.
     wall_clock_ms: fn() -> Int,
@@ -224,19 +199,17 @@ pub fn default_print(level: ConsoleLevel, line: String) -> Nil {
 }
 
 /// The capability-free default: a host that can neither block an agent nor
-/// deliver wakes, and that has no dynamic-import hook (so `import()` rejects
-/// with a TypeError). "No capabilities" is the safe baseline — sync
-/// Atomics.wait throws (AgentCanSuspend is false) rather than hanging. The
-/// clock and sleep hooks are NOT capability-gated: they default to the real
-/// `arc_clock_ffi` monotonic clock and `timer:sleep`, which is what every
-/// host wants unless it is virtualising time.
+/// deliver wakes. "No capabilities" is the safe baseline — sync Atomics.wait
+/// throws (AgentCanSuspend is false) rather than hanging. The clock and sleep
+/// hooks are NOT capability-gated: they default to the real `arc_clock_ffi`
+/// monotonic clock and `timer:sleep`, which is what every host wants unless
+/// it is virtualising time.
 pub fn default_host_hooks() -> HostHooks {
   HostHooks(
     atomics: option.None,
     monotonic_now: clock_ffi.monotonic_now,
     sleep_ms: clock_ffi.sleep_ms,
     report_uncaught: io.println_error,
-    import_hook: option.None,
     wall_clock_ms: host_time.now_ms,
     time_zone: host_time.host_time_zone(),
     random: float.random,

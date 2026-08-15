@@ -1,3 +1,4 @@
+import arc/host_hooks
 import arc/internal/host_time
 import arc/parser/number
 import arc/vm/builtins/temporal_tz
@@ -1342,12 +1343,11 @@ pub type AtomicsNativeFn {
 /// arc_waiter_ffi:shared_buffer_key/local_buffer_key). Compared structurally;
 /// safe to send between processes.
 ///
-/// It lives here rather than in arc/vm/state because `AtomicsWaiter` below
-/// carries one, and it is the ONE notion of waiter identity: the shared ETS
-/// registry keys tokens by it, so anything that reconciles State's waiters
-/// against that registry must match on it too. `arc/vm/state` re-exports it
-/// as the host-capability contract type.
-pub type WaiterKey
+/// Alias of the host-capability contract type `host_hooks.WaiterKey`, which
+/// is the ONE notion of waiter identity: `AtomicsWaiter` below carries one and
+/// the shared registry keys tokens by it.
+pub type WaiterKey =
+  host_hooks.WaiterKey
 
 /// A pending Atomics.waitAsync waiter: a promise to resolve with "ok" when
 /// Atomics.notify hits the same waiter-list slot.

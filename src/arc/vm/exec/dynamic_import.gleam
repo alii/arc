@@ -20,13 +20,12 @@
 ////       e. If AllImportAttributesSupported(attributes) is false, reject
 ////          with TypeError (this host supports no import attributes).
 ////   9+. HostLoadImportedModule / ContinueDynamicImport — delegated to the
-////       embedder's import hook, a host function carried as ENGINE state on
-////       `state.ctx.host_hooks.import_hook` (installed by
-////       arc/module_host.install_import_hook, never visible to guest JS).
-////       The hook returns the module namespace object or throws; the promise
-////       is resolved or rejected accordingly. Without a hook, import()
-////       rejects with a TypeError (dynamic import unsupported in this
-////       context).
+////       embedder's import hook, a host function carried as ENGINE state
+////       (never visible to guest JS). The hook returns the module namespace
+////       object or throws; the promise is resolved or rejected accordingly.
+////       Without a hook, import() rejects with a TypeError (dynamic import
+////       unsupported in this context). This retired interpreter no longer
+////       has a hook slot; the live one is arc/interp/dynamic_import.
 ////
 //// All failures after argument evaluation reject the returned promise —
 //// nothing here throws synchronously (IfAbruptRejectPromise semantics).
@@ -36,7 +35,7 @@
 //// properties: the hook, the active referrer, and the ~defer~ "already
 //// settled" signal all used to live in guest-reachable strings/properties,
 //// which let user JS replace the module loader or forge its resolution root.
-//// They are now typed engine state (`HostHooks.import_hook` /
+//// They are now typed engine state (`Agent.host_fns` /
 //// `RealmCtx.import_referrer`) and a typed job outcome (`DeferHookOutcome`).
 
 import arc/vm/builtins/common
@@ -507,25 +506,16 @@ fn validate_attributes(
   }
 }
 
-/// Steps 9+ (HostLoadImportedModule): read the embedder's import hook off the
-/// realm's ENGINE state (`ctx.host_hooks.import_hook` — never a globalThis
-/// property, so guest JS can neither observe nor replace it) and invoke it with
-/// `hook_args` (built by `encode_hook_args`, decoded by `parse_hook_args`).
-/// `Ok(returned)` is a normal hook return; `Error(thrown)` is either "no hook
-/// installed" (a TypeError) or the value the hook threw.
+/// Steps 9+ (HostLoadImportedModule). `HostHooks` no longer carries an import
+/// hook (the live engine keeps it on `Agent.host_fns`, see arc/module_host),
+/// so this retired interpreter has no hook to call: `import()` always rejects
+/// with the "unsupported in this context" TypeError, exactly as it did with no
+/// hook installed.
 fn call_host_hook(
   state: State(host),
-  hook_args: List(JsValue),
+  _hook_args: List(JsValue),
 ) -> #(State(host), Result(JsValue, JsValue)) {
-  case state.ctx.host_hooks.import_hook {
-    Some(hook_fn) ->
-      case state.call(state, hook_fn, JsUndefined, hook_args) {
-        Ok(#(namespace, state)) -> #(state, Ok(namespace))
-        Error(#(thrown, state)) -> #(state, Error(thrown))
-      }
-    None ->
-      state.type_error(state, "Dynamic import is not supported in this context")
-  }
+  state.type_error(state, "Dynamic import is not supported in this context")
 }
 
 /// `call_host_hook` for the ~defer~ phase, mapping the raw call outcome onto

@@ -178,8 +178,7 @@ pub type RealmCtx(host) {
 
 /// Every heap ref a `HostHooks` record can hold — the ENGINE-state values a
 /// GC must treat as reachable for as long as the hooks are installed (today:
-/// the dynamic-import hook's function object). Folded into
-/// `reachable_root_refs` below.
+/// none). Folded into `reachable_root_refs` below.
 ///
 /// The destructure below is EXHAUSTIVE over `HostHooks` on purpose: adding a
 /// hook field is a compile error here until it has been classified as
@@ -193,14 +192,12 @@ pub fn host_hook_roots(hooks: host_hooks.HostHooks) -> List(JsValue) {
     monotonic_now: _,
     sleep_ms: _,
     report_uncaught: _,
-    // The one JsValue-carrying hook: %DynamicImportHook%'s function object.
-    import_hook:,
     wall_clock_ms: _,
     time_zone: _,
     random: _,
     print: _,
   ) = hooks
-  option.values([import_hook])
+  []
 }
 
 /// The ONE canonical enumerator of every heap `Ref` reachable from a `State`

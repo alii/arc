@@ -4,8 +4,8 @@
 ////
 //// The VM's DynamicImport opcode (see arc/vm/exec/dynamic_import) performs
 //// the language-level ImportCall steps and then calls a host hook carried as
-//// ENGINE state on the realm's `HostHooks.import_hook` — never a globalThis
-//// property, so guest JS can neither observe nor replace the module loader.
+//// ENGINE state — never a globalThis property, so guest JS can neither
+//// observe nor replace the module loader.
 //// This module provides that hook: it resolves and loads the requested
 //// module source via an embedder-supplied loader, compiles + links +
 //// evaluates the module graph through arc/vm/module, and returns the Module
@@ -89,10 +89,9 @@ pub fn forbid_load(_resolved: String) -> Result(String, LoadError) {
 /// is active); `resolve` maps specifiers to module identities and `load`
 /// reads their sources — a cached import never calls `load` at all.
 ///
-/// The returned function value is ENGINE state: the embedder stores it in the
-/// `HostHooks.import_hook` it boots the realm with, and every derived State
-/// (eval realms, module bodies, dynamic-import continuations) inherits it.
-/// It is NEVER installed as a globalThis property, so guest JS cannot read,
+/// The returned function value is ENGINE state (`HostHooks` no longer has a
+/// slot for it; the live engine keeps its hook on `Agent.host_fns`). It is
+/// NEVER installed as a globalThis property, so guest JS cannot read,
 /// replace or delete the module loader. Because nothing else in the heap
 /// reaches the hook's function object, it is pinned as a persistent GC root
 /// here (like builtins prototypes and template objects).

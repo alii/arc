@@ -357,7 +357,7 @@ pub fn default_host_hooks() -> HostHooks {
 }
 
 /// Install the Atomics blocking-wait + wake-delivery capabilities on `hooks`,
-/// leaving every OTHER hook (`monotonic_now`, `sleep_ms`, `import_hook`, …)
+/// leaving every OTHER hook (`monotonic_now`, `sleep_ms`, `print`, …)
 /// exactly as the caller configured it. Both capabilities together, always: a
 /// host that blocks but cannot deliver wakes (or vice versa) deadlocks its
 /// peer agents, and `HostHooks.atomics` is one `Option(AtomicsCapabilities)`
