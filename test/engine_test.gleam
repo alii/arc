@@ -1,5 +1,6 @@
 import arc/engine.{ModuleReturned, Returned}
 import arc/module/load_error
+import arc/rt/snapshot.{IncompatibleSnapshot, MalformedBinary}
 import arc/vm/builtins/console
 import arc/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
 import gleam/option.{Some}
@@ -16,20 +17,21 @@ fn assert_eval(eng: engine.Engine(host), source: String) -> value.JsValue {
 
 /// Helper: serialize then deserialize an engine.
 fn roundtrip(eng: engine.Engine(host)) -> engine.Engine(host) {
-  let assert Ok(eng) = eng |> engine.serialize |> engine.deserialize
+  let assert Ok(bin) = engine.serialize(eng)
+  let assert Ok(eng) = engine.deserialize(bin)
   eng
 }
 
 pub fn deserialize_rejects_garbage_bytes_test() {
   let result: Result(engine.Engine(Nil), _) =
     engine.deserialize(<<"definitely not a snapshot":utf8>>)
-  assert result == Error(engine.MalformedBinary)
+  assert result == Error(MalformedBinary)
 }
 
 pub fn deserialize_rejects_unaligned_bits_test() {
   // A BitArray that isn't even byte-aligned, let alone a serialized term.
   let result: Result(engine.Engine(Nil), _) = engine.deserialize(<<1:size(3)>>)
-  assert result == Error(engine.MalformedBinary)
+  assert result == Error(MalformedBinary)
 }
 
 pub fn deserialize_rejects_foreign_term_test() {
@@ -38,22 +40,22 @@ pub fn deserialize_rejects_foreign_term_test() {
   // snapshot. Rejected on the bytes; nothing is ever decoded.
   let result: Result(engine.Engine(Nil), _) =
     engine.deserialize(<<131, 104, 3, 97, 1, 97, 2, 97, 3>>)
-  assert result == Error(engine.MalformedBinary)
+  assert result == Error(MalformedBinary)
 }
 
 pub fn deserialize_rejects_wrong_version_test() {
   // Our tag, a version no build will ever carry.
   let result: Result(engine.Engine(Nil), _) =
     engine.deserialize(<<"arc-engine":utf8, 999_999:32, 131, 106>>)
-  assert result == Error(engine.IncompatibleSnapshot)
+  assert result == Error(IncompatibleSnapshot)
 }
 
 pub fn deserialize_rejects_corrupt_payload_behind_header_test() {
   // A well-formed header whose payload is not an external term at all: the
   // decoder must fail closed rather than crash out of `binary_to_term`.
   let result: Result(engine.Engine(Nil), _) =
-    engine.deserialize(<<"arc-engine":utf8, 3:32, 1, 2, 3>>)
-  assert result == Error(engine.IncompatibleSnapshot)
+    engine.deserialize(<<"arc-engine":utf8, 4:32, 1, 2, 3>>)
+  assert result == Error(IncompatibleSnapshot)
 }
 
 pub fn serialize_roundtrip_number_test() {

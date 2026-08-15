@@ -15,6 +15,7 @@ import arc/host_hooks
 import arc/module
 import arc/module_host
 import arc/parser
+import arc/rt/snapshot
 import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/compile_task
@@ -637,81 +638,67 @@ pub fn call_with(
 // Serialization
 // ----------------------------------------------------------------------------
 
-/// The version stamped into the plain-bytes header `arc_snapshot_ffi` wraps
-/// every `serialize` payload in (`<<"arc-engine", Version:32, Term/binary>>`).
-/// Bump it whenever the shape of the serialized state changes; `deserialize`
-/// then rejects older snapshots as `IncompatibleSnapshot` — by matching the
-/// header, before the term is decoded — instead of misreading them.
+/// Version of THIS engine's payload inside the `arc_snapshot_ffi` container:
+/// the interpreter heap plus its `(builtins, global)` pair. An engine backed
+/// by the shared store snapshots through `arc/rt/snapshot` and its
+/// `abi_version` instead.
 ///
-/// Version history:
-///   1 — initial versioned envelope.
-///   2 — `value.SymbolId`'s well-known variant carries a `WellKnown` sum
-///       member instead of an Int, changing the serialized term shape of
-///       every well-known symbol in the heap.
-///   3 — the tag/version envelope moved OUT of the term into a plain-bytes
-///       header, so a foreign binary is rejected before it is decoded.
-const snapshot_version = 3
+///   1..3  earlier envelopes of the same heap
+///   4     the heap sits in the `{arc_snapshot, version, store, realms}` term
+const snapshot_version = 4
 
-/// Why `deserialize` rejected a binary.
-pub type DeserializeError {
-  /// The bytes do not carry the snapshot header at all — random bytes, a bare
-  /// Erlang term, or an unaligned bit array. Nothing was decoded.
-  MalformedBinary
-  /// The bytes ARE a snapshot container, but not one this build understands:
-  /// a different `snapshot_version`, or a corrupt/forged payload behind a
-  /// valid header.
-  IncompatibleSnapshot
-}
-
-/// Wrap a snapshot payload in the plain-bytes header. Monomorphic on the
-/// payload — Erlang's `term_to_binary` is not exposed to the rest of the tree.
 @external(erlang, "arc_snapshot_ffi", "encode")
 fn encode_snapshot(
   version: Int,
-  snapshot: #(Heap(host), Builtins, Ref),
+  heap: Heap(host),
+  realm: #(Builtins, Ref),
 ) -> BitArray
 
-/// Unwrap a snapshot binary, or say why not. Implemented in Erlang so the
-/// header check happens on the RAW BYTES: `binary_to_term` only ever runs on a
-/// payload already proved to carry our tag and our exact version, and neither
-/// of its failure modes (badarg on garbage, a term of the wrong shape) can
-/// surface in Gleam as a badmatch.
+/// The header check runs on the raw bytes, so `binary_to_term` only sees a
+/// payload with our tag and exact version, and neither badarg on garbage nor
+/// a wrong-shaped term can surface in Gleam as a badmatch.
 @external(erlang, "arc_snapshot_ffi", "decode")
 fn decode_snapshot(
   version: Int,
   data: BitArray,
-) -> Result(#(Heap(host), Builtins, Ref), DeserializeError)
+) -> Result(#(Heap(host), #(Builtins, Ref)), snapshot.DeserializeError)
 
 /// Serialize the entire engine state to a binary.
 ///
 /// The payload is wrapped in a versioned header so `deserialize` can tell a
 /// stale or foreign binary apart from a current one without decoding it.
 ///
-/// Host function closures stored in the heap will NOT survive — their Ref
-/// slots persist but the Erlang closure data is lost. Embedders must
-/// re-register host functions after `deserialize`. `host_hooks` are closures
-/// too and are deliberately NOT serialized.
-pub fn serialize(engine: Engine(host)) -> BitArray {
-  encode_snapshot(snapshot_version, #(
-    engine.heap,
-    engine.builtins,
-    engine.global,
-  ))
+/// Not written, and re-bound after `deserialize`: host functions (their
+/// objects survive, the closures do not; re-register them in the same
+/// order), `host_hooks`, host modules. Fails with
+/// `SnapshotContainsCompiledCode` when the heap holds a function whose body
+/// is compiled BEAM code, which is bound to one loaded module version and
+/// cannot round-trip; an interpreter-only engine never does.
+pub fn serialize(
+  engine: Engine(host),
+) -> Result(BitArray, snapshot.SnapshotError) {
+  Ok(
+    encode_snapshot(snapshot_version, engine.heap, #(
+      engine.builtins,
+      engine.global,
+    )),
+  )
 }
 
 /// Restore an engine from a binary produced by `serialize`.
 ///
 /// Fails with `MalformedBinary` if the bytes carry no snapshot header, and with
-/// `IncompatibleSnapshot` if they do but name a different `snapshot_version`
-/// (e.g. a snapshot written by an older or newer build) or hide a corrupt
-/// payload behind it.
+/// `IncompatibleSnapshot` if they do but name a different version (a snapshot
+/// written by an older or newer build) or hide a corrupt payload behind it.
 ///
-/// The restored engine carries `host_hooks.default_host_hooks()` and no host modules
-/// — both hold embedder closures that cannot round-trip through `serialize`.
-/// Re-install hooks with `with_host_hooks` and host modules with
-/// `register_host_module`, alongside re-registering host functions.
-pub fn deserialize(data: BitArray) -> Result(Engine(host), DeserializeError) {
-  use #(heap, builtins, global) <- result.map(decode_snapshot(
+/// The restored engine carries `host_hooks.default_host_hooks()`, no host
+/// functions and no host modules: all three hold embedder closures. Re-install
+/// them with `with_host_hooks`, `define_fn`/`host_fn` and
+/// `register_host_module`.
+pub fn deserialize(
+  data: BitArray,
+) -> Result(Engine(host), snapshot.DeserializeError) {
+  use #(heap, #(builtins, global)) <- result.map(decode_snapshot(
     snapshot_version,
     data,
   ))
