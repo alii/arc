@@ -24,18 +24,22 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type HostTerm, type JsVal, type Property, Agent,
-  HostFnEntry, JFloat, JInt, KBool, KHandle, KHost, KNum, KStr, NoElements,
-  RangeErr, SObject, StringKey, TypeErr, classify, mk_object, mk_undefined,
+  HostFnEntry, HostJob, JFloat, JInt, KBool, KHandle, KHost, KNum, KStr,
+  NoElements, PromiseObj, PromisePending, RangeErr, SObject, StringKey, TypeErr,
+  classify, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/set
 
 // -- State -------------------------------------------------------------------
 
@@ -256,6 +260,124 @@ pub fn validate_boolean(
   case classify(val) {
     KBool(b) -> cont(b, s)
     _ -> invalid_arg_type(s, name, "boolean", val)
+  }
+}
+
+// -- Suspend / resume --------------------------------------------------------
+//
+// The macrotask loop is the embedder's. Core only knows about Promises and
+// the microtask queue. These two functions are the bridge: a host function
+// hands JS a pending Promise and walks away with a settle `Ticket`; later,
+// from its own loop (BEAM mailbox, libuv, epoll, whatever), it calls
+// `resume` with that Ticket. `resume` queues the settlement as a microtask
+// job behind whatever is already queued, so the Promise settles, and its
+// reactions run, on the next drain: `with_state` drains on the way out, as
+// do the engine's eval/call epilogues.
+//
+//     fn fetch(args, _this, s) {
+//       let #(s, promise, ticket) = host.suspend(s)
+//       kick_off_http(url, on_done: my_queue.push(ticket, _))
+//       #(s, Ok(promise))
+//     }
+//     fn my_loop(agent) {
+//       case my_queue.in_flight() {
+//         0 -> agent
+//         _ -> {
+//           let #(ticket, result) = my_queue.block()
+//           let #(agent, _outcome) =
+//             host.with_state(agent, fn(s) { host.resume(s, ticket, result) })
+//           my_loop(agent)
+//         }
+//       }
+//     }
+
+/// What `resume` did with the ticket. Embedders that don't care can bind
+/// `_outcome`; embedders that want to detect their own bugs match on it.
+pub type ResumeOutcome {
+  /// The settlement is queued; the next drain settles the promise.
+  Resumed
+  /// The ticket had already been resumed once. Nothing changed.
+  AlreadySettled
+  /// The ticket does not name a suspended promise on this agent (it came
+  /// from another engine, or from before a `deserialize`). Nothing changed.
+  StaleTicket
+}
+
+/// Opaque settle handle for one `suspend`ed Promise. The ONLY way to get one
+/// is from `suspend`, and the only thing to do with it is hand it back to
+/// `resume`, so passing the Promise object or some unrelated handle to
+/// `resume` is a compile error, not silent heap corruption.
+pub opaque type Ticket {
+  Ticket(promise: Handle)
+}
+
+/// Create a pending Promise. Return the value from your host function so JS
+/// can `await` it; keep the `Ticket` to pass to `resume` once your external
+/// work completes. The promise is a GC root until then, so everything
+/// awaiting it survives any collection in between.
+pub fn suspend(s: State(host)) -> #(State(host), JsVal, Ticket) {
+  let #(promise, st) = rt_async.t_new_promise(s.agent)
+  let st = rt_store.t_pin_root(st, promise)
+  #(State(..s, agent: st), mk_object(promise), Ticket(promise:))
+}
+
+/// Queue the settlement of the Promise behind a `suspend` Ticket as a
+/// microtask job: it resolves on `Ok` (assimilating a thenable like a
+/// `resolve` function does), rejects on `Error`, and the reactions run in
+/// the same drain. The promise stops being a GC root here; the queued job
+/// keeps it alive until it has run.
+///
+/// Resuming an already-resumed ticket is a no-op reported as
+/// `AlreadySettled`, and a ticket this agent never issued is `StaleTicket`,
+/// so an embedder counting `Resumed` outcomes against its suspends stays
+/// honest.
+pub fn resume(
+  s: State(host),
+  ticket: Ticket,
+  outcome: Result(JsVal, JsVal),
+) -> #(State(host), ResumeOutcome) {
+  let Ticket(promise:) = ticket
+  case ticket_state(s.agent, promise) {
+    Stale -> #(s, StaleTicket)
+    Spent -> #(s, AlreadySettled)
+    Live -> {
+      let st = rt_gc.t_release_roots(s.agent, [promise.id])
+      let settle = fn(st) {
+        case outcome {
+          Ok(value) -> rt_async.t_promise_resolve(st, promise, value)
+          Error(reason) -> rt_async.t_promise_reject(st, promise, reason)
+        }
+      }
+      let st = rt_async.t_enqueue_job(st, HostJob(run: settle))
+      #(State(..s, agent: st), Resumed)
+    }
+  }
+}
+
+type TicketState {
+  /// Suspended and not yet resumed: a pinned, pending promise.
+  Live
+  /// Resumed before: the pin is gone (the promise may still be pending
+  /// until the queued job runs).
+  Spent
+  /// Not a promise of this agent at all.
+  Stale
+}
+
+fn ticket_state(st: Agent, promise: Handle) -> TicketState {
+  use <- bool.guard(!rt_gc.t_is_live(st, promise), Stale)
+  use <- bool.guard(!is_promise(st, promise), Stale)
+  let pinned = set.contains(st.store.pinned_roots, promise.id)
+  case rt_async.promise_data(st, promise) {
+    #(_, PromisePending(_), _) if pinned -> Live
+    _ -> Spent
+  }
+}
+
+fn is_promise(st: Agent, h: Handle) -> Bool {
+  case rt_store.t_cell_get(st, h) {
+    SObject(kind: PromiseObj(..), ..) -> True
+    _ -> False
   }
 }
 
