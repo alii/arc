@@ -15,6 +15,7 @@
 //// popped in step so `Error.stack` names the live bytecode frames.
 
 import arc/interp/ffi
+import arc/interp/safepoint
 import arc/interp/state.{
   type SavedFrame, type State, type StepExit, Returned, SavedFrame, State, Threw,
 }
@@ -777,7 +778,8 @@ fn resolve_return(
 /// The Return opcode. Top of stack (or `undefined`) is the completion
 /// value. With no caller frame this activation is done: `Returned` carries
 /// the raw value and the final state to the driver. Otherwise apply the
-/// constructor return rules, restore the caller and push the value.
+/// constructor return rules, restore the caller, push the value, and give
+/// the collector its chance if this landed back in the root activation.
 pub fn return_op(state: State) -> Result(State, StepExit) {
   let return_value = case state.stack {
     [v, ..] -> v
@@ -790,7 +792,9 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
         Ok(pushed) -> {
           let caller = restore_frame(state, saved, rest_frames)
-          Ok(State(..caller, stack: [pushed, ..caller.stack]))
+          Ok(safepoint.maybe_collect_at_toplevel(
+            State(..caller, stack: [pushed, ..caller.stack]),
+          ))
         }
       }
   }
