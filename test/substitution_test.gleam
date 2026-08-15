@@ -1,4 +1,4 @@
-import arc/vm/builtins/substitution.{
+import arc/rt/builtins/substitution.{
   type PlainSegment, CaptureSeg, Ctx, LiteralSeg, MatchedSeg, NamedSeg, Plain,
 }
 

@@ -1,8 +1,8 @@
 import arc/internal/utf16
+import arc/rt/builtins/substitution
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/regexp_ops
-import arc/vm/builtins/substitution
 import arc/vm/heap
 import arc/vm/js_string
 import arc/vm/key

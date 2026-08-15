@@ -14,10 +14,10 @@
 /// units; identical for ASCII subjects).
 import arc/parser/regex
 import arc/parser/regex_error
+import arc/rt/builtins/substitution
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/regexp_ops
-import arc/vm/builtins/substitution
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/key.{Index, Named}

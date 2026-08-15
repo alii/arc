@@ -5,6 +5,7 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
+import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -35,7 +36,6 @@ import arc/rt/types.{
   well_known_symbol_description,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/builtins/substitution
 import arc/vm/js_string
 import arc/vm/limits
 import gleam/int
