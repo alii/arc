@@ -1,26 +1,40 @@
 //// The embedder capability contract: everything a host supplies ONCE at
-//// engine/realm construction and that every derived State inherits through
-//// `state.RealmCtx.host_hooks`.
+//// engine/realm construction. The interpreter carries it on
+//// `state.RealmCtx.host_hooks`; the shared runtime carries it on
+//// `Agent.hooks`. One record for both.
 ////
 //// Core never blocks on the BEAM mailbox and never sends wake messages
 //// itself. Both event-driven sides of `Atomics.wait`/`notify` are inverted
 //// into embedder-supplied capability functions (the same inversion as
-//// `host.suspend`/`host.resume` for promises), and the clock is a hook so a
-//// host can virtualise time.
+//// `host.suspend`/`host.resume` for promises), and the clocks, the PRNG and
+//// the console sink are hooks so a host can virtualise them.
 ////
 //// This module is deliberately tiny and dependency-light — it sits BELOW
-//// `arc/vm/state` (which stores a `HostHooks` on every realm) and is
-//// re-exported by `arc/host` for embedders.
+//// `arc/vm/state` and `arc/rt/types` and is re-exported by `arc/host` for
+//// embedders.
 ////
 //// The opaque terms (`WaiterKey`, `WaiterHandle`, `ClaimedWaiter`) are
 //// produced exclusively by the data-only ETS registry
 //// `arc/vm/builtins/arc_waiter_ffi.erl` and are safe to send between
 //// processes.
 
+import arc/internal/host_time
 import arc/vm/internal/clock_ffi
 import arc/vm/value.{type JsValue}
+import gleam/float
 import gleam/io
 import gleam/option.{type Option}
+
+/// Which `console` method produced a line. The default `print` hook sends
+/// `LogLevel`/`InfoLevel`/`DebugLevel` to stdout and `WarnLevel`/`ErrorLevel`
+/// to stderr.
+pub type ConsoleLevel {
+  LogLevel
+  InfoLevel
+  WarnLevel
+  ErrorLevel
+  DebugLevel
+}
 
 /// Opaque cross-process identity of a buffer's WaiterList (an Erlang term:
 /// the SAB's atomics ref for shared storage, a pid-scoped heap id
@@ -183,7 +197,25 @@ pub type HostHooks {
     /// `heap.root` at install time (like `RealmCtx.template_objects` entries),
     /// because nothing else in the heap reaches it.
     import_hook: Option(JsValue),
+    /// Wall clock: milliseconds since the Unix epoch. Backs `Date.now` and
+    /// `new Date()`. Defaults to `erlang:system_time(millisecond)`.
+    wall_clock_ms: fn() -> Int,
+    /// Uniform Float in [0, 1) behind `Math.random`. Defaults to
+    /// `float.random`; a harness seeds a deterministic PRNG here.
+    random: fn() -> Float,
+    /// The `console.*` sink: one formatted line (no trailing newline) and
+    /// the level of the method that produced it.
+    print: fn(ConsoleLevel, String) -> Nil,
   )
+}
+
+/// The default `print` hook: log/info/debug lines to stdout, warn/error
+/// lines to stderr.
+pub fn default_print(level: ConsoleLevel, line: String) -> Nil {
+  case level {
+    LogLevel | InfoLevel | DebugLevel -> io.println(line)
+    WarnLevel | ErrorLevel -> io.println_error(line)
+  }
 }
 
 /// The capability-free default: a host that can neither block an agent nor
@@ -200,5 +232,8 @@ pub fn default_host_hooks() -> HostHooks {
     sleep_ms: clock_ffi.sleep_ms,
     report_uncaught: io.println_error,
     import_hook: option.None,
+    wall_clock_ms: host_time.now_ms,
+    random: float.random,
+    print: default_print,
   )
 }

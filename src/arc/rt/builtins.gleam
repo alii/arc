@@ -11,6 +11,7 @@
 //// `@external(erlang, "arc_rt_builtins_ffi", ...)`; the FFI shim
 //// forwards straight to this module. Return-tuple order `#(V, St')` (R1).
 
+import arc/host_hooks.{type HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins/array as b_array
 import arc/rt/builtins/array_buffer as b_array_buffer
@@ -64,15 +65,16 @@ import gleam/option.{None, Some}
 
 // ───────────────────────────────── init_realm ───────────────────────────────
 
-/// A fresh `Agent` with an empty store seeded from `hooks` and a fully
+/// A fresh `Agent` with an empty store, the embedder's `hooks` and a fully
 /// initialised realm.
-pub fn new_agent(hooks: rt_types.HostHooks) -> Agent {
+pub fn new_agent(hooks: HostHooks) -> Agent {
   let st =
     Agent(
-      store: rt_store.t_store_new(hooks),
+      store: rt_store.t_store_new(),
       realm: rt_types.unset_realm(),
       template_objects: dict.new(),
       frames: [],
+      hooks:,
     )
   let #(_realm, st) = init_realm(st)
   st

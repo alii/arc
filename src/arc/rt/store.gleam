@@ -10,13 +10,11 @@
 //// (D11 — allocation is O(1) and pure; GC is turn-boundary only).
 
 import arc/rt/types.{
-  type Agent, type Handle, type HostHooks, type JobQueue, type JsOps,
-  type JsSlot, type JsStore, type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr,
+  type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
+  type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr,
 } as rt_types
 import arc/vm/limits
-import gleam/bit_array
 import gleam/dict
-import gleam/list
 import gleam/set
 
 // ── FFI: opaque JobQueue construction (M8 owns push/pop) ────────────────────
@@ -32,7 +30,7 @@ fn jq_new() -> JobQueue
 /// global object (G18 — those are allocated INTO the store by M6 `init_realm`).
 /// `ops` is a panic-stub `JsOps` (unreachable until `init_realm` seeds the
 /// real M4/M-CALL fns as its step 1). Total; touches no process dictionary.
-pub fn t_store_new(hooks: HostHooks) -> JsStore(Agent) {
+pub fn t_store_new() -> JsStore(Agent) {
   JsStore(
     data: dict.new(),
     free: [],
@@ -45,10 +43,8 @@ pub fn t_store_new(hooks: HostHooks) -> JsStore(Agent) {
     private_uid: 0,
     symbol_uid: 0,
     ops: unseeded_ops(),
-    host_hooks: hooks,
     microtasks: jq_new(),
     unhandled_rejections: [],
-    console_buf: [],
     shapes: dict.from_list([
       #(0, rt_types.ShapeDesc(0, dict.new(), dict.new())),
     ]),
@@ -212,28 +208,6 @@ pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
 pub fn t_leave_call(st: Agent) -> Agent {
   let js = require_js(st)
   with_js(st, JsStore(..js, call_depth: js.call_depth - 1))
-}
-
-// ── console (M20 harness sink) ──────────────────────────────────────────────
-
-/// Append one console line to `console_buf` (stored reversed — LIFO prepend).
-/// The M20 harness reads via `t_console_read`/`t_console_bytes` after the run;
-/// nothing is written to real stdio (deterministic, replayable).
-pub fn t_console_write(st: Agent, line: BitArray) -> Agent {
-  let js = require_js(st)
-  with_js(st, JsStore(..js, console_buf: [line, ..js.console_buf]))
-}
-
-/// Read the buffered console output in emission order (oldest first).
-pub fn t_console_read(st: Agent) -> List(BitArray) {
-  let js = require_js(st)
-  list.reverse(js.console_buf)
-}
-
-/// Read the buffered console output as one contiguous `BitArray` in emission
-/// order — what the M20 test harness diffs against expected output.
-pub fn t_console_bytes(st: Agent) -> BitArray {
-  bit_array.concat(t_console_read(st))
 }
 
 // ── exception (D7 / R2) ─────────────────────────────────────────────────────

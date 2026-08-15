@@ -321,7 +321,7 @@ fn math_exp(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 /// through the host hook (never `rand:uniform` directly) is what lets the
 /// harness seed a deterministic PRNG.
 fn math_random(st: Agent) -> #(JsVal, Agent) {
-  #(mk_number(JFloat(st.store.host_hooks.random())), st)
+  #(mk_number(JFloat(st.hooks.random())), st)
 }
 
 /// Math.sign(x) — returns -1, 0, or 1 (preserving ±0)

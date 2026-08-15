@@ -9,6 +9,7 @@
 /// Based on ECMAScript §16.2 and QuickJS's module implementation.
 import arc/compiler
 import arc/esm
+import arc/host_hooks
 import arc/link
 import arc/module/graph
 import arc/module/load_error.{type LoadError, type ResolveError}
@@ -20,7 +21,6 @@ import arc/vm/exec/entry
 import arc/vm/exec/frame
 import arc/vm/exec/interpreter
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array

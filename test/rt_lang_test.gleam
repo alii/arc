@@ -4,21 +4,15 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/lang
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, HostHooks, JInt, KHandle, KNum, KStr, KUndef, Named, StringKey,
-  classify, mk_number, mk_string, mk_undefined,
+  type Agent, JInt, KHandle, KNum, KStr, KUndef, Named, StringKey, classify,
+  mk_number, mk_string, mk_undefined,
 }
 import gleam/list
 import gleam/option.{Some}
+import rt_helpers
 
 fn agent() -> Agent {
-  rt_builtins.new_agent(
-    HostHooks(
-      monotonic_now: fn() { 0 },
-      random: fn() { 0.5 },
-      sleep_ms: fn(_) { Nil },
-      print: fn(_) { Nil },
-    ),
-  )
+  rt_builtins.new_agent(rt_helpers.quiet_hooks())
 }
 
 fn ints(xs: List(Int)) {

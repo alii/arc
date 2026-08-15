@@ -6,22 +6,16 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, type ParsedDesc, DataProperty, HostHooks, Index, JInt,
-  KNum, KStr, KUndef, Named, ParsedDesc, StringKey, SymbolKey, canonical_key,
-  classify, mk_number, mk_object, mk_string,
+  type Agent, type JsVal, type ParsedDesc, DataProperty, Index, JInt, KNum, KStr,
+  KUndef, Named, ParsedDesc, StringKey, SymbolKey, canonical_key, classify,
+  mk_number, mk_object, mk_string,
 }
 import gleam/list
 import gleam/option.{None, Some}
+import rt_helpers
 
 fn agent() -> Agent {
-  rt_builtins.new_agent(
-    HostHooks(
-      monotonic_now: fn() { 0 },
-      random: fn() { 0.5 },
-      sleep_ms: fn(_) { Nil },
-      print: fn(_) { Nil },
-    ),
-  )
+  rt_builtins.new_agent(rt_helpers.quiet_hooks())
 }
 
 fn key(name: String) {

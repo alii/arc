@@ -16,7 +16,7 @@
 //// (the claim is the spec's "woken" count) and hands remote ones to the
 //// embedder's `deliver_wake` capability for message
 //// delivery — core never sends wake messages either. See
-//// `arc/vm/host_hooks.AtomicsCapabilities` for the capability contract and
+//// `arc/host_hooks.AtomicsCapabilities` for the capability contract and
 //// `arc_waiter_ffi.erl` for the registry's ordering rules; `arc/host` is the
 //// embedder-facing summary. `Atomics.waitAsync` waiters are
 //// kept on State (FIFO, where the promise lives) plus an interchangeable
@@ -32,11 +32,11 @@
 ////   bounds (RangeError) → value coercion (user code!) → revalidate
 ////   (detached → TypeError, shrunk → RangeError).
 
+import arc/host_hooks.{type WaiterKey}
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
-import arc/vm/host_hooks.{type WaiterKey}
 import arc/vm/internal/typed_array_ffi.{
   type IntElem, I16, I32, I64, I8, U16, U32, U64, U8, int_elem_bits,
   int_elem_signed, int_elem_size, ta_get_int, ta_set_int,
@@ -154,7 +154,7 @@ fn sab_cas_element(
 
 /// Opaque handle to one registered waiterlist entry (its ETS key plus the
 /// unique message ref the notifier will address). Contract type from
-/// arc/vm/host_hooks — handed to the embedder inside a WaitRequest.
+/// arc/host_hooks — handed to the embedder inside a WaitRequest.
 type WaiterHandle =
   host_hooks.WaiterHandle
 

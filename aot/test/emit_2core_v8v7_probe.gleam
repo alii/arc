@@ -418,12 +418,12 @@ type Loaded {
 }
 
 fn seed_realm() -> Agent {
-  run.seed(harness.rt_test_hooks())
+  harness.seed()
 }
 
 /// One js_main apply from the shared seed → `DiffRun`.
-fn run_once(loaded: Loaded) -> run.DiffRun {
-  run.run_loaded(loaded.mod, loaded.seed).1
+fn run_once(loaded: Loaded) -> harness.DiffRun {
+  harness.run_loaded(loaded.mod, loaded.seed).1
 }
 
 fn bench_compiled(name: String, source: String) -> Outcome {
@@ -465,9 +465,9 @@ fn bench_compiled(name: String, source: String) -> Outcome {
               let loaded = Loaded(mod:, seed:)
               let #(warm_us, first) = time_us(fn() { run_once(loaded) })
               case first {
-                run.DiffRun(result: Error(e), stdout:) ->
+                harness.DiffRun(result: Error(e), stdout:) ->
                   RunFailed(e, string.inspect(stdout))
-                run.DiffRun(result: Ok(_), stdout:) ->
+                harness.DiffRun(result: Ok(_), stdout:) ->
                   case stdout {
                     <<"ok\n":utf8>> -> {
                       let reps = reps_for(warm_us)
@@ -488,9 +488,9 @@ fn bench_compiled(name: String, source: String) -> Outcome {
 fn bench_interp(source: String) -> Outcome {
   let #(warm_us, first) = time_us(fn() { harness.run_interpreted(source) })
   case first {
-    run.DiffRun(result: Error(e), stdout:) ->
+    harness.DiffRun(result: Error(e), stdout:) ->
       RunFailed(e, string.inspect(stdout))
-    run.DiffRun(result: Ok(_), stdout:) ->
+    harness.DiffRun(result: Ok(_), stdout:) ->
       case stdout {
         <<"ok\n":utf8>> -> {
           let reps = reps_for(warm_us)

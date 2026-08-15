@@ -97,15 +97,12 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     prop_seq: _,
     private_uid: _,
     symbol_uid: _,
-    // fn-records + host closures: engine plumbing, no `{js_cell,_}` captured.
+    // fn-record: engine plumbing, no `{js_cell,_}` captured.
     ops: _,
-    host_hooks: _,
     // Opaque `:queue` of `Job` — port `state.gleam:297-300`.
     microtasks:,
     // List(Int) of promise cell ids — port `state.gleam:282`.
     unhandled_rejections:,
-    // List(BitArray) — raw bytes only, no handles.
-    console_buf: _,
     // ── hidden-class table — Int/BitArray only, no handles ──
     shapes: _,
     next_shape: _,

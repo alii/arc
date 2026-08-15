@@ -1,4 +1,5 @@
 import arc/compiler
+import arc/host_hooks
 import arc/module
 import arc/module/load_error
 import arc/parser
@@ -7,7 +8,6 @@ import arc/vm/builtins/common
 import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state

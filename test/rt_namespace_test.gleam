@@ -8,12 +8,13 @@ import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type ParsedDesc, DataProperty, HostHooks,
-  JInt, KNum, KStr, KUndef, Named, ParsedDesc, SBox, StringKey, SymbolKey,
-  canonical_key, classify, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
+  type Agent, type Handle, type JsVal, type ParsedDesc, DataProperty, JInt, KNum,
+  KStr, KUndef, Named, ParsedDesc, SBox, StringKey, SymbolKey, canonical_key,
+  classify, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
 }
 import gleam/list
 import gleam/option.{None, Some}
+import rt_helpers
 
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
 fn t_apply_protected(
@@ -22,14 +23,7 @@ fn t_apply_protected(
 ) -> #(rt_call.Completion, Agent)
 
 fn agent() -> Agent {
-  rt_builtins.new_agent(
-    HostHooks(
-      monotonic_now: fn() { 0 },
-      random: fn() { 0.5 },
-      sleep_ms: fn(_) { Nil },
-      print: fn(_) { Nil },
-    ),
-  )
+  rt_builtins.new_agent(rt_helpers.quiet_hooks())
 }
 
 fn key(name: String) {

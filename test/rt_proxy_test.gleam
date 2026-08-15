@@ -9,14 +9,15 @@ import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/types.{
-  type Agent, type CompiledFn, type JsVal, FnFlags, HostHooks, JInt, KBool,
-  KHandle, KNum, KStr, KUndef, StringKey, canonical_key, classify, mk_bool,
-  mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  type Agent, type CompiledFn, type JsVal, FnFlags, JInt, KBool, KHandle, KNum,
+  KStr, KUndef, StringKey, canonical_key, classify, mk_bool, mk_null, mk_number,
+  mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
+import rt_helpers
 
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
 fn t_apply_protected(
@@ -28,14 +29,7 @@ fn t_apply_protected(
 fn as_code(f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent)) -> CompiledFn
 
 fn agent() -> Agent {
-  rt_builtins.new_agent(
-    HostHooks(
-      monotonic_now: fn() { 0 },
-      random: fn() { 0.5 },
-      sleep_ms: fn(_) { Nil },
-      print: fn(_) { Nil },
-    ),
-  )
+  rt_builtins.new_agent(rt_helpers.quiet_hooks())
 }
 
 fn int(i: Int) -> JsVal {

@@ -405,6 +405,29 @@ pub fn throwing_species_resolve_is_reported_test() {
       "var p=Promise.resolve(1);function C(ex){ex(function(){throw new Error('boom')},function(){})}C[Symbol.species]=C;Promise.prototype.constructor=C;p.then(function(v){console.log('ran',v);return v})",
     )
   assert c.stdout == <<"ran 1\n":utf8>>
-  assert harness.buf_read()
-    == <<"ran 1\nUncaught (in promise job) Error: boom\n":utf8>>
+  assert harness.err_read()
+    == <<"Uncaught (in promise job) Error: boom\n":utf8>>
+}
+
+// ── Host hooks ──────────────────────────────────────────────────────────────
+
+/// console.log/info/debug reach the stdout level of the print hook and
+/// console.warn/error the stderr level, so only the former are diffed.
+pub fn console_levels_split_test() {
+  let c =
+    harness.run_compiled(
+      "console.log('a');console.warn('b');console.error('c',1);console.info('d');console.debug('e')",
+    )
+  assert c.stdout == <<"a\nd\ne\n":utf8>>
+  assert harness.err_read() == <<"b\nc 1\n":utf8>>
+}
+
+/// `Date.now()` and `new Date()` read the wall-clock hook, which the harness
+/// pins to `fixed_now_ms`.
+pub fn date_now_reads_wall_clock_hook_test() {
+  let c =
+    harness.run_compiled(
+      "console.log(Date.now(), new Date().getTime()===Date.now())",
+    )
+  assert c.stdout == <<"1700000000000 true\n":utf8>>
 }

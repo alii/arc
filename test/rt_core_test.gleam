@@ -10,14 +10,15 @@ import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledFn, type JsVal, Agent, FnFlags, FrameInfo, HostHooks,
-  JFloat, JInt, JNegInf, JsOps, JsStore, KBool, KBytecode, KHandle, KNum, KStr,
+  type Agent, type CompiledFn, type JsVal, Agent, FnFlags, FrameInfo, JFloat,
+  JInt, JNegInf, JsOps, JsStore, KBool, KBytecode, KHandle, KNum, KStr,
   NoElements, SObject, StringKey, canonical_key, classify, mk_null, mk_number,
   mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{None}
+import rt_helpers
 
 @external(erlang, "arc_rt_store_ffi", "identity")
 fn as_code(f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent)) -> CompiledFn
@@ -32,14 +33,7 @@ fn template(label: String) -> FuncTemplate
 fn env(vals: List(JsVal)) -> EnvTuple
 
 fn agent() -> Agent {
-  rt_builtins.new_agent(
-    HostHooks(
-      monotonic_now: fn() { 0 },
-      random: fn() { 0.5 },
-      sleep_ms: fn(_) { Nil },
-      print: fn(_) { Nil },
-    ),
-  )
+  rt_builtins.new_agent(rt_helpers.quiet_hooks())
 }
 
 fn flags(strict: Bool) {

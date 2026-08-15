@@ -5,12 +5,12 @@
 -ifndef(ARC_RT_LAYOUT_HRL).
 -define(ARC_RT_LAYOUT_HRL, true).
 
-%% arc/rt/types.Agent: {agent, Store, Realm, TemplateObjects, Frames}. Both
-%% indexed fields bare (no Option wrapper).
+%% arc/rt/types.Agent: {agent, Store, Realm, TemplateObjects, Frames, Hooks}.
+%% Both indexed fields bare (no Option wrapper).
 -define(AGENT_TAG, agent).
 -define(AGENT_STORE, 2).
 -define(AGENT_REALM, 3).
--define(AGENT_ARITY, 5).
+-define(AGENT_ARITY, 6).
 -define(SOME, some).
 -define(NONE, none).
 
@@ -27,9 +27,9 @@
 -define(STORE_NEXT, 4).
 -define(STORE_PINNED_ROOTS, 5).
 -define(STORE_ALLOC, 6).
--define(STORE_SHAPES, 17).
--define(STORE_NEXT_SHAPE, 18).
--define(STORE_ARITY, 18).
+-define(STORE_SHAPES, 15).
+-define(STORE_NEXT_SHAPE, 16).
+-define(STORE_ARITY, 16).
 
 %% arc/rt/types.Realm / BuiltinPair
 -define(REALM_TAG, realm).

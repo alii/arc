@@ -1,10 +1,10 @@
+import arc/host_hooks
 import arc/vm/builtins/common.{
   type Builtins, RangeErr, ReferenceErr, SyntaxErr, TypeErr,
 }
 import arc/vm/completion.{type SuspendKind}
 import arc/vm/gc_trace
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/internal/job_queue.{type JobQueue}
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/key.{Named}
@@ -195,6 +195,9 @@ pub fn host_hook_roots(hooks: host_hooks.HostHooks) -> List(JsValue) {
     report_uncaught: _,
     // The one JsValue-carrying hook: %DynamicImportHook%'s function object.
     import_hook:,
+    wall_clock_ms: _,
+    random: _,
+    print: _,
   ) = hooks
   option.values([import_hook])
 }

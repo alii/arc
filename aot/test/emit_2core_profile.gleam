@@ -68,7 +68,7 @@ fn compile_and_seed(source: String, name: String) -> #(Atom, Agent) {
   let assert Ok(unit) = emit_2core.compile_source(source, opts)
   let assert Ok(beam) = pipeline.compile_ir(unit.module, emit_2core.binding())
   let assert Ok(mod) = run.load(beam, name)
-  #(mod, run.seed(harness.rt_test_hooks()))
+  #(mod, harness.seed())
 }
 
 fn repeat(times: Int, f: fn() -> a) -> Nil {
@@ -1177,11 +1177,11 @@ const richards_baseline = [
 fn correctness_gate(label: String, path: String) -> Bool {
   let assert Ok(source) = simplifile.read(path)
   case harness.run_compiled(source) {
-    run.DiffRun(result: Ok(_), stdout: <<"ok\n":utf8>>) -> {
+    harness.DiffRun(result: Ok(_), stdout: <<"ok\n":utf8>>) -> {
       io.println("  ✓ " <> label <> " prints ok")
       True
     }
-    run.DiffRun(result: Ok(_), stdout:) -> {
+    harness.DiffRun(result: Ok(_), stdout:) -> {
       io.println(
         "  ✗ "
         <> label
@@ -1191,7 +1191,7 @@ fn correctness_gate(label: String, path: String) -> Bool {
       )
       False
     }
-    run.DiffRun(result: Error(e), stdout:) -> {
+    harness.DiffRun(result: Error(e), stdout:) -> {
       io.println(
         "  ✗ "
         <> label

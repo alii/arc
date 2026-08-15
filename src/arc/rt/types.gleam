@@ -5,8 +5,9 @@
 ////
 //// Section order (readability; Gleam allows forward type refs in-module):
 ////   value-ABI → keys/symbols → property/heap → ObjKind/JsSlot → async →
-////   realm → HostHooks/JsOps/JsStore.
+////   realm → JsOps/JsStore → Agent.
 
+import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/rt/bytecode.{
   type EnvTuple, type FrameStep, type FuncTemplate, type SuspendedFrame,
 }
@@ -1033,7 +1034,7 @@ pub type ErrorNative {
 pub type DateNative {
   /// §21.4.2.1 Date ( ...values ).
   DateConstructor(proto: Handle)
-  /// §21.4.3.1 Date.now ( ) — reads `st.store.host_hooks.monotonic_now`.
+  /// §21.4.3.1 Date.now ( ) — reads `st.hooks.wall_clock_ms`.
   DateNow
   /// §21.4.3.2 Date.parse ( string ).
   DateParse
@@ -1346,11 +1347,10 @@ pub type ReflectNative {
   ReflectSetPrototypeOf
 }
 
-/// WHATWG Console natives (arc `ConsoleNativeFn`). No Handle-carrying
-/// variants.
+/// WHATWG Console natives: one Logger per method, tagged with the level it
+/// hands to `HostHooks.print`.
 pub type ConsoleNative {
-  ConsoleLog
-  ConsoleLogError
+  ConsolePrint(level: ConsoleLevel)
 }
 
 /// §19.2 Global function natives — parseInt/parseFloat/isNaN/isFinite plus
@@ -2097,8 +2097,8 @@ pub fn shape_slots_fold(
 /// (utf8 BitArray) → slot index; `transitions` maps an added key → the
 /// successor shape_id.
 ///
-/// The shape table lives on `JsStore.shapes` (Erlang element 17) +
-/// `JsStore.next_shape` (element 18): shapes are pure structural metadata
+/// The shape table lives on `JsStore.shapes` + `JsStore.next_shape`
+/// (`?STORE_SHAPES`/`?STORE_NEXT_SHAPE`): shapes are pure structural metadata
 /// (no Handle refs, GC-invisible) threaded with the store so an Agent stays
 /// self-contained. A ShapeDesc is immutable once created except for
 /// `transitions` gaining an edge.
@@ -2369,23 +2369,6 @@ pub type ErrorKind {
   SyntaxErr
 }
 
-/// Embedder capabilities. Seeded once into `JsStore.host_hooks` by
-/// `t_store_new(hooks)`; read by Date/Math/console/performance natives (M6).
-/// Port of arc `host_hooks.gleam:141-187` REDUCED to the deterministic-
-/// harness set (SPEC §2.4) — NOT arc's full record.
-pub type HostHooks {
-  HostHooks(
-    /// ms since an arbitrary epoch; backs `Date.now`, `performance.now`.
-    monotonic_now: fn() -> Int,
-    /// Uniform Float in [0, 1); backs `Math.random`. Harness seeds a PRNG.
-    random: fn() -> Float,
-    /// Block the calling thread; backs `Atomics.wait` and (v2) timers.
-    sleep_ms: fn(Int) -> Nil,
-    /// `console.*` sink. Harness routes into `JsStore.console_buf`.
-    print: fn(String) -> Nil,
-  )
-}
-
 /// D17: rt_val (leaf) needs to call rt_obj.get_prop / rt_call.call
 /// for `ToPrimitive`/`OrdinaryToPrimitive`, but importing them is a cycle.
 /// Type-parameterized over the threaded state; the concrete instantiation
@@ -2447,20 +2430,15 @@ pub type JsStore(st) {
     private_uid: Int,
     /// `UserSymbol` id counter (replaces arc's `make_ref`).
     symbol_uid: Int,
-    // ── cycle-breaking upcalls + host (D17, G16) ──
+    // ── cycle-breaking upcalls (D17, G16) ──
     /// fn-record: rt_val→rt_obj upcalls without an import cycle.
     ops: JsOps(st),
-    /// Embedder capabilities (clock, rng, print, sleep).
-    host_hooks: HostHooks,
     // ── async (M8) ──
     /// Opaque Erlang `:queue` via `arc_job_queue_ffi`.
     microtasks: JobQueue,
     /// Promise cell ids rejected with no handler attached.
     unhandled_rejections: List(Int),
-    // ── test harness (M20) ──
-    /// Reversed; `console.log` appends here, NOT `io:format`.
-    console_buf: List(BitArray),
-    // ── hidden classes (H) — APPENDED so *_ffi.erl element(N,_) stays valid ──
+    // ── hidden classes (H) ──
     /// shape_id → descriptor. Shape 0 = the empty shape.
     shapes: Dict(Int, ShapeDesc),
     /// Next never-used shape_id.
@@ -2483,6 +2461,9 @@ pub type Agent {
     /// Call and pops it on Return. `Error` construction renders it into
     /// `stack`. Compiled code keeps it empty.
     frames: List(FrameInfo),
+    /// Embedder capabilities (clocks, PRNG, console sink, uncaught-report
+    /// sink). Not part of the heap: excluded from GC and serialization.
+    hooks: HostHooks,
   )
 }
 

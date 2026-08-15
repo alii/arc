@@ -18,11 +18,11 @@
 ////       }
 ////     }
 
+import arc/host_hooks
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/ops/operators
 import arc/vm/state.{type HostFn, type State, State}
@@ -302,12 +302,12 @@ pub fn resume(
 //     in your mailbox.
 //
 // The full contract lives next to its implementation: the capability
-// semantics on `arc/vm/host_hooks.AtomicsCapabilities`, the claim/settle
+// semantics on `arc/host_hooks.AtomicsCapabilities`, the claim/settle
 // accounting in `arc/vm/builtins/atomics`, and the registry's ordering rules
 // in `arc/vm/builtins/arc_waiter_ffi.erl`.
 
 /// Re-export: one blocking sync Atomics.wait handed to the embedder.
-/// See arc/vm/host_hooks.WaitRequest for field semantics.
+/// See arc/host_hooks.WaitRequest for field semantics.
 pub type WaitRequest =
   host_hooks.WaitRequest
 

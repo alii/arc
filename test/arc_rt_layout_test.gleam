@@ -2,17 +2,16 @@
 //// the Gleam runtime records the hand-written Erlang fast paths index with
 //// element/2. A field reorder or insert in those records fails here.
 
-import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledFn, type FnFlags, type HostHooks, type JsVal,
-  type ShapeSlots, AccessorProperty, ArrayObj, DataProperty, Dense, FnFlags,
-  HostHooks, Index, JsCell, JsStore, KBytecode, KCompiled, KHandle, KNative,
-  Named, NativeUnseeded, NoElements, Ordinary, Private, ProxyObj, SBox, SObject,
-  SShapedObject, ShapeDesc, Sparse, StringKey, SymbolKey,
+  type Agent, type CompiledFn, type FnFlags, type JsVal, type ShapeSlots,
+  AccessorProperty, ArrayObj, DataProperty, Dense, FnFlags, Index, JsCell,
+  JsStore, KBytecode, KCompiled, KHandle, KNative, Named, NativeUnseeded,
+  NoElements, Ordinary, Private, ProxyObj, SBox, SObject, SShapedObject,
+  ShapeDesc, Sparse, StringKey, SymbolKey,
 } as rt_types
 import arc/vm/internal/tree_array
 import gleam/dict
@@ -20,6 +19,7 @@ import gleam/dynamic.{type Dynamic}
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/set
+import rt_helpers
 
 @external(erlang, "arc_rt_layout_root_ffi", "idx")
 fn idx(name: String) -> Int
@@ -60,17 +60,8 @@ fn arity(record: a) -> Int {
   tuple_size(dyn(record))
 }
 
-fn hooks() -> HostHooks {
-  HostHooks(
-    monotonic_now: fn() { 0 },
-    random: fn() { 0.5 },
-    sleep_ms: fn(_) { Nil },
-    print: fn(_) { Nil },
-  )
-}
-
 fn seeded() -> Agent {
-  rt_builtins.new_agent(hooks())
+  rt_helpers.agent()
 }
 
 fn no_flags() -> FnFlags {
@@ -97,7 +88,7 @@ pub fn agent_test() {
 }
 
 pub fn js_store_test() {
-  let base = rt_store.t_store_new(hooks())
+  let base = rt_store.t_store_new()
   let desc =
     ShapeDesc(
       arity: 1,

@@ -895,8 +895,7 @@ fn parse_frac(rest: BitArray) -> Int {
 // ── low-level helpers ───────────────────────────────────────────────────────
 
 fn now_ms(st: Agent) -> Int {
-  let js = st.store
-  js.host_hooks.monotonic_now()
+  st.hooks.wall_clock_ms()
 }
 
 fn require_date(st: Agent, v: JsVal, name: String) -> JsNum {

@@ -19,6 +19,7 @@
 import arc/compiler
 import arc/esm
 import arc/host
+import arc/host_hooks
 import arc/internal/path
 import arc/module
 import arc/module/load_error
@@ -32,7 +33,6 @@ import arc/vm/exec/event_loop
 import arc/vm/exec/frame
 import arc/vm/exec/interpreter
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/internal/clock_ffi
 import arc/vm/internal/elements
 import arc/vm/key.{Named}
@@ -1676,7 +1676,7 @@ fn ffi_take_report() -> Result(String, Nil) {
 
 // -- Atomics host capabilities (harness as embedder) --
 //
-// The embedder side of the capability contract in arc/vm/host_hooks.gleam:
+// The embedder side of the capability contract in arc/host_hooks.gleam:
 // `sync_wait` (blocking sync wait) and `deliver_wake` (wake delivery) supplied
 // as the `HostHooks.atomics` value every State the harness boots is
 // constructed with, plus the bounded mailbox receive that feeds

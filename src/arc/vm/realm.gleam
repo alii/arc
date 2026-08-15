@@ -1,5 +1,6 @@
 import arc/compiler
 import arc/compiler/scope
+import arc/host_hooks
 import arc/parser
 import arc/parser/ast
 import arc/vm/builtins
@@ -11,7 +12,6 @@ import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/event_loop
 import arc/vm/exec/frame
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}

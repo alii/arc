@@ -76,7 +76,7 @@ fn compile_load(source: String, name: String) -> #(Int, Int, Loaded) {
       beam
     })
   let assert Ok(mod) = run.load(beam, name)
-  let #(realm_us, seed) = time_us(fn() { run.seed(harness.rt_test_hooks()) })
+  let #(realm_us, seed) = time_us(fn() { harness.seed() })
   #(compile_us, realm_us, Loaded(mod:, seed:))
 }
 

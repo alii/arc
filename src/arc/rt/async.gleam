@@ -294,7 +294,7 @@ fn call_settle(st: Agent, target: JsVal, args: List(JsVal)) -> Agent {
     // settled), so `unhandled_rejections` cannot carry it; report it through
     // the host sink instead of letting it vanish.
     #(ThrowCompletion(thrown), st) -> {
-      require_js(st).host_hooks.print(
+      st.hooks.report_uncaught(
         "Uncaught (in promise job) " <> describe_thrown(st, thrown),
       )
       st

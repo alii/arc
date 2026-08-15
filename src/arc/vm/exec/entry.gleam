@@ -2,6 +2,7 @@
 // Public API for the VM — run scripts, modules, REPL sessions
 // ============================================================================
 
+import arc/host_hooks
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{
@@ -14,7 +15,6 @@ import arc/vm/exec/interpreter
 import arc/vm/exec/promises
 import arc/vm/gc_trace
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
 import arc/vm/realm

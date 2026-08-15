@@ -2,16 +2,16 @@
 //// builtin through the runtime's own call primitive, and round-trip a
 //// property through the object model.
 
-import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type JsVal, HostHooks, JInt, KHandle, KNum, KStr, Named, StringKey,
-  classify, mk_number, mk_object, mk_string,
+  type Agent, type JsVal, JInt, KHandle, KNum, KStr, Named, StringKey, classify,
+  mk_number, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/option.{Some}
+import rt_helpers
 
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
 fn t_apply_protected(
@@ -19,17 +19,8 @@ fn t_apply_protected(
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(rt_call.Completion, Agent)
 
-fn hooks() -> types.HostHooks {
-  HostHooks(
-    monotonic_now: fn() { 0 },
-    random: fn() { 0.5 },
-    sleep_ms: fn(_) { Nil },
-    print: fn(_) { Nil },
-  )
-}
-
 fn agent() -> Agent {
-  rt_builtins.new_agent(hooks())
+  rt_helpers.agent()
 }
 
 pub fn array_join_via_t_call_test() {

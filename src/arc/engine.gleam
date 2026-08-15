@@ -11,6 +11,7 @@
 //// builtins + entry directly.
 
 import arc/compiler
+import arc/host_hooks
 import arc/module
 import arc/module_host
 import arc/parser
@@ -21,7 +22,6 @@ import arc/vm/exec/entry
 import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type HostFn}

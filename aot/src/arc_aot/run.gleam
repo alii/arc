@@ -1,21 +1,20 @@
 //// Run a compiled JS module on the BEAM against arc's runtime: seed an
 //// `Agent`, load the `.beam`, apply `js_main`, then drain microtasks and run
-//// the GC safepoint. `DiffRun` is what the differential harness compares.
+//// the GC safepoint. Console output goes wherever `HostHooks.print` sends it.
 
+import arc/host_hooks.{type HostHooks}
 import arc/rt/builtins as rt_builtins
-import arc/rt/store as rt_store
-import arc/rt/types.{type Agent, type HostHooks}
+import arc/rt/types.{type Agent}
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/string
 import twocore/backend/build_beam
 
-/// Console bytes in emission order plus how the top level completed:
-/// `Ok(v)` for a normal return, `Error(reason)` for a load failure, an
-/// uncaught throw (rendered with `string.inspect`) or a crash.
-pub type DiffRun {
-  DiffRun(stdout: BitArray, result: Result(Dynamic, String))
-}
+/// How the top level completed: `Ok(v)` for a normal return,
+/// `Error(reason)` for a load failure, an uncaught throw (rendered with
+/// `string.inspect`) or a crash.
+pub type RunResult =
+  Result(Dynamic, String)
 
 /// Wire terms from `arc_aot_exec_ffi:apply_js_main/2`.
 pub type JsExecOutcome {
@@ -40,30 +39,26 @@ pub fn load(beam: BitArray, name: String) -> Result(Atom, String) {
 @external(erlang, "arc_aot_exec_ffi", "apply_js_main")
 pub fn apply_main(module: Atom, st: Agent) -> #(JsExecOutcome, Agent)
 
-/// `apply_main` packaged as a `DiffRun`.
-pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, DiffRun) {
+/// `apply_main` with the outcome folded into a `RunResult`.
+pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, RunResult) {
   let #(outcome, st) = apply_main(module, st)
-  let stdout = rt_store.t_console_bytes(st)
   let result = case outcome {
     JsReturned(v) -> Ok(v)
     JsThrew(e) -> Error("uncaught: " <> string.inspect(e))
     JsCrashed(reason) -> Error(reason)
   }
-  #(st, DiffRun(stdout:, result:))
+  #(st, result)
 }
 
 /// Load and run in an already seeded agent. On a load failure the agent is
-/// returned unchanged with empty stdout.
+/// returned unchanged.
 pub fn run_beam_in(
   st: Agent,
   beam: BitArray,
   name: String,
-) -> #(Agent, DiffRun) {
+) -> #(Agent, RunResult) {
   case load(beam, name) {
-    Error(reason) -> #(
-      st,
-      DiffRun(stdout: <<>>, result: Error("load failed: " <> reason)),
-    )
+    Error(reason) -> #(st, Error("load failed: " <> reason))
     Ok(module) -> run_loaded(module, st)
   }
 }
@@ -73,6 +68,6 @@ pub fn run_beam(
   beam: BitArray,
   name: String,
   hooks: HostHooks,
-) -> #(Agent, DiffRun) {
+) -> #(Agent, RunResult) {
   run_beam_in(seed(hooks), beam, name)
 }

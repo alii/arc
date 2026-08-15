@@ -1,3 +1,4 @@
+import arc/host_hooks
 import arc/vm/binop
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/disposable_stack
@@ -15,7 +16,6 @@ import arc/vm/exec/dynamic_import
 import arc/vm/exec/frame
 import arc/vm/exec/generators
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array

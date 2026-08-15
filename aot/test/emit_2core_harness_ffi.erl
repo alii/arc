@@ -1,7 +1,7 @@
 -module(emit_2core_harness_ffi).
 -export([capture_stdout/1, to_dynamic/1,
          seed_random/1, next_random/0,
-         buf_reset/0, buf_push/1, buf_read/0,
+         buf_reset/0, buf_push/1, buf_read/0, err_push/1, err_read/0,
          env_is_truthy/1]).
 
 env_is_truthy(Name) ->
@@ -80,24 +80,34 @@ next_random() ->
     %% top 53 bits / 2^53 → uniform [0,1) with a full double mantissa
     (Mixed bsr 11) / 9007199254740992.0.
 
-%% Print buffer: reversed list of utf8-binary lines. Backs
-%% `HostHooks.print` / arc `report_uncaught`.
+%% Print buffers: reversed lists of utf8-binary lines. `emit_2core_buf`
+%% backs the stdout levels of `HostHooks.print`; `emit_2core_err` backs the
+%% stderr levels and `report_uncaught`.
 buf_reset() ->
     erlang:put(emit_2core_buf, []),
+    erlang:put(emit_2core_err, []),
     nil.
 
-buf_push(Line) ->
-    Cur = case erlang:get(emit_2core_buf) of
+buf_push(Line) -> push(emit_2core_buf, Line).
+
+err_push(Line) -> push(emit_2core_err, Line).
+
+buf_read() -> read(emit_2core_buf).
+
+err_read() -> read(emit_2core_err).
+
+push(Key, Line) ->
+    Cur = case erlang:get(Key) of
         undefined -> [];
         V -> V
     end,
     %% One trailing newline per call so the compiled path's captured bytes
     %% match arc's io.println output byte-for-byte.
-    erlang:put(emit_2core_buf, [<<Line/binary, "\n">> | Cur]),
+    erlang:put(Key, [<<Line/binary, "\n">> | Cur]),
     nil.
 
-buf_read() ->
-    case erlang:get(emit_2core_buf) of
+read(Key) ->
+    case erlang:get(Key) of
         undefined -> <<>>;
         V -> iolist_to_binary(lists:reverse(V))
     end.

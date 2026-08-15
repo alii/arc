@@ -15,7 +15,6 @@
 ////     cd aot && gleam run -m emit_2core_gc_verify_x8k2
 
 import arc/rt/gc as rt_gc
-import arc/rt/store as rt_store
 import arc/rt/types.{type Agent} as rt_types
 import arc_aot/emit as emit_2core
 import arc_aot/run
@@ -87,7 +86,7 @@ console.log('sync');
 // ── helpers ────────────────────────────────────────────────────────────────
 
 fn seed() -> Agent {
-  run.seed(harness.rt_test_hooks())
+  harness.seed()
 }
 
 fn compile_load(source: String, name: String) -> Result(Atom, String) {
@@ -125,8 +124,8 @@ fn stats_line(label: String, s: rt_gc.GcStats) -> String {
   <> int.to_string(since_gc)
 }
 
-fn stdout_str(st: Agent) -> String {
-  case bit_array.to_string(rt_store.t_console_bytes(st)) {
+fn stdout_str(_st: Agent) -> String {
+  case bit_array.to_string(harness.buf_read()) {
     Ok(s) -> s
     Error(Nil) -> "<non-utf8>"
   }

@@ -15,6 +15,7 @@
 //// errors are cached (on hidden global objects), so a module's body runs at
 //// most once and repeated imports yield the identical namespace / error.
 
+import arc/host_hooks
 import arc/module
 import arc/module/graph
 import arc/module/load_error
@@ -23,7 +24,6 @@ import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/dynamic_import
 import arc/vm/heap
-import arc/vm/host_hooks
 import arc/vm/internal/job_queue
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{type JsValue, type Ref, JsObject, JsUndefined}

@@ -1,37 +1,42 @@
 //// M20 differential-test harness: run the same JS source through the arc
 //// interpreter and through emit_2core→ir_to_core→BEAM, and compare console
-//// output byte-for-byte. `run_compiled` / `run_interpreted` (added by sibling
-//// units) both return `DiffRun` so the test file can `assert c.stdout ==
-//// i.stdout` without caring which path produced it.
+//// output byte-for-byte. `run_compiled` / `run_interpreted` both return
+//// `DiffRun` so the test file can `assert c.stdout == i.stdout` without
+//// caring which path produced it.
 
 import arc/engine
-import arc/rt/types as rt_types
-import arc/vm/host_hooks
+import arc/host_hooks.{type ConsoleLevel, DebugLevel, InfoLevel, LogLevel}
+import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
-import arc_aot/run.{type DiffRun, DiffRun}
+import arc_aot/run.{type RunResult}
 import gleam/dynamic.{type Dynamic}
+import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/string
 import twocore/pipeline
+
+/// Console stdout bytes in emission order plus how the top level completed.
+pub type DiffRun {
+  DiffRun(stdout: BitArray, result: RunResult)
+}
 
 // ----------------------------------------------------------------------------
 // Interpreter oracle
 // ----------------------------------------------------------------------------
 
-/// Run `source` through arc's tree-walking interpreter and capture stdout.
+/// Run `source` through arc's interpreter and capture stdout.
 ///
 /// arc's `console.log` writes straight to `io.println` (see
-/// `arc/vm/builtins/console.gleam`) — there is no `print` host hook — so
-/// stdout is captured by temporarily installing an Erlang group_leader
-/// collector around the eval (`emit_2core_harness_ffi:capture_stdout/1`).
-/// `engine.Outcome` maps onto `DiffRun.result`: `Returned(v)` → `Ok(v as
-/// Dynamic)`, `Threw(e)` → `Error(format_error(e))`; a parse/compile
-/// failure is also `Error`.
+/// `arc/vm/builtins/console.gleam`), so stdout is captured by temporarily
+/// installing an Erlang group_leader collector around the eval
+/// (`emit_2core_harness_ffi:capture_stdout/1`). `engine.Outcome` maps onto
+/// `DiffRun.result`: `Returned(v)` → `Ok(v as Dynamic)`, `Threw(e)` →
+/// `Error(format_error(e))`; a parse/compile failure is also `Error`.
 pub fn run_interpreted(source: String) -> DiffRun {
   let #(stdout, eval_result) =
     capture_stdout(fn() {
       let eng: engine.Engine(Nil) =
-        engine.new() |> engine.with_host_hooks(arc_test_hooks())
+        engine.new() |> engine.with_host_hooks(test_hooks())
       engine.eval(eng, source)
     })
   let result = case eval_result {
@@ -52,54 +57,56 @@ fn to_dynamic(a: a) -> Dynamic
 // Deterministic host hooks (SPEC §20)
 // ----------------------------------------------------------------------------
 
-/// The fixed monotonic-clock reading both runtimes report for `Date.now` /
-/// `performance.now`. sum(n)/makeAdder never read the clock, but SPEC§20
-/// mandates the constructors exist so time-sensitive fixtures added later
-/// diff cleanly.
+/// The fixed clock reading both runtimes report for `Date.now` /
+/// `performance.now`.
 pub const fixed_now_ms = 1_700_000_000_000
 
-/// Deterministic `arc/vm/host_hooks.HostHooks` for the interpreter oracle.
-/// arc's `HostHooks` has no `random`/`print` fields (arc's `console.log`
-/// is `io.println`, arc's `Math.random` is not hook-driven), so only the
-/// clock, sleep and uncaught-report sinks are virtualised here.
-pub fn arc_test_hooks() -> host_hooks.HostHooks {
+/// Deterministic hooks for both paths: fixed clocks, no sleep, a seeded
+/// xorshift64* PRNG, console lines into the process-local stdout buffer
+/// (log/info/debug, newline-terminated to match `io.println` bytes) or the
+/// stderr buffer (warn/error), and uncaught-job reports into the stderr
+/// buffer. The interpreter only reads the clock, sleep and report hooks.
+pub fn test_hooks() -> host_hooks.HostHooks {
   host_hooks.HostHooks(
     ..host_hooks.default_host_hooks(),
     monotonic_now: fn() { fixed_now_ms },
+    wall_clock_ms: fn() { fixed_now_ms },
     sleep_ms: fn(_) { Nil },
-    report_uncaught: buf_push,
-  )
-}
-
-/// Deterministic `arc/rt/types.HostHooks` for the compiled path. `random`
-/// is a seeded xorshift64* stepped in the process dictionary; `print`
-/// appends to the same process-local buffer, newline-terminated to match
-/// arc's `io.println` bytes.
-pub fn rt_test_hooks() -> rt_types.HostHooks {
-  rt_types.HostHooks(
-    monotonic_now: fn() { fixed_now_ms },
     random: next_random,
-    sleep_ms: fn(_) { Nil },
-    print: buf_push,
+    print: buf_print,
+    report_uncaught: err_push,
   )
 }
 
-/// Re-seed the deterministic PRNG behind `rt_test_hooks().random`.
+fn buf_print(level: ConsoleLevel, line: String) -> Nil {
+  case level {
+    LogLevel | InfoLevel | DebugLevel -> buf_push(line)
+    _ -> err_push(line)
+  }
+}
+
+/// Re-seed the deterministic PRNG behind `test_hooks().random`.
 /// Call at the top of a fixture that needs a known `Math.random` sequence.
 pub fn seed_random(seed: Int) -> Nil {
   do_seed_random(seed)
 }
 
-/// Clear the process-local print buffer. `run_compiled` calls this before
-/// each fixture so consecutive tests do not see each other's console lines.
+/// Clear both process-local buffers. `run_compiled` calls this before each
+/// fixture so consecutive tests do not see each other's console lines.
 pub fn buf_reset() -> Nil {
   do_buf_reset()
 }
 
-/// Read the process-local print buffer as one contiguous BitArray in
-/// emission order — the compiled path's `DiffRun.stdout`.
+/// Read the stdout buffer as one contiguous BitArray in emission order —
+/// the compiled path's `DiffRun.stdout`.
 pub fn buf_read() -> BitArray {
   do_buf_read()
+}
+
+/// Read the stderr buffer (console.warn/error lines and uncaught-job
+/// reports) in emission order.
+pub fn err_read() -> BitArray {
+  do_err_read()
 }
 
 @external(erlang, "emit_2core_harness_ffi", "next_random")
@@ -111,11 +118,17 @@ fn do_seed_random(seed: Int) -> Nil
 @external(erlang, "emit_2core_harness_ffi", "buf_push")
 fn buf_push(line: String) -> Nil
 
+@external(erlang, "emit_2core_harness_ffi", "err_push")
+fn err_push(line: String) -> Nil
+
 @external(erlang, "emit_2core_harness_ffi", "buf_reset")
 fn do_buf_reset() -> Nil
 
 @external(erlang, "emit_2core_harness_ffi", "buf_read")
 fn do_buf_read() -> BitArray
+
+@external(erlang, "emit_2core_harness_ffi", "err_read")
+fn do_err_read() -> BitArray
 
 @external(erlang, "emit_2core_harness_ffi", "env_is_truthy")
 pub fn env_is_truthy(name: String) -> Bool
@@ -124,6 +137,19 @@ pub fn env_is_truthy(name: String) -> Bool
 // Compiled path (emit_2core → 2core IR → Core Erlang → BEAM)
 // ----------------------------------------------------------------------------
 
+/// A seeded agent on `test_hooks`.
+pub fn seed() -> Agent {
+  run.seed(test_hooks())
+}
+
+/// Apply a loaded module's `js_main` from `st` with fresh buffers and
+/// package the captured stdout as a `DiffRun`.
+pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, DiffRun) {
+  buf_reset()
+  let #(st, result) = run.run_loaded(module, st)
+  #(st, DiffRun(stdout: buf_read(), result:))
+}
+
 /// Run `source` through emit_2core → `pipeline.compile_ir(emit.binding())`
 /// → BEAM and return the captured console bytes + completion result. Any
 /// compile-stage failure (parse/emit/lower/build) is folded into
@@ -131,7 +157,6 @@ pub fn env_is_truthy(name: String) -> Bool
 /// still gets two structurally comparable `DiffRun`s. Each call mints a
 /// fresh module atom so the BEAM code server never sees a re-register.
 pub fn run_compiled(source: String) -> DiffRun {
-  buf_reset()
   let mod_name = "arc_emit2c_test_" <> int.to_string(unique_integer([Positive]))
   let opts =
     emit_2core.CompileOpts(
@@ -144,10 +169,12 @@ pub fn run_compiled(source: String) -> DiffRun {
     Ok(unit) ->
       case pipeline.compile_ir(unit.module, emit_2core.binding()) {
         Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
-        Ok(beam) -> {
-          let #(_st, run) = run.run_beam(beam, mod_name, rt_test_hooks())
-          run
-        }
+        Ok(beam) ->
+          case run.load(beam, mod_name) {
+            Error(reason) ->
+              DiffRun(stdout: <<>>, result: Error("load failed: " <> reason))
+            Ok(module) -> run_loaded(module, seed()).1
+          }
       }
   }
 }

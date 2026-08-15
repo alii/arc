@@ -1,22 +1,23 @@
 //// The `console` global (WHATWG Console).
 ////
-//// Faithful port of arc/vm/builtins/console.gleam over 2core's threaded
-//// Agent. Output goes through `HostHooks.print` (never `io:format`
-//// directly) so the harness can route it into `JsStore.console_buf`.
+//// Faithful port of arc/vm/builtins/console.gleam over the threaded Agent.
+//// Output goes through `HostHooks.print` with the method's level; the
+//// default hook writes log/info/debug to stdout and warn/error to stderr.
 //// Return-tuple order is `#(JsVal, Agent)` (R1); a user
 //// `toString`/`valueOf` throw from a %s/%d specifier diverges via `t_throw`
 //// inside `t_to_string`/`t_to_number` (D7) — nothing is written.
 
+import arc/host_hooks.{
+  type ConsoleLevel, DebugLevel, ErrorLevel, InfoLevel, LogLevel, WarnLevel,
+}
 import arc/rt/builtins/common
 import arc/rt/builtins/global_fns
-import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type ConsoleNative, type Handle, type JsNum, type JsVal,
-  ConsoleLog, ConsoleLogError, ConsoleN, JFloat, JInt, KBig, KStr, KSym,
-  classify, mk_number, mk_undefined,
+  type Agent, type ConsoleNative, type Handle, type JsNum, type JsVal, ConsoleN,
+  ConsolePrint, JFloat, JInt, KBig, KStr, KSym, classify, mk_number,
+  mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -30,11 +31,11 @@ pub fn init(
 ) -> #(Handle, Agent) {
   let #(methods, st) =
     common.alloc_methods(st, function_proto, [
-      #("log", ConsoleN(ConsoleLog), 0),
-      #("info", ConsoleN(ConsoleLog), 0),
-      #("debug", ConsoleN(ConsoleLog), 0),
-      #("warn", ConsoleN(ConsoleLogError), 0),
-      #("error", ConsoleN(ConsoleLogError), 0),
+      #("log", ConsoleN(ConsolePrint(LogLevel)), 0),
+      #("info", ConsoleN(ConsolePrint(InfoLevel)), 0),
+      #("debug", ConsoleN(ConsolePrint(DebugLevel)), 0),
+      #("warn", ConsoleN(ConsolePrint(WarnLevel)), 0),
+      #("error", ConsoleN(ConsolePrint(ErrorLevel)), 0),
     ])
   common.init_namespace(st, object_proto, "console", methods)
 }
@@ -46,23 +47,21 @@ pub fn dispatch(
   _this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  case native {
-    // Both levels write via HostHooks.print — the harness sink is one
-    // channel; a distinct stderr sink is a future HostHooks addition.
-    ConsoleLog | ConsoleLogError -> print(st, args)
-  }
+  let ConsolePrint(level:) = native
+  print(st, level, args)
 }
 
 /// WHATWG Console §2.1 Logger — format `args` then hand the line to
 /// `HostHooks.print`. Formatting runs user code (`toString`/`valueOf` via
 /// %s/%d/%i/%f), so it can throw; a throw aborts the log — nothing is
 /// written — and diverges out of `console.log`, matching Node.
-pub fn print(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+pub fn print(
+  st: Agent,
+  level: ConsoleLevel,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
   let #(line, st) = format(st, args)
-  st.store.host_hooks.print(line)
-  // Also buffer into JsStore.console_buf so `t_console_bytes` reads back the
-  // run's stdout — the print hook is fire-and-forget and threads no state.
-  let st = rt_store.t_console_write(st, bit_array.from_string(line <> "\n"))
+  st.hooks.print(level, line)
   #(mk_undefined(), st)
 }
 
