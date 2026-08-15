@@ -29,6 +29,8 @@
 
 -include("arc_rt_layout.hrl").
 
+-compile({inline, [peek_get/3, slot_of/2, shape_offset/3]}).
+
 %% t_get_prop_own_data(St, {js_cell,Id}, KeyBin) -> V | miss
 %% JRead. Own DataProperty on an Ordinary SObject (kind=:=ordinary avoids
 %% ArrayObj's virtual "length") or own slot on an SShapedObject. Accessors,
@@ -73,27 +75,34 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case Data of
-        #{Id := {?SSHAPED_TAG, Sid, P, Slots}} ->
-            case shape_offset(St, Sid, KeyBin) of
-                miss -> miss;
-                Off ->
-                    NewSlot = {?SSHAPED_TAG, Sid, P,
-                               setelement(Off + 1, Slots, V)},
-                    setelement(?AGENT_STORE, St,
-                        setelement(?STORE_DATA, Store, Data#{Id := NewSlot}))
-            end;
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG,
-                           element(?SOBJECT_KIND, Slot) =:= ?ORDINARY ->
-            Props = element(?SOBJECT_PROPS, Slot),
-            K = {?KEY_NAMED, KeyBin},
-            case Props of
-                #{K := Prop}
-                  when element(1, Prop) =:= ?DATAPROP_TAG,
-                       element(?DATAPROP_WRITABLE, Prop) =:= true ->
-                    NewProps = Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
-                    NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
-                    setelement(?AGENT_STORE, St,
-                        setelement(?STORE_DATA, Store, Data#{Id := NewSlot}));
+        #{Id := Slot} ->
+            case Slot of
+                {?SSHAPED_TAG, Sid, P, Slots} ->
+                    case shape_offset(St, Sid, KeyBin) of
+                        miss -> miss;
+                        Off ->
+                            NewSlot = {?SSHAPED_TAG, Sid, P,
+                                       setelement(Off + 1, Slots, V)},
+                            setelement(?AGENT_STORE, St,
+                                setelement(?STORE_DATA, Store,
+                                           Data#{Id := NewSlot}))
+                    end;
+                _ when element(1, Slot) =:= ?SOBJECT_TAG,
+                       element(?SOBJECT_KIND, Slot) =:= ?ORDINARY ->
+                    Props = element(?SOBJECT_PROPS, Slot),
+                    K = {?KEY_NAMED, KeyBin},
+                    case Props of
+                        #{K := Prop}
+                          when element(1, Prop) =:= ?DATAPROP_TAG,
+                               element(?DATAPROP_WRITABLE, Prop) =:= true ->
+                            NewProps =
+                                Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
+                            NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
+                            setelement(?AGENT_STORE, St,
+                                setelement(?STORE_DATA, Store,
+                                           Data#{Id := NewSlot}));
+                        _ -> miss
+                    end;
                 _ -> miss
             end;
         _ -> miss

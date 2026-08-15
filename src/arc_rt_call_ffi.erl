@@ -74,18 +74,18 @@ t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case Data of
-        #{RId := RSlot} when element(1, RSlot) =:= ?SSHAPED_TAG ->
-            case mono_shaped_own(Store, RSlot, KeyBin) of
+        #{RId := RSlot} ->
+            Own = case element(1, RSlot) of
+                ?SOBJECT_TAG -> mono_own_value(RSlot, KeyBin);
+                ?SSHAPED_TAG -> mono_shaped_own(Store, RSlot, KeyBin);
+                _ -> miss
+            end,
+            case Own of
                 absent ->
-                    mono_proto(St, Data, element(?SSHAPED_PROTO, RSlot),
-                               KeyBin, Recv, Args);
-                V -> mono_apply(St, Data, V, Recv, Args)
-            end;
-        #{RId := RSlot} when element(1, RSlot) =:= ?SOBJECT_TAG ->
-            case mono_own_value(RSlot, KeyBin) of
-                absent ->
+                    %% proto is element 3 for BOTH s_object and s_shaped_object.
                     mono_proto(St, Data, element(?SOBJECT_PROTO, RSlot),
                                KeyBin, Recv, Args);
+                miss -> {miss, St};
                 V -> mono_apply(St, Data, V, Recv, Args)
             end;
         _ -> {miss, St}
@@ -142,16 +142,24 @@ mono_shaped_own(Store, RSlot, KeyBin) ->
 %% Gate + apply. Same KFunction gate as t_kfn_code (home_object=:=none so
 %% super.x methods miss to the full MOR). KNative → dispatch_native (M6 seam)
 %% so `Array.prototype.push` etc. hit here too. `this` is Recv — always a
-%% cell, so no OrdinaryCallBindThis substitution. Frame per D5 mk_frame.
+%% cell, so no OrdinaryCallBindThis substitution. A this-ABI simple variant
+%% (KFunction.simple with needs_this=true) of matching arity is applied as
+%% CodeT(St, Recv, P0..Pn-1) with no Frame tuple; otherwise Frame per D5
+%% mk_frame.
 mono_apply(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, Args) ->
     case Data of
         #{FnId := FSlot} when element(1, FSlot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, FSlot) of
-                {?KFN_TAG, Code, ?NONE, Flags, _, _, _}
+                {?KFN_TAG, Code, ?NONE, Flags, _, _, Simple}
                   when element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
-                    Code(St, {Recv, Fn, undefined, undefined}, Args);
+                    case Simple of
+                        {?SOME, {CodeT, Arity, true}}
+                          when length(Args) =:= Arity ->
+                            apply_this(CodeT, St, Recv, Args);
+                        _ -> Code(St, {Recv, Fn, undefined, undefined}, Args)
+                    end;
                 {?KNATIVE_TAG, Tag, _, _, _} ->
                     arc@rt@builtins:dispatch_native(
                         St, Tag, Recv, Args);
@@ -160,6 +168,12 @@ mono_apply(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, Args) ->
         _ -> {miss, St}
     end;
 mono_apply(St, _, _, _, _) -> {miss, St}.
+
+apply_this(CodeT, St, Recv, []) -> CodeT(St, Recv);
+apply_this(CodeT, St, Recv, [A]) -> CodeT(St, Recv, A);
+apply_this(CodeT, St, Recv, [A, B]) -> CodeT(St, Recv, A, B);
+apply_this(CodeT, St, Recv, [A, B, C]) -> CodeT(St, Recv, A, B, C);
+apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 
 %% t_new_simple(St, Ctor, Args) -> {Handle, St'} | {miss, St}
 %% JMut fast-path probe for `new F(args)` on a plain-function ctor
