@@ -3,15 +3,15 @@
 ////
 ////     gleam run -m emit_2core_v8v7_bisect
 
+import arc_aot/run
 import emit_2core_harness as harness
 import gleam/io
 import gleam/string
-import twocore/pipeline
 
 fn t(name: String, source: String) {
   let src = source <> ";console.log(\"ok\")"
   case harness.run_compiled(src) {
-    pipeline.DiffRun(result: Ok(_), stdout:) ->
+    run.DiffRun(result: Ok(_), stdout:) ->
       case stdout {
         <<"ok\n":utf8>> -> io.println("  pass  " <> name)
         _ ->
@@ -19,7 +19,7 @@ fn t(name: String, source: String) {
             "  BAD   " <> name <> " → stdout=" <> string.inspect(stdout),
           )
       }
-    pipeline.DiffRun(result: Error(e), stdout:) ->
+    run.DiffRun(result: Error(e), stdout:) ->
       io.println(
         "  FAIL  "
         <> name

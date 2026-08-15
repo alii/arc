@@ -166,3 +166,133 @@ pub fn cond_eq_diff_test() {
   assert i.stdout == <<"y n y y y\nne\n3\nonce\n":utf8>>
   assert c.stdout == i.stdout
 }
+
+// ── Language ops served by arc/rt/lang ─────────────────────────────────────
+
+fn diff(src: String, want: String) {
+  let i = harness.run_interpreted(src)
+  let c = harness.run_compiled(src)
+  assert i.stdout == <<want:utf8>>
+  assert c.stdout == i.stdout
+}
+
+pub fn for_of_array_diff_test() {
+  diff("var s='';for(const x of [1,2,3])s+=x;console.log(s)", "123\n")
+}
+
+const user_iter_src = "var log=[];function it(n){var i=0;return {[Symbol.iterator](){return this},next(){i++;return {done:i>n,value:i}},return(){log.push('ret'+i);return {}}}}
+for(var a of it(3)){log.push(a)}
+for(var b of it(5)){if(b==2)break;log.push(b)}
+try{for(var c of it(5)){if(c==2)throw 'boom';log.push(c)}}catch(e){log.push(e)}
+console.log(log.join())"
+
+pub fn for_of_user_iterator_return_diff_test() {
+  diff(user_iter_src, "1,2,3,1,ret2,1,ret2,boom\n")
+}
+
+pub fn array_spread_diff_test() {
+  diff(
+    "var a=[1,2,3];var b=[0,...a,4,...'xy'];console.log(b.length,b.join())",
+    "7 0,1,2,3,4,x,y\n",
+  )
+}
+
+pub fn call_spread_diff_test() {
+  diff(
+    "function f(){return Array.prototype.join.call(arguments)}var a=[2,3];console.log(f(1,...a,4),Math.max(...a))",
+    "1,2,3,4 3\n",
+  )
+}
+
+pub fn object_spread_diff_test() {
+  diff(
+    "var o={a:1,b:2};Object.defineProperty(o,'h',{value:9,enumerable:false});var p={...o,c:3,...null};console.log(Object.keys(p).join(),p.a+p.b+p.c,p.h)",
+    "a,b,c 6 undefined\n",
+  )
+}
+
+pub fn object_rest_diff_test() {
+  diff(
+    "var o={a:1,b:2,c:3};var {a,...r}=o;var k='b';var {[k]:bb,...r2}=o;console.log(a,Object.keys(r).join(),bb,Object.keys(r2).join())",
+    "1 b,c 2 a,c\n",
+  )
+}
+
+pub fn array_pattern_rest_diff_test() {
+  diff(
+    "var [x,,y,...zs]=[1,2,3,4,5];var [p,...ps]='ab';var h,t;[h,...t]=[7,8,9];var [q,...qs]=[];console.log(x,y,zs.join(),p,ps.join(),h+':'+t.length,q,qs.length)",
+    "1 3 4,5 a b 7:2 undefined 0\n",
+  )
+}
+
+pub fn tagged_template_identity_diff_test() {
+  diff(
+    "function t(s){return s}function f(x){return t`a${x}\\n`}var s1=f(1),s2=f(2);console.log(s1===s2,s1.length,s1[1]==='\\n',s1.raw[1],Object.isFrozen(s1),t`z`===s1)",
+    "true 2 true \\n true false\n",
+  )
+}
+
+pub fn regexp_literal_diff_test() {
+  diff(
+    "var r=/a+(b)?/g;var m=r.exec('caaab');console.log(m[0],m[1],m.index,r.lastIndex,/x/===/x/)",
+    "aaab b 1 5 false\n",
+  )
+}
+
+pub fn global_delete_diff_test() {
+  diff(
+    "globalThis.gx=1;Object.defineProperty(globalThis,'gy',{value:2,configurable:false});let lz=3;console.log(delete gx,typeof gx,delete gy,typeof gy,delete lz,lz)",
+    "true undefined false number false 3\n",
+  )
+}
+
+// Counts iterations only: the for-await lowering does not yet rebind the
+// loop variable per iteration, but get_iterator(async) / async_iter_next /
+// the done check are what this covers.
+pub fn for_await_step_diff_test() {
+  diff(
+    "var it={i:0,[Symbol.asyncIterator](){return this},next(){this.i++;return Promise.resolve({done:this.i>3,value:this.i})}};var n=0;var main=async function(){for await(const v of it)n++;for await(const w of [1,2])n+=10;console.log(n)};main()",
+    "23\n",
+  )
+}
+
+pub fn microtasks_drain_after_main_diff_test() {
+  diff(
+    "Promise.resolve(1).then(v=>console.log('then',v));console.log('sync')",
+    "sync\nthen 1\n",
+  )
+}
+
+pub fn unsupported_import_call_is_compile_error_test() {
+  let c = harness.run_compiled("var p=import('x');console.log('no')")
+  assert c.stdout == <<>>
+  let assert Error(msg) = c.result
+  assert msg == "UnsupportedFeature(\"import()\")"
+}
+
+pub fn unsupported_using_is_compile_error_test() {
+  let c =
+    harness.run_compiled("{using r={[Symbol.dispose](){}};console.log('no')}")
+  assert c.stdout == <<>>
+  let assert Error(msg) = c.result
+  assert msg == "UnsupportedFeature(\"using declaration\")"
+}
+
+const iter_close_protocol_src = "var log=[];function it(n){var i=0;return {[Symbol.iterator](){return this},next(){i++;log.push('n'+i);return {done:i>n,value:i}},return(){log.push('r');return {}}}}
+var [a]=it(3);var [b,c,d,e]=it(2);var [...all]=it(2);var [f,...g]=it(3);
+var t={[Symbol.iterator](){return this},next(){throw 'nx'},return(){log.push('BAD')}};try{for(const x of t){}}catch(ex){log.push(ex)}
+console.log(log.join(),a,e,all.join(),g.join())"
+
+pub fn iterator_close_protocol_diff_test() {
+  diff(
+    iter_close_protocol_src,
+    "n1,r,n1,n2,n3,n1,n2,n3,n1,n2,n3,n4,nx 1 undefined 1,2 2,3\n",
+  )
+}
+
+pub fn generator_and_collection_iteration_diff_test() {
+  diff(
+    "function* gen(){yield 1;yield 2;return 3}var s=[];for(const v of gen())s.push(v);s.push([...gen()].length);var m=new Map([[1,'a'],[2,'b']]);for(const [k,v] of m)s.push(k+v);var closed=0;var inf={[Symbol.iterator](){return this},next(){return {done:false,value:1}},return(){closed++;return {}}};lab:for(const x of inf){for(const y of inf){break lab}}console.log(s.join(),Math.max(...new Set([5,1,5])),closed)",
+    "1,2,2,1a,2b 5 2\n",
+  )
+}

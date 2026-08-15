@@ -357,19 +357,16 @@
 // 200µs threshold or erl-ABI-coupled with other-bench win.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
+import arc_aot/run
 import emit_2core_harness as harness
-import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
 import gleam/string
 import simplifile
-import twocore/backend/build_beam
 import twocore/pipeline
-import twocore/runtime/rt_js_builtins
-import twocore/runtime/rt_js_store
-import twocore/runtime/rt_state.{type InstanceState}
 
 type TimeUnit {
   Microsecond
@@ -413,53 +410,21 @@ fn repeat(n: Int, f: fn() -> a) -> Nil {
 // The hot loop must time ONLY the js_main apply so the emit_2core column is
 // comparable to the qjs/llint refs — not compile+load+realm-init per rep.
 
-/// A compiled+loaded JS module plus the seeded realm state each apply starts
-/// from. `InstanceState` is a pure threaded record and `apply_js_main` clears
-/// its process-dict overlay on entry, so re-applying the SAME `seed` observes
-/// an identical fresh realm every rep.
+/// A compiled+loaded JS module plus the seeded agent each apply starts
+/// from. `Agent` is a pure threaded record and `apply_main` clears its
+/// process-dict overlay on entry, so re-applying the SAME `seed` observes an
+/// identical fresh realm every rep.
 type Loaded {
-  Loaded(mod: Atom, seed: InstanceState)
+  Loaded(mod: Atom, seed: Agent)
 }
 
-/// Wire terms from `twocore_rt_js_exec_ffi:apply_js_main/2` — mirrors the
-/// private `pipeline.JsExecOutcome`. Tag atoms MUST match the Erlang side.
-type JsExecOutcome {
-  JsReturned(value: Dynamic)
-  JsThrew(exn: Dynamic)
-  JsCrashed(reason: String)
+fn seed_realm() -> Agent {
+  run.seed(harness.rt_test_hooks())
 }
 
-@external(erlang, "twocore_rt_js_exec_ffi", "apply_js_main")
-fn ffi_apply_js_main(
-  mod: Atom,
-  st: InstanceState,
-) -> #(JsExecOutcome, InstanceState)
-
-fn seed_realm() -> InstanceState {
-  let st =
-    rt_state.fresh_full(
-      rt_state.FullDecl(mems: [], globals: [], tables: [], ref_globals: []),
-    )
-  let st =
-    rt_state.t_with_js_store(
-      st,
-      rt_js_store.t_store_new(harness.twocore_test_hooks()),
-    )
-  let #(_realm, st) = rt_js_builtins.init_realm(st)
-  st
-}
-
-/// One js_main apply from the shared seed → `DiffRun` (stdout from the
-/// returned state's console buffer, result mapped from the FFI outcome).
-fn run_once(loaded: Loaded) -> pipeline.DiffRun {
-  let #(outcome, st) = ffi_apply_js_main(loaded.mod, loaded.seed)
-  let stdout = rt_js_store.t_console_bytes(st)
-  let result = case outcome {
-    JsReturned(v) -> Ok(v)
-    JsThrew(e) -> Error("uncaught: " <> string.inspect(e))
-    JsCrashed(reason) -> Error(reason)
-  }
-  pipeline.DiffRun(stdout:, result:)
+/// One js_main apply from the shared seed → `DiffRun`.
+fn run_once(loaded: Loaded) -> run.DiffRun {
+  run.run_loaded(loaded.mod, loaded.seed).1
 }
 
 fn bench_compiled(name: String, source: String) -> Outcome {
@@ -491,7 +456,7 @@ fn bench_compiled(name: String, source: String) -> Outcome {
       case lower_r {
         Error(e) -> CompileFailed("ir_to_beam", string.inspect(e))
         Ok(beam) ->
-          case build_beam.load_module(atom.create(mod_name), mod_name, beam) {
+          case run.load(beam, mod_name) {
             Error(e) -> CompileFailed("beam_load", e)
             Ok(mod) -> {
               let #(realm_us, seed) = time_us(seed_realm)
@@ -501,9 +466,9 @@ fn bench_compiled(name: String, source: String) -> Outcome {
               let loaded = Loaded(mod:, seed:)
               let #(warm_us, first) = time_us(fn() { run_once(loaded) })
               case first {
-                pipeline.DiffRun(result: Error(e), stdout:) ->
+                run.DiffRun(result: Error(e), stdout:) ->
                   RunFailed(e, string.inspect(stdout))
-                pipeline.DiffRun(result: Ok(_), stdout:) ->
+                run.DiffRun(result: Ok(_), stdout:) ->
                   case stdout {
                     <<"ok\n":utf8>> -> {
                       let reps = reps_for(warm_us)
@@ -524,9 +489,9 @@ fn bench_compiled(name: String, source: String) -> Outcome {
 fn bench_interp(source: String) -> Outcome {
   let #(warm_us, first) = time_us(fn() { harness.run_interpreted(source) })
   case first {
-    pipeline.DiffRun(result: Error(e), stdout:) ->
+    run.DiffRun(result: Error(e), stdout:) ->
       RunFailed(e, string.inspect(stdout))
-    pipeline.DiffRun(result: Ok(_), stdout:) ->
+    run.DiffRun(result: Ok(_), stdout:) ->
       case stdout {
         <<"ok\n":utf8>> -> {
           let reps = reps_for(warm_us)

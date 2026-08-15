@@ -5,7 +5,6 @@ import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser
 import arc/parser/ast
-import arc_aot/emit/anf
 import arc_aot/emit/async
 import arc_aot/emit/class
 import arc_aot/emit/destructure
@@ -14,6 +13,7 @@ import arc_aot/emit/expr
 import arc_aot/emit/func
 import arc_aot/emit/state
 import arc_aot/emit/stmt
+import arc_aot/host_ops
 import gleam/bit_array
 import gleam/dict
 import gleam/int
@@ -57,9 +57,14 @@ pub type EmitError =
 /// R2: the single JS exception tag name. Source of truth is `exn.gleam`.
 pub const js_exn_tag = exn.js_exn_tag
 
-/// The 2core `Binding` profile every arc→BEAM compile uses (SPEC §19.9 / R3).
+/// The 2core `Binding` every arc→BEAM compile uses: threaded state on the
+/// portable tiers, no metering, and arc's own runtime as the `"js"` host.
 pub fn binding() -> instance.Binding {
-  profiles.js_direct()
+  instance.Binding(
+    ..profiles.portable(),
+    direct_host: Some(host_ops.table()),
+    meter: instance.MeterOff,
+  )
 }
 
 /// SPEC§19.2 / R13: wire the M12-M18 emit_* modules into the mutual-recursion
@@ -264,14 +269,14 @@ pub fn compile(
   let #(prologue, e) = root_binding_prologue(e)
   // (2) hoist top-level FunctionDeclarations (§16.1.7 step 16).
   use #(wrap, e) <- result.try(emit_hoists(e, body))
-  // (3)+(4) statement fold; terminal K drains microtasks then Return(undef).
-  // The anf.run_to Emitter2 is dropped — after this only fns_acc is read.
-  let terminal = fn(ef: state.Emitter2) {
-    anf.run_to(anf.host_unit("drain_microtasks", []), ef, fn(ef, _) {
-      ir.Return([ef.consts.undef])
-    }).0
-  }
-  use #(stmts_tree, ef) <- result.map(e.dispatch.emit_stmts(e, body, terminal))
+  // (3)+(4) statement fold; terminal K is Return(undef). The runner drains
+  // microtasks and runs the GC safepoint after js_main returns.
+  let terminal = fn(ef: state.Emitter2) { ir.Return([ef.consts.undef]) }
+  use #(stmts_tree, ef) <- result.try(e.dispatch.emit_stmts(e, body, terminal))
+  use Nil <- result.map(case list.reverse(ef.unsupported) {
+    [feature, ..] -> Error(state.UnsupportedFeature(feature))
+    [] -> Ok(Nil)
+  })
   // (5) js_main params match the R7 call ABI (frame 4-tuple, args list).
   let js_main =
     ir.Function(

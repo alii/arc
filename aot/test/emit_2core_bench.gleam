@@ -12,22 +12,16 @@
 ////     cd aot && gleam run -m emit_2core_bench
 
 import arc/engine
+import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
+import arc_aot/run
 import emit_2core_harness as harness
 import gleam/dynamic.{type Dynamic}
+import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
 import gleam/string
-import twocore/backend/build_beam
 import twocore/pipeline
-import twocore/runtime/profiles
-import twocore/runtime/rt_js_builtins
-import twocore/runtime/rt_js_store
-import twocore/runtime/rt_state.{type InstanceState}
-
-// arc has gleam_erlang only transitively (via twocore); the import
-// warning is expected and harmless for a bench-only module.
-import gleam/erlang/atom.{type Atom}
 
 type TimeUnit {
   Microsecond
@@ -60,13 +54,11 @@ pub const obj_js = "let o={x:0};for(let i=0;i<1000000;i++)o.x=o.x+i;let s=o.x;s"
 
 // ───────────────────────────── compiled path ─────────────────────────────
 
-/// A compiled+loaded JS script plus the seeded realm state each apply
-/// starts from. `InstanceState` is a pure threaded record (no process-
-/// dictionary state — see rt_state.fresh_full), so the SAME `seed` is
-/// passed to every `apply_js_main` and each run observes an identical
-/// fresh realm.
+/// A compiled+loaded JS script plus the seeded agent each apply starts
+/// from. `Agent` is a pure threaded record, so the SAME `seed` is passed to
+/// every `apply_main` and each run observes an identical fresh realm.
 type Loaded {
-  Loaded(mod: Atom, seed: InstanceState)
+  Loaded(mod: Atom, seed: Agent)
 }
 
 fn compile_load(source: String, name: String) -> #(Int, Int, Loaded) {
@@ -80,36 +72,17 @@ fn compile_load(source: String, name: String) -> #(Int, Int, Loaded) {
     time_us(fn() {
       let assert Ok(unit) = emit_2core.compile_source(source, opts)
       let assert Ok(beam) =
-        pipeline.compile_ir(unit.module, profiles.js_direct())
+        pipeline.compile_ir(unit.module, emit_2core.binding())
       beam
     })
-  let assert Ok(mod) = build_beam.load_module(atom.create(name), name, beam)
-  let #(realm_us, seed) =
-    time_us(fn() {
-      let st =
-        rt_state.fresh_full(
-          rt_state.FullDecl(mems: [], globals: [], tables: [], ref_globals: []),
-        )
-      let st =
-        rt_state.t_with_js_store(
-          st,
-          rt_js_store.t_store_new(harness.twocore_test_hooks()),
-        )
-      let #(_realm, st) = rt_js_builtins.init_realm(st)
-      st
-    })
+  let assert Ok(mod) = run.load(beam, name)
+  let #(realm_us, seed) = time_us(fn() { run.seed(harness.rt_test_hooks()) })
   #(compile_us, realm_us, Loaded(mod:, seed:))
 }
 
-/// Re-declared FFI (private in `pipeline`): apply the loaded module's
-/// `js_main(st, frame, [])` under a protected try. Returns
-/// `#(JsExecOutcome, st')`; only the completion value is inspected here.
-@external(erlang, "twocore_rt_js_exec_ffi", "apply_js_main")
-fn ffi_apply_js_main(mod: Atom, st: InstanceState) -> #(Dynamic, InstanceState)
-
 fn run_once(loaded: Loaded) -> Dynamic {
-  let #(outcome, _st) = ffi_apply_js_main(loaded.mod, loaded.seed)
-  outcome
+  let #(outcome, _st) = run.apply_main(loaded.mod, loaded.seed)
+  to_dynamic(outcome)
 }
 
 // ───────────────────────────── interpreter path ─────────────────────────────

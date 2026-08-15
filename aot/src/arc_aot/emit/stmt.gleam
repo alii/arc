@@ -605,14 +605,7 @@ fn emit_block(
               fold_body(e, body, fn(ef) {
                 next(leave_scope_carrying(ef, save, carried))
               })
-            True -> {
-              // M17 replaces this with proper try-wrapped DisposeResources.
-              let e = state.push_barrier(e, None, None)
-              use ef <- fold_body(e, body)
-              let ef = state.pop_frame(ef)
-              use ef <- host_unit_(ef, "dispose_resources", [])
-              next(leave_scope_carrying(ef, save, carried))
-            }
+            True -> Error(state.UnsupportedFeature("using declaration"))
           }
         }
       }

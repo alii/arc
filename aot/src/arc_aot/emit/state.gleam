@@ -294,6 +294,9 @@ pub type Emitter2 {
     pending_label: Option(String),
     // ── module-wide function accumulator (survives enter_function) ──
     fns_acc: List(ir.Function),
+    /// Unsupported features met inside expression position, where the ANF
+    /// builder has no error channel. `compile` fails the unit if non-empty.
+    unsupported: List(String),
     // ── per-body mode flags (reset by enter_function) ──
     strict: Bool,
     is_async: Bool,
@@ -420,6 +423,11 @@ pub fn add_function(e: Emitter2, f: ir.Function) -> Emitter2 {
 /// this). Reverses fns_acc since add_function prepends.
 pub fn take_functions(e: Emitter2) -> List(ir.Function) {
   list.reverse(e.fns_acc)
+}
+
+/// Record an unsupported feature seen in expression position.
+pub fn mark_unsupported(e: Emitter2, feature: String) -> Emitter2 {
+  Emitter2(..e, unsupported: [feature, ..e.unsupported])
 }
 
 /// Canonical initial IR var name for scope slot `slot`. The function prologue
@@ -711,6 +719,7 @@ pub fn new_emitter(
     frame_stack: [],
     pending_label: None,
     fns_acc: [],
+    unsupported: [],
     strict:,
     is_async: False,
     is_generator: False,

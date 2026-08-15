@@ -440,20 +440,10 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
     }
 
     // ── Dynamic import (u-delegate-dispatch, port emit.gleam:4995) ──────────
-    ast.ImportExpression(_, source, options, phase) -> {
+    ast.ImportExpression(..) -> {
+      use _ <- anf.then(modify(state.mark_unsupported(_, "import()")))
       use rc <- anf.then(consts())
-      use src <- anf.then(expr(source))
-      use opts <- anf.then(case options {
-        Some(o) -> expr(o)
-        None -> anf.pure(rc.undef)
-      })
-      // M12.md:457 3-arg form; emit.gleam:4995 branches on phase.
-      let phase_atom = case phase {
-        ast.PhaseEvaluation -> "evaluation"
-        ast.PhaseSource -> "source"
-        ast.PhaseDefer -> "defer"
-      }
-      anf.host("dynamic_import", [src, opts, ir.ConstAtom(phase_atom)])
+      anf.pure(rc.undef)
     }
   }
 }
@@ -2127,7 +2117,7 @@ fn fold_args_spread(
     }
     [arg, ..rest] -> {
       use v <- anf.then(expr(arg))
-      use acc <- anf.then(anf.bind(ir.TermOp(ir.MakeCons, [v, acc])))
+      use acc <- anf.then(anf.host("list_append_one", [acc, v]))
       fold_args_spread(rest, acc)
     }
   }
@@ -2266,7 +2256,7 @@ fn emit_member_call(
           // Per-CALLSITE polymorphic IC: SiteKey is a compile-time-unique
           // ConstBinary pdict key (literal — zero runtime alloc; disjoint
           // from the integer/atom overlay-key space). Cache format (see
-          // twocore_rt_js_obj_ffi:tc_ic_install/6): mono `{{Sid,Proto},Code,
+          // arc_rt_obj_ffi:tc_ic_install/6): mono `{{Sid,Proto},Code,
           // FnH,SimpleT}` | poly `#{{Sid,Proto} => {Code,FnH,SimpleT}}` |
           // `mega` | undefined. Keyed on the `{Sid,Proto}` PAIR — Sid alone
           // is unsound (two ctors with identical field sequence share a Sid
@@ -3788,7 +3778,7 @@ fn emit_object_assign_props(
     [] -> anf.pure(Nil)
     [ast.SpreadProperty(argument), ..] -> {
       use excl <- anf.then(anf.cons_list(list.reverse(seen)))
-      use rest <- anf.then(anf.host("copy_data_props", [src, excl]))
+      use rest <- anf.then(anf.host("object_rest", [src, excl]))
       emit_destructuring_assign(argument, rest)
     }
     [ast.InitProperty(key:, value:, ..), ..tail] -> {

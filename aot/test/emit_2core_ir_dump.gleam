@@ -17,7 +17,6 @@ import simplifile
 import twocore/ir
 import twocore/ir/printer
 import twocore/pipeline
-import twocore/runtime/profiles
 
 fn dump(name: String, source: String) -> Nil {
   io.println("═══════════════════════════════════════════════════════════════")
@@ -35,8 +34,8 @@ fn dump(name: String, source: String) -> Nil {
     Ok(unit) -> {
       io.println("─── twocore IR (printer.print_module) ───")
       io.println(printer.print_module(unit.module))
-      io.println("─── Core Erlang (pipeline.ir_to_core, js_direct) ───")
-      case pipeline.ir_to_core(unit.module, profiles.js_direct()) {
+      io.println("─── Core Erlang (pipeline.ir_to_core, emit binding) ───")
+      case pipeline.ir_to_core(unit.module, emit_2core.binding()) {
         Error(e) -> io.println("!! ir_to_core FAILED: " <> string.inspect(e))
         Ok(core) -> io.println(core)
       }

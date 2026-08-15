@@ -4507,34 +4507,23 @@ fn emit_for_await_head(
 
 /// for-await CHECK arm body (state `fap.check`, entered post-await with
 /// `ctx.sent_v` = resolved IteratorResult): read `.done`/`.value`; if done →
-/// close iterator (async, non-abrupt) and `Continue(after)`; else bind
-/// `value` to `left` (via `bind_for_lhs` — handles ForInitExpression identifier
-/// targets) then `Continue(body_s)`. The loop body itself is a plan.arms
-/// ArmSpec so body-internal splits work.
+/// `Continue(after)`; else bind `value` to `left` (via `bind_for_lhs` —
+/// handles ForInitExpression identifier targets) then `Continue(body_s)`.
+/// The loop body itself is a plan.arms ArmSpec so body-internal splits work.
 fn emit_for_await_check(
   e: Emitter2,
   ctx: SmCtx,
   fap: ForAwaitSpec,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
-  let iter_idx = extra_idx(ctx.layout, for_await_iter_key(fap.head))
   run_rk(e, fn(e, done) {
     use e <- restore_and_seed(e, ctx)
     let e = install_cursor(e, fap.body_cursor)
-    // done-branch: close iterator (non-abrupt) then jump to `after`.
+    // done-branch: §14.7.5.7 step 6.d, exhaustion does not close; jump to
+    // `after`.
     let #(done_branch, e) =
-      anf.run_to(
-        {
-          use iter_h <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, iter_idx)))
-          use _ <- anf.then(
-            anf.host_unit("iter_close", [iter_h, ir.ConstAtom("false")]),
-          )
-          pack_loc(ctx, dict.new())
-        },
-        e,
-        fn(_e, loc2) {
-          ir.Continue(ctx.lresume, [ir.ConstI32(fap.after), loc2])
-        },
-      )
+      anf.run_to(pack_loc(ctx, dict.new()), e, fn(_e, loc2) {
+        ir.Continue(ctx.lresume, [ir.ConstI32(fap.after), loc2])
+      })
     // not-done: bind `left := value` then Continue→body_s (body emitted via
     // plan.arms; its tail loops FallTo(head)).
     let #(val_name, e) = state.fresh_var(e)

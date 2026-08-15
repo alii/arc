@@ -1,6 +1,6 @@
 %%% call_time profiler for the emit_2core benches. Installs
 %%% erlang:trace_pattern call_time counters on every module the compiled
-%%% path can hit (rt_js_* + the FFI shims + the compiled bench module),
+%%% path can hit (arc@rt@* + the FFI shims + the compiled bench module),
 %%% runs the workload, then reads back {M,F,A} -> {Count, µs} for the
 %%% top-N by time.
 -module(emit_2core_profile_ffi).
@@ -12,24 +12,23 @@
 mods() ->
     [
      %% state-threaded runtime layer (Gleam)
-     'twocore@runtime@rt_js_store',
-     'twocore@runtime@rt_js_obj',
-     'twocore@runtime@rt_js_call',
-     'twocore@runtime@rt_js_ops',
-     'twocore@runtime@rt_js_val',
-     'twocore@runtime@rt_js_gc',
-     'twocore@runtime@rt_js_class',
-     'twocore@runtime@rt_js_async',
-     'twocore@runtime@rt_js_types',
-     'twocore@runtime@rt_js_ordered_entries',
-     'twocore@runtime@rt_state',
+     'arc@rt@store',
+     'arc@rt@obj',
+     'arc@rt@lang',
+     'arc@rt@call',
+     'arc@rt@ops',
+     'arc@rt@val',
+     'arc@rt@gc',
+     'arc@rt@class',
+     'arc@rt@async',
+     'arc@rt@types',
+     'arc@vm@internal@ordered_entries',
      %% hand FFI shims
-     twocore_rt_js_call_ffi,
-     twocore_rt_js_store_ffi,
-     twocore_rt_js_ops_ffi,
-     twocore_rt_js_val_ffi,
-     twocore_rt_js_obj_ffi,
-     twocore_rt_js_ffi,
+     arc_rt_call_ffi,
+     arc_rt_store_ffi,
+     arc_rt_ops_ffi,
+     arc_rt_val_ffi,
+     arc_rt_obj_ffi,
      %% gleam stdlib the runtime touches
      'gleam@dict', 'gleam@list', 'gleam@option',
      gleam_stdlib
@@ -135,34 +134,34 @@ bench_op(Which, St, Arg, N) ->
 
 bench_op_loop(_, _, _, 0) -> ok;
 bench_op_loop(kfn_code, St, F, N) ->
-    _ = 'twocore@runtime@rt_js_call':t_kfn_code(St, F, undefined),
+    _ = 'arc@rt@call':t_kfn_code(St, F, undefined),
     bench_op_loop(kfn_code, St, F, N-1);
 bench_op_loop(kfn_code_ffi, St, F, N) ->
-    _ = twocore_rt_js_call_ffi:t_kfn_code(St, F, undefined),
+    _ = arc_rt_call_ffi:t_kfn_code(St, F, undefined),
     bench_op_loop(kfn_code_ffi, St, F, N-1);
 bench_op_loop(cell_get, St, H, N) ->
-    _ = 'twocore@runtime@rt_js_store':t_cell_get(St, H),
+    _ = 'arc@rt@store':t_cell_get(St, H),
     bench_op_loop(cell_get, St, H, N-1);
 bench_op_loop(cell_get_ffi, St, H, N) ->
-    _ = twocore_rt_js_store_ffi:t_cell_get(St, H),
+    _ = arc_rt_store_ffi:t_cell_get(St, H),
     bench_op_loop(cell_get_ffi, St, H, N-1);
 bench_op_loop(get_prop, St, {O, K}, N) ->
-    {_, _} = 'twocore@runtime@rt_js_obj':t_get_prop_any(St, O, K),
+    {_, _} = 'arc@rt@obj':t_get_prop_any(St, O, K),
     bench_op_loop(get_prop, St, {O, K}, N-1);
 bench_op_loop(get_prop_own_data, St, {O, Kb}, N) ->
-    _ = twocore_rt_js_obj_ffi:t_get_prop_own_data(St, O, Kb),
+    _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb),
     bench_op_loop(get_prop_own_data, St, {O, Kb}, N-1);
 bench_op_loop(get_prop_own_data_2k, St, {O, Kb1, Kb2}, N) ->
     %% Second-key path: Kb1 warms the mono cache, Kb2 hits the `{_,_}` arm
     %% (persistent-store peek, no install). Measures the multi-field read.
-    _ = twocore_rt_js_obj_ffi:t_get_prop_own_data(St, O, Kb1),
-    _ = twocore_rt_js_obj_ffi:t_get_prop_own_data(St, O, Kb2),
+    _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb1),
+    _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb2),
     bench_op_loop(get_prop_own_data_2k, St, {O, Kb1, Kb2}, N-1);
 bench_op_loop(set_prop_own_data, St, {O, Kb}, N) ->
-    _ = twocore_rt_js_obj_ffi:t_set_prop_own_data(St, O, Kb, 42),
+    _ = arc_rt_obj_ffi:t_set_prop_own_data(St, O, Kb, 42),
     bench_op_loop(set_prop_own_data, St, {O, Kb}, N-1);
 bench_op_loop(set_prop, St, {O, K}, N) ->
-    {_, St2} = 'twocore@runtime@rt_js_obj':t_set_prop_any(St, O, K, 42),
+    {_, St2} = 'arc@rt@obj':t_set_prop_any(St, O, K, 42),
     bench_op_loop(set_prop, St2, {O, K}, N-1);
 bench_op_loop(nop, St, A, N) ->
     bench_op_loop(nop, St, A, N-1).
@@ -213,7 +212,7 @@ eprof_run(Mod, St) ->
          || {F,A} <- Jsf],
     _ = [erlang:trace_pattern(MFA, true, [call_count]) || MFA <- Bifs],
     erlang:trace(self(), true, [call]),
-    _ = twocore_rt_js_exec_ffi:apply_js_main(Mod, St),
+    _ = arc_aot_exec_ffi:apply_js_main(Mod, St),
     erlang:trace(self(), false, [call]),
     io:format("  BIF counts:~n", []),
     lists:foreach(
@@ -275,7 +274,7 @@ probe_jsf(Mod, St) ->
     erlang:trace_pattern({erlang, element, 2}, true, [call_count]),
     erlang:trace_pattern({erlang, setelement, 3}, true, [call_count]),
     erlang:trace(self(), true, [call]),
-    twocore_rt_js_exec_ffi:apply_js_main(Mod, St),
+    arc_aot_exec_ffi:apply_js_main(Mod, St),
     erlang:trace(self(), false, [call]),
     {call_count, Gc} = erlang:trace_info({erlang, get, 1}, call_count),
     {call_count, Pc} = erlang:trace_info({erlang, put, 2}, call_count),
@@ -300,7 +299,7 @@ count_pdict_gets(Mod, St) ->
     erlang:trace_pattern({erlang, put, 2}, true, [call_count]),
     erlang:trace(self(), true, [call]),
     T0 = erlang:monotonic_time(microsecond),
-    twocore_rt_js_exec_ffi:apply_js_main(Mod, St),
+    arc_aot_exec_ffi:apply_js_main(Mod, St),
     Us = erlang:monotonic_time(microsecond) - T0,
     erlang:trace(self(), false, [call]),
     {call_count, Gc} = erlang:trace_info({erlang, get, 1}, call_count),

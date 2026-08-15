@@ -150,7 +150,7 @@ pub fn run_to(
   #(tree, pdict_erase(cell))
 }
 
-// ── slot-rebind threading (SPEC§9.12 / profiles.gleam js_direct opt_level) ──
+// ── slot-rebind threading (SPEC§9.12 / emit.binding() opt_level) ──
 // A write_slot(_, False, _) inside an arm binds a fresh name INSIDE that arm's
 // tree and leaks it via e.slot_vars to the outer continuation, where it is out
 // of ir.Let-scope. bind_if/bind_block therefore snapshot slot_vars, run each

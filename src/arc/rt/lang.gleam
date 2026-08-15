@@ -221,30 +221,19 @@ fn copy_data_properties(
       let #(from, st) = rt_val.t_to_object(st, source)
       let #(keys, st) = rt_obj.t_own_keys(st, from)
       use st, key <- list.fold(keys, st)
-      case list.contains(excluded, key) {
-        True -> st
-        False ->
-          case rt_obj.t_get_own_property(st, from, key) {
-            option.None -> st
-            Some(prop) ->
-              case types.prop_enumerable(prop) {
-                False -> st
-                True -> {
-                  let #(v, st) = rt_obj.t_get_prop(st, mk_object(from), key)
-                  let #(_, st) =
-                    rt_obj.t_define_own_data(
-                      st,
-                      target,
-                      key,
-                      v,
-                      True,
-                      True,
-                      True,
-                    )
-                  st
-                }
-              }
-          }
+      let wanted =
+        !list.contains(excluded, key)
+        && rt_obj.t_get_own_property(st, from, key)
+        |> option.map(types.prop_enumerable)
+        |> option.unwrap(False)
+      case wanted {
+        False -> st
+        True -> {
+          let #(v, st) = rt_obj.t_get_prop(st, mk_object(from), key)
+          let #(_, st) =
+            rt_obj.t_define_own_data(st, target, key, v, True, True, True)
+          st
+        }
       }
     }
   }

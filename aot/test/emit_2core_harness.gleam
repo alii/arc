@@ -5,14 +5,14 @@
 //// i.stdout` without caring which path produced it.
 
 import arc/engine
+import arc/rt/types as rt_types
 import arc/vm/host_hooks
 import arc_aot/emit as emit_2core
+import arc_aot/run.{type DiffRun, DiffRun}
 import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/string
-import twocore/pipeline.{type DiffRun, DiffRun}
-import twocore/runtime/profiles
-import twocore/runtime/rt_js_types
+import twocore/pipeline
 
 // ----------------------------------------------------------------------------
 // Interpreter oracle
@@ -71,12 +71,12 @@ pub fn arc_test_hooks() -> host_hooks.HostHooks {
   )
 }
 
-/// Deterministic `twocore/runtime/rt_js_types.HostHooks` for the compiled
-/// path. `random` is a seeded xorshift64* stepped in the process
-/// dictionary; `print` appends to the same process-local buffer, newline-
-/// terminated to match arc's `io.println` bytes.
-pub fn twocore_test_hooks() -> rt_js_types.HostHooks {
-  rt_js_types.HostHooks(
+/// Deterministic `arc/rt/types.HostHooks` for the compiled path. `random`
+/// is a seeded xorshift64* stepped in the process dictionary; `print`
+/// appends to the same process-local buffer, newline-terminated to match
+/// arc's `io.println` bytes.
+pub fn rt_test_hooks() -> rt_types.HostHooks {
+  rt_types.HostHooks(
     monotonic_now: fn() { fixed_now_ms },
     random: next_random,
     sleep_ms: fn(_) { Nil },
@@ -84,7 +84,7 @@ pub fn twocore_test_hooks() -> rt_js_types.HostHooks {
   )
 }
 
-/// Re-seed the deterministic PRNG behind `twocore_test_hooks().random`.
+/// Re-seed the deterministic PRNG behind `rt_test_hooks().random`.
 /// Call at the top of a fixture that needs a known `Math.random` sequence.
 pub fn seed_random(seed: Int) -> Nil {
   do_seed_random(seed)
@@ -124,8 +124,8 @@ pub fn env_is_truthy(name: String) -> Bool
 // Compiled path (emit_2core → 2core IR → Core Erlang → BEAM)
 // ----------------------------------------------------------------------------
 
-/// Run `source` through emit_2core → `pipeline.compile_ir(js_direct())` →
-/// BEAM and return the captured console bytes + completion result. Any
+/// Run `source` through emit_2core → `pipeline.compile_ir(emit.binding())`
+/// → BEAM and return the captured console bytes + completion result. Any
 /// compile-stage failure (parse/emit/lower/build) is folded into
 /// `Error(string.inspect(e))` with empty `stdout` so the differential test
 /// still gets two structurally comparable `DiffRun`s. Each call mints a
@@ -142,11 +142,10 @@ pub fn run_compiled(source: String) -> DiffRun {
   case emit_2core.compile_source(source, opts) {
     Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
     Ok(unit) ->
-      case pipeline.compile_ir(unit.module, profiles.js_direct()) {
+      case pipeline.compile_ir(unit.module, emit_2core.binding()) {
         Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
         Ok(beam) -> {
-          let #(_st, run) =
-            pipeline.run_js_beam(beam, mod_name, twocore_test_hooks())
+          let #(_st, run) = run.run_beam(beam, mod_name, rt_test_hooks())
           run
         }
       }

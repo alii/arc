@@ -3,7 +3,7 @@
 ////
 //// (A) DIRECT — run a program that stores 10 survivors on `globalThis.keep`
 //// and 100K garbage cells; take returned `st`, manually call
-//// `rt_js_gc.t_collect(st, [])`; verify `stats.live` dropped ~100K and
+//// `rt_gc.t_collect(st, [])`; verify `stats.live` dropped ~100K and
 //// `stats.free` grew; then run a SECOND compiled snippet in `st'` that
 //// reads `globalThis.keep[5][0]` — must print `50000`, no dangling-handle
 //// panic.
@@ -14,24 +14,19 @@
 ////
 ////     cd aot && gleam run -m emit_2core_gc_verify_x8k2
 
+import arc/rt/gc as rt_gc
+import arc/rt/store as rt_store
+import arc/rt/types.{type Agent} as rt_types
 import arc_aot/emit as emit_2core
+import arc_aot/run
 import emit_2core_harness as harness
 import gleam/bit_array
-import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
+import gleam/list
 import gleam/string
-import twocore/backend/build_beam
 import twocore/pipeline
-import twocore/runtime/profiles
-import twocore/runtime/rt_js_builtins
-import twocore/runtime/rt_js_gc.{type GcStats, GcStats}
-import twocore/runtime/rt_js_store
-import twocore/runtime/rt_state.{type InstanceState}
-
-@external(erlang, "twocore_rt_js_exec_ffi", "apply_js_main")
-fn ffi_apply_js_main(mod: Atom, st: InstanceState) -> #(Dynamic, InstanceState)
 
 // ── programs ───────────────────────────────────────────────────────────────
 // NOTE: `{x:i}` object literal crashes compiled path (badarg element(6,0)).
@@ -91,18 +86,8 @@ console.log('sync');
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
-fn seed() -> InstanceState {
-  let st =
-    rt_state.fresh_full(
-      rt_state.FullDecl(mems: [], globals: [], tables: [], ref_globals: []),
-    )
-  let st =
-    rt_state.t_with_js_store(
-      st,
-      rt_js_store.t_store_new(harness.twocore_test_hooks()),
-    )
-  let #(_realm, st) = rt_js_builtins.init_realm(st)
-  st
+fn seed() -> Agent {
+  run.seed(harness.rt_test_hooks())
 }
 
 fn compile_load(source: String, name: String) -> Result(Atom, String) {
@@ -115,10 +100,10 @@ fn compile_load(source: String, name: String) -> Result(Atom, String) {
   case emit_2core.compile_source(source, opts) {
     Error(e) -> Error("emit: " <> string.inspect(e))
     Ok(unit) ->
-      case pipeline.compile_ir(unit.module, profiles.js_direct()) {
+      case pipeline.compile_ir(unit.module, emit_2core.binding()) {
         Error(e) -> Error("lower: " <> string.inspect(e))
         Ok(beam) ->
-          case build_beam.load_module(atom.create(name), name, beam) {
+          case run.load(beam, name) {
             Error(e) -> Error("load: " <> e)
             Ok(m) -> Ok(m)
           }
@@ -126,8 +111,8 @@ fn compile_load(source: String, name: String) -> Result(Atom, String) {
   }
 }
 
-fn stats_line(label: String, s: GcStats) -> String {
-  let GcStats(live:, free:, next:, since_gc:) = s
+fn stats_line(label: String, s: rt_gc.GcStats) -> String {
+  let rt_gc.GcStats(live:, free:, next:, since_gc:) = s
   "  "
   <> label
   <> " next="
@@ -140,10 +125,10 @@ fn stats_line(label: String, s: GcStats) -> String {
   <> int.to_string(since_gc)
 }
 
-fn stdout_str(st: InstanceState) -> String {
-  case bit_array.to_string(rt_js_store.t_console_bytes(st)) {
+fn stdout_str(st: Agent) -> String {
+  case bit_array.to_string(rt_store.t_console_bytes(st)) {
     Ok(s) -> s
-    Error(_) -> "<non-utf8>"
+    Error(Nil) -> "<non-utf8>"
   }
 }
 
@@ -203,19 +188,19 @@ fn run_a() {
         Ok(m_read) -> {
           harness.buf_reset()
           let st0 = seed()
-          let s0 = rt_js_gc.stats(st0)
+          let s0 = rt_gc.stats(st0)
           io.println(stats_line("seed:     ", s0))
           // 1. run alloc program
-          let #(out1, st1) = ffi_apply_js_main(m_alloc, st0)
-          let s1 = rt_js_gc.stats(st1)
+          let #(out1, st1) = run.apply_main(m_alloc, st0)
+          let s1 = rt_gc.stats(st1)
           io.println(stats_line("post-run: ", s1))
           io.println(
             "  outcome  : " <> string.slice(string.inspect(out1), 0, 80),
           )
           io.println("  stdout   : " <> string.inspect(stdout_str(st1)))
           // 2. manual t_collect
-          let st2 = rt_js_gc.t_collect(st1, [])
-          let s2 = rt_js_gc.stats(st2)
+          let st2 = rt_gc.t_collect(st1, [])
+          let s2 = rt_gc.stats(st2)
           io.println(stats_line("post-gc:  ", s2))
           let dropped = s1.live - s2.live
           let freed = s2.free - s1.free
@@ -231,7 +216,7 @@ fn run_a() {
           assert_in_range("dropped      ", dropped, 99_000, 101_000)
           assert_eq("since_gc reset", int.to_string(s2.since_gc), "0")
           // 3. run read program in st2 — survivor must still be reachable
-          let #(out2, st3) = ffi_apply_js_main(m_read, st2)
+          let #(out2, st3) = run.apply_main(m_read, st2)
           io.println(
             "  read outcome: " <> string.slice(string.inspect(out2), 0, 120),
           )
@@ -258,9 +243,9 @@ fn run_b() {
     Ok(m) -> {
       harness.buf_reset()
       let st0 = seed()
-      let s0 = rt_js_gc.stats(st0)
-      let #(out, st1) = ffi_apply_js_main(m, st0)
-      let s1 = rt_js_gc.stats(st1)
+      let s0 = rt_gc.stats(st0)
+      let #(out, st1) = run.apply_main(m, st0)
+      let s1 = rt_gc.stats(st1)
       io.println(stats_line("seed:     ", s0))
       io.println(stats_line("post-run: ", s1))
       io.println("  outcome  : " <> string.slice(string.inspect(out), 0, 200))
@@ -284,8 +269,8 @@ fn run_c() {
     Ok(m) -> {
       harness.buf_reset()
       let st0 = seed()
-      let #(out, st1) = ffi_apply_js_main(m, st0)
-      let s1 = rt_js_gc.stats(st1)
+      let #(out, st1) = run.apply_main(m, st0)
+      let s1 = rt_gc.stats(st1)
       io.println(stats_line("post-run: ", s1))
       io.println("  outcome  : " <> string.slice(string.inspect(out), 0, 200))
       let out_str = stdout_str(st1)
@@ -302,13 +287,10 @@ fn inspect_roots() {
   io.println("")
   io.println("═══ roots_of_state includes global object? ═══")
   let st = seed()
-  let realm = rt_state.t_realm(st)
-  let global_id = case realm.global_object {
-    rt_js_types.JsCell(id) -> id
-  }
-  let roots = rt_js_gc.roots_of_state(st)
-  let n = list_length(roots)
-  let has_global = list_contains(roots, global_id)
+  let rt_types.JsCell(global_id) = st.realm.global_object
+  let roots = rt_gc.roots_of_state(st)
+  let n = list.length(roots)
+  let has_global = list.contains(roots, global_id)
   io.println(
     "  roots count = "
     <> int.to_string(n)
@@ -320,17 +302,6 @@ fn inspect_roots() {
       False -> "NO — BUG"
     },
   )
-}
-
-import gleam/list
-import twocore/runtime/rt_js_types
-
-fn list_length(l: List(a)) -> Int {
-  list.length(l)
-}
-
-fn list_contains(l: List(Int), x: Int) -> Bool {
-  list.contains(l, x)
 }
 
 pub fn main() {

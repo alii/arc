@@ -227,7 +227,7 @@ fn emit_object_props(
     // parser early error, so `..` tail is dead here.
     [ast.RestProperty(name:, span:), ..] -> {
       use excl <- anf.then(anf.cons_list(list.reverse(seen)))
-      use rest <- anf.then(anf.host("copy_data_props", [source, excl]))
+      use rest <- anf.then(anf.host("object_rest", [source, excl]))
       go(ast.IdentifierPattern(name:, span:), rest, mode)
     }
     // Static / numeric / bigint / computed key — expr.emit_key evaluates the

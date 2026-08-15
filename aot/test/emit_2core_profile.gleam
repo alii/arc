@@ -9,7 +9,9 @@
 ////
 //// Not a test — profiling harness only.
 
+import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
+import arc_aot/run
 import emit_2core_bench.{adder_js, obj_js, sum_js}
 import emit_2core_harness as harness
 import gleam/dynamic.{type Dynamic}
@@ -17,15 +19,9 @@ import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
 import gleam/list
-import gleam/option.{Some}
 import gleam/string
 import simplifile
-import twocore/backend/build_beam
 import twocore/pipeline
-import twocore/runtime/profiles
-import twocore/runtime/rt_js_builtins
-import twocore/runtime/rt_js_store
-import twocore/runtime/rt_state.{type InstanceState}
 
 // ───────────────────────────── FFI ─────────────────────────────
 
@@ -50,8 +46,8 @@ fn module_total(m: Atom) -> Int
 @external(erlang, "emit_2core_profile_ffi", "all_mods")
 fn all_mods() -> List(Atom)
 
-@external(erlang, "twocore_rt_js_exec_ffi", "apply_js_main")
-fn ffi_apply_js_main(mod: Atom, st: InstanceState) -> #(Dynamic, InstanceState)
+@external(erlang, "arc_aot_exec_ffi", "apply_js_main")
+fn ffi_apply_js_main(mod: Atom, st: Agent) -> #(Dynamic, Agent)
 
 type TimeUnit {
   Microsecond
@@ -62,7 +58,7 @@ fn monotonic_time(unit: TimeUnit) -> Int
 
 // ───────────────────────────── setup ─────────────────────────────
 
-fn compile_and_seed(source: String, name: String) -> #(Atom, InstanceState) {
+fn compile_and_seed(source: String, name: String) -> #(Atom, Agent) {
   let opts =
     emit_2core.CompileOpts(
       module_name: name,
@@ -70,19 +66,9 @@ fn compile_and_seed(source: String, name: String) -> #(Atom, InstanceState) {
       entry_name: "js_main",
     )
   let assert Ok(unit) = emit_2core.compile_source(source, opts)
-  let assert Ok(beam) = pipeline.compile_ir(unit.module, profiles.js_direct())
-  let assert Ok(mod) = build_beam.load_module(atom.create(name), name, beam)
-  let st =
-    rt_state.fresh_full(
-      rt_state.FullDecl(mems: [], globals: [], tables: [], ref_globals: []),
-    )
-  let st =
-    rt_state.t_with_js_store(
-      st,
-      rt_js_store.t_store_new(harness.twocore_test_hooks()),
-    )
-  let #(_realm, st) = rt_js_builtins.init_realm(st)
-  #(mod, st)
+  let assert Ok(beam) = pipeline.compile_ir(unit.module, emit_2core.binding())
+  let assert Ok(mod) = run.load(beam, name)
+  #(mod, run.seed(harness.rt_test_hooks()))
 }
 
 fn repeat(times: Int, f: fn() -> a) -> Nil {
@@ -109,9 +95,9 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
   ffi_apply_js_main(mod, seed)
 
   // cell-alloc probe: one untraced run, delta the store counter
-  let assert Some(js_before) = seed.js_store
+  let js_before = seed.store
   let #(_v, st_after) = ffi_apply_js_main(mod, seed)
-  let assert Some(js_after) = st_after.js_store
+  let js_after = st_after.store
   let cells = js_after.alloc_since_gc - js_before.alloc_since_gc
 
   // untraced wall-clock (baseline — trace overhead is ~2-3×)
@@ -179,17 +165,9 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
 
   // fast-path probe: is CallClosure fast-path actually taken?
   let fast =
-    count_of(
-      atom.create("twocore_rt_js_call_ffi"),
-      atom.create("t_kfn_code"),
-      3,
-    )
+    count_of(atom.create("arc_rt_call_ffi"), atom.create("t_kfn_code"), 3)
   let slow =
-    count_of(
-      atom.create("twocore@runtime@rt_js_call"),
-      atom.create("t_call_checked"),
-      4,
-    )
+    count_of(atom.create("arc@rt@call"), atom.create("t_call_checked"), 4)
   case fast + slow {
     0 -> Nil
     _ ->
@@ -243,7 +221,7 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
 }
 
 fn short(m: String) -> String {
-  // "twocore@runtime@rt_js_obj" → "rt_js_obj"
+  // "arc@rt@obj" → "rt_js_obj"
   case string.split(m, "@") {
     [_, _, tail] -> tail
     _ -> m
@@ -843,7 +821,7 @@ fn short(m: String) -> String {
 //     letrec-float measurement. Even at 0 join cost the floor is 55k
 //     setelement (825µs) + 51k put (408µs) + ~40k code_t wrapper applies +
 //     ~40k jsf `{V,St}` return tuples + jsf body BIFs ≈ 2,000-2,200.
-//     Hitting it needs the InstanceState thread eliminated (all richards-
+//     Hitting it needs the Agent thread eliminated (all richards-
 //     hot ops are pdict-backed, so `st` is dead freight — a
 //     `js_direct_nostate` profile with JMut→JPure-via-pdict, jsf/N return
 //     bare V not `{V,St}`, CallClosure no `{V,St'}` destructure). That is
@@ -875,9 +853,9 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
   ffi_apply_js_main(mod, seed)
 
   // cell-alloc probe: one untraced run, delta the store counter
-  let assert Some(js_before) = seed.js_store
+  let js_before = seed.store
   let #(_v, st_after) = ffi_apply_js_main(mod, seed)
-  let assert Some(js_after) = st_after.js_store
+  let js_after = st_after.store
   let cells = js_after.alloc_since_gc - js_before.alloc_since_gc
 
   // untraced wall-clock (baseline — trace overhead is ~2-3×)
@@ -983,36 +961,36 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
   // explicit counts for the {M,F,A}s the fast-path work targets — these are
   // the rows we expect to move when A/B/C/E land.
   io.println("  ── targeted call counts (per run) ──")
-  let rt = fn(m: String) { atom.create("twocore@runtime@" <> m) }
-  let ffi = fn(m: String) { atom.create("twocore_" <> m) }
+  let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
+  let ffi = fn(m: String) { atom.create("arc_" <> m) }
   let targets = [
-    #(rt("rt_js_obj"), "t_get_prop_any", 3),
-    #(rt("rt_js_obj"), "t_set_prop_any", 4),
-    #(rt("rt_js_call"), "t_call_checked", 4),
-    #(rt("rt_js_call"), "t_kfn_code", 3),
-    #(rt("rt_js_call"), "t_construct", 4),
-    #(rt("rt_js_ops"), "t_instance_of", 3),
-    #(ffi("rt_js_obj_ffi"), "t_get_prop_own_data", 3),
+    #(rt("obj"), "t_get_prop_any", 3),
+    #(rt("obj"), "t_set_prop_any", 4),
+    #(rt("call"), "t_call_checked", 4),
+    #(rt("call"), "t_kfn_code", 3),
+    #(rt("call"), "t_construct", 4),
+    #(rt("ops"), "t_instance_of", 3),
+    #(ffi("rt_obj_ffi"), "t_get_prop_own_data", 3),
     // profile-baseline-and-k: G/H/I/K drivers
-    #(rt("rt_js_obj"), "t_global_get", 2),
-    #(ffi("rt_js_obj_ffi"), "t_global_get_fast", 2),
-    #(ffi("rt_js_obj_ffi"), "t_get_elem_fast", 3),
-    #(ffi("rt_js_obj_ffi"), "elem_read", 2),
-    #(ffi("rt_js_obj_ffi"), "t_set_elem_fast", 4),
-    #(ffi("rt_js_obj_ffi"), "elem_write", 3),
-    #(rt("rt_js_val"), "t_to_property_key", 2),
-    #(ffi("rt_js_obj_ffi"), "t_set_prop_own_data", 4),
-    #(rt("rt_js_store"), "t_cell_get", 2),
-    #(ffi("rt_js_store_ffi"), "t_cell_get", 2),
-    #(ffi("rt_js_call_ffi"), "t_call_method_ic", 5),
-    #(ffi("rt_js_call_ffi"), "t_new_simple", 3),
+    #(rt("obj"), "t_global_get", 2),
+    #(ffi("rt_obj_ffi"), "t_global_get_fast", 2),
+    #(ffi("rt_obj_ffi"), "t_get_elem_fast", 3),
+    #(ffi("rt_obj_ffi"), "elem_read", 2),
+    #(ffi("rt_obj_ffi"), "t_set_elem_fast", 4),
+    #(ffi("rt_obj_ffi"), "elem_write", 3),
+    #(rt("val"), "t_to_property_key", 2),
+    #(ffi("rt_obj_ffi"), "t_set_prop_own_data", 4),
+    #(rt("store"), "t_cell_get", 2),
+    #(ffi("rt_store_ffi"), "t_cell_get", 2),
+    #(ffi("rt_call_ffi"), "t_call_method_ic", 5),
+    #(ffi("rt_call_ffi"), "t_new_simple", 3),
     // H/I placeholders — read 0 pre-impl
-    #(ffi("rt_js_obj_ffi"), "t_ic_get", 4),
-    #(ffi("rt_js_obj_ffi"), "t_ic_set", 5),
+    #(ffi("rt_obj_ffi"), "t_ic_get", 4),
+    #(ffi("rt_obj_ffi"), "t_ic_set", 5),
     // perf8 CC: raytrace `.apply(this,arguments)` chain
-    #(rt("rt_js_obj"), "t_new_arguments", 3),
-    #(ffi("rt_js_call_ffi"), "new_simple_apply", 7),
-    #(ffi("rt_js_call_ffi"), "t_method_ic_warm", 2),
+    #(rt("obj"), "t_new_arguments", 3),
+    #(ffi("rt_call_ffi"), "new_simple_apply", 7),
+    #(ffi("rt_call_ffi"), "t_method_ic_warm", 2),
   ]
   list.each(targets, fn(t) {
     let #(m, f, a) = t
@@ -1035,18 +1013,12 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
 // ───────────────────────────── isolated microbench ─────────────────────────────
 
 @external(erlang, "emit_2core_profile_ffi", "bench_op")
-fn bench_op(which: Atom, st: InstanceState, arg: Dynamic, n: Int) -> Int
+fn bench_op(which: Atom, st: Agent, arg: Dynamic, n: Int) -> Int
 
 @external(erlang, "emit_2core_harness_ffi", "to_dynamic")
 fn to_dynamic(a: a) -> Dynamic
 
-fn micro(
-  label: String,
-  which: String,
-  st: InstanceState,
-  arg: Dynamic,
-  n: Int,
-) {
+fn micro(label: String, which: String, st: Agent, arg: Dynamic, n: Int) {
   let a = atom.create(which)
   bench_op(a, st, arg, n)
   // warm
@@ -1074,7 +1046,7 @@ fn microbench() {
   let #(mod, seed) = compile_and_seed(adder_js, "arc_prof_micro_adder")
   // run once so `add5` and its `x` cell exist; capture the resulting state
   let #(_v, st_adder) = ffi_apply_js_main(mod, seed)
-  let assert Some(js) = st_adder.js_store
+  let js = st_adder.store
   // adder's inner fn is the last cell allocated (next-1); its captured `x`
   // is next-3 (makeAdder cell, x cell, inner cell → 3 allocs after realm)
   let add5_h = to_dynamic(#(atom.create("js_cell"), js.next - 1))
@@ -1087,7 +1059,7 @@ fn microbench() {
   // obj_prop: make an object with x, then microbench get/set
   let #(mod2, seed2) = compile_and_seed(obj_js, "arc_prof_micro_obj")
   let #(_v2, st_obj) = ffi_apply_js_main(mod2, seed2)
-  let assert Some(js2) = st_obj.js_store
+  let js2 = st_obj.store
   let o_h = to_dynamic(#(atom.create("js_cell"), js2.next - 1))
   let key =
     to_dynamic(#(
@@ -1190,26 +1162,26 @@ const richards_us_target = 2200
 const obj_prop_us_target = 11_800
 
 const richards_baseline = [
-  #("twocore_rt_js_obj_ffi", "t_global_get_fast", 2, 65),
-  #("twocore@runtime@rt_js_obj", "t_global_get", 2, 0),
-  #("twocore_rt_js_obj_ffi", "t_get_prop_own_data", 3, 106),
-  #("twocore_rt_js_obj_ffi", "t_set_prop_own_data", 4, 143),
-  #("twocore_rt_js_obj_ffi", "t_ic_get", 4, 0),
-  #("twocore_rt_js_obj_ffi", "t_ic_set", 5, 0),
-  #("twocore_rt_js_call_ffi", "t_new_simple", 3, 32),
-  #("twocore_rt_js_call_ffi", "t_call_method_ic", 5, 40_466),
-  #("twocore_rt_js_store_ffi", "t_cell_get", 2, 1320),
-  #("twocore_rt_js_call_ffi", "t_kfn_code", 3, 1),
+  #("arc_rt_obj_ffi", "t_global_get_fast", 2, 65),
+  #("arc@rt@obj", "t_global_get", 2, 0),
+  #("arc_rt_obj_ffi", "t_get_prop_own_data", 3, 106),
+  #("arc_rt_obj_ffi", "t_set_prop_own_data", 4, 143),
+  #("arc_rt_obj_ffi", "t_ic_get", 4, 0),
+  #("arc_rt_obj_ffi", "t_ic_set", 5, 0),
+  #("arc_rt_call_ffi", "t_new_simple", 3, 32),
+  #("arc_rt_call_ffi", "t_call_method_ic", 5, 40_466),
+  #("arc_rt_store_ffi", "t_cell_get", 2, 1320),
+  #("arc_rt_call_ffi", "t_kfn_code", 3, 1),
 ]
 
 fn correctness_gate(label: String, path: String) -> Bool {
   let assert Ok(source) = simplifile.read(path)
   case harness.run_compiled(source) {
-    pipeline.DiffRun(result: Ok(_), stdout: <<"ok\n":utf8>>) -> {
+    run.DiffRun(result: Ok(_), stdout: <<"ok\n":utf8>>) -> {
       io.println("  ✓ " <> label <> " prints ok")
       True
     }
-    pipeline.DiffRun(result: Ok(_), stdout:) -> {
+    run.DiffRun(result: Ok(_), stdout:) -> {
       io.println(
         "  ✗ "
         <> label
@@ -1219,7 +1191,7 @@ fn correctness_gate(label: String, path: String) -> Bool {
       )
       False
     }
-    pipeline.DiffRun(result: Error(e), stdout:) -> {
+    run.DiffRun(result: Error(e), stdout:) -> {
       io.println(
         "  ✗ "
         <> label
@@ -1352,9 +1324,9 @@ pub fn bench_verify() -> Bool {
     False -> {
       io.println("  ── attribution (target missed) ──")
       let n = fn(m, f, a) { count_of(atom.create(m), atom.create(f), a) }
-      let g_after = n("twocore_rt_js_obj_ffi", "t_global_get_fast", 2)
-      let i_after = n("twocore_rt_js_obj_ffi", "t_ic_get", 4)
-      let h_own = n("twocore_rt_js_obj_ffi", "t_get_prop_own_data", 3)
+      let g_after = n("arc_rt_obj_ffi", "t_global_get_fast", 2)
+      let i_after = n("arc_rt_obj_ffi", "t_ic_get", 4)
+      let h_own = n("arc_rt_obj_ffi", "t_get_prop_own_data", 3)
       io.println(
         "    G slotted-globals: t_global_get_fast "
         <> int.to_string(g_after)
@@ -1477,17 +1449,17 @@ pub fn raytrace_apply_verify() -> Bool {
   })
 
   // Targeted counts — the four rows that prove/disprove the .apply chain.
-  let rt = fn(m: String) { atom.create("twocore@runtime@" <> m) }
-  let ffi = fn(m: String) { atom.create("twocore_" <> m) }
-  let n_new_args = count_of(rt("rt_js_obj"), atom.create("t_new_arguments"), 3)
-  let n_call_chk = count_of(rt("rt_js_call"), atom.create("t_call_checked"), 4)
+  let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
+  let ffi = fn(m: String) { atom.create("arc_" <> m) }
+  let n_new_args = count_of(rt("obj"), atom.create("t_new_arguments"), 3)
+  let n_call_chk = count_of(rt("call"), atom.create("t_call_checked"), 4)
   let n_new_simple =
-    count_of(ffi("rt_js_call_ffi"), atom.create("t_new_simple"), 3)
+    count_of(ffi("rt_call_ffi"), atom.create("t_new_simple"), 3)
   let n_ns_apply =
-    count_of(ffi("rt_js_call_ffi"), atom.create("new_simple_apply"), 7)
+    count_of(ffi("rt_call_ffi"), atom.create("new_simple_apply"), 7)
   let n_method_ic =
-    count_of(ffi("rt_js_call_ffi"), atom.create("t_call_method_ic"), 5)
-  let n_construct = count_of(rt("rt_js_call"), atom.create("t_construct"), 4)
+    count_of(ffi("rt_call_ffi"), atom.create("t_call_method_ic"), 5)
+  let n_construct = count_of(rt("call"), atom.create("t_construct"), 4)
   io.println("  ── targeted counts (per run) ──")
   let row = fn(name: String, n: Int) {
     io.println(
@@ -1636,34 +1608,22 @@ pub fn crypto_am3_op_map() -> Nil {
   })
 
   io.println("  ── per-op runtime counts (JPure verdict) ──")
-  let ffi = fn(m: String) { atom.create("twocore_" <> m) }
-  let rt = fn(m: String) { atom.create("twocore@runtime@" <> m) }
+  let ffi = fn(m: String) { atom.create("arc_" <> m) }
+  let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let per_op = [
     // (host, arity, "op it backs", expected/4000-iter, verdict_if_zero)
-    #(ffi("rt_js_ops_ffi"), "t_shr_fast", 2, ">>14/>>28 fallback", 0),
-    #(ffi("rt_js_ops_ffi"), "t_shl_fast", 2, "<<14 fallback", 0),
-    #(
-      ffi("rt_js_ops_ffi"),
-      "t_bitand_fast",
-      2,
-      "& 0x3fff/0xfffffff fallback",
-      0,
-    ),
-    #(ffi("rt_js_ops_ffi"), "t_ushr_fast", 2, ">>> (am3 has none)", 0),
-    #(rt("rt_js_ops"), "t_mul", 3, "* fallback (JMut)", 0),
-    #(rt("rt_js_ops"), "t_add", 3, "+ fallback (JMut)", 0),
-    #(
-      ffi("rt_js_obj_ffi"),
-      "t_get_elem_fast_c",
-      4,
-      "this_array[i] hoisted",
-      8000,
-    ),
-    #(ffi("rt_js_obj_ffi"), "t_get_elem_fast_p", 3, "w_array[j] read", 4000),
-    #(ffi("rt_js_obj_ffi"), "t_set_elem_fast_p", 4, "w_array[j++]= write", 4000),
-    #(ffi("rt_js_obj_ffi"), "t_arr_c_load", 1, "arr_c hoist (1/am3 call)", 100),
-    #(rt("rt_js_obj"), "t_get_prop_any", 3, "elem-miss slow path", 0),
-    #(rt("rt_js_val"), "t_to_property_key", 2, "elem-miss key coerce", 0),
+    #(ffi("rt_ops_ffi"), "t_shr_fast", 2, ">>14/>>28 fallback", 0),
+    #(ffi("rt_ops_ffi"), "t_shl_fast", 2, "<<14 fallback", 0),
+    #(ffi("rt_ops_ffi"), "t_bitand_fast", 2, "& 0x3fff/0xfffffff fallback", 0),
+    #(ffi("rt_ops_ffi"), "t_ushr_fast", 2, ">>> (am3 has none)", 0),
+    #(rt("ops"), "t_mul", 3, "* fallback (JMut)", 0),
+    #(rt("ops"), "t_add", 3, "+ fallback (JMut)", 0),
+    #(ffi("rt_obj_ffi"), "t_get_elem_fast_c", 4, "this_array[i] hoisted", 8000),
+    #(ffi("rt_obj_ffi"), "t_get_elem_fast_p", 3, "w_array[j] read", 4000),
+    #(ffi("rt_obj_ffi"), "t_set_elem_fast_p", 4, "w_array[j++]= write", 4000),
+    #(ffi("rt_obj_ffi"), "t_arr_c_load", 1, "arr_c hoist (1/am3 call)", 100),
+    #(rt("obj"), "t_get_prop_any", 3, "elem-miss slow path", 0),
+    #(rt("val"), "t_to_property_key", 2, "elem-miss key coerce", 0),
   ]
   io.println(
     "    "
@@ -1701,7 +1661,7 @@ fn dump_am3_core() -> Nil {
     Error(e) ->
       io.println("!! am3 compile_source FAILED: " <> string.inspect(e))
     Ok(unit) ->
-      case pipeline.ir_to_core(unit.module, profiles.js_direct()) {
+      case pipeline.ir_to_core(unit.module, emit_2core.binding()) {
         Error(e) ->
           io.println("!! am3 ir_to_core FAILED: " <> string.inspect(e))
         Ok(core) -> io.println(core)
