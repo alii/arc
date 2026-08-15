@@ -89,8 +89,9 @@ fn require_js(st: Agent) -> JsStore(Agent) {
 ///
 /// Port of arc `state.reachable_root_refs` (`state.gleam:216-313`) MINUS
 /// interpreter-only fields (`stack`/`locals`/`call_args`/`new_target`/
-/// `eval_env`/`atomics_waiters` — no interpreter frame exists at a D11
-/// turn-boundary safepoint) and MINUS the `RealmCtx` destructure (subsumed
+/// `eval_env` — no interpreter frame exists at a D11 turn-boundary
+/// safepoint; the waitAsync waiters moved to `Agent.waiters` and ARE walked)
+/// and MINUS the `RealmCtx` destructure (subsumed
 /// by `pinned_roots` per above). EXHAUSTIVE `JsStore` destructure (M2-I5 —
 /// no `..`): adding a store field is a compile error here until rooted.
 pub fn roots_of_state(st: Agent) -> List(Int) {
@@ -126,6 +127,9 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
   // prototype); walk their fun envs, the import hook's included.
   let acc = push_term_refs(to_dynamic(dict.values(st.host_fns)), acc)
   let acc = push_term_refs(to_dynamic(st.import_hook), acc)
+  // A parked Atomics.waitAsync waiter's promise capability is usually
+  // unreachable from JS by the time the drain collects between jobs.
+  let acc = push_term_refs(to_dynamic(st.waiters), acc)
   // Global let/const/class bindings of every realm live outside the heap's
   // global objects (intrinsics and template objects are already pinned).
   // The registry's copy of the current realm may be stale, so it is walked

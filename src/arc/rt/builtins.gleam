@@ -88,6 +88,7 @@ pub fn new_agent(hooks: HostHooks) -> Agent {
       host_fns: dict.new(),
       realms: dict.new(),
       import_hook: None,
+      waiters: [],
     )
   let #(_realm, st) = init_realm(seed_ops(st))
   st
@@ -229,8 +230,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
         set:,
         weak_map:,
         weak_set:,
-        disposable_stack:,
         finalization_registry:,
+        disposable_stack:,
         async_disposable_stack:,
         shadow_realm:,
         date:,

@@ -3644,6 +3644,34 @@ pub type Agent {
     /// `arc/module_host`. Kept apart from `host_fns` so installing it never
     /// shifts embedder ids; excluded from serialization like them.
     import_hook: Option(HostFnEntry),
+    /// Pending `Atomics.waitAsync` waiters of this agent, oldest first
+    /// (§25.4.3.14 DoWait, async mode): this agent's side of the WaiterLists
+    /// its waiters joined in the blocks' owner processes. Rooted by `rt/gc`;
+    /// settled by `rt/async.drain` (owner wake messages and timeout jobs).
+    waiters: List(AsyncWaiter),
+  )
+}
+
+/// This agent's record of one `Atomics.waitAsync` WaiterRecord (§25.4.3.5)
+/// registered with a block's owner: which registration it is and the
+/// promise capability its wake settles. [[AgentSignifier]] is implicit (the
+/// agent whose `waiters` holds it) and [[Result]] is "ok" once notified.
+pub type AsyncWaiter {
+  AsyncWaiter(
+    /// The owner process whose WaiterList holds the registration, and the
+    /// registration's identity there (named by the owner's wake message and
+    /// by the timeout job's withdrawal).
+    owner: SabOwner,
+    ref: WaiterRef,
+    /// [[PromiseCapability]]: `promise` is the result object's `value`;
+    /// `resolve`/`reject` are its resolving functions, called by the
+    /// timeout job and by NotifyWaiter's resolve-in-agent job.
+    promise: Handle,
+    resolve: JsVal,
+    reject: JsVal,
+    /// [[TimeoutTime]] on the host's monotonic clock (ms); `None` = +∞,
+    /// no timeout job armed.
+    deadline: Option(Int),
   )
 }
 
