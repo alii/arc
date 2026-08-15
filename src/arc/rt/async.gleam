@@ -32,12 +32,13 @@ import arc/rt/types.{
   GenSuspendedYield, GenThrow, GeneratorObj, Handler, HostJob,
   IdentityPassThrough, JsCell, JsStore, KHandle, Named, NoElements, Ordinary,
   PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
-  PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob,
+  PromiseRejected, PromiseResolveFn, RangeErr, ReactionJob, ResolveThenableJob,
   ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox, SGenerator,
   SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
   ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push, mk_bool, mk_object,
   mk_undefined,
 } as rt_types
+import arc/vm/limits
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -1163,10 +1164,36 @@ fn run_asyncgen_body(
   // Mark executing FIRST so re-entrant next()/return()/throw() enqueue.
   let st = write_asyncgen(st, gen_h, ag_set_state(_, AGExecuting))
   let resume = { read_asyncgen(st, gen_h) }.resume
-  let st = rt_store.t_enter_call(st)
-  let #(step, st) = apply_resume(st, resume, sent)
-  let st = rt_store.t_leave_call(st)
+  let #(step, st) = asyncgen_turn(st, resume, sent)
   drive_step(st, asyncgen_ctx(gen_h, req), step)
+}
+
+/// Run one asyncgen body turn under the `call_depth` gate. The generator is
+/// already `Executing` with `req` at the queue head, so at
+/// `limits.max_call_depth` the turn is refused as a `StepThrow(RangeError)`:
+/// the driver then completes the generator and rejects `req` rather than the
+/// raise escaping the reaction job with the state stuck `Executing`.
+fn asyncgen_turn(
+  st: Agent,
+  resume: Resume,
+  sent: #(Int, JsVal),
+) -> #(Step, Agent) {
+  case st.store.call_depth >= limits.max_call_depth {
+    True -> {
+      let #(e, st) =
+        require_js(st).ops.new_error(
+          st,
+          RangeErr,
+          "Maximum call stack size exceeded",
+        )
+      #(StepThrow(e), st)
+    }
+    False -> {
+      let st = rt_store.t_enter_call(st)
+      let #(step, st) = apply_resume(st, resume, sent)
+      #(step, rt_store.t_leave_call(st))
+    }
+  }
 }
 
 /// The `StepCtx` for the asyncgen body — port of arc `handle_exec_result`
@@ -1268,9 +1295,7 @@ fn redrive_asyncgen(
     True -> sent_throw
     False -> fulfil_mode
   }
-  let st = rt_store.t_enter_call(st)
-  let #(step, st) = apply_resume(st, resume, #(mode, settled))
-  let st = rt_store.t_leave_call(st)
+  let #(step, st) = asyncgen_turn(st, resume, #(mode, settled))
   drive_step(st, asyncgen_ctx(gen_h, req), step)
 }
 
