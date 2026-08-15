@@ -260,6 +260,28 @@ fn alloc_regexp(
   // §22.2.4.1 step 8 → RegExpAlloc → OrdinaryCreateFromConstructor.
   let #(proto, st) =
     proto_from_new_target(st, new_target, realm.regexp.prototype)
+  alloc_regexp_with_proto(st, source, flags, proto)
+}
+
+/// §13.2.7.3 regular expression literal: RegExpCreate(pattern, flags) on
+/// %RegExp.prototype%. Flags were validated by the parser; re-checked here.
+pub fn regexp_create_literal(
+  st: Agent,
+  source: String,
+  flags: String,
+) -> #(JsVal, Agent) {
+  validate_flags(st, flags)
+  let #(h, st) =
+    alloc_regexp_with_proto(st, source, flags, st.realm.regexp.prototype)
+  #(rt_types.mk_object(h), st)
+}
+
+fn alloc_regexp_with_proto(
+  st: Agent,
+  source: String,
+  flags: String,
+  proto: Handle,
+) -> #(Handle, Agent) {
   let #(li_prop, st) =
     common.data_property(st, rt_types.mk_number(rt_types.JInt(0)))
   rt_store.t_cell_new(

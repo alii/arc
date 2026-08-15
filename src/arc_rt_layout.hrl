@@ -10,7 +10,7 @@
 -define(AGENT_TAG, agent).
 -define(AGENT_STORE, 2).
 -define(AGENT_REALM, 3).
--define(AGENT_ARITY, 3).
+-define(AGENT_ARITY, 4).
 -define(SOME, some).
 -define(NONE, none).
 

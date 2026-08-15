@@ -2193,5 +2193,10 @@ pub type JsStore(st) {
 /// for the hand-written Erlang (`arc_rt_layout.hrl`: store = element 2,
 /// realm = element 3); new fields are appended, never inserted.
 pub type Agent {
-  Agent(store: JsStore(Agent), realm: Realm)
+  Agent(
+    store: JsStore(Agent),
+    realm: Realm,
+    /// §13.2.8.4 [[TemplateMap]]: site id -> pinned template array.
+    template_objects: Dict(Int, Handle),
+  )
 }

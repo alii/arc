@@ -68,7 +68,11 @@ import gleam/option.{None, Some}
 /// initialised realm.
 pub fn new_agent(hooks: rt_types.HostHooks) -> Agent {
   let st =
-    Agent(store: rt_store.t_store_new(hooks), realm: rt_types.unset_realm())
+    Agent(
+      store: rt_store.t_store_new(hooks),
+      realm: rt_types.unset_realm(),
+      template_objects: dict.new(),
+    )
   let #(_realm, st) = init_realm(st)
   st
 }

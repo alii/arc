@@ -1010,14 +1010,24 @@ fn set_integrity_level(
 ) -> #(JsVal, Agent) {
   let target = first_arg_or_undefined(args)
   case classify(target) {
-    KHandle(h) -> {
-      let st = rt_obj.t_prevent_extensions(st, h)
-      let #(keys, st) = rt_obj.t_own_keys(st, h)
-      let st = list.fold(keys, st, fn(st, k) { seal_one_key(st, h, k, level) })
-      #(target, st)
-    }
+    KHandle(h) -> #(target, set_integrity_level_of(st, h, level))
     _ -> #(target, st)
   }
+}
+
+fn set_integrity_level_of(
+  st: Agent,
+  h: Handle,
+  level: IntegrityLevel,
+) -> Agent {
+  let st = rt_obj.t_prevent_extensions(st, h)
+  let #(keys, st) = rt_obj.t_own_keys(st, h)
+  list.fold(keys, st, fn(st, k) { seal_one_key(st, h, k, level) })
+}
+
+/// §7.3.16 SetIntegrityLevel(O, frozen).
+pub fn freeze(st: Agent, h: Handle) -> Agent {
+  set_integrity_level_of(st, h, Frozen)
 }
 
 fn seal_one_key(
