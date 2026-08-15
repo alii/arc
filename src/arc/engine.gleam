@@ -28,7 +28,7 @@ import arc/vm/state.{type Heap, type HostFn}
 import arc/vm/value.{type JsValue, type Ref, JsObject}
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
@@ -537,6 +537,63 @@ pub fn read_export(
 }
 
 // ----------------------------------------------------------------------------
+// REPL sessions
+// ----------------------------------------------------------------------------
+
+/// An engine plus the state a REPL keeps between inputs that a one-shot
+/// `eval` does not: the global lexical record (`let`/`const`/`class`
+/// declarations made at the top level of an earlier input) and the realm
+/// registry. Advance it with `repl_eval`; read values it produced through
+/// `repl_engine` + `inspect`/`format_error`.
+pub opaque type Repl(host) {
+  Repl(engine: Engine(host), env: entry.ReplEnv)
+}
+
+/// Start a REPL session on `engine`. Host functions, hooks and modules
+/// already installed on the engine are visible to every input.
+pub fn repl(engine: Engine(host)) -> Repl(host) {
+  Repl(engine:, env: entry.new_repl_env(engine.global))
+}
+
+/// The session's engine as of the last input, for rendering values the
+/// session produced (`inspect`, `format_error`, `dump_object`).
+pub fn repl_engine(repl: Repl(host)) -> Engine(host) {
+  repl.engine
+}
+
+/// Parse, compile (in REPL mode) and run one input, draining microtasks.
+/// The outcome is the input's completion value, so `1 + 1` is
+/// `Returned(2)`. Top-level lexical declarations persist into later inputs
+/// on the returned session; on `Error` nothing ran and the session passed in
+/// is still the current one.
+pub fn repl_eval(
+  repl: Repl(host),
+  source: String,
+) -> Result(#(Outcome, Repl(host)), EvalError(host)) {
+  use #(body, sb) <- result.try(
+    parser.parse_script(source) |> result.map_error(ParseError),
+  )
+  use template <- result.try(
+    compiler.compile_repl(body, sb) |> result.map_error(CompileError),
+  )
+  let engine = repl.engine
+  use #(settled, heap, env) <- result.map(
+    entry.run_and_drain_repl_with(
+      template,
+      engine.heap,
+      engine.builtins,
+      repl.env,
+      engine.host_hooks,
+      True,
+      None,
+      event_loop.drain_jobs,
+    )
+    |> result.map_error(VmError),
+  )
+  #(outcome_of(settled), Repl(engine: Engine(..engine, heap:), env:))
+}
+
+// ----------------------------------------------------------------------------
 // Calling a held value
 // ----------------------------------------------------------------------------
 
@@ -688,6 +745,20 @@ pub fn inspect(engine: Engine(host), value: JsValue) -> String {
 /// Read-only — never re-enters JS.
 pub fn format_error(engine: Engine(host), error: JsValue) -> String {
   object.format_error(error, engine.heap)
+}
+
+/// The raw heap slot behind an object value, rendered as the Gleam term —
+/// a debugging view (the CLI's `/heap`), not a JS-level rendering. `None`
+/// when `val` is not an object; a dangling reference reads `<collected>`.
+pub fn dump_object(engine: Engine(host), val: JsValue) -> Option(String) {
+  case val {
+    JsObject(ref) ->
+      heap.read(engine.heap, ref)
+      |> option.map(value.heap_slot_to_string)
+      |> option.unwrap("<collected>")
+      |> Some
+    _ -> None
+  }
 }
 
 // ----------------------------------------------------------------------------
