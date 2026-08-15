@@ -8,9 +8,7 @@
 ////   realm → JsOps/JsStore → Agent.
 
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
-import arc/rt/bytecode.{
-  type EnvTuple, type FrameStep, type FuncTemplate, type SuspendedFrame,
-}
+import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, type SuspendedFrame}
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/tree_array.{type TreeArray}
 import gleam/bit_array
@@ -2058,10 +2056,10 @@ pub type JsSlot {
   )
   SBox(value: JsVal)
   SPromise(state: PromiseState, is_handled: Bool)
-  SGenerator(state: GeneratorState, resume: CompiledFn, gen_cell: Handle)
+  SGenerator(state: GeneratorState, resume: Resume, gen_cell: Handle)
   SAsyncGen(
     state: AsyncGenState,
-    resume: CompiledFn,
+    resume: Resume,
     queue: #(List(AsyncGenRequest), List(AsyncGenRequest)),
     gen_cell: Handle,
   )
@@ -2199,6 +2197,34 @@ pub type AsyncGenRequest {
     resolve: JsVal,
     reject: JsVal,
   )
+}
+
+/// A compiled coroutine body lowered to a state machine:
+/// `fun(St, Rs, Sent, Loc) -> {StepWire, St'}` where `Rs` is the resume-state
+/// index, `Sent` the injected `#(mode, value)` and `Loc` the suspended locals.
+pub type SmFn
+
+/// The suspended-locals tuple of a compiled state machine. Built and read
+/// only by the state machine; traced by the GC term walk.
+pub type Loc
+
+/// Where a suspended coroutine picks up: a compiled state machine at
+/// `(rs, loc)`, or a parked interpreter frame. Built by `arc_rt_async_ffi`
+/// (`?RESUME_COMPILED_TAG`) and by the interpreter.
+pub type Resume {
+  ResumeCompiled(sm: SmFn, rs: Int, loc: Loc)
+  ResumeFrame(frame: SuspendedFrame)
+}
+
+/// One turn of a coroutine body: it finished, threw, or suspended at a
+/// `yield`/`await` with the `Resume` to continue from. Built by
+/// `arc_rt_async_ffi` from the state machine's wire step (`?STEP_*` tags)
+/// and by `JsOps.resume_frame`.
+pub type Step {
+  StepReturn(JsVal)
+  StepThrow(JsVal)
+  StepYield(value: JsVal, resume: Resume)
+  StepAwait(value: JsVal, resume: Resume)
 }
 
 /// Opaque Erlang `:queue.queue(Job)`. Constructed/drained via
@@ -2396,7 +2422,7 @@ pub type JsOps(st) {
     construct_bytecode: fn(st, Handle, List(JsVal), JsVal) -> #(Handle, st),
     /// Resume a suspended interpreter frame with `sent` = `#(mode, value)`
     /// (the coroutine driver's Sent pair).
-    resume_frame: fn(st, SuspendedFrame, #(Int, JsVal)) -> #(FrameStep, st),
+    resume_frame: fn(st, SuspendedFrame, #(Int, JsVal)) -> #(Step, st),
   )
 }
 

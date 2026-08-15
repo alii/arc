@@ -11,7 +11,3 @@ pub type EnvTuple
 
 /// An activation parked at a `yield`/`await`, resumable by the interpreter.
 pub type SuspendedFrame
-
-/// What resuming a `SuspendedFrame` produced: a return, a throw, or the
-/// next suspension.
-pub type FrameStep

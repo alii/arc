@@ -1,20 +1,13 @@
-//// `rt_async` — Step protocol + state-machine resume driver (SPEC §7.M8).
+//// Coroutine drivers (generators, async functions, async generators),
+//// promise core and the microtask drain for the shared runtime.
 ////
-//// The `Step` type + `apply_sm`/`drive_step` seam shared by every coroutine
-//// kind (async fn / generator / async-generator). A compiled `<name>__sm`
-//// function (M18) has BEAM signature `fun(St, Rs, Sent, Loc) -> {StepWire,
-//// St'}` where `Rs` is the resume-state Int, `Sent` is `#(mode, value)`
-//// injected by next/throw/return (SPEC:1795 — 0=normal, 1=throw, 2=return),
-//// and `Loc` is the suspended-locals tuple. `apply_sm` invokes it and decodes
-//// the wire step; `drive_step` dispatches to the caller-supplied continuation.
-////
-//// **(Rs, Loc) storage** (u-resume-ffi-pin resolution): `SGenerator` /
-//// `SAsyncGen` carry only `resume: CompiledFn` — no explicit rs/loc fields
-//// (rt_types is FROZEN). So the stored `resume` is a 3-tuple
-//// `{SmFun, Rs, Loc}` (opaque as `CompiledFn`), built via `mk_resume`; each
-//// yield/await re-pins with `repin_resume(old, ns, loc')`. GC-safe:
-//// `refs_in_term` (rt_js_gc_ffi) already walks tuples + fun envs, so both
-//// `SmFun`'s captures and every Handle inside `Loc` stay traced.
+//// A coroutine body runs one turn at a time and reports a `Step`. Compiled
+//// bodies are state machines applied through `apply_sm`; interpreted bodies
+//// are parked frames resumed through `JsOps.resume_frame`. Either way the
+//// suspension point comes back as a `Resume` inside the `Step`, is stored on
+//// the coroutine's data cell, and is handed to `apply_resume` with the next
+//// `Sent = #(mode, value)` (0 = next, 1 = throw, 2 = return). `drive_step` is
+//// the one place a `Step` is cased on.
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
 
@@ -27,19 +20,20 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type AGResumeKind, type Agent, type AsyncGenRequest, type AsyncGenState,
-  type CompiledFn, type GeneratorCompletion, type Handle, type Job, type JsSlot,
-  type JsStore, type JsVal, type NativeToken, type PromiseReaction,
-  type ReactionHandler, AGAwaitingReturn, AGCompleted, AGExecuting,
-  AGResumeAwaitingReturn, AGResumeBody, AGResumeReturnUnwind, AGSuspendedStart,
-  AGSuspendedYield, Agent, AsyncGenRequest, AsyncGenResume, AsyncResume,
-  DataProperty, ErrorObj, GenCompleted, GenExecuting, GenNext, GenReturn,
-  GenSuspendedStart, GenSuspendedYield, GenThrow, Handler, HostJob,
-  IdentityPassThrough, JsCell, JsStore, KHandle, KNative, KStr, KSym, Named,
-  NoElements, Ordinary, PromiseFulfilled, PromisePending, PromiseReaction,
-  PromiseRejectFn, PromiseRejected, PromiseResolveFn, ReactionJob,
-  ResolveThenableJob, SAsyncGen, SBox, SGenerator, SObject, SPromise, StringKey,
-  ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push, mk_bool, mk_object,
-  mk_undefined,
+  type GeneratorCompletion, type Handle, type Job, type JsSlot, type JsStore,
+  type JsVal, type Loc, type NativeToken, type PromiseReaction,
+  type ReactionHandler, type Resume, type SmFn, type Step, AGAwaitingReturn,
+  AGCompleted, AGExecuting, AGResumeAwaitingReturn, AGResumeBody,
+  AGResumeReturnUnwind, AGSuspendedStart, AGSuspendedYield, Agent,
+  AsyncGenRequest, AsyncGenResume, AsyncResume, DataProperty, ErrorObj,
+  GenCompleted, GenExecuting, GenNext, GenReturn, GenSuspendedStart,
+  GenSuspendedYield, GenThrow, Handler, HostJob, IdentityPassThrough, JsCell,
+  JsStore, KHandle, KNative, KStr, KSym, Named, NoElements, Ordinary,
+  PromiseFulfilled, PromisePending, PromiseReaction, PromiseRejectFn,
+  PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob,
+  ResumeCompiled, ResumeFrame, SAsyncGen, SBox, SGenerator, SObject, SPromise,
+  StepAwait, StepReturn, StepThrow, StepYield, StringKey, ThrowerPassThrough,
+  TypeErr, classify, jq_pop, jq_push, mk_bool, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -47,85 +41,51 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-// ── Step protocol (SPEC §7.M18 wire type) ───────────────────────────────────
-
-/// The suspended-locals snapshot tuple. Opaque: built by the compiled sm
-/// (`MakeTuple` of every hoisted local, SPEC §18.3), read only by the sm on
-/// resume. Gleam never destructures it — it round-trips through
-/// `mk_resume`/`apply_sm` and is traced by `refs_in_term`.
-pub type Loc
-
-/// One turn of a compiled state-machine. Wire form (returned by the sm's
-/// `Return([…])`) is `{return,V} | {throw,V} | {yield,V,Ns,Loc'} |
-/// {await,V,Ns,Loc'}` (SPEC:1509); `step_classify` (FFI) decodes to this sum.
-/// NO `Delegate` variant — `yield*` is lowered as a self-looping arm inside
-/// the sm (SPEC §18.6 / Q6).
-pub type Step {
-  StepReturn(JsVal)
-  StepThrow(JsVal)
-  StepYield(value: JsVal, next_state: Int, loc: Loc)
-  StepAwait(value: JsVal, next_state: Int, loc: Loc)
-}
+// ── Sent modes ──────────────────────────────────────────────────────────────
 
 /// `Sent` mode 0: normal resumption — `.next(v)` or await-fulfilled.
 pub const sent_next = 0
 
-/// `Sent` mode 1: throw injection — `.throw(e)` or await-rejected. The sm's
-/// per-arm mode-dispatch (SPEC §18.4 step 2) routes to the enclosing try-
-/// region's catch-state or, if none, returns `{throw, sent_v}`.
+/// `Sent` mode 1: throw injection — `.throw(e)` or await-rejected. A state
+/// machine's per-arm mode-dispatch routes to the enclosing try-region's
+/// catch-state or, if none, returns `{throw, sent_v}`.
 pub const sent_throw = 1
 
 /// `Sent` mode 2: return injection — `.return(v)`. Routes to the enclosing
-/// finally-state with `pending = {return, v}` (SPEC §18.5).
+/// finally-state with `pending = {return, v}`.
 pub const sent_return = 2
 
-/// Build the `Sent` pair for the initial invocation: `{0, undefined}` — state
-/// 0 ignores it (SPEC §18 invariant).
+/// The `Sent` pair for the initial invocation: `{0, undefined}` — state 0
+/// ignores it.
 pub fn sent_start() -> #(Int, JsVal) {
   #(sent_next, mk_undefined())
 }
 
-// ── FFI: sm invocation + resume pinning (arc_rt_async_ffi) ───────────
+// ── running one turn ────────────────────────────────────────────────────────
 
-/// Invoke a compiled sm closure directly: `Sm(St, Rs, Sent, Loc)`, catch
-/// `{wasm_exn, 0, [St', E]}` into `StepThrow(E)` (R2 payload order), and
-/// classify the wire step. Captures are already curried into `sm` by
-/// `MakeClosure` (SPEC §18.1 — closure arity 3 + St).
+/// Invoke a compiled state machine at `(rs, loc)` with `sent`: catches a JS
+/// throw into `StepThrow` and decodes the wire step, folding the next
+/// `(sm, rs, loc)` into the `Step`'s `ResumeCompiled`.
 @external(erlang, "arc_rt_async_ffi", "apply_sm")
 pub fn apply_sm(
   st: Agent,
-  sm: CompiledFn,
+  sm: SmFn,
   rs: Int,
   sent: #(Int, JsVal),
   loc: Loc,
 ) -> #(Step, Agent)
 
-/// Build the opaque `resume` term stored on `SGenerator` / `SAsyncGen`:
-/// `{Sm, Rs, Loc}`. Sits in the `CompiledFn`-typed field so rt_types stays
-/// unchanged; only ever unpacked by `apply_resume` / `repin_resume`.
-@external(erlang, "arc_rt_async_ffi", "mk_resume")
-pub fn mk_resume(sm: CompiledFn, rs: Int, loc: Loc) -> CompiledFn
-
-/// Re-pin a stored `resume` at a new `(Rs, Loc)` after a yield/await. Extracts
-/// the base sm from the old term so callers never carry `sm` separately.
-@external(erlang, "arc_rt_async_ffi", "repin_resume")
-pub fn repin_resume(resume: CompiledFn, rs: Int, loc: Loc) -> CompiledFn
-
-/// Invoke a stored `resume` term with a fresh `Sent`. Unpacks `{Sm, Rs, Loc}`
-/// and delegates to `apply_sm`.
-@external(erlang, "arc_rt_async_ffi", "apply_resume")
+/// Continue a suspended coroutine from `resume` with a fresh `sent`.
 pub fn apply_resume(
   st: Agent,
-  resume: CompiledFn,
+  resume: Resume,
   sent: #(Int, JsVal),
-) -> #(Step, Agent)
-
-/// The initial empty locals tuple (`{}`). The outer function's prologue
-/// normally builds `initial_locals_tuple` from `_args` (SPEC §18.1) and passes
-/// it to `<kind>_start`; this is the zero-arity fallback for a body with no
-/// hoisted locals.
-@external(erlang, "arc_rt_async_ffi", "loc_empty")
-pub fn loc_empty() -> Loc
+) -> #(Step, Agent) {
+  case resume {
+    ResumeCompiled(sm:, rs:, loc:) -> apply_sm(st, sm, rs, sent, loc)
+    ResumeFrame(frame:) -> require_js(st).ops.resume_frame(st, frame, sent)
+  }
+}
 
 // ── drive_step: generic step dispatcher ─────────────────────────────────────
 
@@ -138,8 +98,8 @@ pub type StepCtx(r) {
   StepCtx(
     on_return: fn(Agent, JsVal) -> r,
     on_throw: fn(Agent, JsVal) -> r,
-    on_yield: fn(Agent, JsVal, Int, Loc) -> r,
-    on_await: fn(Agent, JsVal, Int, Loc) -> r,
+    on_yield: fn(Agent, JsVal, Resume) -> r,
+    on_await: fn(Agent, JsVal, Resume) -> r,
   )
 }
 
@@ -149,29 +109,16 @@ pub fn drive_step(st: Agent, ctx: StepCtx(r), step: Step) -> r {
   case step {
     StepReturn(v) -> ctx.on_return(st, v)
     StepThrow(e) -> ctx.on_throw(st, e)
-    StepYield(v, ns, loc) -> ctx.on_yield(st, v, ns, loc)
-    StepAwait(v, ns, loc) -> ctx.on_await(st, v, ns, loc)
+    StepYield(value:, resume:) -> ctx.on_yield(st, value, resume)
+    StepAwait(value:, resume:) -> ctx.on_await(st, value, resume)
   }
 }
 
-/// Run one sm turn from a stored `resume` and dispatch the outcome. The
-/// composed `apply_resume → drive_step` used by every `.next` / `.throw` /
-/// `.return` / await-resume path.
-pub fn resume_and_drive(
-  st: Agent,
-  resume: CompiledFn,
-  sent: #(Int, JsVal),
-  ctx: StepCtx(r),
-) -> r {
-  let #(step, st) = apply_resume(st, resume, sent)
-  drive_step(st, ctx, step)
-}
-
 /// A `StepCtx` continuation for the arm a driver cannot legitimately reach —
-/// e.g. `on_await` in a sync generator, `on_yield` in a plain async function.
-/// Engine-bug panic (E3 posture; matches `rt_store.require_js`): the M18
-/// lowerer never emits the wrong step kind for a given fn flavour.
-pub fn step_unreachable(_st: Agent, _v: JsVal, _ns: Int, _loc: Loc) -> r {
+/// `on_await` in a sync generator, `on_yield` in a plain async function.
+/// Engine-bug panic: neither the state-machine lowering nor the bytecode
+/// compiler produces the wrong step kind for a given function flavour.
+pub fn step_unreachable(_st: Agent, _v: JsVal, _resume: Resume) -> r {
   panic as "rt_async: unreachable Step variant for this coroutine kind"
 }
 
@@ -219,9 +166,9 @@ pub fn alloc_resolving_fns(
 }
 
 /// §27.7.5.3 Await steps 3-5: allocate the on-fulfilled/on-rejected `KNative`
-/// resume closure for a plain async function. `(Rs, Loc)` are already pinned
-/// on `gen_h`'s `SGenerator.resume` via `repin_resume` — the closure carries
-/// only `(gen_h, is_throw)`, matching arc `AsyncResume(data_ref, is_reject)`.
+/// resume closure for a plain async function. The `Resume` is already stored
+/// on `gen_h`'s cell — the closure carries only `(gen_h, is_throw)`, matching
+/// arc `AsyncResume(data_ref, is_reject)`.
 pub fn alloc_resume(
   st: Agent,
   gen_h: Handle,
@@ -409,12 +356,11 @@ pub fn alloc_iter_result(
   )
 }
 
-// ── sync generator driver (SPEC §7.M8; port arc generators.gleam:52-331) ────
-// The SM model collapses arc's `run_to_completion` / `unwind_return` / catch-
-// unwinding into ONE resume: `apply_resume` re-enters the compiled sm with a
-// `Sent = {mode, value}` and the sm's own per-arm mode-dispatch (SPEC §18.4
-// step 2) routes to the enclosing catch/finally state, so this driver never
-// walks a try-stack. `yield*` is likewise inside-SM (§18.6) — no delegate arm.
+// ── sync generator driver (port arc generators.gleam:52-331) ───────────────
+// One resume covers arc's `run_to_completion` / `unwind_return` / catch-
+// unwinding: `apply_resume` re-enters the body with `Sent = {mode, value}` and
+// the body itself routes to the enclosing catch/finally, so this driver never
+// walks a try-stack. `yield*` is lowered inside the body — no delegate arm.
 
 /// Read the `SGenerator` at `gen_h`, or raise TypeError. Port of arc
 /// `get_generator_data` (D7 — arc's `None` becomes a raise here).
@@ -442,15 +388,14 @@ fn set_gen_state(
 }
 
 /// §27.5.1.2 GeneratorStart — allocate the generator object for a call to a
-/// generator function. Captures are already curried into `sm` by
+/// compiled generator function. Captures are already curried into `sm` by
 /// `MakeClosure` and args/frame are already packed into `loc0` by the outer
-/// prologue (SPEC §18.1), so `_frame`/`_args` are accepted for signature
-/// parity with `t_async_start` and the §8 op-table's 4-arg `gen_start` row
-/// but never read. Returns the `SGenerator` cell handle (SPEC:1494 —
-/// "h = generator cell").
+/// prologue, so `_frame`/`_args` are accepted for parity with the op-table's
+/// 4-arg `gen_start` row but never read. Returns the `SGenerator` cell
+/// handle.
 pub fn t_gen_start(
   st: Agent,
-  sm: CompiledFn,
+  sm: SmFn,
   _frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
@@ -469,12 +414,11 @@ pub fn t_gen_start(
         extensible: True,
       ),
     )
-  // Data: the internal state cell. `resume` pins {sm, rs=0, loc0}.
   rt_store.t_cell_new(
     st,
     SGenerator(
       state: GenSuspendedStart,
-      resume: mk_resume(sm, 0, loc0),
+      resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
       gen_cell: shell_h,
     ),
   )
@@ -489,9 +433,8 @@ pub fn t_gen_next(st: Agent, gen_h: Handle, sent: JsVal) -> #(Handle, Agent) {
   case state {
     GenCompleted -> alloc_iter_result(st, mk_undefined(), True)
     GenExecuting -> throw_type_error(st, "Generator is already running")
-    // SuspendedStart: state 0 ignores `sent` (SPEC §18 invariant) but is
-    // otherwise a normal resume — arc's AtStart branch differs only in NOT
-    // pushing sent onto the saved stack, which the sm handles itself.
+    // SuspendedStart: the first turn ignores `sent` but is otherwise a
+    // normal resume.
     GenSuspendedStart | GenSuspendedYield ->
       gen_resume(st, gen_h, gen, resume, #(sent_next, sent))
   }
@@ -500,8 +443,7 @@ pub fn t_gen_next(st: Agent, gen_h: Handle, sent: JsVal) -> #(Handle, Agent) {
 /// §27.5.3.4 GeneratorResumeAbrupt with a return completion —
 /// `Generator.prototype.return(value)`. Port of arc
 /// `call_native_generator_return` (arc:116-199) with `unwind_return` folded
-/// into the sm's mode-2 dispatch (SPEC §18.5 — finally states, `yield*`
-/// forwarding all inside-SM).
+/// into the body's mode-2 dispatch.
 pub fn t_gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
   let gen = require_generator(st, gen_h)
   let assert SGenerator(state:, resume:, ..) = gen
@@ -520,7 +462,7 @@ pub fn t_gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
 /// §27.5.3.4 GeneratorResumeAbrupt with a throw completion —
 /// `Generator.prototype.throw(exception)`. Port of arc
 /// `call_native_generator_throw` (arc:202-283) with `unwind_to_catch` folded
-/// into the sm's mode-1 dispatch (SPEC §18.4 step 2).
+/// into the body's mode-1 dispatch.
 pub fn t_gen_throw(st: Agent, gen_h: Handle, e: JsVal) -> #(Handle, Agent) {
   let gen = require_generator(st, gen_h)
   let assert SGenerator(state:, resume:, ..) = gen
@@ -536,8 +478,8 @@ pub fn t_gen_throw(st: Agent, gen_h: Handle, e: JsVal) -> #(Handle, Agent) {
   }
 }
 
-/// Resume a suspended generator with `sent` and marshal the sm's `Step` back
-/// into the sync-driver convention. Port of arc `build_resumed_state` +
+/// Resume a suspended generator with `sent` and marshal the `Step` back into
+/// the sync-driver convention. Port of arc `build_resumed_state` +
 /// `run_to_completion` + `settle_completion` (arc:388-610). Bracketed with
 /// `t_enter_call`/`t_leave_call` — arc bumps `call_depth` for the exact same
 /// D11 reason (arc:382).
@@ -545,7 +487,7 @@ fn gen_resume(
   st: Agent,
   gen_h: Handle,
   gen: JsSlot,
-  resume: CompiledFn,
+  resume: Resume,
   sent: #(Int, JsVal),
 ) -> #(Handle, Agent) {
   let st = set_gen_state(st, gen_h, gen, GenExecuting)
@@ -567,17 +509,13 @@ fn gen_resume(
         let st = set_gen_state(st, gen_h, gen, GenCompleted)
         rt_store.t_throw(st, e)
       },
-      on_yield: fn(st, v, ns, loc) {
+      on_yield: fn(st, v, resume) {
         let assert SGenerator(gen_cell:, ..) = gen
         let st =
           rt_store.t_cell_set(
             st,
             gen_h,
-            SGenerator(
-              state: GenSuspendedYield,
-              resume: repin_resume(resume, ns, loc),
-              gen_cell:,
-            ),
+            SGenerator(state: GenSuspendedYield, resume:, gen_cell:),
           )
         alloc_iter_result(st, v, False)
       },
@@ -937,15 +875,15 @@ fn untrack_rejection(st: Agent, promise_h: Handle) -> Agent {
 // Cell layout (matches `t_gen_start`): shell `SObject` (proto
 // `%AsyncGeneratorPrototype%`) + `SAsyncGen` data cell; `gen_cell` = shell
 // handle; DATA handle returned. Every `t_asyncgen_*` op reads it as
-// `SAsyncGen`. `yield*` delegation is inside-SM (SPEC §18.6) — no delegate
+// `SAsyncGen`. `yield*` delegation is lowered inside the body — no delegate
 // arms here.
 
 /// §27.6.3.1 AsyncGeneratorStart. Alloc the `SObject` shell + `SAsyncGen`
-/// data cell in `SuspendedStart`; `resume = {sm, 0, loc0}`. Frame/args
-/// accepted for §8 op-table 4-arg parity, unused (already packed into loc0).
+/// data cell in `SuspendedStart`. Frame/args accepted for op-table 4-arg
+/// parity, unused (already packed into loc0).
 pub fn t_asyncgen_start(
   st: Agent,
-  sm: CompiledFn,
+  sm: SmFn,
   _frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
@@ -966,7 +904,7 @@ pub fn t_asyncgen_start(
     st,
     SAsyncGen(
       state: AGSuspendedStart,
-      resume: mk_resume(sm, 0, loc0),
+      resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
       queue: #([], []),
       gen_cell: shell_h,
     ),
@@ -1104,8 +1042,8 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
               run_asyncgen_body(st, gen_h, req, #(sent_throw, req.value))
             GenReturn -> {
               // §27.6.3.10 step 8: the DRIVER does Await(resumptionValue)
-              // FIRST (arc `run_body` AGReturn :231-240 / SPEC §18.4 step 2
-              // emits no await for mode 2). State stays Executing; the
+              // FIRST (arc `run_body` AGReturn :231-240; the body emits no
+              // await for mode 2). State stays Executing; the
               // AGResumeReturnUnwind arm injects mode 2 with the AWAITED v.
               let st = write_asyncgen(st, gen_h, ag_set_state(_, AGExecuting))
               setup_asyncgen_await(st, gen_h, req.value, AGResumeReturnUnwind)
@@ -1115,7 +1053,7 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
   }
 }
 
-/// Mark `Executing`, run one sm turn, dispatch outcome. Port of arc `run_body`
+/// Mark `Executing`, run one turn, dispatch outcome. Port of arc `run_body`
 /// (async_generators.gleam:189-243) with the `yield*`-delegate branch dropped.
 fn run_asyncgen_body(
   st: Agent,
@@ -1146,22 +1084,19 @@ fn asyncgen_ctx(gen_h: Handle, req: AsyncGenRequest) -> StepCtx(Agent) {
       let st = call_settle(st, req.reject, [e])
       drain_queue(st, gen_h)
     },
-    on_yield: fn(st, v, ns, loc) {
-      // Repin resume, dequeue + resolve request, loop.
+    on_yield: fn(st, v, resume) {
+      // Store resume, dequeue + resolve request, loop.
       let st =
         write_asyncgen(st, gen_h, fn(ag) {
-          ag
-          |> ag_repin(ns, loc)
-          |> ag_set_state(AGSuspendedYield)
-          |> ag_drop_head
+          AGLive(..ag, resume:, state: AGSuspendedYield) |> ag_drop_head
         })
       let st = fulfill_iter(st, req.resolve, v, False)
       drain_queue(st, gen_h)
     },
-    on_await: fn(st, v, ns, loc) {
-      // Repin (state stays Executing); do NOT dequeue — same request stays at
-      // head until a yield/return/throw settles it.
-      let st = write_asyncgen(st, gen_h, ag_repin(_, ns, loc))
+    on_await: fn(st, v, resume) {
+      // State stays Executing; do NOT dequeue — same request stays at head
+      // until a yield/return/throw settles it.
+      let st = write_asyncgen(st, gen_h, fn(ag) { AGLive(..ag, resume:) })
       setup_asyncgen_await(st, gen_h, v, AGResumeBody)
     },
   )
@@ -1192,7 +1127,7 @@ pub fn t_asyncgen_resume(
           }
           drain_queue(st, gen_h)
         }
-        // Body await OR §27.6.3.10 return-unwind await: re-drive the sm.
+        // Body await OR §27.6.3.10 return-unwind await: re-drive the body.
         // Only the fulfil-mode differs — return-unwind injects mode 2 with
         // the AWAITED value (arc AGResumeReturnUnwind :646-655).
         AGResumeBody ->
@@ -1220,12 +1155,12 @@ pub fn t_asyncgen_resume(
 }
 
 /// Shared body of `t_asyncgen_resume`'s `AGResumeBody`/`AGResumeReturnUnwind`
-/// arms: run one sm turn with `Sent = {sent_throw|fulfil_mode, settled}`.
+/// arms: run one turn with `Sent = {sent_throw|fulfil_mode, settled}`.
 fn redrive_asyncgen(
   st: Agent,
   gen_h: Handle,
   req: AsyncGenRequest,
-  resume: CompiledFn,
+  resume: Resume,
   is_throw: Bool,
   fulfil_mode: Int,
   settled: JsVal,
@@ -1275,7 +1210,7 @@ fn fulfill_iter(st: Agent, resolve: JsVal, value: JsVal, done: Bool) -> Agent {
 type AGLive {
   AGLive(
     state: AsyncGenState,
-    resume: CompiledFn,
+    resume: Resume,
     front: List(AsyncGenRequest),
     back: List(AsyncGenRequest),
     gen_cell: Handle,
@@ -1333,10 +1268,6 @@ fn ag_set_state(ag: AGLive, s: AsyncGenState) -> AGLive {
   AGLive(..ag, state: s)
 }
 
-fn ag_repin(ag: AGLive, ns: Int, loc: Loc) -> AGLive {
-  AGLive(..ag, resume: repin_resume(ag.resume, ns, loc))
-}
-
 fn ag_drop_head(ag: AGLive) -> AGLive {
   let ag = ag_normalize(ag)
   case ag.front {
@@ -1352,9 +1283,8 @@ fn ag_complete_drop_head(ag: AGLive) -> AGLive {
 // ── §27.7.5 Async function driver: t_async_start / t_await ──────────────────
 // Port of arc `exec/call.gleam:324-543 call_async_function` /
 // `finish_async_execution` / `call_native_async_resume` +
-// `exec/promises.gleam:1715-1766 setup_await`, re-expressed under the M18 sm
-// ABI. The internal `SGenerator` cell is REUSED as the async-context slot:
-// `resume = {sm, rs, loc}`, `gen_cell = result_promise_h` (SPEC §7.M8 note).
+// `exec/promises.gleam:1715-1766 setup_await`. The internal `SGenerator` cell
+// is REUSED as the async-context slot: `gen_cell = result_promise_h`.
 
 /// First argument or `undefined` — the `arguments[0]` a resolving/resume
 /// function's body reads (arc `helpers.first_arg_or_undefined`).
@@ -1380,27 +1310,27 @@ fn as_promise(st: Agent, v: JsVal) -> Option(Handle) {
 
 /// §27.7.5.1 AsyncFunctionStart. Allocate the result promise + an internal
 /// `SGenerator` state cell (reused as the async context; `gen_cell` = result
-/// promise handle), run the sm's first turn, drive its outcome, and return
+/// promise handle), run the body's first turn, drive its outcome, and return
 /// the result promise (R1 value-first). Port of arc
-/// `call.gleam:324-366 call_async_function`. Frame/args accepted for §8
+/// `call.gleam:324-366 call_async_function`. Frame/args accepted for
 /// op-table 4-arg parity, unused (already packed into `loc0` by the outer
-/// prologue — SPEC §18.1).
+/// prologue).
 pub fn t_async_start(
   st: Agent,
-  sm: CompiledFn,
+  sm: SmFn,
   _frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
   let #(promise_h, st) = t_new_promise(st)
-  // Internal state cell: `resume` = `{sm, 0, loc0}`; `gen_cell` links to the
-  // result promise so `do_async_resume` can settle it.
+  // Internal state cell; `gen_cell` links to the result promise so
+  // `do_async_resume` can settle it.
   let #(gen_h, st) =
     rt_store.t_cell_new(
       st,
       SGenerator(
         state: GenExecuting,
-        resume: mk_resume(sm, 0, loc0),
+        resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
         gen_cell: promise_h,
       ),
     )
@@ -1409,9 +1339,9 @@ pub fn t_async_start(
   #(promise_h, st)
 }
 
-/// Shared completion handling for one async-fn sm turn. Port of arc
+/// Shared completion handling for one async-fn turn. Port of arc
 /// `call.gleam:398-465 finish_async_execution`. `StepYield` in a plain async
-/// function is an engine bug (M18 never emits it for `is_generator: False`).
+/// function is an engine bug.
 fn drive_async_step(
   st: Agent,
   gen_h: Handle,
@@ -1432,21 +1362,17 @@ fn drive_async_step(
         t_promise_reject(st, promise_h, e)
       },
       on_yield: step_unreachable,
-      // Body hit `await` — re-pin the resume state and hand off to `t_await`.
-      on_await: fn(st, awaited, ns, loc) {
+      // Body hit `await` — store where to resume and hand off to `t_await`.
+      on_await: fn(st, awaited, resume) {
         let st =
           rt_store.t_cell_update(st, gen_h, fn(slot) {
             case slot {
-              SGenerator(resume:, gen_cell:, ..) ->
-                SGenerator(
-                  state: GenExecuting,
-                  resume: repin_resume(resume, ns, loc),
-                  gen_cell:,
-                )
+              SGenerator(gen_cell:, ..) ->
+                SGenerator(state: GenExecuting, resume:, gen_cell:)
               other -> other
             }
           })
-        t_await(st, gen_h, awaited, ns, loc)
+        t_await(st, gen_h, awaited)
       },
     ),
     step,
@@ -1467,19 +1393,10 @@ fn complete_async(st: Agent, gen_h: Handle) -> Agent {
 
 /// §27.7.5.3 Await. `PromiseResolve(%Promise%, awaited)` then
 /// `PerformPromiseThen` with `AsyncResume` on-fulfill/on-reject closures that
-/// re-invoke `gen_h`'s stored sm at `(next_state, {mode, sent}, locals)`. Port
-/// of arc `promises.gleam:1715-1766 setup_await`. `next_state`/`locals` are
-/// carried per SPEC signature but the resume closure reads them from
-/// `gen_h.resume` (already re-pinned by `drive_async_step`), so they are
-/// unused here beyond documenting the ABI. Always enqueues (§27.5.3 — an
+/// continue `gen_h`'s stored `Resume` with `{mode, settled}`. Port of arc
+/// `promises.gleam:1715-1766 setup_await`. Always enqueues (§27.5.3 — an
 /// already-settled promise still resumes asynchronously).
-pub fn t_await(
-  st: Agent,
-  gen_h: Handle,
-  awaited: JsVal,
-  _next_state: Int,
-  _locals: Loc,
-) -> Agent {
+pub fn t_await(st: Agent, gen_h: Handle, awaited: JsVal) -> Agent {
   // §27.7.5.3 step 2: PromiseResolve(%Promise%, value).
   let #(awaited_h, st) = promise_resolve_static(st, awaited)
   // Steps 3-4: onFulfilled/onRejected close over the async-context handle.
@@ -1544,9 +1461,9 @@ fn check_already_resolved(st: Agent, already_h: Handle) -> #(Bool, Agent) {
   }
 }
 
-/// `AsyncResume` body — §27.7.5.3 Await onFulfilled/onRejected. Reads the
-/// stored `{sm, rs, loc}` from `gen_h`, re-invokes the sm with
-/// `Sent = {mode, settled_value}`, and drives the resulting step. Port of
+/// `AsyncResume` body — §27.7.5.3 Await onFulfilled/onRejected. Continues the
+/// `Resume` stored on `gen_h` with `Sent = {mode, settled_value}` and drives
+/// the resulting step. Port of
 /// arc `call.gleam:481-543 call_native_async_resume`.
 pub fn do_async_resume(
   st: Agent,

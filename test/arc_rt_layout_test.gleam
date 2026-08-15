@@ -10,8 +10,9 @@ import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type JsVal, type ShapeSlots,
   AccessorProperty, ArrayObj, DataProperty, Dense, FnFlags, Index, JsCell,
   JsStore, KBytecode, KCompiled, KHandle, KNative, Named, NativeUnseeded,
-  NoElements, Ordinary, Private, ProxyObj, SBox, SObject, SShapedObject,
-  ShapeDesc, Sparse, StringKey, SymbolKey,
+  NoElements, Ordinary, Private, ProxyObj, ResumeCompiled, ResumeFrame, SBox,
+  SObject, SShapedObject, ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow,
+  StepYield, StringKey, SymbolKey,
 } as rt_types
 import arc/vm/internal/tree_array
 import gleam/dict
@@ -47,6 +48,15 @@ fn template(label: String) -> FuncTemplate
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
 fn env(vals: List(JsVal)) -> EnvTuple
+
+@external(erlang, "arc_rt_layout_root_ffi", "dyn")
+fn sm_fn(label: String) -> rt_types.SmFn
+
+@external(erlang, "arc_rt_layout_root_ffi", "dyn")
+fn loc(label: String) -> rt_types.Loc
+
+@external(erlang, "arc_rt_layout_root_ffi", "dyn")
+fn frame(label: String) -> bytecode.SuspendedFrame
 
 fn at(record: a, name: String) -> Dynamic {
   element(idx(name), dyn(record))
@@ -382,6 +392,27 @@ pub fn data_property_test() {
   assert arity(acc) == idx("ACCESSORPROP_ARITY")
   assert at(acc, "ACCESSORPROP_GET") == dyn(Some(g))
   assert at(acc, "ACCESSORPROP_SET") == dyn(Some(s))
+}
+
+pub fn step_and_resume_test() {
+  let v = rt_types.mk_string("v")
+  let compiled = ResumeCompiled(sm: sm_fn("sm"), rs: 3, loc: loc("L"))
+  assert tag_of(compiled) == tag("RESUME_COMPILED_TAG")
+  assert arity(compiled) == 4
+  assert element(2, dyn(compiled)) == dyn("sm")
+  assert element(3, dyn(compiled)) == dyn(3)
+  assert element(4, dyn(compiled)) == dyn("L")
+  let parked = ResumeFrame(frame: frame("F"))
+  assert tag_of(parked) == tag("RESUME_FRAME_TAG")
+  assert element(2, dyn(parked)) == dyn("F")
+  assert tag_of(StepReturn(v)) == tag("STEP_RETURN")
+  assert element(2, dyn(StepReturn(v))) == dyn(v)
+  assert tag_of(StepThrow(v)) == tag("STEP_THROW")
+  assert tag_of(StepYield(v, compiled)) == tag("STEP_YIELD")
+  assert element(2, dyn(StepYield(v, compiled))) == dyn(v)
+  assert element(3, dyn(StepYield(v, compiled))) == dyn(compiled)
+  assert tag_of(StepAwait(v, parked)) == tag("STEP_AWAIT")
+  assert element(3, dyn(StepAwait(v, parked))) == dyn(parked)
 }
 
 pub fn completion_test() {
