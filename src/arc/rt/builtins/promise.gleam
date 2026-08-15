@@ -285,10 +285,12 @@ fn finally_wrapper(
   // Step 2: p = ? PromiseResolve(C, result).
   let #(cap, st) = new_capability_from_constructor(st, constructor)
   let #(_, st) = t_call_checked(st, cap.resolve, mk_undefined(), [result])
-  // Step 4: handler = () => original  (or  () => { throw original }).
+  // Step 4: handler = CreateBuiltinFunction(() => original | throw original,
+  // 0, "", « »).
   let #(handler, st) = case rejecting {
-    False -> alloc_closure(st, PromiseN(PromiseFinallyValueThunk(original)))
-    True -> alloc_closure(st, PromiseN(PromiseFinallyThrower(original)))
+    False ->
+      alloc_closure_n(st, PromiseN(PromiseFinallyValueThunk(original)), 0)
+    True -> alloc_closure_n(st, PromiseN(PromiseFinallyThrower(original)), 0)
   }
   // Step 5: Return ? Invoke(p, "then", « handler »).
   t_call_method(st, cap.promise, StringKey(Named("then")), [handler])
@@ -331,9 +333,11 @@ fn resolve_with_constructor(
 ) -> #(JsVal, Agent) {
   case c == intrinsic {
     True -> {
-      // Intrinsic %Promise% fast path: t_new_promise + t_promise_resolve.
-      let #(h, st) = rt_async.promise_resolve_static(st, val)
-      #(mk_object(h), st)
+      // §27.2.4.7.1 steps 2-4 for the intrinsic %Promise%: always a FRESH
+      // promise resolved with `val` (step 1's same-constructor early return
+      // was already decided by the caller).
+      let #(h, st) = rt_async.t_new_promise(st)
+      #(mk_object(h), rt_async.t_promise_resolve(st, h, val))
     }
     False -> {
       let #(cap, st) = new_capability_from_constructor(st, c)
@@ -817,26 +821,26 @@ fn protected(
 ) -> #(rt_call.Completion, Agent)
 
 fn alloc_closure(st: Agent, tag: rt_types.NativeToken) -> #(JsVal, Agent) {
-  let #(h, st) =
-    rt_call.t_native_new(
-      st,
-      Some(st.realm.function.prototype),
-      tag,
-      "",
-      1,
-      False,
-    )
-  #(mk_object(h), st)
+  alloc_closure_n(st, tag, 1)
 }
 
 fn alloc_closure2(st: Agent, tag: rt_types.NativeToken) -> #(JsVal, Agent) {
+  alloc_closure_n(st, tag, 2)
+}
+
+/// Anonymous non-constructible builtin closure with `length` = `len`.
+fn alloc_closure_n(
+  st: Agent,
+  tag: rt_types.NativeToken,
+  len: Int,
+) -> #(JsVal, Agent) {
   let #(h, st) =
     rt_call.t_native_new(
       st,
       Some(st.realm.function.prototype),
       tag,
       "",
-      2,
+      len,
       False,
     )
   #(mk_object(h), st)
