@@ -776,46 +776,9 @@ fn hex4(a: Int, b: Int, c: Int, d: Int) -> Option(Int) {
   high * 256 + low
 }
 
-/// TrimString(START) with the ES StrWhiteSpace set — NOT Erlang's Unicode
-/// White_Space set (which misses ZWNBSP).
-fn trim_leading_js_whitespace(s: String) -> String {
-  case string.pop_grapheme(s) {
-    Ok(#(ch, rest)) ->
-      case is_js_whitespace(ch) {
-        True -> trim_leading_js_whitespace(rest)
-        False -> s
-      }
-    Error(Nil) -> s
-  }
-}
-
-fn is_js_whitespace(ch: String) -> Bool {
-  case ch {
-    " "
-    | "\t"
-    | "\n"
-    | "\r"
-    | "\u{000B}"
-    | "\u{000C}"
-    | "\u{00A0}"
-    | "\u{FEFF}"
-    | "\u{2028}"
-    | "\u{2029}"
-    | "\u{1680}"
-    | "\u{2000}"
-    | "\u{2001}"
-    | "\u{2002}"
-    | "\u{2003}"
-    | "\u{2004}"
-    | "\u{2005}"
-    | "\u{2006}"
-    | "\u{2007}"
-    | "\u{2008}"
-    | "\u{2009}"
-    | "\u{200A}"
-    | "\u{202F}"
-    | "\u{205F}"
-    | "\u{3000}" -> True
-    _ -> False
-  }
-}
+/// §22.1.3.32.1 TrimString(START) with the ES StrWhiteSpace set — NOT
+/// Erlang's Unicode White_Space set (which misses ZWNBSP and includes NEL).
+/// Byte-wise over code points, so a CR LF pair is two characters, not one
+/// grapheme.
+@external(erlang, "arc_rt_string_ffi", "trim_leading_js_ws")
+fn trim_leading_js_whitespace(s: String) -> String
