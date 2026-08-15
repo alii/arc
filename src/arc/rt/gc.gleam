@@ -451,9 +451,15 @@ fn push_opt_val(ov: Option(JsVal), acc: List(Int)) -> List(Int) {
 // SPEC §7.M2 "Dropped from arc": `lazy_proto` handling (arc heap.gleam:
 // 513-530) — protos are eagerly-allocated real cells here, so `mark_loop`
 // has NO tagged-id decode branch and `sweep` has NO `is_real_slot` filter.
-// `t_compact` (arc heap.gleam:453-460) is DROPPED — handles are stable,
-// sweep-to-free-list only (M2.md:49 keeps it; SPEC §7.M2:618 drops it;
-// SPEC wins per RULINGS precedence).
+// Handles are stable: a collection never renumbers ids. Like arc
+// `heap.compact` (heap.gleam:459-473) the sweep DISCARDS the dead ids rather
+// than refilling the free list: an allocation-heavy turn (test262's
+// dst-offset-caching family allocates ~2.4M short-lived Dates) would
+// otherwise leave a multi-megaword free list inside the store record, which
+// then travels with the Agent across every process boundary and defeats the
+// point of collecting. Discarding them only wastes id space — `t_cell_new`
+// falls back to bumping `next`, and ids are plain ints. `free` still serves
+// explicit `t_cell_free`.
 
 /// Default allocation-count threshold before an automatic collection. Seeds
 /// `JsStore.gc_threshold` in `t_store_new`; `t_maybe_collect` reads the
@@ -505,16 +511,16 @@ pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
 
 /// Mark-and-sweep the JS heap. Roots = `roots_of_state(st)` ∪ `extra_roots`
 /// (the interpreter's live root frame, or a host-driven mid-turn `gc()`).
-/// Resets `alloc_since_gc`. NO id renumbering (SPEC §7.M2 invariant).
-/// Port of arc `heap.collect_with_roots` (heap.gleam:470-476).
+/// Resets `alloc_since_gc` and drops the free list (see above). NO id
+/// renumbering (SPEC §7.M2 invariant). Port of arc `heap.compact`
+/// (heap.gleam:459-473).
 pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   let js = require_js(st)
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
   let live = mark_from(js.data, roots)
-  let #(data, free) = sweep(js.data, js.free, live)
-  let data = prune_weak(data, live)
-  Agent(..st, store: JsStore(..js, data:, free:, alloc_since_gc: 0))
+  let data = sweep(js.data, live) |> prune_weak(live)
+  Agent(..st, store: JsStore(..js, data:, free: [], alloc_since_gc: 0))
 }
 
 /// Mark phase: from `roots`, return every reachable cell id. Port of arc
@@ -560,24 +566,10 @@ fn prepend_ids(ids: List(Int), tail: List(Int)) -> List(Int) {
   }
 }
 
-/// Sweep: keep only live cells, fold dead ids onto the free list. NO id
-/// renumbering. arc's `!is_real_slot(id)` guard DELETED — no tagged ids
-/// (SPEC §7.M2 "Dropped from arc"). Port of arc `heap.sweep` (heap.gleam:
-/// 550-563).
-fn sweep(
-  data: Dict(Int, JsSlot),
-  free: List(Int),
-  live: Set(Int),
-) -> #(Dict(Int, JsSlot), List(Int)) {
-  let new_data = dict.filter(data, fn(id, _) { set.contains(live, id) })
-  let new_free =
-    dict.fold(data, free, fn(f, id, _) {
-      case set.contains(live, id) {
-        True -> f
-        False -> [id, ..f]
-      }
-    })
-  #(new_data, new_free)
+/// Sweep: keep only live cells. NO id renumbering; dead ids are discarded,
+/// not recycled (arc heap.gleam:471).
+fn sweep(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
+  dict.filter(data, fn(id, _) { set.contains(live, id) })
 }
 
 /// Post-sweep weak-prune (SPEC §7.M2 §weak): drop `WeakMapObj`/`WeakSetObj`

@@ -3,8 +3,8 @@
 ////
 //// (A) DIRECT — run a program that stores 10 survivors on `globalThis.keep`
 //// and 100K garbage cells; take returned `st`, manually call
-//// `rt_gc.t_collect(st, [])`; verify `stats.live` dropped ~100K and
-//// `stats.free` grew; then run a SECOND compiled snippet in `st'` that
+//// `rt_gc.t_collect(st, [])`; verify `stats.live` dropped ~100K; then
+//// run a SECOND compiled snippet in `st'` that
 //// reads `globalThis.keep[5][0]` — must print `50000`, no dangling-handle
 //// panic.
 ////
@@ -124,6 +124,12 @@ fn stats_line(label: String, s: rt_gc.GcStats) -> String {
   <> int.to_string(since_gc)
 }
 
+/// Cells minted between `before` and `after` that a collection has since
+/// discarded (a sweep drops dead ids rather than recycling them).
+fn swept(before: rt_gc.GcStats, after: rt_gc.GcStats) -> Int {
+  { after.next - before.next } - { after.live - before.live }
+}
+
 fn stdout_str(_st: Agent) -> String {
   case bit_array.to_string(harness.buf_read()) {
     Ok(s) -> s
@@ -202,13 +208,7 @@ fn run_a() {
           let s2 = rt_gc.stats(st2)
           io.println(stats_line("post-gc:  ", s2))
           let dropped = s1.live - s2.live
-          let freed = s2.free - s1.free
-          io.println(
-            "  dropped="
-            <> int.to_string(dropped)
-            <> " freed="
-            <> int.to_string(freed),
-          )
+          io.println("  dropped=" <> int.to_string(dropped))
           // Assertions on stats:
           //   ~100K garbage should be swept; ~10 survivor arrays + realm remain.
           assert_in_range("live-after-gc", s2.live, s0.live, s0.live + 200)
@@ -252,7 +252,7 @@ fn run_b() {
       io.println("  stdout   : " <> string.inspect(out_str))
       // GC fired between then1 and then2 iff since_gc < 100K:
       assert_in_range("since_gc-after (< threshold)", s1.since_gc, 0, 65_535)
-      assert_in_range("free (swept ~100K)         ", s1.free, 99_000, 101_000)
+      assert_in_range("swept (~100K)              ", swept(s0, s1), 99_000, 101_000)
       assert_eq("stdout", string.trim(out_str), "sync\nthen1 10\nthen2 50000")
     }
   }
@@ -268,13 +268,14 @@ fn run_c() {
     Ok(m) -> {
       harness.buf_reset()
       let st0 = seed()
+      let s0 = rt_gc.stats(st0)
       let #(out, st1) = run.apply_main(m, st0)
       let s1 = rt_gc.stats(st1)
       io.println(stats_line("post-run: ", s1))
       io.println("  outcome  : " <> string.slice(string.inspect(out), 0, 200))
       let out_str = stdout_str(st1)
       io.println("  stdout   : " <> string.inspect(out_str))
-      assert_in_range("free (swept ~100K)", s1.free, 99_000, 101_000)
+      assert_in_range("swept (~100K)", swept(s0, s1), 99_000, 101_000)
       assert_eq("stdout", string.trim(out_str), "sync\ncaptured 42 99")
     }
   }
