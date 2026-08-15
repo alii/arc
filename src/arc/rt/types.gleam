@@ -2907,13 +2907,19 @@ pub type Agent {
     /// Embedder capabilities (clocks, PRNG, console sink, uncaught-report
     /// sink). Not part of the heap: excluded from GC and serialization.
     hooks: HostHooks,
-    /// Embedder natives by `NativeToken.HostFn(id)`. Closures, so excluded
-    /// from serialization like `hooks`; the embedder re-registers them.
+    /// Embedder natives by `NativeToken.HostFn(id)`, dense from 0 in
+    /// registration order (`arc/host` is the only writer). Closures, so
+    /// excluded from serialization like `hooks`; the embedder re-registers
+    /// them in the same order.
     host_fns: Dict(Int, HostFnEntry),
     /// Every realm of this agent by `Realm.id`. The entry for `realm.id`
     /// is refreshed only when another realm is entered (`rt/realm`), so read
     /// the current realm through `realm`, never through this map.
     realms: Dict(Int, Realm),
+    /// The dynamic-import host hook (HostLoadImportedModule), installed by
+    /// `arc/module_host`. Kept apart from `host_fns` so installing it never
+    /// shifts embedder ids; excluded from serialization like them.
+    import_hook: Option(HostFnEntry),
   )
 }
 

@@ -122,8 +122,9 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
   let acc = list.append(unhandled_rejections, acc)
   let acc = push_term_refs(to_dynamic(jq_to_list(microtasks)), acc)
   // Embedder closures may capture handles (a class constructor holding its
-  // prototype); walk their fun envs.
+  // prototype); walk their fun envs, the import hook's included.
   let acc = push_term_refs(to_dynamic(dict.values(st.host_fns)), acc)
+  let acc = push_term_refs(to_dynamic(st.import_hook), acc)
   // Global let/const/class bindings of every realm live outside the heap's
   // global objects (intrinsics and template objects are already pinned).
   // The registry's copy of the current realm may be stale, so it is walked

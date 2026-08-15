@@ -90,7 +90,7 @@ pub fn forbid_load(_resolved: String) -> Result(String, LoadError) {
 /// reads their sources — a cached import never calls `load` at all.
 ///
 /// The returned function value is ENGINE state (`HostHooks` no longer has a
-/// slot for it; the live engine keeps its hook on `Agent.host_fns`). It is
+/// slot for it; the live engine keeps its hook on `Agent.import_hook`). It is
 /// NEVER installed as a globalThis property, so guest JS cannot read,
 /// replace or delete the module loader. Because nothing else in the heap
 /// reaches the hook's function object, it is pinned as a persistent GC root

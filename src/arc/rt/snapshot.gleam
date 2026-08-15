@@ -4,8 +4,8 @@
 //// realm, the realm registry and the template map. It holds no BEAM funs: `JsOps` is re-seeded with
 //// the runtime's entries on `deserialize` (the interpreter links its own on
 //// top), `hooks` are supplied by the caller, `host_fns` are re-registered by
-//// the embedder (ids line up by registration order) and `frames` are empty
-//// at an engine boundary. RegExp objects are written without their compiled
+//// the embedder (ids line up by registration order), the `import_hook` is
+//// re-installed and `frames` are empty at an engine boundary. RegExp objects are written without their compiled
 //// matcher (an OTP-release-specific `re` pattern) and recompile on first
 //// exec. A store that itself holds compiled code (a
 //// `KCompiled` function, a coroutine parked in a compiled state machine, a
@@ -110,6 +110,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     hooks: _,
     host_fns: _,
     realms:,
+    import_hook: _,
   ) = st
   let JsStore(
     data:,
@@ -152,9 +153,9 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
 }
 
 /// Read an agent back from `serialize` output, on `hooks`, with no host
-/// functions registered and the runtime's `JsOps` seeded. The interpreter's
-/// `JsOps` entries are not linked; the caller does that, as for a fresh
-/// agent.
+/// functions registered, no import hook installed and the runtime's `JsOps`
+/// seeded. The interpreter's `JsOps` entries are not linked; the caller does
+/// that, as for a fresh agent.
 pub fn deserialize(
   data: BitArray,
   hooks: HostHooks,
@@ -169,6 +170,7 @@ pub fn deserialize(
     hooks:,
     host_fns: dict.new(),
     realms:,
+    import_hook: None,
   )
   |> rt_builtins.seed_ops
 }

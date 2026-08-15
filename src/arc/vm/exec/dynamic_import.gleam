@@ -35,7 +35,7 @@
 //// properties: the hook, the active referrer, and the ~defer~ "already
 //// settled" signal all used to live in guest-reachable strings/properties,
 //// which let user JS replace the module loader or forge its resolution root.
-//// They are now typed engine state (`Agent.host_fns` /
+//// They are now typed engine state (`Agent.import_hook` /
 //// `RealmCtx.import_referrer`) and a typed job outcome (`DeferHookOutcome`).
 
 import arc/vm/builtins/common
@@ -507,7 +507,7 @@ fn validate_attributes(
 }
 
 /// Steps 9+ (HostLoadImportedModule). `HostHooks` no longer carries an import
-/// hook (the live engine keeps it on `Agent.host_fns`, see arc/module_host),
+/// hook (the live engine keeps it on `Agent.import_hook`, see arc/module_host),
 /// so this retired interpreter has no hook to call: `import()` always rejects
 /// with the "unsupported in this context" TypeError, exactly as it did with no
 /// hook installed.

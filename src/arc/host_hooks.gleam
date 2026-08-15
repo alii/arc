@@ -9,7 +9,7 @@
 ////
 //// This module is a dependency-light leaf below `arc/rt/types`, re-exported
 //// by `arc/host` for embedders. No field mentions a JS value type; the
-//// dynamic-import host function is engine state on `Agent.host_fns` (see
+//// dynamic-import host function is engine state on `Agent.import_hook` (see
 //// `arc/module_host.install_import_hook`), not a hook here.
 ////
 //// The opaque terms (`WaiterKey`, `WaiterHandle`, `ClaimedWaiter`) are

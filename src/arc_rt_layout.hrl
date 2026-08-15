@@ -6,14 +6,15 @@
 -define(ARC_RT_LAYOUT_HRL, true).
 
 %% arc/rt/types.Agent:
-%%   {agent, Store, Realm, TemplateObjects, Frames, Hooks, HostFns, Realms}.
-%% Both indexed fields bare (no Option wrapper).
+%%   {agent, Store, Realm, TemplateObjects, Frames, Hooks, HostFns, Realms,
+%%    ImportHook}.
+%% The indexed fields are bare (no Option wrapper).
 -define(AGENT_TAG, agent).
 -define(AGENT_STORE, 2).
 -define(AGENT_REALM, 3).
 -define(AGENT_HOST_FNS, 7).
 -define(AGENT_REALMS, 8).
--define(AGENT_ARITY, 8).
+-define(AGENT_ARITY, 9).
 -define(SOME, some).
 -define(NONE, none).
 

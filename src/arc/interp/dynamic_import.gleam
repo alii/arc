@@ -20,9 +20,8 @@
 ////       e. If AllImportAttributesSupported(attributes) is false, reject
 ////          with TypeError (this host supports no import attributes).
 ////   9+. HostLoadImportedModule / ContinueDynamicImport: delegated to the
-////       embedder's import hook, the `Agent.host_fns` entry registered under
-////       `import_hook_id` (installed by arc/module_host, never
-////       reachable from guest JS). The hook returns the module namespace
+////       embedder's import hook, `Agent.import_hook` (installed by
+////       arc/module_host, never reachable from guest JS). The hook returns the module namespace
 ////       object or an error; the promise is resolved or rejected accordingly.
 ////       Without a hook, import() rejects with a TypeError.
 ////
@@ -41,14 +40,8 @@ import arc/rt/types.{
   StringKey, SyntaxErr, TypeErr, classify, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
-
-/// The `Agent.host_fns` id the dynamic-import hook is registered under. Ids
-/// the embedder mints for its own natives are never negative, and no function
-/// object carries this token: the hook is called from here only.
-pub const import_hook_id = -1
 
 /// Positional phase marker (3rd hook argument) that `import.defer(spec)`
 /// passes to the host hook: load + LINK the graph without evaluating it, and
@@ -417,8 +410,8 @@ fn call_host_hook(
   st: Agent,
   hook_args: List(JsVal),
 ) -> #(Agent, Result(JsVal, JsVal)) {
-  case dict.get(st.host_fns, import_hook_id) {
-    Error(Nil) -> {
+  case st.import_hook {
+    None -> {
       let #(err, st) =
         st.store.ops.new_error(
           st,
@@ -427,7 +420,7 @@ fn call_host_hook(
         )
       #(st, Error(err))
     }
-    Ok(types.HostFnEntry(call:, ..)) -> {
+    Some(types.HostFnEntry(call:, ..)) -> {
       let outcome =
         protected(st, fn(st) {
           case call(st, hook_args, mk_undefined(), mk_undefined()) {

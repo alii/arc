@@ -1,10 +1,10 @@
 //// Host side of dynamic import(): HostLoadImportedModule (§16.2.1.8).
 ////
 //// The interpreter's DynamicImport opcode (arc/interp/dynamic_import) does
-//// the language-level ImportCall steps and then calls a host hook registered
-//// as engine state on `Agent.host_fns` under `dynamic_import.import_hook_id`
-//// (never a function object or globalThis property, so guest JS can neither
-//// observe nor replace the module loader). This module provides that hook:
+//// the language-level ImportCall steps and then calls a host hook kept as
+//// engine state on `Agent.import_hook` (never a function object or
+//// globalThis property, so guest JS can neither observe nor replace the
+//// module loader). This module provides that hook:
 //// it resolves and loads the requested module source via an
 //// embedder-supplied loader, compiles + links + evaluates the module graph
 //// through arc/module, and returns the Module Namespace Exotic Object.
@@ -72,10 +72,11 @@ pub fn forbid_load(_resolved: String) -> Result(String, LoadError) {
 /// module body is active); `resolve` maps specifiers to module identities
 /// and `load` reads their sources (a cached import never calls `load`).
 ///
-/// The hook is ENGINE state: an `Agent.host_fns` entry that no function
-/// object carries, so it is agent-wide (every realm and activation reaches
-/// it), excluded from GC and serialization like the other host functions,
-/// and invisible to guest JS.
+/// The hook is ENGINE state (`Agent.import_hook`) that no function object
+/// carries, so it is agent-wide (every realm and activation reaches it),
+/// excluded from serialization like the host functions (re-install it after
+/// `deserialize`), never shifts the embedder's host-function ids whenever it
+/// is installed, and is invisible to guest JS.
 pub fn install_import_hook(
   st: Agent,
   referrer: String,
@@ -86,10 +87,7 @@ pub fn install_import_hook(
     HostFnEntry(name: "%DynamicImportHook%", call: fn(st, args, _this, _nt) {
       import_module(args, st, referrer, resolve, load)
     })
-  Agent(
-    ..st,
-    host_fns: dict.insert(st.host_fns, dynamic_import.import_hook_id, hook),
-  )
+  Agent(..st, import_hook: option.Some(hook))
 }
 
 /// A dynamic-import evaluation runs inside a promise job on the host's own

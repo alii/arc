@@ -703,20 +703,18 @@ pub fn class(
   #(State(..s, agent: st), mk_object(pair.constructor))
 }
 
-/// Add `impl` to the agent's host-function table under the next id. Embedder
-/// ids are the non-negative keys, dense from 0 in registration order, which
-/// is what lets a deserialized engine's `HostFn(id)` cells find their
-/// closures again once the embedder repeats its registrations. Negative keys
-/// are engine slots (the dynamic-import hook) that may be installed at any
-/// point, so they must not shift the numbering. Every call of `impl` sees
-/// the `key` it was registered under.
+/// Add `impl` to the agent's host-function table under the next id. This is
+/// the table's only writer, so ids are dense from 0 in registration order,
+/// which is what lets a deserialized engine's `HostFn(id)` cells find their
+/// closures again once the embedder repeats its registrations. Every call of
+/// `impl` sees the `key` it was registered under.
 fn register(
   st: Agent,
   key: Key(host),
   name: String,
   impl: HostFn(host),
 ) -> #(Int, Agent) {
-  let id = next_host_fn_id(st.host_fns)
+  let id = dict.size(st.host_fns)
   let entry =
     HostFnEntry(name:, call: fn(agent, args, this, new_target) {
       let #(State(agent:, ..), result) =
@@ -724,16 +722,6 @@ fn register(
       #(agent, result)
     })
   #(id, Agent(..st, host_fns: dict.insert(st.host_fns, id, entry)))
-}
-
-/// The number of embedder-minted (non-negative) ids already in `host_fns`.
-fn next_host_fn_id(host_fns: dict.Dict(Int, rt_types.HostFnEntry)) -> Int {
-  dict.fold(host_fns, 0, fn(count, id, _entry) {
-    case id >= 0 {
-      True -> count + 1
-      False -> count
-    }
-  })
 }
 
 fn alloc_host_methods(

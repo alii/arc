@@ -559,7 +559,7 @@ pub fn call_with(
 ///
 /// Not written, and re-bound after `deserialize`: host functions (their
 /// objects survive, the closures do not; re-register them in the same
-/// order), host hooks, host modules. Fails with
+/// order), host hooks, the dynamic-import hook, host modules. Fails with
 /// `SnapshotContainsCompiledCode` when the heap holds a function whose body
 /// is compiled BEAM code, and with `SnapshotContainsHostJob` while a
 /// `host.resume` settlement is still queued.
@@ -574,9 +574,12 @@ pub fn serialize(
 /// Fails with `MalformedBinary` if the bytes carry no snapshot header, and
 /// with `IncompatibleSnapshot` if they name a different ABI version or hide a
 /// corrupt payload. The restored engine carries the default host hooks, no
-/// host functions, no host modules and a fresh payload key: re-install them
-/// with `with_host_hooks`, `define_fn`/`host_fn` and `register_host_module`.
-/// Host objects written under the old key read as `None`.
+/// host functions, no dynamic-import hook, no host modules and a fresh
+/// payload key: re-install them with `with_host_hooks`, `define_fn`/`host_fn`
+/// (in the original order: that alone decides which closure a surviving
+/// function object reaches), `module_host.install_import_hook` and
+/// `register_host_module`, each independently of the others. Host objects
+/// written under the old key read as `None`.
 pub fn deserialize(
   data: BitArray,
 ) -> Result(Engine(host), snapshot.DeserializeError) {
