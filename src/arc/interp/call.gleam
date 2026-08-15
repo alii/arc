@@ -37,6 +37,7 @@ import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/lexical
 import arc/vm/limits
 import arc/vm/opcode
+import gleam/bool
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -905,46 +906,60 @@ pub type RootKind {
   RootDerivedConstruct
 }
 
+/// The receiver a root activation of the bytecode cell `fn_h` starts with:
+/// `this_arg` for a [[Call]] (`new_target` undefined), TDZ for a derived
+/// [[Construct]], a fresh object for a base one. §10.2.2 steps 1-3 run in
+/// the CALLER's context, before PrepareForOrdinaryCall switches realms, so
+/// this is taken before `entry.run_root` enters the callee's realm: `Error`
+/// carries a throwing `newTarget.prototype` with the agent to re-raise it
+/// under, its error created from the caller's intrinsics.
+pub fn root_this(
+  agent: Agent,
+  fn_h: Handle,
+  this_arg: JsVal,
+  new_target: JsVal,
+) -> Result(#(JsVal, RootKind, Agent), #(JsVal, Agent)) {
+  use <- bool.guard(is_undefined(new_target), Ok(#(this_arg, RootCall, agent)))
+  let assert SObject(kind: KBytecode(template:, ..), ..) =
+    rt_store.t_cell_get(agent, fn_h)
+    as "root_this: handle is not a KBytecode cell"
+  use <- bool.guard(
+    template.is_derived_constructor,
+    Ok(#(mk_tdz(), RootDerivedConstruct, agent)),
+  )
+  case ffi.guard1(new_base_this(_, new_target), agent) {
+    ffi.Ok(value: h, agent:) -> Ok(#(mk_object(h), RootBaseConstruct(h), agent))
+    ffi.Threw(agent:, thrown:) -> Error(#(thrown, agent))
+  }
+}
+
 /// Lay out a fresh root activation of the bytecode cell `fn_h` for a nested
 /// [[Call]] (`new_target` undefined) or [[Construct]] arriving from a
-/// builtin or compiled frame. The enclosing `t_call`/`apply_ctor` owns the
-/// depth bracket; this pushes the stack frame only. `Error` carries a throw
-/// raised before the body could start (class-ctor-without-new, a throwing
-/// `newTarget.prototype` getter) with the agent to re-raise it under.
+/// builtin or compiled frame, over the receiver `root_this` prepared. The
+/// enclosing `t_call`/`apply_ctor` owns the depth bracket; this pushes the
+/// stack frame only. `Error` carries a throw raised before the body could
+/// start (class-ctor-without-new, created in the callee's realm as §10.2.1
+/// step 2's calleeContext has it) with the agent to re-raise it under.
 pub fn enter_root(
   agent: Agent,
   fn_h: Handle,
   this_arg: JsVal,
   args: List(JsVal),
   new_target: JsVal,
-) -> Result(#(State, RootKind, CoroutineCall), #(JsVal, Agent)) {
+) -> Result(#(State, CoroutineCall), #(JsVal, Agent)) {
   let assert SObject(
     kind: KBytecode(template:, env:, home_object:, flags:, ..),
     ..,
   ) = rt_store.t_cell_get(agent, fn_h)
     as "enter_root: handle is not a KBytecode cell"
-  let constructing = !is_undefined(new_target)
   use <- refuse(
-    template.is_class_constructor && !constructing,
+    template.is_class_constructor && is_undefined(new_target),
     agent,
     types.TypeErr,
     "Class constructor "
       <> option.unwrap(template.name, "")
       <> " cannot be invoked without 'new'",
   )
-  use #(this_arg, kind, agent) <- result.try(case constructing {
-    False -> Ok(#(this_arg, RootCall, agent))
-    True ->
-      case template.is_derived_constructor {
-        True -> Ok(#(mk_tdz(), RootDerivedConstruct, agent))
-        False ->
-          case ffi.guard1(new_base_this(_, new_target), agent) {
-            ffi.Ok(value: h, agent:) ->
-              Ok(#(mk_object(h), RootBaseConstruct(h), agent))
-            ffi.Threw(agent:, thrown:) -> Error(#(thrown, agent))
-          }
-      }
-  })
   let home = home_value(home_object)
   let #(locals, this_val, agent) =
     setup_frame(
@@ -978,7 +993,6 @@ pub fn enter_root(
     )
   Ok(#(
     state,
-    kind,
     CoroutineCall(
       fn_h:,
       template:,

@@ -243,18 +243,20 @@ pub fn run_bytecode(
 }
 
 /// `new_target` undefined is a [[Call]]; otherwise a [[Construct]] whose
-/// receiver `enter_root` creates, with the constructor return rules applied
+/// receiver `root_this` creates, with the constructor return rules applied
 /// to the result. A generator or async body is started through the
 /// coroutine driver and completes with its generator object / promise. The
 /// enclosing `t_call` (or `construct_bytecode`) owns the depth bracket;
 /// `enter_root`/`finish_root` own the `Error.stack` frame; this owns the
 /// backstop.
 ///
-/// §10.2.1.1 PrepareForOrdinaryCall step 5: the callee's [[Realm]] is the
-/// running realm while its body runs and the caller's is restored once it
-/// unwinds (also on a throw, which arrives here as a completion). §10.2.2
-/// [[Construct]] steps 10-13 — the return-override / uninitialised-`this`
-/// checks — run after that restore, so their errors are the caller's.
+/// §10.2.2 [[Construct]] steps 1-3 create the receiver in the caller's
+/// context, so `root_this` runs before the realm switch. §10.2.1.1
+/// PrepareForOrdinaryCall step 5: the callee's [[Realm]] is the running
+/// realm while its body runs and the caller's is restored once it unwinds
+/// (also on a throw, which arrives here as a completion). §10.2.2 steps
+/// 10-13 — the return-override / uninitialised-`this` checks — run after
+/// that restore, so their errors are the caller's.
 fn run_root(
   st: Agent,
   cell: Handle,
@@ -262,17 +264,23 @@ fn run_root(
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Completion, Agent) {
-  let #(outcome, st) = {
-    use st <- rt_realm.with_realm(st, closure_realm(st, cell))
-    run_root_body(st, cell, this, args, new_target)
-  }
-  case outcome {
-    RootSettled(c) -> #(c, st)
-    RootReturned(kind, v, final) ->
-      case call.finish_root(kind, v, State(..final, agent: st)) {
-        Ok(#(v, agent)) -> #(NormalCompletion(v), agent)
-        Error(#(e, agent)) -> #(ThrowCompletion(e), agent)
+  let m = mark(st)
+  case call.root_this(st, cell, this, new_target) {
+    Error(#(thrown, st)) -> #(ThrowCompletion(thrown), settle(st, m))
+    Ok(#(this, kind, st)) -> {
+      let #(outcome, st) = {
+        use st <- rt_realm.with_realm(st, closure_realm(st, cell))
+        run_root_body(st, m, cell, this, args, new_target)
       }
+      case outcome {
+        RootSettled(c) -> #(c, st)
+        RootReturned(v, final) ->
+          case call.finish_root(kind, v, State(..final, agent: st)) {
+            Ok(#(v, agent)) -> #(NormalCompletion(v), agent)
+            Error(#(e, agent)) -> #(ThrowCompletion(e), agent)
+          }
+      }
+    }
   }
 }
 
@@ -281,7 +289,7 @@ fn run_root(
 /// still owes the constructor return rules.
 type RootOutcome {
   RootSettled(Completion)
-  RootReturned(call.RootKind, JsVal, State)
+  RootReturned(JsVal, State)
 }
 
 /// The [[Realm]] of the bytecode cell `cell`; anything else counts as the
@@ -295,18 +303,18 @@ fn closure_realm(st: Agent, cell: Handle) -> Int {
 
 fn run_root_body(
   st: Agent,
+  m: EntryMark,
   cell: Handle,
   this: JsVal,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(RootOutcome, Agent) {
-  let m = mark(st)
   case call.enter_root(st, cell, this, args, new_target) {
     Error(#(thrown, agent)) -> #(
       RootSettled(ThrowCompletion(thrown)),
       settle(agent, m),
     )
-    Ok(#(state, kind, coroutine)) ->
+    Ok(#(state, coroutine)) ->
       case state.func.is_generator || state.func.is_async {
         // `start_coroutine` gives the body its own `Error.stack` frame:
         // drop the one `enter_root` pushed rather than show it twice.
@@ -324,7 +332,7 @@ fn run_root_body(
             let #(res, s) = complete(State(..state, agent:), "run_bytecode")
             let agent = call.pop_frame_info(s.agent)
             case res {
-              Ok(v) -> #(RootReturned(kind, v, s), agent)
+              Ok(v) -> #(RootReturned(v, s), agent)
               Error(e) -> #(RootSettled(ThrowCompletion(e)), agent)
             }
           }
@@ -385,7 +393,7 @@ pub fn call_bytecode(
 /// taken here, as `rt/call.apply_ctor` does for a compiled constructor:
 /// RangeError at `limits.max_call_depth`, and the body's root-`Return`
 /// safepoint kept shut over the caller's registers. The result is always an
-/// object: `enter_root`/`finish_root` create the receiver and apply the
+/// object: `root_this`/`finish_root` create the receiver and apply the
 /// return override, so a non-object here is an engine fault.
 pub fn construct_bytecode(
   st: Agent,
