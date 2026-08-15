@@ -357,9 +357,8 @@ pub fn async_yield_star_test() {
        it.throw('rej').then(r => log.push(r.value));" <> settle) == "throw once,n,throw fin,kept,after T,throw rej,n,caught R"
   // No throw() on the delegate: AsyncIteratorClose it (awaiting a present
   // return()), then a TypeError lands in the outer body. No return() on
-  // the delegate: the outer return carries on through its finally. (Same
-  // interleaving as the old interpreter: one Await fewer than the spec's
-  // step 7.c.ii.2 on the missing-return path.)
+  // the delegate: the outer return is awaited once more, then carries on
+  // through its finally.
   assert out("var log = [], out;
        var closed = 0;
        var noThrow = { [Symbol.asyncIterator]() { return this }, next() { return { done: false, value: 1 } }, return() { closed++; return {} } };
@@ -368,7 +367,7 @@ pub fn async_yield_star_test() {
        var a = g(noThrow); a.next(); a.throw('x').then(r => log.push('a ' + r.value));
        var b = g(bare); b.next(); b.throw('x').then(r => log.push('b ' + r.value));
        async function* h() { try { yield* bare } finally { log.push('h fin') } }
-       var c = h(); c.next(); c.return('R').then(r => log.push('c ' + r.value + r.done));" <> settle) == "h fin,b TypeError1,c Rtrue,a TypeError1"
+       var c = h(); c.next(); c.return('R').then(r => log.push('c ' + r.value + r.done));" <> settle) == "b TypeError1,h fin,a TypeError1,c Rtrue"
   // An async delegate's `next` is read once (GetAsyncIterator leaves it to
   // the Iterator Record) however many steps run; a sync-only iterable is
   // found by reading @@asyncIterator then @@iterator once each.
@@ -393,6 +392,16 @@ pub fn for_await_test() {
        async function sync() { var r = []; for await (var v of [10, Promise.resolve(20), 30]) r.push(v); return r.join('/') }
        async function dstr() { var it = (function*() { yield; yield })(); for await (var [,] of [it]) { return it.next().done } }
        Promise.all([all(), brk(), ret(), thr(), sync(), dstr()]).then(v => { log.push(v.join(), closes) });" <> settle) == "123,b,r1,cboom,10/20/30,true,3"
+  // A return / labelled continue crossing the loop is AsyncIteratorClose:
+  // the return() result is awaited before the enclosing finally runs, and
+  // the iterator itself is closed whatever own properties it carries.
+  assert out("var log = [], out;
+       var it = { iterator: 42, next() { return { done: false, value: 1 } }, [Symbol.asyncIterator]() { return this },
+         return() { log.push('ret'); return Promise.resolve({}).then(v => (log.push('settled'), v)) } };
+       Promise.resolve().then(() => log.push('t1')).then(() => log.push('t2')).then(() => log.push('t3'));
+       async function f() { try { for await (const x of it) { return 'f' + x } } finally { log.push('fin') } }
+       async function g() { outer: for (var i of [1, 2]) { for await (const x of it) continue outer } return 'g' + it.done }
+       f().then(v => { log.push(v); return g() }).then(v => log.push(v));" <> settle) == "t1,ret,t2,settled,t3,fin,f1,ret,settled,ret,settled,gundefined"
   // for await inside an async generator, feeding yields.
   assert out("var log = [], out;
        async function* doubled(xs) { for await (var x of xs) yield x * 2 }

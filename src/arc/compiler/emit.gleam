@@ -20,11 +20,11 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import arc/vm/lexical
 import arc/vm/opcode.{
-  type IrOp, type LabelId, type TryKind, CatchOnly, Finally,
-  IrAsyncYieldStarNext, IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor,
-  IrDefineField, IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2,
-  IrGosub, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrPushTry, IrPutField, IterCloseGuard,
+  type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarNext,
+  IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
+  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
+  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
+  IrPutField, IterCloseGuard,
 }
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -127,16 +127,16 @@ pub type EmitOutput {
 type Frame {
   /// Iteration statement: both a break and a continue target.
   ///
-  /// `iterator: True` (for-of / for-await-of) means the body runs under one
-  /// try frame (F_body) with the iterator on the value stack, so crossing
-  /// this frame emits IrPopTry followed by IrIteratorClose (with an IrSwap
-  /// first when a return value sits above iter). Everything else about a
-  /// loop frame is transparent to a jump that crosses it.
+  /// A for-of / for-await-of body runs under one try frame (F_body) with the
+  /// iterator on the value stack, so crossing this frame emits IrPopTry
+  /// followed by the close for its `iterator` kind (with an IrSwap first
+  /// when a return value sits above iter). Everything else about a loop
+  /// frame is transparent to a jump that crosses it.
   LoopFrame(
     break_target: LabelId,
     continue_target: LabelId,
     label: Option(String),
-    iterator: Bool,
+    iterator: LoopIter,
   )
   /// Switch statement: a break target (labeled or unlabeled) but never a
   /// continue target — `continue` walks straight past it to the enclosing
@@ -159,6 +159,17 @@ type Frame {
   ///   spec-correct completion replacement (§14.15.3). Mirrors
   ///   BlockEnv.drop_count (quickjs.c:21325).
   BarrierFrame(pop_try: Int, label_finally: Option(LabelId), drop_count: Int)
+}
+
+/// What a loop keeps on the value stack under its body, and so how a jump
+/// crossing the loop closes it.
+type LoopIter {
+  NoIter
+  /// for-of: an Iterator Record, closed by one IteratorClose (§7.4.11).
+  SyncIter
+  /// for-await-of: the bare async iterator. AsyncIteratorClose (§7.4.13)
+  /// awaits the `.return()` result, so the close is open-coded bytecode.
+  AsyncIter
 }
 
 /// The emitter state, threaded through all emit functions.
@@ -2257,7 +2268,7 @@ fn push_loop(
       break_target:,
       continue_target:,
       label: e.pending_label,
-      iterator: False,
+      iterator: NoIter,
     ),
   )
 }
@@ -2268,6 +2279,7 @@ fn push_loop_iter(
   e: Emitter,
   break_target: LabelId,
   continue_target: LabelId,
+  iterator: LoopIter,
 ) -> Emitter {
   push_frame(
     e,
@@ -2275,7 +2287,7 @@ fn push_loop_iter(
       break_target:,
       continue_target:,
       label: e.pending_label,
-      iterator: True,
+      iterator:,
     ),
   )
 }
@@ -2460,9 +2472,12 @@ fn frame_target(
 /// any pending finally as a subroutine. QuickJS emit_break (quickjs.c:27794).
 fn emit_cross_frame(e: Emitter, frame: Frame) -> Emitter {
   case frame {
-    LoopFrame(iterator: True, ..) ->
+    LoopFrame(iterator: SyncIter, ..) ->
       e |> emit_op(opcode.PopTry) |> emit_op(opcode.IteratorClose)
-    LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> e
+    LoopFrame(iterator: AsyncIter, ..) ->
+      e |> emit_op(opcode.PopTry) |> emit_async_iterator_close
+    LoopFrame(iterator: NoIter, ..) | SwitchFrame(..) | LabeledBlockFrame(..) ->
+      e
     BarrierFrame(pop_try:, label_finally:, drop_count:) -> {
       let e = repeat_ir(e, IrFinal(opcode.PopTry), pop_try)
       let e = repeat_ir(e, IrFinal(opcode.Pop), drop_count)
@@ -2482,12 +2497,18 @@ fn emit_cross_frame(e: Emitter, frame: Frame) -> Emitter {
 /// (QuickJS emit_return, quickjs.c:27876).
 fn emit_return_cross_frame(e: Emitter, frame: Frame) -> Emitter {
   case frame {
-    LoopFrame(iterator: True, ..) ->
+    LoopFrame(iterator: SyncIter, ..) ->
       e
       |> emit_op(opcode.PopTry)
       |> emit_op(opcode.Swap)
       |> emit_op(opcode.IteratorClose)
-    LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> e
+    LoopFrame(iterator: AsyncIter, ..) ->
+      e
+      |> emit_op(opcode.PopTry)
+      |> emit_op(opcode.Swap)
+      |> emit_async_iterator_close
+    LoopFrame(iterator: NoIter, ..) | SwitchFrame(..) | LabeledBlockFrame(..) ->
+      e
     BarrierFrame(pop_try:, label_finally:, drop_count:) -> {
       let e = repeat_ir(e, IrFinal(opcode.PopTry), pop_try)
       let e = repeat_nip(e, drop_count)
@@ -2497,6 +2518,29 @@ fn emit_return_cross_frame(e: Emitter, frame: Frame) -> Emitter {
       }
     }
   }
+}
+
+/// §7.4.13 AsyncIteratorClose with a normal completion: [iter, ..] → [..].
+/// Every error (getter throw, non-callable, call throw, await reject,
+/// non-object result) propagates to the enclosing handler; a missing
+/// `return` is not awaited (step 4). The Await parks the frame, so this
+/// cannot be one opcode.
+fn emit_async_iterator_close(e: Emitter) -> Emitter {
+  let #(e, no_ret) = fresh_label(e)
+  let #(e, closed) = fresh_label(e)
+  e
+  |> emit_ir(IrGetField2("return"))
+  |> emit_op(opcode.Dup)
+  |> emit_ir(IrJumpIfNullish(no_ret))
+  |> emit_op(opcode.CallMethod(0))
+  |> emit_op(opcode.Await)
+  |> emit_op(opcode.IteratorCheckObject)
+  |> emit_ir(IrJump(closed))
+  // [ret(nullish), iter, ..]
+  |> emit_ir(IrLabel(no_ret))
+  |> emit_op(opcode.Pop)
+  |> emit_ir(IrLabel(closed))
+  |> emit_op(opcode.Pop)
 }
 
 /// Shared body of break/continue. Walks frame_stack emitting PopTry and
@@ -5748,8 +5792,8 @@ fn emit_for_of_iter_body(
 /// so a labeled break/continue/return that *crosses* this loop drops
 /// F_body and closes iter (cross_pop_try=1, has_iterator).
 ///
-/// `body_kind` is F_body's `TryKind`: `IterCloseGuard` for the sync loop (a
-/// return completion out of a suspended `yield` closes the iterator), but
+/// F_body's `TryKind` follows `iterator`: `IterCloseGuard` for the sync loop
+/// (a return completion out of a suspended `yield` closes the iterator), but
 /// `CatchOnly` for `for await`, whose close needs an Await the generator
 /// unwinder cannot perform.
 ///
@@ -5769,8 +5813,7 @@ fn emit_for_of_common(
   e: Emitter,
   left: ast.ForInit,
   right: ast.Expression,
-  get_iter: IrOp,
-  body_kind: TryKind(LabelId),
+  iterator: LoopIter,
   tail: fn(Emitter, ForOfLabels) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
   let #(e, loop_start) = fresh_label(e)
@@ -5781,11 +5824,15 @@ fn emit_for_of_common(
   let has_lex = ast_util.for_classic_init_is_lex(Some(left))
   let #(e, save) = enter_for_scope(e, has_lex)
   use e <- result.try(emit_for_head_expr(e, right))
+  let #(get_iter, body_kind) = case iterator {
+    AsyncIter -> #(opcode.GetAsyncIterator, CatchOnly)
+    SyncIter | NoIter -> #(opcode.GetIterator, IterCloseGuard)
+  }
   let e =
     e
-    |> emit_ir(get_iter)
+    |> emit_op(get_iter)
     |> emit_ir(IrPushTry(catch_body, body_kind))
-    |> push_loop_iter(break_target, loop_continue)
+    |> push_loop_iter(break_target, loop_continue, iterator)
     |> emit_ir(IrLabel(loop_start))
   let labels =
     ForOfLabels(loop_start:, loop_continue:, break_target:, catch_body:, end:)
@@ -5808,13 +5855,7 @@ fn emit_for_of(
   right: ast.Expression,
   body: ast.Statement,
 ) -> Result(Emitter, EmitError) {
-  use e, labels <- emit_for_of_common(
-    e,
-    left,
-    right,
-    IrFinal(opcode.GetIterator),
-    IterCloseGuard,
-  )
+  use e, labels <- emit_for_of_common(e, left, right, SyncIter)
   let ForOfLabels(loop_start:, loop_continue:, break_target:, catch_body:, end:) =
     labels
   let #(e, exhausted) = fresh_label(e)
@@ -5881,23 +5922,13 @@ fn emit_for_await_of(
   right: ast.Expression,
   body: ast.Statement,
 ) -> Result(Emitter, EmitError) {
-  use e, labels <- emit_for_of_common(
-    e,
-    left,
-    right,
-    IrFinal(opcode.GetAsyncIterator),
-    // §7.4.12 AsyncIteratorClose Awaits the .return() result, which the
-    // return-completion unwinder cannot do — so F_body is a plain catch here
-    // and the close is open-coded in bytecode below.
-    CatchOnly,
-  )
+  use e, labels <- emit_for_of_common(e, left, right, AsyncIter)
   let ForOfLabels(loop_start:, loop_continue:, break_target:, catch_body:, end:) =
     labels
   let #(e, exhausted) = fresh_label(e)
   let #(e, catch_next) = fresh_label(e)
   let #(e, no_ret_thr) = fresh_label(e)
   let #(e, rethrow) = fresh_label(e)
-  let #(e, no_ret_brk) = fresh_label(e)
 
   // F_next shadows F_body for the next/await/unwrap region. Same recorded
   // depth (stack is [iter, ..base]). §14.7.5.6 step 6.a-f: errors here must
@@ -5979,24 +6010,11 @@ fn emit_for_await_of(
   let e = emit_op(e, opcode.Pop)
   let e = emit_ir(e, IrJump(end))
 
-  // break_target: [iter, ..base], try=[F_body, ..]. §7.4.12 normal-completion
-  // close — every error (getter throw, non-callable, call throw, await reject,
-  // non-object result) propagates to the enclosing handler.
+  // break_target: [iter, ..base], try=[F_body, ..]. §7.4.13 normal-completion
+  // close.
   let e = emit_ir(e, IrLabel(break_target))
   let e = emit_op(e, opcode.PopTry)
-  let e = emit_ir(e, IrGetField2("return"))
-  let e = emit_op(e, opcode.Dup)
-  let e = emit_ir(e, IrJumpIfNullish(no_ret_brk))
-  let e = emit_op(e, opcode.CallMethod(0))
-  let e = emit_op(e, opcode.Await)
-  let e = emit_op(e, opcode.IteratorCheckObject)
-  let e = emit_op(e, opcode.Pop)
-  let e = emit_ir(e, IrJump(end))
-
-  let e = emit_ir(e, IrLabel(no_ret_brk))
-  // [ret(nullish), iter, ..base] — no await per §7.4.12 step 5.b.
-  let e = emit_op(e, opcode.Pop)
-  let e = emit_op(e, opcode.Pop)
+  let e = emit_async_iterator_close(e)
   emit_ir(e, IrJump(end))
 }
 

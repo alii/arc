@@ -110,6 +110,10 @@ pub type ParkedAt {
   /// result (§27.5.3.8 step 7.c.v): fulfilled and done ends the body with a
   /// return completion, not done yields the value and stays delegating.
   ParkedDelegateReturn
+  /// An async `yield*` site whose delegate has no `.return`, awaiting the
+  /// forwarded return value itself (§27.5.3.8 step 7.c.iii.2): fulfilled
+  /// carries on out of the `yield*` as a return completion.
+  ParkedReturnValue
   /// An async `yield*` site awaiting AsyncIteratorClose of a delegate that
   /// has no `.throw` (§27.5.3.8 step 7.b.iii): once it settles to an object,
   /// a TypeError is thrown at the site.

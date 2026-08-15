@@ -3334,20 +3334,15 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // §7.4.11 normal-completion close. [rec, ..] → [..]. An undefined slot
-    // ([[Done]]) is a no-op. A for-await loop keeps the bare async iterator
-    // in its slot, closed the same way when a `return`/`break` crosses it.
+    // ([[Done]]) is a no-op. Only ever sees an Iterator Record: a for-await
+    // loop's bare async iterator is closed by open-coded bytecode.
     IteratorClose ->
       case state.stack {
         [rec, ..rest] -> {
           let state = State(..state, stack: rest, pc: state.pc + 1)
-          case is_undef(rec), rt_lang.record_parts(state.agent, rec) {
-            True, _ -> Ok(state)
-            False, Some(_) -> rt_unit3(state, rt_lang.t_iter_close, rec, False)
-            False, None ->
-              call.guarded_unit(state, iter_protocol.iterator_close_normal(
-                _,
-                rec,
-              ))
+          case is_undef(rec) {
+            True -> Ok(state)
+            False -> rt_unit3(state, rt_lang.t_iter_close, rec, False)
           }
         }
         [] -> underflow(state, "IteratorClose")
@@ -3359,25 +3354,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [thrown, rec, ..rest] -> {
           let state = State(..state, stack: rest)
-          let closed = case
-            is_undef(rec),
-            rt_lang.record_parts(state.agent, rec)
-          {
-            True, _ -> Ok(state)
-            False, Some(_) -> rt_unit3(state, rt_lang.t_iter_close, rec, True)
-            False, None -> {
-              use #(_ignored, state) <- result.map(rt2(
-                state,
-                iter_protocol.call_return,
-                rec,
-              ))
-              state
-            }
-          }
-          case closed {
-            Ok(state) -> Error(Threw(thrown, state))
-            Error(Threw(_, state)) -> Error(Threw(thrown, state))
-            Error(other) -> Error(other)
+          case is_undef(rec) {
+            True -> Error(Threw(thrown, state))
+            False ->
+              case rt_unit3(state, rt_lang.t_iter_close, rec, True) {
+                Ok(state) -> Error(Threw(thrown, state))
+                Error(Threw(_, state)) -> Error(Threw(thrown, state))
+                Error(other) -> Error(other)
+              }
           }
         }
         _ -> underflow(state, "IteratorCloseThrow")

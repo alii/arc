@@ -20,7 +20,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/bytecode.{
   type FuncTemplate, type ParkedAt, type SuspendedFrame, ParkedDelegateClose,
-  ParkedDelegateReturn, ParkedOp, ParkedStart, TryFrame,
+  ParkedDelegateReturn, ParkedOp, ParkedReturnValue, ParkedStart, TryFrame,
 }
 import arc/rt/call.{
   type Completion, type Frame, NormalCompletion, ThrowCompletion,
@@ -520,6 +520,7 @@ pub fn resume_frame(
       ParkedOp, 1 -> inject_throw(s, value)
       ParkedOp, _ -> inject_return(s, value)
       ParkedDelegateReturn, 0 -> delegate_returned(s, value)
+      ParkedReturnValue, 0 -> step_of(return_into(s, value))
       ParkedDelegateClose, 0 -> delegate_closed(s, value)
       // A rejected delegate await (or an abrupt completion delivered before
       // the body ran) lands at the parked point like any other.
@@ -741,8 +742,9 @@ fn forward_throw(
 }
 
 /// Step 7.c: `return = GetMethod(iterator, "return")`.
-/// - absent: the return completion carries on out of the `yield*` (an async
-///   generator's driver has already awaited the value).
+/// - absent: the return completion carries on out of the `yield*`; an async
+///   generator awaits the value once more first (step 7.c.iii.2, on top of
+///   the driver's AsyncGeneratorUnwrapYieldResumption).
 /// - present: `Call(return, iterator, «value»)`; a generator reads the
 ///   result now (done: return its value out of the body; not done: yield it
 ///   and keep delegating); an async generator awaits it first.
@@ -753,7 +755,8 @@ fn forward_return(
 ) -> #(Step, Agent) {
   use #(method, s) <- or_delegate_exit(delegate_method(s, site, "return"))
   case method, site {
-    None, _ -> step_of(return_into(s, value))
+    None, SyncSite(..) -> step_of(return_into(s, value))
+    None, AsyncSite(..) -> await_at(s, value, ParkedReturnValue)
     Some(method), SyncSite(rest:, ..) -> {
       use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, value))
       delegate_result(s, res, rest, fn(s, val) { step_of(return_into(s, val)) })
