@@ -9,19 +9,26 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, JInt, KHandle, KHost, KNative, KStr,
-  Named, SObject, StringKey, classify, mk_number, mk_object, mk_string,
+  type Agent, type Handle, type JsVal, JInt, JsCell, KHandle, KHost, KNative,
+  KStr, Named, SObject, StringKey, classify, mk_number, mk_object, mk_string,
   mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
+import gleam/list
 import gleam/option.{None, Some}
+import gleam/set
 import gleam/string
 import rt_helpers.{agent, get, global}
 
 type Payload {
   Pid(Int)
   Holds(Handle)
+}
+
+/// One key per test: each test is its own embedding.
+fn key() -> host.Key(Payload) {
+  host.new_key()
 }
 
 fn int(i: Int) -> JsVal {
@@ -49,7 +56,8 @@ fn twice(args, _this, s: host.State(Payload)) {
 }
 
 pub fn define_fn_installs_a_callable_global_test() {
-  let st = host.define_fn(host.from_agent(agent()), "twice", 1, twice).agent
+  let st =
+    host.define_fn(host.from_agent(agent(), key()), "twice", 1, twice).agent
   let #(f, st) = global(st, "twice")
   let assert SObject(kind: KNative(tag: types.HostFn(0), ..), ..) =
     rt_store.t_cell_get(st, handle(f))
@@ -62,7 +70,8 @@ pub fn define_fn_installs_a_callable_global_test() {
 }
 
 pub fn error_result_becomes_a_throw_test() {
-  let st = host.define_fn(host.from_agent(agent()), "twice", 1, twice).agent
+  let st =
+    host.define_fn(host.from_agent(agent(), key()), "twice", 1, twice).agent
   let #(f, st) = global(st, "twice")
   // Not a number: TypeError naming the JS type.
   let #(c, st) = rt_call.t_call(st, f, mk_undefined(), [mk_string("3")])
@@ -86,7 +95,7 @@ pub fn error_result_becomes_a_throw_test() {
 }
 
 pub fn validators_unwrap_or_throw_test() {
-  let s = host.from_agent(agent())
+  let s = host.from_agent(agent(), key())
   let s =
     host.define_fn(s, "shout", 1, fn(args, _, s) {
       use text, s <- host.validate_string(s, host.first_arg(args), "text")
@@ -115,7 +124,7 @@ pub fn validators_unwrap_or_throw_test() {
 }
 
 pub fn try_call_calls_back_into_js_test() {
-  let s = host.from_agent(agent())
+  let s = host.from_agent(agent(), key())
   // apply(fn, x) => fn(x) + 1, propagating fn's throw.
   let s =
     host.define_fn(s, "apply", 2, fn(args, _, s) {
@@ -145,7 +154,7 @@ pub fn try_call_calls_back_into_js_test() {
 }
 
 pub fn namespace_and_helpers_test() {
-  let s = host.from_agent(agent())
+  let s = host.from_agent(agent(), key())
   let s =
     host.define_namespace(s, "util", [
       #("pair", 2, fn(args, _, s) {
@@ -206,7 +215,7 @@ fn point_class(s) {
 }
 
 pub fn class_constructs_and_reprototypes_test() {
-  let #(s, point) = point_class(host.from_agent(agent()))
+  let #(s, point) = point_class(host.from_agent(agent(), key()))
   let st = s.agent
   assert rt_call.is_constructor(st, point)
   let point_proto = handle(get(st, point, "prototype").0)
@@ -231,7 +240,7 @@ pub fn class_constructs_and_reprototypes_test() {
 pub fn subclass_new_target_picks_the_prototype_test() {
   // What `class Sub extends Point {}` + `new Sub(5)` reaches the host ctor
   // as: Point's [[Construct]] with NewTarget = Sub.
-  let #(s, point) = point_class(host.from_agent(agent()))
+  let #(s, point) = point_class(host.from_agent(agent(), key()))
   let #(s, sub) = host.class(s, "Sub", 1, point_ctor, [], [])
   let st = s.agent
   let sub_proto = handle(get(st, sub, "prototype").0)
@@ -247,7 +256,7 @@ pub fn subclass_new_target_picks_the_prototype_test() {
 pub fn constructor_must_return_an_object_test() {
   let #(s, bad) =
     host.class(
-      host.from_agent(agent()),
+      host.from_agent(agent(), key()),
       "Bad",
       0,
       fn(_, _, s) { #(s, Ok(int(1))) },
@@ -266,7 +275,7 @@ pub fn constructor_must_return_an_object_test() {
 // ── host objects ────────────────────────────────────────────────────────────
 
 pub fn host_object_round_trips_typed_test() {
-  let s: host.State(Payload) = host.from_agent(agent())
+  let s: host.State(Payload) = host.from_agent(agent(), key())
   let #(s, tagged_proto) = host.object(s, [])
   let st =
     rt_obj.t_define_own_data(
@@ -303,7 +312,7 @@ pub fn host_object_round_trips_typed_test() {
 }
 
 pub fn gc_traces_handles_inside_payloads_and_closures_test() {
-  let s: host.State(Payload) = host.from_agent(agent())
+  let s: host.State(Payload) = host.from_agent(agent(), key())
   // An unrooted object reachable only through a host payload.
   let #(s, inner) = host.object(s, [#("k", int(1))])
   let #(s, holder) = host.alloc_host_object(s, Holds(handle(inner)), None)
@@ -321,6 +330,59 @@ pub fn gc_traces_handles_inside_payloads_and_closures_test() {
     == Some(Holds(handle(inner)))
 }
 
+pub fn another_key_reads_none_not_a_mistyped_value_test() {
+  // The same agent seen through a second key at another payload type: the
+  // object is still a host object, but not this key's.
+  let s = host.from_agent(agent(), key())
+  let #(s, pid) = host.alloc_host_object(s, Pid(42), None)
+  let strings: host.Key(String) = host.new_key()
+  let other = host.from_agent(s.agent, strings)
+  assert host.read_host(other, pid) == None
+  // And the other way round, including a second key at the SAME type.
+  let #(other, word) = host.alloc_host_object(other, "w", None)
+  assert host.read_host(State(..s, agent: other.agent), word) == None
+  assert host.read_host(host.from_agent(other.agent, key()), pid) == None
+  assert host.read_host(other, word) == Some("w")
+  assert host.read_host(State(..s, agent: other.agent), pid) == Some(Pid(42))
+}
+
+pub fn host_functions_see_the_key_they_were_defined_under_test() {
+  // `wrap(n)` allocates under the defining key; `unwrap(o)` reads under it.
+  let s = host.from_agent(agent(), key())
+  let s =
+    host.define_fn(s, "wrap", 1, fn(args, _, s) {
+      use n, s <- host.validate_integer(s, host.first_arg(args), "n", 0, 100)
+      let #(s, o) = host.alloc_host_object(s, Pid(n), None)
+      #(s, Ok(o))
+    })
+  let s =
+    host.define_fn(s, "unwrap", 1, fn(args, _, s) {
+      case host.read_host(s, host.first_arg(args)) {
+        Some(Pid(n)) -> #(s, Ok(int(n)))
+        Some(Holds(_)) | None -> host.type_error(s, "not a pid")
+      }
+    })
+  let st = s.agent
+  let #(wrapped, st) =
+    rt_call.t_call_checked(st, global(st, "wrap").0, mk_undefined(), [int(9)])
+  let #(n, st) =
+    rt_call.t_call_checked(st, global(st, "unwrap").0, mk_undefined(), [
+      wrapped,
+    ])
+  assert n == int(9)
+  // A ticket root is a host cell too, under the module's own key: not ours.
+  let #(s, _promise, _ticket) = host.suspend(State(..s, agent: st))
+  let st = s.agent
+  let assert Ok(root) =
+    list.find(set.to_list(st.store.pinned_roots), fn(id) {
+      case rt_store.t_cell_get(st, JsCell(id:)) {
+        SObject(kind: KHost(_), ..) -> True
+        _ -> False
+      }
+    })
+  assert host.read_host(s, mk_object(JsCell(id: root))) == None
+}
+
 pub fn unregistered_id_is_a_type_error_test() {
   // A cell whose closure was never (re-)registered on this agent.
   let st = agent()
@@ -333,7 +395,7 @@ pub fn unregistered_id_is_a_type_error_test() {
 
 pub fn with_state_runs_body_and_drains_test() {
   let #(st, seen) =
-    host.with_state(agent(), fn(s) {
+    host.with_state(agent(), key(), fn(s) {
       // Body allocates and schedules a promise reaction; the drain runs it.
       let #(s, o) = host.object(s, [#("v", int(5))])
       let s = host.define_global(s, "shared", o)

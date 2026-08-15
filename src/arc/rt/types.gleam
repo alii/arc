@@ -2641,7 +2641,7 @@ pub type FrameInfo {
 /// The embedder's own value inside a `KHost` cell. `Agent` is deliberately
 /// not generic over it: the parameter would thread through every runtime
 /// signature for one variant nothing in the runtime inspects. `arc/host`
-/// erases to this on allocation and its `State(host)` reads it back typed.
+/// erases to this on allocation and reads it back typed under a `Key(host)`.
 pub type HostTerm
 
 /// A registered embedder native. `call` takes `(agent, args, this,

@@ -42,18 +42,40 @@ import gleam/option.{type Option, None, Some}
 
 // -- State -------------------------------------------------------------------
 
+/// Names the embedder's payload type `host` for `alloc_host_object` /
+/// `read_host`. `Agent` is not generic over `host` and stores payloads
+/// erased (`KHost`), so this key is what pins the type: every `State(host)`
+/// carries one, host functions are registered under the key of the state
+/// that defined them, and each host object records the key it was written
+/// under. Mint it once with `new_key` and use that one value everywhere;
+/// sharing the value is what makes a mistyped read a compile error. A read
+/// under a different key (a second `new_key()`, or a key minted after a
+/// `snapshot.deserialize` in another node) is `None`, never a mistyped value.
+pub opaque type Key(host) {
+  Key(id: Int)
+}
+
+/// A fresh key. Two calls give two keys that never read each other's
+/// objects, even at the same `host` type, so call it once per embedding.
+pub fn new_key() -> Key(host) {
+  Key(id: unique_integer([Positive]))
+}
+
+type UniqueIntegerOption {
+  Positive
+}
+
+@external(erlang, "erlang", "unique_integer")
+fn unique_integer(options: List(UniqueIntegerOption)) -> Int
+
 /// What a host function threads through. `agent` is the whole runtime state:
 /// the `arc/rt/*` operations take and return an `Agent`, so host code that
-/// drops to that layer rebuilds this record with the agent it gets back.
+/// drops to that layer rebuilds this record with the agent it gets back
+/// (`State(..s, agent: st)`, which keeps `key` and so keeps `host`).
 /// `new_target` is NewTarget of the [[Construct]] this function is serving,
-/// `undefined` under a plain call.
-///
-/// `host` is the embedder's payload type for `alloc_host_object` /
-/// `read_host`. The runtime stores payloads erased (`KHost`), so this
-/// parameter is the only thing tying a read back to the type that was
-/// written; one engine uses one `host` throughout.
+/// `undefined` under a plain call. `key` is the payload key above.
 pub type State(host) {
-  State(agent: Agent, new_target: JsVal)
+  State(agent: Agent, new_target: JsVal, key: Key(host))
 }
 
 /// Signature of an embedder native as `function` / `class` /
@@ -64,8 +86,8 @@ pub type HostFn(host) =
 /// Wrap an agent for host code that is not inside a host-function call
 /// (`engine.with_state`, tests). No [[Construct]] is in progress, so
 /// `new_target` is `undefined`.
-pub fn from_agent(agent: Agent) -> State(host) {
-  State(agent:, new_target: mk_undefined())
+pub fn from_agent(agent: Agent, key: Key(host)) -> State(host) {
+  State(agent:, new_target: mk_undefined(), key:)
 }
 
 /// NewTarget of the [[Construct]] being served: the leaf class for
@@ -80,9 +102,10 @@ pub fn new_target(s: State(host)) -> JsVal {
 /// control returns to the embedder.
 pub fn with_state(
   agent: Agent,
+  key: Key(host),
   body: fn(State(host)) -> #(State(host), a),
 ) -> #(Agent, a) {
-  let #(State(agent:, ..), result) = body(from_agent(agent))
+  let #(State(agent:, ..), result) = body(from_agent(agent, key))
   #(rt_async.drain(agent), result)
 }
 
@@ -284,7 +307,7 @@ pub fn validate_boolean(
 //         _ -> {
 //           let #(ticket, result) = my_queue.block()
 //           let #(agent, _outcome) =
-//             host.with_state(agent, fn(s) { host.resume(s, ticket, result) })
+//             host.with_state(agent, key, fn(s) { host.resume(s, ticket, result) })
 //           my_loop(agent)
 //         }
 //       }
@@ -327,18 +350,9 @@ type TicketRoot {
 /// everything awaiting it survives any collection in between.
 pub fn suspend(s: State(host)) -> #(State(host), JsVal, Ticket) {
   let #(promise, st) = rt_async.t_new_promise(s.agent)
-  let #(root, st) =
-    rt_store.t_cell_new(
-      st,
-      SObject(
-        kind: KHost(payload: erase(TicketRoot(promise:))),
-        proto: None,
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: False,
-      ),
-    )
+  let root_slot =
+    host_slot(tag(ticket_key(), TicketRoot(promise:)), None, False)
+  let #(root, st) = rt_store.t_cell_new(st, root_slot)
   let st = rt_store.t_pin_root(st, root)
   #(State(..s, agent: st), mk_object(promise), Ticket(promise:, root:))
 }
@@ -398,9 +412,16 @@ fn ticket_state(st: Agent, ticket: Ticket) -> TicketState {
 fn is_ticket_root(st: Agent, root: Handle, promise: Handle) -> Bool {
   use <- bool.guard(!rt_gc.t_is_live(st, root), False)
   case rt_store.t_cell_get(st, root) {
-    SObject(kind: KHost(payload:), ..) -> payload == erase(TicketRoot(promise:))
+    SObject(kind: KHost(payload:), ..) ->
+      payload == tag(ticket_key(), TicketRoot(promise:))
     _ -> False
   }
+}
+
+/// The key ticket roots are written under. `new_key` ids are positive, so
+/// no embedder key is ever 0.
+fn ticket_key() -> Key(TicketRoot) {
+  Key(id: 0)
 }
 
 fn is_promise(st: Agent, h: Handle) -> Bool {
@@ -494,18 +515,58 @@ pub fn object(
 }
 
 // -- Opaque host values ------------------------------------------------------
+//
+// The one place payload types are erased. A `KHost` payload is always a
+// `Tagged`: the id of the `Key` it was written under, then the value.
+// `erase` / `unerase` are unchecked casts and `tag` / `untag` are their only
+// callers. `untag` claims `Tagged(host)` for whatever the cell holds, which
+// is true of `key` (an Int in every `Tagged`) and becomes true of `value`
+// once `key` matches the caller's `Key(host)`; on a mismatch `value` is
+// dropped unread.
+
+type Tagged(host) {
+  Tagged(key: Int, value: host)
+}
 
 @external(erlang, "gleam_stdlib", "identity")
-fn erase(value: host) -> HostTerm
+fn erase(tagged: Tagged(host)) -> HostTerm
 
 @external(erlang, "gleam_stdlib", "identity")
-fn unerase(term: HostTerm) -> host
+fn unerase(term: HostTerm) -> Tagged(host)
+
+fn tag(key: Key(host), value: host) -> HostTerm {
+  erase(Tagged(key: key.id, value:))
+}
+
+fn untag(key: Key(host), term: HostTerm) -> Option(host) {
+  let Tagged(key: id, value:) = unerase(term)
+  case id == key.id {
+    True -> Some(value)
+    False -> None
+  }
+}
+
+fn host_slot(
+  payload: HostTerm,
+  proto: Option(Handle),
+  extensible: Bool,
+) -> rt_types.JsSlot {
+  SObject(
+    kind: KHost(payload:),
+    proto:,
+    props: dict.new(),
+    symbol_props: [],
+    elements: NoElements,
+    extensible:,
+  )
+}
 
 /// Allocate an opaque, embedder-owned object wrapping `value` (the
 /// embedder's own type). The engine never inspects `value`; it renders the
 /// object via the prototype's `@@toStringTag`. The object has no own
 /// properties; pass `Some(proto)` to give it methods/a tag, or `None` for a
-/// null-prototype value. Read it back, typed, with `read_host`.
+/// null-prototype value. Read it back, typed, with `read_host` under the
+/// same key.
 ///
 /// Heap handles inside `value` are traced by the collector, so a payload
 /// may hold JS objects directly.
@@ -515,25 +576,16 @@ pub fn alloc_host_object(
   prototype: Option(Handle),
 ) -> #(State(host), JsVal) {
   let #(h, st) =
-    rt_store.t_cell_new(
-      s.agent,
-      SObject(
-        kind: KHost(payload: erase(value)),
-        proto: prototype,
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
-      ),
-    )
+    rt_store.t_cell_new(s.agent, host_slot(tag(s.key, value), prototype, True))
   #(State(..s, agent: st), mk_object(h))
 }
 
-/// Read the embedder value out of a host object. `None` if `val` is not one.
+/// Read the embedder value out of a host object. `None` if `val` is not one,
+/// or is one written under a different key than `s` carries.
 pub fn read_host(s: State(host), val: JsVal) -> Option(host) {
   use h <- option.then(handle_of(val))
   case rt_store.t_cell_get(s.agent, h) {
-    SObject(kind: KHost(payload:), ..) -> Some(unerase(payload))
+    SObject(kind: KHost(payload:), ..) -> untag(s.key, payload)
     _ -> None
   }
 }
@@ -556,7 +608,7 @@ pub fn function(
   arity: Int,
   impl: HostFn(host),
 ) -> #(State(host), JsVal) {
-  let #(id, st) = register(s.agent, name, impl)
+  let #(id, st) = register(s.agent, s.key, name, impl)
   let #(h, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -606,7 +658,7 @@ pub fn define_namespace(
   methods: List(#(String, Int, HostFn(host))),
 ) -> State(host) {
   let st = s.agent
-  let #(props, st) = alloc_host_methods(st, methods)
+  let #(props, st) = alloc_host_methods(st, s.key, methods)
   let #(ns, st) =
     common.init_namespace(st, st.realm.object.prototype, name, props)
   define_global(State(..s, agent: st), name, mk_object(ns))
@@ -634,9 +686,9 @@ pub fn class(
 ) -> #(State(host), JsVal) {
   let st = s.agent
   let realm = st.realm
-  let #(proto_props, st) = alloc_host_methods(st, methods)
-  let #(static_props, st) = alloc_host_methods(st, statics)
-  let #(id, st) = register(st, name, constructor)
+  let #(proto_props, st) = alloc_host_methods(st, s.key, methods)
+  let #(static_props, st) = alloc_host_methods(st, s.key, statics)
+  let #(id, st) = register(st, s.key, name, constructor)
   let #(pair, st) =
     common.init_type(
       st,
@@ -654,13 +706,19 @@ pub fn class(
 /// Add `impl` to the agent's host-function table under the next id. Ids are
 /// dense and assigned in registration order, which is what lets a
 /// deserialized engine's `HostFn(id)` cells find their closures again once
-/// the embedder repeats its registrations.
-fn register(st: Agent, name: String, impl: HostFn(host)) -> #(Int, Agent) {
+/// the embedder repeats its registrations. Every call of `impl` sees the
+/// `key` it was registered under.
+fn register(
+  st: Agent,
+  key: Key(host),
+  name: String,
+  impl: HostFn(host),
+) -> #(Int, Agent) {
   let id = dict.size(st.host_fns)
   let entry =
     HostFnEntry(name:, call: fn(agent, args, this, new_target) {
       let #(State(agent:, ..), result) =
-        impl(args, this, State(agent:, new_target:))
+        impl(args, this, State(agent:, new_target:, key:))
       #(agent, result)
     })
   #(id, Agent(..st, host_fns: dict.insert(st.host_fns, id, entry)))
@@ -668,13 +726,14 @@ fn register(st: Agent, name: String, impl: HostFn(host)) -> #(Int, Agent) {
 
 fn alloc_host_methods(
   st: Agent,
+  key: Key(host),
   specs: List(#(String, Int, HostFn(host))),
 ) -> #(List(#(String, Property)), Agent) {
   let #(props, st) =
     list.fold(specs, #([], st), fn(acc, spec) {
       let #(props, st) = acc
       let #(name, arity, impl) = spec
-      let #(id, st) = register(st, name, impl)
+      let #(id, st) = register(st, key, name, impl)
       let #(h, st) =
         common.alloc_rooted_native_fn(
           st,
