@@ -19,7 +19,8 @@
          t_instanceof_fast/3,
          t_get_elem_fast/3, t_set_elem_fast/4,
          t_global_get_fast/2,
-         shape_slots_get/2, shape_slots_fold/3]).
+         shape_slots_get/2, shape_slots_set/3, shape_slots_append/2,
+         shape_slots_fold/3]).
 
 %% Record indices come from arc_rt_layout.hrl (asserted by
 %% arc_rt_layout_test). Plain tuples indexed here:
@@ -283,6 +284,12 @@ elem_write_grow(_, _, _) -> miss.
 %% ── ShapeSlots FFI (rt_types.gleam) — plain-tuple slot storage. ──
 %% shape_slots_get(Slots, Off) -> JsVal — 0-based offset.
 shape_slots_get(Slots, Off) -> element(Off + 1, Slots).
+
+%% shape_slots_set(Slots, Off, V) -> Slots' — overwrite the 0-based slot.
+shape_slots_set(Slots, Off, V) -> setelement(Off + 1, Slots, V).
+
+%% shape_slots_append(Slots, V) -> Slots' — the slot a shape transition adds.
+shape_slots_append(Slots, V) -> erlang:append_element(Slots, V).
 
 %% shape_slots_fold(Slots, Acc, F) -> Acc' — fold F(Off, V, A) over every
 %% slot. Mirrors the tree_array.sparse_fold contract used by rt_gc.

@@ -1809,6 +1809,12 @@ pub type ShapeSlots
 @external(erlang, "arc_rt_obj_ffi", "shape_slots_get")
 pub fn shape_slots_get(slots: ShapeSlots, off: Int) -> JsVal
 
+@external(erlang, "arc_rt_obj_ffi", "shape_slots_set")
+pub fn shape_slots_set(slots: ShapeSlots, off: Int, v: JsVal) -> ShapeSlots
+
+@external(erlang, "arc_rt_obj_ffi", "shape_slots_append")
+pub fn shape_slots_append(slots: ShapeSlots, v: JsVal) -> ShapeSlots
+
 @external(erlang, "arc_rt_obj_ffi", "shape_slots_fold")
 pub fn shape_slots_fold(
   slots: ShapeSlots,

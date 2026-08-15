@@ -2088,9 +2088,9 @@ fn emit_if(
       })
     None -> Ok(#(ir.Values(carried_values(e, carried)), e))
   })
-  // Restore pre-branch slot_vars — else's arm-local rebinds (both `carried`
-  // and any expr-level slot -1 rebind) name Let-binders inside else_tree; the
-  // join re-binds `carried` freshly and nothing else may leak.
+  // Restore pre-branch slot_vars — else's arm-local rebinds name Let-binders
+  // inside else_tree; the join re-binds `carried` freshly and nothing else
+  // may leak.
   let e = state.Emitter2(..e, slot_vars: branch_slots)
   rebind_after_block(
     e,

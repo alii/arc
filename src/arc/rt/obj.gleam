@@ -21,11 +21,11 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsOps, type JsSlot,
   type JsStore, type JsVal, type ObjKind, type ObjectKey, type ParsedDesc,
-  type Property, type PropertyKey, type SymbolId, AccessorProperty, ArgumentsObj,
-  ArrayObj, DataProperty, Dense, Index, KHandle, KNull, KUndef, Named,
-  NoElements, Ordinary, Private, ProxyObj, SAsyncGen, SBox, SGenerator, SObject,
-  SPromise, SShapedObject, ShapeDesc, Sparse, StringKey, StringObj, SymbolKey,
-  TypeErr,
+  type Property, type PropertyKey, type SymbolId, AccessorProperty, Agent,
+  ArgumentsObj, ArrayObj, DataProperty, Dense, Index, JsStore, KHandle, KNull,
+  KUndef, Named, NoElements, Ordinary, Private, ProxyObj, SAsyncGen, SBox,
+  SGenerator, SObject, SPromise, SShapedObject, ShapeDesc, Sparse, StringKey,
+  StringObj, SymbolKey, TypeErr,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
@@ -694,23 +694,106 @@ fn set_on_receiver(
   case rt_types.classify(receiver) {
     KHandle(recv_h) -> {
       let recv_h = resolve_object_handle(st, recv_h)
-      let st = devolve(st, recv_h)
-      let assert SObject(
-        kind:,
-        props:,
-        symbol_props:,
-        elements:,
-        extensible:,
-        ..,
-      ) = read_object(st, recv_h)
-      case key {
-        StringKey(pk) ->
-          set_own_string(st, recv_h, kind, props, elements, extensible, pk, v)
-        SymbolKey(sym) ->
-          set_own_symbol(st, recv_h, symbol_props, extensible, sym, v)
+      case read_object(st, recv_h), key {
+        SShapedObject(shape_id:, proto:, slots:), StringKey(Named(name)) ->
+          set_own_shaped(st, recv_h, shape_id, proto, slots, name, v)
+        _, _ -> {
+          let st = devolve(st, recv_h)
+          let assert SObject(
+            kind:,
+            props:,
+            symbol_props:,
+            elements:,
+            extensible:,
+            ..,
+          ) = read_object(st, recv_h)
+          case key {
+            StringKey(pk) ->
+              set_own_string(
+                st,
+                recv_h,
+                kind,
+                props,
+                elements,
+                extensible,
+                pk,
+                v,
+              )
+            SymbolKey(sym) ->
+              set_own_symbol(st, recv_h, symbol_props, extensible, sym, v)
+          }
+        }
       }
     }
     _ -> #(False, st)
+  }
+}
+
+/// §10.1.9.2 steps 2.c-e on a shaped receiver (always ordinary and
+/// extensible): an existing slot is overwritten in place; a new named key
+/// moves the object to the successor shape along the transition edge for
+/// that key, minting the successor on first use.
+fn set_own_shaped(
+  st: Agent,
+  h: Handle,
+  shape_id: Int,
+  proto: Option(Handle),
+  slots: rt_types.ShapeSlots,
+  name: String,
+  v: JsVal,
+) -> #(Bool, Agent) {
+  let js = require_js(st)
+  let key_bin = bit_array.from_string(name)
+  case dict.get(js.shapes, shape_id) {
+    Error(Nil) -> #(False, st)
+    Ok(ShapeDesc(arity:, offsets:, transitions:) as from) ->
+      case dict.get(offsets, key_bin) {
+        Ok(off) -> {
+          let slots = rt_types.shape_slots_set(slots, off, v)
+          #(
+            True,
+            rt_store.t_cell_set(st, h, SShapedObject(shape_id:, proto:, slots:)),
+          )
+        }
+        Error(Nil) -> {
+          let #(to, st) = case dict.get(transitions, key_bin) {
+            Ok(to) -> #(to, st)
+            Error(Nil) -> {
+              let to = js.next_shape
+              let shapes =
+                js.shapes
+                |> dict.insert(
+                  shape_id,
+                  ShapeDesc(
+                    ..from,
+                    transitions: dict.insert(transitions, key_bin, to),
+                  ),
+                )
+                |> dict.insert(
+                  to,
+                  ShapeDesc(
+                    arity: arity + 1,
+                    offsets: dict.insert(offsets, key_bin, arity),
+                    transitions: dict.new(),
+                  ),
+                )
+              #(
+                to,
+                Agent(..st, store: JsStore(..js, shapes:, next_shape: to + 1)),
+              )
+            }
+          }
+          let slots = rt_types.shape_slots_append(slots, v)
+          #(
+            True,
+            rt_store.t_cell_set(
+              st,
+              h,
+              SShapedObject(shape_id: to, proto:, slots:),
+            ),
+          )
+        }
+      }
   }
 }
 

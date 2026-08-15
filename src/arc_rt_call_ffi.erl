@@ -183,7 +183,10 @@ apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 %% + `t_cell_new` + apply body + §10.2.2 step 13 base return-override
 %% (object result overrides `this`; else new `this`). Any shape miss →
 %% `{miss, St}` and the emitter's IsAtom guard falls back to `t_construct`.
-%% Record indices via arc_rt_layout.hrl.
+%% The new object is born as an SShapedObject at the empty root shape, so
+%% the ctor body's `this.k = v` writes extend it along shape transitions
+%% (rt_obj set_own_shaped) and later `.k` reads/writes hit the shaped-slot
+%% fast paths. Record indices via arc_rt_layout.hrl.
 t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
@@ -215,8 +218,7 @@ t_new_simple(St, _, _) -> {miss, St}.
 
 %% Inline `t_cell_new` (rt_store.gleam) + apply + return-override.
 new_simple_apply(St, Store, Data, Ctor, Code, Proto, Args) ->
-    NewSlot = {?SOBJECT_TAG, ?ORDINARY, {?SOME, Proto}, #{}, [], ?ELEMS_NONE,
-               true},
+    NewSlot = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}},
     {NewId, Free, Next} = case element(?STORE_FREE, Store) of
         [Id | Rest] -> {Id, Rest, element(?STORE_NEXT, Store)};
         [] -> N = element(?STORE_NEXT, Store), {N, [], N + 1}
