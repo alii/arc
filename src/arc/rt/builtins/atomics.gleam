@@ -137,9 +137,6 @@ type TaInfo {
     /// bits/signed pair), so an element width the FFI has no clause for is
     /// unrepresentable.
     elem: IntElem,
-    /// IsSharedArrayBuffer of the viewed buffer, captured ONCE from the
-    /// validated buffer's [[ArrayBufferData]].
-    shared: Bool,
   )
 }
 
@@ -210,13 +207,15 @@ fn with_ta_and_index(
   use storage <- helpers.some_or(buffer.buffer_storage(st, view.buffer), fn() {
     rt_val.t_throw_type_error(st, "TypedArray is not attached")
   })
-  let shared = types.buffer_is_shared(storage)
-  use Nil <- helpers.guard(!require_shared || shared, fn() {
-    rt_val.t_throw_type_error(
-      st,
-      "Atomics.wait requires a SharedArrayBuffer TypedArray",
-    )
-  })
+  use Nil <- helpers.guard(
+    !require_shared || types.buffer_is_shared(storage),
+    fn() {
+      rt_val.t_throw_type_error(
+        st,
+        "Atomics.wait requires a SharedArrayBuffer TypedArray",
+      )
+    },
+  )
   use buf <- helpers.some_or(live_buffer(storage), fn() {
     rt_val.t_throw_type_error(st, "ArrayBuffer is detached")
   })
@@ -239,7 +238,6 @@ fn with_ta_and_index(
       elem_kind: view.elem_kind,
       byte_offset: view.byte_offset,
       elem:,
-      shared:,
     )
   // §25.4.3.2 ValidateAtomicAccess: ToIndex then bounds check.
   let #(idx, st) =

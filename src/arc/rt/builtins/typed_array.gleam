@@ -314,11 +314,8 @@ pub fn dispatch_construct(
         st,
         "Abstract class TypedArray not directly constructable",
       )
-    TypedArrayConstructor(kind:, proto:) -> {
-      // Step 3: proto = GetPrototypeFromConstructor(NewTarget, default).
-      let #(proto, st) = proto_from_new_target(st, new_target, proto)
-      ta_construct(st, kind, proto, args)
-    }
+    TypedArrayConstructor(kind:, proto:) ->
+      ta_construct(st, kind, new_target, proto, args)
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
   }
 }
@@ -539,18 +536,29 @@ fn ta_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 // Constructor — §23.2.5.1 TypedArray ( ...args )
 // ============================================================================
 
+/// AllocateTypedArray's GetPrototypeFromConstructor(NewTarget) is a real
+/// [[Get]] that may run user code, so it sits exactly where §23.2.5.1 puts
+/// AllocateTypedArray in each branch: first for the no-argument and Object
+/// branches, but AFTER `? ToIndex(firstArgument)` for a primitive length.
 fn ta_construct(
   st: Agent,
   kind: TypedArrayKind,
-  proto: Handle,
+  new_target: JsVal,
+  default_proto: Handle,
   args: List(JsVal),
 ) -> #(Handle, Agent) {
   case args {
     // Step 4: no args → AllocateTypedArray(0).
-    [] -> fresh_handle(alloc_ta_with_length(st, kind, proto, 0))
+    [] -> {
+      let #(proto, st) = proto_from_new_target(st, new_target, default_proto)
+      fresh_handle(alloc_ta_with_length(st, kind, proto, 0))
+    }
     [first, ..rest] ->
       case classify(first) {
-        KHandle(ref) ->
+        // Step 6.a: firstArgument is an Object → AllocateTypedArray first.
+        KHandle(ref) -> {
+          let #(proto, st) =
+            proto_from_new_target(st, new_target, default_proto)
           case rt_store.t_cell_get(st, ref) {
             SObject(kind: types.ArrayBufferObj(..), ..) ->
               from_buffer(st, kind, proto, ref, rest)
@@ -580,9 +588,12 @@ fn ta_construct(
               )
             _ -> from_object(st, kind, proto, first, ref)
           }
-        // Step 6.b: not an object → AllocateTypedArray(ToIndex(arg)).
+        }
+        // Step 6.b-c: not an object → AllocateTypedArray(? ToIndex(arg)).
         _ -> {
           let #(len, st) = to_index(st, first)
+          let #(proto, st) =
+            proto_from_new_target(st, new_target, default_proto)
           fresh_handle(alloc_ta_with_length(st, kind, proto, len))
         }
       }

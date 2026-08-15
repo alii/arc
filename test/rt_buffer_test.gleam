@@ -10,6 +10,7 @@ import arc/rt/types.{
   KStr, KUndef, StringKey, canonical_key, classify, mk_bigint, mk_bool,
   mk_number, mk_object, mk_string, mk_undefined,
 }
+import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{Some}
 
@@ -320,4 +321,51 @@ pub fn set_subarray_slice_sort_at_test() {
   assert classify(last) == KNum(JFloat(9.0))
   let #(none, _) = invoke(st, x, "at", [int(3)])
   assert classify(none) == KUndef
+}
+
+pub fn wide_integer_float_store_rounds_like_arithmetic_test() {
+  let st = agent()
+  let #(f, st) = construct(st, "Float64Array", [int(2)])
+  // 2^64 + 2049 has no double; the store must round it the way the rest of
+  // the runtime rounds a wide integer to a Number.
+  let wide = 18_446_744_073_709_553_665
+  let st = set(st, f, "0", int(wide))
+  assert classify(get_(st, f, "0")) == KNum(rt_val.num_from_int(wide))
+  let st = set(st, f, "1", int(9_007_199_254_740_993))
+  assert classify(get_(st, f, "1")) == KNum(JFloat(9_007_199_254_740_992.0))
+}
+
+/// §23.2.5.1: a primitive first argument is `? ToIndex`ed BEFORE
+/// AllocateTypedArray reads `newTarget.prototype`; an Object first argument
+/// allocates (and so reads the prototype) first.
+pub fn constructor_reads_new_target_prototype_in_spec_order_test() {
+  let st = agent()
+  let #(nt_h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+  let #(_, st) =
+    rt_obj.t_define_own_accessor(
+      st,
+      nt_h,
+      StringKey(canonical_key("prototype")),
+      Some(mk_object(st.realm.throw_type_error)),
+      option.None,
+      False,
+      True,
+    )
+  let nt = mk_object(nt_h)
+  let ctor = global(st, "Int8Array")
+  let #(c, st) =
+    t_apply_protected(st, fn(st) {
+      let #(h, st) = rt_call.t_construct(st, ctor, [int(-1)], nt)
+      #(mk_object(h), st)
+    })
+  let assert ThrowCompletion(err) = c
+  assert error_name(st, err) == "RangeError"
+  let #(src, st) = array(st, ints([1]))
+  let #(c, st) =
+    t_apply_protected(st, fn(st) {
+      let #(h, st) = rt_call.t_construct(st, ctor, [src], nt)
+      #(mk_object(h), st)
+    })
+  let assert ThrowCompletion(err) = c
+  assert error_name(st, err) == "TypeError"
 }

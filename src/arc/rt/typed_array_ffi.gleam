@@ -15,9 +15,10 @@
 
 import arc/rt/types.{
   type BigIntKind, type JsNum, type TypedArrayKind, BigInt64Kind, BigKind,
-  BigUint64Kind, Float32Kind, Float64Kind, Int16Kind, Int32Kind, Int8Kind,
+  BigUint64Kind, Float32Kind, Float64Kind, Int16Kind, Int32Kind, Int8Kind, JInt,
   NumKind, Uint16Kind, Uint32Kind, Uint8ClampedKind, Uint8Kind,
 }
+import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/int
 
@@ -239,32 +240,59 @@ pub fn ta_set_int(
 @external(erlang, "arc_rt_typed_array_ffi", "ta_get_float")
 pub fn ta_get_float(data: BitArray, byte_off: Int, elem: FloatElem) -> JsNum
 
-/// Write a float element (§25.1.2.12 SetValueInBuffer). Finite values that
-/// overflow the 32-bit range round to the correctly-signed infinity
-/// (IEEE 754 round-to-nearest), matching Float32Array store semantics.
 @external(erlang, "arc_rt_typed_array_ffi", "ta_set_float")
-pub fn ta_set_float(
+fn ffi_set_float(
   data: BitArray,
   byte_off: Int,
   elem: FloatElem,
   val: JsNum,
 ) -> BitArray
 
+/// Write a float element (§25.1.2.12 SetValueInBuffer). Finite values that
+/// overflow the 32-bit range round to the correctly-signed infinity
+/// (IEEE 754 round-to-nearest), matching Float32Array store semantics.
+pub fn ta_set_float(
+  data: BitArray,
+  byte_off: Int,
+  elem: FloatElem,
+  val: JsNum,
+) -> BitArray {
+  ffi_set_float(data, byte_off, elem, as_double(val))
+}
+
+/// An exact `JInt` as the double the rest of the runtime rounds it to
+/// (`num_from_int`, ties-to-even past 2^53), so a stored integer reads back
+/// as the same Number arithmetic would produce.
+fn as_double(n: JsNum) -> JsNum {
+  case n {
+    JInt(i) -> rt_val.num_from_int(i)
+    _ -> n
+  }
+}
+
 /// ES2024 §7.1.12 ToUint8Clamp: clamp to [0,255] with round-half-to-EVEN.
 /// NaN → 0, +Infinity → 255, -Infinity → 0.
 @external(erlang, "arc_rt_typed_array_ffi", "ta_clamp_uint8")
 pub fn ta_clamp_uint8(val: JsNum) -> Int
 
+@external(erlang, "arc_rt_typed_array_ffi", "f32_bits")
+fn ffi_f32_bits(n: JsNum) -> Int
+
 /// Encode a `JsNum` as its IEEE 754 binary32 bit pattern (an integer). Finite
 /// values that overflow the 32-bit range round to ±infinity's bits (BEAM's
 /// native round-to-nearest). The ONE place the NaN/±Inf f32 constants live.
-@external(erlang, "arc_rt_typed_array_ffi", "f32_bits")
-pub fn f32_bits(n: JsNum) -> Int
+pub fn f32_bits(n: JsNum) -> Int {
+  ffi_f32_bits(as_double(n))
+}
+
+@external(erlang, "arc_rt_typed_array_ffi", "f64_bits")
+fn ffi_f64_bits(n: JsNum) -> Int
 
 /// Encode a `JsNum` as its IEEE 754 binary64 bit pattern (an integer).
 /// The ONE place the NaN/±Inf f64 constants live.
-@external(erlang, "arc_rt_typed_array_ffi", "f64_bits")
-pub fn f64_bits(n: JsNum) -> Int
+pub fn f64_bits(n: JsNum) -> Int {
+  ffi_f64_bits(as_double(n))
+}
 
 /// Decode an IEEE 754 binary32 bit pattern (an integer) into a `JsNum`.
 /// Inverse of `f32_bits`.
