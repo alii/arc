@@ -704,22 +704,23 @@ fn ab_transfer(
 /// §25.2.5.2 get SharedArrayBuffer.prototype.byteLength
 fn sab_get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "byteLength")
-  let #(byte_length, _buf) = require_shared(st, buf, "byteLength")
-  #(mk_number(JInt(byte_length)), st)
+  let bytes = require_shared(st, buf, "byteLength")
+  #(mk_number(JInt(bit_array.byte_size(bytes))), st)
 }
 
 /// §25.2.5.4 get SharedArrayBuffer.prototype.growable
 fn sab_get_growable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "growable")
-  let #(_len, buf) = require_shared(st, buf, "growable")
+  let _bytes = require_shared(st, buf, "growable")
   #(mk_bool(max_byte_length(buf) != None), st)
 }
 
 /// §25.2.5.5 get SharedArrayBuffer.prototype.maxByteLength
 fn sab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "maxByteLength")
-  let #(byte_length, buf) = require_shared(st, buf, "maxByteLength")
-  #(mk_number(JInt(option.unwrap(max_byte_length(buf), byte_length))), st)
+  let bytes = require_shared(st, buf, "maxByteLength")
+  let max = option.unwrap(max_byte_length(buf), bit_array.byte_size(bytes))
+  #(mk_number(JInt(max)), st)
 }
 
 /// §25.2.5.3 SharedArrayBuffer.prototype.grow ( newLength )
@@ -738,7 +739,7 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         "SharedArrayBuffer.prototype.grow called on a non-growable SharedArrayBuffer",
       )
     Some(max) -> {
-      let #(_len, buf) = require_shared(st, buf, "grow")
+      let _bytes = require_shared(st, buf, "grow")
       let #(new_len, st) =
         rt_val.t_to_index(
           st,
@@ -747,7 +748,8 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         )
       // ToIndex may run user code (a nested grow) — re-read the length.
       let buf = require_buffer(st, mk_object(buf.ref), "grow")
-      let #(current, buf) = require_shared(st, buf, "grow")
+      let bits = require_shared(st, buf, "grow")
+      let current = bit_array.byte_size(bits)
       // The length is monotonic: shrinking is a RangeError, so is exceeding
       // the max the storage was declared with.
       case new_len < current || new_len > max {
@@ -757,7 +759,6 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
             "SharedArrayBuffer.prototype.grow: invalid length",
           )
         False -> {
-          let assert Some(bits) = types.buffer_bits(buf.storage)
           let storage =
             Shared(
               bytes: bit_array.append(bits, zero_block(new_len - current)),
@@ -833,12 +834,12 @@ fn require_unshared(st: Agent, buf: Buf, method: String) -> Buf {
   }
 }
 
-/// IsSharedArrayBuffer(O) must be true, else TypeError. Hands back the current
-/// byte length alongside — the proof travels with the gate. (`Shared` is
-/// never detached.)
-fn require_shared(st: Agent, buf: Buf, method: String) -> #(Int, Buf) {
+/// IsSharedArrayBuffer(O) must be true, else TypeError. Hands back the shared
+/// bytes — the proof travels with the gate, so no caller has to write a "what
+/// if it were byte storage" branch. (`Shared` is never detached.)
+fn require_shared(st: Agent, buf: Buf, method: String) -> BitArray {
   case buf.storage {
-    Shared(bytes:, ..) -> #(bit_array.byte_size(bytes), buf)
+    Shared(bytes:, ..) -> bytes
     Bytes(..) | Immutable(..) | Detached(..) -> incompatible(st, method)
   }
 }
@@ -847,7 +848,10 @@ fn require_shared(st: Agent, buf: Buf, method: String) -> #(Int, Buf) {
 /// SharedArrayBuffer, shared=False requires a plain ArrayBuffer.
 fn require_family(st: Agent, buf: Buf, method: String, shared: Bool) -> Buf {
   case shared {
-    True -> require_shared(st, buf, method).1
+    True -> {
+      let _bytes = require_shared(st, buf, method)
+      buf
+    }
     False -> require_unshared(st, buf, method)
   }
 }

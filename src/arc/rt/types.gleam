@@ -485,11 +485,9 @@ pub type ViewElementType {
 ///   IsImmutableBuffer state (transferToImmutable / sliceToImmutable
 ///   results): never shared, never resizable, never detachable, and every
 ///   write path (Atomics, TypedArray/DataView stores) rejects it.
-/// * `Shared` — a SharedArrayBuffer. Multi-agent sharing is not supported in
-///   this runtime: the bytes live in this agent's store exactly like `Bytes`
-///   (current [[ArrayBufferByteLength]] = `byte_size(bytes)`), so every
-///   Atomics operation on it is trivially sequentially consistent.
-///   `max_byte_length: Some(_)` iff growable.
+/// * `Shared` — a SharedArrayBuffer: bytes held in this agent's store
+///   exactly like `Bytes` (current [[ArrayBufferByteLength]] =
+///   `byte_size(bytes)`). `max_byte_length: Some(_)` iff growable.
 ///
 /// Shared-ness is not a flag: a buffer is shared iff its storage is
 /// `Shared`. Detached-ness is not a flag: a buffer is detached iff its
@@ -498,6 +496,7 @@ pub type BufferStorage {
   Detached(max_byte_length: Option(Int))
   Bytes(bytes: BitArray, max_byte_length: Option(Int))
   Immutable(bytes: BitArray)
+  /// Multi-agent sharing is not supported in this runtime.
   Shared(bytes: BitArray, max_byte_length: Option(Int))
 }
 
