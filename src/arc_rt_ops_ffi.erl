@@ -3,8 +3,28 @@
 %%% mk_number/1): {j_float,F} | j_nan | j_pos_inf | j_neg_inf.
 -module(arc_rt_ops_ffi).
 -export([pow_total/2, fmod_total/2, t_eq_fast/2, nul_eq/1,
+         add/2, sub/2, mul/2,
          t_bitand_fast/2, t_bitor_fast/2, t_bitxor_fast/2,
          t_shl_fast/2, t_shr_fast/2, t_ushr_fast/2, t_bitnot_fast/1]).
+
+%% JPure `+ - *` on two BEAM number terms (the emitter's is_number-guarded
+%% arm). Native arithmetic, then the two Number invariants an exact BEAM
+%% integer cannot carry by itself: a result wider than 2^53 - 1 becomes the
+%% nearest double (arc_rt_val_ffi:mk_int/1), and an integer product of
+%% zero takes the sign of its operands (§6.1.6.1.4: 0 * -1 is -0).
+-define(MAX_SAFE_INT, 9007199254740991).
+-compile({inline, [norm/1]}).
+norm(R) when is_integer(R), (R > ?MAX_SAFE_INT orelse R < -?MAX_SAFE_INT) ->
+    arc_rt_val_ffi:mk_int(R);
+norm(R) -> R.
+
+add(A, B) -> norm(A + B).
+sub(A, B) -> norm(A - B).
+mul(A, B) ->
+    case A * B of
+        0 when A < 0; B < 0 -> -0.0;
+        R -> norm(R)
+    end.
 
 %% t_eq_fast(A, B) -> 0 | 1 | miss
 %% JPure §7.2.14 IsLooselyEqual fast path for the operand pairs richards

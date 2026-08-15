@@ -24,8 +24,8 @@
 
 -export([
     classify/1,
-    mk_undefined/0, mk_null/0, mk_bool/1, mk_number/1, mk_string/1,
-    mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
+    mk_undefined/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
+    mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
     to_boolean_i32/1,
     t_to_property_key_fast/1,
     js_number_to_string/1,
@@ -132,12 +132,23 @@ mk_bool(B) -> B.
 %% mk_number(JsNum) -> JsVal
 %% Invert the number rows of `classify/1`: unwrap `JInt`/`JFloat` to a bare
 %% BEAM number, and map the three non-finite `JsNum` variants to their §2.3
-%% sentinel atoms (BEAM floats cannot represent NaN/±Inf).
-mk_number({j_int, N}) -> N;
+%% sentinel atoms (BEAM floats cannot represent NaN/±Inf). `JInt` is the
+%% exact-integer shape of a double, so it never leaves here wider than
+%% 2^53 - 1: `mk_int/1` rounds anything wider to the nearest double.
+mk_number({j_int, N}) -> mk_int(N);
 mk_number({j_float, F}) -> F;
 mk_number(j_nan) -> js_nan;
 mk_number(j_pos_inf) -> js_inf;
 mk_number(j_neg_inf) -> js_neg_inf.
+
+%% mk_int(Int) -> JsVal
+%% An exact BEAM integer as a JS Number: |N| =< 2^53 - 1 stays a bare int;
+%% wider rounds to nearest-even double (or ±Infinity) via the Gleam
+%% `num_from_int`, since float/1 double-rounds very wide integers.
+-define(MAX_SAFE_INT, 9007199254740991).
+mk_int(N) when N > ?MAX_SAFE_INT; N < -?MAX_SAFE_INT ->
+    mk_number('arc@rt@val':num_from_int(N));
+mk_int(N) -> N.
 
 %% mk_string(String) -> JsVal
 %% Gleam `String` is already a UTF-8 binary — the string wire form (D10).

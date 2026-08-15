@@ -1,13 +1,15 @@
-//// Core call semantics on the arc/rt runtime: §10.2.1.2 this-binding by
-//// strictness and the call-depth RangeError.
+//// Core semantics on the arc/rt runtime: §10.2.1.2 this-binding by
+//// strictness, the call-depth RangeError, and the one-Number invariants
+//// (integers past 2^53 - 1 widen to doubles; -0 survives).
 
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/ops as rt_ops
 import arc/rt/types.{
-  type Agent, type CompiledFn, type JsVal, FnFlags, HostHooks, JInt, KHandle,
-  KStr, StringKey, canonical_key, classify, mk_null, mk_number, mk_object,
-  mk_string, mk_undefined,
+  type Agent, type CompiledFn, type JsVal, FnFlags, HostHooks, JFloat, JInt,
+  JNegInf, KBool, KHandle, KNum, KStr, StringKey, canonical_key, classify,
+  mk_null, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/option.{None}
@@ -106,4 +108,93 @@ pub fn call_depth_range_error_test() {
   let #(f, st) = this_fn(st, True)
   let assert #(NormalCompletion(_), _) =
     rt_call.t_call(st, f, mk_undefined(), [])
+}
+
+// ── Number: 2^53 widening and -0 ────────────────────────────────────────────
+
+fn int(i: Int) -> JsVal {
+  mk_number(JInt(i))
+}
+
+fn num(v: JsVal) {
+  let assert KNum(n) = classify(v)
+  n
+}
+
+fn show(st: Agent, v: JsVal) -> String {
+  rt_val.t_to_string(st, v).0
+}
+
+fn is_minus_zero(st: Agent, v: JsVal) -> Bool {
+  let #(q, _) = rt_ops.t_div(st, int(1), v)
+  num(q) == JNegInf
+}
+
+pub fn integer_results_widen_past_2_53_test() {
+  let st = agent()
+  let m = int(9_007_199_254_740_991)
+  let #(a, st) = rt_ops.t_add(st, m, int(1))
+  assert num(a) == JFloat(9_007_199_254_740_992.0)
+  let #(b, st) = rt_ops.t_add(st, m, int(2))
+  assert rt_val.strict_equal(a, b)
+  assert show(st, b) == "9007199254740992"
+  let #(c, st) = rt_ops.t_add(st, b, int(1))
+  assert show(st, c) == "9007199254740992"
+  let #(d, st) = rt_ops.t_sub(st, rt_ops.t_neg(st, m).0, int(2))
+  assert show(st, d) == "-9007199254740992"
+  let #(e, st) = rt_ops.t_mul(st, m, m)
+  assert show(st, e) == "8.112963841460666e+31"
+  let #(f, st) = rt_ops.t_mul(st, int(123_456_789), int(987_654_321))
+  assert show(st, f) == "121932631112635260"
+  // The value ABI itself never hands out a wide integer.
+  assert show(st, int(18_014_398_509_481_985)) == "18014398509481984"
+  assert num(int(-9_007_199_254_740_993)) == JFloat(-9_007_199_254_740_992.0)
+  assert num(int(9_007_199_254_740_991)) == JInt(9_007_199_254_740_991)
+}
+
+pub fn minus_zero_survives_integer_arithmetic_test() {
+  let st = agent()
+  let #(a, st) = rt_ops.t_mul(st, int(0), int(-1))
+  assert is_minus_zero(st, a)
+  let #(b, st) = rt_ops.t_mul(st, int(-7), int(0))
+  assert is_minus_zero(st, b)
+  let #(c, st) = rt_ops.t_mul(st, int(0), int(3))
+  assert !is_minus_zero(st, c)
+  let #(d, st) = rt_ops.t_neg(st, int(0))
+  assert is_minus_zero(st, d)
+  let #(e, st) = rt_ops.t_add(st, d, d)
+  assert is_minus_zero(st, e)
+  let #(f, st) = rt_ops.t_add(st, d, int(0))
+  assert !is_minus_zero(st, f)
+  let #(g, st) = rt_ops.t_sub(st, int(0), int(0))
+  assert !is_minus_zero(st, g)
+  let #(h, st) = rt_ops.t_mod(st, int(-4), int(2))
+  assert is_minus_zero(st, h)
+  let #(i, st) = rt_ops.t_mod(st, int(4), int(-2))
+  assert !is_minus_zero(st, i)
+  let #(j, st) = rt_ops.t_div(st, int(0), int(-5))
+  assert is_minus_zero(st, j)
+  assert show(st, d) == "0"
+  assert !rt_val.same_value(d, int(0))
+  assert rt_val.strict_equal(d, int(0))
+  let object_is = global(st, "Object") |> get(st, _, "is")
+  let #(r, st) = rt_call.t_call_checked(st, object_is, mk_undefined(), [d, c])
+  assert classify(r) == KBool(False)
+  let stringify = global(st, "JSON") |> get(st, _, "stringify")
+  let #(s, st) = rt_call.t_call_checked(st, stringify, mk_undefined(), [a])
+  assert classify(s) == KStr("0")
+  let round = global(st, "Math") |> get(st, _, "round")
+  let #(r, st) =
+    rt_call.t_call_checked(st, round, mk_undefined(), [
+      mk_number(JFloat(-0.4)),
+    ])
+  assert is_minus_zero(st, r)
+}
+
+fn global(st: Agent, name: String) -> JsVal {
+  rt_obj.t_global_get(st, <<name:utf8>>).0
+}
+
+fn get(st: Agent, obj: JsVal, name: String) -> JsVal {
+  rt_obj.t_get_prop(st, obj, StringKey(canonical_key(name))).0
 }

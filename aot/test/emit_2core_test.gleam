@@ -379,3 +379,19 @@ pub fn strict_and_sloppy_this_diff_test() {
     "object number object boolean true undefined true null object\nobject object object undefined\n",
   )
 }
+
+// ── One Number type: 2^53 widening and -0 (N38) ────────────────────────────
+
+pub fn big_integers_widen_to_double_diff_test() {
+  diff(
+    "var m=9007199254740991;console.log(m+1===m+2,9007199254740992+1,m+2,2**53+2,m*3,m*m,-m-2,(m+1)-(-3));var x=1;for(var i=0;i<60;i++)x=x+x;console.log(x,x+1===x,x*2);var c=m;c++;c++;console.log(c,String(m*1000).length);console.log(123456789*987654321,99999999999*99999999999,parseInt('9007199254740993'),Number('18014398509481985'))",
+    "true 9007199254740992 9007199254740992 9007199254740994 27021597764222972 8.112963841460666e+31 -9007199254740992 9007199254740996\n1152921504606847000 true 2305843009213694000\n9007199254740992 19\n121932631112635260 9.9999999998e+21 9007199254740992 18014398509481984\n",
+  )
+}
+
+pub fn minus_zero_is_preserved_diff_test() {
+  diff(
+    "function d(v){return 1/v===-Infinity?'-0':String(v)}var z=0,n=-1,p=5;console.log(d(-0),d(0*-1),d(z*n),d(n*z),d(z*p),d(-z),d(-0+-0),d(-0+0),d(0-0),d(-4%2),d(4%-2),d(z/-5),d(Math.round(-0.4)),d(-p*0));console.log(Object.is(-0,0),Object.is(z*n,-0),1/-0,(-0).toString(),JSON.stringify(-0),JSON.stringify([z*n]),String(-0),-0===0,[-0].includes(0),Math.max(-0,0)===0&&1/Math.max(-0,0));var o={};o[-0]='k';console.log(Object.keys(o).join());var q=0;q*= -1;console.log(d(q),d(q+1-1));var ng=-1,nz=-0;console.log(ng,ng==-1,5&ng,d(nz),d(nz*ng))",
+    "-0 -0 -0 -0 0 -0 -0 0 0 -0 0 -0 -0 -0\nfalse true -Infinity 0 0 [0] 0 true true Infinity\n0\n-0 0\n-1 true 5 -0 0\n",
+  )
+}

@@ -657,14 +657,24 @@ fn finite_to_float(n: JsNum) -> Float {
   }
 }
 
-/// §6.1.6.1.1 Number::unaryMinus. `JInt(0)` negates to `JInt(0)` (Int has no
-/// -0; JS's -0 arises only from `float.negate(0.0)`). arc
-/// `numeric.gleam:123-130`.
+/// An exact integer result as a Number: `JInt` holds only what a double
+/// holds exactly (|i| <= 2^53 - 1); anything wider rounds to the nearest
+/// double, so `2**53 + 1` loses the 1 exactly as IEEE arithmetic does.
+fn int_result(i: Int) -> JsNum {
+  case i > rt_val.max_safe_integer || i < -rt_val.max_safe_integer {
+    True -> rt_val.num_from_int(i)
+    False -> JInt(i)
+  }
+}
+
+/// §6.1.6.1.1 Number::unaryMinus. `-0` is a double, so `JInt(0)` negates to
+/// `JFloat(-0.0)`. arc `numeric.gleam:123-130`.
 fn num_negate(n: JsNum) -> JsNum {
   case n {
     JNan -> JNan
     JPosInf -> JNegInf
     JNegInf -> JPosInf
+    JInt(0) -> JFloat(-0.0)
     JInt(x) -> JInt(0 - x)
     JFloat(x) -> JFloat(float.negate(x))
   }
@@ -677,7 +687,7 @@ fn num_add(a: JsNum, b: JsNum) -> JsNum {
     JPosInf, JNegInf | JNegInf, JPosInf -> JNan
     JPosInf, _ | _, JPosInf -> JPosInf
     JNegInf, _ | _, JNegInf -> JNegInf
-    JInt(x), JInt(y) -> JInt(x + y)
+    JInt(x), JInt(y) -> int_result(x + y)
     JInt(x), JFloat(y) -> JFloat(int.to_float(x) +. y)
     JFloat(x), JInt(y) -> JFloat(x +. int.to_float(y))
     JFloat(x), JFloat(y) -> JFloat(x +. y)
@@ -693,7 +703,7 @@ fn num_sub(a: JsNum, b: JsNum) -> JsNum {
     JNegInf, _ -> JNegInf
     _, JPosInf -> JNegInf
     _, JNegInf -> JPosInf
-    JInt(x), JInt(y) -> JInt(x - y)
+    JInt(x), JInt(y) -> int_result(x - y)
     JInt(x), JFloat(y) -> JFloat(int.to_float(x) -. y)
     JFloat(x), JInt(y) -> JFloat(x -. int.to_float(y))
     JFloat(x), JFloat(y) -> JFloat(x -. y)
@@ -715,7 +725,8 @@ fn inf_times(s: Int, b: JsNum) -> JsNum {
   }
 }
 
-/// §6.1.6.1.4 Number::multiply. Port of arc `numeric.gleam:174-198`.
+/// §6.1.6.1.4 Number::multiply. Port of arc `numeric.gleam:174-198`. An
+/// integer zero product takes the operands' sign: `0 * -1` is -0.
 fn num_mul(a: JsNum, b: JsNum) -> JsNum {
   case a, b {
     JNan, _ | _, JNan -> JNan
@@ -723,7 +734,9 @@ fn num_mul(a: JsNum, b: JsNum) -> JsNum {
     JNegInf, _ -> inf_times(-1, b)
     _, JPosInf -> inf_times(1, a)
     _, JNegInf -> inf_times(-1, a)
-    JInt(x), JInt(y) -> JInt(x * y)
+    JInt(0), JInt(y) if y < 0 -> JFloat(-0.0)
+    JInt(x), JInt(0) if x < 0 -> JFloat(-0.0)
+    JInt(x), JInt(y) -> int_result(x * y)
     JInt(x), JFloat(y) -> JFloat(int.to_float(x) *. y)
     JFloat(x), JInt(y) -> JFloat(x *. int.to_float(y))
     JFloat(x), JFloat(y) -> JFloat(x *. y)
@@ -756,14 +769,18 @@ fn num_div(a: JsNum, b: JsNum) -> JsNum {
 @external(erlang, "arc_rt_ops_ffi", "fmod_total")
 fn fmod_total(a: Float, b: Float) -> JsNum
 
-/// §6.1.6.1.6 Number::remainder — dividend-signed. Port of arc
-/// `numeric.gleam:240-258`.
+/// §6.1.6.1.6 Number::remainder — dividend-signed, so a zero remainder of
+/// a negative dividend is -0. Port of arc `numeric.gleam:240-258`.
 fn num_mod(a: JsNum, b: JsNum) -> JsNum {
   case a, b {
     JNan, _ | _, JNan -> JNan
     JPosInf, _ | JNegInf, _ -> JNan
     _, JPosInf | _, JNegInf -> a
-    JInt(x), JInt(y) if y != 0 -> JInt(x % y)
+    JInt(x), JInt(y) if y != 0 ->
+      case x % y {
+        0 if x < 0 -> JFloat(-0.0)
+        r -> JInt(r)
+      }
     _, _ ->
       case is_zero(b) {
         True -> JNan

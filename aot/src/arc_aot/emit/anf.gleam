@@ -43,7 +43,7 @@ pub fn bind(rhs: ir.Expr) -> Build(ir.Value) {
 }
 
 /// `bind` that also records the fresh var as a known BEAM number (int|float
-/// term). Use for `Convert(BoxInt,·)`, `NumTerm(NAdd/NSub/NMul,·)` and other
+/// term). Use for `Convert(BoxInt,·)` and other
 /// rhs whose result is provably a number term — lets `guarded_binop`/`cmp`
 /// elide the `is_number` TermTest on that operand.
 pub fn bind_number(rhs: ir.Expr) -> Build(ir.Value) {
@@ -404,22 +404,27 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
   }
 }
 
-/// JS arithmetic `+ - *`: NumTerm fast path when both operands are BEAM
-/// numbers, else the `rt_js` slow path (handles ToPrimitive, string concat,
-/// bigint, throw-on-symbol). NAdd/NSub/NMul yield TTerm directly. When BOTH
-/// operands are statically known numbers the guard/If/slow-arm are elided
-/// entirely and the NumTerm result is itself marked known — the M0 shape.
+/// `+ - *` on two BEAM number terms: the total `arc_rt_ops_ffi` kernel
+/// (native op, then widen an integer past 2^53 - 1 to a double and keep the
+/// sign of an integer zero product). The result is marked a known number.
+pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
+  then(host(op, [a, b]), mark_number)
+}
+
+/// JS arithmetic `+ - *`: `num_binop` fast path when both operands are BEAM
+/// numbers, else the runtime slow path (handles ToPrimitive, string concat,
+/// bigint, throw-on-symbol). When BOTH operands are statically known numbers
+/// the guard/If/slow-arm are elided entirely — the M0 shape.
 pub fn guarded_binop(
-  fast: ir.NumTermOp,
+  fast_op: String,
   slow_op: String,
   a: ir.Value,
   b: ir.Value,
 ) -> Build(ir.Value) {
   use #(both, elided) <- then(both_numbers(a, b))
   case elided {
-    True -> bind_number(ir.NumTerm(fast, a, b))
-    False ->
-      bind_if(both, bind_number(ir.NumTerm(fast, a, b)), host(slow_op, [a, b]))
+    True -> num_binop(fast_op, a, b)
+    False -> bind_if(both, num_binop(fast_op, a, b), host(slow_op, [a, b]))
   }
 }
 

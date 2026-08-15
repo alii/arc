@@ -16,6 +16,7 @@
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
+import arc/rt/val as rt_val
 import arc/vm/lexical
 import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/state.{type EmitError, type Emitter2}
@@ -427,9 +428,9 @@ pub fn emit_identifier(name: String) -> Build(ir.Value) {
 
 fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   case op {
-    ast.Add -> anf.guarded_binop(ir.NAdd, "add", l, r)
-    ast.Subtract -> anf.guarded_binop(ir.NSub, "sub", l, r)
-    ast.Multiply -> anf.guarded_binop(ir.NMul, "mul", l, r)
+    ast.Add -> anf.guarded_binop("num_add", "add", l, r)
+    ast.Subtract -> anf.guarded_binop("num_sub", "sub", l, r)
+    ast.Multiply -> anf.guarded_binop("num_mul", "mul", l, r)
     ast.LessThan -> anf.guarded_cmp(ir.NLt, "lt", l, r)
     ast.LessThanEqual -> anf.guarded_cmp(ir.NLe, "le", l, r)
     ast.GreaterThan -> anf.guarded_cmp(ir.NGt, "gt", l, r)
@@ -641,12 +642,7 @@ fn fold_const_int(
     }
     ast.Identifier(name:, ..) ->
       case dict.get(known, name) {
-        Ok(ir.ConstI32(bits)) ->
-          // ConstI32 stores unsigned bits; recover signed for arithmetic.
-          case bits >= 0x80000000 {
-            True -> Some(bits - 0x100000000)
-            False -> Some(bits)
-          }
+        Ok(ir.ConstI32(v)) -> Some(v)
         _ -> None
       }
     ast.ParenthesizedExpression(expression:, ..) ->
@@ -655,8 +651,12 @@ fn fold_const_int(
       option.map(fold_const_int(known, argument), fn(a) {
         int.bitwise_exclusive_or(a, -1)
       })
+    // `-0` and `0 * -n` are the Number -0, not an integer.
     ast.UnaryExpression(operator: ast.Negate, argument:, ..) ->
-      option.map(fold_const_int(known, argument), int.negate)
+      case fold_const_int(known, argument) {
+        Some(0) -> None
+        a -> option.map(a, int.negate)
+      }
     ast.BinaryExpression(operator:, left:, right:, ..) ->
       case fold_const_int(known, left), fold_const_int(known, right) {
         Some(a), Some(b) ->
@@ -666,6 +666,7 @@ fn fold_const_int(
             ast.BitwiseXor -> Some(int.bitwise_exclusive_or(a, b))
             ast.Add -> Some(a + b)
             ast.Subtract -> Some(a - b)
+            ast.Multiply if a * b == 0 && { a < 0 || b < 0 } -> None
             ast.Multiply -> Some(a * b)
             _ -> None
           }
@@ -675,15 +676,22 @@ fn fold_const_int(
   }
 }
 
-/// A finite double `f` that's an exact small int → the ir.Value the JS
-/// number `f` lowers to (mirrors `number_literal`'s smi arm, but a bare
-/// term-level integer since it's used where a JsVal is expected — at BEAM
-/// level `Convert(BoxInt(W32), ConstI32(n))` and `ConstI32(n)` both emit
-/// `CInt(n)`; the Convert is a type-level annotation only).
+/// A finite double `f` that's an exact non-negative small int → the
+/// ir.Value the JS number `f` lowers to (mirrors `number_literal`'s smi arm,
+/// but a bare term-level integer since it's used where a JsVal is expected —
+/// at BEAM level `Convert(BoxInt(W32), ConstI32(n))` and `ConstI32(n)` both
+/// emit `CInt(n)`; the Convert is a type-level annotation only). `ConstI32`
+/// carries unsigned bits, so a negative int has no term literal (its bits
+/// would surface as `n + 2^32`) and `-0` is not an integer at all.
 fn small_int_value(f: Float) -> Option(ir.Value) {
   let i = float.truncate(f)
-  case int.to_float(i) == f && i >= -2_147_483_648 && i < 2_147_483_648 {
-    True -> Some(ir.ConstI32(int.bitwise_and(i, 0xFFFFFFFF)))
+  case
+    int.to_float(i) == f
+    && i >= 0
+    && i < 2_147_483_648
+    && !rt_val.is_neg_zero(f)
+  {
+    True -> Some(ir.ConstI32(i))
     False -> None
   }
 }
@@ -1012,12 +1020,13 @@ fn number_literal(n: ast.LiteralNumber) -> Build(ir.Value) {
     ast.InfiniteNumber -> anf.then(consts(), fn(rc) { anf.pure(rc.pos_inf) })
     ast.FiniteNumber(f) -> {
       let i = float.truncate(f)
-      case int.to_float(i) == f && i >= -2_147_483_648 && i < 2_147_483_648 {
-        True ->
-          anf.bind_number(ir.Convert(
-            ir.BoxInt(ir.W32),
-            ir.ConstI32(int.bitwise_and(i, 0xFFFFFFFF)),
-          ))
+      case
+        int.to_float(i) == f
+        && i >= 0
+        && i < 2_147_483_648
+        && !rt_val.is_neg_zero(f)
+      {
+        True -> anf.bind_number(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(i)))
         False ->
           anf.then(
             anf.host("float_lit", [ir.ConstF64(float_bits(f))]),
@@ -2503,15 +2512,15 @@ fn emit_update(
       use old <- anf.then(lvalue_get(lv))
       use one <- anf.then(number_literal(ast.FiniteNumber(1.0)))
       let #(fast_op, bop) = case op {
-        ast.Increment -> #(ir.NAdd, ast.Add)
-        ast.Decrement -> #(ir.NSub, ast.Subtract)
+        ast.Increment -> #("num_add", ast.Add)
+        ast.Decrement -> #("num_sub", ast.Subtract)
       }
       use e <- anf.then(ask)
       case anf.is_known_number(e, old) {
         // Statically known BEAM number: ToNumeric is identity and number±1
         // stays a number — emit the M0 shape (no TermTest/If/tuple).
         True -> {
-          use new <- anf.then(anf.bind_number(ir.NumTerm(fast_op, old, one)))
+          use new <- anf.then(anf.num_binop(fast_op, old, one))
           use _ <- anf.then(lvalue_put(lv, new))
           case prefix {
             True -> anf.pure(new)
@@ -2520,12 +2529,12 @@ fn emit_update(
         }
         False -> {
           // ONE is_number test drives BOTH ToNumeric and the ±1 guard: fast
-          // arm knows `old` is a BEAM number so NumTerm applies directly; slow
-          // arm keeps full to_numeric + guarded_binop for str/obj/bigint.
+          // arm knows `old` is a BEAM number so num_binop applies directly;
+          // slow arm keeps full to_numeric + guarded_binop for str/obj/bigint.
           use is_num <- anf.then(anf.bind(ir.TermTest(ir.IsNumber, old)))
           use pair <- anf.then(anf.bind_if(
             is_num,
-            anf.then(anf.bind_number(ir.NumTerm(fast_op, old, one)), fn(new) {
+            anf.then(anf.num_binop(fast_op, old, one), fn(new) {
               anf.make_tuple([old, new])
             }),
             anf.then(anf.host("to_numeric", [old]), fn(old_n) {
