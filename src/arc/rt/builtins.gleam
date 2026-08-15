@@ -45,6 +45,7 @@ import arc/rt/builtins/typed_array as b_typed_array
 import arc/rt/builtins/weak as b_weak
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
@@ -55,7 +56,7 @@ import arc/rt/types.{
   Named, NativeUnseeded, NoElements, NumberConstructor, NumberN, NumberObj,
   ObjectN, Ordinary, PromiseN, PromiseRejectFn, PromiseResolveFn, ProxyN, Realm,
   ReflectN, RegExpN, ReturnThis, SObject, SetN, StringConstructor, StringKey,
-  StringN, StringObj, SymbolConstructor, SymbolN, ThrowTypeErrorPoison,
+  StringN, StringObj, SymbolConstructor, SymbolN, Test262N, ThrowTypeErrorPoison,
   TypedArrayN, WeakN, classify, mk_number, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
@@ -66,8 +67,8 @@ import gleam/option.{None, Some}
 
 // ───────────────────────────────── init_realm ───────────────────────────────
 
-/// A fresh `Agent` with an empty store, the embedder's `hooks` and a fully
-/// initialised realm.
+/// A fresh `Agent` with an empty store, the embedder's `hooks`, `JsOps`
+/// seeded, and a fully initialised realm 0 as the current realm.
 pub fn new_agent(hooks: HostHooks) -> Agent {
   let st =
     Agent(
@@ -77,22 +78,28 @@ pub fn new_agent(hooks: HostHooks) -> Agent {
       frames: [],
       hooks:,
       host_fns: dict.new(),
+      realms: dict.new(),
     )
-  let #(_realm, st) = init_realm(st)
+  let #(_realm, st) = init_realm(seed_ops(st))
   st
 }
 
-/// Allocate and root every built-in intrinsic into the store, seed `JsOps`,
-/// build `globalThis`, and return the populated `Realm` (SPEC §7.M6 / §2.5).
+/// Allocate and root every built-in intrinsic of a NEW realm into the store,
+/// build its `globalThis`, register it in `st.realms` under the next free id
+/// and make it the current realm (SPEC §7.M6 / §2.5, §9.3.3 CreateRealm +
+/// SetRealmGlobalObject + SetDefaultGlobalBindings).
 ///
-/// Precondition: `st.store` is a fresh `t_store_new`. The returned `st` has
-/// `store` populated with all intrinsic cells + pinned roots + seeded ops,
-/// AND `realm` set so downstream `st.realm` reads succeed.
+/// Works on any agent whose `JsOps` are seeded: `new_agent` calls it for
+/// realm 0, `create_realm` (with `st.realm` reset to `unset_realm()`,
+/// reproducing the bootstrap state) for every later one.
 ///
 /// Allocation order mirrors arc `builtins.gleam:54-456` — prototype-chain
 /// wiring depends on it (Object.prototype first, then Function.prototype,
-/// then everything else). Deterministic: same handle ids every run.
+/// then everything else). Deterministic: same handle ids for realm 0 every
+/// run.
 pub fn init_realm(st: Agent) -> #(Realm, Agent) {
+  // Ids are never reused or removed, so the registry size is the next id.
+  let id = dict.size(st.realms)
   // 1. Object.prototype — the root of all prototype chains (proto: None).
   let #(object_proto, st) = common.alloc_proto(st, None, dict.new())
   // 2. Function.prototype + %Function% + %ThrowTypeError%.
@@ -104,10 +111,10 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   // 4. Array.
   let #(array, st) = b_array.init(st, object_proto, fn_proto)
   // 5. Error family (Error + 7 NativeError subclasses).
-  let #(errors, st) = b_error.init(st, object_proto, fn_proto)
+  let #(errors, st) = b_error.init(st, object_proto, fn_proto, id)
   // 6. Namespace objects (Math, JSON, Reflect, console, Atomics).
   let #(math, st) = b_math.init(st, object_proto, fn_proto)
-  let #(json, st) = b_json.init(st, object_proto, fn_proto)
+  let #(json, st) = b_json.init(st, object_proto, fn_proto, id)
   let #(reflect, st) = b_reflect.init(st, object_proto, fn_proto)
   let #(console, st) = b_console.init(st, object_proto, fn_proto)
   let #(atomics, st) = b_atomics.init(st, object_proto, fn_proto)
@@ -243,6 +250,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       throw_type_error:,
       global_object:,
       shared_array_buffer:,
+      id:,
+      lexical_globals: dict.new(),
     )
   // 17. Pin every realm handle (idempotent — most are already pinned by
   // alloc_proto/init_type, this catches any that arrived by another route).
@@ -250,17 +259,26 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
     list.fold(realm_ops.realm_handles(realm), st, fn(st, h) {
       rt_store.t_pin_root(st, h)
     })
-  // 18. Seed the concrete JsOps (D17) so rt_val/rt_obj upcalls resolve.
-  let st = seed_ops(st)
-  // 19. Install the realm on Agent so `st.realm` reads succeed
+  // 18. Register the realm and make it current so `st.realm` reads succeed
   // from here on (the JsOps bodies + every native call rely on it).
-  let st = Agent(..st, realm:)
+  let st = Agent(..st, realm:, realms: dict.insert(st.realms, id, realm))
   #(realm, st)
 }
 
-/// Rebind `st.store.ops` to the concrete M4/M-CALL bodies. `t_store_new`
-/// starts with a panic-stub `unseeded_ops`; this is `init_realm` step 1.
-fn seed_ops(st: Agent) -> Agent {
+/// §9.6 InitializeHostDefinedRealm for an agent that already runs one: a
+/// fresh realm with its own intrinsics and global object, registered in
+/// `st.realms`. The current realm is unchanged on return.
+pub fn create_realm(st: Agent) -> #(Realm, Agent) {
+  let origin = st.realm
+  let #(realm, st) = init_realm(Agent(..st, realm: rt_types.unset_realm()))
+  #(realm, Agent(..st, realm: origin))
+}
+
+/// Rebind `st.store.ops` to the runtime's own `JsOps` bodies; the bytecode
+/// entries stay unlinked stubs until the interpreter links them. Runs when
+/// an agent is built, and again in `snapshot.deserialize`, whose decoded
+/// store carries no ops.
+pub fn seed_ops(st: Agent) -> Agent {
   let js = st.store
   Agent(
     ..st,
@@ -524,6 +542,7 @@ pub fn dispatch_native(
     DataViewN(n) -> b_data_view.dispatch(st, n, this, args)
     TypedArrayN(n) -> b_typed_array.dispatch(st, n, this, args)
     AtomicsN(n) -> b_atomics.dispatch(st, n, this, args)
+    Test262N(n) -> rt_realm.dispatch_262(st, n, this, args, create_realm)
   }
 }
 
@@ -646,7 +665,8 @@ pub fn dispatch_native_construct(
     | ReflectN(_)
     | ConsoleN(_)
     | GlobalN(_)
-    | AtomicsN(_) ->
+    | AtomicsN(_)
+    | Test262N(_) ->
       panic as "dispatch_native_construct: non-constructible token reached [[Construct]]"
   }
 }

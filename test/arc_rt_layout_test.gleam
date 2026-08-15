@@ -94,8 +94,10 @@ pub fn agent_test() {
   assert at(st, "AGENT_STORE") == dyn(st.store)
   assert at(st, "AGENT_REALM") == dyn(st.realm)
   assert at(st, "AGENT_HOST_FNS") == dyn(st.host_fns)
+  assert at(st, "AGENT_REALMS") == dyn(st.realms)
   assert tag_of(at(st, "AGENT_STORE")) == tag("STORE_TAG")
   assert tag_of(at(st, "AGENT_REALM")) == tag("REALM_TAG")
+  assert dict.get(st.realms, st.realm.id) == Ok(st.realm)
 }
 
 pub fn js_store_test() {
@@ -136,6 +138,8 @@ pub fn realm_test() {
   assert at(realm, "REALM_FUNCTION") == dyn(realm.function)
   assert at(realm, "REALM_ARRAY") == dyn(realm.array)
   assert at(realm, "REALM_GLOBAL") == dyn(realm.global_object)
+  assert at(realm, "REALM_ID") == dyn(realm.id)
+  assert realm.id == 0
   assert realm.object != realm.function
   assert realm.function != realm.array
   let pair = realm.object

@@ -18,6 +18,7 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict
+import gleam/int
 import gleam/list
 import gleam/option.{Some}
 
@@ -71,6 +72,31 @@ fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let #(_, st) =
     rt_obj.t_define_own_data(st, h, k_done, mk_bool(False), True, True, True)
   #(mk_object(h), st)
+}
+
+/// The record object for an iterator whose `next` is already fetched (the
+/// interpreter's IteratorRecord opcode, after GetAsyncIterator).
+pub fn t_alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
+  alloc_record(st, rec)
+}
+
+/// The `[[Iterator]]`/`[[NextMethod]]` pair of a record object, `None` when
+/// `rec` is not one. yield* delegation reads them to call `next` itself and
+/// to forward `return`/`throw` to the underlying iterator.
+pub fn record_parts(st: Agent, rec: JsVal) -> option.Option(IteratorRecord) {
+  case classify(rec) {
+    KHandle(h) ->
+      case
+        rt_obj.t_ordinary_own_property(st, h, k_iterator),
+        rt_obj.t_ordinary_own_property(st, h, k_next)
+      {
+        Some(types.DataProperty(value: iterator, ..)),
+          Some(types.DataProperty(value: next_method, ..))
+        -> Some(IteratorRecord(iterator:, next_method:))
+        _, _ -> option.None
+      }
+    _ -> option.None
+  }
 }
 
 fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
@@ -252,14 +278,17 @@ pub fn t_regexp_new(
 
 /// §13.2.8.4 GetTemplateObject. `site` is unique per tagged-template source
 /// position (the emitter qualifies it with the module name); the frozen
-/// template array (with its frozen `raw`) is built once, pinned, and cached
-/// on the agent. `cooked` holds `undefined` for quasis with invalid escapes.
+/// template array (with its frozen `raw`) is built once per realm (the
+/// [[TemplateMap]] is a Realm Record field), pinned, and cached on the agent
+/// under the current realm's id. `cooked` holds `undefined` for quasis with
+/// invalid escapes.
 pub fn t_get_template_object(
   st: Agent,
   site: String,
   cooked: List(JsVal),
   raw: List(String),
 ) -> #(JsVal, Agent) {
+  let site = int.to_string(st.realm.id) <> ":" <> site
   case dict.get(st.template_objects, site) {
     Ok(h) -> #(mk_object(h), st)
     Error(Nil) -> {

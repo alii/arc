@@ -26,14 +26,14 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayBufferNative, type BufferStorage, type BuiltinPair,
-  type Handle, type JsVal, ArrayBufferConstructor, ArrayBufferGetByteLength,
-  ArrayBufferGetDetached, ArrayBufferGetImmutable, ArrayBufferGetMaxByteLength,
-  ArrayBufferGetResizable, ArrayBufferIsView, ArrayBufferN, ArrayBufferObj,
-  ArrayBufferResize, ArrayBufferSlice, ArrayBufferSliceToImmutable,
-  ArrayBufferTransfer, ArrayBufferTransferToFixedLength,
-  ArrayBufferTransferToImmutable, Bytes, DataViewObj, Detached, Immutable, JInt,
-  KHandle, KUndef, Named, ReturnThis, SObject, Shared,
-  SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
+  type Handle, type JsVal, ArrayBufferConstructor, ArrayBufferDetach262,
+  ArrayBufferGetByteLength, ArrayBufferGetDetached, ArrayBufferGetImmutable,
+  ArrayBufferGetMaxByteLength, ArrayBufferGetResizable, ArrayBufferIsView,
+  ArrayBufferN, ArrayBufferObj, ArrayBufferResize, ArrayBufferSlice,
+  ArrayBufferSliceToImmutable, ArrayBufferTransfer,
+  ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable, Bytes,
+  DataViewObj, Detached, Immutable, JInt, KHandle, KUndef, Named, ReturnThis,
+  SObject, Shared, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
   SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
   SharedArrayBufferGrow, SharedArrayBufferSlice, StringKey, TypedArrayObj,
   classify, mk_bool, mk_number, mk_object, mk_undefined,
@@ -186,7 +186,19 @@ pub fn dispatch(
     SharedArrayBufferGetMaxByteLength -> sab_get_max_byte_length(st, this)
     SharedArrayBufferGrow -> sab_grow(st, this, args)
     SharedArrayBufferSlice -> buffer_slice(st, this, args, shared: True)
+    ArrayBufferDetach262 -> detach_262(st, args)
   }
+}
+
+/// test262 `$262.detachArrayBuffer(buffer)`: §25.1.3.5 DetachArrayBuffer on
+/// an unshared buffer. Immutable buffers can never be detached (Immutable
+/// ArrayBuffer proposal), so that is a TypeError like a shared one.
+fn detach_262(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  let method = "detachArrayBuffer"
+  let buf = require_buffer(st, helpers.first_arg_or_undefined(args), method)
+  let buf = require_unshared(st, buf, method)
+  let buf = require_not_immutable(st, buf, method)
+  #(mk_undefined(), detach(st, buf))
 }
 
 /// Per-module [[Construct]] dispatch.

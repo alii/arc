@@ -1492,8 +1492,7 @@ fn is_concat_spreadable(st: Agent, item: JsVal) -> #(Bool, Agent) {
 // ─────────────────────── ArraySpeciesCreate + species writes ────────────────
 
 /// §9.4.2.3 ArraySpeciesCreate. `None` → caller allocates a plain Array;
-/// `Some(target)` → a custom species constructor was invoked. Single-realm:
-/// arc's cross-realm step 4a is a no-op here.
+/// `Some(target)` → a custom species constructor was invoked.
 fn array_species_create(
   st: Agent,
   original: JsVal,
@@ -1505,8 +1504,20 @@ fn array_species_create(
       case is_arr {
         False -> #(None, st)
         True -> {
+          // Step 3: C = ? Get(originalArray, "constructor").
           let #(ctor, st) =
             rt_obj.t_get_prop(st, original, StringKey(Named("constructor")))
+          // Step 4: C is the %Array% of ANOTHER realm → C = undefined, so
+          // @@species is never read (create-proto-from-ctor-realm-array.js).
+          let ctor = case classify(ctor) {
+            KHandle(ctor_ref) ->
+              case is_foreign_array_ctor(st, ctor_ref) {
+                True -> mk_undefined()
+                False -> ctor
+              }
+            _ -> ctor
+          }
+          // Step 5: C = ? Get(C, @@species); null → undefined.
           let #(ctor, st) = case classify(ctor) {
             KHandle(_) -> {
               let #(species, st) =
@@ -1535,6 +1546,14 @@ fn array_species_create(
     }
     _ -> #(None, st)
   }
+}
+
+/// Step 4 of ArraySpeciesCreate: `ctor` is SameValue with the intrinsic
+/// %Array% of a realm other than the running one (GetFunctionRealm of an
+/// intrinsic constructor is the realm that owns it).
+fn is_foreign_array_ctor(st: Agent, ctor: Handle) -> Bool {
+  ctor != st.realm.array.constructor
+  && list.any(dict.values(st.realms), fn(r) { r.array.constructor == ctor })
 }
 
 fn species_construct(

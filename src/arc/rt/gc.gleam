@@ -1,8 +1,11 @@
 //// `rt_gc` — turn-boundary-only mark-sweep over the threaded `JsStore`
 //// (SPEC §7.M2, D11). Port of arc `vm/{heap.gleam:442-563, gc_trace.gleam}`
 //// onto 2core's `rt_types` shapes. Collection is gated on
-//// `call_depth == 0` (D11 — NO fn-entry safepoint), so a live JS stack
-//// frame's locals are never roots and need no tracing.
+//// `call_depth == 0` (D11 — NO fn-entry safepoint): compiled code never has
+//// a live frame at a safepoint, and the interpreter, which does collect from
+//// inside its root activation, hands that frame's registers in as
+//// `extra_roots` (`arc/interp/safepoint`). Parked coroutine frames live in
+//// cells and are traced by `refs_in_cell`.
 ////
 //// **G18 divergence from M2.md:** M2.md's `roots_of_state` sketch
 //// destructures a `Realm` record for `global_object` / intrinsics. That
@@ -12,24 +15,30 @@
 //// `t_pin_root`. The D11 root formula therefore reduces to
 //// `pinned_roots ∪ refs_in_term(microtasks) ∪ unhandled_rejections`.
 
+import arc/rt/bytecode.{
+  type EnvTuple, type FuncTemplate, type SuspendedFrame, FuncTemplate,
+  SuspendedFrame,
+}
 import arc/rt/types.{
-  type Agent, type Handle, type Job, type JsElements, type JsSlot, type JsStore,
-  type JsVal, type ObjKind, type PromiseReaction, type PromiseState,
-  type Property, type ReactionHandler, AccessorProperty, Agent, ArgumentsObj,
-  ArrayBufferObj, ArrayIterator, ArrayObj, AsyncFromSyncIterator,
-  AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty, DataViewObj, DateObj,
-  Dense, ErrorObj, ForInIterator, GeneratorObj, Handler, HostJob,
-  IdentityPassThrough, IteratorHelperObj, JsCell, JsStore, KBound, KBytecode,
-  KCompiled, KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements,
-  NumberObj, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
-  PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
-  ResolveThenableJob, SAsyncContext, SAsyncGen, SBox, SGenerator, SObject,
-  SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, StringIterator,
-  StringObj, SymbolObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj,
-  WeakSetObj, WrapForValidIteratorObj, jq_to_list, native_token_refs,
+  type Agent, type AsyncGenRequest, type Handle, type Job, type JsElements,
+  type JsSlot, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
+  type PromiseState, type Property, type ReactionHandler, type Resume,
+  AccessorProperty, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
+  AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
+  BooleanObj, DataProperty, DataViewObj, DateObj, Dense, ErrorObj, ForInIterator,
+  GeneratorObj, Handler, HostJob, IdentityPassThrough, IteratorHelperObj, JsCell,
+  JsStore, KBound, KBytecode, KCompiled, KHost, KNative, MapIterator, MapObj,
+  ModuleNamespace, NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj,
+  PromisePending, PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj,
+  ReactionJob, RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame,
+  SAsyncContext, SAsyncGen, SBox, SGenerator, SObject, SPromiseData,
+  SShapedObject, SetIterator, SetObj, Sparse, StringIterator, StringObj,
+  SymbolObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakSetObj,
+  WrapForValidIteratorObj, jq_to_list, native_token_refs,
 } as rt_types
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array as rt_tree_array
+import arc/vm/internal/tuple_array.{type TupleArray}
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
 import gleam/list
@@ -113,7 +122,17 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
   let acc = push_term_refs(to_dynamic(jq_to_list(microtasks)), acc)
   // Embedder closures may capture handles (a class constructor holding its
   // prototype); walk their fun envs.
-  push_term_refs(to_dynamic(dict.values(st.host_fns)), acc)
+  let acc = push_term_refs(to_dynamic(dict.values(st.host_fns)), acc)
+  // Global let/const/class bindings of every realm live outside the heap's
+  // global objects (intrinsics and template objects are already pinned).
+  // The registry's copy of the current realm may be stale, so it is walked
+  // from `st.realm`; a stale entry only over-approximates.
+  let realms = dict.insert(st.realms, st.realm.id, st.realm)
+  dict.fold(realms, acc, fn(acc, _id, realm) {
+    dict.fold(realm.lexical_globals, acc, fn(acc, _name, binding) {
+      push_val_refs(rt_types.lexical_global_value(binding), acc)
+    })
+  })
 }
 
 // ── cell tracer (arc gc_trace.gleam:61-540) ─────────────────────────────────
@@ -138,16 +157,110 @@ pub fn refs_in_cell(slot: JsSlot) -> List(Int) {
     }
     SBox(value:) -> push_val_refs(value, [])
     SPromiseData(state:, is_handled: _) -> push_promise_state_refs(state, [])
-    // A `Resume` holds the state machine fun (captures in its env) plus the
-    // locals tuple, or a parked frame: all walked by the FFI term scanner.
-    SGenerator(state: _, resume:) -> push_term_refs(to_dynamic(resume), [])
-    SAsyncGen(state: _, resume:, queue:) -> {
-      let acc = push_term_refs(to_dynamic(resume), [])
-      push_term_refs(to_dynamic(queue), acc)
+    SGenerator(state: _, resume:) -> push_resume_refs(resume, [])
+    SAsyncGen(state: _, resume:, queue: #(front, back)) -> {
+      let acc = push_resume_refs(resume, [])
+      let acc = list.fold(front, acc, push_request_refs)
+      list.fold(back, acc, push_request_refs)
     }
-    SAsyncContext(resume:, promise:) ->
-      push_term_refs(to_dynamic(resume), [promise.id])
+    SAsyncContext(resume:, promise:) -> push_resume_refs(resume, [promise.id])
   }
+}
+
+/// Refs a parked coroutine keeps alive. Exhaustive over `Resume`.
+fn push_resume_refs(resume: Resume, acc: List(Int)) -> List(Int) {
+  case resume {
+    // A compiled state machine: the fun's captured env plus its own locals
+    // tuple, both opaque compiled terms only the FFI walk can open.
+    ResumeCompiled(sm:, rs: _, loc:) ->
+      push_term_refs(to_dynamic(loc), push_term_refs(to_dynamic(sm), acc))
+    ResumeFrame(frame:) -> push_suspended_frame_refs(frame, acc)
+  }
+}
+
+/// Refs a parked interpreter frame keeps alive: its locals, operand stack,
+/// receiver, home object and its own sloppy-direct-eval var object (reachable
+/// from nowhere else, so a resume after a collection would find it gone).
+/// Port of arc `gc_trace.push_suspended_frame_refs`. EXHAUSTIVE destructure:
+/// a new `SuspendedFrame` field is a compile error here until classified.
+pub fn push_suspended_frame_refs(
+  frame: SuspendedFrame,
+  acc: List(Int),
+) -> List(Int) {
+  let SuspendedFrame(
+    template:,
+    // Plain index.
+    pc: _,
+    locals:,
+    stack:,
+    // Scalar: pc offsets and a stack depth.
+    try_stack: _,
+    this:,
+    home_object:,
+    eval_env:,
+    line: _,
+    at_start: _,
+  ) = frame
+  let acc = push_template_refs(template, acc)
+  let acc = push_vals_tuple_refs(locals, acc)
+  let acc = list.fold(stack, acc, fn(a, v) { push_val_refs(v, a) })
+  let acc = push_val_refs(this, acc)
+  let acc = push_val_refs(home_object, acc)
+  case eval_env {
+    Some(id) -> [id, ..acc]
+    None -> acc
+  }
+}
+
+/// Refs a code template keeps alive: only its own constant pool can name a
+/// value. Nested `functions` are not walked: a nested template is compile-time
+/// data until MakeClosure instantiates it as its own `KBytecode` cell, which
+/// is then traced here in its own right. EXHAUSTIVE destructure.
+fn push_template_refs(template: FuncTemplate, acc: List(Int)) -> List(Int) {
+  let FuncTemplate(
+    name: _,
+    arity: _,
+    length: _,
+    local_count: _,
+    // Opcodes: operands are ints, strings and pool indices.
+    bytecode: _,
+    constants:,
+    functions: _,
+    // Parent-slot indices.
+    env_descriptors: _,
+    is_strict: _,
+    is_arrow: _,
+    is_derived_constructor: _,
+    is_generator: _,
+    is_async: _,
+    is_constructor: _,
+    is_class_constructor: _,
+    // Names and slot indices.
+    local_names: _,
+    lexical: _,
+    code_kind: _,
+  ) = template
+  push_vals_tuple_refs(constants, acc)
+}
+
+/// A closure's captured environment: a flat tuple of values.
+fn push_env_refs(env: EnvTuple, acc: List(Int)) -> List(Int) {
+  push_term_refs(to_dynamic(env), acc)
+}
+
+/// A flat tuple of values (locals, constant pool), walked in one FFI pass.
+fn push_vals_tuple_refs(vals: TupleArray(JsVal), acc: List(Int)) -> List(Int) {
+  push_term_refs(to_dynamic(vals), acc)
+}
+
+/// One queued `.next`/`.throw`/`.return` on an async generator: the sent
+/// value and the promise capability it settles. EXHAUSTIVE destructure.
+fn push_request_refs(acc: List(Int), req: AsyncGenRequest) -> List(Int) {
+  let AsyncGenRequest(completion: _, value:, resolve:, reject:) = req
+  acc
+  |> push_val_refs(value, _)
+  |> push_val_refs(resolve, _)
+  |> push_val_refs(reject, _)
 }
 
 /// Refs reachable from an `ObjKind`. EXHAUSTIVE (SPEC §7.M2 table) — no
@@ -178,10 +291,8 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     KBytecode(template:, env:, home_object:, flags: _, fields_init:) -> {
       let acc = push_opt_handle(home_object, acc)
       let acc = push_opt_handle(fields_init, acc)
-      // The constant pool and the closed-over environment hold `JsVal`s
-      // inside interpreter-owned terms; walk them via the FFI term scanner.
-      let acc = push_term_refs(to_dynamic(template), acc)
-      push_term_refs(to_dynamic(env), acc)
+      let acc = push_template_refs(template, acc)
+      push_env_refs(env, acc)
     }
     KNative(tag:, name: _, length: _, constructible: _) -> {
       let acc = list.fold(native_token_refs(tag), acc, fn(a, h) { [h.id, ..a] })
@@ -336,20 +447,49 @@ fn push_opt_val(ov: Option(JsVal), acc: List(Int)) -> List(Int) {
 pub const default_gc_threshold: Int = 65_536
 
 /// TURN-BOUNDARY safepoint (D11). Collects only when `call_depth == 0` AND
-/// `alloc_since_gc >= gc_threshold` (uses the store's own `gc_threshold`
-/// field — NOT a module const; verified `rt_types.gleam:943-949`).
-/// Called from exactly two places: M8 `t_drain_microtasks` between jobs, and
-/// M19 `js_main` after top-level return. NEVER at fn-entry (D11).
+/// `alloc_since_gc >= gc_threshold` (the store's own `gc_threshold` field).
+/// Safepoints: `rt/async.drain` between jobs, the runner / engine after a
+/// top-level return, and the interpreter's root-activation `Return`
+/// (`arc/interp/safepoint`, via `t_maybe_collect_with`). NEVER at fn-entry.
 pub fn t_maybe_collect(st: Agent) -> Agent {
+  t_maybe_collect_with(st, [])
+}
+
+/// `t_maybe_collect` for a caller that still holds live values the store
+/// cannot see: the interpreter's root activation passes its frame registers.
+/// Same gate; `extra_roots` only matter when it fires.
+pub fn t_maybe_collect_with(st: Agent, extra_roots: List(Handle)) -> Agent {
   let js = require_js(st)
   case js.call_depth == 0 && js.alloc_since_gc >= js.gc_threshold {
-    True -> t_collect(st, [])
+    True -> t_collect(st, extra_roots)
     False -> st
   }
 }
 
+/// Keep the cells `held` names alive across a stretch where safepoints fire
+/// without the holder's roots (a microtask drain run while the engine holds
+/// a completion value in Gleam). Pins the ids not already permanent and
+/// returns exactly those, for `t_release_roots` to undo this hold and
+/// nothing else.
+pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(Agent, List(Int)) {
+  let js = require_js(st)
+  let ids =
+    list.fold(held, [], fn(acc, v) { push_val_refs(v, acc) })
+    |> list.filter(fn(id) { !set.contains(js.pinned_roots, id) })
+    |> list.unique
+  let pinned = list.fold(ids, js.pinned_roots, set.insert)
+  #(Agent(..st, store: JsStore(..js, pinned_roots: pinned)), ids)
+}
+
+/// Undo a `t_hold_roots`.
+pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
+  let js = require_js(st)
+  let pinned = list.fold(ids, js.pinned_roots, set.delete)
+  Agent(..st, store: JsStore(..js, pinned_roots: pinned))
+}
+
 /// Mark-and-sweep the JS heap. Roots = `roots_of_state(st)` ∪ `extra_roots`
-/// (v2 escape hatch for host-driven mid-turn `gc()`; empty at turn-boundary).
+/// (the interpreter's live root frame, or a host-driven mid-turn `gc()`).
 /// Resets `alloc_since_gc`. NO id renumbering (SPEC §7.M2 invariant).
 /// Port of arc `heap.collect_with_roots` (heap.gleam:470-476).
 pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {

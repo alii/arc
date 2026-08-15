@@ -846,6 +846,20 @@ pub type NativeToken {
   /// closure, so it serializes; the embedder re-registers in the same order
   /// after `deserialize` and the ids line up again.
   HostFn(id: Int)
+  /// The test262 host-defined `$262` methods (INTERPRETING.md).
+  Test262N(Test262Native)
+}
+
+/// `$262` methods. `realm` is the id of the realm whose `$262` object the
+/// function sits on: `evalScript` runs its source there and `createRealm`
+/// copies that `$262`'s `agent` onto the child it builds.
+pub type Test262Native {
+  /// `$262.evalScript(source)` — §16.1.6 ScriptEvaluation in `realm`.
+  Test262EvalScript(realm: Int)
+  /// `$262.createRealm()` — a fresh realm; returns its `$262`.
+  Test262CreateRealm(realm: Int)
+  /// `$262.gc()` — a hint; collection only happens at safepoints.
+  Test262Gc
 }
 
 /// §27.2 Promise built-in dispatch tokens. Handle-carrying variants are the
@@ -1035,8 +1049,10 @@ pub type ErrorNative {
   ErrorCaptureStackTrace
   /// get Error.prototype.stack — error-stack-accessor proposal.
   ErrorStackGetter
-  /// set Error.prototype.stack — carries own realm's %Error.prototype%.
-  ErrorStackSetter(proto: Handle)
+  /// set Error.prototype.stack — `realm` is the setter's own realm: its
+  /// %Error.prototype% is the `home` object and its %TypeError% brands the
+  /// step-2 throw, whichever realm calls it.
+  ErrorStackSetter(realm: Int)
   /// Error.isError ( arg ) — proposal.
   ErrorIsError
 }
@@ -1169,6 +1185,8 @@ pub type ArrayBufferNative {
   /// Immutable ArrayBuffer proposal:
   /// ArrayBuffer.prototype.transferToImmutable ( [ newLength ] )
   ArrayBufferTransferToImmutable
+  /// test262 `$262.detachArrayBuffer(buffer)` — §25.1.3.5 DetachArrayBuffer.
+  ArrayBufferDetach262
   /// §25.2.3.1 SharedArrayBuffer ( length [ , options ] )
   SharedArrayBufferConstructor(proto: Handle)
   /// §25.2.5.2 get SharedArrayBuffer.prototype.byteLength
@@ -1344,14 +1362,16 @@ pub type MathNative {
   MathTrunc
 }
 
-/// §25.5 JSON namespace natives (arc `JsonNativeFn`). No Handle-carrying
-/// variants in 2core (arc per-token `fn_proto` realm marker dropped;
-/// 2core is single-realm per SPEC §2.5).
+/// §25.5 JSON namespace natives (arc `JsonNativeFn`). Every variant carries
+/// `realm`: the id of the realm the function object was created in (its
+/// [[Realm]]), whose intrinsics brand the errors it throws and the objects
+/// it allocates however it was reached (`otherRealm.JSON.parse('{')` throws
+/// `otherRealm.SyntaxError`).
 pub type JsonNative {
-  JsonParse
-  JsonStringify
-  JsonRawJson
-  JsonIsRawJson
+  JsonParse(realm: Int)
+  JsonStringify(realm: Int)
+  JsonRawJson(realm: Int)
+  JsonIsRawJson(realm: Int)
 }
 
 /// §28.1 Reflect namespace natives (arc `ReflectNativeFn`). No
@@ -1711,7 +1731,8 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     | ConsoleN(_)
     | GlobalN(_)
     | ThrowTypeErrorPoison
-    | HostFn(_) -> []
+    | HostFn(_)
+    | Test262N(_) -> []
   }
 }
 
@@ -1858,11 +1879,11 @@ pub fn error_native_refs(n: ErrorNative) -> List(Handle) {
   case n {
     ErrorConstructor(proto:)
     | AggregateErrorConstructor(proto:)
-    | SuppressedErrorConstructor(proto:)
-    | ErrorStackSetter(proto:) -> [proto]
+    | SuppressedErrorConstructor(proto:) -> [proto]
     ErrorPrototypeToString
     | ErrorCaptureStackTrace
     | ErrorStackGetter
+    | ErrorStackSetter(_)
     | ErrorIsError -> []
   }
 }
@@ -2318,9 +2339,33 @@ pub type TypedArrays {
   TypedArrays(by_kind: Dict(TypedArrayKind, BuiltinPair))
 }
 
-/// A realm's intrinsics: every built-in prototype/constructor handle. NOT a
-/// field on `JsStore` (G18) — `t_store_new` returns a realm-less store; M6's
-/// `init_realm` allocates this INTO the store and returns it separately.
+/// A global `let`/`const`/`class` binding (§9.1.1.4 declarative part of the
+/// global Environment Record). Lives on `Realm.lexical_globals`, not on the
+/// global object. `mk_tdz()` as the value marks an uninitialized binding.
+pub type LexicalGlobal {
+  Let(JsVal)
+  Const(JsVal)
+}
+
+/// The bound value of a lexical global, let or const.
+pub fn lexical_global_value(g: LexicalGlobal) -> JsVal {
+  case g {
+    Let(v) | Const(v) -> v
+  }
+}
+
+/// Replace the bound value of a lexical global, preserving let/const-ness.
+pub fn lexical_global_with_value(g: LexicalGlobal, v: JsVal) -> LexicalGlobal {
+  case g {
+    Let(_) -> Let(v)
+    Const(_) -> Const(v)
+  }
+}
+
+/// A Realm Record (§9.3): every intrinsic prototype/constructor handle, the
+/// global object, the global lexical bindings, and its `id` in
+/// `Agent.realms`. NOT a field on `JsStore` (G18) — `t_store_new` returns a
+/// realm-less store; `init_realm` allocates this INTO the store.
 pub type Realm {
   Realm(
     object: BuiltinPair,
@@ -2373,6 +2418,11 @@ pub type Realm {
     global_object: Handle,
     // APPENDED after `global_object` so `?REALM_GLOBAL` stays put.
     shared_array_buffer: BuiltinPair,
+    /// Key of this realm in `Agent.realms`; realm-attributed native tokens
+    /// carry it. The bootstrap realm is 0.
+    id: Int,
+    /// Global `let`/`const`/`class` bindings (§9.1.1.4 [[DeclarativeRecord]]).
+    lexical_globals: Dict(String, LexicalGlobal),
   )
 }
 
@@ -2431,6 +2481,8 @@ pub fn unset_realm() -> Realm {
     throw_type_error: h,
     global_object: h,
     shared_array_buffer: p,
+    id: -1,
+    lexical_globals: dict.new(),
   )
 }
 
@@ -2557,8 +2609,11 @@ pub type JsStore(st) {
 pub type Agent {
   Agent(
     store: JsStore(Agent),
+    /// The current Realm Record (the running execution context's realm).
+    /// Authoritative for its own id: `realms` may hold a stale copy of it.
     realm: Realm,
-    /// §13.2.8.4 [[TemplateMap]]: site id -> pinned template array.
+    /// §13.2.8.4 [[TemplateMap]]: `"<realm id>:<site id>"` -> pinned
+    /// template array, so each realm caches its own template objects.
     template_objects: Dict(String, Handle),
     /// Active call chain, innermost first, as the interpreter pushes it on
     /// Call and pops it on Return. `Error` construction renders it into
@@ -2570,6 +2625,10 @@ pub type Agent {
     /// Embedder natives by `NativeToken.HostFn(id)`. Closures, so excluded
     /// from serialization like `hooks`; the embedder re-registers them.
     host_fns: Dict(Int, HostFnEntry),
+    /// Every realm of this agent by `Realm.id`. The entry for `realm.id`
+    /// is refreshed only when another realm is entered (`rt/realm`), so read
+    /// the current realm through `realm`, never through this map.
+    realms: Dict(Int, Realm),
   )
 }
 

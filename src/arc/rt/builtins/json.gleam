@@ -4,17 +4,24 @@
 //// unmodified primitive, and `JSON.rawJSON` / `JSON.isRawJSON` box verbatim
 //// JSON text for `JSON.stringify`.
 ////
-//// Port of arc/vm/builtins/json.gleam over 2core's threaded Agent.
-//// Return-tuple order is `#(JsVal, Agent)` (R1). The one simplification is
-//// realms: this runtime is single-realm, so the per-token [[Realm]] marker
-//// and the owner/caller `Builtins` swap are gone. Each place the arc code
-//// consulted them carries a `// REALM:` comment.
+//// Port of arc/vm/builtins/json.gleam over the threaded Agent.
+//// Return-tuple order is `#(JsVal, Agent)` (R1).
+////
+//// Realms: everything a JSON builtin allocates — thrown errors, the parsed
+//// objects, the reviver's `context` — comes from the intrinsics of the realm
+//// the FUNCTION belongs to (the `realm` id its token carries), not the realm
+//// that happens to be running: `otherRealm.JSON.parse('{')` throws
+//// `otherRealm.SyntaxError`. `dispatch` enters that realm for the body. User
+//// callbacks the builtin re-enters — a reviver, a replacer, a `toJSON` — run
+//// back in the CALLER's realm (`call_in_caller_realm`), so what their code
+//// creates belongs to the running realm as it did before any realm handling.
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsVal, type JsonNative, ArrayObj,
@@ -39,20 +46,21 @@ import gleam/string_tree.{type StringTree}
 // Init — set up the JSON global object
 // ============================================================================
 
-/// Set up the JSON global object.
+/// Set up the JSON global object of realm `realm`.
 /// JSON is NOT a constructor — it's a plain object with static methods
 /// (like Math), per ES2024 §25.5.
 pub fn init(
   st: Agent,
   object_proto: Handle,
   function_proto: Handle,
+  realm: Int,
 ) -> #(Handle, Agent) {
   let #(methods, st) =
     common.alloc_methods(st, function_proto, [
-      #("parse", JsonN(JsonParse), 2),
-      #("stringify", JsonN(JsonStringify), 3),
-      #("rawJSON", JsonN(JsonRawJson), 1),
-      #("isRawJSON", JsonN(JsonIsRawJson), 1),
+      #("parse", JsonN(JsonParse(realm:)), 2),
+      #("stringify", JsonN(JsonStringify(realm:)), 3),
+      #("rawJSON", JsonN(JsonRawJson(realm:)), 1),
+      #("isRawJSON", JsonN(JsonIsRawJson(realm:)), 1),
     ])
 
   common.init_namespace(st, object_proto, "JSON", methods)
@@ -62,22 +70,38 @@ pub fn init(
 // Dispatch
 // ============================================================================
 
-/// Per-module dispatch for JSON native functions.
+/// Per-module dispatch for JSON native functions. The body runs in the
+/// function's own realm; `caller` (the realm running at entry) is threaded
+/// to every user-callback site. Attribution never looks at the receiver:
+/// `JSON.parse.call(otherRealm.JSON, '{}')` is still this realm's parse.
 pub fn dispatch(
   st: Agent,
   native: JsonNative,
   _this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  // REALM: arc installed the JSON function's owner-realm `Builtins`
-  // (`owner_realm_builtins`) for the body and restored the caller's after, so
-  // errors and parsed objects came from the callee's realm. Single-realm here.
+  let caller = st.realm.id
+  use st <- rt_realm.with_realm(st, native.realm)
   case native {
-    JsonParse -> json_parse(args, st)
-    JsonStringify -> json_stringify(args, st)
-    JsonRawJson -> json_raw_json(args, st)
-    JsonIsRawJson -> json_is_raw_json(args, st)
+    JsonParse(_) -> json_parse(args, caller, st)
+    JsonStringify(_) -> json_stringify(args, caller, st)
+    JsonRawJson(_) -> json_raw_json(args, st)
+    JsonIsRawJson(_) -> json_is_raw_json(args, st)
   }
+}
+
+/// Re-enter user code (a reviver / replacer / toJSON) with realm `caller` —
+/// the realm that was running when the JSON builtin was invoked — current
+/// again, coming back to the JSON function's own realm afterwards.
+fn call_in_caller_realm(
+  st: Agent,
+  caller: Int,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  use st <- rt_realm.with_realm(st, caller)
+  rt_call.t_call_checked(st, callee, this, args)
 }
 
 // ============================================================================
@@ -95,7 +119,7 @@ pub fn dispatch(
 ///        CreateDataPropertyOrThrow(root, "", unfiltered), then return
 ///        ? InternalizeJSONProperty(root, "", reviver, the root parse node).
 ///   10. Otherwise return unfiltered.
-fn json_parse(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
+fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
   // Step 1: ToString(text).
   let #(json_str, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
@@ -122,7 +146,8 @@ fn json_parse(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
                 False -> #(unfiltered, st)
                 True -> {
                   let #(root, st) = alloc_holder(st, unfiltered)
-                  internalize_json_property(st, reviver, root, "", Some(record))
+                  let ctx = ReviveCtx(reviver:, caller:)
+                  internalize_json_property(st, ctx, root, "", Some(record))
                 }
               }
             None -> #(unfiltered, st)
@@ -164,11 +189,11 @@ fn json_parse(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 ///   6. Return ? Call(reviver, holder, « name, val, context »).
 ///
 /// Recursion here is ordinary Gleam recursion; the re-entrant JS calls go
-/// through `rt_call.t_call_checked`, the same convention `serialize_property`
+/// through `call_in_caller_realm`, the same convention `serialize_property`
 /// uses to invoke `toJSON` and the replacer.
 fn internalize_json_property(
   st: Agent,
-  reviver: JsVal,
+  ctx: ReviveCtx,
   holder: Handle,
   name: String,
   node: Option(ParseRecord),
@@ -193,12 +218,12 @@ fn internalize_json_property(
         // Step 5.b: indices 0..len-1, len from LengthOfArrayLike.
         True -> {
           let #(len, st) = length_of_array_like(st, h)
-          internalize_elements(st, reviver, h, 0, len, record_elements(node))
+          internalize_elements(st, ctx, h, 0, len, record_elements(node))
         }
         // Step 5.c: EnumerableOwnPropertyNames(val, key).
         False -> {
           let #(keys, st) = enumerable_string_keys(st, h)
-          internalize_keys(st, reviver, h, keys, record_members(node))
+          internalize_keys(st, ctx, h, keys, record_members(node))
         }
       }
     _ -> st
@@ -206,15 +231,19 @@ fn internalize_json_property(
   // Steps 2-3: the `context` object, carrying `source` only for an unmodified
   // primitive literal.
   let #(context, st) = alloc_context(st, record_source(node))
-  // Step 6: return ? Call(reviver, holder, « name, val, context »).
-  // REALM: arc re-entered the reviver via `call_in_caller_realm`, reinstalling
-  // the realm that was running when JSON.parse was invoked so the reviver's
-  // own allocations came from it. Single-realm here: a plain call.
-  rt_call.t_call_checked(st, reviver, mk_object(holder), [
+  // Step 6: return ? Call(reviver, holder, « name, val, context »), back in
+  // the realm that was running when JSON.parse was invoked.
+  call_in_caller_realm(st, ctx.caller, ctx.reviver, mk_object(holder), [
     mk_string(name),
     val,
     mk_object(context),
   ])
+}
+
+/// The reviver walk's fixed context: the reviver and the id of the realm
+/// JSON.parse was called from, which every reviver call re-enters.
+type ReviveCtx {
+  ReviveCtx(reviver: JsVal, caller: Int)
 }
 
 /// Step 3: keep the parse record only if it is still the record for `val` —
@@ -241,7 +270,7 @@ fn fresh_record(node: Option(ParseRecord), val: JsVal) -> Option(ParseRecord) {
 /// simply run out and get `None`.
 fn internalize_elements(
   st: Agent,
-  reviver: JsVal,
+  ctx: ReviveCtx,
   h: Handle,
   i: Int,
   len: Int,
@@ -256,9 +285,9 @@ fn internalize_elements(
       }
       let name = int.to_string(i)
       let #(new_element, st) =
-        internalize_json_property(st, reviver, h, name, child)
+        internalize_json_property(st, ctx, h, name, child)
       let st = replace_or_delete(st, h, name, new_element)
-      internalize_elements(st, reviver, h, i + 1, len, rest_children)
+      internalize_elements(st, ctx, h, i + 1, len, rest_children)
     }
   }
 }
@@ -269,7 +298,7 @@ fn internalize_elements(
 /// so each key costs one dict lookup rather than a scan of every member.
 fn internalize_keys(
   st: Agent,
-  reviver: JsVal,
+  ctx: ReviveCtx,
   h: Handle,
   keys: List(String),
   members: dict.Dict(String, ParseRecord),
@@ -280,13 +309,13 @@ fn internalize_keys(
       let #(new_element, st) =
         internalize_json_property(
           st,
-          reviver,
+          ctx,
           h,
           p,
           dict.get(members, p) |> option.from_result,
         )
       let st = replace_or_delete(st, h, p, new_element)
-      internalize_keys(st, reviver, h, rest, members)
+      internalize_keys(st, ctx, h, rest, members)
     }
   }
 }
@@ -332,10 +361,8 @@ fn replace_or_delete(
 /// with CreateDataPropertyOrThrow(holder, "", val). Both JSON.parse
 /// (§25.5.1 steps 7-8) and JSON.stringify (§25.5.2 steps 9-11) start from one.
 fn alloc_holder(st: Agent, val: JsVal) -> #(Handle, Agent) {
-  // REALM: arc took %Object.prototype% from the JSON function's owner realm
-  // (`state.builtins` after the `dispatch` swap). Single-realm here.
-  let obj_proto = st.realm.object.prototype
-  common.alloc_pojo(st, obj_proto, [#("", val)])
+  // The JSON function's own realm is current (the `dispatch` swap).
+  common.alloc_pojo(st, st.realm.object.prototype, [#("", val)])
 }
 
 /// InternalizeJSONProperty step 2 (+3.a): OrdinaryObjectCreate(%Object.prototype%),
@@ -357,8 +384,7 @@ fn alloc_context(st: Agent, source: Option(BitArray)) -> #(Handle, Agent) {
     }
     None -> []
   }
-  // REALM: arc took %Object.prototype% from the JSON function's owner realm
-  // (`state.builtins` after the `dispatch` swap). Single-realm here.
+  // The JSON function's own realm is current (the `dispatch` swap).
   common.alloc_pojo(st, st.realm.object.prototype, props)
 }
 
@@ -900,16 +926,14 @@ fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
     )
     JsonArray(items) -> {
       let #(elements, st) = materialize_list(st, items, [])
-      // REALM: arc took %Array.prototype% from the JSON function's owner
-      // realm (`b.array.prototype`). Single-realm here.
+      // %Array.prototype% / %Object.prototype% of the JSON function's own
+      // realm, which `dispatch` made current.
       let #(h, st) = realm_ops.alloc_array(st, list.map(elements, record_value))
       #(ArrayRecord(value: mk_object(h), elements:), st)
     }
     JsonObject(entries) -> {
       let #(entries, st) = materialize_object_entries(st, entries, [])
       let #(props, st) = props_from_entries(st, entries, dict.new())
-      // REALM: arc took %Object.prototype% from the JSON function's owner
-      // realm (`b.object.prototype`). Single-realm here.
       let #(h, st) =
         rt_store.t_cell_new(
           st,
@@ -1101,13 +1125,19 @@ type Replacer {
   PropertyList(names: List(String))
 }
 
+/// `caller` is not the spec's: it is the id of the realm running when
+/// JSON.stringify was invoked, re-entered for every `toJSON`/replacer call.
 type StringifyCtx {
-  StringifyCtx(replacer: Replacer, gap: String)
+  StringifyCtx(replacer: Replacer, gap: String, caller: Int)
 }
 
 const circular_msg = "Converting circular structure to JSON"
 
-fn json_stringify(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
+fn json_stringify(
+  args: List(JsVal),
+  caller: Int,
+  st: Agent,
+) -> #(JsVal, Agent) {
   let val = helpers.first_arg_or_undefined(args)
   let replacer_arg = helpers.arg_at(args, 1)
   let space = helpers.arg_at(args, 2)
@@ -1117,7 +1147,7 @@ fn json_stringify(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   let #(gap, st) = compute_gap(st, space)
   // Steps 9-11: wrapper = { "": value }.
   let #(wrapper, st) = alloc_holder(st, val)
-  let ctx = StringifyCtx(replacer:, gap:)
+  let ctx = StringifyCtx(replacer:, gap:, caller:)
   // Step 12.
   case serialize_property(st, ctx, [], "", "", wrapper) {
     #(Some(s), st) -> #(mk_string(s), st)
@@ -1245,16 +1275,15 @@ fn serialize_property(
       mk_object(holder),
       StringKey(rt_types.canonical_key(key)),
     )
-  // Step 2: toJSON — for Objects and BigInt.
-  // REALM: arc re-entered `toJSON` and the replacer (step 3 below) via
-  // `call_in_caller_realm`, with the caller's realm reinstalled. Single-realm
-  // here: plain calls.
+  // Step 2: toJSON — for Objects and BigInt. It and the replacer (step 3)
+  // are user code: they run back in the caller's realm.
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
       let #(to_json, st) =
         rt_obj.t_get_prop(st, val, StringKey(Named("toJSON")))
       case rt_call.is_callable(st, to_json) {
-        True -> rt_call.t_call_checked(st, to_json, val, [mk_string(key)])
+        True ->
+          call_in_caller_realm(st, ctx.caller, to_json, val, [mk_string(key)])
         False -> #(val, st)
       }
     }
@@ -1263,7 +1292,7 @@ fn serialize_property(
   // Step 3: ReplacerFunction.
   let #(val, st) = case ctx.replacer {
     ReplacerFn(rf) ->
-      rt_call.t_call_checked(st, rf, mk_object(holder), [
+      call_in_caller_realm(st, ctx.caller, rf, mk_object(holder), [
         mk_string(key),
         val,
       ])

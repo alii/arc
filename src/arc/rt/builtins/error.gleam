@@ -12,6 +12,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/obj as rt_obj
+import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type ErrorNative, type FrameInfo, type Handle,
@@ -45,11 +46,13 @@ pub type ErrorFamily {
   )
 }
 
-/// Set up all error prototypes and constructors as `KNative` cells.
+/// Set up all error prototypes and constructors as `KNative` cells. `realm`
+/// is the id of the realm being built (the stack setter is realm-attributed).
 pub fn init(
   st: Agent,
   object_proto: Handle,
   fn_proto: Handle,
+  realm: Int,
 ) -> #(ErrorFamily, Agent) {
   // Error.prototype.toString method.
   let #(to_string_methods, st) =
@@ -84,7 +87,7 @@ pub fn init(
       st,
       fn_proto,
       ErrorN(ErrorStackGetter),
-      ErrorN(ErrorStackSetter(proto: error.prototype)),
+      ErrorN(ErrorStackSetter(realm:)),
       "stack",
     )
   let st =
@@ -160,7 +163,7 @@ pub fn dispatch(
     ErrorPrototypeToString -> error_to_string(st, this)
     ErrorCaptureStackTrace -> capture_stack_trace(st, args)
     ErrorStackGetter -> stack_getter(st, this)
-    ErrorStackSetter(proto:) -> stack_setter(st, proto, this, args)
+    ErrorStackSetter(realm:) -> stack_setter(st, realm, this, args)
     ErrorIsError -> is_error(st, args)
   }
 }
@@ -486,13 +489,18 @@ fn stack_getter(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// set Error.prototype.stack — error-stack-accessor proposal.
+/// set Error.prototype.stack — error-stack-accessor proposal. Runs in the
+/// setter's own realm (§10.3.1: a built-in's callee context takes
+/// F.[[Realm]]), so `home` is that realm's %Error.prototype% and every
+/// TypeError below is that realm's, whichever realm called it.
 fn stack_setter(
   st: Agent,
-  proto: Handle,
+  realm: Int,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
+  use st <- rt_realm.with_realm(st, realm)
+  let proto = st.realm.error.prototype
   case classify(this), classify(helpers.first_arg_or_undefined(args)) {
     KNull, _ | KUndef, _ ->
       rt_val.t_throw_type_error(
