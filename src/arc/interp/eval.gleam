@@ -142,31 +142,34 @@ fn run_global_code(
 /// and a positive depth is what keeps the turn-boundary safepoint shut. The
 /// same unit enforces `limits.max_call_depth` (RangeError, as a throw of the
 /// eval). Entries through `JsOps` already sit inside `t_call`'s bracket.
+///
+/// On the way out the frames and depth are put back to what they were on
+/// entry rather than decremented: a throw that unwinds out of the nested
+/// root frame leaves behind whatever the abandoned frames had pushed.
 fn run_bracketed(
   agent: Agent,
   make: fn(Agent) -> State,
   run: Run,
 ) -> #(Result(JsVal, JsVal), Agent) {
   let store = agent.store
-  case store.call_depth >= limits.max_call_depth {
+  let depth = store.call_depth
+  case depth >= limits.max_call_depth {
     True -> {
       let #(err, agent) =
         store.ops.new_error(agent, RangeErr, "Maximum call stack size exceeded")
       #(Error(err), agent)
     }
     False -> {
-      let agent =
-        Agent(
-          ..agent,
-          store: JsStore(..store, call_depth: store.call_depth + 1),
-        )
-      let #(res, agent) = run(make(agent))
-      let store = agent.store
+      let frames = agent.frames
+      let entered =
+        Agent(..agent, store: JsStore(..store, call_depth: depth + 1))
+      let #(res, after) = run(make(entered))
       #(
         res,
         Agent(
-          ..agent,
-          store: JsStore(..store, call_depth: store.call_depth - 1),
+          ..after,
+          frames:,
+          store: JsStore(..after.store, call_depth: depth),
         ),
       )
     }

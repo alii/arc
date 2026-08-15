@@ -161,6 +161,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
     b_global_fns.init(
       st,
       fn_proto,
+      id,
       parse_int: nb.parse_int,
       parse_float: nb.parse_float,
       is_nan: nb.is_nan,

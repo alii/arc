@@ -1404,10 +1404,11 @@ pub type ConsoleNative {
 /// them under one `GlobalN` wrapper). No Handle-carrying variants.
 pub type GlobalNative {
   /// §19.2.1 eval(x) reached through [[Call]] — always an INDIRECT eval
-  /// (`JsOps.eval_hook`). Direct eval is recognised by the interpreter at
-  /// the call site (CallEval opcode) by identity with this function object
-  /// and never dispatches here.
-  GlobalEval
+  /// (`JsOps.eval_hook`), run in `realm`: the id of the realm this %eval%
+  /// belongs to (§19.2.1.1 evalRealm). Direct eval is recognised by the
+  /// interpreter at the call site (CallEval opcode) as the CURRENT realm's
+  /// %eval% (§13.3.6.1 step 6.a) and never dispatches here.
+  GlobalEval(realm: Int)
   GlobalParseInt
   GlobalParseFloat
   GlobalIsNaN

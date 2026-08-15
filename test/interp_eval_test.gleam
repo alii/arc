@@ -9,11 +9,14 @@ import arc/parser
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
+import arc/rt/realm as rt_realm
 import arc/rt/types.{type Agent, type JsVal, JInt, KBool, KNum, KStr, classify}
 import rt_helpers
 
 fn agent() -> Agent {
-  rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
+  let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
+  let #(_, st) = rt_realm.install_262(st, st.realm)
+  st
 }
 
 fn run(source: String) -> #(rt_call.Completion, Agent) {
@@ -139,6 +142,30 @@ pub fn indirect_eval_syntax_error_test() {
   )
 }
 
+pub fn other_realm_eval_is_indirect_test() {
+  // §13.3.6.1 step 6.a: only the CURRENT realm's %eval% makes `eval(...)`
+  // a direct eval. Another realm's eval called through the name `eval` is
+  // an ordinary call: indirect, global scope, and in that eval's realm.
+  assert thrown_name(
+      "(function () { var eval = $262.createRealm().global.eval; var y = 1; return eval('y') })()",
+    )
+    == "ReferenceError"
+  assert eval_string(
+      "var x = 'outer'; var r = $262.createRealm(); "
+      <> "(function () { var eval = r.global.eval; eval('var x = \"inner\"') })(); "
+      <> "x + '/' + r.global.x",
+    )
+    == "outer/inner"
+  assert eval_bool(
+    "var r = $262.createRealm(); r.global.eval('[]') instanceof r.global.Array",
+  )
+  // The current realm's own eval, however it was fetched, is still direct.
+  assert eval_int(
+      "(function () { var eval = globalThis.eval; var y = 41; return eval('y + 1') })()",
+    )
+    == 42
+}
+
 // -- direct eval -----------------------------------------------------------------
 
 pub fn direct_eval_reads_locals_test() {
@@ -193,6 +220,26 @@ pub fn direct_eval_throw_unwinds_test() {
     )
     == "RangeError"
   assert thrown_name("(function () { eval('null.x') })()") == "TypeError"
+}
+
+pub fn direct_eval_escaping_throw_restores_depth_test() {
+  // A throw raised in a bytecode function called from eval code, escaping
+  // the eval, must leave the frame and depth bookkeeping where it was.
+  let depth =
+    "(function () { try { null.x } catch (e) { return e.stack.split('\\n').length } })()"
+  let leak =
+    "try { (function () { eval('(function a () { (function b () { null.x })() })()') })() } catch (e) {} "
+  assert eval_int(leak <> leak <> leak <> depth) == eval_int(depth)
+  let #(_, st) = eval(leak <> leak)
+  assert st.store.call_depth == 0
+  assert st.frames == []
+  // Repeated leaks used to exhaust the call stack for unrelated code.
+  assert eval_int(
+      "for (var i = 0; i < 300; i++) { "
+      <> leak
+      <> "} (function rec (n) { return n === 0 ? 0 : 1 + rec(n - 1) })(9500)",
+    )
+    == 9500
 }
 
 pub fn shadowed_eval_is_a_plain_call_test() {

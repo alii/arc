@@ -13,6 +13,7 @@
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type GlobalNative, type Handle, type JsNum, type JsVal,
@@ -46,14 +47,16 @@ pub type GlobalFns {
   )
 }
 
-/// Allocate the global function objects. Rooted (they live for the realm's
-/// lifetime); `init_realm` installs them as global-object properties.
-/// `parse_int`/`parse_float`/`is_nan`/`is_finite` are passed in from
-/// `b_number.init` — §21.1.2.12/.13 require `Number.parseInt === parseInt`,
-/// so the SAME handles are installed on both the global object and Number.
+/// Allocate the global function objects of realm `realm`. Rooted (they live
+/// for the realm's lifetime); `init_realm` installs them as global-object
+/// properties. `parse_int`/`parse_float`/`is_nan`/`is_finite` are passed in
+/// from `b_number.init` — §21.1.2.12/.13 require `Number.parseInt ===
+/// parseInt`, so the SAME handles are installed on both the global object
+/// and Number.
 pub fn init(
   st: Agent,
   function_proto: Handle,
+  realm: Int,
   parse_int parse_int: Handle,
   parse_float parse_float: Handle,
   is_nan is_nan: Handle,
@@ -62,7 +65,7 @@ pub fn init(
   let alloc = fn(st, tag, name, len) {
     common.alloc_rooted_native_fn(st, function_proto, GlobalN(tag), name, len)
   }
-  let #(eval, st) = alloc(st, GlobalEval, "eval", 1)
+  let #(eval, st) = alloc(st, GlobalEval(realm:), "eval", 1)
   let #(encode_uri, st) = alloc(st, GlobalEncodeUri, "encodeURI", 1)
   let #(encode_uri_component, st) =
     alloc(st, GlobalEncodeUriComponent, "encodeURIComponent", 1)
@@ -97,7 +100,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    GlobalEval -> indirect_eval(st, args)
+    GlobalEval(realm:) -> indirect_eval(st, realm, args)
     GlobalParseInt -> {
       let #(val, radix) = helpers.two_args_or_undefined(args)
       let #(n, st) = parse_int_value(st, val, radix)
@@ -133,23 +136,29 @@ pub fn dispatch(
 
 /// §19.2.1 eval ( x ) reached through [[Call]]: an INDIRECT eval. Step 2:
 /// a non-string `x` is returned unchanged; otherwise PerformEval(x, false,
-/// false) in the current realm via `JsOps.eval_hook`.
-fn indirect_eval(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+/// false) via `JsOps.eval_hook`, in the realm this eval function belongs to
+/// (§19.2.1.1 step 11 evalRealm) rather than the caller's.
+fn indirect_eval(st: Agent, realm: Int, args: List(JsVal)) -> #(JsVal, Agent) {
   let x = helpers.first_arg_or_undefined(args)
   case rt_types.classify(x) {
-    KStr(source) -> st.store.ops.eval_hook(st, source, IndirectEval)
+    KStr(source) -> {
+      use st <- rt_realm.with_realm(st, realm)
+      st.store.ops.eval_hook(st, source, IndirectEval)
+    }
     _ -> #(x, st)
   }
 }
 
-/// Is `callee` a realm's intrinsic %eval%? The interpreter's CallEval site
-/// asks this to choose direct over indirect eval (§13.3.6.1 step 6.a:
-/// SameValue(func, %eval%)).
+/// Is `callee` the CURRENT realm's intrinsic %eval%? The interpreter's
+/// CallEval site asks this to choose direct over indirect eval (§13.3.6.1
+/// step 6.a: SameValue(func, %eval%)). Another realm's eval reached through
+/// the name `eval` is an ordinary, indirect, call.
 pub fn is_intrinsic_eval(st: Agent, callee: JsVal) -> Bool {
   case rt_types.classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KNative(tag: GlobalN(GlobalEval), ..), ..) -> True
+        SObject(kind: KNative(tag: GlobalN(GlobalEval(realm:)), ..), ..) ->
+          realm == st.realm.id
         _ -> False
       }
     _ -> False
