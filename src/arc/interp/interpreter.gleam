@@ -45,6 +45,7 @@ import arc/rt/val as rt_val
 import arc/vm/binop
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/key
+import arc/vm/lexical
 import arc/vm/opcode.{
   type Op, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread,
   AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
@@ -337,6 +338,162 @@ fn make_method(agent: Agent, func: JsVal, target: Handle) -> Agent {
     KHandle(fn_h) -> set_home_object(agent, fn_h, target)
     _ -> agent
   }
+}
+
+// ============================================================================
+// Explicit resource management (`using` / `await using`)
+// ============================================================================
+// The compiler lowers a using-scope to anonymous disposer slots plus an
+// inline DisposeResources sequence; the interpreter supplies
+// CreateDisposableResource. A disposer never reaches user code, so it is
+// whichever callable performs Dispose(V, hint, method) exactly.
+
+/// CreateDisposableResource(V, hint): undefined for a null/undefined
+/// resource, else the 0-argument callable the lowered dispose sequence
+/// invokes. GetDisposeMethod(V, hint) reads the method once, here, never
+/// again at dispose time. Raises TypeError for a primitive or method-less
+/// resource.
+fn using_disposer(agent: Agent, val: JsVal, is_async: Bool) -> #(JsVal, Agent) {
+  case classify(val), is_async {
+    // Step 1.a: V is null or undefined → method undefined.
+    KUndef, _ | KNull, _ -> #(mk_undefined(), agent)
+    // sync-dispose: GetMethod(V, @@dispose).
+    KHandle(_), False -> {
+      let #(method, agent) = dispose_method(agent, val, rt_types.symbol_dispose)
+      case method {
+        Some(m) -> direct_disposer(agent, m, val)
+        None ->
+          rt_val.t_throw_type_error(
+            agent,
+            "Object does not have a [Symbol.dispose] method",
+          )
+      }
+    }
+    // async-dispose: GetMethod(V, @@asyncDispose), falling back to the
+    // GetDisposeMethod step 1.b.ii wrapper around GetMethod(V, @@dispose).
+    KHandle(_), True -> {
+      let #(method, agent) =
+        dispose_method(agent, val, rt_types.symbol_async_dispose)
+      case method {
+        Some(m) -> direct_disposer(agent, m, val)
+        None -> {
+          let #(sync_method, agent) =
+            dispose_method(agent, val, rt_types.symbol_dispose)
+          case sync_method {
+            Some(m) -> sync_fallback_disposer(agent, m, val)
+            None ->
+              rt_val.t_throw_type_error(
+                agent,
+                "Object does not have a [Symbol.asyncDispose] or [Symbol.dispose] method",
+              )
+          }
+        }
+      }
+    }
+    // Step 1.b.i: a primitive resource is a TypeError.
+    _, _ ->
+      rt_val.t_throw_type_error(
+        agent,
+        "using declaration initializer is not an object, null, or undefined",
+      )
+  }
+}
+
+/// §7.3.11 GetMethod(V, @@symbol): undefined/null → None; a non-callable
+/// value is a TypeError.
+fn dispose_method(
+  agent: Agent,
+  val: JsVal,
+  symbol: rt_types.SymbolId,
+) -> #(Option(Handle), Agent) {
+  let #(method, agent) = rt_obj.t_get_prop(agent, val, SymbolKey(symbol))
+  case classify(method) {
+    KUndef | KNull -> #(None, agent)
+    KHandle(h) ->
+      case rt_call.is_callable(agent, method) {
+        True -> #(Some(h), agent)
+        False ->
+          rt_val.t_throw_type_error(
+            agent,
+            "Dispose method property is not callable",
+          )
+      }
+    _ ->
+      rt_val.t_throw_type_error(
+        agent,
+        "Dispose method property is not callable",
+      )
+  }
+}
+
+/// Dispose(V, hint, method) is Call(method, V): a bound function of `method`
+/// with `this` = V and no arguments. Built directly rather than through
+/// Function.prototype.bind so the method's own `length`/`name` are not read.
+fn direct_disposer(
+  agent: Agent,
+  method: Handle,
+  val: JsVal,
+) -> #(JsVal, Agent) {
+  let #(h, agent) =
+    rt_store.t_cell_new(
+      agent,
+      SObject(
+        kind: rt_types.KBound(target: method, bound_this: val, bound_args: []),
+        proto: Some(agent.realm.function.prototype),
+        props: dict.new(),
+        symbol_props: [],
+        elements: NoElements,
+        extensible: True,
+      ),
+    )
+  #(mk_object(h), agent)
+}
+
+/// GetDisposeMethod step 1.b.ii: the async-dispose fallback onto a sync
+/// @@dispose calls the method, discards its result and settles a fresh
+/// promise with undefined (rejecting it instead if the call threw). That is
+/// an async function whose body is `Call(method, V)`, so it is one: an
+/// async arrow closed over [method, V].
+fn sync_fallback_disposer(
+  agent: Agent,
+  method: Handle,
+  val: JsVal,
+) -> #(JsVal, Agent) {
+  let #(h, agent) =
+    make_closure(agent, sync_fallback_template(), [mk_object(method), val])
+  #(mk_object(h), agent)
+}
+
+/// `async () => { Call(locals[0], locals[1]) }` over a two-value env.
+fn sync_fallback_template() -> FuncTemplate {
+  bytecode.FuncTemplate(
+    name: None,
+    arity: 0,
+    length: 0,
+    local_count: 2,
+    // [V] → [method, V] → CallMethod(0) → drop → undefined → Return.
+    bytecode: tuple_array.from_list([
+      GetLocal(1),
+      GetLocal(0),
+      CallMethod(0),
+      Pop,
+      PushConst(0),
+      Return,
+    ]),
+    constants: tuple_array.from_list([mk_undefined()]),
+    functions: tuple_array.from_list([]),
+    env_descriptors: [bytecode.CaptureLocal(0), bytecode.CaptureLocal(1)],
+    is_strict: True,
+    is_arrow: True,
+    is_derived_constructor: False,
+    is_generator: False,
+    is_async: True,
+    is_constructor: False,
+    is_class_constructor: False,
+    local_names: None,
+    lexical: lexical.NoLexicalSlots,
+    code_kind: lexical.FunctionCode,
+  )
 }
 
 // ============================================================================
@@ -1905,19 +2062,30 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "InitGlobalLex")
       }
 
-    // `using` / `await using`: explicit resource management is not part of
-    // this runtime yet; the declaration site throws before any binding is
-    // observed.
-    opcode.GetDisposer(is_async: _) ->
-      state.throw_type_error(
-        state,
-        "'using' declarations are not supported in this environment",
-      )
+    // `using` / `await using` desugar: CreateDisposableResource(V, hint) —
+    // pop the resource value, push its disposer callable (or undefined for
+    // null/undefined). TypeError for non-disposable values.
+    opcode.GetDisposer(is_async:) ->
+      case state.stack {
+        [val, ..rest] -> {
+          let state = State(..state, stack: rest, pc: state.pc + 1)
+          use #(disposer, state) <- result.map(rt3(
+            state,
+            using_disposer,
+            val,
+            is_async,
+          ))
+          State(..state, stack: [disposer, ..state.stack])
+        }
+        [] -> underflow(state, "GetDisposer")
+      }
 
+    // `using` / `await using` desugar: DisposeResources error folding needs
+    // %SuppressedError%, which this realm does not carry yet.
     opcode.MakeSuppressed ->
       state.throw_type_error(
         state,
-        "'using' declarations are not supported in this environment",
+        "SuppressedError is not supported in this environment",
       )
 
     TypeOf ->
