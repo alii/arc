@@ -2033,6 +2033,53 @@ pub type TemporalNative {
     method: PlainMonthDayMethod,
     protos: TemporalProtos,
   )
+  /// new Temporal.ZonedDateTime(epochNanoseconds, timeZone [, calendar])
+  TemporalZonedDateTimeCtor(protos: TemporalProtos)
+  /// Temporal.ZonedDateTime.from / compare
+  TemporalZonedDateTimeStatic(name: TemporalStaticName, protos: TemporalProtos)
+  /// get Temporal.ZonedDateTime.prototype.<field>
+  TemporalZonedDateTimeGetter(getter: TemporalZonedGetter)
+  /// Temporal.ZonedDateTime.prototype methods
+  TemporalZonedDateTimeMethod(
+    method: ZonedDateTimeMethod,
+    protos: TemporalProtos,
+  )
+}
+
+/// ZonedDateTime getters: its own exact-time/zone fields plus the shared
+/// date and time field sets.
+pub type TemporalZonedGetter {
+  ZgTimeZoneId
+  ZgEpochMilliseconds
+  ZgEpochNanoseconds
+  ZgOffsetNanoseconds
+  ZgOffset
+  ZgHoursInDay
+  ZgDate(TemporalDateGetter)
+  ZgTime(TemporalTimeGetter)
+}
+
+pub type ZonedDateTimeMethod {
+  ZmWithTimeZone
+  ZmWithCalendar
+  ZmWithPlainTime
+  ZmWith
+  ZmAdd
+  ZmSubtract
+  ZmUntil
+  ZmSince
+  ZmRound
+  ZmEquals
+  ZmToString
+  ZmToLocaleString
+  ZmToJson
+  ZmValueOf
+  ZmStartOfDay
+  ZmGetTimeZoneTransition
+  ZmToInstant
+  ZmToPlainDate
+  ZmToPlainTime
+  ZmToPlainDateTime
 }
 
 pub type TemporalYearMonthGetter {
@@ -2631,6 +2678,10 @@ pub fn temporal_native_refs(n: TemporalNative) -> List(Handle) {
     | TemporalPlainMonthDayCtor(protos:)
     | TemporalPlainMonthDayStatic(protos:, ..)
     | TemporalPlainMonthDayMethod(protos:, ..) -> temporal_protos_refs(protos)
+    TemporalZonedDateTimeGetter(_) -> []
+    TemporalZonedDateTimeCtor(protos:)
+    | TemporalZonedDateTimeStatic(protos:, ..)
+    | TemporalZonedDateTimeMethod(protos:, ..) -> temporal_protos_refs(protos)
   }
 }
 

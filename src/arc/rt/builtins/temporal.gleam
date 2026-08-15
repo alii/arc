@@ -425,11 +425,14 @@ pub fn dispatch(
     TemporalInstantMethod(method:, protos:) ->
       instant_method(st, method, protos, this, args)
     TemporalNowFn(name:, protos:) -> now_dispatch(st, name, protos, args)
-    _ ->
-      rt_val.t_throw_type_error(
-        st,
-        "Temporal operation is not registered in this realm",
-      )
+    TemporalZonedDateTimeCtor(..) ->
+      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
+    TemporalZonedDateTimeStatic(name:, protos:) ->
+      temporal_zoned_date_time.static(st, name, protos, args)
+    TemporalZonedDateTimeGetter(getter:) ->
+      temporal_zoned_date_time.getter(st, getter, this)
+    TemporalZonedDateTimeMethod(method:, protos:) ->
+      temporal_zoned_date_time.method(st, method, protos, this, args)
   }
 }
 
@@ -466,6 +469,10 @@ pub fn dispatch_construct(
     }
     TemporalDurationCtor(protos:) -> {
       let #(v, st) = temporal_duration.ctor(st, protos, args)
+      apply_new_target_proto(st, new_target, v)
+    }
+    TemporalZonedDateTimeCtor(protos:) -> {
+      let #(v, st) = temporal_zoned_date_time.ctor(st, protos, args)
       apply_new_target_proto(st, new_target, v)
     }
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
