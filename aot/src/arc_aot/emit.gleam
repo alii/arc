@@ -259,10 +259,12 @@ pub fn compile(
       Error(state.UnsupportedFeature("ESM module graph (SPEC Q7 v1)"))
   }
   use body <- result.try(body)
-  // (1) init emitter at root; strict iff Module goal (compile_source seeds
-  // AnalyzeOpts.strict from the same flag; "use strict" directives are
-  // per-function and handled by func.emit_function).
-  let e = init_emitter(tree, opts.source_kind == AsModule, opts.module_name)
+  // (1) init emitter at root; strict iff Module goal or a top-level
+  // "use strict" directive (§11.2.2 Directive Prologue). Nested functions
+  // inherit it or scan their own prologue in func.emit_function.
+  let strict =
+    opts.source_kind == AsModule || ast_util.has_use_strict_directive(body)
+  let e = init_emitter(tree, strict, opts.module_name)
   let e = state.set_const_globals(e, expr.analyze_const_globals(body))
   // Optimization G: allocate boxed cells for every root-scope Local binding
   // (top-level `var`/`function` under module_slot_globals) BEFORE hoists so

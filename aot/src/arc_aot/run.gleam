@@ -4,7 +4,7 @@
 
 import arc/host_hooks.{type HostHooks}
 import arc/rt/builtins as rt_builtins
-import arc/rt/types.{type Agent}
+import arc/rt/types.{type Agent, type JsVal}
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/string
@@ -19,7 +19,8 @@ pub type RunResult =
 /// Wire terms from `arc_aot_exec_ffi:apply_js_main/2`.
 pub type JsExecOutcome {
   JsReturned(value: Dynamic)
-  JsThrew(exn: Dynamic)
+  /// The uncaught JS value.
+  JsThrew(exn: JsVal)
   JsCrashed(reason: String)
 }
 
@@ -33,6 +34,10 @@ pub fn seed(hooks: HostHooks) -> Agent {
 pub fn load(beam: BitArray, name: String) -> Result(Atom, String) {
   build_beam.load_module(atom.create(name), name, beam)
 }
+
+/// Drop a loaded module (old and current code) from the code server.
+@external(erlang, "arc_aot_exec_ffi", "unload")
+pub fn unload(module: Atom) -> Nil
 
 /// Apply `module:js_main(st, frame, [])` under a protected try, then drain
 /// microtasks and run the GC safepoint. Never raises.

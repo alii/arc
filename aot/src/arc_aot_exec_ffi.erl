@@ -1,7 +1,7 @@
 %%% Top-level protected apply of a compiled module's `js_main/3`, plus the
 %%% turn-end epilogue (drain microtasks, GC safepoint) the runner owns.
 -module(arc_aot_exec_ffi).
--export([apply_js_main/2]).
+-export([apply_js_main/2, unload/1]).
 
 %% apply_js_main(Mod, St) -> {JsExecOutcome, St'}
 %%   {js_returned, V} normal completion of js_main and the epilogue
@@ -32,3 +32,11 @@ render_reason(Class, Reason, Stk) ->
     Top = case Stk of [H | _] -> H; [] -> no_stack end,
     unicode:characters_to_binary(
         io_lib:format("~0p:~0p at ~0p", [Class, Reason, Top])).
+
+%% Purge any old code, delete the current code, purge again so nothing of
+%% Mod stays resident. Idempotent for a module that was never loaded.
+unload(Mod) ->
+    _ = code:purge(Mod),
+    _ = code:delete(Mod),
+    _ = code:purge(Mod),
+    nil.
