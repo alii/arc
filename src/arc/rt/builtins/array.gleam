@@ -19,6 +19,7 @@ import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as object_builtin
 import arc/rt/call as rt_call
+import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -38,15 +39,14 @@ import arc/rt/types.{
   ArrayPrototypeSplice, ArrayPrototypeToLocaleString, ArrayPrototypeToReversed,
   ArrayPrototypeToSorted, ArrayPrototypeToSpliced, ArrayPrototypeToString,
   ArrayPrototypeUnshift, ArrayPrototypeValues, ArrayPrototypeWith, DataProperty,
-  Dense, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr,
+  Index, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr,
   KUndef, Named, NoElements, ObjectPrototypeToString, Ordinary, ParsedDesc,
-  ProxyObj, ReturnThis, SObject, Sparse, StringKey, StringObj, SymbolKey,
-  classify, index_key, key_display_string, max_array_length, mk_bool, mk_number,
-  mk_object, mk_string, mk_undefined, symbol_is_concat_spreadable,
-  symbol_iterator, symbol_species, symbol_unscopables,
+  ProxyObj, ReturnThis, SObject, StringKey, StringObj, SymbolKey, classify,
+  index_key, key_display_string, max_array_length, mk_bool, mk_number, mk_object,
+  mk_string, mk_undefined, symbol_is_concat_spreadable, symbol_iterator,
+  symbol_species, symbol_unscopables,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/internal/tree_array
 import arc/vm/limits
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -260,205 +260,6 @@ pub fn dispatch(
   }
 }
 
-// ────────────────────── JsElements ops (arc elements.gleam) ─────────────────
-// Local port of arc `internal/elements.gleam` bulk transforms. rt_obj's
-// private elem_* helpers cover get/set/has/delete/truncate/indices; the bulk
-// move ops (move_range, reverse_range, fill_range, copy_within, write_list,
-// from_list) live here so mutator fast paths can do one heap read + one
-// JsElements transform + one heap write.
-
-const elem_max_gap = 1024
-
-fn el_new() -> JsElements {
-  NoElements
-}
-
-fn el_get_option(elements: JsElements, index: Int) -> Option(JsVal) {
-  case elements {
-    NoElements -> None
-    Dense(data) -> tree_array.get_option(index, data)
-    Sparse(data) ->
-      case dict.get(data, index) {
-        Ok(v) -> Some(v)
-        Error(Nil) -> None
-      }
-  }
-}
-
-fn el_get(elements: JsElements, index: Int) -> JsVal {
-  el_get_option(elements, index) |> option.unwrap(mk_undefined())
-}
-
-fn el_has(elements: JsElements, index: Int) -> Bool {
-  option.is_some(el_get_option(elements, index))
-}
-
-fn el_set(elements: JsElements, index: Int, val: JsVal) -> JsElements {
-  case elements {
-    NoElements -> el_set(Dense(tree_array.new(mk_undefined())), index, val)
-    Dense(data) -> {
-      let size = tree_array.size(data)
-      case index - size > elem_max_gap || index >= limits.max_dense_index {
-        True -> Sparse(el_dense_to_sparse(data) |> dict.insert(index, val))
-        False -> Dense(tree_array.set(index, val, data))
-      }
-    }
-    Sparse(data) -> Sparse(dict.insert(data, index, val))
-  }
-}
-
-fn el_delete(elements: JsElements, index: Int) -> JsElements {
-  case elements {
-    NoElements -> NoElements
-    Dense(data) -> Dense(tree_array.reset(index, data))
-    Sparse(data) -> Sparse(dict.delete(data, index))
-  }
-}
-
-fn el_is_empty(elements: JsElements) -> Bool {
-  case elements {
-    NoElements -> True
-    Dense(data) ->
-      tree_array.sparse_fold(fn(_i, _v, _acc) { False }, True, data)
-    Sparse(data) -> dict.size(data) == 0
-  }
-}
-
-fn el_from_list(items: List(JsVal)) -> JsElements {
-  case items {
-    [] -> NoElements
-    _ -> Dense(tree_array.from_list(items, mk_undefined()))
-  }
-}
-
-fn el_truncate(elements: JsElements, new_len: Int) -> JsElements {
-  case elements {
-    NoElements -> NoElements
-    Dense(data) ->
-      case new_len >= tree_array.size(data) {
-        True -> elements
-        False -> Dense(tree_array.resize(data, new_len))
-      }
-    Sparse(data) -> Sparse(dict.filter(data, fn(idx, _v) { idx < new_len }))
-  }
-}
-
-fn el_put_option(
-  elements: JsElements,
-  index: Int,
-  val: Option(JsVal),
-) -> JsElements {
-  case val {
-    Some(v) -> el_set(elements, index, v)
-    None -> el_delete(elements, index)
-  }
-}
-
-fn el_move_range(
-  elements: JsElements,
-  from: Int,
-  len: Int,
-  delta: Int,
-) -> JsElements {
-  el_copy_within(elements, from, from + delta, len - from)
-}
-
-fn el_reverse_range(elements: JsElements, len: Int) -> JsElements {
-  el_reverse_loop(elements, 0, len - 1)
-}
-
-fn el_reverse_loop(elements: JsElements, lo: Int, hi: Int) -> JsElements {
-  case lo >= hi {
-    True -> elements
-    False -> {
-      let lo_v = el_get_option(elements, lo)
-      let hi_v = el_get_option(elements, hi)
-      let elements =
-        el_put_option(elements, lo, hi_v) |> el_put_option(hi, lo_v)
-      el_reverse_loop(elements, lo + 1, hi - 1)
-    }
-  }
-}
-
-fn el_fill_range(
-  elements: JsElements,
-  start: Int,
-  end: Int,
-  val: JsVal,
-) -> JsElements {
-  case start >= end {
-    True -> elements
-    False -> el_fill_range(el_set(elements, start, val), start + 1, end, val)
-  }
-}
-
-fn el_copy_within(
-  elements: JsElements,
-  from: Int,
-  to: Int,
-  count: Int,
-) -> JsElements {
-  case from < to {
-    True -> el_copy_backward(elements, from + count - 1, to + count - 1, count)
-    False -> el_copy_forward(elements, from, to, count)
-  }
-}
-
-fn el_copy_forward(
-  elements: JsElements,
-  from: Int,
-  to: Int,
-  remaining: Int,
-) -> JsElements {
-  case remaining <= 0 {
-    True -> elements
-    False ->
-      el_copy_forward(
-        el_put_option(elements, to, el_get_option(elements, from)),
-        from + 1,
-        to + 1,
-        remaining - 1,
-      )
-  }
-}
-
-fn el_copy_backward(
-  elements: JsElements,
-  from: Int,
-  to: Int,
-  remaining: Int,
-) -> JsElements {
-  case remaining <= 0 {
-    True -> elements
-    False ->
-      el_copy_backward(
-        el_put_option(elements, to, el_get_option(elements, from)),
-        from - 1,
-        to - 1,
-        remaining - 1,
-      )
-  }
-}
-
-fn el_write_list(
-  elements: JsElements,
-  idx: Int,
-  vals: List(JsVal),
-) -> JsElements {
-  case vals {
-    [] -> elements
-    [v, ..rest] -> el_write_list(el_set(elements, idx, v), idx + 1, rest)
-  }
-}
-
-fn el_dense_to_sparse(data: tree_array.TreeArray(JsVal)) -> Dict(Int, JsVal) {
-  tree_array.sparse_fold(
-    fn(i, v, acc) { dict.insert(acc, i, v) },
-    dict.new(),
-    data,
-  )
-}
-
 // ──────────────────────── Array constructor / Array.isArray ──────────────────
 
 /// §23.1.1.1 Array ( ...values ). Called as function or constructor (identical).
@@ -468,7 +269,7 @@ fn construct(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   case args {
     // numberOfArgs = 0 → ArrayCreate(0, proto).
-    [] -> alloc_array(st, 0, el_new(), array_proto)
+    [] -> alloc_array(st, 0, elements.new(), array_proto)
     // numberOfArgs = 1 and the arg IS a Number → length path (§23.1.1.1 step 5).
     [only] ->
       case classify(only) {
@@ -476,24 +277,24 @@ fn construct(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
           case num {
             JInt(n) ->
               case n >= 0 && n <= max_array_length {
-                True -> alloc_array(st, n, el_new(), array_proto)
+                True -> alloc_array(st, n, elements.new(), array_proto)
                 False -> rt_val.t_throw_range_error(st, "Invalid array length")
               }
             JFloat(f) ->
               case array_length_of_float(f) {
-                Some(n) -> alloc_array(st, n, el_new(), array_proto)
+                Some(n) -> alloc_array(st, n, elements.new(), array_proto)
                 None -> rt_val.t_throw_range_error(st, "Invalid array length")
               }
             JNan | JPosInf | JNegInf ->
               rt_val.t_throw_range_error(st, "Invalid array length")
           }
         // Single non-Number arg → items path.
-        _ -> alloc_array(st, 1, el_from_list([only]), array_proto)
+        _ -> alloc_array(st, 1, elements.from_list([only]), array_proto)
       }
     // numberOfArgs ≥ 2 → items path.
     _ -> {
       let count = list.length(args)
-      alloc_array(st, count, el_from_list(args), array_proto)
+      alloc_array(st, count, elements.from_list(args), array_proto)
     }
   }
 }
@@ -563,7 +364,7 @@ fn alloc_array(
 /// Allocate a plain dense array from a value list.
 fn alloc_array_list(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
-  alloc_array(st, list.length(values), el_from_list(values), array_proto)
+  alloc_array(st, list.length(values), elements.from_list(values), array_proto)
 }
 
 // ──────────────────── shared prologue (ToObject / LengthOfArrayLike) ─────────
@@ -840,7 +641,7 @@ fn proto_chain_has_index_keys(st: Agent, proto: Option(Handle)) -> Bool {
         SObject(kind: ProxyObj(..), ..) -> True
         SObject(kind: StringObj(value: s), ..) if s != "" -> True
         SObject(props:, elements: els, proto:, ..) ->
-          !el_is_empty(els)
+          !elements.is_empty(els)
           || properties_have_index_keys(props)
           || proto_chain_has_index_keys(st, proto)
         // Shaped: no elements, Named-only keys → recurse.
@@ -933,7 +734,7 @@ fn try_push_fast_path(
               SObject(
                 ..slot,
                 kind: ArrayObj(new_length),
-                elements: el_write_list(els, length, args),
+                elements: elements.write_list(els, length, args),
               ),
             )
           Some(#(new_length, st))
@@ -992,14 +793,14 @@ fn proto_chain_has_index_in_range(
 }
 
 fn elements_has_in_range(els: JsElements, start: Int, count: Int) -> Bool {
-  !el_is_empty(els) && elements_in_range_loop(els, start, start + count)
+  !elements.is_empty(els) && elements_in_range_loop(els, start, start + count)
 }
 
 fn elements_in_range_loop(els: JsElements, idx: Int, end: Int) -> Bool {
   case idx >= end {
     True -> False
     False ->
-      case el_has(els, idx) {
+      case elements.has(els, idx) {
         True -> True
         False -> elements_in_range_loop(els, idx + 1, end)
       }
@@ -1090,7 +891,7 @@ fn join_elements_snapshot(
   case idx >= length {
     True -> finish_join(st, acc, separator)
     False ->
-      case el_get_option(els, idx) {
+      case elements.get_option(els, idx) {
         Some(v) ->
           case classify(v) {
             // undefined / null → "".
@@ -1230,7 +1031,7 @@ fn array_pop(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
       let new_len = length - 1
       let fast = {
         use els, len <- try_elements_fast_path(st, ref, length)
-        #(el_truncate(els, len - 1), len - 1, el_get(els, len - 1))
+        #(elements.truncate(els, len - 1), len - 1, elements.get(els, len - 1))
       }
       case fast {
         Some(#(val, st)) -> #(val, st)
@@ -1254,8 +1055,9 @@ fn array_shift(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
     False -> {
       let fast = {
         use els, len <- try_elements_fast_path(st, ref, length)
-        let first = el_get(els, 0)
-        let els = el_move_range(els, 1, len, -1) |> el_truncate(len - 1)
+        let first = elements.get(els, 0)
+        let els =
+          elements.move_range(els, 1, len, -1) |> elements.truncate(len - 1)
         #(els, len - 1, first)
       }
       case fast {
@@ -1325,7 +1127,9 @@ fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- guard_safe_length(st, new_len)
   let fast = {
     use els, len <- try_elements_fast_path(st, ref, length)
-    let els = el_move_range(els, 0, len, arg_count) |> el_write_list(0, args)
+    let els =
+      elements.move_range(els, 0, len, arg_count)
+      |> elements.write_list(0, args)
     #(els, len + arg_count, Nil)
   }
   case fast {
@@ -1366,7 +1170,7 @@ fn array_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(end, st) = relative_index(st, helpers.arg_at(args, 1), length, length)
   let count = int.max(end - start, 0)
   let #(species, st) = array_species_create(st, this, count)
-  let #(copied, st) = copy_range(st, this, start, 0, count, el_new())
+  let #(copied, st) = copy_range(st, this, start, 0, count, elements.new())
   case species {
     None -> alloc_array(st, count, copied, array_proto)
     Some(target) -> {
@@ -1398,7 +1202,7 @@ fn copy_range_dense(
         src_idx + 1,
         dst_idx + 1,
         remaining - 1,
-        el_set(dst, dst_idx, val),
+        elements.set(dst, dst_idx, val),
       )
     }
   }
@@ -1471,7 +1275,7 @@ fn copy_range_snapshot(
   case remaining <= 0 {
     True -> #(dst, st)
     False ->
-      case el_get_option(els, src_idx) {
+      case elements.get_option(els, src_idx) {
         Some(val) ->
           copy_range_snapshot(
             st,
@@ -1481,7 +1285,7 @@ fn copy_range_snapshot(
             src_idx + 1,
             dst_idx + 1,
             remaining - 1,
-            el_set(dst, dst_idx, val),
+            elements.set(dst, dst_idx, val),
             fuel - 1,
           )
         None -> {
@@ -1539,7 +1343,7 @@ fn copy_range_generic(
             src_idx + 1,
             dst_idx + 1,
             remaining - 1,
-            el_set(dst, dst_idx, val),
+            elements.set(dst, dst_idx, val),
             fuel - 1,
           )
         None ->
@@ -1565,7 +1369,8 @@ fn array_concat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let all_items = [this, ..args]
   case species {
     None -> {
-      let #(#(elems, total), st) = concat_items(st, all_items, el_new(), 0)
+      let #(#(elems, total), st) =
+        concat_items(st, all_items, elements.new(), 0)
       alloc_array(st, total, elems, array_proto)
     }
     Some(target) -> {
@@ -1618,7 +1423,7 @@ fn concat_item(
           "Array length exceeds maximum safe integer",
         )
       })
-      #(#(el_set(elems, pos, item), pos + 1), st)
+      #(#(elements.set(elems, pos, item), pos + 1), st)
     }
   }
 }
@@ -1777,7 +1582,7 @@ fn write_species_elements(
   case idx >= length {
     True -> st
     False ->
-      case el_get_option(els, idx) {
+      case elements.get_option(els, idx) {
         None -> write_species_elements(st, target, els, idx + 1, length)
         Some(val) -> {
           let st = write_species_element(st, target, idx, val)
@@ -1865,7 +1670,7 @@ fn array_reverse(
   use st, this, ref, length <- require_array(st, this)
   let fast = {
     use els, len <- try_elements_fast_path(st, ref, length)
-    #(el_reverse_range(els, len), len, Nil)
+    #(elements.reverse_range(els, len), len, Nil)
   }
   case fast {
     Some(#(Nil, st)) -> #(this, st)
@@ -1939,7 +1744,7 @@ fn array_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   })
   let fast = {
     use els, len <- try_elements_fast_path(st, ref, length)
-    #(el_fill_range(els, start, end, fill_val), len, Nil)
+    #(elements.fill_range(els, start, end, fill_val), len, Nil)
   }
   case fast {
     Some(#(Nil, st)) -> #(this, st)
@@ -2349,8 +2154,8 @@ fn array_map(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       length,
       cb,
       this_arg,
-      el_new(),
-      fn(_st, acc, result, _elem, idx) { el_set(acc, idx, result) },
+      elements.new(),
+      fn(_st, acc, result, _elem, idx) { elements.set(acc, idx, result) },
     )
   case species {
     None -> finish_array(st, els, length)
@@ -2399,7 +2204,7 @@ fn array_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         write_species_result(
           st,
           target,
-          el_from_list(vals),
+          elements.from_list(vals),
           list.length(vals),
           None,
         )
@@ -2744,7 +2549,7 @@ fn collect_sort_elements_snapshot(
   case idx >= length {
     True -> #(#(list.reverse(acc), undefs), st)
     False ->
-      case el_get_option(els, idx) {
+      case elements.get_option(els, idx) {
         Some(v) ->
           case classify(v) {
             KUndef ->
@@ -2959,7 +2764,7 @@ fn write_sort_result(
   let fast = case idx == 0 {
     True -> {
       use _els, len <- try_elements_fast_path(st, ref, length)
-      #(el_from_list(values), len, Nil)
+      #(elements.from_list(values), len, Nil)
     }
     False -> None
   }
@@ -3015,7 +2820,7 @@ fn to_sorted_impl(
     collect_sort_elements(st, this, length, 0, [], 0, VisitHoles)
   let #(sorted, st) = sort(st, defined)
   let all_values = list.append(sorted, list.repeat(mk_undefined(), undefs))
-  alloc_array(st, length, el_from_list(all_values), array_proto)
+  alloc_array(st, length, elements.from_list(all_values), array_proto)
 }
 
 fn sort_values_default(
@@ -3045,7 +2850,14 @@ fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(removed_arr, st) = case species {
     None -> {
       let #(removed_elements, st) =
-        copy_range(st, this, actual_start, 0, actual_delete_count, el_new())
+        copy_range(
+          st,
+          this,
+          actual_start,
+          0,
+          actual_delete_count,
+          elements.new(),
+        )
       alloc_array(st, actual_delete_count, removed_elements, array_proto)
     }
     Some(target) -> {
@@ -3069,9 +2881,11 @@ fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     let move_from = actual_start + actual_delete_count
     let els = case shift == 0 {
       True -> els
-      False -> el_move_range(els, move_from, len, shift)
+      False -> elements.move_range(els, move_from, len, shift)
     }
-    let els = el_write_list(els, actual_start, items) |> el_truncate(new_length)
+    let els =
+      elements.write_list(els, actual_start, items)
+      |> elements.truncate(new_length)
     #(els, new_length, Nil)
   }
   case fast {
@@ -3153,7 +2967,8 @@ fn finish_species_list(
     None -> alloc_array_list(st, kept)
     Some(target) -> {
       let count = list.length(kept)
-      let st = write_species_result(st, target, el_from_list(kept), count, None)
+      let st =
+        write_species_result(st, target, elements.from_list(kept), count, None)
       #(mk_object(target), st)
     }
   }
@@ -3291,7 +3106,7 @@ fn array_copy_within(
     False -> {
       let fast = {
         use els, len <- try_elements_fast_path(st, ref, length)
-        #(el_copy_within(els, from, target, count), len, Nil)
+        #(elements.copy_within(els, from, target, count), len, Nil)
       }
       case fast {
         Some(#(Nil, st)) -> #(this, st)
@@ -3447,7 +3262,12 @@ fn array_from_loop(
   case idx >= length {
     True -> {
       let array_proto = st.realm.array.prototype
-      alloc_array(st, length, el_from_list(list.reverse(acc)), array_proto)
+      alloc_array(
+        st,
+        length,
+        elements.from_list(list.reverse(acc)),
+        array_proto,
+      )
     }
     False -> {
       let #(elem, st) = get_index(st, items, idx)
@@ -3493,8 +3313,8 @@ fn array_to_spliced(
   let new_len = length + item_count - actual_skip_count
   use <- guard_safe_length(st, new_len)
   let #(new_elements, st) =
-    copy_range_dense(st, this, 0, 0, actual_start, el_new())
-  let new_elements = el_write_list(new_elements, actual_start, items)
+    copy_range_dense(st, this, 0, 0, actual_start, elements.new())
+  let new_elements = elements.write_list(new_elements, actual_start, items)
   let src_from = actual_start + actual_skip_count
   let dst_from = actual_start + item_count
   let remaining = length - src_from
@@ -3523,8 +3343,8 @@ fn array_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         _ -> mk_undefined()
       }
       let #(new_elements, st) =
-        copy_range_dense(st, this, 0, 0, actual_index, el_new())
-      let new_elements = el_set(new_elements, actual_index, replacement)
+        copy_range_dense(st, this, 0, 0, actual_index, elements.new())
+      let new_elements = elements.set(new_elements, actual_index, replacement)
       let #(new_elements, st) =
         copy_range_dense(
           st,
@@ -3551,7 +3371,7 @@ fn array_to_reversed(
     rt_val.t_throw_range_error(st, iteration_budget_msg)
   })
   let #(reversed, st) = collect_elements_descending(st, this, length - 1, [])
-  alloc_array(st, length, el_from_list(reversed), array_proto)
+  alloc_array(st, length, elements.from_list(reversed), array_proto)
 }
 
 fn collect_elements_descending(
