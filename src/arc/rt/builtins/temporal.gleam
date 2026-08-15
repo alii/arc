@@ -11,15 +11,16 @@ import arc/internal/int_math.{floor_div}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  Hour, Nanosecond, Second, apply_new_target_proto, apply_since_mode,
-  apply_since_ns, as_if_positive_mode, balance_time_ns, epoch_ns_to_iso_in,
-  get_difference_settings, get_options_object, instant_slot_of, make_date,
-  make_date_time, make_duration, make_instant, make_time, make_zoned, max_unit,
-  parse_time_zone_id, require_largest_ge_smallest, require_temporal,
-  require_time_unit, round_options, round_to_increment, system_time_zone, terr,
-  time_only_ns, time_unit_ns, time_zone_id, to_string_time_options,
-  to_temporal_duration, to_temporal_instant, to_temporal_time_zone,
-  tz_offset_ns_at, unit_rank,
+  Hour, Nanosecond, Second, Trunc, apply_new_target_proto, apply_since_mode,
+  apply_since_ns, as_if_positive_mode, balance_time_ns, check_diff_setup,
+  epoch_ns_to_iso_in, get_difference_settings, get_fractional_digits,
+  get_options_object, get_rounding_mode_option, get_unit_option,
+  instant_slot_of, make_date, make_date_time, make_duration, make_instant,
+  make_time, make_zoned, max_unit, parse_time_zone_id, require_temporal,
+  require_time_unit, round_options, round_to_increment,
+  seconds_string_precision, system_time_zone, terr, time_only_ns, time_unit_ns,
+  time_zone_id, to_temporal_duration, to_temporal_instant,
+  to_temporal_time_zone, tz_offset_ns_at, unit_rank,
 }
 import arc/rt/builtins/temporal_iso.{
   type Precision, AutoPrec, epoch_ns_to_iso, format_iso_date, format_iso_time,
@@ -394,14 +395,20 @@ fn instant_method(
     )
     InstantToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
-      // Read options: fractionalSecondDigits, roundingMode, smallestUnit,
-      // timeZone (alphabetical).
-      let #(#(prec, su, sinc, mode), st) = to_string_time_options(st, opts)
+      // Read every option before any algorithmic validation:
+      // fractionalSecondDigits, roundingMode, smallestUnit, timeZone
+      // (alphabetical); only then resolve the precision (which may throw).
+      let #(digits, st) = get_fractional_digits(st, opts)
+      let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
+      let #(su_opt, st) =
+        get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       let #(tz_opt, st) = case opts {
         None -> #(mk_undefined(), st)
         Some(h) ->
           rt_obj.t_get_prop(st, mk_object(h), StringKey(Named("timeZone")))
       }
+      let #(prec, su, sinc, mode) =
+        terr(st, seconds_string_precision(digits, su_opt, mode))
       let rounded = case su {
         None -> ns
         Some(u) ->
@@ -469,7 +476,10 @@ fn instant_method(
       case inc >= 1 && inc <= max && max % inc == 0 {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
         True -> {
-          let rounded = round_to_increment(ns, inc * u_ns, mode)
+          // RoundTemporalInstant rounds as if positive: "down" is towards
+          // the Big Bang, not towards the epoch.
+          let rounded =
+            round_to_increment(ns, inc * u_ns, as_if_positive_mode(mode))
           case int.absolute_value(rounded) <= ns_max_instant {
             False ->
               rt_val.t_throw_range_error(st, "instant outside valid range")
@@ -520,7 +530,7 @@ fn instant_until_since(
     True ->
       rt_val.t_throw_range_error(st, "units must be time units for Instant")
     False -> {
-      let Nil = require_largest_ge_smallest(st, largest, smallest)
+      let Nil = check_diff_setup(st, largest, smallest, inc)
       let su = terr(st, require_time_unit(smallest))
       let mode2 = apply_since_mode(mode, is_since)
       let diff = b - a

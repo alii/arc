@@ -2035,8 +2035,13 @@ fn parse_instant_to_ns(st: Agent, s: String) -> #(Int, Agent) {
   case parse_iso_datetime_string(s) {
     None -> rt_val.t_throw_range_error(st, "invalid instant string: " <> s)
     Some(p) ->
-      case p.time {
-        Some(t) ->
+      case p.time, valid_tz_annotation(p.tz) {
+        _, False ->
+          rt_val.t_throw_range_error(
+            st,
+            "invalid time zone annotation in instant string: " <> s,
+          )
+        Some(t), True ->
           case p.offset {
             NoOffset ->
               rt_val.t_throw_range_error(
@@ -2052,8 +2057,19 @@ fn parse_instant_to_ns(st: Agent, s: String) -> #(Int, Agent) {
               #(terr(st, validate_epoch_ns(ns)), st)
             }
           }
-        None -> rt_val.t_throw_range_error(st, "instant string requires a time")
+        None, True ->
+          rt_val.t_throw_range_error(st, "instant string requires a time")
       }
+  }
+}
+
+/// A bracketed time zone annotation is only syntax-checked for Instant: an
+/// offset annotation must be a minute-precision ±HH:MM, a name is any name.
+fn valid_tz_annotation(tz: Option(String)) -> Bool {
+  case tz {
+    Some("+" <> _ as ann) | Some("-" <> _ as ann) ->
+      option.is_some(parse_offset_tz_id(ann))
+    Some(_) | None -> True
   }
 }
 
