@@ -142,5 +142,10 @@ pub type SuspendedFrame {
     /// The activation's argument list. An async function parks at pc 0
     /// before its prologue, so `arguments` / rest are built on resume.
     call_args: List(JsVal),
+    /// Id of the body's function [[Realm]] (the realm running when it
+    /// parked): a resume makes it current for the turn, so an await or
+    /// generator continuation sees its own realm's globals and intrinsics
+    /// whichever realm the job or `.next()` call arrives from.
+    realm: Int,
   )
 }

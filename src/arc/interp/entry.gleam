@@ -556,11 +556,16 @@ pub fn eval_source(
 /// frame inside the `Step`. The driver (`rt/async`) owns the generator state
 /// transitions and the depth bracket; this owns the body's `Error.stack`
 /// frame and the backstop.
+///
+/// The turn runs with the body's [[Realm]] current, as `run_root` does for a
+/// call: an Await continuation job or a `.next()` from another realm still
+/// resumes the body in the realm that created it (§27.7.5.3, §10.2.1.1).
 pub fn resume_frame(
   st: Agent,
   frame: SuspendedFrame,
   sent: #(Int, JsVal),
 ) -> #(Step, Agent) {
+  use st <- rt_realm.with_realm(st, frame.realm)
   let m = mark(st)
   let agent = call.push_frame_info(st, frame.template)
   let #(mode, value) = sent

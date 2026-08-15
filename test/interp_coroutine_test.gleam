@@ -12,6 +12,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
+import arc/rt/realm as rt_realm
 import arc/rt/types.{type Agent, type JsVal, JInt, KBool, KNum, KStr, classify}
 import gleam/string
 import rt_helpers
@@ -279,6 +280,47 @@ pub fn async_ordering_against_microtasks_test() {
        async function sum(n) { var t = 0; for (var i = 0; i < n; i++) { t += await Promise.resolve(i) } return t }
        async function outer() { return [await sum(4), await sum(0), (await sum(3)) + 100].join('/') }
        outer().then(v => log.push(v));" <> settle) == "6/0/103"
+}
+
+pub fn coroutines_resume_in_their_own_realm_test() {
+  // An await / yield continuation runs with the body's own realm current,
+  // whichever realm the reaction job or `.next()` call arrives from: code
+  // inside a ShadowRealm keeps seeing (and writing) its own globalThis
+  // after the await, and nothing leaks onto the incubating realm's global.
+  let #(_, st) =
+    run_on(
+      agent(),
+      "var r = new ShadowRealm(); globalThis.tag = 'outer';
+       r.evaluate('globalThis.tag = \"inner\"; 0');
+       r.evaluate('(async function () { globalThis.before = globalThis.tag; await 1; globalThis.after = globalThis.tag })(); 0');
+       r.evaluate('(async function* () { await 1; globalThis.ag = globalThis.tag; yield 0 })().next(); 0');
+       r.evaluate('var it = (async function* () { yield 1; globalThis.ag3 = globalThis.tag })(); it.next(); it.next(); 0');",
+    )
+  let #(inside, st) =
+    out_of(
+      st,
+      "var out = r.evaluate('[globalThis.before, globalThis.after, globalThis.ag, globalThis.ag3].join()')",
+    )
+  assert classify(inside) == KStr("inner,inner,inner,inner")
+  let #(outside, _) =
+    out_of(
+      st,
+      "var out = [typeof globalThis.before, typeof globalThis.after, typeof globalThis.ag, typeof globalThis.ag3].join()",
+    )
+  assert classify(outside) == KStr("undefined,undefined,undefined,undefined")
+  // A plain generator handed across `$262.createRealm` and driven from the
+  // other side resumes in its own realm too.
+  let st = agent()
+  let #(_, st) = rt_realm.install_262(st, st.realm)
+  let #(v, _) =
+    out_of(
+      st,
+      "var other = $262.createRealm();
+       other.evalScript('var tag = \"theirs\"; function* g() { while (true) yield tag + \":\" + ([] instanceof Array) }');
+       var tag = 'ours', it = other.global.g();
+       var out = it.next().value + '/' + it.next().value",
+    )
+  assert classify(v) == KStr("theirs:true/theirs:true")
 }
 
 // -- async generators ---------------------------------------------------------

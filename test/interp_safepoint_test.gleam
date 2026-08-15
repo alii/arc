@@ -217,6 +217,7 @@ pub fn parked_frame_roots_its_registers_test() {
       line: 1,
       parked: ParkedOp,
       call_args: [],
+      realm: st.realm.id,
     )
   let #(gen_h, st) =
     rt_store.t_cell_new(

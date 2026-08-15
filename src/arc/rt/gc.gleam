@@ -208,6 +208,8 @@ pub fn push_suspended_frame_refs(
     line: _,
     parked: _,
     call_args:,
+    // Realm id: realms are registry entries, rooted in their own right.
+    realm: _,
   ) = frame
   let acc = push_template_refs(template, acc)
   let acc = push_vals_tuple_refs(locals, acc)
