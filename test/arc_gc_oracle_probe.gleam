@@ -8,7 +8,7 @@
 ////     cd arc && gleam run -m arc_gc_oracle_probe
 
 import arc/engine
-import arc/vm/heap
+import arc/rt/gc as rt_gc
 import gleam/int
 import gleam/io
 import gleam/list
@@ -97,15 +97,15 @@ fn run_one(p: Prog) -> Nil {
   let #(result, hs) = case r {
     Ok(#(engine.Returned(v), eng2)) -> #(
       string.inspect(v),
-      heap.stats(engine.heap(eng2)),
+      rt_gc.stats(engine.heap(eng2)),
     )
     Ok(#(engine.Threw(e), eng2)) -> #(
       "THREW " <> engine.format_error(eng2, e),
-      heap.stats(engine.heap(eng2)),
+      rt_gc.stats(engine.heap(eng2)),
     )
     Error(e) -> #(
       "ERR " <> engine.eval_error_message(e),
-      heap.HeapStats(0, 0, 0, 0),
+      rt_gc.GcStats(0, 0, 0, 0),
     )
   }
   io.println(

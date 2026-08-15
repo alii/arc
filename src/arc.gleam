@@ -42,7 +42,6 @@ fn format_eval_error(err: engine.EvalError(host)) -> String {
       "SyntaxError: " <> parser.parse_error_to_string(parse_err)
     engine.CompileError(compile_err) ->
       "compile error: " <> compiler.error_message(compile_err)
-    engine.VmError(_) -> "InternalError: " <> engine.eval_error_message(err)
     engine.ModuleCompileError(_) | engine.ModuleError(..) ->
       engine.eval_error_message(err)
   }

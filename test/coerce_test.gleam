@@ -5,18 +5,17 @@
 ///     a caller-chosen default), so the spec-mandated RangeErrors fire.
 ///   - ±∞ saturated to ±(2^53 - 1) still clamps to the spec's explicit
 ///     "+∞ → len / -∞ → 0" index branches.
-import arc/engine.{Returned}
-import arc/vm/value.{JsBool, JsString}
+import arc/engine.{type JsValueKind, JsBool, JsString, Returned}
 
 /// Eval source on a fresh engine, assert normal completion, return the value.
-fn eval(source: String) -> value.JsValue {
+fn eval(source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  value
+  engine.classify(value)
 }
 
 /// Eval an expression expected to throw; return the thrown error's `name`
 /// (e.g. "RangeError"), or "no throw" if it completed normally.
-fn thrown_name(expr: String) -> value.JsValue {
+fn thrown_name(expr: String) -> JsValueKind {
   eval(
     "(function () { try { "
     <> expr

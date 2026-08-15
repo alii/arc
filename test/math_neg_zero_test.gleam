@@ -8,13 +8,12 @@
 /// The recurring trap: on the BEAM `-0.0 >=. 0.0` is True, `-0.0 <. 0.0` is
 /// False, and `0.0 =:= -0.0` is False. So a bare comparison reads -0 as
 /// POSITIVE, while a bare `=:=` reads -0 as NON-INTEGRAL.
-import arc/engine.{Returned}
-import arc/vm/value.{JsBool}
+import arc/engine.{type JsValueKind, JsBool, Returned}
 
 /// Eval `source` on a fresh engine, asserting normal completion.
-fn eval(source: String) -> value.JsValue {
+fn eval(source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  value
+  engine.classify(value)
 }
 
 /// Plain `+ - * /` past 1.8e308 is ±Infinity by the operands' signs; the

@@ -1,25 +1,24 @@
 /// JSON.parse reviver — §25.5.1.1 InternalizeJSONProperty — plus the ES2025
 /// json-parse-with-source proposal (reviver `context`, JSON.rawJSON,
 /// JSON.isRawJSON, verbatim rawJSON serialization).
-import arc/engine.{Returned, Threw}
-import arc/vm/value.{type JsValue, JsBool, JsString}
+import arc/engine.{type JsValueKind, JsBool, JsString, Returned, Threw}
 
 /// Helper: eval source on a fresh engine, assert normal completion, return
 /// the completion value.
-fn eval(source: String) -> JsValue {
+fn eval(source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  value
+  engine.classify(value)
 }
 
 /// Helper: eval source, assert it threw, return the thrown value.
-fn eval_throw(source: String) -> JsValue {
+fn eval_throw(source: String) -> JsValueKind {
   let assert Ok(#(Threw(error:), _)) = engine.eval(engine.new(), source)
-  error
+  engine.classify(error)
 }
 
 /// Helper: eval an expression that is expected to throw, return the thrown
 /// error's constructor name (or "no throw" if it completed normally).
-fn eval_error_name(source: String) -> JsValue {
+fn eval_error_name(source: String) -> JsValueKind {
   eval("try { " <> source <> "; 'no throw'; } catch (e) { e.constructor.name }")
 }
 

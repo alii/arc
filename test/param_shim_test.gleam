@@ -11,13 +11,12 @@
 //// impossible as a JS identifier (same convention as the `<withN_M>`
 //// with-object holder), so the collision cannot happen.
 
-import arc/engine.{Returned}
-import arc/vm/value.{type JsValue, JsString}
+import arc/engine.{type JsValueKind, JsString, Returned}
 
 /// Eval `source` on a fresh engine and return the completion value.
-fn assert_eval(source: String) -> JsValue {
+fn assert_eval(source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  value
+  engine.classify(value)
 }
 
 /// `$param_0` and `$param_1` as USER formal names in a non-simple parameter

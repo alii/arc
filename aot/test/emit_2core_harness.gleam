@@ -25,31 +25,22 @@ pub type DiffRun {
 // Interpreter oracle
 // ----------------------------------------------------------------------------
 
-/// Run `source` through arc's interpreter and capture stdout.
-///
-/// arc's `console.log` writes straight to `io.println` (see
-/// `arc/vm/builtins/console.gleam`), so stdout is captured by temporarily
-/// installing an Erlang group_leader collector around the eval
-/// (`emit_2core_harness_ffi:capture_stdout/1`). `engine.Outcome` maps onto
+/// Run `source` through arc's interpreter on `test_hooks()`, so its
+/// `console` lines land in the same process-local buffers the compiled path
+/// fills, and read the stdout buffer back. `engine.Outcome` maps onto
 /// `DiffRun.result`: `Returned(v)` → `Ok(v as Dynamic)`, `Threw(e)` →
 /// `Error(format_error(e))`; a parse/compile failure is also `Error`.
 pub fn run_interpreted(source: String) -> DiffRun {
-  let #(stdout, eval_result) =
-    capture_stdout(fn() {
-      let eng: engine.Engine(Nil) =
-        engine.new() |> engine.with_host_hooks(test_hooks())
-      engine.eval(eng, source)
-    })
-  let result = case eval_result {
+  buf_reset()
+  let eng: engine.Engine(Nil) =
+    engine.new() |> engine.with_host_hooks(test_hooks())
+  let result = case engine.eval(eng, source) {
     Ok(#(engine.Returned(value:), _eng)) -> Ok(to_dynamic(value))
     Ok(#(engine.Threw(error:), eng)) -> Error(engine.format_error(eng, error))
     Error(err) -> Error(engine.eval_error_message(err))
   }
-  DiffRun(stdout:, result:)
+  DiffRun(stdout: buf_read(), result:)
 }
-
-@external(erlang, "emit_2core_harness_ffi", "capture_stdout")
-fn capture_stdout(thunk: fn() -> a) -> #(BitArray, a)
 
 @external(erlang, "emit_2core_harness_ffi", "to_dynamic")
 fn to_dynamic(a: a) -> Dynamic
@@ -66,7 +57,7 @@ pub const fixed_now_ms = 1_700_000_000_000
 /// xorshift64* PRNG, console lines into the process-local stdout buffer
 /// (log/info/debug, newline-terminated to match `io.println` bytes) or the
 /// stderr buffer (warn/error), and uncaught-job reports into the stderr
-/// buffer. The interpreter only reads the clock, sleep and report hooks.
+/// buffer.
 pub fn test_hooks() -> host_hooks.HostHooks {
   host_hooks.HostHooks(
     ..host_hooks.default_host_hooks(),

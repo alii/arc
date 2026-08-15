@@ -8,10 +8,9 @@
 //// one file. Run with: gleam run -m arc/examples/module_instance
 
 import arc/engine.{ModuleReturned, Returned, Threw}
+import arc/host
 import arc/module_host
-import arc/vm/host
-import arc/vm/state
-import arc/vm/value.{JsString, JsUndefined}
+import arc/rt/types.{mk_string, mk_undefined}
 import gleam/io
 import gleam/list
 import gleam/option.{Some}
@@ -38,14 +37,10 @@ pub fn main() -> Nil {
 
   // 3. Drive it: each call threads the heap forward, so `count` accumulates.
   list.fold(["hello", "world", "again"], eng, fn(eng, msg) {
-    case engine.call(eng, receive, JsUndefined, [JsString(msg)]) {
-      Ok(#(Returned(_), eng)) -> eng
-      Ok(#(Threw(val), eng)) -> {
+    case engine.call(eng, receive, mk_undefined(), [mk_string(msg)]) {
+      #(Returned(_), eng) -> eng
+      #(Threw(val), eng) -> {
         io.println_error("receive threw: " <> engine.format_error(eng, val))
-        eng
-      }
-      Error(err) -> {
-        io.println_error("receive error: " <> state.vm_error_message(err))
         eng
       }
     }
@@ -56,8 +51,8 @@ pub fn main() -> Nil {
 /// `Host.emit(text)` — print a line. The embedder's window into the sandbox.
 /// A missing or non-string argument throws a TypeError back into JS rather
 /// than quietly printing an empty line.
-fn emit(args, _this, s) {
+fn emit(args, _this, s: host.State(Nil)) {
   use text, s <- host.validate_string(s, host.first_arg(args), "text")
   io.println(text)
-  #(s, Ok(JsUndefined))
+  #(s, Ok(mk_undefined()))
 }
