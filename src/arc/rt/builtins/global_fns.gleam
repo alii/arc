@@ -24,6 +24,7 @@ import arc/rt/types.{
   SObject, mk_bool, mk_number, mk_object, mk_string,
 } as rt_types
 import arc/rt/val as rt_val
+import gleam/bit_array
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -491,11 +492,14 @@ fn uri_decode_loop(
       case decode_utf8_escape(bytes, offset) {
         Error(e) -> Error(e)
         Ok(#(cp, consumed, rest)) -> {
-          let sub = case
+          let reserved =
             preserve_reserved && cp < 128 && is_uri_reserved_byte(cp)
-          {
-            True -> "%" <> to_hex_upper(cp, 2)
-            False -> {
+          let sub = case reserved, bytes {
+            True, <<0x25, h1, h2, _:bytes>> -> {
+              let assert Ok(original) = bit_array.to_string(<<0x25, h1, h2>>)
+              original
+            }
+            _, _ -> {
               let assert Ok(ucp) = string.utf_codepoint(cp)
               string.from_utf_codepoints([ucp])
             }
