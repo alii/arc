@@ -509,11 +509,17 @@ fn pending_module_promise(
       let namespace = mk_object(namespace_h)
       let #(#(ns_promise, ns_resolve, ns_reject), st) =
         rt_async.t_new_promise_capability(st)
-      // Fulfilled: evaluation completed. Future imports read the namespace
-      // cache; the namespace promise fulfills with the namespace itself.
+      // Fulfilled (AsyncModuleExecutionFulfilled): [[Status]] = ~evaluated~,
+      // so a later deferred trigger over it is ready; future imports read
+      // the namespace cache; the namespace promise fulfills with the
+      // namespace itself.
       let #(on_fulfilled, st) = {
         use st, _args <- module.alloc_host_fn(st, "%FinishDynamicImport%", 0)
-        #(namespace, registry.clear_pending_promise(st, resolved))
+        let st =
+          st
+          |> registry.clear_pending_promise(resolved)
+          |> registry.write_module_status(resolved, registry.Evaluated)
+        #(namespace, st)
       }
       // Rejected: cache the evaluation error (every future import repeats
       // the same rejection) and re-throw so the namespace promise rejects.
