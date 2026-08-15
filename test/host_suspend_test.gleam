@@ -3,6 +3,7 @@
 //// the one drain settles it and runs the reactions.
 
 import arc/host.{AlreadySettled, Resumed, StaleTicket, State}
+import arc/interp/safepoint
 import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
@@ -123,13 +124,16 @@ pub fn double_resume_is_a_no_op_test() {
   assert seen(st) == int(1)
 }
 
+/// Suspend with no reactions attached: nothing but the ticket references
+/// the promise.
+fn bare_suspend() -> #(Agent, #(JsVal, host.Ticket)) {
+  use s <- host.with_state(agent())
+  let #(s, promise, ticket) = host.suspend(s)
+  #(s, #(promise, ticket))
+}
+
 pub fn resumed_promise_is_collectable_then_stale_test() {
-  // Nothing but the ticket references this promise.
-  let #(st, #(promise, ticket)) =
-    host.with_state(agent(), fn(s) {
-      let #(s, promise, ticket) = host.suspend(s)
-      #(s, #(promise, ticket))
-    })
+  let #(st, #(promise, ticket)) = bare_suspend()
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, handle(promise))
   let #(st, outcome) =
@@ -142,6 +146,38 @@ pub fn resumed_promise_is_collectable_then_stale_test() {
   let #(_, outcome) =
     host.with_state(st, fn(s) { host.resume(s, ticket, Ok(int(2))) })
   assert outcome == StaleTicket
+}
+
+pub fn held_promise_survives_resume_inside_a_turn_end_test() {
+  // The engine's completion value IS the suspended promise (`fetch()` at
+  // top level); its turn end holds it while the embedder's loop resumes the
+  // ticket and a collection fires mid-drive.
+  let #(st, #(promise, ticket)) = bare_suspend()
+  let st =
+    safepoint.finish_turn(st, [promise], fn(st) {
+      let #(st, outcome) =
+        host.with_state(st, fn(s) { host.resume(s, ticket, Ok(int(5))) })
+      assert outcome == Resumed
+      rt_gc.t_collect(st, [])
+    })
+  assert rt_gc.t_is_live(st, handle(promise))
+  assert promise_state(st, promise) == PromiseFulfilled(int(5))
+  // The hold is released: now nothing keeps it.
+  let st = rt_gc.t_collect(st, [])
+  assert !rt_gc.t_is_live(st, handle(promise))
+}
+
+pub fn holding_the_promise_does_not_revive_a_spent_ticket_test() {
+  let #(st, #(promise, ticket)) = bare_suspend()
+  // Resumed but not yet drained, then held by a turn end.
+  let #(State(agent: st, ..), first) =
+    host.resume(host.from_agent(st), ticket, Ok(int(1)))
+  let #(st, ids) = rt_gc.t_hold_roots(st, [promise])
+  let #(State(agent: st, ..), second) =
+    host.resume(host.from_agent(st), ticket, Ok(int(2)))
+  assert #(first, second) == #(Resumed, AlreadySettled)
+  let st = rt_gc.t_release_roots(rt_async.drain(st), ids)
+  assert promise_state(st, promise) == PromiseFulfilled(int(1))
 }
 
 pub fn foreign_ticket_is_stale_test() {

@@ -30,8 +30,8 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type HostTerm, type JsVal, type Property, Agent,
   HostFnEntry, HostJob, JFloat, JInt, KBool, KHandle, KHost, KNum, KStr,
-  NoElements, PromiseObj, PromisePending, RangeErr, SObject, StringKey, TypeErr,
-  classify, mk_object, mk_undefined,
+  NoElements, PromiseObj, RangeErr, SObject, StringKey, TypeErr, classify,
+  mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bool
@@ -39,7 +39,6 @@ import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/set
 
 // -- State -------------------------------------------------------------------
 
@@ -307,25 +306,48 @@ pub type ResumeOutcome {
 /// is from `suspend`, and the only thing to do with it is hand it back to
 /// `resume`, so passing the Promise object or some unrelated handle to
 /// `resume` is a compile error, not silent heap corruption.
+///
+/// `root` is a private cell that references the promise and is pinned from
+/// `suspend` to `resume`. It is never handed to JS or the embedder, so no
+/// `t_hold_roots` caller can name it and its pin cannot be confused with a
+/// hold on the promise itself: the two lifetimes overlap without nesting
+/// (the engine may be holding the very promise the embedder resumes).
 pub opaque type Ticket {
-  Ticket(promise: Handle)
+  Ticket(promise: Handle, root: Handle)
+}
+
+/// Payload of a ticket's root cell.
+type TicketRoot {
+  TicketRoot(promise: Handle)
 }
 
 /// Create a pending Promise. Return the value from your host function so JS
 /// can `await` it; keep the `Ticket` to pass to `resume` once your external
-/// work completes. The promise is a GC root until then, so everything
-/// awaiting it survives any collection in between.
+/// work completes. The promise is reachable from a GC root until then, so
+/// everything awaiting it survives any collection in between.
 pub fn suspend(s: State(host)) -> #(State(host), JsVal, Ticket) {
   let #(promise, st) = rt_async.t_new_promise(s.agent)
-  let st = rt_store.t_pin_root(st, promise)
-  #(State(..s, agent: st), mk_object(promise), Ticket(promise:))
+  let #(root, st) =
+    rt_store.t_cell_new(
+      st,
+      SObject(
+        kind: KHost(payload: erase(TicketRoot(promise:))),
+        proto: None,
+        props: dict.new(),
+        symbol_props: [],
+        elements: NoElements,
+        extensible: False,
+      ),
+    )
+  let st = rt_store.t_pin_root(st, root)
+  #(State(..s, agent: st), mk_object(promise), Ticket(promise:, root:))
 }
 
 /// Queue the settlement of the Promise behind a `suspend` Ticket as a
 /// microtask job: it resolves on `Ok` (assimilating a thenable like a
 /// `resolve` function does), rejects on `Error`, and the reactions run in
-/// the same drain. The promise stops being a GC root here; the queued job
-/// keeps it alive until it has run.
+/// the same drain. The ticket's root is dropped here; the queued job keeps
+/// the promise alive until it has run.
 ///
 /// Resuming an already-resumed ticket is a no-op reported as
 /// `AlreadySettled`, and a ticket this agent never issued is `StaleTicket`,
@@ -336,12 +358,13 @@ pub fn resume(
   ticket: Ticket,
   outcome: Result(JsVal, JsVal),
 ) -> #(State(host), ResumeOutcome) {
-  let Ticket(promise:) = ticket
-  case ticket_state(s.agent, promise) {
+  let Ticket(promise:, root:) = ticket
+  case ticket_state(s.agent, ticket) {
     Stale -> #(s, StaleTicket)
     Spent -> #(s, AlreadySettled)
     Live -> {
-      let st = rt_gc.t_release_roots(s.agent, [promise.id])
+      let st = rt_gc.t_release_roots(s.agent, [root.id])
+      let st = rt_store.t_cell_free(st, root)
       let settle = fn(st) {
         case outcome {
           Ok(value) -> rt_async.t_promise_resolve(st, promise, value)
@@ -355,22 +378,28 @@ pub fn resume(
 }
 
 type TicketState {
-  /// Suspended and not yet resumed: a pinned, pending promise.
+  /// Suspended and not yet resumed: the root cell still names the promise.
   Live
-  /// Resumed before: the pin is gone (the promise may still be pending
-  /// until the queued job runs).
+  /// Resumed before: the root is gone but the promise is still on this
+  /// agent (it may still be pending until the queued job runs).
   Spent
   /// Not a promise of this agent at all.
   Stale
 }
 
-fn ticket_state(st: Agent, promise: Handle) -> TicketState {
-  use <- bool.guard(!rt_gc.t_is_live(st, promise), Stale)
-  use <- bool.guard(!is_promise(st, promise), Stale)
-  let pinned = set.contains(st.store.pinned_roots, promise.id)
-  case rt_async.promise_data(st, promise) {
-    #(_, PromisePending(_), _) if pinned -> Live
-    _ -> Spent
+fn ticket_state(st: Agent, ticket: Ticket) -> TicketState {
+  let Ticket(promise:, root:) = ticket
+  use <- bool.guard(is_ticket_root(st, root, promise), Live)
+  let spent = rt_gc.t_is_live(st, promise) && is_promise(st, promise)
+  use <- bool.guard(spent, Spent)
+  Stale
+}
+
+fn is_ticket_root(st: Agent, root: Handle, promise: Handle) -> Bool {
+  use <- bool.guard(!rt_gc.t_is_live(st, root), False)
+  case rt_store.t_cell_get(st, root) {
+    SObject(kind: KHost(payload:), ..) -> payload == erase(TicketRoot(promise:))
+    _ -> False
   }
 }
 
