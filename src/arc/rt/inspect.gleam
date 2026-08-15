@@ -13,14 +13,16 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsVal, type Property,
-  type PropertyKey, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
+  type PropertyKey, type TemporalData, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
   AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty,
   DataViewObj, DateObj, ErrorObj, ForInIterator, GeneratorObj, Index, IntlObj,
   IteratorHelperObj, KBig, KBool, KBound, KBytecode, KCompiled, KHandle, KHost,
   KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, MapIterator, MapObj,
   ModuleNamespace, Named, NumberObj, Ordinary, Private, PromiseObj, ProxyObj,
   RawJsonObj, RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator,
-  StringObj, SymbolObj, TemporalInstant, TemporalObj, TypedArrayObj, WeakMapObj,
+  StringObj, SymbolObj, TemporalDate, TemporalDateTime, TemporalDuration,
+  TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
+  TemporalYearMonth, TemporalZonedDateTime, TypedArrayObj, WeakMapObj,
   WeakSetObj, WrapForValidIteratorObj, classify,
 } as rt_types
 import arc/rt/val as rt_val
@@ -182,7 +184,7 @@ fn inspect_object(
             intl_data.IntlNumberFormat -> "[Intl.NumberFormat]"
             intl_data.IntlDurationFormat -> "[Intl.DurationFormat]"
           }
-        TemporalObj(data: TemporalInstant(..)) -> "Temporal.Instant {}"
+        TemporalObj(data:) -> temporal_label(data)
         // A tagged ordinary object renders via its Symbol.toStringTag
         // (`Object [Tag] { ... }`). Host objects have no own properties and
         // render through their prototype's tag the same way.
@@ -387,5 +389,19 @@ fn error_property(
           }
       }
     _ -> None
+  }
+}
+
+/// Console rendering of a Temporal object: its type name.
+fn temporal_label(data: TemporalData) -> String {
+  case data {
+    TemporalInstant(..) -> "Temporal.Instant {}"
+    TemporalDate(..) -> "Temporal.PlainDate {}"
+    TemporalTime(..) -> "Temporal.PlainTime {}"
+    TemporalDateTime(..) -> "Temporal.PlainDateTime {}"
+    TemporalYearMonth(..) -> "Temporal.PlainYearMonth {}"
+    TemporalMonthDay(..) -> "Temporal.PlainMonthDay {}"
+    TemporalDuration(..) -> "Temporal.Duration {}"
+    TemporalZonedDateTime(..) -> "Temporal.ZonedDateTime {}"
   }
 }

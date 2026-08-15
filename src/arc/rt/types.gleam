@@ -8,10 +8,12 @@
 ////   realm → JsOps/JsStore → Agent.
 
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
+import arc/rt/builtins/temporal_tz
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, type SuspendedFrame}
 import arc/rt/intl_data.{type IntlData, type IntlService}
 import arc/rt/wire
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
+import arc/vm/internal/temporal_calendar.{type Calendar}
 import arc/vm/internal/tree_array.{type TreeArray}
 import gleam/bit_array
 import gleam/dict.{type Dict}
@@ -1909,14 +1911,270 @@ pub type IntlHostOverrideName {
 /// with (and the OrdinaryCreateFromConstructor fallback for the constructor).
 pub type TemporalNative {
   /// new Temporal.Instant(epochNanoseconds)
-  TemporalInstantCtor(proto: Handle)
+  TemporalInstantCtor(protos: TemporalProtos)
   /// Temporal.Instant.from / fromEpochMilliseconds / fromEpochNanoseconds /
   /// compare
-  TemporalInstantStatic(name: InstantStaticName, proto: Handle)
+  TemporalInstantStatic(name: InstantStaticName, protos: TemporalProtos)
   /// get Temporal.Instant.prototype.epochMilliseconds / epochNanoseconds
   TemporalInstantGetter(getter: InstantGetterName)
   /// Temporal.Instant.prototype methods
-  TemporalInstantMethod(method: InstantMethodName, proto: Handle)
+  TemporalInstantMethod(method: InstantMethodName, protos: TemporalProtos)
+  /// Temporal.Now.* functions
+  TemporalNowFn(name: TemporalNowName, protos: TemporalProtos)
+  /// new Temporal.PlainDateTime(y, mo, d, h, mi, s, ms, us, ns [, calendar])
+  TemporalPlainDateTimeCtor(protos: TemporalProtos)
+  /// Temporal.PlainDateTime.from / compare
+  TemporalPlainDateTimeStatic(name: TemporalStaticName, protos: TemporalProtos)
+  /// get Temporal.PlainDateTime.prototype.<field>
+  TemporalPlainDateTimeGetter(getter: TemporalDateTimeGetter)
+  /// Temporal.PlainDateTime.prototype methods
+  TemporalPlainDateTimeMethod(
+    method: PlainDateTimeMethod,
+    protos: TemporalProtos,
+  )
+  /// new Temporal.PlainTime(h, mi, s, ms, us, ns)
+  TemporalPlainTimeCtor(protos: TemporalProtos)
+  /// Temporal.PlainTime.from / compare
+  TemporalPlainTimeStatic(name: TemporalStaticName, protos: TemporalProtos)
+  /// get Temporal.PlainTime.prototype.<field>
+  TemporalPlainTimeGetter(getter: TemporalTimeGetter)
+  /// Temporal.PlainTime.prototype methods
+  TemporalPlainTimeMethod(method: PlainTimeMethod, protos: TemporalProtos)
+  /// new Temporal.Duration(y, mo, w, d, h, mi, s, ms, us, ns)
+  TemporalDurationCtor(protos: TemporalProtos)
+  /// Temporal.Duration.from / compare
+  TemporalDurationStatic(name: TemporalStaticName, protos: TemporalProtos)
+  /// get Temporal.Duration.prototype.years ... blank
+  TemporalDurationGetter(getter: TemporalDurationGetter)
+  /// Temporal.Duration.prototype methods
+  TemporalDurationMethod(method: DurationMethod, protos: TemporalProtos)
+  /// new Temporal.PlainDate(year, month, day [, calendar])
+  TemporalPlainDateCtor(protos: TemporalProtos)
+  /// Temporal.PlainDate.from / compare
+  TemporalPlainDateStatic(name: TemporalStaticName, protos: TemporalProtos)
+  /// get Temporal.PlainDate.prototype.<field>
+  TemporalPlainDateGetter(getter: TemporalDateGetter)
+  /// Temporal.PlainDate.prototype methods
+  TemporalPlainDateMethod(method: PlainDateMethod, protos: TemporalProtos)
+  /// new Temporal.PlainYearMonth(year, month [, calendar [, referenceISODay]])
+  TemporalPlainYearMonthCtor(protos: TemporalProtos)
+  /// Temporal.PlainYearMonth.from / compare
+  TemporalPlainYearMonthStatic(
+    name: TemporalStaticName,
+    protos: TemporalProtos,
+  )
+  /// get Temporal.PlainYearMonth.prototype.<field>
+  TemporalPlainYearMonthGetter(getter: TemporalYearMonthGetter)
+  /// Temporal.PlainYearMonth.prototype methods
+  TemporalPlainYearMonthMethod(
+    method: PlainYearMonthMethod,
+    protos: TemporalProtos,
+  )
+  /// new Temporal.PlainMonthDay(month, day [, calendar [, referenceISOYear]])
+  TemporalPlainMonthDayCtor(protos: TemporalProtos)
+  /// Temporal.PlainMonthDay.from (PlainMonthDay has no compare)
+  TemporalPlainMonthDayStatic(name: TemporalStaticName, protos: TemporalProtos)
+  /// get Temporal.PlainMonthDay.prototype.<field>
+  TemporalPlainMonthDayGetter(getter: TemporalMonthDayGetter)
+  /// Temporal.PlainMonthDay.prototype methods
+  TemporalPlainMonthDayMethod(
+    method: PlainMonthDayMethod,
+    protos: TemporalProtos,
+  )
+}
+
+pub type TemporalYearMonthGetter {
+  YmCalendarId
+  YmEra
+  YmEraYear
+  YmYear
+  YmMonth
+  YmMonthCode
+  YmDaysInYear
+  YmDaysInMonth
+  YmMonthsInYear
+  YmInLeapYear
+}
+
+pub type TemporalMonthDayGetter {
+  MdCalendarId
+  MdMonthCode
+  MdDay
+}
+
+pub type PlainYearMonthMethod {
+  PymWith
+  PymAdd
+  PymSubtract
+  PymUntil
+  PymSince
+  PymEquals
+  PymToString
+  PymToLocaleString
+  PymToJson
+  PymValueOf
+  PymToPlainDate
+}
+
+pub type PlainMonthDayMethod {
+  PmdWith
+  PmdEquals
+  PmdToString
+  PmdToLocaleString
+  PmdToJson
+  PmdValueOf
+  PmdToPlainDate
+}
+
+/// Temporal.PlainDate.prototype methods.
+pub type PlainDateMethod {
+  PdToPlainYearMonth
+  PdToPlainMonthDay
+  PdToPlainDateTime
+  PdToZonedDateTime
+  PdAdd
+  PdSubtract
+  PdWith
+  PdWithCalendar
+  PdUntil
+  PdSince
+  PdEquals
+  PdToString
+  PdToLocaleString
+  PdToJson
+  PdValueOf
+}
+
+pub type PlainTimeMethod {
+  PtAdd
+  PtSubtract
+  PtWith
+  PtUntil
+  PtSince
+  PtRound
+  PtEquals
+  PtToString
+  PtToLocaleString
+  PtToJson
+  PtValueOf
+}
+
+/// Handles of all eight Temporal type prototypes, captured inside each
+/// Temporal native token at init time so methods can allocate instances of
+/// sibling types (e.g. PlainDateTime.prototype.toPlainDate needs the
+/// PlainDate prototype). All are rooted at builtin init.
+pub type TemporalProtos {
+  TemporalProtos(
+    plain_date: Handle,
+    plain_time: Handle,
+    plain_date_time: Handle,
+    plain_year_month: Handle,
+    plain_month_day: Handle,
+    duration: Handle,
+    instant: Handle,
+    zoned_date_time: Handle,
+  )
+}
+
+pub type TemporalDurationGetter {
+  DrYears
+  DrMonths
+  DrWeeks
+  DrDays
+  DrHours
+  DrMinutes
+  DrSeconds
+  DrMilliseconds
+  DrMicroseconds
+  DrNanoseconds
+  DrSign
+  DrBlank
+}
+
+pub type DurationMethod {
+  DmWith
+  DmNegated
+  DmAbs
+  DmAdd
+  DmSubtract
+  DmRound
+  DmTotal
+  DmToString
+  DmToJson
+  DmToLocaleString
+  DmValueOf
+}
+
+/// Static methods shared by the Temporal type constructors.
+pub type TemporalStaticName {
+  TsFrom
+  TsCompare
+}
+
+/// Date fields shared by PlainDate, PlainDateTime and ZonedDateTime.
+pub type TemporalDateGetter {
+  DgCalendarId
+  DgEra
+  DgEraYear
+  DgYear
+  DgMonth
+  DgMonthCode
+  DgDay
+  DgDayOfWeek
+  DgDayOfYear
+  DgWeekOfYear
+  DgYearOfWeek
+  DgDaysInWeek
+  DgDaysInMonth
+  DgDaysInYear
+  DgMonthsInYear
+  DgInLeapYear
+}
+
+/// Wall-clock fields shared by PlainTime, PlainDateTime and ZonedDateTime.
+pub type TemporalTimeGetter {
+  TgHour
+  TgMinute
+  TgSecond
+  TgMillisecond
+  TgMicrosecond
+  TgNanosecond
+}
+
+pub type TemporalDateTimeGetter {
+  DtDate(TemporalDateGetter)
+  DtTime(TemporalTimeGetter)
+}
+
+pub type PlainDateTimeMethod {
+  PdtWith
+  PdtWithPlainTime
+  PdtWithCalendar
+  PdtAdd
+  PdtSubtract
+  PdtUntil
+  PdtSince
+  PdtRound
+  PdtEquals
+  PdtToString
+  PdtToLocaleString
+  PdtToJson
+  PdtValueOf
+  PdtToPlainDate
+  PdtToPlainTime
+  PdtToZonedDateTime
+}
+
+/// A Temporal.ZonedDateTime's [[TimeZone]], resolved once at construction.
+/// There is no "unknown" variant: an unrecognised identifier is a RangeError
+/// at parse time.
+pub type TimeZone {
+  /// The distinguished "UTC" zone (offset 0, no transitions).
+  TzUtc
+  /// A fixed numeric offset ("+05:30"), stored in nanoseconds. No transitions.
+  TzOffset(ns: Int)
+  /// A named IANA zone, validated against the system tzdata.
+  TzNamed(zone: temporal_tz.Zone)
 }
 
 pub type InstantStaticName {
@@ -1932,18 +2190,79 @@ pub type InstantGetterName {
 }
 
 pub type InstantMethodName {
+  InstantAdd
+  InstantSubtract
+  InstantUntil
+  InstantSince
   InstantRound
   InstantEquals
   InstantToString
   InstantToLocaleString
   InstantToJson
   InstantValueOf
+  InstantToZonedDateTimeIso
+}
+
+/// Temporal.Now.* functions.
+pub type TemporalNowName {
+  NowInstant
+  NowTimeZoneId
+  NowPlainDateISO
+  NowPlainTimeISO
+  NowPlainDateTimeISO
+  NowZonedDateTimeISO
 }
 
 /// The internal slots of a Temporal object. The variant IS the brand.
 pub type TemporalData {
   /// [[EpochNanoseconds]] of a Temporal.Instant, |ns| <= 8.64e21.
   TemporalInstant(epoch_ns: Int)
+  /// Temporal.PlainDate: ISO calendar date plus its calendar. `calendar`
+  /// (here and on the other Temporal slots) is the closed CLDR calendar set.
+  TemporalDate(year: Int, month: Int, day: Int, calendar: Calendar)
+  /// Temporal.PlainTime: wall-clock time, nanosecond precision.
+  TemporalTime(
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int,
+    microsecond: Int,
+    nanosecond: Int,
+  )
+  /// Temporal.PlainDateTime: combined ISO date + wall-clock time.
+  TemporalDateTime(
+    year: Int,
+    month: Int,
+    day: Int,
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int,
+    microsecond: Int,
+    nanosecond: Int,
+    calendar: Calendar,
+  )
+  /// Temporal.PlainYearMonth. `year`/`month`/`day` are the ISO date of the
+  /// reference day.
+  TemporalYearMonth(year: Int, month: Int, day: Int, calendar: Calendar)
+  /// Temporal.PlainMonthDay. `month`/`day`/`ref_year` are the ISO date of the
+  /// reference day.
+  TemporalMonthDay(month: Int, day: Int, ref_year: Int, calendar: Calendar)
+  /// Temporal.Duration: ten integral fields, all the same sign.
+  TemporalDuration(
+    years: Int,
+    months: Int,
+    weeks: Int,
+    days: Int,
+    hours: Int,
+    minutes: Int,
+    seconds: Int,
+    milliseconds: Int,
+    microseconds: Int,
+    nanoseconds: Int,
+  )
+  /// Temporal.ZonedDateTime: exact time + resolved time zone.
+  TemporalZonedDateTime(epoch_ns: Int, time_zone: TimeZone, calendar: Calendar)
 }
 
 /// Which async-generator suspension the settled `AsyncGenResume` await was for
@@ -2207,11 +2526,49 @@ pub fn intl_native_refs(n: IntlNative) -> List(Handle) {
 /// over the intrinsic prototype it allocates with.
 pub fn temporal_native_refs(n: TemporalNative) -> List(Handle) {
   case n {
-    TemporalInstantCtor(proto:)
-    | TemporalInstantStatic(proto:, ..)
-    | TemporalInstantMethod(proto:, ..) -> [proto]
-    TemporalInstantGetter(_) -> []
+    TemporalInstantCtor(protos:)
+    | TemporalInstantStatic(protos:, ..)
+    | TemporalInstantMethod(protos:, ..)
+    | TemporalNowFn(protos:, ..) -> temporal_protos_refs(protos)
+    TemporalInstantGetter(_)
+    | TemporalPlainDateTimeGetter(_)
+    | TemporalPlainTimeGetter(_) -> []
+    TemporalPlainDateTimeCtor(protos:)
+    | TemporalPlainDateTimeStatic(protos:, ..)
+    | TemporalPlainDateTimeMethod(protos:, ..)
+    | TemporalPlainTimeCtor(protos:)
+    | TemporalPlainTimeStatic(protos:, ..)
+    | TemporalPlainTimeMethod(protos:, ..) -> temporal_protos_refs(protos)
+    TemporalDurationGetter(_) -> []
+    TemporalDurationCtor(protos:)
+    | TemporalDurationStatic(protos:, ..)
+    | TemporalDurationMethod(protos:, ..) -> temporal_protos_refs(protos)
+    TemporalPlainDateGetter(_) -> []
+    TemporalPlainDateCtor(protos:)
+    | TemporalPlainDateStatic(protos:, ..)
+    | TemporalPlainDateMethod(protos:, ..) -> temporal_protos_refs(protos)
+    TemporalPlainYearMonthGetter(_) | TemporalPlainMonthDayGetter(_) -> []
+    TemporalPlainYearMonthCtor(protos:)
+    | TemporalPlainYearMonthStatic(protos:, ..)
+    | TemporalPlainYearMonthMethod(protos:, ..)
+    | TemporalPlainMonthDayCtor(protos:)
+    | TemporalPlainMonthDayStatic(protos:, ..)
+    | TemporalPlainMonthDayMethod(protos:, ..) -> temporal_protos_refs(protos)
   }
+}
+
+/// Every prototype handle a `TemporalProtos` record closes over.
+pub fn temporal_protos_refs(p: TemporalProtos) -> List(Handle) {
+  [
+    p.plain_date,
+    p.plain_time,
+    p.plain_date_time,
+    p.plain_year_month,
+    p.plain_month_day,
+    p.duration,
+    p.instant,
+    p.zoned_date_time,
+  ]
 }
 
 /// GC-trace hook for `ArrayBufferNative` — only the constructor closes over

@@ -33,7 +33,7 @@ import arc/rt/types.{
   PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
   ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
   SBox, SGenerator, SObject, SPromiseData, SShapedObject, SetIterator, SetObj,
-  Sparse, StringIterator, StringObj, SymbolObj, TemporalInstant, TemporalObj,
+  Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
   ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj,
   WeakSymKey, WrapForValidIteratorObj, jq_to_list, native_token_refs,
 } as rt_types
@@ -355,7 +355,9 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     // The resolved Intl state is handle-free; only the bound-method cache
     // holds a cell.
     IntlObj(data: _, bound:) -> push_opt_handle(bound, acc)
-    TemporalObj(data: TemporalInstant(epoch_ns: _)) -> acc
+    // Temporal internal slots are plain integers, calendars and resolved
+    // time zones: no handles.
+    TemporalObj(data: _) -> acc
   }
 }
 
