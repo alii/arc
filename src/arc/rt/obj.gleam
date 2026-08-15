@@ -1002,23 +1002,16 @@ fn set_own_string(
   v: JsVal,
 ) -> #(Bool, Agent) {
   case kind, key {
-    // §10.4.2.1 step 1: Array "length" → ArraySetLength (§10.4.2.4).
-    ArrayObj(length:), Named("length") -> {
-      let length_writable = case dict.get(props, key) {
-        Ok(DataProperty(writable: w, ..)) -> w
-        _ -> True
-      }
-      case length_writable {
+    // §10.1.9.2 step 2.a: non-writable "length" → false (no coercion);
+    // otherwise §10.4.2.1 step 1: ArraySetLength (§10.4.2.4).
+    ArrayObj(_), Named("length") ->
+      case array_length_writable(props) {
         False -> #(False, st)
-        True -> array_set_length(st, h, v, length)
+        True -> array_put_length(st, h, v)
       }
-    }
     // §10.4.2.1 step 2 / §10.4.4.2: array/arguments index write.
     ArrayObj(length:), Index(i) -> {
-      let length_writable = case dict.get(props, Named("length")) {
-        Ok(DataProperty(writable: w, ..)) -> w
-        _ -> True
-      }
+      let length_writable = array_length_writable(props)
       case dict.get(props, key) {
         // Dict override at this index — honor its writable, keep attributes.
         Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
@@ -1245,31 +1238,59 @@ fn write_symbol_props(
   #(True, st)
 }
 
-/// §10.4.2.4 ArraySetLength (value-only Desc). Shrinking truncates elements
-/// and dict Index overrides. Throws RangeError (via D7 raise) on a non-uint32
-/// value. Port of arc `array_set_length` (`object.gleam:1429-1509`).
+/// The Array "length" [[Writable]] attribute: a dict override holds it once
+/// defineProperty froze it; absent means the default writable length.
+fn array_length_writable(props: Dict(PropertyKey, Property)) -> Bool {
+  case dict.get(props, Named("length")) {
+    Ok(DataProperty(writable:, ..)) -> writable
+    Ok(AccessorProperty(..)) | Error(Nil) -> True
+  }
+}
+
+/// §10.4.2.4 ArraySetLength steps 3-5: newLen = ? ToUint32(Desc.[[Value]]),
+/// numberLen = ? ToNumber(Desc.[[Value]]) (two observable coercions), then
+/// RangeError unless SameValueZero(newLen, numberLen). Port of arc
+/// `mop.array_define_length` + `parse_array_length` (`mop.gleam:590-644`).
+fn to_array_length(st: Agent, v: JsVal) -> #(Int, Agent) {
+  let #(new_len, st) = rt_val.t_to_uint32(st, v)
+  let #(number_len, st) = rt_val.t_to_number(st, v)
+  let same = case number_len {
+    rt_types.JInt(n) -> n == new_len
+    // `+. 0.0` folds -0.0 to +0.0 (SameValueZero).
+    rt_types.JFloat(f) -> f +. 0.0 == int.to_float(new_len)
+    rt_types.JNan | rt_types.JPosInf | rt_types.JNegInf -> False
+  }
+  case same {
+    True -> #(new_len, st)
+    False -> throw_range_error(st, "Invalid array length")
+  }
+}
+
+/// §10.1.9.2 step 3 → §10.4.2.1 step 1 for `A.length = v`: the receiver's
+/// own "length" was writable, so [[DefineOwnProperty]](A, "length",
+/// {[[Value]]: v}) = ArraySetLength. Steps 3-5 coerce first; steps 7-12 then
+/// re-read oldLenDesc, which the coercion may have frozen.
+fn array_put_length(st: Agent, h: Handle, v: JsVal) -> #(Bool, Agent) {
+  let #(new_len, st) = to_array_length(st, v)
+  let assert SObject(kind: ArrayObj(length: old_len), props:, ..) =
+    read_object(st, h)
+  case array_length_writable(props) {
+    True -> array_set_length(st, h, new_len, old_len)
+    // Step 11.a with a non-writable current: true only for an unchanged
+    // value; step 12: shrinking a non-writable length → false.
+    False -> #(new_len == old_len, st)
+  }
+}
+
+/// §10.4.2.4 ArraySetLength steps 11-19 for an already validated uint32
+/// `new_len`. Shrinking truncates elements and dict Index overrides. Port of
+/// arc `write_array_length` + `shrink_array` (`mop.gleam:693-807`).
 fn array_set_length(
   st: Agent,
   h: Handle,
-  v: JsVal,
+  new_len: Int,
   old_len: Int,
 ) -> #(Bool, Agent) {
-  let new_len = case rt_types.classify(v) {
-    rt_types.KNum(rt_types.JInt(n))
-      if n >= 0 && n <= rt_types.max_array_length
-    -> n
-    rt_types.KNum(rt_types.JFloat(f)) ->
-      case rt_types.array_index_of_float(f) {
-        // array_index_of_float caps at 2^32-2; length may be 2^32-1.
-        Some(n) -> n
-        None ->
-          case f == int.to_float(rt_types.max_array_length) {
-            True -> rt_types.max_array_length
-            False -> throw_range_error(st, "Invalid array length")
-          }
-      }
-    _ -> throw_range_error(st, "Invalid array length")
-  }
   case new_len >= old_len {
     True -> {
       let st =
@@ -1350,6 +1371,16 @@ pub fn t_define_own_prop(
   desc: ParsedDesc,
 ) -> #(Bool, Agent) {
   let st = devolve(st, obj)
+  // §10.4.2.4 ArraySetLength steps 3-6 run before oldLenDesc is read (step
+  // 7): the coercion may call user code that redefines "length" on A.
+  let #(desc, new_len, st) = case read_object(st, obj), key, desc.value {
+    SObject(kind: ArrayObj(_), ..), StringKey(Named("length")), Some(v) -> {
+      let #(n, st) = to_array_length(st, v)
+      let value = Some(rt_types.mk_number(rt_types.JInt(n)))
+      #(ParsedDesc(..desc, value:), Some(n), st)
+    }
+    _, _, _ -> #(desc, None, st)
+  }
   let assert SObject(kind:, props:, symbol_props:, elements:, extensible:, ..) =
     read_object(st, obj)
   use <- exotic_define(st, kind, key, desc)
@@ -1357,6 +1388,13 @@ pub fn t_define_own_prop(
     ArrayObj(_) | ArgumentsObj(..) -> True
     _ -> False
   }
+  // §10.4.2.1 steps 2.b-c: an index at or past a non-writable length → false.
+  let index_blocked = case kind, key {
+    ArrayObj(length:), StringKey(Index(i)) ->
+      i >= length && !array_length_writable(props)
+    _, _ -> False
+  }
+  use <- bool.guard(index_blocked, #(False, st))
   // Step 1: current = O.[[GetOwnProperty]](P).
   let existing = case key {
     StringKey(pk) -> own_property_of(st, kind, props, elements, pk)
@@ -1389,10 +1427,11 @@ pub fn t_define_own_prop(
     // `kind: ArrayObj(new_len)` and truncates elements; the dict entry only
     // carries the merged attribute override (its value field is ignored by
     // `own_property_of`). `is_compatible_descriptor` above already rejected
-    // accessor/configurable/enumerable/non-writable violations.
+    // accessor/configurable/enumerable/non-writable violations (steps 1,
+    // 11.a, 12, 15-16).
     ArrayObj(length: old_len), StringKey(Named("length") as pk) -> {
-      let #(len_ok, st) = case desc.value {
-        Some(v) -> array_set_length(st, obj, v, old_len)
+      let #(len_ok, st) = case new_len {
+        Some(n) -> array_set_length(st, obj, n, old_len)
         None -> #(True, st)
       }
       let st =
@@ -2222,6 +2261,22 @@ fn slot_extensible(slot: JsSlot) -> Bool {
   case slot {
     SObject(extensible:, ..) -> extensible
     SShapedObject(..) -> True
+    _ -> False
+  }
+}
+
+/// **IsArray ( argument )** — §7.2.2 for an object argument: step 2 Array
+/// exotic → true; step 3 Proxy → throw TypeError if revoked (3.a), else
+/// recurse on [[ProxyTarget]] (3.b-c); step 4 false. Raises via D7.
+pub fn t_is_array(st: Agent, h: Handle) -> Bool {
+  case rt_store.t_cell_get(st, h) {
+    SObject(kind: ArrayObj(_), ..) -> True
+    SObject(kind: ProxyObj(revoked: True, ..), ..) ->
+      throw_type_error(
+        st,
+        "Cannot perform 'IsArray' on a proxy that has been revoked",
+      )
+    SObject(kind: ProxyObj(target:, ..), ..) -> t_is_array(st, target)
     _ -> False
   }
 }
