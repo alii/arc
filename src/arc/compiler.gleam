@@ -19,7 +19,9 @@ import arc/compiler/resolve
 import arc/compiler/scope
 import arc/esm
 import arc/parser/ast
+import arc/rt/bytecode
 import arc/rt/types.{type JsVal}
+import arc/rt/val as rt_val
 import arc/vm/internal/tuple_array
 import arc/vm/lexical.{type CodeKind, type LexicalSlots}
 import arc/vm/opcode
@@ -29,6 +31,7 @@ import arc/vm/value.{
   JsUninitialized,
 }
 import gleam/dict.{type Dict}
+import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -746,5 +749,81 @@ fn check_param_scope_var_conflict(
         Error(Nil) -> Ok(Nil)
       }
     }
+  }
+}
+
+/// The shared-runtime view of a compiled template, for the new interpreter.
+/// While the old interpreter is still the engine, templates are assembled in
+/// its shape (`resolve_legacy`); this converts one back, constant pool
+/// included, using the emitter's own number rule so both interpreters and
+/// compiled code hold identical constants.
+pub fn shared_template(t: FuncTemplate) -> bytecode.FuncTemplate {
+  bytecode.FuncTemplate(
+    name: t.name,
+    arity: t.arity,
+    length: t.length,
+    local_count: t.local_count,
+    bytecode: t.bytecode,
+    constants: tuple_array.to_list(t.constants)
+      |> list.map(shared_constant)
+      |> tuple_array.from_list,
+    functions: tuple_array.to_list(t.functions)
+      |> list.map(shared_template)
+      |> tuple_array.from_list,
+    env_descriptors: list.map(t.env_descriptors, fn(c) {
+      let CaptureLocal(parent_index:) = c
+      bytecode.CaptureLocal(parent_index:)
+    }),
+    is_strict: t.is_strict,
+    is_arrow: t.is_arrow,
+    is_derived_constructor: t.is_derived_constructor,
+    is_generator: t.is_generator,
+    is_async: t.is_async,
+    is_constructor: t.is_constructor,
+    is_class_constructor: t.is_class_constructor,
+    local_names: option.map(t.local_names, fn(n) {
+      bytecode.EvalNameTable(var_env: shared_var_env(n.var_env), names: n.names)
+    }),
+    lexical: t.lexical,
+    code_kind: t.code_kind,
+  )
+}
+
+fn shared_var_env(k: VarEnvKind) -> bytecode.VarEnvKind {
+  case k {
+    GlobalVarEnv -> bytecode.GlobalVarEnv
+    value.FrameVarEnv -> bytecode.FrameVarEnv
+  }
+}
+
+/// One legacy pool entry forward to its wire value. Inverse of
+/// `legacy_constant`; numbers follow `emit.number_const`.
+fn shared_constant(v: JsValue) -> JsVal {
+  case v {
+    JsUndefined -> types.mk_undefined()
+    value.JsNull -> types.mk_null()
+    value.JsBool(b) -> types.mk_bool(b)
+    value.JsNumber(value.Finite(f)) -> shared_number(f)
+    value.JsNumber(value.NaN) -> types.mk_number(types.JNan)
+    value.JsNumber(value.Infinity) -> types.mk_number(types.JPosInf)
+    value.JsNumber(value.NegInfinity) -> types.mk_number(types.JNegInf)
+    value.JsString(s) -> types.mk_string(s)
+    value.JsBigInt(value.BigInt(n)) -> types.mk_bigint(n)
+    JsUninitialized -> types.mk_tdz()
+    value.JsSymbol(_) | value.JsObject(_) ->
+      panic as "constant pool holds a symbol or heap reference"
+  }
+}
+
+fn shared_number(f: Float) -> JsVal {
+  let i = float.truncate(f)
+  case
+    int.to_float(i) == f
+    && i >= 0
+    && i < 2_147_483_648
+    && !rt_val.is_neg_zero(f)
+  {
+    True -> types.mk_number(types.JInt(i))
+    False -> types.mk_number(types.JFloat(f))
   }
 }
