@@ -589,9 +589,9 @@ fn to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         "RegExp.prototype.toString called on non-object",
       )
   }
-  let #(src_v, st) = get_source(st, this)
-  let #(flags_v, st) = get_flags(st, this)
+  let #(src_v, st) = get_named(st, this, "source")
   let #(src, st) = rt_val.t_to_string(st, src_v)
+  let #(flags_v, st) = get_named(st, this, "flags")
   let #(flags, st) = rt_val.t_to_string(st, flags_v)
   #(mk_string("/" <> src <> "/" <> flags), st)
 }
