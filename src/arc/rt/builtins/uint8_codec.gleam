@@ -11,6 +11,7 @@ import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
+import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{splice_clamped}
@@ -20,7 +21,6 @@ import arc/rt/types.{
   classify, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/js_string
 import gleam/bit_array
 import gleam/bool
 import gleam/dict

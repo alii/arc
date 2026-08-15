@@ -7,6 +7,7 @@
 //// `vm/builtins/iter_protocol.gleam` re-expressed under D7 (throwing ops
 //// diverge via `t_throw`; catching sites use `t_apply_protected`).
 
+import arc/internal/tree_array
 import arc/rt/call.{
   type Completion, NormalCompletion, ThrowCompletion, is_callable, t_call,
   t_call_checked,
@@ -20,7 +21,6 @@ import arc/rt/types.{
   classify, mk_object, mk_undefined, symbol_async_iterator, symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/internal/tree_array
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}

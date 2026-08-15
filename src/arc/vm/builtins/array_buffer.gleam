@@ -19,10 +19,10 @@
 //// Spec algorithms follow tc39.es/ecma262 §25.1.3 (abstract operations) and
 //// were cross-checked against engine262's ArrayBuffer intrinsics.
 
+import arc/bytecode/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
-import arc/vm/key.{Named}
 import arc/vm/ops/buffer as ops_buffer
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object

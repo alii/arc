@@ -743,7 +743,7 @@ setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) when is_tuple(Env
 setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) ->
     list_to_tuple(locals_env(Env, Seeds, Args, Arity, LocalCount, Undef)).
 
-%% Non-arrow locals build. Lexical is an arc/vm/lexical.LexicalSlots term
+%% Non-arrow locals build. Lexical is an arc/bytecode/lexical.LexicalSlots term
 %% (that module owns the ordering, see lexical.all_lexical_refs):
 %%   {owned_lexical_slots, Base} — all four owned, contiguous, in canonical
 %%       order [this, active_func, home_object, new_target] starting at

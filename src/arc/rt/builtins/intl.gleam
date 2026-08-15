@@ -11,6 +11,7 @@
 
 import arc/internal/gregorian.{days_from_civil}
 import arc/internal/int_math.{floor_div}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/builtins/intl_collate.{collator_compare}
@@ -102,7 +103,6 @@ import arc/rt/types.{
   mk_bool, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/dict
 import gleam/float
 import gleam/int

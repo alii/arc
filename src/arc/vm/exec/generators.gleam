@@ -1,3 +1,6 @@
+import arc/bytecode/key.{Named}
+import arc/bytecode/opcode.{CatchOnly, Finally, IterCloseGuard, Pc, YieldStar}
+import arc/internal/tuple_array
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
@@ -6,9 +9,6 @@ import arc/vm/completion.{
 }
 import arc/vm/exec/frame
 import arc/vm/heap
-import arc/vm/internal/tuple_array
-import arc/vm/key.{Named}
-import arc/vm/opcode.{CatchOnly, Finally, IterCloseGuard, Pc, YieldStar}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
   type Heap, type HeapSlot, type State, type StepExit, InternalError, State,

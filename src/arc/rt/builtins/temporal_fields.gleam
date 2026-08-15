@@ -11,6 +11,7 @@
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{floor_div, floor_mod as math_mod, trunc_div}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type RoundingMode, RHalfEven, RHalfInfinity, RHalfZero, RInfinity, RZero,
@@ -34,7 +35,6 @@ import arc/rt/types.{
   mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/result

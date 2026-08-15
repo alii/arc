@@ -1,19 +1,19 @@
-import arc/rt/bytecode.{type FuncTemplate, FuncTemplate}
-import arc/rt/types
-import arc/vm/builtins
-import arc/vm/builtins/common
-import arc/vm/exec/entry
-import arc/vm/heap
-import arc/vm/internal/tuple_array
-import arc/vm/key.{Named}
-import arc/vm/lexical
-import arc/vm/opcode.{
+import arc/bytecode/key.{Named}
+import arc/bytecode/lexical
+import arc/bytecode/opcode.{
   type Op, Add, BitAnd, BitNot, BitOr, BitXor, CatchOnly, DefineField, Div, Dup,
   Eq, Exp, GetField, GetGlobal, GetLocal, Gt, GtEq, Jump, JumpIfFalse,
   JumpIfTrue, LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pc, Pop,
   Pos, PushConst, PushTry, PutField, PutLocal, Return, ShiftLeft, ShiftRight,
   StrictEq, StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void, bin_op,
 }
+import arc/internal/tuple_array
+import arc/rt/bytecode.{type FuncTemplate, FuncTemplate}
+import arc/rt/types
+import arc/vm/builtins
+import arc/vm/builtins/common
+import arc/vm/exec/entry
+import arc/vm/heap
 import arc/vm/ops/object
 import arc/vm/state
 import arc/vm/value.{

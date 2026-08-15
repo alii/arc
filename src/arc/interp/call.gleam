@@ -14,6 +14,9 @@
 //// so `limits.max_call_depth` bounds both. `Agent.frames` is pushed and
 //// popped in step so `Error.stack` names the live bytecode frames.
 
+import arc/bytecode/lexical
+import arc/bytecode/opcode
+import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/ffi
 import arc/interp/safepoint
 import arc/interp/state.{
@@ -24,6 +27,7 @@ import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call as rt_call
 import arc/rt/elements as rt_elements
 import arc/rt/inspect as rt_inspect
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -33,10 +37,6 @@ import arc/rt/types.{
   ReflectApply, ReflectN, SBox, SObject, classify, mk_object, mk_tdz,
   mk_undefined,
 }
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/lexical
-import arc/vm/limits
-import arc/vm/opcode
 import gleam/bool
 import gleam/list
 import gleam/option.{type Option, None, Some}

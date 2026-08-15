@@ -19,8 +19,8 @@
 //// that tree still compiles, and the shared runtime never calls them. What
 //// it reads is whether the record is installed at all — `can_block`.
 
+import arc/internal/clock
 import arc/internal/host_time
-import arc/vm/internal/clock_ffi
 import gleam/float
 import gleam/io
 import gleam/option.{type Option, None, Some}
@@ -103,12 +103,12 @@ pub type HostHooks {
     /// Monotonic clock in milliseconds: `Atomics.waitAsync` deadlines and the
     /// embedder's timers. NOT optional — every host has a clock — so it
     /// defaults to the BEAM monotonic clock
-    /// (`internal/clock_ffi.monotonic_now`). An embedder overrides it to
+    /// (`internal/clock.monotonic_now`). An embedder overrides it to
     /// virtualise time (deterministic / mocked clocks).
     monotonic_now: fn() -> Int,
     /// Blocking sleep for the given number of milliseconds (ms <= 0 returns
     /// immediately), for an embedder loop idling until its next timer.
-    /// Defaults to `internal/clock_ffi.sleep_ms`; an embedder overrides it
+    /// Defaults to `internal/clock.sleep_ms`; an embedder overrides it
     /// alongside `monotonic_now` for a virtual clock, or to yield to its own
     /// scheduler instead of blocking the OS thread.
     sleep_ms: fn(Int) -> Nil,
@@ -152,8 +152,8 @@ pub fn default_print(level: ConsoleLevel, line: String) -> Nil {
 pub fn default_host_hooks() -> HostHooks {
   HostHooks(
     atomics: None,
-    monotonic_now: clock_ffi.monotonic_now,
-    sleep_ms: clock_ffi.sleep_ms,
+    monotonic_now: clock.monotonic_now,
+    sleep_ms: clock.sleep_ms,
     report_uncaught: io.println_error,
     wall_clock_ms: host_time.now_ms,
     time_zone: host_time.host_time_zone(),

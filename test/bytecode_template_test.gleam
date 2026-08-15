@@ -4,13 +4,13 @@
 //// rule compiled code uses), nested function templates included.
 
 import arc/compiler
+import arc/internal/tuple_array
 import arc/parser
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/types.{
   type JsValKind, JFloat, JInt, KHandle, KNum, KStr, KSym, KTdz, KUndef,
   classify,
 }
-import arc/vm/internal/tuple_array
 import gleam/list
 import gleam/option.{Some}
 

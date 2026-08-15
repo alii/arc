@@ -8,6 +8,7 @@
 
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div, floor_mod as math_mod}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/temporal_iso.{
@@ -32,7 +33,6 @@ import arc/rt/types.{
   mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/float
 import gleam/int
 import gleam/list

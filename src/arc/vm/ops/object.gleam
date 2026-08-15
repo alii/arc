@@ -1,10 +1,10 @@
+import arc/bytecode/key.{type PropertyKey, Index, Named, Private}
+import arc/bytecode/opcode
+import arc/rt/js_string
 import arc/vm/heap
 import arc/vm/inspect
 import arc/vm/internal/elements
 import arc/vm/internal/typed_array_ffi.{ta_get_float, ta_get_int}
-import arc/vm/js_string
-import arc/vm/key.{type PropertyKey, Index, Named, Private}
-import arc/vm/opcode
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap, type HeapSlot, type State, State}
 import arc/vm/value.{

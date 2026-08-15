@@ -1,3 +1,7 @@
+import arc/bytecode/key.{Named}
+import arc/internal/ordered_entries
+import arc/internal/tuple_array
+import arc/rt/limits
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/array_buffer as builtins_array_buffer
 import arc/vm/builtins/atomics as builtins_atomics
@@ -39,10 +43,6 @@ import arc/vm/exec/generators.{type Drive, type ExecuteInnerFn}
 import arc/vm/exec/promises
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/ordered_entries
-import arc/vm/internal/tuple_array
-import arc/vm/key.{Named}
-import arc/vm/limits
 import arc/vm/ops/array_iterator
 import arc/vm/ops/coerce
 import arc/vm/ops/instanceof

@@ -12,9 +12,9 @@
 /// (rest elements, yield*), the generator machinery and the Map/Set/WeakMap/
 /// WeakSet constructors drive. None of them import `builtins/iterator`, which
 /// only owns the `Iterator` builtin object itself.
+import arc/bytecode/key.{Index, Named}
 import arc/vm/builtins/helpers.{is_callable}
 import arc/vm/heap
-import arc/vm/key.{Index, Named}
 import arc/vm/ops/object
 import arc/vm/state.{type State}
 import arc/vm/value.{

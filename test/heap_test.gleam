@@ -1,8 +1,8 @@
+import arc/bytecode/key.{Named}
+import arc/bytecode/lexical
+import arc/internal/tuple_array
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/tuple_array
-import arc/vm/key.{Named}
-import arc/vm/lexical
 import arc/vm/value.{
   type FuncTemplate, type Ref, ArrayObject, BigInt, BoxSlot, EnvSlot, Finite,
   FuncTemplate, FunctionObject, HostObject, JsBigInt, JsNull, JsNumber, JsObject,

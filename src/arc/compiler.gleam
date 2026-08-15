@@ -13,20 +13,20 @@
 /// pass over the IR. Per-function metadata (local_count, captures, lexical
 /// slots, name table, eval flags) lives in `scope.FunctionInfo`, looked up
 /// by the function's scope_id in the tree.
+import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
+import arc/bytecode/opcode
 import arc/compiler/ast_util
 import arc/compiler/emit
 import arc/compiler/resolve
 import arc/compiler/scope
 import arc/esm
+import arc/internal/tuple_array
 import arc/parser/ast
 import arc/rt/bytecode.{
   type EvalNameTable, type FuncTemplate, type VarEnvKind, CaptureLocal,
   EvalNameTable, FrameVarEnv, FuncTemplate, GlobalVarEnv,
 }
 import arc/rt/types.{type JsVal}
-import arc/vm/internal/tuple_array
-import arc/vm/lexical.{type CodeKind, type LexicalSlots}
-import arc/vm/opcode
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}

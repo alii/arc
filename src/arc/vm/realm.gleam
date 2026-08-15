@@ -1,6 +1,10 @@
+import arc/bytecode/key.{Named}
+import arc/bytecode/lexical
 import arc/compiler
+import arc/compiler/compile_task
 import arc/compiler/scope
 import arc/host_hooks
+import arc/internal/tuple_array
 import arc/parser
 import arc/parser/ast
 import arc/rt/bytecode
@@ -8,16 +12,12 @@ import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
-import arc/vm/compile_task
 import arc/vm/completion.{NormalCompletion, ThrowCompletion}
 import arc/vm/exec/event_loop
 import arc/vm/exec/frame
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/tuple_array
-import arc/vm/key.{Named}
 import arc/vm/legacy
-import arc/vm/lexical
 import arc/vm/ops/coerce
 import arc/vm/ops/mop
 import arc/vm/ops/object
@@ -307,7 +307,7 @@ fn compile_or_throw(
     #(state, Error(err))
   }
   // Big sources parse+compile in a heap-sized scratch process (see
-  // arc/vm/compile_task): the AST / scope tree / IR are large transients
+  // arc/compiler/compile_task): the AST / scope tree / IR are large transients
   // the copying GC would otherwise re-copy many times, and only the
   // compact FuncTemplate (or error string) crosses back. Small sources
   // run inline.

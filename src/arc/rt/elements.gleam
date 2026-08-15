@@ -2,8 +2,8 @@
 //// (port of `arc/vm/internal/elements.gleam`, the subset the MOP and the
 //// buffer family need). The type itself lives in `arc/rt/types`.
 
+import arc/internal/tree_array
 import arc/rt/types.{type JsElements, type JsVal, Dense, NoElements, Sparse}
-import arc/vm/internal/tree_array
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list

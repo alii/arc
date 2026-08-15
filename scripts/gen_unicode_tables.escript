@@ -18,7 +18,7 @@
 
 main(_) ->
     Packed = "scripts/unicode/arc_regex_uni17_packed.erl",
-    Charset = "src/arc/vm/builtins/arc_regex_charset.erl",
+    Charset = "src/arc/parser/arc_regex_charset.erl",
     Out = "src/arc/parser/arc_regex_uni17_ffi.erl",
     ok = load(Packed),
     ok = load(Charset),

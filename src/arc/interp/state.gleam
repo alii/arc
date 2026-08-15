@@ -11,14 +11,14 @@
 //// activation (program counter, operand stack, locals, try frames) and no
 //// code outside the interpreter can hold a stale copy of it.
 
+import arc/bytecode/opcode.{type Op}
+import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
 import arc/rt/gc as rt_gc
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsVal, JsCell, RangeErr,
   ReferenceErr, SyntaxErr, TypeErr,
 }
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/opcode.{type Op}
 import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list

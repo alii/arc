@@ -17,6 +17,7 @@
 /// QuickJS has no Temporal, engine262's implementation was consulted for
 /// abstract-operation semantics (ToIntegerWithTruncation, RegulateISODate,
 /// ISODateTimeWithinLimits, IsValidDuration, ParseISODateTime).
+import arc/bytecode/key.{Named}
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
@@ -25,6 +26,7 @@ import arc/internal/host_time
 import arc/internal/int_math.{
   floor_div, floor_mod as math_mod, trunc_div, trunc_mod,
 }
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/temporal_iso.{
   type DurRec, type IsoDate, type Overflow, type ParsedIso, type ParsedOffset,
   type Precision, type TErr, type TimeRec, AutoPrec, Constrain, DurRec,
@@ -46,8 +48,6 @@ import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/temporal_calendar as tcal
-import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}

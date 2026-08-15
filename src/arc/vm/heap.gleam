@@ -1,7 +1,7 @@
+import arc/bytecode/key.{Named}
 import arc/vm/gc_trace
 import arc/vm/internal/elements
 import arc/vm/internal/lazy_proto.{type LazyProto, LazyProto}
-import arc/vm/key.{Named}
 import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
 import gleam/list

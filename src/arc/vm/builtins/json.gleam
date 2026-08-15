@@ -1,10 +1,10 @@
+import arc/bytecode/key
 import arc/internal/utf16
+import arc/rt/js_string
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/js_string
-import arc/vm/key
 import arc/vm/ops/coerce
 import arc/vm/ops/mop
 import arc/vm/ops/object as objops

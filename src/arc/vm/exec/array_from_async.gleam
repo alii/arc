@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Index, Named}
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
@@ -5,7 +6,6 @@ import arc/vm/exec/job_call
 import arc/vm/exec/promises
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/mop
 import arc/vm/ops/object

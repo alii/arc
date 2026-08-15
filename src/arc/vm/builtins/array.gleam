@@ -1,12 +1,12 @@
+import arc/bytecode/key.{Index, Named, max_array_index, max_array_length}
+import arc/rt/js_string
+import arc/rt/limits
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/object as object_builtin
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/js_string
-import arc/vm/key.{Index, Named, max_array_index, max_array_length}
-import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/mop
 import arc/vm/ops/object

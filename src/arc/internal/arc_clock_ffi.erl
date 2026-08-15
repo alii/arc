@@ -6,10 +6,10 @@
 %%
 %% `sleep/1` is a BOUNDED idle: the event loop uses it to wait out the next
 %% timer / waitAsync deadline, so the argument is always a finite number of
-%% milliseconds. There is deliberately no unbounded sleep here — an untimed
-%% synchronous Atomics.wait blocks through the embedder's
-%% `HostHooks.atomics.await_notify` capability, which suspends on a mailbox
-%% that a notifier can actually reach, not on a local sleep nothing can wake.
+%% milliseconds. There is deliberately no unbounded sleep here: an untimed
+%% synchronous Atomics.wait blocks in a receive on the SharedArrayBuffer
+%% owner protocol (arc/rt/sab), which a notifier can actually reach, not on a
+%% local sleep nothing can wake.
 -module(arc_clock_ffi).
 -export([monotonic_now/0, sleep/1]).
 

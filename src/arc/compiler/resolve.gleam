@@ -4,11 +4,9 @@
 /// Two-pass algorithm:
 ///   Pass 1: Walk IR, skip IrLabel markers, build Dict(label_id → PC)
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
-import arc/rt/types.{type JsVal, JInt}
-import arc/vm/binop
-import arc/vm/internal/tuple_array
-import arc/vm/key
-import arc/vm/opcode.{
+import arc/bytecode/binop
+import arc/bytecode/key
+import arc/bytecode/opcode.{
   type IrOp, type LabelId, type Op, type Pc, IrAsyncYieldStarNext,
   IrAsyncYieldStarResume, IrBinOp, IrCmpLocalConstJump, IrCmpLocalLocalJump,
   IrDefineAccessor, IrDefineField, IrDefineMethod, IrDeleteField, IrFinal,
@@ -17,6 +15,8 @@ import arc/vm/opcode.{
   IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis, IrWithMakeRef,
   IrWithPutRefValue, IrWithPutVar, Pc,
 }
+import arc/internal/tuple_array
+import arc/rt/types.{type JsVal, JInt}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}

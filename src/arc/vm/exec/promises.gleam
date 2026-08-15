@@ -1,10 +1,10 @@
+import arc/bytecode/key.{Named}
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Named}
 import arc/vm/ops/mop
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, type StepExit, State, Threw}

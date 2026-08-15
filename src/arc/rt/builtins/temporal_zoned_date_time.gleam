@@ -8,6 +8,7 @@
 //// are temporal_zoned_ops.gleam; the difference core is temporal_diff.gleam.
 
 import arc/internal/int_math.{floor_div}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   Compatible, Hour, Nanosecond, OffsetShowAuto, OffsetShowNever, PreferOffset,
@@ -66,7 +67,6 @@ import arc/rt/types.{
   mk_number, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}

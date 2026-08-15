@@ -44,9 +44,8 @@ pub const all_lexical_refs = [
 /// `OwnedLexicalSlots(base)` carries only the base index: the four owned
 /// slots are ALWAYS contiguous, in `all_lexical_refs` order, starting at
 /// `base`. That contiguity used to be an unwritten convention the emitter
-/// upheld and `arc_vm_ffi:setup_locals_seeded/10` silently assumed; here it
-/// is a fact of the type, so a mis-ordered or gappy owned layout is
-/// unrepresentable.
+/// upheld and the call prologue silently assumed; here it is a fact of the
+/// type, so a mis-ordered or gappy owned layout is unrepresentable.
 pub type LexicalSlots {
   /// All four owned, contiguous, at `base`..`base + 3` in canonical order.
   OwnedLexicalSlots(base: Int)

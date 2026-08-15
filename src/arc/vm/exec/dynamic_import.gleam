@@ -38,12 +38,12 @@
 //// They are now typed engine state (`Agent.import_hook` /
 //// `RealmCtx.import_referrer`) and a typed job outcome (`DeferHookOutcome`).
 
+import arc/bytecode/key.{Named}
 import arc/vm/builtins/common
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/exec/job_call
 import arc/vm/exec/promises
 import arc/vm/internal/job_queue
-import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/mop
 import arc/vm/ops/object

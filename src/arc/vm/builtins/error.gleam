@@ -1,9 +1,9 @@
+import arc/bytecode/key.{Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/dom_exception
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
 import arc/vm/heap
-import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/mop
 import arc/vm/ops/object

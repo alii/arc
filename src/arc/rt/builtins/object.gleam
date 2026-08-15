@@ -9,6 +9,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
 import arc/rt/call as rt_call
+import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -33,7 +34,6 @@ import arc/rt/types.{
   mk_bool, mk_null, mk_number, mk_object, mk_string, mk_symbol, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/js_string
 import gleam/bool
 import gleam/dict
 import gleam/int

@@ -10,6 +10,7 @@
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Errors go through
 //// `ops.new_error` + `t_throw` (D7).
 
+import arc/internal/tree_array
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
@@ -36,7 +37,6 @@ import arc/rt/types.{
   ReturnThis, SBox, SObject, StringKey, SymbolKey, TypeErr, classify, mk_bool,
   mk_number, mk_object, mk_string, mk_undefined,
 } as rt_types
-import arc/vm/internal/tree_array
 import gleam/dict
 import gleam/int
 import gleam/list

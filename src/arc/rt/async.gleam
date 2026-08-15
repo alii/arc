@@ -17,6 +17,7 @@ import arc/rt/call.{
 }
 import arc/rt/gc as rt_gc
 import arc/rt/inspect
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -37,7 +38,6 @@ import arc/rt/types.{
   StepThrow, StepYield, StringKey, ThrowerPassThrough, TypeErr, classify, jq_pop,
   jq_push, mk_bool, mk_object, mk_string, mk_undefined,
 } as rt_types
-import arc/vm/limits
 import gleam/dict
 import gleam/int
 import gleam/list

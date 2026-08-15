@@ -1,5 +1,12 @@
+import arc/bytecode/key.{type PropertyKey, Index, Named}
+import arc/bytecode/lexical
+import arc/bytecode/opcode.{type Op, type Pc, type TryKind}
 import arc/host_hooks
 import arc/internal/host_time
+import arc/internal/ordered_entries.{type OrderedEntries}
+import arc/internal/temporal_calendar.{type Calendar}
+import arc/internal/tree_array.{type TreeArray}
+import arc/internal/tuple_array.{type TupleArray}
 import arc/parser/number
 import arc/rt/builtins/temporal_tz
 import arc/rt/intl_data.{
@@ -8,13 +15,6 @@ import arc/rt/intl_data.{
   type NameWidth, type Notation, type NumStyle, type PluralType, type RtfNumeric,
   type RtfStyle, type SignDisplay,
 }
-import arc/vm/internal/ordered_entries.{type OrderedEntries}
-import arc/vm/internal/temporal_calendar.{type Calendar}
-import arc/vm/internal/tree_array.{type TreeArray}
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/key.{type PropertyKey, Index, Named}
-import arc/vm/lexical
-import arc/vm/opcode.{type Op, type Pc, type TryKind}
 import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -3254,7 +3254,7 @@ pub type ExoticKind(ctx, host) {
   /// Map object — ES2024 §24.1 Map Objects.
   /// Stores key-value pairs using SameValueZero equality.
   /// `store` maps normalized MapKey → value and models the spec's append-only
-  /// [[MapData]] insertion order (see `arc/vm/internal/ordered_entries`).
+  /// [[MapData]] insertion order (see `arc/internal/ordered_entries`).
   /// Original JS keys are reconstructed via `map_key_to_js` (lossless inverse
   /// modulo -0→+0, which §24.1.3.9 step 4 mandates anyway), so no second dict
   /// is needed. delete() leaves a seq gap (the spec's emptied record) and a

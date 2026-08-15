@@ -6,13 +6,13 @@
 /// vocabulary, its own option-object grammar, its own decode loop — sits in
 /// one file a reader opens for "how does base64 work here", not buried at
 /// the tail of the general TypedArray prototype module.
+import arc/bytecode/key.{Named}
 import arc/internal/digits
+import arc/rt/js_string
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/typed_array_ffi.{splice_clamped}
-import arc/vm/js_string
-import arc/vm/key.{Named}
 import arc/vm/ops/buffer as ops_buffer
 import arc/vm/ops/object
 import arc/vm/ops/operators

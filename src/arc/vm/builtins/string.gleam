@@ -1,16 +1,16 @@
+import arc/bytecode/key
 import arc/internal/utf16
 import arc/rt/builtins/substitution
+import arc/rt/js_string
+import arc/rt/limits
+import arc/rt/unicode_case
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/regexp_ops
 import arc/vm/heap
-import arc/vm/js_string
-import arc/vm/key
-import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/unicode_case
 import arc/vm/value.{
   type JsValue, type Ref, type StringNativeFn, Finite, JsNull, JsNumber,
   JsObject, JsString, JsUndefined, NaN, StringFromCharCode, StringFromCodePoint,
@@ -1003,7 +1003,7 @@ fn replace_string_search(
 }
 
 /// Concatenate a replace loop's reversed accumulator, honouring the
-/// engine-wide invariant (see `arc/vm/limits`) that no builtin materialises a
+/// engine-wide invariant (see `arc/rt/limits`) that no builtin materialises a
 /// string longer than `limits.max_string_bytes`.
 fn concat_within_limit(
   state: State(host),
@@ -2113,5 +2113,5 @@ fn string_transform(
 //
 // The codepoint string primitives (`js_string.slice`,
 // `js_string.drop_start`, `js_string.explode`, `js_string.length`,
-// `js_string.char_at`) all live in `arc/vm/js_string` — one place that
+// `js_string.char_at`) all live in `arc/rt/js_string` — one place that
 // defines what a JS string index means for the whole engine.

@@ -16,7 +16,7 @@ import arc/internal/gregorian.{
   is_leap_year as is_gregorian_leap,
 }
 import arc/internal/int_math.{floor_div, floor_mod}
-import arc/vm/internal/temporal_calendar_data.{
+import arc/internal/temporal_calendar_data.{
   chinese_data, dangi_data, umalqura_month_length, umalqura_year_start_fix,
 }
 import gleam/int

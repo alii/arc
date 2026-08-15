@@ -3,6 +3,8 @@
 //// bounded under a small threshold, the turn-end drain keeps the completion
 //// value, and parked coroutine frames / closure environments are traced.
 
+import arc/bytecode/lexical
+import arc/internal/tuple_array
 import arc/interp/safepoint
 import arc/interp/state.{type State, SavedFrame, State}
 import arc/rt/async as rt_async
@@ -17,8 +19,6 @@ import arc/rt/types.{
   HostJob, JsStore, KBytecode, KHandle, NoElements, ResumeFrame, SGenerator,
   SObject, classify, mk_object, mk_undefined,
 }
-import arc/vm/internal/tuple_array
-import arc/vm/lexical
 import gleam/dict
 import gleam/option.{None, Some}
 import gleam/set

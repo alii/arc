@@ -9,6 +9,7 @@
 //// lossless modulo -0→+0 normalization, which the spec requires anyway
 //// (§24.1.3.9 step 4).
 
+import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
@@ -25,7 +26,6 @@ import arc/rt/types.{
   map_key_to_js, mk_bool, mk_number, mk_object, mk_undefined, symbol_iterator,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/ordered_entries
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}

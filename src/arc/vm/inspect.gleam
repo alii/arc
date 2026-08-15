@@ -5,10 +5,10 @@
 //// side effects or VM re-entry. Shared by console.log, uncaught-exception
 //// reporting, and diagnostic messages ("x is not a function").
 
+import arc/bytecode/key.{type PropertyKey, Named}
+import arc/internal/ordered_entries
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/ordered_entries
-import arc/vm/key.{type PropertyKey, Named}
 import arc/vm/ops/typed_array_elements
 import arc/vm/state.{type Heap}
 import arc/vm/value.{

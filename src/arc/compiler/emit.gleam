@@ -5,6 +5,14 @@
 /// Emitter at each entry point) and emitted as concrete IrGetLocal /
 /// IrGetBoxed / IrGetGlobal / IrWith* ops; jump targets use integer label
 /// IDs (IrJump) resolved in the label-resolution pass.
+import arc/bytecode/lexical
+import arc/bytecode/opcode.{
+  type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarNext,
+  IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
+  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
+  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
+  IrPutField, IterCloseGuard,
+}
 import arc/compiler/ast_util
 import arc/compiler/scope.{
   type BindingKind, type GlobalFallthrough, type ScopeId, type TopLevelLex,
@@ -18,14 +26,6 @@ import arc/rt/types.{
   mk_string, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/lexical
-import arc/vm/opcode.{
-  type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarNext,
-  IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
-  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
-  IrPutField, IterCloseGuard,
-}
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/float
@@ -39,8 +39,16 @@ import gleam/set.{type Set}
 /// cache key). Baked into bytecode at compile time so re-executing the same
 /// compiled site reuses its template object while each fresh compilation
 /// (repeated eval / new Function) gets distinct sites.
-@external(erlang, "arc_vm_ffi", "unique_positive_integer")
-fn unique_positive_integer() -> Int
+fn unique_positive_integer() -> Int {
+  unique_integer([Positive])
+}
+
+type UniqueIntegerModifier {
+  Positive
+}
+
+@external(erlang, "erlang", "unique_integer")
+fn unique_integer(modifiers: List(UniqueIntegerModifier)) -> Int
 
 // ============================================================================
 // Types

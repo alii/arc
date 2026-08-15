@@ -21,6 +21,7 @@ import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as object_builtin
 import arc/rt/call as rt_call
 import arc/rt/elements
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -50,7 +51,6 @@ import arc/rt/types.{
   symbol_species, symbol_unscopables,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/limits
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int

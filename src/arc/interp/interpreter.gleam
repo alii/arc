@@ -10,6 +10,31 @@
 //// with; throws the interpreter originates itself allocate the error with
 //// the non-raising `JsOps.new_error` and return `Error(Threw(..))` too.
 
+import arc/bytecode/binop
+import arc/bytecode/key
+import arc/bytecode/lexical
+import arc/bytecode/opcode.{
+  type Op, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread,
+  AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
+  CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
+  CallMethodApply, CmpLocalConstJump, CmpLocalLocalJump, CreateArguments,
+  CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
+  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
+  DefineMethod, DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
+  DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup, ForInNext,
+  ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar,
+  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetPrivateFieldDyn,
+  GetPrivateFieldDyn2, GetPrototypeOf, GetSuperValue, GetSuperValue2, IncLocal,
+  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
+  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
+  JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod, NewObject,
+  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PrivateInDyn,
+  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutEvalVar, PutField,
+  PutGlobal, PutLocal, PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue,
+  Return, Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf,
+  TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
+}
+import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
 import arc/interp/dynamic_import
 import arc/interp/eval
@@ -44,31 +69,6 @@ import arc/rt/types.{
   classify, mk_bool, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/binop
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/key
-import arc/vm/lexical
-import arc/vm/opcode.{
-  type Op, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread,
-  AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
-  CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
-  CallMethodApply, CmpLocalConstJump, CmpLocalLocalJump, CreateArguments,
-  CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
-  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
-  DefineMethod, DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
-  DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup, ForInNext,
-  ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar,
-  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetPrivateFieldDyn,
-  GetPrivateFieldDyn2, GetPrototypeOf, GetSuperValue, GetSuperValue2, IncLocal,
-  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
-  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
-  JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod, NewObject,
-  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PrivateInDyn,
-  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutEvalVar, PutField,
-  PutGlobal, PutLocal, PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue,
-  Return, Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf,
-  TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
-}
 import gleam/bit_array
 import gleam/bool
 import gleam/dict

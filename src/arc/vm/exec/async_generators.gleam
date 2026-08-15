@@ -10,6 +10,9 @@
 ///
 /// The request queue is the key difference: callers can fire next();next();next()
 /// before any settle, and each gets its own promise.
+import arc/bytecode/key.{Named}
+import arc/bytecode/opcode.{AsyncYieldStarNext, Pc}
+import arc/internal/tuple_array
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
@@ -20,9 +23,6 @@ import arc/vm/completion.{
 import arc/vm/exec/generators.{type Drive}
 import arc/vm/exec/promises
 import arc/vm/heap
-import arc/vm/internal/tuple_array
-import arc/vm/key.{Named}
-import arc/vm/opcode.{AsyncYieldStarNext, Pc}
 import arc/vm/ops/object as object_ops
 import arc/vm/state.{
   type Heap, type HeapSlot, type State, type StepExit, InternalError, State,

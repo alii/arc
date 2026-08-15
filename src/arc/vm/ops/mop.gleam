@@ -6,13 +6,13 @@
 //// `Object.*` dispatch, and Reflect / the interpreter / other builtins can
 //// depend on the MOP core without pulling in the whole Object-builtin surface.
 
+import arc/bytecode/key.{Index, Named, Private}
+import arc/rt/js_string
+import arc/rt/limits
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/js_string
-import arc/vm/key.{Index, Named, Private}
-import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/ops/property

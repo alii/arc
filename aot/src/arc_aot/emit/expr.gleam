@@ -13,11 +13,11 @@
 //// called and the CPS chain stays total. `emit_expr` therefore always returns
 //// Ok — the Result wrapper exists to satisfy state.EmitDispatch.emit_expr.
 
+import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
 import arc/rt/val as rt_val
-import arc/vm/lexical
 import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/state.{type EmitError, type Emitter2}
 import gleam/bit_array

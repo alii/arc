@@ -1,4 +1,8 @@
+import arc/bytecode/key.{Named}
+import arc/bytecode/opcode.{type Op}
 import arc/host_hooks
+import arc/internal/tuple_array.{type TupleArray}
+import arc/rt/limits
 import arc/vm/builtins/common.{
   type Builtins, RangeErr, ReferenceErr, SyntaxErr, TypeErr,
 }
@@ -6,10 +10,6 @@ import arc/vm/completion.{type SuspendKind}
 import arc/vm/gc_trace
 import arc/vm/heap
 import arc/vm/internal/job_queue.{type JobQueue}
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/key.{Named}
-import arc/vm/limits
-import arc/vm/opcode.{type Op}
 import arc/vm/value.{type FuncTemplate, type JsValue, type Ref}
 import gleam/dict
 import gleam/float

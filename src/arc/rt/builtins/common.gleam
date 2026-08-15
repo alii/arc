@@ -9,6 +9,7 @@
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Property-builder
 //// helpers thread `t_next_prop_seq` per-prop (arc used a global counter).
 
+import arc/internal/tree_array
 import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -17,7 +18,6 @@ import arc/rt/types.{
   ArrayObj, BuiltinPair, DataProperty, Dense, ErrorObj, JInt, KNative, Named,
   NoElements, Ordinary, SObject, mk_number, mk_object, mk_string,
 } as rt_types
-import arc/vm/internal/tree_array
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}

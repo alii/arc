@@ -2,9 +2,9 @@
 //// twocore/ir — bind/host/cons_list/bind_if/guarded_binop/object_key_lit.
 //// Invariant #3: `host` is the ONLY CallHost("js", ..) site in emit_2core/*.
 
+import arc/bytecode/key
 import arc/parser/ast
-import arc/vm/key
-import arc/vm/value
+import arc/rt/val
 import arc_aot/emit/state.{type Emitter2, Emitter2}
 import gleam/bit_array
 import gleam/dict.{type Dict}
@@ -539,7 +539,7 @@ pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
     ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
       case key.array_index_of_float(f) {
         Some(i) -> wire_index(i)
-        None -> wire_named(value.js_format_number(f))
+        None -> wire_named(val.js_format_float(f))
       }
     ast.KeyNumber(value: ast.InfiniteNumber, ..) -> wire_named("Infinity")
     ast.KeyBigInt(value: n, ..) -> wire_prop_key(key.index_key(n))

@@ -1,4 +1,5 @@
 import arc/compiler
+import arc/internal/tuple_array
 import arc/parser
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/closure as rt_closure
@@ -8,7 +9,6 @@ import arc/rt/types.{
   type Agent, type Handle, DataProperty, JInt, KBytecode, KHandle, KNum, KStr,
   Named, SObject, StringKey, classify,
 }
-import arc/vm/internal/tuple_array
 import gleam/list
 import gleam/option.{None, Some}
 import rt_helpers

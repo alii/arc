@@ -12,16 +12,16 @@
 /// Uses Erlang's `re` module (PCRE) via FFI for actual matching. Indices are
 /// BYTE offsets into the UTF-8 subject (deviation: spec uses UTF-16 code
 /// units; identical for ASCII subjects).
+import arc/bytecode/key.{Index, Named}
 import arc/parser/regex
 import arc/parser/regex_error
 import arc/rt/builtins/substitution
+import arc/rt/limits
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/regexp_ops
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Index, Named}
-import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}

@@ -10,11 +10,11 @@
 //// iterator reported done it stays done, even if the source later grows or
 //// its buffer is resized.
 
+import arc/bytecode/key.{Index}
+import arc/rt/limits
 import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Index}
-import arc/vm/limits
 import arc/vm/ops/object
 import arc/vm/ops/property
 import arc/vm/state.{

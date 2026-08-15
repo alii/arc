@@ -8,6 +8,9 @@
 ////   realm → JsOps/JsStore → Agent.
 
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
+import arc/internal/ordered_entries.{type OrderedEntries}
+import arc/internal/temporal_calendar.{type Calendar}
+import arc/internal/tree_array.{type TreeArray}
 import arc/rt/builtins/temporal_tz
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, type SuspendedFrame}
 import arc/rt/intl_data.{
@@ -15,9 +18,6 @@ import arc/rt/intl_data.{
   type IntlService,
 }
 import arc/rt/wire
-import arc/vm/internal/ordered_entries.{type OrderedEntries}
-import arc/vm/internal/temporal_calendar.{type Calendar}
-import arc/vm/internal/tree_array.{type TreeArray}
 import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/float
@@ -140,7 +140,7 @@ pub type IterHint {
 // (dynamic `obj[expr]` access, JSON, Object.keys). One implementation is
 // load-bearing: if compile-time and runtime canonicalized differently, the
 // same property would land in two dict slots. Faithful port of
-// arc/vm/key.gleam:19-219 (D9: `Private(BitArray)`) + arc/vm/value.gleam:37-168
+// arc/bytecode/key.gleam:19-219 (D9: `Private(BitArray)`) + arc/vm/value.gleam:37-168
 // (D14: `UserSymbol` uid is a threaded `Int`, not `ErlangRef`).
 
 /// Largest valid array index (§6.1.7): an array index is an integer in

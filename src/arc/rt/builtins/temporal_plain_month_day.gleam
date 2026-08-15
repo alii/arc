@@ -6,6 +6,7 @@
 //// month-day exists) plus the calendar. PlainMonthDay has no `compare`.
 
 import arc/internal/gregorian.{days_in_month}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type CalendarNameMode, CalAlways, CalAuto, CalCritical, CalNever,
@@ -37,7 +38,6 @@ import arc/rt/types.{
   classify, mk_bool, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}

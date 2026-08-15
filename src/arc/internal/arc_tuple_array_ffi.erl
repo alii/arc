@@ -1,5 +1,5 @@
 %% Backing store for tuple-backed fixed arrays
-%% (src/arc/vm/internal/tuple_array.gleam) — bytecode, constant pools, call
+%% (src/arc/internal/tuple_array.gleam) — bytecode, constant pools, call
 %% frame locals, function tables. Reads dominate; writes are rare and copy.
 -module(arc_tuple_array_ffi).
 -export([array_get/2, array_repeat/2,

@@ -33,6 +33,7 @@
 ////   (detached → TypeError, shrunk → RangeError).
 
 import arc/host_hooks.{type WaiterKey}
+import arc/rt/limits
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers
 import arc/vm/builtins/promise as builtins_promise
@@ -41,7 +42,6 @@ import arc/vm/internal/typed_array_ffi.{
   type IntElem, I16, I32, I64, I8, U16, U32, U64, U8, int_elem_bits,
   int_elem_signed, int_elem_size, ta_get_int, ta_set_int,
 }
-import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}

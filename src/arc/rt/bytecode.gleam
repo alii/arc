@@ -4,10 +4,10 @@
 //// the compiler-side opcode/lexical definitions and the wire value type, so
 //// `arc/rt/types` can import it without a cycle.
 
+import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
+import arc/bytecode/opcode.{type Op, type Pc, type TryKind}
+import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/wire.{type JsVal}
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/lexical.{type CodeKind, type LexicalSlots}
-import arc/vm/opcode.{type Op, type Pc, type TryKind}
 import gleam/option.{type Option}
 
 /// Whether a frame's VariableEnvironment is the GLOBAL environment

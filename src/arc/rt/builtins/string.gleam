@@ -8,6 +8,8 @@ import arc/rt/builtins/realm_ops
 import arc/rt/builtins/regexp
 import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
+import arc/rt/js_string
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -37,8 +39,6 @@ import arc/rt/types.{
   well_known_symbol_description,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/js_string
-import arc/vm/limits
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -1350,7 +1350,7 @@ fn codepoint_or_replacement(i: Int) -> UtfCodepoint {
   }
 }
 
-// ── Unicode Default Case Conversion (port of arc/vm/unicode_case.gleam) ────
+// ── Unicode Default Case Conversion (port of arc/rt/unicode_case.gleam) ────
 
 /// toLowercase per §22.1.3.27, including the SpecialCasing Final_Sigma rule:
 /// U+03A3 Σ → ς when preceded by a cased char (skipping case-ignorable chars)

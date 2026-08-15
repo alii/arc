@@ -6,8 +6,8 @@
 ////   * The `matchAll`/`replaceAll` "must be a global RegExp" guard
 ////     (§22.1.3.14 step 2.b / §22.1.3.19 step 2.a).
 
+import arc/bytecode/key.{Named}
 import arc/vm/heap
-import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type State}

@@ -9,11 +9,11 @@
 //// every other op returns a bare `Agent`. `t_cell_new` NEVER collects
 //// (D11 — allocation is O(1) and pure; GC is turn-boundary only).
 
+import arc/rt/limits
 import arc/rt/types.{
   type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
   type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr,
 } as rt_types
-import arc/vm/limits
 import gleam/dict
 import gleam/set
 

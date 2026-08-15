@@ -3,10 +3,10 @@
 //// `event_loop` so any of them can seed a frame without pulling in the
 //// interpreter (and the import cycle that would cause).
 
+import arc/bytecode/lexical
+import arc/internal/tuple_array
 import arc/vm/builtins/common
 import arc/vm/heap
-import arc/vm/internal/tuple_array
-import arc/vm/lexical
 import arc/vm/state.{type Heap, type State}
 import arc/vm/value.{
   type FuncTemplate, type JsValue, JsNull, JsObject, JsUndefined,

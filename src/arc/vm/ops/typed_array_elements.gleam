@@ -16,12 +16,12 @@
 //// from here — the ctx hook is the same inversion as `ctx.call_fn`. Do NOT
 //// re-introduce a private ToPrimitive/ToNumber/ToBigInt in this module.
 
+import arc/bytecode/key.{type PropertyKey, Index}
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/typed_array_ffi.{
   U8, ta_clamp_uint8, ta_set_float, ta_set_int, ta_zeroed,
 }
-import arc/vm/key.{type PropertyKey, Index}
 import arc/vm/state.{type Heap, type State, State}
 import arc/vm/value.{
   type JsElements, type JsValue, type Property, type Ref, AccessorProperty,

@@ -4,6 +4,7 @@
 //// iterator-proto bootstrap + arc `exec/promises.gleam:1791-2003`
 //// Async-from-Sync dispatch, re-expressed over threaded `Agent` (R1).
 
+import arc/internal/ordered_entries
 import arc/rt/async as rt_async
 import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
@@ -11,6 +12,8 @@ import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/rt/builtins/iter_protocol.{IterateStrings, RejectPrimitives}
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
+import arc/rt/js_string
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
@@ -36,9 +39,6 @@ import arc/rt/types.{
   symbol_to_string_tag,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/internal/ordered_entries
-import arc/vm/js_string
-import arc/vm/limits
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}

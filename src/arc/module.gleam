@@ -9,6 +9,7 @@
 
 import arc/compiler.{type ExportSeed}
 import arc/esm
+import arc/internal/tuple_array
 import arc/interp/entry
 import arc/interp/interpreter
 import arc/interp/safepoint
@@ -36,7 +37,6 @@ import arc/rt/types.{
   mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/tuple_array
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/list

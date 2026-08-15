@@ -6,6 +6,7 @@
 //// reporting, and diagnostic messages ("x is not a function"). Renders the
 //// same text as arc/vm/inspect over the old heap.
 
+import arc/internal/ordered_entries
 import arc/rt/buffer
 import arc/rt/elements
 import arc/rt/intl_data
@@ -27,7 +28,6 @@ import arc/rt/types.{
   WeakSetObj, WrapForValidIteratorObj, classify,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/internal/ordered_entries
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int

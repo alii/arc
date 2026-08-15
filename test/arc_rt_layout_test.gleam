@@ -2,6 +2,7 @@
 //// the Gleam runtime records the hand-written Erlang fast paths index with
 //// element/2. A field reorder or insert in those records fails here.
 
+import arc/internal/tree_array
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
@@ -14,7 +15,6 @@ import arc/rt/types.{
   SObject, SShapedObject, ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow,
   StepYield, StringKey, SymbolKey,
 } as rt_types
-import arc/vm/internal/tree_array
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
 import gleam/list

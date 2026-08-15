@@ -24,7 +24,7 @@
 /// Pure non-escaping scratch (e.g. `using`-emission temporaries, the
 /// completion-value slot, with-ref base slots) is NOT a binding — the
 /// emitter mints those via `alloc_scratch` and gets back a bare `Int`.
-import arc/vm/lexical.{
+import arc/bytecode/lexical.{
   type LexicalRef, type LexicalRefs, type LexicalSlots, RefActiveFunc,
   RefHomeObject, RefNewTarget, RefThis,
 }

@@ -27,9 +27,9 @@
 ////   - pending:   specifier → in-flight namespace promise for a module
 ////                parked on top-level await ([[TopLevelCapability]]).
 
+import arc/bytecode/key.{type PropertyKey, Named}
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{type PropertyKey, Named}
 import arc/vm/ops/object
 import arc/vm/state.{type Heap}
 import arc/vm/value.{

@@ -10,6 +10,7 @@
 import arc/compiler
 import arc/esm
 import arc/host_hooks
+import arc/internal/tuple_array
 import arc/link
 import arc/module/graph
 import arc/module/load_error.{type LoadError, type ResolveError}
@@ -22,7 +23,6 @@ import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/job_queue
-import arc/vm/internal/tuple_array
 import arc/vm/legacy
 import arc/vm/module_registry as registry
 import arc/vm/ops/object

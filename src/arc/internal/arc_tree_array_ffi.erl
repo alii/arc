@@ -1,5 +1,5 @@
 %% Backing store for the O(log n) functional tree arrays
-%% (src/arc/vm/internal/tree_array.gleam) — Erlang's `array` module, used for
+%% (src/arc/internal/tree_array.gleam) — Erlang's `array` module, used for
 %% JS array elements (DenseElements).
 %%
 %% Default is the caller-provided sentinel, so unset slots read back as a

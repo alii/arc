@@ -11,8 +11,8 @@
 /// Two invariants hold at EVERY entry point, not just some of them:
 ///   - indices are >= 0 (`assert_index`)
 ///   - stored values are never the JsUninitialized sentinel (`assert_storable`)
-import arc/vm/internal/tree_array
-import arc/vm/limits
+import arc/internal/tree_array
+import arc/rt/limits
 import arc/vm/value.{
   type JsElements, type JsValue, DenseElements, JsUndefined, JsUninitialized,
   NoElements, SparseElements,

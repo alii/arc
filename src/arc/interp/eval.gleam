@@ -14,8 +14,11 @@
 //// which imports this), so running a prepared activation to completion is
 //// the caller-supplied `Run`.
 
+import arc/bytecode/lexical
 import arc/compiler
+import arc/compiler/compile_task
 import arc/compiler/scope
+import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, State}
 import arc/parser
 import arc/parser/ast
@@ -24,16 +27,13 @@ import arc/rt/bytecode.{
   type FuncTemplate, EvalNameTable, FrameVarEnv, GlobalVarEnv,
 }
 import arc/rt/env as rt_env
+import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type Handle, type JsVal, Agent, DynamicFunction,
   IndirectEval, JsStore, KBytecode, KHandle, KStr, RangeErr, SObject, ScriptEval,
   SyntaxErr, TypeErr, classify, mk_object, mk_undefined,
 }
-import arc/vm/compile_task
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/lexical
-import arc/vm/limits
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}

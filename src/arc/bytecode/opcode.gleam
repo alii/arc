@@ -1,5 +1,5 @@
-import arc/vm/binop.{type PureBinOp}
-import arc/vm/key.{type PropertyKey}
+import arc/bytecode/binop.{type PureBinOp}
+import arc/bytecode/key.{type PropertyKey}
 import gleam/option.{type Option}
 
 /// One quasi (literal chunk) of a tagged template, as carried by
@@ -19,7 +19,7 @@ pub type TemplateQuasi {
 // Static property-access ops carry a `key.PropertyKey`, precomputed by
 // resolve.gleam via `key.canonical_key` so the interpreter never re-parses a
 // compile-time-constant string per dispatch. There is exactly ONE
-// canonicalizer (see arc/vm/key), so compile-time and runtime keys for the
+// canonicalizer (see arc/bytecode/key), so compile-time and runtime keys for the
 // same string can never land in different dict slots.
 
 /// Native error constructor selector for `ThrowError` — mirrors the kind

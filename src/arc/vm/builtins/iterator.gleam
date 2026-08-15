@@ -3,13 +3,13 @@
 /// toArray, forEach, reduce, some, every, find).
 ///
 /// Prior art: QuickJS quickjs.c js_iterator_* (bellard/quickjs).
+import arc/bytecode/key.{Named}
+import arc/rt/limits
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable}
 import arc/vm/builtins/iter_protocol.{IterateStrings, RejectPrimitives}
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/key.{Named}
-import arc/vm/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/instanceof
 import arc/vm/ops/mop

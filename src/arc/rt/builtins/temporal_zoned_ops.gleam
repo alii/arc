@@ -9,6 +9,7 @@
 //// temporal_fields (calendar fields) and temporal_plain_time (time fields).
 
 import arc/internal/int_math.{floor_div}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/temporal_common.{
   type Disambiguation, type OffsetOption, Compatible, Earlier, HalfExpand,
   IgnoreOffset, Later, RejectDisambiguation, RejectOffset, UseOffset,
@@ -40,7 +41,6 @@ import arc/rt/types.{
   TemporalZonedDateTime, TzNamed, TzOffset, TzUtc, classify, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}

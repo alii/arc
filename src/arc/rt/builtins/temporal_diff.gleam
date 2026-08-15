@@ -10,6 +10,7 @@
 
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{trunc_div, trunc_mod}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/temporal_common.{
   type RoundingMode, type Unit, Compatible, Day, Hour, Microsecond, Millisecond,
   Minute, Month, Nanosecond, Second, Week, Year, balance_time_ns,
@@ -29,7 +30,6 @@ import arc/rt/builtins/temporal_zoned_ops.{
   check_iso_days_range, get_epoch_ns_for,
 }
 import arc/rt/types.{type TimeZone}
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/int
 import gleam/list
 import gleam/result

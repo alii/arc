@@ -1,5 +1,5 @@
 %% Heap-sized scratch process for parse/compile work — the Erlang half of
-%% src/arc/vm/compile_task.gleam. Nothing else lives here: this module owns
+%% src/arc/compiler/compile_task.gleam. Nothing else lives here: this module owns
 %% exactly one capability, the compile fork/join.
 %%
 %% Run a 0-arity parse/compile task. For big sources the task runs in a

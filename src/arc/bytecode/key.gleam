@@ -7,8 +7,8 @@
 //// runtime canonicalized the same string differently, the same property
 //// would land in two different dict slots.
 ////
-//// This module is a leaf (only gleam stdlib imports) so both `arc/vm/opcode`
-//// and `arc/vm/value` can depend on it without a cycle.
+//// This module is a leaf (only gleam stdlib imports) so both the compiler
+//// and the runtime can depend on it without a cycle.
 
 import gleam/bit_array
 import gleam/float

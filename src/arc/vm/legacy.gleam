@@ -4,9 +4,9 @@
 //// sites converts once, here, before running anything.
 
 import arc/compiler.{type ExportSeed, SeedUndefined, SeedUninitialized}
+import arc/internal/tuple_array
 import arc/rt/bytecode
 import arc/rt/types.{type JsVal}
-import arc/vm/internal/tuple_array
 import arc/vm/value.{
   type FuncTemplate, type JsValue, CaptureLocal, EvalNameTable, FuncTemplate,
   JsUndefined, JsUninitialized,

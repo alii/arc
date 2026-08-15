@@ -19,14 +19,14 @@
 /// Nested functions are printed after their parent, depth-first, labelled
 /// with their path in the function tree (`[0]`, `[0.1]`, ...) — the same
 /// index `MakeClosure` refers to.
+import arc/bytecode/opcode.{type Op}
 import arc/compiler
 import arc/esm
+import arc/internal/tuple_array.{type TupleArray}
 import arc/parser
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/types.{type JsVal}
 import arc/rt/val
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/opcode.{type Op}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}

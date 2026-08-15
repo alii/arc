@@ -4,13 +4,13 @@
 //// D11: NO fn-entry `maybe_collect` — GC safepoint is turn-boundary only.
 //// R7: _frame TupleGet indices 0-based (this=0, af=1, ho=2, nt=3).
 
+import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope.{
   type Binding, type FunctionInfo, type ScopeId, CaptureBinding, CatchBinding,
   ConstBinding, FnNameBinding, LetBinding, ParamBinding, VarBinding,
 }
 import arc/parser/ast
-import arc/vm/lexical
 import arc_aot/emit/anf
 import arc_aot/emit/expr
 import arc_aot/emit/state.{

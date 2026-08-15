@@ -16,6 +16,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -35,7 +36,6 @@ import arc/rt/types.{
   mk_number, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/limits
 import gleam/bit_array
 import gleam/dict
 import gleam/int

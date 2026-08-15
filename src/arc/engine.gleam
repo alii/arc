@@ -17,6 +17,7 @@
 //// function or `with_state`.
 
 import arc/compiler
+import arc/compiler/compile_task
 import arc/host
 import arc/host_hooks
 import arc/interp/entry
@@ -36,7 +37,6 @@ import arc/rt/types.{
   JNegInf, JPosInf, JsCell, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz,
   KUndef, mk_object,
 }
-import arc/vm/compile_task
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
 import gleam/int
@@ -398,7 +398,7 @@ pub fn eval_with(
   finish: fn(Agent) -> Agent,
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   // Big sources parse+compile in a heap-sized scratch process (see
-  // arc/vm/compile_task); only the compact FuncTemplate (or error) crosses
+  // arc/compiler/compile_task); only the compact FuncTemplate (or error) crosses
   // back.
   use template <- result.map(
     compile_task.run(string.byte_size(source), fn() {

@@ -4,18 +4,18 @@
 /// SameValueZero algorithm (NaN === NaN, +0 === -0).
 ///
 /// Stores values in an `OrderedEntries(MapKey, JsValue)` store (see
-/// `arc/vm/internal/ordered_entries`) mapping normalized MapKey → original
+/// `arc/internal/ordered_entries`) mapping normalized MapKey → original
 /// JsValue, which also models the spec's append-only [[SetData]] insertion
 /// order. delete() removes the record; the seq gap is the spec's emptied
 /// record, so a deleted-then-re-added value gets a fresh seq and is revisited
 /// by in-flight iterators per §24.2.5. Iteration points call
 /// ordered_entries.live_values to recover forward insertion order.
+import arc/bytecode/key.{Named}
+import arc/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/iter_protocol
 import arc/vm/heap
-import arc/vm/internal/ordered_entries.{type OrderedEntries}
-import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}

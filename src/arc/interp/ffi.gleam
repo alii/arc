@@ -7,10 +7,10 @@
 //// it before using the value in any other way. That confines the type
 //// assertion to a single probe and keeps a hit allocation-free.
 
+import arc/bytecode/lexical.{type LexicalSlots}
+import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, type StepExit}
 import arc/rt/types.{type Agent, type JsStore, type JsVal}
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/lexical.{type LexicalSlots}
 import gleam
 
 // -- Raise adapter -------------------------------------------------------------

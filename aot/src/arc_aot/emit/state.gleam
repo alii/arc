@@ -2,9 +2,9 @@
 //// scope cursor, EmitError. Port of emit.gleam:125-310,1295-1475,2226-2314
 //// re-shaped for ir.Expr output. D2: NO St/state_var — emit_core owns that.
 
+import arc/bytecode/lexical
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
-import arc/vm/lexical
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}

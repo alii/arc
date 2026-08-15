@@ -1,6 +1,6 @@
+import arc/bytecode/key.{type PropertyKey, Named}
 import arc/vm/heap.{type Heap}
 import arc/vm/internal/elements
-import arc/vm/key.{type PropertyKey, Named}
 import arc/vm/value.{
   type CallNativeFn, type ExoticKind, type JsElements, type JsValue,
   type NativeFn, type NativeFnSlot, type Property, type Ref, ArrayObject, Call,

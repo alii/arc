@@ -1,27 +1,7 @@
-import arc/host_hooks
-import arc/vm/binop
-import arc/vm/builtins/common.{type Builtins}
-import arc/vm/builtins/disposable_stack
-import arc/vm/builtins/error as builtins_error
-import arc/vm/builtins/helpers
-import arc/vm/builtins/iter_protocol
-import arc/vm/builtins/object as builtins_object
-import arc/vm/builtins/regexp as builtins_regexp
-import arc/vm/completion.{
-  type Completion, type Outcome, Completed, NormalCompletion, Suspended,
-  ThrowCompletion,
-}
-import arc/vm/exec/call
-import arc/vm/exec/dynamic_import
-import arc/vm/exec/frame
-import arc/vm/exec/generators
-import arc/vm/heap
-import arc/vm/internal/elements
-import arc/vm/internal/job_queue
-import arc/vm/internal/tuple_array
-import arc/vm/key.{Index, Named, private_key_from_text}
-import arc/vm/lexical
-import arc/vm/opcode.{
+import arc/bytecode/binop
+import arc/bytecode/key.{Index, Named, private_key_from_text}
+import arc/bytecode/lexical
+import arc/bytecode/opcode.{
   type Op, ArrayFrom, ArrayFromWithHoles, ArrayPush, ArrayPushHole, ArraySpread,
   AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
   CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
@@ -42,6 +22,26 @@ import arc/vm/opcode.{
   Return, Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf,
   TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
+import arc/host_hooks
+import arc/internal/tuple_array
+import arc/vm/builtins/common.{type Builtins}
+import arc/vm/builtins/disposable_stack
+import arc/vm/builtins/error as builtins_error
+import arc/vm/builtins/helpers
+import arc/vm/builtins/iter_protocol
+import arc/vm/builtins/object as builtins_object
+import arc/vm/builtins/regexp as builtins_regexp
+import arc/vm/completion.{
+  type Completion, type Outcome, Completed, NormalCompletion, Suspended,
+  ThrowCompletion,
+}
+import arc/vm/exec/call
+import arc/vm/exec/dynamic_import
+import arc/vm/exec/frame
+import arc/vm/exec/generators
+import arc/vm/heap
+import arc/vm/internal/elements
+import arc/vm/internal/job_queue
 import arc/vm/ops/array as array_ops
 import arc/vm/ops/array_iterator
 import arc/vm/ops/coerce

@@ -1,10 +1,10 @@
+import arc/bytecode/key.{Index}
+import arc/rt/js_string
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/iter_protocol
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/js_string
-import arc/vm/key.{Index}
 import arc/vm/ops/mop.{type ParsedDesc, ParsedDesc}
 import arc/vm/ops/object
 import arc/vm/ops/property

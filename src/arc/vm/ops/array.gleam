@@ -1,10 +1,10 @@
+import arc/bytecode/key.{Index, Named}
+import arc/internal/ordered_entries
 import arc/vm/builtins/common
 import arc/vm/builtins/iter_protocol
 import arc/vm/exec/generators
 import arc/vm/heap
 import arc/vm/internal/elements
-import arc/vm/internal/ordered_entries
-import arc/vm/key.{Index, Named}
 import arc/vm/ops/array_iterator
 import arc/vm/ops/object
 import arc/vm/ops/property

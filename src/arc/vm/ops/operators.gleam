@@ -1,11 +1,11 @@
-import arc/vm/binop.{
+import arc/bytecode/binop.{
   type ArithOp, type BitwiseOp, type CompareOp, type EqualityOp, type PureBinOp,
   AndOp, Arith, ArithDiv, ArithExp, ArithMod, ArithMul, ArithSub, Bitwise,
   Compare, EqOp, Equality, GtCmp, GtEqCmp, LtCmp, LtEqCmp, NotEqOp, OrOp, ShlOp,
   ShrOp, StrictEqOp, StrictNotEqOp, UShrOp, XorOp,
 }
+import arc/bytecode/opcode.{type UnaryOpKind, BitNot, LogicalNot, Neg, Pos, Void}
 import arc/vm/heap.{type Heap}
-import arc/vm/opcode.{type UnaryOpKind, BitNot, LogicalNot, Neg, Pos, Void}
 
 // The Number primitive library. `ops/operators` is the operator DISPATCHER;
 // the IEEE 754 arithmetic and the ToInt32/ToUint32 reductions it applies live

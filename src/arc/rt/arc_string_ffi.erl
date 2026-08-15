@@ -14,9 +14,6 @@
 %% which is ~20x slower and spec-incorrect for JS (which uses UTF-16 code
 %% units). Codepoints are closer to correct and far cheaper.
 %%
-%% Consumers: src/arc/vm/builtins/string.gleam and src/arc/vm/ops/object.gleam
-%% (StringGetOwnProperty / "length").
-%%
 %% INVALID UTF-8 POLICY (the one policy, for every walker below): a JS string
 %% is always well-formed UTF-8 — every construction path maps lone surrogates
 %% to U+FFFD (arc_escape_ffi:encode_codepoint, char_codes_to_string,

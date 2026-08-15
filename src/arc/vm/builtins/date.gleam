@@ -13,6 +13,7 @@
 /// in pure Gleam Int arithmetic ported from the QuickJS algorithms; only the
 /// wall clock and the local-zone offset lookups go through FFI, and those live
 /// in `arc/internal/host_time`.
+import arc/bytecode/key.{Named}
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{civil_from_days, days_from_year}
 import arc/internal/host_time.{
@@ -22,7 +23,6 @@ import arc/internal/int_math.{floor_div, floor_mod as math_mod}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap
-import arc/vm/key.{Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object as ops_object
 import arc/vm/state.{type Heap, type State, State}

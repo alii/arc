@@ -11,9 +11,9 @@
 //// Nothing here touches `Heap` or `State`; the caller supplies `host_refs` so
 //// an embedder's opaque host values can be traced too.
 
-import arc/vm/internal/ordered_entries
-import arc/vm/internal/tree_array
-import arc/vm/internal/tuple_array
+import arc/internal/ordered_entries
+import arc/internal/tree_array
+import arc/internal/tuple_array
 import arc/vm/value
 import gleam/dict
 import gleam/list

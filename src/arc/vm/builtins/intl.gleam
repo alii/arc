@@ -7,9 +7,11 @@
 //// (see intl_format.gleam); tag parsing/canonicalization is in
 //// intl_locale.gleam.
 
+import arc/bytecode/key.{Index, Named}
 import arc/internal/gregorian.{days_from_civil}
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/intl_format.{
   PDay, PDayPeriod, PElement, PEra, PFractionalSecond, PHour, PLiteral, PMinute,
   PMonth, PSecond, PTimeZoneName, PWeekday, PYear,
@@ -36,18 +38,16 @@ import arc/rt/intl_data.{
   StyleDecimal, StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitList,
   UnitLong, UnitNarrow, UnitShort, WLong, WNarrow, WShort,
 }
+import arc/rt/unicode_case
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers.{first_arg_or_undefined}
 import arc/vm/builtins/intl_collate.{collator_compare}
 import arc/vm/builtins/intl_segment as seg
 import arc/vm/builtins/intl_timezone as tz
 import arc/vm/heap
-import arc/vm/internal/temporal_calendar as tcal
-import arc/vm/key.{Index, Named}
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, State}
-import arc/vm/unicode_case
 import arc/vm/value.{
   type BoundGetterService, type CaseFirst, type CollatorSensitivity,
   type CollatorState, type CollatorUsage, type ConstructibleService,

@@ -7,6 +7,7 @@
 //// pieces from temporal_plain_time, exact-time resolution (toZonedDateTime)
 //// from temporal_zoned_ops and until/since from temporal_diff.
 
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   CalAuto, Day, Nanosecond, UDay, apply_since_dur, apply_since_mode,
@@ -51,7 +52,6 @@ import arc/rt/types.{
   classify, mk_bool, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}

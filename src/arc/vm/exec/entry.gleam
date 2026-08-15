@@ -3,6 +3,7 @@
 // ============================================================================
 
 import arc/host_hooks
+import arc/internal/tuple_array
 import arc/rt/bytecode
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
@@ -17,7 +18,6 @@ import arc/vm/exec/promises
 import arc/vm/gc_trace
 import arc/vm/heap
 import arc/vm/internal/job_queue
-import arc/vm/internal/tuple_array
 import arc/vm/legacy
 import arc/vm/realm
 import arc/vm/state.{type Heap, type State, type VmError, RealmCtx, State}

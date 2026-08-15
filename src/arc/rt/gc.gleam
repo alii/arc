@@ -15,6 +15,9 @@
 //// `t_pin_root`. The D11 root formula therefore reduces to
 //// `pinned_roots ∪ refs_in_term(microtasks) ∪ unhandled_rejections`.
 
+import arc/internal/ordered_entries
+import arc/internal/tree_array as rt_tree_array
+import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/bytecode.{
   type EnvTuple, type FuncTemplate, type SuspendedFrame, FuncTemplate,
   SuspendedFrame,
@@ -38,9 +41,6 @@ import arc/rt/types.{
   ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj,
   WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list, native_token_refs,
 } as rt_types
-import arc/vm/internal/ordered_entries
-import arc/vm/internal/tree_array as rt_tree_array
-import arc/vm/internal/tuple_array.{type TupleArray}
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
 import gleam/list

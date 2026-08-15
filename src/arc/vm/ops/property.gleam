@@ -1,5 +1,5 @@
-import arc/vm/key.{Index, Named}
-import arc/vm/limits
+import arc/bytecode/key.{Index, Named}
+import arc/rt/limits
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type State}

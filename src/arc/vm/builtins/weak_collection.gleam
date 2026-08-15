@@ -17,10 +17,10 @@
 /// the check that establishes them: a `WeakRef` (from `require`) carries the
 /// `WeakKind` it was proved against, and a `WeakKey` (from `require_weak_key`)
 /// carries a value proved to satisfy §9.13 CanBeHeldWeakly.
+import arc/bytecode/key.{Named}
 import arc/vm/builtins/common
 import arc/vm/builtins/helpers.{first_arg_or_undefined, is_callable}
 import arc/vm/heap
-import arc/vm/key.{Named}
 import arc/vm/ops/object
 import arc/vm/state.{type State, State}
 import arc/vm/value.{

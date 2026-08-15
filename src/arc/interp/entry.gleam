@@ -10,6 +10,11 @@
 //// agent the exception travelled with, and the activation's `Error.stack`
 //// frames and depth are trued up to what they were on entry.
 
+import arc/bytecode/lexical
+import arc/bytecode/opcode.{
+  AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
+}
+import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call
 import arc/interp/eval
 import arc/interp/ffi
@@ -26,6 +31,7 @@ import arc/rt/call.{
   type Completion, type Frame, NormalCompletion, ThrowCompletion,
 } as rt_call
 import arc/rt/lang as rt_lang
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
@@ -37,12 +43,6 @@ import arc/rt/types.{
   mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/tuple_array.{type TupleArray}
-import arc/vm/lexical
-import arc/vm/limits
-import arc/vm/opcode.{
-  AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
-}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result

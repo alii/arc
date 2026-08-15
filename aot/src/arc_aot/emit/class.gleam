@@ -4,10 +4,10 @@
 //// R11: MethodInstallKind wire-encoded as ConstAtom("m_i_method"/…).
 //// R7: 0-based TupleGet. R14: emit_function returns #(ir.Expr, Emitter2).
 
+import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope.{type Binding}
 import arc/parser/ast
-import arc/vm/lexical
 import arc_aot/emit/anf
 import arc_aot/emit/func
 import arc_aot/emit/state.{type EmitError, type Emitter2, ClassCtx, Emitter2}

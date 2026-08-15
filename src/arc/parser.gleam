@@ -16,6 +16,7 @@
 ///
 /// The mutually-recursive core (statements ↔ expressions ↔ patterns) lives
 /// here since Gleam doesn't support cross-module recursion.
+import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
@@ -90,7 +91,6 @@ import arc/parser/token.{
   is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
   is_reserved_word_kind,
 }
-import arc/vm/lexical
 import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}

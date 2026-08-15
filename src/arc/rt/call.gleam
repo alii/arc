@@ -17,6 +17,8 @@
 //// function prologue reads it via `element(N, Frame)` with 0-based logical
 //// indices (R7). It is opaque to Gleam and built via the FFI `mk_frame/4`.
 
+import arc/internal/tree_array
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -28,8 +30,6 @@ import arc/rt/types.{
   mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/internal/tree_array
-import arc/vm/limits
 import gleam/bit_array
 import gleam/bool
 import gleam/dict

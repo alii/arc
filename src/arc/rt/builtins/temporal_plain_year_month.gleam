@@ -8,6 +8,7 @@ import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
 import arc/internal/int_math.{trunc_div, trunc_mod}
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type CalendarNameMode, type RoundingMode, CalAlways, CalAuto, CalCritical,
@@ -45,7 +46,6 @@ import arc/rt/types.{
   mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}

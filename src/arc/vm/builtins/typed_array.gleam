@@ -12,13 +12,13 @@
 /// bulk encoding live in arc/vm/ops/typed_array_elements (typed_array_store
 /// / typed_array_encode_value); this module is the constructor and
 /// prototype surface.
+import arc/bytecode/key.{Index, Named}
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/builtins/iter_protocol
 import arc/vm/builtins/uint8_codec
 import arc/vm/heap
 import arc/vm/internal/typed_array_ffi.{fill_clamped, splice_clamped, ta_zeroed}
-import arc/vm/key.{Index, Named}
 import arc/vm/ops/buffer as ops_buffer
 import arc/vm/ops/coerce
 import arc/vm/ops/numeric

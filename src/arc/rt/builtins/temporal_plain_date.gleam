@@ -9,6 +9,7 @@
 import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
+import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   CalAuto, Compatible, Day, apply_since_dur, apply_since_mode, calendar_suffix,
@@ -48,7 +49,6 @@ import arc/rt/types.{
   TsCompare, TsFrom, classify, mk_bool, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/vm/internal/temporal_calendar as tcal
 import gleam/list
 import gleam/option
 

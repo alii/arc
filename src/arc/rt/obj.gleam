@@ -17,8 +17,11 @@
 //// step 1) seeds the concrete fn. Primitive auto-boxing likewise goes
 //// through `ops.to_object`.
 
+import arc/internal/tree_array
 import arc/rt/buffer
 import arc/rt/elements
+import arc/rt/js_string
+import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsOps, type JsSlot,
@@ -31,9 +34,6 @@ import arc/rt/types.{
   ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr, TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
-import arc/vm/internal/tree_array
-import arc/vm/js_string
-import arc/vm/limits
 import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
