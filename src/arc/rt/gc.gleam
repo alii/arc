@@ -149,8 +149,8 @@ pub fn refs_in_cell(slot: JsSlot) -> List(Int) {
 }
 
 /// Refs reachable from an `ObjKind`. EXHAUSTIVE (SPEC §7.M2 table) — no
-/// wildcard. `WeakMapObj`/`WeakSetObj` trace **NONE** (weak refs are not
-/// roots; dead-key entries are pruned post-sweep — SPEC §7.M2 §weak, A4).
+/// wildcard. Weak keys (`WeakMapObj`/`WeakSetObj`) are not traced; dead-key
+/// entries are pruned post-sweep (SPEC §7.M2 §weak).
 fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
   case kind {
     Ordinary -> acc
@@ -200,9 +200,11 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       ordered_entries.fold(entries, acc, fn(a, k, _) {
         push_term_refs(to_dynamic(k), a)
       })
-    // SPEC §7.M2: weak entries are NOT roots. Overrides M2.md's
-    // trace-strongly note (RULINGS precedence). Pruned post-sweep.
-    WeakMapObj(entries: _) -> acc
+    // Weak KEYS are not roots (dead-key entries are pruned post-sweep); a
+    // WeakMap's VALUES are held strongly, so a value reachable only through
+    // its entry survives for as long as the entry does.
+    WeakMapObj(entries:) ->
+      dict.fold(entries, acc, fn(a, _, v) { push_val_refs(v, a) })
     WeakSetObj(entries: _) -> acc
     DateObj(ms: _) -> acc
     RegExpObj(source: _, flags: _, last_index: _, compiled: _) -> acc
@@ -415,10 +417,9 @@ fn sweep(
 }
 
 /// Post-sweep weak-prune (SPEC §7.M2 §weak): drop `WeakMapObj`/`WeakSetObj`
-/// entries whose key-id ∉ `live`. Weak entries are NOT traced during mark
-/// (`push_objkind_refs` — trace-NONE per SPEC §7.M2 table, overriding M2.md's
-/// trace-strongly note; A4 RULINGS precedence), so a key held ONLY by a weak
-/// container is swept, and its entry disappears here.
+/// entries whose key-id ∉ `live`. Weak keys are NOT traced during mark, so a
+/// key held ONLY by a weak container is swept, and its entry (value
+/// included) disappears here in the same collection.
 fn prune_weak(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
   dict.map_values(data, fn(_, slot) {
     case slot {

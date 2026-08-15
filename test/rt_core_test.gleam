@@ -5,6 +5,7 @@
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
@@ -286,4 +287,159 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
   assert classify(r) == KNum(JInt(42))
   let #(h, st) = rt_call.t_construct(st, f, [], f)
   assert h == st.realm.array.prototype
+}
+
+// ── GC: WeakMap values live as long as their key ─────────────────────────────
+
+fn handle(v: JsVal) {
+  let assert KHandle(h) = classify(v)
+  h
+}
+
+pub fn weak_map_value_traced_until_key_dies_test() {
+  let st = agent()
+  let wm_ctor = global(st, "WeakMap")
+  let #(wm_h, st) = rt_call.t_construct(st, wm_ctor, [], wm_ctor)
+  let wm = mk_object(wm_h)
+  let #(k, st) = rt_obj.t_new_object_literal(st)
+  let #(v, st) = rt_obj.t_new_object_literal(st)
+  let #(_, st) =
+    rt_call.t_call_method(st, wm, StringKey(canonical_key("set")), [k, v])
+  // Key reachable: the value survives even though only the entry holds it.
+  let st = rt_gc.t_collect(st, [wm_h, handle(k)])
+  assert rt_gc.t_is_live(st, handle(v))
+  let #(got, st) =
+    rt_call.t_call_method(st, wm, StringKey(canonical_key("get")), [k])
+  assert got == v
+  // Key unreachable: the entry is pruned in the same collection, which
+  // leaves the value unreferenced for the next one.
+  let st = rt_gc.t_collect(st, [wm_h])
+  assert !rt_gc.t_is_live(st, handle(k))
+  let #(has, st) =
+    rt_call.t_call_method(st, wm, StringKey(canonical_key("has")), [k])
+  assert classify(has) == KBool(False)
+  let st = rt_gc.t_collect(st, [wm_h])
+  assert !rt_gc.t_is_live(st, handle(v))
+}
+
+// ── Map.groupBy / getOrInsert / getOrInsertComputed ──────────────────────────
+
+fn call_method(st: Agent, recv: JsVal, name: String, args: List(JsVal)) {
+  rt_call.t_call_method(st, recv, StringKey(canonical_key(name)), args)
+}
+
+fn str(s: String) -> JsVal {
+  mk_string(s)
+}
+
+pub fn map_get_or_insert_test() {
+  let st = agent()
+  let map_ctor = global(st, "Map")
+  let #(mh, st) = rt_call.t_construct(st, map_ctor, [], map_ctor)
+  let m = mk_object(mh)
+  let #(r, st) = call_method(st, m, "getOrInsert", [str("a"), int(1)])
+  assert classify(r) == KNum(JInt(1))
+  let #(r, st) = call_method(st, m, "getOrInsert", [str("a"), int(2)])
+  assert classify(r) == KNum(JInt(1))
+  // -0 is canonicalized to +0 and matches an existing +0 entry.
+  let #(mz, st) = rt_ops.t_neg(st, int(0))
+  let #(_, st) = call_method(st, m, "getOrInsert", [mz, str("z")])
+  let #(r, st) = call_method(st, m, "get", [int(0)])
+  assert classify(r) == KStr("z")
+  let #(size, st) = rt_obj.t_get_prop(st, m, StringKey(canonical_key("size")))
+  assert classify(size) == KNum(JInt(2))
+  let assert #(ThrowCompletion(_), _) =
+    rt_call.t_call(st, get(st, m, "getOrInsert"), str("not a map"), [])
+}
+
+pub fn map_get_or_insert_computed_test() {
+  let st = agent()
+  let map_ctor = global(st, "Map")
+  let #(mh, st) = rt_call.t_construct(st, map_ctor, [], map_ctor)
+  let m = mk_object(mh)
+  // Miss: callback receives the canonicalized key; its result is stored.
+  let seen_key =
+    as_code(fn(st, _frame, args) {
+      let assert [k] = args
+      let #(q, st) = rt_ops.t_div(st, int(1), k)
+      #(mk_string(rt_val.t_to_string(st, q).0), st)
+    })
+  let #(fh, st) =
+    rt_call.t_fn_new(st, seen_key, [], flags(True), "f", 1, None, None)
+  let f = mk_object(fh)
+  let #(mz, st) = rt_ops.t_neg(st, int(0))
+  let #(r, st) = call_method(st, m, "getOrInsertComputed", [mz, f])
+  assert classify(r) == KStr("Infinity")
+  // Hit: callback not called.
+  let boom =
+    as_code(fn(st, _frame, _args) { rt_val.t_throw_type_error(st, "called") })
+  let #(bh, st) =
+    rt_call.t_fn_new(st, boom, [], flags(True), "b", 1, None, None)
+  let #(r, st) =
+    call_method(st, m, "getOrInsertComputed", [int(0), mk_object(bh)])
+  assert classify(r) == KStr("Infinity")
+  // A callback that inserts the key itself is overwritten, not duplicated.
+  let sneaky =
+    as_code(fn(st, _frame, args) {
+      let assert [k] = args
+      let #(_, st) = call_method(st, m, "set", [k, str("inner")])
+      #(str("outer"), st)
+    })
+  let #(sh, st) =
+    rt_call.t_fn_new(st, sneaky, [], flags(True), "s", 1, None, None)
+  let #(r, st) =
+    call_method(st, m, "getOrInsertComputed", [str("k"), mk_object(sh)])
+  assert classify(r) == KStr("outer")
+  let #(r, st) = call_method(st, m, "get", [str("k")])
+  assert classify(r) == KStr("outer")
+  let #(size, st) = rt_obj.t_get_prop(st, m, StringKey(canonical_key("size")))
+  assert classify(size) == KNum(JInt(2))
+  // Non-callable callback is a TypeError even when the key is present.
+  let assert #(ThrowCompletion(_), _) =
+    rt_call.t_call(st, get(st, m, "getOrInsertComputed"), m, [int(0), int(1)])
+}
+
+pub fn map_group_by_test() {
+  let st = agent()
+  let map_ctor = global(st, "Map")
+  let #(items, st) =
+    rt_obj.t_new_array(st, [
+      int(1),
+      int(2),
+      int(3),
+      int(4),
+      mk_number(JFloat(1.5)),
+    ])
+  let parity =
+    as_code(fn(st, _frame, args) {
+      let assert [n, ..] = args
+      let #(r, st) = rt_ops.t_mod(st, n, int(2))
+      case classify(r) {
+        KNum(JInt(0)) -> #(str("even"), st)
+        KNum(JInt(_)) -> #(str("odd"), st)
+        _ -> rt_ops.t_neg(st, int(0))
+      }
+    })
+  let #(ph, st) =
+    rt_call.t_fn_new(st, parity, [], flags(True), "p", 1, None, None)
+  let #(g, st) = call_method(st, map_ctor, "groupBy", [items, mk_object(ph)])
+  assert type_of(st, g) == "object"
+  let #(size, st) = rt_obj.t_get_prop(st, g, StringKey(canonical_key("size")))
+  assert classify(size) == KNum(JInt(3))
+  let #(odd, st) = call_method(st, g, "get", [str("odd")])
+  let #(joined, st) = call_method(st, odd, "join", [])
+  assert classify(joined) == KStr("1,3")
+  let #(even, st) = call_method(st, g, "get", [str("even")])
+  let #(joined, st) = call_method(st, even, "join", [])
+  assert classify(joined) == KStr("2,4")
+  // The -0 group key was canonicalized to +0.
+  let #(zero, st) = call_method(st, g, "get", [int(0)])
+  let #(joined, st) = call_method(st, zero, "join", [])
+  assert classify(joined) == KStr("1.5")
+  // Insertion order of first occurrence: odd, even, 0.
+  let #(keys_iter, st) = call_method(st, g, "keys", [])
+  let #(first, st) = call_method(st, keys_iter, "next", [])
+  assert classify(get(st, first, "value")) == KStr("odd")
+  let assert #(ThrowCompletion(_), _) =
+    rt_call.t_call(st, get(st, map_ctor, "groupBy"), map_ctor, [items, int(1)])
 }

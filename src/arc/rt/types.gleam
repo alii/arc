@@ -1412,6 +1412,7 @@ pub const all_typed_array_kinds = [
 /// fallback.
 pub type MapNative {
   MapConstructor(proto: Handle)
+  MapGroupBy
   MapGet
   MapSet
   MapHas
@@ -1422,6 +1423,8 @@ pub type MapNative {
   MapKeys
   MapValues
   MapEntries
+  MapGetOrInsert
+  MapGetOrInsertComputed
 }
 
 /// §24.2 Set built-in dispatch tokens (arc `SetNativeFn`). `SetConstructor`
@@ -1685,12 +1688,15 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
 pub fn map_native_refs(n: MapNative) -> List(Handle) {
   case n {
     MapConstructor(proto:) -> [proto]
-    MapGet
+    MapGroupBy
+    | MapGet
     | MapSet
     | MapHas
     | MapDelete
     | MapClear
     | MapForEach
+    | MapGetOrInsert
+    | MapGetOrInsertComputed
     | MapGetSize
     | MapKeys
     | MapValues

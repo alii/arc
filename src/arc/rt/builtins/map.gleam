@@ -19,16 +19,18 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type MapIterKind,
   type MapKey, type MapNative, type ObjKind, JInt, KHandle, KNull, KUndef,
   MapClear, MapConstructor, MapDelete, MapEntries, MapForEach, MapGet,
-  MapGetSize, MapHas, MapIterEntries, MapIterKeys, MapIterValues, MapIterator,
-  MapKeys, MapN, MapObj, MapSet, MapValues, Named, NoElements, SObject,
-  StringKey, classify, js_to_map_key, map_key_to_js, mk_bool, mk_number,
-  mk_object, mk_undefined, symbol_iterator,
+  MapGetOrInsert, MapGetOrInsertComputed, MapGetSize, MapGroupBy, MapHas,
+  MapIterEntries, MapIterKeys, MapIterValues, MapIterator, MapKeys, MapN, MapObj,
+  MapSet, MapValues, Named, NoElements, SObject, StringKey, classify,
+  js_to_map_key, map_key_to_js, mk_bool, mk_number, mk_object, mk_undefined,
+  symbol_iterator,
 }
 import arc/rt/val as rt_val
 import arc/vm/internal/ordered_entries
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 
 // ── init — Map constructor + Map.prototype ──────────────────────────────────
 
@@ -50,7 +52,11 @@ pub fn init(
       #("forEach", MapN(MapForEach), 1),
       #("keys", MapN(MapKeys), 0),
       #("values", MapN(MapValues), 0),
+      #("getOrInsert", MapN(MapGetOrInsert), 2),
+      #("getOrInsertComputed", MapN(MapGetOrInsertComputed), 2),
     ])
+  let #(statics, st) =
+    common.alloc_methods(st, fn_proto, [#("groupBy", MapN(MapGroupBy), 2)])
   // `entries` allocated separately so its own name and [@@iterator] alias the
   // SAME function object (§24.1.3.13).
   let #(entries_h, st) =
@@ -70,7 +76,7 @@ pub fn init(
       fn(proto) { MapN(MapConstructor(proto:)) },
       "Map",
       0,
-      [],
+      statics,
     )
   let st = common.add_to_string_tag(st, bt.prototype, "Map")
   // [@@iterator] — same function object as `entries`. Fresh seq (restamp).
@@ -93,6 +99,7 @@ pub fn dispatch(
   case n {
     MapConstructor(..) ->
       rt_val.t_throw_type_error(st, "Constructor Map requires 'new'")
+    MapGroupBy -> map_group_by(st, args)
     MapGet -> map_get(st, this, args)
     MapSet -> map_set(st, this, args)
     MapHas -> map_has(st, this, args)
@@ -103,6 +110,8 @@ pub fn dispatch(
     MapKeys -> map_iterator(st, this, "keys", MapIterKeys)
     MapValues -> map_iterator(st, this, "values", MapIterValues)
     MapEntries -> map_iterator(st, this, "entries", MapIterEntries)
+    MapGetOrInsert -> map_get_or_insert(st, this, args)
+    MapGetOrInsertComputed -> map_get_or_insert_computed(st, this, args)
   }
 }
 
@@ -156,6 +165,74 @@ fn map_constructor(
   }
 }
 
+// ── §24.1.2.1 Map.groupBy ( items, callback ) ───────────────────────────────
+
+/// §24.1.2.1 Map.groupBy: `? GroupBy(items, callback, COLLECTION)`, then a
+/// fresh %Map% whose values are arrays of the grouped items in first-seen
+/// key order. COLLECTION keys are the callback results themselves,
+/// canonicalized (-0 → +0) and matched by SameValueZero — exactly `MapKey`.
+fn map_group_by(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  let #(items, callback) = two_args_or_undefined(args)
+  // §7.3.35 GroupBy steps 1-2: RequireObjectCoercible(items); IsCallable.
+  let #(_, st) = rt_val.t_require_object_coercible(st, items)
+  use callback <- helpers.require_callable(st, callback, fn() {
+    "Map.groupBy callback is not callable"
+  })
+  // Step 4: iteratorRecord = ? GetIterator(items, sync).
+  let #(rec, st) = iter_protocol.get_iterator_sync(st, items)
+  group_by_loop(st, rec, callback, 0, dict.new(), [])
+}
+
+fn group_by_loop(
+  st: Agent,
+  rec: iter_protocol.IteratorRecord,
+  callback: JsVal,
+  index: Int,
+  groups: dict.Dict(MapKey, List(JsVal)),
+  order: List(MapKey),
+) -> #(JsVal, Agent) {
+  case iter_protocol.iterator_step_value(st, rec) {
+    #(None, st) -> group_by_finish(st, groups, list.reverse(order))
+    #(Some(item), st) -> {
+      // Steps 6.e-6.h: key = Completion(Call(callback, undefined, « value,
+      // 𝔽(k) »)); IfAbruptCloseIterator; key = CanonicalizeKeyedCollectionKey.
+      use kv, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
+        rt_call.t_call_checked(st, callback, mk_undefined(), [
+          item,
+          mk_number(JInt(index)),
+        ])
+      })
+      let key = js_to_map_key(kv)
+      // Step 6.i: AddValueToKeyedGroup.
+      let #(groups, order) = case dict.get(groups, key) {
+        Ok(members) -> #(dict.insert(groups, key, [item, ..members]), order)
+        Error(Nil) -> #(dict.insert(groups, key, [item]), [key, ..order])
+      }
+      group_by_loop(st, rec, callback, index + 1, groups, order)
+    }
+  }
+}
+
+fn group_by_finish(
+  st: Agent,
+  groups: dict.Dict(MapKey, List(JsVal)),
+  order: List(MapKey),
+) -> #(JsVal, Agent) {
+  let array_proto = st.realm.array.prototype
+  // Steps 2-3: map = ! Construct(%Map%); for each group, elements =
+  // CreateArrayFromList(g.[[Elements]]) appended as { key, elements }.
+  let #(entries, st) =
+    list.fold(order, #(ordered_entries.new(), st), fn(acc, key) {
+      let #(entries, st) = acc
+      let members = dict.get(groups, key) |> result.unwrap([])
+      let #(arr_h, st) =
+        common.alloc_array(st, list.reverse(members), array_proto)
+      #(ordered_entries.insert(entries, key, mk_object(arr_h)), st)
+    })
+  let #(map_h, st) = alloc_map_cell(st, st.realm.map.prototype, entries)
+  #(mk_object(map_h), st)
+}
+
 // ── §24.1.3.6 Map.prototype.get ( key ) ─────────────────────────────────────
 
 fn map_get(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -180,6 +257,70 @@ fn map_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let st = update_map_data(st, ref, store)
   // Step 7: return M.
   #(this, st)
+}
+
+// ── Map.prototype.getOrInsert / getOrInsertComputed (proposal-upsert) ───────
+
+/// Map.prototype.getOrInsert ( key, value ). Steps 3-4: canonicalize the key
+/// and return an existing entry's value; steps 5-7: otherwise append
+/// { key, value } and return value.
+fn map_get_or_insert(
+  st: Agent,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  let #(key_arg, val_arg) = two_args_or_undefined(args)
+  use ref <- require_map(st, this, "getOrInsert")
+  let store = read_map_store(st, ref)
+  let map_key = js_to_map_key(key_arg)
+  case ordered_entries.get(store, map_key) {
+    Some(existing) -> #(existing, st)
+    None -> {
+      let st =
+        update_map_data(
+          st,
+          ref,
+          ordered_entries.insert(store, map_key, val_arg),
+        )
+      #(val_arg, st)
+    }
+  }
+}
+
+/// Map.prototype.getOrInsertComputed ( key, callback ). Step 3 checks the
+/// callback BEFORE looking the key up; step 6 calls it with the
+/// canonicalized key only on a miss; steps 7-10 then re-read [[MapData]]
+/// (the callback may have mutated the map) and either overwrite the entry
+/// the callback created or append a new one.
+fn map_get_or_insert_computed(
+  st: Agent,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  let #(key_arg, callback) = two_args_or_undefined(args)
+  // Steps 1-2: RequireInternalSlot before IsCallable.
+  use ref <- require_map(st, this, "getOrInsertComputed")
+  // Step 3.
+  use callback <- helpers.require_callable(st, callback, fn() {
+    let #(ty, _) = rt_val.t_type_of(st, callback)
+    ty <> " is not a function"
+  })
+  // Steps 4-5.
+  let map_key = js_to_map_key(key_arg)
+  case ordered_entries.get(read_map_store(st, ref), map_key) {
+    Some(existing) -> #(existing, st)
+    None -> {
+      // Step 6: value = ? Call(callback, undefined, « key »).
+      let #(value, st) =
+        rt_call.t_call_checked(st, callback, mk_undefined(), [
+          map_key_to_js(map_key),
+        ])
+      // Steps 8-10: Set-or-Append against the CURRENT [[MapData]].
+      let store =
+        ordered_entries.insert(read_map_store(st, ref), map_key, value)
+      #(value, update_map_data(st, ref, store))
+    }
+  }
 }
 
 // ── §24.1.3.7 Map.prototype.has ( key ) ─────────────────────────────────────
