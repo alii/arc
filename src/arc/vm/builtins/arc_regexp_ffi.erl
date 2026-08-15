@@ -1,6 +1,6 @@
 %% JS RegExp -> PCRE (`re`) bridge: JS flags to re:compile options, the source
 %% pattern scan (group count / named groups), the escape + v-mode class
-%% translation, the compiled-pattern cache and exec.
+%% translation, compile and exec.
 %%
 %% Three neighbours own the parts that are not about `re`:
 %%   arc_regex_vclass  — the v-flag ClassSetExpression parser (nested classes,
@@ -73,46 +73,28 @@ newline_mode(<<_, Rest/binary>>, M, S) -> newline_mode(Rest, M, S).
 %% caller matches on — a pattern PCRE cannot compile is NOT the same thing as
 %% a pattern that failed to match, and neither side may confuse them. A compile
 %% failure is not necessarily an arc bug: PCRE rejects constructs that are legal
-%% ECMAScript, e.g. an unbounded-length lookbehind like `(?<=^\w+)`. It is
-%% cached like a success, so a script exec'ing such a regexp in a loop pays the
-%% translation + compile once, not once per call.
+%% ECMAScript, e.g. an unbounded-length lookbehind like `(?<=^\w+)`.
 %%
-%% Get a compiled pattern, caching it in the process dictionary. re:run/3
-%% with a binary pattern recompiles the PCRE pattern on every call, and the
+%% Translates and compiles on every call: re:run/3 needs an MP, and the
 %% global match/replace/split loops at the Gleam level call exec once per
-%% match — so a /g operation with k matches compiled the same regex k times.
-%% Caching the compiled MP makes that one compile + k cheap match calls.
-%% Translation happens behind the same cache: property escapes can expand
-%% into multi-kilobyte classes, so re-translating per exec would dominate
-%% tight test()/exec loops over short subjects. The scan of the source
-%% pattern (group count + named groups) is cached alongside the MP, so
-%% regexp_exec_info gets it for free on a hit. Keyed by the ORIGINAL pattern
-%% plus {CompileOpts, UnicodeMode, NewlineMode} — every compilation and
-%% translation input — so flag chars that affect none of them (g/y/d/etc.)
-%% share an entry.
+%% match, so a /g operation with k matches translates and compiles the same
+%% regex k times (property escapes can expand into multi-kilobyte classes).
+%% The scan of the source pattern (group count + named groups) rides along so
+%% regexp_exec_info gets it from the same pass.
 get_compiled(Pattern, Flags) ->
     Opts = flags_to_opts(Flags),
     Mode = unicode_mode(Flags),
     NL = newline_mode(Flags),
-    Key = {arc_re_mp, Pattern, Opts, Mode, NL},
-    case erlang:get(Key) of
-        undefined ->
-            Caseless = lists:member(caseless, Opts),
-            {Stripped, GroupCount, Names} = scan_pattern(Pattern),
-            Translated = unicode:characters_to_binary(
-                           leading_star_prefix(Stripped, NL)
-                           ++ translate_pat(Stripped, false, Mode, Caseless, [NL])),
-            Result = case re:compile(Translated, Opts) of
-                         {ok, MP} ->
-                             {ok, {MP, GroupCount, Names}};
-                         {error, Reason} ->
-                             {error,
-                              {pattern_compile_failed, compile_reason(Reason)}}
-                     end,
-            cache_put(Key, Result),
-            Result;
-        Result ->
-            Result
+    Caseless = lists:member(caseless, Opts),
+    {Stripped, GroupCount, Names} = scan_pattern(Pattern),
+    Translated = unicode:characters_to_binary(
+                   leading_star_prefix(Stripped, NL)
+                   ++ translate_pat(Stripped, false, Mode, Caseless, [NL])),
+    case re:compile(Translated, Opts) of
+        {ok, MP} ->
+            {ok, {MP, GroupCount, Names}};
+        {error, Reason} ->
+            {error, {pattern_compile_failed, compile_reason(Reason)}}
     end.
 
 %% re:compile's {ErrString, Position} (or anything else it may hand back)
@@ -122,29 +104,6 @@ compile_reason({Msg, Pos}) when is_list(Msg), is_integer(Pos) ->
     unicode:characters_to_binary(io_lib:format("~ts at ~b", [Msg, Pos]));
 compile_reason(Other) ->
     unicode:characters_to_binary(io_lib:format("~tp", [Other])).
-
-%% Max compiled patterns cached per process before the cache is flushed.
--define(CACHE_MAX, 512).
-
-%% Bound cache size: flush all entries once the cap is hit. Real programs
-%% have a small, fixed set of patterns; the cap only triggers for
-%% pathological dynamically-generated patterns, where recompiling matches
-%% the old behavior anyway.
-%% Value cached is get_compiled's whole result — {ok, Entry} or the
-%% pattern_compile_failed error — so failures cost one compile too.
-cache_put(Key, Result) ->
-    N = case erlang:get(arc_re_mp_count) of
-            undefined -> 0;
-            C -> C
-        end,
-    case N >= ?CACHE_MAX of
-        true ->
-            [erlang:erase(K) || {{arc_re_mp, _, _, _, _} = K, _} <- erlang:get()],
-            erlang:put(arc_re_mp_count, 1);
-        false ->
-            erlang:put(arc_re_mp_count, N + 1)
-    end,
-    erlang:put(Key, Result).
 
 %% ---- One scan of the source pattern -------------------------------------
 %%

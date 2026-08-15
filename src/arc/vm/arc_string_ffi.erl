@@ -33,23 +33,9 @@
 %% grapheme indexing for all BMP chars so this is strictly more correct
 %% than the previous string.slice approach.
 %%
-%% Both entry points keep a one-entry per-process cache so the canonical
-%% JS idiom `for (i = 0; i < s.length; i++) use(s[i])` is O(n) instead of
-%% O(n^2):
-%%   - string_codepoint_length caches {Bin, Len}: the first call scans,
-%%     repeat calls on the same string are O(1).
-%%   - string_char_at keeps a cursor {Bin, CharIdx, ByteOffset} and resumes
-%%     the UTF-8 walk from the last position for forward access, so a
-%%     sequential scan advances one codepoint per call instead of re-walking
-%%     from byte 0 (O(i) per access).
-%% Cache hits use `=:=`, which is O(1) when the argument is the identical
-%% heap term (the common case: the same JsString value threaded through the
-%% interpreter loop) and fails fast on different strings (size compared
-%% first). Binaries are immutable, so a hit can never be stale; misses just
-%% replace the entry. Caches are per-process, so concurrent VM processes
-%% (generators, actors) are isolated and merely start cold.
--define(STR_LEN_CACHE, '$arc_str_len_cache').
--define(STR_POS_CACHE, '$arc_str_pos_cache').
+%% Both walks start from byte 0 on every call: string_char_at is O(i) and
+%% string_codepoint_length is O(n), so `for (i = 0; i < s.length; i++)
+%% use(s[i])` is O(n^2) in the string length.
 
 string_char_at(Bin, Idx) ->
     case string_codepoint_at(Bin, Idx) of
@@ -57,51 +43,28 @@ string_char_at(Bin, Idx) ->
         none -> none
     end.
 
-%% Same cursor-cached walk as string_char_at, but returns the codepoint as an
-%% integer — for String.prototype.codePointAt, where building even a one-char
-%% binary per call would be wasted allocation.
+%% Same walk as string_char_at, but returns the codepoint as an integer —
+%% for String.prototype.codePointAt, where building even a one-char binary
+%% per call would be wasted allocation.
 string_codepoint_at(Bin, Idx) when Idx >= 0 ->
-    {Base, Skip} =
-        case get(?STR_POS_CACHE) of
-            {B, CIdx, COff} when B =:= Bin, CIdx =< Idx -> {COff, Idx - CIdx};
-            _ -> {0, Idx}
-        end,
-    <<_:Base/binary, Rest/binary>> = Bin,
-    case char_at_skip(Rest, Skip, Base) of
-        {Char, Off} ->
-            put(?STR_POS_CACHE, {Bin, Idx, Off}),
-            {some, Char};
-        none -> none
+    case char_at_skip(Bin, Idx) of
+        none -> none;
+        Char -> {some, Char}
     end;
 string_codepoint_at(_, _) -> none.
 
-%% Walk N codepoints forward, returning the integer codepoint there plus its
-%% byte offset (for the cursor cache). Off accumulates from the caller's base.
-%% Running out of string is `none` (an out-of-range index); an invalid byte is
-%% not a clause here — see the invalid-UTF-8 policy above.
-char_at_skip(<<C/utf8, _/binary>>, 0, Off) -> {C, Off};
-char_at_skip(<<C/utf8, Rest/binary>>, N, Off) ->
-    char_at_skip(Rest, N - 1, Off + cp_byte_size(C));
-char_at_skip(<<>>, _, _) -> none.
-
-%% UTF-8 encoded byte length of a codepoint.
-cp_byte_size(C) when C < 16#80 -> 1;
-cp_byte_size(C) when C < 16#800 -> 2;
-cp_byte_size(C) when C < 16#10000 -> 3;
-cp_byte_size(_) -> 4.
+%% Walk N codepoints forward, returning the integer codepoint there. Running
+%% out of string is `none` (an out-of-range index); an invalid byte is not a
+%% clause here — see the invalid-UTF-8 policy above.
+char_at_skip(<<C/utf8, _/binary>>, 0) -> C;
+char_at_skip(<<_/utf8, Rest/binary>>, N) -> char_at_skip(Rest, N - 1);
+char_at_skip(<<>>, _) -> none.
 
 %% U+FFFD REPLACEMENT CHARACTER. UtfCodepoint is an integer on the Erlang
 %% target, so this is a constant-pool literal — no Result/assert overhead.
 replacement_codepoint() -> 16#FFFD.
 
-string_codepoint_length(Bin) ->
-    case get(?STR_LEN_CACHE) of
-        {B, Len} when B =:= Bin -> Len;
-        _ ->
-            Len = cp_length(Bin, 0),
-            put(?STR_LEN_CACHE, {Bin, Len}),
-            Len
-    end.
+string_codepoint_length(Bin) -> cp_length(Bin, 0).
 %% W:56 clause: 7 ASCII bytes per step, small-int safe (see cp_drop).
 cp_length(<<W:56, Rest/binary>>, N)
     when W band 16#80808080808080 =:= 0 ->
