@@ -92,6 +92,9 @@
 -define(ARRAYOBJ_LENGTH, 2).
 -define(ARRAYOBJ_ARITY, 2).
 -define(ORDINARY, ordinary).
+%% arc/rt/types.ObjKind: ProxyObj (tag only: fast paths must never read
+%% through a proxy's stored proto/props — its internal methods are traps)
+-define(PROXYOBJ_TAG, proxy_obj).
 
 %% arc/rt/types.FnFlags
 -define(FNFLAGS_TAG, fn_flags).

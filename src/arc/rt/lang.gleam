@@ -16,6 +16,7 @@ import arc/rt/types.{
   classify, mk_bool, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
+import gleam/bool
 import gleam/dict
 import gleam/list
 import gleam/option.{Some}
@@ -221,11 +222,10 @@ fn copy_data_properties(
       let #(from, st) = rt_val.t_to_object(st, source)
       let #(keys, st) = rt_obj.t_own_keys(st, from)
       use st, key <- list.fold(keys, st)
+      use <- bool.guard(list.contains(excluded, key), st)
+      let #(prop, st) = rt_obj.t_get_own_property(st, from, key)
       let wanted =
-        !list.contains(excluded, key)
-        && rt_obj.t_get_own_property(st, from, key)
-        |> option.map(types.prop_enumerable)
-        |> option.unwrap(False)
+        option.map(prop, types.prop_enumerable) |> option.unwrap(False)
       case wanted {
         False -> st
         True -> {

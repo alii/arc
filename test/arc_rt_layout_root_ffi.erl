@@ -85,6 +85,7 @@ tag(<<"KFN_TAG">>) -> ?KFN_TAG;
 tag(<<"KNATIVE_TAG">>) -> ?KNATIVE_TAG;
 tag(<<"ARRAYOBJ_TAG">>) -> ?ARRAYOBJ_TAG;
 tag(<<"ORDINARY">>) -> ?ORDINARY;
+tag(<<"PROXYOBJ_TAG">>) -> ?PROXYOBJ_TAG;
 tag(<<"FNFLAGS_TAG">>) -> ?FNFLAGS_TAG;
 tag(<<"DATAPROP_TAG">>) -> ?DATAPROP_TAG;
 tag(<<"ACCESSORPROP_TAG">>) -> ?ACCESSORPROP_TAG;

@@ -253,7 +253,7 @@ pub fn t_define_method(
 ) -> Agent {
   // §14.3.9 step 11 DefinePropertyOrThrow: an existing non-configurable own
   // (only `prototype` on the ctor) is a TypeError, not a silent False.
-  let _ = case rt_obj.t_get_own_property(st, target, key) {
+  let _ = case rt_obj.t_ordinary_own_property(st, target, key) {
     Some(prop) ->
       case rt_types.prop_configurable(prop) {
         False ->
@@ -410,7 +410,7 @@ pub fn t_define_private(
         MIGetter | MIStaticGetter -> True
         _ -> False
       }
-      let existing = rt_obj.t_get_own_property(st, obj, StringKey(key))
+      let existing = rt_obj.t_ordinary_own_property(st, obj, StringKey(key))
       let st = case existing {
         None -> check_private_add(st, obj, bytes)
         Some(AccessorProperty(get:, set:, ..)) ->
@@ -434,10 +434,10 @@ pub fn t_define_private(
 /// arc `check_private_add` (interpreter.gleam:5471-5501): TypeError on
 /// double-init or non-extensible target.
 fn check_private_add(st: Agent, obj: Handle, bytes: BitArray) -> Agent {
-  case rt_obj.t_get_own_property(st, obj, StringKey(Private(bytes))) {
+  case rt_obj.t_ordinary_own_property(st, obj, StringKey(Private(bytes))) {
     Some(_) -> throw_private_double_init(st, bytes, "")
     None ->
-      case rt_obj.t_is_extensible(st, obj) {
+      case rt_obj.t_ordinary_is_extensible(st, obj) {
         False ->
           throw_type_error(
             st,
@@ -545,7 +545,7 @@ pub fn t_private_get(
   let name = rt_types.private_display_name(bytes)
   case classify(obj) {
     KHandle(h) ->
-      case rt_obj.t_get_own_property(st, h, StringKey(Private(bytes))) {
+      case rt_obj.t_ordinary_own_property(st, h, StringKey(Private(bytes))) {
         Some(DataProperty(value:, ..)) -> #(value, st)
         Some(AccessorProperty(get: Some(getter), ..)) ->
           js_ops(st).call(st, getter, obj, [])
@@ -581,7 +581,7 @@ pub fn t_private_set(
   let key = Private(bytes)
   case classify(obj) {
     KHandle(h) ->
-      case rt_obj.t_get_own_property(st, h, StringKey(key)) {
+      case rt_obj.t_ordinary_own_property(st, h, StringKey(key)) {
         Some(DataProperty(writable: True, ..)) -> {
           // Overwrite the value in place (own data, no [[DefineOwnProperty]]).
           let st =
@@ -643,7 +643,11 @@ pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
   let bytes = priv_key_bytes(priv_key)
   case classify(obj) {
     KHandle(h) ->
-      option.is_some(rt_obj.t_get_own_property(st, h, StringKey(Private(bytes))))
+      option.is_some(rt_obj.t_ordinary_own_property(
+        st,
+        h,
+        StringKey(Private(bytes)),
+      ))
     _ ->
       throw_type_error(
         st,

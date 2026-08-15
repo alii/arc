@@ -34,6 +34,7 @@ import arc/rt/types.{
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/js_string
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -243,7 +244,8 @@ fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KHandle(h) -> {
       let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      case rt_obj.t_get_own_property(st, h, key) {
+      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+      case desc {
         Some(prop) -> from_property_descriptor(st, prop)
         None -> #(mk_undefined(), st)
       }
@@ -267,22 +269,8 @@ fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 /// §6.2.6.4 FromPropertyDescriptor — build a `{value,writable,...}` /
 /// `{get,set,...}` descriptor object.
 fn from_property_descriptor(st: Agent, prop: Property) -> #(JsVal, Agent) {
-  let object_proto = st.realm.object.prototype
-  let entries = case prop {
-    DataProperty(value:, writable:, enumerable:, configurable:, ..) -> [
-      #("value", value),
-      #("writable", mk_bool(writable)),
-      #("enumerable", mk_bool(enumerable)),
-      #("configurable", mk_bool(configurable)),
-    ]
-    AccessorProperty(get:, set:, enumerable:, configurable:, ..) -> [
-      #("get", option.unwrap(get, mk_undefined())),
-      #("set", option.unwrap(set, mk_undefined())),
-      #("enumerable", mk_bool(enumerable)),
-      #("configurable", mk_bool(configurable)),
-    ]
-  }
-  let #(h, st) = common.alloc_pojo(st, object_proto, entries)
+  let #(h, st) =
+    rt_obj.t_from_property_descriptor(st, rt_obj.parsed_of_property(prop))
   #(mk_object(h), st)
 }
 
@@ -298,7 +286,7 @@ fn define_property(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
           // Step 2: ToPropertyKey.
           let #(key, st) = rt_val.t_to_property_key(st, key_val)
           // Step 3: ToPropertyDescriptor.
-          let #(parsed, st) = to_property_descriptor(st, desc_val)
+          let #(parsed, st) = rt_obj.t_to_property_descriptor(st, desc_val)
           // Step 4: DefinePropertyOrThrow.
           let #(ok, st) = rt_obj.t_define_own_prop(st, h, key, parsed)
           case ok {
@@ -370,15 +358,14 @@ fn collect_descriptors(
   case keys {
     [] -> #(list.reverse(acc), st)
     [k, ..rest] -> {
+      let #(prop, st) = rt_obj.t_get_own_property(st, props_h, k)
       let enumerable =
-        rt_obj.t_get_own_property(st, props_h, k)
-        |> option.map(rt_types.prop_enumerable)
-        |> option.unwrap(False)
+        option.map(prop, rt_types.prop_enumerable) |> option.unwrap(False)
       case enumerable {
         False -> collect_descriptors(st, props_h, props_v, rest, acc)
         True -> {
           let #(desc_val, st) = rt_obj.t_get_prop(st, props_v, k)
-          let #(parsed, st) = to_property_descriptor(st, desc_val)
+          let #(parsed, st) = rt_obj.t_to_property_descriptor(st, desc_val)
           collect_descriptors(st, props_h, props_v, rest, [#(k, parsed), ..acc])
         }
       }
@@ -407,79 +394,6 @@ fn apply_descriptors(
   }
 }
 
-/// §6.2.6.5 ToPropertyDescriptor.
-fn to_property_descriptor(st: Agent, v: JsVal) -> #(ParsedDesc, Agent) {
-  case classify(v) {
-    KHandle(_) -> {
-      let #(enumerable, st) = read_bool_field(st, v, "enumerable")
-      let #(configurable, st) = read_bool_field(st, v, "configurable")
-      let #(value, st) = read_opt_field(st, v, "value")
-      let #(writable, st) = read_bool_field(st, v, "writable")
-      let #(get, st) = read_accessor_field(st, v, "get")
-      let #(set, st) = read_accessor_field(st, v, "set")
-      let is_data = option.is_some(value) || option.is_some(writable)
-      let is_acc = option.is_some(get) || option.is_some(set)
-      case is_data && is_acc {
-        True ->
-          rt_val.t_throw_type_error(
-            st,
-            "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
-          )
-        False -> #(
-          ParsedDesc(value:, get:, set:, writable:, enumerable:, configurable:),
-          st,
-        )
-      }
-    }
-    _ -> rt_val.t_throw_type_error(st, "Property description must be an object")
-  }
-}
-
-fn read_opt_field(
-  st: Agent,
-  obj: JsVal,
-  name: String,
-) -> #(Option(JsVal), Agent) {
-  let #(has, st) = rt_obj.t_has_prop(st, obj, StringKey(Named(name)))
-  case has {
-    False -> #(None, st)
-    True -> {
-      let #(v, st) = rt_obj.t_get_prop(st, obj, StringKey(Named(name)))
-      #(Some(v), st)
-    }
-  }
-}
-
-fn read_bool_field(
-  st: Agent,
-  obj: JsVal,
-  name: String,
-) -> #(Option(Bool), Agent) {
-  let #(opt, st) = read_opt_field(st, obj, name)
-  #(option.map(opt, rt_val.to_boolean), st)
-}
-
-fn read_accessor_field(
-  st: Agent,
-  obj: JsVal,
-  name: String,
-) -> #(Option(JsVal), Agent) {
-  let #(opt, st) = read_opt_field(st, obj, name)
-  case opt {
-    None -> #(None, st)
-    Some(v) ->
-      case classify(v) {
-        KUndef -> #(Some(v), st)
-        _ ->
-          case rt_call.is_callable(st, v) {
-            True -> #(Some(v), st)
-            False ->
-              rt_val.t_throw_type_error(st, "Getter/setter must be a function")
-          }
-      }
-  }
-}
-
 // ── keys / values / entries / getOwnPropertyNames / symbols ────────────────
 
 fn own_keys_impl(
@@ -489,27 +403,26 @@ fn own_keys_impl(
 ) -> #(JsVal, Agent) {
   case classify(first_arg_or_undefined(args)) {
     KHandle(h) -> {
-      let #(keys, st) = rt_obj.t_own_keys(st, h)
-      let strings =
-        list.filter_map(keys, fn(k) {
-          case k {
-            StringKey(pk) ->
-              case enumerable_only {
-                False -> Ok(mk_string(rt_types.key_to_text(pk)))
-                True ->
-                  case rt_obj.t_get_own_property(st, h, k) {
-                    Some(p) ->
-                      case rt_types.prop_enumerable(p) {
-                        True -> Ok(mk_string(rt_types.key_to_text(pk)))
-                        False -> Error(Nil)
-                      }
-                    None -> Error(Nil)
-                  }
+      let #(names, st) = case enumerable_only {
+        // §7.3.23 EnumerableOwnProperties(O, key): ownKeys then a per-key
+        // [[GetOwnProperty]] — both trap for a proxy.
+        True -> rt_obj.t_enumerable_own_keys(st, h)
+        False -> {
+          let #(keys, st) = rt_obj.t_own_keys(st, h)
+          let names =
+            list.filter_map(keys, fn(k) {
+              case k {
+                StringKey(pk) -> Ok(pk)
+                SymbolKey(_) -> Error(Nil)
               }
-            SymbolKey(_) -> Error(Nil)
-          }
-        })
-      ok_array(st, strings)
+            })
+          #(names, st)
+        }
+      }
+      ok_array(
+        st,
+        list.map(names, fn(pk) { mk_string(rt_types.key_to_text(pk)) }),
+      )
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     // String primitives: own keys are index chars + "length" (§10.4.3.3).
@@ -551,9 +464,8 @@ fn own_enumerable_pairs(
 ) -> #(List(#(String, JsVal)), Agent) {
   case classify(first_arg_or_undefined(args)) {
     KHandle(h) -> {
-      let recv = mk_object(h)
       let #(keys, st) = rt_obj.t_own_keys(st, h)
-      collect_enumerable(st, h, recv, keys, [])
+      collect_enumerable(st, h, keys, [])
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     // String primitives: enumerable own props are the index chars (§10.4.3).
@@ -567,26 +479,26 @@ fn own_enumerable_pairs(
   }
 }
 
+/// §7.3.23 steps 4.a.i-ii per key: [[GetOwnProperty]] then, if enumerable,
+/// [[Get]] — interleaved (a proxy sees getOwnPropertyDescriptor/get pairs).
 fn collect_enumerable(
   st: Agent,
   h: Handle,
-  recv: JsVal,
   keys: List(ObjectKey),
   acc: List(#(String, JsVal)),
 ) -> #(List(#(String, JsVal)), Agent) {
   case keys {
     [] -> #(list.reverse(acc), st)
-    [SymbolKey(_), ..rest] -> collect_enumerable(st, h, recv, rest, acc)
+    [SymbolKey(_), ..rest] -> collect_enumerable(st, h, rest, acc)
     [StringKey(pk) as k, ..rest] -> {
+      let #(prop, st) = rt_obj.t_get_own_property(st, h, k)
       let enumerable =
-        rt_obj.t_get_own_property(st, h, k)
-        |> option.map(rt_types.prop_enumerable)
-        |> option.unwrap(False)
+        option.map(prop, rt_types.prop_enumerable) |> option.unwrap(False)
       case enumerable {
-        False -> collect_enumerable(st, h, recv, rest, acc)
+        False -> collect_enumerable(st, h, rest, acc)
         True -> {
-          let #(v, st) = rt_obj.t_get_prop(st, recv, k)
-          collect_enumerable(st, h, recv, rest, [
+          let #(v, st) = rt_obj.t_get_prop(st, mk_object(h), k)
+          collect_enumerable(st, h, rest, [
             #(rt_types.key_to_text(pk), v),
             ..acc
           ])
@@ -667,8 +579,9 @@ fn descriptors_from_keys(
 ) -> #(JsVal, Agent) {
   case keys {
     [] -> #(mk_object(result_h), st)
-    [k, ..rest] ->
-      case rt_obj.t_get_own_property(st, src_h, k) {
+    [k, ..rest] -> {
+      let #(desc, st) = rt_obj.t_get_own_property(st, src_h, k)
+      case desc {
         None -> descriptors_from_keys(st, src_h, result_h, rest)
         Some(prop) -> {
           let #(desc_v, st) = from_property_descriptor(st, prop)
@@ -677,6 +590,7 @@ fn descriptors_from_keys(
           descriptors_from_keys(st, src_h, result_h, rest)
         }
       }
+    }
   }
 }
 
@@ -724,10 +638,9 @@ fn assign_one(st: Agent, target_h: Handle, src: JsVal) -> Agent {
       let #(src_h, st) = rt_val.t_to_object(st, src)
       let #(keys, st) = rt_obj.t_own_keys(st, src_h)
       list.fold(keys, st, fn(st, k) {
+        let #(prop, st) = rt_obj.t_get_own_property(st, src_h, k)
         let enumerable =
-          rt_obj.t_get_own_property(st, src_h, k)
-          |> option.map(rt_types.prop_enumerable)
-          |> option.unwrap(False)
+          option.map(prop, rt_types.prop_enumerable) |> option.unwrap(False)
         case enumerable {
           False -> st
           True -> {
@@ -762,7 +675,8 @@ fn has_own(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(target) {
     KHandle(h) -> {
       let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      #(mk_bool(option.is_some(rt_obj.t_get_own_property(st, h, key))), st)
+      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+      #(mk_bool(option.is_some(desc)), st)
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     // String primitives: index chars + "length" via §10.4.3.5.
@@ -785,10 +699,10 @@ fn has_own_property(
   // §20.1.3.2: ToPropertyKey step 1, ToObject step 2 (order matters).
   let #(key, st) = rt_val.t_to_property_key(st, first_arg_or_undefined(args))
   case classify(this) {
-    KHandle(h) -> #(
-      mk_bool(option.is_some(rt_obj.t_get_own_property(st, h, key))),
-      st,
-    )
+    KHandle(h) -> {
+      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+      #(mk_bool(option.is_some(desc)), st)
+    }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     // String primitives: index chars + "length" via §10.4.3.5.
     KStr(s) -> #(
@@ -806,14 +720,15 @@ fn property_is_enumerable(
 ) -> #(JsVal, Agent) {
   let #(key, st) = rt_val.t_to_property_key(st, first_arg_or_undefined(args))
   case classify(this) {
-    KHandle(h) -> #(
-      mk_bool(
-        rt_obj.t_get_own_property(st, h, key)
-        |> option.map(rt_types.prop_enumerable)
-        |> option.unwrap(False),
-      ),
-      st,
-    )
+    KHandle(h) -> {
+      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+      #(
+        mk_bool(
+          option.map(desc, rt_types.prop_enumerable) |> option.unwrap(False),
+        ),
+        st,
+      )
+    }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     // String primitives: index chars are enumerable, "length" is not.
     KStr(s) -> #(
@@ -1015,12 +930,18 @@ fn set_integrity_level(
   }
 }
 
+/// §7.3.16 SetIntegrityLevel ( O, level ). Step 3: a [[PreventExtensions]]
+/// that reports false (a proxy trap refusing) → false; the Object.freeze /
+/// Object.seal callers turn that into a TypeError (§20.1.2.6 step 3).
 fn set_integrity_level_of(
   st: Agent,
   h: Handle,
   level: IntegrityLevel,
 ) -> Agent {
-  let st = rt_obj.t_prevent_extensions(st, h)
+  let #(ok, st) = rt_obj.t_prevent_extensions(st, h)
+  use <- bool.lazy_guard(!ok, fn() {
+    rt_val.t_throw_type_error(st, "Cannot prevent extensions")
+  })
   let #(keys, st) = rt_obj.t_own_keys(st, h)
   list.fold(keys, st, fn(st, k) { seal_one_key(st, h, k, level) })
 }
@@ -1036,44 +957,46 @@ fn seal_one_key(
   k: ObjectKey,
   level: IntegrityLevel,
 ) -> Agent {
-  let desc = case level {
-    Sealed ->
-      Some(ParsedDesc(
-        value: None,
-        get: None,
-        set: None,
-        writable: None,
-        enumerable: None,
-        configurable: Some(False),
-      ))
-    Frozen ->
-      case rt_obj.t_get_own_property(st, h, k) {
-        None -> None
-        Some(AccessorProperty(..)) ->
-          Some(ParsedDesc(
-            value: None,
-            get: None,
-            set: None,
-            writable: None,
-            enumerable: None,
-            configurable: Some(False),
-          ))
-        Some(DataProperty(..)) ->
-          Some(ParsedDesc(
-            value: None,
-            get: None,
-            set: None,
-            writable: Some(False),
-            enumerable: None,
-            configurable: Some(False),
-          ))
-      }
+  let non_configurable =
+    ParsedDesc(
+      value: None,
+      get: None,
+      set: None,
+      writable: None,
+      enumerable: None,
+      configurable: Some(False),
+    )
+  let #(desc, st) = case level {
+    // Step 5.a: DefinePropertyOrThrow(O, k, { [[Configurable]]: false }).
+    Sealed -> #(Some(non_configurable), st)
+    // Step 6.a-b: currentDesc = ? O.[[GetOwnProperty]](k); data → also
+    // { [[Writable]]: false }.
+    Frozen -> {
+      let #(current, st) = rt_obj.t_get_own_property(st, h, k)
+      #(
+        option.map(current, fn(prop) {
+          case prop {
+            AccessorProperty(..) -> non_configurable
+            DataProperty(..) ->
+              ParsedDesc(..non_configurable, writable: Some(False))
+          }
+        }),
+        st,
+      )
+    }
   }
   case desc {
     None -> st
     Some(d) -> {
-      let #(_ok, st) = rt_obj.t_define_own_prop(st, h, k, d)
-      st
+      let #(ok, st) = rt_obj.t_define_own_prop(st, h, k, d)
+      case ok {
+        True -> st
+        False ->
+          rt_val.t_throw_type_error(
+            st,
+            "Cannot redefine property: " <> key_text(k),
+          )
+      }
     }
   }
 }
@@ -1084,21 +1007,24 @@ fn test_integrity_level(
   level: IntegrityLevel,
 ) -> #(JsVal, Agent) {
   case classify(first_arg_or_undefined(args)) {
-    KHandle(h) ->
-      case rt_obj.t_is_extensible(st, h) {
-        True -> #(mk_bool(False), st)
-        False -> {
-          let #(keys, st) = rt_obj.t_own_keys(st, h)
-          let ok =
-            list.all(keys, fn(k) {
-              case rt_obj.t_get_own_property(st, h, k) {
-                None -> True
-                Some(p) -> prop_at_integrity_level(p, level)
-              }
-            })
-          #(mk_bool(ok), st)
-        }
-      }
+    KHandle(h) -> {
+      let #(extensible, st) = rt_obj.t_is_extensible(st, h)
+      use <- bool.guard(extensible, #(mk_bool(False), st))
+      // Step 7: NOTE — every key is examined; no early exit (each
+      // [[GetOwnProperty]] is an observable trap on a proxy).
+      let #(keys, st) = rt_obj.t_own_keys(st, h)
+      let #(ok, st) =
+        list.fold(keys, #(True, st), fn(acc, k) {
+          let #(ok, st) = acc
+          use <- bool.guard(!ok, acc)
+          let #(desc, st) = rt_obj.t_get_own_property(st, h, k)
+          case desc {
+            None -> #(True, st)
+            Some(p) -> #(prop_at_integrity_level(p, level), st)
+          }
+        })
+      #(mk_bool(ok), st)
+    }
     _ -> #(mk_bool(True), st)
   }
 }
@@ -1114,15 +1040,26 @@ fn prop_at_integrity_level(prop: Property, level: IntegrityLevel) -> Bool {
 
 fn is_extensible(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(first_arg_or_undefined(args)) {
-    KHandle(h) -> #(mk_bool(rt_obj.t_is_extensible(st, h)), st)
+    KHandle(h) -> {
+      let #(extensible, st) = rt_obj.t_is_extensible(st, h)
+      #(mk_bool(extensible), st)
+    }
     _ -> #(mk_bool(False), st)
   }
 }
 
+/// §20.1.2.19 Object.preventExtensions: step 2-3 — a false
+/// [[PreventExtensions]] (proxy trap refusing) is a TypeError.
 fn prevent_extensions(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let target = first_arg_or_undefined(args)
   case classify(target) {
-    KHandle(h) -> #(target, rt_obj.t_prevent_extensions(st, h))
+    KHandle(h) -> {
+      let #(ok, st) = rt_obj.t_prevent_extensions(st, h)
+      case ok {
+        True -> #(target, st)
+        False -> rt_val.t_throw_type_error(st, "Cannot prevent extensions")
+      }
+    }
     _ -> #(target, st)
   }
 }
@@ -1299,7 +1236,8 @@ fn lookup_accessor_chain(
   key: ObjectKey,
   kind: AccessorKind,
 ) -> #(JsVal, Agent) {
-  case rt_obj.t_get_own_property(st, h, key) {
+  let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+  case desc {
     Some(AccessorProperty(get:, set:, ..)) -> {
       let slot = case kind {
         AsGetter -> get

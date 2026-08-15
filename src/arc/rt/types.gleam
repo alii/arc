@@ -1989,7 +1989,24 @@ pub type ObjKind {
   /// [[ByteOffset]] is `byte_offset`. `byte_length: None` means byte-length
   /// auto-tracking (view over a resizable buffer with no explicit length).
   DataViewObj(buffer: Handle, byte_offset: Int, byte_length: Option(Int))
-  ModuleNamespace(exports: Dict(String, JsVal))
+  /// Raw JSON box produced by `JSON.rawJSON(text)` (proposal-json-parse-with-
+  /// source). `raw` is the [[IsRawJSON]] internal slot's payload: the exact,
+  /// already-validated JSON source text, which `JSON.stringify` emits verbatim
+  /// with no re-quoting or escaping. The box itself is a null-prototype, frozen
+  /// object whose only own property is the data property `"rawJSON"`.
+  RawJsonObj(raw: String)
+  /// Module Namespace Exotic Object — ES2024 §10.4.6. `exports` maps each
+  /// exported name to the `SBox` cell holding the binding's live value, so
+  /// [[Get]] re-reads the cell (and throws ReferenceError on a TDZ binding).
+  /// String keys come from `exports` (sorted in [[OwnPropertyKeys]]); the only
+  /// symbol key is @@toStringTag = "Module" (in `symbol_props`). The object
+  /// has a null prototype, is non-extensible, and is read-only.
+  ModuleNamespace(exports: Dict(String, Handle))
+  /// Proxy exotic object — ES2024 §10.5. `target`/`handler` are the paired
+  /// [[ProxyTarget]]/[[ProxyHandler]] slots; `revoked` is set by
+  /// Proxy.revocable's revoke function (§28.2.2.1.1). [[Call]]/[[Construct]]
+  /// are answered from `target` (§10.5.14 steps 6-7) and so survive
+  /// revocation: `typeof` a revoked function proxy stays "function".
   ProxyObj(target: Handle, handler: Handle, revoked: Bool)
   ForInIterator(remaining: List(String))
   ArrayIterator(target: Handle, index: Int, kind: ArrayIterKind)

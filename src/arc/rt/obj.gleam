@@ -25,13 +25,15 @@ import arc/rt/types.{
   type JsStore, type JsVal, type ObjKind, type ObjectKey, type ParsedDesc,
   type Property, type PropertyKey, type SymbolId, type TypedArrayKind,
   AccessorProperty, Agent, ArgumentsObj, ArrayObj, DataProperty, Dense, Index,
-  JsStore, KHandle, KNull, KUndef, Named, NoElements, Ordinary, Private,
-  ProxyObj, SAsyncGen, SBox, SGenerator, SObject, SPromise, SShapedObject,
-  ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr, TypedArrayObj,
+  JsStore, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named, NoElements,
+  Ordinary, ParsedDesc, Private, ProxyObj, SAsyncGen, SBox, SGenerator, SObject,
+  SPromise, SShapedObject, ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr,
+  TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
 import arc/vm/js_string
+import arc/vm/limits
 import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -39,6 +41,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
+import gleam/string
 
 // ── private access / throw helpers (u-skeleton-access) ──────────────────────
 
@@ -340,26 +343,10 @@ fn own_property_of(
     // integer index are virtual own props {E:F,C:F}/{E:T,C:F}; everything
     // else falls through to OrdinaryGetOwnProperty. Port of arc
     // `object.gleam:549-575`.
-    StringObj(value: s), Named("length") ->
-      Some(DataProperty(
-        value: rt_types.mk_number(rt_types.JInt(js_string.length(s))),
-        writable: False,
-        enumerable: False,
-        configurable: False,
-        seq: 0,
-      ))
+    StringObj(value: s), Named("length") -> Some(string_length_property(s))
     StringObj(value: s), Index(i) ->
-      case js_string.char_at(s, i) {
-        Some(ch) ->
-          Some(DataProperty(
-            value: rt_types.mk_string(ch),
-            writable: False,
-            enumerable: True,
-            configurable: False,
-            seq: 0,
-          ))
-        None -> dict.get(props, key) |> option.from_result
-      }
+      string_index_property(s, i)
+      |> option.lazy_or(fn() { dict.get(props, key) |> option.from_result })
     // Array/Arguments Index: dict override wins, else elements store.
     ArrayObj(_), Index(i) | ArgumentsObj(..), Index(i) ->
       case dict.get(props, key) {
@@ -377,8 +364,8 @@ fn own_property_of(
             )
           })
       }
-    // TODO(M6): ModuleNamespace/ProxyObj exotic [[GetOwnProperty]] — falls
-    // through to §10.1.5.1 OrdinaryGetOwnProperty.
+    // §10.1.5.1 OrdinaryGetOwnProperty. (Proxy / Module Namespace string
+    // keys dispatch in `t_get_own_property` before reaching the slot read.)
     _, _ -> dict.get(props, key) |> option.from_result
   }
 }
@@ -390,6 +377,32 @@ fn own_symbol_property_of(
   sym: SymbolId,
 ) -> Option(Property) {
   list.key_find(symbol_props, sym) |> option.from_result
+}
+
+/// §10.4.3.4 StringCreate step 10: a String exotic's "length" is the own data
+/// property { [[Value]]: len, W:F, E:F, C:F }. seq: 0 — synthesized, never
+/// stored or enumerated through the seq-ordered named-key path.
+fn string_length_property(s: String) -> Property {
+  DataProperty(
+    value: rt_types.mk_number(rt_types.JInt(js_string.length(s))),
+    writable: False,
+    enumerable: False,
+    configurable: False,
+    seq: 0,
+  )
+}
+
+/// §10.4.3.5 StringGetOwnProperty steps 5-10: an in-range integer index
+/// yields { [[Value]]: <code unit>, W:F, E:T, C:F }; out of range → None.
+fn string_index_property(s: String, i: Int) -> Option(Property) {
+  use ch <- option.map(js_string.char_at(s, i))
+  DataProperty(
+    value: rt_types.mk_string(ch),
+    writable: False,
+    enumerable: True,
+    configurable: False,
+    seq: 0,
+  )
 }
 
 /// §7.2.10 SameValue — like `===`, but `NaN` equals `NaN` and `+0` differs
@@ -434,6 +447,64 @@ fn key_text(key: ObjectKey) -> String {
   }
 }
 
+/// ObjectKey → quoted error-message text, for messages that name the key
+/// mid-sentence ("Cannot redefine property: 'x'").
+fn key_quoted(key: ObjectKey) -> String {
+  case key {
+    StringKey(pk) -> "'" <> rt_types.key_to_text(pk) <> "'"
+    SymbolKey(_) -> "[symbol]"
+  }
+}
+
+/// ObjectKey → JS-visible key value (String or Symbol). Used for proxy trap
+/// arguments and wherever a key crosses back into JS.
+pub fn object_key_value(key: ObjectKey) -> JsVal {
+  case key {
+    StringKey(pk) -> rt_types.mk_string(rt_types.key_to_text(pk))
+    SymbolKey(sym) -> rt_types.mk_symbol(sym)
+  }
+}
+
+/// JsVal → ObjectKey. `None` for anything that is not a String or a Symbol:
+/// §6.1.7 says such a value is not a property key, so no object can have an
+/// own property under it.
+fn object_key_of_value(v: JsVal) -> Option(ObjectKey) {
+  case rt_types.classify(v) {
+    rt_types.KStr(s) -> Some(StringKey(rt_types.canonical_key(s)))
+    rt_types.KSym(sym) -> Some(SymbolKey(sym))
+    _ -> None
+  }
+}
+
+fn throw_reference_error(st: Agent, msg: String) -> a {
+  let #(e, st) = js_ops(st).new_error(st, rt_types.ReferenceErr, msg)
+  rt_store.t_throw(st, e)
+}
+
+/// Allocate a plain `%Object.prototype%` object carrying `entries` as fresh
+/// `{W:T, E:T, C:T}` data properties in list order (FromPropertyDescriptor's
+/// result object; the ordinary counterpart of `common.alloc_pojo`, which this
+/// module cannot import).
+fn alloc_plain(st: Agent, entries: List(#(String, JsVal))) -> #(Handle, Agent) {
+  let #(props, st) =
+    list.fold(entries, #(dict.new(), st), fn(acc, entry) {
+      let #(props, st) = acc
+      let #(prop, st) = new_data_property(st, entry.1)
+      #(dict.insert(props, Named(entry.0), prop), st)
+    })
+  rt_store.t_cell_new(
+    st,
+    SObject(
+      kind: Ordinary,
+      proto: Some(st.realm.object.prototype),
+      props:,
+      symbol_props: [],
+      elements: NoElements,
+      extensible: True,
+    ),
+  )
+}
+
 // ── allocation ──────────────────────────────────────────────────────────────
 
 /// Allocate a fresh ordinary object with the given prototype. Empty props /
@@ -462,17 +533,26 @@ pub fn t_new_object_literal(st: Agent) -> #(JsVal, Agent) {
 
 // ── prototype ops (§10.1.1 / §10.1.2) ───────────────────────────────────────
 
-/// §10.1.1 [[GetPrototypeOf]]. Pure read; state threaded per R1 shape.
+/// **[[GetPrototypeOf]] ( )** — §10.1.1 for ordinary objects, §10.5.1 for
+/// proxies (the `getPrototypeOf` trap). State threaded per R1 shape because
+/// the trap may run user code.
 pub fn t_get_prototype_of(st: Agent, obj: Handle) -> #(Option(Handle), Agent) {
   case read_object(st, obj) {
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..) ->
+      proxy_get_prototype_of(st, Proxy(target:, handler:, revoked:))
     SObject(proto:, ..) | SShapedObject(proto:, ..) -> #(proto, st)
     _ -> #(None, st)
   }
 }
 
-/// §10.1.2.1 OrdinarySetPrototypeOf. Returns `#(True, st')` on success,
-/// `#(False, st)` when rejected (non-extensible or would create a cycle).
-/// Port of arc `mop.ordinary_set_prototype_of` (`mop.gleam:1278-1327`).
+/// **[[SetPrototypeOf]] ( V )** — §10.5.2 for proxies, §10.1.2.1
+/// OrdinarySetPrototypeOf otherwise (with the §10.4.7 SetImmutablePrototype
+/// check for %Object.prototype%). Returns `#(True, st')` on success,
+/// `#(False, st)` when rejected (non-extensible, cycle, immutable, or a
+/// proxy trap returning falsish). THE single dispatch: `Object
+/// .setPrototypeOf`, `Reflect.setPrototypeOf` and `__proto__`'s setter all
+/// route through it, so a proxy is never handed to the ordinary algorithm.
+/// Port of arc `mop.set_prototype_of_stateful` (`mop.gleam:1242-1327`).
 pub fn t_set_prototype(
   st: Agent,
   obj: Handle,
@@ -480,9 +560,14 @@ pub fn t_set_prototype(
 ) -> #(Bool, Agent) {
   let obj = resolve_object_handle(st, obj)
   let st = devolve(st, obj)
-  let assert SObject(proto: current, extensible:, ..) = read_object(st, obj)
+  let assert SObject(kind:, proto: current, extensible:, ..) =
+    read_object(st, obj)
+  use <- proxy_or(kind, proxy_set_prototype_of(st, _, new_proto))
   // Step 4: SameValue(V, current) → true (no-op).
   use <- bool.guard(new_proto == current, #(True, st))
+  // §10.4.7.2 SetImmutablePrototype — Object.prototype is an Immutable
+  // Prototype Exotic Object (§20.1.3): any change is rejected.
+  use <- bool.guard(obj == st.realm.object.prototype, #(False, st))
   // Step 5: extensible false → false.
   use <- bool.guard(!extensible, #(False, st))
   // Step 7: cycle check.
@@ -569,8 +654,19 @@ fn get_from(
   key: ObjectKey,
   receiver: JsVal,
 ) -> #(JsVal, Agent) {
-  // TODO(M6): ModuleNamespace/ProxyObj exotic [[Get]] dispatch on `kind`.
   case read_object(st, h), key {
+    // §10.5.8 Proxy [[Get]] — route through the trap machinery. Private
+    // names live in the proxy's own [[PrivateElements]] and never trap.
+    SObject(kind: ProxyObj(..), ..) as slot, StringKey(Private(_)) ->
+      ordinary_get(st, slot, key, receiver)
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
+      proxy_get(st, Proxy(target:, handler:, revoked:), key, receiver)
+    // §10.4.6.8 Module Namespace [[Get]]: read the live binding cell, throwing
+    // ReferenceError if it is still uninitialized (TDZ). Non-export keys fall
+    // through to undefined (null prototype, no inheritance). Symbol keys are
+    // OrdinaryGet (step 1).
+    SObject(kind: ModuleNamespace(exports:), ..), StringKey(pk) ->
+      namespace_get(st, exports, pk)
     // TypedArray exotic [[Get]] (§10.4.5.4): a canonical numeric index is
     // IntegerIndexedElementGet — element value or undefined, never the
     // prototype chain.
@@ -680,8 +776,15 @@ fn set_from(
   v: JsVal,
   receiver: JsVal,
 ) -> #(Bool, Agent) {
-  // TODO(M6): ModuleNamespace/ProxyObj exotic [[Set]] dispatch on `kind`.
   case read_object(st, h), key {
+    // §10.5.9 Proxy [[Set]] — route through the trap machinery (private
+    // names never trap).
+    SObject(kind: ProxyObj(..), ..) as slot, StringKey(Private(_)) ->
+      ordinary_set(st, slot, key, v, receiver)
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
+      proxy_set(st, Proxy(target:, handler:, revoked:), key, v, receiver)
+    // §10.4.6.9 Module Namespace [[Set]]: always returns false (read-only).
+    SObject(kind: ModuleNamespace(..), ..), _ -> #(False, st)
     // TypedArray exotic [[Set]] (§10.4.5.5). Canonical numeric index,
     // SameValue(O, Receiver) → IntegerIndexedElementSet (§10.4.5.16): convert
     // the value (observable, may call user code), then store if the index is
@@ -798,6 +901,22 @@ fn set_on_receiver(
       case read_object(st, recv_h), key {
         SShapedObject(shape_id:, proto:, slots:), StringKey(Named(name)) ->
           set_own_shaped(st, recv_h, shape_id, proto, slots, name, v)
+        // §10.1.9.2 steps 2.c-2.e with a PROXY receiver (Reflect.set with a
+        // proxy receiver, or [[Set]] forwarded through a trapless proxy):
+        // the GetOwnProperty/DefineOwnProperty pair must go through traps.
+        SObject(kind: ProxyObj(..), ..), StringKey(Named(_))
+        | SObject(kind: ProxyObj(..), ..), StringKey(Index(_))
+        | SObject(kind: ProxyObj(..), ..), SymbolKey(_)
+        -> set_on_proxy_receiver(st, recv_h, key, v)
+        // §10.1.9.2 step 2.c: Receiver.[[GetOwnProperty]](P). For a module
+        // namespace this performs [[Get]] on the binding, which throws a
+        // ReferenceError when the export is still in TDZ. The set never
+        // succeeds (namespaces aren't extensible and exports reject a value
+        // change), so return False afterwards.
+        SObject(kind: ModuleNamespace(exports:), ..), StringKey(pk) -> {
+          let _existing = namespace_own_property(st, exports, pk)
+          #(False, st)
+        }
         _, _ -> {
           let st = devolve(st, recv_h)
           let assert SObject(
@@ -1037,8 +1156,15 @@ fn set_own_string(
             }
           }
       }
-    // TODO(M6): StringObj/ModuleNamespace exotic receiver-write — falls
-    // through to §10.1.6.3 ordinary (arc `set_string_property`).
+    // String exotic receiver (§10.4.3): step 2.c reads the synthesized
+    // "length" / in-range index descriptor, which is non-writable → 2.d.ii
+    // false. Out-of-range indices and other names are ordinary dict writes.
+    StringObj(_), Named("length") -> #(False, st)
+    StringObj(value: s), Index(i) ->
+      case js_string.char_at(s, i) {
+        Some(_) -> #(False, st)
+        None -> set_ordinary_string(st, h, props, extensible, key, v)
+      }
     _, _ -> set_ordinary_string(st, h, props, extensible, key, v)
   }
 }
@@ -1231,13 +1357,20 @@ fn throw_range_error(st: Agent, msg: String) -> a {
 
 // ── [[DefineOwnProperty]] (§10.1.6) ─────────────────────────────────────────
 
-/// §10.1.6.3 ValidateAndApplyPropertyDescriptor — the ordinary
-/// [[DefineOwnProperty]]. Returns `#(True, st')` on success, `#(False, st)`
-/// on rejection (non-extensible + new key, or `Desc` incompatible with a
-/// non-configurable current). Port of arc `mop.ordinary_define`
-/// (`mop.gleam:814-1060`) with the throw replaced by a `False` return (spec
-/// [[DefineOwnProperty]] returns Bool; DefinePropertyOrThrow is the caller's
-/// job). Array/Arguments index keys route through the elements store.
+/// **[[DefineOwnProperty]] ( P, Desc )** — the trap-aware internal method
+/// returning the raw boolean status (the spec's `? O.[[DefineOwnProperty]]
+/// (P, Desc)` expression). Proxies dispatch to the `defineProperty` trap
+/// (§10.5.6); TypedArray / String / Module Namespace exotics validate against
+/// their synthesized descriptors; everything else is §10.1.6.3
+/// ValidateAndApplyPropertyDescriptor. `#(False, st)` is a validation
+/// rejection (non-extensible + new key, or `Desc` incompatible with a
+/// non-configurable current); genuine abrupt completions (ArraySetLength's
+/// RangeError, trap throws, proxy invariant TypeErrors) raise. Callers decide
+/// whether `False` throws (DefinePropertyOrThrow) or is returned
+/// (Reflect.defineProperty, CreateDataProperty). Port of arc
+/// `mop.define_own_property_bool` + `define_parsed` + `ordinary_define`
+/// (`mop.gleam:210-336,814-1060,1900`). Array/Arguments index keys route
+/// through the elements store.
 pub fn t_define_own_prop(
   st: Agent,
   obj: Handle,
@@ -1248,11 +1381,7 @@ pub fn t_define_own_prop(
   let st = devolve(st, obj)
   let assert SObject(kind:, props:, symbol_props:, elements:, extensible:, ..) =
     read_object(st, obj)
-  // §10.4.5.3 TypedArray (Integer-Indexed) [[DefineOwnProperty]]: canonical
-  // numeric index keys never reach the ordinary property table — they
-  // validate against the fixed {W:T, E:T, C:T} element descriptor and store
-  // through IntegerIndexedElementSet. Everything else is ordinary.
-  use <- typed_array_define(st, kind, key, desc)
+  use <- exotic_define(st, kind, key, desc)
   let indexed_kind = case kind {
     ArrayObj(_) | ArgumentsObj(..) -> True
     _ -> False
@@ -1361,9 +1490,11 @@ pub fn t_define_prop(
   t_define_own_prop(st, obj, key, desc)
 }
 
-/// The §10.4.5.3 dispatch head of [[DefineOwnProperty]]: absorb canonical
-/// numeric index keys on a TypedArray, else continue with the ordinary body.
-fn typed_array_define(
+/// The exotic dispatch head of [[DefineOwnProperty]]: Proxy (§10.5.6),
+/// Module Namespace (§10.4.6.6), String (§10.4.3.2) and TypedArray
+/// (§10.4.5.3) absorb the keys they own; everything else continues with the
+/// ordinary body.
+fn exotic_define(
   st: Agent,
   kind: ObjKind,
   key: ObjectKey,
@@ -1371,6 +1502,39 @@ fn typed_array_define(
   ordinary: fn() -> #(Bool, Agent),
 ) -> #(Bool, Agent) {
   case kind, key {
+    // §10.5.6 Proxy [[DefineOwnProperty]] — private names live in the
+    // proxy's own [[PrivateElements]] and never trap.
+    ProxyObj(..), StringKey(Private(_)) -> ordinary()
+    ProxyObj(target:, handler:, revoked:), _ ->
+      proxy_define_own_property(
+        st,
+        Proxy(target:, handler:, revoked:),
+        key,
+        desc,
+      )
+    // §10.4.6.6 Module Namespace [[DefineOwnProperty]] step 1: a Symbol key
+    // is OrdinaryDefineOwnProperty; string keys never define anything.
+    ModuleNamespace(..), SymbolKey(_) -> ordinary()
+    ModuleNamespace(exports:), StringKey(pk) ->
+      namespace_define(st, exports, pk, desc)
+    // §10.4.3.2 String exotic [[DefineOwnProperty]]: the synthesized
+    // "length" and in-range index properties are non-writable and
+    // non-configurable — step 2.b IsCompatiblePropertyDescriptor against
+    // their fixed descriptors instead of writing to the dict (a compatible
+    // Desc is a no-op redefinition). Everything else is ordinary (step 3).
+    StringObj(value: s), StringKey(Named("length")) -> #(
+      is_compatible_descriptor(desc, string_length_property(s)),
+      st,
+    )
+    StringObj(value: s), StringKey(Index(i)) ->
+      case string_index_property(s, i) {
+        Some(cur) -> #(is_compatible_descriptor(desc, cur), st)
+        None -> ordinary()
+      }
+    // §10.4.5.3 TypedArray (Integer-Indexed) [[DefineOwnProperty]]:
+    // canonical numeric index keys never reach the ordinary property table —
+    // they validate against the fixed {W:T, E:T, C:T} element descriptor and
+    // store through IntegerIndexedElementSet. Everything else is ordinary.
     TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:),
       StringKey(Index(idx))
     ->
@@ -1619,7 +1783,7 @@ fn accessor_field(
 /// `has_symbol_property` (`object.gleam:1949-2003,1891`).
 pub fn t_has_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(Bool, Agent) {
   case rt_types.classify(recv) {
-    KHandle(h) -> #(has_from(st, h, key), st)
+    KHandle(h) -> has_from(st, h, key)
     KUndef | KNull ->
       throw_type_error(
         st,
@@ -1633,34 +1797,49 @@ pub fn t_has_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(Bool, Agent) {
       )
     _ -> {
       let #(h, st) = js_ops(st).to_object(st, recv)
-      #(has_from(st, h, key), st)
+      has_from(st, h, key)
     }
   }
 }
 
-fn has_from(st: Agent, h: Handle, key: ObjectKey) -> Bool {
-  case key {
-    StringKey(Private(_)) -> False
-    _ -> {
-      // TODO(M6): ModuleNamespace/ProxyObj exotic [[HasProperty]] dispatch.
-      let slot = read_object(st, h)
+/// §10.1.7.1 OrdinaryHasProperty / §10.5.7 Proxy [[HasProperty]] /
+/// §10.4.6.7 Module Namespace [[HasProperty]] on an object handle. Recurses
+/// through prototype chains so a proxy anywhere on the chain traps.
+fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
+  case read_object(st, h), key {
+    // Private-element keys are invisible to ordinary [[HasProperty]] (the
+    // brand check uses `t_ordinary_own_property` via the PrivateIn op).
+    _, StringKey(Private(_)) -> #(False, st)
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
+      proxy_has(st, Proxy(target:, handler:, revoked:), key)
+    // §10.4.6.7: exported names only; symbols are OrdinaryHasProperty over
+    // `symbol_props` (null prototype, so no chain walk).
+    SObject(kind: ModuleNamespace(exports:), symbol_props:, ..), _ -> #(
+      case key {
+        StringKey(pk) -> dict.has_key(exports, rt_types.key_to_text(pk))
+        SymbolKey(sym) ->
+          option.is_some(own_symbol_property_of(symbol_props, sym))
+      },
+      st,
+    )
+    slot, _ -> {
       // Step 1-2: Let hasOwn be O.[[GetOwnProperty]](P). If not undefined,
       // return true.
       let #(own, proto) = own_and_proto_of_slot(st, slot, key)
       case own {
-        Some(_) -> True
+        Some(_) -> #(True, st)
         // §10.4.5.2 TypedArray [[HasProperty]]: a canonical numeric index key
         // answers IsValidIntegerIndex directly — own_property_of already said
         // the index is invalid, so the answer is false WITHOUT consulting the
         // prototype chain (TypedArray.prototype["1.5"] is unreachable).
         None ->
           case typed_array_absorbs(slot, key) {
-            True -> False
+            True -> #(False, st)
             False ->
               // Step 3-5: parent.[[HasProperty]] or false.
               case proto {
                 Some(parent) -> has_from(st, parent, key)
-                None -> False
+                None -> #(False, st)
               }
           }
       }
@@ -1680,13 +1859,19 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
     read_object(st, obj)
   case key {
     SymbolKey(sym) ->
-      case list.key_pop(symbol_props, sym) {
-        Ok(#(prop, rest)) ->
-          case rt_types.prop_configurable(prop) {
-            False -> #(False, st)
-            True -> write_symbol_props(st, obj, rest)
+      case kind {
+        // §10.5.10 Proxy [[Delete]].
+        ProxyObj(target:, handler:, revoked:) ->
+          proxy_delete(st, Proxy(target:, handler:, revoked:), key)
+        _ ->
+          case list.key_pop(symbol_props, sym) {
+            Ok(#(prop, rest)) ->
+              case rt_types.prop_configurable(prop) {
+                False -> #(False, st)
+                True -> write_symbol_props(st, obj, rest)
+              }
+            Error(Nil) -> #(True, st)
           }
-        Error(Nil) -> #(True, st)
       }
     StringKey(pk) -> {
       // §10.1.10.1 OrdinaryDelete for the string/private-key case: shared by
@@ -1702,6 +1887,17 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
         }
       }
       case kind, pk {
+        // §10.5.10 Proxy [[Delete]] — private names live in the proxy's own
+        // [[PrivateElements]] and never trap.
+        ProxyObj(..), Private(_) -> ordinary_delete()
+        ProxyObj(target:, handler:, revoked:), _ ->
+          proxy_delete(st, Proxy(target:, handler:, revoked:), key)
+        // §10.4.6.10 Module Namespace [[Delete]]: deleting an exported name
+        // fails (non-configurable); a non-export "succeeds" vacuously.
+        ModuleNamespace(exports:), _ -> #(
+          !dict.has_key(exports, rt_types.key_to_text(pk)),
+          st,
+        )
         // Array virtual "length" is non-configurable.
         ArrayObj(_), Named("length") -> #(False, st)
         // Array/Arguments index: dict override wins; else elements.
@@ -1760,8 +1956,14 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
             True -> #(True, st)
             False -> ordinary_delete()
           }
-        // TODO(M6): StringObj/ModuleNamespace/ProxyObj exotic [[Delete]] —
-        // falls through to §10.1.10.1 OrdinaryDelete.
+        // String exotic: "length" and in-range indices are synthesized
+        // non-configurable properties (§10.4.3) — never deletable.
+        StringObj(_), Named("length") -> #(False, st)
+        StringObj(value: s), Index(i) ->
+          case js_string.char_at(s, i) {
+            Some(_) -> #(False, st)
+            None -> ordinary_delete()
+          }
         _, _ -> ordinary_delete()
       }
     }
@@ -1770,53 +1972,80 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
 
 // ── [[OwnPropertyKeys]] (§10.1.11) ────────────────────────────────────────────
 
-/// §10.1.11 OrdinaryOwnPropertyKeys — ES enumeration order: integer-index
-/// ascending, then string keys by insertion (`Property.seq`), then symbols
-/// (creation order — `symbol_props` is an assoc list). `Private(_)` keys are
-/// never returned (SPEC §7.M4 invariant). Port of arc
-/// `own_string_keys_flagged` + `collect_own_symbol_keys`
-/// (`object.gleam:2333-2410`, `mop.gleam:1201`).
+/// **[[OwnPropertyKeys]] ( )** — the trap-aware internal method: §10.5.11
+/// for proxies (whatever order the `ownKeys` trap chose, validated), else
+/// §10.1.11 OrdinaryOwnPropertyKeys order: integer-index ascending, then
+/// string keys by insertion (`Property.seq`), then symbols (creation order —
+/// `symbol_props` is an assoc list). Array/String exotics emit their
+/// birth-time "length" before any user-named key; Module Namespaces emit
+/// their exports sorted by code unit (§10.4.6.11). `Private(_)` keys are
+/// never returned (SPEC §7.M4 invariant).
+///
+/// Every element is a String or a Symbol *by construction* — the ordinary
+/// path builds them from the property tables, the proxy path validates the
+/// trap result (§7.3.19). This is THE single funnel for own-key enumeration
+/// order: for-in, Object.keys/values/entries/assign, getOwnPropertyNames,
+/// Reflect.ownKeys, JSON.stringify and spread/rest all route through it.
+/// Port of arc `mop.own_property_keys` + `own_string_keys_flagged` +
+/// `collect_own_symbol_keys` (`object.gleam:2333-2410`, `mop.gleam:2176`).
 pub fn t_own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
   // Enumeration needs the full props dict — materialize (slow-path only).
   let assert SObject(kind:, props:, symbol_props:, elements:, ..) =
     as_sobject(st, read_object(st, obj))
-  let is_array = case kind {
-    ArrayObj(_) -> True
+  use <- proxy_or(kind, proxy_own_keys(st, _))
+  let has_virtual_length = case kind {
+    ArrayObj(_) | StringObj(_) -> True
     _ -> False
   }
-  // Elements-store indices — always own data properties. TypedArray
-  // synthesizes its live indices (§10.4.5.7 step 2.a).
+  // Elements-store indices — always own data properties. String exotic
+  // synthesizes one index per code unit (§10.4.3.3 step 3); TypedArray its
+  // live indices (§10.4.5.7 step 2.a).
+  let ascending = fn(n) {
+    int.range(from: n - 1, to: -1, with: [], run: fn(acc, i) { [i, ..acc] })
+  }
   let elem_idx = case kind {
     ArrayObj(length:) | ArgumentsObj(length:, ..) ->
       elements.indices(elements) |> list.filter(fn(i) { i < length })
-    TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:) -> {
-      let n =
-        buffer.typed_array_live_count(st, buf, elem_kind, byte_offset, length)
-      int.range(from: n - 1, to: -1, with: [], run: fn(acc, i) { [i, ..acc] })
-    }
-    // TODO(M6): StringObj/ModuleNamespace exotic [[OwnPropertyKeys]]
-    // index-range synth — emits dict-only for those kinds.
+    StringObj(value: s) -> ascending(js_string.length(s))
+    TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:) ->
+      ascending(buffer.typed_array_live_count(
+        st,
+        buf,
+        elem_kind,
+        byte_offset,
+        length,
+      ))
     _ -> []
   }
   // Split dict entries. Array's dict "length" only tracks frozen attributes;
-  // the visible key is emitted as `length_key` below.
+  // the visible key is emitted as `length_key` below. A String wrapper's dict
+  // may hold out-of-range indices only (in-range ones are synthesized).
   let #(dict_idx, named) =
     dict.fold(props, #([], []), fn(acc, k, prop) {
       let #(idx, named) = acc
       case k {
         Index(i) -> #([i, ..idx], named)
-        Named("length") if is_array -> acc
+        Named("length") if has_virtual_length -> acc
         Private(_) -> acc
         Named(_) -> #(idx, [#(rt_types.prop_seq(prop), k), ..named])
       }
     })
+  // §10.4.6.11 Module Namespace: the exported names sorted by code unit,
+  // then (ordinary step 3) the symbol keys.
+  let named = case kind {
+    ModuleNamespace(exports:) ->
+      list.sort(dict.keys(exports), string.compare)
+      |> list.index_map(fn(name, i) { #(i, Named(name)) })
+    _ -> named
+  }
   // Step 1: array-index keys ascending. An index lives in exactly one store.
   let index_keys =
     list.append(elem_idx, dict_idx)
     |> list.sort(int.compare)
     |> list.map(fn(i) { StringKey(Index(i)) })
-  // Array virtual "length" exists from birth — before any user Named key.
-  let length_key = case is_array {
+  // Array/String virtual "length" exists from birth — before any user Named
+  // key (§10.4.2 / §10.4.3.4 StringCreate).
+  let length_key = case has_virtual_length {
     True -> [StringKey(Named("length"))]
     False -> []
   }
@@ -1829,37 +2058,78 @@ pub fn t_own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
   #(list.flatten([index_keys, length_key, named_keys, symbol_keys]), st)
 }
 
+/// §7.3.23 EnumerableOwnProperties ( O, key ): own keys via
+/// [[OwnPropertyKeys]] (trap), then per-key [[GetOwnProperty]] (trap) to
+/// filter for enumerable STRING keys, in [[OwnPropertyKeys]] order. The
+/// per-key descriptor read is observable (proxy `getOwnPropertyDescriptor`,
+/// Module Namespace TDZ ReferenceError). Port of arc
+/// `mop.enumerable_string_keys_stateful` (`mop.gleam:2431`).
+pub fn t_enumerable_own_keys(
+  st: Agent,
+  obj: Handle,
+) -> #(List(PropertyKey), Agent) {
+  let #(keys, st) = t_own_keys(st, obj)
+  let #(found, st) =
+    list.fold(keys, #([], st), fn(acc, key) {
+      let #(found, st) = acc
+      case key {
+        SymbolKey(_) -> acc
+        StringKey(pk) -> {
+          let #(prop, st) = t_get_own_property(st, obj, key)
+          case prop {
+            Some(p) ->
+              case rt_types.prop_enumerable(p) {
+                True -> #([pk, ..found], st)
+                False -> #(found, st)
+              }
+            None -> #(found, st)
+          }
+        }
+      }
+    })
+  #(list.reverse(found), st)
+}
+
 /// SPEC§8 `for_in_keys` — §14.7.5.9 EnumerateObjectProperties. Eager cons-list
 /// of JS string values for `for (k in obj)`. `null`/`undefined` → `[]`
-/// (§14.7.5.6 step 6.a); primitives box via `ops.to_object`. Port of arc
-/// `enumerate_keys` (`object.gleam:2412-2460`).
+/// (§14.7.5.6 step 6.a); primitives box via `ops.to_object`. Own keys come
+/// from [[OwnPropertyKeys]], enumerability from [[GetOwnProperty]] and the
+/// next level from [[GetPrototypeOf]] — all three trap for a proxy anywhere
+/// on the chain, and a Module Namespace's TDZ export throws ReferenceError
+/// before iteration. Port of arc `enumerate_keys` + `mop.enumerate_keys
+/// _stateful` (`object.gleam:2412-2460`, `mop.gleam:2492-2548`).
 pub fn t_for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
   case rt_types.classify(obj) {
     KUndef | KNull -> #([], st)
-    KHandle(h) -> for_in_keys_loop(st, Some(h), set.new(), [])
+    KHandle(h) ->
+      for_in_keys_loop(st, Some(h), set.new(), [], limits.max_prototype_depth)
     _ -> {
       let #(h, st) = js_ops(st).to_object(st, obj)
-      for_in_keys_loop(st, Some(h), set.new(), [])
+      for_in_keys_loop(st, Some(h), set.new(), [], limits.max_prototype_depth)
     }
   }
 }
 
 /// Proto-chain walk for `t_for_in_keys`. Per level: `t_own_keys` gives §10.1.11
 /// order; symbols dropped; a non-enumerable own key still SHADOWS an enumerable
-/// proto key (§14.7.5.9) — `seen` records both.
+/// proto key (§14.7.5.9) — `seen` records both. A `getPrototypeOf` trap can
+/// return a fresh proxy every hop, so the walk is bounded by `fuel`
+/// (`limits.max_prototype_depth`) and stops as if the chain ended — V8 does
+/// the same; §14.7.5.10's note leaves iteration mechanics
+/// implementation-defined.
 fn for_in_keys_loop(
   st: Agent,
   current: Option(Handle),
   seen: set.Set(String),
   acc: List(JsVal),
+  fuel: Int,
 ) -> #(List(JsVal), Agent) {
   case current {
-    None -> #(list.reverse(acc), st)
-    Some(h) -> {
+    Some(h) if fuel > 0 -> {
       let #(keys, st) = t_own_keys(st, h)
-      let #(acc, seen) =
-        list.fold(keys, #(acc, seen), fn(state, key) {
-          let #(a, s) = state
+      let #(acc, seen, st) =
+        list.fold(keys, #(acc, seen, st), fn(state, key) {
+          let #(a, s, st) = state
           case key {
             SymbolKey(_) -> state
             StringKey(pk) -> {
@@ -1868,13 +2138,13 @@ fn for_in_keys_loop(
                 True -> state
                 False -> {
                   let s = set.insert(s, name)
-                  let enumerable = case t_get_own_property(st, h, key) {
-                    Some(prop) -> rt_types.prop_enumerable(prop)
-                    None -> False
-                  }
+                  let #(prop, st) = t_get_own_property(st, h, key)
+                  let enumerable =
+                    option.map(prop, rt_types.prop_enumerable)
+                    |> option.unwrap(False)
                   case enumerable {
-                    True -> #([rt_types.mk_string(name), ..a], s)
-                    False -> #(a, s)
+                    True -> #([rt_types.mk_string(name), ..a], s, st)
+                    False -> #(a, s, st)
                   }
                 }
               }
@@ -1882,8 +2152,9 @@ fn for_in_keys_loop(
           }
         })
       let #(proto, st) = t_get_prototype_of(st, h)
-      for_in_keys_loop(st, proto, seen, acc)
+      for_in_keys_loop(st, proto, seen, acc, fuel - 1)
     }
+    _ -> #(list.reverse(acc), st)
   }
 }
 
@@ -1919,11 +2190,40 @@ pub fn t_set_prop_with_receiver(
   set_from(st, h, key, v, receiver)
 }
 
-/// §10.1.5.1 [[GetOwnProperty]](P) — the raw own-descriptor lookup with NO
-/// prototype walk. JRead: no state threaded. Private-name lookup (M7
-/// `t_private_get`/`t_private_in`) and `Object.getOwnPropertyDescriptor` /
-/// `Reflect.getOwnPropertyDescriptor` land here.
+/// **[[GetOwnProperty]] ( P )** — the trap-aware internal method: §10.5.5
+/// for proxies (the `getOwnPropertyDescriptor` trap, invariants and all),
+/// §10.4.6.5 for Module Namespaces, else `t_ordinary_own_property`. The
+/// single entry point for getOwnPropertyDescriptor-style reflection on
+/// possibly-proxy handles.
+///
+/// The engine's TDZ sentinel is filtered out HERE, once, so a returned
+/// `Option(Property)` structurally cannot carry it: §10.4.6.5 says a module
+/// namespace's [[GetOwnProperty]] performs [[Get]] on the binding, and an
+/// uninitialized binding throws a ReferenceError before any descriptor
+/// exists. Port of arc `mop.own_property_keyed` (`mop.gleam:1702`).
 pub fn t_get_own_property(
+  st: Agent,
+  h: Handle,
+  key: ObjectKey,
+) -> #(Option(Property), Agent) {
+  case read_object(st, h), key {
+    // Private elements are stored in the ordinary table but never trap.
+    slot, StringKey(Private(_)) -> #(own_and_proto_of_slot(st, slot, key).0, st)
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
+      proxy_get_own_property(st, Proxy(target:, handler:, revoked:), key)
+    SObject(kind: ModuleNamespace(exports:), ..), StringKey(pk) -> #(
+      namespace_own_property(st, exports, pk),
+      st,
+    )
+    slot, _ -> #(own_and_proto_of_slot(st, slot, key).0, st)
+  }
+}
+
+/// §10.1.5.1 OrdinaryGetOwnProperty ( O, P ) — the raw own-descriptor slot
+/// read with NO prototype walk and NO trap dispatch. JRead: no state
+/// threaded. Private-name lookup (M7 `t_private_get`/`t_private_in`) lands
+/// here: private elements live in the object's own table even on a Proxy.
+pub fn t_ordinary_own_property(
   st: Agent,
   h: Handle,
   key: ObjectKey,
@@ -1932,27 +2232,1190 @@ pub fn t_get_own_property(
   own
 }
 
-/// §10.1.3.1 [[IsExtensible]]. JRead: no state threaded.
-pub fn t_is_extensible(st: Agent, h: Handle) -> Bool {
+/// **IsExtensible ( O )** — §7.2.5 / §10.5.3 Proxy [[IsExtensible]] (the
+/// `isExtensible` trap, whose result must agree with the target), else the
+/// ordinary `[[Extensible]]` slot.
+pub fn t_is_extensible(st: Agent, h: Handle) -> #(Bool, Agent) {
   case read_object(st, h) {
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..) ->
+      proxy_is_extensible(st, Proxy(target:, handler:, revoked:))
+    slot -> #(slot_extensible(slot), st)
+  }
+}
+
+/// §10.1.3.1 OrdinaryIsExtensible — the raw `[[Extensible]]` slot. JRead.
+pub fn t_ordinary_is_extensible(st: Agent, h: Handle) -> Bool {
+  slot_extensible(read_object(st, h))
+}
+
+fn slot_extensible(slot: JsSlot) -> Bool {
+  case slot {
     SObject(extensible:, ..) -> extensible
     SShapedObject(..) -> True
     _ -> False
   }
 }
 
-/// §10.1.4.1 [[PreventExtensions]] — set `[[Extensible]]` to `false`.
-/// Short-circuits when already non-extensible (spec no-op; keeps the
-/// `SPromise`-never-reaches-`t_cell_update` invariant of `read_object`).
-pub fn t_prevent_extensions(st: Agent, h: Handle) -> Agent {
+/// **[[PreventExtensions]] ( )** — §10.5.4 for proxies (the
+/// `preventExtensions` trap; `False` when the trap refuses), else §10.1.4.1
+/// OrdinaryPreventExtensions (always `True`). Short-circuits when already
+/// non-extensible (spec no-op; keeps the `SPromise`-never-reaches-
+/// `t_cell_update` invariant of `read_object`).
+pub fn t_prevent_extensions(st: Agent, h: Handle) -> #(Bool, Agent) {
   let h = resolve_object_handle(st, h)
   let st = devolve(st, h)
-  let assert SObject(extensible:, ..) = read_object(st, h)
-  use <- bool.guard(!extensible, st)
-  rt_store.t_cell_update(st, h, fn(slot) {
-    let assert SObject(..) = slot
-    SObject(..slot, extensible: False)
+  let assert SObject(kind:, extensible:, ..) = read_object(st, h)
+  use <- proxy_or(kind, proxy_prevent_extensions(st, _))
+  use <- bool.guard(!extensible, #(True, st))
+  let st =
+    rt_store.t_cell_update(st, h, fn(slot) {
+      let assert SObject(..) = slot
+      SObject(..slot, extensible: False)
+    })
+  #(True, st)
+}
+
+// ── Module Namespace exotic objects (§10.4.6) ────────────────────────────────
+
+/// Allocate a Module Namespace exotic object (§10.4.6.12 ModuleNamespaceCreate)
+/// over `exports`: each name maps to the `SBox` cell holding that binding's
+/// live value, so [[Get]] observes later assignments by the module body and
+/// a still-uninitialized (TDZ) binding surfaces as ReferenceError. Null
+/// prototype, non-extensible; the only symbol key is @@toStringTag =
+/// "Module" {W:F, E:F, C:F} (§28.3.1).
+pub fn t_new_module_namespace(
+  st: Agent,
+  exports: List(#(String, Handle)),
+) -> #(Handle, Agent) {
+  let to_string_tag =
+    DataProperty(
+      value: rt_types.mk_string("Module"),
+      writable: False,
+      enumerable: False,
+      configurable: False,
+      seq: 0,
+    )
+  rt_store.t_cell_new(
+    st,
+    SObject(
+      kind: ModuleNamespace(exports: dict.from_list(exports)),
+      proto: None,
+      props: dict.new(),
+      symbol_props: [#(rt_types.symbol_to_string_tag, to_string_tag)],
+      elements: NoElements,
+      extensible: False,
+    ),
+  )
+}
+
+/// Read the live value of a namespace export's binding cell, throwing
+/// ReferenceError when the binding is still uninitialized (TDZ).
+fn namespace_binding_value(st: Agent, name: String, cell: Handle) -> JsVal {
+  let v = case rt_store.t_cell_get(st, cell) {
+    SBox(value:) -> value
+    _ -> rt_types.mk_undefined()
+  }
+  case rt_types.classify(v) {
+    KTdz ->
+      throw_reference_error(
+        st,
+        "Cannot access '" <> name <> "' before initialization",
+      )
+    _ -> v
+  }
+}
+
+/// §10.4.6.8 Module Namespace [[Get]] for a string key. Resolves the export's
+/// live binding cell and returns its value, throwing ReferenceError when the
+/// binding is still uninitialized (TDZ). Unknown keys return undefined.
+fn namespace_get(
+  st: Agent,
+  exports: Dict(String, Handle),
+  key: PropertyKey,
+) -> #(JsVal, Agent) {
+  let name = rt_types.key_to_text(key)
+  case dict.get(exports, name) {
+    Error(Nil) -> #(rt_types.mk_undefined(), st)
+    Ok(cell) -> #(namespace_binding_value(st, name, cell), st)
+  }
+}
+
+/// §10.4.6.5 Module Namespace [[GetOwnProperty]] for a string key: a data
+/// descriptor { value: <live binding>, writable: true, enumerable: true,
+/// configurable: false }. Step 4 performs [[Get]], so an uninitialized (TDZ)
+/// binding throws ReferenceError — even key-only operations (Object.keys,
+/// hasOwnProperty, for-in) surface it. Unknown keys → None.
+fn namespace_own_property(
+  st: Agent,
+  exports: Dict(String, Handle),
+  key: PropertyKey,
+) -> Option(Property) {
+  let name = rt_types.key_to_text(key)
+  use cell <- option.map(dict.get(exports, name) |> option.from_result)
+  DataProperty(
+    value: namespace_binding_value(st, name, cell),
+    writable: True,
+    enumerable: True,
+    configurable: False,
+    seq: 0,
+  )
+}
+
+/// §10.4.6.6 Module Namespace [[DefineOwnProperty]] steps 2-9 for a string
+/// key. Every export is a { writable: true, enumerable: true,
+/// configurable: false } data property whose value is the live binding;
+/// a request is honoured (true) iff it changes nothing.
+fn namespace_define(
+  st: Agent,
+  exports: Dict(String, Handle),
+  key: PropertyKey,
+  desc: ParsedDesc,
+) -> #(Bool, Agent) {
+  let name = rt_types.key_to_text(key)
+  case dict.get(exports, name) {
+    // Steps 2-3: current = O.[[GetOwnProperty]](P); undefined → false.
+    Error(Nil) -> #(False, st)
+    Ok(cell) -> {
+      // Step 4: Desc.[[Configurable]] present and true → false.
+      // Step 5: Desc.[[Enumerable]] present and false → false.
+      // Step 6: IsAccessorDescriptor(Desc) → false.
+      // Step 7: Desc.[[Writable]] present and false → false.
+      let incompatible =
+        desc.configurable == Some(True)
+        || desc.enumerable == Some(False)
+        || desc_is_accessor(desc)
+        || desc.writable == Some(False)
+      use <- bool.guard(incompatible, #(False, st))
+      case desc.value {
+        // Step 9: no [[Value]] requested → true (nothing to change).
+        None -> #(True, st)
+        // Step 8: return SameValue(Desc.[[Value]], current.[[Value]]).
+        // [[GetOwnProperty]] read the live binding at step 2; a TDZ binding
+        // is a genuine abrupt completion, NOT a boolean-false define result:
+        // Reflect.defineProperty(ns, ...) must throw it, not return false.
+        Some(requested) -> #(
+          same_value(requested, namespace_binding_value(st, name, cell)),
+          st,
+        )
+      }
+    }
+  }
+}
+
+// ── Proxy exotic objects (§10.5) ────────────────────────────────────────────
+// Every proxy internal method below (a) validates the proxy is not revoked
+// and fetches the trap with GetMethod semantics (`proxy_trap`), (b) forwards
+// to the TARGET's corresponding internal method when the trap is absent —
+// via the public `t_*` entry so a proxy target traps in turn — and (c)
+// enforces the §10.5 invariants against `? target.[[GetOwnProperty]](P)` /
+// `? IsExtensible(target)`, both of which are the target's own (possibly
+// trapping) internal methods, never raw slot reads. [[Call]]/[[Construct]]
+// live in `rt_call`. Port of arc `object.gleam:3239-3844` +
+// `mop.gleam:1719-2290`.
+
+/// A Proxy exotic object's [[ProxyTarget]] / [[ProxyHandler]] slots plus its
+/// revocation flag, lifted off the `ProxyObj` kind for the internal methods.
+type Proxy {
+  Proxy(target: Handle, handler: Handle, revoked: Bool)
+}
+
+/// Run `when_proxy` if `kind` is a Proxy, else the ordinary continuation.
+fn proxy_or(
+  kind: ObjKind,
+  when_proxy: fn(Proxy) -> a,
+  ordinary: fn() -> a,
+) -> a {
+  case kind {
+    ProxyObj(target:, handler:, revoked:) ->
+      when_proxy(Proxy(target:, handler:, revoked:))
+    _ -> ordinary()
+  }
+}
+
+/// §10.5.14 ValidateNonRevokedProxy + §7.3.10 GetMethod(handler, name).
+/// Returns the trap function (`None` when the handler leaves it undefined
+/// or null → forward to the target). TypeError on a revoked proxy or a
+/// non-callable trap.
+fn proxy_trap(st: Agent, p: Proxy, name: String) -> #(Option(JsVal), Agent) {
+  use <- bool.lazy_guard(p.revoked, fn() {
+    throw_type_error(
+      st,
+      "Cannot perform '" <> name <> "' on a proxy that has been revoked",
+    )
   })
+  // GetMethod step 1: Let func be ? GetV(V, P).
+  let #(trap, st) =
+    t_get_prop(st, rt_types.mk_object(p.handler), StringKey(Named(name)))
+  case rt_types.classify(trap) {
+    // GetMethod step 2: undefined or null → undefined.
+    KUndef | KNull -> #(None, st)
+    _ -> {
+      // GetMethod step 3: If IsCallable(func) is false, throw TypeError.
+      let #(callable, st) = rt_val.t_is_callable(st, trap)
+      case callable {
+        True -> #(Some(trap), st)
+        False ->
+          throw_type_error(
+            st,
+            "'" <> name <> "' trap of proxy handler is not a function",
+          )
+      }
+    }
+  }
+}
+
+/// `Call(trap, handler, args)` through the seeded `JsOps.call` (D17).
+fn call_trap(
+  st: Agent,
+  p: Proxy,
+  trap: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  js_ops(st).call(st, trap, rt_types.mk_object(p.handler), args)
+}
+
+/// §10.5.1 Proxy [[GetPrototypeOf]] ( ).
+fn proxy_get_prototype_of(st: Agent, p: Proxy) -> #(Option(Handle), Agent) {
+  // Steps 1-5: revocation check + GetMethod(handler, "getPrototypeOf").
+  let #(trap, st) = proxy_trap(st, p, "getPrototypeOf")
+  case trap {
+    // Step 6: no trap → target.[[GetPrototypeOf]]().
+    None -> t_get_prototype_of(st, p.target)
+    Some(trap_fn) -> {
+      // Step 7: handlerProto = ? Call(trap, handler, « target »).
+      let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
+      // Step 8: neither Object nor Null → TypeError.
+      let proto = case rt_types.classify(res) {
+        KHandle(h) -> Some(h)
+        KNull -> None
+        _ ->
+          throw_type_error(
+            st,
+            "'getPrototypeOf' on proxy: trap returned neither object nor null",
+          )
+      }
+      // Step 9: ? IsExtensible(target) — traps for proxy targets.
+      let #(ext, st) = t_is_extensible(st, p.target)
+      // Step 10: extensible target → no invariant, return trap result.
+      use <- bool.guard(ext, #(proto, st))
+      // Steps 11-12: non-extensible target → must match actual proto.
+      let #(target_proto, st) = t_get_prototype_of(st, p.target)
+      case proto == target_proto {
+        True -> #(proto, st)
+        False ->
+          throw_type_error(
+            st,
+            "'getPrototypeOf' on proxy: proxy target is non-extensible but the trap did not return its actual prototype",
+          )
+      }
+    }
+  }
+}
+
+/// §10.5.2 Proxy [[SetPrototypeOf]] ( V ).
+fn proxy_set_prototype_of(
+  st: Agent,
+  p: Proxy,
+  new_proto: Option(Handle),
+) -> #(Bool, Agent) {
+  let #(trap, st) = proxy_trap(st, p, "setPrototypeOf")
+  case trap {
+    // Step 6: no trap → target.[[SetPrototypeOf]](V).
+    None -> t_set_prototype(st, p.target, new_proto)
+    Some(trap_fn) -> {
+      let proto_val = case new_proto {
+        Some(h) -> rt_types.mk_object(h)
+        None -> rt_types.mk_null()
+      }
+      // Step 7: ToBoolean(? Call(trap, handler, « target, V »)).
+      let #(res, st) =
+        call_trap(st, p, trap_fn, [rt_types.mk_object(p.target), proto_val])
+      // Step 8: false → return false.
+      use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
+      // Step 9: ? IsExtensible(target) — traps for proxy targets.
+      let #(ext, st) = t_is_extensible(st, p.target)
+      // Step 10: extensible target → true.
+      use <- bool.guard(ext, #(True, st))
+      // Steps 11-12: non-extensible target → V must be its actual proto.
+      let #(target_proto, st) = t_get_prototype_of(st, p.target)
+      case new_proto == target_proto {
+        True -> #(True, st)
+        False ->
+          throw_type_error(
+            st,
+            "'setPrototypeOf' on proxy: trap returned truish for setting a new prototype on the non-extensible proxy target",
+          )
+      }
+    }
+  }
+}
+
+/// §10.5.3 Proxy [[IsExtensible]] ( ).
+fn proxy_is_extensible(st: Agent, p: Proxy) -> #(Bool, Agent) {
+  let #(trap, st) = proxy_trap(st, p, "isExtensible")
+  case trap {
+    // Step 6: no trap → ? IsExtensible(target).
+    None -> t_is_extensible(st, p.target)
+    Some(trap_fn) -> {
+      // Step 7: ToBoolean(? Call(trap, handler, « target »)).
+      let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
+      let b = rt_val.to_boolean(res)
+      // Steps 8-9: result must equal ? IsExtensible(target).
+      let #(target_ext, st) = t_is_extensible(st, p.target)
+      case b == target_ext {
+        True -> #(b, st)
+        False ->
+          throw_type_error(
+            st,
+            "'isExtensible' on proxy: trap result does not reflect extensibility of proxy target (which is '"
+              <> case target_ext {
+              True -> "true"
+              False -> "false"
+            }
+              <> "')",
+          )
+      }
+    }
+  }
+}
+
+/// §10.5.4 Proxy [[PreventExtensions]] ( ).
+fn proxy_prevent_extensions(st: Agent, p: Proxy) -> #(Bool, Agent) {
+  let #(trap, st) = proxy_trap(st, p, "preventExtensions")
+  case trap {
+    // Step 6: no trap → target.[[PreventExtensions]]().
+    None -> t_prevent_extensions(st, p.target)
+    Some(trap_fn) -> {
+      // Step 7: ToBoolean(? Call(trap, handler, « target »)).
+      let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
+      use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
+      // Step 8: trap returned true → target must now be non-extensible.
+      let #(target_ext, st) = t_is_extensible(st, p.target)
+      case target_ext {
+        True ->
+          throw_type_error(
+            st,
+            "'preventExtensions' on proxy: trap returned truish but the proxy target is extensible",
+          )
+        False -> #(True, st)
+      }
+    }
+  }
+}
+
+/// §10.5.5 Proxy [[GetOwnProperty]] ( P ).
+fn proxy_get_own_property(
+  st: Agent,
+  p: Proxy,
+  key: ObjectKey,
+) -> #(Option(Property), Agent) {
+  let #(trap, st) = proxy_trap(st, p, "getOwnPropertyDescriptor")
+  case trap {
+    // Step 6: no trap → target.[[GetOwnProperty]](P).
+    None -> t_get_own_property(st, p.target, key)
+    Some(trap_fn) -> {
+      // Step 7: Call(trap, handler, « target, P »).
+      let #(res, st) =
+        call_trap(st, p, trap_fn, [
+          rt_types.mk_object(p.target),
+          object_key_value(key),
+        ])
+      case rt_types.classify(res) {
+        // Steps 9-11: trap says "absent". Step 9 first reads
+        // `? target.[[GetOwnProperty]](P)` — the target's OWN trap when the
+        // target is itself a proxy, never a raw heap read.
+        KUndef -> {
+          let #(target_desc, st) = t_get_own_property(st, p.target, key)
+          case target_desc {
+            None -> #(None, st)
+            Some(prop) ->
+              case rt_types.prop_configurable(prop) {
+                False ->
+                  throw_type_error(
+                    st,
+                    "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
+                      <> key_quoted(key)
+                      <> " which is non-configurable in the proxy target",
+                  )
+                True -> {
+                  // Step 11.c: extensibleTarget = ? IsExtensible(target).
+                  let #(ext, st) = t_is_extensible(st, p.target)
+                  case ext {
+                    False ->
+                      throw_type_error(
+                        st,
+                        "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
+                          <> key_quoted(key)
+                          <> " which exists in the non-extensible proxy target",
+                      )
+                    True -> #(None, st)
+                  }
+                }
+              }
+          }
+        }
+        // Steps 9-17: trap returned a descriptor object — validate.
+        KHandle(_) -> {
+          let #(target_desc, st) = t_get_own_property(st, p.target, key)
+          // Step 12: extensibleTarget = ? IsExtensible(target).
+          let #(ext, st) = t_is_extensible(st, p.target)
+          // Steps 13-14: ? ToPropertyDescriptor, CompletePropertyDescriptor.
+          let #(parsed, st) = t_to_property_descriptor(st, res)
+          let completed = complete_descriptor(parsed)
+          // Step 15: IsCompatiblePropertyDescriptor against the COMPLETED
+          // descriptor.
+          use <- bool.lazy_guard(
+            !compatible_descriptor(
+              ext,
+              parsed_of_property(completed),
+              target_desc,
+            ),
+            fn() {
+              throw_type_error(
+                st,
+                "'getOwnPropertyDescriptor' on proxy: trap returned descriptor for property "
+                  <> key_quoted(key)
+                  <> " that is incompatible with the existing property in the proxy target",
+              )
+            },
+          )
+          // Step 16: resultDesc.[[Configurable]] false requires a matching
+          // non-configurable target property.
+          case rt_types.prop_configurable(completed), target_desc {
+            True, _ -> #(Some(completed), st)
+            False, None ->
+              throw_type_error(
+                st,
+                "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
+                  <> key_quoted(key)
+                  <> " which is non-existent in the proxy target",
+              )
+            False, Some(td) ->
+              case rt_types.prop_configurable(td) {
+                True ->
+                  throw_type_error(
+                    st,
+                    "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
+                      <> key_quoted(key)
+                      <> " which is configurable in the proxy target",
+                  )
+                False ->
+                  // Step 16.b: IsDataDescriptor(resultDesc) with
+                  // writable:false requires target's writable:false too.
+                  // resultDesc is the COMPLETED descriptor from step 14 — an
+                  // absent [[Writable]] in the trap result defaults to false
+                  // and must still trip this invariant.
+                  case completed, td {
+                    DataProperty(writable: False, ..),
+                      DataProperty(writable: True, ..)
+                    ->
+                      throw_type_error(
+                        st,
+                        "'getOwnPropertyDescriptor' on proxy: trap reported non-writability for property "
+                          <> key_quoted(key)
+                          <> " which is writable in the proxy target",
+                      )
+                    _, _ -> #(Some(completed), st)
+                  }
+              }
+          }
+        }
+        // Step 8: neither Object nor Undefined → TypeError.
+        _ ->
+          throw_type_error(
+            st,
+            "'getOwnPropertyDescriptor' on proxy: trap returned neither object nor undefined for property "
+              <> key_quoted(key),
+          )
+      }
+    }
+  }
+}
+
+/// §10.5.6 Proxy [[DefineOwnProperty]] ( P, Desc ). Returns the raw boolean —
+/// callers decide whether false throws (DefinePropertyOrThrow) or not
+/// (Reflect.defineProperty).
+fn proxy_define_own_property(
+  st: Agent,
+  p: Proxy,
+  key: ObjectKey,
+  desc: ParsedDesc,
+) -> #(Bool, Agent) {
+  let #(trap, st) = proxy_trap(st, p, "defineProperty")
+  case trap {
+    // Step 6: no trap → target.[[DefineOwnProperty]](P, Desc). The raw
+    // internal method returns a boolean — only a validation rejection maps to
+    // `false` here (DefinePropertyOrThrow is applied by the CALLER of the
+    // outermost proxy, not per level); genuine abrupt completions (e.g.
+    // ArraySetLength's RangeError) propagate.
+    None -> t_define_own_prop(st, p.target, key, desc)
+    Some(trap_fn) -> {
+      // Step 7: descObj = FromPropertyDescriptor(Desc) — a fresh object
+      // carrying only the present fields.
+      let #(desc_obj, st) = t_from_property_descriptor(st, desc)
+      // Step 8: ToBoolean(? Call(trap, handler, « target, P, descObj »)).
+      let #(res, st) =
+        call_trap(st, p, trap_fn, [
+          rt_types.mk_object(p.target),
+          object_key_value(key),
+          rt_types.mk_object(desc_obj),
+        ])
+      // Step 9: false → return false.
+      use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
+      // Steps 10-11: invariants. Both reads are the target's own internal
+      // methods (`? target.[[GetOwnProperty]](P)`, `? IsExtensible(target)`)
+      // — traps fire when the target is itself a proxy.
+      let #(target_desc, st) = t_get_own_property(st, p.target, key)
+      let #(ext, st) = t_is_extensible(st, p.target)
+      // Step 12-13: settingConfigFalse.
+      let setting_config_false = desc.configurable == Some(False)
+      case target_desc {
+        // Step 14: targetDesc undefined.
+        None -> {
+          use <- bool.lazy_guard(!ext, fn() {
+            throw_type_error(
+              st,
+              "'defineProperty' on proxy: trap returned truish for adding property "
+                <> key_quoted(key)
+                <> " to the non-extensible proxy target",
+            )
+          })
+          use <- bool.lazy_guard(setting_config_false, fn() {
+            throw_type_error(
+              st,
+              "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
+                <> key_quoted(key)
+                <> " which is either non-existent or configurable in the proxy target",
+            )
+          })
+          #(True, st)
+        }
+        // Step 15: targetDesc exists.
+        Some(cur) -> {
+          use <- bool.lazy_guard(
+            !compatible_descriptor(ext, desc, Some(cur)),
+            fn() {
+              throw_type_error(
+                st,
+                "'defineProperty' on proxy: trap returned truish for adding property "
+                  <> key_quoted(key)
+                  <> " that is incompatible with the existing property in the proxy target",
+              )
+            },
+          )
+          use <- bool.lazy_guard(
+            setting_config_false && rt_types.prop_configurable(cur),
+            fn() {
+              throw_type_error(
+                st,
+                "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
+                  <> key_quoted(key)
+                  <> " which is either non-existent or configurable in the proxy target",
+              )
+            },
+          )
+          // Step 15.c: writable:false over a non-configurable writable data
+          // property is rejected.
+          case cur, desc.writable {
+            DataProperty(configurable: False, writable: True, ..), Some(False)
+            ->
+              throw_type_error(
+                st,
+                "'defineProperty' on proxy: trap returned truish for defining non-writable property "
+                  <> key_quoted(key)
+                  <> " which is writable in the proxy target",
+              )
+            _, _ -> #(True, st)
+          }
+        }
+      }
+    }
+  }
+}
+
+/// §10.5.7 Proxy [[HasProperty]] ( P ).
+fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
+  let #(trap, st) = proxy_trap(st, p, "has")
+  case trap {
+    // Step 6: trap undefined → target.[[HasProperty]](P).
+    None -> has_from(st, p.target, key)
+    Some(trap_fn) -> {
+      // Step 7: ToBoolean(? Call(trap, handler, « target, P »)).
+      let #(res, st) =
+        call_trap(st, p, trap_fn, [
+          rt_types.mk_object(p.target),
+          object_key_value(key),
+        ])
+      use <- bool.guard(rt_val.to_boolean(res), #(True, st))
+      // Steps 8-9: invariants when the trap reports the key as absent,
+      // starting from `? target.[[GetOwnProperty]](P)`.
+      let #(target_desc, st) = t_get_own_property(st, p.target, key)
+      case target_desc {
+        None -> #(False, st)
+        Some(prop) ->
+          case rt_types.prop_configurable(prop) {
+            False ->
+              throw_type_error(
+                st,
+                "'has' on proxy: trap returned falsish for property "
+                  <> key_quoted(key)
+                  <> " which exists in the proxy target as non-configurable",
+              )
+            True -> {
+              // Step 9.b.ii: ? IsExtensible(target) — traps when the target
+              // is itself a proxy.
+              let #(ext, st) = t_is_extensible(st, p.target)
+              case ext {
+                False ->
+                  throw_type_error(
+                    st,
+                    "'has' on proxy: trap returned falsish for property "
+                      <> key_quoted(key)
+                      <> " but the proxy target is not extensible",
+                  )
+                True -> #(False, st)
+              }
+            }
+          }
+      }
+    }
+  }
+}
+
+/// §10.5.8 Proxy [[Get]] ( P, Receiver ).
+fn proxy_get(
+  st: Agent,
+  p: Proxy,
+  key: ObjectKey,
+  receiver: JsVal,
+) -> #(JsVal, Agent) {
+  // Steps 1-5: revocation check + GetMethod(handler, "get").
+  let #(trap, st) = proxy_trap(st, p, "get")
+  case trap {
+    // Step 6: trap undefined → target.[[Get]](P, Receiver).
+    None -> get_from(st, p.target, key, receiver)
+    Some(trap_fn) -> {
+      // Step 7: Call(trap, handler, « target, P, Receiver »).
+      let #(res, st) =
+        call_trap(st, p, trap_fn, [
+          rt_types.mk_object(p.target),
+          object_key_value(key),
+          receiver,
+        ])
+      // Steps 8-9: invariants against `? target.[[GetOwnProperty]](P)`.
+      let #(target_desc, st) = t_get_own_property(st, p.target, key)
+      case target_desc {
+        Some(DataProperty(value: tv, writable: False, configurable: False, ..)) ->
+          case same_value(res, tv) {
+            True -> #(res, st)
+            False ->
+              throw_type_error(
+                st,
+                "'get' on proxy: property "
+                  <> key_quoted(key)
+                  <> " is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value",
+              )
+          }
+        Some(AccessorProperty(get: None, configurable: False, ..)) ->
+          case rt_types.classify(res) {
+            KUndef -> #(res, st)
+            _ ->
+              throw_type_error(
+                st,
+                "'get' on proxy: property "
+                  <> key_quoted(key)
+                  <> " is a non-configurable accessor property on the proxy target without a getter, but the trap did not return undefined",
+              )
+          }
+        _ -> #(res, st)
+      }
+    }
+  }
+}
+
+/// §10.5.9 Proxy [[Set]] ( P, V, Receiver ).
+fn proxy_set(
+  st: Agent,
+  p: Proxy,
+  key: ObjectKey,
+  v: JsVal,
+  receiver: JsVal,
+) -> #(Bool, Agent) {
+  let #(trap, st) = proxy_trap(st, p, "set")
+  case trap {
+    // Step 6: trap undefined → target.[[Set]](P, V, Receiver).
+    None -> set_from(st, p.target, key, v, receiver)
+    Some(trap_fn) -> {
+      // Step 7: ToBoolean(? Call(trap, handler, « target, P, V, Receiver »)).
+      let #(res, st) =
+        call_trap(st, p, trap_fn, [
+          rt_types.mk_object(p.target),
+          object_key_value(key),
+          v,
+          receiver,
+        ])
+      // Step 8: trap returned false → [[Set]] fails.
+      use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
+      // Steps 9-10: invariants against `? target.[[GetOwnProperty]](P)`.
+      let #(target_desc, st) = t_get_own_property(st, p.target, key)
+      case target_desc {
+        Some(DataProperty(value: tv, writable: False, configurable: False, ..)) ->
+          case same_value(v, tv) {
+            True -> #(True, st)
+            False ->
+              throw_type_error(
+                st,
+                "'set' on proxy: trap returned truish for property "
+                  <> key_quoted(key)
+                  <> " which exists in the proxy target as a non-configurable and non-writable data property with a different value",
+              )
+          }
+        Some(AccessorProperty(set: None, configurable: False, ..)) ->
+          throw_type_error(
+            st,
+            "'set' on proxy: trap returned truish for property "
+              <> key_quoted(key)
+              <> " which exists in the proxy target as a non-configurable accessor property without a setter",
+          )
+        _ -> #(True, st)
+      }
+    }
+  }
+}
+
+/// §10.1.9.2 OrdinarySetWithOwnDescriptor steps 2.c-2.e with a Proxy
+/// `Receiver`: existingDescriptor = ? Receiver.[[GetOwnProperty]](P) (the
+/// §10.5.5 trap), then either false (accessor / non-writable existing),
+/// ? Receiver.[[DefineOwnProperty]](P, { [[Value]]: V }) for an existing data
+/// property, or ? CreateDataProperty(Receiver, P, V) — both the §10.5.6 trap.
+fn set_on_proxy_receiver(
+  st: Agent,
+  recv_h: Handle,
+  key: ObjectKey,
+  v: JsVal,
+) -> #(Bool, Agent) {
+  let #(existing, st) = t_get_own_property(st, recv_h, key)
+  case existing {
+    // Step 2.d.i-ii: accessor or non-writable existing → false.
+    Some(AccessorProperty(..)) -> #(False, st)
+    Some(DataProperty(writable: False, ..)) -> #(False, st)
+    // Step 2.d.iii-iv: Receiver.[[DefineOwnProperty]](P, { [[Value]]: V }).
+    Some(DataProperty(..)) ->
+      t_define_own_prop(
+        st,
+        recv_h,
+        key,
+        ParsedDesc(
+          value: Some(v),
+          get: None,
+          set: None,
+          writable: None,
+          enumerable: None,
+          configurable: None,
+        ),
+      )
+    // Step 2.e: CreateDataProperty(Receiver, P, V).
+    None -> t_define_own_data(st, recv_h, key, v, True, True, True)
+  }
+}
+
+/// §10.5.10 Proxy [[Delete]] ( P ).
+fn proxy_delete(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
+  let #(trap, st) = proxy_trap(st, p, "deleteProperty")
+  case trap {
+    // Step 6: trap undefined → target.[[Delete]](P).
+    None -> t_delete_prop(st, p.target, key)
+    Some(trap_fn) -> {
+      // Step 7: ToBoolean(? Call(trap, handler, « target, P »)).
+      let #(res, st) =
+        call_trap(st, p, trap_fn, [
+          rt_types.mk_object(p.target),
+          object_key_value(key),
+        ])
+      // Step 8: false → return false.
+      use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
+      // Steps 9-13: invariants, starting from
+      // `? target.[[GetOwnProperty]](P)`.
+      let #(target_desc, st) = t_get_own_property(st, p.target, key)
+      case target_desc {
+        None -> #(True, st)
+        Some(prop) ->
+          case rt_types.prop_configurable(prop) {
+            False ->
+              throw_type_error(
+                st,
+                "'deleteProperty' on proxy: trap returned truish for property "
+                  <> key_quoted(key)
+                  <> " which is non-configurable in the proxy target",
+              )
+            True -> {
+              // Step 12: ? IsExtensible(target).
+              let #(ext, st) = t_is_extensible(st, p.target)
+              case ext {
+                False ->
+                  throw_type_error(
+                    st,
+                    "'deleteProperty' on proxy: trap returned truish but the proxy target is not extensible",
+                  )
+                True -> #(True, st)
+              }
+            }
+          }
+      }
+    }
+  }
+}
+
+/// §10.5.11 Proxy [[OwnPropertyKeys]] ( ).
+fn proxy_own_keys(st: Agent, p: Proxy) -> #(List(ObjectKey), Agent) {
+  let #(trap, st) = proxy_trap(st, p, "ownKeys")
+  case trap {
+    // Step 6: no trap → target.[[OwnPropertyKeys]]().
+    None -> t_own_keys(st, p.target)
+    Some(trap_fn) -> {
+      // Step 7: Call(trap, handler, « target »).
+      let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
+      // Step 8: CreateListFromArrayLike(trapResultArray, property-key).
+      let #(keys, st) = keys_from_array_like(st, res)
+      // Step 9: duplicate entries are rejected.
+      use <- bool.lazy_guard(has_duplicate_keys(keys, []), fn() {
+        throw_type_error(
+          st,
+          "'ownKeys' on proxy: trap returned duplicate entries",
+        )
+      })
+      // Step 10: extensibleTarget = ? IsExtensible(target).
+      let #(ext, st) = t_is_extensible(st, p.target)
+      // Steps 11-16: split target keys by configurability.
+      let #(target_keys, st) = t_own_keys(st, p.target)
+      let #(#(nonconf, conf), st) =
+        partition_configurable(st, p.target, target_keys, [], [])
+      // Step 17: extensible target with no non-configurable keys → done.
+      use <- bool.guard(ext && nonconf == [], #(keys, st))
+      // Step 19: every non-configurable target key must be reported.
+      let missing = fn(required) {
+        list.find(required, fn(k) { !list.contains(keys, k) })
+      }
+      use <- lazy_guard_found(missing(nonconf), fn(k) {
+        throw_type_error(
+          st,
+          "'ownKeys' on proxy: trap result did not include "
+            <> key_quoted(k)
+            <> ", a non-configurable key of the proxy target",
+        )
+      })
+      // Step 20: extensible target — no further checks.
+      use <- bool.guard(ext, #(keys, st))
+      // Step 21: every (configurable) target key must be reported…
+      use <- lazy_guard_found(missing(conf), fn(k) {
+        throw_type_error(
+          st,
+          "'ownKeys' on proxy: trap result did not include "
+            <> key_quoted(k)
+            <> ", a key of the non-extensible proxy target",
+        )
+      })
+      // Step 22: …and no extra keys may be invented.
+      case list.find(keys, fn(k) { !list.contains(target_keys, k) }) {
+        Ok(_) ->
+          throw_type_error(
+            st,
+            "'ownKeys' on proxy: trap returned extra keys but proxy target is non-extensible",
+          )
+        Error(Nil) -> #(keys, st)
+      }
+    }
+  }
+}
+
+/// `use <- lazy_guard_found(search, on_found)`: divert to `on_found(x)` when
+/// `search` found something, else continue.
+fn lazy_guard_found(
+  search: Result(a, Nil),
+  on_found: fn(a) -> b,
+  otherwise: fn() -> b,
+) -> b {
+  case search {
+    Ok(x) -> on_found(x)
+    Error(Nil) -> otherwise()
+  }
+}
+
+/// §10.5.11 steps 11-16: partition `keys` into (non-configurable,
+/// configurable), each key's descriptor read with
+/// `? target.[[GetOwnProperty]](key)` — a trap when the target is a proxy
+/// itself. Both lists come back in `keys` order.
+fn partition_configurable(
+  st: Agent,
+  target: Handle,
+  keys: List(ObjectKey),
+  nonconf: List(ObjectKey),
+  conf: List(ObjectKey),
+) -> #(#(List(ObjectKey), List(ObjectKey)), Agent) {
+  case keys {
+    [] -> #(#(list.reverse(nonconf), list.reverse(conf)), st)
+    [k, ..rest] -> {
+      let #(prop, st) = t_get_own_property(st, target, k)
+      let is_nonconf =
+        option.map(prop, fn(p) { !rt_types.prop_configurable(p) })
+        |> option.unwrap(False)
+      case is_nonconf {
+        True -> partition_configurable(st, target, rest, [k, ..nonconf], conf)
+        False -> partition_configurable(st, target, rest, nonconf, [k, ..conf])
+      }
+    }
+  }
+}
+
+/// True when `keys` contains the same String/Symbol value twice.
+fn has_duplicate_keys(keys: List(ObjectKey), seen: List(ObjectKey)) -> Bool {
+  case keys {
+    [] -> False
+    [k, ..rest] ->
+      case list.contains(seen, k) {
+        True -> True
+        False -> has_duplicate_keys(rest, [k, ..seen])
+      }
+  }
+}
+
+/// §7.3.20 CreateListFromArrayLike ( obj, property-key ). Each element must
+/// be a String or Symbol, else TypeError — so the result is a list of
+/// ObjectKeys. Generic path: ? LengthOfArrayLike(obj), then ? Get(obj,
+/// ToString(i)) for each index — honours array-like plain objects, getters
+/// and proxies wrapping arrays.
+fn keys_from_array_like(st: Agent, v: JsVal) -> #(List(ObjectKey), Agent) {
+  case rt_types.classify(v) {
+    KHandle(_) -> {
+      // Step 2: Let len be ? LengthOfArrayLike(obj).
+      let #(len_v, st) = t_get_prop(st, v, StringKey(Named("length")))
+      let #(len, st) = rt_val.t_to_length(st, len_v)
+      // One observable Get per index — bound by the iteration budget.
+      use <- bool.lazy_guard(len > limits.max_iteration, fn() {
+        throw_range_error(
+          st,
+          "'ownKeys' on proxy: trap result length exceeds iteration budget",
+        )
+      })
+      gather_keys_via_get(st, v, 0, len, [])
+    }
+    // Step 1: not an Object → TypeError.
+    _ -> throw_type_error(st, "CreateListFromArrayLike called on non-object")
+  }
+}
+
+/// §7.3.20 steps 4-6: read indices 0..len-1 with observable Get, validating
+/// each element is a String or Symbol.
+fn gather_keys_via_get(
+  st: Agent,
+  obj: JsVal,
+  idx: Int,
+  len: Int,
+  acc: List(ObjectKey),
+) -> #(List(ObjectKey), Agent) {
+  use <- bool.guard(idx >= len, #(list.reverse(acc), st))
+  // Step 6.b: Let next be ? Get(obj, ToString(index)).
+  let #(item, st) = t_get_prop(st, obj, StringKey(rt_types.index_key(idx)))
+  // Step 6.c: validate the element type.
+  case object_key_of_value(item) {
+    Some(k) -> gather_keys_via_get(st, obj, idx + 1, len, [k, ..acc])
+    None ->
+      throw_type_error(
+        st,
+        "'ownKeys' on proxy: trap returned a non-String, non-Symbol key",
+      )
+  }
+}
+
+// ── Property Descriptor ⇄ Object (§6.2.6) ───────────────────────────────────
+
+/// **ToPropertyDescriptor ( Obj )** — §6.2.6.5. Step 1 rejects a non-Object,
+/// then the six fields are read (invoking getters / `has`+`get` traps),
+/// get/set callability and the accessor/data conflict validated.
+///
+/// The read ORDER is normative and observable — a Proxy descriptor sees the
+/// `has`/`get` traps in exactly this sequence: enumerable, configurable,
+/// value, writable, get, set. Step 12.b's getter check also runs BEFORE
+/// step 13 reads "set", so `{ get: 1, get set() { throw } }` is a plain
+/// TypeError and never runs the `set` accessor. `None` = field absent (which
+/// matters for descriptor merging), `Some(undefined)` = present. Port of arc
+/// `mop.parse_descriptor` (`mop.gleam:1618-1676`).
+pub fn t_to_property_descriptor(st: Agent, obj: JsVal) -> #(ParsedDesc, Agent) {
+  // Step 1: If Obj is not an Object, throw a TypeError exception.
+  case rt_types.classify(obj) {
+    KHandle(_) -> Nil
+    _ -> throw_type_error(st, "Property description must be an object")
+  }
+  // Steps 3-4.
+  let #(enumerable, st) = read_desc_bool(st, obj, "enumerable")
+  // Steps 5-6.
+  let #(configurable, st) = read_desc_bool(st, obj, "configurable")
+  // Steps 7-8.
+  let #(value, st) = read_desc_field(st, obj, "value")
+  // Steps 9-10.
+  let #(writable, st) = read_desc_bool(st, obj, "writable")
+  // Steps 11-12: read "get", then reject a non-callable one immediately.
+  let #(get, st) = read_desc_field(st, obj, "get")
+  let st = require_callable_accessor(st, get, "Getter")
+  // Steps 13-14: only now is "set" observed at all.
+  let #(set, st) = read_desc_field(st, obj, "set")
+  let st = require_callable_accessor(st, set, "Setter")
+  let desc =
+    ParsedDesc(get:, set:, value:, writable:, enumerable:, configurable:)
+  // Step 15: accessor and data attributes are mutually exclusive.
+  case desc_is_accessor(desc) && desc_is_data(desc) {
+    True ->
+      throw_type_error(
+        st,
+        "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
+      )
+    False -> #(desc, st)
+  }
+}
+
+/// §6.2.6.5 steps 3/5/7/…: ? HasProperty(Obj, name), then — only if present
+/// — ? Get(Obj, name). Interleaved per field, not batched.
+fn read_desc_field(
+  st: Agent,
+  obj: JsVal,
+  name: String,
+) -> #(Option(JsVal), Agent) {
+  let key = StringKey(Named(name))
+  let #(present, st) = t_has_prop(st, obj, key)
+  case present {
+    False -> #(None, st)
+    True -> {
+      let #(v, st) = t_get_prop(st, obj, key)
+      #(Some(v), st)
+    }
+  }
+}
+
+/// `read_desc_field` + ToBoolean (§7.1.2) for enumerable/configurable/
+/// writable.
+fn read_desc_bool(
+  st: Agent,
+  obj: JsVal,
+  name: String,
+) -> #(Option(Bool), Agent) {
+  let #(field, st) = read_desc_field(st, obj, name)
+  #(option.map(field, rt_val.to_boolean), st)
+}
+
+/// §6.2.6.5 steps 12.b / 14.b: a `get`/`set` field that is present, is not
+/// undefined and is not callable is a TypeError. `role` is "Getter"/"Setter".
+fn require_callable_accessor(
+  st: Agent,
+  field: Option(JsVal),
+  role: String,
+) -> Agent {
+  case field {
+    None -> st
+    Some(f) ->
+      case rt_types.classify(f) {
+        KUndef -> st
+        _ -> {
+          let #(callable, st) = rt_val.t_is_callable(st, f)
+          case callable {
+            True -> st
+            False -> throw_type_error(st, role <> " must be a function")
+          }
+        }
+      }
+  }
+}
+
+/// **FromPropertyDescriptor ( Desc )** — §6.2.6.4 on a possibly PARTIAL
+/// descriptor: only fields present in `desc` become own `{W:T, E:T, C:T}`
+/// data properties of a fresh `%Object.prototype%` object, in spec order
+/// value, writable, get, set, enumerable, configurable. This is the object
+/// the `defineProperty` trap receives (§10.5.6 step 7) and what
+/// `Object.getOwnPropertyDescriptor` returns (via `parsed_of_property`).
+pub fn t_from_property_descriptor(
+  st: Agent,
+  desc: ParsedDesc,
+) -> #(Handle, Agent) {
+  let field = fn(name, v: Option(JsVal)) {
+    option.map(v, fn(x) { [#(name, x)] }) |> option.unwrap([])
+  }
+  let flag = fn(name, b: Option(Bool)) {
+    field(name, option.map(b, rt_types.mk_bool))
+  }
+  alloc_plain(
+    st,
+    list.flatten([
+      field("value", desc.value),
+      flag("writable", desc.writable),
+      field("get", desc.get),
+      field("set", desc.set),
+      flag("enumerable", desc.enumerable),
+      flag("configurable", desc.configurable),
+    ]),
+  )
+}
+
+/// A stored `Property` as the fully-populated `ParsedDesc` it round-trips
+/// to (accessor halves absent internally render as `undefined`).
+pub fn parsed_of_property(prop: Property) -> ParsedDesc {
+  case prop {
+    DataProperty(value:, writable:, enumerable:, configurable:, ..) ->
+      ParsedDesc(
+        value: Some(value),
+        writable: Some(writable),
+        get: None,
+        set: None,
+        enumerable: Some(enumerable),
+        configurable: Some(configurable),
+      )
+    AccessorProperty(get:, set:, enumerable:, configurable:, ..) ->
+      ParsedDesc(
+        value: None,
+        writable: None,
+        get: Some(option.unwrap(get, rt_types.mk_undefined())),
+        set: Some(option.unwrap(set, rt_types.mk_undefined())),
+        enumerable: Some(enumerable),
+        configurable: Some(configurable),
+      )
+  }
+}
+
+/// §6.2.6.6 CompletePropertyDescriptor — fill absent fields with defaults,
+/// yielding a concrete Property. seq: 0 — a trap-result descriptor is only
+/// ever rendered or compared, never stored.
+fn complete_descriptor(desc: ParsedDesc) -> Property {
+  case desc_is_accessor(desc) {
+    True ->
+      AccessorProperty(
+        get: accessor_field(desc.get, None),
+        set: accessor_field(desc.set, None),
+        enumerable: option.unwrap(desc.enumerable, False),
+        configurable: option.unwrap(desc.configurable, False),
+        seq: 0,
+      )
+    False ->
+      DataProperty(
+        value: option.unwrap(desc.value, rt_types.mk_undefined()),
+        writable: option.unwrap(desc.writable, False),
+        enumerable: option.unwrap(desc.enumerable, False),
+        configurable: option.unwrap(desc.configurable, False),
+        seq: 0,
+      )
+  }
+}
+
+/// §10.1.6.3 ValidateAndApplyPropertyDescriptor in validation-only mode
+/// (IsCompatiblePropertyDescriptor §10.1.6.2): would defining `desc` over
+/// `current` succeed on an object with the given extensibility?
+fn compatible_descriptor(
+  extensible: Bool,
+  desc: ParsedDesc,
+  current: Option(Property),
+) -> Bool {
+  case current {
+    // Step 2: no current property — allowed iff extensible.
+    None -> extensible
+    Some(cur) -> is_compatible_descriptor(desc, cur)
+  }
 }
 
 /// [[DefineOwnProperty]] with a fully-populated data descriptor

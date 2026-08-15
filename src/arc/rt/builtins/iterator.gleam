@@ -1914,7 +1914,7 @@ fn zip_keyed_collect(
     [key, ..rest] -> {
       let opened = fn() { collected_iters(iters_acc) }
       use desc, st <- or_close_all(st, opened, fn(st) {
-        #(rt_obj.t_get_own_property(st, iterables_h, key), st)
+        rt_obj.t_get_own_property(st, iterables_h, key)
       })
       let enumerable = case desc {
         Some(prop) -> rt_types.prop_enumerable(prop)

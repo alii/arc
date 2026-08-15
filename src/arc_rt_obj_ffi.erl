@@ -143,9 +143,14 @@ t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
 t_instanceof_fast(_, _, _) -> miss.
 
 %% §7.3.22 step 7 chain walk. Fuel exhaustion on a `{js_cell,_}` V → miss
-%% (clause 2); non-cell V (bigint / symbol / primitive) → 0 (clause 3).
+%% (clause 2); non-cell V (bigint / symbol / primitive) → 0 (clause 3). A
+%% Proxy anywhere on the chain → miss: its [[GetPrototypeOf]] is a trap
+%% (§10.5.1), never the stored proto field.
 proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
     case slot_of(St, VId) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+                  element(1, element(?SOBJECT_KIND, Slot)) =:= ?PROXYOBJ_TAG ->
+            miss;
         %% proto is element 3 for BOTH s_object and s_shaped_object.
         Slot when element(1, Slot) =:= ?SOBJECT_TAG;
                   element(1, Slot) =:= ?SSHAPED_TAG ->

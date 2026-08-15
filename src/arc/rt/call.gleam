@@ -29,6 +29,7 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
 import gleam/bit_array
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -296,39 +297,62 @@ fn call_proxy(
   args: List(JsVal),
 ) -> #(Completion, Agent) {
   t_apply_protected(st, fn(st) {
-    case revoked {
-      True ->
-        throw_error(st, TypeErr, "Cannot perform 'apply' on a revoked proxy")
-      False ->
-        // §10.5.12 step 1: only a proxy whose target is callable HAS
-        // [[Call]] (installed at ProxyCreate time).
-        case is_callable(st, mk_object(target)) {
-          False -> not_a_function_raise(st, callee)
-          True -> {
-            // Step 5: GetMethod(handler, "apply").
-            let #(trap, st) =
-              rt_obj.t_get_prop(
-                st,
-                mk_object(handler),
-                StringKey(Named("apply")),
-              )
-            case is_callable(st, trap) {
-              // Step 7: no trap → Call(target, this, args).
-              False -> t_call_checked(st, mk_object(target), this, args)
-              // Steps 8-9: Call(trap, handler, «target, this, argArray»).
-              True -> {
-                let #(args_arr, st) = alloc_args_array(st, args)
-                t_call_checked(st, trap, mk_object(handler), [
-                  mk_object(target),
-                  this,
-                  mk_object(args_arr),
-                ])
-              }
-            }
-          }
-        }
+    // §10.5.14 step 6: only a proxy whose target is callable HAS [[Call]]
+    // (installed at ProxyCreate time) — checked before revocation so a
+    // revoked non-callable proxy is still "not a function".
+    use <- bool.lazy_guard(!is_callable(st, mk_object(target)), fn() {
+      not_a_function_raise(st, callee)
+    })
+    // Steps 1-5: revocation check + GetMethod(handler, "apply").
+    let #(trap, st) = proxy_trap(st, handler, revoked, "apply")
+    case trap {
+      // Step 6: no trap → Call(target, thisArgument, argumentsList).
+      None -> t_call_checked(st, mk_object(target), this, args)
+      // Steps 7-8: Call(trap, handler, « target, thisArgument, argArray »).
+      Some(trap_fn) -> {
+        let #(args_arr, st) = alloc_args_array(st, args)
+        t_call_checked(st, trap_fn, mk_object(handler), [
+          mk_object(target),
+          this,
+          mk_object(args_arr),
+        ])
+      }
     }
   })
+}
+
+/// §10.5.14 ValidateNonRevokedProxy + §7.3.10 GetMethod(handler, name) for
+/// the two call-side traps. `None` when the handler leaves the trap
+/// undefined/null (forward to the target); TypeError on a revoked proxy or a
+/// non-callable trap. Mirrors `rt_obj`'s private `proxy_trap`.
+fn proxy_trap(
+  st: Agent,
+  handler: Handle,
+  revoked: Bool,
+  name: String,
+) -> #(Option(JsVal), Agent) {
+  use <- bool.lazy_guard(revoked, fn() {
+    throw_error(
+      st,
+      TypeErr,
+      "Cannot perform '" <> name <> "' on a proxy that has been revoked",
+    )
+  })
+  let #(trap, st) =
+    rt_obj.t_get_prop(st, mk_object(handler), StringKey(Named(name)))
+  case classify(trap) {
+    KUndef | KNull -> #(None, st)
+    _ ->
+      case is_callable(st, trap) {
+        True -> #(Some(trap), st)
+        False ->
+          throw_error(
+            st,
+            TypeErr,
+            "'" <> name <> "' trap of proxy handler is not a function",
+          )
+      }
+  }
 }
 
 fn not_a_function(st: Agent, callee: JsVal) -> #(Completion, Agent) {
@@ -579,36 +603,29 @@ fn construct_proxy(
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  case revoked {
-    True ->
-      throw_error(st, TypeErr, "Cannot perform 'construct' on a revoked proxy")
-    False -> {
-      // Step 5: GetMethod(handler, "construct").
-      let #(trap, st) =
-        rt_obj.t_get_prop(st, mk_object(handler), StringKey(Named("construct")))
-      case is_callable(st, trap) {
-        // Step 7: no trap → Construct(target, args, newTarget).
-        False -> t_construct(st, mk_object(target), args, new_target)
-        True -> {
-          // Steps 8-9: Call(trap, handler, «target, argArray, newTarget»).
-          let #(args_arr, st) = alloc_args_array(st, args)
-          let #(res, st) =
-            t_call_checked(st, trap, mk_object(handler), [
-              mk_object(target),
-              mk_object(args_arr),
-              new_target,
-            ])
-          // Step 10: newObj must be an Object.
-          case classify(res) {
-            KHandle(h) -> #(h, st)
-            _ ->
-              throw_error(
-                st,
-                TypeErr,
-                "'construct' on proxy: trap returned non-object",
-              )
-          }
-        }
+  // Steps 1-5: revocation check + GetMethod(handler, "construct").
+  let #(trap, st) = proxy_trap(st, handler, revoked, "construct")
+  case trap {
+    // Step 6: no trap → ? Construct(target, argumentsList, newTarget).
+    None -> t_construct(st, mk_object(target), args, new_target)
+    Some(trap_fn) -> {
+      // Steps 7-8: Call(trap, handler, « target, argArray, newTarget »).
+      let #(args_arr, st) = alloc_args_array(st, args)
+      let #(res, st) =
+        t_call_checked(st, trap_fn, mk_object(handler), [
+          mk_object(target),
+          mk_object(args_arr),
+          new_target,
+        ])
+      // Step 9: If newObj is not an Object, throw a TypeError.
+      case classify(res) {
+        KHandle(h) -> #(h, st)
+        _ ->
+          throw_error(
+            st,
+            TypeErr,
+            "'construct' on proxy: trap returned non-object",
+          )
       }
     }
   }
@@ -851,19 +868,14 @@ pub fn t_bound_new(
   bound_args: List(JsVal),
 ) -> #(Handle, Agent) {
   let target_v = mk_object(target)
-  // Steps 4-6: L. Step 5 is `? HasOwnProperty(Target, "length")` — for the
-  // ordinary case (KFunction/KNative/KBound target) that's a props-dict read.
-  // A ProxyObj target's `getOwnPropertyDescriptor` trap is NOT fired here
-  // (rt_obj does not yet export a trap-aware `t_own_property_of` — matches
-  // its own TODO(M6) at `rt_obj.gleam:230`); the step-6.a Get IS
-  // trap-aware via `t_get_prop`.
-  let has_own_length = case rt_store.t_cell_get(st, target) {
-    SObject(props:, ..) -> dict.has_key(props, Named("length"))
-    _ -> False
-  }
-  let #(target_len, st) = case has_own_length {
-    True -> rt_obj.t_get_prop(st, target_v, StringKey(Named("length")))
-    False -> #(mk_undefined(), st)
+  // Steps 4-6: L. Step 5 is `? HasOwnProperty(Target, "length")` — the
+  // target's [[GetOwnProperty]] (a `getOwnPropertyDescriptor` trap on a
+  // Proxy target); step 6.a is `? Get(Target, "length")`.
+  let #(own_length, st) =
+    rt_obj.t_get_own_property(st, target, StringKey(Named("length")))
+  let #(target_len, st) = case own_length {
+    Some(_) -> rt_obj.t_get_prop(st, target_v, StringKey(Named("length")))
+    None -> #(mk_undefined(), st)
   }
   let n_args = list.length(bound_args)
   let length_v = case classify(target_len) {

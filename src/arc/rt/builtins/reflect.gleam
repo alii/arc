@@ -11,13 +11,12 @@ import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type ParsedDesc, type ReflectNative,
-  AccessorProperty, DataProperty, KHandle, KNull, Named, ParsedDesc,
+  type Agent, type Handle, type JsVal, type ReflectNative, KHandle, KNull, Named,
   ReflectApply, ReflectConstruct, ReflectDefineProperty, ReflectDeleteProperty,
   ReflectGet, ReflectGetOwnPropertyDescriptor, ReflectGetPrototypeOf, ReflectHas,
   ReflectIsExtensible, ReflectN, ReflectOwnKeys, ReflectPreventExtensions,
   ReflectSet, ReflectSetPrototypeOf, StringKey, classify, mk_bool, mk_null,
-  mk_object, mk_string, mk_symbol, mk_undefined,
+  mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/list
@@ -178,7 +177,7 @@ fn reflect_define_property(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
   let #(pk, st) = rt_val.t_to_property_key(st, key_val)
   // Step 3: Let desc be ? ToPropertyDescriptor(attributes).
-  let #(desc, st) = to_property_descriptor(st, desc_val)
+  let #(desc, st) = rt_obj.t_to_property_descriptor(st, desc_val)
   // Step 4: Return ? target.[[DefineOwnProperty]](key, desc).
   let #(ok, st) = rt_obj.t_define_own_prop(st, h, pk, desc)
   #(mk_bool(ok), st)
@@ -219,9 +218,14 @@ fn reflect_get_own_property_descriptor(
   // Step 2: Let key be ? ToPropertyKey(propertyKey).
   let #(pk, st) = rt_val.t_to_property_key(st, key_val)
   // Step 3: Let desc be ? target.[[GetOwnProperty]](key).
-  case rt_obj.t_get_own_property(st, h, pk) {
+  let #(desc, st) = rt_obj.t_get_own_property(st, h, pk)
+  case desc {
     // Step 4: FromPropertyDescriptor(desc).
-    Some(prop) -> from_property_descriptor(st, prop)
+    Some(prop) -> {
+      let #(dh, st) =
+        rt_obj.t_from_property_descriptor(st, rt_obj.parsed_of_property(prop))
+      #(mk_object(dh), st)
+    }
     None -> #(mk_undefined(), st)
   }
 }
@@ -250,29 +254,24 @@ fn reflect_has(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 /// Reflect.isExtensible ( target ) — ES2024 §28.1.9
 fn reflect_is_extensible(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, _rest, st <- require_object_target(args, st, "isExtensible")
-  #(mk_bool(rt_obj.t_is_extensible(st, h)), st)
+  let #(extensible, st) = rt_obj.t_is_extensible(st, h)
+  #(mk_bool(extensible), st)
 }
 
 /// Reflect.ownKeys ( target ) — ES2024 §28.1.10
 fn reflect_own_keys(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, _rest, st <- require_object_target(args, st, "ownKeys")
   let #(keys, st) = rt_obj.t_own_keys(st, h)
-  let key_vals =
-    list.map(keys, fn(ok) {
-      case ok {
-        StringKey(pk) -> mk_string(rt_types.key_to_text(pk))
-        rt_types.SymbolKey(sym) -> mk_symbol(sym)
-      }
-    })
-  let #(arr, st) = realm_ops.alloc_array(st, key_vals)
+  let #(arr, st) =
+    realm_ops.alloc_array(st, list.map(keys, rt_obj.object_key_value))
   #(mk_object(arr), st)
 }
 
 /// Reflect.preventExtensions ( target ) — ES2024 §28.1.11
 fn reflect_prevent_extensions(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, _rest, st <- require_object_target(args, st, "preventExtensions")
-  let st = rt_obj.t_prevent_extensions(st, h)
-  #(mk_bool(True), st)
+  let #(ok, st) = rt_obj.t_prevent_extensions(st, h)
+  #(mk_bool(ok), st)
 }
 
 /// Reflect.set ( target, propertyKey, V [ , receiver ] ) — ES2024 §28.1.12
@@ -349,88 +348,4 @@ fn collect_indexed(
       collect_indexed(st, obj, i + 1, len, [v, ..acc])
     }
   }
-}
-
-/// §6.2.6.5 ToPropertyDescriptor — read the six descriptor fields off `obj`.
-/// Throws TypeError if `obj` is not an object, or if it mixes data+accessor.
-fn to_property_descriptor(st: Agent, obj: JsVal) -> #(ParsedDesc, Agent) {
-  case classify(obj) {
-    KHandle(_) -> Nil
-    _ -> rt_val.t_throw_type_error(st, "Property description must be an object")
-  }
-  let read = fn(st, name) {
-    let key = StringKey(Named(name))
-    let #(has, st) = rt_obj.t_has_prop(st, obj, key)
-    case has {
-      True -> {
-        let #(v, st) = rt_obj.t_get_prop(st, obj, key)
-        #(Some(v), st)
-      }
-      False -> #(None, st)
-    }
-  }
-  let read_bool = fn(st, name) {
-    let #(v, st) = read(st, name)
-    #(option.map(v, rt_val.to_boolean), st)
-  }
-  let #(enumerable, st) = read_bool(st, "enumerable")
-  let #(configurable, st) = read_bool(st, "configurable")
-  let #(value, st) = read(st, "value")
-  let #(writable, st) = read_bool(st, "writable")
-  let #(get, st) = read(st, "get")
-  let #(set, st) = read(st, "set")
-  // Step 8: get/set must be callable or undefined.
-  let check_accessor = fn(st, v: option.Option(JsVal), which) {
-    case v {
-      Some(f) ->
-        case rt_val.is_undef(f) || rt_call.is_callable(st, f) {
-          True -> Nil
-          False ->
-            rt_val.t_throw_type_error(
-              st,
-              "Property descriptor '" <> which <> "' is not callable",
-            )
-        }
-      None -> Nil
-    }
-  }
-  check_accessor(st, get, "get")
-  check_accessor(st, set, "set")
-  // Step 9: data + accessor mix → TypeError.
-  case
-    { option.is_some(get) || option.is_some(set) }
-    && { option.is_some(value) || option.is_some(writable) }
-  {
-    True ->
-      rt_val.t_throw_type_error(
-        st,
-        "Property descriptor cannot have both accessors and a value/writable",
-      )
-    False -> Nil
-  }
-  #(ParsedDesc(value:, get:, set:, writable:, enumerable:, configurable:), st)
-}
-
-/// §6.2.6.4 FromPropertyDescriptor — build a plain descriptor object.
-fn from_property_descriptor(
-  st: Agent,
-  prop: rt_types.Property,
-) -> #(JsVal, Agent) {
-  let obj_proto = st.realm.object.prototype
-  let entries = case prop {
-    DataProperty(value:, writable:, enumerable:, configurable:, ..) -> [
-      #("value", value),
-      #("writable", mk_bool(writable)),
-      #("enumerable", mk_bool(enumerable)),
-      #("configurable", mk_bool(configurable)),
-    ]
-    AccessorProperty(get:, set:, enumerable:, configurable:, ..) -> [
-      #("get", option.unwrap(get, mk_undefined())),
-      #("set", option.unwrap(set, mk_undefined())),
-      #("enumerable", mk_bool(enumerable)),
-      #("configurable", mk_bool(configurable)),
-    ]
-  }
-  let #(h, st) = common.alloc_pojo(st, obj_proto, entries)
-  #(mk_object(h), st)
 }

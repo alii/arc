@@ -10,8 +10,8 @@ import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type HostHooks, type JsVal,
   type ShapeSlots, AccessorProperty, ArrayObj, DataProperty, Dense, FnFlags,
   HostHooks, Index, JsCell, JsStore, KFunction, KHandle, KNative, Named,
-  NativeUnseeded, NoElements, Ordinary, Private, SBox, SObject, SShapedObject,
-  ShapeDesc, Sparse, StringKey, SymbolKey,
+  NativeUnseeded, NoElements, Ordinary, Private, ProxyObj, SBox, SObject,
+  SShapedObject, ShapeDesc, Sparse, StringKey, SymbolKey,
 } as rt_types
 import arc/vm/internal/tree_array
 import gleam/dict
@@ -200,6 +200,8 @@ pub fn sobject_test() {
   assert tag_of(kind) == tag("ARRAYOBJ_TAG")
   assert arity(kind) == idx("ARRAYOBJ_ARITY")
   assert at(kind, "ARRAYOBJ_LENGTH") == dyn(9)
+  assert tag_of(ProxyObj(target: proto, handler: proto, revoked: False))
+    == tag("PROXYOBJ_TAG")
 }
 
 pub fn keys_and_elements_test() {
@@ -411,6 +413,17 @@ fn get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> Dynamic
 @external(erlang, "arc_rt_obj_ffi", "t_set_prop_own_data")
 fn set_prop_own_data(st: Agent, recv: JsVal, key: BitArray, v: JsVal) -> Dynamic
 
+@external(erlang, "arc_rt_obj_ffi", "t_instanceof_fast")
+fn instanceof_fast(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
+
+@external(erlang, "arc_rt_call_ffi", "t_call_method_mono")
+fn call_method_mono(
+  st: Agent,
+  recv: JsVal,
+  key: BitArray,
+  args: List(JsVal),
+) -> #(Dynamic, Agent)
+
 type Probe {
   Miss
 }
@@ -437,4 +450,59 @@ pub fn typed_array_fast_paths_miss_test() {
   assert get_prop_own_data(st, ta, <<"length">>) == dyn(Miss)
   assert get_prop_own_data(st, ta, <<"extra">>) == dyn(Miss)
   assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
+}
+
+/// Proxy exotics never take an Erlang fast path: own-data / element probes,
+/// the monomorphic method call and the instanceof chain walk all miss on a
+/// Proxy cell (its internal methods are traps, never its stored fields), so
+/// the §10.5 arms in arc/rt/obj run.
+pub fn proxy_fast_paths_miss_test() {
+  let st = seeded()
+  let n = rt_types.mk_number(rt_types.JInt(4))
+  let #(arr, st) = rt_obj.t_new_array(st, [n, n])
+  let #(handler, st) = rt_obj.t_new_object_literal(st)
+  let #(proxy_ctor, st) = rt_obj.t_global_get(st, <<"Proxy">>)
+  let #(ph, st) =
+    rt_call.t_construct(st, proxy_ctor, [arr, handler], proxy_ctor)
+  let p = rt_types.mk_object(ph)
+  assert get_elem_fast(st, p, 0) == dyn(Miss)
+  assert set_elem_fast(st, p, 0, n) == dyn(Miss)
+  assert get_prop_own_data(st, p, <<"length">>) == dyn(Miss)
+  assert set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
+  assert call_method_mono(st, p, <<"push">>, [n]).0 == dyn(Miss)
+  // `p instanceof F` must reach the getPrototypeOf trap: the probe takes the
+  // fast path for a plain-function ctor over an ordinary V, but never over a
+  // proxy V or an ordinary V whose prototype chain crosses a proxy.
+  let #(fh, st) =
+    rt_call.t_fn_new(st, compiled_fn("F"), [], no_flags(), "F", 0, None, None)
+  let #(f, st) = rt_call.t_make_constructor(st, rt_types.mk_object(fh))
+  let #(plain, st) = rt_obj.t_new_object_literal(st)
+  assert instanceof_fast(st, plain, f) == dyn(0)
+  assert instanceof_fast(st, p, f) == dyn(Miss)
+  let #(child, st) = rt_obj.t_new_object(st, Some(ph))
+  assert instanceof_fast(st, rt_types.mk_object(child), f) == dyn(Miss)
+}
+
+/// String exotics never take the Erlang own-data / element fast paths: the
+/// synthesized index and "length" properties live in no props dict.
+pub fn string_object_fast_paths_miss_test() {
+  let st = seeded()
+  let n = rt_types.mk_number(rt_types.JInt(1))
+  let #(string_ctor, st) = rt_obj.t_global_get(st, <<"String">>)
+  let #(sh, st) =
+    rt_call.t_construct(
+      st,
+      string_ctor,
+      [rt_types.mk_string("abc")],
+      string_ctor,
+    )
+  let s = rt_types.mk_object(sh)
+  let #(_, st) =
+    rt_obj.t_set_prop(st, s, StringKey(Named("extra")), rt_types.mk_string("x"))
+  assert get_elem_fast(st, s, 0) == dyn(Miss)
+  assert set_elem_fast(st, s, 0, n) == dyn(Miss)
+  assert set_elem_fast(st, s, 3, n) == dyn(Miss)
+  assert get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
+  assert get_prop_own_data(st, s, <<"extra">>) == dyn(Miss)
+  assert set_prop_own_data(st, s, <<"extra">>, n) == dyn(Miss)
 }

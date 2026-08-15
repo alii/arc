@@ -17,9 +17,9 @@ import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsVal, type JsonNative, ArrayObj,
   BigIntObj, BooleanObj, JFloat, JInt, JNan, JNegInf, JPosInf, JsonIsRawJson,
   JsonN, JsonParse, JsonRawJson, JsonStringify, KBig, KBool, KHandle, KNull,
-  KNum, KStr, KSym, KUndef, Named, NumberObj, Ordinary, SObject, SShapedObject,
-  StringKey, StringObj, classify, index_key, mk_bool, mk_null, mk_number,
-  mk_object, mk_string, mk_undefined,
+  KNum, KStr, KSym, KUndef, Named, NumberObj, Ordinary, RawJsonObj, SObject,
+  SShapedObject, StringKey, StringObj, classify, index_key, mk_bool, mk_null,
+  mk_number, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -669,19 +669,26 @@ fn json_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   case validate_raw_json_text(bit_array.from_string(json_str)) {
     Error(e) -> rt_val.t_throw_syntax_error(st, json_error_message(e))
     Ok(Nil) -> {
-      // Frozen null-proto {rawJSON: json_str}. 2core's ObjKind has no
-      // RawJsonObject slot; the [[IsRawJSON]] check reads back the frozen
-      // null-proto shape + own "rawJSON" data property.
-      let #(prop, st) = common.data_prop(st, mk_string(json_str))
+      // Steps 5-8: OrdinaryObjectCreate(null, « [[IsRawJSON]] ») +
+      // CreateDataPropertyOrThrow + SetIntegrityLevel(frozen): a
+      // null-prototype, non-extensible object whose only own property is a
+      // non-writable, non-configurable "rawJSON" string.
+      let #(seq, st) = rt_store.t_next_prop_seq(st)
+      let prop =
+        rt_types.DataProperty(
+          value: mk_string(json_str),
+          writable: False,
+          enumerable: True,
+          configurable: False,
+          seq:,
+        )
       let #(h, st) =
         rt_store.t_cell_new(
           st,
           SObject(
-            kind: Ordinary,
+            kind: RawJsonObj(raw: json_str),
             proto: None,
-            props: dict.from_list([
-              #(Named("rawJSON"), prop),
-            ]),
+            props: dict.from_list([#(Named("rawJSON"), prop)]),
             symbol_props: [],
             elements: rt_types.NoElements,
             extensible: False,
@@ -734,34 +741,18 @@ fn json_is_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   #(mk_bool(is_raw_json(st, helpers.arg_at(args, 0))), st)
 }
 
+/// §JSON.isRawJSON step 1: the [[IsRawJSON]] internal-slot brand check.
 fn is_raw_json(st: Agent, v: JsVal) -> Bool {
-  case classify(v) {
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: Ordinary, proto: None, extensible: False, props:, ..) ->
-          case dict.get(props, Named("rawJSON")) {
-            Ok(rt_types.DataProperty(..)) -> True
-            _ -> False
-          }
-        _ -> False
-      }
-    _ -> False
-  }
+  option.is_some(raw_json_text(st, v))
 }
 
+/// The [[IsRawJSON]] slot's payload — the verbatim JSON source text a
+/// `JSON.rawJSON` box carries — or `None` for every other value.
 fn raw_json_text(st: Agent, v: JsVal) -> Option(String) {
   case classify(v) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: Ordinary, proto: None, extensible: False, props:, ..) ->
-          case dict.get(props, Named("rawJSON")) {
-            Ok(rt_types.DataProperty(value:, ..)) ->
-              case classify(value) {
-                KStr(s) -> Some(s)
-                _ -> None
-              }
-            _ -> None
-          }
+      case obj_kind(st, h) {
+        Some(RawJsonObj(raw:)) -> Some(raw)
         _ -> None
       }
     _ -> None
@@ -1192,11 +1183,17 @@ fn obj_kind(st: Agent, h: Handle) -> Option(rt_types.ObjKind) {
   }
 }
 
+/// §7.2.2 IsArray — pierces Proxy exotic objects to their [[ProxyTarget]]
+/// (step 3.b) and throws TypeError on a revoked proxy (step 3.a).
 fn is_array_handle(st: Agent, h: Handle) -> Bool {
   case obj_kind(st, h) {
     Some(ArrayObj(..)) -> True
-    Some(rt_types.ProxyObj(target:, revoked: False, ..)) ->
-      is_array_handle(st, target)
+    Some(rt_types.ProxyObj(revoked: True, ..)) ->
+      rt_val.t_throw_type_error(
+        st,
+        "Cannot perform 'IsArray' on a proxy that has been revoked",
+      )
+    Some(rt_types.ProxyObj(target:, ..)) -> is_array_handle(st, target)
     _ -> False
   }
 }
@@ -1207,23 +1204,9 @@ fn length_of_array_like(st: Agent, h: Handle) -> #(Int, Agent) {
   rt_val.t_to_length(st, len_v)
 }
 
-/// EnumerableOwnPropertyNames(obj, key) — string-keyed own enumerable props.
+/// EnumerableOwnProperties(obj, key) — string-keyed own enumerable props via
+/// [[OwnPropertyKeys]] + per-key [[GetOwnProperty]] (both trap on a proxy).
 fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(String), Agent) {
-  let #(keys, st) = rt_obj.t_own_keys(st, h)
-  let names =
-    list.filter_map(keys, fn(ok) {
-      case ok {
-        StringKey(pk) ->
-          case rt_obj.t_get_own_property(st, h, ok) {
-            Some(prop) ->
-              case rt_types.prop_enumerable(prop) {
-                True -> Ok(rt_types.key_to_text(pk))
-                False -> Error(Nil)
-              }
-            None -> Error(Nil)
-          }
-        rt_types.SymbolKey(_) -> Error(Nil)
-      }
-    })
-  #(names, st)
+  let #(keys, st) = rt_obj.t_enumerable_own_keys(st, h)
+  #(list.map(keys, rt_types.key_to_text), st)
 }

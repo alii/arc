@@ -21,11 +21,11 @@ import arc/rt/types.{
   Handler, IdentityPassThrough, IteratorHelperObj, JsCell, JsStore, KBound,
   KFunction, KNative, MapIterator, MapObj, ModuleNamespace, NoElements,
   NumberObj, Ordinary, PromiseFulfilled, PromisePending, PromiseReaction,
-  PromiseRejected, ProxyObj, ReactionJob, RegExpObj, ResolveThenableJob,
-  SAsyncGen, SBox, SGenerator, SObject, SPromise, SShapedObject, SetIterator,
-  SetObj, Sparse, StringIterator, StringObj, SymbolObj, ThrowerPassThrough,
-  TypedArrayObj, WeakMapObj, WeakSetObj, WrapForValidIteratorObj, jq_to_list,
-  native_token_refs,
+  PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
+  ResolveThenableJob, SAsyncGen, SBox, SGenerator, SObject, SPromise,
+  SShapedObject, SetIterator, SetObj, Sparse, StringIterator, StringObj,
+  SymbolObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakSetObj,
+  WrapForValidIteratorObj, jq_to_list, native_token_refs,
 } as rt_types
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array as rt_tree_array
@@ -205,8 +205,9 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       ..acc
     ]
     DataViewObj(buffer:, byte_offset: _, byte_length: _) -> [buffer.id, ..acc]
+    RawJsonObj(raw: _) -> acc
     ModuleNamespace(exports:) ->
-      dict.fold(exports, acc, fn(a, _, v) { push_val_refs(v, a) })
+      dict.fold(exports, acc, fn(a, _, h) { [h.id, ..a] })
     ProxyObj(target:, handler:, revoked: _) -> [target.id, handler.id, ..acc]
     ForInIterator(remaining: _) -> acc
     ArrayIterator(target:, index: _, kind: _) -> [target.id, ..acc]
