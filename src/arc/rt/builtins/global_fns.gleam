@@ -17,9 +17,10 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type GlobalNative, type Handle, type JsNum, type JsVal,
   GlobalDecodeUri, GlobalDecodeUriComponent, GlobalEncodeUri,
-  GlobalEncodeUriComponent, GlobalEscape, GlobalIsFinite, GlobalIsNaN, GlobalN,
-  GlobalParseFloat, GlobalParseInt, GlobalUnescape, JFloat, JInt, JNan, JNegInf,
-  JPosInf, mk_bool, mk_number, mk_object, mk_string,
+  GlobalEncodeUriComponent, GlobalEscape, GlobalEval, GlobalIsFinite,
+  GlobalIsNaN, GlobalN, GlobalParseFloat, GlobalParseInt, GlobalUnescape,
+  IndirectEval, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNative, KStr,
+  SObject, mk_bool, mk_number, mk_object, mk_string,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/int
@@ -61,18 +62,7 @@ pub fn init(
   let alloc = fn(st, tag, name, len) {
     common.alloc_rooted_native_fn(st, function_proto, GlobalN(tag), name, len)
   }
-  // `eval` is dispatched via JsOps.eval_hook (M19); the token here reuses
-  // GlobalParseInt's slot ONLY to allocate a callable object — the top-level
-  // dispatch table routes eval separately. A dedicated GlobalEval variant is
-  // added when M19 lands.
-  let #(eval, st) =
-    common.alloc_rooted_native_fn(
-      st,
-      function_proto,
-      rt_types.NativeUnseeded,
-      "eval",
-      1,
-    )
+  let #(eval, st) = alloc(st, GlobalEval, "eval", 1)
   let #(encode_uri, st) = alloc(st, GlobalEncodeUri, "encodeURI", 1)
   let #(encode_uri_component, st) =
     alloc(st, GlobalEncodeUriComponent, "encodeURIComponent", 1)
@@ -107,6 +97,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
+    GlobalEval -> indirect_eval(st, args)
     GlobalParseInt -> {
       let #(val, radix) = helpers.two_args_or_undefined(args)
       let #(n, st) = parse_int_value(st, val, radix)
@@ -133,6 +124,35 @@ pub fn dispatch(
         rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
       #(mk_string(js_unescape(s)), st)
     }
+  }
+}
+
+// ============================================================================
+// eval
+// ============================================================================
+
+/// §19.2.1 eval ( x ) reached through [[Call]]: an INDIRECT eval. Step 2:
+/// a non-string `x` is returned unchanged; otherwise PerformEval(x, false,
+/// false) in the current realm via `JsOps.eval_hook`.
+fn indirect_eval(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  let x = helpers.first_arg_or_undefined(args)
+  case rt_types.classify(x) {
+    KStr(source) -> st.store.ops.eval_hook(st, source, IndirectEval)
+    _ -> #(x, st)
+  }
+}
+
+/// Is `callee` a realm's intrinsic %eval%? The interpreter's CallEval site
+/// asks this to choose direct over indirect eval (§13.3.6.1 step 6.a:
+/// SameValue(func, %eval%)).
+pub fn is_intrinsic_eval(st: Agent, callee: JsVal) -> Bool {
+  case rt_types.classify(callee) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: KNative(tag: GlobalN(GlobalEval), ..), ..) -> True
+        _ -> False
+      }
+    _ -> False
   }
 }
 

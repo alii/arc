@@ -1371,11 +1371,16 @@ pub type ConsoleNative {
   ConsolePrint(level: ConsoleLevel)
 }
 
-/// §19.2 Global function natives — parseInt/parseFloat/isNaN/isFinite plus
-/// the §19.2.6 URI codecs and Annex B escape/unescape (arc splits these
+/// §19.2 Global function natives — eval/parseInt/parseFloat/isNaN/isFinite
+/// plus the §19.2.6 URI codecs and Annex B escape/unescape (arc splits these
 /// across `NumberNativeFn` + `arc/vm/exec/call` URI wrappers; 2core unifies
 /// them under one `GlobalN` wrapper). No Handle-carrying variants.
 pub type GlobalNative {
+  /// §19.2.1 eval(x) reached through [[Call]] — always an INDIRECT eval
+  /// (`JsOps.eval_hook`). Direct eval is recognised by the interpreter at
+  /// the call site (CallEval opcode) by identity with this function object
+  /// and never dispatches here.
+  GlobalEval
   GlobalParseInt
   GlobalParseFloat
   GlobalIsNaN
@@ -2433,6 +2438,26 @@ pub type ErrorKind {
   SyntaxErr
 }
 
+/// What `JsOps.eval_hook` compiles its source text as. All three run in the
+/// CURRENT realm's global environment with `this` = the global object and
+/// return the completion value (a throw raises).
+pub type EvalKind {
+  /// §19.2.1.1 PerformEval with direct = false: eval code, so
+  /// EvalDeclarationInstantiation makes its `var`/function globals
+  /// configurable (§B.3.2.3 / §19.2.1.3 D = true).
+  IndirectEval
+  /// §20.2.1.1.1 CreateDynamicFunction: the source is one parenthesised
+  /// anonymous function expression assembled by the Function-family
+  /// constructor; evaluated as eval code, the result is the closure. The
+  /// hook also applies step 29 SetFunctionName(F, "anonymous") to the parts
+  /// of the function only the interpreter can reach (its code template).
+  DynamicFunction
+  /// §16.1.6 ScriptEvaluation ($262.evalScript): script code, so
+  /// GlobalDeclarationInstantiation makes `var`/function globals
+  /// non-configurable, and microtasks are drained before returning.
+  ScriptEval
+}
+
 /// D17: rt_val (leaf) needs to call rt_obj.get_prop / rt_call.call
 /// for `ToPrimitive`/`OrdinaryToPrimitive`, but importing them is a cycle.
 /// Type-parameterized over the threaded state; the concrete instantiation
@@ -2449,8 +2474,10 @@ pub type JsOps(st) {
     /// Allocate a native error of `kind` with `message` and stack.
     new_error: fn(st, ErrorKind, String) -> #(JsVal, st),
     /// Indirect eval / `Function()` / `$262.evalScript`: compile `source`
-    /// to bytecode on the shared heap and run it. Interpreter-seeded.
-    eval_hook: fn(st, String) -> #(JsVal, st),
+    /// to bytecode on the shared heap and run it as `kind` says. A parse
+    /// error raises SyntaxError. Interpreter-seeded; the runtime's own seed
+    /// raises TypeError (no compiler linked).
+    eval_hook: fn(st, String, EvalKind) -> #(JsVal, st),
     /// [[Call]] of a `KBytecode` cell: `(callee, this, args, new_target)`.
     /// Runs a fresh activation to completion; re-raises a throw.
     call_bytecode: fn(st, Handle, JsVal, List(JsVal), JsVal) -> #(JsVal, st),

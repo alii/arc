@@ -16,16 +16,18 @@ import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type FunctionNative, type Handle, type JsVal,
-  DataProperty, FunctionApply, FunctionBind, FunctionCall, FunctionConstructor,
-  FunctionHasInstance, FunctionN, FunctionPrototypeCall, FunctionToString, JInt,
-  KBound, KBytecode, KCompiled, KHandle, KNative, KNull, KStr, KUndef, Named,
-  NoElements, ProxyObj, SObject, StringKey, ThrowTypeErrorFn, classify, mk_bool,
-  mk_number, mk_object, mk_string, mk_undefined,
+  DataProperty, DynamicFunction, FunctionApply, FunctionBind, FunctionCall,
+  FunctionConstructor, FunctionHasInstance, FunctionN, FunctionPrototypeCall,
+  FunctionToString, JInt, KBound, KBytecode, KCompiled, KHandle, KNative, KNull,
+  KStr, KUndef, Named, NoElements, ProxyObj, SObject, StringKey,
+  ThrowTypeErrorFn, classify, mk_bool, mk_number, mk_object, mk_string,
+  mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/list
 import gleam/option.{Some}
+import gleam/string
 
 /// Set up Function.prototype and Function constructor. Also allocates
 /// %ThrowTypeError% (§10.2.4.1) and hands its Handle back to the caller: it
@@ -216,14 +218,66 @@ pub fn dispatch(
     ThrowTypeErrorFn -> restricted_function_property(st, this)
     // §20.2.3 calling Function.prototype itself returns undefined.
     FunctionPrototypeCall -> #(mk_undefined(), st)
-    // §20.2.1.1 Function ( ...args, bodyArg ) — the dynamic constructor. Needs
-    // the eval hook (JsOps.eval_hook, M19-seeded); until then, spec-compliant
-    // "no eval available" behaviour is a thrown EvalError-shaped TypeError.
-    FunctionConstructor ->
-      rt_val.t_throw_type_error(
-        st,
-        "Function constructor is not supported in this environment",
-      )
+    // §20.2.1.1 Function ( ...parameterArgs, bodyArg ).
+    FunctionConstructor -> create_dynamic_function(st, args, "function")
+  }
+}
+
+/// §20.2.1.1.1 CreateDynamicFunction, shared by Function / GeneratorFunction
+/// / AsyncFunction / AsyncGeneratorFunction: `keyword` is "function",
+/// "function*", "async function" or "async function*". The last argument is
+/// the body, the ones before it are parameter sources; all are ToString'd in
+/// order (steps 8-10) before anything is parsed. Same result for `Ctor(...)`
+/// and `new Ctor(...)`.
+///
+/// Step 16 assembles "function anonymous(" P "\n) {\n" body "\n}", but the
+/// spec then calls OrdinaryFunctionCreate directly, so unlike a named
+/// function expression there is NO self-name binding: `anonymous` must not
+/// resolve inside the body (test262 staging/sm/Function/constructor-binding).
+/// The source handed to the eval hook is therefore an ANONYMOUS function
+/// expression, and step 29 SetFunctionName(F, "anonymous") is applied to the
+/// result. The newline before ")" matters: a trailing line comment in the
+/// last parameter must not swallow the ")" (test262
+/// Function/prototype/toString/Function).
+pub fn create_dynamic_function(
+  st: Agent,
+  args: List(JsVal),
+  keyword: String,
+) -> #(JsVal, Agent) {
+  let #(strs, st) =
+    list.fold(args, #([], st), fn(acc, arg) {
+      let #(done, st) = acc
+      let #(s, st) = rt_val.t_to_string(st, arg)
+      #([s, ..done], st)
+    })
+  let #(params, body) = case strs {
+    [] -> #([], "")
+    [b, ..params_rev] -> #(list.reverse(params_rev), b)
+  }
+  let source =
+    "("
+    <> keyword
+    <> "("
+    <> string.join(params, ",")
+    <> "\n) {\n"
+    <> body
+    <> "\n})"
+  let #(f, st) = st.store.ops.eval_hook(st, source, DynamicFunction)
+  case classify(f) {
+    KHandle(h) -> {
+      let #(_, st) =
+        rt_obj.t_define_own_data(
+          st,
+          h,
+          StringKey(Named("name")),
+          mk_string("anonymous"),
+          False,
+          False,
+          True,
+        )
+      #(f, st)
+    }
+    _ -> #(f, st)
   }
 }
 

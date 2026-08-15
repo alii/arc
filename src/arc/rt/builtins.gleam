@@ -269,7 +269,7 @@ fn seed_ops(st: Agent) -> Agent {
         call: rt_call.t_call_checked,
         to_object: realm_ops.t_box_primitive,
         new_error: realm_ops.t_new_error,
-        eval_hook: fn(_, _) { interpreter_not_linked("eval_hook") },
+        eval_hook: no_eval,
         call_bytecode: fn(_, _, _, _, _) {
           interpreter_not_linked("call_bytecode")
         },
@@ -279,6 +279,17 @@ fn seed_ops(st: Agent) -> Agent {
         resume_frame: fn(_, _, _) { interpreter_not_linked("resume_frame") },
       ),
     ),
+  )
+}
+
+/// `eval_hook` seed for an agent with no interpreter linked. Unlike the
+/// bytecode entries this IS reachable from user code (`Function("...")`,
+/// `(0, eval)("...")` in compiled code), so it is a JS-level TypeError, not
+/// a wiring panic. `interp/entry.link` replaces it.
+fn no_eval(st: Agent, _source: String, _kind: rt_types.EvalKind) -> a {
+  rt_val.t_throw_type_error(
+    st,
+    "eval is not supported in this environment: no interpreter linked",
   )
 }
 

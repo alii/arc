@@ -12,6 +12,7 @@
 
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
+import arc/rt/builtins/function as b_function
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -19,7 +20,7 @@ import arc/rt/types.{
   AsyncFunctionCtor, AsyncGeneratorFunctionCtor, AsyncGeneratorNext,
   AsyncGeneratorReturn, AsyncGeneratorThrow, BuiltinPair, GeneratorFunctionCtor,
   GeneratorN, GeneratorNext, GeneratorReturn, GeneratorThrow, KNative,
-  NoElements, SObject, TypeErr, mk_object,
+  NoElements, SObject, mk_object,
 } as rt_types
 import gleam/dict
 import gleam/option.{None, Some}
@@ -227,15 +228,14 @@ pub fn dispatch(
       let #(h, st) = rt_async.t_asyncgen_throw(st, this, arg)
       #(mk_object(h), st)
     }
-    // Dynamic constructors — reachable only as `(function*(){}).constructor(...)`.
-    // arc parity: throw until M19 wires eval (§20.2.1.1 CreateDynamicFunction).
-    GeneratorFunctionCtor | AsyncGeneratorFunctionCtor | AsyncFunctionCtor ->
-      throw_type_error(st, "dynamic function creation not supported")
+    // §27.3.1.1 GeneratorFunction / §27.7.1.1 AsyncFunction / §27.4.1.1
+    // AsyncGeneratorFunction ( ...parameterArgs, bodyArg ): all three are
+    // CreateDynamicFunction with their own kind.
+    GeneratorFunctionCtor ->
+      b_function.create_dynamic_function(st, args, "function*")
+    AsyncFunctionCtor ->
+      b_function.create_dynamic_function(st, args, "async function")
+    AsyncGeneratorFunctionCtor ->
+      b_function.create_dynamic_function(st, args, "async function*")
   }
-}
-
-fn throw_type_error(st: Agent, msg: String) -> a {
-  let js = st.store
-  let #(e, st) = js.ops.new_error(st, TypeErr, msg)
-  rt_store.t_throw(st, e)
 }

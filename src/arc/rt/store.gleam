@@ -61,7 +61,7 @@ fn unseeded_ops() -> JsOps(Agent) {
     call: fn(_, _, _, _) { unseeded() },
     to_object: fn(_, _) { unseeded() },
     new_error: fn(_, _, _) { unseeded() },
-    eval_hook: fn(_, _) { unseeded() },
+    eval_hook: fn(_, _, _) { unseeded() },
     call_bytecode: fn(_, _, _, _, _) { unseeded() },
     construct_bytecode: fn(_, _, _, _) { unseeded() },
     resume_frame: fn(_, _, _) { unseeded() },
