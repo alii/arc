@@ -947,10 +947,12 @@ fn module_activation(
 }
 
 /// Run a module body with the registry's active referrer set to its resolved
-/// specifier for the synchronous part of the body (§16.2.1.8
-/// HostLoadImportedModule: an ImportCall inside captures it as its
-/// referencingScriptOrModule), then `finish`, then classify the outcome. A
-/// body that awaits at top level becomes ExecuteAsyncModule (§16.2.1.5.3.4).
+/// specifier (§16.2.1.8 HostLoadImportedModule: an ImportCall inside
+/// captures it as its referencingScriptOrModule) across the synchronous part
+/// of the body AND `finish`, so the turns of a body parked on top-level await
+/// that `finish` resumes still import relative to the module; then classify
+/// the outcome. A body that awaits at top level becomes ExecuteAsyncModule
+/// (§16.2.1.5.3.4).
 fn run_module_body(
   st: Agent,
   specifier: String,
@@ -960,9 +962,18 @@ fn run_module_body(
 ) -> #(BodyOutcome, Agent) {
   let outer_referrer = registry.read_active_referrer(st)
   let st = registry.write_active_referrer(st, Some(specifier))
+  let #(outcome, st) = run_module_turns(st, compiled, seeds, finish)
+  #(outcome, registry.write_active_referrer(st, outer_referrer))
+}
+
+fn run_module_turns(
+  st: Agent,
+  compiled: CompiledModule,
+  seeds: List(#(Int, JsVal)),
+  finish: Finish,
+) -> #(BodyOutcome, Agent) {
   let #(step, st) =
     entry.run_turn(module_activation(st, compiled.template, seeds))
-  let st = registry.write_active_referrer(st, outer_referrer)
   case step {
     StepReturn(v) -> #(BodyReturned(v), finish(st))
     StepThrow(e) -> #(BodyThrew(e), finish(st))

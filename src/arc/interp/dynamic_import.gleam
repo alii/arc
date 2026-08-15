@@ -33,6 +33,7 @@
 import arc/interp/module_registry as registry
 import arc/rt/async as rt_async
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -234,14 +235,15 @@ pub fn defer_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
       // up `then`), so the hook is handed the resolving functions.
       let #(#(resolve_h, reject_h), st) =
         rt_async.alloc_resolving_fns(st, promise)
+      let resolve_fn = mk_object(resolve_h)
       let reject_fn = mk_object(reject_h)
       let hook_args =
         encode_hook_args(
           string_of(specifier_string),
           registry.read_active_referrer(st),
-          DeferPhase(resolve_fn: mk_object(resolve_h), reject_fn:),
+          DeferPhase(resolve_fn:, reject_fn:),
         )
-      use st <- enqueue_host_job(st)
+      use st <- enqueue_host_job(st, [resolve_fn, reject_fn])
       case call_host_hook(st, hook_args) {
         #(st, Ok(_)) -> st
         #(st, Error(reason)) -> call_settle_fn(st, reject_fn, reason)
@@ -367,16 +369,36 @@ fn enqueue_import_job(
   settle: fn(Agent) -> #(Agent, Result(JsVal, JsVal)),
 ) -> Agent {
   let #(#(resolve_h, reject_h), st) = rt_async.alloc_resolving_fns(st, promise)
-  use st <- enqueue_host_job(st)
+  let resolve_fn = mk_object(resolve_h)
+  let reject_fn = mk_object(reject_h)
+  use st <- enqueue_host_job(st, [resolve_fn, reject_fn])
   case settle(st) {
-    #(st, Ok(v)) -> call_settle_fn(st, mk_object(resolve_h), v)
-    #(st, Error(reason)) -> call_settle_fn(st, mk_object(reject_h), reason)
+    #(st, Ok(v)) -> call_settle_fn(st, resolve_fn, v)
+    #(st, Error(reason)) -> call_settle_fn(st, reject_fn, reason)
   }
 }
 
-/// A `HostJob` carries no child capability: settlement happens inside `run`.
-fn enqueue_host_job(st: Agent, run: fn(Agent) -> Agent) -> Agent {
-  rt_async.t_enqueue_job(st, HostJob(run:))
+/// A `HostJob` carries no child capability: settlement happens inside `run`
+/// through `capability`, the import promise's resolving functions. While the
+/// job is queued the closure keeps them traced, but once it runs only Gleam
+/// holds them, and the imported bodies run as root activations whose
+/// `Return` safepoint collects mid-job: hold them as roots until `run` is
+/// done (the promise itself is reachable from either function).
+fn enqueue_host_job(
+  st: Agent,
+  capability: List(JsVal),
+  run: fn(Agent) -> Agent,
+) -> Agent {
+  let job = fn(st) {
+    let #(st, held) = rt_gc.t_hold_roots(st, capability)
+    let #(outcome, st) = protected(st, fn(st) { #(mk_undefined(), run(st)) })
+    let st = rt_gc.t_release_roots(st, held)
+    case outcome {
+      NormalCompletion(_) -> st
+      ThrowCompletion(thrown) -> rt_store.t_throw(st, thrown)
+    }
+  }
+  rt_async.t_enqueue_job(st, HostJob(run: job))
 }
 
 /// Call one of a promise's resolving functions (§27.2.1.3: they return

@@ -14,10 +14,11 @@ import arc/parser
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion} as _
+import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, KNum, KStr, PromiseFulfilled, PromisePending,
-  PromiseRejected, classify, mk_object,
+  type Agent, type JsVal, Agent, JInt, JsStore, KNum, KStr, PromiseFulfilled,
+  PromisePending, PromiseRejected, classify, mk_object,
 }
 import gleam/dict
 import gleam/list
@@ -28,6 +29,22 @@ import rt_helpers
 
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
+}
+
+/// An agent that collects every 64 allocations, so a module body of any size
+/// crosses the root-activation safepoint many times while it runs.
+fn small_gc_agent() -> Agent {
+  let st = agent() |> rt_gc.t_collect([])
+  Agent(..st, store: JsStore(..st.store, gc_threshold: 64))
+}
+
+/// A module source whose body allocates well past the small threshold
+/// through bytecode calls, then exports `tag`.
+fn churning_module(tag: String) -> String {
+  "function churn() { let a = []; for (let i = 0; i < 300; i++) a.push({ i }); return a.length }
+   export const v = '"
+  <> tag
+  <> "' + churn() + churn();"
 }
 
 fn no_drain(st: Agent) -> Agent {
@@ -302,6 +319,121 @@ pub fn import_defer_links_without_evaluating_test() {
   assert global_string(st, "before") == "no"
   assert global_string(st, "v") == "1"
   assert global_string(st, "after") == "yes"
+}
+
+/// A statically imported module that dynamic-imports a relative specifier
+/// AFTER its first top-level await still resolves it against itself, not the
+/// entry (§16.2.1.8: the resumed execution context's ScriptOrModule).
+pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
+  let load = fn(resolved) {
+    case resolved {
+      "/dir/dep.js" -> Ok("await null; export const p = import('./sib.js');")
+      "/dir/sib.js" -> Ok("export const where = 'sib';")
+      _ -> Error(load_error.LoadNotFound)
+    }
+  }
+  let resolve = fn(raw: String, referrer: String) {
+    rt_helpers.record(#(raw, referrer))
+    case raw, referrer {
+      "./dir/dep.js", "/main.js" -> Ok("/dir/dep.js")
+      "./sib.js", "/dir/dep.js" -> Ok("/dir/sib.js")
+      _, _ -> Error(load_error.ResolveNotFound)
+    }
+  }
+  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let assert Ok(bundle) =
+    module.compile_bundle(
+      "/main.js",
+      "import { p } from './dir/dep.js';
+       export let out = 'unset';
+       p.then(ns => { out = ns.where }, e => { out = 'rejected ' + e });",
+      resolve,
+      load,
+    )
+  let assert #(st, Ok(evaluated)) =
+    module_host.evaluate_bundle_with_registry(st, bundle, rt_async.drain)
+  let st = rt_async.drain(st)
+  assert classify(export(st, evaluated, "out")) == KStr("sib")
+  let requests: List(#(String, String)) = rt_helpers.recorded()
+  assert list.contains(requests, #("./sib.js", "/dir/dep.js"))
+}
+
+/// The registry's hidden caches hang off the global object; a guest that
+/// froze or sealed `globalThis` first must not be able to break the loader.
+pub fn dynamic_import_survives_a_non_extensible_global_test() {
+  let #(resolve, load) = files([#("/lib.js", "export const v = 'lib';")])
+  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st =
+    run_script(
+      st,
+      "var out = 'unset';
+       Object.preventExtensions(globalThis);
+       import('/lib.js').then(ns => { out = ns.v }, e => { out = 'rejected ' + e })",
+    )
+  assert global_string(st, "out") == "lib"
+}
+
+pub fn static_module_survives_a_frozen_global_test() {
+  let st = run_script(agent(), "Object.freeze(globalThis)")
+  let #(resolve, load) = files([])
+  let assert Ok(bundle) =
+    module.compile_bundle("/main.js", "export const v = 1;", resolve, load)
+  let assert #(st, Ok(evaluated)) =
+    module.evaluate_bundle(bundle, st, rt_async.drain)
+  assert classify(export(st, evaluated, "v")) == KNum(JInt(1))
+}
+
+// -- Dynamic import under a collecting heap ----------------------------------------
+//
+// The import promise's capability is held only by the import job while the
+// imported bodies run; the bodies cross the root-activation safepoint, so the
+// job must keep the capability alive itself.
+
+pub fn dynamic_import_survives_collection_during_the_body_test() {
+  let #(resolve, load) = files([#("/lib.js", churning_module("lib"))])
+  let st =
+    module_host.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+  let st =
+    run_script(
+      st,
+      "var out = 'unset';
+       import('/lib.js').then(ns => { out = ns.v }, e => { out = 'rejected ' + e })",
+    )
+  assert global_string(st, "out") == "lib300300"
+}
+
+pub fn dynamic_import_of_a_tla_module_survives_collection_test() {
+  let #(resolve, load) =
+    files([#("/tla.js", churning_module("tla") <> "\nawait null;")])
+  let st =
+    module_host.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+  let st =
+    run_script(
+      st,
+      "var out = 'unset';
+       import('/tla.js').then(ns => { out = ns.v }, e => { out = 'rejected ' + e })",
+    )
+  assert global_string(st, "out") == "tla300300"
+}
+
+pub fn import_defer_with_an_async_dep_survives_collection_test() {
+  let #(resolve, load) =
+    files([
+      #(
+        "/lazy.js",
+        "import { v as d } from '/dep.js'; export const v = 'lazy:' + d;",
+      ),
+      #("/dep.js", churning_module("dep") <> "\nawait null;"),
+    ])
+  let st =
+    module_host.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+  let st =
+    run_script(
+      st,
+      "var v = 'unset';
+       import.defer('/lazy.js').then(ns => { v = String(ns.v) }, e => { v = 'rejected ' + e })",
+    )
+  assert global_string(st, "v") == "lazy:dep300300"
 }
 
 pub fn rejected_import_promise_reports_nothing_uncaught_test() {

@@ -25,10 +25,12 @@
 ////                right now (§16.2.1.8 referencingScriptOrModule), one slot.
 
 import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type PropertyKey, DataProperty, KHandle,
-  KStr, Named, StringKey, classify, mk_object, mk_string,
+  KStr, Named, SObject, StringKey, classify, mk_object, mk_string,
 }
+import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 // =============================================================================
@@ -336,9 +338,7 @@ fn read_object_entry(
 }
 
 /// Write `key` → `val` into the hidden cache object `property` on the global,
-/// creating the (null-prototype) cache object on first use. A refused define
-/// is a broken invariant: both targets are ordinary extensible objects and
-/// the entries are configurable.
+/// creating the (null-prototype) cache object on first use.
 fn write_entry(
   st: Agent,
   property: PropertyKey,
@@ -350,24 +350,45 @@ fn write_entry(
     None -> {
       let #(cache, st) = rt_obj.t_new_object(st, None)
       let st =
-        define_or_panic(st, st.realm.global_object, property, mk_object(cache))
+        put_hidden_slot(st, st.realm.global_object, property, mk_object(cache))
       #(cache, st)
     }
   }
-  define_or_panic(st, cache, Named(key), val)
+  put_hidden_slot(st, cache, Named(key), val)
 }
 
-fn define_or_panic(
+/// Install (or replace) `key` as a raw own data slot of `target`, bypassing
+/// [[DefineOwnProperty]]: like a class private element, a registry slot is
+/// engine bookkeeping invisible to integrity levels, so a guest that froze or
+/// sealed `globalThis` cannot make the loader refuse to record its state.
+fn put_hidden_slot(
   st: Agent,
   target: Handle,
   key: PropertyKey,
   val: JsVal,
 ) -> Agent {
-  let #(ok, st) =
-    rt_obj.t_define_own_data(st, target, StringKey(key), val, True, False, True)
-  case ok {
-    True -> st
-    False -> panic as "arc/module/registry: cache entry refused definition"
+  let st = rt_obj.devolve(st, target)
+  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  use slot <- rt_store.t_cell_update(st, target)
+  case slot {
+    SObject(props:, ..) ->
+      SObject(
+        ..slot,
+        props: dict.insert(
+          props,
+          key,
+          DataProperty(
+            value: val,
+            writable: True,
+            enumerable: False,
+            configurable: True,
+            seq:,
+          ),
+        ),
+      )
+    // `devolve` left an object cell an `SObject`; the global and the cache
+    // objects are never data cells.
+    _ -> panic as "arc/module/registry: hidden slot target is not an object"
   }
 }
 
