@@ -364,17 +364,19 @@ fn to_string_type_error(st: Agent) -> a {
 }
 
 /// §10.2.4.1 %ThrowTypeError%, with the V8/JSC legacy relaxation: reading
-/// "caller"/"arguments" on a non-strict plain function yields undefined
-/// instead of throwing. `FnFlags` has no `strict` bit (SPEC §2.4 gap; 2core
-/// emits all user code strict per rt_call.gleam:646-652), so the legacy
-/// relaxation gates on `is_constructor && !is_class_constructor`.
+/// "caller"/"arguments" through Function.prototype's restricted accessor on
+/// a NON-strict plain function yields undefined instead of throwing (V8
+/// returns null, JSC undefined; test262's features:[caller] tests accept
+/// undefined). Everything else still throws: strict functions, class
+/// constructors (always strict), arrows / generators / async functions /
+/// methods (not constructors), bound and native functions.
 fn restricted_function_property(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let is_legacy = case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: KCompiled(flags:, ..), ..)
         | SObject(kind: KBytecode(flags:, ..), ..) ->
-          flags.is_constructor && !flags.is_class_constructor
+          flags.is_constructor && !flags.is_strict
         _ -> False
       }
     _ -> False
