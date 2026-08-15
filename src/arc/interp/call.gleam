@@ -67,7 +67,7 @@ pub fn guarded_unit(
 // -- Agent.frames / call depth ------------------------------------------
 
 /// Script label in `Error.stack` frames.
-pub const stack_source = "script"
+const stack_source = "script"
 
 fn template_frame(template: FuncTemplate) -> types.FrameInfo {
   FrameInfo(
@@ -129,7 +129,7 @@ fn enter_frame(agent: Agent, template: FuncTemplate) -> Result(Agent, Nil) {
 }
 
 /// Leave a flat bytecode frame: `--call_depth` and pop its stack frame.
-pub fn leave_frame(agent: Agent) -> Agent {
+fn leave_frame(agent: Agent) -> Agent {
   let store = agent.store
   let frames = case agent.frames {
     [_, ..rest] -> rest
@@ -589,7 +589,7 @@ fn padded_elements(
 /// §10.1.13 OrdinaryCreateFromConstructor(newTarget, %Object.prototype%):
 /// the fresh receiver for a base-class / plain-function [[Construct]].
 /// `? Get(newTarget, "prototype")` is observable and may raise.
-pub fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
+fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
   let #(proto, agent) =
     rt_call.get_prototype_from_constructor(agent, new_target)
   rt_obj.t_new_object(agent, Some(proto))
@@ -704,7 +704,7 @@ fn construct_handle(
 
 /// Read one of the frame's lexical pseudo-bindings, unboxing a captured
 /// (boxed) slot. `undefined` when the body owns no such slot.
-pub fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
+fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
   case lexical.lexical_slot(state.func.lexical, ref) {
     None -> mk_undefined()
     Some(idx) -> {
@@ -722,7 +722,7 @@ pub fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
 }
 
 /// The frame's current `this` binding (after any `super()` write).
-pub fn read_this_local(state: State) -> JsVal {
+fn read_this_local(state: State) -> JsVal {
   read_lexical_local(state, lexical.RefThis)
 }
 
@@ -731,7 +731,7 @@ pub fn read_this_local(state: State) -> JsVal {
 /// state holding it). `constructor_this` is the base-constructor receiver
 /// (`Some`) or `None` for plain calls and derived constructors (told apart by
 /// the returning template).
-pub fn resolve_return(
+fn resolve_return(
   state: State,
   return_value: JsVal,
   constructor_this: Option(JsVal),
