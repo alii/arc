@@ -1660,12 +1660,50 @@ pub type WeakNative {
   WeakSetDelete
 }
 
+/// Array.fromAsync loop state (iterator path), threaded through the native
+/// promise-reaction continuation closures (§23.1.2.1 step 3.j).
+pub type FromAsyncCtx {
+  FromAsyncCtx(
+    iter: JsVal,
+    next_method: JsVal,
+    map_fn: Option(JsVal),
+    this_arg: JsVal,
+    target: JsVal,
+    k: Int,
+    resolve: JsVal,
+    reject: JsVal,
+  )
+}
+
+/// Array.fromAsync loop state (array-like path, §23.1.2.1 step 3.k).
+pub type FromAsyncLikeCtx {
+  FromAsyncLikeCtx(
+    items: JsVal,
+    map_fn: Option(JsVal),
+    this_arg: JsVal,
+    target: JsVal,
+    k: Int,
+    len: Int,
+    resolve: JsVal,
+    reject: JsVal,
+  )
+}
+
 /// Array natives (arc `ArrayNativeFn` value.gleam:691-735). No Handle-bearing
-/// variants — constructor stores no closed-over state.
+/// variants — constructor stores no closed-over state; the `fromAsync`
+/// continuations close over `JsVal`s only (traced via the whole-tag walk).
 pub type ArrayNative {
   ArrayConstructor
   ArrayIsArray
   ArrayFrom
+  ArrayFromAsync
+  /// Array.fromAsync await continuations (§23.1.2.1).
+  ArrayFromAsyncOnNext(ctx: FromAsyncCtx)
+  ArrayFromAsyncOnMapped(ctx: FromAsyncCtx)
+  ArrayFromAsyncCloseReject(iter: JsVal, reject: JsVal)
+  ArrayFromAsyncRejectWith(error: JsVal, reject: JsVal)
+  ArrayFromAsyncLikeOnValue(ctx: FromAsyncLikeCtx)
+  ArrayFromAsyncLikeOnMapped(ctx: FromAsyncLikeCtx)
   ArrayOf
   ArrayPrototypeJoin
   ArrayPrototypePush

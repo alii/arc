@@ -14,6 +14,7 @@
 //// `move_range`, JsElements ops) are local — arc's fast-path bulk-mutate
 //// pattern (one heap read, one JsElements transform, one heap write) is kept.
 
+import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
@@ -25,15 +26,17 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayNative, type BuiltinPair, type Handle, type JsElements,
   type JsVal, type Property, type PropertyKey, ArrayConstructor, ArrayFrom,
-  ArrayIsArray, ArrayIterEntries, ArrayIterKeys, ArrayIterValues, ArrayIterator,
-  ArrayN, ArrayObj, ArrayOf, ArrayPrototypeAt, ArrayPrototypeConcat,
-  ArrayPrototypeCopyWithin, ArrayPrototypeEntries, ArrayPrototypeEvery,
-  ArrayPrototypeFill, ArrayPrototypeFilter, ArrayPrototypeFind,
-  ArrayPrototypeFindIndex, ArrayPrototypeFindLast, ArrayPrototypeFindLastIndex,
-  ArrayPrototypeFlat, ArrayPrototypeFlatMap, ArrayPrototypeForEach,
-  ArrayPrototypeIncludes, ArrayPrototypeIndexOf, ArrayPrototypeJoin,
-  ArrayPrototypeKeys, ArrayPrototypeLastIndexOf, ArrayPrototypeMap,
-  ArrayPrototypePop, ArrayPrototypePush, ArrayPrototypeReduce,
+  ArrayFromAsync, ArrayFromAsyncCloseReject, ArrayFromAsyncLikeOnMapped,
+  ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped, ArrayFromAsyncOnNext,
+  ArrayFromAsyncRejectWith, ArrayIsArray, ArrayIterEntries, ArrayIterKeys,
+  ArrayIterValues, ArrayIterator, ArrayN, ArrayObj, ArrayOf, ArrayPrototypeAt,
+  ArrayPrototypeConcat, ArrayPrototypeCopyWithin, ArrayPrototypeEntries,
+  ArrayPrototypeEvery, ArrayPrototypeFill, ArrayPrototypeFilter,
+  ArrayPrototypeFind, ArrayPrototypeFindIndex, ArrayPrototypeFindLast,
+  ArrayPrototypeFindLastIndex, ArrayPrototypeFlat, ArrayPrototypeFlatMap,
+  ArrayPrototypeForEach, ArrayPrototypeIncludes, ArrayPrototypeIndexOf,
+  ArrayPrototypeJoin, ArrayPrototypeKeys, ArrayPrototypeLastIndexOf,
+  ArrayPrototypeMap, ArrayPrototypePop, ArrayPrototypePush, ArrayPrototypeReduce,
   ArrayPrototypeReduceRight, ArrayPrototypeReverse, ArrayPrototypeShift,
   ArrayPrototypeSlice, ArrayPrototypeSome, ArrayPrototypeSort,
   ArrayPrototypeSplice, ArrayPrototypeToLocaleString, ArrayPrototypeToReversed,
@@ -120,6 +123,7 @@ pub fn init(
     common.alloc_methods(st, fn_proto, [
       #("isArray", ArrayN(ArrayIsArray), 1),
       #("from", ArrayN(ArrayFrom), 1),
+      #("fromAsync", ArrayN(ArrayFromAsync), 1),
       #("of", ArrayN(ArrayOf), 0),
     ])
   let #(bt, st) =
@@ -218,6 +222,17 @@ pub fn dispatch(
     ArrayConstructor -> construct(st, args)
     ArrayIsArray -> is_array(st, args)
     ArrayFrom -> array_from(st, args)
+    ArrayFromAsync -> array_from_async.from_async(st, this, args)
+    ArrayFromAsyncOnNext(ctx:) -> array_from_async.on_next(st, ctx, args)
+    ArrayFromAsyncOnMapped(ctx:) -> array_from_async.on_mapped(st, ctx, args)
+    ArrayFromAsyncCloseReject(iter:, reject:) ->
+      array_from_async.close_reject(st, iter, reject, args)
+    ArrayFromAsyncRejectWith(error:, reject:) ->
+      array_from_async.reject_with(st, error, reject)
+    ArrayFromAsyncLikeOnValue(ctx:) ->
+      array_from_async.like_on_value(st, ctx, args)
+    ArrayFromAsyncLikeOnMapped(ctx:) ->
+      array_from_async.like_on_mapped(st, ctx, args)
     ArrayOf -> array_of(st, args)
     ArrayPrototypeJoin -> array_join(st, this, args)
     ArrayPrototypePush -> array_push(st, this, args)
