@@ -116,8 +116,8 @@ fn throw_error(st: Agent, kind: rt_types.ErrorKind, msg: String) -> a {
   rt_store.t_throw(st, e)
 }
 
-/// `SObject(kind:)` at `h`, or `None` for a non-`SObject` cell (SBox/SPromise/
-/// SGenerator/SAsyncGen — never callable/constructible).
+/// `SObject(kind:)` at `h`, or `None` for a data cell (never callable or
+/// constructible).
 fn read_obj_kind(st: Agent, h: Handle) -> Option(ObjKind) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind:, ..) -> Some(kind)

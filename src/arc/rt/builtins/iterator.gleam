@@ -9,7 +9,6 @@ import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/rt/builtins/iter_protocol.{IterateStrings, RejectPrimitives}
-import arc/rt/builtins/promise as b_promise
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -762,7 +761,7 @@ fn afs_continuation(
   // are the reaction's child directly (arc promises.gleam:2006-2048).
   let #(inner_p, st) = rt_async.promise_resolve_static(st, inner)
   let st =
-    b_promise.perform_promise_then_with_cap(
+    rt_async.t_perform_then(
       st,
       inner_p,
       on_fulfilled,

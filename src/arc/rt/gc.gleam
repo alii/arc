@@ -16,16 +16,17 @@ import arc/rt/types.{
   type Agent, type Handle, type Job, type JsElements, type JsSlot, type JsStore,
   type JsVal, type ObjKind, type PromiseReaction, type PromiseState,
   type Property, type ReactionHandler, AccessorProperty, Agent, ArgumentsObj,
-  ArrayBufferObj, ArrayIterator, ArrayObj, AsyncFromSyncIterator, BigIntObj,
-  BooleanObj, DataProperty, DataViewObj, DateObj, Dense, ErrorObj, ForInIterator,
-  Handler, HostJob, IdentityPassThrough, IteratorHelperObj, JsCell, JsStore,
-  KBound, KBytecode, KCompiled, KNative, MapIterator, MapObj, ModuleNamespace,
-  NoElements, NumberObj, Ordinary, PromiseFulfilled, PromisePending,
+  ArrayBufferObj, ArrayIterator, ArrayObj, AsyncFromSyncIterator,
+  AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty, DataViewObj, DateObj,
+  Dense, ErrorObj, ForInIterator, GeneratorObj, Handler, HostJob,
+  IdentityPassThrough, IteratorHelperObj, JsCell, JsStore, KBound, KBytecode,
+  KCompiled, KNative, MapIterator, MapObj, ModuleNamespace, NoElements,
+  NumberObj, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
   PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
-  ResolveThenableJob, SAsyncGen, SBox, SGenerator, SObject, SPromise,
-  SShapedObject, SetIterator, SetObj, Sparse, StringIterator, StringObj,
-  SymbolObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakSetObj,
-  WrapForValidIteratorObj, jq_to_list, native_token_refs,
+  ResolveThenableJob, SAsyncContext, SAsyncGen, SBox, SGenerator, SObject,
+  SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, StringIterator,
+  StringObj, SymbolObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj,
+  WeakSetObj, WrapForValidIteratorObj, jq_to_list, native_token_refs,
 } as rt_types
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array as rt_tree_array
@@ -133,15 +134,16 @@ pub fn refs_in_cell(slot: JsSlot) -> List(Int) {
       rt_types.shape_slots_fold(slots, acc, fn(_, v, a) { push_val_refs(v, a) })
     }
     SBox(value:) -> push_val_refs(value, [])
-    SPromise(state:, is_handled: _) -> push_promise_state_refs(state, [])
-    SGenerator(state: _, resume:, gen_cell:) ->
-      // `resume` is an opaque `CompiledFn` (BEAM fun); its captured env is
-      // walked via the FFI's `erlang:fun_info(F, env)` clause.
-      push_term_refs(to_dynamic(resume), [gen_cell.id])
-    SAsyncGen(state: _, resume:, queue:, gen_cell:) -> {
-      let acc = push_term_refs(to_dynamic(resume), [gen_cell.id])
+    SPromiseData(state:, is_handled: _) -> push_promise_state_refs(state, [])
+    // A `Resume` holds the state machine fun (captures in its env) plus the
+    // locals tuple, or a parked frame: all walked by the FFI term scanner.
+    SGenerator(state: _, resume:) -> push_term_refs(to_dynamic(resume), [])
+    SAsyncGen(state: _, resume:, queue:) -> {
+      let acc = push_term_refs(to_dynamic(resume), [])
       push_term_refs(to_dynamic(queue), acc)
     }
+    SAsyncContext(resume:, promise:) ->
+      push_term_refs(to_dynamic(resume), [promise.id])
   }
 }
 
@@ -221,6 +223,9 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     MapIterator(target:, index: _, kind: _) -> [target.id, ..acc]
     SetIterator(target:, index: _, kind: _) -> [target.id, ..acc]
     StringIterator(source: _, index: _) -> acc
+    PromiseObj(data:) -> [data.id, ..acc]
+    GeneratorObj(data:) -> [data.id, ..acc]
+    AsyncGeneratorObj(data:) -> [data.id, ..acc]
     AsyncFromSyncIterator(sync_rec:) -> [sync_rec.id, ..acc]
     // ES2025 iterator helpers — payload nests JsVals + Option(IteratorRecord);
     // walk via the FFI term scanner (arc parity: value.gleam refs are opaque).

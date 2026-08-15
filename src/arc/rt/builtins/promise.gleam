@@ -24,20 +24,17 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type PromiseNative,
-  Agent, ArrayObj, Dense, Handler, IdentityPassThrough, JInt, JsCell, JsStore,
-  KHandle, Named, PromiseAllResolveElement, PromiseAllSettledElement,
-  PromiseAllSettledStatic, PromiseAllStatic, PromiseAnyRejectElement,
-  PromiseAnyStatic, PromiseCapabilityExecutor, PromiseCatch, PromiseConstructor,
-  PromiseFinally, PromiseFinallyFn, PromiseFinallyThrower,
-  PromiseFinallyValueThunk, PromiseFulfilled, PromiseN, PromisePending,
-  PromiseRaceStatic, PromiseReaction, PromiseRejectStatic, PromiseRejected,
-  PromiseResolveStatic, PromiseThen, ReactionJob, ReturnThis, SBox, SObject,
-  SPromise, StringKey, ThrowerPassThrough, TypeErr, classify, mk_bool, mk_number,
-  mk_object, mk_string, mk_undefined,
+  ArrayObj, Dense, JInt, KHandle, Named, PromiseAllResolveElement,
+  PromiseAllSettledElement, PromiseAllSettledStatic, PromiseAllStatic,
+  PromiseAnyRejectElement, PromiseAnyStatic, PromiseCapabilityExecutor,
+  PromiseCatch, PromiseConstructor, PromiseFinally, PromiseFinallyFn,
+  PromiseFinallyThrower, PromiseFinallyValueThunk, PromiseN, PromiseRaceStatic,
+  PromiseRejectStatic, PromiseResolveStatic, PromiseThen, ReturnThis, SBox,
+  SObject, StringKey, TypeErr, classify, mk_bool, mk_number, mk_object,
+  mk_string, mk_undefined,
 } as rt_types
 import arc/vm/internal/tree_array
 import gleam/int
-import gleam/list
 import gleam/option.{None, Some}
 
 // ── init (arc builtins/promise.gleam:22-72) ─────────────────────────────────
@@ -166,21 +163,27 @@ pub fn dispatch(
   }
 }
 
-/// `new Promise(executor)` — §27.2.3.1. Called via `dispatch_native_construct`
-/// (rt_call.gleam:92-98). Returns the SPromise cell handle.
+/// `new Promise(executor)` — §27.2.3.1. Called via `dispatch_native_construct`.
+/// Returns the promise object handle, created from `new_target`'s prototype
+/// so subclass instances get the subclass prototype.
 pub fn dispatch_construct(
   st: Agent,
   args: List(JsVal),
-  _new_target: JsVal,
+  new_target: JsVal,
 ) -> #(Handle, Agent) {
   let executor = first_arg_or_undefined(args)
   // Step 2: If IsCallable(executor) is false, throw TypeError.
   case is_callable(st, executor) {
     False -> throw_type_error(st, "Promise resolver is not a function")
     True -> {
-      // Steps 3-8: NewPromiseCapability(%Promise%).
-      let #(#(promise_h, resolve_h, reject_h), st) =
-        rt_async.t_new_promise_capability(st)
+      // Steps 3-7: OrdinaryCreateFromConstructor(NewTarget,
+      // "%Promise.prototype%") + internal slots; step 8:
+      // CreateResolvingFunctions.
+      let #(proto, st) =
+        proto_from_new_target(st, new_target, st.realm.promise.prototype)
+      let #(promise_h, st) = rt_async.t_new_promise_with_proto(st, Some(proto))
+      let #(#(resolve_h, reject_h), st) =
+        rt_async.alloc_resolving_fns(st, promise_h)
       let resolve = mk_object(resolve_h)
       let reject = mk_object(reject_h)
       // Step 9: Completion(Call(executor, undefined, « resolve, reject »)).
@@ -204,7 +207,7 @@ pub fn dispatch_construct(
 
 fn then(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(on_fulfilled, on_rejected) = two_args_or_undefined(args)
-  // Step 2: IsPromise(this) — must be an SPromise cell.
+  // Step 2: IsPromise(this).
   let promise_h = require_promise(st, this, "Promise.prototype.then")
   // Step 3: C = ? SpeciesConstructor(promise, %Promise%).
   let #(c, st) = species_constructor(st, this)
@@ -213,7 +216,7 @@ fn then(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(cap, st) = new_capability_from_constructor(st, c)
   // Step 5: PerformPromiseThen(promise, onFulfilled, onRejected, resultCap).
   let st =
-    perform_promise_then_with_cap(
+    rt_async.t_perform_then(
       st,
       promise_h,
       on_fulfilled,
@@ -222,106 +225,6 @@ fn then(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       cap.reject,
     )
   #(cap.promise, st)
-}
-
-/// §27.2.5.4.1 PerformPromiseThen with a caller-supplied capability. Port of
-/// arc `perform_promise_then` (promises.gleam:465-568) — attaches the reaction
-/// with the SUPPLIED resolve/reject as the child directly (no fresh capability,
-/// no extra hop). Shared by `then` and §27.1.4.4 AsyncFromSyncContinuation.
-pub fn perform_promise_then_with_cap(
-  st: Agent,
-  promise_h: Handle,
-  on_fulfilled: JsVal,
-  on_rejected: JsVal,
-  cap_resolve: JsVal,
-  cap_reject: JsVal,
-) -> Agent {
-  // Steps 3-6: non-callable → the spec's "empty" handler.
-  let fulfill_handler = case is_callable(st, on_fulfilled) {
-    True -> Handler(on_fulfilled)
-    False -> IdentityPassThrough
-  }
-  let reject_handler = case is_callable(st, on_rejected) {
-    True -> Handler(on_rejected)
-    False -> ThrowerPassThrough
-  }
-  case rt_store.t_cell_get(st, promise_h) {
-    // Step 9: pending → append reaction; step 12: [[PromiseIsHandled]] = true.
-    SPromise(state: PromisePending(reactions), ..) ->
-      rt_store.t_cell_set(
-        st,
-        promise_h,
-        SPromise(
-          PromisePending([
-            PromiseReaction(
-              on_fulfill: fulfill_handler,
-              on_reject: reject_handler,
-              child_resolve: cap_resolve,
-              child_reject: cap_reject,
-            ),
-            ..reactions
-          ]),
-          True,
-        ),
-      )
-    // Step 10: fulfilled → mark handled + enqueue fulfill reaction job.
-    SPromise(state: PromiseFulfilled(value), ..) -> {
-      let st = mark_handled(st, promise_h)
-      rt_async.t_enqueue_job(
-        st,
-        ReactionJob(
-          handler: fulfill_handler,
-          arg: value,
-          resolve: cap_resolve,
-          reject: cap_reject,
-        ),
-      )
-    }
-    // Step 11: rejected → mark handled + untrack rejection + enqueue.
-    SPromise(state: PromiseRejected(reason), is_handled:) -> {
-      let st = mark_handled(st, promise_h)
-      let st = case is_handled {
-        False -> untrack_rejection(st, promise_h)
-        True -> st
-      }
-      rt_async.t_enqueue_job(
-        st,
-        ReactionJob(
-          handler: reject_handler,
-          arg: reason,
-          resolve: cap_resolve,
-          reject: cap_reject,
-        ),
-      )
-    }
-    _ ->
-      panic as "perform_promise_then_with_cap: Handle is not an SPromise cell"
-  }
-}
-
-/// Set `[[PromiseIsHandled]] = true` (§27.2.5.4.1 step 12).
-fn mark_handled(st: Agent, promise_h: Handle) -> Agent {
-  rt_store.t_cell_update(st, promise_h, fn(slot) {
-    case slot {
-      SPromise(state:, ..) -> SPromise(state:, is_handled: True)
-      other -> other
-    }
-  })
-}
-
-/// HostPromiseRejectionTracker(promise, "handle") — §27.2.5.4.1 step 11c.
-fn untrack_rejection(st: Agent, promise_h: Handle) -> Agent {
-  let js = st.store
-  let JsCell(id) = promise_h
-  Agent(
-    ..st,
-    store: JsStore(
-      ..js,
-      unhandled_rejections: list.filter(js.unhandled_rejections, fn(r) {
-        r != id
-      }),
-    ),
-  )
 }
 
 // ── §27.2.5.3 Promise.prototype.finally ─────────────────────────────────────
@@ -407,7 +310,7 @@ fn resolve_static(
   let realm = st.realm
   let intrinsic = mk_object(realm.promise.constructor)
   // §27.2.4.7.1 step 1: if x is a promise whose constructor is C, return x.
-  case as_promise(st, val) {
+  case rt_async.as_promise(st, val) {
     Some(_) -> {
       let #(ctor, st) =
         rt_obj.t_get_prop(st, val, StringKey(Named("constructor")))
@@ -784,8 +687,8 @@ fn with_element_once(
 
 // ── §27.2.1.5 NewPromiseCapability + GetCapabilitiesExecutor ────────────────
 
-/// PromiseCapability Record (§27.2.1.1) — `promise` is a `JsVal` (may be a
-/// user-constructed non-SPromise object).
+/// PromiseCapability Record (§27.2.1.1) — `promise` is a `JsVal` (may be
+/// any object a user constructor returned).
 type Capability {
   Capability(promise: JsVal, resolve: JsVal, reject: JsVal)
 }
@@ -1023,21 +926,23 @@ fn make_aggregate_error(st: Agent, errors_h: Handle) -> #(JsVal, Agent) {
 }
 
 fn require_promise(st: Agent, this: JsVal, name: String) -> Handle {
-  case as_promise(st, this) {
+  case rt_async.as_promise(st, this) {
     Some(h) -> h
     None -> throw_type_error(st, name <> " called on non-promise")
   }
 }
 
-/// IsPromise(v) that also yields the `SPromise` cell handle on success.
-fn as_promise(st: Agent, v: JsVal) -> option.Option(Handle) {
-  case classify(v) {
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SPromise(..) -> Some(h)
-        _ -> None
-      }
-    _ -> None
+/// §10.1.13.2 GetPrototypeFromConstructor with the intrinsic fallback.
+fn proto_from_new_target(
+  st: Agent,
+  new_target: JsVal,
+  fallback: Handle,
+) -> #(Handle, Agent) {
+  let #(proto, st) =
+    rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
+  case classify(proto) {
+    KHandle(h) -> #(h, st)
+    _ -> #(fallback, st)
   }
 }
 

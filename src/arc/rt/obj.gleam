@@ -26,9 +26,9 @@ import arc/rt/types.{
   type Property, type PropertyKey, type SymbolId, type TypedArrayKind,
   AccessorProperty, Agent, ArgumentsObj, ArrayObj, DataProperty, Dense, Index,
   JsStore, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named, NoElements,
-  Ordinary, ParsedDesc, Private, ProxyObj, SAsyncGen, SBox, SGenerator, SObject,
-  SPromise, SShapedObject, ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr,
-  TypedArrayObj,
+  Ordinary, ParsedDesc, Private, ProxyObj, SAsyncContext, SAsyncGen, SBox,
+  SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, StringKey,
+  StringObj, SymbolKey, TypeErr, TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
@@ -63,34 +63,21 @@ fn throw_type_error(st: Agent, msg: String) -> a {
   rt_store.t_throw(st, e)
 }
 
-/// Read the `SObject` cell backing property MOP for `h`. `SGenerator` /
-/// `SAsyncGen` delegate to their `gen_cell` shell (a real `SObject` whose
-/// proto reaches `%GeneratorPrototype%` / `%AsyncGeneratorPrototype%` — see
-/// `rt_async.t_gen_start`/`t_asyncgen_start`). `SPromise` (single-cell,
-/// no shell) synthesizes a proto-only view onto `%Promise.prototype%` with
-/// `extensible: False` so every write path rejects BEFORE reaching a
-/// `t_cell_update` that would panic on the non-`SObject` cell. `SBox` is an
-/// internal capture cell — never a JS receiver.
+/// Read the object cell backing property MOP for `h`: an `SObject`, or an
+/// `SShapedObject` returned as-is (hot-path callers handle it via
+/// `own_property_shaped`; write-path callers `devolve` first, avoiding the
+/// `as_sobject` dict.fold rebuild). Data cells (`SBox`, promise/generator
+/// state, async contexts) are never a JS receiver.
 fn read_object(st: Agent, h: Handle) -> JsSlot {
   case rt_store.t_cell_get(st, h) {
     SObject(..) as obj -> obj
-    SGenerator(gen_cell:, ..) -> read_object(st, gen_cell)
-    SAsyncGen(gen_cell:, ..) -> read_object(st, gen_cell)
-    SPromise(..) ->
-      SObject(
-        kind: Ordinary,
-        proto: Some(st.realm.promise.prototype),
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: False,
-      )
-    // Shaped-direct: hot-path callers handle via `own_property_shaped`;
-    // write-path callers `devolve` first. Avoids the `as_sobject` dict.fold
-    // rebuild (~87% of the perf5 raytrace regression).
     SShapedObject(..) as s -> s
-    SBox(..) ->
-      panic as "rt_obj: SBox capture cell used as JS receiver (engine invariant)"
+    SBox(..)
+    | SPromiseData(..)
+    | SGenerator(..)
+    | SAsyncGen(..)
+    | SAsyncContext(..) ->
+      panic as "rt_obj: internal data cell used as JS receiver (engine invariant)"
   }
 }
 
@@ -223,20 +210,6 @@ pub fn devolve(st: Agent, h: Handle) -> Agent {
   case rt_store.t_cell_get(st, h) {
     SShapedObject(..) as s -> rt_store.t_cell_set(st, h, as_sobject(st, s))
     _ -> st
-  }
-}
-
-/// Resolve `h` to the `Handle` whose cell is the actual `SObject` that
-/// `t_cell_update` should mutate for a property MOP write on `h`.
-/// `SGenerator`/`SAsyncGen` redirect to their `gen_cell` shell so own-prop
-/// writes land on the shell; `SObject`/`SPromise`/`SBox` return `h` unchanged
-/// (`SPromise` writes never reach `t_cell_update` — `read_object` reports it
-/// non-extensible so every write guard rejects first).
-fn resolve_object_handle(st: Agent, h: Handle) -> Handle {
-  case rt_store.t_cell_get(st, h) {
-    SGenerator(gen_cell:, ..) -> resolve_object_handle(st, gen_cell)
-    SAsyncGen(gen_cell:, ..) -> resolve_object_handle(st, gen_cell)
-    _ -> h
   }
 }
 
@@ -558,7 +531,6 @@ pub fn t_set_prototype(
   obj: Handle,
   new_proto: Option(Handle),
 ) -> #(Bool, Agent) {
-  let obj = resolve_object_handle(st, obj)
   let st = devolve(st, obj)
   let assert SObject(kind:, proto: current, extensible:, ..) =
     read_object(st, obj)
@@ -897,7 +869,6 @@ fn set_on_receiver(
 ) -> #(Bool, Agent) {
   case rt_types.classify(receiver) {
     KHandle(recv_h) -> {
-      let recv_h = resolve_object_handle(st, recv_h)
       case read_object(st, recv_h), key {
         SShapedObject(shape_id:, proto:, slots:), StringKey(Named(name)) ->
           set_own_shaped(st, recv_h, shape_id, proto, slots, name, v)
@@ -1377,7 +1348,6 @@ pub fn t_define_own_prop(
   key: ObjectKey,
   desc: ParsedDesc,
 ) -> #(Bool, Agent) {
-  let obj = resolve_object_handle(st, obj)
   let st = devolve(st, obj)
   let assert SObject(kind:, props:, symbol_props:, elements:, extensible:, ..) =
     read_object(st, obj)
@@ -1853,7 +1823,6 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
 /// `#(False, st)` when the property is non-configurable. Port of arc
 /// `delete_property` + `delete_symbol_property` (`object.gleam:2118-2305`).
 pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
-  let obj = resolve_object_handle(st, obj)
   let st = devolve(st, obj)
   let assert SObject(kind:, props:, symbol_props:, elements:, ..) =
     read_object(st, obj)
@@ -2259,10 +2228,8 @@ fn slot_extensible(slot: JsSlot) -> Bool {
 /// **[[PreventExtensions]] ( )** — §10.5.4 for proxies (the
 /// `preventExtensions` trap; `False` when the trap refuses), else §10.1.4.1
 /// OrdinaryPreventExtensions (always `True`). Short-circuits when already
-/// non-extensible (spec no-op; keeps the `SPromise`-never-reaches-
-/// `t_cell_update` invariant of `read_object`).
+/// non-extensible (spec no-op).
 pub fn t_prevent_extensions(st: Agent, h: Handle) -> #(Bool, Agent) {
-  let h = resolve_object_handle(st, h)
   let st = devolve(st, h)
   let assert SObject(kind:, extensible:, ..) = read_object(st, h)
   use <- proxy_or(kind, proxy_prevent_extensions(st, _))

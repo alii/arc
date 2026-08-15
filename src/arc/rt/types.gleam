@@ -793,8 +793,8 @@ pub type NativeToken {
   PromiseResolveFn(promise: Handle, already_resolved: Handle)
   /// §27.2.1.3.1 Promise Reject Function — same closure fields as resolve.
   PromiseRejectFn(promise: Handle, already_resolved: Handle)
-  /// Async-function await resumption (§27.7.5.3 steps 3c/5c): re-drives
-  /// `gen`'s pinned `resume` (`{Sm,Rs,Loc}`) with `Sent = {mode, args[0]}`.
+  /// Async-function await resumption (§27.7.5.3 steps 3c/5c): continues the
+  /// `SAsyncContext` at `gen` with `Sent = {mode, args[0]}`.
   AsyncResume(gen: Handle, is_throw: Bool)
   /// Async-generator internal-await resumption (§27.6.3.5 machinery).
   /// `kind` distinguishes body-await vs the two driver-level return awaits.
@@ -2033,6 +2033,15 @@ pub type ObjKind {
   MapIterator(target: Handle, index: Int, kind: MapIterKind)
   SetIterator(target: Handle, index: Int, kind: SetIterKind)
   StringIterator(source: String, index: Int)
+  /// §27.2 Promise instance; [[PromiseState]]/[[PromiseIsHandled]] and the
+  /// reactions live in the `SPromiseData` cell at `data`.
+  PromiseObj(data: Handle)
+  /// §27.5 Generator instance; [[GeneratorState]] and the suspension live in
+  /// the `SGenerator` cell at `data`.
+  GeneratorObj(data: Handle)
+  /// §27.6 AsyncGenerator instance; state, suspension and the request queue
+  /// live in the `SAsyncGen` cell at `data`.
+  AsyncGeneratorObj(data: Handle)
   AsyncFromSyncIterator(sync_rec: Handle)
   /// ES2025 §27.1.4 %IteratorHelper% — map/filter/take/drop/flatMap/zip/
   /// concat. `gen_state` is that closure generator's [[GeneratorState]].
@@ -2041,10 +2050,11 @@ pub type ObjKind {
   WrapForValidIteratorObj(record: IteratorRecord)
 }
 
-/// A heap cell's contents. `SObject` is the common case; the others are
-/// non-object cells (boxed captured bindings, promises, generators). M2's
-/// `refs_in_cell` matches this WITHOUT a wildcard — adding a variant is a
-/// compile error there by design (SPEC §7.M1a invariant).
+/// A heap cell's contents. `SObject`/`SShapedObject` are the JS-visible
+/// objects; the others are internal data cells an object (or a native
+/// closure) points at and are never a JS receiver. `gc.refs_in_cell` matches
+/// this WITHOUT a wildcard — adding a variant is a compile error there by
+/// design.
 pub type JsSlot {
   SObject(
     kind: ObjKind,
@@ -2055,14 +2065,20 @@ pub type JsSlot {
     extensible: Bool,
   )
   SBox(value: JsVal)
-  SPromise(state: PromiseState, is_handled: Bool)
-  SGenerator(state: GeneratorState, resume: Resume, gen_cell: Handle)
+  /// Behind a `PromiseObj`.
+  SPromiseData(state: PromiseState, is_handled: Bool)
+  /// Behind a `GeneratorObj`.
+  SGenerator(state: GeneratorState, resume: Resume)
+  /// Behind an `AsyncGeneratorObj`.
   SAsyncGen(
     state: AsyncGenState,
     resume: Resume,
     queue: #(List(AsyncGenRequest), List(AsyncGenRequest)),
-    gen_cell: Handle,
   )
+  /// A running async function: where its body resumes after the current
+  /// `await`, and the result promise object it settles. Reachable only from
+  /// the `AsyncResume` closures of that await.
+  SAsyncContext(resume: Resume, promise: Handle)
   /// Hidden-class fast object: props are a flat slot array indexed by
   /// `ShapeDesc.offsets`. Devolves to `SObject` on delete/accessor/etc.
   SShapedObject(shape_id: Int, proto: Option(Handle), slots: ShapeSlots)

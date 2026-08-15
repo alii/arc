@@ -450,3 +450,22 @@ pub fn unhandled_rejection_report_diff_test() {
   let assert Ok(_) = c.result
   assert harness.err_read() == <<"Uncaught (in promise) RangeError: e\n":utf8>>
 }
+
+// ── Promises and generators are ordinary objects (N21) ─────────────────────
+
+pub fn promise_and_generator_take_own_properties_diff_test() {
+  diff(
+    "var p=Promise.resolve(1);p.tag='t';function* g(){yield 1;yield 2}var it=g();it.n=9;console.log(p.tag,Object.isExtensible(p),Object.keys(p).join(),it.n,Object.isExtensible(it),it.next().value,it.n,Object.keys(it).join());Object.preventExtensions(p);console.log(Object.isExtensible(p),p instanceof Promise,Object.getPrototypeOf(it)===Object.getPrototypeOf(g()))",
+    "t true tag 9 true 1 9 n\nfalse true true\n",
+  )
+}
+
+/// A promise subclass built with `Reflect.construct`: instances get the
+/// subclass prototype from `new.target`, and `then` goes through the species
+/// constructor so its result is a subclass instance too.
+pub fn promise_subclass_via_new_target_diff_test() {
+  diff(
+    "function P(ex){return Reflect.construct(Promise,[ex],P)}Object.setPrototypeOf(P,Promise);P.prototype=Object.create(Promise.prototype);P.prototype.constructor=P;var q=new P(function(r){r(7)});var c=q.then(function(v){console.log('v',v)});console.log(q instanceof P,Object.getPrototypeOf(q)===P.prototype,c instanceof P,q instanceof Promise)",
+    "true true true true\nv 7\n",
+  )
+}

@@ -57,10 +57,28 @@ pub fn record(term: a) -> Nil
 @external(erlang, "rt_helpers_ffi", "recorded")
 pub fn recorded() -> List(a)
 
+/// A Gleam closure as compiled-function code over `(st, frame, args)`.
 @external(erlang, "arc_rt_store_ffi", "identity")
-fn as_code(
+pub fn as_code(
   f: fn(Agent, rt_call.Frame, List(JsVal)) -> #(JsVal, Agent),
 ) -> CompiledFn
+
+/// Element `n` (1-based) of a call frame: this, active function, home
+/// object, new.target.
+@external(erlang, "erlang", "element")
+pub fn frame_at(n: Int, frame: rt_call.Frame) -> JsVal
+
+/// An arbitrary term as a `Frame` / `Loc` for drivers that never read it.
+@external(erlang, "arc_rt_store_ffi", "identity")
+pub fn as_frame(t: a) -> rt_call.Frame
+
+@external(erlang, "arc_rt_store_ffi", "identity")
+pub fn as_loc(t: a) -> types.Loc
+
+/// A compiled state machine that yields `a`, yields `b`, then returns
+/// `done`, reading them from `Loc = #(a, b, done)`.
+@external(erlang, "rt_helpers_ffi", "counter_sm")
+pub fn counter_sm() -> types.SmFn
 
 /// A JS function object whose body is the Gleam `body(st, args)`.
 pub fn func(

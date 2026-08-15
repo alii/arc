@@ -22,18 +22,19 @@ import arc/rt/types.{
   type AGResumeKind, type Agent, type AsyncGenRequest, type AsyncGenState,
   type GeneratorCompletion, type Handle, type Job, type JsSlot, type JsStore,
   type JsVal, type Loc, type NativeToken, type PromiseReaction,
-  type ReactionHandler, type Resume, type SmFn, type Step, AGAwaitingReturn,
-  AGCompleted, AGExecuting, AGResumeAwaitingReturn, AGResumeBody,
-  AGResumeReturnUnwind, AGSuspendedStart, AGSuspendedYield, Agent,
-  AsyncGenRequest, AsyncGenResume, AsyncResume, DataProperty, ErrorObj,
-  GenCompleted, GenExecuting, GenNext, GenReturn, GenSuspendedStart,
-  GenSuspendedYield, GenThrow, Handler, HostJob, IdentityPassThrough, JsCell,
-  JsStore, KHandle, KNative, KStr, KSym, Named, NoElements, Ordinary,
-  PromiseFulfilled, PromisePending, PromiseReaction, PromiseRejectFn,
-  PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob,
-  ResumeCompiled, ResumeFrame, SAsyncGen, SBox, SGenerator, SObject, SPromise,
-  StepAwait, StepReturn, StepThrow, StepYield, StringKey, ThrowerPassThrough,
-  TypeErr, classify, jq_pop, jq_push, mk_bool, mk_object, mk_undefined,
+  type PromiseState, type ReactionHandler, type Resume, type SmFn, type Step,
+  AGAwaitingReturn, AGCompleted, AGExecuting, AGResumeAwaitingReturn,
+  AGResumeBody, AGResumeReturnUnwind, AGSuspendedStart, AGSuspendedYield, Agent,
+  AsyncGenRequest, AsyncGenResume, AsyncGeneratorObj, AsyncResume, DataProperty,
+  ErrorObj, GenCompleted, GenExecuting, GenNext, GenReturn, GenSuspendedStart,
+  GenSuspendedYield, GenThrow, GeneratorObj, Handler, HostJob,
+  IdentityPassThrough, JsCell, JsStore, KHandle, KNative, KStr, KSym, Named,
+  NoElements, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
+  PromiseReaction, PromiseRejectFn, PromiseRejected, PromiseResolveFn,
+  ReactionJob, ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext,
+  SAsyncGen, SBox, SGenerator, SObject, SPromiseData, StepAwait, StepReturn,
+  StepThrow, StepYield, StringKey, ThrowerPassThrough, TypeErr, classify, jq_pop,
+  jq_push, mk_bool, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -122,11 +123,10 @@ pub fn step_unreachable(_st: Agent, _v: JsVal, _resume: Resume) -> r {
   panic as "rt_async: unreachable Step variant for this coroutine kind"
 }
 
-// ── native-closure allocation (u-native-closure-encoding, arc port) ─────────
-// CHOSEN encoding: data-carrying `NativeToken` variants (M6.md §2/§7 + arc
-// `value.gleam:3020-3055`). `KNative` stays payload-free; the closed-over
-// `Handle`s ride on the tag and reach `dispatch_native` directly. GC-trace
-// hook is `rt_types.native_token_refs` — NOT YET WIRED at rt_gc:175.
+// ── native-closure allocation ───────────────────────────────────────────────
+// Data-carrying `NativeToken` variants (arc `value.gleam:3020-3055`):
+// `KNative` stays payload-free; the closed-over `Handle`s ride on the tag,
+// reach `dispatch_native` directly and are traced via `native_token_refs`.
 
 /// Allocate a `KNative` function object: `SObject{kind: KNative(tag,…),
 /// proto: %Function.prototype%}`. Port of arc `common.alloc_call_fn`.
@@ -167,14 +167,14 @@ pub fn alloc_resolving_fns(
 
 /// §27.7.5.3 Await steps 3-5: allocate the on-fulfilled/on-rejected `KNative`
 /// resume closure for a plain async function. The `Resume` is already stored
-/// on `gen_h`'s cell — the closure carries only `(gen_h, is_throw)`, matching
-/// arc `AsyncResume(data_ref, is_reject)`.
+/// on the context cell — the closure carries only `(ctx_h, is_throw)`,
+/// matching arc `AsyncResume(data_ref, is_reject)`.
 pub fn alloc_resume(
   st: Agent,
-  gen_h: Handle,
+  ctx_h: Handle,
   is_throw: Bool,
 ) -> #(Handle, Agent) {
-  alloc_native_fn(st, AsyncResume(gen: gen_h, is_throw:), "", 1)
+  alloc_native_fn(st, AsyncResume(gen: ctx_h, is_throw:), "", 1)
 }
 
 /// Async-generator counterpart of `alloc_resume` — dispatches to the
@@ -233,7 +233,7 @@ fn finish_drain(st: Agent) -> Agent {
   let js = require_js(st)
   list.each(js.unhandled_rejections, fn(id) {
     case rt_store.t_cell_get(st, JsCell(id)) {
-      SPromise(state: PromiseRejected(reason), ..) ->
+      SPromiseData(state: PromiseRejected(reason), ..) ->
         st.hooks.report_uncaught(
           "Uncaught (in promise) " <> describe_thrown(st, reason),
         )
@@ -356,18 +356,62 @@ pub fn alloc_iter_result(
   )
 }
 
+/// Allocate the JS-visible object of `kind` over an already-allocated data
+/// cell: ordinary, extensible, `[[Prototype]] = proto`.
+fn alloc_shell(
+  st: Agent,
+  kind: rt_types.ObjKind,
+  proto: Option(Handle),
+) -> #(Handle, Agent) {
+  rt_store.t_cell_new(
+    st,
+    SObject(
+      kind:,
+      proto:,
+      props: dict.new(),
+      symbol_props: [],
+      elements: NoElements,
+      extensible: True,
+    ),
+  )
+}
+
 // ── sync generator driver (port arc generators.gleam:52-331) ───────────────
+// Two cells: the JS-visible `SObject(kind: GeneratorObj(data))` and the
+// `SGenerator` data cell. `t_gen_start` returns the object; the prototype
+// methods brand-check the object (`generator_data`) and drive the data cell.
 // One resume covers arc's `run_to_completion` / `unwind_return` / catch-
 // unwinding: `apply_resume` re-enters the body with `Sent = {mode, value}` and
 // the body itself routes to the enclosing catch/finally, so this driver never
 // walks a try-stack. `yield*` is lowered inside the body — no delegate arm.
 
-/// Read the `SGenerator` at `gen_h`, or raise TypeError. Port of arc
-/// `get_generator_data` (D7 — arc's `None` becomes a raise here).
-fn require_generator(st: Agent, gen_h: Handle) -> JsSlot {
+/// §27.5.3.2 GeneratorValidate brand check: the `SGenerator` data handle
+/// behind generator object `this`, or a TypeError.
+pub fn generator_data(st: Agent, this: JsVal) -> Handle {
+  let data = case classify(this) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: GeneratorObj(data:), ..) -> Some(data)
+        _ -> None
+      }
+    _ -> None
+  }
+  case data {
+    Some(data) -> data
+    None ->
+      throw_type_error(
+        st,
+        "Generator.prototype method called on incompatible receiver",
+      )
+  }
+}
+
+/// Read the `SGenerator` data cell at `gen_h`.
+fn read_generator(st: Agent, gen_h: Handle) -> JsSlot {
   case rt_store.t_cell_get(st, gen_h) {
     SGenerator(..) as gen -> gen
-    _ -> throw_type_error(st, "not a generator object")
+    _ ->
+      panic as "rt_async: Handle is not an SGenerator cell (engine invariant)"
   }
 }
 
@@ -379,20 +423,17 @@ fn set_gen_state(
   gen: JsSlot,
   new_state: rt_types.GeneratorState,
 ) -> Agent {
-  let assert SGenerator(resume:, gen_cell:, ..) = gen
-  rt_store.t_cell_set(
-    st,
-    gen_h,
-    SGenerator(state: new_state, resume:, gen_cell:),
-  )
+  let assert SGenerator(resume:, ..) = gen
+  rt_store.t_cell_set(st, gen_h, SGenerator(state: new_state, resume:))
 }
 
-/// §27.5.1.2 GeneratorStart — allocate the generator object for a call to a
-/// compiled generator function. Captures are already curried into `sm` by
-/// `MakeClosure` and args/frame are already packed into `loc0` by the outer
-/// prologue, so `_frame`/`_args` are accepted for parity with the op-table's
-/// 4-arg `gen_start` row but never read. Returns the `SGenerator` cell
-/// handle.
+/// §27.5.1.2 GeneratorStart — allocate the generator for a call to a compiled
+/// generator function: the `SGenerator` data cell plus the JS-visible
+/// `GeneratorObj` whose prototype is `%GeneratorPrototype%`. Captures are
+/// already curried into `sm` by `MakeClosure` and args/frame are already
+/// packed into `loc0` by the outer prologue, so `_frame`/`_args` are accepted
+/// for parity with the op-table's 4-arg `gen_start` row but never read.
+/// Returns the object handle.
 pub fn t_gen_start(
   st: Agent,
   sm: SmFn,
@@ -400,36 +441,23 @@ pub fn t_gen_start(
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
-  // Shell: the JS-visible object whose proto chain reaches
-  // `%GeneratorPrototype%`'s `next`/`return`/`throw` (M6 native delegates).
-  let #(shell_h, st) =
+  let #(data, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: Ordinary,
-        proto: Some(st.realm.generator.prototype),
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+      SGenerator(
+        state: GenSuspendedStart,
+        resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
       ),
     )
-  rt_store.t_cell_new(
-    st,
-    SGenerator(
-      state: GenSuspendedStart,
-      resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
-      gen_cell: shell_h,
-    ),
-  )
+  alloc_shell(st, GeneratorObj(data:), Some(st.realm.generator.prototype))
 }
 
-/// §27.5.3.3 GeneratorResume — `Generator.prototype.next(value)`. Returns a
-/// fresh iter-result `{value, done}` handle. Port of arc
-/// `resume_generator_next` + `alloc_iter_result` (arc:52-113).
+/// §27.5.3.3 GeneratorResume — `Generator.prototype.next(value)` on the data
+/// cell `gen_h`. Returns a fresh iter-result `{value, done}` handle. Port of
+/// arc `resume_generator_next` + `alloc_iter_result` (arc:52-113).
 pub fn t_gen_next(st: Agent, gen_h: Handle, sent: JsVal) -> #(Handle, Agent) {
-  let gen = require_generator(st, gen_h)
-  let assert SGenerator(state:, resume:, ..) = gen
+  let gen = read_generator(st, gen_h)
+  let assert SGenerator(state:, resume:) = gen
   case state {
     GenCompleted -> alloc_iter_result(st, mk_undefined(), True)
     GenExecuting -> throw_type_error(st, "Generator is already running")
@@ -445,8 +473,8 @@ pub fn t_gen_next(st: Agent, gen_h: Handle, sent: JsVal) -> #(Handle, Agent) {
 /// `call_native_generator_return` (arc:116-199) with `unwind_return` folded
 /// into the body's mode-2 dispatch.
 pub fn t_gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
-  let gen = require_generator(st, gen_h)
-  let assert SGenerator(state:, resume:, ..) = gen
+  let gen = read_generator(st, gen_h)
+  let assert SGenerator(state:, resume:) = gen
   case state {
     GenExecuting -> throw_type_error(st, "Generator is already running")
     // §27.5.3.4 step 5: SuspendedStart → Completed, no body run. Also covers
@@ -464,8 +492,8 @@ pub fn t_gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
 /// `call_native_generator_throw` (arc:202-283) with `unwind_to_catch` folded
 /// into the body's mode-1 dispatch.
 pub fn t_gen_throw(st: Agent, gen_h: Handle, e: JsVal) -> #(Handle, Agent) {
-  let gen = require_generator(st, gen_h)
-  let assert SGenerator(state:, resume:, ..) = gen
+  let gen = read_generator(st, gen_h)
+  let assert SGenerator(state:, resume:) = gen
   case state {
     GenExecuting -> throw_type_error(st, "Generator is already running")
     // §27.5.3.4 step 5 + step 8.b: SuspendedStart / Completed → mark
@@ -494,10 +522,6 @@ fn gen_resume(
   let st = rt_store.t_enter_call(st)
   let #(step, st) = apply_resume(st, resume, sent)
   let st = rt_store.t_leave_call(st)
-  // Re-read: `apply_resume` runs user JS which may observe/mutate `gen_h`
-  // (e.g. a nested `.return()` on itself would hit the Executing guard, but
-  // the cell identity is the invariant, not the pre-resume snapshot).
-  let gen = require_generator(st, gen_h)
   drive_step(
     st,
     StepCtx(
@@ -510,12 +534,11 @@ fn gen_resume(
         rt_store.t_throw(st, e)
       },
       on_yield: fn(st, v, resume) {
-        let assert SGenerator(gen_cell:, ..) = gen
         let st =
           rt_store.t_cell_set(
             st,
             gen_h,
-            SGenerator(state: GenSuspendedYield, resume:, gen_cell:),
+            SGenerator(state: GenSuspendedYield, resume:),
           )
         alloc_iter_result(st, v, False)
       },
@@ -525,14 +548,13 @@ fn gen_resume(
   )
 }
 
-// ── Promise core (SPEC §7.M8; port arc builtins/promise.gleam:89-718 +
+// ── Promise core (§27.2; port arc builtins/promise.gleam:89-718 +
 //    exec/promises.gleam:483-563) ──────────────────────────────────────────────
-// SPromise-vs-SObject (u-promise-core resolution): 2core's `SPromise` is a
-// `JsSlot` PEER of `SObject` (rt_types:680) with NO proto/props, and
-// `rt_obj.t_get_prop` panics on non-`SObject` cells. Single-cell model:
-// `promise_h` IS the `SPromise` cell. The runtime `t_promise_*` fns operate
-// on it directly (emitted `await` / M6 `Promise.prototype.then` call these);
-// JS-visible `.then` prototype-lookup glue is M6's concern.
+// Two cells per promise: the JS-visible `SObject(kind: PromiseObj(data))`
+// (prototype, own properties, extensible like any object) and the
+// `SPromiseData` cell holding [[PromiseState]] / [[PromiseIsHandled]]. Every
+// API here takes the OBJECT handle and hops to the data cell;
+// `unhandled_rejections` tracks data-cell ids.
 
 /// Run a threaded thunk under the same `{wasm_exn,0,[St,V]}` try/catch as
 /// `t_call_protected` — used to catch a throwing `.then` accessor during
@@ -544,11 +566,53 @@ fn protected(
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(Completion, Agent)
 
-/// Allocate a fresh pending promise cell (§27.2.3.1 steps 3-7 internal-slot
-/// init). Returns the `SPromise` handle. Port of arc `create_promise`
-/// (builtins/promise.gleam:89-116) collapsed to the single-cell model.
+/// IsPromise(v) (§27.2.1.6): the promise OBJECT handle when `v` is one.
+pub fn as_promise(st: Agent, v: JsVal) -> Option(Handle) {
+  case classify(v) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: PromiseObj(..), ..) -> Some(h)
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// The data cell behind promise object `promise_h`:
+/// `#(data_h, state, is_handled)`.
+pub fn promise_data(
+  st: Agent,
+  promise_h: Handle,
+) -> #(Handle, PromiseState, Bool) {
+  case rt_store.t_cell_get(st, promise_h) {
+    SObject(kind: PromiseObj(data:), ..) ->
+      case rt_store.t_cell_get(st, data) {
+        SPromiseData(state:, is_handled:) -> #(data, state, is_handled)
+        _ ->
+          panic as "rt_async: PromiseObj data is not SPromiseData (engine invariant)"
+      }
+    // Every caller reaches here via a handle it minted with `t_new_promise`
+    // or brand-checked with `as_promise`; anything else is heap corruption.
+    _ -> panic as "rt_async: Handle is not a promise object (engine invariant)"
+  }
+}
+
+/// Allocate a fresh pending promise (§27.2.3.1 steps 3-7) whose
+/// [[Prototype]] is `proto` — OrdinaryCreateFromConstructor for a subclass
+/// `new_target`. Returns the object handle.
+pub fn t_new_promise_with_proto(
+  st: Agent,
+  proto: Option(Handle),
+) -> #(Handle, Agent) {
+  let #(data, st) =
+    rt_store.t_cell_new(st, SPromiseData(PromisePending([]), False))
+  alloc_shell(st, PromiseObj(data:), proto)
+}
+
+/// A fresh pending %Promise% instance. Port of arc `create_promise`
+/// (builtins/promise.gleam:89-116).
 pub fn t_new_promise(st: Agent) -> #(Handle, Agent) {
-  rt_store.t_cell_new(st, SPromise(PromisePending([]), False))
+  t_new_promise_with_proto(st, Some(st.realm.promise.prototype))
 }
 
 /// §27.2.1.5 NewPromiseCapability(%Promise%) — `t_new_promise` +
@@ -568,40 +632,42 @@ pub fn t_new_promise_capability(
 /// Port of arc `fulfill_promise` + `settle_promise`
 /// (builtins/promise.gleam:233-367).
 fn fulfill_promise(st: Agent, promise_h: Handle, value: JsVal) -> Agent {
-  case rt_store.t_cell_get(st, promise_h) {
-    SPromise(state: PromisePending(reactions), is_handled:) -> {
+  case promise_data(st, promise_h) {
+    #(data, PromisePending(reactions), is_handled) -> {
       let st =
         rt_store.t_cell_set(
           st,
-          promise_h,
-          SPromise(PromiseFulfilled(value), is_handled),
+          data,
+          SPromiseData(PromiseFulfilled(value), is_handled),
         )
       enqueue_reactions(st, reactions, value, on_fulfill_handler)
     }
-    // Already settled (soft assert) or not a promise → no-op.
     _ -> st
   }
 }
 
 /// §27.2.1.7 RejectPromise(promise, reason). Step 7: on `is_handled == False`,
-/// prepend the cell id to `unhandled_rejections` (HostPromiseRejectionTracker
-/// "reject" op). Port of arc `reject_promise` (builtins/promise.gleam:386-426).
+/// prepend the data-cell id to `unhandled_rejections`
+/// (HostPromiseRejectionTracker "reject"). Port of arc `reject_promise`
+/// (builtins/promise.gleam:386-426).
 pub fn t_promise_reject(st: Agent, promise_h: Handle, reason: JsVal) -> Agent {
-  case rt_store.t_cell_get(st, promise_h) {
-    SPromise(state: PromisePending(reactions), is_handled:) -> {
+  case promise_data(st, promise_h) {
+    #(data, PromisePending(reactions), is_handled) -> {
       let st =
         rt_store.t_cell_set(
           st,
-          promise_h,
-          SPromise(PromiseRejected(reason), is_handled),
+          data,
+          SPromiseData(PromiseRejected(reason), is_handled),
         )
       let st = case is_handled {
         False -> {
           let js = require_js(st)
-          let JsCell(id) = promise_h
           with_js(
             st,
-            JsStore(..js, unhandled_rejections: [id, ..js.unhandled_rejections]),
+            JsStore(..js, unhandled_rejections: [
+              data.id,
+              ..js.unhandled_rejections
+            ]),
           )
         }
         True -> st
@@ -614,7 +680,7 @@ pub fn t_promise_reject(st: Agent, promise_h: Handle, reason: JsVal) -> Agent {
 
 /// §27.2.1.8 TriggerPromiseReactions — enqueue one `ReactionJob` per stored
 /// reaction. `pick` selects `on_fulfill` vs `on_reject` from each record
-/// (2core stores both handlers per reaction; arc uses two lists).
+/// (both handlers are stored per reaction; arc uses two lists).
 fn enqueue_reactions(
   st: Agent,
   reactions: List(PromiseReaction),
@@ -643,7 +709,7 @@ fn on_reject_handler(r: PromiseReaction) -> ReactionHandler {
 }
 
 /// §27.2.1.3.2 Promise Resolve Functions steps 7-16 — the resolve-function
-/// body minus the `[[AlreadyResolved]]` gate (M6's `PromiseResolveFn`
+/// body minus the `[[AlreadyResolved]]` gate (the `PromiseResolveFn`
 /// dispatch owns that; the pending-only guard in `fulfill_promise` is the
 /// belt-and-suspenders). Self-resolution → reject with TypeError; thenable →
 /// enqueue `ResolveThenableJob`; throwing `.then` accessor → reject; else
@@ -672,10 +738,9 @@ pub fn t_promise_resolve(
   }
 }
 
-/// §27.2.1.3.2 steps 9-16 for a `KHandle` resolution. `SObject` runs the
-/// thenable protocol; `SPromise` (proto-less single-cell) adopts directly via
-/// `t_promise_then` — arc parity, where a native promise IS a thenable. Every
-/// other `JsSlot` is an internal cell with no `.then` — fulfill as-is.
+/// §27.2.1.3.2 steps 9-16 for a `KHandle` resolution. A JS object (plain,
+/// shaped, or a native promise) runs the thenable protocol; an internal data
+/// cell has no `.then` and fulfills as-is.
 fn resolve_with_handle(
   st: Agent,
   promise_h: Handle,
@@ -683,16 +748,7 @@ fn resolve_with_handle(
   h: Handle,
 ) -> Agent {
   case rt_store.t_cell_get(st, h) {
-    // Native promise: adopt its state by attaching `promise_h`'s resolving fns
-    // as reactions (semantically the ResolveThenableJob outcome for a native
-    // promise; child capability from `t_promise_then` is discarded).
-    SPromise(..) -> {
-      let #(#(resolve_h, reject_h), st) = alloc_resolving_fns(st, promise_h)
-      let #(_, st) =
-        t_promise_then(st, h, mk_object(resolve_h), mk_object(reject_h))
-      st
-    }
-    SObject(..) -> {
+    SObject(..) | rt_types.SShapedObject(..) -> {
       // Step 9: then = Completion(Get(resolution, "then")).
       let #(outcome, st) =
         protected(st, fn(st) {
@@ -722,16 +778,15 @@ fn resolve_with_handle(
           }
       }
     }
-    // `SBox`/`SGenerator`/…: internal cell — no `.then`, fulfill with value.
     _ -> fulfill_promise(st, promise_h, resolution)
   }
 }
 
-/// §27.2.4.7.1 PromiseResolve(%Promise%, x). If `v` is already an `SPromise`
-/// cell, return its handle unchanged (step 2.b — SameValue constructor check
-/// collapses to an IsPromise check under the single-realm intrinsic %Promise%
-/// model); else allocate a fresh pending promise and `t_promise_resolve` it
-/// with `v`. Port of arc `promise_resolve` (builtins/promise.gleam:720-744).
+/// §27.2.4.7.1 PromiseResolve(%Promise%, x). If `v` is already a promise
+/// object, return its handle unchanged (step 2.b — the SameValue constructor
+/// check collapses to an IsPromise check for the intrinsic %Promise%); else
+/// allocate a fresh pending promise and `t_promise_resolve` it with `v`. Port
+/// of arc `promise_resolve` (builtins/promise.gleam:720-744).
 pub fn promise_resolve_static(st: Agent, v: JsVal) -> #(Handle, Agent) {
   case as_promise(st, v) {
     Some(h) -> #(h, st)
@@ -743,8 +798,8 @@ pub fn promise_resolve_static(st: Agent, v: JsVal) -> #(Handle, Agent) {
 }
 
 /// §27.2.5.4.1 PerformPromiseThen(promise, onFulfilled, onRejected,
-/// resultCapability) with a fresh %Promise% capability (steps 1-14). Returns
-/// the child promise handle. Port of arc `perform_promise_then`
+/// resultCapability) with a fresh %Promise% capability. Returns the child
+/// promise handle. Port of arc `perform_promise_then`
 /// (builtins/promise.gleam:465-568).
 pub fn t_promise_then(
   st: Agent,
@@ -752,27 +807,48 @@ pub fn t_promise_then(
   on_fulfilled: JsVal,
   on_rejected: JsVal,
 ) -> #(Handle, Agent) {
-  // resultCapability = NewPromiseCapability(%Promise%).
   let #(#(child_h, resolve_h, reject_h), st) = t_new_promise_capability(st)
-  let child_resolve = mk_object(resolve_h)
-  let child_reject = mk_object(reject_h)
+  let st =
+    t_perform_then(
+      st,
+      promise_h,
+      on_fulfilled,
+      on_rejected,
+      mk_object(resolve_h),
+      mk_object(reject_h),
+    )
+  #(child_h, st)
+}
+
+/// §27.2.5.4.1 PerformPromiseThen with a caller-supplied capability: attach
+/// the reaction with `resolve`/`reject` as the child directly. Shared by
+/// `t_promise_then`, `Promise.prototype.then` (species capability) and
+/// §27.1.4.4 AsyncFromSyncIteratorContinuation.
+pub fn t_perform_then(
+  st: Agent,
+  promise_h: Handle,
+  on_fulfilled: JsVal,
+  on_rejected: JsVal,
+  resolve: JsVal,
+  reject: JsVal,
+) -> Agent {
   // Steps 3-6: non-callable → the spec's "empty" handler.
   let fulfill_handler = to_handler(st, on_fulfilled, IdentityPassThrough)
   let reject_handler = to_handler(st, on_rejected, ThrowerPassThrough)
-  let st = case rt_store.t_cell_get(st, promise_h) {
+  case promise_data(st, promise_h) {
     // Step 9: pending → append reaction; step 12: [[PromiseIsHandled]] = true.
     // Stored newest-first (O(1) prepend), reversed once at settle time.
-    SPromise(state: PromisePending(reactions), ..) ->
+    #(data, PromisePending(reactions), _) ->
       rt_store.t_cell_set(
         st,
-        promise_h,
-        SPromise(
+        data,
+        SPromiseData(
           PromisePending([
             PromiseReaction(
               on_fulfill: fulfill_handler,
               on_reject: reject_handler,
-              child_resolve:,
-              child_reject:,
+              child_resolve: resolve,
+              child_reject: reject,
             ),
             ..reactions
           ]),
@@ -780,41 +856,26 @@ pub fn t_promise_then(
         ),
       )
     // Step 10: fulfilled → mark handled + enqueue fulfill reaction job.
-    SPromise(state: PromiseFulfilled(value), ..) -> {
-      let st = mark_handled(st, promise_h)
+    #(data, PromiseFulfilled(value) as state, _) -> {
+      let st = rt_store.t_cell_set(st, data, SPromiseData(state, True))
       t_enqueue_job(
         st,
-        ReactionJob(
-          handler: fulfill_handler,
-          arg: value,
-          resolve: child_resolve,
-          reject: child_reject,
-        ),
+        ReactionJob(handler: fulfill_handler, arg: value, resolve:, reject:),
       )
     }
     // Step 11: rejected → mark handled + untrack rejection + enqueue.
-    SPromise(state: PromiseRejected(reason), is_handled:) -> {
-      let st = mark_handled(st, promise_h)
+    #(data, PromiseRejected(reason) as state, is_handled) -> {
+      let st = rt_store.t_cell_set(st, data, SPromiseData(state, True))
       let st = case is_handled {
-        False -> untrack_rejection(st, promise_h)
+        False -> untrack_rejection(st, data)
         True -> st
       }
       t_enqueue_job(
         st,
-        ReactionJob(
-          handler: reject_handler,
-          arg: reason,
-          resolve: child_resolve,
-          reject: child_reject,
-        ),
+        ReactionJob(handler: reject_handler, arg: reason, resolve:, reject:),
       )
     }
-    // Not an `SPromise` — VM invariant. Every caller reaches here via a handle
-    // it minted with `t_new_promise`; a non-promise slot is heap corruption,
-    // and a silent no-op would hang the child forever (arc:565 posture).
-    _ -> panic as "t_promise_then: Handle is not an SPromise cell"
   }
-  #(child_h, st)
 }
 
 /// Steps 3-6 helper: `Handler(v)` if callable, else the given pass-through.
@@ -829,29 +890,16 @@ fn to_handler(
   }
 }
 
-/// Set `[[PromiseIsHandled]] = true` (§27.2.5.4.1 step 12). No-op on a
-/// non-`SPromise` cell. Port of arc `mark_handled`
-/// (builtins/promise.gleam:712-718).
-fn mark_handled(st: Agent, promise_h: Handle) -> Agent {
-  rt_store.t_cell_update(st, promise_h, fn(slot) {
-    case slot {
-      SPromise(state:, ..) -> SPromise(state:, is_handled: True)
-      other -> other
-    }
-  })
-}
-
-/// HostPromiseRejectionTracker(promise, "handle") — drop `promise_h`'s id from
-/// `unhandled_rejections` (§27.2.5.4.1 step 11c).
-fn untrack_rejection(st: Agent, promise_h: Handle) -> Agent {
+/// HostPromiseRejectionTracker(promise, "handle") — drop the data cell's id
+/// from `unhandled_rejections` (§27.2.5.4.1 step 11c).
+fn untrack_rejection(st: Agent, data: Handle) -> Agent {
   let js = require_js(st)
-  let JsCell(id) = promise_h
   with_js(
     st,
     JsStore(
       ..js,
       unhandled_rejections: list.filter(js.unhandled_rejections, fn(r) {
-        r != id
+        r != data.id
       }),
     ),
   )
@@ -872,15 +920,16 @@ fn untrack_rejection(st: Agent, promise_h: Handle) -> Agent {
 // The request queue is the key difference: callers can fire next();next();
 // next() before any settle, and each gets its own promise.
 //
-// Cell layout (matches `t_gen_start`): shell `SObject` (proto
-// `%AsyncGeneratorPrototype%`) + `SAsyncGen` data cell; `gen_cell` = shell
-// handle; DATA handle returned. Every `t_asyncgen_*` op reads it as
-// `SAsyncGen`. `yield*` delegation is lowered inside the body — no delegate
+// Two cells (matches `t_gen_start`): the JS-visible
+// `SObject(kind: AsyncGeneratorObj(data))` and the `SAsyncGen` data cell.
+// The prototype methods brand-check the object; everything below drives the
+// data handle. `yield*` delegation is lowered inside the body — no delegate
 // arms here.
 
-/// §27.6.3.1 AsyncGeneratorStart. Alloc the `SObject` shell + `SAsyncGen`
-/// data cell in `SuspendedStart`. Frame/args accepted for op-table 4-arg
-/// parity, unused (already packed into loc0).
+/// §27.6.3.1 AsyncGeneratorStart. Alloc the `SAsyncGen` data cell in
+/// `SuspendedStart` plus the `AsyncGeneratorObj`. Frame/args accepted for
+/// op-table 4-arg parity, unused (already packed into loc0). Returns the
+/// object handle.
 pub fn t_asyncgen_start(
   st: Agent,
   sm: SmFn,
@@ -888,27 +937,16 @@ pub fn t_asyncgen_start(
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
-  let #(shell_h, st) =
+  let #(data, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: Ordinary,
-        proto: Some(st.realm.async_gen.prototype),
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+      SAsyncGen(
+        state: AGSuspendedStart,
+        resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
+        queue: #([], []),
       ),
     )
-  rt_store.t_cell_new(
-    st,
-    SAsyncGen(
-      state: AGSuspendedStart,
-      resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
-      queue: #([], []),
-      gen_cell: shell_h,
-    ),
-  )
+  alloc_shell(st, AsyncGeneratorObj(data:), Some(st.realm.async_gen.prototype))
 }
 
 /// §27.6.1.2 `%AsyncGeneratorPrototype%.next(value)`. Returns a promise handle.
@@ -978,7 +1016,8 @@ fn asyncgen_method(
   }
 }
 
-/// Brand check: `this` classifies to a `Handle` whose cell is `SAsyncGen`.
+/// Brand check: `this` is an `AsyncGeneratorObj`; yields its data handle and
+/// current state.
 fn asyncgen_data_of(
   st: Agent,
   this: JsVal,
@@ -986,7 +1025,11 @@ fn asyncgen_data_of(
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SAsyncGen(state:, ..) -> Ok(#(h, state))
+        SObject(kind: AsyncGeneratorObj(data:), ..) ->
+          case rt_store.t_cell_get(st, data) {
+            SAsyncGen(state:, ..) -> Ok(#(data, state))
+            _ -> Error(Nil)
+          }
         _ -> Error(Nil)
       }
     _ -> Error(Nil)
@@ -1103,8 +1146,8 @@ fn asyncgen_ctx(gen_h: Handle, req: AsyncGenRequest) -> StepCtx(Agent) {
 }
 
 /// AsyncGeneratorAwaitReturn / body-await / return-unwind settlement. Called
-/// from M6's `dispatch_native` for `AsyncGenResume(gen_h, is_throw, kind)`
-/// with `settled` = the awaited value/reason. Port of arc `call_native_resume`
+/// from `dispatch_native` for `AsyncGenResume(gen_h, is_throw, kind)` with
+/// `settled` = the awaited value/reason. Port of arc `call_native_resume`
 /// (async_generators.gleam:584-663) with delegate arms dropped.
 pub fn t_asyncgen_resume(
   st: Agent,
@@ -1213,25 +1256,19 @@ type AGLive {
     resume: Resume,
     front: List(AsyncGenRequest),
     back: List(AsyncGenRequest),
-    gen_cell: Handle,
   )
 }
 
 fn read_asyncgen(st: Agent, gen_h: Handle) -> AGLive {
   case rt_store.t_cell_get(st, gen_h) {
-    SAsyncGen(state:, resume:, queue: #(front, back), gen_cell:) ->
-      AGLive(state:, resume:, front:, back:, gen_cell:)
+    SAsyncGen(state:, resume:, queue: #(front, back)) ->
+      AGLive(state:, resume:, front:, back:)
     _ -> panic as "rt_async: Handle is not an SAsyncGen cell (engine invariant)"
   }
 }
 
 fn encode_asyncgen(ag: AGLive) -> JsSlot {
-  SAsyncGen(
-    state: ag.state,
-    resume: ag.resume,
-    queue: #(ag.front, ag.back),
-    gen_cell: ag.gen_cell,
-  )
+  SAsyncGen(state: ag.state, resume: ag.resume, queue: #(ag.front, ag.back))
 }
 
 /// Re-read the LIVE slot at write time, apply a pure update, write it back.
@@ -1283,8 +1320,9 @@ fn ag_complete_drop_head(ag: AGLive) -> AGLive {
 // ── §27.7.5 Async function driver: t_async_start / t_await ──────────────────
 // Port of arc `exec/call.gleam:324-543 call_async_function` /
 // `finish_async_execution` / `call_native_async_resume` +
-// `exec/promises.gleam:1715-1766 setup_await`. The internal `SGenerator` cell
-// is REUSED as the async-context slot: `gen_cell = result_promise_h`.
+// `exec/promises.gleam:1715-1766 setup_await`. The running body's context is
+// an `SAsyncContext(resume, promise)` cell reachable only from the
+// `AsyncResume` closures of its current await.
 
 /// First argument or `undefined` — the `arguments[0]` a resolving/resume
 /// function's body reads (arc `helpers.first_arg_or_undefined`).
@@ -1295,23 +1333,9 @@ fn first_arg(args: List(JsVal)) -> JsVal {
   }
 }
 
-/// `Some(h)` iff `v` is a Handle to an `SPromise` cell — IsPromise + data-ref
-/// extraction in one (arc `promise.gleam:589-596 as_promise_data`).
-fn as_promise(st: Agent, v: JsVal) -> Option(Handle) {
-  case classify(v) {
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SPromise(..) -> Some(h)
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
-/// §27.7.5.1 AsyncFunctionStart. Allocate the result promise + an internal
-/// `SGenerator` state cell (reused as the async context; `gen_cell` = result
-/// promise handle), run the body's first turn, drive its outcome, and return
-/// the result promise (R1 value-first). Port of arc
+/// §27.7.5.1 AsyncFunctionStart. Allocate the result promise + the
+/// `SAsyncContext` cell, run the body's first turn, drive its outcome, and
+/// return the result promise (R1 value-first). Port of arc
 /// `call.gleam:324-366 call_async_function`. Frame/args accepted for
 /// op-table 4-arg parity, unused (already packed into `loc0` by the outer
 /// prologue).
@@ -1323,19 +1347,11 @@ pub fn t_async_start(
   loc0: Loc,
 ) -> #(Handle, Agent) {
   let #(promise_h, st) = t_new_promise(st)
-  // Internal state cell; `gen_cell` links to the result promise so
-  // `do_async_resume` can settle it.
-  let #(gen_h, st) =
-    rt_store.t_cell_new(
-      st,
-      SGenerator(
-        state: GenExecuting,
-        resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
-        gen_cell: promise_h,
-      ),
-    )
+  let resume = ResumeCompiled(sm:, rs: 0, loc: loc0)
+  let #(ctx_h, st) =
+    rt_store.t_cell_new(st, SAsyncContext(resume:, promise: promise_h))
   let #(step, st) = apply_sm(st, sm, 0, sent_start(), loc0)
-  let st = drive_async_step(st, gen_h, promise_h, step)
+  let st = drive_async_step(st, ctx_h, promise_h, step)
   #(promise_h, st)
 }
 
@@ -1344,7 +1360,7 @@ pub fn t_async_start(
 /// function is an engine bug.
 fn drive_async_step(
   st: Agent,
-  gen_h: Handle,
+  ctx_h: Handle,
   promise_h: Handle,
   step: Step,
 ) -> Agent {
@@ -1352,56 +1368,36 @@ fn drive_async_step(
     st,
     StepCtx(
       // §27.7.5.2 step 3.d: fulfil via Resolve so a thenable return is adopted.
-      on_return: fn(st, v) {
-        let st = complete_async(st, gen_h)
-        t_promise_resolve(st, promise_h, v)
-      },
+      on_return: fn(st, v) { t_promise_resolve(st, promise_h, v) },
       // §27.7.5.2 step 3.f: reject the result promise.
-      on_throw: fn(st, e) {
-        let st = complete_async(st, gen_h)
-        t_promise_reject(st, promise_h, e)
-      },
+      on_throw: fn(st, e) { t_promise_reject(st, promise_h, e) },
       on_yield: step_unreachable,
       // Body hit `await` — store where to resume and hand off to `t_await`.
       on_await: fn(st, awaited, resume) {
         let st =
-          rt_store.t_cell_update(st, gen_h, fn(slot) {
-            case slot {
-              SGenerator(gen_cell:, ..) ->
-                SGenerator(state: GenExecuting, resume:, gen_cell:)
-              other -> other
-            }
-          })
-        t_await(st, gen_h, awaited)
+          rt_store.t_cell_set(
+            st,
+            ctx_h,
+            SAsyncContext(resume:, promise: promise_h),
+          )
+        t_await(st, ctx_h, awaited)
       },
     ),
     step,
   )
 }
 
-/// Mark the async-context cell completed (releases its `Loc`/captures for GC
-/// on the next turn-boundary collect).
-fn complete_async(st: Agent, gen_h: Handle) -> Agent {
-  rt_store.t_cell_update(st, gen_h, fn(slot) {
-    case slot {
-      SGenerator(resume:, gen_cell:, ..) ->
-        SGenerator(state: GenCompleted, resume:, gen_cell:)
-      other -> other
-    }
-  })
-}
-
 /// §27.7.5.3 Await. `PromiseResolve(%Promise%, awaited)` then
 /// `PerformPromiseThen` with `AsyncResume` on-fulfill/on-reject closures that
-/// continue `gen_h`'s stored `Resume` with `{mode, settled}`. Port of arc
+/// continue `ctx_h`'s stored `Resume` with `{mode, settled}`. Port of arc
 /// `promises.gleam:1715-1766 setup_await`. Always enqueues (§27.5.3 — an
 /// already-settled promise still resumes asynchronously).
-pub fn t_await(st: Agent, gen_h: Handle, awaited: JsVal) -> Agent {
+pub fn t_await(st: Agent, ctx_h: Handle, awaited: JsVal) -> Agent {
   // §27.7.5.3 step 2: PromiseResolve(%Promise%, value).
   let #(awaited_h, st) = promise_resolve_static(st, awaited)
   // Steps 3-4: onFulfilled/onRejected close over the async-context handle.
-  let #(on_fulfill, st) = alloc_resume(st, gen_h, False)
-  let #(on_reject, st) = alloc_resume(st, gen_h, True)
+  let #(on_fulfill, st) = alloc_resume(st, ctx_h, False)
+  let #(on_reject, st) = alloc_resume(st, ctx_h, True)
   // Step 5: PerformPromiseThen with a throwaway capability (§27.7.5.3 note —
   // the child promise is never observed; arc allocates one anyway).
   let #(_child, st) =
@@ -1409,7 +1405,7 @@ pub fn t_await(st: Agent, gen_h: Handle, awaited: JsVal) -> Agent {
   st
 }
 
-// ── native-token dispatch bodies (called by M6 dispatch_native) ─────────────
+// ── native-token dispatch bodies (called by dispatch_native) ────────────────
 
 /// `PromiseResolveFn` body — §27.2.1.3.2 Promise Resolve Functions. Checks
 /// and sets the shared `[[AlreadyResolved]]` box, then `t_promise_resolve`.
@@ -1462,25 +1458,25 @@ fn check_already_resolved(st: Agent, already_h: Handle) -> #(Bool, Agent) {
 }
 
 /// `AsyncResume` body — §27.7.5.3 Await onFulfilled/onRejected. Continues the
-/// `Resume` stored on `gen_h` with `Sent = {mode, settled_value}` and drives
-/// the resulting step. Port of
-/// arc `call.gleam:481-543 call_native_async_resume`.
+/// `Resume` stored on the context cell with `Sent = {mode, settled_value}` and
+/// drives the resulting step. Port of arc `call.gleam:481-543
+/// call_native_async_resume`.
 pub fn do_async_resume(
   st: Agent,
-  gen_h: Handle,
+  ctx_h: Handle,
   is_throw: Bool,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  case rt_store.t_cell_get(st, gen_h) {
-    SGenerator(resume:, gen_cell: promise_h, ..) -> {
+  case rt_store.t_cell_get(st, ctx_h) {
+    SAsyncContext(resume:, promise:) -> {
       let mode = case is_throw {
         False -> sent_next
         True -> sent_throw
       }
       let #(step, st) = apply_resume(st, resume, #(mode, first_arg(args)))
-      #(mk_undefined(), drive_async_step(st, gen_h, promise_h, step))
+      #(mk_undefined(), drive_async_step(st, ctx_h, promise, step))
     }
     _ ->
-      panic as "rt_async: AsyncResume target is not SGenerator (engine invariant)"
+      panic as "rt_async: AsyncResume target is not SAsyncContext (engine invariant)"
   }
 }

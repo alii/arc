@@ -4,7 +4,8 @@
 //// `arc/vm/builtins/async_generator.gleam` + `common.init_generator_function`).
 ////
 //// `next`/`return`/`throw` bodies live in `rt_async` (`t_gen_next` /
-//// `t_gen_return` / `t_gen_throw` and `t_asyncgen_*`) — this module only
+//// `t_gen_return` / `t_gen_throw` over the data cell `generator_data`
+//// brand-checks out of `this`, and `t_asyncgen_*`) — this module only
 //// installs the prototype method objects and routes dispatch.
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
@@ -17,8 +18,8 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type GeneratorNative, type Handle, type JsVal,
   AsyncFunctionCtor, AsyncGeneratorFunctionCtor, AsyncGeneratorNext,
   AsyncGeneratorReturn, AsyncGeneratorThrow, BuiltinPair, GeneratorFunctionCtor,
-  GeneratorN, GeneratorNext, GeneratorReturn, GeneratorThrow, KHandle, KNative,
-  NoElements, SObject, TypeErr, classify, mk_object,
+  GeneratorN, GeneratorNext, GeneratorReturn, GeneratorThrow, KNative,
+  NoElements, SObject, TypeErr, mk_object,
 } as rt_types
 import gleam/dict
 import gleam/option.{None, Some}
@@ -200,15 +201,18 @@ pub fn dispatch(
   let arg = first_arg_or_undefined(args)
   case n {
     GeneratorNext -> {
-      let #(h, st) = rt_async.t_gen_next(st, require_gen(st, this), arg)
+      let #(h, st) =
+        rt_async.t_gen_next(st, rt_async.generator_data(st, this), arg)
       #(mk_object(h), st)
     }
     GeneratorReturn -> {
-      let #(h, st) = rt_async.t_gen_return(st, require_gen(st, this), arg)
+      let #(h, st) =
+        rt_async.t_gen_return(st, rt_async.generator_data(st, this), arg)
       #(mk_object(h), st)
     }
     GeneratorThrow -> {
-      let #(h, st) = rt_async.t_gen_throw(st, require_gen(st, this), arg)
+      let #(h, st) =
+        rt_async.t_gen_throw(st, rt_async.generator_data(st, this), arg)
       #(mk_object(h), st)
     }
     AsyncGeneratorNext -> {
@@ -227,20 +231,6 @@ pub fn dispatch(
     // arc parity: throw until M19 wires eval (§20.2.1.1 CreateDynamicFunction).
     GeneratorFunctionCtor | AsyncGeneratorFunctionCtor | AsyncFunctionCtor ->
       throw_type_error(st, "dynamic function creation not supported")
-  }
-}
-
-/// §27.5.1.2 GeneratorValidate brand-check on `this` — must be a Handle. The
-/// `SGenerator` cell check itself lives in `rt_async.require_generator`
-/// (raises "not a generator object" on mismatch).
-fn require_gen(st: Agent, this: JsVal) -> Handle {
-  case classify(this) {
-    KHandle(h) -> h
-    _ ->
-      throw_type_error(
-        st,
-        "Generator.prototype method called on incompatible receiver",
-      )
   }
 }
 
