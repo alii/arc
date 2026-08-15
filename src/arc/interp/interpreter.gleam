@@ -66,6 +66,7 @@ import arc/vm/opcode.{
   TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
 import gleam/bit_array
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -1035,6 +1036,32 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
+    // `{name: v}` static-key definition on a fresh literal: an ordinary,
+    // extensible SObject takes a raw own insert (CreateDataProperty on such a
+    // target can neither trap nor fail). Anything else goes through step's
+    // full [[DefineOwnProperty]].
+    DefineField(key.Named(name)) ->
+      case stack {
+        [val, obj, ..rest] ->
+          case define_plain(agent, obj, Named(name), val) {
+            Ok(agent) ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [obj, ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                line,
+              )
+            Error(Nil) ->
+              dispatch_slow(state, drive, pc, stack, locals, agent, line)
+          }
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
     _other -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
   }
 }
@@ -1069,6 +1096,50 @@ fn pure_binop_kernel(op: binop.PureBinOp, left: JsVal, right: JsVal) -> JsVal {
         False -> mk_bool(!ffi.truthy(r))
       }
     }
+  }
+}
+
+/// §7.3.5 CreateDataProperty on an ordinary, extensible `SObject` under a
+/// string key: a fresh `{W, E, C: true}` data property is inserted, or
+/// replaces a configurable one in place (§10.1.6.3: any configurable
+/// current accepts the new descriptor; the key keeps its creation order,
+/// §10.1.11). `Error(Nil)` when the receiver is anything else (array,
+/// proxy, non-extensible, shaped or not an object) or the current property
+/// is non-configurable, so the caller takes the full [[DefineOwnProperty]].
+fn define_plain(
+  agent: Agent,
+  obj: JsVal,
+  pk: rt_types.PropertyKey,
+  val: JsVal,
+) -> Result(Agent, Nil) {
+  use <- bool.guard(!is_handle(obj), Error(Nil))
+  let h = as_handle(obj)
+  case rt_store.t_cell_get(agent, h) {
+    SObject(kind: rt_types.Ordinary, extensible: True, props:, ..) as slot -> {
+      let current = case dict.get(props, pk) {
+        Ok(old) ->
+          case rt_types.prop_configurable(old) {
+            True -> Ok(#(rt_types.prop_seq(old), agent))
+            False -> Error(Nil)
+          }
+        Error(Nil) -> Ok(rt_store.t_next_prop_seq(agent))
+      }
+      use #(seq, agent) <- result.map(current)
+      let prop =
+        DataProperty(
+          value: val,
+          writable: True,
+          enumerable: True,
+          configurable: True,
+          seq:,
+        )
+      rt_store.t_cell_set(
+        agent,
+        h,
+        SObject(..slot, props: dict.insert(props, pk, prop)),
+      )
+    }
+    _ -> Error(Nil)
   }
 }
 
@@ -2278,15 +2349,39 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [value, obj, ..rest] ->
           case handle_of(obj) {
-            Some(h) -> {
-              use state <- result.map(create_data_property_or_throw(
-                state,
-                h,
-                okey(k),
-                value,
-              ))
-              State(..state, stack: [obj, ..rest], pc: state.pc + 1)
-            }
+            Some(h) ->
+              case okey(k) {
+                StringKey(pk) ->
+                  case define_plain(state.agent, obj, pk, value) {
+                    Ok(agent) ->
+                      Ok(
+                        State(
+                          ..state,
+                          agent:,
+                          stack: [obj, ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                    Error(Nil) -> {
+                      use state <- result.map(create_data_property_or_throw(
+                        state,
+                        h,
+                        StringKey(pk),
+                        value,
+                      ))
+                      State(..state, stack: [obj, ..rest], pc: state.pc + 1)
+                    }
+                  }
+                symbol_key -> {
+                  use state <- result.map(create_data_property_or_throw(
+                    state,
+                    h,
+                    symbol_key,
+                    value,
+                  ))
+                  State(..state, stack: [obj, ..rest], pc: state.pc + 1)
+                }
+              }
             // DefineField on non-object: no-op, keep object on stack.
             None -> Ok(State(..state, pc: state.pc + 1))
           }
@@ -3194,8 +3289,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 ),
               )
             False ->
-              case rt2(state, rt_lang.t_iter_next, rec) {
-                Ok(#(#(done, val), state)) -> {
+              case array_iter_step(state.agent, rec) {
+                Some(#(done, val, agent)) -> {
                   let slot = case done {
                     True -> mk_undefined()
                     False -> rec
@@ -3203,17 +3298,34 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   Ok(
                     State(
                       ..state,
+                      agent:,
                       stack: [mk_bool(done), val, slot, ..rest],
                       pc: state.pc + 1,
                     ),
                   )
                 }
-                Error(exit) ->
-                  Error(
-                    state.map_exit_state(exit, fn(s) {
-                      State(..s, stack: [mk_undefined(), ..rest])
-                    }),
-                  )
+                None ->
+                  case rt2(state, rt_lang.t_iter_next, rec) {
+                    Ok(#(#(done, val), state)) -> {
+                      let slot = case done {
+                        True -> mk_undefined()
+                        False -> rec
+                      }
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [mk_bool(done), val, slot, ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                    }
+                    Error(exit) ->
+                      Error(
+                        state.map_exit_state(exit, fn(s) {
+                          State(..s, stack: [mk_undefined(), ..rest])
+                        }),
+                      )
+                  }
               }
           }
         _ -> underflow(state, "IteratorNext")
@@ -4014,6 +4126,88 @@ fn fill_holes(
               ])
           }
       }
+  }
+}
+
+/// IteratorNext for the record of an unmodified Array values iteration
+/// (`for (x of array)`, spread of an array): the record's [[NextMethod]] IS
+/// %ArrayIteratorPrototype%.next and its [[Iterator]] an ArrayIterator over
+/// a plain Array cell, so §23.1.5.2.1 is stepped here without allocating the
+/// `{value, done}` object the native would build and this opcode would
+/// immediately take apart. Only the shapes whose element read observes
+/// nothing are handled (a present own element, no index override); a hole,
+/// an exhausted-but-not-yet-marked source of another kind, or anything else
+/// answers `None` and the generic protocol call runs instead.
+fn array_iter_step(agent: Agent, rec: JsVal) -> Option(#(Bool, JsVal, Agent)) {
+  use record <- option.then(rt_lang.record_parts(agent, rec))
+  use next_h <- option.then(handle_of(record.next_method))
+  use iter_h <- option.then(handle_of(record.iterator))
+  case rt_store.t_cell_get(agent, next_h), rt_store.t_cell_get(agent, iter_h) {
+    SObject(
+      kind: rt_types.KNative(
+        tag: rt_types.IteratorN(rt_types.ArrayIteratorNext),
+        ..,
+      ),
+      ..,
+    ),
+      SObject(
+        kind: rt_types.ArrayIterator(
+          target:,
+          index:,
+          kind: rt_types.ArrayIterValues as kind,
+        ),
+        ..,
+      ) as iter_slot
+    ->
+      case index < 0 {
+        // Already exhausted: done, nothing to write.
+        True -> Some(#(True, mk_undefined(), agent))
+        False ->
+          case rt_store.t_cell_get(agent, target) {
+            SObject(kind: rt_types.ArrayObj(length:), elements:, props:, ..) ->
+              case index >= length {
+                True ->
+                  Some(#(
+                    True,
+                    mk_undefined(),
+                    rt_store.t_cell_set(
+                      agent,
+                      iter_h,
+                      SObject(
+                        ..iter_slot,
+                        kind: rt_types.ArrayIterator(target:, index: -1, kind:),
+                      ),
+                    ),
+                  ))
+                False ->
+                  case
+                    dict.has_key(props, Index(index)),
+                    rt_elements.get_option(elements, index)
+                  {
+                    False, Some(v) ->
+                      Some(#(
+                        False,
+                        v,
+                        rt_store.t_cell_set(
+                          agent,
+                          iter_h,
+                          SObject(
+                            ..iter_slot,
+                            kind: rt_types.ArrayIterator(
+                              target:,
+                              index: index + 1,
+                              kind:,
+                            ),
+                          ),
+                        ),
+                      ))
+                    _, _ -> None
+                  }
+              }
+            _ -> None
+          }
+      }
+    _, _ -> None
   }
 }
 

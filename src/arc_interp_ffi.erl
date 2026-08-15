@@ -594,35 +594,49 @@ put_field(_, _, _, _) -> miss.
 
 %% put_elem(Store, V, Idx, Val) -> Store2 | miss
 %% `V[Idx] = Val` on an extensible Array cell for a non-negative integer
-%% Idx in [0, Length]: overwrite an existing element, fill a hole inside a
-%% dense array's allocated size, or append at Idx == Length (bumping the
-%% ArrayObj length). An {index,Idx} props override, a non-extensible or
-%% non-array receiver, or a dense write past the allocated size misses.
+%% Idx in [0, Length]. Overwriting a present element is a write to an own
+%% writable data property. Filling a hole or appending at Idx == Length
+%% creates a property, so it first needs the prototype chain to hold
+%% nothing at Idx (a setter or read-only index up the chain takes the store,
+%% §10.1.9.2 step 2) and, for the append, a writable "length" (§10.4.2.1
+%% step 2.h). An {index,Idx} props override, a non-extensible or non-array
+%% receiver, or a dense fill past the allocated size misses.
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V) when is_integer(Idx), Idx >= 0 ->
     Data = element(?STORE_DATA, Store),
     case Data of
         #{Id := Slot}
           when element(1, Slot) =:= ?SOBJECT_TAG,
                element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
+            Props = element(?SOBJECT_PROPS, Slot),
             case element(?SOBJECT_KIND, Slot) of
-                {?ARRAYOBJ_TAG, Length} when Idx =< Length ->
-                    case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_INDEX, Idx} := _} -> miss;
-                        _ when Idx < Length ->
-                            case elem_write(element(?SOBJECT_ELEMENTS, Slot), Idx, V) of
+                _ when is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
+                {?ARRAYOBJ_TAG, Length} when Idx < Length ->
+                    Elems = element(?SOBJECT_ELEMENTS, Slot),
+                    case elem_has(Elems, Idx)
+                         orelse index_free(Data, element(?STORE_SHAPES, Store),
+                                           element(?SOBJECT_PROTO, Slot), Idx, 64) of
+                        false -> miss;
+                        true ->
+                            case elem_write(Elems, Idx, V) of
                                 miss -> miss;
                                 NewE ->
                                     NewSlot = setelement(?SOBJECT_ELEMENTS, Slot, NewE),
                                     setelement(?STORE_DATA, Store,
                                                Data#{Id := NewSlot})
-                            end;
-                        _ ->
+                            end
+                    end;
+                {?ARRAYOBJ_TAG, Idx} ->
+                    case length_writable(Props)
+                         andalso index_free(Data, element(?STORE_SHAPES, Store),
+                                            element(?SOBJECT_PROTO, Slot), Idx, 64) of
+                        false -> miss;
+                        true ->
                             case elem_write_grow(element(?SOBJECT_ELEMENTS, Slot), Idx, V) of
                                 miss -> miss;
                                 NewE ->
                                     NewSlot = setelement(?SOBJECT_ELEMENTS,
                                         setelement(?SOBJECT_KIND, Slot,
-                                                   {?ARRAYOBJ_TAG, Length + 1}),
+                                                   {?ARRAYOBJ_TAG, Idx + 1}),
                                         NewE),
                                     setelement(?STORE_DATA, Store,
                                                Data#{Id := NewSlot})
@@ -634,6 +648,61 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V) when is_integer(Idx), Idx >= 0 ->
     end;
 put_elem(_, _, _, _) -> miss.
 
+%% The Array "length" attribute override, when defineProperty made one;
+%% absent means the default writable length.
+length_writable(#{{?KEY_NAMED, <<"length">>} := Prop})
+  when element(1, Prop) =:= ?DATAPROP_TAG ->
+    element(?DATAPROP_WRITABLE, Prop) =:= true;
+length_writable(_) -> true.
+
+%% index_free(Data, Shapes, Proto, Idx, Fuel) -> boolean()
+%% No object on the prototype chain starting at Proto has an own property
+%% at Idx, along hops whose index lookup is a pure props/elements probe.
+%% A Proxy, String, TypedArray or namespace hop, a dangling handle, or more
+%% than Fuel hops answer false.
+index_free(_, _, ?NONE, _, _) -> true;
+index_free(_, _, _, _, 0) -> false;
+index_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
+    case Data of
+        #{P := {?SSHAPED_TAG, Sid, Proto, _Slots}} ->
+            case Shapes of
+                #{Sid := Desc} ->
+                    (not is_map_key(integer_to_binary(Idx),
+                                    element(?SHAPE_OFFSETS, Desc)))
+                        andalso index_free(Data, Shapes, Proto, Idx, Fuel - 1);
+                _ -> false
+            end;
+        #{P := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+            index_is_plain(element(?SOBJECT_KIND, Slot))
+                andalso (not is_map_key({?KEY_INDEX, Idx},
+                                        element(?SOBJECT_PROPS, Slot)))
+                andalso (not elem_has(element(?SOBJECT_ELEMENTS, Slot), Idx))
+                andalso index_free(Data, Shapes, element(?SOBJECT_PROTO, Slot),
+                                   Idx, Fuel - 1);
+        _ -> false
+    end;
+index_free(_, _, _, _, _) -> false.
+
+%% Whether an Index key on this ObjKind is answered by the props map plus
+%% the elements store alone (rt/obj own_property_of): Proxy and namespace
+%% cells trap, String objects expose their code units, TypedArrays their
+%% buffer.
+index_is_plain(Kind) when is_atom(Kind) -> true;
+index_is_plain(Kind) ->
+    case element(1, Kind) of
+        ?PROXYOBJ_TAG -> false;
+        module_namespace -> false;
+        typed_array_obj -> false;
+        string_obj -> false;
+        _ -> true
+    end.
+
+%% A present (non-hole) element at Idx.
+elem_has({?ELEMS_DENSE, A}, Idx) ->
+    Idx < array:size(A) andalso array:get(Idx, A) =/= js_hole;
+elem_has({?ELEMS_SPARSE, M}, Idx) -> is_map_key(Idx, M);
+elem_has(_, _) -> false.
+
 elem_write({?ELEMS_DENSE, A}, Idx, V) ->
     case Idx < array:size(A) of
         true -> {?ELEMS_DENSE, array:set(Idx, V, A)};
@@ -642,9 +711,20 @@ elem_write({?ELEMS_DENSE, A}, Idx, V) ->
 elem_write({?ELEMS_SPARSE, M}, Idx, V) -> {?ELEMS_SPARSE, M#{Idx => V}};
 elem_write(_, _, _) -> miss.
 
-%% Append at Idx == Length: dense array:set/3 extends past size(A) itself.
-elem_write_grow({?ELEMS_DENSE, A}, Idx, V) -> {?ELEMS_DENSE, array:set(Idx, V, A)};
+%% Append at Idx == Length. A dense array:set/3 extends past size(A) itself;
+%% the gap and size bounds are rt/elements' dense-promotion policy, past
+%% which the write belongs to the sparse representation (miss). An empty
+%% store starts dense the way rt/elements `set` does.
+-define(MAX_GAP, 1024).
+-define(MAX_DENSE_INDEX, 10000000).
+elem_write_grow({?ELEMS_DENSE, A}, Idx, V) ->
+    case Idx - array:size(A) =< ?MAX_GAP andalso Idx < ?MAX_DENSE_INDEX of
+        true -> {?ELEMS_DENSE, array:set(Idx, V, A)};
+        false -> miss
+    end;
 elem_write_grow({?ELEMS_SPARSE, M}, Idx, V) -> {?ELEMS_SPARSE, M#{Idx => V}};
+elem_write_grow(?ELEMS_NONE, Idx, V) when Idx =< ?MAX_GAP ->
+    {?ELEMS_DENSE, array:set(Idx, V, array:new({default, js_hole}))};
 elem_write_grow(_, _, _) -> miss.
 
 %% ── 3. locals tuple build ────────────────────────────────────────────────
