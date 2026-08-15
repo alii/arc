@@ -598,6 +598,100 @@ pub fn get_prototype_from_constructor(
   }
 }
 
+/// §7.3.24 GetFunctionRealm(obj), as a realm id. A realm-attributed native
+/// answers with the realm it carries (step 1); bound functions and proxies
+/// defer to their target (steps 2-3, a revoked proxy is a TypeError). Other
+/// function objects have no [[Realm]] slot: they are attributed by their
+/// [[Prototype]], which at birth is one of the owning realm's function
+/// prototypes, and count as the current realm once that link is gone
+/// (step 4).
+pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
+  case rt_store.t_cell_get(st, obj) {
+    SObject(kind: KBound(target:, ..), ..) -> get_function_realm(st, target)
+    SObject(kind: ProxyObj(revoked: True, ..), ..) ->
+      throw_error(
+        st,
+        TypeErr,
+        "Cannot perform 'getFunctionRealm' on a proxy that has been revoked",
+      )
+    SObject(kind: ProxyObj(target:, ..), ..) -> get_function_realm(st, target)
+    SObject(kind: KNative(tag:, ..), proto:, ..) ->
+      case native_realm(tag) {
+        Some(id) -> id
+        None -> realm_of_function_proto(st, proto)
+      }
+    SObject(proto:, ..) -> realm_of_function_proto(st, proto)
+    _ -> st.realm.id
+  }
+}
+
+/// The realm id a realm-attributed native token carries, if any.
+fn native_realm(tag: NativeToken) -> Option(Int) {
+  case tag {
+    rt_types.GlobalN(rt_types.GlobalEval(realm:))
+    | rt_types.JsonN(rt_types.JsonParse(realm:))
+    | rt_types.JsonN(rt_types.JsonStringify(realm:))
+    | rt_types.JsonN(rt_types.JsonRawJson(realm:))
+    | rt_types.JsonN(rt_types.JsonIsRawJson(realm:))
+    | rt_types.ErrorN(rt_types.ErrorStackSetter(realm:))
+    | rt_types.Test262N(rt_types.Test262EvalScript(realm:))
+    | rt_types.Test262N(rt_types.Test262CreateRealm(realm:)) -> Some(realm)
+    _ -> None
+  }
+}
+
+/// The id of the realm whose %Function.prototype%, %GeneratorFunction
+/// .prototype%, %AsyncFunction.prototype% or %AsyncGeneratorFunction
+/// .prototype% is `proto`, else the current realm's. The current realm is
+/// checked first: it is the answer for nearly every call.
+fn realm_of_function_proto(st: Agent, proto: Option(Handle)) -> Int {
+  let current = st.realm
+  case proto {
+    None -> current.id
+    Some(p) -> {
+      use <- bool.guard(is_function_proto_of(st, current, p), current.id)
+      let found =
+        list.find(dict.values(st.realms), fn(r) {
+          r.id != current.id && is_function_proto_of(st, r, p)
+        })
+      case found {
+        Ok(r) -> r.id
+        Error(Nil) -> current.id
+      }
+    }
+  }
+}
+
+fn is_function_proto_of(st: Agent, realm: rt_types.Realm, p: Handle) -> Bool {
+  p == realm.function.prototype
+  || p == realm.generator_fn.prototype
+  || p == realm.async_fn.prototype
+  || p == async_generator_fn_prototype(st, realm)
+}
+
+/// %AsyncGeneratorFunction.prototype% of `realm`: the realm record keeps only
+/// the %AsyncGeneratorFunction% constructor, whose own `prototype` is
+/// {W:F, C:F} and so always names the intrinsic.
+pub fn async_generator_fn_prototype(
+  st: Agent,
+  realm: rt_types.Realm,
+) -> Handle {
+  case
+    rt_obj.t_ordinary_own_property(
+      st,
+      realm.async_gen.constructor,
+      StringKey(Named("prototype")),
+    )
+  {
+    Some(DataProperty(value:, ..)) ->
+      case classify(value) {
+        KHandle(p) -> p
+        _ -> realm.function.prototype
+      }
+    _ -> realm.function.prototype
+  }
+}
+
 /// §7.3.33 InitializeInstanceElements — call the class's synthesized
 /// field-initializer function (if any) with `this = new_this`.
 fn run_fields_init(
@@ -801,21 +895,7 @@ pub fn t_new_function(
   let realm = st.realm
   let proto = case flags.is_generator, flags.is_async {
     True, False -> realm.generator_fn.prototype
-    True, True ->
-      case
-        rt_obj.t_ordinary_own_property(
-          st,
-          realm.async_gen.constructor,
-          StringKey(Named("prototype")),
-        )
-      {
-        Some(DataProperty(value:, ..)) ->
-          case classify(value) {
-            KHandle(p) -> p
-            _ -> realm.function.prototype
-          }
-        _ -> realm.function.prototype
-      }
+    True, True -> async_generator_fn_prototype(st, realm)
     False, True -> realm.async_fn.prototype
     False, False -> realm.function.prototype
   }

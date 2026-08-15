@@ -20,10 +20,11 @@ import arc/rt/types.{
   AsyncFunctionCtor, AsyncGeneratorFunctionCtor, AsyncGeneratorNext,
   AsyncGeneratorReturn, AsyncGeneratorThrow, BuiltinPair, GeneratorFunctionCtor,
   GeneratorN, GeneratorNext, GeneratorReturn, GeneratorThrow, KNative,
-  NoElements, SObject, mk_object,
+  NoElements, SObject, mk_object, mk_undefined,
 } as rt_types
+import arc/rt/val as rt_val
 import gleam/dict
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 
 // ── init: %Generator% + %GeneratorFunction% (§27.3 / §27.5) ─────────────────
 
@@ -229,13 +230,60 @@ pub fn dispatch(
       #(mk_object(h), st)
     }
     // §27.3.1.1 GeneratorFunction / §27.7.1.1 AsyncFunction / §27.4.1.1
-    // AsyncGeneratorFunction ( ...parameterArgs, bodyArg ): all three are
-    // CreateDynamicFunction with their own kind.
+    // AsyncGeneratorFunction ( ...parameterArgs, bodyArg ) under [[Call]]:
+    // CreateDynamicFunction with their own kind and NewTarget undefined.
     GeneratorFunctionCtor ->
-      b_function.create_dynamic_function(st, args, "function*")
+      b_function.create_dynamic_function(
+        st,
+        args,
+        b_function.DynamicGenerator,
+        mk_undefined(),
+      )
     AsyncFunctionCtor ->
-      b_function.create_dynamic_function(st, args, "async function")
+      b_function.create_dynamic_function(
+        st,
+        args,
+        b_function.DynamicAsync,
+        mk_undefined(),
+      )
     AsyncGeneratorFunctionCtor ->
-      b_function.create_dynamic_function(st, args, "async function*")
+      b_function.create_dynamic_function(
+        st,
+        args,
+        b_function.DynamicAsyncGenerator,
+        mk_undefined(),
+      )
+  }
+}
+
+/// [[Construct]] of %GeneratorFunction% / %AsyncFunction% /
+/// %AsyncGeneratorFunction% with the original `new.target`.
+pub fn dispatch_construct(
+  st: Agent,
+  n: GeneratorNative,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(JsVal, Agent) {
+  case constructor_kind(n) {
+    Some(kind) -> b_function.create_dynamic_function(st, args, kind, new_target)
+    None -> rt_val.t_throw_type_error(st, "not a constructor")
+  }
+}
+
+/// The CreateDynamicFunction kind of a constructor token; `None` for the
+/// prototype methods.
+fn constructor_kind(
+  n: GeneratorNative,
+) -> Option(b_function.DynamicFunctionKind) {
+  case n {
+    GeneratorFunctionCtor -> Some(b_function.DynamicGenerator)
+    AsyncFunctionCtor -> Some(b_function.DynamicAsync)
+    AsyncGeneratorFunctionCtor -> Some(b_function.DynamicAsyncGenerator)
+    GeneratorNext
+    | GeneratorReturn
+    | GeneratorThrow
+    | AsyncGeneratorNext
+    | AsyncGeneratorReturn
+    | AsyncGeneratorThrow -> None
   }
 }

@@ -13,6 +13,7 @@ import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
+import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type FunctionNative, type Handle, type JsVal,
@@ -218,17 +219,47 @@ pub fn dispatch(
     ThrowTypeErrorFn -> restricted_function_property(st, this)
     // §20.2.3 calling Function.prototype itself returns undefined.
     FunctionPrototypeCall -> #(mk_undefined(), st)
-    // §20.2.1.1 Function ( ...parameterArgs, bodyArg ).
-    FunctionConstructor -> create_dynamic_function(st, args, "function")
+    // §20.2.1.1 Function ( ...parameterArgs, bodyArg ) under [[Call]]:
+    // NewTarget is undefined.
+    FunctionConstructor ->
+      create_dynamic_function(st, args, DynamicNormal, mk_undefined())
   }
 }
 
-/// §20.2.1.1.1 CreateDynamicFunction, shared by Function / GeneratorFunction
-/// / AsyncFunction / AsyncGeneratorFunction: `keyword` is "function",
-/// "function*", "async function" or "async function*". The last argument is
-/// the body, the ones before it are parameter sources; all are ToString'd in
-/// order (steps 8-10) before anything is parsed. Same result for `Ctor(...)`
-/// and `new Ctor(...)`.
+/// [[Construct]] of %Function%: §20.2.1.1 with the original `new.target`.
+pub fn dispatch_construct(
+  st: Agent,
+  native: FunctionNative,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(JsVal, Agent) {
+  case native {
+    FunctionConstructor ->
+      create_dynamic_function(st, args, DynamicNormal, new_target)
+    FunctionCall
+    | FunctionApply
+    | FunctionBind
+    | FunctionToString
+    | FunctionHasInstance
+    | ThrowTypeErrorFn
+    | FunctionPrototypeCall ->
+      rt_val.t_throw_type_error(st, "not a constructor")
+  }
+}
+
+/// §20.2.1.1.1 CreateDynamicFunction's `kind`.
+pub type DynamicFunctionKind {
+  DynamicNormal
+  DynamicGenerator
+  DynamicAsync
+  DynamicAsyncGenerator
+}
+
+/// §20.2.1.1.1 CreateDynamicFunction(constructor, newTarget, kind, args),
+/// shared by Function / GeneratorFunction / AsyncFunction /
+/// AsyncGeneratorFunction. The last argument is the body, the ones before it
+/// are parameter sources; all are ToString'd in order (steps 8-10) before
+/// anything is parsed.
 ///
 /// Step 16 assembles "function anonymous(" P "\n) {\n" body "\n}", but the
 /// spec then calls OrdinaryFunctionCreate directly, so unlike a named
@@ -239,10 +270,16 @@ pub fn dispatch(
 /// result. The newline before ")" matters: a trailing line comment in the
 /// last parameter must not swallow the ")" (test262
 /// Function/prototype/toString/Function).
+///
+/// Steps 18-19: the closure's [[Prototype]] is
+/// GetPrototypeFromConstructor(newTarget, fallbackProto). With NewTarget
+/// undefined, newTarget is the constructor itself, whose `prototype` is the
+/// intrinsic the eval hook already used; otherwise it is applied here.
 pub fn create_dynamic_function(
   st: Agent,
   args: List(JsVal),
-  keyword: String,
+  kind: DynamicFunctionKind,
+  new_target: JsVal,
 ) -> #(JsVal, Agent) {
   let #(strs, st) =
     list.fold(args, #([], st), fn(acc, arg) {
@@ -253,6 +290,12 @@ pub fn create_dynamic_function(
   let #(params, body) = case strs {
     [] -> #([], "")
     [b, ..params_rev] -> #(list.reverse(params_rev), b)
+  }
+  let keyword = case kind {
+    DynamicNormal -> "function"
+    DynamicGenerator -> "function*"
+    DynamicAsync -> "async function"
+    DynamicAsyncGenerator -> "async function*"
   }
   let source =
     "("
@@ -275,9 +318,45 @@ pub fn create_dynamic_function(
           False,
           True,
         )
-      #(f, st)
+      #(f, apply_new_target_prototype(st, h, kind, new_target))
     }
     _ -> #(f, st)
+  }
+}
+
+/// §20.2.1.1.1 steps 18-19 for an object `new_target`: set the closure's
+/// [[Prototype]] to `? Get(newTarget, "prototype")` when that is an object,
+/// else to the `kind` intrinsic of newTarget's realm (§10.1.14
+/// GetPrototypeFromConstructor via §7.3.24 GetFunctionRealm).
+fn apply_new_target_prototype(
+  st: Agent,
+  h: Handle,
+  kind: DynamicFunctionKind,
+  new_target: JsVal,
+) -> Agent {
+  case classify(new_target) {
+    KHandle(nt) -> {
+      let #(p, st) =
+        rt_obj.t_get_prop(st, new_target, StringKey(Named("prototype")))
+      let proto = case classify(p) {
+        KHandle(ph) -> ph
+        _ -> {
+          let realm = rt_realm.lookup(st, rt_call.get_function_realm(st, nt))
+          case kind {
+            DynamicNormal -> realm.function.prototype
+            DynamicGenerator -> realm.generator_fn.prototype
+            DynamicAsync -> realm.async_fn.prototype
+            DynamicAsyncGenerator ->
+              rt_call.async_generator_fn_prototype(st, realm)
+          }
+        }
+      }
+      // A fresh, extensible ordinary function cell: OrdinarySetPrototypeOf
+      // cannot reject it.
+      let #(_set, st) = rt_obj.t_set_prototype(st, h, Some(proto))
+      st
+    }
+    _ -> st
   }
 }
 

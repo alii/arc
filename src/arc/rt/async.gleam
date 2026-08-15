@@ -18,6 +18,7 @@ import arc/rt/call.{
 import arc/rt/gc as rt_gc
 import arc/rt/inspect
 import arc/rt/obj as rt_obj
+import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type AGResumeKind, type Agent, type AsyncGenRequest, type AsyncGenState,
@@ -440,15 +441,20 @@ pub fn t_gen_start(
 pub fn t_gen_new(st: Agent, callee: JsVal, resume: Resume) -> #(Handle, Agent) {
   let #(data, st) =
     rt_store.t_cell_new(st, SGenerator(state: GenSuspendedStart, resume:))
-  let proto = generator_prototype(st, callee, st.realm.generator.prototype)
+  let proto = generator_prototype(st, callee, fn(r) { r.generator.prototype })
   alloc_shell(st, GeneratorObj(data:), Some(proto))
 }
 
 /// §10.1.14 GetPrototypeFromConstructor for a generator function's call:
 /// its own `prototype` data property when that holds an object, else the
-/// realm `fallback`. The property is non-configurable data, so the own-slot
-/// read is the whole of the observable Get.
-fn generator_prototype(st: Agent, callee: JsVal, fallback: Handle) -> Handle {
+/// `intrinsic` of the function's realm (§7.3.24 GetFunctionRealm). The
+/// property is non-configurable data, so the own-slot read is the whole of
+/// the observable Get.
+fn generator_prototype(
+  st: Agent,
+  callee: JsVal,
+  intrinsic: fn(rt_types.Realm) -> Handle,
+) -> Handle {
   case classify(callee) {
     KHandle(fn_h) ->
       case
@@ -457,12 +463,16 @@ fn generator_prototype(st: Agent, callee: JsVal, fallback: Handle) -> Handle {
         Some(DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(p) -> p
-            _ -> fallback
+            _ -> intrinsic(function_realm(st, fn_h))
           }
-        _ -> fallback
+        _ -> intrinsic(function_realm(st, fn_h))
       }
-    _ -> fallback
+    _ -> intrinsic(st.realm)
   }
+}
+
+fn function_realm(st: Agent, fn_h: Handle) -> rt_types.Realm {
+  rt_realm.lookup(st, call.get_function_realm(st, fn_h))
 }
 
 /// §27.5.3.3 GeneratorResume — `Generator.prototype.next(value)` on the data
@@ -991,7 +1001,7 @@ pub fn t_asyncgen_new(
       st,
       SAsyncGen(state: AGSuspendedStart, resume:, queue: #([], [])),
     )
-  let proto = generator_prototype(st, callee, st.realm.async_gen.prototype)
+  let proto = generator_prototype(st, callee, fn(r) { r.async_gen.prototype })
   alloc_shell(st, AsyncGeneratorObj(data:), Some(proto))
 }
 

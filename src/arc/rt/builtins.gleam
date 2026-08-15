@@ -640,14 +640,14 @@ pub fn dispatch_native_construct(
     // practice (`constructible: False`) but explicit so `require_handle`
     // never sees a primitive BigInt.
     BigIntN(_) -> rt_val.t_throw_type_error(st, "BigInt is not a constructor")
-    // §20.2.1.1 / §27.3.1.1 dynamic Function-family constructors — bodies
-    // throw ("not supported") until M19 seeds eval; new_target is unused.
+    // §20.2.1.1 / §27.3.1.1 dynamic Function-family constructors:
+    // CreateDynamicFunction(C, NewTarget, kind, args).
     FunctionN(n) -> {
-      let #(v, st) = b_function.dispatch(st, n, mk_undefined(), args)
+      let #(v, st) = b_function.dispatch_construct(st, n, args, new_target)
       require_handle(st, v)
     }
     GeneratorN(n) -> {
-      let #(v, st) = b_generator.dispatch(st, n, mk_undefined(), args)
+      let #(v, st) = b_generator.dispatch_construct(st, n, args, new_target)
       require_handle(st, v)
     }
     // Non-constructor method tokens on constructible types.
