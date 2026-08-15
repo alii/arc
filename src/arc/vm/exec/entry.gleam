@@ -3,6 +3,7 @@
 // ============================================================================
 
 import arc/host_hooks
+import arc/rt/bytecode
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/completion.{
@@ -17,6 +18,7 @@ import arc/vm/gc_trace
 import arc/vm/heap
 import arc/vm/internal/job_queue
 import arc/vm/internal/tuple_array
+import arc/vm/legacy
 import arc/vm/realm
 import arc/vm/state.{type Heap, type State, type VmError, RealmCtx, State}
 import arc/vm/value.{
@@ -87,8 +89,11 @@ pub fn new_repl_env(global_object: Ref) -> ReplEnv {
 /// The settled outcome is `Ok(value)` for a normal top-level return and
 /// `Error(thrown)` for an uncaught throw — the only two ways a top-level run
 /// can end (see `settle`) — paired with the drained heap.
+///
+/// The `run*` family takes the compiler's template and converts it to this
+/// interpreter's shape on entry (`legacy.legacy_template`).
 pub fn run(
-  func: FuncTemplate,
+  func: bytecode.FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
@@ -102,7 +107,7 @@ pub fn run(
 /// (e.g. `arc/beam.run`). Core's `event_loop.drain_jobs` is the no-macrotask
 /// default. Boots with `host_hooks.default_host_hooks()`.
 pub fn run_with(
-  func: FuncTemplate,
+  func: bytecode.FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
@@ -126,7 +131,7 @@ pub fn run_with(
 /// install step to forget. `run`/`run_with` pass `host_hooks.default_host_hooks()`
 /// (no capabilities — a blocking `Atomics.wait` then throws per DoWait).
 pub fn run_with_hooks(
-  func: FuncTemplate,
+  func: bytecode.FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   global_object: Ref,
@@ -135,7 +140,7 @@ pub fn run_with_hooks(
 ) -> Result(#(Result(JsValue, JsValue), Heap(host)), VmError) {
   let executed =
     interpreter.init_state(
-      func,
+      legacy.legacy_template(func),
       heap,
       builtins,
       global_object,
@@ -317,7 +322,7 @@ fn drive_top_level_await(
 /// Hands back the settled outcome (`Ok(value)` / `Error(thrown)`), the drained
 /// heap, and the persistent REPL environment for the next evaluation.
 pub fn run_and_drain_repl(
-  func: FuncTemplate,
+  func: bytecode.FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   env: ReplEnv,
@@ -343,7 +348,7 @@ pub fn run_and_drain_repl(
 /// of the default microtask drain). Used by the test262 harness, whose
 /// per-test worker processes drive the event loop directly.
 pub fn run_and_drain_repl_with(
-  func: FuncTemplate,
+  func: bytecode.FuncTemplate,
   heap: Heap(host),
   builtins: Builtins,
   env: ReplEnv,
@@ -352,6 +357,7 @@ pub fn run_and_drain_repl_with(
   extend_262: Option(state.Extend262(host)),
   finish: fn(State(host)) -> State(host),
 ) -> Result(#(Result(JsValue, JsValue), Heap(host), ReplEnv), VmError) {
+  let func = legacy.legacy_template(func)
   // §16.1.6 ScriptEvaluation sets envs to globalEnv; script `this` resolves via §9.1.1.4.11 GetThisBinding to [[GlobalThisValue]].
   let this_val = JsObject(env.global_object)
   let locals = frame.init_top_level_locals(func, this_val)

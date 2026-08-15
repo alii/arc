@@ -57,7 +57,7 @@ fn run_with(
     as { "parse failed: " <> source }
   let assert Ok(template) = compile(body, sb)
     as { "compile failed: " <> source }
-  entry.run_script(st, compiler.shared_template(template))
+  entry.run_script(st, template)
 }
 
 /// Run and return the normal completion value; a throw fails the test with

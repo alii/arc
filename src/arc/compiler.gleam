@@ -19,20 +19,15 @@ import arc/compiler/resolve
 import arc/compiler/scope
 import arc/esm
 import arc/parser/ast
-import arc/rt/bytecode
+import arc/rt/bytecode.{
+  type EvalNameTable, type FuncTemplate, type VarEnvKind, CaptureLocal,
+  EvalNameTable, FrameVarEnv, FuncTemplate, GlobalVarEnv,
+}
 import arc/rt/types.{type JsVal}
-import arc/rt/val as rt_val
 import arc/vm/internal/tuple_array
 import arc/vm/lexical.{type CodeKind, type LexicalSlots}
 import arc/vm/opcode
-import arc/vm/value.{
-  type EvalNameTable, type FuncTemplate, type JsValue, type VarEnvKind,
-  CaptureLocal, EvalNameTable, FuncTemplate, GlobalVarEnv, JsUndefined,
-  JsUninitialized,
-}
 import gleam/dict.{type Dict}
-import gleam/float
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -119,41 +114,6 @@ pub type DirectEvalCaller {
   )
 }
 
-/// Phase 3 plus the coexistence shim: the emitter builds the constant pool
-/// as shared-runtime `JsVal`s, but the old interpreter's `FuncTemplate`
-/// still indexes a `JsValue` pool, so convert once here at template assembly.
-fn resolve_legacy(
-  code: List(opcode.IrOp),
-  constants: List(JsVal),
-) -> #(tuple_array.TupleArray(opcode.Op), tuple_array.TupleArray(JsValue)) {
-  let #(bytecode, constants) = resolve.resolve(code, constants)
-  let legacy =
-    tuple_array.to_list(constants)
-    |> list.map(legacy_constant)
-    |> tuple_array.from_list
-  #(bytecode, legacy)
-}
-
-/// One pool entry back to the old interpreter's value type. The pool only
-/// ever holds primitives and the TDZ sentinel (see `emit.add_constant`).
-fn legacy_constant(v: JsVal) -> JsValue {
-  case types.classify(v) {
-    types.KUndef -> JsUndefined
-    types.KNull -> value.JsNull
-    types.KBool(b) -> value.JsBool(b)
-    types.KNum(types.JInt(i)) -> value.JsNumber(value.Finite(int.to_float(i)))
-    types.KNum(types.JFloat(f)) -> value.JsNumber(value.Finite(f))
-    types.KNum(types.JNan) -> value.JsNumber(value.NaN)
-    types.KNum(types.JPosInf) -> value.JsNumber(value.Infinity)
-    types.KNum(types.JNegInf) -> value.JsNumber(value.NegInfinity)
-    types.KStr(s) -> value.JsString(s)
-    types.KBig(n) -> value.JsBigInt(value.BigInt(n))
-    types.KTdz -> JsUninitialized
-    types.KSym(_) | types.KHandle(_) ->
-      panic as "constant pool holds a symbol or heap reference"
-  }
-}
-
 /// Phase 3 for a top-level body (script, module, or eval): unnamed, zero
 /// arity, no env captures, and not an arrow/constructor/generator/async.
 fn resolve_top_level(
@@ -165,7 +125,7 @@ fn resolve_top_level(
   code_kind: CodeKind,
   local_names: Option(EvalNameTable),
 ) -> FuncTemplate {
-  let #(bytecode, constants) = resolve_legacy(code, constants)
+  let #(bytecode, constants) = resolve.resolve(code, constants)
   FuncTemplate(
     name: None,
     arity: 0,
@@ -221,11 +181,9 @@ pub type CompiledModuleBody {
     /// `template.functions`, in source order. The linker instantiates the
     /// exported ones before evaluation so importers observe the closures.
     hoisted_funcs: List(#(String, Int)),
-    /// Exported local name → the value the linker pre-seeds into its BoxSlot
-    /// before the body runs (§16.2 instantiation): `undefined` for var and
-    /// function declarations (hoisted, never TDZ), `uninitialized` for
-    /// let/const/class and the default export (TDZ until initialized).
-    export_seeds: Dict(String, JsValue),
+    /// Exported local name → how the linker pre-seeds its cell before the
+    /// body runs (§16.2 instantiation).
+    export_seeds: Dict(String, ExportSeed),
     /// [[HasTLA]] (§16.2.1.5): the module body contains a top-level `await`.
     /// An `await` inside a nested function compiles into that function's own
     /// child template, so an Await opcode in the module-root bytecode is
@@ -233,6 +191,15 @@ pub type CompiledModuleBody {
     /// so callers never scan bytecode.
     has_tla: Bool,
   )
+}
+
+/// The value the linker seeds into an exported local's cell before the body
+/// runs (§16.2 instantiation).
+pub type ExportSeed {
+  /// var/function: hoisted, never TDZ.
+  SeedUndefined
+  /// let/const/class and the default export: TDZ until initialized.
+  SeedUninitialized
 }
 
 /// Compile a module body to a `CompiledModuleBody`.
@@ -264,15 +231,15 @@ fn local_export_names(exports: List(esm.ExportEntry)) -> List(String) {
   })
 }
 
-/// The value the linker pre-seeds into each exported local's BoxSlot before the
-/// module body runs (§16.2 instantiation): `undefined` for var and function
-/// declarations (hoisted, never TDZ), `uninitialized` for let/const/class and
-/// the default export (TDZ until the body initializes them). Computed here,
-/// alongside the bytecode, and handed to the linker on `CompiledModuleBody`.
+/// The seed for each exported local's cell before the module body runs
+/// (§16.2 instantiation): `undefined` for var and function declarations
+/// (hoisted, never TDZ), `uninitialized` for let/const/class and the default
+/// export (TDZ until the body initializes them). Computed here, alongside the
+/// bytecode, and handed to the linker on `CompiledModuleBody`.
 fn module_export_seeds(
   items: List(ast.ModuleItem),
   exports: List(esm.ExportEntry),
-) -> Dict(String, JsValue) {
+) -> Dict(String, ExportSeed) {
   // The `undefined`-seeded names are exactly the module-level VarDeclaredNames
   // plus the top-level FunctionDeclarations — the same ast_util helpers the
   // emitter drives instantiation from, so `export {x}; if (c) var x` sees `x`
@@ -298,8 +265,8 @@ fn module_export_seeds(
   local_export_names(exports)
   |> list.fold(dict.new(), fn(acc, name) {
     let seed = case set.contains(undef, name) {
-      True -> JsUndefined
-      False -> JsUninitialized
+      True -> SeedUndefined
+      False -> SeedUninitialized
     }
     dict.insert(acc, name, seed)
   })
@@ -668,10 +635,7 @@ fn compile_child(
   // A child function's VariableEnvironment is always its own frame.
   let local_names = case info.eval_in_subtree {
     True ->
-      Some(EvalNameTable(
-        var_env: value.FrameVarEnv,
-        names: dict.to_list(info.names),
-      ))
+      Some(EvalNameTable(var_env: FrameVarEnv, names: dict.to_list(info.names)))
     False -> None
   }
 
@@ -681,7 +645,7 @@ fn compile_child(
     compile_children(child.functions, tree, child.scope_id)
 
   // Phase 3: Resolve labels.
-  let #(bytecode, constants) = resolve_legacy(child.code, child.constants)
+  let #(bytecode, constants) = resolve.resolve(child.code, child.constants)
   FuncTemplate(
     name: child.name,
     arity: child.arity,
@@ -749,81 +713,5 @@ fn check_param_scope_var_conflict(
         Error(Nil) -> Ok(Nil)
       }
     }
-  }
-}
-
-/// The shared-runtime view of a compiled template, for the new interpreter.
-/// While the old interpreter is still the engine, templates are assembled in
-/// its shape (`resolve_legacy`); this converts one back, constant pool
-/// included, using the emitter's own number rule so both interpreters and
-/// compiled code hold identical constants.
-pub fn shared_template(t: FuncTemplate) -> bytecode.FuncTemplate {
-  bytecode.FuncTemplate(
-    name: t.name,
-    arity: t.arity,
-    length: t.length,
-    local_count: t.local_count,
-    bytecode: t.bytecode,
-    constants: tuple_array.to_list(t.constants)
-      |> list.map(shared_constant)
-      |> tuple_array.from_list,
-    functions: tuple_array.to_list(t.functions)
-      |> list.map(shared_template)
-      |> tuple_array.from_list,
-    env_descriptors: list.map(t.env_descriptors, fn(c) {
-      let CaptureLocal(parent_index:) = c
-      bytecode.CaptureLocal(parent_index:)
-    }),
-    is_strict: t.is_strict,
-    is_arrow: t.is_arrow,
-    is_derived_constructor: t.is_derived_constructor,
-    is_generator: t.is_generator,
-    is_async: t.is_async,
-    is_constructor: t.is_constructor,
-    is_class_constructor: t.is_class_constructor,
-    local_names: option.map(t.local_names, fn(n) {
-      bytecode.EvalNameTable(var_env: shared_var_env(n.var_env), names: n.names)
-    }),
-    lexical: t.lexical,
-    code_kind: t.code_kind,
-  )
-}
-
-fn shared_var_env(k: VarEnvKind) -> bytecode.VarEnvKind {
-  case k {
-    GlobalVarEnv -> bytecode.GlobalVarEnv
-    value.FrameVarEnv -> bytecode.FrameVarEnv
-  }
-}
-
-/// One legacy pool entry forward to its wire value. Inverse of
-/// `legacy_constant`; numbers follow `emit.number_const`.
-fn shared_constant(v: JsValue) -> JsVal {
-  case v {
-    JsUndefined -> types.mk_undefined()
-    value.JsNull -> types.mk_null()
-    value.JsBool(b) -> types.mk_bool(b)
-    value.JsNumber(value.Finite(f)) -> shared_number(f)
-    value.JsNumber(value.NaN) -> types.mk_number(types.JNan)
-    value.JsNumber(value.Infinity) -> types.mk_number(types.JPosInf)
-    value.JsNumber(value.NegInfinity) -> types.mk_number(types.JNegInf)
-    value.JsString(s) -> types.mk_string(s)
-    value.JsBigInt(value.BigInt(n)) -> types.mk_bigint(n)
-    JsUninitialized -> types.mk_tdz()
-    value.JsSymbol(_) | value.JsObject(_) ->
-      panic as "constant pool holds a symbol or heap reference"
-  }
-}
-
-fn shared_number(f: Float) -> JsVal {
-  let i = float.truncate(f)
-  case
-    int.to_float(i) == f
-    && i >= 0
-    && i < 2_147_483_648
-    && !rt_val.is_neg_zero(f)
-  {
-    True -> types.mk_number(types.JInt(i))
-    False -> types.mk_number(types.JFloat(f))
   }
 }

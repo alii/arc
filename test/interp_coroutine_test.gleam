@@ -26,7 +26,7 @@ fn run_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
   let assert Ok(template) = compiler.compile(body, sb)
     as { "compile failed: " <> source }
   let #(completion, st) =
-    entry.run_script(st, compiler.shared_template(template))
+    entry.run_script(st, template)
   #(completion, rt_async.drain(st))
 }
 

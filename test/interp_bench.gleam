@@ -5,16 +5,17 @@
 ////   gleam run -m interp_bench                      # bench/bench.js, 1 run each
 ////   gleam run -m interp_bench -- bench/bench.js 5   # min of 5
 ////
-//// The script is compiled once; the old interpreter runs the template as
-//// compiled, the new one its `shared_template` view. `console.log` is teed
-//// into an array whose join is the script's completion value, so the numbers
-//// come back as data without any capture state outside the two heaps.
+//// The script is compiled once and both interpreters run the same template
+//// (the old one converts it on entry). `console.log` is teed into an array
+//// whose join is the script's completion value, so the numbers come back as
+//// data without any capture state outside the two heaps.
 
 import arc/compiler
 import arc/host_hooks
 import arc/interp/entry as new_entry
 import arc/parser
 import arc/rt/builtins as rt_builtins
+import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as _
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{KStr, classify}
@@ -72,21 +73,20 @@ pub fn main() -> Nil {
         Error(e) -> panic as { "compile error: " <> compiler.error_message(e) }
       }
   }
-  let shared = compiler.shared_template(template)
   let #(old_runs, new_runs) =
     int.range(from: 1, to: runs + 1, with: #([], []), run: fn(acc, i) {
       let #(olds, news) = acc
       io.println("# old interpreter, run " <> int.to_string(i))
       let old = run_old(template)
       io.println("# new interpreter, run " <> int.to_string(i))
-      let new = run_new(shared)
+      let new = run_new(template)
       #([old, ..olds], [new, ..news])
     })
   report(sections(old_runs), min_by_section(old_runs), min_by_section(new_runs))
 }
 
 /// One run through the old interpreter: its `BENCH` lines as (name, ms).
-fn run_old(template: value.FuncTemplate) -> List(#(String, Int)) {
+fn run_old(template: FuncTemplate) -> List(#(String, Int)) {
   let #(h, b) = old_builtins.init(heap.new())
   let #(h, global) = old_builtins.globals(b, h)
   let hooks = host_hooks.default_host_hooks()
@@ -110,7 +110,7 @@ fn run_old(template: value.FuncTemplate) -> List(#(String, Int)) {
 }
 
 /// One run through the new interpreter: its `BENCH` lines as (name, ms).
-fn run_new(template) -> List(#(String, Int)) {
+fn run_new(template: FuncTemplate) -> List(#(String, Int)) {
   let agent =
     rt_builtins.new_agent(host_hooks.default_host_hooks()) |> new_entry.link
   case new_entry.run_script(agent, template) {

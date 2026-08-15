@@ -18,7 +18,7 @@ fn run_string(source: String) -> String {
     as { "parse failed: " <> source }
   let assert Ok(template) = compiler.compile(body, sb)
     as { "compile failed: " <> source }
-  case entry.run_script(st, compiler.shared_template(template)) {
+  case entry.run_script(st, template) {
     #(NormalCompletion(v), st) ->
       case classify(v) {
         KStr(s) -> s

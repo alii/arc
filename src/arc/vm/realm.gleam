@@ -3,6 +3,7 @@ import arc/compiler/scope
 import arc/host_hooks
 import arc/parser
 import arc/parser/ast
+import arc/rt/bytecode
 import arc/vm/builtins
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/helpers
@@ -15,6 +16,7 @@ import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/tuple_array
 import arc/vm/key.{Named}
+import arc/vm/legacy
 import arc/vm/lexical
 import arc/vm/ops/coerce
 import arc/vm/ops/mop
@@ -296,7 +298,7 @@ fn compile_or_throw(
   parse: fn(String) ->
     Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), parser.ParseError),
   compile: fn(List(ast.StmtWithLine), scope.ScopeBuilder) ->
-    Result(FuncTemplate, compiler.CompileError),
+    Result(bytecode.FuncTemplate, compiler.CompileError),
   cont: fn(FuncTemplate) -> #(State(host), Result(JsValue, JsValue)),
 ) -> #(State(host), Result(JsValue, JsValue)) {
   let throw_syntax = fn(msg) {
@@ -316,7 +318,7 @@ fn compile_or_throw(
         Ok(#(body, sb)) ->
           case compile(body, sb) {
             Error(err) -> Error(compiler.error_message(err))
-            Ok(template) -> Ok(template)
+            Ok(template) -> Ok(legacy.legacy_template(template))
           }
       }
     })
@@ -569,7 +571,7 @@ fn run_direct_eval(
         True -> compiler.Strict
         False -> compiler.Sloppy
       },
-      var_env:,
+      var_env: legacy.shared_var_env(var_env),
       param_scope_names:,
       with_names:,
       private_names:,

@@ -1,3 +1,5 @@
+import arc/rt/bytecode.{type FuncTemplate, FuncTemplate}
+import arc/rt/types
 import arc/vm/builtins
 import arc/vm/builtins/common
 import arc/vm/exec/entry
@@ -7,20 +9,21 @@ import arc/vm/key.{Named}
 import arc/vm/lexical
 import arc/vm/opcode.{
   type Op, Add, BitAnd, BitNot, BitOr, BitXor, CatchOnly, DefineField, Div, Dup,
-  Eq, Exp, GetField, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue,
-  LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pc, Pop, Pos, PushConst,
-  PushTry, PutField, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq,
-  StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void, bin_op,
+  Eq, Exp, GetField, GetGlobal, GetLocal, Gt, GtEq, Jump, JumpIfFalse,
+  JumpIfTrue, LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pc, Pop,
+  Pos, PushConst, PushTry, PutField, PutLocal, Return, ShiftLeft, ShiftRight,
+  StrictEq, StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void, bin_op,
 }
 import arc/vm/ops/object
 import arc/vm/state
 import arc/vm/value.{
-  type FuncTemplate, AccessorProperty, DataProperty, Finite, FuncTemplate,
-  JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
+  AccessorProperty, DataProperty, Finite, JsBool, JsNull, JsNumber, JsObject,
+  JsString, JsUndefined,
 }
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
+import gleam/string
 
 /// Test helper: read a data property walking the prototype chain.
 fn get_data(
@@ -54,7 +57,7 @@ fn make_func(
     length: 0,
     local_count:,
     bytecode: tuple_array.from_list(bytecode),
-    constants: tuple_array.from_list(constants),
+    constants: tuple_array.from_list(list.map(constants, wire_constant)),
     functions: tuple_array.from_list([]),
     env_descriptors: [],
     is_strict: False,
@@ -68,6 +71,19 @@ fn make_func(
     lexical: lexical.NoLexicalSlots,
     code_kind: lexical.ScriptCode,
   )
+}
+
+/// A hand-written pool constant as the compiler would emit it.
+fn wire_constant(v: value.JsValue) -> types.JsVal {
+  case v {
+    JsUndefined -> types.mk_undefined()
+    JsNull -> types.mk_null()
+    JsBool(b) -> types.mk_bool(b)
+    JsNumber(Finite(f)) -> types.mk_number(types.JFloat(f))
+    JsString(s) -> types.mk_string(s)
+    value.JsUninitialized -> types.mk_tdz()
+    _ -> panic as { "not a pool constant: " <> string.inspect(v) }
+  }
 }
 
 /// Helper: run bytecode with builtins, return just the value for a normal
@@ -694,11 +710,12 @@ pub fn tdz_throws_reference_error_test() {
 }
 
 pub fn type_error_thrown_for_symbol_conversion_test() {
-  // +Symbol() should throw TypeError
+  // +Symbol.toStringTag should throw TypeError. Symbols never sit in a
+  // constant pool, so read one off the global.
   let func =
     make_func(
-      [PushConst(0), UnaryOp(Pos)],
-      [value.JsSymbol(value.symbol_to_string_tag)],
+      [GetGlobal("Symbol"), GetField(Named("toStringTag")), UnaryOp(Pos)],
+      [],
       0,
     )
   expect_throw_named(func, "TypeError")

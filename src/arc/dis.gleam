@@ -67,7 +67,7 @@ pub fn compile(
   goal: Goal,
   source: String,
 ) -> Result(FuncTemplate, SourceError) {
-  let compiled = case goal {
+  case goal {
     Script -> {
       use #(body, sb) <- result.try(
         parser.parse_script(source) |> result.map_error(Syntax),
@@ -91,7 +91,6 @@ pub fn compile(
       compiled.template
     }
   }
-  result.map(compiled, compiler.shared_template)
 }
 
 /// Compile `source` under `goal` and disassemble the result.

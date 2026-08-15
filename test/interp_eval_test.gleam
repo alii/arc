@@ -24,7 +24,7 @@ fn run(source: String) -> #(rt_call.Completion, Agent) {
     as { "parse failed: " <> source }
   let assert Ok(template) = compiler.compile(body, sb)
     as { "compile failed: " <> source }
-  entry.run_script(agent(), compiler.shared_template(template))
+  entry.run_script(agent(), template)
 }
 
 fn eval(source: String) -> #(JsVal, Agent) {

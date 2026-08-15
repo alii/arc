@@ -24,7 +24,7 @@ fn run_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
     as { "parse failed: " <> source }
   let assert Ok(template) = compiler.compile(body, sb)
     as { "compile failed: " <> source }
-  entry.run_script(st, compiler.shared_template(template))
+  entry.run_script(st, template)
 }
 
 fn run(source: String) -> #(rt_call.Completion, Agent) {

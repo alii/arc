@@ -34,7 +34,6 @@ import arc/vm/compile_task
 import arc/vm/internal/tuple_array.{type TupleArray}
 import arc/vm/lexical
 import arc/vm/limits
-import arc/vm/value
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -55,7 +54,7 @@ type Parse =
 
 type Compile =
   fn(List(ast.StmtWithLine), scope.ScopeBuilder) ->
-    Result(value.FuncTemplate, compiler.CompileError)
+    Result(FuncTemplate, compiler.CompileError)
 
 /// Parse and compile `source`, or hand back a SyntaxError allocated in the
 /// current realm. Big sources go through the heap-sized scratch process
@@ -72,7 +71,6 @@ fn compile_source(
         Error(err) -> Error(parser.parse_error_to_string(err))
         Ok(#(body, sb)) ->
           compile(body, sb)
-          |> result.map(compiler.shared_template)
           |> result.map_error(compiler.error_message)
       }
     })
@@ -333,10 +331,7 @@ fn run_direct_eval(
         True -> compiler.Strict
         False -> compiler.Sloppy
       },
-      var_env: case var_env {
-        GlobalVarEnv -> value.GlobalVarEnv
-        FrameVarEnv -> value.FrameVarEnv
-      },
+      var_env:,
       param_scope_names:,
       with_names:,
       private_names:,

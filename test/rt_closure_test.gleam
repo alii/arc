@@ -16,7 +16,7 @@ import rt_helpers
 fn compile(source: String) -> FuncTemplate {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compiler.compile(body, sb)
-  compiler.shared_template(template)
+  template
 }
 
 fn find(t: FuncTemplate, name: String) -> Result(FuncTemplate, Nil) {

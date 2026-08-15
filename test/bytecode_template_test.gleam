@@ -17,7 +17,7 @@ import gleam/option.{Some}
 fn compile(source: String) -> FuncTemplate {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compiler.compile(body, sb)
-  compiler.shared_template(template)
+  template
 }
 
 fn constant_kinds(t: FuncTemplate) -> List(JsValKind) {

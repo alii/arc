@@ -23,6 +23,7 @@ import arc/host_hooks
 import arc/internal/path
 import arc/module/load_error
 import arc/parser
+import arc/rt/bytecode.{type FuncTemplate}
 import arc/vm/builtins
 import arc/vm/builtins/common
 import arc/vm/completion.{ThrowCompletion}
@@ -34,6 +35,7 @@ import arc/vm/heap
 import arc/vm/internal/clock_ffi
 import arc/vm/internal/elements
 import arc/vm/key.{Named}
+import arc/vm/legacy
 import arc/vm/module
 import arc/vm/module_host
 import arc/vm/ops/coerce
@@ -137,7 +139,7 @@ fn boot_base_realm() -> #(Heap(host), common.Builtins, value.Ref) {
 fn harness_template(
   key: String,
   read_source: fn() -> Result(String, String),
-) -> Result(value.FuncTemplate, String) {
+) -> Result(FuncTemplate, String) {
   case template_cache_get(key) {
     Some(template) -> Ok(template)
     None -> {
@@ -149,9 +151,7 @@ fn harness_template(
   }
 }
 
-fn compile_harness_source(
-  source: String,
-) -> Result(value.FuncTemplate, String) {
+fn compile_harness_source(source: String) -> Result(FuncTemplate, String) {
   use #(body, sb) <- result.try(
     parser.parse_script(source)
     |> result.map_error(fn(err) {
@@ -1029,7 +1029,7 @@ fn eval_harness(
 
 /// Evaluate a compiled harness template as a REPL script.
 fn eval_harness_template(
-  template: value.FuncTemplate,
+  template: FuncTemplate,
   h: Heap(host),
   b: common.Builtins,
   env: entry.ReplEnv,
@@ -1279,7 +1279,7 @@ fn run_agent_child(source: String) -> Nil {
         Ok(#(body, sb)) ->
           case compiler.compile_eval(body, sb) {
             Error(err) -> Error(string.inspect(err))
-            Ok(template) -> Ok(template)
+            Ok(template) -> Ok(legacy.legacy_template(template))
           }
       }
     })
@@ -1816,12 +1816,12 @@ fn realm_cache_put(
 }
 
 @external(erlang, "test262_exec_ffi", "cache_get")
-fn template_cache_get(_key: String) -> option.Option(value.FuncTemplate) {
+fn template_cache_get(_key: String) -> option.Option(FuncTemplate) {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "cache_put")
-fn template_cache_put(_key: String, _template: value.FuncTemplate) -> Nil {
+fn template_cache_put(_key: String, _template: FuncTemplate) -> Nil {
   panic as beam_only_test
 }
 

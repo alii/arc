@@ -16,7 +16,7 @@ import rt_helpers
 fn run(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compiler.compile(body, sb)
-  entry.run_script(st, compiler.shared_template(template))
+  entry.run_script(st, template)
 }
 
 pub fn parked_generator_eval_env_survives_collect_test() {
