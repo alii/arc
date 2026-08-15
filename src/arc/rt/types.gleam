@@ -1130,10 +1130,108 @@ pub type RegExpFlag {
   RFSticky
 }
 
+/// One of %RegExp%'s legacy internal slots (tc39
+/// proposal-regexp-legacy-features): [[RegExpInput]], [[RegExpLastMatch]],
+/// [[RegExpLastParen]], [[RegExpLeftContext]], [[RegExpRightContext]], and
+/// [[RegExpParenN]] for N in 1..9. Names the field of `LegacyStatics` a
+/// `RegExpLegacyGetter` reads. Every paren index is a distinct constructor,
+/// so a mis-numbered slot (`$0`, `$10`) is not representable and reading a
+/// slot is total.
+pub type LegacySlot {
+  LegacyInput
+  LegacyLastMatch
+  LegacyLastParen
+  LegacyLeftContext
+  LegacyRightContext
+  LegacyParen1
+  LegacyParen2
+  LegacyParen3
+  LegacyParen4
+  LegacyParen5
+  LegacyParen6
+  LegacyParen7
+  LegacyParen8
+  LegacyParen9
+}
+
+/// The tc39 legacy-regexp proposal's %RegExp% internal slots, all present at
+/// once. InitializeLegacyRegExpStaticProperties sets every one to "" (hence
+/// `empty_legacy_statics()`) and UpdateLegacyRegExpStaticProperties rewrites
+/// every one on each successful builtin exec, so there is no "unset" slot to
+/// distinguish from an empty one.
+pub type LegacyStatics {
+  LegacyStatics(
+    input: String,
+    last_match: String,
+    last_paren: String,
+    left_context: String,
+    right_context: String,
+    paren1: String,
+    paren2: String,
+    paren3: String,
+    paren4: String,
+    paren5: String,
+    paren6: String,
+    paren7: String,
+    paren8: String,
+    paren9: String,
+  )
+}
+
+/// InitializeLegacyRegExpStaticProperties: every slot the empty String.
+pub fn empty_legacy_statics() -> LegacyStatics {
+  LegacyStatics(
+    input: "",
+    last_match: "",
+    last_paren: "",
+    left_context: "",
+    right_context: "",
+    paren1: "",
+    paren2: "",
+    paren3: "",
+    paren4: "",
+    paren5: "",
+    paren6: "",
+    paren7: "",
+    paren8: "",
+    paren9: "",
+  )
+}
+
+/// Read one legacy slot. Total: every `LegacySlot` names a real field.
+pub fn legacy_slot(statics: LegacyStatics, slot: LegacySlot) -> String {
+  case slot {
+    LegacyInput -> statics.input
+    LegacyLastMatch -> statics.last_match
+    LegacyLastParen -> statics.last_paren
+    LegacyLeftContext -> statics.left_context
+    LegacyRightContext -> statics.right_context
+    LegacyParen1 -> statics.paren1
+    LegacyParen2 -> statics.paren2
+    LegacyParen3 -> statics.paren3
+    LegacyParen4 -> statics.paren4
+    LegacyParen5 -> statics.paren5
+    LegacyParen6 -> statics.paren6
+    LegacyParen7 -> statics.paren7
+    LegacyParen8 -> statics.paren8
+    LegacyParen9 -> statics.paren9
+  }
+}
+
 /// RegExp natives (arc `RegExpNativeFn` value.gleam:1113-1170).
 pub type RegExpNative {
-  /// §22.2.4.1 RegExp ( pattern, flags ).
-  RegExpConstructor
+  /// §22.2.4.1 RegExp ( pattern, flags ). `legacy` holds the tc39
+  /// legacy-regexp proposal's internal slots ([[RegExpInput]],
+  /// [[RegExpLastMatch]], [[RegExpParen1]], ...) as one typed record. Living
+  /// inside the constructor's `KNative` kind keeps the state per-realm (each
+  /// realm has its own %RegExp% object) and invisible to
+  /// OrdinaryOwnPropertyKeys.
+  RegExpConstructor(legacy: LegacyStatics)
+  /// GetLegacyRegExpStaticProperty for `slot`; `ctor` is the %RegExp% the
+  /// accessor was installed on (the SameValue(C, thisValue) operand).
+  RegExpLegacyGetter(ctor: Handle, slot: LegacySlot)
+  /// SetLegacyRegExpStaticProperty for [[RegExpInput]] (`input` / `$_`).
+  RegExpLegacyInputSetter(ctor: Handle)
   RegExpPrototypeExec
   RegExpPrototypeTest
   RegExpPrototypeToString
@@ -1708,7 +1806,8 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     ObjectN(_) | FunctionN(_) | ReturnThis -> []
     ErrorN(n) -> error_native_refs(n)
     DateN(n) -> date_native_refs(n)
-    RegExpN(_) | AtomicsN(_) -> []
+    RegExpN(n) -> regexp_native_refs(n)
+    AtomicsN(_) -> []
     ArrayBufferN(n) -> array_buffer_native_refs(n)
     TypedArrayN(n) -> typed_array_native_refs(n)
     DataViewN(n) -> data_view_native_refs(n)
@@ -1886,6 +1985,15 @@ pub fn error_native_refs(n: ErrorNative) -> List(Handle) {
     | ErrorStackGetter
     | ErrorStackSetter(_)
     | ErrorIsError -> []
+  }
+}
+
+/// GC-trace hook for `RegExpNative`: the legacy static accessors close over
+/// the %RegExp% constructor they were installed on.
+pub fn regexp_native_refs(n: RegExpNative) -> List(Handle) {
+  case n {
+    RegExpLegacyGetter(ctor:, ..) | RegExpLegacyInputSetter(ctor:) -> [ctor]
+    _ -> []
   }
 }
 

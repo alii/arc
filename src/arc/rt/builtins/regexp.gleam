@@ -16,12 +16,16 @@ import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
-  type RegExpFlag, type RegExpNative, Index, JInt, KHandle, KNull, KUndef, Named,
-  NoElements, Ordinary, RFDotAll, RFGlobal, RFHasIndices, RFIgnoreCase,
-  RFMultiline, RFSticky, RFUnicode, RFUnicodeSets, RegExpConstructor,
-  RegExpGetFlag, RegExpGetFlags, RegExpGetSource, RegExpN, RegExpObj,
-  RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
+  type Agent, type BuiltinPair, type Handle, type JsVal, type LegacySlot,
+  type LegacyStatics, type ObjectKey, type RegExpFlag, type RegExpNative, Index,
+  JInt, KHandle, KNative, KNull, KUndef, LegacyInput, LegacyLastMatch,
+  LegacyLastParen, LegacyLeftContext, LegacyParen1, LegacyParen2, LegacyParen3,
+  LegacyParen4, LegacyParen5, LegacyParen6, LegacyParen7, LegacyParen8,
+  LegacyParen9, LegacyRightContext, LegacyStatics, Named, NoElements, Ordinary,
+  RFDotAll, RFGlobal, RFHasIndices, RFIgnoreCase, RFMultiline, RFSticky,
+  RFUnicode, RFUnicodeSets, RegExpConstructor, RegExpGetFlag, RegExpGetFlags,
+  RegExpGetSource, RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN,
+  RegExpObj, RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
   RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
   RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
   RegExpSymbolSplit, ReturnThis, SObject, StringKey, classify, mk_bool, mk_null,
@@ -33,6 +37,7 @@ import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -75,11 +80,12 @@ pub fn init(
       object_proto,
       fn_proto,
       proto_props,
-      fn(_) { RegExpN(RegExpConstructor) },
+      fn(_) { RegExpN(RegExpConstructor(rt_types.empty_legacy_statics())) },
       "RegExp",
       2,
       [],
     )
+  let st = install_legacy_accessors(st, fn_proto, bt.constructor)
   // §22.2.6.8-12 Symbol methods — each its own function object.
   let #(st, _) =
     list.fold(
@@ -110,6 +116,69 @@ pub fn init(
   #(bt, st)
 }
 
+/// Annex B / legacy-regexp proposal: install RegExp.input/$_, lastMatch/$&,
+/// lastParen/$+, leftContext/$`, rightContext/$', $1-$9 as accessor
+/// properties on the constructor ({enumerable: false, configurable: true};
+/// only input/$_ has a setter).
+fn install_legacy_accessors(
+  st: Agent,
+  fn_proto: Handle,
+  ctor: Handle,
+) -> Agent {
+  let getter_only = [
+    #("lastMatch", LegacyLastMatch),
+    #("$&", LegacyLastMatch),
+    #("lastParen", LegacyLastParen),
+    #("$+", LegacyLastParen),
+    #("leftContext", LegacyLeftContext),
+    #("$`", LegacyLeftContext),
+    #("rightContext", LegacyRightContext),
+    #("$'", LegacyRightContext),
+    #("$1", LegacyParen1),
+    #("$2", LegacyParen2),
+    #("$3", LegacyParen3),
+    #("$4", LegacyParen4),
+    #("$5", LegacyParen5),
+    #("$6", LegacyParen6),
+    #("$7", LegacyParen7),
+    #("$8", LegacyParen8),
+    #("$9", LegacyParen9),
+  ]
+  // input/$_ get a setter as well; everything else is getter-only.
+  let st =
+    list.fold(["input", "$_"], st, fn(st, name) {
+      let #(prop, st) =
+        common.alloc_get_set_accessor(
+          st,
+          fn_proto,
+          RegExpN(RegExpLegacyGetter(ctor, LegacyInput)),
+          RegExpN(RegExpLegacyInputSetter(ctor)),
+          name,
+        )
+      common.add_named_property(st, ctor, name, prop)
+    })
+  list.fold(getter_only, st, fn(st, spec) {
+    let #(name, slot) = spec
+    let #(get_h, st) =
+      common.alloc_rooted_native_fn(
+        st,
+        fn_proto,
+        RegExpN(RegExpLegacyGetter(ctor, slot)),
+        "get " <> name,
+        0,
+      )
+    let #(prop, st) =
+      common.accessor_prop(
+        st,
+        get: Some(mk_object(get_h)),
+        set: None,
+        enumerable: False,
+        configurable: True,
+      )
+    common.add_named_property(st, ctor, name, prop)
+  })
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Dispatch
 // ═══════════════════════════════════════════════════════════════════════════
@@ -122,7 +191,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    RegExpConstructor -> {
+    RegExpConstructor(legacy: _) -> {
       // §22.2.4.1 step 4: called-as-function with a RegExp arg → return it.
       let #(p, _) = helpers.two_args_or_undefined(args)
       case is_regexp_object(st, p) {
@@ -131,7 +200,7 @@ pub fn dispatch(
           let #(h, st) =
             dispatch_construct(
               st,
-              RegExpConstructor,
+              native,
               args,
               mk_object(st.realm.regexp.constructor),
             )
@@ -139,6 +208,9 @@ pub fn dispatch(
         }
       }
     }
+    RegExpLegacyGetter(ctor:, slot:) -> legacy_static_get(st, this, ctor, slot)
+    RegExpLegacyInputSetter(ctor:) ->
+      legacy_static_set_input(st, this, args, ctor)
     RegExpGetSource -> get_source(st, this)
     RegExpGetFlags -> get_flags(st, this)
     RegExpGetFlag(f) -> get_flag(st, this, f)
@@ -163,7 +235,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    RegExpConstructor -> {
+    RegExpConstructor(legacy: _) -> {
       let #(pattern_v, flags_v) = helpers.two_args_or_undefined(args)
       // §22.2.4.1 step 3: pattern is a RegExp → copy its source/flags.
       let #(source, flags, st) = case classify(pattern_v) {
@@ -184,6 +256,147 @@ pub fn dispatch_construct(
       alloc_regexp(st, source, flags, new_target)
     }
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
+  }
+}
+
+// ── legacy static accessors (tc39 proposal-regexp-legacy-features) ──────────
+
+const legacy_receiver_error = "RegExp legacy static properties may only be accessed on the RegExp constructor"
+
+/// GetLegacyRegExpStaticProperty(C, thisValue, slot): throw TypeError unless
+/// SameValue(C, thisValue); return the slot's string ("" before any match:
+/// InitializeLegacyRegExpStaticProperties sets every slot to the empty
+/// String).
+fn legacy_static_get(
+  st: Agent,
+  this: JsVal,
+  ctor: Handle,
+  slot: LegacySlot,
+) -> #(JsVal, Agent) {
+  case is_handle(this, ctor) {
+    False -> rt_val.t_throw_type_error(st, legacy_receiver_error)
+    True ->
+      case read_legacy_statics(st, ctor) {
+        Some(statics) -> #(mk_string(rt_types.legacy_slot(statics, slot)), st)
+        None -> rt_val.t_throw_type_error(st, legacy_receiver_error)
+      }
+  }
+}
+
+/// SetLegacyRegExpStaticProperty(C, thisValue, [[RegExpInput]], val): throw
+/// TypeError unless SameValue(C, thisValue); slot = ? ToString(val).
+fn legacy_static_set_input(
+  st: Agent,
+  this: JsVal,
+  args: List(JsVal),
+  ctor: Handle,
+) -> #(JsVal, Agent) {
+  case is_handle(this, ctor) {
+    False -> rt_val.t_throw_type_error(st, legacy_receiver_error)
+    True -> {
+      let #(s, st) =
+        rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+      let st =
+        write_legacy_statics(st, ctor, fn(statics) {
+          LegacyStatics(..statics, input: s)
+        })
+      #(mk_undefined(), st)
+    }
+  }
+}
+
+fn is_handle(v: JsVal, h: Handle) -> Bool {
+  case classify(v) {
+    KHandle(vh) -> vh == h
+    _ -> False
+  }
+}
+
+/// Read the constructor's legacy statics. `None` only when `ctor` is not a
+/// %RegExp% constructor object at all, never "this slot was never set", which
+/// the typed record makes unrepresentable (every slot always holds a String).
+fn read_legacy_statics(st: Agent, ctor: Handle) -> Option(LegacyStatics) {
+  case rt_store.t_cell_get(st, ctor) {
+    SObject(kind: KNative(tag: RegExpN(RegExpConstructor(legacy:)), ..), ..) ->
+      Some(legacy)
+    _ -> None
+  }
+}
+
+/// Rewrite the constructor kind's hidden `legacy` record: internal slots,
+/// deliberately NOT properties, so they never appear in
+/// Object.getOwnPropertySymbols(RegExp) / Reflect.ownKeys(RegExp).
+fn write_legacy_statics(
+  st: Agent,
+  ctor: Handle,
+  update: fn(LegacyStatics) -> LegacyStatics,
+) -> Agent {
+  use slot <- rt_store.t_cell_update(st, ctor)
+  case slot {
+    SObject(
+      kind: KNative(
+        tag: RegExpN(RegExpConstructor(legacy:)),
+        name:,
+        length:,
+        constructible:,
+      ),
+      ..,
+    ) ->
+      SObject(
+        ..slot,
+        kind: KNative(
+          tag: RegExpN(RegExpConstructor(update(legacy))),
+          name:,
+          length:,
+          constructible:,
+        ),
+      )
+    other -> other
+  }
+}
+
+/// UpdateLegacyRegExpStaticProperties: refresh the current realm's %RegExp%
+/// legacy state after a successful RegExpBuiltinExec. `whole` is the raw
+/// byte-offset span of the whole match; `groups` is captures 1..N (unset
+/// groups as start -1).
+fn update_legacy_statics(
+  st: Agent,
+  s: String,
+  whole: #(Int, Int),
+  groups: List(#(Int, Int)),
+) -> Agent {
+  let #(match_start, match_len) = whole
+  let group_strings = list.map(groups, capture_to_legacy_string(s, _))
+  let last_paren = list.last(group_strings) |> result.unwrap("")
+  // Groups the pattern doesn't have read as "": the spec's [[RegExpParenN]]
+  // for N > the group count.
+  let paren = fn(n) {
+    helpers.list_at(group_strings, n - 1) |> option.unwrap("")
+  }
+  use _previous <- write_legacy_statics(st, st.realm.regexp.constructor)
+  LegacyStatics(
+    input: s,
+    last_match: byte_slice(s, match_start, match_len),
+    last_paren:,
+    left_context: byte_slice(s, 0, match_start),
+    right_context: byte_drop_start(s, match_start + match_len),
+    paren1: paren(1),
+    paren2: paren(2),
+    paren3: paren(3),
+    paren4: paren(4),
+    paren5: paren(5),
+    paren6: paren(6),
+    paren7: paren(7),
+    paren8: paren(8),
+    paren9: paren(9),
+  )
+}
+
+/// A capture's matched text for legacy statics; unset groups become "".
+fn capture_to_legacy_string(s: String, cap: #(Int, Int)) -> String {
+  case cap {
+    #(start, len) if start >= 0 -> byte_slice(s, start, len)
+    _ -> ""
   }
 }
 
@@ -577,6 +790,15 @@ fn builtin_exec(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
         True -> set_throw(st, h, "lastIndex", mk_number(JInt(e)))
         False -> st
       }
+      // Legacy-regexp proposal: UpdateLegacyRegExpStaticProperties on every
+      // successful builtin exec (RegExp.input, RegExp.$1-$9, etc.).
+      // Unconditional, matching V8/JSC/SpiderMonkey. The proposal gates this on
+      // R.[[LegacyFeaturesEnabled]] and otherwise runs
+      // InvalidateLegacyRegExpStaticProperties (making the getters throw
+      // TypeError); we implement neither half. Gating alone would be strictly
+      // wrong: it would leave a *stale* previous match readable through
+      // RegExp.$1 & co, a result no engine and no spec produces.
+      let st = update_legacy_statics(st, s, whole, groups)
       build_exec_result(st, s, whole, groups, names, has_indices)
     }
   }
