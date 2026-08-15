@@ -19,6 +19,7 @@ import arc/compiler/resolve
 import arc/compiler/scope
 import arc/esm
 import arc/parser/ast
+import arc/rt/types.{type JsVal}
 import arc/vm/internal/tuple_array
 import arc/vm/lexical.{type CodeKind, type LexicalSlots}
 import arc/vm/opcode
@@ -28,6 +29,7 @@ import arc/vm/value.{
   JsUninitialized,
 }
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -114,18 +116,53 @@ pub type DirectEvalCaller {
   )
 }
 
+/// Phase 3 plus the coexistence shim: the emitter builds the constant pool
+/// as shared-runtime `JsVal`s, but the old interpreter's `FuncTemplate`
+/// still indexes a `JsValue` pool, so convert once here at template assembly.
+fn resolve_legacy(
+  code: List(opcode.IrOp),
+  constants: List(JsVal),
+) -> #(tuple_array.TupleArray(opcode.Op), tuple_array.TupleArray(JsValue)) {
+  let #(bytecode, constants) = resolve.resolve(code, constants)
+  let legacy =
+    tuple_array.to_list(constants)
+    |> list.map(legacy_constant)
+    |> tuple_array.from_list
+  #(bytecode, legacy)
+}
+
+/// One pool entry back to the old interpreter's value type. The pool only
+/// ever holds primitives and the TDZ sentinel (see `emit.add_constant`).
+fn legacy_constant(v: JsVal) -> JsValue {
+  case types.classify(v) {
+    types.KUndef -> JsUndefined
+    types.KNull -> value.JsNull
+    types.KBool(b) -> value.JsBool(b)
+    types.KNum(types.JInt(i)) -> value.JsNumber(value.Finite(int.to_float(i)))
+    types.KNum(types.JFloat(f)) -> value.JsNumber(value.Finite(f))
+    types.KNum(types.JNan) -> value.JsNumber(value.NaN)
+    types.KNum(types.JPosInf) -> value.JsNumber(value.Infinity)
+    types.KNum(types.JNegInf) -> value.JsNumber(value.NegInfinity)
+    types.KStr(s) -> value.JsString(s)
+    types.KBig(n) -> value.JsBigInt(value.BigInt(n))
+    types.KTdz -> JsUninitialized
+    types.KSym(_) | types.KHandle(_) ->
+      panic as "constant pool holds a symbol or heap reference"
+  }
+}
+
 /// Phase 3 for a top-level body (script, module, or eval): unnamed, zero
 /// arity, no env captures, and not an arrow/constructor/generator/async.
 fn resolve_top_level(
   code: List(opcode.IrOp),
-  constants: List(JsValue),
+  constants: List(JsVal),
   info: scope.FunctionInfo,
   child_templates: List(FuncTemplate),
   is_strict: Bool,
   code_kind: CodeKind,
   local_names: Option(EvalNameTable),
 ) -> FuncTemplate {
-  let #(bytecode, constants) = resolve.resolve(code, constants)
+  let #(bytecode, constants) = resolve_legacy(code, constants)
   FuncTemplate(
     name: None,
     arity: 0,
@@ -641,7 +678,7 @@ fn compile_child(
     compile_children(child.functions, tree, child.scope_id)
 
   // Phase 3: Resolve labels.
-  let #(bytecode, constants) = resolve.resolve(child.code, child.constants)
+  let #(bytecode, constants) = resolve_legacy(child.code, child.constants)
   FuncTemplate(
     name: child.name,
     arity: child.arity,

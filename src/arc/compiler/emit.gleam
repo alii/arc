@@ -13,6 +13,11 @@ import arc/compiler/scope.{
   root_scope_id,
 }
 import arc/parser/ast
+import arc/rt/types.{
+  type JsVal, JFloat, JInt, JPosInf, mk_bigint, mk_bool, mk_null, mk_number,
+  mk_string, mk_tdz, mk_undefined,
+}
+import arc/rt/val as rt_val
 import arc/vm/lexical
 import arc/vm/opcode.{
   type IrOp, type LabelId, type TryKind, CatchOnly, Finally,
@@ -21,12 +26,9 @@ import arc/vm/opcode.{
   IrGosub, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
   IrPushTry, IrPutField, IterCloseGuard,
 }
-import arc/vm/value.{
-  type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
-  JsUninitialized,
-}
 import gleam/bool
 import gleam/dict.{type Dict}
+import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -67,7 +69,7 @@ pub type CompiledChild {
     /// (rest param excluded). `arity` still counts all fixed params.
     length: Int,
     code: List(IrOp),
-    constants: List(JsValue),
+    constants: List(JsVal),
     functions: List(CompiledChild),
     is_strict: Bool,
     is_arrow: Bool,
@@ -101,7 +103,7 @@ pub type CompiledChild {
 pub type EmitOutput {
   EmitOutput(
     code: List(IrOp),
-    constants: List(JsValue),
+    constants: List(JsVal),
     children: List(CompiledChild),
     is_strict: Bool,
     /// Post-emission scope tree — MUST replace the caller's pre-emission
@@ -163,8 +165,8 @@ type Frame {
 pub opaque type Emitter {
   Emitter(
     code: List(IrOp),
-    constants_map: Dict(JsValue, Int),
-    constants_list: List(JsValue),
+    constants_map: Dict(JsVal, Int),
+    constants_list: List(JsVal),
     next_const: Int,
     next_label: Int,
     frame_stack: List(Frame),
@@ -735,24 +737,24 @@ fn make_using_scope(
 /// the scope tree — so declaration order relative to hoisted functions is
 /// irrelevant (never captured).
 fn emit_using_prelude(e: Emitter, scope: UsingScope) -> Emitter {
-  let e = declare_scratch(e, scope.err, JsUndefined)
-  let e = declare_scratch(e, scope.has_err, JsBool(False))
+  let e = declare_scratch(e, scope.err, mk_undefined())
+  let e = declare_scratch(e, scope.has_err, mk_bool(False))
   let e =
     list.fold(scope.disposers, e, fn(e, d) {
-      declare_scratch(e, d.slot, JsNull)
+      declare_scratch(e, d.slot, mk_null())
     })
   case scope.has_async {
     False -> e
     True ->
       e
-      |> declare_scratch(scope.needs_await, JsBool(False))
-      |> declare_scratch(scope.has_awaited, JsBool(False))
-      |> declare_scratch(scope.tmp, JsUndefined)
-      |> declare_scratch(scope.ok, JsBool(False))
+      |> declare_scratch(scope.needs_await, mk_bool(False))
+      |> declare_scratch(scope.has_awaited, mk_bool(False))
+      |> declare_scratch(scope.tmp, mk_undefined())
+      |> declare_scratch(scope.ok, mk_bool(False))
   }
 }
 
-fn declare_scratch(e: Emitter, slot: Int, init: JsValue) -> Emitter {
+fn declare_scratch(e: Emitter, slot: Int, init: JsVal) -> Emitter {
   seed_local(e, slot, init)
 }
 
@@ -838,7 +840,7 @@ fn emit_using_merge_error(e: Emitter, scope: UsingScope) -> Emitter {
   |> emit_op(opcode.MakeSuppressed)
   |> emit_ir(IrLabel(skip))
   |> emit_scratch_put(scope.err)
-  |> push_const(JsBool(True))
+  |> push_const(mk_bool(True))
   |> emit_scratch_put(scope.has_err)
 }
 
@@ -878,14 +880,14 @@ fn emit_using_flush_pending(
     |> emit_ir(IrJumpIfFalse(skip))
     |> emit_scratch_get(scope.has_awaited)
     |> emit_ir(IrJumpIfTrue(skip))
-    |> push_const(JsUndefined)
+    |> push_const(mk_undefined())
     |> emit_op(opcode.Await)
     |> emit_op(opcode.Pop)
   let e = case reset {
     False -> e
     True ->
       e
-      |> push_const(JsBool(False))
+      |> push_const(mk_bool(False))
       |> emit_scratch_put(scope.needs_await)
   }
   emit_ir(e, IrLabel(skip))
@@ -895,7 +897,7 @@ fn emit_using_flush_pending(
 fn emit_jump_unless_strict_neq(
   e: Emitter,
   slot: Int,
-  constant: JsValue,
+  constant: JsVal,
   target: LabelId,
 ) -> Emitter {
   e
@@ -916,8 +918,8 @@ fn emit_using_dispose_sync(
   slot: Int,
 ) -> Emitter {
   let #(e, skip) = fresh_label(e)
-  let e = emit_jump_unless_strict_neq(e, slot, JsNull, skip)
-  let e = emit_jump_unless_strict_neq(e, slot, JsUndefined, skip)
+  let e = emit_jump_unless_strict_neq(e, slot, mk_null(), skip)
+  let e = emit_jump_unless_strict_neq(e, slot, mk_undefined(), skip)
   let e = case scope.has_async {
     False -> e
     True -> emit_using_flush_pending(e, scope, True)
@@ -951,13 +953,13 @@ fn emit_using_dispose_async(
   let #(e, skip) = fresh_label(e)
   let #(e, no_method) = fresh_label(e)
   let #(e, after_await) = fresh_label(e)
-  let e = emit_jump_unless_strict_neq(e, slot, JsNull, skip)
-  let e = emit_jump_unless_strict_neq(e, slot, JsUndefined, no_method)
+  let e = emit_jump_unless_strict_neq(e, slot, mk_null(), skip)
+  let e = emit_jump_unless_strict_neq(e, slot, mk_undefined(), no_method)
   // Has a real disposer: call it, then await the result, each step under
   // its own try-merge so a sync throw vs a rejection are folded the same.
   let e =
     e
-    |> push_const(JsBool(False))
+    |> push_const(mk_bool(False))
     |> emit_scratch_put(scope.ok)
   let e = {
     use e <- emit_using_try_merge(e, scope)
@@ -965,7 +967,7 @@ fn emit_using_dispose_async(
     |> emit_scratch_get(slot)
     |> emit_op(opcode.Call(0))
     |> emit_scratch_put(scope.tmp)
-    |> push_const(JsBool(True))
+    |> push_const(mk_bool(True))
     |> emit_scratch_put(scope.ok)
   }
   let e =
@@ -980,14 +982,14 @@ fn emit_using_dispose_async(
     |> emit_op(opcode.Pop)
   }
   e
-  |> push_const(JsBool(True))
+  |> push_const(mk_bool(True))
   |> emit_scratch_put(scope.has_awaited)
   |> emit_ir(IrLabel(after_await))
   |> emit_ir(IrJump(skip))
   // Method-less (`await using x = null/undefined`): record that the next
   // sync resource (or the trailing flush) owes one Await(undefined).
   |> emit_ir(IrLabel(no_method))
-  |> push_const(JsBool(True))
+  |> push_const(mk_bool(True))
   |> emit_scratch_put(scope.needs_await)
   |> emit_ir(IrLabel(skip))
 }
@@ -1041,7 +1043,7 @@ fn emit_using_try_wrap(
   })
   let e = emit_ir(e, IrLabel(catch_label))
   let e = emit_scratch_put(e, scope.err)
-  let e = push_const(e, JsBool(True))
+  let e = push_const(e, mk_bool(True))
   Ok(emit_scratch_put(e, scope.has_err))
 }
 
@@ -1203,7 +1205,7 @@ fn emit_module_using_top(
     e
     |> emit_ir(IrLabel(catch_label))
     |> emit_scratch_put(scope.err)
-    |> push_const(JsBool(True))
+    |> push_const(mk_bool(True))
     |> emit_scratch_put(scope.has_err)
 
   let e = emit_ir(e, IrLabel(dispose_label))
@@ -1211,7 +1213,7 @@ fn emit_module_using_top(
   // Module body completion value (unobservable for modules, but the
   // surrounding emit_module expects one on stack like the no-using
   // emit_stmts_tail path).
-  push_const(e, JsUndefined)
+  push_const(e, mk_undefined())
 }
 
 /// Shared top-level emission trunk for emit_program / emit_eval_direct:
@@ -1530,9 +1532,8 @@ fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
   let seeded = at_module_root && set.contains(e.scope_tree.linker_seeded, name)
   use <- bool.guard(seeded, e)
   let e = case b.kind {
-    VarBinding -> seed_local(e, b.slot, JsUndefined)
-    LetBinding | ConstBinding | FnNameBinding ->
-      seed_local(e, b.slot, JsUninitialized)
+    VarBinding -> seed_local(e, b.slot, mk_undefined())
+    LetBinding | ConstBinding | FnNameBinding -> seed_local(e, b.slot, mk_tdz())
     ParamBinding | CatchBinding | CaptureBinding -> e
   }
   case b.kind, b.is_boxed {
@@ -1542,7 +1543,7 @@ fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
   }
 }
 
-fn seed_local(e: Emitter, slot: Int, val: JsValue) -> Emitter {
+fn seed_local(e: Emitter, slot: Int, val: JsVal) -> Emitter {
   let #(e, idx) = add_constant(e, val)
   e |> emit_op(opcode.PushConst(idx)) |> emit_op(opcode.PutLocal(slot))
 }
@@ -1811,7 +1812,7 @@ fn emit_var_get_this(e: Emitter, name: String) -> Emitter {
   let e = track_arguments_ref(e, name)
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
   use e <- emit_with_chain(e, crossed, opcode.IrWithGetVarThis(name, _))
-  let e = push_const(e, JsUndefined)
+  let e = push_const(e, mk_undefined())
   emit_static_get(e, fallback)
 }
 
@@ -1909,9 +1910,9 @@ fn emit_var_delete(e: Emitter, name: String) -> Emitter {
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
   use e <- emit_with_chain(e, crossed, opcode.IrWithDeleteVar(name, _))
   case fallback {
-    scope.Local(..) -> push_const(e, JsBool(False))
+    scope.Local(..) -> push_const(e, mk_bool(False))
     scope.Global(name:) -> emit_op(e, opcode.DeleteGlobalVar(name))
-    scope.EvalEnv(name: _) -> push_const(e, JsBool(True))
+    scope.EvalEnv(name: _) -> push_const(e, mk_bool(True))
   }
 }
 
@@ -1950,7 +1951,7 @@ fn emit_var_ref_make(e: Emitter, name: String) -> #(Emitter, VarRef) {
         })
       // No with object had the property: store undefined as the base so
       // GetRef/PutRef know to take the static fallback.
-      let e = push_const(e, JsUndefined)
+      let e = push_const(e, mk_undefined())
       let e = emit_ir(e, IrLabel(lref))
       #(
         emit_op(e, opcode.PutLocal(slot)),
@@ -2158,7 +2159,7 @@ fn acquire_ref_slot(e: Emitter) -> #(Emitter, Int) {
   }
 }
 
-fn add_constant(e: Emitter, val: JsValue) -> #(Emitter, Int) {
+fn add_constant(e: Emitter, val: JsVal) -> #(Emitter, Int) {
   case dict.get(e.constants_map, val) {
     Ok(idx) -> #(e, idx)
     Error(Nil) -> {
@@ -2175,7 +2176,7 @@ fn add_constant(e: Emitter, val: JsValue) -> #(Emitter, Int) {
   }
 }
 
-fn push_const(e: Emitter, val: JsValue) -> Emitter {
+fn push_const(e: Emitter, val: JsVal) -> Emitter {
   let #(e, idx) = add_constant(e, val)
   emit_op(e, opcode.PushConst(idx))
 }
@@ -2335,7 +2336,7 @@ fn repeat_nip(e: Emitter, n: Int) -> Emitter {
 /// (quickjs.c:28839-28841, 28903-28905).
 fn emit_gosub_normal(e: Emitter, fin_label: LabelId) -> Emitter {
   e
-  |> push_const(JsUndefined)
+  |> push_const(mk_undefined())
   |> emit_ir(IrGosub(fin_label))
   |> emit_op(opcode.Pop)
 }
@@ -2603,7 +2604,7 @@ fn get_lexical(e: Emitter, ref: lexical.LexicalRef) -> Emitter {
     Some(#(slot, False)) -> emit_op(e, opcode.GetLocal(slot))
     // Script/Module root with no lexical slot — bit-for-bit match for the
     // old Phase-2 IrGetLexical Error(Nil) arm: push `undefined`.
-    None -> push_const(e, JsUndefined)
+    None -> push_const(e, mk_undefined())
   }
 }
 
@@ -2673,7 +2674,7 @@ fn emit_super_key(
   property: ast.MemberProperty,
 ) -> Result(Emitter, EmitError) {
   case property {
-    ast.Dot(name:, ..) -> Ok(push_const(e, JsString(name)))
+    ast.Dot(name:, ..) -> Ok(push_const(e, mk_string(name)))
     ast.Bracket(expression:) -> emit_expr(e, expression)
   }
 }
@@ -2748,7 +2749,7 @@ fn emit_field_init_call(e: Emitter) -> Emitter {
 /// `List(IrOp)` — the parser-built scope tree (`scope.finalize`) resolved
 /// every binding up front, so there are no scope markers to strip; just
 /// reverse the accumulated stream into source order.
-fn finish(e: Emitter) -> #(List(IrOp), List(JsValue), List(CompiledChild)) {
+fn finish(e: Emitter) -> #(List(IrOp), List(JsVal), List(CompiledChild)) {
   #(
     list.reverse(e.code),
     list.reverse(e.constants_list),
@@ -2772,7 +2773,7 @@ fn emit_stmt_tail(
     ast.BlockStatement(body) -> emit_block(e, body, tail: True)
 
     ast.IfStatement(cond, cons, alt) ->
-      emit_if(e, cond, cons, alt, emit_stmt_tail, push_const(_, JsUndefined))
+      emit_if(e, cond, cons, alt, emit_stmt_tail, push_const(_, mk_undefined()))
 
     // try with a finally: delegate to the full statement emitter (which
     // runs the finalizer via Gosub), tracking the completion value in a
@@ -2820,7 +2821,7 @@ fn emit_stmt_tail(
     // as the completion value
     _ -> {
       use e <- result.map(emit_stmt(e, stmt))
-      push_const(e, JsUndefined)
+      push_const(e, mk_undefined())
     }
   }
 }
@@ -2842,7 +2843,7 @@ fn emit_stmt_tail_completion(
 ) -> Result(Emitter, EmitError) {
   let #(e, slot) = fresh_slot(e)
   let saved_var = e.completion_var
-  let e = seed_local(e, slot, JsUndefined)
+  let e = seed_local(e, slot, mk_undefined())
   let e = Emitter(..e, completion_var: Some(slot))
   use e <- result.map(emit_stmt(e, stmt))
   let e = Emitter(..e, completion_var: saved_var)
@@ -2928,7 +2929,7 @@ fn emit_block_using(
     False -> #(e, None)
     True -> {
       let #(e, slot) = fresh_slot(e)
-      let e = declare_scratch(e, slot, JsUndefined)
+      let e = declare_scratch(e, slot, mk_undefined())
       #(Emitter(..e, completion_var: Some(slot)), Some(slot))
     }
   }
@@ -3067,7 +3068,7 @@ fn emit_stmts_tail_value(
   stmts: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
   case stmts {
-    [] -> Ok(push_const(e, JsUndefined))
+    [] -> Ok(push_const(e, mk_undefined()))
     [only] -> emit_stmt_tail(set_line(e, only.line), only.statement)
     [first, ..rest] -> {
       use e <- result.try(emit_stmt(set_line(e, first.line), first.statement))
@@ -3578,7 +3579,7 @@ fn compile_function_body(
   }
 
   // Implicit return undefined at end
-  let e = push_const(e, JsUndefined)
+  let e = push_const(e, mk_undefined())
   let e = emit_op(e, opcode.Return)
 
   // Body and parameter-default emission is complete — `references_arguments`
@@ -3702,7 +3703,7 @@ fn emit_stmt_inner(
         | ast.SwitchStatement(..)
         | ast.TryStatement(..)
         | ast.WithStatement(..) -> {
-          let e = push_const(e, JsUndefined)
+          let e = push_const(e, mk_undefined())
           emit_scratch_put(e, v)
         }
         _ -> e
@@ -3758,7 +3759,7 @@ fn emit_stmt_inner(
               // to undefined already; only lexical bindings need this.
               None ->
                 case ast_util.is_lexical(kind) {
-                  True -> Ok(init_lex(push_const(e, JsUndefined), name))
+                  True -> Ok(init_lex(push_const(e, mk_undefined()), name))
                   False -> Ok(e)
                 }
             }
@@ -3767,7 +3768,7 @@ fn emit_stmt_inner(
           ast.VariableDeclarator(pattern, init) -> {
             use e <- result.try(case init {
               Some(init_expr) -> emit_expr(e, init_expr)
-              None -> Ok(push_const(e, JsUndefined))
+              None -> Ok(push_const(e, mk_undefined()))
             })
             emit_destructuring_bind(e, pattern, binding_kind)
           }
@@ -3860,7 +3861,7 @@ fn emit_stmt_inner(
     ast.ReturnStatement(arg) -> {
       use e <- result.try(case arg {
         Some(expr) -> emit_expr(e, expr)
-        None -> Ok(push_const(e, JsUndefined))
+        None -> Ok(push_const(e, mk_undefined()))
       })
       // A return crosses every frame — see emit_return_cross_frame.
       let e = list.fold(e.frame_stack, e, emit_return_cross_frame)
@@ -4116,13 +4117,13 @@ fn emit_chain_root(
   // Depth-1 cleanup: [nullish] → [undefined]
   let e = emit_ir(e, IrLabel(l1))
   let e = emit_op(e, opcode.Pop)
-  let e = push_const(e, JsUndefined)
+  let e = push_const(e, mk_undefined())
   let e = emit_ir(e, IrJump(end_label))
   // Depth-2 cleanup: [f, receiver] → [undefined]
   let e = emit_ir(e, IrLabel(l2))
   let e = emit_op(e, opcode.Pop)
   let e = emit_op(e, opcode.Pop)
-  let e = push_const(e, JsUndefined)
+  let e = push_const(e, mk_undefined())
   emit_ir(e, IrLabel(end_label))
 }
 
@@ -4256,30 +4257,41 @@ fn emit_chain_call_args(
   }
 }
 
-/// A parsed numeric literal as the VM's number type. `1e400` overflows the
-/// double range and denotes +Infinity — a literal is never negative and never
-/// NaN, so those two JsNum cases are unreachable from source.
-fn literal_number(n: ast.LiteralNumber) -> value.JsNum {
+/// A parsed numeric literal as a constant-pool value. `1e400` overflows the
+/// double range and denotes +Infinity; a literal is never negative and never
+/// NaN. Same wire rule as the AOT emitter's `number_literal`: an integral
+/// value in `[0, 2^31)` that is not `-0` is an int, anything else a float, so
+/// interpreted and compiled code hold identical constants.
+fn number_const(n: ast.LiteralNumber) -> JsVal {
   case n {
-    ast.FiniteNumber(f) -> Finite(f)
-    ast.InfiniteNumber -> value.Infinity
+    ast.InfiniteNumber -> mk_number(JPosInf)
+    ast.FiniteNumber(f) -> {
+      let i = float.truncate(f)
+      case
+        int.to_float(i) == f
+        && i >= 0
+        && i < 2_147_483_648
+        && !rt_val.is_neg_zero(f)
+      {
+        True -> mk_number(JInt(i))
+        False -> mk_number(JFloat(f))
+      }
+    }
   }
 }
 
 fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
   case expr {
     // Literals
-    ast.NumberLiteral(_, value) ->
-      Ok(push_const(e, JsNumber(literal_number(value))))
-    ast.BigIntLiteral(value: n, ..) ->
-      Ok(push_const(e, value.JsBigInt(value.BigInt(n))))
-    ast.StringExpression(_, value) -> Ok(push_const(e, JsString(value)))
-    ast.BooleanLiteral(_, value) -> Ok(push_const(e, JsBool(value)))
-    ast.NullLiteral(_) -> Ok(push_const(e, JsNull))
-    ast.UndefinedExpression(_) -> Ok(push_const(e, JsUndefined))
+    ast.NumberLiteral(_, value) -> Ok(push_const(e, number_const(value)))
+    ast.BigIntLiteral(value: n, ..) -> Ok(push_const(e, mk_bigint(n)))
+    ast.StringExpression(_, value) -> Ok(push_const(e, mk_string(value)))
+    ast.BooleanLiteral(_, value) -> Ok(push_const(e, mk_bool(value)))
+    ast.NullLiteral(_) -> Ok(push_const(e, mk_null()))
+    ast.UndefinedExpression(_) -> Ok(push_const(e, mk_undefined()))
 
     // Identifier
-    ast.Identifier(name: "undefined", ..) -> Ok(push_const(e, JsUndefined))
+    ast.Identifier(name: "undefined", ..) -> Ok(push_const(e, mk_undefined()))
     // Bare PrivateIdentifier outside `#x in obj` — early error per §13.10.1.
     // The `#x in obj` BinaryExpression arm below does NOT recurse on its LHS,
     // so this only catches genuinely-bare `#x` used as a value.
@@ -4374,7 +4386,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           // delete <other expr> → evaluate for side effects, discard, push true
           use e <- result.map(emit_expr(e, arg))
           let e = emit_op(e, opcode.Pop)
-          push_const(e, JsBool(True))
+          push_const(e, mk_bool(True))
         }
       }
 
@@ -4413,7 +4425,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       )
     }
     ast.UpdateExpression(_, op, prefix, ast.Identifier(name:, ..)) -> {
-      let one = JsNumber(Finite(1.0))
+      let one = mk_number(JInt(1))
       let bin_kind = case op {
         ast.Increment -> opcode.Add
         ast.Decrement -> opcode.Sub
@@ -4450,7 +4462,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Postfix stashes the numeric old value in a scratch slot because the
     // put-args sit between it and the new value on the stack.
     ast.UpdateExpression(_, op, prefix, ast.MemberExpression(..) as member) -> {
-      let one = JsNumber(Finite(1.0))
+      let one = mk_number(JInt(1))
       let bin_kind = case op {
         ast.Increment -> opcode.Add
         ast.Decrement -> opcode.Sub
@@ -4925,7 +4937,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.YieldExpression(_, argument, is_delegate) -> {
       let e = case argument {
         Some(arg) -> emit_expr(e, arg)
-        None -> Ok(push_const(e, JsUndefined))
+        None -> Ok(push_const(e, mk_undefined()))
       }
       use e <- result.try(e)
       case is_delegate {
@@ -4950,7 +4962,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
               // Cache [[NextMethod]] once (GetIteratorFromMethod §7.4.4) so
               // the loop doesn't re-Get `next` per step.
               let e = emit_op(e, opcode.IteratorRecord)
-              let e = push_const(e, JsUndefined)
+              let e = push_const(e, mk_undefined())
               let #(e, next_label) = fresh_label(e)
               // `after_label` marks the instruction the delegation falls out
               // to. The async-gen driver resumes there when a forwarded
@@ -4967,7 +4979,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
               // Sync yield* — get iterator, seed undefined, self-looping
               // YieldStar handles the rest. Leaves final result.value on stack.
               let e = emit_op(e, opcode.GetIterator)
-              let e = push_const(e, JsUndefined)
+              let e = push_const(e, mk_undefined())
               Ok(emit_op(e, opcode.YieldStar))
             }
           }
@@ -4984,8 +4996,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // RegExp literal — push pattern and flags, then NewRegExp opcode
     ast.RegExpLiteral(_, pattern, flags) -> {
-      let e = push_const(e, JsString(pattern))
-      let e = push_const(e, JsString(flags))
+      let e = push_const(e, mk_string(pattern))
+      let e = push_const(e, mk_string(flags))
       Ok(emit_op(e, opcode.NewRegExp))
     }
 
@@ -4998,7 +5010,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         ast.PhaseEvaluation -> {
           use e <- result.map(case options {
             Some(opts) -> emit_expr(e, opts)
-            None -> Ok(push_const(e, JsUndefined))
+            None -> Ok(push_const(e, mk_undefined()))
           })
           emit_op(e, opcode.DynamicImport)
         }
@@ -5063,7 +5075,7 @@ fn emit_template_literal(
   // `a${x}b${y}c` is TemplateParts(head: "a", tail: [#(x, "b"), #(y, "c")]).
   // Desugar to: "a" + x + "b" + y + "c". The alternation is total by
   // construction — no empty-quasis or trailing-expression case exists.
-  let e = push_const(e, JsString(parts.head))
+  let e = push_const(e, mk_string(parts.head))
   list.try_fold(parts.tail, e, fn(e, part) {
     let #(expr, quasi) = part
     // Emit expression, ToString it (§13.2.8.5 — string hint, NOT the Add
@@ -5072,7 +5084,7 @@ fn emit_template_literal(
     let e = emit_op(e, opcode.ToStringVal)
     let e = emit_ir(e, IrBinOp(opcode.Add))
     // Emit the following quasi string, concat.
-    let e = push_const(e, JsString(quasi))
+    let e = push_const(e, mk_string(quasi))
     emit_ir(e, IrBinOp(opcode.Add))
   })
 }
@@ -5194,7 +5206,7 @@ fn emit_sequence(
   exprs: List(ast.Expression),
 ) -> Result(Emitter, EmitError) {
   case exprs {
-    [] -> Ok(push_const(e, JsUndefined))
+    [] -> Ok(push_const(e, mk_undefined()))
     [only] -> emit_expr(e, only)
     [first, ..rest] -> {
       use e <- result.try(emit_expr(e, first))
@@ -5431,12 +5443,10 @@ fn emit_property_key(
 ) -> Result(Emitter, EmitError) {
   case key {
     ast.KeyIdentifier(name:, ..) | ast.KeyPrivate(name:, ..) ->
-      Ok(push_const(e, JsString(name)))
-    ast.KeyString(value: s, ..) -> Ok(push_const(e, JsString(s)))
-    ast.KeyNumber(value: n, ..) ->
-      Ok(push_const(e, JsNumber(literal_number(n))))
-    ast.KeyBigInt(value: i, ..) ->
-      Ok(push_const(e, value.JsBigInt(value.BigInt(i))))
+      Ok(push_const(e, mk_string(name)))
+    ast.KeyString(value: s, ..) -> Ok(push_const(e, mk_string(s)))
+    ast.KeyNumber(value: n, ..) -> Ok(push_const(e, number_const(n)))
+    ast.KeyBigInt(value: i, ..) -> Ok(push_const(e, mk_bigint(i)))
     ast.KeyComputed(expression:) -> emit_expr(e, expression)
   }
 }
@@ -5938,7 +5948,7 @@ fn emit_for_await_of(
   // [result, thrown, ..base] — pad so saved_stack after the Await pop has
   // length B+2 (== F_swallow depth). Reject-unwind then lands at
   // [inner_err, undef, thrown, ..base] = B+3, matching every other path.
-  let e = push_const(e, JsUndefined)
+  let e = push_const(e, mk_undefined())
   let e = emit_op(e, opcode.Swap)
   // [result, undef, thrown, ..base]
   let e = emit_op(e, opcode.Await)
@@ -6111,7 +6121,7 @@ fn emit_default_if_undefined(
 ) -> Result(Emitter, EmitError) {
   let #(e, has_val) = fresh_label(e)
   let e = emit_op(e, opcode.Dup)
-  let e = push_const(e, JsUndefined)
+  let e = push_const(e, mk_undefined())
   let e = emit_ir(e, IrBinOp(opcode.StrictEq))
   let e = emit_ir(e, IrJumpIfFalse(has_val))
   let e = emit_op(e, opcode.Pop)
@@ -6181,7 +6191,7 @@ fn emit_single_object_prop(
       case has_rest {
         False -> #(e, n_excl)
         True -> {
-          let e = push_const(e, JsString(name))
+          let e = push_const(e, mk_string(name))
           #(emit_op(e, opcode.Swap), n_excl + 1)
         }
       }
@@ -6575,7 +6585,7 @@ fn emit_single_object_assign_prop(
           case has_rest {
             False -> #(e, n_excl)
             True -> {
-              let e = push_const(e, JsString(name))
+              let e = push_const(e, mk_string(name))
               #(emit_op(e, opcode.Swap), n_excl + 1)
             }
           }
@@ -6804,7 +6814,7 @@ fn object_prop_key_name(key: ast.PropertyKey) -> Option(String) {
     ast.KeyIdentifier(name:, ..) | ast.KeyPrivate(name:, ..) -> Some(name)
     ast.KeyString(value: s, ..) -> Some(s)
     ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
-      Some(value.js_format_number(f))
+      Some(rt_val.js_format_float(f))
     ast.KeyNumber(value: ast.InfiniteNumber, ..) -> Some("Infinity")
     ast.KeyBigInt(..) | ast.KeyComputed(..) -> None
   }
@@ -7356,7 +7366,7 @@ fn compile_class_init_fn(
 /// the const slot isn't TDZ. Mirrors QuickJS OP_scope_put_var_init.
 fn emit_attach_field_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
   case init_idx {
-    None -> push_const(e, JsUndefined)
+    None -> push_const(e, mk_undefined())
     Some(idx) ->
       e
       |> emit_op(opcode.Dup)
@@ -7682,7 +7692,7 @@ fn emit_field_init(e: Emitter, fi: FieldInit) -> Result(Emitter, EmitError) {
       })
     NumericFieldInit(value: n, init:) ->
       use_this(e, fn(e) {
-        let e = push_const(e, JsNumber(literal_number(n)))
+        let e = push_const(e, number_const(n))
         use e <- result.map(emit_expr(e, init))
         emit_op(e, opcode.DefineFieldComputed)
       })
@@ -7694,7 +7704,7 @@ fn emit_field_init(e: Emitter, fi: FieldInit) -> Result(Emitter, EmitError) {
       })
     BigIntFieldInit(value: i, init:) ->
       use_this(e, fn(e) {
-        let e = push_const(e, value.JsBigInt(value.BigInt(i)))
+        let e = push_const(e, mk_bigint(i))
         use e <- result.map(emit_expr(e, init))
         emit_op(e, opcode.DefineFieldComputed)
       })
