@@ -20,9 +20,9 @@ import arc/rt/call.{
   NormalCompletion, ThrowCompletion, is_callable, is_constructor, t_call,
   t_call_checked, t_call_method, t_construct,
 } as rt_call
+import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
-import arc/rt/elements
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type PromiseKeyedKind, type PromiseNative, ArrayObj, Dense, JInt, KHandle,
