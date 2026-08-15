@@ -86,9 +86,16 @@ fn alloc_closure(st: Agent, tag: NativeToken) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
+/// Name for error messages: typeof, except null is "null" (typeof says
+/// "object").
 fn type_name(st: Agent, v: JsVal) -> String {
-  let #(ty, _) = rt_val.t_type_of(st, v)
-  ty
+  case classify(v) {
+    KNull -> "null"
+    _ -> {
+      let #(ty, _) = rt_val.t_type_of(st, v)
+      ty
+    }
+  }
 }
 
 /// Shared shell for the four onFulfilled continuation handlers: extract the
