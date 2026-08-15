@@ -2,14 +2,16 @@
 //// is rebuilt, and what refuses to be written.
 
 import arc/rt/async as rt_async
+import arc/rt/builtins/regexp as b_regexp
 import arc/rt/obj as rt_obj
 import arc/rt/snapshot.{
   IncompatibleSnapshot, MalformedBinary, SnapshotContainsCompiledCode,
   SnapshotContainsHostJob,
 }
+import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, HostJob, JInt, KBool, KHandle, KNum, KStr, Named, StringKey,
-  classify, mk_number, mk_string,
+  type Agent, HostJob, JInt, KBool, KHandle, KNum, KStr, Named, RegExpObj,
+  SObject, StringKey, classify, mk_number, mk_string,
 }
 import gleam/dict
 import rt_helpers
@@ -93,6 +95,33 @@ pub fn roundtrip_is_repeatable_test() {
   let st = roundtrip(st)
   let #(x, _st) = rt_helpers.global(st, "x")
   assert classify(x) == KNum(JInt(11))
+}
+
+pub fn regexp_matcher_is_dropped_and_rebuilt_test() {
+  let st = rt_helpers.agent()
+  let #(re, st) = b_regexp.regexp_create_literal(st, "a+b", "")
+  let assert KHandle(h) = classify(re)
+  let st = rt_obj.t_global_set(st, <<"re">>, re)
+  let matcher_cached = fn(st) {
+    let assert SObject(kind: RegExpObj(compiled:, ..), ..) =
+      rt_store.t_cell_get(st, h)
+    compiled != b_regexp.uncompiled_regexp()
+  }
+  assert !matcher_cached(st)
+  let #(hit, st) = rt_helpers.call_method(st, re, "test", [mk_string("caab")])
+  assert classify(hit) == KBool(True)
+  assert matcher_cached(st)
+
+  let st = roundtrip(st)
+  let #(re, st) = rt_helpers.global(st, "re")
+  let assert KHandle(h2) = classify(re)
+  assert h2 == h
+  assert !matcher_cached(st)
+  let #(hit, st) = rt_helpers.call_method(st, re, "test", [mk_string("caab")])
+  assert classify(hit) == KBool(True)
+  let #(miss, st) = rt_helpers.call_method(st, re, "test", [mk_string("ccc")])
+  assert classify(miss) == KBool(False)
+  assert matcher_cached(st)
 }
 
 pub fn deserialize_rebinds_hooks_and_drops_host_fns_test() {

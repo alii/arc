@@ -23,17 +23,18 @@ import arc/rt/types.{
   type Agent, type AsyncGenRequest, type Handle, type Job, type JsElements,
   type JsSlot, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
   type PromiseState, type Property, type ReactionHandler, type Resume,
-  AccessorProperty, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
-  AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
-  BooleanObj, DataProperty, DataViewObj, DateObj, Dense, ErrorObj, ForInIterator,
-  GeneratorObj, Handler, HostJob, IdentityPassThrough, IteratorHelperObj, JsCell,
-  JsStore, KBound, KBytecode, KCompiled, KHost, KNative, MapIterator, MapObj,
-  ModuleNamespace, NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj,
-  PromisePending, PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj,
-  ReactionJob, RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame,
-  SAsyncContext, SAsyncGen, SBox, SGenerator, SObject, SPromiseData,
-  SShapedObject, SetIterator, SetObj, Sparse, StringIterator, StringObj,
-  SymbolObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakSetObj,
+  type WeakKey, AccessorProperty, Agent, ArgumentsObj, ArrayBufferObj,
+  ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGenRequest,
+  AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty, DataViewObj, DateObj,
+  Dense, ErrorObj, ForInIterator, GeneratorObj, Handler, HostJob,
+  IdentityPassThrough, IteratorHelperObj, JsCell, JsStore, KBound, KBytecode,
+  KCompiled, KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements,
+  NumberObj, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
+  PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
+  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
+  SBox, SGenerator, SObject, SPromiseData, SShapedObject, SetIterator, SetObj,
+  Sparse, StringIterator, StringObj, SymbolObj, ThrowerPassThrough,
+  TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj, WeakSymKey,
   WrapForValidIteratorObj, jq_to_list, native_token_refs,
 } as rt_types
 import arc/vm/internal/ordered_entries
@@ -570,22 +571,24 @@ fn sweep(
 /// Post-sweep weak-prune (SPEC §7.M2 §weak): drop `WeakMapObj`/`WeakSetObj`
 /// entries whose key-id ∉ `live`. Weak keys are NOT traced during mark, so a
 /// key held ONLY by a weak container is swept, and its entry (value
-/// included) disappears here in the same collection.
+/// included) disappears here in the same collection. Symbol keys are not
+/// heap cells and are never pruned.
 fn prune_weak(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
+  let keep = fn(k: WeakKey) {
+    case k {
+      WeakObjKey(id:) -> set.contains(live, id)
+      WeakSymKey(_) -> True
+    }
+  }
   dict.map_values(data, fn(_, slot) {
     case slot {
       SObject(kind: WeakMapObj(entries:), ..) ->
         SObject(
           ..slot,
-          kind: WeakMapObj(
-            entries: dict.filter(entries, fn(k, _) { set.contains(live, k) }),
-          ),
+          kind: WeakMapObj(entries: dict.filter(entries, fn(k, _) { keep(k) })),
         )
       SObject(kind: WeakSetObj(entries:), ..) ->
-        SObject(
-          ..slot,
-          kind: WeakSetObj(entries: set.filter(entries, set.contains(live, _))),
-        )
+        SObject(..slot, kind: WeakSetObj(entries: set.filter(entries, keep)))
       _ -> slot
     }
   })

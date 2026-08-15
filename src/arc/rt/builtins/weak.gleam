@@ -1,12 +1,10 @@
 //// ES2024 §24.3 WeakMap + §24.4 WeakSet — port of `arc/vm/builtins/
 //// {weak_collection,weak_map,weak_set}.gleam`, merged into one module.
 ////
-//// Storage per SPEC §2.4: `WeakMapObj(entries: Dict(Int, JsVal))` and
-//// `WeakSetObj(entries: Set(Int))`, both keyed by `Handle.id`. This is a
-//// deliberate simplification vs arc's `Dict(JsValue, v)` — 2core weak
-//// collections accept only OBJECT keys (Symbols cannot be held weakly here);
-//// §9.13 CanBeHeldWeakly is thus tightened to `is_object`. Not truly weak (GC
-//// doesn't collect entries) but API-compatible.
+//// Storage: `WeakMapObj(entries: Dict(WeakKey, JsVal))` and
+//// `WeakSetObj(entries: Set(WeakKey))`, keyed by object cell id or by
+//// non-registered symbol identity (§9.13 CanBeHeldWeakly). Object-keyed
+//// entries are pruned by GC when the key dies; symbol-keyed entries persist.
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{
@@ -18,15 +16,15 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjKind,
-  type WeakNative, KHandle, KNull, KUndef, Named, NoElements, SObject, StringKey,
-  WeakMapConstructor, WeakMapDelete, WeakMapGet, WeakMapGetOrInsert,
-  WeakMapGetOrInsertComputed, WeakMapHas, WeakMapObj, WeakMapSet, WeakN,
-  WeakSetAdd, WeakSetConstructor, WeakSetDelete, WeakSetHas, WeakSetObj,
-  classify, mk_bool, mk_object, mk_undefined,
+  type WeakKey, type WeakNative, KHandle, KNull, KSym, KUndef, Named, NoElements,
+  SObject, StringKey, WeakMapConstructor, WeakMapDelete, WeakMapGet,
+  WeakMapGetOrInsert, WeakMapGetOrInsertComputed, WeakMapHas, WeakMapObj,
+  WeakMapSet, WeakN, WeakObjKey, WeakSetAdd, WeakSetConstructor, WeakSetDelete,
+  WeakSetHas, WeakSetObj, WeakSymKey, classify, mk_bool, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict.{type Dict}
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 
 // ── init — WeakMap + WeakSet constructors + prototypes ──────────────────────
@@ -183,8 +181,8 @@ fn weak_construct(
 fn weak_map_get(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "get")
   let key = first_arg_or_undefined(args)
-  // A non-object key can never be present (`insert` demands a proved
-  // `WeakKey`), so no separate CanBeHeldWeakly gate — mirrors `has`.
+  // A key failing CanBeHeldWeakly can never be present (`insert` demands a
+  // proved `WeakKey`), so no separate gate — mirrors `has`.
   #(lookup_wm(st, ref, key) |> option.unwrap(mk_undefined()), st)
 }
 
@@ -192,17 +190,17 @@ fn weak_map_get(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 fn weak_map_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "set")
   let #(key, val) = two_args_or_undefined(args)
-  use key_id <- require_weak_key(st, key, "Invalid value used as weak map key")
-  #(this, update_wm(st, ref, dict.insert(_, key_id, val)))
+  use wk <- require_weak_key(st, key, "Invalid value used as weak map key")
+  #(this, update_wm(st, ref, dict.insert(_, wk, val)))
 }
 
 /// §24.3.3.4 WeakMap.prototype.has ( key )
 fn weak_map_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "has")
   let key = first_arg_or_undefined(args)
-  case classify(key) {
-    KHandle(h) -> #(mk_bool(dict.has_key(read_wm(st, ref), h.id)), st)
-    _ -> #(mk_bool(False), st)
+  case to_weak_key(key) {
+    Some(wk) -> #(mk_bool(dict.has_key(read_wm(st, ref), wk)), st)
+    None -> #(mk_bool(False), st)
   }
 }
 
@@ -214,13 +212,13 @@ fn weak_map_delete(
 ) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "delete")
   let key = first_arg_or_undefined(args)
-  case classify(key) {
-    KHandle(h) ->
-      case dict.has_key(read_wm(st, ref), h.id) {
-        True -> #(mk_bool(True), update_wm(st, ref, dict.delete(_, h.id)))
+  case to_weak_key(key) {
+    Some(wk) ->
+      case dict.has_key(read_wm(st, ref), wk) {
+        True -> #(mk_bool(True), update_wm(st, ref, dict.delete(_, wk)))
         False -> #(mk_bool(False), st)
       }
-    _ -> #(mk_bool(False), st)
+    None -> #(mk_bool(False), st)
   }
 }
 
@@ -232,12 +230,12 @@ fn weak_map_get_or_insert(
 ) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "getOrInsert")
   let key = first_arg_or_undefined(args)
-  use key_id <- require_weak_key(st, key, "Invalid value used as weak map key")
-  case dict.get(read_wm(st, ref), key_id) {
+  use wk <- require_weak_key(st, key, "Invalid value used as weak map key")
+  case dict.get(read_wm(st, ref), wk) {
     Ok(existing) -> #(existing, st)
     Error(Nil) -> {
       let val = arg_at(args, 1)
-      #(val, update_wm(st, ref, dict.insert(_, key_id, val)))
+      #(val, update_wm(st, ref, dict.insert(_, wk, val)))
     }
   }
 }
@@ -253,18 +251,18 @@ fn weak_map_get_or_insert_computed(
 ) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "getOrInsertComputed")
   let key = first_arg_or_undefined(args)
-  use key_id <- require_weak_key(st, key, "Invalid value used as weak map key")
+  use wk <- require_weak_key(st, key, "Invalid value used as weak map key")
   let callback = arg_at(args, 1)
   use callback <- helpers.require_callable(st, callback, fn() {
     let #(ty, _) = rt_val.t_type_of(st, callback)
     ty <> " is not a function"
   })
-  case dict.get(read_wm(st, ref), key_id) {
+  case dict.get(read_wm(st, ref), wk) {
     Ok(existing) -> #(existing, st)
     Error(Nil) -> {
       let #(computed, st) =
         rt_call.t_call_checked(st, callback, mk_undefined(), [key])
-      #(computed, update_wm(st, ref, dict.insert(_, key_id, computed)))
+      #(computed, update_wm(st, ref, dict.insert(_, wk, computed)))
     }
   }
 }
@@ -275,17 +273,17 @@ fn weak_map_get_or_insert_computed(
 fn weak_set_add(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_set(st, this, "add")
   let val = first_arg_or_undefined(args)
-  use val_id <- require_weak_key(st, val, "Invalid value used in weak set")
-  #(this, update_ws(st, ref, set.insert(_, val_id)))
+  use wk <- require_weak_key(st, val, "Invalid value used in weak set")
+  #(this, update_ws(st, ref, set.insert(_, wk)))
 }
 
 /// §24.4.3.3 WeakSet.prototype.has ( value )
 fn weak_set_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_set(st, this, "has")
   let val = first_arg_or_undefined(args)
-  case classify(val) {
-    KHandle(h) -> #(mk_bool(set.contains(read_ws(st, ref), h.id)), st)
-    _ -> #(mk_bool(False), st)
+  case to_weak_key(val) {
+    Some(wk) -> #(mk_bool(set.contains(read_ws(st, ref), wk)), st)
+    None -> #(mk_bool(False), st)
   }
 }
 
@@ -297,13 +295,13 @@ fn weak_set_delete(
 ) -> #(JsVal, Agent) {
   use ref <- require_weak_set(st, this, "delete")
   let val = first_arg_or_undefined(args)
-  case classify(val) {
-    KHandle(h) ->
-      case set.contains(read_ws(st, ref), h.id) {
-        True -> #(mk_bool(True), update_ws(st, ref, set.delete(_, h.id)))
+  case to_weak_key(val) {
+    Some(wk) ->
+      case set.contains(read_ws(st, ref), wk) {
+        True -> #(mk_bool(True), update_ws(st, ref, set.delete(_, wk)))
         False -> #(mk_bool(False), st)
       }
-    _ -> #(mk_bool(False), st)
+    None -> #(mk_bool(False), st)
   }
 }
 
@@ -368,21 +366,34 @@ fn require_weak_set(
   cont(WSRef(h))
 }
 
-/// §9.13 CanBeHeldWeakly gate — under 2core's `Dict(Int, _)` storage, only
-/// objects qualify. Hands over the proved key's `Handle.id` or throws.
+/// §9.13 CanBeHeldWeakly ( v ): objects and non-registered symbols. The only
+/// way to mint a `WeakKey` in this module.
+fn to_weak_key(v: JsVal) -> Option(WeakKey) {
+  case classify(v) {
+    KHandle(h) -> Some(WeakObjKey(h.id))
+    KSym(id) ->
+      case types.is_registered_symbol(id) {
+        True -> None
+        False -> Some(WeakSymKey(id))
+      }
+    _ -> None
+  }
+}
+
+/// CanBeHeldWeakly gate — hands over the proved `WeakKey` or throws `msg`.
 fn require_weak_key(
   st: Agent,
   key: JsVal,
   msg: String,
-  cont: fn(Int) -> #(JsVal, Agent),
+  cont: fn(WeakKey) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  case classify(key) {
-    KHandle(h) -> cont(h.id)
-    _ -> rt_val.t_throw_type_error(st, msg)
+  case to_weak_key(key) {
+    Some(wk) -> cont(wk)
+    None -> rt_val.t_throw_type_error(st, msg)
   }
 }
 
-fn read_wm(st: Agent, ref: WMRef) -> Dict(Int, JsVal) {
+fn read_wm(st: Agent, ref: WMRef) -> Dict(WeakKey, JsVal) {
   let WMRef(h) = ref
   let assert SObject(kind: WeakMapObj(entries:), ..) =
     rt_store.t_cell_get(st, h)
@@ -390,11 +401,9 @@ fn read_wm(st: Agent, ref: WMRef) -> Dict(Int, JsVal) {
   entries
 }
 
-fn lookup_wm(st: Agent, ref: WMRef, key: JsVal) -> option.Option(JsVal) {
-  case classify(key) {
-    KHandle(h) -> dict.get(read_wm(st, ref), h.id) |> option.from_result
-    _ -> None
-  }
+fn lookup_wm(st: Agent, ref: WMRef, key: JsVal) -> Option(JsVal) {
+  use wk <- option.then(to_weak_key(key))
+  dict.get(read_wm(st, ref), wk) |> option.from_result
 }
 
 /// Read-modify-write the entry dict inside a single heap access — takes a
@@ -403,7 +412,7 @@ fn lookup_wm(st: Agent, ref: WMRef, key: JsVal) -> option.Option(JsVal) {
 fn update_wm(
   st: Agent,
   ref: WMRef,
-  f: fn(Dict(Int, JsVal)) -> Dict(Int, JsVal),
+  f: fn(Dict(WeakKey, JsVal)) -> Dict(WeakKey, JsVal),
 ) -> Agent {
   let WMRef(h) = ref
   rt_store.t_cell_update(st, h, fn(slot) {
@@ -412,7 +421,7 @@ fn update_wm(
   })
 }
 
-fn read_ws(st: Agent, ref: WSRef) -> Set(Int) {
+fn read_ws(st: Agent, ref: WSRef) -> Set(WeakKey) {
   let WSRef(h) = ref
   let assert SObject(kind: WeakSetObj(entries:), ..) =
     rt_store.t_cell_get(st, h)
@@ -420,7 +429,11 @@ fn read_ws(st: Agent, ref: WSRef) -> Set(Int) {
   entries
 }
 
-fn update_ws(st: Agent, ref: WSRef, f: fn(Set(Int)) -> Set(Int)) -> Agent {
+fn update_ws(
+  st: Agent,
+  ref: WSRef,
+  f: fn(Set(WeakKey)) -> Set(WeakKey),
+) -> Agent {
   let WSRef(h) = ref
   rt_store.t_cell_update(st, h, fn(slot) {
     let assert SObject(kind: WeakSetObj(entries:), ..) = slot

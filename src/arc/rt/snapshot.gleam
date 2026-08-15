@@ -5,7 +5,9 @@
 //// the runtime's entries on `deserialize` (the interpreter links its own on
 //// top), `hooks` are supplied by the caller, `host_fns` are re-registered by
 //// the embedder (ids line up by registration order) and `frames` are empty
-//// at an engine boundary. A store that itself holds compiled code (a
+//// at an engine boundary. RegExp objects are written without their compiled
+//// matcher (an OTP-release-specific `re` pattern) and recompile on first
+//// exec. A store that itself holds compiled code (a
 //// `KCompiled` function, a coroutine parked in a compiled state machine, a
 //// queued `HostJob`) cannot be written, because a fun is bound to one loaded
 //// version of its module; `serialize` fails and names the cell.
@@ -17,12 +19,13 @@
 
 import arc/host_hooks.{type HostHooks}
 import arc/rt/builtins as rt_builtins
+import arc/rt/builtins/regexp as b_regexp
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type Job, type JsSlot, type JsStore, type Realm,
   type ShapeDesc, Agent, HostJob, JsCell, JsStore, KCompiled, ReactionJob,
-  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
-  SBox, SGenerator, SObject, SPromiseData, SShapedObject,
+  RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext,
+  SAsyncGen, SBox, SGenerator, SObject, SPromiseData, SShapedObject,
 }
 import gleam/dict.{type Dict}
 import gleam/list
@@ -130,7 +133,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
   use Nil <- result.try(check_jobs(microtasks))
   let store =
     StoreImage(
-      data:,
+      data: dict.map_values(data, drop_regexp_matcher),
       free:,
       next:,
       pinned_roots:,
@@ -230,6 +233,25 @@ fn holds_compiled_code(slot: JsSlot) -> Bool {
     | SAsyncGen(resume: ResumeFrame(..), ..)
     | SAsyncContext(resume: ResumeFrame(..), ..) -> False
     SObject(..) | SBox(..) | SPromiseData(..) | SShapedObject(..) -> False
+  }
+}
+
+/// A RegExp's cached matcher is a `re` compiled pattern, valid only on the
+/// OTP release that built it, so the image keeps source and flags and the
+/// restored object recompiles on its first exec.
+fn drop_regexp_matcher(_id: Int, slot: JsSlot) -> JsSlot {
+  case slot {
+    SObject(kind: RegExpObj(source:, flags:, last_index:, compiled: _), ..) ->
+      SObject(
+        ..slot,
+        kind: RegExpObj(
+          source:,
+          flags:,
+          last_index:,
+          compiled: b_regexp.uncompiled_regexp(),
+        ),
+      )
+    _ -> slot
   }
 }
 

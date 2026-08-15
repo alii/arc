@@ -5,6 +5,7 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
+import arc/rt/builtins/regexp
 import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -12,7 +13,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type StringNative,
   type SymbolId, JFloat, JInt, JNan, KHandle, KNull, KStr, KUndef, Named,
-  NoElements, RegExpObj, SObject, StringConstructor, StringFromCharCode,
+  NoElements, SObject, StringConstructor, StringFromCharCode,
   StringFromCodePoint, StringIterator, StringKey, StringN, StringObj,
   StringPrototypeAnchor, StringPrototypeAt, StringPrototypeBig,
   StringPrototypeBlink, StringPrototypeBold, StringPrototypeCharAt,
@@ -361,7 +362,7 @@ fn string_search_bool(
   let #(s, st) = with_this_string(st, this)
   let search_val = helpers.first_arg_or_undefined(args)
   // Steps 3-4: IsRegExp(searchString) → TypeError.
-  let #(is_re, st) = is_regexp(st, search_val)
+  let #(is_re, st) = regexp.is_regexp(st, search_val)
   case is_re {
     True ->
       rt_val.t_throw_type_error(
@@ -389,7 +390,7 @@ fn string_ends_with(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   let search_val = helpers.first_arg_or_undefined(args)
-  let #(is_re, st) = is_regexp(st, search_val)
+  let #(is_re, st) = regexp.is_regexp(st, search_val)
   case is_re {
     True ->
       rt_val.t_throw_type_error(
@@ -678,8 +679,8 @@ fn not_a_function(symbol: SymbolId) -> String {
 }
 
 /// Delegate to a Symbol method on `val` if it has one, passing the ORIGINAL
-/// `this`; otherwise ToString(this), construct a RegExp from `val`, invoke
-/// its symbol method with the string. Shared by match/search.
+/// `this`; otherwise S = ToString(this), rx = RegExpCreate(val, undefined),
+/// Invoke(rx, @@symbol, « S »). Shared by match/search.
 fn delegate_or_regexp(
   st: Agent,
   val: JsVal,
@@ -691,11 +692,7 @@ fn delegate_or_regexp(
     Some(method) -> rt_call.t_call_checked(st, method, val, [this])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
-      let regexp_ctor = st.realm.regexp.constructor
-      let #(rx, st) =
-        rt_call.t_call_checked(st, mk_object(regexp_ctor), mk_undefined(), [
-          val,
-        ])
+      let #(rx, st) = regexp.regexp_create(st, val, mk_undefined())
       let #(method_opt, st) = get_method(st, rx, symbol)
       case method_opt {
         Some(method) -> rt_call.t_call_checked(st, method, rx, [mk_string(s)])
@@ -757,7 +754,7 @@ fn string_replace_all(
   let st = require_object_coercible(st, this, "replaceAll")
   let search_val = helpers.first_arg_or_undefined(args)
   let replace_val = helpers.arg_at(args, 1)
-  let #(is_re, st) = is_regexp(st, search_val)
+  let #(is_re, st) = regexp.is_regexp(st, search_val)
   let st = require_global_when_regexp(st, search_val, is_re, "replaceAll")
   let #(method_opt, st) = get_method(st, search_val, rt_types.symbol_replace)
   case method_opt {
@@ -779,7 +776,7 @@ fn string_match_all(
 ) -> #(JsVal, Agent) {
   let st = require_object_coercible(st, this, "matchAll")
   let regexp_arg = helpers.first_arg_or_undefined(args)
-  let #(is_re, st) = is_regexp(st, regexp_arg)
+  let #(is_re, st) = regexp.is_regexp(st, regexp_arg)
   let st = require_global_when_regexp(st, regexp_arg, is_re, "matchAll")
   let #(method_opt, st) = get_method(st, regexp_arg, rt_types.symbol_match_all)
   case method_opt {
@@ -787,12 +784,7 @@ fn string_match_all(
     None -> {
       // Steps 3-5: S = ToString(O); rx = RegExpCreate(regexp, "g"); Invoke.
       let #(s, st) = rt_val.t_to_string(st, this)
-      let regexp_ctor = st.realm.regexp.constructor
-      let #(rx, st) =
-        rt_call.t_call_checked(st, mk_object(regexp_ctor), mk_undefined(), [
-          regexp_arg,
-          mk_string("g"),
-        ])
+      let #(rx, st) = regexp.regexp_create(st, regexp_arg, mk_string("g"))
       let #(method_opt, st) = get_method(st, rx, rt_types.symbol_match_all)
       case method_opt {
         Some(method) -> rt_call.t_call_checked(st, method, rx, [mk_string(s)])
@@ -1210,26 +1202,6 @@ fn html_wrap_attr(
 }
 
 // ── internal helpers ────────────────────────────────────────────────────────
-
-/// §7.2.8 IsRegExp: object with @@match not undefined and truthy, or with
-/// [[RegExpMatcher]] internal slot.
-fn is_regexp(st: Agent, val: JsVal) -> #(Bool, Agent) {
-  case classify(val) {
-    KHandle(h) -> {
-      let #(matcher, st) =
-        rt_obj.t_get_prop(st, val, SymbolKey(rt_types.symbol_match))
-      case classify(matcher) {
-        KUndef ->
-          case rt_store.t_cell_get(st, h) {
-            SObject(kind: RegExpObj(..), ..) -> #(True, st)
-            _ -> #(False, st)
-          }
-        _ -> #(rt_val.to_boolean(matcher), st)
-      }
-    }
-    _ -> #(False, st)
-  }
-}
 
 /// matchAll step 2.b / replaceAll step 2.a: when IsRegExp, its "flags" must
 /// be object-coercible and its string must contain "g".

@@ -1,13 +1,16 @@
 //// ES2024 §22.2 RegExp Objects
 ////
 //// Internal storage: `RegExpObj(source, flags, last_index, compiled)` exotic
-//// kind where `compiled` is an opaque `CompiledRegExp` (§10 vendored engine).
-//// Port of arc `builtins/regexp.gleam` init/dispatch re-expressed under D7/R1.
-//// Actual pattern matching is a single `ffi_regexp_exec_info` @external stub
+//// kind where `compiled` is an opaque `CompiledRegExp` (§10 vendored engine),
+//// filled on first exec and kept in the cell so a pattern compiles once per
+//// object. Port of arc `builtins/regexp.gleam` init/dispatch under D7/R1.
+//// Actual pattern matching is the `ffi_regexp_exec_compiled` @external stub
 //// (§10 `arc_regexp_ffi.erl`); every method body around it — exec,
 //// test, [@@match/matchAll/replace/search/split], match-array construction,
 //// lastIndex advancement, GetSubstitution — is ported here in full Gleam.
 
+import arc/parser/regex
+import arc/parser/regex_error
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -33,6 +36,7 @@ import arc/rt/types.{
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/limits
+import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -191,23 +195,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    RegExpConstructor(legacy: _) -> {
-      // §22.2.4.1 step 4: called-as-function with a RegExp arg → return it.
-      let #(p, _) = helpers.two_args_or_undefined(args)
-      case is_regexp_object(st, p) {
-        True -> #(p, st)
-        False -> {
-          let #(h, st) =
-            dispatch_construct(
-              st,
-              native,
-              args,
-              mk_object(st.realm.regexp.constructor),
-            )
-          #(mk_object(h), st)
-        }
-      }
-    }
+    RegExpConstructor(legacy: _) -> regexp_call(st, args)
     RegExpLegacyGetter(ctor:, slot:) -> legacy_static_get(st, this, ctor, slot)
     RegExpLegacyInputSetter(ctor:) ->
       legacy_static_set_input(st, this, args, ctor)
@@ -227,7 +215,7 @@ pub fn dispatch(
   }
 }
 
-/// Per-module [[Construct]] dispatch — §22.2.4.1.
+/// Per-module [[Construct]] dispatch — §22.2.4.1 with NewTarget defined.
 pub fn dispatch_construct(
   st: Agent,
   native: RegExpNative,
@@ -236,26 +224,123 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case native {
     RegExpConstructor(legacy: _) -> {
-      let #(pattern_v, flags_v) = helpers.two_args_or_undefined(args)
-      // §22.2.4.1 step 3: pattern is a RegExp → copy its source/flags.
-      let #(source, flags, st) = case classify(pattern_v) {
-        KHandle(h) ->
-          case rt_store.t_cell_get(st, h) {
-            SObject(kind: RegExpObj(source: s, flags: f, ..), ..) ->
-              case classify(flags_v) {
-                rt_types.KUndef -> #(s, f, st)
-                _ -> {
-                  let #(fl, st) = rt_val.t_to_string(st, flags_v)
-                  #(s, fl, st)
-                }
-              }
-            _ -> pattern_and_flags_from_strings(st, pattern_v, flags_v)
-          }
-        _ -> pattern_and_flags_from_strings(st, pattern_v, flags_v)
-      }
-      alloc_regexp(st, source, flags, new_target)
+      let #(pattern, flags) = helpers.two_args_or_undefined(args)
+      // Step 1: Let patternIsRegExp be ? IsRegExp(pattern).
+      let #(pattern_is_regexp, st) = is_regexp(st, pattern)
+      construct_regexp(st, pattern, pattern_is_regexp, flags, new_target)
     }
     _ -> rt_val.t_throw_type_error(st, "not a constructor")
+  }
+}
+
+/// ES2024 §22.2.4.1 RegExp(pattern, flags), NewTarget undefined.
+///
+///   1. Let patternIsRegExp be ? IsRegExp(pattern).
+///   2. If NewTarget is undefined:
+///      a. Let newTarget be the active function object (%RegExp%).
+///      b. If patternIsRegExp is true and flags is undefined:
+///         i.  Let patternConstructor be ? Get(pattern, "constructor").
+///         ii. If SameValue(newTarget, patternConstructor), return pattern.
+///   4-8. construct_regexp.
+fn regexp_call(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  let #(pattern, flags) = helpers.two_args_or_undefined(args)
+  let #(pattern_is_regexp, st) = is_regexp(st, pattern)
+  let new_target = mk_object(st.realm.regexp.constructor)
+  let construct = fn(st) {
+    let #(h, st) =
+      construct_regexp(st, pattern, pattern_is_regexp, flags, new_target)
+    #(mk_object(h), st)
+  }
+  case pattern_is_regexp, classify(flags) {
+    True, KUndef -> {
+      let #(ctor, st) = get_named(st, pattern, "constructor")
+      case rt_val.same_value(ctor, new_target) {
+        True -> #(pattern, st)
+        False -> construct(st)
+      }
+    }
+    _, _ -> construct(st)
+  }
+}
+
+/// §22.2.4.1 steps 4-8: derive P and F, then RegExpAlloc(newTarget) +
+/// RegExpInitialize. The Get(newTarget, "prototype") happens AFTER the
+/// source/flags reads.
+fn construct_regexp(
+  st: Agent,
+  pattern: JsVal,
+  pattern_is_regexp: Bool,
+  flags: JsVal,
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  let #(p, f, st) = case regexp_slot(st, pattern) {
+    // Step 4: pattern has [[RegExpMatcher]] — reuse original source/flags.
+    Some(#(source, orig_flags)) ->
+      case classify(flags) {
+        KUndef -> #(mk_string(source), mk_string(orig_flags), st)
+        _ -> #(mk_string(source), flags, st)
+      }
+    None ->
+      case pattern_is_regexp {
+        // Step 5: patternIsRegExp — read source/flags via Get.
+        True -> {
+          let #(p, st) = get_named(st, pattern, "source")
+          case classify(flags) {
+            KUndef -> {
+              let #(f, st) = get_named(st, pattern, "flags")
+              #(p, f, st)
+            }
+            _ -> #(p, flags, st)
+          }
+        }
+        // Step 6.
+        False -> #(pattern, flags, st)
+      }
+  }
+  // Step 7: O = ? RegExpAlloc(newTarget).
+  let #(proto, st) =
+    proto_from_new_target(st, new_target, st.realm.regexp.prototype)
+  // Step 8: ? RegExpInitialize(O, P, F).
+  let #(source, flags, st) = pattern_and_flags_from_strings(st, p, f)
+  validate_pattern_and_flags(st, source, flags)
+  alloc_regexp_with_proto(st, source, flags, proto)
+}
+
+/// §22.2.3.2 RegExpCreate(P, F): RegExpAlloc(%RegExp%) + RegExpInitialize.
+pub fn regexp_create(st: Agent, p: JsVal, f: JsVal) -> #(JsVal, Agent) {
+  let #(source, flags, st) = pattern_and_flags_from_strings(st, p, f)
+  validate_pattern_and_flags(st, source, flags)
+  let #(h, st) =
+    alloc_regexp_with_proto(st, source, flags, st.realm.regexp.prototype)
+  #(mk_object(h), st)
+}
+
+/// §7.2.8 IsRegExp: an Object whose @@match is truthy, or (when @@match is
+/// undefined) one with a [[RegExpMatcher]] slot. The Get is observable.
+pub fn is_regexp(st: Agent, val: JsVal) -> #(Bool, Agent) {
+  case classify(val) {
+    KHandle(_) -> {
+      let #(matcher, st) =
+        rt_obj.t_get_prop(st, val, rt_types.SymbolKey(rt_types.symbol_match))
+      case classify(matcher) {
+        KUndef -> #(is_regexp_object(st, val), st)
+        _ -> #(rt_val.to_boolean(matcher), st)
+      }
+    }
+    _ -> #(False, st)
+  }
+}
+
+/// [[OriginalSource]]/[[OriginalFlags]] if `v` has a [[RegExpMatcher]] slot.
+fn regexp_slot(st: Agent, v: JsVal) -> Option(#(String, String)) {
+  case classify(v) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: RegExpObj(source:, flags:, ..), ..) ->
+          Some(#(source, flags))
+        _ -> None
+      }
+    _ -> None
   }
 }
 
@@ -404,8 +489,60 @@ fn capture_to_legacy_string(s: String, cap: #(Int, Int)) -> String {
 
 fn get_source(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case require_regexp_or_proto(st, this, "source") {
-    RSlot(s, _, _) -> #(mk_string(s), st)
+    RSlot(s, _, _) -> #(mk_string(source_string(s)), st)
     RProto -> #(mk_string("(?:)"), st)
+  }
+}
+
+/// §22.2.6.13.1 EscapeRegExpPattern: empty pattern displays as "(?:)";
+/// unescaped "/" becomes "\/" and literal line terminators are escaped so
+/// that "/" <> source <> "/" re-parses as the same RegExp literal.
+fn source_string(pattern: String) -> String {
+  case pattern {
+    "" -> "(?:)"
+    p ->
+      case
+        string.contains(p, "/")
+        || string.contains(p, "\n")
+        || string.contains(p, "\r")
+        || string.contains(p, "\u{2028}")
+        || string.contains(p, "\u{2029}")
+      {
+        False -> p
+        True -> escape_pattern(string.to_graphemes(p), "")
+      }
+  }
+}
+
+fn escape_pattern(chars: List(String), acc: String) -> String {
+  case chars {
+    [] -> acc
+    // Keep escape pairs together; an escaped line terminator is rewritten
+    // to its escape-sequence form (same matcher semantics, single line).
+    ["\\", next, ..rest] ->
+      escape_pattern(rest, acc <> "\\" <> escape_terminator(next))
+    ["\\"] -> acc <> "\\"
+    ["/", ..rest] -> escape_pattern(rest, acc <> "\\/")
+    ["\n", ..rest] -> escape_pattern(rest, acc <> "\\n")
+    // "\r\n" is one grapheme cluster.
+    ["\r\n", ..rest] -> escape_pattern(rest, acc <> "\\r\\n")
+    ["\r", ..rest] -> escape_pattern(rest, acc <> "\\r")
+    ["\u{2028}", ..rest] -> escape_pattern(rest, acc <> "\\u2028")
+    ["\u{2029}", ..rest] -> escape_pattern(rest, acc <> "\\u2029")
+    [ch, ..rest] -> escape_pattern(rest, acc <> ch)
+  }
+}
+
+/// The character following a backslash, rewritten if it is a literal line
+/// terminator ("\<LF>" → "\n" keeps the escape's meaning on one line).
+fn escape_terminator(ch: String) -> String {
+  case ch {
+    "\n" -> "n"
+    "\r\n" -> "r\\n"
+    "\r" -> "r"
+    "\u{2028}" -> "u2028"
+    "\u{2029}" -> "u2029"
+    other -> other
   }
 }
 
@@ -486,28 +623,13 @@ fn pattern_and_flags_from_strings(
   #(source, flags, st)
 }
 
-fn alloc_regexp(
-  st: Agent,
-  source: String,
-  flags: String,
-  new_target: JsVal,
-) -> #(Handle, Agent) {
-  validate_flags(st, flags)
-  let realm = st.realm
-  // §22.2.4.1 step 8 → RegExpAlloc → OrdinaryCreateFromConstructor.
-  let #(proto, st) =
-    proto_from_new_target(st, new_target, realm.regexp.prototype)
-  alloc_regexp_with_proto(st, source, flags, proto)
-}
-
 /// §13.2.7.3 regular expression literal: RegExpCreate(pattern, flags) on
-/// %RegExp.prototype%. Flags were validated by the parser; re-checked here.
+/// %RegExp.prototype%. Pattern and flags were validated by the parser.
 pub fn regexp_create_literal(
   st: Agent,
   source: String,
   flags: String,
 ) -> #(JsVal, Agent) {
-  validate_flags(st, flags)
   let #(h, st) =
     alloc_regexp_with_proto(st, source, flags, st.realm.regexp.prototype)
   #(rt_types.mk_object(h), st)
@@ -567,31 +689,24 @@ fn proto_from_new_target(
   }
 }
 
-fn validate_flags(st: Agent, flags: String) -> Nil {
-  do_validate_flags(st, string.to_graphemes(flags), [])
-}
-
-fn do_validate_flags(st: Agent, rest: List(String), seen: List(String)) -> Nil {
-  case rest {
-    [] -> Nil
-    [c, ..tail] -> {
-      case list.contains(["d", "g", "i", "m", "s", "u", "v", "y"], c) {
-        False ->
-          rt_val.t_throw_syntax_error(
-            st,
-            "Invalid flags supplied to RegExp constructor '" <> c <> "'",
-          )
-        True -> Nil
-      }
-      case list.contains(seen, c) {
-        True ->
-          rt_val.t_throw_syntax_error(
-            st,
-            "Invalid regular expression flags: duplicate '" <> c <> "'",
-          )
-        False -> do_validate_flags(st, tail, [c, ..seen])
-      }
-    }
+/// §22.2.3.4 RegExpInitialize steps 5-8: validate the flags string, then
+/// parse the pattern against the ECMAScript Pattern grammar (Annex B
+/// extended grammar without u/v, strict grammar with it) — the same
+/// validators the parser runs on regex literals. SyntaxError on failure.
+fn validate_pattern_and_flags(
+  st: Agent,
+  pattern: String,
+  flags: String,
+) -> Nil {
+  let bytes = <<pattern:utf8>>
+  let checked = {
+    use parsed <- result.try(regex.validate_flags(flags))
+    regex.validate_pattern(bytes, 0, bit_array.byte_size(bytes), parsed)
+  }
+  case checked {
+    Ok(Nil) -> Nil
+    Error(err) ->
+      rt_val.t_throw_syntax_error(st, regex_error.pattern_error_message(err))
   }
 }
 
@@ -640,21 +755,30 @@ fn throw_receiver(st: Agent, op: String) -> a {
 // §22.2.7 RegExpExec / RegExpBuiltinExec
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Why `ffi_regexp_exec_info` produced no match. arc `ExecFailure`.
+/// Why `ffi_regexp_exec_compiled` produced no match. arc `ExecFailure`.
 type ExecFailure {
   NoMatch
   OffsetOutOfRange
   PatternCompileFailed(reason: String)
 }
 
-/// §10 FFI: run the pattern against `s` at byte `offset`. Returns whole-match
-/// span, per-group spans (`{-1,0}` = did-not-participate), group count, and
-/// (name, capture-index) for named groups. arc `ffi_regexp_exec_info`; the
-/// Erlang module is copied by §10.
-@external(erlang, "arc_regexp_ffi", "regexp_exec_info")
-fn ffi_regexp_exec_info(
-  pattern: String,
-  flags: String,
+/// §10 FFI: translate and `re:compile` `pattern` under `flags`. The result
+/// (matcher + group count + named groups, or the compile failure) is what a
+/// RegExpObj keeps in its `compiled` slot.
+@external(erlang, "arc_regexp_ffi", "regexp_compile")
+fn ffi_regexp_compile(pattern: String, flags: String) -> rt_types.CompiledRegExp
+
+/// Whether a `compiled` slot holds an `ffi_regexp_compile` result yet (as
+/// opposed to the `uncompiled_regexp` sentinel).
+@external(erlang, "arc_regexp_ffi", "is_compiled")
+fn ffi_is_compiled(compiled: rt_types.CompiledRegExp) -> Bool
+
+/// §10 FFI: run a compiled pattern against `s` at byte `offset`. Returns
+/// whole-match span, per-group spans (`{-1,0}` = did-not-participate), group
+/// count, and (name, capture-index) for named groups.
+@external(erlang, "arc_regexp_ffi", "regexp_exec_compiled")
+fn ffi_regexp_exec_compiled(
+  compiled: rt_types.CompiledRegExp,
   s: String,
   offset: Int,
   sticky: Bool,
@@ -747,9 +871,9 @@ fn builtin_exec(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
   // Step 2: lastIndex = ? ToLength(? Get(R, "lastIndex")).
   let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
   let #(last_index, st) = rt_val.t_to_length(st, li_v)
-  // Re-read [[OriginalSource]]/[[OriginalFlags]] AFTER the observable Get —
+  // Re-read [[OriginalFlags]]/[[RegExpMatcher]] AFTER the observable Get —
   // a poisoned lastIndex getter may have compile()'d.
-  let #(pattern, flags) = read_regexp_slot(st, h)
+  let #(flags, compiled, st) = regexp_matcher(st, h)
   let global = string.contains(flags, "g")
   let sticky = string.contains(flags, "y")
   let has_indices = string.contains(flags, "d")
@@ -757,7 +881,7 @@ fn builtin_exec(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
     True -> last_index
     False -> 0
   }
-  case ffi_regexp_exec_info(pattern, flags, s, last_index, sticky) {
+  case ffi_regexp_exec_compiled(compiled, s, last_index, sticky) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> {
       let st = case global || sticky {
         True -> set_throw(st, h, "lastIndex", mk_number(JInt(0)))
@@ -786,9 +910,24 @@ fn builtin_exec(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
   }
 }
 
-fn read_regexp_slot(st: Agent, h: Handle) -> #(String, String) {
+/// [[OriginalFlags]] and [[RegExpMatcher]] of `h`. The matcher is compiled on
+/// first use and written back into the cell, so each RegExp object translates
+/// and compiles its pattern at most once.
+fn regexp_matcher(
+  st: Agent,
+  h: Handle,
+) -> #(String, rt_types.CompiledRegExp, Agent) {
   case rt_store.t_cell_get(st, h) {
-    SObject(kind: RegExpObj(source:, flags:, ..), ..) -> #(source, flags)
+    SObject(kind: RegExpObj(source:, flags:, last_index:, compiled:), ..) as slot ->
+      case ffi_is_compiled(compiled) {
+        True -> #(flags, compiled, st)
+        False -> {
+          let compiled = ffi_regexp_compile(source, flags)
+          let kind = RegExpObj(source:, flags:, last_index:, compiled:)
+          let st = rt_store.t_cell_set(st, h, SObject(..slot, kind:))
+          #(flags, compiled, st)
+        }
+      }
     _ ->
       rt_val.t_throw_type_error(
         st,
@@ -1022,7 +1161,7 @@ fn regexp_compile(
       }
     _ -> pattern_and_flags_from_strings(st, pattern_v, flags_v)
   }
-  validate_flags(st, flags)
+  validate_pattern_and_flags(st, source, flags)
   let source = case source {
     "" -> "(?:)"
     _ -> source
@@ -1030,10 +1169,15 @@ fn regexp_compile(
   let st =
     rt_store.t_cell_update(st, h, fn(slot) {
       case slot {
-        SObject(kind: RegExpObj(compiled:, ..), ..) ->
+        SObject(kind: RegExpObj(..), ..) ->
           SObject(
             ..slot,
-            kind: RegExpObj(source:, flags:, last_index: 0, compiled:),
+            kind: RegExpObj(
+              source:,
+              flags:,
+              last_index: 0,
+              compiled: uncompiled_regexp(),
+            ),
           )
         _ -> slot
       }
@@ -1827,8 +1971,9 @@ fn flag_char(f: RegExpFlag) -> String {
   }
 }
 
-/// The "not-yet-compiled" sentinel `CompiledRegExp`. arc allocates a real
-/// engine handle at construction; 2core defers to the §10 FFI copy — until
-/// then the opaque type is a bare atom the FFI recognises as unlinked.
+/// The "not-yet-compiled" sentinel `CompiledRegExp`: a bare atom that
+/// `ffi_is_compiled` rejects, replaced by the real matcher on first exec
+/// (`regexp_matcher`) and restored whenever source/flags change or the
+/// object is written to a snapshot.
 @external(erlang, "arc_rt_val_ffi", "mk_undefined")
-fn uncompiled_regexp() -> rt_types.CompiledRegExp
+pub fn uncompiled_regexp() -> rt_types.CompiledRegExp

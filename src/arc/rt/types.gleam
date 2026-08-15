@@ -413,6 +413,13 @@ pub fn is_registered_symbol(id: SymbolId) -> Bool {
   }
 }
 
+/// Identity of a value that passed §9.13 CanBeHeldWeakly: an object's cell id
+/// or a non-registered symbol. Keys `WeakMapObj`/`WeakSetObj` entries.
+pub type WeakKey {
+  WeakObjKey(id: Int)
+  WeakSymKey(id: SymbolId)
+}
+
 /// §20.4.3.3.1 SymbolDescriptiveString — "Symbol(" + description + ")".
 pub fn symbol_descriptive_string(id: SymbolId) -> String {
   "Symbol(" <> option.unwrap(symbol_description(id), "") <> ")"
@@ -2143,8 +2150,8 @@ pub type ObjKind {
   ErrorObj(stack: String)
   MapObj(entries: OrderedEntries(MapKey, JsVal))
   SetObj(entries: OrderedEntries(MapKey, JsVal))
-  WeakMapObj(entries: Dict(Int, JsVal))
-  WeakSetObj(entries: Set(Int))
+  WeakMapObj(entries: Dict(WeakKey, JsVal))
+  WeakSetObj(entries: Set(WeakKey))
   DateObj(ms: JsNum)
   RegExpObj(
     source: String,

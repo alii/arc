@@ -16,6 +16,7 @@
 %%     one name and one out-of-range policy for those three functions.
 -module(arc_regexp_ffi).
 -export([regexp_exec_info/5]).
+-export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4]).
 %% Shared with arc_regex_vclass — the same trail-surrogate reader both the
 %% general translation and the v-class parser use.
 -export([pair_trail/1]).
@@ -75,12 +76,13 @@ newline_mode(<<_, Rest/binary>>, M, S) -> newline_mode(Rest, M, S).
 %% failure is not necessarily an arc bug: PCRE rejects constructs that are legal
 %% ECMAScript, e.g. an unbounded-length lookbehind like `(?<=^\w+)`.
 %%
-%% Translates and compiles on every call: re:run/3 needs an MP, and the
-%% global match/replace/split loops at the Gleam level call exec once per
-%% match, so a /g operation with k matches translates and compiles the same
-%% regex k times (property escapes can expand into multi-kilobyte classes).
-%% The scan of the source pattern (group count + named groups) rides along so
-%% regexp_exec_info gets it from the same pass.
+%% Translation + re:compile is the expensive part (property escapes and
+%% Unicode ID classes expand into multi-kilobyte PCRE classes), so the result
+%% is meant to be computed once per RegExp object: regexp_compile/2 hands it
+%% to the Gleam side, which keeps it in the object's `compiled` slot and execs
+%% through regexp_exec_compiled/4. regexp_exec_info/5 is the uncached
+%% one-shot form. The scan of the source pattern (group count + named groups)
+%% rides along so exec gets it from the same pass.
 get_compiled(Pattern, Flags) ->
     Opts = flags_to_opts(Flags),
     Mode = unicode_mode(Flags),
@@ -805,38 +807,70 @@ pair_trail(_) -> none.
 %%     (PCRE omits trailing unset groups; JS exposes them as undefined),
 %%   - Names is [{GroupName, CaptureIndex}] for (?<name>...) groups, in
 %%     source order, so the caller can build the `groups` object.
-regexp_exec_info(Pattern, Flags, String, Offset, Sticky) when Offset < 0 ->
-    regexp_exec_info(Pattern, Flags, String, 0, Sticky);
-regexp_exec_info(_Pattern, _Flags, String, Offset, _Sticky)
-  when Offset > byte_size(String) ->
+regexp_exec_info(Pattern, Flags, String, Offset, Sticky) ->
+    case check_offset(String, Offset) of
+        {ok, Offset1} ->
+            run_compiled(get_compiled(Pattern, Flags), String, Offset1, Sticky);
+        {error, _} = Err ->
+            Err
+    end.
+
+%% regexp_compile(Pattern, Flags) -> Compiled
+%%
+%% get_compiled's whole result, success or compile failure, as the opaque
+%% `CompiledRegExp` a RegExp object keeps in its `compiled` slot. A failure is
+%% cached like a success: exec'ing an uncompilable pattern in a loop pays the
+%% translation once, not once per call.
+regexp_compile(Pattern, Flags) ->
+    get_compiled(Pattern, Flags).
+
+%% is_compiled(Term) -> boolean()
+%%
+%% Whether a `compiled` slot holds a regexp_compile/2 result yet. Anything
+%% else is the Gleam side's not-yet-compiled sentinel.
+is_compiled({ok, {_MP, _GroupCount, _Names}}) -> true;
+is_compiled({error, {pattern_compile_failed, _Reason}}) -> true;
+is_compiled(_) -> false.
+
+%% regexp_exec_compiled(Compiled, String, Offset, Sticky)
+%%
+%% regexp_exec_info/5 against an already regexp_compile/2'd pattern; same
+%% result shapes, same offset policy.
+regexp_exec_compiled(Compiled, String, Offset, Sticky) ->
+    case check_offset(String, Offset) of
+        {ok, Offset1} -> run_compiled(Compiled, String, Offset1, Sticky);
+        {error, _} = Err -> Err
+    end.
+
+%% The offset policy described above regexp_exec_info/5: clamp negatives to
+%% 0, past-the-end is offset_out_of_range, and an offset landing on a UTF-8
+%% continuation byte is mid-character (re:run would raise badarg) so it is a
+%% plain no_match. Same test as arc_bytes_ffi:next_char_boundary's.
+check_offset(String, Offset) when Offset < 0 ->
+    check_offset(String, 0);
+check_offset(String, Offset) when Offset > byte_size(String) ->
     {error, offset_out_of_range};
-%% An offset landing on a UTF-8 continuation byte is mid-character; re:run
-%% would raise badarg. Same test as arc_bytes_ffi:next_char_boundary's.
-regexp_exec_info(Pattern, Flags, String, Offset, Sticky)
-  when Offset < byte_size(String) ->
+check_offset(String, Offset) when Offset < byte_size(String) ->
     case (binary:at(String, Offset) band 16#C0) =:= 16#80 of
         true -> {error, no_match};
-        false -> exec_compiled(Pattern, Flags, String, Offset, Sticky)
+        false -> {ok, Offset}
     end;
-regexp_exec_info(Pattern, Flags, String, Offset, Sticky) ->
-    exec_compiled(Pattern, Flags, String, Offset, Sticky).
+check_offset(_String, Offset) ->
+    {ok, Offset}.
 
-exec_compiled(Pattern, Flags, String, Offset, Sticky) ->
+run_compiled({error, {pattern_compile_failed, _Reason}} = Err, _S, _O, _St) ->
+    Err;
+run_compiled({ok, {MP, GroupCount, Names}}, String, Offset, Sticky) ->
     Opts0 = [{offset, Offset}, {capture, all, index}],
     Opts = case Sticky of
                true -> [anchored | Opts0];
                false -> Opts0
            end,
-    case get_compiled(Pattern, Flags) of
-        {error, {pattern_compile_failed, _Reason}} = Err ->
-            Err;
-        {ok, {MP, GroupCount, Names}} ->
-            case re:run(String, MP, Opts) of
-                {match, [Whole | Groups]} ->
-                    Padded = pad_captures(Groups, GroupCount),
-                    {ok, {Whole, Padded, GroupCount, Names}};
-                nomatch -> {error, no_match}
-            end
+    case re:run(String, MP, Opts) of
+        {match, [Whole | Groups]} ->
+            Padded = pad_captures(Groups, GroupCount),
+            {ok, {Whole, Padded, GroupCount, Names}};
+        nomatch -> {error, no_match}
     end.
 
 %% Pad the capture list with {-1, 0} (PCRE's "unset group" marker) to N
