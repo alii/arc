@@ -197,10 +197,34 @@ fn get_source(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 fn get_flags(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  // §22.2.6.4: reads each flag getter — but all read the same slot; use it.
-  case require_regexp_or_proto(st, this, "flags") {
-    RSlot(_, f, _) -> #(mk_string(f), st)
-    RProto -> #(mk_string(""), st)
+  // §22.2.6.4: Get() each flag property off `this` in canonical order; the
+  // reads are observable (own getters, subclasses) and any object qualifies.
+  case classify(this) {
+    KHandle(_) -> build_flags(st, this, all_flags, "")
+    _ ->
+      rt_val.t_throw_type_error(
+        st,
+        "RegExp.prototype.flags getter called on non-object",
+      )
+  }
+}
+
+fn build_flags(
+  st: Agent,
+  this: JsVal,
+  remaining: List(RegExpFlag),
+  acc: String,
+) -> #(JsVal, Agent) {
+  case remaining {
+    [] -> #(mk_string(acc), st)
+    [flag, ..rest] -> {
+      let #(v, st) = get_named(st, this, flag_property(flag))
+      let acc = case rt_val.to_boolean(v) {
+        True -> acc <> flag_char(flag)
+        False -> acc
+      }
+      build_flags(st, this, rest, acc)
+    }
   }
 }
 
