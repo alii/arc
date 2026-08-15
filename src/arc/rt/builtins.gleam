@@ -98,8 +98,12 @@ pub fn new_agent(hooks: HostHooks) -> Agent {
 /// then everything else). Deterministic: same handle ids for realm 0 every
 /// run.
 pub fn init_realm(st: Agent) -> #(Realm, Agent) {
-  // Ids are never reused or removed, so the registry size is the next id.
-  let id = dict.size(st.realms)
+  // One past the highest id in use, counting the current realm even if the
+  // registry has no entry for it (`unset_realm` is -1, so realm 0 first).
+  let id =
+    dict.fold(st.realms, st.realm.id + 1, fn(next, known, _realm) {
+      int.max(next, known + 1)
+    })
   // 1. Object.prototype — the root of all prototype chains (proto: None).
   let #(object_proto, st) = common.alloc_proto(st, None, dict.new())
   // 2. Function.prototype + %Function% + %ThrowTypeError%.

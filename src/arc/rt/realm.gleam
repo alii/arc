@@ -5,9 +5,10 @@
 ////
 //// Model: `Agent.realm` is the running execution context's Realm Record and
 //// `Agent.realms` holds every realm by `Realm.id`. Function objects carry no
-//// [[Realm]] slot; a realm-attributed native (JSON, `%eval%`-style host
-//// functions, the `Error.prototype.stack` setter) carries its realm id in
-//// its `NativeToken` and enters it with `with_realm`.
+//// [[Realm]] slot; a realm-attributed native (JSON, the `$262` methods, the
+//// `Error.prototype.stack` setter) carries its realm id in its `NativeToken`
+//// and enters it with `with_realm`. `eval` and `Function` are not attributed:
+//// they run in whichever realm is current.
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -38,11 +39,6 @@ pub fn lookup(st: Agent, id: Int) -> Realm {
     Error(Nil) ->
       panic as { "rt/realm.lookup: no realm with id " <> int.to_string(id) }
   }
-}
-
-/// Every realm of the agent, the current one as it is right now.
-pub fn all(st: Agent) -> List(Realm) {
-  dict.insert(st.realms, st.realm.id, st.realm) |> dict.values
 }
 
 // ── entering a realm ────────────────────────────────────────────────────────

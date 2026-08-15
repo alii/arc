@@ -489,99 +489,100 @@ fn stack_getter(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// set Error.prototype.stack — error-stack-accessor proposal. Runs in the
-/// setter's own realm (§10.3.1: a built-in's callee context takes
-/// F.[[Realm]]), so `home` is that realm's %Error.prototype% and every
-/// TypeError below is that realm's, whichever realm called it.
+/// set Error.prototype.stack — error-stack-accessor proposal. `realm` is
+/// the setter's own realm (§10.3.1: a built-in's callee context takes
+/// F.[[Realm]]): `home` is that realm's %Error.prototype% and every
+/// TypeError the setter itself throws is that realm's, whichever realm called
+/// it. The [[GetOwnProperty]] / [[Set]] / [[DefineOwnProperty]] steps stay in
+/// the caller's realm, since a proxy trap or accessor they reach is user code.
 fn stack_setter(
   st: Agent,
   realm: Int,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st <- rt_realm.with_realm(st, realm)
-  let proto = st.realm.error.prototype
+  let proto = rt_realm.lookup(st, realm).error.prototype
   case classify(this), classify(helpers.first_arg_or_undefined(args)) {
     KNull, _ | KUndef, _ ->
-      rt_val.t_throw_type_error(
+      throw_type_error_in(
         st,
+        realm,
         "set Error.prototype.stack called on non-object",
       )
-    KHandle(h), KStr(s) -> set_stack_ignoring_prototype(st, proto, h, s)
+    KHandle(h), KStr(s) -> set_stack_ignoring_prototype(st, realm, proto, h, s)
     KHandle(_), _ ->
-      rt_val.t_throw_type_error(
+      throw_type_error_in(
         st,
+        realm,
         "Error.prototype.stack value must be a string",
       )
     _, _ ->
-      rt_val.t_throw_type_error(
+      throw_type_error_in(
         st,
+        realm,
         "set Error.prototype.stack called on non-object",
       )
   }
 }
 
+/// Throw a TypeError of realm `realm` rather than of the current one.
+fn throw_type_error_in(st: Agent, realm: Int, message: String) -> #(a, Agent) {
+  use st <- rt_realm.with_realm(st, realm)
+  rt_val.t_throw_type_error(st, message)
+}
+
 /// SetterThatIgnoresPrototypeProperties ( this, home, p, v ).
 fn set_stack_ignoring_prototype(
   st: Agent,
+  realm: Int,
   proto: Handle,
   h: Handle,
   s: String,
 ) -> #(JsVal, Agent) {
   case h == proto {
     True ->
-      rt_val.t_throw_type_error(
+      throw_type_error_in(
         st,
+        realm,
         "Cannot assign to read only property 'stack' of Error.prototype",
       )
     False -> {
       // Step 3: desc = ? this.[[GetOwnProperty]]("stack") — proxy-aware.
       let #(own, st) =
         rt_obj.t_get_own_property(st, h, StringKey(Named("stack")))
-      case option.is_some(own) {
+      let #(ok, st) = case option.is_some(own) {
         // Step 5: Set(this, "stack", v, true) — false → TypeError.
-        True -> {
-          let #(ok, st) =
-            rt_obj.t_set_prop(
-              st,
-              mk_object(h),
-              StringKey(Named("stack")),
-              mk_string(s),
-            )
-          case ok {
-            True -> #(mk_undefined(), st)
-            False ->
-              rt_val.t_throw_type_error(
-                st,
-                "Cannot assign to read only property 'stack'",
-              )
-          }
-        }
+        True ->
+          rt_obj.t_set_prop(
+            st,
+            mk_object(h),
+            StringKey(Named("stack")),
+            mk_string(s),
+          )
         // Step 4: CreateDataPropertyOrThrow(this, "stack", v) — {W:T,E:T,C:T}.
-        False -> {
-          let #(ok, st) =
-            rt_obj.t_define_own_prop(
-              st,
-              h,
-              StringKey(Named("stack")),
-              ParsedDesc(
-                value: Some(mk_string(s)),
-                get: None,
-                set: None,
-                writable: Some(True),
-                enumerable: Some(True),
-                configurable: Some(True),
-              ),
-            )
-          case ok {
-            True -> #(mk_undefined(), st)
-            False ->
-              rt_val.t_throw_type_error(
-                st,
-                "Cannot assign to read only property 'stack'",
-              )
-          }
-        }
+        False ->
+          rt_obj.t_define_own_prop(
+            st,
+            h,
+            StringKey(Named("stack")),
+            ParsedDesc(
+              value: Some(mk_string(s)),
+              get: None,
+              set: None,
+              writable: Some(True),
+              enumerable: Some(True),
+              configurable: Some(True),
+            ),
+          )
+      }
+      case ok {
+        True -> #(mk_undefined(), st)
+        False ->
+          throw_type_error_in(
+            st,
+            realm,
+            "Cannot assign to read only property 'stack'",
+          )
       }
     }
   }
