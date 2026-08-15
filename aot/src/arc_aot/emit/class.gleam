@@ -23,23 +23,21 @@ import gleam/result
 import gleam/set
 import twocore/ir
 
-// ── Result-aware CPS (Rk chain) — mirrors func.gleam:28-145 verbatim ────────
-// RULING: Rk returns bare Result(ir.Expr,_), NOT an Sk #(Expr,E2) pair (R13
-// rejects the pair-return Build variant). Transfers never call `next`; run_rk
-// pre-seeds its pdict cell with the entry e (func.gleam:138) so a diverged
-// chain still yields a valid final Emitter2. R12 Result channel; host_ is a
-// sanctioned CallHost("js",..) site alongside anf.host.
+// ── Result-aware CPS (Rk chain) — mirrors func.gleam ────────────────────────
+// Rk returns the tree paired with the emitter the chain finished with.
+// R12 Result channel; host_ is a sanctioned CallHost("js",..) site alongside
+// anf.host.
 
 type Rk(a) =
-  fn(Emitter2, a) -> Result(ir.Expr, EmitError)
+  fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
 
 fn let_(
   e: Emitter2,
   rhs: ir.Expr,
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let #(n, e) = state.fresh_var(e)
-  use body <- result.map(k(e, ir.Var(n)))
+  use body <- state.map_tree(k(e, ir.Var(n)))
   ir.Let([n], rhs, body)
 }
 
@@ -48,7 +46,7 @@ fn host_(
   op: String,
   args: List(ir.Value),
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let_(e, ir.CallHost("js", op, args), k)
 }
 
@@ -56,8 +54,8 @@ fn host_unit_(
   e: Emitter2,
   op: String,
   args: List(ir.Value),
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   use e, _ <- host_(e, op, args)
   k(e)
 }
@@ -67,10 +65,13 @@ fn host_unit_(
 fn each_(
   e: Emitter2,
   items: List(a),
-  then k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-  with step: fn(Emitter2, a, fn(Emitter2) -> Result(ir.Expr, EmitError)) ->
-    Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  then k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+  with step: fn(
+    Emitter2,
+    a,
+    fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+  ) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case items {
     [] -> k(e)
     [x, ..rest] -> step(e, x, fn(e) { each_(e, rest, k, step) })
@@ -85,7 +86,7 @@ fn if_(
   t: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
   f: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   use #(tt, e) <- result.try(t(e))
   use #(ft, e) <- result.try(f(e))
   let_(e, ir.If(cond, [ir.TTerm], tt, ft), k)
@@ -97,37 +98,15 @@ fn pure_arm(
   fn(e) { Ok(#(ir.Values([v]), e)) }
 }
 
-// pdict seam (mirrors func.gleam:115-145 / anf.gleam:68-94) to recover the
-// leaf Emitter2 from an Rk chain — the chain returns Result(ir.Expr, _), the
-// final e is captured by `done` inside the leaf closure. Re-entrant (fresh
-// make_ref per call).
-
-type Ref
-
-type Erased
-
-@external(erlang, "erlang", "make_ref")
-fn make_ref() -> Ref
-
-@external(erlang, "erlang", "put")
-fn pdict_put(k: Ref, v: a) -> Erased
-
-@external(erlang, "erlang", "erase")
-fn pdict_erase(k: Ref) -> a
-
+/// Run an Rk chain whose leaf calls `done(ef, tree)`.
 fn run_rk(
   e: Emitter2,
-  f: fn(Emitter2, fn(Emitter2, ir.Expr) -> Result(ir.Expr, EmitError)) ->
-    Result(ir.Expr, EmitError),
+  f: fn(
+    Emitter2,
+    fn(Emitter2, ir.Expr) -> Result(#(ir.Expr, Emitter2), EmitError),
+  ) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let cell = make_ref()
-  let _ = pdict_put(cell, e)
-  let done = fn(ef, tree) {
-    let _ = pdict_put(cell, ef)
-    Ok(tree)
-  }
-  use tree <- result.map(f(e, done))
-  #(tree, pdict_erase(cell))
+  f(e, fn(ef, tree) { Ok(#(tree, ef)) })
 }
 
 // ── class-scope const slot access (shared by scaffold/methods/init-fns) ─────
@@ -152,8 +131,8 @@ fn store_class_const(
   e: Emitter2,
   name: String,
   v: ir.Value,
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let b = class_scope_binding(e, name)
   let e = state.Emitter2(..e, initialized: set.insert(e.initialized, b.slot))
   case b.is_boxed {
@@ -161,7 +140,7 @@ fn store_class_const(
       host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), v], k)
     False -> {
       let vn = state.slot_var_name(b.slot)
-      use body <- result.map(k(state.set_slot_var(e, b.slot, vn)))
+      use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
       ir.Let([vn], ir.Values([v]), body)
     }
   }
@@ -172,7 +151,7 @@ fn read_class_const(
   e: Emitter2,
   name: String,
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let b = class_scope_binding(e, name)
   let v = ir.Var(state.get_slot_var(e, b.slot))
   case b.is_boxed {
@@ -192,8 +171,8 @@ fn read_class_const(
 fn emit_computed_keys(
   e: Emitter2,
   body: List(ast.ClassElement),
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   use e, pair, next <- each_(e, ast_util.computed_element_keys(body), then: k)
   let #(idx, key_expr) = pair
   use #(tree, e) <- result.try(e.dispatch.emit_expr(e, key_expr))
@@ -248,7 +227,7 @@ fn resolve_method_key(
   key: ast.PropertyKey,
   body_index: Int,
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case key {
     ast.KeyComputed(..) ->
       read_class_const(e, ast_util.computed_field_const(body_index), k)
@@ -277,8 +256,8 @@ fn emit_methods(
   methods: List(ast_util.ClassMethodEl),
   target_h: ir.Value,
   is_static: Bool,
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   use e, method, next <- each_(e, methods, then: k)
   let ast_util.ClassMethodEl(body_index:, key:, kind:, fun:) = method
   let ast.FunctionLiteral(params:, body:, is_generator: is_gen, is_async:, ..) =
@@ -375,7 +354,7 @@ fn emit_ctor_and_create(
   has_field_init: Bool,
   ctor_child_id: scope.ScopeId,
   k: Rk(#(ir.Value, ir.Value)),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let #(ctor_params, ctor_body) = case parts.constructor {
     Some(ast_util.ClassMethodEl(
       fun: ast.FunctionLiteral(params:, body:, ..),
@@ -456,8 +435,8 @@ fn default_ctor_body(is_derived: Bool) -> List(ast.StmtWithLine) {
 fn binding_prologue(
   e: Emitter2,
   scope_id: scope.ScopeId,
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let bindings =
     dict.to_list(scope.get_scope(e.tree, scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
@@ -467,12 +446,12 @@ fn binding_prologue(
   let seed = fn(e: Emitter2, init) {
     case b.is_boxed {
       False -> {
-        use body <- result.map(next(state.set_slot_var(e, b.slot, name)))
+        use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
         use e, cell <- host_(e, "cell_new", [init])
-        use body <- result.map(next(state.set_slot_var(e, b.slot, name)))
+        use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([cell]), body)
       }
     }
@@ -605,7 +584,10 @@ pub fn emit_class(
   // (11) §15.7.14: bind inner name to F AFTER all element evaluation (computed
   // keys/methods can't see it) but BEFORE static element evaluation, so
   // `class C { static x = C }` sees the constructor.
-  let with_inner_name = fn(e, then: fn(Emitter2) -> Result(ir.Expr, EmitError)) {
+  let with_inner_name = fn(
+    e,
+    then: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+  ) {
     case binding_name {
       Some(n) -> store_class_const(e, n, ctor_h, then)
       None -> then(e)
@@ -781,8 +763,8 @@ fn seed_init_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
 fn unpack_init_frame(
   e: Emitter2,
   info: FunctionInfo,
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case info.lexical {
     lexical.OwnedLexicalSlots(base:) -> {
       use e, ref, next <- each_(e, lexical.all_lexical_refs, then: k)
@@ -792,13 +774,13 @@ fn unpack_init_frame(
       case lexical.lexical_refs_get(info.lexical_boxed, ref) {
         False -> {
           let name = state.slot_var_name(slot)
-          use body <- result.map(next(state.set_slot_var(e, slot, name)))
+          use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
           ir.Let([name], ir.Values([raw]), body)
         }
         True -> {
           use e, cell <- host_(e, "cell_new", [raw])
           let name = state.slot_var_name(slot)
-          use body <- result.map(next(state.set_slot_var(e, slot, name)))
+          use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
           ir.Let([name], ir.Values([cell]), body)
         }
       }
@@ -814,7 +796,7 @@ fn cons_list_(
   e: Emitter2,
   vs: List(ir.Value),
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case vs {
     [] -> host_(e, "empty_list", [], k)
     [head, ..rest] -> {
@@ -846,7 +828,7 @@ fn read_captured_const(
   e: Emitter2,
   name: String,
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case state.resolve(e, name) {
     scope.Plain(scope.Local(slot:, boxed:, ..)) -> {
       let v = ir.Var(state.get_slot_var(e, slot))
@@ -879,8 +861,8 @@ fn emit_one_init(
   e: Emitter2,
   this_v: ir.Value,
   fi: FieldInit,
-  next: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  next: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case fi {
     StaticBlockInit(body:) -> {
       // Arrow IIFE so `this` inside the block reads the enclosing wrapper's,
@@ -961,7 +943,7 @@ fn build_class_init_closure(
   inits: List(FieldInit),
   home_h: ir.Value,
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let child_info = scope.function_info(e.tree, child_id)
   // Capture values are read from the PARENT frame BEFORE enter_function.
   let capture_vals = func.build_capture_values(e, child_info)
@@ -1052,7 +1034,7 @@ fn emit_field_init_fn(
   proto_h: ir.Value,
   init_child_id: Option(scope.ScopeId),
   k: Rk(Option(ir.Value)),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let inits =
     list.append(
       private_method_inits(parts.instance_methods),
@@ -1084,8 +1066,8 @@ fn emit_static_init(
   e: Emitter2,
   parts: ast_util.ClassBodyParts,
   ctor_h: ir.Value,
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let inits = static_inits(parts.static_elements)
   case inits {
     [] -> k(e)

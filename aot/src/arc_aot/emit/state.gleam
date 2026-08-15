@@ -182,8 +182,21 @@ pub type BarrierCleanup {
 
 // ── EmitDispatch (R13: 7 fields, NOT opaque, defined here) ──────────────────
 
+/// Terminal continuation of a statement fold: builds the tail expression and
+/// hands back the emitter it finished with.
 pub type K =
-  fn(Emitter2) -> ir.Expr
+  fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError)
+
+/// Rewrap the tree of a threaded `#(tree, e)` result, keeping the emitter.
+pub fn map_tree(
+  r: Result(#(ir.Expr, Emitter2), EmitError),
+  f: fn(ir.Expr) -> ir.Expr,
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  case r {
+    Ok(#(tree, e)) -> Ok(#(f(tree), e))
+    Error(err) -> Error(err)
+  }
+}
 
 pub type BindMode {
   BindLet
@@ -221,8 +234,9 @@ pub type CoroutineKind {
 /// labels async.gleam pushed for split-spanning loops/labeled/switch.
 pub type SmAbrupt {
   SmAbrupt(
-    on_return: fn(Emitter2, ir.Value) -> Result(ir.Expr, EmitError),
-    on_goto: fn(Emitter2, String) -> Option(Result(ir.Expr, EmitError)),
+    on_return: fn(Emitter2, ir.Value) -> Result(#(ir.Expr, Emitter2), EmitError),
+    on_goto: fn(Emitter2, String) ->
+      Option(Result(#(ir.Expr, Emitter2), EmitError)),
   )
 }
 

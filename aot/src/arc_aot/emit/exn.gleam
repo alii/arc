@@ -22,23 +22,22 @@ import twocore/ir
 /// R2: the single JS-exception ir.Throw/ir.Try tag.
 pub const js_exn_tag = "js_exn"
 
-// ── Result-aware CPS (Rk chain) — mirrors func.gleam:28-145 verbatim ────────
-// RULING: Rk returns bare Result(ir.Expr,_), NOT an Sk #(Expr,E2) pair (R13
-// rejects the pair-return Build variant). Transfers (Throw) never call `next`;
-// run_rk pre-seeds its pdict cell with the entry e (func.gleam:138) so a
-// diverged chain still yields a valid final Emitter2. R12 Result channel;
-// host_ is a sanctioned CallHost("js",..) site alongside anf.host.
+// ── Result-aware CPS (Rk chain) — mirrors func.gleam ────────────────────────
+// Rk returns the tree paired with the emitter the chain finished with.
+// Transfers (Throw) never call `next`; they return the emitter they diverged
+// at. R12 Result channel; host_ is a sanctioned CallHost("js",..) site
+// alongside anf.host.
 
 type Rk(a) =
-  fn(Emitter2, a) -> Result(ir.Expr, EmitError)
+  fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
 
 fn let_(
   e: Emitter2,
   rhs: ir.Expr,
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let #(n, e) = state.fresh_var(e)
-  use body <- result.map(k(e, ir.Var(n)))
+  use body <- state.map_tree(k(e, ir.Var(n)))
   ir.Let([n], rhs, body)
 }
 
@@ -47,7 +46,7 @@ fn host_(
   op: String,
   args: List(ir.Value),
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let_(e, ir.CallHost("js", op, args), k)
 }
 
@@ -55,8 +54,8 @@ fn host_unit_(
   e: Emitter2,
   op: String,
   args: List(ir.Value),
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   use e, _ <- host_(e, op, args)
   k(e)
 }
@@ -66,10 +65,13 @@ fn host_unit_(
 fn each_(
   e: Emitter2,
   items: List(a),
-  then k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-  with step: fn(Emitter2, a, fn(Emitter2) -> Result(ir.Expr, EmitError)) ->
-    Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  then k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+  with step: fn(
+    Emitter2,
+    a,
+    fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+  ) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case items {
     [] -> k(e)
     [x, ..rest] -> step(e, x, fn(e) { each_(e, rest, k, step) })
@@ -84,7 +86,7 @@ fn if_(
   t: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
   f: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
   k: Rk(ir.Value),
-) -> Result(ir.Expr, EmitError) {
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   use #(tt, e) <- result.try(t(e))
   use #(ft, e) <- result.try(f(e))
   let_(e, ir.If(cond, [ir.TTerm], tt, ft), k)
@@ -96,37 +98,15 @@ fn pure_arm(
   fn(e) { Ok(#(ir.Values([v]), e)) }
 }
 
-// pdict seam (mirrors func.gleam:115-145 / anf.gleam:68-94) to recover the
-// leaf Emitter2 from an Rk chain — the chain returns Result(ir.Expr, _), the
-// final e is captured by `done` inside the leaf closure. Re-entrant (fresh
-// make_ref per call).
-
-type Ref
-
-type Erased
-
-@external(erlang, "erlang", "make_ref")
-fn make_ref() -> Ref
-
-@external(erlang, "erlang", "put")
-fn pdict_put(k: Ref, v: a) -> Erased
-
-@external(erlang, "erlang", "erase")
-fn pdict_erase(k: Ref) -> a
-
+/// Run an Rk chain whose leaf calls `done(ef, tree)`.
 fn run_rk(
   e: Emitter2,
-  f: fn(Emitter2, fn(Emitter2, ir.Expr) -> Result(ir.Expr, EmitError)) ->
-    Result(ir.Expr, EmitError),
+  f: fn(
+    Emitter2,
+    fn(Emitter2, ir.Expr) -> Result(#(ir.Expr, Emitter2), EmitError),
+  ) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let cell = make_ref()
-  let _ = pdict_put(cell, e)
-  let done = fn(ef, tree) {
-    let _ = pdict_put(cell, ef)
-    Ok(tree)
-  }
-  use tree <- result.map(f(e, done))
-  #(tree, pdict_erase(cell))
+  f(e, fn(ef, tree) { Ok(#(tree, ef)) })
 }
 
 // ── throw + finally-inline (port emit.gleam:2287-2310, 3875-3945) ───────────
@@ -153,8 +133,8 @@ pub fn inline_finally(
   e: Emitter2,
   body: List(ast.StmtWithLine),
   saved: state.ScopeSave2,
-  then: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  then: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   // RULING slot-vars-scope-survival (stmt.gleam:116-128): teleport ONLY the
   // scope-cursor triple, NOT slot_vars. F must read the break-site SSA names
   // (try-body writes visible in finally), and F's own writes must flow into
@@ -163,8 +143,9 @@ pub fn inline_finally(
   // Port emit.gleam:2357-2388 pop-before-subroutine: drop everything up to and
   // INCLUDING the Barrier2(Some(F)) being inlined so a transfer INSIDE F does
   // not re-cross it (would infinite-recurse on `try{break}finally{break}`).
-  // frame_stack does NOT escape a diverged transfer (run_rk pre-seeds its
-  // pdict cell with the entry e), so the trim is local to this cleanup chain.
+  // The trimmed frame_stack rides out on the diverged transfer's emitter;
+  // statement emitters restore their own frames around each body, so the
+  // trim stays local to this cleanup chain.
   let e =
     state.Emitter2(
       ..e,
@@ -175,7 +156,9 @@ pub fn inline_finally(
     )
   let e = state.push_barrier(e, None, None)
   use #(f_tree, e) <- result.try(
-    e.dispatch.emit_stmts(e, body, fn(ef) { ir.Values([ef.consts.undef]) }),
+    e.dispatch.emit_stmts(e, body, fn(ef) {
+      Ok(#(ir.Values([ef.consts.undef]), ef))
+    }),
   )
   let e = state.pop_frame(e)
   let e =
@@ -232,7 +215,9 @@ fn emit_finalizer(
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let e = state.push_barrier(e, None, None)
   use #(tree, e) <- result.map(
-    e.dispatch.emit_stmts(e, as_block(finalizer), fn(_) { ir.Values([]) }),
+    e.dispatch.emit_stmts(e, as_block(finalizer), fn(ef) {
+      Ok(#(ir.Values([]), ef))
+    }),
   )
   #(tree, state.pop_frame(e))
 }
@@ -251,7 +236,7 @@ pub fn emit_try_finally(
   use e <- wrap_with_finally(e, finalizer, block_scope_count(block), k)
   // B runs directly under the outer Barrier2(Some(F)) — one barrier,
   // matching emit.gleam:3907-3909's single IrPushTry(Finally).
-  e.dispatch.emit_stmts(e, as_block(block), fn(_) { ir.Values([]) })
+  e.dispatch.emit_stmts(e, as_block(block), fn(ef) { Ok(#(ir.Values([]), ef)) })
 }
 
 /// `try { B } catch(p?) { H } finally { F }` — port of M17.md §3.6 +
@@ -272,7 +257,9 @@ pub fn emit_try_catch_finally(
   // Inner catch-only barrier around B (port emit.gleam:2385-2389).
   let e = state.push_barrier(e, None, None)
   use #(body_ir, e) <- result.try(
-    e.dispatch.emit_stmts(e, as_block(block), fn(_) { ir.Values([]) }),
+    e.dispatch.emit_stmts(e, as_block(block), fn(ef) {
+      Ok(#(ir.Values([]), ef))
+    }),
   )
   let e = state.pop_frame(e)
   // Catch handler H — outer Barrier2(Some(F)) still on frame_stack.
@@ -365,7 +352,8 @@ fn wrap_with_finally(
   // assigned_unboxed_slots + rebind_after_block; until then, restore
   // entry slot_vars so downstream reads reference in-scope (pre-try) names.
   let e = state.Emitter2(..e, slot_vars: entry_save.slot_vars)
-  Ok(#(ir.Let([], region, ir.Let([], f_normal, k(e))), e))
+  use tail <- state.map_tree(k(e))
+  ir.Let([], region, ir.Let([], f_normal, tail))
 }
 
 /// Catch handler body — port of emit.gleam:3010-3027 / stmt.gleam:1602-1632.
@@ -392,13 +380,17 @@ fn emit_catch_arm(
       ))
       use e, _ <- let_(e, dtree)
       use #(body_ir, e) <- result.try(
-        e.dispatch.emit_stmts(e, as_block(catch_body), fn(_) { ir.Values([]) }),
+        e.dispatch.emit_stmts(e, as_block(catch_body), fn(ef) {
+          Ok(#(ir.Values([]), ef))
+        }),
       )
       done(state.leave_scope(e, save), body_ir)
     }
     None -> {
       use #(body_ir, e) <- result.try(
-        e.dispatch.emit_stmts(e, as_block(catch_body), fn(_) { ir.Values([]) }),
+        e.dispatch.emit_stmts(e, as_block(catch_body), fn(ef) {
+          Ok(#(ir.Values([]), ef))
+        }),
       )
       done(e, body_ir)
     }
@@ -412,8 +404,8 @@ fn emit_catch_arm(
 fn catch_binding_prologue(
   e: Emitter2,
   scope_id: scope.ScopeId,
-  k: fn(Emitter2) -> Result(ir.Expr, EmitError),
-) -> Result(ir.Expr, EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let bindings =
     dict.to_list(scope.get_scope(e.tree, scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
@@ -423,12 +415,12 @@ fn catch_binding_prologue(
   let seed = fn(e: Emitter2, init) {
     case b.is_boxed {
       False -> {
-        use body <- result.map(next(state.set_slot_var(e, b.slot, name)))
+        use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
         use e, cell <- host_(e, "cell_new", [init])
-        use body <- result.map(next(state.set_slot_var(e, b.slot, name)))
+        use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([cell]), body)
       }
     }

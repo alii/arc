@@ -1,4 +1,4 @@
-//// M11: Build(a) CPS monad (R13-pinned) + ANF let-binding combinators over
+//// M11: Build(a) CPS monad + ANF let-binding combinators over
 //// twocore/ir — bind/host/cons_list/bind_if/guarded_binop/object_key_lit.
 //// Invariant #3: `host` is the ONLY CallHost("js", ..) site in emit_2core/*.
 
@@ -13,10 +13,19 @@ import gleam/list
 import gleam/option.{None, Some}
 import twocore/ir
 
-/// R13-pinned. Tail continuation receives the final Emitter2 + result and
-/// returns the terminal ir.Expr, which the builder wraps in Let-bindings.
+/// Tail continuation receives the final Emitter2 + result and returns the
+/// terminal ir.Expr paired with the emitter it finished with; the builder
+/// wraps the tree in Let-bindings and passes the emitter through.
 pub type Build(a) =
-  fn(Emitter2, fn(Emitter2, a) -> ir.Expr) -> ir.Expr
+  fn(Emitter2, fn(Emitter2, a) -> #(ir.Expr, Emitter2)) -> #(ir.Expr, Emitter2)
+
+/// Rewrap the tree of a `#(tree, e)` continuation result, keeping the emitter.
+pub fn wrap(
+  p: #(ir.Expr, Emitter2),
+  f: fn(ir.Expr) -> ir.Expr,
+) -> #(ir.Expr, Emitter2) {
+  #(f(p.0), p.1)
+}
 
 pub fn pure(v: a) -> Build(a) {
   fn(e, k) { k(e, v) }
@@ -29,7 +38,7 @@ pub fn then(b: Build(a), f: fn(a) -> Build(c)) -> Build(c) {
 pub fn bind(rhs: ir.Expr) -> Build(ir.Value) {
   fn(e, k) {
     let #(name, e) = state.fresh_var(e)
-    ir.Let([name], rhs, k(e, ir.Var(name)))
+    wrap(k(e, ir.Var(name)), ir.Let([name], rhs, _))
   }
 }
 
@@ -40,7 +49,11 @@ pub fn bind(rhs: ir.Expr) -> Build(ir.Value) {
 pub fn bind_number(rhs: ir.Expr) -> Build(ir.Value) {
   fn(e, k) {
     let #(name, e) = state.fresh_var(e)
-    ir.Let([name], rhs, k(state.mark_known_number(e, name), ir.Var(name)))
+    wrap(k(state.mark_known_number(e, name), ir.Var(name)), ir.Let(
+      [name],
+      rhs,
+      _,
+    ))
   }
 }
 
@@ -96,58 +109,21 @@ pub fn tuple_get(v: ir.Value, i: Int) -> ir.Expr {
   ir.TermOp(ir.TupleGet(i), [v])
 }
 
-// ── The ONE impure seam (RULINGS R13 note) ──────────────────────────────────
-// erlang:make_ref/0 → guaranteed-unique per call, so nested run_arm calls
-// (bind_if inside a bind_if arm) each get an independent process-dict slot —
-// re-entrant by construction. Precedent: src/arc/vm/builtins/symbol.gleam:161.
-type Ref
-
-type Erased
-
-@external(erlang, "erlang", "make_ref")
-fn make_ref() -> Ref
-
-@external(erlang, "erlang", "put")
-fn pdict_put(k: Ref, v: a) -> Erased
-
-@external(erlang, "erlang", "erase")
-fn pdict_erase(k: Ref) -> a
-
-/// Run a Build to a Values-terminal ir.Expr and recover the final Emitter2
-/// the tail continuation received. Re-entrant (fresh make_ref per call).
-/// Seeded with the incoming `e` so a Build that diverges before reaching `k`
-/// still returns a valid Emitter2 (no M11 combinator does this today).
-fn run_arm(b: Build(ir.Value), e: Emitter2) -> #(ir.Expr, Emitter2) {
-  let cell = make_ref()
-  let _ = pdict_put(cell, e)
-  let tree =
-    b(e, fn(ef, v) {
-      let _ = pdict_put(cell, ef)
-      ir.Values([v])
-    })
-  #(tree, pdict_erase(cell))
-}
-
+/// Run a Build to a Values-terminal ir.Expr and the final Emitter2 (the one
+/// the tail continuation received, or the one a diverging Build stopped at).
 pub fn run(b: Build(ir.Value), e: Emitter2) -> #(ir.Expr, Emitter2) {
-  run_arm(b, e)
+  b(e, fn(ef, v) { #(ir.Values([v]), ef) })
 }
 
 /// Run a Build to a caller-supplied TERMINAL ir.Expr (Return/Continue/If…)
-/// instead of the default `Values([v])`. Same re-entrant pdict seam as `run`.
-/// M18 arm bodies end in Step-tuple `Return`s / `Continue(Lresume,…)`.
+/// instead of the default `Values([v])`. M18 arm bodies end in Step-tuple
+/// `Return`s / `Continue(Lresume,…)`.
 pub fn run_to(
   b: Build(a),
   e: Emitter2,
   tail: fn(Emitter2, a) -> ir.Expr,
 ) -> #(ir.Expr, Emitter2) {
-  let cell = make_ref()
-  let _ = pdict_put(cell, e)
-  let tree =
-    b(e, fn(ef, a) {
-      let _ = pdict_put(cell, ef)
-      tail(ef, a)
-    })
-  #(tree, pdict_erase(cell))
+  b(e, fn(ef, a) { #(tail(ef, a), ef) })
 }
 
 // ── slot-rebind threading (SPEC§9.12 / emit.binding() opt_level) ──
@@ -178,7 +154,7 @@ fn merge_slots(a: List(Int), b: List(Int)) -> List(Int) {
   list.append(a, b) |> list.unique |> list.sort(int.compare)
 }
 
-/// Descend a run_arm tree's Let-spine and widen its terminal `Values([v])` to
+/// Descend a `run` tree's Let-spine and widen its terminal `Values([v])` to
 /// `Values([v, ..extra])`. A non-Values terminal (Break/Throw…) diverges before
 /// the join and is left unchanged — that path never falls through, so the
 /// wrapper's result arity is irrelevant on it.
@@ -251,8 +227,8 @@ fn bind_if_typed(
 ) -> Build(ir.Value) {
   fn(e: Emitter2, k) {
     let sv0 = e.slot_vars
-    let #(then_tree, e_t) = run_arm(t, e)
-    let #(else_tree, e_f) = run_arm(f, Emitter2(..e_t, slot_vars: sv0))
+    let #(then_tree, e_t) = run(t, e)
+    let #(else_tree, e_f) = run(f, Emitter2(..e_t, slot_vars: sv0))
     let carried =
       merge_slots(
         slots_rebound(sv0, e_t.slot_vars),
@@ -262,21 +238,21 @@ fn bind_if_typed(
     let #(r, e) = state.fresh_var(e)
     case carried {
       [] ->
-        ir.Let(
+        wrap(k(e, ir.Var(r)), ir.Let(
           [r],
           ir.If(cond, [head_ty], then_tree, else_tree),
-          k(e, ir.Var(r)),
-        )
+          _,
+        ))
       _ -> {
         let then_tree = append_tail(then_tree, arm_slot_vals(e_t, carried))
         let else_tree = append_tail(else_tree, arm_slot_vals(e_f, carried))
         let #(e, out) = rebind_slots(e, carried)
         let tys = [head_ty, ..list.map(carried, fn(_) { ir.TTerm })]
-        ir.Let(
+        wrap(k(e, ir.Var(r)), ir.Let(
           [r, ..out],
           ir.If(cond, tys, then_tree, else_tree),
-          k(e, ir.Var(r)),
-        )
+          _,
+        ))
       }
     }
   }
@@ -356,11 +332,11 @@ pub fn share(
     let #(l_join, e) = state.fresh_label(e)
     let #(l_miss, e) = state.fresh_label(e)
     // Diverging Build — same shape as chain_guard's Break arm (expr.gleam).
-    let miss = fn(_e, _k) { ir.Break(l_miss, [ir.ConstI32(0)]) }
-    let #(body_tree, e_b) = run_arm(body(miss), e)
+    let miss = fn(e, _k) { #(ir.Break(l_miss, [ir.ConstI32(0)]), e) }
+    let #(body_tree, e_b) = run(body(miss), e)
     // cold runs from body's fresh-var state but the ENTRY slot snapshot —
     // body's rebinds are on the hit path only; miss falls to cold with sv0.
-    let #(cold_tree, e_c) = run_arm(cold, Emitter2(..e_b, slot_vars: sv0))
+    let #(cold_tree, e_c) = run(cold, Emitter2(..e_b, slot_vars: sv0))
     let carried =
       merge_slots(
         slots_rebound(sv0, e_b.slot_vars),
@@ -385,25 +361,25 @@ pub fn share(
                 e,
               )
             let #(r, e) = state.fresh_var(e)
-            ir.Let(
+            wrap(k(e, ir.Var(r)), ir.Let(
               [r],
               ir.Block(l_join, [ir.TTerm], to_break(inlined, l_join)),
-              k(e, ir.Var(r)),
-            )
+              _,
+            ))
           }
           False -> {
             let #(d, e) = state.fresh_var(e)
             let #(r, e) = state.fresh_var(e)
             let body_tree = to_break(body_tree, l_join)
-            ir.Let(
+            wrap(k(e, ir.Var(r)), ir.Let(
               [r],
               ir.Block(
                 l_join,
                 [ir.TTerm],
                 ir.Let([d], ir.Block(l_miss, [ir.TTerm], body_tree), cold_tree),
               ),
-              k(e, ir.Var(r)),
-            )
+              _,
+            ))
           }
         }
       }
@@ -418,15 +394,15 @@ pub fn share(
         let cold_tree = append_tail(cold_tree, cold_extra)
         let #(e, out) = rebind_slots(e, carried)
         let tys = [ir.TTerm, ..list.map(carried, fn(_) { ir.TTerm })]
-        ir.Let(
+        wrap(k(e, ir.Var(r)), ir.Let(
           [r, ..out],
           ir.Block(
             l_join,
             tys,
             ir.Let([d], ir.Block(l_miss, [ir.TTerm], body_tree), cold_tree),
           ),
-          k(e, ir.Var(r)),
-        )
+          _,
+        ))
       }
     }
   }
@@ -482,7 +458,7 @@ fn is_id_tail(r: String, tail: ir.Expr, label: String) -> Bool {
 }
 
 /// Count `Break(label, _)` occurrences in `tree`. Descends the same shapes a
-/// `run_arm`-built body nests a Break under (Let rhs+body, If arms, Block body
+/// `run`-built body nests a Break under (Let rhs+body, If arms, Block body
 /// — Loop/Try/Switch don't occur there; see `widen_breaks`).
 pub fn count_breaks_to(tree: ir.Expr, label: String) -> Int {
   let go = count_breaks_to(_, label)
@@ -599,12 +575,17 @@ pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
   fn(e: Emitter2, k) {
     let sv0 = e.slot_vars
     let #(label, e) = state.fresh_label(e)
-    let #(body_tree, e_b) = run_arm(body(label), e)
+    let #(body_tree, e_b) = run(body(label), e)
     let carried = slots_rebound(sv0, e_b.slot_vars)
     let e = Emitter2(..e_b, slot_vars: sv0)
     let #(r, e) = state.fresh_var(e)
     case carried {
-      [] -> ir.Let([r], ir.Block(label, [ir.TTerm], body_tree), k(e, ir.Var(r)))
+      [] ->
+        wrap(k(e, ir.Var(r)), ir.Let(
+          [r],
+          ir.Block(label, [ir.TTerm], body_tree),
+          _,
+        ))
       _ -> {
         // Fall-through gets the arm's rebound names; every Break to `label`
         // (chain_guard's short-circuit) gets the entry-snapshot names — the
@@ -614,7 +595,11 @@ pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
           |> widen_breaks(label, arm_slot_vals(e, carried))
         let #(e, out) = rebind_slots(e, carried)
         let tys = [ir.TTerm, ..list.map(carried, fn(_) { ir.TTerm })]
-        ir.Let([r, ..out], ir.Block(label, tys, body_tree), k(e, ir.Var(r)))
+        wrap(k(e, ir.Var(r)), ir.Let(
+          [r, ..out],
+          ir.Block(label, tys, body_tree),
+          _,
+        ))
       }
     }
   }

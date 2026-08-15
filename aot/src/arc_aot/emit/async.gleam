@@ -558,8 +558,8 @@ fn pack_loc_cps(
   e: Emitter2,
   ctx: SmCtx,
   overrides: Dict(Int, ir.Value),
-  k: fn(Emitter2, ir.Value) -> ir.Expr,
-) -> ir.Expr {
+  k: fn(Emitter2, ir.Value) -> #(ir.Expr, Emitter2),
+) -> #(ir.Expr, Emitter2) {
   pack_loc_from(e, ctx, overrides, 0, [], k)
 }
 
@@ -569,16 +569,16 @@ fn pack_loc_from(
   overrides: Dict(Int, ir.Value),
   i: Int,
   acc: List(ir.Value),
-  k: fn(Emitter2, ir.Value) -> ir.Expr,
-) -> ir.Expr {
+  k: fn(Emitter2, ir.Value) -> #(ir.Expr, Emitter2),
+) -> #(ir.Expr, Emitter2) {
   case i >= ctx.layout.size {
     True -> {
       let #(name, e) = state.fresh_var(e)
-      ir.Let(
+      anf.wrap(k(e, ir.Var(name)), ir.Let(
         [name],
         ir.TermOp(ir.MakeTuple, list.reverse(acc)),
-        k(e, ir.Var(name)),
-      )
+        _,
+      ))
     }
     False ->
       case dict.get(overrides, i) {
@@ -591,9 +591,7 @@ fn pack_loc_from(
             }
             None -> {
               let #(name, e) = state.fresh_var(e)
-              ir.Let(
-                [name],
-                ir.TermOp(ir.TupleGet(i), [ctx.loc_v]),
+              anf.wrap(
                 pack_loc_from(
                   e,
                   ctx,
@@ -602,6 +600,7 @@ fn pack_loc_from(
                   [ir.Var(name), ..acc],
                   k,
                 ),
+                ir.Let([name], ir.TermOp(ir.TupleGet(i), [ctx.loc_v]), _),
               )
             }
           }
@@ -631,9 +630,8 @@ pub fn route_abrupt(
   ctx: SmCtx,
   pk: PendingKind,
   stop_at: Option(Int),
-  sink: fn(Emitter2) -> Nil,
-) -> ir.Expr {
-  route_abrupt_walk(e, ctx, ctx.try_stack, pk, stop_at, sink)
+) -> #(ir.Expr, Emitter2) {
+  route_abrupt_walk(e, ctx, ctx.try_stack, pk, stop_at)
 }
 
 fn route_abrupt_walk(
@@ -642,25 +640,23 @@ fn route_abrupt_walk(
   stack: List(TryEntry),
   pk: PendingKind,
   stop_at: Option(Int),
-  sink: fn(Emitter2) -> Nil,
-) -> ir.Expr {
+) -> #(ir.Expr, Emitter2) {
   case stack {
-    [] -> route_abrupt_tail(e, ctx, pk, sink)
+    [] -> route_abrupt_tail(e, ctx, pk)
     [entry, ..rest] ->
       case stop_at == Some(entry.id) {
-        True -> route_abrupt_tail(e, ctx, pk, sink)
+        True -> route_abrupt_tail(e, ctx, pk)
         False ->
           case entry.finally_state {
             Some(fs) -> {
               let #(pv, e) = state.fresh_var(e)
-              ir.Let([pv], pending_tuple(pk), {
-                let over =
-                  dict.from_list([#(entry.pending_loc_idx, ir.Var(pv))])
+              let over = dict.from_list([#(entry.pending_loc_idx, ir.Var(pv))])
+              anf.wrap(
                 pack_loc_cps(e, ctx, over, fn(e, loc) {
-                  let _ = sink(e)
-                  sm_continue(ctx, fs, loc)
-                })
-              })
+                  #(sm_continue(ctx, fs, loc), e)
+                }),
+                ir.Let([pv], pending_tuple(pk), _),
+              )
             }
             None ->
               case pk {
@@ -669,13 +665,12 @@ fn route_abrupt_walk(
                     Some(cs) -> {
                       let over = dict.from_list([#(entry.caught_loc_idx, v)])
                       pack_loc_cps(e, ctx, over, fn(e, loc) {
-                        let _ = sink(e)
-                        sm_continue(ctx, cs, loc)
+                        #(sm_continue(ctx, cs, loc), e)
                       })
                     }
-                    None -> route_abrupt_walk(e, ctx, rest, pk, stop_at, sink)
+                    None -> route_abrupt_walk(e, ctx, rest, pk, stop_at)
                   }
-                _ -> route_abrupt_walk(e, ctx, rest, pk, stop_at, sink)
+                _ -> route_abrupt_walk(e, ctx, rest, pk, stop_at)
               }
           }
       }
@@ -686,21 +681,13 @@ fn route_abrupt_tail(
   e: Emitter2,
   ctx: SmCtx,
   pk: PendingKind,
-  sink: fn(Emitter2) -> Nil,
-) -> ir.Expr {
+) -> #(ir.Expr, Emitter2) {
   case pk {
-    PkReturn(v) -> {
-      let _ = sink(e)
-      step_return(v)
-    }
-    PkThrow(v) -> {
-      let _ = sink(e)
-      step_throw(v)
-    }
+    PkReturn(v) -> #(step_return(v), e)
+    PkThrow(v) -> #(step_throw(v), e)
     PkGoto(target) ->
       pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-        let _ = sink(e)
-        sm_continue(ctx, target, loc)
+        #(sm_continue(ctx, target, loc), e)
       })
   }
 }
@@ -737,21 +724,20 @@ fn sentinel_target(l: SmLabel, ir_label: String) -> #(Int, Option(Int)) {
 
 fn make_on_return(
   ctx: SmCtx,
-  sink: fn(Emitter2) -> Nil,
-) -> fn(Emitter2, ir.Value) -> Result(ir.Expr, state.EmitError) {
-  fn(e, v) { Ok(route_abrupt(e, ctx, PkReturn(v), None, sink)) }
+) -> fn(Emitter2, ir.Value) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
+  fn(e, v) { Ok(route_abrupt(e, ctx, PkReturn(v), None)) }
 }
 
 fn make_on_goto(
   ctx: SmCtx,
-  sink: fn(Emitter2) -> Nil,
-) -> fn(Emitter2, String) -> Option(Result(ir.Expr, state.EmitError)) {
+) -> fn(Emitter2, String) ->
+  Option(Result(#(ir.Expr, Emitter2), state.EmitError)) {
   fn(e, ir_label) {
     case sentinel_match(ctx.sm_labels, ir_label) {
       None -> None
       Some(label) -> {
         let #(target, stop) = sentinel_target(label, ir_label)
-        Some(Ok(route_abrupt(e, ctx, PkGoto(target), stop, sink)))
+        Some(Ok(route_abrupt(e, ctx, PkGoto(target), stop)))
       }
     }
   }
@@ -761,42 +747,21 @@ fn make_on_goto(
 /// (so M13 resolves break/continue), install `state.SmAbrupt` hooks routing
 /// return + resolved sentinels through `route_abrupt`, then run `body`. `body`
 /// receives the prepared emitter and a `restore` fn that removes exactly what
-/// was installed. Frames are pushed OUTERMOST FIRST so frame_stack head is
-/// innermost (matching M13's walk order).
+/// was installed (apply it to the emitter the fragment finished with). Frames
+/// are pushed OUTERMOST FIRST so frame_stack head is innermost (matching M13's
+/// walk order).
 pub fn with_abrupt_intercept(
   e: Emitter2,
   ctx: SmCtx,
   body: fn(Emitter2, fn(Emitter2) -> Emitter2) -> a,
 ) -> a {
-  // SmAbrupt hooks return bare ir.Expr (state.gleam:220-224) but allocate
-  // fresh_vars via pack_loc_cps; sink the leaf next_var so `restore` can merge
-  // it and later arms don't reallocate the same _tN names (ir.gleam:419-420).
-  let hook_cell = make_ref()
-  let _ = pdict_put(hook_cell, e.next_var)
-  let sink = fn(ef: Emitter2) -> Nil {
-    let cur: Int = pdict_erase(hook_cell)
-    let nv = case ef.next_var > cur {
-      True -> ef.next_var
-      False -> cur
-    }
-    let _ = pdict_put(hook_cell, nv)
-    Nil
-  }
   let #(e, n_pushed) = push_sm_frames(e, ctx.sm_labels)
   let e =
     state.set_sm_abrupt(
       e,
-      state.SmAbrupt(
-        on_return: make_on_return(ctx, sink),
-        on_goto: make_on_goto(ctx, sink),
-      ),
+      state.SmAbrupt(on_return: make_on_return(ctx), on_goto: make_on_goto(ctx)),
     )
   let restore = fn(e: Emitter2) {
-    let hook_nv: Int = pdict_erase(hook_cell)
-    let e = case hook_nv > e.next_var {
-      True -> state.Emitter2(..e, next_var: hook_nv)
-      False -> e
-    }
     pop_n_frames(state.clear_sm_abrupt(e), n_pushed)
   }
   body(e, restore)
@@ -2780,22 +2745,6 @@ fn kind_is_gen(kind: state.CoroutineKind) -> Bool {
   }
 }
 
-// pdict seam (mirrors anf.gleam:68-94 / func.gleam:119-145). Re-entrant
-// (fresh make_ref per call). Shared by run_rk / emit_arm_body / run_terminal.
-
-type Ref
-
-type Erased
-
-@external(erlang, "erlang", "make_ref")
-fn make_ref() -> Ref
-
-@external(erlang, "erlang", "put")
-fn pdict_put(k: Ref, v: a) -> Erased
-
-@external(erlang, "erlang", "erase")
-fn pdict_erase(k: Ref) -> a
-
 /// Emit the outer `jsf_N` wrapper (body: loc0=MakeTuple(initial); sm=
 /// MakeClosure(sm_name,caps,3); h=host(<kind>_start,[sm,_frame,_args,loc0]);
 /// Return([h])) into e.fns_acc, then return the PARENT-frame closure-site
@@ -3049,16 +2998,9 @@ fn emit_mode_dispatch(
 // ── §18.6 yield* delegation (u-yield-star-arm) ──────────────────────────────
 
 /// Run a Build(ir.Expr) whose leaves are terminal (Return/Continue). anf.run
-/// only handles Build(ir.Value); this reuses the module's pdict seam.
+/// only handles Build(ir.Value).
 fn run_terminal(b: anf.Build(ir.Expr), e: Emitter2) -> #(ir.Expr, Emitter2) {
-  let cell = make_ref()
-  let _ = pdict_put(cell, e)
-  let tree =
-    b(e, fn(ef, expr) {
-      let _ = pdict_put(cell, ef)
-      expr
-    })
-  #(tree, pdict_erase(cell))
+  b(e, fn(ef, expr) { #(expr, ef) })
 }
 
 /// ir.If where both arms are terminal ir.Expr (Return/Continue). Threads
@@ -3265,8 +3207,8 @@ fn outer_entry(ctx: SmCtx, entry: TryEntry) -> Option(TryEntry) {
 fn restore_and_seed(
   e: Emitter2,
   ctx: SmCtx,
-  k: fn(Emitter2) -> Result(ir.Expr, state.EmitError),
-) -> Result(ir.Expr, state.EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), state.EmitError),
+) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   restore_and_seed_go(e, ctx, dict.to_list(ctx.layout.slot_to_idx), k)
 }
 
@@ -3274,14 +3216,14 @@ fn restore_and_seed_go(
   e: Emitter2,
   ctx: SmCtx,
   slots: List(#(Int, Int)),
-  k: fn(Emitter2) -> Result(ir.Expr, state.EmitError),
-) -> Result(ir.Expr, state.EmitError) {
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), state.EmitError),
+) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   case slots {
     [] -> k(e)
     [#(slot, idx), ..rest] -> {
       let #(name, e) = state.fresh_var(e)
       let e = state.set_slot_var(e, slot, name)
-      use body <- result.map(restore_and_seed_go(e, ctx, rest, k))
+      use body <- state.map_tree(restore_and_seed_go(e, ctx, rest, k))
       ir.Let([name], ir.TermOp(ir.TupleGet(idx), [ctx.loc_v]), body)
     }
   }
@@ -3401,12 +3343,11 @@ fn dispatch_goto(
     None ->
       cps_pair(e, fn(e, k) {
         let #(ns, e) = state.fresh_var(e)
-        ir.Let(
-          [ns],
-          ir.Convert(ir.UnboxInt(ir.W32), carry),
+        anf.wrap(
           pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
             k(e, ir.Continue(ctx.lresume, [ir.Var(ns), loc]))
           }),
+          ir.Let([ns], ir.Convert(ir.UnboxInt(ir.W32), carry), _),
         )
       })
     Some(o) ->
@@ -3492,22 +3433,15 @@ fn build_pending_dispatch(
   )
 }
 
-/// Result-CPS runner (mirrors stmt.gleam:284-297). Recovers the leaf Emitter2
-/// alongside the built ir.Expr; pre-seeds so a body that diverges before
-/// `done` still yields a valid Emitter2 (module-monotone invariant #1).
+/// Run an Rk chain whose leaf calls `done(ef, tree)`.
 fn run_rk(
   e: Emitter2,
-  body: fn(Emitter2, fn(Emitter2, ir.Expr) -> Result(ir.Expr, state.EmitError)) ->
-    Result(ir.Expr, state.EmitError),
+  body: fn(
+    Emitter2,
+    fn(Emitter2, ir.Expr) -> Result(#(ir.Expr, Emitter2), state.EmitError),
+  ) -> Result(#(ir.Expr, Emitter2), state.EmitError),
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
-  let cell = make_ref()
-  let _ = pdict_put(cell, e)
-  let done = fn(ef: Emitter2, tree: ir.Expr) {
-    let _ = pdict_put(cell, ef)
-    Ok(tree)
-  }
-  use tree <- result.map(body(e, done))
-  #(tree, pdict_erase(cell))
+  body(e, fn(ef, tree) { Ok(#(tree, ef)) })
 }
 
 /// §18.5 finally-state arm body: restore locals; pend=loc[pending_idx];
@@ -3525,34 +3459,19 @@ fn emit_finally_arm(
     use e <- restore_and_seed(e, ctx)
     let #(pend_n, e) = state.fresh_var(e)
     let pend = ir.Var(pend_n)
-    let leaf_cell = make_ref()
-    let _ = pdict_put(leaf_cell, e)
-    let seed = e
-    use #(body, e2) <- result.try(
+    use #(body, e_out) <- result.try(
       with_abrupt_intercept(e, ctx, fn(e, restore) {
-        let k_tail = fn(e_leaf: Emitter2) -> ir.Expr {
-          let #(tail, e_final) =
-            build_pending_dispatch(e_leaf, ctx, entry, pend)
-          let _ = pdict_put(leaf_cell, restore(e_final))
-          tail
+        let k_tail = fn(e_leaf: Emitter2) {
+          Ok(build_pending_dispatch(e_leaf, ctx, entry, pend))
         }
         use #(body, e2) <- result.map(e.dispatch.emit_stmts(
           e,
           finalizer,
           k_tail,
         ))
-        case k_tail_ran(leaf_cell, seed) {
-          True -> Nil
-          False -> {
-            let _ = pdict_put(leaf_cell, restore(e2))
-            Nil
-          }
-        }
-        #(body, e2)
+        #(body, restore(e2))
       }),
     )
-    let _ = e2
-    let e_out: Emitter2 = pdict_erase(leaf_cell)
     done(
       e_out,
       ir.Let(
@@ -3582,13 +3501,10 @@ fn emit_catch_arm(
     use e <- restore_and_seed(e, ctx)
     let #(caught_n, e) = state.fresh_var(e)
     let caught = ir.Var(caught_n)
-    let leaf_cell = make_ref()
-    let _ = pdict_put(leaf_cell, e)
-    let seed = e
-    use #(handler_tree, e2) <- result.try(
+    use #(handler_tree, e_out) <- result.try(
       with_abrupt_intercept(e, ctx, fn(e, restore) {
-        let k_tail = fn(e_leaf: Emitter2) -> ir.Expr {
-          let #(tail, e_final) = case entry.finally_state {
+        let k_tail = fn(e_leaf: Emitter2) {
+          Ok(case entry.finally_state {
             Some(fs) ->
               jump_state_leaf(
                 e_leaf,
@@ -3599,11 +3515,9 @@ fn emit_catch_arm(
                 ]),
               )
             None -> jump_state_leaf(e_leaf, ctx, entry.after_state, dict.new())
-          }
-          let _ = pdict_put(leaf_cell, restore(e_final))
-          tail
+          })
         }
-        use #(tree, e2) <- result.try(case param {
+        use #(tree, e2) <- result.map(case param {
           Some(p) -> {
             let #(e, save) = state.enter_scope(e, in_block: e.in_block)
             use #(dtree, e) <- result.try(e.dispatch.emit_destructure(
@@ -3622,18 +3536,9 @@ fn emit_catch_arm(
           }
           None -> e.dispatch.emit_stmts(e, catch_body, k_tail)
         })
-        case k_tail_ran(leaf_cell, seed) {
-          True -> Nil
-          False -> {
-            let _ = pdict_put(leaf_cell, restore(e2))
-            Nil
-          }
-        }
-        Ok(#(tree, e2))
+        #(tree, restore(e2))
       }),
     )
-    let _ = e2
-    let e_out: Emitter2 = pdict_erase(leaf_cell)
     done(
       e_out,
       ir.Let(
@@ -3657,10 +3562,8 @@ fn emit_catch_arm(
 ///     install SmAbrupt hooks so `return`/cross-state `break`/`continue` in
 ///     the fragment route via `route_abrupt` (§18.4.5).
 ///  3. `dispatch.emit_stmts(body_fragment, k_tail)` — fragment is split-free.
-///  4. `k_tail` (state.K, non-Result) builds `arm.tail` with the LEAF emitter
-///     so `pack_loc_cps` picks up any fragment reassignments (§18.4.4). The
-///     leaf Emitter2 and any operand-eval error are smuggled out via pdict
-///     (state.K can't return Result) — same pattern as run_rk/anf.run_to.
+///  4. `k_tail` builds `arm.tail` with the LEAF emitter so `pack_loc_cps`
+///     picks up any fragment reassignments (§18.4.4).
 /// Mode-dispatch (§18.4.2) and the arm-Try wrapper are layered by the caller
 /// (build_switch_arms) AROUND this result.
 fn emit_arm_body(
@@ -3671,97 +3574,37 @@ fn emit_arm_body(
   let e = install_cursor(e, arm.entry_cursor)
   // Per-arm ctx: try_stack from arm.region; sm_labels from arm.sm_labels.
   let ctx = SmCtx(..with_region(ctx, arm.region), sm_labels: arm.sm_labels)
-  // Leaf-emitter + error cells (state.K returns bare ir.Expr; smuggle via
-  // pdict so k_tail's fresh_var allocations and any dispatch.emit_expr error
-  // reach the caller). Re-entrant: fresh make_ref per call.
-  let leaf_cell = make_ref()
-  let err_cell = make_ref()
-  let _ = pdict_put(leaf_cell, e)
-  let _ = pdict_put(err_cell, none_err())
-  let tree_r =
-    restore_and_seed(e, ctx, fn(e) {
-      let _ = pdict_put(leaf_cell, e)
-      with_abrupt_intercept(e, ctx, fn(e, restore) {
-        // §18.4.2: bind sent_v per `arm.resume` BEFORE emitting the fragment.
-        // ResumeReturn/Throw short-circuit — the fragment tail is dead code
-        // after `return await p` / `throw await p`.
-        case arm.resume {
-          Some(ResumeReturn) ->
-            Ok(
-              route_abrupt(e, ctx, PkReturn(ctx.sent_v), None, fn(ef) {
-                let _ = pdict_put(leaf_cell, restore(ef))
-                Nil
-              }),
-            )
-          Some(ResumeThrow) ->
-            Ok(
-              route_abrupt(e, ctx, PkThrow(ctx.sent_v), None, fn(ef) {
-                let _ = pdict_put(leaf_cell, restore(ef))
-                Nil
-              }),
-            )
-          _ -> {
-            use #(prelude, e) <- result.try(case arm.resume {
-              Some(ResumeBind(pat, mode)) ->
-                e.dispatch.emit_destructure(e, pat, ctx.sent_v, mode)
-              _ -> Ok(#(ir.Values([e.consts.undef]), e))
-            })
-            let #(pre_n, e) = state.fresh_var(e)
-            let k_tail = fn(e_leaf: Emitter2) -> ir.Expr {
-              case emit_seg_tail(e_leaf, ctx, arm.tail) {
-                Ok(#(tail, e_final)) -> {
-                  let _ = pdict_put(leaf_cell, restore(e_final))
-                  tail
-                }
-                Error(err) -> {
-                  let _ = pdict_put(err_cell, Some(err))
-                  let _ = pdict_put(leaf_cell, restore(e_leaf))
-                  // Dummy — caller discards after reading err_cell.
-                  step_return(e_leaf.consts.undef)
-                }
-              }
-            }
-            use #(frag, e2) <- result.map(e.dispatch.emit_stmts(
-              e,
-              arm.body_fragment,
-              k_tail,
-            ))
-            // If k_tail ran, leaf_cell holds restore(e_final). If the fragment
-            // diverged (SegDone: last stmt was Return/Throw/Break/Continue),
-            // k_tail never ran — take emit_stmts's captured leaf and restore it.
-            case k_tail_ran(leaf_cell, e) {
-              True -> Nil
-              False -> {
-                let _ = pdict_put(leaf_cell, restore(e2))
-                Nil
-              }
-            }
-            case arm.resume {
-              Some(ResumeBind(..)) -> ir.Let([pre_n], prelude, frag)
-              _ -> frag
-            }
-          }
+  use e <- restore_and_seed(e, ctx)
+  with_abrupt_intercept(e, ctx, fn(e, restore) {
+    // §18.4.2: bind sent_v per `arm.resume` BEFORE emitting the fragment.
+    // ResumeReturn/Throw short-circuit — the fragment tail is dead code
+    // after `return await p` / `throw await p`.
+    use #(tree, e2) <- result.map(case arm.resume {
+      Some(ResumeReturn) -> Ok(route_abrupt(e, ctx, PkReturn(ctx.sent_v), None))
+      Some(ResumeThrow) -> Ok(route_abrupt(e, ctx, PkThrow(ctx.sent_v), None))
+      _ -> {
+        use #(prelude, e) <- result.try(case arm.resume {
+          Some(ResumeBind(pat, mode)) ->
+            e.dispatch.emit_destructure(e, pat, ctx.sent_v, mode)
+          _ -> Ok(#(ir.Values([e.consts.undef]), e))
+        })
+        let #(pre_n, e) = state.fresh_var(e)
+        let k_tail = fn(e_leaf: Emitter2) {
+          emit_seg_tail(e_leaf, ctx, arm.tail)
         }
-      })
+        use #(frag, e2) <- result.map(e.dispatch.emit_stmts(
+          e,
+          arm.body_fragment,
+          k_tail,
+        ))
+        case arm.resume {
+          Some(ResumeBind(..)) -> #(ir.Let([pre_n], prelude, frag), e2)
+          _ -> #(frag, e2)
+        }
+      }
     })
-  let e_final: Emitter2 = pdict_erase(leaf_cell)
-  let err: Option(state.EmitError) = pdict_erase(err_cell)
-  case err {
-    Some(err) -> Error(err)
-    None -> result.map(tree_r, fn(t) { #(t, e_final) })
-  }
-}
-
-fn none_err() -> Option(state.EmitError) {
-  None
-}
-
-/// True iff k_tail wrote to leaf_cell (its next_var advanced past the seeded
-/// pre-intercept snapshot). erase+re-put so the cell survives the check.
-fn k_tail_ran(leaf_cell: Ref, seed: Emitter2) -> Bool {
-  let cur: Emitter2 = pdict_erase(leaf_cell)
-  let _ = pdict_put(leaf_cell, cur)
-  cur.next_var > seed.next_var
+    #(tree, restore(e2))
+  })
 }
 
 /// Build the arm's terminal ir.Expr from its `SegTail` (§18.4.4). Runs with
@@ -3810,12 +3653,11 @@ fn emit_seg_tail(
           }
           Ok(
             cps_pair(e, fn(e, k) {
-              ir.Let(
-                [v_n],
-                operand_tree,
+              anf.wrap(
                 pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
                   k(e, step(ir.Var(v_n), loc))
                 }),
+                ir.Let([v_n], operand_tree, _),
               )
             }),
           )
@@ -3835,24 +3677,25 @@ fn emit_seg_tail(
       // in `cond` are in scope for pack_loc's slot_var reads (§18.4.4).
       Ok(
         cps_pair(e, fn(e, k) {
-          ir.Let(
-            [cv_n],
-            cond_tree,
-            ir.Let(
-              [ti_n],
-              ir.CallHost("js", "truthy", [ir.Var(cv_n)]),
-              pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-                k(
-                  e,
-                  ir.If(
-                    ir.Var(ti_n),
-                    [ir.TTerm],
-                    sm_continue(ctx, then_s, loc),
-                    sm_continue(ctx, else_s, loc),
-                  ),
-                )
-              }),
-            ),
+          anf.wrap(
+            pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
+              k(
+                e,
+                ir.If(
+                  ir.Var(ti_n),
+                  [ir.TTerm],
+                  sm_continue(ctx, then_s, loc),
+                  sm_continue(ctx, else_s, loc),
+                ),
+              )
+            }),
+            fn(t) {
+              ir.Let(
+                [cv_n],
+                cond_tree,
+                ir.Let([ti_n], ir.CallHost("js", "truthy", [ir.Var(cv_n)]), t),
+              )
+            },
           )
         }),
       )
@@ -3865,12 +3708,11 @@ fn emit_seg_tail(
       let #(tmp, e) = state.fresh_var(e)
       Ok(
         cps_pair(e, fn(e, k) {
-          ir.Let(
-            [tmp],
-            upd_tree,
+          anf.wrap(
             pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
               k(e, sm_continue(ctx, head, loc))
             }),
+            ir.Let([tmp], upd_tree, _),
           )
         }),
       )
@@ -3884,22 +3726,27 @@ fn emit_seg_tail(
       let #(iter_n, e) = state.fresh_var(e)
       Ok(
         cps_pair(e, fn(e, k) {
-          ir.Let(
-            [rhs_n],
-            rhs_tree,
-            ir.Let(
-              [iter_n],
-              ir.CallHost("js", "get_iterator", [
-                ir.Var(rhs_n),
-                ir.ConstAtom("sync"),
-              ]),
-              pack_loc_cps(
-                e,
-                ctx,
-                dict.from_list([#(iter_idx, ir.Var(iter_n))]),
-                fn(e, loc) { k(e, sm_continue(ctx, head, loc)) },
-              ),
+          anf.wrap(
+            pack_loc_cps(
+              e,
+              ctx,
+              dict.from_list([#(iter_idx, ir.Var(iter_n))]),
+              fn(e, loc) { k(e, sm_continue(ctx, head, loc)) },
             ),
+            fn(t) {
+              ir.Let(
+                [rhs_n],
+                rhs_tree,
+                ir.Let(
+                  [iter_n],
+                  ir.CallHost("js", "get_iterator", [
+                    ir.Var(rhs_n),
+                    ir.ConstAtom("sync"),
+                  ]),
+                  t,
+                ),
+              )
+            },
           )
         }),
       )
@@ -3911,22 +3758,27 @@ fn emit_seg_tail(
       let #(iter_n, e) = state.fresh_var(e)
       Ok(
         cps_pair(e, fn(e, k) {
-          ir.Let(
-            [rhs_n],
-            rhs_tree,
-            ir.Let(
-              [iter_n],
-              ir.CallHost("js", "get_iterator", [
-                ir.Var(rhs_n),
-                ir.ConstAtom("async"),
-              ]),
-              pack_loc_cps(
-                e,
-                ctx,
-                dict.from_list([#(iter_idx, ir.Var(iter_n))]),
-                fn(e, loc) { k(e, sm_continue(ctx, head, loc)) },
-              ),
+          anf.wrap(
+            pack_loc_cps(
+              e,
+              ctx,
+              dict.from_list([#(iter_idx, ir.Var(iter_n))]),
+              fn(e, loc) { k(e, sm_continue(ctx, head, loc)) },
             ),
+            fn(t) {
+              ir.Let(
+                [rhs_n],
+                rhs_tree,
+                ir.Let(
+                  [iter_n],
+                  ir.CallHost("js", "get_iterator", [
+                    ir.Var(rhs_n),
+                    ir.ConstAtom("async"),
+                  ]),
+                  t,
+                ),
+              )
+            },
           )
         }),
       )
@@ -3944,19 +3796,13 @@ fn emit_seg_tail(
   }
 }
 
-/// Run a CPS builder capturing the final Emitter2 (pdict seam, re-entrant).
+/// Run a CPS builder to its terminal tail and the final Emitter2.
 fn cps_pair(
   e: Emitter2,
-  f: fn(Emitter2, fn(Emitter2, ir.Expr) -> ir.Expr) -> ir.Expr,
+  f: fn(Emitter2, fn(Emitter2, ir.Expr) -> #(ir.Expr, Emitter2)) ->
+    #(ir.Expr, Emitter2),
 ) -> #(ir.Expr, Emitter2) {
-  let cell = make_ref()
-  let _ = pdict_put(cell, e)
-  let tree =
-    f(e, fn(ef, tail) {
-      let _ = pdict_put(cell, ef)
-      tail
-    })
-  #(tree, pdict_erase(cell))
+  f(e, fn(ef, tail) { #(tail, ef) })
 }
 
 /// for-of/for-await step tail: `iter_h = loc[extras[iter_key]]`; `res =
@@ -4000,16 +3846,17 @@ fn emit_for_of_step(
     let #(tmp, e) = state.fresh_var(e)
     let #(body_branch, e) =
       cps_pair(e, fn(e, k) {
-        ir.Let(
-          [val_n],
-          ir.CallHost("js", "get_prop", [ir.Var(res_n), ir.Var(vk_n)]),
-          ir.Let(
-            [tmp],
-            bind_tree,
-            pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-              k(e, sm_continue(ctx, body_s, loc))
-            }),
-          ),
+        anf.wrap(
+          pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
+            k(e, sm_continue(ctx, body_s, loc))
+          }),
+          fn(t) {
+            ir.Let(
+              [val_n],
+              ir.CallHost("js", "get_prop", [ir.Var(res_n), ir.Var(vk_n)]),
+              ir.Let([tmp], bind_tree, t),
+            )
+          },
         )
       })
     let branch = ir.If(ir.Var(done_i), [ir.TTerm], done_branch, body_branch)

@@ -271,7 +271,9 @@ pub fn compile(
   use #(wrap, e) <- result.try(emit_hoists(e, body))
   // (3)+(4) statement fold; terminal K is Return(undef). The runner drains
   // microtasks and runs the GC safepoint after js_main returns.
-  let terminal = fn(ef: state.Emitter2) { ir.Return([ef.consts.undef]) }
+  let terminal = fn(ef: state.Emitter2) {
+    Ok(#(ir.Return([ef.consts.undef]), ef))
+  }
   use #(stmts_tree, ef) <- result.try(e.dispatch.emit_stmts(e, body, terminal))
   use Nil <- result.map(case list.reverse(ef.unsupported) {
     [feature, ..] -> Error(state.UnsupportedFeature(feature))

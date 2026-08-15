@@ -40,7 +40,10 @@ pub const perf8_int_const_shift: Bool = True
 // ── Emitter2-access combinators (state monad over Build) ────────────────────
 
 /// Read the threaded Emitter2. `ask` IS a Build(Emitter2): `use e <- then(ask)`.
-pub fn ask(e: Emitter2, k: fn(Emitter2, Emitter2) -> ir.Expr) -> ir.Expr {
+pub fn ask(
+  e: Emitter2,
+  k: fn(Emitter2, Emitter2) -> #(ir.Expr, Emitter2),
+) -> #(ir.Expr, Emitter2) {
   k(e, e)
 }
 
@@ -104,7 +107,7 @@ pub fn bridge_expr(
     case call(e) {
       Ok(#(tree, e)) -> {
         let #(name, e) = state.fresh_var(e)
-        ir.Let([name], tree, k(e, ir.Var(name)))
+        anf.wrap(k(e, ir.Var(name)), ir.Let([name], tree, _))
       }
       Error(err) -> throw_at_rt("throw_type_error", describe_error(err))(e, k)
     }
@@ -1193,11 +1196,11 @@ fn set_lexical_this(v: ir.Value) -> Build(Nil) {
               )
             False -> {
               let #(name, e) = state.fresh_var(e)
-              ir.Let(
+              anf.wrap(k(state.set_slot_var(e, slot, name), Nil), ir.Let(
                 [name],
                 ir.Values([v]),
-                k(state.set_slot_var(e, slot, name), Nil),
-              )
+                _,
+              ))
             }
           }
         })
@@ -1705,7 +1708,7 @@ fn emit_chain(
 /// If `v` is nullish, Break `exit` with undefined; else yield `v` unchanged.
 fn chain_guard(v: ir.Value, exit: String, undef: ir.Value) -> Build(ir.Value) {
   use is_nul <- anf.then(anf.host("is_nullish", [v]))
-  anf.bind_if(is_nul, fn(_e, _k) { ir.Break(exit, [undef]) }, anf.pure(v))
+  anf.bind_if(is_nul, fn(e, _k) { #(ir.Break(exit, [undef]), e) }, anf.pure(v))
 }
 
 fn chain_obj(
@@ -2048,7 +2051,11 @@ fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
           True -> state.mark_known_number(e, name)
           False -> e
         }
-        ir.Let([name], ir.Values([v]), k(state.set_slot_var(e, slot, name), v))
+        anf.wrap(k(state.set_slot_var(e, slot, name), v), ir.Let(
+          [name],
+          ir.Values([v]),
+          _,
+        ))
       }
     }
   }
