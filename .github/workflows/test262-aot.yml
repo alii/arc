@@ -1,0 +1,159 @@
+name: test262 conformance (aot)
+
+on:
+  schedule:
+    # Nightly. The AOT run compiles every test through the BEAM compiler, so
+    # it is far too slow to run on every push.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Same fan-out as test262.yml: each shard runs a disjoint hash slice of the
+  # test files from aot/ and uploads its pass list + counts.
+  shard:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # The shard count (8) is written out in three places that must agree:
+      # this list, the /8 in TEST262_SHARD below, and the count check in the
+      # merge job.
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '29'
+          gleam-version: '1.17'
+          rebar3-version: '3'
+
+      - name: Build
+        working-directory: aot
+        run: gleam deps download
+
+      - name: Run test262 shard (aot)
+        # UPDATE_SNAPSHOT=1 makes the runner write the set of tests that pass
+        # in this shard's slice to .github/test262/pass-aot.txt instead of
+        # failing on snapshot mismatches. The merge job reassembles the full
+        # set and turns snapshot regressions back into a failure.
+        working-directory: aot
+        run: |
+          TEST262_EXEC=1 UPDATE_SNAPSHOT=1 TEST262_SHARD='${{ matrix.shard }}/8' RESULTS_FILE='../results-aot-${{ matrix.shard }}.json' gleam test
+          cp ../.github/test262/pass-aot.txt '../pass-aot-${{ matrix.shard }}.txt'
+        timeout-minutes: 300
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test262-aot-shard-${{ matrix.shard }}
+          path: |
+            pass-aot-${{ matrix.shard }}.txt
+            results-aot-${{ matrix.shard }}.json
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+
+  merge:
+    needs: shard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test262-aot-shard-*
+          merge-multiple: true
+          path: /tmp/shards
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Reassemble pass-aot.txt and results-aot.json
+        # The shards' slices are disjoint and each pass list is byte-sorted
+        # with a trailing newline, so a byte-order merge is exactly what one
+        # full run would have written.
+        run: |
+          set -o pipefail
+          n_pass=$(ls /tmp/shards/pass-aot-*.txt | wc -l)
+          n_results=$(ls /tmp/shards/results-aot-*.json | wc -l)
+          # 8 = the number of entries in jobs.shard.strategy.matrix.shard.
+          if [ "$n_pass" -ne 8 ] || [ "$n_results" -ne 8 ]; then
+            echo "::error::expected 8 shard pass lists and results files, got $n_pass and $n_results"
+            exit 1
+          fi
+          if [ -f .github/test262/pass-aot.txt ]; then
+            echo yes > /tmp/had-baseline
+          else
+            echo no > /tmp/had-baseline
+          fi
+          LC_ALL=C sort -u /tmp/shards/pass-aot-*.txt | sed '/^$/d' > .github/test262/pass-aot.txt
+          python3 .github/scripts/merge_results.py .github/test262/results-aot.json /tmp/shards/results-aot-*.json
+
+      - name: Guard against test262 regressions (aot)
+        # Added lines = new passing tests (committed). A removed line whose
+        # file still exists = a regression: fail and leave pass-aot.txt as it
+        # was. No baseline yet = write it, no failure.
+        run: |
+          if [ ! -d vendor/test262/test/built-ins ]; then
+            echo "::error::vendor/test262 submodule is missing — refusing to evaluate pass-aot.txt"
+            exit 1
+          fi
+          if [ "$(cat /tmp/had-baseline)" = "no" ]; then
+            echo "No pass-aot.txt baseline yet — writing the first one ($(wc -l < .github/test262/pass-aot.txt) passing tests)"
+            exit 0
+          fi
+          git diff -- .github/test262/pass-aot.txt > /tmp/pass-aot.diff
+          if [ ! -s /tmp/pass-aot.diff ]; then
+            echo "No change to pass-aot.txt"
+            exit 0
+          fi
+          grep -E '^-[^-]' /tmp/pass-aot.diff | sed 's/^-//' > /tmp/removed.txt || true
+          removed_count=$(wc -l < /tmp/removed.txt)
+          if [ "$removed_count" -gt 500 ]; then
+            echo "::error::$removed_count tests dropped out of pass-aot.txt in one run — too many to be plausible; investigate manually"
+            git checkout -- .github/test262/pass-aot.txt
+            exit 1
+          fi
+          while IFS= read -r t; do
+            if [ -f "vendor/test262/test/$t" ]; then
+              printf '%s\n' "$t"
+            else
+              echo "removed upstream: $t" >&2
+            fi
+          done < /tmp/removed.txt > /tmp/regressions.txt
+          if [ -s /tmp/regressions.txt ]; then
+            echo "::error::test262 (aot) regression — previously-passing test(s) now fail; pass-aot.txt left unchanged"
+            cat /tmp/regressions.txt
+            git checkout -- .github/test262/pass-aot.txt
+            exit 1
+          fi
+          echo "pass-aot.txt changes (new passes and/or tests removed upstream):"
+          git diff --stat -- .github/test262/pass-aot.txt
+
+      - name: Commit results
+        if: github.ref == 'refs/heads/master'
+        run: |
+          git config user.name "alistair-bot"
+          git config user.email "alistair-bot@users.noreply.github.com"
+          git add .github/test262/pass-aot.txt .github/test262/results-aot.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update test262 aot conformance: $(python3 -c "
+          import json
+          with open('.github/test262/results-aot.json') as f:
+              r = json.load(f)
+          print(f\"{r['percent']}% ({r['pass']}/{r['tested']})\")
+          ")"
+            git pull --rebase origin master
+            git push
+          fi

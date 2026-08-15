@@ -291,9 +291,14 @@ fn run_harness(ctx: Ctx, st: Agent, name: String) -> Result(Agent, Outcome) {
       case run.apply_main(module, st) {
         #(run.JsReturned(_), st) -> Ok(st)
         #(run.JsThrew(thrown), st) ->
-          Error(Fail(
-            "harness " <> name <> " threw: " <> inspect_thrown(thrown, st),
-          ))
+          case emitter_rejection(thrown, st) {
+            Some(feature) ->
+              Error(Skip("harness " <> name <> " unsupported: " <> feature))
+            None ->
+              Error(Fail(
+                "harness " <> name <> " threw: " <> inspect_thrown(thrown, st),
+              ))
+          }
         #(run.JsCrashed(reason), _st) ->
           Error(Fail("harness " <> name <> " crashed: " <> reason))
       }
@@ -315,6 +320,42 @@ fn compile_test(source: String, module_name: String) -> Result(Atom, Outcome) {
 }
 
 fn judge(
+  metadata: TestMetadata,
+  is_async: Bool,
+  exec: run.JsExecOutcome,
+  st: Agent,
+) -> Outcome {
+  let rejected = case exec {
+    run.JsThrew(thrown) -> emitter_rejection(thrown, st)
+    run.JsReturned(_) if is_async ->
+      case check_async_completion(st) {
+        Error("async failure: TypeError: unsupported: " <> feature) ->
+          Some(feature)
+        _ -> None
+      }
+    _ -> None
+  }
+  case rejected {
+    Some(feature) -> Skip(feature)
+    None -> judge_completion(metadata, is_async, exec, st)
+  }
+}
+
+/// The emitter reports an `UnsupportedFeature` met below the top level
+/// (inside a function body) as a runtime `TypeError("unsupported: ...")`
+/// at that point rather than failing the compile; it is the same static
+/// rejection, so it is the same SKIP.
+fn emitter_rejection(thrown: JsVal, st: Agent) -> Option(String) {
+  use h <- option.then(as_handle(thrown))
+  use name <- option.then(get_data(st, h, "name"))
+  use message <- option.then(get_data(st, h, "message"))
+  case classify(name), classify(message) {
+    KStr("TypeError"), KStr("unsupported: " <> feature) -> Some(feature)
+    _, _ -> None
+  }
+}
+
+fn judge_completion(
   metadata: TestMetadata,
   is_async: Bool,
   exec: run.JsExecOutcome,
