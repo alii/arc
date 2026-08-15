@@ -1,13 +1,23 @@
 //// ES2024 §25.4 The Atomics Object.
 ////
-//// This runtime runs one agent per store and keeps SharedArrayBuffer bytes
-//// in that store (`types.Shared`), so every read-modify-write here is a
-//// plain read-compute-write over the snapshot: with no second agent able to
-//// observe the buffer, that IS sequentially consistent. There is no
-//// WaiterList: `Atomics.wait` validates and coerces exactly as the spec
-//// orders, then throws at DoWait step 10 (this agent's [[CanBlock]] is
-//// false — nothing could ever notify it), `Atomics.waitAsync` is
-//// unsupported (TypeError), and `Atomics.notify` always finds zero waiters.
+//// A SharedArrayBuffer only this agent has ever seen keeps its bytes in the
+//// store (`types.LocalBlock`), and there every read-modify-write is a plain
+//// read-compute-write over the snapshot: with no second agent able to
+//// observe the buffer, that IS sequentially consistent. Once the buffer has
+//// been handed to another agent (or waited on) its block lives in an owner
+//// process (`arc/rt/sab`, `types.OwnerBlock`) together with the spec's
+//// WaiterList, and load / store / RMW / compareExchange / wait / notify are
+//// each ONE synchronous message to that process — the owner's mailbox order
+//// is the critical section of §25.4.3.17 AtomicReadModifyWrite and §25.4.1
+//// WaiterList Records. A sync `Atomics.wait` then blocks this BEAM process
+//// in a selective receive until notified or timed out; `Atomics.waitAsync`
+//// registers a waiter that joins `Agent.waiters`, and the agent's microtask
+//// drain (`arc/rt/async.drain`) takes its wake from this process's mailbox
+//// or runs its timeout job, settling the promise.
+////
+//// AgentCanSuspend() (§25.4.3.14 step 10) is the agent's [[CanBlock]],
+//// `host_hooks.can_block(st.hooks)`: an embedder that cannot afford to have
+//// this process parked leaves it false and a sync wait throws instead.
 ////
 //// Validation order follows the spec (cross-checked against QuickJS
 //// js_atomics_get_buf / js_atomics_op):
@@ -16,26 +26,28 @@
 ////   bounds (RangeError) → value coercion (user code!) → revalidate
 ////   (detached → TypeError, shrunk → RangeError).
 
+import arc/host_hooks
 import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/sab
 import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{
   type IntElem, I16, I32, I64, I8, U16, U32, U64, U8, int_elem_bits,
-  int_elem_signed, int_elem_size, ta_get_int, ta_set_int,
+  int_elem_signed, int_elem_size, ta_get_int, ta_set_int, ta_zeroed,
 }
 import arc/rt/types.{
   type Agent, type AtomicsNative, type BufferStorage, type Handle, type JsVal,
-  type TypedArrayKind, AtomicsAdd, AtomicsAnd, AtomicsCompareExchange,
-  AtomicsExchange, AtomicsIsLockFree, AtomicsLoad, AtomicsN, AtomicsNotify,
-  AtomicsOr, AtomicsPause, AtomicsStore, AtomicsSub, AtomicsWait,
-  AtomicsWaitAsync, AtomicsXor, BigInt64Kind, BigKind, BigUint64Kind, Int16Kind,
-  Int32Kind, Int8Kind, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNum,
-  KUndef, NumKind, SObject, TypedArrayObj, Uint16Kind, Uint32Kind, Uint8Kind,
-  classify, mk_bigint, mk_bool, mk_number, mk_undefined,
+  type SabOwner, type TypedArrayKind, AtomicsAdd, AtomicsAnd,
+  AtomicsCompareExchange, AtomicsExchange, AtomicsIsLockFree, AtomicsLoad,
+  AtomicsN, AtomicsNotify, AtomicsOr, AtomicsPause, AtomicsStore, AtomicsSub,
+  AtomicsWait, AtomicsWaitAsync, AtomicsXor, BigInt64Kind, BigKind,
+  BigUint64Kind, Detached, Int16Kind, Int32Kind, Int8Kind, JFloat, JInt, JNan,
+  JNegInf, JPosInf, KHandle, KNum, KUndef, NumKind, OwnerBlock, SObject, Shared,
+  TypedArrayObj, Uint16Kind, Uint32Kind, Uint8Kind, classify, mk_bigint, mk_bool,
+  mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/float
 import gleam/int
 import gleam/option.{type Option, None, Some}
@@ -94,12 +106,8 @@ pub fn dispatch(
     AtomicsStore -> atomic_store(st, args)
     AtomicsIsLockFree -> is_lock_free(st, args)
     AtomicsNotify -> notify(st, args)
-    AtomicsWait -> do_wait(st, args)
-    AtomicsWaitAsync ->
-      rt_val.t_throw_type_error(
-        st,
-        "Atomics.waitAsync is not supported in this runtime",
-      )
+    AtomicsWait -> do_wait(st, args, sync: True)
+    AtomicsWaitAsync -> do_wait(st, args, sync: False)
     AtomicsPause -> pause(st, args)
   }
 }
@@ -230,7 +238,7 @@ fn with_ta_and_index(
   // Live length: a resizable buffer may have shrunk below the view
   // (§10.4.5.12 IsTypedArrayOutOfBounds folds into this).
   let size = int_elem_size(elem)
-  let avail = { bit_array.byte_size(buf.bits) - view.byte_offset } / size
+  let avail = { buf.byte_size - view.byte_offset } / size
   let live = int.clamp(avail, 0, view.length)
   let info =
     TaInfo(
@@ -295,23 +303,42 @@ fn read_typed_array(st: Agent, val: JsVal) -> Option(TaView) {
 /// non-detached buffer, so nothing downstream has to re-check that.
 type BufferInfo {
   BufferInfo(
-    /// The live [[ArrayBufferData]] storage — never `Detached`.
-    data: BufferStorage,
-    /// The bytes of `data`.
-    bits: BitArray,
+    /// Where the live [[ArrayBufferData]] bytes are — never detached.
+    data: LiveData,
+    /// [[ArrayBufferByteLength]] of `data`.
+    byte_size: Int,
     immutable: Bool,
   )
+}
+
+/// The two places live bytes can be. In-store bytes are read and rebuilt
+/// right here; an owner-held shared block is only ever touched through
+/// messages to its owner, one per element operation.
+type LiveData {
+  StoreData(storage: BufferStorage, bits: BitArray)
+  OwnerData(owner: SabOwner)
 }
 
 /// IsDetachedBuffer(O) is false — project a storage value onto its live
 /// bytes. `Detached` IS the detached case: there are no bytes to hand out.
 fn live_buffer(storage: BufferStorage) -> Option(BufferInfo) {
-  use bits <- option.map(types.buffer_bits(storage))
-  BufferInfo(
-    data: storage,
-    bits:,
-    immutable: types.buffer_is_immutable(storage),
-  )
+  case storage {
+    Detached(..) -> None
+    Shared(block: OwnerBlock(owner:, ..), ..) ->
+      Some(BufferInfo(
+        data: OwnerData(owner:),
+        byte_size: types.buffer_byte_size(storage),
+        immutable: False,
+      ))
+    _ -> {
+      use bits <- option.map(types.buffer_bits(storage))
+      BufferInfo(
+        data: StoreData(storage:, bits:),
+        byte_size: types.buffer_byte_size(storage),
+        immutable: types.buffer_is_immutable(storage),
+      )
+    }
+  }
 }
 
 /// §25.4.3.4 RevalidateAtomicAccess — the value coercion may have run user
@@ -328,10 +355,9 @@ fn revalidate(st: Agent, info: TaInfo, idx: Int) -> BufferInfo {
   })
   let size = elem_size(info)
   let byte_off = info.byte_offset + idx * size
-  use Nil <- helpers.guard(
-    byte_off + size <= bit_array.byte_size(buf.bits),
-    fn() { rt_val.t_throw_range_error(st, "Atomics access index out of range") },
-  )
+  use Nil <- helpers.guard(byte_off + size <= buf.byte_size, fn() {
+    rt_val.t_throw_range_error(st, "Atomics access index out of range")
+  })
   buf
 }
 
@@ -374,16 +400,32 @@ fn wrap_to_kind(v: Int, elem: IntElem) -> Int {
   }
 }
 
-/// Read element `idx` (already validated) from fresh buffer data.
-fn read_element(data: BitArray, info: TaInfo, idx: Int) -> Int {
-  let off = info.byte_offset + idx * elem_size(info)
-  ta_get_int(data, off, info.elem)
+/// Byte offset of element `idx` of the validated view.
+fn element_offset(info: TaInfo, idx: Int) -> Int {
+  info.byte_offset + idx * elem_size(info)
 }
 
-/// Write raw integer `v` (truncated mod 2^bits by the FFI) at element `idx`
-/// and persist it into the buffer `revalidate` just witnessed (`buf`) — NOT
-/// into a second store read that could disagree with the revalidation and
-/// silently drop the store.
+/// The element's bytes on their own: `v` (truncated mod 2^bits by the FFI)
+/// encoded into a fresh element-sized binary. What an owner is sent for a
+/// store, and what a wait compares the live element against.
+fn element_bytes(info: TaInfo, v: Int) -> BitArray {
+  ta_set_int(ta_zeroed(elem_size(info)), 0, info.elem, v)
+}
+
+/// Read element `idx` (already validated) from the live buffer.
+fn read_element(buf: BufferInfo, info: TaInfo, idx: Int) -> Int {
+  let off = element_offset(info, idx)
+  case buf.data {
+    StoreData(bits:, ..) -> ta_get_int(bits, off, info.elem)
+    OwnerData(owner:) ->
+      ta_get_int(sab.read_part(owner, off, elem_size(info)), 0, info.elem)
+  }
+}
+
+/// Write raw integer `v` at element `idx` of the buffer `revalidate` just
+/// witnessed (`buf`) — for in-store bytes NOT into a second store read that
+/// could disagree with the revalidation and silently drop the store; for an
+/// owner-held block as one store message of exactly the element's bytes.
 fn write_element(
   st: Agent,
   info: TaInfo,
@@ -392,13 +434,63 @@ fn write_element(
   v: Int,
 ) -> Agent {
   let size = elem_size(info)
-  let off = info.byte_offset + idx * size
-  let new_bits = ta_set_int(buf.bits, off, info.elem, v)
-  buffer.set_storage(
-    st,
-    info.buffer,
-    types.buffer_store_region(buf.data, new_bits, off, size),
-  )
+  let off = element_offset(info, idx)
+  case buf.data {
+    StoreData(storage:, bits:) ->
+      buffer.set_storage(
+        st,
+        info.buffer,
+        types.buffer_store_region(
+          storage,
+          ta_set_int(bits, off, info.elem, v),
+          off,
+          size,
+        ),
+      )
+    OwnerData(owner:) -> {
+      let Nil = sab.write(owner, off, element_bytes(info, v))
+      st
+    }
+  }
+}
+
+/// §25.4.3.17 AtomicReadModifyWrite steps 8-11 / §25.4.6 compareExchange
+/// steps 11-14: read the element, decide what replaces it (`Some(new)`) or
+/// that it stays (`None`), write, and hand back the value READ. In-store
+/// bytes: no other agent can interleave, so read-compute-write over the
+/// snapshot is trivially atomic. Owner-held block: the whole step runs
+/// inside the owner as one `sab.update`.
+fn modify_element(
+  st: Agent,
+  info: TaInfo,
+  buf: BufferInfo,
+  idx: Int,
+  op: fn(Int) -> Option(Int),
+) -> #(Int, Agent) {
+  case buf.data {
+    StoreData(..) -> {
+      let old = read_element(buf, info, idx)
+      case op(old) {
+        Some(new) -> #(old, write_element(st, info, buf, idx, new))
+        None -> #(old, st)
+      }
+    }
+    OwnerData(owner:) -> {
+      let old = {
+        use old_bits <- sab.update(
+          owner,
+          element_offset(info, idx),
+          elem_size(info),
+        )
+        let old = ta_get_int(old_bits, 0, info.elem)
+        case op(old) {
+          Some(new) -> #(old, ta_set_int(old_bits, 0, info.elem, new))
+          None -> #(old, old_bits)
+        }
+      }
+      #(old, st)
+    }
+  }
 }
 
 /// Old element value → JS value per content type.
@@ -421,34 +513,34 @@ fn rmw(
   let #(info, idx, st) = with_ta_and_index(st, args, mode: RmwAccess)
   let #(operand, st) = to_operand(st, info, helpers.arg_at(args, 2))
   let buf = revalidate(st, info, idx)
-  // Single-agent storage: no interleaving is possible, the snapshot
-  // read-compute-write is trivially atomic.
-  let old = read_element(buf.bits, info, idx)
-  let st = write_element(st, info, buf, idx, op(old, operand))
+  let #(old, st) =
+    modify_element(st, info, buf, idx, fn(old) { Some(op(old, operand)) })
   #(element_to_js(info, old), st)
 }
 
-// §25.4.7 Atomics.compareExchange ( typedArray, index, expected, replacement )
+// §25.4.6 Atomics.compareExchange ( typedArray, index, expected, replacement )
 fn compare_exchange(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(info, idx, st) = with_ta_and_index(st, args, mode: RmwAccess)
   let #(expected, st) = to_operand(st, info, helpers.arg_at(args, 2))
   let #(replacement, st) = to_operand(st, info, helpers.arg_at(args, 3))
   let buf = revalidate(st, info, idx)
   let wrapped_expected = wrap_to_kind(expected, info.elem)
-  let old = read_element(buf.bits, info, idx)
-  let st = case old == wrapped_expected {
-    True -> write_element(st, info, buf, idx, replacement)
-    False -> st
-  }
+  let #(old, st) =
+    modify_element(st, info, buf, idx, fn(old) {
+      case old == wrapped_expected {
+        True -> Some(replacement)
+        False -> None
+      }
+    })
   #(element_to_js(info, old), st)
 }
 
-// §25.4.10 Atomics.load ( typedArray, index )
+// §25.4.9 Atomics.load ( typedArray, index )
 fn atomic_load(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(info, idx, st) = with_ta_and_index(st, args, mode: LoadAccess)
-  // The index coercion may have run user code — revalidate (§25.4.10 step 2).
+  // The index coercion may have run user code — revalidate (§25.4.9 step 2).
   let buf = revalidate(st, info, idx)
-  #(element_to_js(info, read_element(buf.bits, info, idx)), st)
+  #(element_to_js(info, read_element(buf, info, idx)), st)
 }
 
 // §25.4.12 Atomics.store ( typedArray, index, value ) — returns the COERCED
@@ -483,7 +575,7 @@ fn atomic_store(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// §25.4.9 Atomics.isLockFree ( size ) — must be consistent across calls;
+// §25.4.8 Atomics.isLockFree ( size ) — must be consistent across calls;
 // hardware lock-free sizes on every BEAM target are 1/2/4/8.
 fn is_lock_free(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(n, st) =
@@ -497,7 +589,7 @@ fn is_lock_free(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 // Atomics.pause ( [ iterationNumber ] ) — microwait proposal. No coercion:
 // anything other than undefined or an integral Number is a TypeError. The
-// pause itself is a no-op (single agent; nothing to spin-wait for).
+// pause itself is a no-op hint.
 fn pause(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(helpers.first_arg_or_undefined(args)) {
     KUndef -> #(mk_undefined(), st)
@@ -513,21 +605,73 @@ fn pause(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 // ============================================================================
-// §25.4.3.14 DoWait — Atomics.wait (sync)
+// §25.4.3.14 DoWait — Atomics.wait (sync) and Atomics.waitAsync (async)
 // ============================================================================
 
-fn do_wait(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(info, _idx, st) = with_ta_and_index(st, args, mode: WaitAccess)
+fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
+  let #(info, idx, st) = with_ta_and_index(st, args, mode: WaitAccess)
   // Step 6/7: v = ToBigInt64(value) | ToInt32(value).
-  let #(_v, st) = wait_value(st, info, helpers.arg_at(args, 2))
+  let #(v, st) = wait_value(st, info, helpers.arg_at(args, 2))
   // Step 8/9: t = ToNumber(timeout); NaN/undefined → +∞; clamp ≥ 0.
-  let #(_timeout_ms, st) = wait_timeout(st, helpers.arg_at(args, 3))
-  // Step 10: if mode is sync and AgentCanSuspend() is false, throw a
-  // TypeError. Sits after the value/timeout coercions (steps 6-9) per the
-  // current spec text — the position is observable via valueOf side effects.
-  // This agent's [[CanBlock]] is false: no other agent shares its buffers,
-  // so a suspended wait could never be notified.
-  rt_val.t_throw_type_error(st, "Atomics.wait cannot be called in this agent")
+  let #(timeout_ms, st) = wait_timeout(st, helpers.arg_at(args, 3))
+  // Step 10: if mode is sync and AgentCanSuspend() is false — this agent's
+  // [[CanBlock]] is false — throw a TypeError. Sits after the value/timeout
+  // coercions (steps 6-9) per the current spec text; the position is
+  // observable via valueOf side effects. waitAsync never blocks, so async
+  // mode is exempt.
+  use Nil <- helpers.guard(!sync || host_hooks.can_block(st.hooks), fn() {
+    rt_val.t_throw_type_error(st, "Atomics.wait cannot be called in this agent")
+  })
+  // SharedArrayBuffers are never detached and never shrink, so this cannot
+  // fail; it fixes the byte index the waiter is keyed on (steps 11-13).
+  let _buf = revalidate(st, info, idx)
+  let byte_off = element_offset(info, idx)
+  let expected = element_bytes(info, v)
+  // Steps 14-16: the WaiterList lives with the block's owner; a block only
+  // this agent could see so far gets its owner now.
+  let #(owner, st) = sab.share(st, info.buffer)
+  let assert Some(owner) = owner
+    as "Atomics.wait: WaitAccess validated a SharedArrayBuffer"
+  case sync, timeout_ms {
+    // Steps 17-20 + 22-31, sync: compare-and-add-waiter inside the owner's
+    // critical section, then suspend THIS process until notified or timed
+    // out (None = +∞). Even t = 0 goes through the WaiterList: a notify
+    // that lands between AddWaiter and the timeout has woken this waiter and
+    // counted it, so "ok" is the only answer consistent with that count.
+    True, _ -> {
+      let outcome =
+        sab.wait_sync(owner, byte_off, expected, option.unwrap(timeout_ms, -1))
+      #(mk_string(sab.outcome_string(outcome)), st)
+    }
+    // Async, t = 0 (steps 17-21): compare, then { async: false, value:
+    // "not-equal" | "timed-out" } WITHOUT ever joining the WaiterList — a
+    // waiter that was never added is one no notify can count.
+    False, Some(0) -> {
+      let live = sab.read_part(owner, byte_off, elem_size(info))
+      let outcome = case live == expected {
+        True -> sab.TimedOut
+        False -> sab.NotEqual
+      }
+      wait_result_object(st, False, mk_string(sab.outcome_string(outcome)))
+    }
+    // Async (steps 22-32): compare-and-AddWaiter in the owner; the waiter
+    // joins `st.waiters`, and this agent's drain wakes it (the owner's
+    // message queues NotifyWaiter's resolve job) or runs its timeout job at
+    // `deadline` (`rt/async.drain`).
+    False, _ -> {
+      let deadline =
+        option.map(timeout_ms, fn(ms) { st.hooks.monotonic_now() + ms })
+      case sab.register_async(st, owner, byte_off, expected, deadline) {
+        #(Some(promise), st) -> wait_result_object(st, True, mk_object(promise))
+        #(None, st) ->
+          wait_result_object(
+            st,
+            False,
+            mk_string(sab.outcome_string(sab.NotEqual)),
+          )
+      }
+    }
+  }
 }
 
 /// DoWait steps 6/7: Int32Array → ToInt32, BigInt64Array → ToBigInt64.
@@ -557,18 +701,42 @@ fn wait_timeout(st: Agent, val: JsVal) -> #(Option(Int), Agent) {
   #(t, st)
 }
 
+/// §25.4.3.14 steps 4/20/21/29: the { async, value } record waitAsync
+/// returns, on %Object.prototype%.
+fn wait_result_object(
+  st: Agent,
+  is_async: Bool,
+  value: JsVal,
+) -> #(JsVal, Agent) {
+  let #(h, st) =
+    common.alloc_pojo(st, st.realm.object.prototype, [
+      #("async", mk_bool(is_async)),
+      #("value", value),
+    ])
+  #(mk_object(h), st)
+}
+
 // ============================================================================
 // §25.4.11 Atomics.notify ( typedArray, index, count )
 // ============================================================================
 
 fn notify(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(_info, _idx, st) = with_ta_and_index(st, args, mode: NotifyAccess)
+  let #(info, idx, st) = with_ta_and_index(st, args, mode: NotifyAccess)
   // Step 3: count — undefined → +∞, else ToIntegerOrInfinity clamped ≥ 0.
   // Coerced BEFORE the non-shared early return (observable, test262 checks).
-  let #(_count, st) = notify_count(st, helpers.arg_at(args, 2))
-  // Step 6: non-shared buffers can have no waiters → +0. Shared buffers in
-  // this single-agent runtime have an always-empty WaiterList → +0 too.
-  #(mk_number(JInt(0)), st)
+  let #(count, st) = notify_count(st, helpers.arg_at(args, 2))
+  // Step 6: a non-shared buffer has no waiters → +0 (no revalidation: a
+  // buffer detached or shrunk by the coercions still answers 0). Neither
+  // has a shared block no other agent has seen and nobody has waited on:
+  // any waiter would have moved it to an owner first.
+  case buffer.buffer_storage(st, info.buffer) {
+    // Steps 7-12: RemoveWaiters + NotifyWaiter, FIFO, inside the owner.
+    Some(Shared(block: OwnerBlock(owner:, ..), ..)) -> {
+      let n = sab.notify(owner, element_offset(info, idx), count)
+      #(mk_number(JInt(n)), st)
+    }
+    Some(_) | None -> #(mk_number(JInt(0)), st)
+  }
 }
 
 /// Notify count (§25.4.11 step 3): undefined → effectively unbounded;

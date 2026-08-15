@@ -38,12 +38,13 @@ import arc/rt/elements
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
+import arc/rt/sab
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type BufferStorage, type Handle, type JsVal, ArrayBufferObj,
-  ArrayObj, DataProperty, Detached, JFloat, JInt, KHandle, KStr, KUndef, Named,
-  NoElements, Ordinary, ProxyObj, SObject, SShapedObject, StringKey, classify,
-  mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  type Agent, type BufferStorage, type Handle, type JsVal, type WaiterRef, Agent,
+  ArrayBufferObj, ArrayObj, DataProperty, Detached, JFloat, JInt, KHandle, KStr,
+  KUndef, Named, NoElements, Ordinary, ProxyObj, SObject, SShapedObject, Shared,
+  StringKey, classify, mk_null, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -63,10 +64,12 @@ import test_runner
 type Settled =
   #(Result(JsVal, JsVal), Agent)
 
-/// The state the harness's host functions thread. The harness keeps no typed
-/// host payloads, so the payload type is `Nil`.
+/// The state the harness's host functions thread. The one typed host
+/// payload the harness keeps is the pid of a `$262.agent` child process
+/// (the `__children__` list on the agent object), so that is the payload
+/// type.
 type HostState =
-  host.State(Nil)
+  host.State(AgentPid)
 
 const test_dir: String = "vendor/test262/test"
 
@@ -126,6 +129,19 @@ fn warm_caches() -> Nil {
       Error(err) -> io.println("Warning: harness cache warm failed: " <> err)
     }
   })
+}
+
+/// The agent a test runs on: the base agent, with the test's [[CanBlock]]
+/// policy applied. test262's CanBlockIsFalse flag asks for an agent whose
+/// AgentCanSuspend() is false (sync Atomics.wait throws a TypeError); every
+/// other test — and every `$262.agent` child — may block (CanBlockIsTrue is
+/// the harness default, §9.7).
+fn boot_agent(metadata: TestMetadata) -> Agent {
+  let agent = boot_base_agent()
+  case list.contains(metadata.flags, "CanBlockIsFalse") {
+    True -> Agent(..agent, hooks: host_hooks.with_can_block(agent.hooks, False))
+    False -> agent
+  }
 }
 
 /// Boot (or fetch the cached) base agent: a fresh realm on the harness's
@@ -493,7 +509,11 @@ fn run_parse_negative_test(
 
 /// Shared scaffold for running a test to completion: handles the
 /// module/script branch, timeout, and async dispatch. Callers supply how to
-/// map run errors, completions, and async completions to outcomes.
+/// map run errors, completions, and async completions to outcomes. The
+/// outcome is judged INSIDE the timed run: `run_with_timeout` runs it in a
+/// process of its own, and only the small verdict travels back — never the
+/// settled agent, whose store would be copied whole (sharing flattened)
+/// into the heap-capped worker.
 fn run_test_completion(
   metadata: TestMetadata,
   source: String,
@@ -511,13 +531,19 @@ fn run_test_completion(
       do_run_script_with_harness(metadata, source, path, variant, is_async)
     }
   }
-  case test_runner.run_with_timeout(run, test_timeout_ms) |> result.flatten {
+  let judged = fn() {
+    case run() {
+      Error(reason) -> on_error(reason)
+      Ok(settled) ->
+        case is_async {
+          False -> completion_outcome(settled)
+          True -> async_outcome(settled)
+        }
+    }
+  }
+  case test_runner.run_with_timeout(judged, test_timeout_ms) {
     Error(reason) -> on_error(reason)
-    Ok(settled) ->
-      case is_async {
-        False -> completion_outcome(settled)
-        True -> async_outcome(settled)
-      }
+    Ok(outcome) -> outcome
   }
 }
 
@@ -735,7 +761,12 @@ fn do_run_module(
 ) -> Result(Settled, String) {
   // Evaluate harness files as REPL scripts to populate globals. Async module
   // tests use the same $DONE/print protocol as scripts (doneprintHandle.js).
-  use st <- result.try(eval_harness(metadata, boot_base_agent(), path, is_async))
+  use st <- result.try(eval_harness(
+    metadata,
+    boot_agent(metadata),
+    path,
+    is_async,
+  ))
 
   case module.compile_bundle(path, source, test262_resolve, test262_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
@@ -804,7 +835,12 @@ fn do_run_script_with_harness(
   is_async: Bool,
 ) -> Result(Settled, String) {
   // Evaluate harness files as REPL scripts to populate globals
-  use st <- result.try(eval_harness(metadata, boot_base_agent(), path, is_async))
+  use st <- result.try(eval_harness(
+    metadata,
+    boot_agent(metadata),
+    path,
+    is_async,
+  ))
 
   // Prepend "use strict" to test source only (not harness) when strict
   let test_source = case variant {
@@ -870,7 +906,8 @@ fn eval_harness(
         module_host.install_import_hook(st, path, test262_resolve, test262_load)
       // Native $262 (global/evalScript/createRealm/gc/detachArrayBuffer) on
       // the global, extended with the harness's `agent` API and `print`.
-      let st = install_host_api(st)
+      // This is the main agent: it has no parent to report to.
+      let st = install_host_api(st, None)
 
       // Harness file order: assert.js → sta.js → doneprintHandle.js (if
       // async) → extra includes
@@ -898,11 +935,12 @@ fn eval_harness(
 }
 
 /// `$262` plus the harness host functions (`$262.agent.*`, `print`) on the
-/// current realm of `st`.
-fn install_host_api(st: Agent) -> Agent {
+/// current realm of `st`. `parent` is the pid of the agent process that
+/// started this one — `None` in the main agent.
+fn install_host_api(st: Agent, parent: Option(AgentPid)) -> Agent {
   let #(dollar_262, st) = rt_realm.install_262(st, st.realm)
   let s = host.from_agent(st, host.new_key())
-  let s = extend_262_with_agent(s, dollar_262)
+  let s = extend_262_with_agent(s, dollar_262, parent)
   let s = install_print(s)
   s.agent
 }
@@ -1006,43 +1044,62 @@ fn inspect_thrown(val: JsVal, st: Agent) -> String {
 // child owns its realm globals) agent source, executes it, drains its
 // microtasks, and then parks in a broadcast loop.
 //
-// `broadcast(sab)` ships the SharedArrayBuffer's backing storage to every
+// `broadcast(sab)` hands the SharedArrayBuffer's block to an owner process
+// (`arc/rt/sab.share`) and ships its storage — the owner pid — to every
 // child, blocking until each child acknowledges receipt (the ack is sent
 // BEFORE the child invokes its receiveBroadcast callbacks, so a callback
-// blocking in a sync Atomics.wait cannot deadlock broadcast). Buffer storage
-// in this runtime is a byte image held in the agent's own store, so the
-// child receives a copy: cross-agent Atomics.wait/notify is not wired yet.
+// blocking in a sync Atomics.wait cannot deadlock broadcast). The child's
+// reconstructed SAB aliases the very same block, so Atomics writes, waits
+// and notifies cross agents. A plain ArrayBuffer travels as a byte copy.
+//
+// Wakes for an agent's `Atomics.waitAsync` waiters land in that agent's own
+// mailbox and are taken by its microtask drain (`arc/rt/async.drain`), which
+// also runs the timeout jobs. A child idling between broadcasts with a
+// deadline-free waiter still pending receives the wake in its idle loop and
+// hands it to the runtime (`rt_async.t_wake_waiter`) before draining.
 //
 // `report(str)` in a child posts the string to the parent's mailbox;
-// `getReport()` in the parent drains that mailbox non-blockingly. The
-// hidden __reports__/__agents__ queues remain: __agents__ holds the
-// receiveBroadcast callbacks a child's script registered (consumed by the
-// child's own broadcast loop), __reports__ backs report/getReport for the
-// degenerate same-process case (the main agent reporting to itself).
+// `getReport()` in the parent drains that mailbox non-blockingly.
+//
+// All agent bookkeeping is agent state, held in hidden queues on the
+// `$262.agent` object: __children__ holds the pids (host objects) of the
+// agent processes `start` spawned, which `broadcast` hands to the FFI;
+// __agents__ holds the receiveBroadcast callbacks a child's script
+// registered (consumed by the child's own broadcast loop); __reports__
+// backs report/getReport for the degenerate same-process case (the main
+// agent reporting to itself). A child's parent pid is the argument its
+// process body is spawned with, captured by the child's `report`.
 // ============================================================================
 
 /// Build the agent object and hang it off `$262` with builtin_property
 /// attributes (enumerable:False), which matches the rest of the $262 surface
 /// and keeps "agent" out of Object.keys($262).
-fn extend_262_with_agent(s: HostState, dollar_262: Handle) -> HostState {
-  let #(s, agent) = build_agent(s)
+fn extend_262_with_agent(
+  s: HostState,
+  dollar_262: Handle,
+  parent: Option(AgentPid),
+) -> HostState {
+  let #(s, agent) = build_agent(s, parent)
   let #(prop, st) = common.builtin_property(s.agent, agent)
   let st = common.add_named_property(st, dollar_262, "agent", prop)
   host.State(..s, agent: st)
 }
 
-/// Allocate the $262.agent object: host-function methods plus two hidden
-/// array-backed queues — __reports__ (strings posted by $262.agent.report,
-/// consumed by getReport) and __agents__ (callbacks registered by
-/// receiveBroadcast, invoked by the child's broadcast loop).
-fn build_agent(s: HostState) -> #(HostState, JsVal) {
+/// Allocate the $262.agent object: host-function methods plus three hidden
+/// array-backed queues — __children__ (pids of the agent processes `start`
+/// spawned, as host objects), __reports__ (strings posted by
+/// $262.agent.report, consumed by getReport) and __agents__ (callbacks
+/// registered by receiveBroadcast, invoked by the child's broadcast loop).
+/// `report` captures `parent`, the pid a child posts its reports to.
+fn build_agent(s: HostState, parent: Option(AgentPid)) -> #(HostState, JsVal) {
+  let report = fn(args, this, s) { agent_report_native(args, this, s, parent) }
   let methods = [
     #("start", agent_start_native, 1),
     #("broadcast", agent_broadcast_native, 2),
     #("getReport", agent_get_report_native, 0),
     #("sleep", agent_sleep_native, 1),
     #("monotonicNow", agent_monotonic_now_native, 0),
-    #("report", agent_report_native, 1),
+    #("report", report, 1),
     #("leaving", agent_leaving_native, 0),
     #("receiveBroadcast", agent_receive_broadcast_native, 1),
   ]
@@ -1056,11 +1113,14 @@ fn build_agent(s: HostState) -> #(HostState, JsVal) {
     })
   let st = s.agent
   let array_proto = st.realm.array.prototype
+  let #(children, st) = common.alloc_array(st, [], array_proto)
   let #(reports, st) = common.alloc_array(st, [], array_proto)
   let #(agents, st) = common.alloc_array(st, [], array_proto)
+  let #(children_prop, st) = common.data_prop(st, mk_object(children))
   let #(reports_prop, st) = common.data_prop(st, mk_object(reports))
   let #(agents_prop, st) = common.data_prop(st, mk_object(agents))
   let hidden = [
+    #("__children__", common.configurable(children_prop)),
     #("__reports__", common.configurable(reports_prop)),
     #("__agents__", common.configurable(agents_prop)),
   ]
@@ -1082,9 +1142,11 @@ fn build_agent(s: HostState) -> #(HostState, JsVal) {
 /// A BEAM agent child process pid (opaque — see test262_exec_ffi.erl).
 type AgentPid
 
-/// The term `broadcast` ships to each child process. (Shared)ArrayBuffers
-/// travel as their raw `BufferStorage`; primitives pass through as-is —
-/// they are store-independent.
+/// The term `broadcast` ships to each child process. A SharedArrayBuffer
+/// travels as its `BufferStorage` AFTER `sab.share`, i.e. as the owner
+/// process handle, so every receiver sees the same bytes; a plain
+/// ArrayBuffer's storage is its byte image (a copy); primitives pass
+/// through as-is — they are store-independent.
 type AgentPayload {
   /// Shared-ness is derived from the storage variant (`buffer_is_shared`),
   /// not a separate flag.
@@ -1092,12 +1154,12 @@ type AgentPayload {
   AgentValuePayload(value: JsVal)
 }
 
-/// What woke an idle agent child process (see test262_exec_ffi.erl):
-/// a parent broadcast, a cross-process Atomics.notify addressed to this
-/// agent, or the parent process dying.
+/// What woke an idle agent child process (see test262_exec_ffi.erl): a
+/// parent broadcast, the owner wake of one of this agent's deadline-free
+/// `Atomics.waitAsync` waiters, or the parent process dying.
 type AgentWake {
   AgentWakeBroadcast(payload: AgentPayload)
-  AgentWakeNotify(key: host_hooks.WaiterKey, byte_index: Int)
+  AgentWakeSab(ref: WaiterRef)
   AgentWakeParentDown
 }
 
@@ -1111,24 +1173,34 @@ fn done(s: HostState, st: Agent) -> #(HostState, Result(JsVal, JsVal)) {
 /// fresh agent and runs the agent script there. The source is NOT
 /// IIFE-wrapped: the child has its own realm, so its top-level declarations
 /// are its own realm globals (several tests start N agents with identical
-/// scripts — separate realms keep them from colliding).
+/// scripts — separate realms keep them from colliding). The child's pid
+/// joins this agent's __children__ list, which `broadcast` reads.
 fn agent_start_native(
   args: List(JsVal),
-  _this: JsVal,
+  this: JsVal,
   s: HostState,
 ) -> #(HostState, Result(JsVal, JsVal)) {
   let #(source, st) = rt_val.t_to_string(s.agent, host.first_arg(args))
-  let Nil = ffi_spawn_agent(fn() { run_agent_child(source) })
-  done(s, st)
+  let s = host.State(..s, agent: st)
+  case agent_queue(s.agent, this, "__children__") {
+    None -> host.type_error(s, "start: $262.agent state missing")
+    Some(#(arr, children)) -> {
+      let pid = ffi_spawn_agent(fn(parent) { run_agent_child(source, parent) })
+      let #(s, child) = host.alloc_host_object(s, pid, None)
+      done(s, agent_queue_write(s.agent, arr, list.append(children, [child])))
+    }
+  }
 }
 
 /// Child-process body: boot a fresh agent (own store/intrinsics/globals/
 /// $262), compile + execute the agent script, drain, then park in the
 /// broadcast loop until the parent broadcasts or goes away. Runs INSIDE the
 /// spawned BEAM process — errors are reported to stderr, never thrown back
-/// (there is no JS frame to throw into).
-fn run_agent_child(source: String) -> Nil {
-  let st = install_host_api(boot_base_agent())
+/// (there is no JS frame to throw into). `parent` is the pid of the agent
+/// process that started this one: reports are posted to it, and its death
+/// ends the loop.
+fn run_agent_child(source: String, parent: AgentPid) -> Nil {
+  let st = install_host_api(boot_base_agent(), Some(parent))
   // The child's $262.agent object — its __agents__ queue collects the
   // receiveBroadcast callbacks the script registers; the broadcast loop
   // below invokes them.
@@ -1163,22 +1235,28 @@ fn run_agent_child(source: String) -> Nil {
         NormalCompletion(_) -> Nil
       }
       let st = settle_pending_wakes(st)
-      agent_child_loop(st, agent_this)
+      agent_child_loop(st, agent_this, parent)
     }
   }
 }
 
-/// Child broadcast loop: block until the parent broadcasts (the receipt ack
-/// is sent by await_broadcast_or_notify BEFORE we run any JS), materialize
-/// the payload in the child's store, invoke every registered
-/// receiveBroadcast callback, drain, repeat. A cross-process notify wake has
-/// no waiter to settle in this runtime yet, so it only re-drives the drain.
-/// Ends — and the child process exits — when the parent process goes away.
-fn agent_child_loop(st: Agent, agent_this: JsVal) -> Nil {
-  case ffi_await_broadcast_or_notify() {
+/// Child idle loop: block until the parent broadcasts (the receipt ack is
+/// sent by await_broadcast_or_wake BEFORE we run any JS) or the wake of a
+/// deadline-free waitAsync waiter arrives (waiters with a deadline never
+/// reach here pending: the drain runs until they settle). A broadcast is
+/// materialized in the child's store and handed to every registered
+/// receiveBroadcast callback; a wake queues its waiter's resolve job; either
+/// way the child then drains. Ends — and the child process exits — when
+/// `parent`, the process that started this agent, goes away.
+fn agent_child_loop(st: Agent, agent_this: JsVal, parent: AgentPid) -> Nil {
+  case ffi_await_broadcast_or_wake(parent) {
     AgentWakeParentDown -> Nil
-    AgentWakeNotify(_key, _byte_index) ->
-      agent_child_loop(settle_pending_wakes(st), agent_this)
+    AgentWakeSab(ref) ->
+      agent_child_loop(
+        settle_pending_wakes(rt_async.t_wake_waiter(st, ref)),
+        agent_this,
+        parent,
+      )
     AgentWakeBroadcast(payload) -> {
       let #(st, msg) = payload_to_value(st, payload)
       let st = case agent_queue(st, agent_this, "__agents__") {
@@ -1197,7 +1275,7 @@ fn agent_child_loop(st: Agent, agent_this: JsVal) -> Nil {
           })
         None -> st
       }
-      agent_child_loop(settle_pending_wakes(st), agent_this)
+      agent_child_loop(settle_pending_wakes(st), agent_this, parent)
     }
   }
 }
@@ -1233,59 +1311,77 @@ fn agent_receive_broadcast_native(
 }
 
 /// $262.agent.broadcast(sab) — ship the buffer to every child agent process
-/// and block until all of them have RECEIVED it (test262 INTERPRETING.md).
-/// Children ack on receipt, before invoking their receiveBroadcast
-/// callbacks, so a callback that immediately blocks cannot deadlock the
-/// broadcaster.
+/// in this agent's __children__ list and block until all of them have
+/// RECEIVED it (test262 INTERPRETING.md). Children ack on receipt, before
+/// invoking their receiveBroadcast callbacks, so a callback that immediately
+/// blocks cannot deadlock the broadcaster.
 fn agent_broadcast_native(
-  args: List(JsVal),
-  _this: JsVal,
-  s: HostState,
-) -> #(HostState, Result(JsVal, JsVal)) {
-  case make_broadcast_payload(s.agent, host.first_arg(args)) {
-    None ->
-      host.type_error(
-        s,
-        "$262.agent.broadcast: argument must be a (Shared)ArrayBuffer or a primitive",
-      )
-    Some(payload) -> {
-      let children = ffi_agent_children()
-      let Nil = list.each(children, ffi_send_broadcast(_, payload))
-      let Nil = ffi_await_acks(children)
-      done(s, s.agent)
-    }
-  }
-}
-
-/// Serialize a broadcast argument. (Shared)ArrayBuffers travel as their
-/// backing storage; primitives travel as-is; any other object has no
-/// cross-store meaning, and a detached buffer has no storage to ship.
-fn make_broadcast_payload(st: Agent, v: JsVal) -> Option(AgentPayload) {
-  case classify(v) {
-    KHandle(h) ->
-      case buffer.buffer_storage(st, h) {
-        Some(Detached(..)) | None -> None
-        Some(storage) -> Some(AgentSabPayload(storage:))
-      }
-    _ -> Some(AgentValuePayload(v))
-  }
-}
-
-/// $262.agent.report(value) — in a child agent process, post ToString(value)
-/// to the parent's mailbox; in the main agent, push onto the local
-/// __reports__ queue (degenerate self-report).
-fn agent_report_native(
   args: List(JsVal),
   this: JsVal,
   s: HostState,
 ) -> #(HostState, Result(JsVal, JsVal)) {
+  case agent_queue(s.agent, this, "__children__") {
+    None -> host.type_error(s, "broadcast: $262.agent state missing")
+    Some(#(_arr, children)) -> {
+      let pids =
+        list.filter_map(children, fn(child) {
+          host.read_host(s, child) |> option.to_result(Nil)
+        })
+      case make_broadcast_payload(s.agent, host.first_arg(args)) {
+        #(None, st) ->
+          host.type_error(
+            host.State(..s, agent: st),
+            "$262.agent.broadcast: argument must be a (Shared)ArrayBuffer or a primitive",
+          )
+        #(Some(payload), st) -> {
+          let Nil = ffi_broadcast(pids, payload)
+          done(s, st)
+        }
+      }
+    }
+  }
+}
+
+/// Serialize a broadcast argument. A SharedArrayBuffer is first handed to
+/// an owner process (`sab.share`), so the storage that travels is the owner
+/// pid and every receiver aliases one block; a plain ArrayBuffer travels as
+/// its bytes (a copy); primitives travel as-is; any other object has no
+/// cross-store meaning, and a detached buffer has no storage to ship.
+fn make_broadcast_payload(
+  st: Agent,
+  v: JsVal,
+) -> #(Option(AgentPayload), Agent) {
+  case classify(v) {
+    KHandle(h) ->
+      case buffer.buffer_storage(st, h) {
+        Some(Detached(..)) | None -> #(None, st)
+        Some(Shared(..)) -> {
+          let #(_owner, st) = sab.share(st, h)
+          #(option.map(buffer.buffer_storage(st, h), AgentSabPayload), st)
+        }
+        Some(storage) -> #(Some(AgentSabPayload(storage:)), st)
+      }
+    _ -> #(Some(AgentValuePayload(v)), st)
+  }
+}
+
+/// $262.agent.report(value) — in a child agent process, post ToString(value)
+/// to the mailbox of `parent` (the process that started it); in the main
+/// agent (`parent` is None), push onto the local __reports__ queue
+/// (degenerate self-report).
+fn agent_report_native(
+  args: List(JsVal),
+  this: JsVal,
+  s: HostState,
+  parent: Option(AgentPid),
+) -> #(HostState, Result(JsVal, JsVal)) {
   let #(str, st) = rt_val.t_to_string(s.agent, host.first_arg(args))
-  case ffi_agent_parent() {
-    Ok(parent) -> {
+  case parent {
+    Some(parent) -> {
       let Nil = ffi_send_report(parent, str)
       done(s, st)
     }
-    Error(Nil) ->
+    None ->
       case agent_queue(st, this, "__reports__") {
         Some(#(arr, reports)) ->
           done(
@@ -1410,33 +1506,24 @@ fn agent_queue_write(st: Agent, arr: Handle, values: List(JsVal)) -> Agent {
 
 // -- Agent FFI (test262_exec_ffi.erl) --
 
+/// Spawn a child agent process running `body`, which is handed the pid of
+/// this (the parent) process. Returns the child's pid.
 @external(erlang, "test262_exec_ffi", "spawn_agent")
-fn ffi_spawn_agent(_body: fn() -> Nil) -> Nil {
+fn ffi_spawn_agent(_body: fn(AgentPid) -> Nil) -> AgentPid {
   panic as beam_only_test
 }
 
-@external(erlang, "test262_exec_ffi", "agent_children")
-fn ffi_agent_children() -> List(AgentPid) {
+/// Hand `payload` to every child in `pids` and block until each has acked
+/// receipt (a child that died counts as having received it).
+@external(erlang, "test262_exec_ffi", "broadcast")
+fn ffi_broadcast(_pids: List(AgentPid), _payload: AgentPayload) -> Nil {
   panic as beam_only_test
 }
 
-@external(erlang, "test262_exec_ffi", "agent_parent")
-fn ffi_agent_parent() -> Result(AgentPid, Nil) {
-  panic as beam_only_test
-}
-
-@external(erlang, "test262_exec_ffi", "send_broadcast")
-fn ffi_send_broadcast(_pid: AgentPid, _payload: AgentPayload) -> Nil {
-  panic as beam_only_test
-}
-
-@external(erlang, "test262_exec_ffi", "await_acks")
-fn ffi_await_acks(_pids: List(AgentPid)) -> Nil {
-  panic as beam_only_test
-}
-
-@external(erlang, "test262_exec_ffi", "await_broadcast_or_notify")
-fn ffi_await_broadcast_or_notify() -> AgentWake {
+/// Child side: block for the next broadcast, waitAsync wake, or the death
+/// of `parent`.
+@external(erlang, "test262_exec_ffi", "await_broadcast_or_wake")
+fn ffi_await_broadcast_or_wake(_parent: AgentPid) -> AgentWake {
   panic as beam_only_test
 }
 
@@ -1450,67 +1537,21 @@ fn ffi_take_report() -> Result(String, Nil) {
   panic as beam_only_test
 }
 
-// -- Atomics host capabilities (harness as embedder) --
-//
-// The embedder side of the capability contract in arc/host_hooks.gleam:
-// `sync_wait` (blocking sync wait) and `deliver_wake` (wake delivery)
-// supplied as the `HostHooks.atomics` value of every agent the harness
-// boots. Every receive of — and every send into — the
-// `{arc_notify, Ref, Key, ByteIndex}` wake protocol happens HERE, via
-// test262_exec_ffi.erl. This is test262 HOST machinery (INTERPRETING.md):
-// agents and blocking waits are the host's job, the same engine/platform
-// split as V8 vs d8.
+// -- Atomics: [[CanBlock]] and the waitAsync driver (harness as embedder) --
 
-/// The `sync_wait` blocking receive: selective receive for the entry's wake,
-/// with the notify-vs-timeout race resolved by ets:take of our own entry
-/// (negative timeout = infinity). Returns the JS "ok" / "timed-out".
-@external(erlang, "test262_exec_ffi", "await_notify")
-fn ffi_await_notify(
-  _handle: host_hooks.WaiterHandle,
-  _timeout_ms: Int,
-) -> String {
-  panic as beam_only_test
-}
-
-/// The `deliver_wake` capability: send `{arc_notify, Ref, Key, ByteIndex}` to
-/// each remote waiter claimed by Atomics.notify's waiterlist take.
-@external(erlang, "test262_exec_ffi", "deliver_wakes")
-fn ffi_deliver_wakes(_claimed: List(host_hooks.ClaimedWaiter)) -> Nil {
-  panic as beam_only_test
-}
-
-/// Blocking-wait capability (`AtomicsCapabilities.sync_wait` on
-/// `HostHooks.atomics`): suspend this worker process in a selective receive
-/// until the registered waiterlist entry is woken or the timeout elapses.
-/// `timeout_ms: None` = wait forever (the FFI clamps to the BEAM receive
-/// ceiling). A `Some(0)` timeout doubles as the cancel flush — see
-/// await_notify's doc.
-fn atomics_sync_wait(req: host_hooks.WaitRequest) -> host_hooks.WaitOutcome {
-  let host_hooks.WaitRequest(handle:, timeout_ms:, key: _, byte_index: _) = req
-  case ffi_await_notify(handle, option.unwrap(timeout_ms, -1)) {
-    "timed-out" -> host_hooks.WaitTimedOut
-    _ -> host_hooks.WaitOk
-  }
-}
-
-/// The harness's host capabilities — both Atomics capabilities together,
-/// as `AtomicsCapabilities` demands (a host that can block but not deliver
-/// wakes, or vice versa, deadlocks its peers). Supplied ONCE, when the
-/// harness boots an agent; every realm and activation of that agent —
-/// eval/Function code, $262.createRealm children, module bodies including
-/// dynamic import() — reads the same record, and $262.agent children boot
-/// with it too.
+/// The harness's host hooks: [[CanBlock]] = true (§9.7), so its agents — the
+/// main test agent and every `$262.agent` worker, each its own process — may
+/// park in a sync `Atomics.wait`. A CanBlockIsFalse test strips it again in
+/// `boot_agent`.
 fn harness_host_hooks() -> host.HostHooks {
-  host.with_atomics(
-    host.default_host_hooks(),
-    sync_wait: atomics_sync_wait,
-    deliver_wake: ffi_deliver_wakes,
-  )
+  host_hooks.with_can_block(host.default_host_hooks(), True)
 }
 
 /// The harness's post-script driver: one microtask checkpoint through the
 /// shared drain, so promise reactions (and the async $DONE protocol) settle
-/// before an outcome is read.
+/// before an outcome is read. The drain is also what wakes and times out
+/// `Atomics.waitAsync` waiters; it returns once the queue is dry and no
+/// waiter with a deadline remains.
 fn settle_pending_wakes(st: Agent) -> Agent {
   rt_async.drain(st)
 }

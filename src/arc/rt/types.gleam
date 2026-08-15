@@ -507,9 +507,8 @@ pub type ViewElementType {
 ///   IsImmutableBuffer state (transferToImmutable / sliceToImmutable
 ///   results): never shared, never resizable, never detachable, and every
 ///   write path (Atomics, TypedArray/DataView stores) rejects it.
-/// * `Shared` — a SharedArrayBuffer: bytes held in this agent's store
-///   exactly like `Bytes` (current [[ArrayBufferByteLength]] =
-///   `byte_size(bytes)`). `max_byte_length: Some(_)` iff growable.
+/// * `Shared` — a SharedArrayBuffer's Shared Data Block (§6.2.9), wherever
+///   it lives (`SharedBlock`). `max_byte_length: Some(_)` iff growable.
 ///
 /// Shared-ness is not a flag: a buffer is shared iff its storage is
 /// `Shared`. Detached-ness is not a flag: a buffer is detached iff its
@@ -518,9 +517,44 @@ pub type BufferStorage {
   Detached(max_byte_length: Option(Int))
   Bytes(bytes: BitArray, max_byte_length: Option(Int))
   Immutable(bytes: BitArray)
-  /// Multi-agent sharing is not supported in this runtime.
-  Shared(bytes: BitArray, max_byte_length: Option(Int))
+  Shared(block: SharedBlock, max_byte_length: Option(Int))
 }
+
+/// Where a SharedArrayBuffer's bytes (and its WaiterList) live.
+///
+/// * `LocalBlock` — no other agent has ever been handed this buffer, so its
+///   bytes sit in this agent's store exactly like `Bytes` and every access
+///   is the same pure binary read/rebuild. A block only this agent can see
+///   has no waiters either: registering one promotes it first.
+/// * `OwnerBlock` — the block has been shared (broadcast to another agent,
+///   or waited on): an owner PROCESS (`arc_rt_sab_ffi`) holds the bytes and
+///   the WaiterList, every agent holding the buffer holds this same pid, and
+///   each read / write / read-modify-write / wait / notify is a synchronous
+///   message to it. `byte_length` is the length at hand-off: authoritative
+///   for a fixed-length buffer, a lower bound for a growable one (whose live
+///   length is the owner's, `buffer_byte_size`).
+pub type SharedBlock {
+  LocalBlock(bytes: BitArray)
+  OwnerBlock(owner: SabOwner, byte_length: Int)
+}
+
+/// Pid of a shared block's owner process (`arc_rt_sab_ffi:spawn_owner/1`).
+/// An ordinary Erlang pid: it travels between processes inside the
+/// `BufferStorage` term and aliases the same block wherever it lands.
+pub type SabOwner
+
+/// Identity of one waiter registered with an owner (an Erlang reference,
+/// `arc_rt_sab_ffi:make_waiter_ref/0`). The owner's wake message names it.
+pub type WaiterRef
+
+@external(erlang, "arc_rt_sab_ffi", "byte_length")
+fn sab_byte_length(owner: SabOwner) -> Int
+
+@external(erlang, "arc_rt_sab_ffi", "read")
+fn sab_read(owner: SabOwner) -> BitArray
+
+@external(erlang, "arc_rt_sab_ffi", "write")
+fn sab_write(owner: SabOwner, byte_offset: Int, chunk: BitArray) -> Nil
 
 /// Whether the storage is a SharedArrayBuffer backing. This is THE definition
 /// of shared-ness — there is no separate flag.
@@ -559,31 +593,46 @@ pub fn buffer_max_byte_length(storage: BufferStorage) -> Option(Int) {
 }
 
 /// [[ArrayBufferByteLength]] of a storage value — +0 for a detached buffer,
-/// which is exactly what §25.1.6.2 / §25.1.3.4 want.
+/// which is exactly what §25.1.6.2 / §25.1.3.4 want. A growable owner-held
+/// block is asked for its live length (§25.2.2.5 step 4: the length of a
+/// growable SAB is read from the shared block); a fixed-length one never
+/// changes, so the hand-off length stands.
 pub fn buffer_byte_size(storage: BufferStorage) -> Int {
   case storage {
     Detached(..) -> 0
-    Bytes(bytes:, ..) | Immutable(bytes:) | Shared(bytes:, ..) ->
-      bit_array.byte_size(bytes)
+    Bytes(bytes:, ..)
+    | Immutable(bytes:)
+    | Shared(block: LocalBlock(bytes:), ..) -> bit_array.byte_size(bytes)
+    Shared(block: OwnerBlock(byte_length:, ..), max_byte_length: None) ->
+      byte_length
+    Shared(block: OwnerBlock(owner:, ..), max_byte_length: Some(_)) ->
+      sab_byte_length(owner)
   }
 }
 
 /// The live buffer contents, or None when the buffer is DETACHED — there are
 /// no bytes to hand out, and the compiler makes every reader say what it
-/// does about that. Zero cost: the (immutable) backing binary itself.
+/// does about that. Zero cost for in-store bytes (the backing binary
+/// itself); an owner-held shared block answers with a snapshot of its bytes
+/// (one message round trip), which is a valid unordered read of every byte.
 pub fn buffer_bits(storage: BufferStorage) -> Option(BitArray) {
   case storage {
     Detached(..) -> None
-    Bytes(bytes:, ..) | Immutable(bytes:) | Shared(bytes:, ..) -> Some(bytes)
+    Bytes(bytes:, ..)
+    | Immutable(bytes:)
+    | Shared(block: LocalBlock(bytes:), ..) -> Some(bytes)
+    Shared(block: OwnerBlock(owner:, ..), ..) -> Some(sab_read(owner))
   }
 }
 
 /// Persist a full-buffer image `new_bits`. `byte_offset`/`count` name the
 /// region the caller actually modified (§6.2.9.3 CopyDataBlockBytes writes
-/// exactly that range); with in-store shared bytes the whole image is the
-/// new storage either way, but the region MUST lie inside `new_bits`: every
-/// caller has already validated the write range against the live buffer, so
-/// an out-of-range region is an arithmetic bug in the caller — crash rather
+/// exactly that range). With in-store bytes the whole image is the new
+/// storage; an owner-held shared block is sent ONLY that region, so bytes
+/// another agent wrote elsewhere since this agent's snapshot are not
+/// clobbered. Either way the region MUST lie inside `new_bits`: every caller
+/// has already validated the write range against the live buffer, so an
+/// out-of-range region is an arithmetic bug in the caller — crash rather
 /// than silently drop the store.
 ///
 /// `Detached` and `Immutable` storage have nothing to write into: every write
@@ -601,13 +650,22 @@ pub fn buffer_store_region(
   case storage {
     Bytes(bytes: _, max_byte_length:) ->
       Bytes(bytes: new_bits, max_byte_length:)
-    Shared(bytes: _, max_byte_length:) -> {
+    Shared(block:, max_byte_length:) -> {
       let assert True =
         byte_offset >= 0
         && count >= 0
         && byte_offset + count <= bit_array.byte_size(new_bits)
         as "buffer_store_region: write range outside the new buffer image"
-      Shared(bytes: new_bits, max_byte_length:)
+      case block {
+        LocalBlock(_) ->
+          Shared(block: LocalBlock(bytes: new_bits), max_byte_length:)
+        OwnerBlock(owner:, ..) -> {
+          let assert Ok(chunk) = bit_array.slice(new_bits, byte_offset, count)
+            as "buffer_store_region: region checked above"
+          let Nil = sab_write(owner, byte_offset, chunk)
+          storage
+        }
+      }
     }
     Immutable(..) | Detached(..) -> storage
   }

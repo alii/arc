@@ -3,8 +3,9 @@
 //// Both share one exotic kind — `ArrayBufferObj` — whose whole state is a
 //// `types.BufferStorage` sum type:
 ////   Bytes     — a plain ArrayBuffer (an immutable BEAM binary),
-////   Shared    — a SharedArrayBuffer (bytes held in this agent's store;
-////               multi-agent sharing is not supported in this runtime),
+////   Shared    — a SharedArrayBuffer (bytes in this agent's store until
+////               the buffer is shared with another agent, then held by
+////               its owner process — `types.SharedBlock`),
 ////   Immutable — an immutable ArrayBuffer (immutable-arraybuffer proposal),
 ////   Detached  — [[ArrayBufferData]] = null.
 //// Detached-ness, shared-ness and immutability are variants, not flags, so a
@@ -23,6 +24,7 @@ import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/sab
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayBufferNative, type BufferStorage, type BuiltinPair,
@@ -32,14 +34,15 @@ import arc/rt/types.{
   ArrayBufferN, ArrayBufferObj, ArrayBufferResize, ArrayBufferSlice,
   ArrayBufferSliceToImmutable, ArrayBufferTransfer,
   ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable, Bytes,
-  DataViewObj, Detached, Immutable, JInt, KHandle, KUndef, Named, ReturnThis,
-  SObject, Shared, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
+  DataViewObj, Detached, Immutable, JInt, KHandle, KUndef, LocalBlock, Named,
+  OwnerBlock, ReturnThis, SObject, Shared, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
   SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
   SharedArrayBufferGrow, SharedArrayBufferSlice, StringKey, TypedArrayObj,
   classify, mk_bool, mk_number, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
+import gleam/bool
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -286,11 +289,15 @@ fn allocate(
           rt_val.t_throw_range_error(st, "Array buffer allocation failed")
         True -> {
           // §6.2.9.2 CreateByteDataBlock / CreateSharedByteDataBlock: both
-          // are an immutable BEAM binary in this runtime; a growable SAB
-          // grows by appending zeros (grow publishes a new image).
+          // start as an immutable BEAM binary in this agent's store; a
+          // shared block moves to an owner process only once it is shared.
           let storage = case shared {
             False -> Bytes(bytes: zero_block(byte_length), max_byte_length: max)
-            True -> Shared(bytes: zero_block(byte_length), max_byte_length: max)
+            True ->
+              Shared(
+                block: LocalBlock(bytes: zero_block(byte_length)),
+                max_byte_length: max,
+              )
           }
           realm_ops.alloc_wrapper(st, ArrayBufferObj(storage:), proto)
         }
@@ -716,8 +723,8 @@ fn ab_transfer(
 /// §25.2.5.2 get SharedArrayBuffer.prototype.byteLength
 fn sab_get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "byteLength")
-  let bytes = require_shared(st, buf, "byteLength")
-  #(mk_number(JInt(bit_array.byte_size(bytes))), st)
+  let _block = require_shared(st, buf, "byteLength")
+  #(mk_number(JInt(live_byte_size(buf))), st)
 }
 
 /// §25.2.5.4 get SharedArrayBuffer.prototype.growable
@@ -730,8 +737,8 @@ fn sab_get_growable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 /// §25.2.5.5 get SharedArrayBuffer.prototype.maxByteLength
 fn sab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "maxByteLength")
-  let bytes = require_shared(st, buf, "maxByteLength")
-  let max = option.unwrap(max_byte_length(buf), bit_array.byte_size(bytes))
+  let _block = require_shared(st, buf, "maxByteLength")
+  let max = option.unwrap(max_byte_length(buf), live_byte_size(buf))
   #(mk_number(JInt(max)), st)
 }
 
@@ -751,7 +758,7 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         "SharedArrayBuffer.prototype.grow called on a non-growable SharedArrayBuffer",
       )
     Some(max) -> {
-      let _bytes = require_shared(st, buf, "grow")
+      let _block = require_shared(st, buf, "grow")
       let #(new_len, st) =
         rt_val.t_to_index(
           st,
@@ -760,24 +767,37 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         )
       // ToIndex may run user code (a nested grow) — re-read the length.
       let buf = require_buffer(st, mk_object(buf.ref), "grow")
-      let bits = require_shared(st, buf, "grow")
-      let current = bit_array.byte_size(bits)
+      let block = require_shared(st, buf, "grow")
+      let invalid = fn() {
+        rt_val.t_throw_range_error(
+          st,
+          "SharedArrayBuffer.prototype.grow: invalid length",
+        )
+      }
       // The length is monotonic: shrinking is a RangeError, so is exceeding
       // the max the storage was declared with.
-      case new_len < current || new_len > max {
-        True ->
-          rt_val.t_throw_range_error(
-            st,
-            "SharedArrayBuffer.prototype.grow: invalid length",
-          )
-        False -> {
+      use <- bool.lazy_guard(new_len > max, invalid)
+      case block {
+        LocalBlock(bytes: bits) -> {
+          let current = bit_array.byte_size(bits)
+          use <- bool.lazy_guard(new_len < current, invalid)
           let storage =
             Shared(
-              bytes: bit_array.append(bits, zero_block(new_len - current)),
+              block: LocalBlock(
+                bytes: bit_array.append(bits, zero_block(new_len - current)),
+              ),
               max_byte_length: Some(max),
             )
           #(mk_undefined(), buffer.set_storage(st, buf.ref, storage))
         }
+        // Another agent may grow the block between any read of its length
+        // and our write, so the compare-and-grow is the owner's one step
+        // (§25.2.2.3 GrowSharedArrayBuffer's compare-exchange loop).
+        OwnerBlock(owner:, ..) ->
+          case sab.grow(owner, new_len) {
+            Ok(Nil) -> #(mk_undefined(), st)
+            Error(Nil) -> invalid()
+          }
       }
     }
   }
@@ -847,11 +867,11 @@ fn require_unshared(st: Agent, buf: Buf, method: String) -> Buf {
 }
 
 /// IsSharedArrayBuffer(O) must be true, else TypeError. Hands back the shared
-/// bytes — the proof travels with the gate, so no caller has to write a "what
+/// block — the proof travels with the gate, so no caller has to write a "what
 /// if it were byte storage" branch. (`Shared` is never detached.)
-fn require_shared(st: Agent, buf: Buf, method: String) -> BitArray {
+fn require_shared(st: Agent, buf: Buf, method: String) -> types.SharedBlock {
   case buf.storage {
-    Shared(bytes:, ..) -> bytes
+    Shared(block:, ..) -> block
     Bytes(..) | Immutable(..) | Detached(..) -> incompatible(st, method)
   }
 }
