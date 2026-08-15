@@ -4,6 +4,7 @@ import arc/engine.{
 }
 import arc/host.{State}
 import arc/module/load_error
+import arc/module_host
 import arc/rt/builtins/console
 import arc/rt/snapshot.{IncompatibleSnapshot, MalformedBinary}
 import arc/rt/types.{
@@ -268,6 +269,52 @@ pub fn serialize_host_fn_reregister_test() {
     })
 
   assert assert_eval(restored, "double(5)") == JsNumber(Finite(10.0))
+}
+
+pub fn serialize_host_fn_reregister_after_import_hook_test() {
+  // The dynamic-import hook lives in the same table as the embedder's host
+  // functions. Installing it BEFORE registering must not shift their ids:
+  // the restored engine has no hook, and re-registering in the same order
+  // has to land each function on the id its surviving object still carries.
+  // `d`/`n` hold the ORIGINAL function objects across the roundtrip, so they
+  // dispatch on the ids minted before serialization, not the fresh globals.
+  let double = fn(args, _this, state) {
+    case kinds(args) {
+      [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
+      _ -> #(state, Ok(mk_undefined()))
+    }
+  }
+  let negate = fn(args, _this, state) {
+    case kinds(args) {
+      [JsNumber(Finite(n)), ..] -> #(state, Ok(num(0.0 -. n)))
+      _ -> #(state, Ok(mk_undefined()))
+    }
+  }
+  let #(eng, Nil) =
+    engine.with_state(engine.new(), fn(s) {
+      let agent =
+        module_host.install_import_hook(
+          s.agent,
+          "/main.js",
+          reject_imports,
+          reject_loads,
+        )
+      #(State(..s, agent:), Nil)
+    })
+  let eng =
+    eng
+    |> engine.define_fn("double", 1, double)
+    |> engine.define_fn("negate", 1, negate)
+  let assert Ok(#(_, eng)) = engine.eval(eng, "var d = double, n = negate;")
+  assert assert_eval(eng, "d(5)") == JsNumber(Finite(10.0))
+  assert assert_eval(eng, "n(5)") == JsNumber(Finite(-5.0))
+
+  let restored =
+    roundtrip(eng)
+    |> engine.define_fn("double", 1, double)
+    |> engine.define_fn("negate", 1, negate)
+  assert assert_eval(restored, "d(5)") == JsNumber(Finite(10.0))
+  assert assert_eval(restored, "n(5)") == JsNumber(Finite(-5.0))
 }
 
 pub fn serialize_constructor_and_instances_test() {
