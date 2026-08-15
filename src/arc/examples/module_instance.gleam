@@ -8,8 +8,8 @@
 //// one file. Run with: gleam run -m arc/examples/module_instance
 
 import arc/engine.{ModuleReturned, Returned, Threw}
-import arc/host
 import arc/module_host
+import arc/vm/host
 import arc/vm/state
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io

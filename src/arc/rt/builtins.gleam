@@ -49,17 +49,18 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
   type Realm, Agent, ArrayBufferN, ArrayN, AsyncGenResume, AsyncResume, AtomicsN,
-  BigIntN, BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataViewN, DateN,
-  ErrorN, FunctionN, GeneratorN, GlobalN, IteratorN, JInt, JNan, JPosInf, JsOps,
-  JsStore, JsonN, KHandle, MapN, MathN, Named, NativeUnseeded, NoElements,
-  NumberConstructor, NumberN, NumberObj, ObjectN, Ordinary, PromiseN,
-  PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN,
-  ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN, StringObj,
-  SymbolConstructor, SymbolN, ThrowTypeErrorPoison, TypedArrayN, WeakN, classify,
-  mk_number, mk_object, mk_undefined,
+  BigIntN, BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty,
+  DataViewN, DateN, ErrorN, FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry,
+  IteratorN, JInt, JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN,
+  Named, NativeUnseeded, NoElements, NumberConstructor, NumberN, NumberObj,
+  ObjectN, Ordinary, PromiseN, PromiseRejectFn, PromiseResolveFn, ProxyN, Realm,
+  ReflectN, RegExpN, ReturnThis, SObject, SetN, StringConstructor, StringKey,
+  StringN, StringObj, SymbolConstructor, SymbolN, ThrowTypeErrorPoison,
+  TypedArrayN, WeakN, classify, mk_number, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
+import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 
@@ -75,6 +76,7 @@ pub fn new_agent(hooks: HostHooks) -> Agent {
       template_objects: dict.new(),
       frames: [],
       hooks:,
+      host_fns: dict.new(),
     )
   let #(_realm, st) = init_realm(st)
   st
@@ -492,6 +494,8 @@ pub fn dispatch_native(
       b_function.dispatch(st, rt_types.ThrowTypeErrorFn, this, args)
     NativeUnseeded ->
       panic as "dispatch_native: NativeUnseeded token reached (unimplemented builtin)"
+    // ── embedder natives: plain [[Call]], NewTarget undefined (§10.2.1) ─────
+    HostFn(id:) -> call_host_fn(st, id, this, args, mk_undefined())
     // ── per-module wrapper variants ─────────────────────────────────────────
     ObjectN(n) -> b_object.dispatch(st, n, this, args)
     FunctionN(n) -> b_function.dispatch(st, n, this, args)
@@ -545,6 +549,7 @@ pub fn dispatch_native_construct(
       let #(v, st) = b_error.dispatch(st, n, mk_undefined(), args, new_target)
       require_handle(st, v)
     }
+    HostFn(id:) -> construct_host_fn(st, id, args, new_target)
     MapN(n) -> b_map.dispatch_construct(st, n, args, new_target)
     SetN(n) -> b_set.dispatch_construct(st, n, args, new_target)
     WeakN(n) -> b_weak.dispatch_construct(st, n, args, new_target)
@@ -665,5 +670,73 @@ fn require_handle(st: Agent, v: JsVal) -> #(Handle, Agent) {
     KHandle(h) -> #(h, st)
     _ ->
       panic as "dispatch_native_construct: native constructor returned non-object"
+  }
+}
+
+// ───────────────────────────── embedder natives ─────────────────────────────
+
+/// Run the closure registered under `HostFn(id)`. The one site where the
+/// embedder's `Result` contract meets the runtime's raise contract:
+/// `Error(thrown)` becomes `t_throw`. An id with no entry (a deserialized
+/// engine whose natives were not re-registered) is a TypeError.
+fn call_host_fn(
+  st: Agent,
+  id: Int,
+  this: JsVal,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(JsVal, Agent) {
+  case dict.get(st.host_fns, id) {
+    Ok(HostFnEntry(call:, ..)) ->
+      case call(st, args, this, new_target) {
+        #(st, Ok(v)) -> #(v, st)
+        #(st, Error(thrown)) -> rt_store.t_throw(st, thrown)
+      }
+    Error(Nil) ->
+      rt_val.t_throw_type_error(
+        st,
+        "host function #" <> int.to_string(id) <> " is not registered",
+      )
+  }
+}
+
+/// [[Construct]] of a host class. The closure sees `new_target`, `this` is
+/// undefined, and it must return an object. That object is re-prototyped to
+/// `new_target.prototype` when it is an own data property holding an object,
+/// so `class Sub extends HostClass {}` yields `Sub.prototype` instances even
+/// when the closure allocated a plain object (port of arc `exec/call.gleam`
+/// do_construct, native arm).
+fn construct_host_fn(
+  st: Agent,
+  id: Int,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  let #(v, st) = call_host_fn(st, id, mk_undefined(), args, new_target)
+  case classify(v), own_data_prototype(st, new_target) {
+    KHandle(h), Some(proto) -> {
+      let #(_changed, st) = rt_obj.t_set_prototype(st, h, Some(proto))
+      #(h, st)
+    }
+    KHandle(h), None -> #(h, st)
+    _, _ ->
+      rt_val.t_throw_type_error(st, "host constructor must return an object")
+  }
+}
+
+/// `ctor.prototype` iff it is an own DATA property holding an object: no
+/// getter runs and no proxy trap fires.
+fn own_data_prototype(st: Agent, ctor: JsVal) -> option.Option(Handle) {
+  use h <- option.then(as_handle(ctor))
+  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named("prototype"))) {
+    Some(DataProperty(value:, ..)) -> as_handle(value)
+    _ -> None
+  }
+}
+
+fn as_handle(v: JsVal) -> option.Option(Handle) {
+  case classify(v) {
+    KHandle(h) -> Some(h)
+    _ -> None
   }
 }

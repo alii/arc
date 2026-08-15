@@ -20,7 +20,7 @@ import arc/rt/types.{
   AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty, DataViewObj, DateObj,
   Dense, ErrorObj, ForInIterator, GeneratorObj, Handler, HostJob,
   IdentityPassThrough, IteratorHelperObj, JsCell, JsStore, KBound, KBytecode,
-  KCompiled, KNative, MapIterator, MapObj, ModuleNamespace, NoElements,
+  KCompiled, KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements,
   NumberObj, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
   PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
   ResolveThenableJob, SAsyncContext, SAsyncGen, SBox, SGenerator, SObject,
@@ -110,7 +110,10 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
-  push_term_refs(to_dynamic(jq_to_list(microtasks)), acc)
+  let acc = push_term_refs(to_dynamic(jq_to_list(microtasks)), acc)
+  // Embedder closures may capture handles (a class constructor holding its
+  // prototype); walk their fun envs.
+  push_term_refs(to_dynamic(dict.values(st.host_fns)), acc)
 }
 
 // ── cell tracer (arc gc_trace.gleam:61-540) ─────────────────────────────────
@@ -190,6 +193,8 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       let acc = push_val_refs(bound_this, [target.id, ..acc])
       list.fold(bound_args, acc, fn(a, v) { push_val_refs(v, a) })
     }
+    // Handles the embedder stashed inside its own value keep their cells.
+    KHost(payload:) -> push_term_refs(to_dynamic(payload), acc)
     ErrorObj(stack: _) -> acc
     MapObj(entries:) ->
       ordered_entries.fold(entries, acc, fn(a, k, v) {

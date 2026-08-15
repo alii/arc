@@ -93,6 +93,7 @@ pub fn agent_test() {
   assert arity(st) == idx("AGENT_ARITY")
   assert at(st, "AGENT_STORE") == dyn(st.store)
   assert at(st, "AGENT_REALM") == dyn(st.realm)
+  assert at(st, "AGENT_HOST_FNS") == dyn(st.host_fns)
   assert tag_of(at(st, "AGENT_STORE")) == tag("STORE_TAG")
   assert tag_of(at(st, "AGENT_REALM")) == tag("REALM_TAG")
 }

@@ -842,6 +842,10 @@ pub type NativeToken {
   /// %ThrowTypeError% (§10.2.4.1) — poison-pill for restricted
   /// `caller`/`arguments` accessors on `Function.prototype`.
   ThrowTypeErrorPoison
+  /// An embedder native: `id` keys `Agent.host_fns`. The cell carries no
+  /// closure, so it serializes; the embedder re-registers in the same order
+  /// after `deserialize` and the ids line up again.
+  HostFn(id: Int)
 }
 
 /// §27.2 Promise built-in dispatch tokens. Handle-carrying variants are the
@@ -1706,7 +1710,8 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     | ReflectN(_)
     | ConsoleN(_)
     | GlobalN(_)
-    | ThrowTypeErrorPoison -> []
+    | ThrowTypeErrorPoison
+    | HostFn(_) -> []
   }
 }
 
@@ -2001,6 +2006,10 @@ pub type ObjKind {
   )
   KNative(tag: NativeToken, name: String, length: Int, constructible: Bool)
   KBound(target: Handle, bound_this: JsVal, bound_args: List(JsVal))
+  /// An opaque embedder-owned object (arc HostObject). No own behaviour
+  /// beyond Ordinary; `payload` is the embedder's value, type-erased here
+  /// and read back typed by `arc/host`.
+  KHost(payload: HostTerm)
   ErrorObj(stack: String)
   MapObj(entries: OrderedEntries(MapKey, JsVal))
   SetObj(entries: OrderedEntries(MapKey, JsVal))
@@ -2558,6 +2567,9 @@ pub type Agent {
     /// Embedder capabilities (clocks, PRNG, console sink, uncaught-report
     /// sink). Not part of the heap: excluded from GC and serialization.
     hooks: HostHooks,
+    /// Embedder natives by `NativeToken.HostFn(id)`. Closures, so excluded
+    /// from serialization like `hooks`; the embedder re-registers them.
+    host_fns: Dict(Int, HostFnEntry),
   )
 }
 
@@ -2565,4 +2577,21 @@ pub type Agent {
 /// for anonymous code (the top-level script body); `line` 0 is unknown.
 pub type FrameInfo {
   FrameInfo(name: String, script: String, line: Int)
+}
+
+/// The embedder's own value inside a `KHost` cell. `Agent` is deliberately
+/// not generic over it: the parameter would thread through every runtime
+/// signature for one variant nothing in the runtime inspects. `arc/host`
+/// erases to this on allocation and its `State(host)` reads it back typed.
+pub type HostTerm
+
+/// A registered embedder native. `call` takes `(agent, args, this,
+/// new_target)`; `new_target` is `undefined` under [[Call]]. A returned
+/// `Error(thrown)` is raised by the dispatcher, so the embedder-facing
+/// contract stays Result-shaped while the runtime's stays raise-shaped.
+pub type HostFnEntry {
+  HostFnEntry(
+    name: String,
+    call: fn(Agent, List(JsVal), JsVal, JsVal) -> #(Agent, Result(JsVal, JsVal)),
+  )
 }

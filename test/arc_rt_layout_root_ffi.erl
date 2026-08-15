@@ -8,6 +8,7 @@
 idx(<<"AGENT_ARITY">>) -> ?AGENT_ARITY;
 idx(<<"AGENT_STORE">>) -> ?AGENT_STORE;
 idx(<<"AGENT_REALM">>) -> ?AGENT_REALM;
+idx(<<"AGENT_HOST_FNS">>) -> ?AGENT_HOST_FNS;
 idx(<<"STORE_DATA">>) -> ?STORE_DATA;
 idx(<<"STORE_FREE">>) -> ?STORE_FREE;
 idx(<<"STORE_NEXT">>) -> ?STORE_NEXT;

@@ -15,12 +15,12 @@ import arc/rt/types.{
   type PropertyKey, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
   AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty,
   DataViewObj, DateObj, ErrorObj, ForInIterator, GeneratorObj, Index,
-  IteratorHelperObj, KBig, KBool, KBound, KBytecode, KCompiled, KHandle, KNative,
-  KNull, KNum, KStr, KSym, KTdz, KUndef, MapIterator, MapObj, ModuleNamespace,
-  Named, NumberObj, Ordinary, Private, PromiseObj, ProxyObj, RawJsonObj,
-  RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator, StringObj,
-  SymbolObj, TypedArrayObj, WeakMapObj, WeakSetObj, WrapForValidIteratorObj,
-  classify,
+  IteratorHelperObj, KBig, KBool, KBound, KBytecode, KCompiled, KHandle, KHost,
+  KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, MapIterator, MapObj,
+  ModuleNamespace, Named, NumberObj, Ordinary, Private, PromiseObj, ProxyObj,
+  RawJsonObj, RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator,
+  StringObj, SymbolObj, TypedArrayObj, WeakMapObj, WeakSetObj,
+  WrapForValidIteratorObj, classify,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/ordered_entries
@@ -177,8 +177,9 @@ fn inspect_object(
         // ErrorObj, so unwrap is safe here.
         ErrorObj(_) -> error_display(st, h) |> option.unwrap("[Error]")
         // A tagged ordinary object renders via its Symbol.toStringTag
-        // (`Object [Tag] { ... }`).
-        Ordinary -> {
+        // (`Object [Tag] { ... }`). Host objects have no own properties and
+        // render through their prototype's tag the same way.
+        Ordinary | KHost(_) -> {
           let body = inspect_plain_object(st, props, depth, visited)
           case list.key_find(symbol_props, rt_types.symbol_to_string_tag) {
             Ok(DataProperty(value:, ..)) ->

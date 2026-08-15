@@ -3,7 +3,7 @@
 //// Run with: gleam run -m arc/examples/host_ffi
 
 import arc/engine.{Returned}
-import arc/host
+import arc/vm/host
 import arc/vm/value.{JsString, JsUndefined}
 import gleam/io
 import gleam/list

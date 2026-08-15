@@ -1,5 +1,5 @@
 import arc/engine.{Returned, Threw}
-import arc/host
+import arc/vm/host
 import arc/vm/ops/coerce
 import arc/vm/state
 import arc/vm/value.{Finite, JsNumber, JsString, JsUndefined}
