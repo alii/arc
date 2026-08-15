@@ -333,3 +333,40 @@ pub fn shared_buffer_and_atomics_diff_test() {
     "0 5 5 9 9 0 -1 12 10 9 25 -Infinity 0 true\n16 4 true\nTypeError\nRangeError\nTypeError\n",
   )
 }
+
+// ── Meta-object protocol: Proxy / Reflect / String exotic / JSON ───────────
+
+pub fn proxy_traps_logging_diff_test() {
+  diff(
+    "var log=[];var t={a:1,b:2};var h={};['get','set','has','deleteProperty','ownKeys','getOwnPropertyDescriptor','defineProperty','getPrototypeOf'].forEach(function(n){h[n]=function(){log.push(n);return Reflect[n].apply(null,arguments)}});var p=new Proxy(t,h);console.log(p.a);p.c=3;console.log('a' in p,delete p.b,Object.keys(p).join(),t.c,p instanceof Object);var ks=[];for(var k in p)ks.push(k);console.log(ks.join(),log.join())",
+    "1\ntrue true a,c 3 true\na,c get,set,getOwnPropertyDescriptor,defineProperty,has,deleteProperty,ownKeys,getOwnPropertyDescriptor,getOwnPropertyDescriptor,getPrototypeOf,ownKeys,getOwnPropertyDescriptor,getOwnPropertyDescriptor,getPrototypeOf\n",
+  )
+}
+
+pub fn proxy_invariants_and_revocation_diff_test() {
+  diff(
+    "function tr(f){try{return String(f())}catch(e){return e.constructor.name}}var t={};Object.defineProperty(t,'k',{value:1});var p=new Proxy(t,{get:function(){return 2},has:function(){return false},ownKeys:function(){return []},getOwnPropertyDescriptor:function(){return undefined},deleteProperty:function(){return true},isExtensible:function(){return false},defineProperty:function(){return true},getPrototypeOf:function(){return 1}});console.log(tr(function(){return p.k}),tr(function(){return 'k' in p}),tr(function(){return Object.keys(p)}),tr(function(){return Object.getOwnPropertyDescriptor(p,'k')}),tr(function(){return Reflect.deleteProperty(p,'k')}),tr(function(){return Object.isExtensible(p)}),tr(function(){return Object.defineProperty(p,'z',{configurable:false})}),tr(function(){return Object.getPrototypeOf(p)}),Reflect.defineProperty(new Proxy({},{defineProperty:function(){return false}}),'x',{}),tr(function(){return new Proxy({},{get:1}).x}));var r=Proxy.revocable(function(){},{});r.revoke();r.revoke();console.log(tr(function(){return r.proxy.x}),tr(function(){return Object.keys(r.proxy)}),tr(function(){return r.proxy()}),typeof r.proxy,tr(function(){return Array.isArray(r.proxy)}),Array.isArray(new Proxy(new Proxy([],{}),{})))",
+    "TypeError TypeError TypeError TypeError TypeError TypeError TypeError TypeError false TypeError\nTypeError TypeError TypeError function TypeError true\n",
+  )
+}
+
+pub fn reflect_through_proxy_diff_test() {
+  diff(
+    "var t={x:1};var p=new Proxy(t,{});Reflect.set(p,'y',2);console.log(Reflect.get(p,'x'),Reflect.has(p,'y'),t.y,Reflect.ownKeys(p).join(),Reflect.getPrototypeOf(p)===Object.prototype,Reflect.setPrototypeOf(p,null),Object.getPrototypeOf(t),Reflect.isExtensible(p),Reflect.preventExtensions(p),Object.isExtensible(t),Reflect.defineProperty(p,'z',{value:3}),Reflect.deleteProperty(p,'x'),JSON.stringify(Reflect.getOwnPropertyDescriptor(p,'y')),JSON.stringify(Object.getOwnPropertyDescriptors(p)));var c=Object.create(new Proxy({inh:7},{}));console.log(c.inh,'inh' in c,Object.keys(Object.assign({},p)).join())",
+    "1 true 2 x,y true true null true true false false true {\"value\":2,\"writable\":true,\"enumerable\":true,\"configurable\":true} {\"y\":{\"value\":2,\"writable\":true,\"enumerable\":true,\"configurable\":true}}\n7 true y\n",
+  )
+}
+
+pub fn string_exotic_keys_diff_test() {
+  diff(
+    "var s=new String('abc');s.x=1;s[5]='q';console.log(s[0],s[3],s.length,Object.keys(s).join(),Object.getOwnPropertyNames(s).join(),JSON.stringify(Object.getOwnPropertyDescriptor(s,'1')),delete s[5],'2' in s,'3' in s,Reflect.set(s,'0','z'),s[0],Reflect.defineProperty(s,'0',{value:'a'}),Reflect.defineProperty(s,'0',{value:'z'}),Reflect.defineProperty(s,'length',{value:3}),Reflect.deleteProperty(s,'length'),Object.isFrozen(Object.freeze(new String('hi'))));var r=[];for(var k in s)r.push(k);console.log(r.join(),JSON.stringify(s),JSON.stringify({...new String('ok')}))",
+    "a undefined 3 0,1,2,5,x 0,1,2,5,length,x {\"value\":\"b\",\"writable\":false,\"enumerable\":true,\"configurable\":false} true true false false a true false true false true\n0,1,2,x \"abc\" {\"0\":\"o\",\"1\":\"k\"}\n",
+  )
+}
+
+pub fn json_through_proxy_and_raw_json_diff_test() {
+  diff(
+    "var p=new Proxy({a:[1,{b:2}],c:'x'},{});console.log(JSON.stringify(p),JSON.stringify({r:JSON.rawJSON('99')}),JSON.isRawJSON(JSON.rawJSON('1')),JSON.isRawJSON(Object.freeze({rawJSON:'1'})),JSON.stringify(new Proxy([1,2],{})),Object.prototype.toString.call(new Proxy(function(){},{})),JSON.stringify(p,['c']))",
+    "{\"a\":[1,{\"b\":2}],\"c\":\"x\"} {\"r\":99} true false [1,2] [object Function] {\"c\":\"x\"}\n",
+  )
+}
