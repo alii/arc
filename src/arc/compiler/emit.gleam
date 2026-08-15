@@ -5910,12 +5910,13 @@ fn emit_for_of(
 /// F_next records the same depth B+1 as F_body so unwind_to_catch always
 /// lands on [thrown, iter, ..base].
 ///
-/// Throw-path padding: before the throw-close Await we push a JsUndefined slot
-/// under the awaited value so the saved stack on suspend has length B+2 — the
-/// same as F_swallow's recorded depth. That way every entry into `rethrow`
-/// (getter throw, call throw, await reject, nullish skip, or success) arrives
-/// with exactly three values above ..base and `Pop;Pop;Throw` always rethrows
-/// the original.
+/// Throw-path shape: the iterator is duplicated before `GetField2("return")`
+/// so that once CallMethod has consumed the method and its receiver the stack
+/// is still [iter, thrown, ..base] = B+2, F_swallow's recorded depth. Every
+/// entry into `rethrow` (getter throw, not-callable, call throw from any
+/// callee kind, await reject, nullish skip, or success) therefore arrives with
+/// exactly three values above ..base and `Pop;Pop;Throw` always rethrows the
+/// original, without depending on what a failing call leaves on the stack.
 fn emit_for_await_of(
   e: Emitter,
   left: ast.ForInit,
@@ -5970,32 +5971,31 @@ fn emit_for_await_of(
   let e = emit_ir(e, IrLabel(catch_body))
   let e = emit_ir(e, IrPushTry(rethrow, CatchOnly))
   let e = emit_op(e, opcode.Swap)
-  // [iter, thrown, ..base]
+  let e = emit_op(e, opcode.Dup)
+  // [iter, iter, thrown, ..base]
   let e = emit_ir(e, IrGetField2("return"))
   let e = emit_op(e, opcode.Dup)
   let e = emit_ir(e, IrJumpIfNullish(no_ret_thr))
-  // [ret_fn, iter, thrown, ..base]
+  // [ret_fn, iter, iter, thrown, ..base]
   let e = emit_op(e, opcode.CallMethod(0))
-  // [result, thrown, ..base] — pad so saved_stack after the Await pop has
-  // length B+2 (== F_swallow depth). Reject-unwind then lands at
-  // [inner_err, undef, thrown, ..base] = B+3, matching every other path.
-  let e = push_const(e, mk_undefined())
-  let e = emit_op(e, opcode.Swap)
-  // [result, undef, thrown, ..base]
+  // [result, iter, thrown, ..base]: whatever the call leaves behind on a
+  // throw, unwind truncates to B+2 = [iter, thrown, ..base]; the saved stack
+  // across the Await is that same B+2, so a reject lands at
+  // [inner_err, iter, thrown, ..base] like every other path.
   let e = emit_op(e, opcode.Await)
-  // fulfilled → [awaited, undef, thrown, ..base]
+  // fulfilled → [awaited, iter, thrown, ..base]
   let e = emit_op(e, opcode.PopTry)
   let e = emit_ir(e, IrJump(rethrow))
 
   let e = emit_ir(e, IrLabel(no_ret_thr))
-  // [ret(nullish), iter, thrown, ..base], try=[F_swallow, ..]
+  // [ret(nullish), iter, iter, thrown, ..base], try=[F_swallow, ..]
   let e = emit_op(e, opcode.PopTry)
+  let e = emit_op(e, opcode.Pop)
   // fall through
 
   // rethrow: F_swallow catch-target AND merge point. Stack is always
-  // [_, _, thrown, ..base] (slot0 = inner_err|awaited|nullish-ret;
-  // slot1 = iter|undef). Spec: original throw completion wins, no object
-  // check on the throw path.
+  // [_, iter, thrown, ..base] (slot0 = inner_err|awaited|iter). Spec:
+  // original throw completion wins, no object check on the throw path.
   let e = emit_ir(e, IrLabel(rethrow))
   let e = emit_op(e, opcode.Pop)
   let e = emit_op(e, opcode.Pop)

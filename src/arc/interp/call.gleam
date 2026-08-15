@@ -533,10 +533,9 @@ fn require_callable(
   }
 }
 
-/// The not-callable TypeError is raised with the operand stack untouched
-/// (callee and arguments still on it): `unwind_to_catch` truncates to the
-/// handler's recorded depth, and open-coded close sequences (for-await's
-/// AsyncIteratorClose) record that depth above the popped operands.
+/// The not-callable TypeError. The operand stack is left as-is:
+/// `unwind_to_catch` truncates to the handler's recorded depth, and no
+/// handler records a depth above a call's operands.
 fn not_a_function(state: State, callee: JsVal) -> Result(State, StepExit) {
   state.throw_type_error(
     state,
