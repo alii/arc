@@ -344,6 +344,26 @@ fn write_stack(
   })
 }
 
+/// AddDisposableResource step 3: append to the capability's CURRENT
+/// [[DisposableResourceStack]]. CreateDisposableResource (steps 1-2) runs
+/// user code (@@dispose getters, proxy traps) that may re-entrantly
+/// defer/dispose/move on this same stack, so the slot is re-read here rather
+/// than reusing the pre-call snapshot. A stack disposed or moved during that
+/// user code stays Disposed: the spec appends to a capability that is never
+/// disposed again, which is observably the same as dropping the resource.
+fn append_resource(
+  st: Agent,
+  this: JsVal,
+  async: Bool,
+  resource: DisposeResource,
+) -> Agent {
+  case read_stack(st, this, async) {
+    Some(#(h, Pending(current))) ->
+      write_stack(st, h, Pending([resource, ..current]))
+    _ -> st
+  }
+}
+
 /// §12.3.3.4 / §12.4.3.4 get (Async)DisposableStack.prototype.disposed
 ///
 ///   1. Let stack be the this value.
@@ -456,8 +476,8 @@ fn dispose_resources(
 ///      value, sync-dispose).
 ///   5. Return value.
 fn use_resource(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use h, disposable_state <- require_stack(st, this, False, "use")
-  use resources <- try_pending(st, disposable_state, async: False)
+  use _h, disposable_state <- require_stack(st, this, False, "use")
+  use _resources <- try_pending(st, disposable_state, async: False)
   let val = first_arg_or_undefined(args)
   case classify(val) {
     // AddDisposableResource step 1.a: null/undefined with sync-dispose and
@@ -473,8 +493,7 @@ fn use_resource(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         DirectDispose(method) | SyncFallbackDispose(method) ->
           MethodDispose(value: val, method: mk_object(method))
       }
-      let st = write_stack(st, h, Pending([resource, ..resources]))
-      #(val, st)
+      #(val, append_resource(st, this, False, resource))
     }
     _ ->
       rt_val.t_throw_type_error(
@@ -495,17 +514,14 @@ fn use_resource_async(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use h, disposable_state <- require_stack(st, this, True, "use")
-  use resources <- try_pending(st, disposable_state, async: True)
+  use _h, disposable_state <- require_stack(st, this, True, "use")
+  use _resources <- try_pending(st, disposable_state, async: True)
   let val = first_arg_or_undefined(args)
   case classify(val) {
     // CreateDisposableResource step 1.a: V null/undefined with async-dispose
     // → V = undefined, method = undefined. DisposeResources will still
     // perform one Await(undefined) for it (needsAwait).
-    KUndef | KNull -> {
-      let st = write_stack(st, h, Pending([NullDispose, ..resources]))
-      #(val, st)
-    }
+    KUndef | KNull -> #(val, append_resource(st, this, True, NullDispose))
     KHandle(_) -> {
       // GetDisposeMethod(V, async-dispose): GetMethod(V, @@asyncDispose),
       // falling back to a closure around GetMethod(V, @@dispose).
@@ -518,8 +534,7 @@ fn use_resource_async(
         SyncFallbackDispose(method) ->
           AsyncFallbackDispose(value: val, method: mk_object(method))
       }
-      let st = write_stack(st, h, Pending([resource, ..resources]))
-      #(val, st)
+      #(val, append_resource(st, this, True, resource))
     }
     _ ->
       rt_val.t_throw_type_error(
