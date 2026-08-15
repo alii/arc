@@ -203,10 +203,7 @@ pub fn ctor(
       let date = IsoDate(y, mo, d)
       case iso_datetime_within_limits(date, t) {
         False ->
-          rt_val.t_throw_range_error(
-            st,
-            "date-time outside of supported range",
-          )
+          rt_val.t_throw_range_error(st, "date-time outside of supported range")
         True -> make_date_time_cal(st, protos, date, t, cal)
       }
     }
@@ -319,8 +316,7 @@ pub fn date_time_from_bag(
   let t = terr(st, regulate_time(t0, overflow))
   case iso_datetime_within_limits(date, t) {
     True -> #(#(date, t, cal), st)
-    False ->
-      rt_val.t_throw_range_error(st, "date-time outside supported range")
+    False -> rt_val.t_throw_range_error(st, "date-time outside supported range")
   }
 }
 

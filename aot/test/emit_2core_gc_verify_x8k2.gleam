@@ -252,7 +252,12 @@ fn run_b() {
       io.println("  stdout   : " <> string.inspect(out_str))
       // GC fired between then1 and then2 iff since_gc < 100K:
       assert_in_range("since_gc-after (< threshold)", s1.since_gc, 0, 65_535)
-      assert_in_range("swept (~100K)              ", swept(s0, s1), 99_000, 101_000)
+      assert_in_range(
+        "swept (~100K)              ",
+        swept(s0, s1),
+        99_000,
+        101_000,
+      )
       assert_eq("stdout", string.trim(out_str), "sync\nthen1 10\nthen2 50000")
     }
   }
