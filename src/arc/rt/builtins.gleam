@@ -28,6 +28,7 @@ import arc/rt/builtins/function as b_function
 import arc/rt/builtins/generator as b_generator
 import arc/rt/builtins/global_fns as b_global_fns
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
+import arc/rt/builtins/intl as b_intl
 import arc/rt/builtins/iterator as b_iterator
 import arc/rt/builtins/json as b_json
 import arc/rt/builtins/map as b_map
@@ -42,6 +43,7 @@ import arc/rt/builtins/regexp as b_regexp
 import arc/rt/builtins/set as b_set
 import arc/rt/builtins/string as b_string
 import arc/rt/builtins/symbol as b_symbol
+import arc/rt/builtins/temporal as b_temporal
 import arc/rt/builtins/typed_array as b_typed_array
 import arc/rt/builtins/weak as b_weak
 import arc/rt/call as rt_call
@@ -53,13 +55,13 @@ import arc/rt/types.{
   type Realm, Agent, ArrayBufferN, ArrayN, AsyncGenResume, AsyncResume, AtomicsN,
   BigIntN, BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty,
   DataViewN, DateN, DomExceptionN, ErrorN, FunctionN, GeneratorN, GlobalN,
-  HostFn, HostFnEntry, IteratorN, JInt, JNan, JPosInf, JsOps, JsStore, JsonN,
-  KHandle, MapN, MathN, Named, NativeUnseeded, NoElements, NumberConstructor,
-  NumberN, NumberObj, ObjectN, Ordinary, PromiseN, PromiseRejectFn,
-  PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SObject, SetN,
-  StringConstructor, StringKey, StringN, StringObj, SymbolConstructor, SymbolN,
-  Test262N, ThrowTypeErrorPoison, TypedArrayN, WeakN, classify, mk_number,
-  mk_object, mk_undefined,
+  HostFn, HostFnEntry, IntlN, IteratorN, JInt, JNan, JPosInf, JsOps, JsStore,
+  JsonN, KHandle, MapN, MathN, Named, NativeUnseeded, NoElements,
+  NumberConstructor, NumberN, NumberObj, ObjectN, Ordinary, PromiseN,
+  PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN,
+  ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN, StringObj,
+  SymbolConstructor, SymbolN, TemporalN, Test262N, ThrowTypeErrorPoison,
+  TypedArrayN, WeakN, classify, mk_number, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -171,7 +173,12 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       is_nan: nb.is_nan,
       is_finite: nb.is_finite,
     )
-  // 16. globalThis — allocated last so it can reference every constructor.
+  // 16. Intl (+ the ECMA-402 overrides on Number/BigInt prototypes) and
+  // Temporal.
+  let #(intl, st) =
+    b_intl.init(st, object_proto, fn_proto, number.prototype, bigint.prototype)
+  let #(temporal, st) = b_temporal.init(st, object_proto, fn_proto)
+  // 17. globalThis — allocated last so it can reference every constructor.
   let #(global_object, st) =
     alloc_global_object(
       st,
@@ -206,6 +213,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
         reflect:,
         console:,
         atomics:,
+        intl:,
+        temporal:,
       ),
     )
   // Assemble the Realm record — every field populated, no Options.
@@ -263,13 +272,13 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       id:,
       lexical_globals: dict.new(),
     )
-  // 17. Pin every realm handle (idempotent — most are already pinned by
+  // 18. Pin every realm handle (idempotent — most are already pinned by
   // alloc_proto/init_type, this catches any that arrived by another route).
   let st =
     list.fold(realm_ops.realm_handles(realm), st, fn(st, h) {
       rt_store.t_pin_root(st, h)
     })
-  // 18. Register the realm and make it current so `st.realm` reads succeed
+  // 19. Register the realm and make it current so `st.realm` reads succeed
   // from here on (the JsOps bodies + every native call rely on it).
   let st = Agent(..st, realm:, realms: dict.insert(st.realms, id, realm))
   #(realm, st)
@@ -364,6 +373,8 @@ type GlobalRefs {
     reflect: Handle,
     console: Handle,
     atomics: Handle,
+    intl: Handle,
+    temporal: Handle,
   )
 }
 
@@ -426,6 +437,8 @@ fn alloc_global_object(
     Builtin("Reflect", ns(r.reflect)),
     Builtin("console", ns(r.console)),
     Builtin("Atomics", ns(r.atomics)),
+    Builtin("Intl", ns(r.intl)),
+    Builtin("Temporal", ns(r.temporal)),
     // Global functions (§19.2).
     Builtin("eval", ns(gfns.eval)),
     Builtin("parseInt", ns(gfns.parse_int)),
@@ -557,6 +570,8 @@ pub fn dispatch_native(
     TypedArrayN(n) -> b_typed_array.dispatch(st, n, this, args)
     AtomicsN(n) -> b_atomics.dispatch(st, n, this, args)
     Test262N(n) -> rt_realm.dispatch_262(st, n, this, args, create_realm)
+    IntlN(n) -> b_intl.dispatch(st, n, this, args)
+    TemporalN(n) -> b_temporal.dispatch(st, n, this, args)
   }
 }
 
@@ -599,6 +614,8 @@ pub fn dispatch_native_construct(
       b_array_buffer.dispatch_construct(st, n, args, new_target)
     DataViewN(n) -> b_data_view.dispatch_construct(st, n, args, new_target)
     TypedArrayN(n) -> b_typed_array.dispatch_construct(st, n, args, new_target)
+    IntlN(n) -> b_intl.dispatch_construct(st, n, args, new_target)
+    TemporalN(n) -> b_temporal.dispatch_construct(st, n, args, new_target)
     // §22.1.1 Array — proto derived from new.target, then ArrayCreate.
     // b_array has no dispatch_construct yet (out-of-scope file), so allocate
     // via its call path then fix up [[Prototype]] before returning.

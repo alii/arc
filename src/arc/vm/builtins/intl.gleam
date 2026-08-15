@@ -10,14 +10,35 @@
 import arc/internal/gregorian.{days_from_civil}
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div}
-import arc/vm/builtins/common
-import arc/vm/builtins/helpers.{first_arg_or_undefined}
-import arc/vm/builtins/intl_collate.{collator_compare}
-import arc/vm/builtins/intl_format.{
+import arc/rt/builtins/intl_format.{
   PDay, PDayPeriod, PElement, PEra, PFractionalSecond, PHour, PLiteral, PMinute,
   PMonth, PSecond, PTimeZoneName, PWeekday, PYear,
 } as fmt
-import arc/vm/builtins/intl_locale as tags
+import arc/rt/builtins/intl_locale as tags
+import arc/rt/intl_data.{
+  type CompactDisplay, type CurrencyDisplay, type CurrencySign,
+  type DurationBaseStyle, type DurationDisplay, type DurationUnitOptions,
+  type DurationUnitStyle, type IntlDigitOptions, type IntlUseGrouping,
+  type ListFormatStyle, type ListFormatType, type NameWidth, type Notation,
+  type NumStyle, type PluralType, type RoundingMode, type RoundingPriority,
+  type RtfNumeric, type RtfStyle, type SignDisplay, type TrailingZeroDisplay,
+  type UnitDisplay, BsDigital, BsLong, BsNarrow, BsShort, Cardinal, CompactLong,
+  CompactShort, Conjunction, CurAccounting, CurCode, CurName, CurNarrowSymbol,
+  CurStandard, CurSymbol, Disjunction, DisplayAlways, DisplayAuto, DurFractional,
+  DurLong, DurNarrow, DurNumeric, DurShort, DurTwoDigit, DurationUnitOptions,
+  GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, IntlDigitOptions,
+  LLong, LNarrow, LShort, NotationCompact, NotationEngineering,
+  NotationScientific, NotationStandard, Ordinal, PriorityAuto,
+  PriorityLessPrecision, PriorityMorePrecision, RoundCeil, RoundExpand,
+  RoundFloor, RoundHalfCeil, RoundHalfEven, RoundHalfExpand, RoundHalfFloor,
+  RoundHalfTrunc, RoundTrunc, RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort,
+  SignAlways, SignAuto, SignExceptZero, SignNegative, SignNever, StyleCurrency,
+  StyleDecimal, StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitList,
+  UnitLong, UnitNarrow, UnitShort, WLong, WNarrow, WShort,
+}
+import arc/vm/builtins/common
+import arc/vm/builtins/helpers.{first_arg_or_undefined}
+import arc/vm/builtins/intl_collate.{collator_compare}
 import arc/vm/builtins/intl_segment as seg
 import arc/vm/builtins/intl_timezone as tz
 import arc/vm/heap
@@ -29,42 +50,31 @@ import arc/vm/state.{type Heap, type State, State}
 import arc/vm/unicode_case
 import arc/vm/value.{
   type BoundGetterService, type CaseFirst, type CollatorSensitivity,
-  type CollatorState, type CollatorUsage, type CompactDisplay,
-  type ConstructibleService, type CurrencyDisplay, type CurrencySign,
+  type CollatorState, type CollatorUsage, type ConstructibleService,
   type DateStyle, type DateTimeFormatState, type DisplayNamesFallback,
   type DisplayNamesState, type DisplayNamesType, type DtfComponent,
-  type DtfComponents, type DurationBaseStyle, type DurationDisplay,
-  type DurationFormatState, type DurationUnitOptions, type DurationUnitStyle,
-  type Granularity, type HostOverride, type HourCycle, type IntlData,
-  type IntlDigitOptions, type IntlMethodName, type IntlNativeFn,
-  type IntlService, type JsValue, type LanguageDisplay, type ListFormatState,
-  type ListFormatStyle, type ListFormatType, type LocaleGetterName,
-  type LocaleMethodName, type LocaleState, type MonthWidth, type NameWidth,
-  type Notation, type NumStyle, type NumberFormatState, type NumericWidth,
-  type PluralRulesState, type PluralType, type Ref, type RelativeTimeFormatState,
-  type RoundingMode, type RoundingPriority, type RtfNumeric, type RtfStyle,
-  type Segment, type SegmentIteratorState, type SegmenterState,
-  type SegmentsState, type SignDisplay, type TimeStyle, type TimeZoneNameWidth,
-  type TrailingZeroDisplay, type UnitDisplay, BgCollator, BgDateTimeFormat,
-  BgNumberFormat, BigIntToLocaleString, BsDigital, BsLong, BsNarrow, BsShort,
-  Cardinal, CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CollatorData,
-  CollatorState, CompactLong, CompactShort, Conjunction, CsCollator,
-  CsDateTimeFormat, CsDisplayNames, CsDurationFormat, CsListFormat, CsLocale,
-  CsNumberFormat, CsPluralRules, CsRelativeTimeFormat, CsSegmenter,
-  CurAccounting, CurCode, CurName, CurNarrowSymbol, CurStandard, CurSymbol,
-  DateTimeFormatData, DateTimeFormatState, DateToLocaleDateString,
-  DateToLocaleString, DateToLocaleTimeString, Disjunction, Dispatch,
-  DisplayAlways, DisplayAuto, DisplayNamesData, DisplayNamesState, DnCalendar,
-  DnCurrency, DnDateTimeField, DnLanguage, DnRegion, DnScript, DsFull, DsLong,
-  DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
+  type DtfComponents, type DurationFormatState, type Granularity,
+  type HostOverride, type HourCycle, type IntlData, type IntlMethodName,
+  type IntlNativeFn, type IntlService, type JsValue, type LanguageDisplay,
+  type ListFormatState, type LocaleGetterName, type LocaleMethodName,
+  type LocaleState, type MonthWidth, type NumberFormatState, type NumericWidth,
+  type PluralRulesState, type Ref, type RelativeTimeFormatState, type Segment,
+  type SegmentIteratorState, type SegmenterState, type SegmentsState,
+  type TimeStyle, type TimeZoneNameWidth, BgCollator, BgDateTimeFormat,
+  BgNumberFormat, BigIntToLocaleString, CaseFirstFalse, CaseFirstLower,
+  CaseFirstUpper, CollatorData, CollatorState, CsCollator, CsDateTimeFormat,
+  CsDisplayNames, CsDurationFormat, CsListFormat, CsLocale, CsNumberFormat,
+  CsPluralRules, CsRelativeTimeFormat, CsSegmenter, DateTimeFormatData,
+  DateTimeFormatState, DateToLocaleDateString, DateToLocaleString,
+  DateToLocaleTimeString, Dispatch, DisplayNamesData, DisplayNamesState,
+  DnCalendar, DnCurrency, DnDateTimeField, DnLanguage, DnRegion, DnScript,
+  DsFull, DsLong, DsMedium, DsShort, DtfComponents, DtfDay, DtfDayPeriod, DtfEra,
   DtfFractionalSecondDigits, DtfHour, DtfMinute, DtfMonth, DtfSecond,
-  DtfTimeZoneName, DtfWeekday, DtfYear, DurFractional, DurLong, DurNarrow,
-  DurNumeric, DurShort, DurTwoDigit, DurationFormatData, DurationFormatState,
-  DurationUnitOptions, FbCode, FbNone, GGrapheme, GSentence, GWord,
-  GroupingAlways, GroupingAuto, GroupingMin2, GroupingNever, H11, H12, H23, H24,
-  HostZone, IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
-  IntlDateTimeFormat, IntlDigitOptions, IntlDisplayNames, IntlDurationFormat,
-  IntlFormat, IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
+  DtfTimeZoneName, DtfWeekday, DtfYear, DurationFormatData, DurationFormatState,
+  FbCode, FbNone, GGrapheme, GSentence, GWord, H11, H12, H23, H24, HostZone,
+  IntlBoundGetter, IntlBoundMethod, IntlCollator, IntlConstructor,
+  IntlDateTimeFormat, IntlDisplayNames, IntlDurationFormat, IntlFormat,
+  IntlFormatRange, IntlFormatRangeToParts, IntlFormatToParts,
   IntlGetCanonicalLocales, IntlHostOverride, IntlListFormat, IntlLocale,
   IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlNative, IntlNumberFormat,
   IntlObject, IntlOf, IntlPluralRules, IntlRelativeTimeFormat,
@@ -72,30 +82,23 @@ import arc/vm/value.{
   IntlSegmenter, IntlSegmenterSegment, IntlSegments, IntlSegmentsContaining,
   IntlSegmentsIterator, IntlSelect, IntlSelectRange, IntlSupportedLocalesOf,
   IntlSupportedValuesOf, JsBool, JsNumber, JsObject, JsString, JsUndefined,
-  LLong, LNarrow, LShort, LdDialect, LdStandard, ListFormatData, ListFormatState,
-  LocaleBaseName, LocaleCalendar, LocaleCaseFirst, LocaleCollation, LocaleData,
+  LdDialect, LdStandard, ListFormatData, ListFormatState, LocaleBaseName,
+  LocaleCalendar, LocaleCaseFirst, LocaleCollation, LocaleData,
   LocaleFirstDayOfWeek, LocaleGetCalendars, LocaleGetCollations,
   LocaleGetHourCycles, LocaleGetNumberingSystems, LocaleGetTextInfo,
   LocaleGetTimeZones, LocaleGetWeekInfo, LocaleHourCycle, LocaleLanguage,
   LocaleMaximize, LocaleMinimize, LocaleNumberingSystem, LocaleNumeric,
   LocaleRegion, LocaleScript, LocaleState, LocaleToString, LocaleVariants,
-  MonthName, MonthNum, NotationCompact, NotationEngineering, NotationScientific,
-  NotationStandard, NumberFormatData, NumberFormatState, NumberToLocaleString,
-  ObjectSlot, Ordinal, PluralRulesData, PluralRulesState, PriorityAuto,
-  PriorityLessPrecision, PriorityMorePrecision, RelativeTimeFormatData,
-  RelativeTimeFormatState, RoundCeil, RoundExpand, RoundFloor, RoundHalfCeil,
-  RoundHalfEven, RoundHalfExpand, RoundHalfFloor, RoundHalfTrunc, RoundTrunc,
-  RtfAlways, RtfAuto, RtfLong, RtfNarrow, RtfShort, SegmentIteratorData,
-  SegmentIteratorState, SegmenterData, SegmenterState, SegmentsData,
-  SegmentsState, SensAccent, SensBase, SensCase, SensVariant, SignAlways,
-  SignAuto, SignExceptZero, SignNegative, SignNever, StringLocaleCompare,
-  StringToLocaleLowerCase, StringToLocaleUpperCase, StyleCurrency, StyleDecimal,
-  StylePercent, StyleUnit, TemporalDateSlot, TemporalDateTimeSlot,
+  MonthName, MonthNum, NumberFormatData, NumberFormatState, NumberToLocaleString,
+  ObjectSlot, PluralRulesData, PluralRulesState, RelativeTimeFormatData,
+  RelativeTimeFormatState, SegmentIteratorData, SegmentIteratorState,
+  SegmenterData, SegmenterState, SegmentsData, SegmentsState, SensAccent,
+  SensBase, SensCase, SensVariant, StringLocaleCompare, StringToLocaleLowerCase,
+  StringToLocaleUpperCase, TemporalDateSlot, TemporalDateTimeSlot,
   TemporalInstantSlot, TemporalMonthDaySlot, TemporalTimeSlot,
   TemporalYearMonthSlot, TemporalZonedDateTimeSlot, TsFull, TsLong, TsMedium,
   TsShort, TzLong, TzLongGeneric, TzLongOffset, TzShort, TzShortGeneric,
-  TzShortOffset, TzdAuto, TzdStripIfInteger, UnitList, UnitLong, UnitNarrow,
-  UnitShort, UsageSearch, UsageSort, WLong, WNarrow, WNumeric, WShort, WTwoDigit,
+  TzShortOffset, UsageSearch, UsageSort, WNumeric, WTwoDigit,
 }
 
 //
@@ -2097,7 +2100,7 @@ type StyleWithCurrency {
 fn read_unit_options(
   state: State(host),
   opts: Option(Ref),
-) -> Result(#(value.NumStyle, State(host)), Thrown(host)) {
+) -> Result(#(NumStyle, State(host)), Thrown(host)) {
   use #(kind, state) <- result.try(get_enum_opt(
     state,
     opts,
@@ -4141,7 +4144,7 @@ fn resolved_options(
 
 /// `[[UseGrouping]]` as its JS resolvedOptions value: never is the boolean
 /// `false`, everything else its string spelling.
-fn use_grouping_js(g: value.IntlUseGrouping) -> JsValue {
+fn use_grouping_js(g: IntlUseGrouping) -> JsValue {
   case g {
     GroupingNever -> JsBool(False)
     GroupingAuto -> JsString("auto")
@@ -4150,15 +4153,15 @@ fn use_grouping_js(g: value.IntlUseGrouping) -> JsValue {
   }
 }
 
-fn currency_display_js(v: value.CurrencyDisplay) -> JsValue {
+fn currency_display_js(v: CurrencyDisplay) -> JsValue {
   JsString(currency_display_to_js_string(v))
 }
 
-fn currency_sign_js(v: value.CurrencySign) -> JsValue {
+fn currency_sign_js(v: CurrencySign) -> JsValue {
   JsString(currency_sign_to_js_string(v))
 }
 
-fn unit_display_js(v: value.UnitDisplay) -> JsValue {
+fn unit_display_js(v: UnitDisplay) -> JsValue {
   JsString(unit_display_to_js_string(v))
 }
 
@@ -6532,9 +6535,7 @@ fn folds_into_fraction(style: DurationUnitStyle) -> Bool {
 
 /// A DurationFormat per-unit non-numeric style (long/short/narrow) as the
 /// NumberFormat unitDisplay it renders with.
-fn unit_display_from_duration_style(
-  style: DurationUnitStyle,
-) -> value.UnitDisplay {
+fn unit_display_from_duration_style(style: DurationUnitStyle) -> UnitDisplay {
   case style {
     DurLong -> UnitLong
     DurNarrow -> UnitNarrow

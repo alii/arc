@@ -1,7 +1,13 @@
 import arc/host_hooks
 import arc/internal/host_time
 import arc/parser/number
-import arc/vm/builtins/temporal_tz
+import arc/rt/builtins/temporal_tz
+import arc/rt/intl_data.{
+  type DurationBaseStyle, type DurationUnitOptions, type IntlDigitOptions,
+  type IntlUseGrouping, type ListFormatStyle, type ListFormatType,
+  type NameWidth, type Notation, type NumStyle, type PluralType, type RtfNumeric,
+  type RtfStyle, type SignDisplay,
+}
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/temporal_calendar.{type Calendar}
 import arc/vm/internal/tree_array.{type TreeArray}
@@ -2290,126 +2296,6 @@ pub type CaseFirst {
   CaseFirstFalse
 }
 
-// --- Intl.NumberFormat closed option sets (§15.1) -------------------------
-//
-// Each of these options admits a fixed set of spellings. They are parsed
-// (and validated) exactly once, in the constructors in `intl.gleam`; the
-// formatting engine then dispatches on the variants exhaustively, so an
-// out-of-set value cannot reach — or be silently defaulted by — a formatter.
-// The spec spellings for resolvedOptions live alongside their consumer in
-// `builtins/intl.gleam`.
-
-/// `[[Style]]` (§15.1.3 SetNumberFormatUnitOptions). The style-conditional
-/// slots live *inside* the variant that selects them: `[[Currency]]` /
-/// `[[CurrencyDisplay]]` / `[[CurrencySign]]` exist exactly when the style is
-/// currency, `[[Unit]]` / `[[UnitDisplay]]` exactly when it is unit. A
-/// currency style without a currency code is therefore not representable, and
-/// no formatter has to invent a default for a slot the style did not select.
-pub type NumStyle {
-  StyleDecimal
-  StylePercent
-  StyleCurrency(currency: String, display: CurrencyDisplay, sign: CurrencySign)
-  StyleUnit(unit: String, display: UnitDisplay)
-}
-
-/// `[[Notation]]` — shared by NumberFormat and PluralRules. `[[CompactDisplay]]`
-/// only exists under compact notation, so it lives in that variant.
-pub type Notation {
-  NotationStandard
-  NotationScientific
-  NotationEngineering
-  NotationCompact(display: CompactDisplay)
-}
-
-/// `[[CompactDisplay]]` — only meaningful under compact notation.
-pub type CompactDisplay {
-  CompactShort
-  CompactLong
-}
-
-/// `[[SignDisplay]]`.
-pub type SignDisplay {
-  SignAuto
-  SignNever
-  SignAlways
-  SignExceptZero
-  SignNegative
-}
-
-/// `[[CurrencyDisplay]]` — only meaningful for the currency style.
-pub type CurrencyDisplay {
-  CurCode
-  CurSymbol
-  CurNarrowSymbol
-  CurName
-}
-
-/// `[[CurrencySign]]` — only meaningful for the currency style.
-pub type CurrencySign {
-  CurStandard
-  CurAccounting
-}
-
-/// `[[UnitDisplay]]` — only meaningful for the unit style.
-pub type UnitDisplay {
-  UnitShort
-  UnitNarrow
-  UnitLong
-}
-
-/// `[[RoundingMode]]` (§15.5.2).
-pub type RoundingMode {
-  RoundCeil
-  RoundFloor
-  RoundExpand
-  RoundTrunc
-  RoundHalfCeil
-  RoundHalfFloor
-  RoundHalfExpand
-  RoundHalfTrunc
-  RoundHalfEven
-}
-
-/// `[[RoundingType]]` selection priority (§15.1.6).
-pub type RoundingPriority {
-  PriorityAuto
-  PriorityMorePrecision
-  PriorityLessPrecision
-}
-
-/// `[[TrailingZeroDisplay]]`.
-pub type TrailingZeroDisplay {
-  TzdAuto
-  TzdStripIfInteger
-}
-
-/// SetNumberFormatDigitOptions result (§15.1.6) — shared by NumberFormat and
-/// PluralRules. The fraction/significant `(min, max)` pairs are absent when
-/// that rounding kind was not requested, and resolvedOptions omits absent
-/// pairs.
-pub type IntlDigitOptions {
-  IntlDigitOptions(
-    minimum_integer_digits: Int,
-    fraction_digits: Option(#(Int, Int)),
-    significant_digits: Option(#(Int, Int)),
-    rounding_increment: Int,
-    rounding_mode: RoundingMode,
-    rounding_priority: RoundingPriority,
-    trailing_zero_display: TrailingZeroDisplay,
-  )
-}
-
-/// `[[UseGrouping]]` — spec-wise either the boolean `false` or one of the
-/// strings "min2" / "auto" / "always" (a `true` option normalizes to
-/// "always", `false` to never). resolvedOptions must surface never as the
-/// boolean `false`, the rest as their string spelling.
-pub type IntlUseGrouping {
-  GroupingAuto
-  GroupingAlways
-  GroupingMin2
-  GroupingNever
-}
-
 /// Intl.NumberFormat resolved options (§15.1.2 InitializeNumberFormat).
 /// The style-/notation-conditional slots (currency*, unit*, compactDisplay)
 /// live inside the `NumStyle` / `Notation` variant that selects them.
@@ -2457,13 +2343,6 @@ pub type DtfComponent {
 pub type NumericWidth {
   WNumeric
   WTwoDigit
-}
-
-/// Widths of the name components (weekday, era, dayPeriod).
-pub type NameWidth {
-  WLong
-  WShort
-  WNarrow
 }
 
 /// `month` is the one component that admits both a numeric and a name width.
@@ -2631,12 +2510,6 @@ pub type PluralRulesState {
   )
 }
 
-/// `[[Type]]` (§16.1.2 InitializePluralRules).
-pub type PluralType {
-  Cardinal
-  Ordinal
-}
-
 /// Intl.ListFormat resolved options (§13.1.2).
 pub type ListFormatState {
   ListFormatState(
@@ -2644,23 +2517,6 @@ pub type ListFormatState {
     list_type: ListFormatType,
     style: ListFormatStyle,
   )
-}
-
-/// `[[Type]]` (§13.1.2). `UnitList` is the "unit" spelling — the list-format
-/// type, not to be confused with `NumStyle`'s `StyleUnit`.
-pub type ListFormatType {
-  Conjunction
-  Disjunction
-  UnitList
-}
-
-/// `[[Style]]` (§13.1.2). The engine picks its separator patterns by matching
-/// `#(ListFormatType, ListFormatStyle)` exhaustively, so no combination can
-/// silently fall through to the conjunction/long pattern.
-pub type ListFormatStyle {
-  LLong
-  LShort
-  LNarrow
 }
 
 /// Intl.RelativeTimeFormat resolved options (§17.1.2). `numeric` here is the
@@ -2672,19 +2528,6 @@ pub type RelativeTimeFormatState {
     numeric: RtfNumeric,
     numbering_system: String,
   )
-}
-
-/// `[[Style]]` (§17.1.2) — selects the unit spellings ("3 hr. ago").
-pub type RtfStyle {
-  RtfLong
-  RtfShort
-  RtfNarrow
-}
-
-/// `[[Numeric]]` (§17.1.2) — "auto" allows the special names ("yesterday").
-pub type RtfNumeric {
-  RtfAlways
-  RtfAuto
 }
 
 /// Intl.Segmenter resolved options (§18.1.2).
@@ -2740,38 +2583,6 @@ pub type DisplayNamesFallback {
 pub type LanguageDisplay {
   LdDialect
   LdStandard
-}
-
-/// A DurationFormat unit's resolved `[[<Unit>Style]]`. `DurFractional` is the
-/// internal-only style a sub-second unit folds into when it rides on the
-/// preceding numeric unit's fraction; resolvedOptions spells it "numeric".
-pub type DurationUnitStyle {
-  DurLong
-  DurShort
-  DurNarrow
-  DurNumeric
-  DurTwoDigit
-  DurFractional
-}
-
-/// A DurationFormat unit's resolved `[[<Unit>Display]]`.
-pub type DurationDisplay {
-  DisplayAuto
-  DisplayAlways
-}
-
-/// The DurationFormat `style` option (`[[Style]]`).
-pub type DurationBaseStyle {
-  BsLong
-  BsShort
-  BsNarrow
-  BsDigital
-}
-
-/// One DurationFormat unit's resolved `[[<Unit>Style]]` / `[[<Unit>Display]]`
-/// pair (GetDurationUnitOptions). `style` is the INTERNAL style.
-pub type DurationUnitOptions {
-  DurationUnitOptions(style: DurationUnitStyle, display: DurationDisplay)
 }
 
 /// Intl.DurationFormat resolved options (Intl.DurationFormat §1.1.3), one

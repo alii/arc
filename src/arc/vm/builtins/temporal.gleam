@@ -25,9 +25,7 @@ import arc/internal/host_time
 import arc/internal/int_math.{
   floor_div, floor_mod as math_mod, trunc_div, trunc_mod,
 }
-import arc/vm/builtins/common
-import arc/vm/builtins/helpers
-import arc/vm/builtins/temporal_iso.{
+import arc/rt/builtins/temporal_iso.{
   type DurRec, type IsoDate, type Overflow, type ParsedIso, type ParsedOffset,
   type Precision, type TErr, type TimeRec, AutoPrec, Constrain, DurRec,
   FixedPrec, IsoDate, MinutePrec, NoOffset, NumericOffset, RangeE, Reject,
@@ -43,7 +41,9 @@ import arc/vm/builtins/temporal_iso.{
   parse_time_part, parse_year_part, pow10, regulate_iso_date, take_some_digits,
   time_to_ns, utc_epoch_ns, week_of_year, zero_dur,
 }
-import arc/vm/builtins/temporal_tz
+import arc/rt/builtins/temporal_tz
+import arc/vm/builtins/common
+import arc/vm/builtins/helpers
 import arc/vm/heap
 import arc/vm/internal/elements
 import arc/vm/internal/temporal_calendar as tcal

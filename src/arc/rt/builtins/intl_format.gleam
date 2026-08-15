@@ -7,8 +7,7 @@
 
 import arc/internal/gregorian.{civil_from_days}
 import arc/internal/int_math.{floor_div}
-import arc/vm/ops/numeric
-import arc/vm/value.{
+import arc/rt/intl_data.{
   type CompactDisplay, type CurrencyDisplay, type IntlUseGrouping,
   type ListFormatStyle, type ListFormatType, type NameWidth, type Notation,
   type NumStyle, type PluralType, type RoundingMode, type RoundingPriority,
@@ -430,7 +429,7 @@ fn accounting_parens(key: LocaleKey) -> Bool {
 /// Format a finite float per the options. `is_nan`/`is_inf` are handled by
 /// the caller. Returns the full part list including sign/affixes.
 pub fn format_number_parts(opts: NumOpts, x: Float) -> List(Part) {
-  let negative = numeric.is_negative_float(x)
+  let negative = is_negative_float(x)
   let dec = decompose(float.absolute_value(x))
   format_dec_parts(opts, negative, dec)
 }
@@ -1047,7 +1046,7 @@ pub type Dec {
 
 /// Parse the shortest JS decimal string of a non-negative float.
 fn decompose(x: Float) -> Dec {
-  parse_decimal(value.js_format_number(x))
+  parse_decimal(js_format_number(x))
 }
 
 fn parse_decimal(s: String) -> Dec {
@@ -1713,7 +1712,7 @@ pub fn rtf_parts_en(
   let literal3 = fn(text) { UnitPart(PLiteral, text, None) }
   // -0 → +0 so `"second", 0.0 -> Some("now")` in rtf_auto_name matches on
   // OTP≥27 (where a `0.0` literal pattern rejects -0.0).
-  let v = case numeric.is_neg_zero(value) {
+  let v = case is_neg_zero(value) {
     True -> 0.0
     False -> value
   }
@@ -1725,7 +1724,7 @@ pub fn rtf_parts_en(
         _ -> PcOther
       }
       let unit_text = rtf_unit_en(style, unit, plural)
-      let past = numeric.is_negative_float(value)
+      let past = is_negative_float(value)
       // Numeric parts carry the unit for formatToParts.
       let tagged =
         list.map(value_parts, fn(p: Part) {
@@ -2176,3 +2175,22 @@ fn numbering_base(nu: String) -> Option(Int) {
     _ -> None
   }
 }
+
+// ---------------------------------------------------------------------------
+// Float sign / rendering primitives
+// ---------------------------------------------------------------------------
+
+/// True iff `x` is IEEE 754 negative zero. Gleam has no `-0.0` literal, so
+/// the sign-bit test lives in the FFI.
+@external(erlang, "arc_rt_val_ffi", "is_neg_zero")
+fn is_neg_zero(x: Float) -> Bool
+
+/// Whether a float is negative including -0.0 (its IEEE sign bit is set). A
+/// bare `x <. 0.0` is False for -0.0 and silently picks the +0 branch.
+fn is_negative_float(x: Float) -> Bool {
+  x <. 0.0 || is_neg_zero(x)
+}
+
+/// A finite Float per §6.1.6.1.20 Number::toString (1e21 → "1e+21", -0 → "0").
+@external(erlang, "arc_rt_val_ffi", "js_number_to_string")
+fn js_format_number(n: Float) -> String

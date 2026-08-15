@@ -27,15 +27,15 @@ import arc/rt/types.{
   ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGenRequest,
   AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty, DataViewObj, DateObj,
   Dense, ErrorObj, ForInIterator, GeneratorObj, Handler, HostJob,
-  IdentityPassThrough, IteratorHelperObj, JsCell, JsStore, KBound, KBytecode,
-  KCompiled, KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements,
-  NumberObj, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
+  IdentityPassThrough, IntlObj, IteratorHelperObj, JsCell, JsStore, KBound,
+  KBytecode, KCompiled, KHost, KNative, MapIterator, MapObj, ModuleNamespace,
+  NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
   PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
   ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
   SBox, SGenerator, SObject, SPromiseData, SShapedObject, SetIterator, SetObj,
-  Sparse, StringIterator, StringObj, SymbolObj, ThrowerPassThrough,
-  TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj, WeakSymKey,
-  WrapForValidIteratorObj, jq_to_list, native_token_refs,
+  Sparse, StringIterator, StringObj, SymbolObj, TemporalInstant, TemporalObj,
+  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj,
+  WeakSymKey, WrapForValidIteratorObj, jq_to_list, native_token_refs,
 } as rt_types
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array as rt_tree_array
@@ -351,6 +351,10 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     IteratorHelperObj(gen_state: _, body:) ->
       push_term_refs(to_dynamic(body), acc)
     WrapForValidIteratorObj(record:) -> push_term_refs(to_dynamic(record), acc)
+    // The resolved Intl state is handle-free; only the bound-method cache
+    // holds a cell.
+    IntlObj(data: _, bound:) -> push_opt_handle(bound, acc)
+    TemporalObj(data: TemporalInstant(epoch_ns: _)) -> acc
   }
 }
 

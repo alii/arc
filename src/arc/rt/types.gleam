@@ -9,6 +9,7 @@
 
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, type SuspendedFrame}
+import arc/rt/intl_data.{type IntlData, type IntlService}
 import arc/rt/wire
 import arc/vm/internal/ordered_entries.{type OrderedEntries}
 import arc/vm/internal/tree_array.{type TreeArray}
@@ -856,6 +857,8 @@ pub type NativeToken {
   /// The test262 host-defined `$262` methods (INTERPRETING.md).
   Test262N(Test262Native)
   DomExceptionN(DomExceptionNative)
+  IntlN(IntlNative)
+  TemporalN(TemporalNative)
 }
 
 /// WebIDL §2.8.1 DOMException natives. `proto` is the intrinsic prototype
@@ -1818,6 +1821,93 @@ pub type BigIntNative {
   BigIntPrototypeValueOf
 }
 
+/// ECMA-402 natives. `proto` on a constructor is the intrinsic prototype
+/// fallback for OrdinaryCreateFromConstructor.
+pub type IntlNative {
+  /// Intl.getCanonicalLocales(locales)
+  IntlGetCanonicalLocales
+  /// new Intl.<Service>(locales, options)
+  IntlConstructor(service: IntlService, proto: Handle)
+  /// Intl.<Service>.supportedLocalesOf(locales, options)
+  IntlSupportedLocalesOf(service: IntlService)
+  /// Intl.<Service>.prototype.resolvedOptions()
+  IntlResolvedOptions(service: IntlService)
+  /// Accessor getter for NumberFormat.prototype.format: returns (and caches
+  /// on the receiver) a bound method.
+  IntlBoundGetter(service: IntlService)
+  /// The bound method produced by `IntlBoundGetter`; `target` is the instance.
+  IntlBoundMethod(service: IntlService, target: Handle)
+  /// Named prototype method (format/formatToParts/...). The receiver's brand
+  /// (`service`) plus `method` pick the implementation.
+  IntlMethod(service: IntlService, method: IntlMethodName)
+  /// ECMA-402 §18 locale-sensitive overrides installed on Number.prototype /
+  /// BigInt.prototype: not Intl.* methods, no Intl brand check.
+  IntlHostOverride(which: IntlHostOverrideName)
+}
+
+/// The Intl.<Service>.prototype methods registered via `IntlMethod`: one
+/// variant per method name so a registration typo is a compile error.
+pub type IntlMethodName {
+  /// DurationFormat.prototype.format
+  IntlFormat
+  /// NumberFormat/DurationFormat.prototype.formatToParts
+  IntlFormatToParts
+  /// NumberFormat.prototype.formatRange
+  IntlFormatRange
+  /// NumberFormat.prototype.formatRangeToParts
+  IntlFormatRangeToParts
+}
+
+/// The ECMA-402 host overrides (§18) installed at Intl init.
+pub type IntlHostOverrideName {
+  /// Number.prototype.toLocaleString (§18.2.1)
+  NumberToLocaleString
+  /// BigInt.prototype.toLocaleString (§18.3.1)
+  BigIntToLocaleString
+}
+
+/// Temporal natives (proposal-temporal §8 Temporal.Instant). `proto` is the
+/// intrinsic %Temporal.Instant.prototype% the operation allocates results
+/// with (and the OrdinaryCreateFromConstructor fallback for the constructor).
+pub type TemporalNative {
+  /// new Temporal.Instant(epochNanoseconds)
+  TemporalInstantCtor(proto: Handle)
+  /// Temporal.Instant.from / fromEpochMilliseconds / fromEpochNanoseconds /
+  /// compare
+  TemporalInstantStatic(name: InstantStaticName, proto: Handle)
+  /// get Temporal.Instant.prototype.epochMilliseconds / epochNanoseconds
+  TemporalInstantGetter(getter: InstantGetterName)
+  /// Temporal.Instant.prototype methods
+  TemporalInstantMethod(method: InstantMethodName, proto: Handle)
+}
+
+pub type InstantStaticName {
+  InstantFrom
+  InstantFromEpochMilliseconds
+  InstantFromEpochNanoseconds
+  InstantCompare
+}
+
+pub type InstantGetterName {
+  InstantEpochMilliseconds
+  InstantEpochNanoseconds
+}
+
+pub type InstantMethodName {
+  InstantRound
+  InstantEquals
+  InstantToString
+  InstantToLocaleString
+  InstantToJson
+  InstantValueOf
+}
+
+/// The internal slots of a Temporal object. The variant IS the brand.
+pub type TemporalData {
+  /// [[EpochNanoseconds]] of a Temporal.Instant, |ns| <= 8.64e21.
+  TemporalInstant(epoch_ns: Int)
+}
+
 /// Which async-generator suspension the settled `AsyncGenResume` await was for
 /// (arc `value.gleam:4126`). Delegate variants dropped — `yield*` is lowered
 /// entirely inside the sm (SPEC §18.6 / Q6).
@@ -1849,6 +1939,8 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     ErrorN(n) -> error_native_refs(n)
     DomExceptionN(DomExceptionConstructor(proto:)) -> [proto]
     DomExceptionN(DomExceptionGetCode) -> []
+    IntlN(n) -> intl_native_refs(n)
+    TemporalN(n) -> temporal_native_refs(n)
     DateN(n) -> date_native_refs(n)
     RegExpN(n) -> regexp_native_refs(n)
     AtomicsN(_) -> []
@@ -2055,6 +2147,32 @@ pub fn date_native_refs(n: DateNative) -> List(Handle) {
   case n {
     DateConstructor(proto:) -> [proto]
     _ -> []
+  }
+}
+
+/// GC-trace hook for `IntlNative`: constructors close over their intrinsic
+/// prototype, bound methods over their receiver.
+pub fn intl_native_refs(n: IntlNative) -> List(Handle) {
+  case n {
+    IntlConstructor(proto:, ..) -> [proto]
+    IntlBoundMethod(target:, ..) -> [target]
+    IntlGetCanonicalLocales
+    | IntlSupportedLocalesOf(_)
+    | IntlResolvedOptions(_)
+    | IntlBoundGetter(_)
+    | IntlMethod(..)
+    | IntlHostOverride(_) -> []
+  }
+}
+
+/// GC-trace hook for `TemporalNative`: every allocating operation closes
+/// over the intrinsic prototype it allocates with.
+pub fn temporal_native_refs(n: TemporalNative) -> List(Handle) {
+  case n {
+    TemporalInstantCtor(proto:)
+    | TemporalInstantStatic(proto:, ..)
+    | TemporalInstantMethod(proto:, ..) -> [proto]
+    TemporalInstantGetter(_) -> []
   }
 }
 
@@ -2267,6 +2385,12 @@ pub type ObjKind {
   IteratorHelperObj(gen_state: GeneratorState, body: HelperBody)
   /// ES2025 §27.1.5.2 wrapped-iterator object from `Iterator.from`.
   WrapForValidIteratorObj(record: IteratorRecord)
+  /// An ECMA-402 service instance. `data` is the resolved per-service state
+  /// (the brand); `bound` caches the `format` getter's bound function so the
+  /// getter is idempotent (§15.3.3).
+  IntlObj(data: IntlData, bound: Option(Handle))
+  /// A Temporal object; `data` carries its internal slots.
+  TemporalObj(data: TemporalData)
 }
 
 /// A heap cell's contents. `SObject`/`SShapedObject` are the JS-visible

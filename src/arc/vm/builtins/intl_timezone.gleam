@@ -7,9 +7,9 @@
 
 import arc/internal/digits
 import arc/internal/host_time
-import arc/vm/builtins/intl_format as fmt
-import arc/vm/builtins/intl_locale as tags
-import arc/vm/builtins/temporal_tz
+import arc/rt/builtins/intl_format as fmt
+import arc/rt/builtins/intl_locale as tags
+import arc/rt/builtins/temporal_tz
 import arc/vm/value.{
   type DtfTimeZone, type TimeZoneNameWidth, FixedZone, HostZone, NamedZone,
   TzLong, TzLongGeneric, TzLongOffset, TzShort, TzShortGeneric, TzShortOffset,

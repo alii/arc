@@ -8,19 +8,20 @@
 
 import arc/rt/buffer
 import arc/rt/elements
+import arc/rt/intl_data
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsVal, type Property,
   type PropertyKey, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
   AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty,
-  DataViewObj, DateObj, ErrorObj, ForInIterator, GeneratorObj, Index,
+  DataViewObj, DateObj, ErrorObj, ForInIterator, GeneratorObj, Index, IntlObj,
   IteratorHelperObj, KBig, KBool, KBound, KBytecode, KCompiled, KHandle, KHost,
   KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, MapIterator, MapObj,
   ModuleNamespace, Named, NumberObj, Ordinary, Private, PromiseObj, ProxyObj,
   RawJsonObj, RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator,
-  StringObj, SymbolObj, TypedArrayObj, WeakMapObj, WeakSetObj,
-  WrapForValidIteratorObj, classify,
+  StringObj, SymbolObj, TemporalInstant, TemporalObj, TypedArrayObj, WeakMapObj,
+  WeakSetObj, WrapForValidIteratorObj, classify,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/ordered_entries
@@ -176,6 +177,12 @@ fn inspect_object(
         // (or the captured stack). error_display can only return Some for
         // ErrorObj, so unwrap is safe here.
         ErrorObj(_) -> error_display(st, h) |> option.unwrap("[Error]")
+        IntlObj(data:, ..) ->
+          case intl_data.intl_service(data) {
+            intl_data.IntlNumberFormat -> "[Intl.NumberFormat]"
+            intl_data.IntlDurationFormat -> "[Intl.DurationFormat]"
+          }
+        TemporalObj(data: TemporalInstant(..)) -> "Temporal.Instant {}"
         // A tagged ordinary object renders via its Symbol.toStringTag
         // (`Object [Tag] { ... }`). Host objects have no own properties and
         // render through their prototype's tag the same way.
