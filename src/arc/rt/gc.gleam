@@ -33,10 +33,10 @@ import arc/rt/types.{
   Ordinary, PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction,
   PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
   ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
-  SBox, SGenerator, SObject, SPromiseData, SShapedObject, SetIterator, SetObj,
-  Sparse, StringIterator, StringObj, SymbolObj, TemporalObj, ThrowerPassThrough,
-  TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj, WeakSymKey,
-  WrapForValidIteratorObj, classify, jq_to_list, native_token_refs,
+  SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
+  SetIterator, SetObj, Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
+  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj,
+  WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list, native_token_refs,
 } as rt_types
 import arc/vm/internal/ordered_entries
 import arc/vm/internal/tree_array as rt_tree_array
@@ -171,6 +171,9 @@ pub fn refs_in_cell(slot: JsSlot) -> List(Int) {
       list.fold(back, acc, push_request_refs)
     }
     SAsyncContext(resume:, promise:) -> push_resume_refs(resume, [promise.id])
+    // The resource stack holds user values, dispose methods and callback
+    // argument lists — all `JsVal`s; walk the whole list term.
+    SDisposeCapability(resources:) -> push_term_refs(to_dynamic(resources), [])
   }
 }
 
@@ -365,10 +368,12 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     // Temporal internal slots are plain integers, calendars and resolved
     // time zones: no handles.
     TemporalObj(data: _) -> acc
-    // The resource stack holds user values, dispose methods and callback
-    // argument lists — all `JsVal`s; walk the whole state term.
-    DisposableStackObj(async: _, state:) ->
-      push_term_refs(to_dynamic(state), acc)
+    // A pending stack keeps its [[DisposeCapability]] cell alive.
+    DisposableStackObj(async: _, state: rt_types.Pending(capability:)) -> [
+      capability.id,
+      ..acc
+    ]
+    DisposableStackObj(async: _, state: rt_types.Disposed) -> acc
     // [[CleanupCallback]] and every cell's [[HeldValue]] are strong; the
     // [[WeakRefTarget]] and [[UnregisterToken]] are weak (§26.2.1.1) and NOT
     // traced — a cell whose target dies is dropped in `prune_weak`.

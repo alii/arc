@@ -25,7 +25,8 @@ import arc/rt/types.{
   type Agent, type Handle, type Job, type JsSlot, type JsStore, type Realm,
   type ShapeDesc, Agent, HostJob, JsCell, JsStore, KCompiled, ReactionJob,
   RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext,
-  SAsyncGen, SBox, SGenerator, SObject, SPromiseData, SShapedObject,
+  SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject, SPromiseData,
+  SShapedObject,
 }
 import gleam/dict.{type Dict}
 import gleam/list
@@ -243,7 +244,11 @@ fn holds_compiled_code(slot: JsSlot) -> Bool {
     SGenerator(resume: ResumeFrame(..), ..)
     | SAsyncGen(resume: ResumeFrame(..), ..)
     | SAsyncContext(resume: ResumeFrame(..), ..) -> False
-    SObject(..) | SBox(..) | SPromiseData(..) | SShapedObject(..) -> False
+    SObject(..)
+    | SBox(..)
+    | SPromiseData(..)
+    | SShapedObject(..)
+    | SDisposeCapability(..) -> False
   }
 }
 

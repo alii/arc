@@ -3,11 +3,13 @@
 //// (https://tc39.es/proposal-explicit-resource-management/). Port of
 //// `arc/vm/builtins/disposable_stack.gleam`.
 ////
-//// Both stacks hold a [[DisposableResourceStack]] of DisposableResource
-//// records and a disposable state (pending | disposed). Resources are stored
-//// NEWEST-FIRST in the `DisposableStackObj` kind, so dispose() walks the list
-//// head-first — the spec's "reverse list order". The `async` field is the
-//// brand: sync methods require async=False, async methods async=True.
+//// Both stacks hold a disposable state (pending | disposed) and, while
+//// pending, a handle to their [[DisposeCapability]]: an `SDisposeCapability`
+//// cell whose [[DisposableResourceStack]] is stored NEWEST-FIRST, so dispose()
+//// walks the list head-first — the spec's "reverse list order". The
+//// capability is its own cell so `move()` can hand it over by identity. The
+//// `async` field is the brand: sync methods require async=False, async
+//// methods async=True.
 
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -28,8 +30,8 @@ import arc/rt/types.{
   DisposableStackPrototypeDefer, DisposableStackPrototypeDispose,
   DisposableStackPrototypeMove, DisposableStackPrototypeUse, DisposeCallback,
   Disposed, KHandle, KNull, KUndef, MethodDispose, Named, NoElements,
-  NullDispose, Pending, SObject, StringKey, SymbolKey, TypeErr, classify,
-  mk_bool, mk_object, mk_undefined,
+  NullDispose, Pending, SDisposeCapability, SObject, StringKey, SymbolKey,
+  TypeErr, classify, mk_bool, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -231,8 +233,41 @@ fn construct(
 ) -> #(Handle, Agent) {
   // Step 2: GetPrototypeFromConstructor(NewTarget, intrinsic).
   let #(proto_h, st) = proto_from_new_target(st, new_target, proto)
-  // Steps 3-4: pending state, empty resource stack
-  alloc_stack(st, proto_h, async:, disposable_state: Pending([]))
+  // Steps 3-4: pending state, NewDisposeCapability()
+  let #(capability, st) = new_capability(st)
+  alloc_stack(st, proto_h, async:, disposable_state: Pending(capability:))
+}
+
+/// NewDisposeCapability ( ) — proposal §3.1.1: a fresh capability cell with
+/// an empty [[DisposableResourceStack]].
+fn new_capability(st: Agent) -> #(Handle, Agent) {
+  rt_store.t_cell_new(st, SDisposeCapability(resources: []))
+}
+
+/// Read a capability's [[DisposableResourceStack]] (newest first). `cap` only
+/// ever comes from a stack's `Pending(capability:)`, so any other cell shape
+/// is a wiring bug.
+fn read_capability(st: Agent, cap: Handle) -> List(DisposeResource) {
+  let assert SDisposeCapability(resources:) = rt_store.t_cell_get(st, cap)
+    as "disposable_stack: capability handle is not an SDisposeCapability cell"
+  resources
+}
+
+/// AddDisposableResource step 3: append `resource` to
+/// `cap`.[[DisposableResourceStack]].
+///
+/// Callers evaluate `stack.[[DisposeCapability]]` into `cap` BEFORE
+/// CreateDisposableResource runs user code (@@dispose getters, proxy traps),
+/// as the spec does. If that code `move()`s the stack, `cap` now belongs to
+/// the new stack and the resource lands there; if it `dispose()`s the stack,
+/// `cap` is referenced by no stack any more and the append is unobservable.
+fn push_resource(st: Agent, cap: Handle, resource: DisposeResource) -> Agent {
+  let resources = read_capability(st, cap)
+  rt_store.t_cell_set(
+    st,
+    cap,
+    SDisposeCapability(resources: [resource, ..resources]),
+  )
 }
 
 /// §10.1.13.2 GetPrototypeFromConstructor: `Get(newTarget, "prototype")` or
@@ -325,43 +360,18 @@ fn require_stack(
   }
 }
 
-/// Write back a stack's disposable state (which carries the
-/// [[DisposableResourceStack]]). The brand (`async`) never changes after
-/// allocation, and writing `Disposed` structurally drops the resources.
+/// Mark a stack disposed, dropping its [[DisposeCapability]] reference. The
+/// brand (`async`) never changes after allocation.
 ///
 /// Every caller reaches here only after `require_stack` (RequireInternalSlot)
 /// has proven `h` is a live DisposableStackObj, so any other slot shape
 /// is a wiring bug — crash rather than silently drop the write.
-fn write_stack(
-  st: Agent,
-  h: Handle,
-  disposable_state: DisposableState,
-) -> Agent {
+fn mark_disposed(st: Agent, h: Handle) -> Agent {
   rt_store.t_cell_update(st, h, fn(slot) {
     let assert SObject(kind: DisposableStackObj(async:, ..), ..) = slot
-      as "disposable_stack: write_stack on a non-stack cell"
-    SObject(..slot, kind: DisposableStackObj(async:, state: disposable_state))
+      as "disposable_stack: mark_disposed on a non-stack cell"
+    SObject(..slot, kind: DisposableStackObj(async:, state: Disposed))
   })
-}
-
-/// AddDisposableResource step 3: append to the capability's CURRENT
-/// [[DisposableResourceStack]]. CreateDisposableResource (steps 1-2) runs
-/// user code (@@dispose getters, proxy traps) that may re-entrantly
-/// defer/dispose/move on this same stack, so the slot is re-read here rather
-/// than reusing the pre-call snapshot. A stack disposed or moved during that
-/// user code stays Disposed: the spec appends to a capability that is never
-/// disposed again, which is observably the same as dropping the resource.
-fn append_resource(
-  st: Agent,
-  this: JsVal,
-  async: Bool,
-  resource: DisposeResource,
-) -> Agent {
-  case read_stack(st, this, async) {
-    Some(#(h, Pending(current))) ->
-      write_stack(st, h, Pending([resource, ..current]))
-    _ -> st
-  }
 }
 
 /// §12.3.3.4 / §12.4.3.4 get (Async)DisposableStack.prototype.disposed
@@ -394,10 +404,11 @@ fn dispose(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case disposable_state {
     // Step 3: already disposed — no-op
     Disposed -> #(mk_undefined(), st)
-    Pending(resources:) -> {
-      // Step 4: mark disposed — which drops the resource stack — BEFORE
-      // running disposers (re-entrant dispose() must not re-invoke them).
-      let st = write_stack(st, h, Disposed)
+    Pending(capability:) -> {
+      // Step 4: mark disposed BEFORE running disposers (re-entrant dispose()
+      // must not re-invoke them).
+      let resources = read_capability(st, capability)
+      let st = mark_disposed(st, h)
       // Step 5: DisposeResources — resources is newest-first, which is the
       // spec's reverse list order.
       case dispose_resources(st, resources, NormalCompletion(mk_undefined())) {
@@ -477,7 +488,8 @@ fn dispose_resources(
 ///   5. Return value.
 fn use_resource(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use _h, disposable_state <- require_stack(st, this, False, "use")
-  use _resources <- try_pending(st, disposable_state, async: False)
+  // Step 4 evaluates [[DisposeCapability]] before any user code runs.
+  use capability <- try_pending(st, disposable_state, async: False)
   let val = first_arg_or_undefined(args)
   case classify(val) {
     // AddDisposableResource step 1.a: null/undefined with sync-dispose and
@@ -493,7 +505,7 @@ fn use_resource(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         DirectDispose(method) | SyncFallbackDispose(method) ->
           MethodDispose(value: val, method: mk_object(method))
       }
-      #(val, append_resource(st, this, False, resource))
+      #(val, push_resource(st, capability, resource))
     }
     _ ->
       rt_val.t_throw_type_error(
@@ -515,13 +527,14 @@ fn use_resource_async(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use _h, disposable_state <- require_stack(st, this, True, "use")
-  use _resources <- try_pending(st, disposable_state, async: True)
+  // Step 4 evaluates [[DisposeCapability]] before any user code runs.
+  use capability <- try_pending(st, disposable_state, async: True)
   let val = first_arg_or_undefined(args)
   case classify(val) {
     // CreateDisposableResource step 1.a: V null/undefined with async-dispose
     // → V = undefined, method = undefined. DisposeResources will still
     // perform one Await(undefined) for it (needsAwait).
-    KUndef | KNull -> #(val, append_resource(st, this, True, NullDispose))
+    KUndef | KNull -> #(val, push_resource(st, capability, NullDispose))
     KHandle(_) -> {
       // GetDisposeMethod(V, async-dispose): GetMethod(V, @@asyncDispose),
       // falling back to a closure around GetMethod(V, @@dispose).
@@ -534,7 +547,7 @@ fn use_resource_async(
         SyncFallbackDispose(method) ->
           AsyncFallbackDispose(value: val, method: mk_object(method))
       }
-      #(val, append_resource(st, this, True, resource))
+      #(val, push_resource(st, capability, resource))
     }
     _ ->
       rt_val.t_throw_type_error(
@@ -645,8 +658,8 @@ fn adopt(
   args: List(JsVal),
   async async: Bool,
 ) -> #(JsVal, Agent) {
-  use h, disposable_state <- require_stack(st, this, async, "adopt")
-  use resources <- try_pending(st, disposable_state, async:)
+  use _h, disposable_state <- require_stack(st, this, async, "adopt")
+  use capability <- try_pending(st, disposable_state, async:)
   let #(val, on_dispose) = two_args_or_undefined(args)
   case rt_call.is_callable(st, on_dispose) {
     // Step 4: onDispose must be callable
@@ -654,9 +667,8 @@ fn adopt(
     True -> {
       // Steps 5-7: stored as DisposeCallback — Call(onDispose, undefined, « value »)
       let resource = DisposeCallback(callback: on_dispose, args: [val])
-      let st = write_stack(st, h, Pending([resource, ..resources]))
       // Step 8
-      #(val, st)
+      #(val, push_resource(st, capability, resource))
     }
   }
 }
@@ -671,8 +683,8 @@ fn defer(
   args: List(JsVal),
   async async: Bool,
 ) -> #(JsVal, Agent) {
-  use h, disposable_state <- require_stack(st, this, async, "defer")
-  use resources <- try_pending(st, disposable_state, async:)
+  use _h, disposable_state <- require_stack(st, this, async, "defer")
+  use capability <- try_pending(st, disposable_state, async:)
   let on_dispose = first_arg_or_undefined(args)
   case rt_call.is_callable(st, on_dispose) {
     // Step 4: onDispose must be callable
@@ -680,9 +692,8 @@ fn defer(
     True -> {
       // Step 5: Call(onDispose, undefined) with no arguments at dispose time
       let resource = DisposeCallback(callback: on_dispose, args: [])
-      let st = write_stack(st, h, Pending([resource, ..resources]))
       // Step 6
-      #(mk_undefined(), st)
+      #(mk_undefined(), push_resource(st, capability, resource))
     }
   }
 }
@@ -707,23 +718,24 @@ fn move(
   async async: Bool,
 ) -> #(JsVal, Agent) {
   use h, disposable_state <- require_stack(st, this, async, "move")
-  use resources <- try_pending(st, disposable_state, async:)
-  // Steps 4-6: new pending stack takes over the resources
+  use capability <- try_pending(st, disposable_state, async:)
+  // Steps 4-6: the new pending stack takes over the SAME capability cell, so
+  // a use() mid-flight on the old stack still appends into it.
   let #(new_h, st) =
-    alloc_stack(st, proto, async:, disposable_state: Pending(resources))
-  // Steps 7-8: original becomes disposed — Disposed carries no resources, so
-  // its capability is emptied by construction.
-  let st = write_stack(st, h, Disposed)
+    alloc_stack(st, proto, async:, disposable_state: Pending(capability:))
+  // Steps 7-8: the original gets a fresh capability and becomes disposed;
+  // `Disposed` holds no capability, which is that fresh empty one dropped.
+  let st = mark_disposed(st, h)
   #(mk_object(new_h), st)
 }
 
 /// Step 3 of use/adopt/defer/move: disposed stacks reject mutation with a
-/// ReferenceError; a pending stack yields its resource stack.
+/// ReferenceError; a pending stack yields its [[DisposeCapability]] handle.
 fn try_pending(
   st: Agent,
   disposable_state: DisposableState,
   async async: Bool,
-  cont cont: fn(List(DisposeResource)) -> #(JsVal, Agent),
+  cont cont: fn(Handle) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   case disposable_state {
     Disposed ->
@@ -731,7 +743,7 @@ fn try_pending(
         st,
         stack_type_name(async) <> " already disposed",
       )
-    Pending(resources:) -> cont(resources)
+    Pending(capability:) -> cont(capability)
   }
 }
 
@@ -779,10 +791,10 @@ fn dispose_async(st: Agent, this: JsVal) -> #(JsVal, Agent) {
       let st = settle_capability(st, resolve, mk_undefined())
       #(promise, st)
     }
-    Some(#(h, Pending(resources:))) -> {
-      // Step 5: mark disposed — which drops the resource stack — before
-      // running disposers
-      let st = write_stack(st, h, Disposed)
+    Some(#(h, Pending(capability:))) -> {
+      // Step 5: mark disposed before running disposers
+      let resources = read_capability(st, capability)
+      let st = mark_disposed(st, h)
       // Step 6: async DisposeResources loop
       let st =
         async_dispose_loop(

@@ -991,10 +991,12 @@ pub type DisposeResource {
 }
 
 /// [[DisposableState]] / [[AsyncDisposableState]] together with the
-/// [[DisposeCapability]]'s resource stack (newest first). `Disposed` drops the
-/// resources structurally.
+/// [[DisposeCapability]]. The capability is its own `SDisposeCapability` cell
+/// so it keeps its identity when `move()` hands it to a new stack. `Disposed`
+/// drops the reference: a disposed stack's capability is never disposed
+/// again, so nothing appended to it is observable.
 pub type DisposableState {
-  Pending(resources: List(DisposeResource))
+  Pending(capability: Handle)
   Disposed
 }
 
@@ -3103,7 +3105,7 @@ pub type ObjKind {
   TemporalObj(data: TemporalData)
   /// DisposableStack (`async: False`) / AsyncDisposableStack (`async: True`)
   /// — Explicit Resource Management §12.3/§12.4. `async` is the brand;
-  /// `state` is [[DisposableState]] plus the [[DisposeCapability]] resources.
+  /// `state` is [[DisposableState]] plus the [[DisposeCapability]] handle.
   DisposableStackObj(async: Bool, state: DisposableState)
   /// §26.2 FinalizationRegistry — [[CleanupCallback]] (held strongly) and
   /// [[Cells]] (newest first; each cell's target/token weak, held strong).
@@ -3142,6 +3144,10 @@ pub type JsSlot {
   /// `await`, and the result promise object it settles. Reachable only from
   /// the `AsyncResume` closures of that await.
   SAsyncContext(resume: Resume, promise: Handle)
+  /// A pending `DisposableStackObj`'s [[DisposeCapability]]: its
+  /// [[DisposableResourceStack]], newest first. `move()` re-points a new
+  /// stack at the same cell.
+  SDisposeCapability(resources: List(DisposeResource))
   /// Hidden-class fast object: props are a flat slot array indexed by
   /// `ShapeDesc.offsets`. Devolves to `SObject` on delete/accessor/etc.
   SShapedObject(shape_id: Int, proto: Option(Handle), slots: ShapeSlots)

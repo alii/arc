@@ -27,8 +27,8 @@ import arc/rt/types.{
   AccessorProperty, Agent, ArgumentsObj, ArrayObj, DataProperty, Dense, Index,
   JsStore, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named, NoElements,
   Ordinary, ParsedDesc, Private, ProxyObj, SAsyncContext, SAsyncGen, SBox,
-  SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, StringKey,
-  StringObj, SymbolKey, TypeErr, TypedArrayObj,
+  SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
+  ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr, TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
 import arc/vm/internal/tree_array
@@ -67,7 +67,7 @@ fn throw_type_error(st: Agent, msg: String) -> a {
 /// `SShapedObject` returned as-is (hot-path callers handle it via
 /// `own_property_shaped`; write-path callers `devolve` first, avoiding the
 /// `as_sobject` dict.fold rebuild). Data cells (`SBox`, promise/generator
-/// state, async contexts) are never a JS receiver.
+/// state, async contexts, dispose capabilities) are never a JS receiver.
 fn read_object(st: Agent, h: Handle) -> JsSlot {
   case rt_store.t_cell_get(st, h) {
     SObject(..) as obj -> obj
@@ -76,7 +76,8 @@ fn read_object(st: Agent, h: Handle) -> JsSlot {
     | SPromiseData(..)
     | SGenerator(..)
     | SAsyncGen(..)
-    | SAsyncContext(..) ->
+    | SAsyncContext(..)
+    | SDisposeCapability(..) ->
       panic as "rt_obj: internal data cell used as JS receiver (engine invariant)"
   }
 }
