@@ -117,5 +117,8 @@ pub type SuspendedFrame {
     /// Parked by `InitialYield` before the body proper ran: the first
     /// resumption's sent value is not delivered to the operand stack.
     at_start: Bool,
+    /// The activation's argument list. An async function parks at pc 0
+    /// before its prologue, so `arguments` / rest are built on resume.
+    call_args: List(JsVal),
   )
 }

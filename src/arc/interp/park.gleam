@@ -23,14 +23,14 @@ pub fn park(state: State, at_start: Bool) -> SuspendedFrame {
     eval_env: option.map(state.eval_env, fn(h) { h.id }),
     line: call.current_line(state.agent),
     at_start:,
+    call_args: state.call_args,
   )
 }
 
 /// Rebuild the activation `frame` describes on top of `agent` as a root
-/// activation (no caller frames, no `new.target`, no call args: a coroutine
-/// body is never constructed and built its `arguments` before it first
-/// parked). The caller pushes the body's `Error.stack` frame; the parked
-/// line is written onto it here.
+/// activation (no caller frames, no `new.target`: a coroutine body is never
+/// constructed). The caller pushes the body's `Error.stack` frame; the
+/// parked line is written onto it here.
 pub fn unpark(agent: Agent, frame: SuspendedFrame) -> State {
   let SuspendedFrame(
     template:,
@@ -43,6 +43,7 @@ pub fn unpark(agent: Agent, frame: SuspendedFrame) -> State {
     eval_env:,
     line:,
     at_start: _,
+    call_args:,
   ) = frame
   State(
     agent: call.set_line(agent, line),
@@ -57,7 +58,7 @@ pub fn unpark(agent: Agent, frame: SuspendedFrame) -> State {
     this:,
     new_target: mk_undefined(),
     home_object:,
-    call_args: [],
+    call_args:,
     eval_env: option.map(eval_env, JsCell),
   )
 }

@@ -200,12 +200,14 @@ pub fn push_suspended_frame_refs(
     eval_env:,
     line: _,
     at_start: _,
+    call_args:,
   ) = frame
   let acc = push_template_refs(template, acc)
   let acc = push_vals_tuple_refs(locals, acc)
   let acc = list.fold(stack, acc, fn(a, v) { push_val_refs(v, a) })
   let acc = push_val_refs(this, acc)
   let acc = push_val_refs(home_object, acc)
+  let acc = list.fold(call_args, acc, fn(a, v) { push_val_refs(v, a) })
   case eval_env {
     Some(id) -> [id, ..acc]
     None -> acc

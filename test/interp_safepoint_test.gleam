@@ -214,6 +214,7 @@ pub fn parked_frame_roots_its_registers_test() {
       eval_env: Some(env_h.id),
       line: 1,
       at_start: False,
+      call_args: [],
     )
   let #(gen_h, st) =
     rt_store.t_cell_new(

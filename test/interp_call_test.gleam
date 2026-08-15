@@ -151,6 +151,35 @@ pub fn arguments_object_test() {
     == "ab"
 }
 
+/// Coroutine bodies see their own argument list: a generator builds
+/// `arguments` / rest before `InitialYield`, an async function on its first
+/// (synchronous) turn from the parked frame.
+pub fn coroutine_arguments_and_rest_test() {
+  assert eval_int(
+      "var out = 0;\n"
+      <> "(async function (a, ...r) { out = arguments.length * 10 + r.length })(1, 2, 3)\n"
+      <> "out",
+    )
+    == 32
+  assert eval_int(
+      "var out = 0;\n"
+      <> "(async (...r) => { out = r[0] + r[1] })(4, 5)\n"
+      <> "out",
+    )
+    == 9
+  assert eval_int(
+      "function* g(a, ...r) { yield arguments.length * 10 + r.length }\n"
+      <> "g(1, 2, 3).next().value",
+    )
+    == 32
+  assert eval_int(
+      "var out = 0;\n"
+      <> "(async function* (a, ...r) { out = arguments.length * 10 + r.length })(1, 2).next()\n"
+      <> "out",
+    )
+    == 21
+}
+
 pub fn this_binding_test() {
   // Sloppy: undefined this → globalThis; primitives box.
   assert eval_bool("function f() { return this === globalThis } f()")
