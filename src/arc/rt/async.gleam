@@ -428,15 +428,21 @@ pub fn t_gen_start(
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
+  t_gen_new(
+    st,
+    call.frame_active_func(frame),
+    ResumeCompiled(sm:, rs: 0, loc: loc0),
+  )
+}
+
+/// GeneratorStart for a body that begins at `resume` (a state machine at
+/// state 0, or an interpreter frame parked at its InitialYield): the
+/// `SGenerator` data cell in SuspendedStart plus the object, whose prototype
+/// comes from the generator function `callee`. Returns the object handle.
+pub fn t_gen_new(st: Agent, callee: JsVal, resume: Resume) -> #(Handle, Agent) {
   let #(data, st) =
-    rt_store.t_cell_new(
-      st,
-      SGenerator(
-        state: GenSuspendedStart,
-        resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
-      ),
-    )
-  let proto = generator_prototype(st, frame, st.realm.generator.prototype)
+    rt_store.t_cell_new(st, SGenerator(state: GenSuspendedStart, resume:))
+  let proto = generator_prototype(st, callee, st.realm.generator.prototype)
   alloc_shell(st, GeneratorObj(data:), Some(proto))
 }
 
@@ -444,8 +450,8 @@ pub fn t_gen_start(
 /// its own `prototype` data property when that holds an object, else the
 /// realm `fallback`. The property is non-configurable data, so the own-slot
 /// read is the whole of the observable Get.
-fn generator_prototype(st: Agent, frame: Frame, fallback: Handle) -> Handle {
-  case classify(call.frame_active_func(frame)) {
+fn generator_prototype(st: Agent, callee: JsVal, fallback: Handle) -> Handle {
+  case classify(callee) {
     KHandle(fn_h) ->
       case
         rt_obj.t_ordinary_own_property(st, fn_h, StringKey(Named("prototype")))
@@ -947,16 +953,27 @@ pub fn t_asyncgen_start(
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
+  t_asyncgen_new(
+    st,
+    call.frame_active_func(frame),
+    ResumeCompiled(sm:, rs: 0, loc: loc0),
+  )
+}
+
+/// AsyncGeneratorStart for a body that begins at `resume`: the `SAsyncGen`
+/// data cell in SuspendedStart with an empty request queue plus the object,
+/// whose prototype comes from the function `callee`. Returns the object.
+pub fn t_asyncgen_new(
+  st: Agent,
+  callee: JsVal,
+  resume: Resume,
+) -> #(Handle, Agent) {
   let #(data, st) =
     rt_store.t_cell_new(
       st,
-      SAsyncGen(
-        state: AGSuspendedStart,
-        resume: ResumeCompiled(sm:, rs: 0, loc: loc0),
-        queue: #([], []),
-      ),
+      SAsyncGen(state: AGSuspendedStart, resume:, queue: #([], [])),
     )
-  let proto = generator_prototype(st, frame, st.realm.async_gen.prototype)
+  let proto = generator_prototype(st, callee, st.realm.async_gen.prototype)
   alloc_shell(st, AsyncGeneratorObj(data:), Some(proto))
 }
 
@@ -1357,11 +1374,17 @@ pub fn t_async_start(
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
+  t_async_run(st, ResumeCompiled(sm:, rs: 0, loc: loc0))
+}
+
+/// AsyncFunctionStart for a body that begins at `resume`: allocate the
+/// result promise and the `SAsyncContext`, run the first turn now, drive
+/// its outcome, and return the result promise.
+pub fn t_async_run(st: Agent, resume: Resume) -> #(Handle, Agent) {
   let #(promise_h, st) = t_new_promise(st)
-  let resume = ResumeCompiled(sm:, rs: 0, loc: loc0)
   let #(ctx_h, st) =
     rt_store.t_cell_new(st, SAsyncContext(resume:, promise: promise_h))
-  let #(step, st) = apply_sm(st, sm, 0, sent_start(), loc0)
+  let #(step, st) = apply_resume(st, resume, sent_start())
   let st = drive_async_step(st, ctx_h, promise_h, step)
   #(promise_h, st)
 }
