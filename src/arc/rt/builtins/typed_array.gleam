@@ -17,6 +17,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/realm_ops
+import arc/rt/builtins/uint8_codec
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -43,9 +44,12 @@ import arc/rt/types.{
   TypedArrayPrototypeSome, TypedArrayPrototypeSort, TypedArrayPrototypeSubarray,
   TypedArrayPrototypeToLocaleString, TypedArrayPrototypeToReversed,
   TypedArrayPrototypeToSorted, TypedArrayPrototypeValues,
-  TypedArrayPrototypeWith, TypedArrays, all_typed_array_kinds, classify, mk_bool,
-  mk_number, mk_object, mk_string, mk_undefined, symbol_iterator, symbol_species,
-  symbol_to_string_tag, typed_array_name,
+  TypedArrayPrototypeWith, TypedArrays, Uint8ArrayFromBase64, Uint8ArrayFromHex,
+  Uint8ArrayPrototypeSetFromBase64, Uint8ArrayPrototypeSetFromHex,
+  Uint8ArrayPrototypeToBase64, Uint8ArrayPrototypeToHex, Uint8Kind,
+  all_typed_array_kinds, classify, mk_bool, mk_number, mk_object, mk_string,
+  mk_undefined, symbol_iterator, symbol_species, symbol_to_string_tag,
+  typed_array_name,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -203,7 +207,7 @@ pub fn init(
   let #(by_kind, st) =
     list.fold(all_typed_array_kinds, #(dict.new(), st), fn(acc, kind) {
       let #(d, st) = acc
-      let #(pair, st) = init_ctor(st, ta, kind)
+      let #(pair, st) = init_ctor(st, ta, function_proto, kind)
       #(dict.insert(d, kind, pair), st)
     })
   #(#(ta, TypedArrays(by_kind:)), st)
@@ -214,6 +218,7 @@ pub fn init(
 fn init_ctor(
   st: Agent,
   ta: BuiltinPair,
+  function_proto: Handle,
   kind: TypedArrayKind,
 ) -> #(BuiltinPair, Agent) {
   let size = typed_array_ffi.elem_size(kind)
@@ -221,16 +226,49 @@ fn init_ctor(
   let #(size_prop2, st) = common.restamp(st, size_prop)
   // §23.2.6.2: the ctor's "prototype" property is {W:F, E:F, C:F} —
   // installed that way by common.init_type.
-  common.init_type(
-    st,
-    ta.prototype,
-    ta.constructor,
-    [#("BYTES_PER_ELEMENT", size_prop)],
-    fn(proto) { TypedArrayN(TypedArrayConstructor(kind:, proto:)) },
-    typed_array_name(kind),
-    3,
-    [#("BYTES_PER_ELEMENT", size_prop2)],
-  )
+  let #(bt, st) =
+    common.init_type(
+      st,
+      ta.prototype,
+      ta.constructor,
+      [#("BYTES_PER_ELEMENT", size_prop)],
+      fn(proto) { TypedArrayN(TypedArrayConstructor(kind:, proto:)) },
+      typed_array_name(kind),
+      3,
+      [#("BYTES_PER_ELEMENT", size_prop2)],
+    )
+  // proposal-arraybuffer-base64: own methods of Uint8Array.prototype and
+  // statics of the Uint8Array constructor (NOT on %TypedArray%).
+  let st = case kind {
+    NumKind(Uint8Kind) -> {
+      let #(u8_methods, st) =
+        common.alloc_methods(st, function_proto, [
+          #("toBase64", TypedArrayN(Uint8ArrayPrototypeToBase64), 0),
+          #("toHex", TypedArrayN(Uint8ArrayPrototypeToHex), 0),
+          #("setFromBase64", TypedArrayN(Uint8ArrayPrototypeSetFromBase64), 1),
+          #("setFromHex", TypedArrayN(Uint8ArrayPrototypeSetFromHex), 1),
+        ])
+      let st = add_named_props(st, bt.prototype, u8_methods)
+      let #(u8_statics, st) =
+        common.alloc_methods(st, function_proto, [
+          #("fromBase64", TypedArrayN(Uint8ArrayFromBase64), 1),
+          #("fromHex", TypedArrayN(Uint8ArrayFromHex), 1),
+        ])
+      add_named_props(st, bt.constructor, u8_statics)
+    }
+    _ -> st
+  }
+  #(bt, st)
+}
+
+/// Insert named properties into an existing object cell.
+fn add_named_props(
+  st: Agent,
+  ref: Handle,
+  props: List(#(String, types.Property)),
+) -> Agent {
+  use st, #(name, prop) <- list.fold(props, st)
+  common.add_named_property(st, ref, name, prop)
 }
 
 // ============================================================================
@@ -297,6 +335,13 @@ pub fn dispatch(
     TypedArrayPrototypeWith -> proto_with(st, this, args)
     TypedArrayFrom -> ta_from(st, this, args)
     TypedArrayOf -> ta_of(st, this, args)
+    Uint8ArrayPrototypeToBase64 -> uint8_codec.u8_to_base64(st, this, args)
+    Uint8ArrayPrototypeToHex -> uint8_codec.u8_to_hex(st, this)
+    Uint8ArrayPrototypeSetFromBase64 ->
+      uint8_codec.u8_set_from_base64(st, this, args)
+    Uint8ArrayPrototypeSetFromHex -> uint8_codec.u8_set_from_hex(st, this, args)
+    Uint8ArrayFromBase64 -> uint8_codec.u8_from_base64(st, args)
+    Uint8ArrayFromHex -> uint8_codec.u8_from_hex(st, args)
   }
 }
 

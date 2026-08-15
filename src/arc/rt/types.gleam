@@ -1223,6 +1223,19 @@ pub type TypedArrayNative {
   TypedArrayPrototypeToSorted
   TypedArrayPrototypeValues
   TypedArrayPrototypeWith
+  /// proposal-arraybuffer-base64: Uint8Array.prototype.toBase64 ( [ options ] )
+  Uint8ArrayPrototypeToBase64
+  /// proposal-arraybuffer-base64: Uint8Array.prototype.toHex ( )
+  Uint8ArrayPrototypeToHex
+  /// proposal-arraybuffer-base64:
+  /// Uint8Array.prototype.setFromBase64 ( string [ , options ] )
+  Uint8ArrayPrototypeSetFromBase64
+  /// proposal-arraybuffer-base64: Uint8Array.prototype.setFromHex ( string )
+  Uint8ArrayPrototypeSetFromHex
+  /// proposal-arraybuffer-base64: Uint8Array.fromBase64 ( string [ , options ] )
+  Uint8ArrayFromBase64
+  /// proposal-arraybuffer-base64: Uint8Array.fromHex ( string )
+  Uint8ArrayFromHex
 }
 
 /// DataView methods — ES2024 §25.3. Constructor, accessor getters, and the

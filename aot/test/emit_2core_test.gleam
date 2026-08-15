@@ -327,6 +327,13 @@ pub fn data_view_and_bigint_diff_test() {
   )
 }
 
+pub fn uint8_base64_hex_diff_test() {
+  diff(
+    "var u=new Uint8Array([251,255,191,1,2]);var t=new Uint8Array(4);var r=t.setFromBase64('AQID BAU=',{lastChunkHandling:'stop-before-partial'});var h=new Uint8Array(3);var w=h.setFromHex('a0b1c2');console.log(u.toBase64(),u.toBase64({alphabet:'base64url',omitPadding:true}),u.toHex(),Uint8Array.fromHex('DEADbeef').join(),Uint8Array.fromBase64(' +/8 = ',{lastChunkHandling:'loose'}).join(),Uint8Array.fromBase64('-_8',{alphabet:'base64url'}).join(),r.read,r.written,t.join(),w.read,w.written,h.join());try{Uint8Array.fromHex('abc')}catch(e){console.log(e.name,e.message)}try{Uint8Array.fromBase64('QQ',{lastChunkHandling:'strict'})}catch(e){console.log(e.name)}try{u.toBase64({alphabet:'nope'})}catch(e){console.log(e.name,e.message)}try{Uint8Array.fromHex(1)}catch(e){console.log(e.name,e.message)}",
+    "+/+/AQI= -_-_AQI fbffbf0102 222,173,190,239 251,255 251,255 4 3 1,2,3,0 6 3 160,177,194\nSyntaxError unable to decode hex string\nSyntaxError\nTypeError \"nope\" is not a valid value for option alphabet\nTypeError expected input to be a string, got number\n",
+  )
+}
+
 pub fn shared_buffer_and_atomics_diff_test() {
   diff(
     "var sab=new SharedArrayBuffer(8,{maxByteLength:16});var i=new Int32Array(sab);console.log(Atomics.add(i,0,5),Atomics.load(i,0),Atomics.compareExchange(i,0,5,9),Atomics.compareExchange(i,0,5,1),i[0],Atomics.exchange(i,1,-1),Atomics.and(i,1,12),Atomics.sub(i,1,2),Atomics.xor(i,1,3),Atomics.or(i,1,16),i[1],Atomics.store(i,0,-1/0),Atomics.notify(i,0),Atomics.isLockFree(8));sab.grow(16);console.log(sab.byteLength,i.length,sab.growable);try{Atomics.wait(i,0,0,0)}catch(e){console.log(e.name)}try{Atomics.load(i,9)}catch(e){console.log(e.name)}try{Atomics.add(new Float64Array(1),0,1)}catch(e){console.log(e.name)}",
