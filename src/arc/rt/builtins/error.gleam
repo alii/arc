@@ -535,12 +535,10 @@ fn set_stack_ignoring_prototype(
         "Cannot assign to read only property 'stack' of Error.prototype",
       )
     False -> {
-      // Step 3: desc = ? this.[[GetOwnProperty]]("stack").
-      let has_own = case rt_obj.as_sobject(st, rt_store.t_cell_get(st, h)) {
-        SObject(props:, ..) -> dict.has_key(props, Named("stack"))
-        _ -> False
-      }
-      case has_own {
+      // Step 3: desc = ? this.[[GetOwnProperty]]("stack") — proxy-aware.
+      let #(own, st) =
+        rt_obj.t_get_own_property(st, h, StringKey(Named("stack")))
+      case option.is_some(own) {
         // Step 5: Set(this, "stack", v, true) — false → TypeError.
         True -> {
           let #(ok, st) =
