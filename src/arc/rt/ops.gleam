@@ -688,11 +688,25 @@ fn num_add(a: JsNum, b: JsNum) -> JsNum {
     JPosInf, _ | _, JPosInf -> JPosInf
     JNegInf, _ | _, JNegInf -> JNegInf
     JInt(x), JInt(y) -> int_result(x + y)
-    JInt(x), JFloat(y) -> JFloat(int.to_float(x) +. y)
-    JFloat(x), JInt(y) -> JFloat(x +. int.to_float(y))
-    JFloat(x), JFloat(y) -> JFloat(x +. y)
+    JInt(x), JFloat(y) -> fadd(int.to_float(x), y)
+    JFloat(x), JInt(y) -> fadd(x, int.to_float(y))
+    JFloat(x), JFloat(y) -> fadd(x, y)
   }
 }
+
+/// Finite `+ - * /` made total: the BEAM raises `badarith` where IEEE
+/// arithmetic overflows to ±Infinity, so these answer the infinity instead.
+@external(erlang, "arc_rt_ops_ffi", "fadd")
+fn fadd(a: Float, b: Float) -> JsNum
+
+@external(erlang, "arc_rt_ops_ffi", "fsub")
+fn fsub(a: Float, b: Float) -> JsNum
+
+@external(erlang, "arc_rt_ops_ffi", "fmul")
+fn fmul(a: Float, b: Float) -> JsNum
+
+@external(erlang, "arc_rt_ops_ffi", "fdiv")
+fn fdiv(a: Float, b: Float) -> JsNum
 
 /// §6.1.6.1.8 Number::subtract. Port of arc `numeric.gleam:154-172`.
 fn num_sub(a: JsNum, b: JsNum) -> JsNum {
@@ -704,9 +718,9 @@ fn num_sub(a: JsNum, b: JsNum) -> JsNum {
     _, JPosInf -> JNegInf
     _, JNegInf -> JPosInf
     JInt(x), JInt(y) -> int_result(x - y)
-    JInt(x), JFloat(y) -> JFloat(int.to_float(x) -. y)
-    JFloat(x), JInt(y) -> JFloat(x -. int.to_float(y))
-    JFloat(x), JFloat(y) -> JFloat(x -. y)
+    JInt(x), JFloat(y) -> fsub(int.to_float(x), y)
+    JFloat(x), JInt(y) -> fsub(x, int.to_float(y))
+    JFloat(x), JFloat(y) -> fsub(x, y)
   }
 }
 
@@ -737,9 +751,9 @@ fn num_mul(a: JsNum, b: JsNum) -> JsNum {
     JInt(0), JInt(y) if y < 0 -> JFloat(-0.0)
     JInt(x), JInt(0) if x < 0 -> JFloat(-0.0)
     JInt(x), JInt(y) -> int_result(x * y)
-    JInt(x), JFloat(y) -> JFloat(int.to_float(x) *. y)
-    JFloat(x), JInt(y) -> JFloat(x *. int.to_float(y))
-    JFloat(x), JFloat(y) -> JFloat(x *. y)
+    JInt(x), JFloat(y) -> fmul(int.to_float(x), y)
+    JFloat(x), JInt(y) -> fmul(x, int.to_float(y))
+    JFloat(x), JFloat(y) -> fmul(x, y)
   }
 }
 
@@ -761,7 +775,7 @@ fn num_div(a: JsNum, b: JsNum) -> JsNum {
             False -> signed_inf(zero_aware_sign(a) * zero_aware_sign(b))
           }
         // JS `/` is always real division (7/2 → 3.5).
-        False -> JFloat(finite_to_float(a) /. finite_to_float(b))
+        False -> fdiv(finite_to_float(a), finite_to_float(b))
       }
   }
 }

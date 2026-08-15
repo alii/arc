@@ -22,7 +22,7 @@ pub fn num_add(a: JsNum, b: JsNum) -> JsNum {
     Infinity, NegInfinity | NegInfinity, Infinity -> NaN
     Infinity, _ | _, Infinity -> Infinity
     NegInfinity, _ | _, NegInfinity -> NegInfinity
-    Finite(x), Finite(y) -> Finite(x +. y)
+    Finite(x), Finite(y) -> float_add(x, y)
   }
 }
 
@@ -50,7 +50,7 @@ pub fn num_mul(a: JsNum, b: JsNum) -> JsNum {
       }
     Infinity, Infinity | NegInfinity, NegInfinity -> Infinity
     Infinity, NegInfinity | NegInfinity, Infinity -> NegInfinity
-    Finite(x), Finite(y) -> Finite(x *. y)
+    Finite(x), Finite(y) -> float_mul(x, y)
   }
 }
 
@@ -94,7 +94,7 @@ pub fn num_div(a: JsNum, b: JsNum) -> JsNum {
             False -> Infinity
           }
       }
-    Finite(x), Finite(y) -> Finite(x /. y)
+    Finite(x), Finite(y) -> float_div(x, y)
   }
 }
 
@@ -256,6 +256,17 @@ fn is_odd_integer(f: Float) -> Bool {
 /// instead of crashing the VM.
 @external(erlang, "arc_math_ffi", "pow")
 pub fn pow_total(base: Float, exp: Float) -> JsNum
+
+/// Finite `+`, `*` and `/` made total the same way: a result whose magnitude
+/// passes 1.8e308 is ±Infinity, not a `badarith`.
+@external(erlang, "arc_math_ffi", "add")
+fn float_add(x: Float, y: Float) -> JsNum
+
+@external(erlang, "arc_math_ffi", "mul")
+fn float_mul(x: Float, y: Float) -> JsNum
+
+@external(erlang, "arc_math_ffi", "fdiv")
+fn float_div(x: Float, y: Float) -> JsNum
 
 // ============================================================================
 // Signed-zero predicates

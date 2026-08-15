@@ -11,7 +11,7 @@ import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type JsVal, Agent, FnFlags, FrameInfo, JFloat,
-  JInt, JNegInf, JsOps, JsStore, KBool, KBytecode, KHandle, KNum, KStr,
+  JInt, JNegInf, JPosInf, JsOps, JsStore, KBool, KBytecode, KHandle, KNum, KStr,
   NoElements, SObject, StringKey, canonical_key, classify, mk_null, mk_number,
   mk_object, mk_string, mk_undefined,
 }
@@ -155,6 +155,43 @@ pub fn integer_results_widen_past_2_53_test() {
   assert num(int(-9_007_199_254_740_993)) == JFloat(-9_007_199_254_740_992.0)
   assert num(int(9_007_199_254_740_991)) == JInt(9_007_199_254_740_991)
 }
+
+pub fn float_overflow_is_infinity_test() {
+  let st = agent()
+  let big = mk_number(JFloat(1.0e308))
+  let max = mk_number(JFloat(1.7976931348623157e308))
+  let #(a, st) = rt_ops.t_mul(st, big, int(10))
+  assert num(a) == JPosInf
+  let #(b, st) = rt_ops.t_mul(st, rt_ops.t_neg(st, big).0, int(10))
+  assert num(b) == JNegInf
+  let #(c, st) = rt_ops.t_add(st, big, big)
+  assert num(c) == JPosInf
+  let #(d, st) = rt_ops.t_sub(st, rt_ops.t_neg(st, big).0, big)
+  assert num(d) == JNegInf
+  let #(e, st) = rt_ops.t_mul(st, max, int(2))
+  assert num(e) == JPosInf
+  let #(f, st) = rt_ops.t_div(st, big, mk_number(JFloat(1.0e-10)))
+  assert num(f) == JPosInf
+  let #(g, st) = rt_ops.t_div(st, big, mk_number(JFloat(-1.0e-10)))
+  assert num(g) == JNegInf
+  let #(h, st) = rt_ops.t_pow(st, int(-10), int(401))
+  assert num(h) == JNegInf
+  // The AOT number fast path shares the kernels.
+  assert num(pure_add(big, big)) == JPosInf
+  assert num(pure_sub(mk_number(JFloat(-1.0e308)), big)) == JNegInf
+  assert num(pure_mul(big, mk_number(JFloat(-10.0)))) == JNegInf
+  assert num(pure_mul(int(3), int(4))) == JInt(12)
+  assert show(st, a) == "Infinity"
+}
+
+@external(erlang, "arc_rt_ops_ffi", "add")
+fn pure_add(a: JsVal, b: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_ops_ffi", "sub")
+fn pure_sub(a: JsVal, b: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_ops_ffi", "mul")
+fn pure_mul(a: JsVal, b: JsVal) -> JsVal
 
 pub fn minus_zero_survives_integer_arithmetic_test() {
   let st = agent()

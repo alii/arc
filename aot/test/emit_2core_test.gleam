@@ -389,6 +389,15 @@ pub fn big_integers_widen_to_double_diff_test() {
   )
 }
 
+/// Float arithmetic whose true result passes 1.8e308 is ±Infinity on both
+/// paths (native `+ - * /`, `**`, Math), never a `badarith`.
+pub fn float_overflow_is_infinity_diff_test() {
+  diff(
+    "var b=1e308,m=Number.MAX_VALUE;function f(x,y){return [x*10,-x*10,x+x,-x-x,y*2,x/1e-10,x/-1e-10,2**1024,(-10)**401,Math.pow(10,400),Math.exp(1000),x*x-x*x]}console.log(f(b,m).join());var x=b;x*=10;var y=-b;y-=b;console.log(x,y,x===Infinity,1e309,-1e309,parseFloat('1e400'),+'-1e400',isFinite(b*10))",
+    "Infinity,-Infinity,Infinity,-Infinity,Infinity,Infinity,-Infinity,Infinity,-Infinity,Infinity,Infinity,NaN\nInfinity -Infinity true Infinity -Infinity Infinity -Infinity false\n",
+  )
+}
+
 pub fn minus_zero_is_preserved_diff_test() {
   diff(
     "function d(v){return 1/v===-Infinity?'-0':String(v)}var z=0,n=-1,p=5;console.log(d(-0),d(0*-1),d(z*n),d(n*z),d(z*p),d(-z),d(-0+-0),d(-0+0),d(0-0),d(-4%2),d(4%-2),d(z/-5),d(Math.round(-0.4)),d(-p*0));console.log(Object.is(-0,0),Object.is(z*n,-0),1/-0,(-0).toString(),JSON.stringify(-0),JSON.stringify([z*n]),String(-0),-0===0,[-0].includes(0),Math.max(-0,0)===0&&1/Math.max(-0,0));var o={};o[-0]='k';console.log(Object.keys(o).join());var q=0;q*= -1;console.log(d(q),d(q+1-1));var ng=-1,nz=-0;console.log(ng,ng==-1,5&ng,d(nz),d(nz*ng))",

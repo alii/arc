@@ -20,6 +20,34 @@
 %% can escape as an uncaught exception.
 -module(arc_math_ffi).
 -export([exp/1, pow/2, cosh/1, sinh/1, hypot/1, fround/1, is_neg_zero/1]).
+-export([add/2, mul/2, fdiv/2]).
+
+%% Finite + finite, * and / overflow a 64-bit float when the true result's
+%% magnitude passes 1.8e308 (`1e308 * 10`, `Number.MAX_VALUE + Number.MAX_VALUE`,
+%% `1e308 / 1e-10`); IEEE gives ±Infinity there. A sum only overflows when both
+%% operands share a sign, so it takes the sign of either; a product or
+%% quotient takes the XOR of the operand signs. Division by zero never
+%% arrives here (num_div decides it first).
+add(X, Y) ->
+    try {finite, X + Y}
+    catch error:badarith -> signed_infinity(X)
+    end.
+
+mul(X, Y) ->
+    try {finite, X * Y}
+    catch error:badarith -> product_infinity(X, Y)
+    end.
+
+fdiv(X, Y) ->
+    try {finite, X / Y}
+    catch error:badarith -> product_infinity(X, Y)
+    end.
+
+product_infinity(X, Y) ->
+    case neg_sign(X) =:= neg_sign(Y) of
+        true -> infinity;
+        false -> neg_infinity
+    end.
 
 %% math:exp/1 overflows only toward +Infinity (e^x for large positive x).
 exp(X) ->

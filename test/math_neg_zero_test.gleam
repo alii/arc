@@ -17,6 +17,18 @@ fn eval(source: String) -> value.JsValue {
   value
 }
 
+/// Plain `+ - * /` past 1.8e308 is ±Infinity by the operands' signs; the
+/// finite kernels used to `badarith` there and take the process down.
+pub fn arithmetic_overflow_is_infinity_test() {
+  assert eval("1e308 * 10 === Infinity") == JsBool(True)
+  assert eval("-1e308 * 10 === -Infinity") == JsBool(True)
+  assert eval("1e308 + 1e308 === Infinity") == JsBool(True)
+  assert eval("-1e308 - 1e308 === -Infinity") == JsBool(True)
+  assert eval("Number.MAX_VALUE * 2 === Infinity") == JsBool(True)
+  assert eval("1e308 / -1e-10 === -Infinity") == JsBool(True)
+  assert eval("var x = 1e308; x *= -10; x === -Infinity") == JsBool(True)
+}
+
 /// §21.3.2.18 Math.hypot. The old fold squared and summed raw Floats inline,
 /// so an intermediate overflow raised `badarith` and took the runtime process
 /// down — for arguments whose true result is perfectly finite.
