@@ -304,13 +304,6 @@ fn emit_methods(
 
 // ── §15.7.14 steps 8-14: constructor + class_create (port emit.gleam:7159-7290) ──
 
-fn bool_atom(e: Emitter2, b: Bool) -> ir.Value {
-  case b {
-    True -> e.consts.true_
-    False -> e.consts.false_
-  }
-}
-
 /// §15.1.5 ExpectedArgumentCount — leading params before the first default
 /// or rest. Local copy of func.gleam:788 (private there).
 fn ctor_expected_length(params: List(ast.Pattern)) -> Int {
@@ -375,13 +368,12 @@ fn emit_ctor_and_create(
     Some(n) -> ir.ConstBinary(bit_array.from_string(n))
     None -> e.consts.empty_bin
   }
-  // M7.md C2 arg order: [ctor_code, name, length, super, is_derived] → {ctor,proto}.
+  // Arg order: [ctor_code, name, length, super] → {ctor, proto}.
   use e, pair <- host_(e, "class_create", [
     ctor_code_h,
     name_bin,
     ir.ConstI32(ctor_expected_length(ctor_params)),
     super_v,
-    bool_atom(e, is_derived),
   ])
   use e, ctor_h <- let_(e, anf.tuple_get(pair, 0))
   use e, proto_h <- let_(e, anf.tuple_get(pair, 1))
@@ -791,21 +783,6 @@ fn unpack_init_frame(
   }
 }
 
-/// Rk-shaped anf.cons_list (right-fold MakeCons onto host("empty_list")).
-fn cons_list_(
-  e: Emitter2,
-  vs: List(ir.Value),
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  case vs {
-    [] -> host_(e, "empty_list", [], k)
-    [head, ..rest] -> {
-      use e, tail <- cons_list_(e, rest)
-      let_(e, ir.TermOp(ir.MakeCons, [head, tail]), k)
-    }
-  }
-}
-
 /// FnFlags wire tuple for a ClassInitFn — strict (§15.7.1: class bodies are
 /// strict code), every other flag False. MUST match arc/rt/types.FnFlags
 /// field order + tag exactly (func.gleam emit_closure_site).
@@ -1011,13 +988,11 @@ fn build_class_init_closure(
   // Closure site (SPEC.md:1388): MakeClosure → fn_new → make_method(home_h).
   use e, fun <- let_(e, ir.MakeClosure(fn_name, capture_vals, 2))
   use e, flags_t <- let_(e, ir.TermOp(ir.MakeTuple, init_fn_flags(e.consts)))
-  use e, caps_l <- cons_list_(e, capture_vals)
   use e, fn_h <- host_(e, "fn_new", [
     fun,
     flags_t,
     e.consts.empty_bin,
     ir.ConstI32(0),
-    caps_l,
     ir.ConstAtom("none"),
   ])
   // M7 C4 t_make_method is JMutUnit — mutates fn_h in place; result is fn_h.

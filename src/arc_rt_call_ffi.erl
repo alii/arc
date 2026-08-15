@@ -35,7 +35,7 @@ t_kfn_code(St, {js_cell, Id}, This) ->
     case element(?STORE_DATA, Store) of
         #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
-                {?KFN_TAG, Code, none, Flags, _, _, Simple}
+                {?KFN_TAG, Code, none, Flags, _, Simple}
                   when element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
@@ -157,7 +157,7 @@ mono_apply(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, Args) ->
     case Data of
         #{FnId := FSlot} when element(1, FSlot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, FSlot) of
-                {?KFN_TAG, Code, ?NONE, Flags, _, _, Simple}
+                {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
                   when element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
@@ -200,7 +200,7 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     case Data of
         #{CId := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
-                {?KFN_TAG, Code, ?NONE, Flags, ?NONE, _, _}
+                {?KFN_TAG, Code, ?NONE, Flags, ?NONE, _}
                   when element(?FNFLAGS_IS_CTOR, Flags) =:= true,
                        element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
                        element(?FNFLAGS_IS_DERIVED, Flags) =:= false,

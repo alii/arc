@@ -1957,7 +1957,6 @@ pub type ObjKind {
     home_object: Option(Handle),
     flags: FnFlags,
     fields_init: Option(Handle),
-    captures: List(Handle),
     /// Simple-ABI fast-path variant `(closure, declared_arity, needs_this)` —
     /// a positional-args body that skips Frame/args-list build. `needs_this`
     /// True ⇒ closure is `fun(St,This,P0..Pn-1)`; False ⇒ `fun(St,P0..Pn-1)`.

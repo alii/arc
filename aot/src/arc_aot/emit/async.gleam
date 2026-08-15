@@ -2846,13 +2846,11 @@ fn emit_closure_site(
     {
       use fun <- anf.then(anf.bind(ir.MakeClosure(outer_name, captures, 2)))
       use flags_t <- anf.then(anf.make_tuple(flags))
-      use caps_l <- anf.then(anf.cons_list(captures))
       anf.host("fn_new", [
         fun,
         flags_t,
         name_bin,
         ir.ConstI32(exp_len),
-        caps_l,
         ir.ConstAtom("none"),
       ])
     },

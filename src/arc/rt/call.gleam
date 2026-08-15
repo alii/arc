@@ -744,7 +744,7 @@ fn alloc_fn_cell(
 
 /// Allocate a `KCompiled` cell for a compiled user function (D4). An
 /// `SObject{kind: KCompiled{code, home_object: home, flags, fields_init:
-/// None, captures}, proto: %Function.prototype%}` with own `length`/`name`
+/// None}, proto: %Function.prototype%}` with own `length`/`name`
 /// per §20.2.4. Port of arc's function-object allocation shape via
 /// `alloc_fn_slot`. Does NOT allocate a `.prototype` own property — §10.2.5
 /// MakeConstructor is a separate step (M7/M14 responsibility). `fields_init`
@@ -753,7 +753,6 @@ fn alloc_fn_cell(
 pub fn t_fn_new(
   st: Agent,
   code: CompiledFn,
-  captures: List(Handle),
   flags: FnFlags,
   name: String,
   len: Int,
@@ -763,21 +762,14 @@ pub fn t_fn_new(
   alloc_fn_cell(
     st,
     Some(st.realm.function.prototype),
-    KCompiled(
-      code:,
-      home_object: home,
-      flags:,
-      fields_init: None,
-      captures:,
-      simple:,
-    ),
+    KCompiled(code:, home_object: home, flags:, fields_init: None, simple:),
     mk_number(JInt(len)),
     name,
   )
 }
 
-/// SPEC§8 `fn_new` — arc's M14 emit-time arg order `(code, flags, name, len,
-/// captures)`. `name` arrives as the raw `BitArray` (arc's `ir.ConstBinary`);
+/// SPEC§8 `fn_new` — emit-time arg order `(code, flags, name, len, simple)`.
+/// `name` arrives as the raw `BitArray` (arc's `ir.ConstBinary`);
 /// `len` is a boxed `Int` from `ConstI32`. `home` is always `None` at the
 /// closure site — M7 rewrites it on methods via `t_make_method`. Returns the
 /// handle wrapped as a `JsVal` so arc's `let_`/`store_slot` chain sees a
@@ -788,14 +780,13 @@ pub fn t_new_function(
   flags: FnFlags,
   name: BitArray,
   len: Int,
-  captures: List(Handle),
   simple: Option(#(CompiledFn, Int, Bool)),
 ) -> #(JsVal, Agent) {
   let name_s = case bit_array.to_string(name) {
     Ok(s) -> s
-    Error(_) -> ""
+    Error(Nil) -> ""
   }
-  let #(h, st) = t_fn_new(st, code, captures, flags, name_s, len, None, simple)
+  let #(h, st) = t_fn_new(st, code, flags, name_s, len, None, simple)
   #(mk_object(h), st)
 }
 

@@ -133,7 +133,6 @@ pub fn t_class_create(
   name: String,
   len: Int,
   super: JsVal,
-  captures: List(Handle),
 ) -> #(#(Handle, Handle), Agent) {
   let realm = st.realm
   // ── heritage validation (before any alloc — F2 validate-first) ──
@@ -190,16 +189,7 @@ pub fn t_class_create(
       is_strict: True,
     )
   let #(ctor, st) =
-    rt_call.t_fn_new(
-      st,
-      ctor_code,
-      captures,
-      flags,
-      name,
-      len,
-      Some(proto),
-      None,
-    )
+    rt_call.t_fn_new(st, ctor_code, flags, name, len, Some(proto), None)
   // Static inheritance: ctor.[[Prototype]] = super (or %Function.prototype%).
   // `t_fn_new` already set %F.p%; overwrite only when different (derived).
   let st = case ctor_parent {

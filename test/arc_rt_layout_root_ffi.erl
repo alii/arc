@@ -43,7 +43,6 @@ idx(<<"KFN_CODE">>) -> ?KFN_CODE;
 idx(<<"KFN_HOME">>) -> ?KFN_HOME;
 idx(<<"KFN_FLAGS">>) -> ?KFN_FLAGS;
 idx(<<"KFN_FIELDS_INIT">>) -> ?KFN_FIELDS_INIT;
-idx(<<"KFN_CAPTURES">>) -> ?KFN_CAPTURES;
 idx(<<"KFN_SIMPLE">>) -> ?KFN_SIMPLE;
 idx(<<"KFN_ARITY">>) -> ?KFN_ARITY;
 idx(<<"KNATIVE_TOKEN">>) -> ?KNATIVE_TOKEN;

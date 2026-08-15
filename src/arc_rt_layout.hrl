@@ -77,9 +77,8 @@
 -define(KFN_HOME, 3).
 -define(KFN_FLAGS, 4).
 -define(KFN_FIELDS_INIT, 5).
--define(KFN_CAPTURES, 6).
--define(KFN_SIMPLE, 7).
--define(KFN_ARITY, 7).
+-define(KFN_SIMPLE, 6).
+-define(KFN_ARITY, 6).
 
 %% arc/rt/types.ObjKind: KBytecode (tag only: an interpreted function never
 %% takes a compiled-code fast path; its [[Call]] goes through JsOps)

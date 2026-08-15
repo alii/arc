@@ -79,6 +79,6 @@ pub fn func(
       is_strict: True,
     )
   let code = as_code(fn(st, _frame, args) { body(st, args) })
-  let #(h, st) = rt_call.t_fn_new(st, code, [], flags, "f", 0, None, None)
+  let #(h, st) = rt_call.t_fn_new(st, code, flags, "f", 0, None, None)
   #(types.mk_object(h), st)
 }

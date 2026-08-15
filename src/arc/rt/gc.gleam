@@ -162,11 +162,11 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     BooleanObj(value: _) -> acc
     BigIntObj(value: _) -> acc
     SymbolObj(value: _) -> acc
-    KCompiled(code:, home_object:, flags: _, fields_init:, captures:, simple:) -> {
+    KCompiled(code:, home_object:, flags: _, fields_init:, simple:) -> {
       let acc = push_opt_handle(home_object, acc)
       let acc = push_opt_handle(fields_init, acc)
-      let acc = list.fold(captures, acc, fn(a, h) { [h.id, ..a] })
-      // `code`/`simple` are opaque `CompiledFn`s; walk their captured env via FFI.
+      // `code`/`simple` are opaque `CompiledFn`s; the captures live in their
+      // fun env, walked via FFI.
       let acc = push_term_refs(to_dynamic(code), acc)
       push_term_refs(to_dynamic(simple), acc)
     }

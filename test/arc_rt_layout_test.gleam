@@ -287,7 +287,6 @@ pub fn kcompiled_test() {
       home_object: Some(JsCell(30)),
       flags:,
       fields_init: Some(JsCell(31)),
-      captures: [JsCell(32)],
       simple: Some(#(code_s, 2, True)),
     )
   assert tag_of(kfn) == tag("KFN_TAG")
@@ -296,7 +295,6 @@ pub fn kcompiled_test() {
   assert at(kfn, "KFN_HOME") == dyn(Some(JsCell(30)))
   assert at(kfn, "KFN_FLAGS") == dyn(flags)
   assert at(kfn, "KFN_FIELDS_INIT") == dyn(Some(JsCell(31)))
-  assert at(kfn, "KFN_CAPTURES") == dyn([JsCell(32)])
   let simple = at(kfn, "KFN_SIMPLE")
   assert tag_of(simple) == tag("SOME")
   let inner = element(2, simple)
@@ -305,14 +303,7 @@ pub fn kcompiled_test() {
   assert element(2, inner) == dyn(2)
   assert element(3, inner) == dyn(True)
   let bare =
-    KCompiled(
-      code:,
-      home_object: None,
-      flags:,
-      fields_init: None,
-      captures: [],
-      simple: None,
-    )
+    KCompiled(code:, home_object: None, flags:, fields_init: None, simple: None)
   assert at(bare, "KFN_HOME") == tag("NONE")
   assert at(bare, "KFN_FIELDS_INIT") == tag("NONE")
   assert at(bare, "KFN_SIMPLE") == tag("NONE")
@@ -477,7 +468,7 @@ pub fn proxy_fast_paths_miss_test() {
   // fast path for a plain-function ctor over an ordinary V, but never over a
   // proxy V or an ordinary V whose prototype chain crosses a proxy.
   let #(fh, st) =
-    rt_call.t_fn_new(st, compiled_fn("F"), [], no_flags(), "F", 0, None, None)
+    rt_call.t_fn_new(st, compiled_fn("F"), no_flags(), "F", 0, None, None)
   let #(f, st) = rt_call.t_make_constructor(st, rt_types.mk_object(fh))
   let #(plain, st) = rt_obj.t_new_object_literal(st)
   assert instanceof_fast(st, plain, f) == dyn(0)

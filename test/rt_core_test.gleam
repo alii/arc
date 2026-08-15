@@ -52,8 +52,7 @@ fn flags(strict: Bool) {
 /// A function object whose body returns its `this` binding.
 fn this_fn(st: Agent, strict: Bool) -> #(JsVal, Agent) {
   let code = as_code(fn(st, frame, _args) { #(frame_at(1, frame), st) })
-  let #(h, st) =
-    rt_call.t_fn_new(st, code, [], flags(strict), "f", 0, None, None)
+  let #(h, st) = rt_call.t_fn_new(st, code, flags(strict), "f", 0, None, None)
   #(mk_object(h), st)
 }
 
@@ -100,7 +99,7 @@ pub fn call_depth_range_error_test() {
       let #(arr, st) = rt_obj.t_new_array(st, [mk_number(JInt(1))])
       rt_call.t_call_method(st, arr, StringKey(canonical_key("map")), [self])
     })
-  let #(h, st) = rt_call.t_fn_new(st, code, [], flags(True), "f", 0, None, None)
+  let #(h, st) = rt_call.t_fn_new(st, code, flags(True), "f", 0, None, None)
   let assert #(ThrowCompletion(e), st) =
     rt_call.t_call(st, mk_object(h), mk_undefined(), [])
   let assert KHandle(_) = classify(e)
@@ -359,7 +358,7 @@ pub fn map_get_or_insert_computed_test() {
       #(mk_string(rt_val.t_to_string(st, q).0), st)
     })
   let #(fh, st) =
-    rt_call.t_fn_new(st, seen_key, [], flags(True), "f", 1, None, None)
+    rt_call.t_fn_new(st, seen_key, flags(True), "f", 1, None, None)
   let f = mk_object(fh)
   let #(mz, st) = rt_ops.t_neg(st, int(0))
   let #(r, st) = call_method(st, m, "getOrInsertComputed", [mz, f])
@@ -367,8 +366,7 @@ pub fn map_get_or_insert_computed_test() {
   // Hit: callback not called.
   let boom =
     as_code(fn(st, _frame, _args) { rt_val.t_throw_type_error(st, "called") })
-  let #(bh, st) =
-    rt_call.t_fn_new(st, boom, [], flags(True), "b", 1, None, None)
+  let #(bh, st) = rt_call.t_fn_new(st, boom, flags(True), "b", 1, None, None)
   let #(r, st) =
     call_method(st, m, "getOrInsertComputed", [int(0), mk_object(bh)])
   assert classify(r) == KStr("Infinity")
@@ -379,8 +377,7 @@ pub fn map_get_or_insert_computed_test() {
       let #(_, st) = call_method(st, m, "set", [k, str("inner")])
       #(str("outer"), st)
     })
-  let #(sh, st) =
-    rt_call.t_fn_new(st, sneaky, [], flags(True), "s", 1, None, None)
+  let #(sh, st) = rt_call.t_fn_new(st, sneaky, flags(True), "s", 1, None, None)
   let #(r, st) =
     call_method(st, m, "getOrInsertComputed", [str("k"), mk_object(sh)])
   assert classify(r) == KStr("outer")
@@ -414,8 +411,7 @@ pub fn map_group_by_test() {
         _ -> rt_ops.t_neg(st, int(0))
       }
     })
-  let #(ph, st) =
-    rt_call.t_fn_new(st, parity, [], flags(True), "p", 1, None, None)
+  let #(ph, st) = rt_call.t_fn_new(st, parity, flags(True), "p", 1, None, None)
   let #(g, st) = call_method(st, map_ctor, "groupBy", [items, mk_object(ph)])
   assert type_of(st, g) == "object"
   let #(size, st) = rt_obj.t_get_prop(st, g, StringKey(canonical_key("size")))

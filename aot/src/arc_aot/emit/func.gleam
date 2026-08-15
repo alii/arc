@@ -1661,8 +1661,7 @@ fn emit_closure_site(
     {
       use fun <- anf.then(anf.bind(ir.MakeClosure(fn_name, capture_vals, 2)))
       use flags_t <- anf.then(anf.make_tuple(flags))
-      use caps_l <- anf.then(anf.cons_list(capture_vals))
-      // 6th fn_new arg — Option(#(CompiledFn, Int, Bool)) wire term for
+      // 5th fn_new arg — Option(#(CompiledFn, Int, Bool)) wire term for
       // KCompiled.simple. `needs_this` bumps closure arity by 1 (_this param).
       use simple_v <- anf.then(case simple {
         None -> anf.pure(ir.ConstAtom("none"))
@@ -1690,7 +1689,6 @@ fn emit_closure_site(
           flags_t,
           name_bin,
           ir.ConstI32(expected_length),
-          caps_l,
           simple_v,
         ]),
       )
