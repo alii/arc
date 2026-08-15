@@ -14,9 +14,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type ObjectNative, type ParsedDesc, type Property, AccessorProperty,
-  ArgumentsObj, ArrayObj, BooleanObj, DataProperty, DateObj, ErrorObj, Index,
-  JInt, KBig, KBool, KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr,
-  KSym, KUndef, Named, NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
+  ArgumentsObj, BooleanObj, DataProperty, DateObj, ErrorObj, Index, JInt, KBig,
+  KBool, KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KUndef,
+  Named, NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
   ObjectDefineProperties, ObjectDefineProperty, ObjectEntries, ObjectFreeze,
   ObjectFromEntries, ObjectGetOwnPropertyDescriptor,
   ObjectGetOwnPropertyDescriptors, ObjectGetOwnPropertyNames,
@@ -750,10 +750,13 @@ fn object_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
     KUndef -> #(mk_string("[object Undefined]"), st)
     KNull -> #(mk_string("[object Null]"), st)
     _ -> {
+      // Steps 4-14: builtinTag. Step 4 `? IsArray(O)` runs (and may throw
+      // on a revoked proxy) BEFORE step 15's Get.
       let fallback = builtin_tag(st, this)
       // Step 15: Let tag be ? Get(O, @@toStringTag).
       let #(tag_val, st) =
         rt_obj.t_get_prop(st, this, SymbolKey(rt_types.symbol_to_string_tag))
+      // Step 16: If tag is not a String, set tag to builtinTag.
       let t = case classify(tag_val) {
         KStr(s) -> s
         _ -> fallback
@@ -771,11 +774,13 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
     KStr(_) -> "String"
     KSym(_) -> "Symbol"
     KBig(_) -> "Object"
-    KHandle(h) ->
+    KHandle(h) -> {
+      // Step 4-5: Let isArray be ? IsArray(O) — pierces proxies to their
+      // target (§7.2.2 step 3) and throws TypeError when revoked.
+      use <- bool.guard(rt_obj.t_is_array(st, h), "Array")
       case rt_store.t_cell_get(st, h) {
         SObject(kind:, ..) ->
           case kind {
-            ArrayObj(..) -> "Array"
             ArgumentsObj(..) -> "Arguments"
             KCompiled(..) | KBytecode(..) | KNative(..) -> "Function"
             rt_types.KBound(..) -> "Function"
@@ -796,6 +801,7 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
         SShapedObject(..) -> "Object"
         _ -> "Object"
       }
+    }
     _ -> "Object"
   }
 }
