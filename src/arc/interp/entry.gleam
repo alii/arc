@@ -398,9 +398,11 @@ fn start_coroutine(
   let caller = State(..caller, stack: rest_stack)
   let m = mark(caller.agent)
   use agent <- nested(caller)
+  // The body's own `Error.stack` frame, so neither its first stretch nor
+  // the parked snapshot's line reads the caller's.
   let body =
     State(
-      agent:,
+      agent: call.push_frame_info(agent, template),
       pc: 0,
       stack: [],
       locals:,
@@ -425,14 +427,15 @@ fn start_coroutine(
   }
   case template.is_generator {
     False -> {
+      // Only the snapshot is taken from `body`; `resume_frame` pushes the
+      // live frame when `t_async_run` runs the first turn on `agent`.
       let frame = park.park(body, ParkedStart)
       case ffi.guard2(rt_async.t_async_run, agent, ResumeFrame(frame)) {
         ffi.Ok(value: promise, agent:) -> resume(agent, mk_object(promise))
         ffi.Threw(agent:, thrown:) -> threw(agent, thrown)
       }
     }
-    True -> {
-      let body = State(..body, agent: call.push_frame_info(agent, template))
+    True ->
       case execute(body) {
         Parked(state.Yield, _, s) -> {
           let frame = ResumeFrame(park.park(s, ParkedStart))
@@ -452,7 +455,6 @@ fn start_coroutine(
             State(..caller, agent: settle(s.agent, m)),
           ))
       }
-    }
   }
 }
 

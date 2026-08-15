@@ -68,6 +68,30 @@ pub fn nested_frames_have_lines_test() {
   assert string.contains(s, "at script:3")
 }
 
+/// A stack captured in a callee before its first SetLine (a default
+/// parameter initialiser) must not report the caller's line for the callee
+/// frame, whatever kind of function the callee is.
+pub fn prologue_frame_does_not_inherit_caller_line_test() {
+  let run = fn(decl, name) {
+    let src =
+      "var captured; function g() { captured = new Error('x').stack; }\n"
+      <> decl
+      <> "\n"
+      <> "\n"
+      <> name
+      <> "(); captured"
+    eval_string(src)
+  }
+  let sync = run("function f(a = g()) {}", "f")
+  let gen = run("function* gen(a = g()) {}", "gen")
+  let af = run("async function af(a = g()) {}", "af")
+  assert string.contains(sync, "at f (script)\n")
+  assert string.contains(gen, "at gen (script)\n")
+  assert string.contains(af, "at af (script)\n")
+  assert !string.contains(af, "at af (script:4)")
+  assert string.contains(af, "at script:4")
+}
+
 pub fn stack_is_non_enumerable_test() {
   // Object.keys should not include "stack".
   let s =
