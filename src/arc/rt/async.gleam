@@ -29,13 +29,13 @@ import arc/rt/types.{
   AsyncGenRequest, AsyncGenResume, AsyncGeneratorObj, AsyncResume, DataProperty,
   GenCompleted, GenExecuting, GenNext, GenReturn, GenSuspendedStart,
   GenSuspendedYield, GenThrow, GeneratorObj, Handler, HostJob,
-  IdentityPassThrough, JsCell, JsStore, KHandle, KNative, Named, NoElements,
-  Ordinary, PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction,
-  PromiseRejectFn, PromiseRejected, PromiseResolveFn, ReactionJob,
-  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
-  SBox, SGenerator, SObject, SPromiseData, StepAwait, StepReturn, StepThrow,
-  StepYield, StringKey, ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push,
-  mk_bool, mk_object, mk_undefined,
+  IdentityPassThrough, JsCell, JsStore, KHandle, Named, NoElements, Ordinary,
+  PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
+  PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob,
+  ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox, SGenerator,
+  SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
+  ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push, mk_bool, mk_object,
+  mk_undefined,
 } as rt_types
 import gleam/dict
 import gleam/list
@@ -127,24 +127,22 @@ pub fn step_unreachable(_st: Agent, _v: JsVal, _resume: Resume) -> r {
 // `KNative` stays payload-free; the closed-over `Handle`s ride on the tag,
 // reach `dispatch_native` directly and are traced via `native_token_refs`.
 
-/// Allocate a `KNative` function object: `SObject{kind: KNative(tag,…),
-/// proto: %Function.prototype%}`. Port of arc `common.alloc_call_fn`.
+/// Allocate a `KNative` function object with proto %Function.prototype% and
+/// own `length` then `name` (§10.3.4 CreateBuiltinFunction steps 9-11).
+/// Port of arc `common.alloc_call_fn`.
 fn alloc_native_fn(
   st: Agent,
   tag: NativeToken,
   name: String,
   length: Int,
 ) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
+  call.t_native_new(
     st,
-    SObject(
-      kind: KNative(tag:, name:, length:, constructible: False),
-      proto: Some(st.realm.function.prototype),
-      props: dict.new(),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
+    Some(st.realm.function.prototype),
+    tag,
+    name,
+    length,
+    False,
   )
 }
 
