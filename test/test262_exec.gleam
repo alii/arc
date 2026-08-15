@@ -21,9 +21,7 @@ import arc/esm
 import arc/host
 import arc/host_hooks
 import arc/internal/path
-import arc/module
 import arc/module/load_error
-import arc/module_host
 import arc/parser
 import arc/vm/builtins
 import arc/vm/builtins/common
@@ -36,6 +34,8 @@ import arc/vm/heap
 import arc/vm/internal/clock_ffi
 import arc/vm/internal/elements
 import arc/vm/key.{Named}
+import arc/vm/module
+import arc/vm/module_host
 import arc/vm/ops/coerce
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type State, RealmCtx, State}

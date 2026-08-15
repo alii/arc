@@ -12,8 +12,6 @@
 
 import arc/compiler
 import arc/host_hooks
-import arc/module
-import arc/module_host
 import arc/parser
 import arc/rt/snapshot
 import arc/vm/builtins
@@ -24,6 +22,8 @@ import arc/vm/exec/event_loop
 import arc/vm/exec/interpreter
 import arc/vm/heap
 import arc/vm/key.{Named}
+import arc/vm/module
+import arc/vm/module_host
 import arc/vm/ops/object
 import arc/vm/state.{type Heap, type HostFn}
 import arc/vm/value.{type JsValue, type Ref, JsObject}

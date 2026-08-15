@@ -4,10 +4,10 @@
 
 import arc/interp/dynamic_import
 import arc/interp/entry
-import arc/interp/module
-import arc/interp/module_host
-import arc/interp/module_registry as registry
+import arc/module
 import arc/module/load_error
+import arc/module/registry
+import arc/module_host
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/inspect as rt_inspect

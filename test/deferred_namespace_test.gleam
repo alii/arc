@@ -1,6 +1,6 @@
 import arc/engine
-import arc/module
 import arc/module/load_error
+import arc/vm/module
 import arc/vm/state
 import arc/vm/value.{JsString}
 import gleam/dict

@@ -21,7 +21,7 @@
 ////          with TypeError (this host supports no import attributes).
 ////   9+. HostLoadImportedModule / ContinueDynamicImport: delegated to the
 ////       embedder's import hook, the `Agent.host_fns` entry registered under
-////       `import_hook_id` (installed by arc/interp/module_host, never
+////       `import_hook_id` (installed by arc/module_host, never
 ////       reachable from guest JS). The hook returns the module namespace
 ////       object or an error; the promise is resolved or rejected accordingly.
 ////       Without a hook, import() rejects with a TypeError.
@@ -30,7 +30,7 @@
 //// nothing here raises (IfAbruptRejectPromise semantics). Cross-referenced
 //// with QuickJS js_dynamic_import / engine262 ImportCall.
 
-import arc/interp/module_registry as registry
+import arc/module/registry
 import arc/rt/async as rt_async
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
