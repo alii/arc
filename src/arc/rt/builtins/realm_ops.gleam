@@ -9,6 +9,7 @@
 //// paths in `t_box_primitive` RAISE via `rt_val.t_throw_type_error` (D7).
 
 import arc/rt/builtins/common
+import arc/rt/builtins/error as b_error
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type ErrorKind, type Handle, type JsVal,
@@ -35,16 +36,19 @@ pub fn error_kind_intrinsics(r: Realm, kind: ErrorKind) -> #(Handle, String) {
 }
 
 /// §20.5.6.1.1 NativeError(message) — allocate a native error instance of
-/// `kind` with a `message` own property `{W:T, E:F, C:T}`. The concrete body
-/// seeded into `JsOps.new_error` by M6 `init_realm`. arc `make_error`.
+/// `kind` with a `message` own property `{W:T, E:F, C:T}` and its
+/// `[[ErrorData]]` stack rendered from `Agent.frames`. The concrete body
+/// seeded into `JsOps.new_error` by M6 `init_realm`. arc `make_error` +
+/// `state.attach_stack`.
 pub fn t_new_error(
   st: Agent,
   kind: ErrorKind,
   message: String,
 ) -> #(JsVal, Agent) {
-  let #(proto, _name) = error_kind_intrinsics(st.realm, kind)
+  let #(proto, name) = error_kind_intrinsics(st.realm, kind)
   let #(msg_prop, st) = common.builtin_property(st, mk_string(message))
   let #(h, st) = common.alloc_error_slot(st, proto, [#("message", msg_prop)])
+  let st = b_error.attach_stack(st, h, name, message)
   #(mk_object(h), st)
 }
 

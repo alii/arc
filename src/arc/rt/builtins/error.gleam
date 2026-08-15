@@ -401,7 +401,7 @@ fn stack_trace_limit(st: Agent) -> Int {
 
 /// Write the `[[ErrorData]]` stack string: the header plus one line per
 /// `Agent.frames` entry (header-only when no frames are recorded).
-fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
+pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
   let header = case msg {
     "" -> name
     _ -> name <> ": " <> msg
