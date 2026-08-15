@@ -432,6 +432,20 @@ pub fn date_now_reads_wall_clock_hook_test() {
   assert c.stdout == <<"1700000000000 true\n":utf8>>
 }
 
+/// Local-time Date methods under the harness's UTC zone: component
+/// construction, setters, string forms, parse round-trips and the Annex B
+/// year accessors.
+pub fn date_local_time_diff_test() {
+  diff(
+    "var d=new Date(2021,0,15,12,5,9,7);console.log(d.getTime(),d.getDay(),d.getHours(),d.getTimezoneOffset(),d.toString(),d.toISOString(),JSON.stringify(d),d.toUTCString(),d.toLocaleString());d.setMonth(13,29);console.log(d.toDateString(),d.getYear(),d.setYear(99),d.getFullYear());console.log(Date.parse('2021-01-15T12:00'),Date.parse(d.toISOString())===d.getTime(),Date.parse('2021-02-29'),new Date(NaN)+'',Date.UTC(99,11,31,23,59,59,999),new Date(0,0).getFullYear(),String(Date()).length===String(new Date()).length,typeof Date.now())",
+    "1610712309007 5 12 0 Fri Jan 15 2021 12:05:09 GMT+0000 2021-01-15T12:05:09.007Z \"2021-01-15T12:05:09.007Z\" Fri, 15 Jan 2021 12:05:09 GMT 1/15/2021, 12:05:09 PM\nTue Mar 01 2022 122 920289909007 1999\n1610712000000 true NaN Invalid Date 946684799999 1900 true number\n",
+  )
+  diff(
+    "var d=new Date(8.64e15);console.log(d.toISOString(),new Date(8.64e15+1).getTime(),d.setMilliseconds(1));try{d.toISOString()}catch(e){console.log(e.name)}var o={valueOf:function(){d2.setTime(5);return 1}};var d2=new Date(NaN);console.log(d2.setDate(o),d2.getTime(),d2.setFullYear(2020),new Date(2020,0).getTime());console.log(d[Symbol.toPrimitive]('number'),Object.prototype.toString.call(d),d.toJSON())",
+    "+275760-09-13T00:00:00.000Z NaN NaN\nRangeError\nNaN 5 1577836800005 1577836800000\nNaN [object Date] null\n",
+  )
+}
+
 /// A promise left rejected at the end of the drain is reported once through
 /// `report_uncaught`, with the same text on both paths (an Error reason would
 /// differ only by the interpreter's `at script:N` trace lines).

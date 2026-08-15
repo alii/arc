@@ -6,6 +6,7 @@
 
 import arc/engine
 import arc/host_hooks.{type ConsoleLevel, DebugLevel, InfoLevel, LogLevel}
+import arc/internal/host_time
 import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run.{type RunResult}
@@ -61,7 +62,7 @@ fn to_dynamic(a: a) -> Dynamic
 /// `performance.now`.
 pub const fixed_now_ms = 1_700_000_000_000
 
-/// Deterministic hooks for both paths: fixed clocks, no sleep, a seeded
+/// Deterministic hooks for both paths: fixed clocks in UTC, no sleep, a seeded
 /// xorshift64* PRNG, console lines into the process-local stdout buffer
 /// (log/info/debug, newline-terminated to match `io.println` bytes) or the
 /// stderr buffer (warn/error), and uncaught-job reports into the stderr
@@ -71,6 +72,7 @@ pub fn test_hooks() -> host_hooks.HostHooks {
     ..host_hooks.default_host_hooks(),
     monotonic_now: fn() { fixed_now_ms },
     wall_clock_ms: fn() { fixed_now_ms },
+    time_zone: host_time.utc_time_zone(),
     sleep_ms: fn(_) { Nil },
     random: next_random,
     print: buf_print,

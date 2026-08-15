@@ -257,7 +257,7 @@ pub fn t_to_primitive(
       let #(exotic, st) = ops.get_prop(st, v, SymbolKey(symbol_to_primitive))
       case is_nullish(exotic) {
         // GetMethod treats undefined AND null as "not found" → ordinary.
-        True -> ordinary_to_primitive(st, h, hint)
+        True -> t_ordinary_to_primitive(st, h, hint)
         False -> {
           let #(callable, st) = t_is_callable(st, exotic)
           case callable {
@@ -289,7 +289,7 @@ pub fn t_to_primitive(
 /// ES2024 §7.1.1.1 OrdinaryToPrimitive(O, hint). Tries `toString`/`valueOf`
 /// (or `valueOf`/`toString` for a number/default hint); returns the first
 /// non-object result, else TypeError. Port of arc `coerce.gleam:120-166`.
-fn ordinary_to_primitive(
+pub fn t_ordinary_to_primitive(
   st: Agent,
   h: Handle,
   hint: ToPrimHint,
