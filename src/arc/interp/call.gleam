@@ -436,7 +436,12 @@ pub fn call(
   case classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(state.agent, h) {
-        SObject(kind: KBytecode(template:, env:, home_object:, flags:, ..), ..) -> {
+        SObject(
+          kind: KBytecode(template:, env:, home_object:, flags:, realm:, ..),
+          ..,
+        )
+          if realm == state.agent.realm.id
+        -> {
           let res =
             call_function(
               state,
@@ -512,7 +517,11 @@ pub fn call(
           )
           call(state, target, this_arg, call_args, rest_stack, drive)
         }
-        SObject(kind: KNative(..), ..)
+        // A closure from another realm runs with that realm current
+        // (§10.2.1.1 PrepareForOrdinaryCall step 5): one nested root
+        // activation, which `entry.run_root` enters the realm around.
+        SObject(kind: KBytecode(..), ..)
+        | SObject(kind: KNative(..), ..)
         | SObject(kind: KCompiled(..), ..)
         | SObject(kind: ProxyObj(..), ..) ->
           call_nested(state, callee, this, args, rest_stack)
@@ -635,7 +644,12 @@ fn construct_handle(
   drive: Drive,
 ) -> Result(State, StepExit) {
   case rt_store.t_cell_get(state.agent, ctor_h) {
-    SObject(kind: KBytecode(template:, env:, home_object:, flags:, ..), ..) ->
+    SObject(
+      kind: KBytecode(template:, env:, home_object:, flags:, realm:, ..),
+      ..,
+    )
+      if realm == state.agent.realm.id
+    ->
       case template.is_derived_constructor {
         // Derived: `this` starts in TDZ; `super()` writes it. No
         // constructor_this signals derived mode to Return.
@@ -994,8 +1008,9 @@ fn refuse(
 }
 
 /// A root activation's `Returned(value, final_state)` folded through the
-/// constructor return rules for `kind`. The stack frame it pushed is popped
-/// off the returned agent either way.
+/// constructor return rules for `kind` (§10.2.2 steps 10-13). `final_state`
+/// is the activation's last state over the agent the caller resumed with:
+/// its `Error.stack` frame already popped and the caller's realm current.
 pub fn finish_root(
   kind: RootKind,
   value: JsVal,
@@ -1006,7 +1021,7 @@ pub fn finish_root(
     RootCall | RootDerivedConstruct -> None
   }
   case resolve_return(final_state, value, constructor_this) {
-    Ok(v) -> Ok(#(v, pop_frame_info(final_state.agent)))
-    Error(#(thrown, s)) -> Error(#(thrown, pop_frame_info(s.agent)))
+    Ok(v) -> Ok(#(v, final_state.agent))
+    Error(#(thrown, s)) -> Error(#(thrown, s.agent))
   }
 }

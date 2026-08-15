@@ -293,7 +293,14 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       let acc = push_term_refs(to_dynamic(code), acc)
       push_term_refs(to_dynamic(simple), acc)
     }
-    KBytecode(template:, env:, home_object:, flags: _, fields_init:) -> {
+    KBytecode(
+      template:,
+      env:,
+      home_object:,
+      flags: _,
+      fields_init:,
+      realm: _,
+    ) -> {
       let acc = push_opt_handle(home_object, acc)
       let acc = push_opt_handle(fields_init, acc)
       let acc = push_template_refs(template, acc)

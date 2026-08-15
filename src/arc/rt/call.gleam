@@ -600,13 +600,15 @@ pub fn get_prototype_from_constructor(
 
 /// §7.3.24 GetFunctionRealm(obj), as a realm id. A realm-attributed native
 /// answers with the realm it carries (step 1); bound functions and proxies
-/// defer to their target (steps 2-3, a revoked proxy is a TypeError). Other
+/// defer to their target (steps 2-3, a revoked proxy is a TypeError); an
+/// interpreted closure carries its [[Realm]]. Compiled and plain native
 /// function objects have no [[Realm]] slot: they are attributed by their
 /// [[Prototype]], which at birth is one of the owning realm's function
 /// prototypes, and count as the current realm once that link is gone
 /// (step 4).
 pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
   case rt_store.t_cell_get(st, obj) {
+    SObject(kind: KBytecode(realm:, ..), ..) -> realm
     SObject(kind: KBound(target:, ..), ..) -> get_function_realm(st, target)
     SObject(kind: ProxyObj(revoked: True, ..), ..) ->
       throw_error(
@@ -629,6 +631,10 @@ pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
 fn native_realm(tag: NativeToken) -> Option(Int) {
   case tag {
     rt_types.GlobalN(rt_types.GlobalEval(realm:))
+    | rt_types.FunctionN(rt_types.FunctionConstructor(realm:))
+    | rt_types.GeneratorN(rt_types.GeneratorFunctionCtor(realm:))
+    | rt_types.GeneratorN(rt_types.AsyncFunctionCtor(realm:))
+    | rt_types.GeneratorN(rt_types.AsyncGeneratorFunctionCtor(realm:))
     | rt_types.JsonN(rt_types.JsonParse(realm:))
     | rt_types.JsonN(rt_types.JsonStringify(realm:))
     | rt_types.JsonN(rt_types.JsonRawJson(realm:))

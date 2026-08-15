@@ -27,12 +27,14 @@ import arc/rt/call.{
 } as rt_call
 import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
+import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type FrameInfo, type Handle, type IteratorRecord,
-  type JsOps, type JsVal, type Step, Agent, JInt, JsOps, JsStore, KHandle, KNull,
-  KUndef, Named, RangeErr, ResumeFrame, StepAwait, StepReturn, StepThrow,
-  StepYield, StringKey, TypeErr, classify, mk_number, mk_object, mk_undefined,
+  type JsOps, type JsVal, type Step, Agent, JInt, JsOps, JsStore, KBytecode,
+  KHandle, KNull, KUndef, Named, RangeErr, ResumeFrame, SObject, StepAwait,
+  StepReturn, StepThrow, StepYield, StringKey, TypeErr, classify, mk_number,
+  mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import arc/vm/internal/tuple_array.{type TupleArray}
@@ -247,6 +249,12 @@ pub fn run_bytecode(
 /// enclosing `t_call` (or `construct_bytecode`) owns the depth bracket;
 /// `enter_root`/`finish_root` own the `Error.stack` frame; this owns the
 /// backstop.
+///
+/// §10.2.1.1 PrepareForOrdinaryCall step 5: the callee's [[Realm]] is the
+/// running realm while its body runs and the caller's is restored once it
+/// unwinds (also on a throw, which arrives here as a completion). §10.2.2
+/// [[Construct]] steps 10-13 — the return-override / uninitialised-`this`
+/// checks — run after that restore, so their errors are the caller's.
 fn run_root(
   st: Agent,
   cell: Handle,
@@ -254,9 +262,50 @@ fn run_root(
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Completion, Agent) {
+  let #(outcome, st) = {
+    use st <- rt_realm.with_realm(st, closure_realm(st, cell))
+    run_root_body(st, cell, this, args, new_target)
+  }
+  case outcome {
+    RootSettled(c) -> #(c, st)
+    RootReturned(kind, v, final) ->
+      case call.finish_root(kind, v, State(..final, agent: st)) {
+        Ok(#(v, agent)) -> #(NormalCompletion(v), agent)
+        Error(#(e, agent)) -> #(ThrowCompletion(e), agent)
+      }
+  }
+}
+
+/// How a root activation's body ended: already a completion (a throw, or a
+/// coroutine's generator object / promise), or a plain `Return` whose value
+/// still owes the constructor return rules.
+type RootOutcome {
+  RootSettled(Completion)
+  RootReturned(call.RootKind, JsVal, State)
+}
+
+/// The [[Realm]] of the bytecode cell `cell`; anything else counts as the
+/// current realm.
+fn closure_realm(st: Agent, cell: Handle) -> Int {
+  case rt_store.t_cell_get(st, cell) {
+    SObject(kind: KBytecode(realm:, ..), ..) -> realm
+    _ -> st.realm.id
+  }
+}
+
+fn run_root_body(
+  st: Agent,
+  cell: Handle,
+  this: JsVal,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(RootOutcome, Agent) {
   let m = mark(st)
   case call.enter_root(st, cell, this, args, new_target) {
-    Error(#(thrown, agent)) -> #(ThrowCompletion(thrown), settle(agent, m))
+    Error(#(thrown, agent)) -> #(
+      RootSettled(ThrowCompletion(thrown)),
+      settle(agent, m),
+    )
     Ok(#(state, kind, coroutine)) ->
       case state.func.is_generator || state.func.is_async {
         // `start_coroutine` gives the body its own `Error.stack` frame:
@@ -266,26 +315,27 @@ fn run_root(
           let body = fn(agent) {
             let #(res, s) =
               start_coroutine_root(State(..state, agent:), coroutine)
-            #(to_completion(res), s.agent)
+            #(RootSettled(to_completion(res)), s.agent)
           }
-          backstopped(agent, m, body, ThrowCompletion)
+          backstopped(agent, m, body, escaped)
         }
         False -> {
           let body = fn(agent) {
             let #(res, s) = complete(State(..state, agent:), "run_bytecode")
-            let finished = case res {
-              Ok(v) -> call.finish_root(kind, v, s)
-              Error(e) -> Error(#(e, call.pop_frame_info(s.agent)))
-            }
-            case finished {
-              Ok(#(v, agent)) -> #(NormalCompletion(v), agent)
-              Error(#(e, agent)) -> #(ThrowCompletion(e), agent)
+            let agent = call.pop_frame_info(s.agent)
+            case res {
+              Ok(v) -> #(RootReturned(kind, v, s), agent)
+              Error(e) -> #(RootSettled(ThrowCompletion(e)), agent)
             }
           }
-          backstopped(state.agent, m, body, ThrowCompletion)
+          backstopped(state.agent, m, body, escaped)
         }
       }
   }
+}
+
+fn escaped(thrown: JsVal) -> RootOutcome {
+  RootSettled(ThrowCompletion(thrown))
 }
 
 /// A generator / async root call (never a [[Construct]]: neither kind is a

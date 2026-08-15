@@ -40,6 +40,7 @@ import gleam/string
 pub fn init(
   st: Agent,
   object_proto: Handle,
+  realm: Int,
 ) -> #(#(BuiltinPair, Handle), Agent) {
   // Allocate func_proto first (empty) so call/apply/bind can reference it as
   // their [[Prototype]] from the start — no fix-up needed.
@@ -123,7 +124,7 @@ pub fn init(
         restricted_props,
         [#("length", proto_len), #("name", proto_name)],
       ]),
-      fn(_) { FunctionN(FunctionConstructor) },
+      fn(_) { FunctionN(FunctionConstructor(realm:)) },
       "Function",
       1,
       [],
@@ -221,8 +222,8 @@ pub fn dispatch(
     FunctionPrototypeCall -> #(mk_undefined(), st)
     // §20.2.1.1 Function ( ...parameterArgs, bodyArg ) under [[Call]]:
     // NewTarget is undefined.
-    FunctionConstructor ->
-      create_dynamic_function(st, args, DynamicNormal, mk_undefined())
+    FunctionConstructor(realm:) ->
+      create_dynamic_function(st, realm, args, DynamicNormal, mk_undefined())
   }
 }
 
@@ -234,8 +235,8 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
   case native {
-    FunctionConstructor ->
-      create_dynamic_function(st, args, DynamicNormal, new_target)
+    FunctionConstructor(realm:) ->
+      create_dynamic_function(st, realm, args, DynamicNormal, new_target)
     FunctionCall
     | FunctionApply
     | FunctionBind
@@ -275,12 +276,18 @@ pub type DynamicFunctionKind {
 /// GetPrototypeFromConstructor(newTarget, fallbackProto). With NewTarget
 /// undefined, newTarget is the constructor itself, whose `prototype` is the
 /// intrinsic the eval hook already used; otherwise it is applied here.
+///
+/// The whole operation runs with the constructor's realm `realm` current
+/// (§10.3.1 steps 6-7): the argument coercions, the parse, and the closure,
+/// whose [[Realm]] and default [[Prototype]] are that realm's.
 pub fn create_dynamic_function(
   st: Agent,
+  realm: Int,
   args: List(JsVal),
   kind: DynamicFunctionKind,
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
+  use st <- rt_realm.with_realm(st, realm)
   let #(strs, st) =
     list.fold(args, #([], st), fn(acc, arg) {
       let #(done, st) = acc

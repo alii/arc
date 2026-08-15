@@ -298,6 +298,7 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
       home_object: None,
       flags: FnFlags(..flags(True), is_constructor: True),
       fields_init: None,
+      realm: 0,
     )
   let #(fh, st) =
     rt_store.t_cell_new(

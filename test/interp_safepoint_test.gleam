@@ -263,6 +263,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
           home_object: None,
           flags:,
           fields_init: None,
+          realm: 0,
         ),
         proto: None,
         props: dict.new(),

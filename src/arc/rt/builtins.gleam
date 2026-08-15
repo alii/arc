@@ -114,7 +114,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   // 1. Object.prototype — the root of all prototype chains (proto: None).
   let #(object_proto, st) = common.alloc_proto(st, None, dict.new())
   // 2. Function.prototype + %Function% + %ThrowTypeError%.
-  let #(#(function, throw_type_error), st) = b_function.init(st, object_proto)
+  let #(#(function, throw_type_error), st) =
+    b_function.init(st, object_proto, id)
   let fn_proto = function.prototype
   let fn_ctor = function.constructor
   // 3. Object constructor + Object.prototype methods (fills object_proto).
@@ -147,10 +148,17 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   let #(iters, st) = b_iterator.init(st, object_proto, fn_proto)
   // 11. Generator / AsyncGenerator / AsyncFunction intrinsics.
   let #(#(generator, generator_fn), st) =
-    b_generator.init(st, iters.iterator_proto, fn_proto, fn_ctor)
+    b_generator.init(st, iters.iterator_proto, fn_proto, fn_ctor, id)
   let #(#(async_gen, _async_gen_fn), st) =
-    b_generator.init_async(st, iters.async_iterator_proto, fn_proto, fn_ctor)
-  let #(async_fn, st) = b_generator.init_async_function(st, fn_proto, fn_ctor)
+    b_generator.init_async(
+      st,
+      iters.async_iterator_proto,
+      fn_proto,
+      fn_ctor,
+      id,
+    )
+  let #(async_fn, st) =
+    b_generator.init_async_function(st, fn_proto, fn_ctor, id)
   // 12. Collections.
   let #(map, st) = b_map.init(st, object_proto, fn_proto)
   let #(set, st) = b_set.init(st, object_proto, fn_proto)

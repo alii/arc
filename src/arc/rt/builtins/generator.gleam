@@ -36,6 +36,7 @@ pub fn init(
   iterator_proto: Handle,
   fn_proto: Handle,
   fn_ctor: Handle,
+  realm: Int,
 ) -> #(#(BuiltinPair, BuiltinPair), Agent) {
   let #(methods, st) =
     common.alloc_methods(st, fn_proto, [
@@ -49,7 +50,7 @@ pub fn init(
     init_function_intrinsic(
       st,
       "GeneratorFunction",
-      GeneratorN(GeneratorFunctionCtor),
+      GeneratorN(GeneratorFunctionCtor(realm:)),
       fn_proto,
       fn_ctor,
       Some(gen_proto),
@@ -71,6 +72,7 @@ pub fn init_async(
   async_iterator_proto: Handle,
   fn_proto: Handle,
   fn_ctor: Handle,
+  realm: Int,
 ) -> #(#(BuiltinPair, BuiltinPair), Agent) {
   let #(methods, st) =
     common.alloc_methods(st, fn_proto, [
@@ -84,7 +86,7 @@ pub fn init_async(
     init_function_intrinsic(
       st,
       "AsyncGeneratorFunction",
-      GeneratorN(AsyncGeneratorFunctionCtor),
+      GeneratorN(AsyncGeneratorFunctionCtor(realm:)),
       fn_proto,
       fn_ctor,
       Some(agen_proto),
@@ -105,11 +107,12 @@ pub fn init_async_function(
   st: Agent,
   fn_proto: Handle,
   fn_ctor: Handle,
+  realm: Int,
 ) -> #(BuiltinPair, Agent) {
   init_function_intrinsic(
     st,
     "AsyncFunction",
-    GeneratorN(AsyncFunctionCtor),
+    GeneratorN(AsyncFunctionCtor(realm:)),
     fn_proto,
     fn_ctor,
     None,
@@ -232,27 +235,12 @@ pub fn dispatch(
     // §27.3.1.1 GeneratorFunction / §27.7.1.1 AsyncFunction / §27.4.1.1
     // AsyncGeneratorFunction ( ...parameterArgs, bodyArg ) under [[Call]]:
     // CreateDynamicFunction with their own kind and NewTarget undefined.
-    GeneratorFunctionCtor ->
-      b_function.create_dynamic_function(
-        st,
-        args,
-        b_function.DynamicGenerator,
-        mk_undefined(),
-      )
-    AsyncFunctionCtor ->
-      b_function.create_dynamic_function(
-        st,
-        args,
-        b_function.DynamicAsync,
-        mk_undefined(),
-      )
-    AsyncGeneratorFunctionCtor ->
-      b_function.create_dynamic_function(
-        st,
-        args,
-        b_function.DynamicAsyncGenerator,
-        mk_undefined(),
-      )
+    GeneratorFunctionCtor(realm:)
+    | AsyncFunctionCtor(realm:)
+    | AsyncGeneratorFunctionCtor(realm:) -> {
+      let assert Some(kind) = constructor_kind(n)
+      b_function.create_dynamic_function(st, realm, args, kind, mk_undefined())
+    }
   }
 }
 
@@ -264,9 +252,12 @@ pub fn dispatch_construct(
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
-  case constructor_kind(n) {
-    Some(kind) -> b_function.create_dynamic_function(st, args, kind, new_target)
-    None -> rt_val.t_throw_type_error(st, "not a constructor")
+  case n, constructor_kind(n) {
+    GeneratorFunctionCtor(realm:), Some(kind)
+    | AsyncFunctionCtor(realm:), Some(kind)
+    | AsyncGeneratorFunctionCtor(realm:), Some(kind)
+    -> b_function.create_dynamic_function(st, realm, args, kind, new_target)
+    _, _ -> rt_val.t_throw_type_error(st, "not a constructor")
   }
 }
 
@@ -276,9 +267,9 @@ fn constructor_kind(
   n: GeneratorNative,
 ) -> Option(b_function.DynamicFunctionKind) {
   case n {
-    GeneratorFunctionCtor -> Some(b_function.DynamicGenerator)
-    AsyncFunctionCtor -> Some(b_function.DynamicAsync)
-    AsyncGeneratorFunctionCtor -> Some(b_function.DynamicAsyncGenerator)
+    GeneratorFunctionCtor(_) -> Some(b_function.DynamicGenerator)
+    AsyncFunctionCtor(_) -> Some(b_function.DynamicAsync)
+    AsyncGeneratorFunctionCtor(_) -> Some(b_function.DynamicAsyncGenerator)
     GeneratorNext
     | GeneratorReturn
     | GeneratorThrow

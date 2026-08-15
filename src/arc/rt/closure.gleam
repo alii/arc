@@ -92,7 +92,7 @@ pub fn t_new_bytecode_function(
     False ->
       rt_store.t_cell_new(
         st,
-        fn_slot(template, env, flags, fn_proto, None, birth_props),
+        fn_slot(realm.id, template, env, flags, fn_proto, None, birth_props),
       )
     True -> {
       let proto_parent = case flags.is_generator, flags.is_async {
@@ -112,7 +112,7 @@ pub fn t_new_bytecode_function(
       let #(h, st) =
         rt_store.t_cell_new(
           st,
-          fn_slot(template, env, flags, fn_proto, Some(proto), [
+          fn_slot(realm.id, template, env, flags, fn_proto, Some(proto), [
             #(Named("prototype"), prototype_prop),
             ..birth_props
           ]),
@@ -145,6 +145,7 @@ pub fn t_new_bytecode_function(
 }
 
 fn fn_slot(
+  realm: Int,
   template: FuncTemplate,
   env: EnvTuple,
   flags: FnFlags,
@@ -153,7 +154,14 @@ fn fn_slot(
   props: List(#(PropertyKey, Property)),
 ) -> JsSlot {
   SObject(
-    kind: KBytecode(template:, env:, home_object:, flags:, fields_init: None),
+    kind: KBytecode(
+      template:,
+      env:,
+      home_object:,
+      flags:,
+      fields_init: None,
+      realm:,
+    ),
     proto: Some(fn_proto),
     props: dict.from_list(props),
     symbol_props: [],

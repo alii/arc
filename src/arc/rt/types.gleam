@@ -1142,11 +1142,12 @@ pub type GeneratorNative {
   AsyncGeneratorNext
   AsyncGeneratorReturn
   AsyncGeneratorThrow
-  /// Dynamic constructors — `GeneratorFunction("a", "yield a")` etc. Throw
-  /// TypeError until M19 wires the eval hook; kept for prototype-shape parity.
-  GeneratorFunctionCtor
-  AsyncGeneratorFunctionCtor
-  AsyncFunctionCtor
+  /// Dynamic constructors — `GeneratorFunction("a", "yield a")` etc. Each
+  /// carries the id of the realm it belongs to: CreateDynamicFunction runs,
+  /// and the closure it makes lives, in that realm (§10.3.1 step 6-7).
+  GeneratorFunctionCtor(realm: Int)
+  AsyncGeneratorFunctionCtor(realm: Int)
+  AsyncFunctionCtor(realm: Int)
 }
 
 /// Object static + prototype methods (arc `ObjectNativeFn` value.gleam:737-780).
@@ -1193,8 +1194,9 @@ pub type ObjectNative {
 
 /// Function methods + %ThrowTypeError% (arc `VmNativeFn`/`CallNativeFn` subset).
 pub type FunctionNative {
-  /// §20.2.1.1 Function ( ...args, bodyArg ) — the dynamic constructor.
-  FunctionConstructor
+  /// §20.2.1.1 Function ( ...args, bodyArg ) — the dynamic constructor,
+  /// attributed to its realm like the generator-family constructors.
+  FunctionConstructor(realm: Int)
   /// §20.2.3.1 Function.prototype.apply.
   FunctionApply
   /// §20.2.3.2 Function.prototype.bind.
@@ -2913,6 +2915,9 @@ pub type ObjKind {
     home_object: Option(Handle),
     flags: FnFlags,
     fields_init: Option(Handle),
+    /// [[Realm]] (§10.2 table 30): the id of the realm the closure was
+    /// created in. [[Call]] runs with that realm current.
+    realm: Int,
   )
   KNative(tag: NativeToken, name: String, length: Int, constructible: Bool)
   KBound(target: Handle, bound_this: JsVal, bound_args: List(JsVal))
