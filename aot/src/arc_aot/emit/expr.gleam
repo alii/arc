@@ -583,8 +583,9 @@ fn nul_eq_inline(v: ir.Value) -> Build(ir.Value) {
 /// Collect foldable-as-constant top-level `var` bindings. A binding is
 /// foldable iff (a) its declarator is `var NAME = <NumberLiteral(int)>`,
 /// (b) NAME never appears as an assignment/update target ANYWHERE in the
-/// script (including nested function bodies), (c) `eval`/`with` are absent
-/// (D15 already rejects them, so no check needed here). Limitation: a read
+/// script (including nested function bodies), (c) the script never names
+/// `eval` or `Function` (direct eval and `with` are D15-rejected, but
+/// indirect eval / Function() can redeclare a global `var`). Limitation: a read
 /// that runs before the `var` line (via a hoisted function called earlier)
 /// would observe `undefined` — no v8-v7 bench does this and it's a
 /// perf-only fold (a wrongly-folded read is caught by the differential
@@ -618,9 +619,31 @@ pub fn analyze_const_globals(
   case dict.is_empty(cands) {
     True -> cands
     False -> {
-      let assigned = list.fold(body, set.new(), stmt_assigned_globals)
-      dict.filter(cands, fn(name, _) { !set.contains(assigned, name) })
+      let uses = list.fold(body, Uses(set.new(), False), stmt_assigned_globals)
+      case uses.names_eval {
+        True -> dict.new()
+        False ->
+          dict.filter(cands, fn(name, _) { !set.contains(uses.assigned, name) })
+      }
     }
+  }
+}
+
+/// Accumulator for the whole-script walk: every assignment/update target
+/// name, plus whether `eval` / `Function` is named anywhere (identifier,
+/// `.eval`, or `["eval"]`) — either can run code that redeclares a global.
+type Uses {
+  Uses(assigned: set.Set(String), names_eval: Bool)
+}
+
+fn uses_assign(acc: Uses, name: String) -> Uses {
+  Uses(..acc, assigned: set.insert(acc.assigned, name))
+}
+
+fn uses_name(acc: Uses, name: String) -> Uses {
+  case name {
+    "eval" | "Function" -> Uses(..acc, names_eval: True)
+    _ -> acc
   }
 }
 
@@ -710,9 +733,9 @@ fn small_int_value(f: Float) -> Option(ir.Value) {
 /// analyze_const_globals. Over-approximates (includes locals shadowing a
 /// global — safe, just misses a fold).
 fn stmt_assigned_globals(
-  acc: set.Set(String),
+  acc: Uses,
   s: ast.StmtWithLine,
-) -> set.Set(String) {
+) -> Uses {
   case s.statement {
     ast.EmptyStatement | ast.DebuggerStatement -> acc
     ast.BreakStatement(..) | ast.ContinueStatement(..) -> acc
@@ -755,7 +778,7 @@ fn stmt_assigned_globals(
     | ast.ForOfStatement(left:, right:, body:, ..) -> {
       let acc = case left {
         ast.ForInitExpression(ast.Identifier(name:, ..)) ->
-          set.insert(acc, name)
+          uses_assign(acc, name)
         _ -> acc
       }
       st_assigned(ex_assigned(acc, right), body)
@@ -796,14 +819,14 @@ fn stmt_assigned_globals(
   }
 }
 
-fn st_assigned(acc: set.Set(String), s: ast.Statement) -> set.Set(String) {
+fn st_assigned(acc: Uses, s: ast.Statement) -> Uses {
   stmt_assigned_globals(acc, ast.StmtWithLine(0, s))
 }
 
 fn opt_ex_assigned(
-  acc: set.Set(String),
+  acc: Uses,
   e: Option(ast.Expression),
-) -> set.Set(String) {
+) -> Uses {
   case e {
     Some(ex) -> ex_assigned(acc, ex)
     None -> acc
@@ -811,9 +834,9 @@ fn opt_ex_assigned(
 }
 
 fn pat_default_assigned(
-  acc: set.Set(String),
+  acc: Uses,
   p: ast.Pattern,
-) -> set.Set(String) {
+) -> Uses {
   case p {
     ast.AssignmentPattern(right:, ..) -> ex_assigned(acc, right)
     _ -> acc
@@ -821,9 +844,9 @@ fn pat_default_assigned(
 }
 
 fn class_body_assigned(
-  acc: set.Set(String),
+  acc: Uses,
   body: List(ast.ClassElement),
-) -> set.Set(String) {
+) -> Uses {
   list.fold(body, acc, fn(acc, el) {
     case el {
       ast.ClassMethod(key:, value: ast.FunctionLiteral(body:, params:, ..), ..) ->
@@ -839,14 +862,14 @@ fn class_body_assigned(
   })
 }
 
-fn key_assigned(acc: set.Set(String), key: ast.PropertyKey) -> set.Set(String) {
+fn key_assigned(acc: Uses, key: ast.PropertyKey) -> Uses {
   case key {
     ast.KeyComputed(expression:) -> ex_assigned(acc, expression)
     _ -> acc
   }
 }
 
-fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
+fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
   case ex {
     ast.AssignmentExpression(left:, right:, ..) ->
       ex_assigned(ex_assigned(assign_target(acc, left), left), right)
@@ -871,8 +894,8 @@ fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
     ast.ClassExpression(super_class:, body:, ..) ->
       class_body_assigned(opt_ex_assigned(acc, super_class), body)
     // leaves
-    ast.Identifier(..)
-    | ast.NumberLiteral(..)
+    ast.Identifier(name:, ..) -> uses_name(acc, name)
+    ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
     | ast.StringExpression(..)
     | ast.BooleanLiteral(..)
@@ -906,8 +929,10 @@ fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
     | ast.OptionalMemberExpression(object:, property:, ..) -> {
       let acc = ex_assigned(acc, object)
       case property {
+        ast.Bracket(expression: ast.StringExpression(value:, ..)) ->
+          uses_name(acc, value)
         ast.Bracket(expression:) -> ex_assigned(acc, expression)
-        ast.Dot(..) -> acc
+        ast.Dot(name:, ..) -> uses_name(acc, name)
       }
     }
     ast.SequenceExpression(expressions:, ..) ->
@@ -945,9 +970,9 @@ fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
   }
 }
 
-fn assign_target(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
+fn assign_target(acc: Uses, ex: ast.Expression) -> Uses {
   case ast_util.unwrap_parens(ex) {
-    ast.Identifier(name:, ..) -> set.insert(acc, name)
+    ast.Identifier(name:, ..) -> uses_assign(acc, name)
     _ -> acc
   }
 }
