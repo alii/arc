@@ -1576,13 +1576,17 @@ fn for_lhs_bind(
           // and key through dispatch.emit_expr.
           for_lhs_member_put(e, m, v, k)
         }
-        // Destructuring-assign target `for ([a,b] of it)` — Pattern grammar
-        // covers Identifier/Array/Object shapes with BindAssign semantics.
-        ast.ArrayExpression(..) | ast.ObjectExpression(..) ->
-          case expr_to_assign_pattern(target) {
-            Ok(pat) -> via_destructure(e, pat, state.BindAssign)
-            Error(msg) -> Error(state.EarlySyntaxError(msg))
-          }
+        // Destructuring-assign target `for ([a.b, {c: d.e}] of it)` — the
+        // expression-shaped §13.15.5 path, since Pattern has no member target.
+        ast.ArrayExpression(..) | ast.ObjectExpression(..) -> {
+          let assign =
+            anf.then(expr.emit_destructuring_assign(target, v), fn(_) {
+              anf.pure(v)
+            })
+          let #(dtree, e) = anf.run(assign, e)
+          use e, _ <- let_(e, dtree)
+          k(e)
+        }
         _ ->
           Error(state.EarlySyntaxError("invalid for-in/of assignment target"))
       }
@@ -1643,61 +1647,6 @@ fn for_lhs_member_put(
       use e, key <- host_(e, "to_property_key", [kv])
       host_unit_(e, "set_prop", [base, key, v], k)
     }
-  }
-}
-
-/// Convert an Array/ObjectExpression assignment target to the Pattern grammar
-/// so dispatch.emit_destructure(BindAssign) handles it. Member-expression
-/// element targets (`[o.k] = v`) have no Pattern shape — they surface as an
-/// EarlySyntaxError here (D15 residual; expr.emit_destructuring_assign is
-/// Build-typed and not on EmitDispatch).
-fn expr_to_assign_pattern(ex: ast.Expression) -> Result(ast.Pattern, String) {
-  case ast_util.unwrap_parens(ex) {
-    ast.Identifier(name:, span:) -> Ok(ast.IdentifierPattern(name:, span:))
-    ast.ArrayExpression(elements:, ..) -> {
-      use els <- result.try(
-        list.try_map(elements, fn(el) {
-          case el {
-            None -> Ok(None)
-            Some(ast.SpreadElement(argument:, ..)) -> {
-              use inner <- result.map(expr_to_assign_pattern(argument))
-              Some(ast.RestElement(inner))
-            }
-            Some(inner) -> {
-              use p <- result.map(expr_to_assign_pattern(inner))
-              Some(p)
-            }
-          }
-        }),
-      )
-      Ok(ast.ArrayPattern(els))
-    }
-    ast.ObjectExpression(properties:, ..) -> {
-      use props <- result.try(
-        list.try_map(properties, fn(prop) {
-          case prop {
-            ast.InitProperty(key:, value:, shorthand:) -> {
-              use vp <- result.map(expr_to_assign_pattern(value))
-              ast.PatternProperty(key:, value: vp, shorthand:)
-            }
-            ast.SpreadProperty(argument:) ->
-              case ast_util.unwrap_parens(argument) {
-                ast.Identifier(name:, span:) ->
-                  Ok(ast.RestProperty(name:, span:))
-                _ -> Error("invalid rest property in for-in/of head")
-              }
-            ast.MethodProperty(..) | ast.AccessorProperty(..) ->
-              Error("invalid destructuring target in for-in/of head")
-          }
-        }),
-      )
-      Ok(ast.ObjectPattern(props))
-    }
-    ast.AssignmentExpression(operator: ast.Assign, left:, right:, ..) -> {
-      use lp <- result.map(expr_to_assign_pattern(left))
-      ast.AssignmentPattern(left: lp, right:)
-    }
-    _ -> Error("invalid destructuring target in for-in/of head")
   }
 }
 
