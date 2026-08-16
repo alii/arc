@@ -2875,10 +2875,20 @@ fn emit_array_assign_elements(
 ) -> Build(Nil) {
   case elements {
     [] -> anf.pure(Nil)
-    [Some(ast.SpreadElement(_, argument)), ..] -> {
-      use rest <- anf.then(anf.host("iter_rest", [iter]))
-      emit_destructuring_assign(argument, rest)
-    }
+    [Some(ast.SpreadElement(_, argument)), ..] ->
+      case is_member_target(argument) {
+        // §13.15.5.5 step 1: a MemberExpression rest target's lref is
+        // evaluated before the iterator is drained.
+        True -> {
+          use lv <- anf.then(emit_lvalue(argument))
+          use rest <- anf.then(anf.host("iter_rest", [iter]))
+          anf.then(lvalue_put(lv, rest), fn(_) { anf.pure(Nil) })
+        }
+        False -> {
+          use rest <- anf.then(anf.host("iter_rest", [iter]))
+          emit_destructuring_assign(argument, rest)
+        }
+      }
     [None, ..tail] -> {
       // Elision — step the iterator, discard the #(done, value) pair.
       use _ <- anf.then(anf.host("iter_next", [iter]))
