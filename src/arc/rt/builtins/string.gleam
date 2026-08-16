@@ -167,7 +167,7 @@ pub fn dispatch(
     StringPrototypeToLowerCase | StringPrototypeToLocaleLowerCase ->
       string_transform(st, this, to_lower_case)
     StringPrototypeToUpperCase | StringPrototypeToLocaleUpperCase ->
-      string_transform(st, this, string.uppercase)
+      string_transform(st, this, to_upper_case)
     StringPrototypeTrim -> string_transform(st, this, trim_js_ws)
     StringPrototypeTrimStart -> string_transform(st, this, trim_leading_js_ws)
     StringPrototypeTrimEnd -> string_transform(st, this, trim_trailing_js_ws)
@@ -1355,11 +1355,22 @@ fn codepoint_or_replacement(i: Int) -> UtfCodepoint {
 /// U+03A3 Σ → ς when preceded by a cased char (skipping case-ignorable chars)
 /// and not followed by one; else → σ. Erlang string:lowercase/1 does NOT.
 pub fn to_lower_case(s: String) -> String {
-  let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
-  case list.contains(cps, 0x03A3) {
-    False -> string.lowercase(s)
-    True -> sigma_assemble(split_cps_on_sigma(cps, [], []), True)
+  use <- option.lazy_unwrap(js_string.ascii_lower(s))
+  case js_string.index_of(s, "\u{03A3}", 0) {
+    None -> string.lowercase(s)
+    Some(_) -> {
+      let cps =
+        string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
+      sigma_assemble(split_cps_on_sigma(cps, [], []), True)
+    }
   }
+}
+
+/// toUppercase per §22.1.3.28. No context-sensitive rule applies at the root
+/// locale, so this is the plain per-codepoint mapping.
+pub fn to_upper_case(s: String) -> String {
+  use <- option.lazy_unwrap(js_string.ascii_upper(s))
+  string.uppercase(s)
 }
 
 fn split_cps_on_sigma(

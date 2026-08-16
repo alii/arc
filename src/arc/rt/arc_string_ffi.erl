@@ -3,6 +3,7 @@
          replacement_codepoint/0]).
 -export([string_index_of/3, string_last_index_of/3]).
 -export([string_cp_slice/3, string_cp_drop/2, string_cp_explode/1]).
+-export([string_ascii_upper/1, string_ascii_lower/1]).
 
 %% Bytes of match-start window string_last_index_of scans per backward step.
 %% Big enough that a whole small string is one window; small enough that a
@@ -203,3 +204,23 @@ cp_off(<<C, _, _, _, R/binary>>, N, Off) when N >= 1, C >= 16#F0 ->
     cp_off(R, N - 1, Off + 4);
 cp_off(<<>>, _N, Off) -> Off;
 cp_off(_Bin, 0, Off) -> Off.
+
+%% Case-map an all-ASCII string 7 bytes per step; `none` at the first
+%% non-ASCII byte so the caller can run the full Unicode mapping instead.
+%% ASCII has no context-sensitive casing, so this equals string:uppercase /
+%% string:lowercase wherever it answers. Per byte b (upper shown, lower is
+%% the same with 16#3F/16#25): b in [$a,$z] <=> bit 7 of b+16#1F is set and
+%% bit 7 of b+16#05 is clear; that bit shifted down to 16#20 is the case bit.
+string_ascii_upper(Bin) ->
+    ascii_map(Bin, 16#1F1F1F1F1F1F1F, 16#05050505050505, <<>>).
+string_ascii_lower(Bin) ->
+    ascii_map(Bin, 16#3F3F3F3F3F3F3F, 16#25252525252525, <<>>).
+
+ascii_map(<<W:56, Rest/binary>>, Lo, Hi, Acc) when W band 16#80808080808080 =:= 0 ->
+    M = ((W + Lo) band (bnot (W + Hi))) band 16#80808080808080,
+    ascii_map(Rest, Lo, Hi, <<Acc/binary, (W bxor (M bsr 2)):56>>);
+ascii_map(<<C, Rest/binary>>, Lo, Hi, Acc) when C < 16#80 ->
+    M = ((C + (Lo band 16#FF)) band (bnot (C + (Hi band 16#FF)))) band 16#80,
+    ascii_map(Rest, Lo, Hi, <<Acc/binary, (C bxor (M bsr 2))>>);
+ascii_map(<<>>, _Lo, _Hi, Acc) -> {some, Acc};
+ascii_map(_Bin, _Lo, _Hi, _Acc) -> none.
