@@ -3238,10 +3238,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 [],
                 iterable,
               ))
-              let agent =
-                list.fold(items, state.agent, fn(agent, v) {
-                  array_push(agent, h, Some(v))
-                })
+              let agent = array_append(state.agent, h, items)
               State(..state, agent:, stack: [arr, ..rest], pc: state.pc + 1)
             }
             None -> underflow(state, "ArraySpread")
@@ -4402,6 +4399,22 @@ fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
             Some(v) -> rt_elements.set(elements, length, v)
             None -> elements
           },
+        )
+      _ -> slot
+    }
+  })
+}
+
+/// Append every value of `items` to an Array cell in one write (spread into
+/// an array literal); same invariants as `array_push`.
+fn array_append(agent: Agent, h: Handle, items: List(JsVal)) -> Agent {
+  rt_store.t_cell_update(agent, h, fn(slot) {
+    case slot {
+      SObject(kind: rt_types.ArrayObj(length:), elements:, ..) ->
+        SObject(
+          ..slot,
+          kind: rt_types.ArrayObj(length: length + list.length(items)),
+          elements: rt_elements.write_list(elements, length, items),
         )
       _ -> slot
     }
