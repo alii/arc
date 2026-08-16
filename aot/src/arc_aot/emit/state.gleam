@@ -973,6 +973,35 @@ pub fn leave_scope(e: Emitter2, save: ScopeSave2) -> Emitter2 {
   )
 }
 
+/// leave_scope for a body that may have ended in a transfer. A block whose
+/// last statement is return/throw/break/continue never reaches the
+/// continuation that leaves its scope, so the emitter it hands back is still
+/// positioned inside `entered`; whatever is emitted next in the enclosing
+/// scope (an else arm, a catch handler, the statement after a loop) would
+/// resolve names against the dead block. Restores `save` in that case and is
+/// a no-op when the body left normally.
+pub fn leave_scope_if_inside(
+  e: Emitter2,
+  entered: ScopeId,
+  save: ScopeSave2,
+) -> Emitter2 {
+  case entered != save.cur_scope && scope_within(e.tree, e.cur_scope, entered) {
+    True -> leave_scope(e, save)
+    False -> e
+  }
+}
+
+fn scope_within(tree: ScopeTree, id: ScopeId, ancestor: ScopeId) -> Bool {
+  case id == ancestor {
+    True -> True
+    False ->
+      case scope.get_scope(tree, id).parent {
+        Some(parent) -> scope_within(tree, parent, ancestor)
+        None -> False
+      }
+  }
+}
+
 /// Conditionally consume the for-head Block scope (only pushed for
 /// let/const/using heads). None → true no-op on both sides so a var/expr
 /// head does not rewind the cursor past the body's siblings.

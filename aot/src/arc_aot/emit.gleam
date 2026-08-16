@@ -321,6 +321,7 @@ pub fn compile_source(
         // cell_get/run ≈ +2.9ms. Re-enable only for a bench where profile
         // shows >1k/run t_global_get_fast.
         module_slot_globals: False,
+        box_try_writes: True,
       ),
     )
   use module <- result.map(compile(ast.Script(body:), tree, opts))

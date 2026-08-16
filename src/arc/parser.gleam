@@ -2721,6 +2721,7 @@ fn parse_throw_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
 
 fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   let p2 = advance(p)
+  let p2 = P(..p2, sb: scope.sb_enter_try(p2.sb))
   use #(p3, block) <- result.try(parse_block_body(p2))
   use #(p4, handler) <- result.try(parse_catch_clause(p3))
   use #(p5, finalizer) <- result.try(case peek(p4) {
@@ -2730,6 +2731,7 @@ fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     }
     _ -> Ok(#(p4, option.None))
   })
+  let p5 = P(..p5, sb: scope.sb_leave_try(p5.sb))
   use tail <- result.map(case handler, finalizer {
     option.None, option.None -> Error(MissingCatchOrFinally(pos_of(p5)))
     option.Some(handler), option.None -> Ok(ast.TryCatch(handler:))

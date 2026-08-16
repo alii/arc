@@ -1232,7 +1232,8 @@ fn with_scope(a: Ana, f: fn(Ana) -> Ana) -> Ana {
     [] -> Ana(..a, open_cursor: inner)
     [_, ..] -> {
       let #(fresh, a) = alloc_state(a)
-      close_open(a, FallTo(fresh), fresh, AeJump)
+      let a = close_open(a, FallTo(fresh), fresh, AeJump)
+      Ana(..a, open_cursor: inner)
     }
   }
   let a_in = f(Ana(..a, cur: inner))
@@ -3930,10 +3931,8 @@ fn emit_seg_tail(
               )
             }),
             fn(t) {
-              let cv = case state.let_tail_value(cond_tree) {
-                Some(v) -> v
-                None -> ir.Var(cv_n)
-              }
+              let cv =
+                option.unwrap(state.let_tail_value(cond_tree), ir.Var(cv_n))
               state.splice_let(
                 cond_tree,
                 cv_n,

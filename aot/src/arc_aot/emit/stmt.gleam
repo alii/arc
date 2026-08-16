@@ -600,13 +600,18 @@ fn emit_block(
           // (before enter_scope) so only already-bound outer slots qualify.
           let carried = assigned_unboxed_slots(e, ast.BlockStatement(body))
           let #(e, save) = state.enter_scope(e, in_block: True)
+          let entered = e.cur_scope
           use e <- binding_prologue(e, e.cur_scope)
           use e <- hoist_fn_decls(e, body)
           case ast_util.has_using_decl(body) {
-            False ->
-              fold_body(e, body, fn(ef) {
-                next(leave_scope_carrying(ef, save, carried))
-              })
+            False -> {
+              use #(tree, e) <- result.map(
+                fold_body(e, body, fn(ef) {
+                  next(leave_scope_carrying(ef, save, carried))
+                }),
+              )
+              #(tree, state.leave_scope_if_inside(e, entered, save))
+            }
             True -> Error(state.UnsupportedFeature("using declaration"))
           }
         }
@@ -2049,14 +2054,16 @@ fn emit_try(
       // vars/labels/fns allocated inside the try body.
       let branch_slots = e.slot_vars
       let #(esc, e) = state.fresh_escape(e, list.length(carried))
+      let e = state.push_barrier(e, None, None, Some(esc))
       use #(try_body, e) <- result.try(
         run_rk(e, fn(e, done) {
-          let e = state.push_barrier(e, None, None, Some(esc))
           use e <- emit_block(e, block)
-          let e = state.pop_frame(e)
           done(e, ir.Values(carried_values(e, carried)))
         }),
       )
+      // Popped on the emitter the body hands back: a body ending in a
+      // transfer never reaches the code after emit_block.
+      let e = state.pop_frame(e)
       // The try body's slot_vars name Let-bindings inside try_body; the
       // handler must read the pre-try names (as emit_if does per arm).
       let e = state.Emitter2(..e, slot_vars: branch_slots)
@@ -2138,12 +2145,18 @@ fn emit_catch_handler(
         state.BindLet,
       ))
       use e, _ <- let_(e, dtree)
-      use e <- emit_block(e, catch_body)
       // RULING slot-vars-scope-survival: read carried_values from the INNER e
       // before leave_scope drops outer-slot rebinds; the handler is a WRAPPED
-      // body so vals thread out via ir.Try.result → rebind_after_block.
-      let vals = carried_values(e, carried)
-      done(state.leave_scope(e, save), ir.Values(vals))
+      // body so vals thread out via ir.Try.result → rebind_after_block. The
+      // scope is left on the emitter the body hands back, so a body ending in
+      // a transfer still leaves it.
+      use #(body, e) <- result.try(
+        run_rk(e, fn(e, done) {
+          use e <- emit_block(e, catch_body)
+          done(e, ir.Values(carried_values(e, carried)))
+        }),
+      )
+      done(state.leave_scope(e, save), body)
     }
     None -> {
       use e <- emit_block(e, catch_body)
