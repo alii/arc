@@ -1045,11 +1045,13 @@ fn fast_loop(
     // -- Named data property ------------------------------------------------
     // `obj.x`: own or inherited plain data property along an all-ordinary
     // chain (`undefined` when absent on the whole chain, as OrdinaryGet
-    // answers). Accessors, proxies, namespaces, virtual `length` miss.
+    // answers). A string or number receiver reads its wrapper prototype
+    // (String "length" is answered directly). Accessors, proxies,
+    // namespaces, an object cell's virtual `length` miss.
     GetField(key.Named(name)) ->
       case stack {
         [recv, ..rest] -> {
-          let v = ffi.get_field(agent.store, recv, name)
+          let v = ffi.get_field(agent, recv, name)
           case ffi.is_miss(v) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
@@ -1073,7 +1075,7 @@ fn fast_loop(
     GetField2(key.Named(name)) ->
       case stack {
         [recv, ..rest] -> {
-          let v = ffi.get_field(agent.store, recv, name)
+          let v = ffi.get_field(agent, recv, name)
           case ffi.is_miss(v) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
@@ -1093,10 +1095,12 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
-    // `obj.x = v` overwriting an existing own writable data property: the
-    // value is replaced inside the descriptor, keeping attributes and
-    // creation order (§10.1.11). Creation (needs the proto-chain setter
-    // walk), non-writable, accessors and exotic receivers miss.
+    // `obj.x = v` on an existing own writable data property replaces the
+    // value inside the descriptor, keeping attributes and creation order
+    // (§10.1.11); on an extensible ordinary receiver whose prototype chain
+    // holds nothing but writable data at the key it creates the property
+    // (fresh seq from the store). Setters and read-only props up the chain,
+    // non-writable, accessors and exotic receivers miss.
     PutField(key.Named(name)) ->
       case stack {
         [val, recv, ..rest] -> {

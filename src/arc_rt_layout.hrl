@@ -152,4 +152,13 @@
 -define(COMPLETION_NORMAL, normal_completion).
 -define(COMPLETION_THROW, throw_completion).
 
+%% arc/rt/types.Realm: the primitive wrapper prototypes the fused field
+%% read walks from for a string / number receiver.
+-define(REALM_STRING, 5).
+-define(REALM_NUMBER, 6).
+
+%% arc/rt/types.JsStore: the property creation-order stamp the fused
+%% field write bumps when it creates an own property.
+-define(STORE_PROP_SEQ, 9).
+
 -endif.

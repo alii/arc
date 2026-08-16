@@ -44,11 +44,20 @@ pub fn get_and_put_field_test() {
   let st = rt_helpers.agent()
   let #(obj, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(Named("x")), mk_int(42))
-  assert classify(ffi.get_field(st.store, obj, "x")) == KNum(JInt(42))
-  assert classify(ffi.get_field(st.store, obj, "missing")) == KUndef
+  assert classify(ffi.get_field(st, obj, "x")) == KNum(JInt(42))
+  assert classify(ffi.get_field(st, obj, "missing")) == KUndef
   // Inherited data property walks the chain; an accessor misses.
-  let assert KHandle(_) = classify(ffi.get_field(st.store, obj, "constructor"))
-  assert ffi.is_miss(ffi.get_field(st.store, obj, "__proto__"))
+  let assert KHandle(_) = classify(ffi.get_field(st, obj, "constructor"))
+  assert ffi.is_miss(ffi.get_field(st, obj, "__proto__"))
+  // Primitives: String "length" is virtual, anything else reads the realm
+  // wrapper prototype; a getter there misses.
+  assert classify(ffi.get_field(st, mk_string("héllo"), "length"))
+    == KNum(JInt(5))
+  let assert KHandle(_) = classify(ffi.get_field(st, mk_string("s"), "slice"))
+  assert classify(ffi.get_field(st, mk_string("s"), "nope")) == KUndef
+  let assert KHandle(_) = classify(ffi.get_field(st, mk_int(1), "toFixed"))
+  assert ffi.is_miss(ffi.get_field(st, mk_string("s"), "__proto__"))
+  assert ffi.is_miss(ffi.get_field(st, mk_undefined(), "x"))
   assert ffi.type_of_in(st.store, obj) == "object"
   // Overwrite through the kernel, read back through the runtime.
   let store = ffi.put_field(st.store, obj, "x", mk_int(43))
@@ -56,8 +65,25 @@ pub fn get_and_put_field_test() {
   let st = types.Agent(..st, store:)
   let #(v, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("x")))
   assert classify(v) == KNum(JInt(43))
-  // Creating a property is not the kernel's job.
-  assert ffi.is_miss(ffi.put_field(st.store, obj, "y", mk_int(1)))
+  // Creation on an extensible receiver whose chain holds nothing at the
+  // key: a fresh {W,E,C} property stamped after the existing ones.
+  let store = ffi.put_field(st.store, obj, "y", mk_int(1))
+  assert !ffi.is_miss(store)
+  let st = types.Agent(..st, store:)
+  let #(keys, st) = rt_obj.t_own_keys(st, handle_of(obj))
+  assert keys == [StringKey(Named("x")), StringKey(Named("y"))]
+  let #(desc, st) =
+    rt_obj.t_get_own_property(st, handle_of(obj), StringKey(Named("y")))
+  let assert Some(types.DataProperty(
+    writable: True,
+    enumerable: True,
+    configurable: True,
+    ..,
+  )) = desc
+  // An accessor up the chain and a non-extensible receiver miss.
+  assert ffi.is_miss(ffi.put_field(st.store, obj, "__proto__", mk_int(1)))
+  let #(_, st) = rt_obj.t_prevent_extensions(st, handle_of(obj))
+  assert ffi.is_miss(ffi.put_field(st.store, obj, "z", mk_int(1)))
 }
 
 pub fn get_and_put_elem_test() {

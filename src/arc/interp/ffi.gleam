@@ -225,9 +225,10 @@ pub fn type_of(v: JsVal) -> String
 pub fn type_of_in(store: JsStore(Agent), v: JsVal) -> String
 
 /// `obj.key`: own or inherited plain data property, `undefined` if absent
-/// on an all-ordinary chain. `key` is a Named (non-index) key.
+/// on an all-ordinary chain; a string or number receiver reads from its
+/// realm wrapper prototype. `key` is a Named (non-index) key.
 @external(erlang, "arc_interp_ffi", "get_field")
-pub fn get_field(store: JsStore(Agent), obj: JsVal, key: String) -> JsVal
+pub fn get_field(agent: Agent, obj: JsVal, key: String) -> JsVal
 
 /// `obj[key]` for an integer index into an Array cell or a string key.
 @external(erlang, "arc_interp_ffi", "get_elem")

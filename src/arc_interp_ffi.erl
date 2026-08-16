@@ -444,20 +444,40 @@ typeof(_Store, V) -> typeof(V).
 kind_tag(Kind) when is_atom(Kind) -> Kind;
 kind_tag(Kind) -> element(1, Kind).
 
-%% get_field(Store, V, KeyBin) -> JsVal | miss
+%% get_field(Agent, V, KeyBin) -> JsVal | miss
 %% §10.1.8.1 OrdinaryGet for a Named string key on an object cell, walking
 %% the prototype chain while every hop is an ordinary read: an own slot on
 %% an SShapedObject, or an own DataProperty in an SObject's props map for a
-%% kind whose named keys are not virtual. Accessors, Proxy / module
-%% namespace / TypedArray cells, Array and String "length", a dangling
-%% handle, a primitive receiver, or more than 64 hops all miss. Absent on
-%% the whole chain is `undefined`, exactly as OrdinaryGet answers.
+%% kind whose named keys are not virtual. A string or number primitive
+%% starts the walk at its realm wrapper prototype (String "length" is
+%% answered directly). Accessors, Proxy / module namespace / TypedArray
+%% cells, Array and String object "length", a dangling handle, any other
+%% primitive, or more than 64 hops all miss. Absent on the whole chain is
+%% `undefined`, exactly as OrdinaryGet answers.
 %% KeyBin is a canonical Named key (the compiler emits Index keys for
 %% array-index strings).
-get_field(Store, {?HANDLE_TAG, Id}, KeyBin) ->
-    field_walk(element(?STORE_DATA, Store), element(?STORE_SHAPES, Store),
-               Id, KeyBin, 64);
+get_field(Agent, {?HANDLE_TAG, Id}, KeyBin) ->
+    cell_field(element(?AGENT_STORE, Agent), Id, KeyBin);
+get_field(_, Bin, <<"length">>) when is_binary(Bin) ->
+    arc_string_ffi:string_codepoint_length(Bin);
+get_field(Agent, Bin, KeyBin) when is_binary(Bin) ->
+    proto_field(Agent, ?REALM_STRING, KeyBin);
+get_field(Agent, N, KeyBin) when is_number(N) ->
+    proto_field(Agent, ?REALM_NUMBER, KeyBin);
 get_field(_, _, _) -> miss.
+
+%% A string / number primitive has no own named props besides String
+%% "length", so a read walks the realm's wrapper prototype. Only a data
+%% property answers here; a getter misses so the slow path can pass the
+%% primitive as `this`.
+proto_field(Agent, Which, KeyBin) ->
+    Pair = element(Which, element(?AGENT_REALM, Agent)),
+    {?HANDLE_TAG, Id} = element(?PAIR_PROTO, Pair),
+    cell_field(element(?AGENT_STORE, Agent), Id, KeyBin).
+
+cell_field(Store, Id, KeyBin) ->
+    field_walk(element(?STORE_DATA, Store), element(?STORE_SHAPES, Store),
+               Id, KeyBin, 64).
 
 field_walk(_, _, _, _, 0) -> miss;
 field_walk(Data, Shapes, Id, KeyBin, Fuel) ->
@@ -532,7 +552,8 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
     end;
 get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when is_binary(Key) ->
     case arc_rt_val_ffi:t_to_property_key_fast(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, KeyBin}} -> get_field(Store, Obj, KeyBin);
+        {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
+            cell_field(Store, element(?HANDLE_ID, Obj), KeyBin);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
         _ -> miss
     end;
@@ -555,12 +576,16 @@ elem_read({?ELEMS_SPARSE, M}, Idx) ->
 elem_read(_, _) -> miss.
 
 %% put_field(Store, V, KeyBin, Val) -> Store2 | miss
-%% §10.1.9.2 OrdinarySetWithOwnDescriptor step 2 for an EXISTING own
-%% writable data property: overwrite the SShapedObject slot, or replace the
-%% value inside the DataProperty (attributes and creation seq kept,
-%% §10.1.11) for a kind whose named keys are ordinary. Property creation
-%% (needs the proto-chain setter walk and a fresh seq), non-writable,
-%% accessors and exotic receivers miss. Returns the rebuilt store.
+%% §10.1.9.2 OrdinarySetWithOwnDescriptor for a kind whose named keys are
+%% ordinary. Step 2, an EXISTING own writable data property: overwrite the
+%% SShapedObject slot, or replace the value inside the DataProperty
+%% (attributes and creation seq kept, §10.1.11). Step 1 → 2.c-h, CREATION
+%% on an extensible SObject: only when the prototype chain holds nothing
+%% at the key but plain writable data (named_free), so a setter or a
+%% read-only property up the chain still takes the slow path; the new
+%% {W,E,C} property is stamped with the store's prop_seq (t_next_prop_seq).
+%% Non-writable, accessors, non-extensible / shaped receivers for a new key
+%% and exotic receivers miss. Returns the rebuilt store.
 put_field(Store, {?HANDLE_TAG, Id}, KeyBin, V) ->
     Data = element(?STORE_DATA, Store),
     case Data of
@@ -590,12 +615,65 @@ put_field(Store, {?HANDLE_TAG, Id}, KeyBin, V) ->
                                 Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
                             NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
                             setelement(?STORE_DATA, Store, Data#{Id := NewSlot});
+                        #{K := _} -> miss;
+                        _ when element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
+                            case named_free(Data, element(?STORE_SHAPES, Store),
+                                            element(?SOBJECT_PROTO, Slot),
+                                            KeyBin, 64) of
+                                false -> miss;
+                                true ->
+                                    Seq = element(?STORE_PROP_SEQ, Store),
+                                    Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
+                                    NewSlot = setelement(?SOBJECT_PROPS, Slot,
+                                                         Props#{K => Prop}),
+                                    setelement(?STORE_PROP_SEQ,
+                                               setelement(?STORE_DATA, Store,
+                                                          Data#{Id := NewSlot}),
+                                               Seq + 1)
+                            end;
                         _ -> miss
                     end
             end;
         _ -> miss
     end;
 put_field(_, _, _, _) -> miss.
+
+%% named_free(Data, Shapes, Proto, KeyBin, Fuel) -> boolean()
+%% Every object on the prototype chain starting at Proto either lacks an
+%% own property at KeyBin or holds a writable data property there, along
+%% hops whose named lookup is a pure slots/props probe (§10.1.9.2 step 1:
+%% ordinary [[Set]] then creates on the receiver). An accessor or read-only
+%% property, an exotic hop, a dangling handle, or more than Fuel hops
+%% answer false.
+named_free(_, _, ?NONE, _, _) -> true;
+named_free(_, _, _, _, 0) -> false;
+named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, KeyBin, Fuel) ->
+    case Data of
+        #{P := {?SSHAPED_TAG, Sid, Proto, _Slots}} ->
+            case Shapes of
+                #{Sid := Desc} ->
+                    case element(?SHAPE_OFFSETS, Desc) of
+                        #{KeyBin := _} -> true;
+                        _ -> named_free(Data, Shapes, Proto, KeyBin, Fuel - 1)
+                    end;
+                _ -> false
+            end;
+        #{P := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+            case named_is_ordinary(element(?SOBJECT_KIND, Slot), KeyBin) of
+                false -> false;
+                true ->
+                    case element(?SOBJECT_PROPS, Slot) of
+                        #{{?KEY_NAMED, KeyBin} := Prop} ->
+                            element(1, Prop) =:= ?DATAPROP_TAG
+                                andalso element(?DATAPROP_WRITABLE, Prop) =:= true;
+                        _ ->
+                            named_free(Data, Shapes, element(?SOBJECT_PROTO, Slot),
+                                       KeyBin, Fuel - 1)
+                    end
+            end;
+        _ -> false
+    end;
+named_free(_, _, _, _, _) -> false.
 
 %% put_elem(Store, V, Idx, Val) -> Store2 | miss
 %% `V[Idx] = Val` on an extensible Array cell for an array index Idx
