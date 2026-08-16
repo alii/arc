@@ -627,6 +627,24 @@ pub fn t_to_property_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   }
 }
 
+/// ToPropertyKey for a computed member key `base[v]`: §6.2.5.5 GetValue /
+/// §6.2.5.6 PutValue run ToObject(base) before the key is coerced, so a
+/// nullish base throws TypeError without ever calling the key's `toString`.
+pub fn t_to_property_key_of(
+  st: Agent,
+  base: JsVal,
+  v: JsVal,
+) -> #(ObjectKey, Agent) {
+  case classify(base) {
+    KNull | KUndef ->
+      t_throw_type_error(
+        st,
+        "Cannot read properties of " <> nullish_label(base),
+      )
+    _ -> t_to_property_key(st, v)
+  }
+}
+
 /// Steps 2-3 of §7.1.19 for an already-primitive `v`. Numbers/strings take
 /// fast paths so downstream [[Get]]/[[Set]] don't re-stringify: array-index
 /// numbers → `Index(n)` (skip stringify), strings → `canonical_key`, else

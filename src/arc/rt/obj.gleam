@@ -3570,9 +3570,46 @@ pub fn t_set_prop_any(
   t_set_prop(st, recv, as_object_key(key), v)
 }
 
-/// SPEC§8 `define_prop` — §7.3.5 CreateDataProperty(OrThrow) with a wire-form
-/// key. Object-literal `{k: v}` emits this with a raw JsVal `v` (NOT a
-/// ParsedDesc), so route to `t_define_own_data` with all-true attributes.
+/// SPEC§8 `set_prop_strict` — strict-code PutValue (§13.15.2 step 6.b.iv):
+/// a failed [[Set]] throws TypeError instead of being ignored.
+pub fn t_set_prop_strict(
+  st: Agent,
+  recv: JsVal,
+  key: k,
+  v: JsVal,
+) -> #(Bool, Agent) {
+  let okey = as_object_key(key)
+  let #(ok, st) = t_set_prop(st, recv, okey, v)
+  case ok {
+    True -> #(True, st)
+    False ->
+      throw_type_error(
+        st,
+        "Cannot assign to read only property '" <> key_text(okey) <> "'",
+      )
+  }
+}
+
+/// SPEC§8 `delete_prop_strict` — §13.5.1.2 step 5.b.i: strict delete of a
+/// non-configurable property throws TypeError.
+pub fn t_delete_prop_strict(
+  st: Agent,
+  obj: Handle,
+  key: ObjectKey,
+) -> #(Bool, Agent) {
+  let #(deleted, st) = t_delete_prop(st, obj, key)
+  case deleted {
+    True -> #(True, st)
+    False ->
+      throw_type_error(st, "Cannot delete property '" <> key_text(key) <> "'")
+  }
+}
+
+/// SPEC§8 `define_prop` — §7.3.5 CreateDataPropertyOrThrow with a wire-form
+/// key. Object-literal `{k: v}` and class fields emit this with a raw JsVal
+/// `v` (NOT a ParsedDesc), so route to `t_define_own_data` with all-true
+/// attributes; a rejected define (frozen receiver, a class constructor's
+/// `prototype`) throws TypeError.
 pub fn t_create_data_prop(
   st: Agent,
   recv: JsVal,
@@ -3580,8 +3617,18 @@ pub fn t_create_data_prop(
   v: JsVal,
 ) -> #(Bool, Agent) {
   case rt_types.classify(recv) {
-    KHandle(h) ->
-      t_define_own_data(st, h, as_object_key(key), v, True, True, True)
+    KHandle(h) -> {
+      let okey = as_object_key(key)
+      let #(ok, st) = t_define_own_data(st, h, okey, v, True, True, True)
+      case ok {
+        True -> #(True, st)
+        False ->
+          throw_type_error(
+            st,
+            "Cannot define property '" <> key_text(okey) <> "'",
+          )
+      }
+    }
     _ ->
       throw_type_error(
         st,
@@ -3611,6 +3658,12 @@ pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
       throw_reference_error(st, text <> " is not defined")
     }
   }
+}
+
+/// The realm's global object as a value: the script-root `this` binding
+/// (§9.1.1.4.11 GetThisBinding on the global environment).
+pub fn t_global_this(st: Agent) -> JsVal {
+  rt_types.mk_object(st.realm.global_object)
 }
 
 /// SPEC§8 `global_set` — sloppy `PutValue` on the global object (§6.2.5.6
@@ -3648,12 +3701,6 @@ pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
 }
 
 /// SPEC§8 `global_typeof` — ES2024 §13.5.3 `typeof <ident>` where `<ident>` is
-/// The realm's global object as a value: the script-root `this` binding
-/// (§9.1.1.4.11 GetThisBinding on the global environment).
-pub fn t_global_this(st: Agent) -> JsVal {
-  rt_types.mk_object(st.realm.global_object)
-}
-
 /// an unresolvable global Reference yields `"undefined"` without throwing. If
 /// the binding exists on the global object, read it and delegate to `t_type_of`.
 pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {

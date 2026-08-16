@@ -409,8 +409,26 @@ fn emit_stmt(
       expr_(e, expression, fn(e, _) { k(e) })
     // D15: `with` is unsupported — surface as compile-time EmitError (R12).
     ast.WithStatement(..) -> Error(state.UnsupportedFeature("with"))
-    // Already hoisted by func.emit_prologue — the statement itself is a no-op.
-    // Annex-B block-level fn promotion is skipped in v1.
+    // Already hoisted by func.emit_prologue / the block prologue. The only
+    // runtime effect at the statement's position is Annex B §B.3.2.6: in
+    // sloppy mode a block-level plain function is copied into the enclosing
+    // var-scope binding of the same name.
+    ast.FunctionDeclaration(
+      name: Some(ast.NamedBinding(name:, ..)),
+      is_generator: False,
+      is_async: False,
+      ..,
+    ) -> {
+      let blocked =
+        set.contains(
+          scope.get_scope(e.tree, e.cur_scope).annexb_blocked,
+          name,
+        )
+      case e.in_block && !e.strict && !blocked {
+        True -> annexb_promote(e, name, k)
+        False -> k(e)
+      }
+    }
     ast.FunctionDeclaration(..) -> k(e)
     ast.BlockStatement([]) -> k(e)
 
@@ -606,6 +624,103 @@ pub fn block_wrap_fn_decl(stmt: ast.Statement) -> ast.Statement {
   }
 }
 
+/// Annex B §B.3.2.6: copy the block-scoped function binding `name` into the
+/// enclosing var-scope binding. Source is the innermost binding on the chain;
+/// the target walk steps over catch parameters (§B.3.4), stops at a
+/// let/const/fn-name shadow, writes a var/param/capture binding, and falls
+/// through to the global object when the function root has no binding.
+fn annexb_promote(
+  e: Emitter2,
+  name: String,
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  case annexb_find_source(e, e.cur_scope, name) {
+    None -> k(e)
+    Some(#(source, outside)) -> {
+      let target = case annexb_find_target(e, outside, name) {
+        None -> Some(scope.Global(name))
+        Some(scope.Binding(kind: LetBinding, ..))
+        | Some(scope.Binding(kind: ConstBinding, ..))
+        | Some(scope.Binding(kind: FnNameBinding, ..)) -> None
+        Some(scope.Binding(slot:, kind:, is_boxed:, origin_kind_for_capture:)) ->
+          Some(scope.Local(
+            slot:,
+            boxed: is_boxed,
+            kind:,
+            origin_kind: origin_kind_for_capture,
+          ))
+      }
+      case target {
+        None -> k(e)
+        Some(d) -> {
+          let copy = {
+            use v <- anf.then(read_binding(source))
+            expr.emit_direct_put(d, name, v)
+          }
+          let #(tree, e) = anf.run(copy, e)
+          use e, _ <- let_(e, tree)
+          k(e)
+        }
+      }
+    }
+  }
+}
+
+fn read_binding(b: Binding) -> anf.Build(ir.Value) {
+  fn(e: Emitter2, k) {
+    let v = ir.Var(state.get_slot_var(e, b.slot))
+    case b.is_boxed {
+      True -> anf.host("cell_get", [v])(e, k)
+      False -> k(e, v)
+    }
+  }
+}
+
+fn scope_parent_in_fn(e: Emitter2, id: ScopeId) -> Option(ScopeId) {
+  case id == e.fn_scope {
+    True -> None
+    False -> scope.get_scope(e.tree, id).parent
+  }
+}
+
+fn annexb_find_source(
+  e: Emitter2,
+  from: ScopeId,
+  name: String,
+) -> Option(#(Binding, Option(ScopeId))) {
+  let node = scope.get_scope(e.tree, from)
+  case dict.get(node.bindings, name) {
+    Ok(b) -> Some(#(b, scope_parent_in_fn(e, from)))
+    Error(Nil) ->
+      case scope_parent_in_fn(e, from) {
+        Some(parent) -> annexb_find_source(e, parent, name)
+        None -> None
+      }
+  }
+}
+
+fn annexb_find_target(
+  e: Emitter2,
+  from: Option(ScopeId),
+  name: String,
+) -> Option(Binding) {
+  case from {
+    None -> None
+    Some(id) -> {
+      let node = scope.get_scope(e.tree, id)
+      case node.kind {
+        scope.Catch -> annexb_find_target(e, scope_parent_in_fn(e, id), name)
+        _ ->
+          case dict.get(node.bindings, name) {
+            Ok(scope.Binding(kind: CatchBinding, ..)) | Error(Nil) ->
+              annexb_find_target(e, scope_parent_in_fn(e, id), name)
+            Ok(b) -> Some(b)
+          }
+      }
+    }
+  }
+}
+
 // ── VariableDeclaration (port emit.gleam:3727-3776) ─────────────────────────
 
 /// Initialize a declared name to `v`. Port of emit.gleam init_lex/emit_var_put:
@@ -785,18 +900,37 @@ fn rebind_after_block(
 /// Nested function/class bodies are NOT descended — their assignments target
 /// the child frame, not this one.
 fn assigned_unboxed_slots(e: Emitter2, s: ast.Statement) -> List(Int) {
+  let bound_unboxed = fn(slot, boxed) {
+    case boxed, dict.has_key(e.slot_vars, slot) {
+      False, True -> Ok(slot)
+      _, _ -> Error(Nil)
+    }
+  }
+  let annexb = case e.strict {
+    True -> []
+    False -> state.fn_info(e).annexb_candidates
+  }
   stmt_assigned_names(s, [])
   |> list.unique
-  |> list.filter_map(fn(name) {
-    case state.resolve(e, name) {
-      scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
-        case dict.has_key(e.slot_vars, slot) {
-          True -> Ok(slot)
-          False -> Error(Nil)
-        }
+  |> list.flat_map(fn(name) {
+    let plain = case state.resolve(e, name) {
+      scope.Plain(scope.Local(slot:, boxed:, ..)) -> bound_unboxed(slot, boxed)
       _ -> Error(Nil)
     }
+    // Annex B §B.3.2.6 writes the var-scope twin, which a same-named catch
+    // parameter on the chain hides from the plain resolution.
+    let twin = case list.contains(annexb, name) {
+      False -> Error(Nil)
+      True ->
+        case annexb_find_target(e, Some(e.cur_scope), name) {
+          Some(scope.Binding(kind: VarBinding, slot:, is_boxed:, ..)) ->
+            bound_unboxed(slot, is_boxed)
+          _ -> Error(Nil)
+        }
+    }
+    result.values([plain, twin])
   })
+  |> list.unique
   |> list.sort(int.compare)
 }
 
@@ -1124,9 +1258,17 @@ fn stmt_assigned_names(s: ast.Statement, acc: List(String)) -> List(String) {
     ast.EmptyStatement
     | ast.DebuggerStatement
     | ast.BreakStatement(..)
-    | ast.ContinueStatement(..)
-    | // do NOT descend into nested function bodies
-      ast.FunctionDeclaration(..) -> acc
+    | ast.ContinueStatement(..) -> acc
+    // Annex B §B.3.2.6: a sloppy block-level plain function is copied into
+    // the enclosing var binding when its declaration is evaluated. Do NOT
+    // descend into the body.
+    ast.FunctionDeclaration(
+      name: Some(ast.NamedBinding(name:, ..)),
+      is_generator: False,
+      is_async: False,
+      ..,
+    ) -> [name, ..acc]
+    ast.FunctionDeclaration(..) -> acc
     // Class BODY is a nested scope, but the heritage clause evaluates here.
     ast.ClassDeclaration(super_class:, ..) ->
       opt_expr_assigned_names(super_class, acc)
@@ -1681,12 +1823,12 @@ fn for_lhs_member_put(
         e,
         ir.TermOp(ir.MakeTuple, [ir.ConstAtom("string_key"), inner]),
       )
-      host_unit_(e, "set_prop", [base, key, v], k)
+      host_unit_(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
     }
     ast.Bracket(expression:) -> {
       use e, kv <- expr_(e, expression)
       use e, key <- host_(e, "to_property_key", [kv])
-      host_unit_(e, "set_prop", [base, key, v], k)
+      host_unit_(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
     }
   }
 }
