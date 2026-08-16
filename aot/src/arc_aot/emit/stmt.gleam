@@ -1860,6 +1860,7 @@ fn emit_try(
       // run_rk threads e out (state.gleam invariant #1: next_var/next_label/
       // fns_acc are module-monotone) so the handler and rebind_after_block see
       // vars/labels/fns allocated inside the try body.
+      let branch_slots = e.slot_vars
       use #(try_body, e) <- result.try(
         run_rk(e, fn(e, done) {
           let e = state.push_barrier(e, None, None)
@@ -1868,6 +1869,9 @@ fn emit_try(
           done(e, ir.Values(carried_values(e, carried)))
         }),
       )
+      // The try body's slot_vars name Let-bindings inside try_body; the
+      // handler must read the pre-try names (as emit_if does per arm).
+      let e = state.Emitter2(..e, slot_vars: branch_slots)
       use #(handler, e) <- result.try(emit_catch_handler(
         e,
         param,
