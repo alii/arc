@@ -2792,10 +2792,16 @@ pub fn emit_destructuring_assign(
       use iter <- anf.then(
         anf.host("get_iterator", [src, ir.ConstAtom("sync")]),
       )
-      // PORT-GAP: §13.15.5.3 step 6 — a throwing element assignment must
-      // IteratorClose(iter, abrupt). anf.gleam has no Try combinator yet;
-      // SPEC row 1409's OnTag("js_exn") wrap lands with M13/M17.
-      use drained <- anf.then(emit_array_assign_elements(elements, iter))
+      // §13.15.5.3 step 6: a throwing element assignment IteratorCloses
+      // (abrupt) unless the pattern already drained the iterator, in which
+      // case IteratorStep/iter_rest marked it done and close is a no-op.
+      let drained = array_assign_drains(elements)
+      use _ <- anf.then(
+        anf.close_iter_on_throw(iter, {
+          use _ <- anf.then(emit_array_assign_elements(elements, iter))
+          anf.pure(Nil)
+        }),
+      )
       // §13.15.5.2 step 7: IteratorClose only when the pattern didn't drain.
       case drained {
         True -> anf.pure(Nil)
@@ -2847,18 +2853,26 @@ fn iter_next_value(iter: ir.Value) -> Build(ir.Value) {
   anf.bind(anf.tuple_get(pair, 1))
 }
 
-/// Array assignment pattern elements (§13.15.5.3). Returns whether the
-/// iterator was fully drained (rest reached), so the caller skips iter_close.
+/// Whether the pattern ends in a rest element, which drains the iterator.
+fn array_assign_drains(elements: List(Option(ast.Expression))) -> Bool {
+  list.any(elements, fn(el) {
+    case el {
+      Some(ast.SpreadElement(..)) -> True
+      _ -> False
+    }
+  })
+}
+
+/// Array assignment pattern elements (§13.15.5.3).
 fn emit_array_assign_elements(
   elements: List(Option(ast.Expression)),
   iter: ir.Value,
-) -> Build(Bool) {
+) -> Build(Nil) {
   case elements {
-    [] -> anf.pure(False)
+    [] -> anf.pure(Nil)
     [Some(ast.SpreadElement(_, argument)), ..] -> {
       use rest <- anf.then(anf.host("iter_rest", [iter]))
-      use _ <- anf.then(emit_destructuring_assign(argument, rest))
-      anf.pure(True)
+      emit_destructuring_assign(argument, rest)
     }
     [None, ..tail] -> {
       // Elision — step the iterator, discard the #(done, value) pair.
