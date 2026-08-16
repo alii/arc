@@ -183,7 +183,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
     // for `obj.tag`x`` and arg lowering ride the CallExpression arm.
     // §13.3.11.1 note: never a direct eval — wrap a bare `eval` tag.
     ast.TaggedTemplateExpression(tag:, parts:, span:) -> {
-      use site <- anf.then(next_template_site())
+      use site <- anf.then(next_site())
       let template =
         ast.IntrinsicTemplateObject(
           span:,
@@ -1181,9 +1181,10 @@ fn float_bits(f: Float) -> Int {
 
 // ── Templates (u-template, port emit.gleam:4916,5016-5047,5059-5078) ────────
 
-/// Next tagged-template call-site index in this module (§13.2.8.4 template
-/// caching key, qualified by the module name in `emit_template_object`).
-fn next_template_site() -> Build(Int) {
+/// Next site index in this module: tagged-template call sites (§13.2.8.4
+/// template caching key, qualified by the module name in
+/// `emit_template_object`) and property-read inline-cache sites share it.
+fn next_site() -> Build(Int) {
   fn(e: Emitter2, k) {
     k(state.Emitter2(..e, next_site: e.next_site + 1), e.next_site)
   }
@@ -1515,19 +1516,35 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   }
 }
 
-/// Own-data-property READ fast path: one JRead probe (`get_prop_own_data`,
-/// arc_rt_obj_ffi) for an own DataProperty / shaped slot on the receiver;
-/// `=:= miss` (NOT IsAtom — undefined/null/true/false are legitimate
-/// values) falls to `slow`, the full `get_prop`. The probe does its own
-/// receiver check, so non-handle receivers need no guard here.
+/// Own-data-property READ fast path. Each site gets a module-unique id and
+/// probes its store-resident inline cache first (`get_prop_ic`, a JRead:
+/// shape id + slot offset seen at this site). On a miss the JMut
+/// `get_prop_ic_miss` runs the own DataProperty / shaped slot probe
+/// (arc_rt_obj_ffi) and fills an empty site; `=:= miss` (NOT IsAtom —
+/// undefined/null/true/false are legitimate values) falls to `slow`, the
+/// full `get_prop`. The probes do their own receiver check, so non-handle
+/// receivers need no guard here.
 fn get_prop_fast(
   obj: ir.Value,
   kb: BitArray,
   slow: Build(ir.Value),
 ) -> Build(ir.Value) {
-  use v <- anf.then(anf.host("get_prop_own_data", [obj, ir.ConstBinary(kb)]))
-  use is_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
-  anf.bind_if(is_miss, slow, anf.pure(v))
+  use site <- anf.then(next_site())
+  let key = ir.ConstBinary(kb)
+  let site = ir.ConstI32(site)
+  use v <- anf.then(anf.host("get_prop_ic", [obj, key, site]))
+  use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
+  anf.bind_if(
+    ic_miss,
+    {
+      use v <- anf.then(anf.host("get_prop_ic_miss", [obj, key, site]))
+      use is_miss <- anf.then(
+        anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
+      )
+      anf.bind_if(is_miss, slow, anf.pure(v))
+    },
+    anf.pure(v),
+  )
 }
 
 /// Build the wire `{string_key, {named, kb}}` PropertyKey from a raw binary

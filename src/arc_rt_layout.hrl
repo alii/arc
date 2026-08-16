@@ -40,7 +40,8 @@
 -define(STORE_ALLOC, 6).
 -define(STORE_SHAPES, 15).
 -define(STORE_NEXT_SHAPE, 16).
--define(STORE_ARITY, 17).
+-define(STORE_ARITY, 18).
+-define(STORE_ICS, 18).
 
 %% arc/rt/types.Realm / BuiltinPair
 -define(REALM_TAG, realm).

@@ -119,6 +119,7 @@ pub fn js_store_test() {
       prop_seq: 16,
       shapes: dict.from_list([#(7, desc)]),
       next_shape: 15,
+      ics: dict.from_list([#(1, rt_types.IcRead(7, 0, <<"k":utf8>>))]),
     )
   assert tag_of(store) == tag("STORE_TAG")
   assert arity(store) == idx("STORE_ARITY")
@@ -130,6 +131,7 @@ pub fn js_store_test() {
   assert at(store, "STORE_PROP_SEQ") == dyn(16)
   assert at(store, "STORE_SHAPES") == dyn(store.shapes)
   assert at(store, "STORE_NEXT_SHAPE") == dyn(15)
+  assert at(store, "STORE_ICS") == dyn(store.ics)
 }
 
 pub fn realm_test() {

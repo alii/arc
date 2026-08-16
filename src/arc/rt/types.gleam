@@ -3203,6 +3203,16 @@ pub type ShapeDesc {
   )
 }
 
+/// One compiled `.key` read site's inline cache: on a receiver of shape
+/// `shape_id` the key lives at slot `off`. `key` is kept so two modules that
+/// happen to share a site id can never read through each other's entry.
+/// Sound because a shape's offsets never change and shape ids are never
+/// recycled. Lives on `JsStore.ics`; a droppable cache (no handles, not
+/// snapshotted).
+pub type IcEntry {
+  IcRead(shape_id: Int, off: Int, key: BitArray)
+}
+
 // ───────────────────────────────── §2.4 ASYNC ──────────────────────────────
 // Promise / generator / async-generator / job types (SPEC §2.4 lines
 // 284-291; ports of arc `value.gleam:3964-4155`).
@@ -3635,6 +3645,9 @@ pub type JsStore(st) {
     /// dynamic-function body loaded into the agent. Qualifies per-site
     /// caches whose spec key is a Parse Node (§13.2.8.4 [[TemplateMap]]).
     unit_uid: Int,
+    /// Compiled-code property read inline caches by site id. Droppable:
+    /// no handles, rebuilt empty on restore.
+    ics: Dict(Int, IcEntry),
   )
 }
 

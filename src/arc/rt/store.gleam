@@ -57,6 +57,7 @@ pub fn t_store_new() -> JsStore(Agent) {
     ]),
     next_shape: 1,
     unit_uid: 0,
+    ics: dict.new(),
   )
 }
 

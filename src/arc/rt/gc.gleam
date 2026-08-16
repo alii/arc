@@ -124,6 +124,7 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     // Parse-id counter — no roots.
     unit_uid: _,
     // Int/BitArray only, no handles.
+    ics: _,
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)

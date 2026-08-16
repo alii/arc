@@ -141,6 +141,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     shapes:,
     next_shape:,
     unit_uid:,
+    ics: _,
   ) = store
   let microtasks = types.jq_to_list(microtasks)
   let data =
@@ -232,6 +233,7 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     shapes:,
     next_shape:,
     unit_uid:,
+    ics: dict.new(),
   )
 }
 

@@ -72,6 +72,8 @@ pub fn table() -> DirectHost {
       #("new_arguments", HostOp(obj, "t_new_arguments", Mut)),
       #("get_prop", HostOp(obj, "t_get_prop_any", Mut)),
       #("get_prop_own_data", HostOp(obj_ffi, "t_get_prop_own_data", Read)),
+      #("get_prop_ic", HostOp(obj_ffi, "t_get_prop_ic", Read)),
+      #("get_prop_ic_miss", HostOp(obj_ffi, "t_get_prop_ic_miss", Mut)),
       #("erl_band", HostOp(erl, "band", Pure)),
       #("erl_bsr", HostOp(erl, "bsr", Pure)),
       #("erl_bsl", HostOp(erl, "bsl", Pure)),

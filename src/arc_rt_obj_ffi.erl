@@ -16,6 +16,7 @@
 %%% rebuilt `St'`.
 -module(arc_rt_obj_ffi).
 -export([t_get_prop_own_data/3, t_set_prop_own_data/4,
+         t_get_prop_ic/4, t_get_prop_ic_miss/4,
          t_instanceof_fast/3,
          t_get_elem_fast/3, t_set_elem_fast/4,
          t_global_get_fast/2,
@@ -32,6 +33,9 @@
 
 -compile({inline, [peek_get/3, slot_of/2, shape_offset/3]}).
 
+%% IcEntry (rt_types.gleam): {ic_read, Sid, Off, KeyBin}.
+-define(IC_READ, ic_read).
+
 %% t_get_prop_own_data(St, {js_cell,Id}, KeyBin) -> V | miss
 %% JRead. Own DataProperty on an Ordinary SObject (kind=:=ordinary avoids
 %% ArrayObj's virtual "length") or own slot on an SShapedObject. Accessors,
@@ -39,6 +43,50 @@
 t_get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
     peek_get(St, Id, KeyBin);
 t_get_prop_own_data(_, _, _) -> miss.
+
+%% t_get_prop_ic(St, {js_cell,Id}, KeyBin, Site) -> V | miss
+%% JRead. Warm inline-cache hit for a compiled `.key` read site: the entry
+%% installed at `Site` names the shape it was seen on and the slot offset
+%% the key has in that shape (`arc/rt/types.IcEntry`). Anything else → `miss`
+%% and the emitter runs `t_get_prop_ic_miss`.
+t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+    Store = element(?AGENT_STORE, St),
+    case element(?STORE_ICS, Store) of
+        #{Site := {?IC_READ, Sid, Off, KeyBin}} ->
+            case array:get(Id, element(?STORE_DATA, Store)) of
+                {?SSHAPED_TAG, Sid, _, Slots} -> element(Off + 1, Slots);
+                _ -> miss
+            end;
+        _ -> miss
+    end;
+t_get_prop_ic(_, _, _, _) -> miss.
+
+%% t_get_prop_ic_miss(St, Recv, KeyBin, Site) -> {V | miss, St'}
+%% JMut. The `t_get_prop_own_data` probe, plus: an own shaped slot fills an
+%% empty `Site` with its shape/offset. A site keeps its first entry (a
+%% mismatch is a plain probe, never a re-install), so a polymorphic site
+%% costs one map lookup over today's path and never churns the store.
+t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+    Store = element(?AGENT_STORE, St),
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        {?SSHAPED_TAG, Sid, _, Slots} ->
+            case shape_offset(St, Sid, KeyBin) of
+                miss -> {miss, St};
+                Off ->
+                    V = element(Off + 1, Slots),
+                    Ics = element(?STORE_ICS, Store),
+                    case is_map_key(Site, Ics) of
+                        true -> {V, St};
+                        false ->
+                            E = {?IC_READ, Sid, Off, KeyBin},
+                            {V, setelement(?AGENT_STORE, St,
+                                    setelement(?STORE_ICS, Store,
+                                               Ics#{Site => E}))}
+                    end
+            end;
+        _ -> {peek_get(St, Id, KeyBin), St}
+    end;
+t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
 %% t_global_get_fast(St, KeyBin) -> V | miss
 %% JRead global-var read: own data prop on the realm's global object.
