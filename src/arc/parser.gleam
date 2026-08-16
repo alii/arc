@@ -5926,7 +5926,35 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     _ -> parse_primary_expression(p)
   }
   use #(p2, expr) <- result.try(parsed)
+  // A literal that only parses as an AssignmentPattern (`{a = 0}`) can
+  // never be the object of a member/call suffix — `[{a = 0}.x] = []` is a
+  // SyntaxError even though the enclosing array IS a pattern.
+  let literal_cover_error =
+    !p.ctx.has_cover_initializer
+    && p2.ctx.has_cover_initializer
+    && at_suffix_start(p2)
+    && case expr {
+      ast.ObjectExpression(..) | ast.ArrayExpression(..) -> True
+      _ -> False
+    }
+  use <- bool.guard(
+    literal_cover_error,
+    Error(ShorthandDefaultOutsideDestructuring(pos_of(p))),
+  )
   parse_call_chain(p2, expr)
+}
+
+/// Whether the next token continues a member/call chain.
+fn at_suffix_start(p: P) -> Bool {
+  case peek(p) {
+    Dot
+    | LeftBracket
+    | LeftParen
+    | QuestionDot
+    | TemplateLiteral
+    | TemplateHead -> True
+    _ -> False
+  }
 }
 
 /// §13.3.10 ImportCall phase forms: `import.source(expr)` / `import.defer(expr)`.
