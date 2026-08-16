@@ -1841,8 +1841,8 @@ fn emit_chain_callee(
 fn emit_typeof_ident(name: String) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case state.resolve(e, name) {
-    scope.Plain(scope.Local(slot:, boxed:, ..)) -> {
-      use v <- anf.then(read_slot(slot, boxed))
+    scope.Plain(scope.Local(..) as d) -> {
+      use v <- anf.then(emit_direct_get(d, name))
       anf.host("type_of", [v])
     }
     scope.Plain(scope.Global(name: g)) ->
@@ -2201,7 +2201,7 @@ pub fn emit_direct_put(
         Ok(slot) -> write_slot(slot, True, v)
         Error(Nil) -> {
           use _ <- anf.then(
-            anf.host("global_set", [
+            anf.host(global_set_op(e.strict), [
               ir.ConstBinary(bit_array.from_string(name)),
               v,
             ]),
@@ -2212,6 +2212,15 @@ pub fn emit_direct_put(
     }
     scope.EvalEnv(_) ->
       throw_at_rt("throw_type_error", "unsupported: direct eval")
+  }
+}
+
+/// §6.2.5.6 PutValue on an unresolvable Reference: strict code throws
+/// ReferenceError, sloppy code creates the global property.
+pub fn global_set_op(strict: Bool) -> String {
+  case strict {
+    True -> "global_set_strict"
+    False -> "global_set"
   }
 }
 

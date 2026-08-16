@@ -38,6 +38,7 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set
 import gleam/string
 
@@ -3596,23 +3597,54 @@ pub fn t_create_data_prop(
   }
 }
 
-/// SPEC§8 `global_get` — read `name` from the realm's global object. Throws
-/// `ReferenceError` if the name is absent (§9.1.1.4.1 step 4) via M4's
-/// ordinary [[Get]] returning `undefined`; arc's M12 handles the strict-mode
-/// unresolved-reference throw at the emit layer, so this returns `undefined`
-/// for a missing binding rather than throwing.
+/// SPEC§8 `global_get` — read `name` from the realm's global object. An
+/// absent name is an unresolvable Reference, so GetValue (§6.2.5.5 step 3)
+/// throws `ReferenceError` in both strict and sloppy code.
 pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
-  let g = st.realm.global_object
-  t_get_prop(st, rt_types.mk_object(g), StringKey(binary_key(name)))
+  let g = rt_types.mk_object(st.realm.global_object)
+  let key = StringKey(binary_key(name))
+  let #(has, st) = t_has_prop(st, g, key)
+  case has {
+    True -> t_get_prop(st, g, key)
+    False -> {
+      let text = bit_array.to_string(name) |> result.unwrap("")
+      throw_reference_error(st, text <> " is not defined")
+    }
+  }
 }
 
-/// SPEC§8 `global_set` — `PutValue` on the global object (§9.1.1.4.5). arc's
-/// emit handles the strict-mode throw-on-failure; this drops the `Bool` result.
+/// SPEC§8 `global_set` — sloppy `PutValue` on the global object (§6.2.5.6
+/// step 3.b): an unresolvable name is created as a plain property and a
+/// failed [[Set]] is ignored.
 pub fn t_global_set(st: Agent, name: BitArray, v: JsVal) -> Agent {
   let g = st.realm.global_object
   let #(_, st) =
     t_set_prop(st, rt_types.mk_object(g), StringKey(binary_key(name)), v)
   st
+}
+
+/// SPEC§8 `global_set_strict` — strict `PutValue` (§6.2.5.6 step 3.a and
+/// §9.1.1.4.5): an unresolvable name throws ReferenceError and a failed
+/// [[Set]] throws TypeError.
+pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
+  let g = rt_types.mk_object(st.realm.global_object)
+  let key = StringKey(binary_key(name))
+  let text = bit_array.to_string(name) |> result.unwrap("")
+  let #(has, st) = t_has_prop(st, g, key)
+  case has {
+    False -> throw_reference_error(st, text <> " is not defined")
+    True -> {
+      let #(ok, st) = t_set_prop(st, g, key, v)
+      case ok {
+        True -> st
+        False ->
+          throw_type_error(
+            st,
+            "Cannot assign to read only property '" <> text <> "'",
+          )
+      }
+    }
+  }
 }
 
 /// SPEC§8 `global_typeof` — ES2024 §13.5.3 `typeof <ident>` where `<ident>` is

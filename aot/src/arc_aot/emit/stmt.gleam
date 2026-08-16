@@ -1515,7 +1515,7 @@ fn for_lhs_ident_assign(
         Error(Nil) ->
           host_unit_(
             e,
-            "global_set",
+            expr.global_set_op(e.strict),
             [ir.ConstBinary(bit_array.from_string(name)), v],
             k,
           )
