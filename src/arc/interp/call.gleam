@@ -359,6 +359,7 @@ fn call_regular_function(
         constants: template.constants,
         pc: 0,
         call_stack: [saved, ..state.call_stack],
+        outer_depth: state.outer_depth,
         try_stack: [],
         this: this_val,
         new_target:,
@@ -888,7 +889,7 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
         Ok(pushed) ->
           Ok(
-            safepoint.maybe_collect_at_toplevel(restore_frame(
+            safepoint.maybe_collect_at_return(restore_frame(
               state,
               saved,
               [pushed, ..saved.stack],
@@ -931,6 +932,7 @@ fn restore_frame(
     constants: func.constants,
     pc:,
     call_stack: rest_frames,
+    outer_depth: state.outer_depth,
     try_stack:,
     this:,
     new_target:,
@@ -1067,6 +1069,7 @@ pub fn enter_root(
         func: template,
         unit:,
         call_stack: [],
+        outer_depth: agent.store.call_depth,
         try_stack: [],
         this: this_val,
         new_target:,
