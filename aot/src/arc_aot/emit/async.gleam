@@ -2454,7 +2454,8 @@ fn analyze_splits(
     )
   let a = case body {
     state.StmtBody(ss) -> ana_stmts(init, ss)
-    state.ExprBody(e) -> ana_expr(init, e, [])
+    // An arrow's expression body IS its return value.
+    state.ExprBody(e) -> ana_stmts(init, func.body_stmts(state.ExprBody(e)))
   }
   // Close the trailing open segment (BodyEnd → step_return(undef)). §18.4.5:
   // arms accumulated by close_open + this final one form the complete plan.
