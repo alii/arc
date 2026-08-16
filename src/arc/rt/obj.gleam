@@ -3648,6 +3648,12 @@ pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
 }
 
 /// SPEC§8 `global_typeof` — ES2024 §13.5.3 `typeof <ident>` where `<ident>` is
+/// The realm's global object as a value: the script-root `this` binding
+/// (§9.1.1.4.11 GetThisBinding on the global environment).
+pub fn t_global_this(st: Agent) -> JsVal {
+  rt_types.mk_object(st.realm.global_object)
+}
+
 /// an unresolvable global Reference yields `"undefined"` without throwing. If
 /// the binding exists on the global object, read it and delegate to `t_type_of`.
 pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {

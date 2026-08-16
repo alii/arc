@@ -1,6 +1,7 @@
 //// arc AST + scope tree -> twocore IR module. Façade over emit/{state,anf}
 //// and the M12-M18 emit_* passes; body is filled in by M19.
 
+import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser
@@ -97,8 +98,8 @@ fn root_binding_prologue(
   let bindings =
     dict.to_list(scope.get_scope(e.tree, scope.root_scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
-  let id = fn(t: ir.Expr) { t }
-  list.fold(bindings, #(id, e), fn(acc, entry) {
+  let #(wrap, e) = root_lexical_prologue(e)
+  list.fold(bindings, #(wrap, e), fn(acc, entry) {
     let #(wrap, e) = acc
     let #(name, b) = entry
     let sv = state.slot_var_name(b.slot)
@@ -123,6 +124,46 @@ fn root_binding_prologue(
     }
     #(wrap, e)
   })
+}
+
+/// A Script root owns the four lexical pseudo-bindings (scope.gleam
+/// `script_root_owns_lexical`): `this` is the global object (§9.1.1.4.11),
+/// the other three are `undefined`. Mirrors func.unpack_frame for js_main,
+/// whose `_frame` carries no caller context.
+fn root_lexical_prologue(
+  e: state.Emitter2,
+) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
+  let info = state.fn_info(e)
+  let id = fn(t: ir.Expr) { t }
+  case info.lexical {
+    lexical.OwnedLexicalSlots(base:) ->
+      list.fold(lexical.all_lexical_refs, #(id, e), fn(acc, ref) {
+        let #(wrap, e) = acc
+        let slot = base + lexical.lexical_ref_offset(ref)
+        let sv = state.slot_var_name(slot)
+        let e = state.set_slot_var(e, slot, sv)
+        let init = case ref {
+          lexical.RefThis -> ir.CallHost("js", "global_this", [])
+          _ -> ir.Values([e.consts.undef])
+        }
+        let wrap = case state.lexical_is_boxed(e, info, ref) {
+          True -> fn(tail) {
+            wrap(ir.Let(
+              [sv <> "_raw"],
+              init,
+              ir.Let(
+                [sv],
+                ir.CallHost("js", "cell_new", [ir.Var(sv <> "_raw")]),
+                tail,
+              ),
+            ))
+          }
+          False -> fn(tail) { wrap(ir.Let([sv], init, tail)) }
+        }
+        #(wrap, e)
+      })
+    lexical.CapturedLexicalSlots(..) | lexical.NoLexicalSlots -> #(id, e)
+  }
 }
 
 /// SPEC§19.5 step 3 — Script-top-level FunctionDeclaration hoisting

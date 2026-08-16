@@ -96,6 +96,7 @@ pub fn table() -> DirectHost {
       #("global_set", HostOp(obj, "t_global_set", MutUnit)),
       #("global_set_strict", HostOp(obj, "t_global_set_strict", MutUnit)),
       #("global_typeof", HostOp(obj, "t_global_typeof", Mut)),
+      #("global_this", HostOp(obj, "t_global_this", Read)),
       #("global_delete", HostOp(lang, "t_global_delete", Mut)),
       #("set_proto", HostOp(obj, "t_set_proto", Mut)),
       #("num_add", HostOp(ops_ffi, "add", Pure)),
