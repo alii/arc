@@ -3652,10 +3652,14 @@ fn emit_seg_tail(
               )
             }),
             fn(t) {
-              ir.Let(
-                [cv_n],
+              let cv = case state.let_tail_value(cond_tree) {
+                Some(v) -> v
+                None -> ir.Var(cv_n)
+              }
+              state.splice_let(
                 cond_tree,
-                ir.Let([ti_n], ir.CallHost("js", "truthy", [ir.Var(cv_n)]), t),
+                cv_n,
+                ir.Let([ti_n], ir.CallHost("js", "truthy", [cv]), t),
               )
             },
           )
@@ -3674,7 +3678,7 @@ fn emit_seg_tail(
             pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
               k(e, sm_continue(ctx, head, loc))
             }),
-            ir.Let([tmp], upd_tree, _),
+            state.splice_let(upd_tree, tmp, _),
           )
         }),
       )

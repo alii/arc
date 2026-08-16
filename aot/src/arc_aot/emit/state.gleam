@@ -411,7 +411,7 @@ pub fn fresh_var(e: Emitter2) -> #(String, Emitter2) {
 
 /// Tail Value of a straight `Let…Values([v])` chain (the shape `emit_expr`
 /// returns for identifiers/literals). None for If/Block/multi-Values tails.
-fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
+pub fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
   case rhs {
     ir.Values([v]) -> Some(v)
     ir.Let(_, _, body) -> let_tail_value(body)
