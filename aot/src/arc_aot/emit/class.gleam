@@ -285,7 +285,7 @@ fn emit_methods(
 /// instance fields OR any private instance method (installed per-instance per
 /// §7.3.29). Gates ClassCtor(has_field_init:) so a derived ctor emits the
 /// field-init call after `super()`. Port of emit.gleam:7205-7209.
-fn has_instance_field_init(parts: ast_util.ClassBodyParts) -> Bool {
+pub fn has_instance_field_init(parts: ast_util.ClassBodyParts) -> Bool {
   parts.instance_fields != []
   || list.any(parts.instance_methods, fn(m) {
     case m.key {

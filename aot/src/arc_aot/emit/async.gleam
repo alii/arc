@@ -40,6 +40,7 @@ import arc/compiler/ast_util
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
 import arc_aot/emit/anf
+import arc_aot/emit/class
 import arc_aot/emit/func
 import arc_aot/emit/state.{type Emitter2}
 import gleam/bit_array
@@ -1383,10 +1384,8 @@ fn ana_expr(a: Ana, e: ast.Expression, tail: List(ast.StmtWithLine)) -> Ana {
       })
     ast.ImportExpression(source: s, options: o, ..) ->
       ana_opt_expr(ana_expr(a, s, tail), o, tail)
-    ast.ClassExpression(super_class: sc, body: elems, ..) -> {
-      let a = ana_opt_expr(a, sc, tail)
-      list.fold(elems, a, fn(a, ce) { ana_class_elem(a, ce, tail) })
-    }
+    ast.ClassExpression(super_class: sc, body: elems, ..) ->
+      ana_class(a, sc, elems, tail)
   }
 }
 
@@ -1401,18 +1400,45 @@ fn ana_key(a: Ana, k: ast.PropertyKey, tail) -> Ana {
   }
 }
 
-fn ana_class_elem(a: Ana, ce: ast.ClassElement, tail) -> Ana {
-  case ce {
-    ast.ClassMethod(key: k, ..) -> {
-      let a = ana_key(a, k, tail)
-      Ana(..a, cur: cursor_pop_child_fn(a.cur))
-    }
-    // ES §15.7: field initializer is an implicit-function body ([~Await]) —
-    // opaque to this coroutine's scope AND child_fn_cursor. Only the key is
-    // evaluated in the enclosing scope.
-    ast.ClassField(key: k, ..) -> ana_key(a, k, tail)
-    ast.StaticBlock(..) -> Ana(..a, cur: cursor_pop_child_fn(a.cur))
+/// Shadow of class.emit_class's cursor walk: enter the ClassBody scope, pop
+/// the field-init shell (if any) and the constructor, evaluate heritage then
+/// computed keys, pop each method, then the static-init shell. Field
+/// initializers and static blocks are bodies of those shells, so they are
+/// opaque here.
+fn ana_class(
+  a: Ana,
+  sc: Option(ast.Expression),
+  body: List(ast.ClassElement),
+  tail,
+) -> Ana {
+  let parts = ast_util.classify_class_body(body)
+  let #(inner, resume) = cursor_enter_scope(a.tree, a.cur)
+  let a = Ana(..a, cur: inner)
+  let a = case class.has_instance_field_init(parts) {
+    True -> ana_pop_child_fn(a)
+    False -> a
   }
+  let a = ana_pop_child_fn(a)
+  let a = ana_opt_expr(a, sc, tail)
+  let a =
+    list.fold(ast_util.computed_element_keys(body), a, fn(a, key) {
+      ana_expr(a, key.1, tail)
+    })
+  let a =
+    list.fold(
+      list.append(parts.instance_methods, parts.static_methods),
+      a,
+      fn(a, _) { ana_pop_child_fn(a) },
+    )
+  let a = case parts.static_elements {
+    [] -> a
+    [_, ..] -> ana_pop_child_fn(a)
+  }
+  Ana(..a, cur: cursor_leave_scope(resume, a.cur))
+}
+
+fn ana_pop_child_fn(a: Ana) -> Ana {
+  Ana(..a, cur: cursor_pop_child_fn(a.cur))
 }
 
 fn ana_pattern(a: Ana, p: ast.Pattern, tail) -> Ana {
@@ -1468,7 +1494,7 @@ fn one_stmt(line: Int, s: ast.Statement) -> List(ast.StmtWithLine) {
 /// split-free stmt is `frag_push`ed verbatim; a split-containing control-flow
 /// construct is broken into states via the `plan_ctrl_*` helpers.
 fn ana_stmt(a: Ana, sl: ast.StmtWithLine, tail: List(ast.StmtWithLine)) -> Ana {
-  let ast.StmtWithLine(line:, statement: s) = sl
+  let ast.StmtWithLine(statement: s, ..) = sl
   case stmt_has_split(s) {
     // Split-free → append to open fragment; still shadow-walk for cursor sync
     // (nested fns/classes advance child_fn_cursor; blocks consume scope slots).
@@ -1519,11 +1545,8 @@ fn ana_split_stmt(
     | ast.ThrowStatement(..)
     | ast.ReturnStatement(..)
     | ast.VariableDeclaration(..) -> ana_hoisted(a, hoist_one(sl), tail)
-    ast.ClassDeclaration(super_class: sc, body: elems, ..) -> {
-      let a = ana_opt_expr(a, sc, tail)
-      let a = list.fold(elems, a, fn(a, ce) { ana_class_elem(a, ce, tail) })
-      frag_push(a, sl)
-    }
+    ast.ClassDeclaration(super_class: sc, body: elems, ..) ->
+      frag_push(ana_class(a, sc, elems, tail), sl)
     ast.WithStatement(object: o, body: b) ->
       // finding #5: `with (await x) { body }` — the resume arm must wrap
       // `body` in `with(sent_v)`, not run it bare. Recognise a top-level
@@ -1635,10 +1658,8 @@ fn cursor_only_walk(
 ) -> Ana {
   case s {
     ast.FunctionDeclaration(..) -> Ana(..a, cur: cursor_pop_child_fn(a.cur))
-    ast.ClassDeclaration(super_class: sc, body: elems, ..) -> {
-      let a = ana_opt_expr(a, sc, tail)
-      list.fold(elems, a, fn(a, ce) { ana_class_elem(a, ce, tail) })
-    }
+    ast.ClassDeclaration(super_class: sc, body: elems, ..) ->
+      ana_class(a, sc, elems, tail)
     ast.ExpressionStatement(expression: e, ..)
     | ast.ThrowStatement(argument: e) -> ana_expr(a, e, tail)
     ast.ReturnStatement(argument: arg) -> ana_opt_expr(a, arg, tail)
@@ -3223,8 +3244,6 @@ fn emit_delegate_arm(
   inner_idx: Int,
   result_idx: Int,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
-  let nd = d.state_id
-  let next_state = d.next_state
   let undef = ir.ConstAtom("undefined")
   let b = {
     // (1) restore iter_h / inner from loc.
@@ -3266,7 +3285,9 @@ fn emit_delegate_arm(
     let on_missing =
       if_terminal(
         is_throw,
-        // mode==1: close inner (abrupt), then step_throw(sent_v).
+        // mode==1 (yield* step 7.b.iii): close inner, then a TypeError —
+        // thrown as a JS exception so the arm's try routes it to any
+        // enclosing catch/finally.
         {
           use _ <- anf.then(
             anf.host_unit("iter_close", [
@@ -3274,17 +3295,18 @@ fn emit_delegate_arm(
               ir.ConstAtom("true"),
             ]),
           )
+          use _ <- anf.then(
+            anf.host("throw_type_error", [
+              ir.ConstBinary(bit_array.from_string(
+                "iterator does not have a throw method",
+              )),
+            ]),
+          )
           anf.pure(step_throw(ctx.sent_v))
         },
-        // mode==2: SPEC §18.6 → result := sent_v, continue past the yield*.
-        {
-          use loc2 <- anf.then(pack_loc(
-            ctx,
-            dict.from_list([#(result_idx, ctx.sent_v)]),
-          ))
-          use rs <- anf.then(rs_box(next_state))
-          anf.pure(ir.Continue(ctx.lresume, [rs, loc2]))
-        },
+        // mode==2 (yield* step 7.c.iii): the return completion propagates
+        // out of the generator, running enclosing finally blocks.
+        anf.pure(route_return(ctx, current_try(ctx), ctx.sent_v)),
       )
     // ── method present (or mode==0): call it, branch on {done, value} ───────
     let on_call = {
@@ -3349,11 +3371,18 @@ fn delegate_result(
       use v <- anf.then(anf.host("get_prop", [res, k_val]))
       if_terminal(
         done,
-        if_terminal(is_return, anf.pure(step_return(v)), {
-          use loc2 <- anf.then(pack_loc(ctx, dict.from_list([#(result_idx, v)])))
-          use rs <- anf.then(rs_box(d.next_state))
-          anf.pure(ir.Continue(ctx.lresume, [rs, loc2]))
-        }),
+        if_terminal(
+          is_return,
+          anf.pure(route_return(ctx, current_try(ctx), v)),
+          {
+            use loc2 <- anf.then(pack_loc(
+              ctx,
+              dict.from_list([#(result_idx, v)]),
+            ))
+            use rs <- anf.then(rs_box(d.next_state))
+            anf.pure(ir.Continue(ctx.lresume, [rs, loc2]))
+          },
+        ),
         anf.pure(step_yield(v, d.state_id, ctx.loc_v)),
       )
     },
@@ -4857,7 +4886,7 @@ fn block_of(line: Int, stmts: List(ast.StmtWithLine)) -> ast.Statement {
 }
 
 /// Values whose evaluation cannot be observed relative to a later split, so
-/// they need no scratch local. Function/class expressions stay put so
+/// they need no scratch local. Function expressions stay put so
 /// NamedEvaluation is not disturbed by a scratch name.
 fn is_trivial(ex: ast.Expression) -> Bool {
   case ex {
@@ -4870,11 +4899,26 @@ fn is_trivial(ex: ast.Expression) -> Bool {
     | ast.ThisExpression(..)
     | ast.MetaProperty(..)
     | ast.FunctionExpression(..)
-    | ast.ArrowFunctionExpression(..)
-    | ast.ClassExpression(..) -> True
-    ast.Identifier(name:, ..) -> is_temp_name(name)
+    | ast.ArrowFunctionExpression(..) -> True
+    // A class definition runs user code only through heritage, computed
+    // keys and static elements; without those it is as inert as a function.
+    ast.ClassExpression(super_class: sc, body:, ..) ->
+      option.is_none(sc) && !list.any(body, class_element_has_effects)
+    // Scratch locals and `#name in obj` private names never need pinning.
+    ast.Identifier(name:, ..) ->
+      is_temp_name(name) || string.starts_with(name, "#")
     ast.ParenthesizedExpression(_, inner) -> is_trivial(inner)
     _ -> False
+  }
+}
+
+fn class_element_has_effects(el: ast.ClassElement) -> Bool {
+  case el {
+    ast.ClassMethod(key: ast.KeyComputed(_), ..)
+    | ast.ClassField(key: ast.KeyComputed(_), ..)
+    | ast.ClassField(is_static: True, ..)
+    | ast.StaticBlock(..) -> True
+    ast.ClassMethod(..) | ast.ClassField(..) -> False
   }
 }
 
@@ -4884,19 +4928,25 @@ fn pin(a: Ana, line: Int, ex: ast.Expression) -> Lin {
     True -> #(a, [], ex)
     False -> {
       let span = ast.expression_span(ex)
+      let #(t, a) = fresh_temp(a)
       case ex {
+        // Iterate in place: `%t = [...arg]`, then spread the array.
         ast.SpreadElement(sspan, arg) -> {
-          let #(t, a) = fresh_temp(a)
+          let arr =
+            ast.ArrayExpression(span, [Some(ast.SpreadElement(sspan, arg))])
           #(
             a,
-            [assign_stmt(line, span, t, arg)],
+            [assign_stmt(line, span, t, arr)],
             ast.SpreadElement(sspan, ident(span, t)),
           )
         }
-        _ -> {
-          let #(t, a) = fresh_temp(a)
-          #(a, [assign_stmt(line, span, t, ex)], ident(span, t))
+        // `%t = (0, class …)` keeps NamedEvaluation off the scratch name.
+        ast.ClassExpression(..) -> {
+          let zero = ast.NumberLiteral(span, ast.FiniteNumber(0.0))
+          let seq = ast.SequenceExpression(span, [zero, ex])
+          #(a, [assign_stmt(line, span, t, seq)], ident(span, t))
         }
+        _ -> #(a, [assign_stmt(line, span, t, ex)], ident(span, t))
       }
     }
   }
@@ -5175,9 +5225,63 @@ fn lin_split(a: Ana, line: Int, ex: ast.Expression) -> Lin {
         ),
       )
     }
+    ast.ClassExpression(span, name, super_class, body) -> {
+      let #(a, pre, super2, body2) = lin_class(a, line, super_class, body)
+      #(a, pre, ast.ClassExpression(span, name, super2, body2))
+    }
     // Optional chains, dynamic import and everything split-free: no rewrite.
     _ -> #(a, [], ex)
   }
+}
+
+/// Class heritage + computed keys are evaluated in order before any element
+/// body runs (§15.7.14), so they hoist like a plain operand list.
+fn lin_class(
+  a: Ana,
+  line: Int,
+  super_class: Option(ast.Expression),
+  body: List(ast.ClassElement),
+) -> #(
+  Ana,
+  List(ast.StmtWithLine),
+  Option(ast.Expression),
+  List(ast.ClassElement),
+) {
+  let keys =
+    list.flat_map(body, fn(el) {
+      case el {
+        ast.ClassMethod(key: ast.KeyComputed(k), ..)
+        | ast.ClassField(key: ast.KeyComputed(k), ..) -> [k]
+        _ -> []
+      }
+    })
+  let items = case super_class {
+    Some(sc) -> [sc, ..keys]
+    None -> keys
+  }
+  let #(a, pre, xs) = lin_list(a, line, items)
+  let #(super2, rest) = case super_class, xs {
+    Some(_), [sc2, ..rest] -> #(Some(sc2), rest)
+    _, _ -> #(super_class, xs)
+  }
+  let #(_, body2) =
+    list.map_fold(body, rest, fn(rest, el) {
+      case el, rest {
+        ast.ClassMethod(
+          key: ast.KeyComputed(_),
+          value: v,
+          kind: kd,
+          is_static: st,
+        ),
+          [k2, ..more]
+        -> #(more, ast.ClassMethod(ast.KeyComputed(k2), v, kd, st))
+        ast.ClassField(key: ast.KeyComputed(_), value: v, is_static: st),
+          [k2, ..more]
+        -> #(more, ast.ClassField(ast.KeyComputed(k2), v, st))
+        _, _ -> #(rest, el)
+      }
+    })
+  #(a, pre, super2, body2)
 }
 
 fn rebuild_template(
@@ -5613,7 +5717,7 @@ fn explode_stmt(
                       init2,
                       None,
                       u,
-                      loop_with_test(line, c2, pre_c, b),
+                      head_test_block(line, c2, pre_c, b),
                     ),
                   )
                 }
@@ -5648,6 +5752,10 @@ fn explode_stmt(
           done(a, pre, ast.SwitchStatement(d2, cs))
         }
       }
+    ast.ClassDeclaration(name:, super_class: sc, body: b) -> {
+      let #(a, pre, sc2, b2) = lin_class(a, line, sc, b)
+      done(a, pre, ast.ClassDeclaration(name, sc2, b2))
+    }
     ast.LabeledStatement(label:, body: b) ->
       case explode_stmt(a, ast.StmtWithLine(line:, statement: b)) {
         None -> None
@@ -5679,6 +5787,20 @@ fn loop_with_test(
   pre: List(ast.StmtWithLine),
   body: ast.Statement,
 ) -> ast.Statement {
+  ast.WhileStatement(
+    ast.BooleanLiteral(ast.expression_span(cond), True),
+    head_test_block(line, cond, pre, body),
+  )
+}
+
+/// `{ pre; if (!test) break; body }` — the head test moved into the loop
+/// body, so `break` and `continue` still target the enclosing loop.
+fn head_test_block(
+  line: Int,
+  cond: ast.Expression,
+  pre: List(ast.StmtWithLine),
+  body: ast.Statement,
+) -> ast.Statement {
   let span = ast.expression_span(cond)
   let check =
     ast.StmtWithLine(
@@ -5689,10 +5811,7 @@ fn loop_with_test(
         None,
       ),
     )
-  ast.WhileStatement(
-    ast.BooleanLiteral(span, True),
-    ast.BlockStatement(
-      list.flatten([pre, [check], [ast.StmtWithLine(line:, statement: body)]]),
-    ),
+  ast.BlockStatement(
+    list.flatten([pre, [check], [ast.StmtWithLine(line:, statement: body)]]),
   )
 }
