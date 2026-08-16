@@ -349,7 +349,7 @@ pub fn seed_ops(st: Agent) -> Agent {
         to_object: realm_ops.t_box_primitive,
         new_error: realm_ops.t_new_error,
         eval_hook: no_eval,
-        call_bytecode: fn(_, _, _, _, _) {
+        call_bytecode: fn(_, _, _, _) {
           interpreter_not_linked("call_bytecode")
         },
         construct_bytecode: fn(_, _, _, _) {

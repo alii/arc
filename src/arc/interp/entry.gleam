@@ -27,9 +27,7 @@ import arc/rt/bytecode.{
   type FuncTemplate, type ParkedAt, type SuspendedFrame, ParkedDelegateClose,
   ParkedDelegateReturn, ParkedOp, ParkedReturnValue, ParkedStart, TryFrame,
 }
-import arc/rt/call.{
-  type Completion, type Frame, NormalCompletion, ThrowCompletion,
-} as rt_call
+import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
@@ -132,7 +130,7 @@ fn mark(agent: Agent) -> EntryMark {
 /// left behind.
 fn settle(agent: Agent, m: EntryMark) -> Agent {
   let store = agent.store
-  case agent.frames == m.frames && store.call_depth == m.call_depth {
+  case store.call_depth == m.call_depth && agent.frames == m.frames {
     True -> agent
     False ->
       Agent(
@@ -230,28 +228,137 @@ pub fn run_script(
 
 // -- JsOps.call_bytecode / construct_bytecode ----------------------------------
 
-@external(erlang, "erlang", "element")
-fn frame_element(n: Int, frame: Frame) -> JsVal
-
-/// Run the bytecode function `cell` as a fresh root activation over the
-/// runtime call `frame` (`{this, active_func, home_object, new_target}`) and
-/// `args`, until ITS call stack empties. See `run_root`.
-pub fn run_bytecode(
+/// `JsOps.call_bytecode`: [[Call]] of the bytecode cell `fn_h` as a fresh
+/// root activation over `this` and `args`, run until ITS call stack empties,
+/// inside the caller's `t_call` bracket (which owns the depth unit). A throw
+/// comes back as `Error`, never as a raise. §10.2.1.1 PrepareForOrdinaryCall
+/// step 5: the callee's [[Realm]] is the running realm while its body runs
+/// and the caller's is restored once it unwinds.
+pub fn call_bytecode(
   st: Agent,
-  cell: Handle,
-  frame: Frame,
+  fn_h: Handle,
+  this: JsVal,
   args: List(JsVal),
-) -> #(Completion, Agent) {
-  run_root(st, cell, frame_element(1, frame), args, frame_element(4, frame))
+) -> #(Result(JsVal, JsVal), Agent) {
+  let assert SObject(
+    kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+    ..,
+  ) = rt_store.t_cell_get(st, fn_h)
+    as "call_bytecode: handle is not a KBytecode cell"
+  case realm == st.realm.id {
+    True ->
+      run_call(st, fn_h, template, env, home_object, flags, unit, this, args)
+    False -> {
+      use st <- rt_realm.with_realm(st, realm)
+      run_call(st, fn_h, template, env, home_object, flags, unit, this, args)
+    }
+  }
 }
 
-/// `new_target` undefined is a [[Call]]; otherwise a [[Construct]] whose
-/// receiver `root_this` creates, with the constructor return rules applied
-/// to the result. A generator or async body is started through the
-/// coroutine driver and completes with its generator object / promise. The
-/// enclosing `t_call` (or `construct_bytecode`) owns the depth bracket;
-/// `enter_root`/`finish_root` own the `Error.stack` frame; this owns the
-/// backstop.
+/// A [[Call]] root activation: `enter_root` binds `this` and refuses a class
+/// constructor; a generator or async body starts through the coroutine
+/// driver and completes with its generator object / promise; anything else
+/// runs to its `Return`, whose value is the result as-is (§10.2.2's return
+/// rules apply to constructs only). This owns the backstop.
+fn run_call(
+  st: Agent,
+  fn_h: Handle,
+  template: FuncTemplate,
+  env: bytecode.EnvTuple,
+  home_object: Option(Handle),
+  flags: types.FnFlags,
+  unit: Int,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(Result(JsVal, JsVal), Agent) {
+  let m = mark(st)
+  case
+    call.enter_root(
+      st,
+      fn_h,
+      template,
+      env,
+      home_object,
+      flags,
+      unit,
+      this,
+      args,
+      mk_undefined(),
+    )
+  {
+    Error(#(thrown, st)) -> #(Error(thrown), st)
+    Ok(state) ->
+      case template.is_generator || template.is_async {
+        // `start_coroutine` gives the body its own `Error.stack` frame:
+        // drop the one `enter_root` pushed rather than show it twice.
+        True -> {
+          let agent = call.pop_frame_info(state.agent)
+          let body = fn(agent) {
+            let #(res, s) =
+              start_coroutine_root(
+                State(..state, agent:),
+                call.root_coroutine(state, fn_h),
+              )
+            #(res, s.agent)
+          }
+          backstopped(agent, m, body, Error)
+        }
+        False ->
+          case ffi.guard_state(complete_call, state) {
+            ffi.Ok(value:, agent:) -> #(value, settle(agent, m))
+            ffi.Threw(agent:, thrown:) -> #(Error(thrown), settle(agent, m))
+          }
+      }
+  }
+}
+
+/// The body of a plain root call under the backstop: run to the `Return`
+/// and pop the activation's `Error.stack` frame.
+fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
+  let #(res, s) = complete(state, "run_bytecode")
+  #(res, call.pop_frame_info(s.agent))
+}
+
+/// `JsOps.construct_bytecode`: §10.2.2 [[Construct]] of the bytecode cell
+/// `fn_h` (IsConstructor already checked by `t_construct`). `t_construct`
+/// dispatches here unbracketed, so the construct's unit of `call_depth` is
+/// taken here, as `rt/call.apply_ctor` does for a compiled constructor:
+/// RangeError at `limits.max_call_depth`, and the body's root-`Return`
+/// safepoint kept shut over the caller's registers. The result is always an
+/// object: `root_this`/`finish_root` create the receiver and apply the
+/// return override, so a non-object here is an engine fault.
+pub fn construct_bytecode(
+  st: Agent,
+  fn_h: Handle,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(Handle, Agent) {
+  let st = rt_store.t_enter_call(st)
+  let #(completion, st) = run_construct(st, fn_h, args, new_target)
+  let st = rt_store.t_leave_call(st)
+  let #(v, st) = case completion {
+    NormalCompletion(v) -> #(v, st)
+    ThrowCompletion(e) -> rt_store.t_throw(st, e)
+  }
+  case classify(v) {
+    KHandle(h) -> #(h, st)
+    _ -> {
+      let #(e, st) =
+        st.store.ops.new_error(
+          st,
+          TypeErr,
+          "internal error: constructor completed with a non-object",
+        )
+      rt_store.t_throw(st, e)
+    }
+  }
+}
+
+/// The body of a [[Construct]] of the bytecode cell `cell`, run as a fresh
+/// root activation until its call stack empties, with the receiver
+/// `root_this` creates and the constructor return rules applied to the
+/// result. The enclosing bracket owns the depth; `enter_root` owns the
+/// `Error.stack` frame; this owns the backstop.
 ///
 /// §10.2.2 [[Construct]] steps 1-3 create the receiver in the caller's
 /// context, so `root_this` runs before the realm switch. §10.2.1.1
@@ -260,20 +367,53 @@ pub fn run_bytecode(
 /// (also on a throw, which arrives here as a completion). §10.2.2 steps
 /// 10-13 — the return-override / uninitialised-`this` checks — run after
 /// that restore, so their errors are the caller's.
-fn run_root(
+fn run_construct(
   st: Agent,
   cell: Handle,
-  this: JsVal,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Completion, Agent) {
+  let assert SObject(
+    kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+    ..,
+  ) = rt_store.t_cell_get(st, cell)
+    as "construct_bytecode: handle is not a KBytecode cell"
   let m = mark(st)
-  case call.root_this(st, cell, this, new_target) {
+  case call.root_this(st, template, new_target) {
     Error(#(thrown, st)) -> #(ThrowCompletion(thrown), settle(st, m))
     Ok(#(this, kind, st)) -> {
       let #(outcome, st) = {
-        use st <- rt_realm.with_realm(st, closure_realm(st, cell))
-        run_root_body(st, m, cell, this, args, new_target)
+        use st <- rt_realm.with_realm(st, realm)
+        case
+          call.enter_root(
+            st,
+            cell,
+            template,
+            env,
+            home_object,
+            flags,
+            unit,
+            this,
+            args,
+            new_target,
+          )
+        {
+          Error(#(thrown, agent)) -> #(
+            RootSettled(ThrowCompletion(thrown)),
+            agent,
+          )
+          Ok(state) -> {
+            let body = fn(agent) {
+              let #(res, s) = complete(State(..state, agent:), "run_bytecode")
+              let agent = call.pop_frame_info(s.agent)
+              case res {
+                Ok(v) -> #(RootReturned(v, s), agent)
+                Error(e) -> #(RootSettled(ThrowCompletion(e)), agent)
+              }
+            }
+            backstopped(state.agent, m, body, escaped)
+          }
+        }
       }
       case outcome {
         RootSettled(c) -> #(c, st)
@@ -287,62 +427,11 @@ fn run_root(
   }
 }
 
-/// How a root activation's body ended: already a completion (a throw, or a
-/// coroutine's generator object / promise), or a plain `Return` whose value
-/// still owes the constructor return rules.
+/// How a construct's body ended: already a completion (a throw), or a plain
+/// `Return` whose value still owes the constructor return rules.
 type RootOutcome {
   RootSettled(Completion)
   RootReturned(JsVal, State)
-}
-
-/// The [[Realm]] of the bytecode cell `cell`; anything else counts as the
-/// current realm.
-fn closure_realm(st: Agent, cell: Handle) -> Int {
-  case rt_store.t_cell_get(st, cell) {
-    SObject(kind: KBytecode(realm:, ..), ..) -> realm
-    _ -> st.realm.id
-  }
-}
-
-fn run_root_body(
-  st: Agent,
-  m: EntryMark,
-  cell: Handle,
-  this: JsVal,
-  args: List(JsVal),
-  new_target: JsVal,
-) -> #(RootOutcome, Agent) {
-  case call.enter_root(st, cell, this, args, new_target) {
-    Error(#(thrown, agent)) -> #(
-      RootSettled(ThrowCompletion(thrown)),
-      settle(agent, m),
-    )
-    Ok(#(state, coroutine)) ->
-      case state.func.is_generator || state.func.is_async {
-        // `start_coroutine` gives the body its own `Error.stack` frame:
-        // drop the one `enter_root` pushed rather than show it twice.
-        True -> {
-          let agent = call.pop_frame_info(state.agent)
-          let body = fn(agent) {
-            let #(res, s) =
-              start_coroutine_root(State(..state, agent:), coroutine)
-            #(RootSettled(to_completion(res)), s.agent)
-          }
-          backstopped(agent, m, body, escaped)
-        }
-        False -> {
-          let body = fn(agent) {
-            let #(res, s) = complete(State(..state, agent:), "run_bytecode")
-            let agent = call.pop_frame_info(s.agent)
-            case res {
-              Ok(v) -> #(RootReturned(v, s), agent)
-              Error(e) -> #(RootSettled(ThrowCompletion(e)), agent)
-            }
-          }
-          backstopped(state.agent, m, body, escaped)
-        }
-      }
-  }
 }
 
 fn escaped(thrown: JsVal) -> RootOutcome {
@@ -370,58 +459,6 @@ fn start_coroutine_root(
       fault(s, SuspensionLeak("run_bytecode", state.Yield))
     Error(state.Awaited(_, s)) ->
       fault(s, SuspensionLeak("run_bytecode", state.Await))
-  }
-}
-
-/// `JsOps.call_bytecode`: [[Call]] (or, with `new_target` set, the body of
-/// a [[Construct]]) of the bytecode cell `fn_h`, re-raising a throw so it
-/// propagates through the runtime like any other. Runs inside the caller's
-/// `t_call` bracket.
-pub fn call_bytecode(
-  st: Agent,
-  fn_h: Handle,
-  this: JsVal,
-  args: List(JsVal),
-  new_target: JsVal,
-) -> #(JsVal, Agent) {
-  case run_root(st, fn_h, this, args, new_target) {
-    #(NormalCompletion(v), st) -> #(v, st)
-    #(ThrowCompletion(e), st) -> rt_store.t_throw(st, e)
-  }
-}
-
-/// `JsOps.construct_bytecode`: §10.2.2 [[Construct]] of the bytecode cell
-/// `fn_h` (IsConstructor already checked by `t_construct`). `t_construct`
-/// dispatches here unbracketed, so the construct's unit of `call_depth` is
-/// taken here, as `rt/call.apply_ctor` does for a compiled constructor:
-/// RangeError at `limits.max_call_depth`, and the body's root-`Return`
-/// safepoint kept shut over the caller's registers. The result is always an
-/// object: `root_this`/`finish_root` create the receiver and apply the
-/// return override, so a non-object here is an engine fault.
-pub fn construct_bytecode(
-  st: Agent,
-  fn_h: Handle,
-  args: List(JsVal),
-  new_target: JsVal,
-) -> #(Handle, Agent) {
-  let st = rt_store.t_enter_call(st)
-  let #(completion, st) = run_root(st, fn_h, mk_undefined(), args, new_target)
-  let st = rt_store.t_leave_call(st)
-  let #(v, st) = case completion {
-    NormalCompletion(v) -> #(v, st)
-    ThrowCompletion(e) -> rt_store.t_throw(st, e)
-  }
-  case classify(v) {
-    KHandle(h) -> #(h, st)
-    _ -> {
-      let #(e, st) =
-        st.store.ops.new_error(
-          st,
-          TypeErr,
-          "internal error: constructor completed with a non-object",
-        )
-      rt_store.t_throw(st, e)
-    }
   }
 }
 

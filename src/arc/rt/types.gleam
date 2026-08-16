@@ -3572,9 +3572,10 @@ pub type JsOps(st) {
     /// error raises SyntaxError. Interpreter-seeded; the runtime's own seed
     /// raises TypeError (no compiler linked).
     eval_hook: fn(st, String, EvalKind) -> #(JsVal, st),
-    /// [[Call]] of a `KBytecode` cell: `(callee, this, args, new_target)`.
-    /// Runs a fresh activation to completion; re-raises a throw.
-    call_bytecode: fn(st, Handle, JsVal, List(JsVal), JsVal) -> #(JsVal, st),
+    /// [[Call]] of a `KBytecode` cell: `(callee, this, args)`. Runs a fresh
+    /// activation to completion; a throw comes back as `Error`, not a raise.
+    call_bytecode: fn(st, Handle, JsVal, List(JsVal)) ->
+      #(Result(JsVal, JsVal), st),
     /// [[Construct]] of a `KBytecode` cell: `(callee, args, new_target)`.
     construct_bytecode: fn(st, Handle, List(JsVal), JsVal) -> #(Handle, st),
     /// Resume a suspended interpreter frame with `sent` = `#(mode, value)`
