@@ -157,13 +157,52 @@ fn inline_cleanup(
   k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case cleanup {
-    state.FinallyBlock(body:, saved_scope:) ->
+    state.FinallyBlock(body:, saved_scope:, escape: None) ->
       exn.inline_finally(e, body, saved_scope, k)
-    state.IterClose(iter_var:, is_async:) ->
+    state.FinallyBlock(body:, saved_scope:, escape: Some(esc)) -> {
+      let carried = assigned_unboxed_slots_all(e, [ast.BlockStatement(body)])
+      use #(f_tree, e) <- result.try(
+        run_rk(e, fn(e, done) {
+          use e <- exn.inline_finally(e, body, saved_scope)
+          done(e, ir.Values(carried_values(e, carried)))
+        }),
+      )
+      use #(region, e) <- result.try(escaping(e, esc, carried, f_tree))
+      rebind_after_block(e, carried, region, k)
+    }
+    state.IterClose(iter_var:, is_async:, escape: None) ->
       host_unit_(e, "iter_close", [ir.Var(iter_var), bool_atom(e, is_async)], k)
+    state.IterClose(iter_var:, is_async:, escape: Some(esc)) -> {
+      let close =
+        ir.Let(
+          ["_"],
+          ir.CallHost("js", "iter_close", [
+            ir.Var(iter_var),
+            bool_atom(e, is_async),
+          ]),
+          ir.Values([]),
+        )
+      use #(region, e) <- result.try(escaping(e, esc, [], close))
+      use tail <- state.map_tree(k(e))
+      ir.Let([], region, tail)
+    }
     // Structured ir.Try makes a bare catch transparent — nothing to emit.
     state.CatchOnly -> k(e)
   }
+}
+
+/// A cleanup inlined inside `esc`'s region runs under its own ir.Try, so a
+/// throw out of it leaves the region through the landing instead of reaching
+/// the region's handler (which would run the finally block a second time, or
+/// let an inner catch see an iterator close it does not enclose).
+fn escaping(
+  e: Emitter2,
+  esc: state.Escape,
+  carried: List(Int),
+  body: ir.Expr,
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  let #(handler, e) = state.escape_handler(e, esc)
+  Ok(#(ir.Try(result: carried_types(carried), body:, handlers: [handler]), e))
 }
 
 /// Fold `cleanups` (innermost first, per state.find_*_target) through
@@ -185,15 +224,17 @@ fn inline_cleanups(
 fn return_cleanups(frames: List(state.Frame2)) -> List(BarrierCleanup) {
   use frame <- list.flat_map(frames)
   case frame {
-    state.Loop2(iter_close: Some(iv), ..) -> [state.IterClose(iv, False)]
+    state.Loop2(iter_close: Some(#(iv, esc)), ..) -> [
+      state.IterClose(iv, False, Some(esc)),
+    ]
     state.Loop2(..) | state.Switch2(..) | state.Labeled2(..) -> []
-    state.Barrier2(finally_body:, iter_close:) -> {
+    state.Barrier2(finally_body:, iter_close:, escape:) -> {
       let acc = case finally_body {
-        Some(#(body, save)) -> [state.FinallyBlock(body, save)]
+        Some(#(body, save)) -> [state.FinallyBlock(body, save, escape)]
         None -> []
       }
       case iter_close {
-        Some(iv) -> [state.IterClose(iv, False), ..acc]
+        Some(iv) -> [state.IterClose(iv, False, escape), ..acc]
         None ->
           case acc {
             [] -> [state.CatchOnly]
@@ -1761,7 +1802,8 @@ fn emit_for_of(
     let #(head, e) = state.fresh_label(e)
     let #(exn, e) = state.fresh_var(e)
     let #(user_params, e) = carried_params(e, carried)
-    let e = state.push_loop(e, brk, cont, carried, Some(it))
+    let #(esc, e) = state.fresh_escape(e, 0)
+    let e = state.push_loop(e, brk, cont, carried, Some(#(it, esc)))
     use #(loop_body, e) <- result.try(
       run_rk(e, fn(e, done) {
         let e = enter_loop_body(e, carried, user_params)
@@ -1807,17 +1849,20 @@ fn emit_for_of(
                 done_h(e, ir.Throw(e.consts.js_tag, [ir.Var(exn)]))
               }),
             )
-            done_nd(
-              e,
-              ir.Try(result: [], body: try_body, handlers: [
-                ir.CatchHandler(
-                  on: ir.OnTag(e.consts.js_tag),
-                  payload: [exn],
-                  exnref: None,
-                  handler:,
-                ),
-              ]),
-            )
+            let #(region, e) =
+              state.land_escapes(
+                e,
+                esc,
+                ir.Try(result: [], body: try_body, handlers: [
+                  ir.CatchHandler(
+                    on: ir.OnTag(e.consts.js_tag),
+                    payload: [exn],
+                    exnref: None,
+                    handler:,
+                  ),
+                ]),
+              )
+            done_nd(e, region)
           }),
         )
         done(e, ir.If(done_i, [], ir.Break(brk, brk_payload), not_done))
@@ -1861,9 +1906,10 @@ fn emit_try(
       // fns_acc are module-monotone) so the handler and rebind_after_block see
       // vars/labels/fns allocated inside the try body.
       let branch_slots = e.slot_vars
+      let #(esc, e) = state.fresh_escape(e, list.length(carried))
       use #(try_body, e) <- result.try(
         run_rk(e, fn(e, done) {
-          let e = state.push_barrier(e, None, None)
+          let e = state.push_barrier(e, None, None, Some(esc))
           use e <- emit_block(e, block)
           let e = state.pop_frame(e)
           done(e, ir.Values(carried_values(e, carried)))
@@ -1878,15 +1924,19 @@ fn emit_try(
         catch_body,
         carried,
       ))
-      let region =
-        ir.Try(result: carried_types(carried), body: try_body, handlers: [
-          ir.CatchHandler(
-            on: ir.OnTag(e.consts.js_tag),
-            payload: ["_e"],
-            exnref: None,
-            handler:,
-          ),
-        ])
+      let #(region, e) =
+        state.land_escapes(
+          e,
+          esc,
+          ir.Try(result: carried_types(carried), body: try_body, handlers: [
+            ir.CatchHandler(
+              on: ir.OnTag(e.consts.js_tag),
+              payload: ["_e"],
+              exnref: None,
+              handler:,
+            ),
+          ]),
+        )
       rebind_after_block(e, carried, region, next)
     }
     // M17.md §3.4/§3.6 barrier-duplication (Gosub → inline). Bridge exn's

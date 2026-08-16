@@ -152,7 +152,7 @@ pub fn inline_finally(
       in_block: saved.in_block,
       frame_stack: drop_through_finally_barrier(e.frame_stack),
     )
-  let e = state.push_barrier(e, None, None)
+  let e = state.push_barrier(e, None, None, None)
   use #(f_tree, e) <- result.try(
     e.dispatch.emit_stmts(e, body, fn(ef) {
       Ok(#(ir.Values([ef.consts.undef]), ef))
@@ -211,7 +211,7 @@ fn emit_finalizer(
   e: Emitter2,
   finalizer: List(ast.StmtWithLine),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let e = state.push_barrier(e, None, None)
+  let e = state.push_barrier(e, None, None, None)
   use #(tree, e) <- result.map(
     e.dispatch.emit_stmts(e, as_block(finalizer), fn(ef) {
       Ok(#(ir.Values([]), ef))
@@ -253,7 +253,8 @@ pub fn emit_try_catch_finally(
     block_scope_count(block) + catch_scope_count(param, catch_body)
   use e <- wrap_with_finally(e, finalizer, scopes_before_fin, k)
   // Inner catch-only barrier around B (port emit.gleam:2385-2389).
-  let e = state.push_barrier(e, None, None)
+  let #(esc, e) = state.fresh_escape(e, 0)
+  let e = state.push_barrier(e, None, None, Some(esc))
   use #(body_ir, e) <- result.try(
     e.dispatch.emit_stmts(e, as_block(block), fn(ef) {
       Ok(#(ir.Values([]), ef))
@@ -272,7 +273,7 @@ pub fn emit_try_catch_finally(
         handler: h_ir,
       ),
     ])
-  #(inner, e)
+  state.land_escapes(e, esc, inner)
 }
 
 /// scope_cursor entries `emit_stmts(as_block(body))` will consume: 1 iff the
@@ -320,7 +321,14 @@ fn wrap_with_finally(
       ..entry_save,
       scope_cursor: list.drop(e.scope_cursor, scopes_before_fin),
     )
-  let e = state.push_barrier(e, Some(#(as_block(finalizer), fin_save)), None)
+  let #(esc, e) = state.fresh_escape(e, 0)
+  let e =
+    state.push_barrier(
+      e,
+      Some(#(as_block(finalizer), fin_save)),
+      None,
+      Some(esc),
+    )
   use #(protected_ir, e) <- result.try(build(e))
   let e = state.pop_frame(e)
   // Post-protected position: F_block is next in scope_cursor. Snapshot so
@@ -335,15 +343,19 @@ fn wrap_with_finally(
   use #(f_normal, e) <- result.try(emit_finalizer(e, finalizer))
   // ir.Try wraps ONLY the protected region (F_normal outside — a throw from
   // F_normal must NOT re-run F). Let([], _, _) is 0-arity sequencing.
-  let region =
-    ir.Try(result: [], body: protected_ir, handlers: [
-      ir.CatchHandler(
-        on: ir.OnTag(js_exn_tag),
-        payload: [ex],
-        exnref: None,
-        handler: throw_handler,
-      ),
-    ])
+  let #(region, e) =
+    state.land_escapes(
+      e,
+      esc,
+      ir.Try(result: [], body: protected_ir, handlers: [
+        ir.CatchHandler(
+          on: ir.OnTag(js_exn_tag),
+          payload: [ex],
+          exnref: None,
+          handler: throw_handler,
+        ),
+      ]),
+    )
   // KNOWN GAP (M19 wiring): unboxed-slot rebinds inside B/H/F are Let-bound
   // INSIDE region/f_normal so their fresh names are out of IR scope in k(e)
   // and stmt.gleam:1606's `next(e)`. Carried threading needs stmt.gleam-side

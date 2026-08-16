@@ -180,6 +180,26 @@ pub fn for_of_array_diff_test() {
   diff("var s='';for(const x of [1,2,3])s+=x;console.log(s)", "123\n")
 }
 
+/// Code after a try/catch runs outside it: a later throw in the same function
+/// must not land in the earlier handler, and a break out of a try body must
+/// leave it.
+pub fn throw_after_try_diff_test() {
+  diff(
+    "function f(){try{}catch(e){return 'wrong'}throw 1}try{console.log(f())}catch(e){console.log('ok',e)}function g(){for(;;){try{break}catch(e){return 'wrong'}}throw 2}try{console.log(g())}catch(e){console.log('ok',e)}",
+    "ok 1\nok 2\n",
+  )
+}
+
+/// A finally block that throws while a return/break crosses it runs once, and
+/// its throw is not seen by that try's own catch; an iterator close throwing
+/// on `return` inside for-of is not caught by an inner try/catch either.
+pub fn finally_throws_once_diff_test() {
+  diff(
+    "var n=0;function f(){try{return 1}finally{n++;throw 2}}try{f()}catch(e){console.log('A',e,n)}n=0;function g(){try{return 1}catch(e){console.log('inner',e)}finally{n++;throw 2}}try{g()}catch(e){console.log('B',e,n)}n=0;function h(){for(var i=0;i<1;i++){try{break}finally{n++;throw 3}}}try{h()}catch(e){console.log('C',e,n)}n=0;function k(){try{try{return 1}finally{n++;throw 4}}catch(e){console.log('k',e,n);return 9}}console.log('D',k(),n);var rc=0,fe=0,ce=0;var it={};it[Symbol.iterator]=function(){return{next(){return{done:false}},return(){rc++;throw 42}}};function m(){for(var x of it){try{return}catch(e){ce++}finally{fe++}}}try{m()}catch(e){console.log('E',e,rc,ce,fe)}",
+    "A 2 1\nB 2 1\nC 3 1\nk 4 1\nD 9 1\nE 42 1 0 1\n",
+  )
+}
+
 const user_iter_src = "var log=[];function it(n){var i=0;return {[Symbol.iterator](){return this},next(){i++;return {done:i>n,value:i}},return(){log.push('ret'+i);return {}}}}
 for(var a of it(3)){log.push(a)}
 for(var b of it(5)){if(b==2)break;log.push(b)}
