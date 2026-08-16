@@ -14,7 +14,7 @@ packages = [
   { name = "gleam_stdlib", version = "1.0.5", build_tools = ["gleam"], requirements = [], otp_app = "gleam_stdlib", source = "hex", outer_checksum = "CEE5B6C076A85B45F60C585F4316C63EC8B7127C119D5738C3958A9C4D50404E" },
   { name = "simplifile", version = "2.7.0", build_tools = ["gleam"], requirements = ["filepath", "gleam_stdlib"], otp_app = "simplifile", source = "hex", outer_checksum = "A2727627B063E87351934C7F7F008F2D1FDB16F6DE0B8C79F9E46459CFC9C164" },
   { name = "testkit", version = "0.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib", "simplifile"], source = "local", path = "../testkit" },
-  { name = "twocore", version = "1.0.0", build_tools = ["gleam"], requirements = ["argv", "gleam_erlang", "gleam_stdlib", "simplifile"], source = "git", repo = "https://github.com/hiett/2core", commit = "1c0fe37794264004c01b10c8becaaa977081f89f" },
+  { name = "twocore", version = "1.0.0", build_tools = ["gleam"], requirements = ["argv", "gleam_erlang", "gleam_stdlib", "simplifile"], source = "git", repo = "https://github.com/hiett/2core", commit = "02ef188dd18fc137bcaf4d70f765dd25a24c19c2" },
 ]
 
 [requirements]
@@ -23,4 +23,4 @@ gleam_erlang = { version = ">= 1.0.0 and < 2.0.0" }
 gleam_stdlib = { version = ">= 0.44.0 and < 2.0.0" }
 simplifile = { version = ">= 2.0.0 and < 3.0.0" }
 testkit = { path = "../testkit" }
-twocore = { git = "https://github.com/hiett/2core", ref = "1c0fe37794264004c01b10c8becaaa977081f89f" }
+twocore = { git = "https://github.com/hiett/2core", ref = "02ef188dd18fc137bcaf4d70f765dd25a24c19c2" }
