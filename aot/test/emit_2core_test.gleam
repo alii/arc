@@ -77,11 +77,13 @@ pub fn method_call_shaped_chain_diff_test() {
   let i = harness.run_interpreted(method_call_shaped_chain_src)
   let c = harness.run_compiled(method_call_shaped_chain_src)
   assert i.stdout
-    == <<"A12undefined|A123|A123|A12undefined|A123|A123|A12undefined|A123|A123|\nCA12undefinedC\nCB\nownC\n":utf8>>
+    == <<
+      "A12undefined|A123|A123|A12undefined|A123|A123|A12undefined|A123|A123|\nCA12undefinedC\nCB\nownC\n":utf8,
+    >>
   assert c.stdout == i.stdout
 }
 
-const method_call_miss_src ="var o={};try{o.nope()}catch(e){console.log('miss:'+e.name)};Object.defineProperty(o,'g',{get:function(){return function(){return 'getter'}}});console.log(o.g())"
+const method_call_miss_src = "var o={};try{o.nope()}catch(e){console.log('miss:'+e.name)};Object.defineProperty(o,'g',{get:function(){return function(){return 'getter'}}});console.log(o.g())"
 
 pub fn method_call_miss_diff_test() {
   let i = harness.run_interpreted(method_call_miss_src)
