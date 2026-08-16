@@ -2469,6 +2469,8 @@ type ParentView {
     consts: Set(String),
     /// Subset whose ORIGIN binding is a named-function-expression self name.
     fn_names: Set(String),
+    /// Subset whose ORIGIN binding is `let`/`class` — TDZ-checked on read.
+    lets: Set(String),
     /// Subset whose PARENT binding is a boxed heap-cell. A capture of a
     /// name NOT in this set is by-value (child reads cap_i directly, no
     /// cell_get) — see `derive_vars_to_box` / `insert_captures`.
@@ -2605,6 +2607,7 @@ fn analyze_captures(
       names: dict.new(),
       consts: set.new(),
       fn_names: set.new(),
+      lets: set.new(),
       boxed: set.new(),
       lexical_available: lexical.no_lexical_refs,
     )
@@ -2731,7 +2734,7 @@ fn compute_down(
   let kind = { get_scope(tree, fn_id) }.kind
 
   // (1) Name captures from the parent view.
-  let #(captures, const_captures, fn_name_captures) =
+  let #(captures, const_captures, fn_name_captures, let_captures) =
     derive_name_captures(up, parent)
 
   // (2) Lexical pseudo-slot layout (this / active_func / home_object /
@@ -2776,6 +2779,7 @@ fn compute_down(
         captures,
         const_captures,
         fn_name_captures,
+        let_captures,
         parent.boxed,
       )
   }
@@ -2823,6 +2827,7 @@ fn compute_down(
         captures,
         const_captures,
         fn_name_captures,
+        let_captures,
         lex.available,
       )
     compute_down(tree, inputs, by_fn, ups, assigned, refs_args, cid, view)
@@ -2835,7 +2840,7 @@ fn compute_down(
 fn derive_name_captures(
   up: Up,
   parent: ParentView,
-) -> #(List(#(String, Int)), Set(String), Set(String)) {
+) -> #(List(#(String, Int)), Set(String), Set(String), Set(String)) {
   let parent_name_set = set.from_list(dict.keys(parent.names))
   let captured_names = case up.eval_in_subtree {
     True -> parent_name_set
@@ -2854,7 +2859,8 @@ fn derive_name_captures(
     })
   let const_captures = set.intersection(parent.consts, captured_names)
   let fn_name_captures = set.intersection(parent.fn_names, captured_names)
-  #(captures, const_captures, fn_name_captures)
+  let let_captures = set.intersection(parent.lets, captured_names)
+  #(captures, const_captures, fn_name_captures, let_captures)
 }
 
 /// Decide the lexical pseudo-slot (this / active_func / home_object /
@@ -3133,6 +3139,7 @@ fn insert_captures(
   captures: List(#(String, Int)),
   const_captures: Set(String),
   fn_name_captures: Set(String),
+  let_captures: Set(String),
   parent_boxed: Set(String),
 ) -> ScopeTree {
   // Shift every declared binding's slot in this function's scopes.
@@ -3199,11 +3206,13 @@ fn insert_captures(
         use <- bool.guard(root_shadowed(name), bs)
         let origin = case
           set.contains(const_captures, name),
-          set.contains(fn_name_captures, name)
+          set.contains(fn_name_captures, name),
+          set.contains(let_captures, name)
         {
-          True, _ -> ConstBinding
-          False, True -> FnNameBinding
-          False, False -> CaptureBinding
+          True, _, _ -> ConstBinding
+          False, True, _ -> FnNameBinding
+          False, False, True -> LetBinding
+          False, False, False -> CaptureBinding
         }
         dict.insert(
           bs,
@@ -3256,6 +3265,7 @@ fn child_parent_view(
   our_captures: List(#(String, Int)),
   our_const_captures: Set(String),
   our_fn_name_captures: Set(String),
+  our_let_captures: Set(String),
   lexical_available: LexicalRefs,
 ) -> ParentView {
   // Our captures occupy our slots 0..N-1 in capture-list order. After
@@ -3288,6 +3298,7 @@ fn child_parent_view(
   }
   let consts = origin_names(ConstBinding, our_const_captures)
   let fn_names = origin_names(FnNameBinding, our_fn_name_captures)
+  let lets = origin_names(LetBinding, our_let_captures)
   // `own_visible` reflects apply_boxing + insert_captures already run for
   // this function, so each Binding.is_boxed is authoritative here.
   let boxed =
@@ -3297,7 +3308,7 @@ fn child_parent_view(
         False -> s
       }
     })
-  ParentView(names:, consts:, fn_names:, boxed:, lexical_available:)
+  ParentView(names:, consts:, fn_names:, lets:, boxed:, lexical_available:)
 }
 
 /// Set `is_boxed` on every binding in `fn_id`'s scope subtree whose name is
