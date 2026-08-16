@@ -75,35 +75,31 @@ peek_get(St, Id, KeyBin) ->
 t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    case Data of
-        #{Id := Slot} ->
-            case Slot of
-                {?SSHAPED_TAG, Sid, P, Slots} ->
-                    case shape_offset(St, Sid, KeyBin) of
-                        miss -> miss;
-                        Off ->
-                            NewSlot = {?SSHAPED_TAG, Sid, P,
-                                       setelement(Off + 1, Slots, V)},
-                            setelement(?AGENT_STORE, St,
-                                setelement(?STORE_DATA, Store,
-                                           Data#{Id := NewSlot}))
-                    end;
-                _ when element(1, Slot) =:= ?SOBJECT_TAG,
-                       element(?SOBJECT_KIND, Slot) =:= ?ORDINARY ->
-                    Props = element(?SOBJECT_PROPS, Slot),
-                    K = {?KEY_NAMED, KeyBin},
-                    case Props of
-                        #{K := Prop}
-                          when element(1, Prop) =:= ?DATAPROP_TAG,
-                               element(?DATAPROP_WRITABLE, Prop) =:= true ->
-                            NewProps =
-                                Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
-                            NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
-                            setelement(?AGENT_STORE, St,
-                                setelement(?STORE_DATA, Store,
-                                           Data#{Id := NewSlot}));
-                        _ -> miss
-                    end;
+    case array:get(Id, Data) of
+        {?SSHAPED_TAG, Sid, P, Slots} ->
+            case shape_offset(St, Sid, KeyBin) of
+                miss -> miss;
+                Off ->
+                    NewSlot = {?SSHAPED_TAG, Sid, P,
+                               setelement(Off + 1, Slots, V)},
+                    setelement(?AGENT_STORE, St,
+                        setelement(?STORE_DATA, Store,
+                                   array:set(Id, NewSlot, Data)))
+            end;
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+                  element(?SOBJECT_KIND, Slot) =:= ?ORDINARY ->
+            Props = element(?SOBJECT_PROPS, Slot),
+            K = {?KEY_NAMED, KeyBin},
+            case Props of
+                #{K := Prop}
+                  when element(1, Prop) =:= ?DATAPROP_TAG,
+                       element(?DATAPROP_WRITABLE, Prop) =:= true ->
+                    NewProps =
+                        Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
+                    NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
+                    setelement(?AGENT_STORE, St,
+                        setelement(?STORE_DATA, Store,
+                                   array:set(Id, NewSlot, Data)));
                 _ -> miss
             end;
         _ -> miss
@@ -185,8 +181,8 @@ proto_has(_, _, _, _) -> 0.
 t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)
   when is_integer(Idx), Idx >= 0 ->
     Store = element(?AGENT_STORE, St),
-    case element(?STORE_DATA, Store) of
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
                     case element(?SOBJECT_PROPS, Slot) of
@@ -229,10 +225,9 @@ t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0 ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    case Data of
-        #{Id := Slot}
-          when element(1, Slot) =:= ?SOBJECT_TAG,
-               element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
+    case array:get(Id, Data) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+                  element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
             case element(?SOBJECT_KIND, Slot) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
                     case element(?SOBJECT_PROPS, Slot) of
@@ -244,7 +239,7 @@ t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
                                     NewSlot = setelement(?SOBJECT_ELEMENTS, Slot, NewE),
                                     setelement(?AGENT_STORE, St,
                                         setelement(?STORE_DATA, Store,
-                                            Data#{Id := NewSlot}))
+                                            array:set(Id, NewSlot, Data)))
                             end
                     end;
                 {?ARRAYOBJ_TAG, Length} when Idx =:= Length ->
@@ -260,7 +255,7 @@ t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
                                         NewE),
                                     setelement(?AGENT_STORE, St,
                                         setelement(?STORE_DATA, Store,
-                                            Data#{Id := NewSlot}))
+                                            array:set(Id, NewSlot, Data)))
                             end
                     end;
                 _ -> miss
@@ -321,7 +316,7 @@ shape_offset(St, Sid, KeyBin) ->
 %% Read the slot for `Id` from `St.store.data`. `miss` if absent (a
 %% dangling handle).
 slot_of(St, Id) ->
-    case element(?STORE_DATA, element(?AGENT_STORE, St)) of
-        #{Id := Slot} -> Slot;
-        _ -> miss
+    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
+        ?STORE_FREE_SLOT -> miss;
+        Slot -> Slot
     end.

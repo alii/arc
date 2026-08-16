@@ -424,8 +424,8 @@ typeof(_) -> miss.
 %% "function", any other object cell "object". A Proxy answers from its
 %% target (§10.5.14), so it misses rather than chase the chain here.
 typeof(Store, {?HANDLE_TAG, Id}) ->
-    case element(?STORE_DATA, Store) of
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case kind_tag(element(?SOBJECT_KIND, Slot)) of
                 ?KFN_TAG -> <<"function">>;
                 ?KBYTECODE_TAG -> <<"function">>;
@@ -434,7 +434,7 @@ typeof(Store, {?HANDLE_TAG, Id}) ->
                 ?PROXYOBJ_TAG -> miss;
                 _ -> <<"object">>
             end;
-        #{Id := Slot} when element(1, Slot) =:= ?SSHAPED_TAG -> <<"object">>;
+        Slot when element(1, Slot) =:= ?SSHAPED_TAG -> <<"object">>;
         _ -> miss
     end;
 typeof(_Store, V) -> typeof(V).
@@ -481,8 +481,8 @@ cell_field(Store, Id, KeyBin) ->
 
 field_walk(_, _, _, _, 0) -> miss;
 field_walk(Data, Shapes, Id, KeyBin, Fuel) ->
-    case Data of
-        #{Id := {?SSHAPED_TAG, Sid, Proto, Slots}} ->
+    case array:get(Id, Data) of
+        {?SSHAPED_TAG, Sid, Proto, Slots} ->
             case Shapes of
                 #{Sid := Desc} ->
                     case element(?SHAPE_OFFSETS, Desc) of
@@ -491,7 +491,7 @@ field_walk(Data, Shapes, Id, KeyBin, Fuel) ->
                     end;
                 _ -> miss
             end;
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case named_is_ordinary(element(?SOBJECT_KIND, Slot), KeyBin) of
                 false -> miss;
                 true ->
@@ -538,8 +538,8 @@ named_is_ordinary(Kind, KeyBin) ->
 %% key, which canonicalizes and reads as get_field / an index. Anything
 %% else (float or negative index, symbol, object key, non-array cell) misses.
 get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
-    case element(?STORE_DATA, Store) of
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
                     case element(?SOBJECT_PROPS, Slot) of
@@ -588,20 +588,20 @@ elem_read(_, _) -> miss.
 %% and exotic receivers miss. Returns the rebuilt store.
 put_field(Store, {?HANDLE_TAG, Id}, KeyBin, V) ->
     Data = element(?STORE_DATA, Store),
-    case Data of
-        #{Id := {?SSHAPED_TAG, Sid, P, Slots}} ->
+    case array:get(Id, Data) of
+        {?SSHAPED_TAG, Sid, P, Slots} ->
             case element(?STORE_SHAPES, Store) of
                 #{Sid := Desc} ->
                     case element(?SHAPE_OFFSETS, Desc) of
                         #{KeyBin := Off} ->
                             NewSlot = {?SSHAPED_TAG, Sid, P,
                                        setelement(Off + 1, Slots, V)},
-                            setelement(?STORE_DATA, Store, Data#{Id := NewSlot});
+                            setelement(?STORE_DATA, Store, array:set(Id, NewSlot, Data));
                         _ -> miss
                     end;
                 _ -> miss
             end;
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case named_is_ordinary(element(?SOBJECT_KIND, Slot), KeyBin) of
                 false -> miss;
                 true ->
@@ -614,7 +614,7 @@ put_field(Store, {?HANDLE_TAG, Id}, KeyBin, V) ->
                             NewProps =
                                 Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
                             NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
-                            setelement(?STORE_DATA, Store, Data#{Id := NewSlot});
+                            setelement(?STORE_DATA, Store, array:set(Id, NewSlot, Data));
                         #{K := _} -> miss;
                         _ when element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
                             case named_free(Data, element(?STORE_SHAPES, Store),
@@ -628,7 +628,7 @@ put_field(Store, {?HANDLE_TAG, Id}, KeyBin, V) ->
                                                          Props#{K => Prop}),
                                     setelement(?STORE_PROP_SEQ,
                                                setelement(?STORE_DATA, Store,
-                                                          Data#{Id := NewSlot}),
+                                                          array:set(Id, NewSlot, Data)),
                                                Seq + 1)
                             end;
                         _ -> miss
@@ -648,8 +648,8 @@ put_field(_, _, _, _) -> miss.
 named_free(_, _, ?NONE, _, _) -> true;
 named_free(_, _, _, _, 0) -> false;
 named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, KeyBin, Fuel) ->
-    case Data of
-        #{P := {?SSHAPED_TAG, Sid, Proto, _Slots}} ->
+    case array:get(P, Data) of
+        {?SSHAPED_TAG, Sid, Proto, _Slots} ->
             case Shapes of
                 #{Sid := Desc} ->
                     case element(?SHAPE_OFFSETS, Desc) of
@@ -658,7 +658,7 @@ named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, KeyBin, Fuel) ->
                     end;
                 _ -> false
             end;
-        #{P := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case named_is_ordinary(element(?SOBJECT_KIND, Slot), KeyBin) of
                 false -> false;
                 true ->
@@ -690,10 +690,9 @@ named_free(_, _, _, _, _) -> false.
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     Data = element(?STORE_DATA, Store),
-    case Data of
-        #{Id := Slot}
-          when element(1, Slot) =:= ?SOBJECT_TAG,
-               element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
+    case array:get(Id, Data) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+                  element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
             Props = element(?SOBJECT_PROPS, Slot),
             case element(?SOBJECT_KIND, Slot) of
                 _ when is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
@@ -709,7 +708,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
                                 NewE ->
                                     NewSlot = setelement(?SOBJECT_ELEMENTS, Slot, NewE),
                                     setelement(?STORE_DATA, Store,
-                                               Data#{Id := NewSlot})
+                                               array:set(Id, NewSlot, Data))
                             end
                     end;
                 {?ARRAYOBJ_TAG, Idx} ->
@@ -726,7 +725,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
                                                    {?ARRAYOBJ_TAG, Idx + 1}),
                                         NewE),
                                     setelement(?STORE_DATA, Store,
-                                               Data#{Id := NewSlot})
+                                               array:set(Id, NewSlot, Data))
                             end
                     end;
                 _ -> miss
@@ -750,8 +749,8 @@ length_writable(_) -> true.
 index_free(_, _, ?NONE, _, _) -> true;
 index_free(_, _, _, _, 0) -> false;
 index_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
-    case Data of
-        #{P := {?SSHAPED_TAG, Sid, Proto, _Slots}} ->
+    case array:get(P, Data) of
+        {?SSHAPED_TAG, Sid, Proto, _Slots} ->
             case Shapes of
                 #{Sid := Desc} ->
                     (not is_map_key(integer_to_binary(Idx),
@@ -759,7 +758,7 @@ index_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
                         andalso index_free(Data, Shapes, Proto, Idx, Fuel - 1);
                 _ -> false
             end;
-        #{P := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             index_is_plain(element(?SOBJECT_KIND, Slot))
                 andalso (not is_map_key({?KEY_INDEX, Idx},
                                         element(?SOBJECT_PROPS, Slot)))

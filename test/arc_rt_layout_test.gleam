@@ -111,7 +111,7 @@ pub fn js_store_test() {
   let store =
     JsStore(
       ..base,
-      data: dict.from_list([#(3, SBox(rt_types.mk_string("d")))]),
+      data: tree_array.set(3, SBox(rt_types.mk_string("d")), base.data),
       free: [11, 12],
       next: 13,
       pinned_roots: set.from_list([3]),

@@ -3592,8 +3592,10 @@ pub type JsOps(st) {
 pub type JsStore(st) {
   JsStore(
     // ── cell arena (arc heap.gleam:21-45) ──
-    /// Live cells by id.
-    data: Dict(Int, JsSlot),
+    /// Live cells by id. Ids are dense (`next` / free-list), so an OTP
+    /// `array` indexed by id; a freed id reads back as the FFI's free
+    /// sentinel, which every reader treats as absent.
+    data: TreeArray(JsSlot),
     /// Recycled ids, LIFO.
     free: List(Int),
     /// Next never-used id (starts 0).

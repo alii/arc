@@ -32,8 +32,8 @@
 %% Simple is the raw Option term: `none` | `{some,{CodeS,Arity}}`.
 t_kfn_code(St, {js_cell, Id}, This) ->
     Store = element(?AGENT_STORE, St),
-    case element(?STORE_DATA, Store) of
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
                 {?KFN_TAG, Code, none, Flags, _, Simple}
                   when element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
@@ -80,8 +80,8 @@ t_kfn_code(_, _, _) -> undefined.
 t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    case Data of
-        #{RId := RSlot} ->
+    case array:get(RId, Data) of
+        RSlot when is_tuple(RSlot) ->
             Own = case element(1, RSlot) of
                 ?SOBJECT_TAG -> mono_own_value(RSlot, KeyBin);
                 ?SSHAPED_TAG -> mono_shaped_own(Store, RSlot, KeyBin);
@@ -106,8 +106,8 @@ mono_proto(St, _, _, _, _, _) -> {miss, St}.
 %% Bounded walk. Accessor or non-cell hit at any hop shadows → miss.
 mono_proto_walk(St, _, _, _, _, _, 0) -> {miss, St};
 mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel) ->
-    case Data of
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case array:get(Id, Data) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case mono_own_value(Slot, KeyBin) of
                 absent ->
                     case element(?SOBJECT_PROTO, Slot) of
@@ -154,8 +154,8 @@ mono_shaped_own(Store, RSlot, KeyBin) ->
 %% CodeT(St, Recv, P0..Pn-1) with no Frame tuple; otherwise Frame per D5
 %% mk_frame.
 mono_apply(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, Args) ->
-    case Data of
-        #{FnId := FSlot} when element(1, FSlot) =:= ?SOBJECT_TAG ->
+    case array:get(FnId, Data) of
+        FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, FSlot) of
                 {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
                   when element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
@@ -197,8 +197,8 @@ apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    case Data of
-        #{CId := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case array:get(CId, Data) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
                 {?KFN_TAG, Code, ?NONE, Flags, ?NONE, _}
                   when element(?FNFLAGS_IS_CTOR, Flags) =:= true,
@@ -230,7 +230,7 @@ new_simple_apply(St, Store, Data, Ctor, Code, Proto, Args) ->
         [Id | Rest] -> {Id, Rest, element(?STORE_NEXT, Store)};
         [] -> N = element(?STORE_NEXT, Store), {N, [], N + 1}
     end,
-    Store2 = setelement(?STORE_DATA, Store, Data#{NewId => NewSlot}),
+    Store2 = setelement(?STORE_DATA, Store, array:set(NewId, NewSlot, Data)),
     Store3 = setelement(?STORE_FREE, Store2, Free),
     Store4 = setelement(?STORE_NEXT, Store3, Next),
     Store5 = setelement(?STORE_ALLOC, Store4, element(?STORE_ALLOC, Store) + 1),

@@ -161,4 +161,8 @@
 %% field write bumps when it creates an own property.
 -define(STORE_PROP_SEQ, 9).
 
+%% arc/rt/types.JsStore.data is an OTP `array` indexed by cell id whose
+%% default is this sentinel: a freed or never-minted id reads back as it.
+-define(STORE_FREE_SLOT, js_free).
+
 -endif.

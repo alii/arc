@@ -17,19 +17,23 @@
 %%% and zero-copy in Erlang; awkward via `dynamic` in Gleam.
 -module(arc_rt_store_ffi).
 -export([t_throw/2, is_handle/1, handle_id/1, identity/1, as_object_key/1,
-         t_cell_get/2]).
+         t_cell_get/2, data_new/0]).
 
 -include("arc_rt_layout.hrl").
 
+%% data_new() -> array()
+%% The empty cell arena: unset ids answer ?STORE_FREE_SLOT.
+data_new() -> array:new({default, ?STORE_FREE_SLOT}).
+
 %% t_cell_get(St, {js_cell, Id}) -> JsSlot
-%% Hot-path cell read — inlines require_js + dict:get so emitted code and
-%% internal callers pay one map lookup, not two cross-module calls.
+%% Hot-path cell read — inlines require_js + the array read so emitted code
+%% and internal callers pay one lookup, not two cross-module calls.
 t_cell_get(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
-    case element(?STORE_DATA, Store) of
-        #{Id := Slot} -> Slot;
-        _ -> erlang:error(#{gleam_error => panic, message =>
-            <<"t_cell_get: dangling Handle (use-after-free)"/utf8>>})
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        ?STORE_FREE_SLOT -> erlang:error(#{gleam_error => panic, message =>
+            <<"t_cell_get: dangling Handle (use-after-free)"/utf8>>});
+        Slot -> Slot
     end.
 
 %% t_throw(St, V) -> no_return()

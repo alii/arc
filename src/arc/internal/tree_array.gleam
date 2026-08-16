@@ -59,3 +59,7 @@ pub fn reset(index: Int, arr: TreeArray(a)) -> TreeArray(a)
 /// O(k) where k is the number of set entries.
 @external(erlang, "arc_tree_array_ffi", "tree_array_sparse_fold")
 pub fn sparse_fold(f: fn(Int, a, b) -> b, initial: b, arr: TreeArray(a)) -> b
+
+/// Map over non-default entries only; holes stay holes. O(k).
+@external(erlang, "arc_tree_array_ffi", "tree_array_sparse_map")
+pub fn sparse_map(f: fn(Int, a) -> a, arr: TreeArray(a)) -> TreeArray(a)
