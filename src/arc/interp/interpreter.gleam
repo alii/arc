@@ -3602,9 +3602,10 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   pc: state.pc + 1,
                 ),
               )
-            False ->
-              case array_iter_step(state.agent, rec) {
-                Some(#(done, val, agent)) -> {
+            False -> {
+              let record = rt_lang.record_parts(state.agent, rec)
+              case fast_iter_step(state.agent, record) {
+                ArrayStep(done, val, agent) -> {
                   let slot = case done {
                     True -> mk_undefined()
                     False -> rec
@@ -3618,8 +3619,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     ),
                   )
                 }
-                None ->
-                  case iter_step(state, rec) {
+                fast ->
+                  case iter_step(state, rec, fast) {
                     Ok(#(#(done, val), state)) -> {
                       let slot = case done {
                         True -> mk_undefined()
@@ -3641,6 +3642,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                       )
                   }
               }
+            }
           }
         _ -> underflow(state, "IteratorNext")
       }
@@ -4438,7 +4440,7 @@ fn fill_holes(
   }
 }
 
-/// IteratorNext for a record that is not the plain-Array shape, as
+/// IteratorNext for a record `fast_iter_step` did not step itself, as
 /// `#(done, value)`. A generator whose `next` is the intrinsic
 /// %GeneratorPrototype%.next is resumed for one turn and answers the pair
 /// itself: no `{value, done}` object is built per step only to be read
@@ -4446,15 +4448,11 @@ fn fill_holes(
 fn iter_step(
   state: State,
   rec: JsVal,
+  fast: FastIter,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
-  let native =
-    rt_lang.record_parts(state.agent, rec)
-    |> option.then(fn(record) {
-      native_generator(state.agent, record.iterator, record.next_method)
-    })
-  case native {
-    Some(data) -> rt3(state, rt_async.t_gen_step, data, mk_undefined())
-    None -> rt2(state, rt_lang.t_iter_next, rec)
+  case fast {
+    GenStep(data) -> rt3(state, rt_async.t_gen_step, data, mk_undefined())
+    ArrayStep(..) | Protocol -> rt2(state, rt_lang.t_iter_next, rec)
   }
 }
 
@@ -4503,6 +4501,17 @@ fn native_generator(
   }
 }
 
+/// What IteratorNext learns from one read of a record's [[Iterator]] and
+/// [[NextMethod]] cells.
+type FastIter {
+  /// The step was taken here.
+  ArrayStep(done: Bool, value: JsVal, agent: Agent)
+  /// A native generator to resume for one turn.
+  GenStep(data: Handle)
+  /// Run the protocol call.
+  Protocol
+}
+
 /// IteratorNext for the record of an unmodified Array values iteration
 /// (`for (x of array)`, spread of an array): the record's [[NextMethod]] IS
 /// %ArrayIteratorPrototype%.next and its [[Iterator]] an ArrayIterator over
@@ -4511,77 +4520,107 @@ fn native_generator(
 /// immediately take apart. Only the shapes whose element read observes
 /// nothing are handled (a present own element, no index override); a hole,
 /// an exhausted-but-not-yet-marked source of another kind, or anything else
-/// answers `None` and the generic protocol call runs instead.
-fn array_iter_step(agent: Agent, rec: JsVal) -> Option(#(Bool, JsVal, Agent)) {
-  use record <- option.then(rt_lang.record_parts(agent, rec))
-  use next_h <- option.then(handle_of(record.next_method))
-  use iter_h <- option.then(handle_of(record.iterator))
-  case rt_store.t_cell_get(agent, next_h), rt_store.t_cell_get(agent, iter_h) {
-    SObject(
-      kind: rt_types.KNative(
-        tag: rt_types.IteratorN(rt_types.ArrayIteratorNext),
-        ..,
-      ),
-      ..,
-    ),
-      SObject(
-        kind: rt_types.ArrayIterator(
-          target:,
-          index:,
-          kind: rt_types.ArrayIterValues as kind,
-        ),
-        ..,
-      ) as iter_slot
-    ->
-      case index < 0 {
-        // Already exhausted: done, nothing to write.
-        True -> Some(#(True, mk_undefined(), agent))
-        False ->
-          case rt_store.t_cell_get(agent, target) {
-            SObject(kind: rt_types.ArrayObj(length:), elements:, props:, ..) ->
-              case index >= length {
-                True ->
-                  Some(#(
-                    True,
-                    mk_undefined(),
-                    rt_store.t_cell_set(
-                      agent,
-                      iter_h,
-                      SObject(
-                        ..iter_slot,
-                        kind: rt_types.ArrayIterator(target:, index: -1, kind:),
-                      ),
-                    ),
-                  ))
+/// answers `Protocol` and the generic protocol call runs instead. The same
+/// cell reads spot a native generator (see `native_generator`).
+fn fast_iter_step(
+  agent: Agent,
+  record: Option(rt_types.IteratorRecord),
+) -> FastIter {
+  case record {
+    None -> Protocol
+    Some(record) ->
+      case handle_of(record.next_method), handle_of(record.iterator) {
+        Some(next_h), Some(iter_h) ->
+          case
+            rt_store.t_cell_get(agent, next_h),
+            rt_store.t_cell_get(agent, iter_h)
+          {
+            SObject(
+              kind: rt_types.KNative(
+                tag: rt_types.IteratorN(rt_types.ArrayIteratorNext),
+                ..,
+              ),
+              ..,
+            ),
+              SObject(
+                kind: rt_types.ArrayIterator(
+                  target:,
+                  index:,
+                  kind: rt_types.ArrayIterValues as kind,
+                ),
+                ..,
+              ) as iter_slot
+            ->
+              case index < 0 {
+                // Already exhausted: done, nothing to write.
+                True -> ArrayStep(True, mk_undefined(), agent)
                 False ->
-                  case
-                    dict.has_key(props, Index(index)),
-                    rt_elements.get_option(elements, index)
-                  {
-                    False, Some(v) ->
-                      Some(#(
-                        False,
-                        v,
-                        rt_store.t_cell_set(
-                          agent,
-                          iter_h,
-                          SObject(
-                            ..iter_slot,
-                            kind: rt_types.ArrayIterator(
-                              target:,
-                              index: index + 1,
-                              kind:,
+                  case rt_store.t_cell_get(agent, target) {
+                    SObject(
+                      kind: rt_types.ArrayObj(length:),
+                      elements:,
+                      props:,
+                      ..,
+                    ) ->
+                      case index >= length {
+                        True ->
+                          ArrayStep(
+                            True,
+                            mk_undefined(),
+                            rt_store.t_cell_set(
+                              agent,
+                              iter_h,
+                              SObject(
+                                ..iter_slot,
+                                kind: rt_types.ArrayIterator(
+                                  target:,
+                                  index: -1,
+                                  kind:,
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
-                      ))
-                    _, _ -> None
+                          )
+                        False ->
+                          case
+                            dict.has_key(props, Index(index)),
+                            rt_elements.get_option(elements, index)
+                          {
+                            False, Some(v) ->
+                              ArrayStep(
+                                False,
+                                v,
+                                rt_store.t_cell_set(
+                                  agent,
+                                  iter_h,
+                                  SObject(
+                                    ..iter_slot,
+                                    kind: rt_types.ArrayIterator(
+                                      target:,
+                                      index: index + 1,
+                                      kind:,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            _, _ -> Protocol
+                          }
+                      }
+                    _ -> Protocol
                   }
               }
-            _ -> None
+            SObject(
+              kind: rt_types.KNative(
+                tag: rt_types.GeneratorN(rt_types.GeneratorNext),
+                ..,
+              ),
+              ..,
+            ),
+              SObject(kind: rt_types.GeneratorObj(data:), ..)
+            -> GenStep(data)
+            _, _ -> Protocol
           }
+        _, _ -> Protocol
       }
-    _, _ -> None
   }
 }
 
