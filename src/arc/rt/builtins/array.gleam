@@ -216,7 +216,7 @@ pub fn dispatch(
   case native {
     ArrayConstructor -> construct(st, args)
     ArrayIsArray -> is_array(st, args)
-    ArrayFrom -> array_from(st, args)
+    ArrayFrom -> array_from(st, this, args)
     ArrayFromAsync -> array_from_async.from_async(st, this, args)
     ArrayFromAsyncOnNext(ctx:) -> array_from_async.on_next(st, ctx, args)
     ArrayFromAsyncOnMapped(ctx:) -> array_from_async.on_mapped(st, ctx, args)
@@ -228,7 +228,7 @@ pub fn dispatch(
       array_from_async.like_on_value(st, ctx, args)
     ArrayFromAsyncLikeOnMapped(ctx:) ->
       array_from_async.like_on_mapped(st, ctx, args)
-    ArrayOf -> array_of(st, args)
+    ArrayOf -> array_of(st, this, args)
     ArrayPrototypeJoin -> array_join(st, this, args)
     ArrayPrototypePush -> array_push(st, this, args)
     ArrayPrototypePop -> array_pop(st, this, args)
@@ -3189,22 +3189,81 @@ fn copy_within_step(
 
 // ───────────────────────── Array.from / Array.of ────────────────────────────
 
+/// Where Array.from / Array.of put their elements: a plain Array built at
+/// the end from the collected values, or an object obtained from
+/// Construct(C, ...) (§23.1.2.1 step 5.c / 7.b, §23.1.2.3 step 4.a) that
+/// receives each element via CreateDataPropertyOrThrow and a final
+/// Set(A, "length", len, true).
+type FromTarget {
+  FreshArray(acc: List(JsVal))
+  Constructed(target: Handle)
+}
+
+/// `this` is a constructor other than this realm's %Array% — the only case
+/// where the constructed-object path is observable. A non-constructor `this`
+/// falls into ArrayCreate, which is exactly the fresh-array path.
+fn from_target(
+  st: Agent,
+  ctor: JsVal,
+  ctor_args: List(JsVal),
+) -> #(FromTarget, Agent) {
+  case classify(ctor) {
+    KHandle(h) if h != st.realm.array.constructor ->
+      case rt_call.is_constructor(st, ctor) {
+        True -> {
+          let #(a, st) = rt_call.t_construct(st, ctor, ctor_args, ctor)
+          #(Constructed(a), st)
+        }
+        False -> #(FreshArray([]), st)
+      }
+    _ -> #(FreshArray([]), st)
+  }
+}
+
+/// CreateDataPropertyOrThrow(A, ! ToString(𝔽(idx)), v).
+fn from_put(
+  st: Agent,
+  t: FromTarget,
+  idx: Int,
+  v: JsVal,
+) -> #(FromTarget, Agent) {
+  case t {
+    FreshArray(acc) -> #(FreshArray([v, ..acc]), st)
+    Constructed(target) -> #(t, write_species_element(st, target, idx, v))
+  }
+}
+
+/// Set(A, "length", 𝔽(len), true), then A.
+fn from_finish(st: Agent, t: FromTarget, len: Int) -> #(JsVal, Agent) {
+  case t {
+    FreshArray(acc) -> {
+      let array_proto = st.realm.array.prototype
+      alloc_array(st, len, elements.from_list(list.reverse(acc)), array_proto)
+    }
+    Constructed(target) -> {
+      let st = generic_set_length(st, target, len)
+      #(mk_object(target), st)
+    }
+  }
+}
+
 /// §23.1.2.1 Array.from(items[, mapFn[, thisArg]]).
-fn array_from(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+fn array_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(items_val, map_fn, this_arg) = helpers.three_args_or_undefined(args)
   case classify(map_fn) {
-    KUndef -> array_from_array_like(st, items_val, None, this_arg)
+    KUndef -> array_from_array_like(st, this, items_val, None, this_arg)
     _ -> {
       use mf <- helpers.require_callable(st, map_fn, fn() {
         not_a_function(st, map_fn)
       })
-      array_from_array_like(st, items_val, Some(mf), this_arg)
+      array_from_array_like(st, this, items_val, Some(mf), this_arg)
     }
   }
 }
 
 fn array_from_array_like(
   st: Agent,
+  ctor: JsVal,
   items: JsVal,
   map_fn: Option(JsVal),
   this_arg: JsVal,
@@ -3227,13 +3286,17 @@ fn array_from_array_like(
           use <- bool.lazy_guard(length > limits.max_iteration, fn() {
             rt_val.t_throw_range_error(st, iteration_budget_msg)
           })
-          array_from_loop(st, items, 0, length, map_fn, this_arg, [])
+          // Step 7.b: A = ? Construct(C, « 𝔽(len) »).
+          let #(target, st) = from_target(st, ctor, [from_int(length)])
+          array_from_loop(st, items, 0, length, map_fn, this_arg, target)
         }
         _ -> {
           use m <- helpers.require_callable(st, iter_method, fn() {
             not_a_function(st, iter_method)
           })
-          array_from_iterator(st, items, m, map_fn, this_arg)
+          // Step 5.c: A = ? Construct(C).
+          let #(target, st) = from_target(st, ctor, [])
+          array_from_iterator(st, items, m, map_fn, this_arg, target)
         }
       }
     }
@@ -3246,10 +3309,11 @@ fn array_from_iterator(
   iter_method: JsVal,
   map_fn: Option(JsVal),
   this_arg: JsVal,
+  target: FromTarget,
 ) -> #(JsVal, Agent) {
   let #(rec, st) =
     iter_protocol.get_iterator_from_method(st, items, iter_method)
-  array_from_iterator_loop(st, rec, map_fn, this_arg, 0, [])
+  array_from_iterator_loop(st, rec, map_fn, this_arg, 0, target)
 }
 
 fn array_from_iterator_loop(
@@ -3258,11 +3322,11 @@ fn array_from_iterator_loop(
   map_fn: Option(JsVal),
   this_arg: JsVal,
   k: Int,
-  acc: List(JsVal),
+  target: FromTarget,
 ) -> #(JsVal, Agent) {
   let #(step, st) = iter_protocol.iterator_step_value(st, rec)
   case step {
-    None -> alloc_array_list(st, list.reverse(acc))
+    None -> from_finish(st, target, k)
     Some(item) -> {
       let #(mapped, st) = case map_fn {
         // §23.1.2.1 step 5.e.vi-vii: IfAbruptCloseIterator on mapFn.
@@ -3274,7 +3338,17 @@ fn array_from_iterator_loop(
         }
         None -> #(item, st)
       }
-      array_from_iterator_loop(st, rec, map_fn, this_arg, k + 1, [mapped, ..acc])
+      // Step 5.e.viii-ix: IfAbruptCloseIterator on the define.
+      let #(target, st) = case target {
+        FreshArray(_) -> from_put(st, target, k, mapped)
+        Constructed(t) -> {
+          use _undef, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
+            #(mk_undefined(), write_species_element(st, t, k, mapped))
+          })
+          #(target, st)
+        }
+      }
+      array_from_iterator_loop(st, rec, map_fn, this_arg, k + 1, target)
     }
   }
 }
@@ -3286,42 +3360,34 @@ fn array_from_loop(
   length: Int,
   map_fn: Option(JsVal),
   this_arg: JsVal,
-  acc: List(JsVal),
+  target: FromTarget,
 ) -> #(JsVal, Agent) {
   case idx >= length {
-    True -> {
-      let array_proto = st.realm.array.prototype
-      alloc_array(
-        st,
-        length,
-        elements.from_list(list.reverse(acc)),
-        array_proto,
-      )
-    }
+    True -> from_finish(st, target, length)
     False -> {
       let #(elem, st) = get_index(st, items, idx)
-      case map_fn {
-        None ->
-          array_from_loop(st, items, idx + 1, length, map_fn, this_arg, [
-            elem,
-            ..acc
-          ])
-        Some(mf) -> {
-          let #(mapped, st) =
-            rt_call.t_call_checked(st, mf, this_arg, [elem, from_int(idx)])
-          array_from_loop(st, items, idx + 1, length, map_fn, this_arg, [
-            mapped,
-            ..acc
-          ])
-        }
+      let #(mapped, st) = case map_fn {
+        None -> #(elem, st)
+        Some(mf) ->
+          rt_call.t_call_checked(st, mf, this_arg, [elem, from_int(idx)])
       }
+      let #(target, st) = from_put(st, target, idx, mapped)
+      array_from_loop(st, items, idx + 1, length, map_fn, this_arg, target)
     }
   }
 }
 
 /// §23.1.2.3 Array.of(...items).
-fn array_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  alloc_array_list(st, args)
+fn array_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  let len = list.length(args)
+  // Step 4.a: A = ? Construct(C, « 𝔽(len) »).
+  let #(target, st) = from_target(st, this, [from_int(len)])
+  let #(target, st) =
+    list.index_fold(args, #(target, st), fn(acc, item, k) {
+      let #(target, st) = acc
+      from_put(st, target, k, item)
+    })
+  from_finish(st, target, len)
 }
 
 // ───────────────── change-array-by-copy: toSpliced / with / toReversed ──────

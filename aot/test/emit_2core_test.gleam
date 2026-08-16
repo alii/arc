@@ -620,7 +620,7 @@ pub fn derived_constructor_this_diff_test() {
 pub fn class_extends_natives_diff_test() {
   diff(
     "class MyArr extends Array { sum(){ return this.reduce((a,b)=>a+b, 0) } }\nvar m = new MyArr(); m.push(1,2,3);\nconsole.log(m.length, m.sum(), Array.isArray(m), m instanceof MyArr, m instanceof Array, MyArr.from([1]) instanceof MyArr);\nclass MyErr extends Error { constructor(msg){ super(msg); this.name = 'MyErr' } }\nvar e = new MyErr('boom');\nconsole.log(e.message, e.name, e instanceof Error, e instanceof MyErr, String(e), Object.prototype.toString.call(e));\ntry { throw new MyErr('t') } catch (x) { console.log(x instanceof MyErr, x.message) }\nclass MyMap extends Map { setx(k,v){ return super.set(k, v*2) } }\nvar mm = new MyMap([[1,1]]); mm.setx(2, 5); console.log(mm.get(1), mm.get(2), mm.size, mm instanceof Map);\nclass P extends Promise { }\nvar p = new P(function(r){ r(3) }); console.log(p instanceof P, p instanceof Promise, p.then(function(){}) instanceof P);\np.then(function(v){ console.log('v', v) });\nclass U extends Uint8Array { }\nvar u = new U(3); u[0] = 300; console.log(u.length, u[0], u instanceof U, u instanceof Uint8Array);\nclass TE extends TypeError {}\nconsole.log(new TE('x').name, new TE('x') instanceof TypeError, Object.getPrototypeOf(TE) === TypeError);\nclass O extends Object { constructor(){ super(); this.q = 1 } }\nconsole.log(new O().q);",
-    "3 6 true true true false\nboom MyErr true true MyErr: boom [object Error]\ntrue t\n1 10 2 true\ntrue true true\n3 44 true true\nTypeError true true\n1\nv 3\n",
+    "3 6 true true true true\nboom MyErr true true MyErr: boom [object Error]\ntrue t\n1 10 2 true\ntrue true true\n3 44 true true\nTypeError true true\n1\nv 3\n",
   )
 }
 
