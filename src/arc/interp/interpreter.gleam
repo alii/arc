@@ -35,11 +35,13 @@ import arc/bytecode/opcode.{
   SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal,
   UnaryOp, Unrot4, Yield, YieldStar,
 }
+import arc/internal/tree_array
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
 import arc/interp/dynamic_import
 import arc/interp/eval
 import arc/interp/ffi
+import arc/interp/park
 import arc/interp/state.{
   type State, type StepExit, type VmError, AsyncDelegateResume, Awaited,
   DelegateYield, InitialSuspend, InternalError, PlainYield, Returned,
@@ -52,7 +54,9 @@ import arc/rt/builtins/error as rt_error
 import arc/rt/builtins/global_fns
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/regexp as b_regexp
-import arc/rt/bytecode.{type FuncTemplate, TryFrame}
+import arc/rt/bytecode.{
+  type FuncTemplate, type SuspendedFrame, ParkedOp, ParkedStart, TryFrame,
+}
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/class as rt_class
 import arc/rt/closure
@@ -67,8 +71,8 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
   AccessorProperty, Agent, DataProperty, ForInIterator, FunctionApply,
-  FunctionCall, FunctionN, HintString, Index, KBytecode, KCompiled, KHandle,
-  KNative, KNull, KNum, KStr, KSym, KUndef, Named, NoElements, Realm,
+  FunctionCall, FunctionN, HintString, Index, JsStore, KBytecode, KCompiled,
+  KHandle, KNative, KNull, KNum, KStr, KSym, KUndef, Named, NoElements, Realm,
   ReflectApply, ReflectN, SBox, SObject, SShapedObject, StringKey, SymbolKey,
   classify, mk_bool, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
 } as rt_types
@@ -3635,7 +3639,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   )
                 }
                 fast ->
-                  case iter_step(state, rec, fast) {
+                  case iter_step(state, drive, rec, fast) {
                     Ok(#(#(done, val), state)) -> {
                       let slot = case done {
                         True -> mk_undefined()
@@ -3761,6 +3765,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           ))
           use #(#(done, val), state) <- result.try(delegate_step(
             state,
+            drive,
             iterator,
             next_fn,
             arg,
@@ -4478,12 +4483,172 @@ fn fill_holes(
 /// straight back. Anything else runs the protocol call.
 fn iter_step(
   state: State,
+  drive: Drive,
   rec: JsVal,
   fast: FastIter,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   case fast {
-    GenStep(data) -> rt3(state, rt_async.t_gen_step, data, mk_undefined())
+    GenStep(data) -> gen_step(state, drive, data, mk_undefined())
     ArrayStep(..) | Protocol -> rt2(state, rt_lang.t_iter_next, rec)
+  }
+}
+
+/// §27.5.3.3 GeneratorResume of the generator behind `data` with `sent`, as
+/// `#(done, value)`. A body parked at a yield (or its InitialYield) in the
+/// running realm is resumed right here, on this loop's stack: the frame is
+/// unparked, run for one turn and parked again with one store write each
+/// way. Everything else (`.throw`/`.return` parks, a delegate mid-flight,
+/// another realm, a compiled body, the depth limit, running/completed
+/// states) takes the shared driver, which does the same in general form.
+fn gen_step(
+  state: State,
+  drive: Drive,
+  data: Handle,
+  sent: JsVal,
+) -> Result(#(#(Bool, JsVal), State), StepExit) {
+  let agent = state.agent
+  case rt_store.t_cell_get(agent, data) {
+    rt_types.SGenerator(
+      state: rt_types.GenSuspendedYield,
+      resume: rt_types.ResumeFrame(frame:) as resume,
+    )
+      | rt_types.SGenerator(
+        state: rt_types.GenSuspendedStart,
+        resume: rt_types.ResumeFrame(frame:) as resume,
+      )
+      if frame.realm == agent.realm.id
+      && agent.store.call_depth < limits.max_call_depth
+    ->
+      case frame.parked {
+        ParkedOp ->
+          resume_here(state, drive, data, resume, frame, [sent, ..frame.stack])
+        ParkedStart ->
+          resume_here(state, drive, data, resume, frame, frame.stack)
+        _ -> rt3(state, rt_async.t_gen_step, data, sent)
+      }
+    _ -> rt3(state, rt_async.t_gen_step, data, sent)
+  }
+}
+
+/// One turn of the parked body `frame` of generator `data`, delivered
+/// `stack`. Marks the generator running and enters its depth and
+/// `Error.stack` frame in one agent, runs the body under this loop's guard,
+/// then trues the depth and frames back up and writes the generator's next
+/// state: parked at the yield, or completed. The body's own uncaught throw
+/// (and a fault, surfaced as one, as `entry` does) is this step's throw.
+fn resume_here(
+  state: State,
+  drive: Drive,
+  data: Handle,
+  resume: rt_types.Resume,
+  frame: SuspendedFrame,
+  stack: List(JsVal),
+) -> Result(#(#(Bool, JsVal), State), StepExit) {
+  let agent = state.agent
+  let store = agent.store
+  let depth = store.call_depth
+  let frames = agent.frames
+  let running =
+    Agent(
+      ..agent,
+      store: JsStore(
+        ..store,
+        data: tree_array.set(
+          data.id,
+          rt_types.SGenerator(state: rt_types.GenExecuting, resume:),
+          store.data,
+        ),
+        call_depth: depth + 1,
+      ),
+      frames: [call.frame_info_at(frame.template, frame.line), ..frames],
+    )
+  let body = park.unpark_with(running, frame, stack)
+  let completed = rt_types.SGenerator(state: rt_types.GenCompleted, resume:)
+  case ffi.guard_state2(resumed_turn, body, drive) {
+    ffi.Ok(value: Ok(#(Suspended(state.Yield, v), post)), ..) -> {
+      let parked = rt_types.ResumeFrame(park.park(post, ParkedOp))
+      let gen =
+        rt_types.SGenerator(state: rt_types.GenSuspendedYield, resume: parked)
+      Ok(#(
+        #(False, v),
+        State(..state, agent: settle_gen(post.agent, data, depth, frames, gen)),
+      ))
+    }
+    ffi.Ok(value: Ok(#(Completed(NormalCompletion(v)), post)), ..) ->
+      Ok(#(
+        #(True, v),
+        State(
+          ..state,
+          agent: settle_gen(post.agent, data, depth, frames, completed),
+        ),
+      ))
+    ffi.Ok(value: Ok(#(Completed(ThrowCompletion(e)), post)), ..) ->
+      Error(Threw(
+        e,
+        State(
+          ..state,
+          agent: settle_gen(post.agent, data, depth, frames, completed),
+        ),
+      ))
+    ffi.Ok(value: Ok(#(Suspended(state.Await, _), post)), ..) ->
+      Error(VmFailed(
+        SuspensionLeak(site: "gen_step", kind: state.Await),
+        State(
+          ..state,
+          agent: settle_gen(post.agent, data, depth, frames, completed),
+        ),
+      ))
+    ffi.Ok(value: Error(err), agent:) -> {
+      let #(e, s) =
+        state.new_error(
+          State(..state, agent:),
+          rt_types.TypeErr,
+          "internal error: " <> state.vm_error_message(err),
+        )
+      Error(Threw(
+        e,
+        State(..s, agent: settle_gen(s.agent, data, depth, frames, completed)),
+      ))
+    }
+    ffi.Threw(agent:, thrown:) ->
+      Error(Threw(
+        thrown,
+        State(..state, agent: settle_gen(agent, data, depth, frames, completed)),
+      ))
+  }
+}
+
+/// True `agent` back up after a turn of generator `data`'s body: its depth
+/// and `Error.stack` frame gone, the generator now `gen`.
+fn settle_gen(
+  agent: Agent,
+  data: Handle,
+  depth: Int,
+  frames: List(rt_types.FrameInfo),
+  gen: rt_types.JsSlot,
+) -> Agent {
+  let store = agent.store
+  Agent(
+    ..agent,
+    store: JsStore(
+      ..store,
+      data: tree_array.set(data.id, gen, store.data),
+      call_depth: depth,
+    ),
+    frames:,
+  )
+}
+
+/// The guarded body of `resume_here`: run the unparked activation for one
+/// turn and hand back the agent it ended in (the entry agent for a fault,
+/// which carries none).
+fn resumed_turn(
+  body: State,
+  drive: Drive,
+) -> #(Result(#(Outcome, State), VmError), Agent) {
+  case execute_inner(body, drive) {
+    Ok(#(_, post)) as res -> #(res, post.agent)
+    Error(_) as res -> #(res, body.agent)
   }
 }
 
@@ -4493,12 +4658,13 @@ fn iter_step(
 /// its result read.
 fn delegate_step(
   state: State,
+  drive: Drive,
   iterator: JsVal,
   next_fn: JsVal,
   arg: JsVal,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   case native_generator(state.agent, iterator, next_fn) {
-    Some(data) -> rt3(state, rt_async.t_gen_step, data, arg)
+    Some(data) -> gen_step(state, drive, data, arg)
     None -> {
       use #(res, state) <- result.try(
         rt4(state, rt_call.t_call_checked, next_fn, iterator, [arg]),

@@ -5,7 +5,7 @@
 import arc/interp/call
 import arc/interp/state.{type State, State}
 import arc/rt/bytecode.{type ParkedAt, type SuspendedFrame, SuspendedFrame}
-import arc/rt/types.{type Agent, JsCell, mk_undefined}
+import arc/rt/types.{type Agent, type JsVal, JsCell, mk_undefined}
 import gleam/option
 
 /// Snapshot `state` (already fixed up by the suspending opcode) as a frame
@@ -35,11 +35,21 @@ pub fn park(state: State, parked: ParkedAt) -> SuspendedFrame {
 /// constructed). The caller pushes the body's `Error.stack` frame and has
 /// entered `frame.realm`; the parked line is written onto it here.
 pub fn unpark(agent: Agent, frame: SuspendedFrame) -> State {
+  unpark_with(agent, frame, frame.stack)
+}
+
+/// `unpark` with the operand stack the resumption delivers (the parked one
+/// with the sent value pushed, or as parked).
+pub fn unpark_with(
+  agent: Agent,
+  frame: SuspendedFrame,
+  stack: List(JsVal),
+) -> State {
   let SuspendedFrame(
     template:,
     pc:,
     locals:,
-    stack:,
+    stack: _,
     try_stack:,
     this:,
     home_object:,

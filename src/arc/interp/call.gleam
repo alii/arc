@@ -74,11 +74,12 @@ pub fn guarded_unit(
 const stack_source = "script"
 
 fn template_frame(template: FuncTemplate) -> types.FrameInfo {
-  FrameInfo(
-    name: option.unwrap(template.name, ""),
-    script: stack_source,
-    line: 0,
-  )
+  frame_info_at(template, 0)
+}
+
+/// The `Error.stack` frame of an activation of `template` at `line`.
+pub fn frame_info_at(template: FuncTemplate, line: Int) -> types.FrameInfo {
+  FrameInfo(name: option.unwrap(template.name, ""), script: stack_source, line:)
 }
 
 /// Push the `Error.stack` frame for an activation of `template` without
