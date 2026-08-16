@@ -187,6 +187,7 @@ fn inspect_object(
         DisposableStackObj(async: False, ..) -> "DisposableStack {}"
         DisposableStackObj(async: True, ..) -> "AsyncDisposableStack {}"
         FinalizationRegistryObj(..) -> "FinalizationRegistry {}"
+        rt_types.WeakRefObj(..) -> "WeakRef {}"
         rt_types.ShadowRealmObj(..) -> "ShadowRealm {}"
         // A tagged ordinary object renders via its Symbol.toStringTag
         // (`Object [Tag] { ... }`). Host objects have no own properties and

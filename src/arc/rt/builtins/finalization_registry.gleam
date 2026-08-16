@@ -14,10 +14,11 @@ import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type FinRegCell, type FinalizationRegistryNative,
-  type Handle, type JsVal, FinRegCell, FinalizationRegistryConstructor,
-  FinalizationRegistryN, FinalizationRegistryObj,
-  FinalizationRegistryPrototypeRegister, FinalizationRegistryPrototypeUnregister,
-  KUndef, NoElements, SObject, classify, mk_bool, mk_undefined,
+  type Handle, type JsVal, type Realm, FinRegCell,
+  FinalizationRegistryConstructor, FinalizationRegistryN,
+  FinalizationRegistryObj, FinalizationRegistryPrototypeRegister,
+  FinalizationRegistryPrototypeUnregister, KUndef, NoElements, SObject, classify,
+  mk_bool, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -89,8 +90,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    FinalizationRegistryConstructor(proto:) ->
-      construct(st, proto, args, new_target)
+    FinalizationRegistryConstructor(..) -> construct(st, args, new_target)
     FinalizationRegistryPrototypeRegister
     | FinalizationRegistryPrototypeUnregister ->
       rt_val.t_throw_type_error(st, "not a constructor")
@@ -108,7 +108,6 @@ pub fn dispatch_construct(
 ///   6. Return finalizationRegistry.
 fn construct(
   st: Agent,
-  proto: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
@@ -119,12 +118,12 @@ fn construct(
   case callable {
     False -> rt_val.t_throw_type_error(st, "cleanup must be callable")
     True -> {
-      // Step 3: GetPrototypeFromConstructor(NewTarget, intrinsic). The realm
-      // record has no %FinalizationRegistry% slot, so the intrinsic default
-      // is the constructor's own.
+      // Step 3: GetPrototypeFromConstructor(NewTarget,
+      // %FinalizationRegistry.prototype%) — the fallback comes from
+      // NewTarget's realm.
       let #(proto_h, st) =
-        rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
-          proto
+        rt_call.get_prototype_from_constructor(st, new_target, fn(realm: Realm) {
+          realm.finalization_registry.prototype
         })
       rt_store.t_cell_new(
         st,

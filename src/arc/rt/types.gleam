@@ -922,7 +922,14 @@ pub type NativeToken {
   TemporalN(TemporalNative)
   DisposableStackN(DisposableStackNative)
   FinalizationRegistryN(FinalizationRegistryNative)
+  WeakRefN(WeakRefNative)
   ShadowRealmN(ShadowRealmNative)
+}
+
+/// §26.1 WeakRef natives.
+pub type WeakRefNative {
+  WeakRefConstructor
+  WeakRefPrototypeDeref
 }
 
 /// §26.2 FinalizationRegistry natives. The constructor closes over the
@@ -2563,6 +2570,7 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     FinalizationRegistryN(FinalizationRegistryConstructor(proto:)) -> [proto]
     FinalizationRegistryN(FinalizationRegistryPrototypeRegister)
     | FinalizationRegistryN(FinalizationRegistryPrototypeUnregister) -> []
+    WeakRefN(_) -> []
     ShadowRealmN(n) -> shadow_realm_native_refs(n)
     DateN(n) -> date_native_refs(n)
     RegExpN(n) -> regexp_native_refs(n)
@@ -3110,6 +3118,9 @@ pub type ObjKind {
   /// §26.2 FinalizationRegistry — [[CleanupCallback]] (held strongly) and
   /// [[Cells]] (newest first; each cell's target/token weak, held strong).
   FinalizationRegistryObj(callback: JsVal, cells: List(FinRegCell))
+  /// §26.1 WeakRef — [[WeakRefTarget]], held weakly (GC does not trace it;
+  /// `None` = empty, set once the target's cell was swept).
+  WeakRefObj(target: Option(JsVal))
   /// A ShadowRealm instance (proposal-shadowrealm). `realm` is the
   /// [[ShadowRealm]] slot: the id of the realm the constructor made for it.
   ShadowRealmObj(realm: Int)
@@ -3399,6 +3410,8 @@ pub type Realm {
     set: BuiltinPair,
     weak_map: BuiltinPair,
     weak_set: BuiltinPair,
+    weak_ref: BuiltinPair,
+    finalization_registry: BuiltinPair,
     date: BuiltinPair,
     regexp: BuiltinPair,
     promise: BuiltinPair,
@@ -3466,6 +3479,8 @@ pub fn unset_realm() -> Realm {
     set: p,
     weak_map: p,
     weak_set: p,
+    weak_ref: p,
+    finalization_registry: p,
     date: p,
     regexp: p,
     promise: p,

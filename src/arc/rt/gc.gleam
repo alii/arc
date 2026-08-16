@@ -38,8 +38,9 @@ import arc/rt/types.{
   ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
   SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
   SetIterator, SetObj, Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
-  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj,
-  WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list, native_token_refs,
+  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj,
+  WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list,
+  native_token_refs,
 } as rt_types
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
@@ -393,6 +394,9 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       list.fold(cells, push_val_refs(callback, acc), fn(a, cell) {
         push_val_refs(cell.held, a)
       })
+    // [[WeakRefTarget]] is weak (§26.1.1.1) and NOT traced — emptied in
+    // `prune_weak` once the target dies.
+    WeakRefObj(target: _) -> acc
     // A realm id: the realm's intrinsics are pinned roots already.
     rt_types.ShadowRealmObj(realm: _) -> acc
   }
@@ -649,6 +653,11 @@ fn prune_weak(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
           })
         SObject(..slot, kind: FinalizationRegistryObj(callback:, cells:))
       }
+      SObject(kind: WeakRefObj(target:), ..) ->
+        SObject(
+          ..slot,
+          kind: WeakRefObj(target: option.then(target, weak_live)),
+        )
       _ -> slot
     }
   })
