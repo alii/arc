@@ -3,6 +3,7 @@
 //// the GC safepoint. Console output goes wherever `HostHooks.print` sends it.
 
 import arc/host_hooks.{type HostHooks}
+import arc/interp/entry
 import arc/rt/builtins as rt_builtins
 import arc/rt/types.{type Agent, type JsVal}
 import gleam/dynamic.{type Dynamic}
@@ -24,10 +25,11 @@ pub type JsExecOutcome {
   JsCrashed(reason: String)
 }
 
-/// A fresh agent with a full realm. Pure data, so one seed can be applied
-/// any number of times.
+/// A fresh agent with a full realm and the bytecode interpreter linked, so
+/// `eval`, `Function()` and `ShadowRealm.evaluate` run on the same heap as
+/// compiled code. Pure data, so one seed can be applied any number of times.
 pub fn seed(hooks: HostHooks) -> Agent {
-  rt_builtins.new_agent(hooks)
+  entry.link(rt_builtins.new_agent(hooks))
 }
 
 /// Load `beam` under the module atom `name`.
