@@ -639,6 +639,7 @@ pub fn parse_module(
 /// accident.
 pub fn parse_direct_eval(
   source: String,
+  strict strict: Bool,
   allow_new_target allow_new_target: Bool,
   allow_super_property allow_super_property: Bool,
   allow_super_call allow_super_call: Bool,
@@ -646,7 +647,11 @@ pub fn parse_direct_eval(
   outer_private_names outer_private_names: List(String),
 ) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
   use p <- init_parser(source, Script)
-  // §19.2.1.1 PerformEval step 5: direct eval inside a method may legally
+  // §19.2.1.1 PerformEval step 12: `strict` is strictCaller — the eval body
+  // is parsed as strict code when the calling code is strict, so strict-only
+  // early errors (reserved words, octal literals, `with`) surface.
+  //
+  // Step 5: direct eval inside a method may legally
   // reference the caller's private names — `outer_private_names` is the
   // caller's PrivateEnvironment chain at the eval call site. Any other
   // unresolved private reference is the usual AllPrivateIdentifiersValid
@@ -660,6 +665,7 @@ pub fn parse_direct_eval(
       ..p,
       ctx: Ctx(
         ..p.ctx,
+        strict: p.ctx.strict || strict,
         allow_new_target:,
         allow_super_property:,
         allow_super_call:,
