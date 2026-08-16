@@ -637,7 +637,10 @@ fn fresh_vars(e: Emitter2, n: Int) -> #(List(String), Emitter2) {
 
 /// The handler a cleanup's own ir.Try uses to leave `esc`'s region with the
 /// thrown value.
-pub fn escape_handler(e: Emitter2, esc: Escape) -> #(ir.CatchHandler, Emitter2) {
+pub fn escape_handler(
+  e: Emitter2,
+  esc: Escape,
+) -> #(ir.CatchHandler, Emitter2) {
   let #(x, e) = fresh_var(e)
   let dummies = list.repeat(e.consts.undef, esc.arity)
   #(
@@ -655,7 +658,11 @@ pub fn escape_handler(e: Emitter2, esc: Escape) -> #(ir.CatchHandler, Emitter2) 
 /// block: a normal exit yields the carried values on through, an escape
 /// rethrows the carried exception outside the region. Yields the carried
 /// values.
-pub fn land_escapes(e: Emitter2, esc: Escape, region: ir.Expr) -> #(ir.Expr, Emitter2) {
+pub fn land_escapes(
+  e: Emitter2,
+  esc: Escape,
+  region: ir.Expr,
+) -> #(ir.Expr, Emitter2) {
   let #(code, e) = fresh_var(e)
   let #(exn, e) = fresh_var(e)
   let #(inner, e) = fresh_vars(e, esc.arity)

@@ -420,10 +420,7 @@ fn emit_stmt(
       ..,
     ) -> {
       let blocked =
-        set.contains(
-          scope.get_scope(e.tree, e.cur_scope).annexb_blocked,
-          name,
-        )
+        set.contains(scope.get_scope(e.tree, e.cur_scope).annexb_blocked, name)
       case e.in_block && !e.strict && !blocked {
         True -> annexb_promote(e, name, k)
         False -> k(e)

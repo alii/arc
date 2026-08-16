@@ -1483,7 +1483,8 @@ pub fn emit_prologue(
   let unmapped = non_simple || rest_param != None
   let init_args = fn(e, when: Bool, k) {
     case when {
-      True -> init_arguments(e, is_arrow, uses_args, fixed, non_simple, unmapped, k)
+      True ->
+        init_arguments(e, is_arrow, uses_args, fixed, non_simple, unmapped, k)
       False -> k(e)
     }
   }
