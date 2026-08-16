@@ -33,14 +33,12 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, type JsSlot, type JsVal,
-  type NativeToken, type Property, type PropertyKey, Agent, ArgumentsObj,
-  ArrayObj, DataProperty, FrameInfo, FunctionApply, FunctionCall, FunctionN,
-  JsStore, KBound, KBytecode, KCompiled, KHandle, KNative, KNull, KTdz, KUndef,
-  Named, ProxyObj, ReflectApply, ReflectN, SBox, SObject, classify, mk_object,
-  mk_tdz, mk_undefined,
+  type NativeToken, Agent, ArgumentsObj, ArrayObj, FrameInfo, FunctionApply,
+  FunctionCall, FunctionN, JsStore, KBound, KBytecode, KCompiled, KHandle,
+  KNative, KNull, KTdz, KUndef, ProxyObj, ReflectApply, ReflectN, SBox, SObject,
+  classify, mk_object, mk_tdz, mk_undefined,
 }
 import gleam/bool
-import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -702,74 +700,13 @@ pub fn construct(
 ) -> Result(State, StepExit) {
   // §7.2.4 IsConstructor gate — after ArgumentListEvaluation (§13.3.7.2
   // step 5), so `super(sideEffect())` on a non-ctor parent still ran args.
-  case classify(ctor) {
-    KHandle(ctor_h) -> {
-      let slot = rt_store.t_cell_get(state.agent, ctor_h)
-      let constructible = case slot {
-        SObject(kind: KBytecode(flags:, ..), ..) -> flags.is_constructor
-        _ -> rt_call.is_constructor(state.agent, ctor)
-      }
-      case constructible {
-        True ->
-          construct_handle(
-            state,
-            ctor_h,
-            slot,
-            args,
-            rest_stack,
-            new_target,
-            drive,
-          )
-        False -> not_a_constructor(state, ctor, rest_stack)
-      }
-    }
-    _ -> not_a_constructor(state, ctor, rest_stack)
-  }
-}
-
-fn not_a_constructor(
-  state: State,
-  ctor: JsVal,
-  rest_stack: List(JsVal),
-) -> Result(State, StepExit) {
-  state.throw_type_error(
-    State(..state, stack: rest_stack),
-    rt_inspect.inspect(state.agent, ctor) <> " is not a constructor",
-  )
-}
-
-/// The receiver for a base bytecode constructor. When `new_target` is the
-/// constructor itself and its own `prototype` is a data property holding an
-/// object, that [[Get]] is unobservable, so the handle is used directly;
-/// every other shape takes the guarded generic path.
-fn base_this(
-  state: State,
-  ctor_h: Handle,
-  props: Dict(PropertyKey, Property),
-  new_target: JsVal,
-  rest_stack: List(JsVal),
-) -> Result(#(Handle, State), StepExit) {
-  let own_proto = case classify(new_target) {
-    KHandle(nt_h) if nt_h == ctor_h ->
-      case dict.get(props, Named("prototype")) {
-        Ok(DataProperty(value:, ..)) ->
-          case classify(value) {
-            KHandle(p) -> Some(p)
-            _ -> None
-          }
-        _ -> None
-      }
-    _ -> None
-  }
-  case own_proto {
-    Some(p) -> {
-      let #(h, agent) = rt_obj.t_new_object(state.agent, Some(p))
-      Ok(#(h, State(..state, agent:)))
-    }
-    None ->
-      ffi.guarded(
-        ffi.guard2(new_base_this, state.agent, new_target),
+  case rt_call.is_constructor(state.agent, ctor), classify(ctor) {
+    True, KHandle(ctor_h) ->
+      construct_handle(state, ctor_h, args, rest_stack, new_target, drive)
+    _, _ ->
+      state.throw_type_error(
         State(..state, stack: rest_stack),
+        rt_inspect.inspect(state.agent, ctor) <> " is not a constructor",
       )
   }
 }
@@ -777,16 +714,14 @@ fn base_this(
 fn construct_handle(
   state: State,
   ctor_h: Handle,
-  slot: JsSlot,
   args: List(JsVal),
   rest_stack: List(JsVal),
   new_target: JsVal,
   drive: Drive,
 ) -> Result(State, StepExit) {
-  case slot {
+  case rt_store.t_cell_get(state.agent, ctor_h) {
     SObject(
       kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
-      props:,
       ..,
     )
       if realm == state.agent.realm.id
@@ -813,12 +748,9 @@ fn construct_handle(
         // Base: §10.1.13 OrdinaryCreateFromConstructor — proto comes from
         // ? Get(newTarget, "prototype"), observable for proxy newTargets.
         False -> {
-          use #(new_obj, state) <- result.try(base_this(
-            state,
-            ctor_h,
-            props,
-            new_target,
-            rest_stack,
+          use #(new_obj, state) <- result.try(ffi.guarded(
+            ffi.guard2(new_base_this, state.agent, new_target),
+            State(..state, stack: rest_stack),
           ))
           let this_val = mk_object(new_obj)
           call_function(
