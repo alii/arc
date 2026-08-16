@@ -157,6 +157,7 @@ pub fn table() -> DirectHost {
       #("super_call", HostOp(class, "t_super_call", Mut)),
       #("make_method", HostOp(class, "t_make_method", MutUnit)),
       #("async_start", HostOp(async, "t_async_start", Mut)),
+      #("async_reject", HostOp(async, "t_async_reject", Mut)),
       #("gen_start", HostOp(async, "t_gen_start", Mut)),
       #("asyncgen_start", HostOp(async, "t_asyncgen_start", Mut)),
       #("await", HostOp(async, "t_await", MutUnit)),

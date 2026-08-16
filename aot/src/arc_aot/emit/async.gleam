@@ -4319,10 +4319,28 @@ pub fn emit_coroutine_fn(
           ])
         },
         e_pro,
-        fn(_e, h) { ir.Return([h]) },
+        fn(_e, h) { ir.Values([h]) },
       )
     Ok(#(tree, finish(e_pro)))
   })
+  // §27.7.5.1 / §15.9.3: an async function's FunctionDeclarationInstantiation
+  // (parameter defaults) throw rejects the result promise; generators and
+  // async generators throw synchronously (§27.5.3.1, §27.6.3.1).
+  let #(ex, e_outer) = state.fresh_var(e_outer)
+  let #(res, e_outer) = state.fresh_var(e_outer)
+  let body_expr = case kind {
+    state.CorAsync ->
+      ir.Try(result: [ir.TTerm], body: body_expr, handlers: [
+        ir.CatchHandler(
+          on: ir.OnTag("js_exn"),
+          payload: [ex],
+          exnref: None,
+          handler: ir.CallHost("js", "async_reject", [ir.Var(ex)]),
+        ),
+      ])
+    state.CorGenerator | state.CorAsyncGen -> body_expr
+  }
+  let body_expr = ir.Let([res], body_expr, ir.Return([ir.Var(res)]))
   let e_outer =
     state.add_function(
       e_outer,

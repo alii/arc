@@ -2061,9 +2061,14 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
           emit_member_call(o, prop, args)
         }
       }
-    // Direct-eval candidate — D15 UnsupportedFeature.
-    ast.Identifier(name: "eval", ..) ->
+    // Direct-eval candidate — D15 UnsupportedFeature. §13.3.6.1 steps 1-3:
+    // the callee reference and the arguments are evaluated first, so a
+    // throwing argument wins over the unsupported-eval throw.
+    ast.Identifier(name: "eval", ..) -> {
+      use _ <- anf.then(expr(callee))
+      use _ <- anf.then(emit_args_list(args))
       throw_at_rt("throw_type_error", "unsupported: direct eval")
+    }
     // Regular call f(args): thisValue = undefined (§13.3.6.2 step 1.b.iii).
     // When the callee is an unboxed local ∉ carried OR a slotted-global cell
     // never reassigned in the loop, stmt.gleam's loop emit hoists

@@ -1635,6 +1635,15 @@ pub fn t_async_start(
   t_async_run(st, ResumeCompiled(sm:, rs: 0, loc: loc0))
 }
 
+/// §27.7.5.1 EvaluateAsyncFunctionBody / §15.9.3 EvaluateAsyncConciseBody
+/// step 2-3: FunctionDeclarationInstantiation threw, so the call's result
+/// promise is rejected with the thrown value instead of the throw escaping.
+pub fn t_async_reject(st: Agent, reason: JsVal) -> #(Handle, Agent) {
+  let #(promise_h, st) = t_new_promise(st)
+  let st = t_promise_reject(st, promise_h, reason)
+  #(promise_h, st)
+}
+
 /// AsyncFunctionStart for a body that begins at `resume`: allocate the
 /// result promise and the `SAsyncContext`, run the first turn now, drive
 /// its outcome, and return the result promise.

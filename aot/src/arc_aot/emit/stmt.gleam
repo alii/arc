@@ -1938,7 +1938,7 @@ fn emit_catch_handler(
   case param {
     Some(p) -> {
       let #(e, save) = state.enter_scope(e, in_block: e.in_block)
-      use e <- binding_prologue(e, e.cur_scope)
+      use e <- exn.catch_binding_prologue(e, e.cur_scope)
       use #(dtree, e) <- result.try(e.dispatch.emit_destructure(
         e,
         p,

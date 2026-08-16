@@ -395,11 +395,11 @@ fn emit_catch_arm(
   }
 }
 
-/// Seed the just-entered Catch scope's bindings — private copy of
-/// stmt.gleam:415-448 binding_prologue. `catch(x)` → CatchBinding → undef-
-/// seeded (cell_new when captured); destructured `catch({a,b})` names are
-/// LetBinding → tdz-seeded so emit_destructure's stores land on live slots.
-fn catch_binding_prologue(
+/// Seed the just-entered Catch scope's bindings. `catch(x)` → the parameter
+/// binding → undef-seeded (cell_new when captured); destructured
+/// `catch({a,b})` names are LetBinding → tdz-seeded so emit_destructure's
+/// stores land on live slots.
+pub fn catch_binding_prologue(
   e: Emitter2,
   scope_id: scope.ScopeId,
   k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
@@ -426,10 +426,11 @@ fn catch_binding_prologue(
   case b.kind {
     VarBinding -> seed(e, e.consts.undef)
     LetBinding | ConstBinding | FnNameBinding -> seed(e, e.consts.tdz)
-    // CatchBinding IS the Catch scope's own binding — must seed (cell_new when
-    // boxed) so emit_destructure's boxed IdentifierPattern arm has a live cell
-    // to cell_set into. Param/Capture never appear in a Catch scope.
-    CatchBinding -> seed(e, e.consts.undef)
-    ParamBinding | CaptureBinding -> next(e)
+    // The catch parameter (recorded by the parser as ParamBinding) IS the
+    // Catch scope's own binding — must seed (cell_new when boxed) so
+    // emit_destructure's boxed IdentifierPattern arm has a live cell to
+    // cell_set into.
+    CatchBinding | ParamBinding -> seed(e, e.consts.undef)
+    CaptureBinding -> next(e)
   }
 }
