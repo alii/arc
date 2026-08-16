@@ -649,13 +649,35 @@ pub fn t_get_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
           <> key_text(key)
           <> "')",
       )
-    // Bool/Num/Str/BigInt/Symbol → box to a wrapper Handle, walk from there
-    // with the ORIGINAL primitive as Receiver (so accessor `this` is the
-    // primitive, per §10.1.8.1).
-    _ -> {
-      let #(h, st) = js_ops(st).to_object(st, recv)
-      get_from(st, h, key, recv)
-    }
+    // Bool/Num/Str/BigInt/Symbol: a fresh wrapper has no own props beyond the
+    // String exotic virtuals, so read those directly and otherwise walk from
+    // the realm prototype with the ORIGINAL primitive as Receiver (accessor
+    // `this` is the primitive, per §10.1.8.1). No box is allocated.
+    rt_types.KStr(s) -> primitive_string_get(st, s, key, recv)
+    rt_types.KNum(_) -> get_from(st, st.realm.number.prototype, key, recv)
+    rt_types.KBool(_) -> get_from(st, st.realm.boolean.prototype, key, recv)
+    rt_types.KSym(_) -> get_from(st, st.realm.symbol.prototype, key, recv)
+    rt_types.KBig(_) -> get_from(st, st.realm.bigint.prototype, key, recv)
+    KTdz -> panic as "t_get_prop: TDZ sentinel escaped into a JsVal"
+  }
+}
+
+/// [[Get]] on a string primitive: §10.4.3.5 virtual own props, then
+/// `%String.prototype%`.
+fn primitive_string_get(
+  st: Agent,
+  s: String,
+  key: ObjectKey,
+  recv: JsVal,
+) -> #(JsVal, Agent) {
+  let own = case key {
+    StringKey(Named("length")) -> Some(string_length_property(s))
+    StringKey(Index(i)) -> string_index_property(s, i)
+    _ -> None
+  }
+  case own {
+    Some(prop) -> property_get_value(st, prop, recv)
+    None -> get_from(st, st.realm.string.prototype, key, recv)
   }
 }
 
@@ -771,13 +793,26 @@ pub fn t_set_prop(
           <> key_text(key)
           <> "')",
       )
-    // Primitive receiver: box to walk the proto chain for a setter; the
-    // Receiver stays the primitive, so the receiver-write step (2.b —
-    // "Receiver is not an Object → false") rejects if no setter is found.
-    _ -> {
-      let #(h, st) = js_ops(st).to_object(st, recv)
-      set_from(st, h, key, v, recv)
-    }
+    // Primitive receiver: a fresh wrapper's only own props are the String
+    // exotic virtuals (non-writable → false); otherwise walk the realm proto
+    // chain for a setter. The Receiver stays the primitive, so the
+    // receiver-write step (2.b — "Receiver is not an Object → false")
+    // rejects if no setter is found. No box is allocated.
+    rt_types.KStr(s) ->
+      case key {
+        StringKey(Named("length")) -> #(False, st)
+        StringKey(Index(i)) ->
+          case js_string.char_at(s, i) {
+            Some(_) -> #(False, st)
+            None -> set_from(st, st.realm.string.prototype, key, v, recv)
+          }
+        _ -> set_from(st, st.realm.string.prototype, key, v, recv)
+      }
+    rt_types.KNum(_) -> set_from(st, st.realm.number.prototype, key, v, recv)
+    rt_types.KBool(_) -> set_from(st, st.realm.boolean.prototype, key, v, recv)
+    rt_types.KSym(_) -> set_from(st, st.realm.symbol.prototype, key, v, recv)
+    rt_types.KBig(_) -> set_from(st, st.realm.bigint.prototype, key, v, recv)
+    KTdz -> panic as "t_set_prop: TDZ sentinel escaped into a JsVal"
   }
 }
 
