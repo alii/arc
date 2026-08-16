@@ -743,6 +743,8 @@ elem_write_grow(_, _, _) -> miss.
 %% One body-recursive build + list_to_tuple instead of append / reverse
 %% chains. Env is the closure's captured environment, a list or a tuple of
 %% values. local_count is compiler-bounded, so non-tail recursion is fine.
+setup_locals_tuple({}, [], Args, Arity, Arity, _Undef) when length(Args) =:= Arity ->
+    list_to_tuple(Args);
 setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) when is_tuple(Env) ->
     setup_locals_tuple(tuple_to_list(Env), Seeds, Args, Arity, LocalCount, Undef);
 setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) ->
@@ -759,6 +761,12 @@ setup_locals_tuple(Env, Seeds, Args, Arity, LocalCount, Undef) ->
 %% setup_locals_tuple/6; it is left unmatched on purpose: seeding call-time
 %% values into captured slots (which hold parent box refs at
 %% non-contiguous indices) would be silently wrong.
+%% No env, every arg supplied, no extra locals: the tuple is the seeds
+%% followed by the args as given.
+setup_locals_seeded({}, {owned_lexical_slots, _Base},
+                    This, FnObj, Home, NT, Args, Arity, LocalCount, _Undef)
+        when LocalCount =:= Arity + 4, length(Args) =:= Arity ->
+    list_to_tuple([This, FnObj, Home, NT | Args]);
 setup_locals_seeded(Env, Lexical, This, FnObj, Home, NT, Args, Arity,
                     LocalCount, Undef) when is_tuple(Env) ->
     setup_locals_seeded(tuple_to_list(Env), Lexical, This, FnObj, Home, NT,

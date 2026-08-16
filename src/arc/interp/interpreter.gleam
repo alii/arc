@@ -1231,6 +1231,13 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
+    // The frame is popped on the way out, so its line is not recorded.
+    Return ->
+      after_step(
+        call.return_op(State(..state, pc:, stack:, locals:, agent:)),
+        drive,
+      )
+
     _other -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
   }
 }

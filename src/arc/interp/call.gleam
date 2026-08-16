@@ -886,27 +886,32 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
     [saved, ..rest_frames] ->
       case resolve_return(state, return_value, saved.constructor_this) {
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
-        Ok(pushed) -> {
-          let caller = restore_frame(state, saved, rest_frames)
-          Ok(safepoint.maybe_collect_at_toplevel(
-            State(..caller, stack: [pushed, ..caller.stack]),
-          ))
-        }
+        Ok(pushed) ->
+          Ok(
+            safepoint.maybe_collect_at_toplevel(restore_frame(
+              state,
+              saved,
+              [pushed, ..saved.stack],
+              rest_frames,
+            )),
+          )
       }
   }
 }
 
-/// Reinstate `saved` as the running frame (registers, depth, stack frame).
+/// Reinstate `saved` as the running frame (registers, depth, stack frame)
+/// with `stack` as its operand stack.
 fn restore_frame(
   state: State,
   saved: SavedFrame,
+  stack: List(JsVal),
   rest_frames: List(SavedFrame),
 ) -> State {
   let SavedFrame(
     func:,
     unit:,
     locals:,
-    stack:,
+    stack: _,
     pc:,
     try_stack:,
     constructor_this: _,
@@ -941,7 +946,8 @@ fn restore_frame(
 pub fn unwind_frame(state: State) -> Option(State) {
   case state.call_stack {
     [] -> None
-    [saved, ..rest_frames] -> Some(restore_frame(state, saved, rest_frames))
+    [saved, ..rest_frames] ->
+      Some(restore_frame(state, saved, saved.stack, rest_frames))
   }
 }
 
