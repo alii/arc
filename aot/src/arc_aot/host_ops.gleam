@@ -53,6 +53,7 @@ pub fn table() -> DirectHost {
       #("throw_syntax_error", HostOp(val, "t_throw_syntax_error", MutUnit)),
       #("truthy", HostOp(val_ffi, "to_boolean_i32", Pure)),
       #("is_nullish", HostOp(val, "is_nullish", Pure)),
+      #("is_object", HostOp(val, "is_object", Pure)),
       #("float_lit", HostOp(val, "float_from_bits", Pure)),
       #("empty_list", HostOp(val, "empty_list", Pure)),
       #("list_append_one", HostOp(val, "list_append_one", Pure)),
