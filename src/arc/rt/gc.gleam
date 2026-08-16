@@ -123,7 +123,8 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     next_shape: _,
     // Parse-id counter — no roots.
     unit_uid: _,
-    // Int/BitArray only, no handles.
+    // Inline caches: call entries hold handles but are validated on use
+    // (rt_types.IcCall), so they are weak — never roots.
     ics: _,
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)

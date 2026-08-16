@@ -150,6 +150,7 @@ pub fn table() -> DirectHost {
       #("instanceof_fast", HostOp(obj_ffi, "t_instanceof_fast", Read)),
       #("call", HostOp(call, "t_call_checked", Mut)),
       #("call_method_mono", HostOp(call_ffi, "t_call_method_mono", Mut)),
+      #("call_method_ic", HostOp(call_ffi, "t_call_method_ic", Mut)),
       #("construct", HostOp(call, "t_construct", Mut)),
       #("new_simple", HostOp(call_ffi, "t_new_simple", Mut)),
       #("kfn_code", HostOp(call, "t_kfn_code", Read)),

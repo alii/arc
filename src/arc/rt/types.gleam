@@ -3207,10 +3207,28 @@ pub type ShapeDesc {
 /// `shape_id` the key lives at slot `off`. `key` is kept so two modules that
 /// happen to share a site id can never read through each other's entry.
 /// Sound because a shape's offsets never change and shape ids are never
-/// recycled. Lives on `JsStore.ics`; a droppable cache (no handles, not
-/// snapshotted).
+/// recycled. Lives on `JsStore.ics`; a droppable cache (not snapshotted).
+///
+/// `IcCall` is a compiled `o.key(args)` site's cache: up to a few ways, each
+/// a receiver shape `shape_id` (so no own `key`) whose proto chain, from
+/// `proto_id` down to the holder, was `chain` (cell id and the cell's whole
+/// slot) when `key` resolved to the data value `callee`. The guard compares
+/// each live slot with `=:=` (pointer-equal while untouched; any write
+/// replaces it), so a way is sound whatever now lives at those ids: an equal
+/// slot has the same props and the same proto link, so the same lookup. Not
+/// a GC root — the handle is validated on use.
 pub type IcEntry {
   IcRead(shape_id: Int, off: Int, key: BitArray)
+  IcCall(key: BitArray, ways: List(IcCallWay))
+}
+
+pub type IcCallWay {
+  IcCallWay(
+    shape_id: Int,
+    proto_id: Int,
+    chain: List(#(Int, JsSlot)),
+    callee: Handle,
+  )
 }
 
 // ───────────────────────────────── §2.4 ASYNC ──────────────────────────────

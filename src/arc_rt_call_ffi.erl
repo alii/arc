@@ -20,7 +20,7 @@
 -module(arc_rt_call_ffi).
 -export([t_call_protected/4, t_apply_protected/2, mk_frame/4, apply_sm/5,
          step_classify/1, t_kfn_code/3, t_new_simple/3,
-         t_call_method_mono/4]).
+         t_call_method_mono/4, t_call_method_ic/5]).
 
 -include("arc_rt_layout.hrl").
 
@@ -67,6 +67,65 @@ t_kfn_code(_, _, _) -> undefined.
 %% is flat 1-hop. 4 covers both with headroom; deeper → miss to full path.
 -define(MONO_PROTO_MAX, 4).
 
+%% IcEntry (rt_types.gleam): {ic_call, KeyBin, Entries}, each entry
+%% {ic_call_way, Sid, PId, Chain, Fn} with Chain = [{ProtoId, ProtoSlot}]
+%% from the receiver's proto down to the holder. Up to ?IC_CALL_WAYS entries
+%% per site (raytrace's shape.intersect and Class.create's shared
+%% `this.initialize.apply(this, arguments)` are polymorphic).
+-define(IC_CALL, ic_call).
+-define(IC_CALL_WAY, ic_call_way).
+-define(IC_CALL_WAYS, 4).
+
+%% t_call_method_ic(St, Recv, KeyBin, Args, Site) -> {V, St'} | {miss, St}
+%% JMut. `t_call_method_mono` with a per-site inline cache (JsStore.ics).
+%% Hit: receiver is a shaped object of an entry's shape (so no own `key`),
+%% its proto is the entry's first cell and every cell on the chain still
+%% holds the very slot the key was resolved through (an equal slot has the
+%% same props and the same proto link; any write replaces it), then apply
+%% the entry's data value with the mono gate. Otherwise the mono body runs
+%% and, when a shaped receiver resolves the key on its proto chain, records
+%% the way: replacing a stale entry (same shape and proto, a chain cell was
+%% written) or adding one while the site has room.
+t_call_method_ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args, Site) ->
+    Store = element(?AGENT_STORE, St),
+    Data = element(?STORE_DATA, Store),
+    RSlot = array:get(RId, Data),
+    case element(?STORE_ICS, Store) of
+        #{Site := {?IC_CALL, KeyBin, Entries}} ->
+            case RSlot of
+                {?SSHAPED_TAG, Sid, Proto, _} ->
+                    case ic_probe(Data, Sid, Proto, Entries) of
+                        {hit, Fn} -> mono_apply(St, Data, Fn, Recv, Args);
+                        stale -> mono(St, Recv, RSlot, KeyBin, Args, Site);
+                        miss when length(Entries) < ?IC_CALL_WAYS ->
+                            mono(St, Recv, RSlot, KeyBin, Args, Site);
+                        miss -> mono(St, Recv, RSlot, KeyBin, Args, none)
+                    end;
+                _ -> mono(St, Recv, RSlot, KeyBin, Args, none)
+            end;
+        #{Site := _} -> mono(St, Recv, RSlot, KeyBin, Args, none);
+        _ -> mono(St, Recv, RSlot, KeyBin, Args, Site)
+    end;
+t_call_method_ic(St, _, _, _, _) -> {miss, St}.
+
+%% {hit, Fn} | stale (a way for this shape+proto failed its chain) | miss.
+ic_probe(Data, Sid, Proto = {?SOME, {?HANDLE_TAG, PId}},
+         [{?IC_CALL_WAY, Sid, PId, Chain, Fn} | _]) ->
+    case ic_chain_ok(Data, Proto, Chain) of
+        true -> {hit, Fn};
+        false -> stale
+    end;
+ic_probe(Data, Sid, Proto, [_ | Rest]) -> ic_probe(Data, Sid, Proto, Rest);
+ic_probe(_, _, _, []) -> miss.
+
+ic_chain_ok(_, _, []) -> true;
+ic_chain_ok(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PSlot} | Rest]) ->
+    case array:get(PId, Data) of
+        PSlot -> ic_chain_ok(Data, element(?SOBJECT_PROTO, PSlot), Rest);
+        _ -> false
+    end;
+ic_chain_ok(_, _, _) -> false.
+
 %% t_call_method_mono(St, Recv, KeyBin, Args) -> {V, St'} | {miss, St}
 %% JMut fast-path probe for `o.m(args)`. Folds the get_prop_any proto walk +
 %% t_kfn_code + CallClosure apply into ONE FFI call: own-then-proto data-prop
@@ -78,58 +137,91 @@ t_kfn_code(_, _, _) -> undefined.
 %% shaped own slot or an own data prop shadows the proto method; an own
 %% accessor shadows too and misses.
 t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
-    Store = element(?AGENT_STORE, St),
-    Data = element(?STORE_DATA, Store),
-    case array:get(RId, Data) of
-        RSlot when is_tuple(RSlot) ->
-            Own = case element(1, RSlot) of
-                ?SOBJECT_TAG -> mono_own_value(RSlot, KeyBin);
-                ?SSHAPED_TAG -> mono_shaped_own(Store, RSlot, KeyBin);
-                _ -> miss
-            end,
-            case Own of
-                absent ->
-                    %% proto is element 3 for BOTH s_object and s_shaped_object.
-                    mono_proto(St, Data, element(?SOBJECT_PROTO, RSlot),
-                               KeyBin, Recv, Args);
-                miss -> {miss, St};
-                V -> mono_apply(St, Data, V, Recv, Args)
-            end;
-        _ -> {miss, St}
-    end;
+    Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
+    mono(St, Recv, array:get(RId, Data), KeyBin, Args, none);
 t_call_method_mono(St, _, _, _) -> {miss, St}.
 
-mono_proto(St, Data, {?SOME, {?HANDLE_TAG, PId}}, KeyBin, Recv, Args) ->
-    mono_proto_walk(St, Data, PId, KeyBin, Recv, Args, ?MONO_PROTO_MAX);
-mono_proto(St, _, _, _, _, _) -> {miss, St}.
+%% RSlot is the receiver's slot; Site is `none` (no cache) or the site id
+%% to record the resolved way on.
+mono(St, Recv, RSlot, KeyBin, Args, Site) when is_tuple(RSlot) ->
+    Store = element(?AGENT_STORE, St),
+    Data = element(?STORE_DATA, Store),
+    {Own, Ic} = case element(1, RSlot) of
+        ?SOBJECT_TAG -> {mono_own_value(RSlot, KeyBin), none};
+        ?SSHAPED_TAG when Site =:= none ->
+            {mono_shaped_own(Store, RSlot, KeyBin), none};
+        ?SSHAPED_TAG ->
+            {mono_shaped_own(Store, RSlot, KeyBin),
+             {Site, element(?SSHAPED_SID, RSlot), []}};
+        _ -> {miss, none}
+    end,
+    case Own of
+        absent ->
+            %% proto is element 3 for BOTH s_object and s_shaped_object.
+            mono_proto(St, Data, element(?SOBJECT_PROTO, RSlot), KeyBin,
+                       Recv, Args, Ic);
+        miss -> {miss, St};
+        V -> mono_apply(St, Data, V, Recv, Args)
+    end;
+mono(St, _, _, _, _, _) -> {miss, St}.
 
-%% Bounded walk. Accessor or non-cell hit at any hop shadows → miss.
-mono_proto_walk(St, _, _, _, _, _, 0) -> {miss, St};
-mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel) ->
+mono_proto(St, Data, {?SOME, {?HANDLE_TAG, PId}}, KeyBin, Recv, Args, Ic) ->
+    mono_proto_walk(St, Data, PId, KeyBin, Recv, Args, ?MONO_PROTO_MAX, Ic);
+mono_proto(St, _, _, _, _, _, _) -> {miss, St}.
+
+%% Bounded walk. Accessor or non-cell hit at any hop shadows → miss. Ic is
+%% `none` or `{Site, Sid, Chain}` accumulating the hops walked (reversed).
+mono_proto_walk(St, _, _, _, _, _, 0, _) -> {miss, St};
+mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel, Ic) ->
     case array:get(Id, Data) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case mono_own_value(Slot, KeyBin) of
-                absent ->
-                    case element(?SOBJECT_PROTO, Slot) of
-                        {?SOME, {?HANDLE_TAG, NId}} ->
-                            mono_proto_walk(St, Data, NId, KeyBin, Recv,
-                                            Args, Fuel - 1);
-                        _ -> {miss, St}
-                    end;
-                V -> mono_apply(St, Data, V, Recv, Args)
-            end;
+            mono_hop(St, Data, Id, Slot, mono_own_value(Slot, KeyBin),
+                     KeyBin, Recv, Args, Fuel, Ic);
         Slot when element(1, Slot) =:= ?SSHAPED_TAG ->
-            case mono_shaped_own(element(?AGENT_STORE, St), Slot, KeyBin) of
-                absent ->
-                    case element(?SSHAPED_PROTO, Slot) of
-                        {?SOME, {?HANDLE_TAG, NId}} ->
-                            mono_proto_walk(St, Data, NId, KeyBin, Recv,
-                                            Args, Fuel - 1);
-                        _ -> {miss, St}
-                    end;
-                V -> mono_apply(St, Data, V, Recv, Args)
-            end;
+            Own = mono_shaped_own(element(?AGENT_STORE, St), Slot, KeyBin),
+            mono_hop(St, Data, Id, Slot, Own, KeyBin, Recv, Args, Fuel, Ic);
         _ -> {miss, St}
+    end.
+
+%% proto is element 3 for BOTH s_object and s_shaped_object.
+mono_hop(St, Data, Id, Slot, absent, KeyBin, Recv, Args, Fuel, Ic) ->
+    case element(?SOBJECT_PROTO, Slot) of
+        {?SOME, {?HANDLE_TAG, NId}} ->
+            mono_proto_walk(St, Data, NId, KeyBin, Recv, Args, Fuel - 1,
+                            ic_hop(Ic, Id, Slot));
+        _ -> {miss, St}
+    end;
+mono_hop(St, Data, Id, Slot, Fn = {?HANDLE_TAG, _}, KeyBin, Recv, Args, _, Ic)
+  when Ic =/= none ->
+    case mono_apply(St, Data, Fn, Recv, Args) of
+        {miss, _} = Miss -> Miss;
+        {V, St2} -> {V, ic_fill(St2, ic_hop(Ic, Id, Slot), Fn, KeyBin)}
+    end;
+mono_hop(St, Data, _, _, V, _, Recv, Args, _, _) ->
+    mono_apply(St, Data, V, Recv, Args).
+
+ic_hop(none, _, _) -> none;
+ic_hop({Site, Sid, Chain}, Id, Slot) -> {Site, Sid, [{Id, Slot} | Chain]}.
+
+%% Record the resolved way after a successful apply: drop the entry for the
+%% same shape and proto (it went stale), then add while there is room.
+ic_fill(St, {Site, Sid, RevChain}, Fn, KeyBin) ->
+    Store = element(?AGENT_STORE, St),
+    Ics = element(?STORE_ICS, Store),
+    Chain = [{PId, _} | _] = lists:reverse(RevChain),
+    Kept = case Ics of
+        #{Site := {?IC_CALL, KeyBin, Es}} ->
+            [E || E = {?IC_CALL_WAY, S, P, _, _} <- Es,
+                  S =/= Sid orelse P =/= PId];
+        _ -> []
+    end,
+    case length(Kept) < ?IC_CALL_WAYS of
+        true ->
+            New = {?IC_CALL_WAY, Sid, PId, Chain, Fn},
+            IcE = {?IC_CALL, KeyBin, [New | Kept]},
+            setelement(?AGENT_STORE, St,
+                       setelement(?STORE_ICS, Store, Ics#{Site => IcE}));
+        false -> St
     end.
 
 %% Own named data prop of an SObject. `absent` = key not present → caller
