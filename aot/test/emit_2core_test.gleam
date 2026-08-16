@@ -69,7 +69,19 @@ pub fn method_call_proto_chain_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const method_call_miss_src = "var o={};try{o.nope()}catch(e){console.log('miss:'+e.name)};Object.defineProperty(o,'g',{get:function(){return function(){return 'getter'}}});console.log(o.g())"
+// Prototypes that are themselves constructed (shaped) objects: 1/2/3-hop
+// walks, a shadow on the shaped proto after warm-up, and an own shadow.
+const method_call_shaped_chain_src = "function A(){this.a=1};A.prototype.m=function(){return 'A'+this.a+this.b+this.c};function B(){this.b=2};B.prototype=new A();function C(){this.c=3};C.prototype=new B();function D(){this.d=4};D.prototype=new C();var b=new B(),c=new C(),d=new D();var s='';for(var i=0;i<3;i++){s+=b.m()+'|'+c.m()+'|'+d.m()+'|'};console.log(s);C.prototype.m=function(){return 'C'};console.log(c.m()+b.m()+d.m());B.prototype.m=function(){return 'B'};console.log(c.m()+b.m());c.m=function(){return 'own'};console.log(c.m()+d.m())"
+
+pub fn method_call_shaped_chain_diff_test() {
+  let i = harness.run_interpreted(method_call_shaped_chain_src)
+  let c = harness.run_compiled(method_call_shaped_chain_src)
+  assert i.stdout
+    == <<"A12undefined|A123|A123|A12undefined|A123|A123|A12undefined|A123|A123|\nCA12undefinedC\nCB\nownC\n":utf8>>
+  assert c.stdout == i.stdout
+}
+
+const method_call_miss_src ="var o={};try{o.nope()}catch(e){console.log('miss:'+e.name)};Object.defineProperty(o,'g',{get:function(){return function(){return 'getter'}}});console.log(o.g())"
 
 pub fn method_call_miss_diff_test() {
   let i = harness.run_interpreted(method_call_miss_src)
