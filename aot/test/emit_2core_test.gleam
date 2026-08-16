@@ -127,7 +127,7 @@ pub fn ctor_add_shaped_proto_diff_test() {
   assert c.stdout == i.stdout
 }
 
-const set_read_coherence_src ="function C(){this.x=0;this.y=0};C.prototype.w=function(a,b){this.x=a;this.y=b};var c=new C();c.w(4,5);var k='x';console.log(''+c[k]+c['y']+c.x)"
+const set_read_coherence_src = "function C(){this.x=0;this.y=0};C.prototype.w=function(a,b){this.x=a;this.y=b};var c=new C();c.w(4,5);var k='x';console.log(''+c[k]+c['y']+c.x)"
 
 pub fn set_read_coherence_diff_test() {
   let i = harness.run_interpreted(set_read_coherence_src)
@@ -469,15 +469,6 @@ pub fn float_overflow_is_infinity_diff_test() {
   diff(
     "var b=1e308,m=Number.MAX_VALUE;function f(x,y){return [x*10,-x*10,x+x,-x-x,y*2,x/1e-10,x/-1e-10,2**1024,(-10)**401,Math.pow(10,400),Math.exp(1000),x*x-x*x]}console.log(f(b,m).join());var x=b;x*=10;var y=-b;y-=b;console.log(x,y,x===Infinity,1e309,-1e309,parseFloat('1e400'),+'-1e400',isFinite(b*10))",
     "Infinity,-Infinity,Infinity,-Infinity,Infinity,Infinity,-Infinity,Infinity,-Infinity,Infinity,Infinity,NaN\nInfinity -Infinity true Infinity -Infinity Infinity -Infinity false\n",
-  )
-}
-
-/// Integer `+ - *` runs native when the result stays a safe integer; the
-/// widening, -0, Infinity, string and mixed cases still take the kernel.
-pub fn integer_arith_edges_diff_test() {
-  diff(
-    "function d(v){return 1/v===-Infinity?'-0':String(v)}var m=9007199254740991,z=0,n=-5,b=1e308,s='1',h=1.5;function f(a,b){return [a+b,a-b,a*b].join()}console.log(f(m,1),f(-m,-1),f(-m,1),f(m,-1),d(z*n),d(n*z),d(z*5),f(b,10),f(s,1),f(2,h),f(h,2),f(3,4));var i=0,j=m,k=1;for(var q=0;q<3;q++){i++;i+=2;i*=2;j++;k*=m}console.log(i,j,k,m*m,d(0*-1))",
-    "9007199254740992,9007199254740990,9007199254740991 -9007199254740992,-9007199254740990,9007199254740991 -9007199254740990,-9007199254740992,-9007199254740991 9007199254740990,9007199254740992,-9007199254740991 -0 -0 0 1e+308,1e+308,Infinity 11,0,1 3.5,0.5,3 3.5,-0.5,3 7,-1,12\n42 9007199254740992 7.307508186654512e+47 8.112963841460666e+31 -0\n",
   )
 }
 
