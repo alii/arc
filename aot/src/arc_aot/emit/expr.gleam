@@ -1837,8 +1837,7 @@ fn emit_member_call(
         }
         Some(kb) -> {
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          use args_l <- anf.then(anf.cons_list(pos))
-          use r <- anf.then(call_method_ic(o, kb, args_l))
+          use r <- anf.then(call_method_ic_pos(o, kb, pos))
           // `=:= miss` — NOT IsAtom: undefined/null/true/false are atoms and
           // are legitimate call results; an IsAtom guard would double-call.
           use is_miss <- anf.then(
@@ -1855,6 +1854,31 @@ fn emit_member_call(
           )
         }
       }
+  }
+}
+
+/// `call_method_ic` with the args passed positionally for 0..3 args (the
+/// FFI applies a matching simple variant without consing); the list form
+/// beyond that.
+fn call_method_ic_pos(
+  recv: ir.Value,
+  kb: BitArray,
+  pos: List(ir.Value),
+) -> Build(ir.Value) {
+  case pos {
+    [] | [_] | [_, _] | [_, _, _] -> {
+      use site <- anf.then(next_site())
+      anf.host("call_method_ic" <> int.to_string(list.length(pos)), [
+        recv,
+        ir.ConstBinary(kb),
+        ir.ConstI32(site),
+        ..pos
+      ])
+    }
+    _ -> {
+      use args_l <- anf.then(anf.cons_list(pos))
+      call_method_ic(recv, kb, args_l)
+    }
   }
 }
 

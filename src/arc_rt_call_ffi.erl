@@ -20,7 +20,8 @@
 -module(arc_rt_call_ffi).
 -export([t_call_protected/4, t_apply_protected/2, mk_frame/4, apply_sm/5,
          step_classify/1, t_kfn_code/3, t_new_simple/3,
-         t_call_method_mono/4, t_call_method_ic/5]).
+         t_call_method_mono/4, t_call_method_ic/5, t_call_method_ic0/4,
+         t_call_method_ic1/5, t_call_method_ic2/6, t_call_method_ic3/7]).
 
 -include("arc_rt_layout.hrl").
 
@@ -67,6 +68,12 @@ t_kfn_code(_, _, _) -> undefined.
 %% is flat 1-hop. 4 covers both with headroom; deeper → miss to full path.
 -define(MONO_PROTO_MAX, 4).
 
+%% Ordinary user function: not a class ctor, generator or async.
+-define(KFN_PLAIN(Flags),
+        (element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false andalso
+         element(?FNFLAGS_IS_GEN, Flags) =:= false andalso
+         element(?FNFLAGS_IS_ASYNC, Flags) =:= false)).
+
 %% IcEntry (rt_types.gleam): {ic_call, KeyBin, Entries}, each entry
 %% {ic_call_way, Sid, PId, Chain, Fn} with Chain = [{ProtoId, ProtoSlot}]
 %% from the receiver's proto down to the holder. Up to ?IC_CALL_WAYS entries
@@ -86,7 +93,23 @@ t_kfn_code(_, _, _) -> undefined.
 %% and, when a shaped receiver resolves the key on its proto chain, records
 %% the way: replacing a stale entry (same shape and proto, a chain cell was
 %% written) or adding one while the site has room.
-t_call_method_ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args, Site) ->
+t_call_method_ic(St, Recv, KeyBin, Args, Site) ->
+    ic(St, Recv, KeyBin, Site, Args, undefined, undefined, undefined).
+
+%% t_call_method_icN(St, Recv, KeyBin, Site, A1..AN) — the same probe with
+%% 0..3 positional args, so a hit applies a matching simple variant with no
+%% args list, no length/1 and no apply hop.
+t_call_method_ic0(St, Recv, KeyBin, Site) ->
+    ic(St, Recv, KeyBin, Site, 0, undefined, undefined, undefined).
+t_call_method_ic1(St, Recv, KeyBin, Site, A) ->
+    ic(St, Recv, KeyBin, Site, 1, A, undefined, undefined).
+t_call_method_ic2(St, Recv, KeyBin, Site, A, B) ->
+    ic(St, Recv, KeyBin, Site, 2, A, B, undefined).
+t_call_method_ic3(St, Recv, KeyBin, Site, A, B, C) ->
+    ic(St, Recv, KeyBin, Site, 3, A, B, C).
+
+%% N is the args list itself, or 0..3 with the args in A, B, C.
+ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     RSlot = array:get(RId, Data),
@@ -95,24 +118,75 @@ t_call_method_ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args, Site) ->
             case RSlot of
                 {?SSHAPED_TAG, Sid, Proto, _} ->
                     case ic_probe(Data, Sid, Proto, Entries) of
-                        {hit, Fn} -> mono_apply(St, Data, Fn, Recv, Args);
-                        stale -> mono(St, Recv, RSlot, KeyBin, Args, Site);
+                        Fn = {?HANDLE_TAG, _} ->
+                            apply_pos(St, Data, Fn, Recv, N, A, B, C);
+                        stale ->
+                            mono(St, Recv, RSlot, KeyBin, args(N, A, B, C),
+                                 Site);
                         miss when length(Entries) < ?IC_CALL_WAYS ->
-                            mono(St, Recv, RSlot, KeyBin, Args, Site);
-                        miss -> mono(St, Recv, RSlot, KeyBin, Args, none)
+                            mono(St, Recv, RSlot, KeyBin, args(N, A, B, C),
+                                 Site);
+                        miss ->
+                            mono(St, Recv, RSlot, KeyBin, args(N, A, B, C),
+                                 none)
                     end;
-                _ -> mono(St, Recv, RSlot, KeyBin, Args, none)
+                _ -> mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), none)
             end;
-        #{Site := _} -> mono(St, Recv, RSlot, KeyBin, Args, none);
-        _ -> mono(St, Recv, RSlot, KeyBin, Args, Site)
+        #{Site := _} ->
+            mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), none);
+        _ -> mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), Site)
     end;
-t_call_method_ic(St, _, _, _, _) -> {miss, St}.
+ic(St, _, _, _, _, _, _, _) -> {miss, St}.
 
-%% {hit, Fn} | stale (a way for this shape+proto failed its chain) | miss.
+args(L, _, _, _) when is_list(L) -> L;
+args(0, _, _, _) -> [];
+args(1, A, _, _) -> [A];
+args(2, A, B, _) -> [A, B];
+args(3, A, B, C) -> [A, B, C].
+
+%% mono_apply with positional args: a simple variant of arity N is applied
+%% directly (with `this` only when it reads it); the Frame and native paths
+%% cons the list.
+apply_pos(St, Data, Fn, Recv, Args, _, _, _) when is_list(Args) ->
+    mono_apply(St, Data, Fn, Recv, Args);
+apply_pos(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, N, A, B, C) ->
+    case array:get(FnId, Data) of
+        FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, FSlot) of
+                {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
+                  when ?KFN_PLAIN(Flags) ->
+                    case Simple of
+                        {?SOME, {CodeT, N, true}} ->
+                            case N of
+                                0 -> CodeT(St, Recv);
+                                1 -> CodeT(St, Recv, A);
+                                2 -> CodeT(St, Recv, A, B);
+                                3 -> CodeT(St, Recv, A, B, C)
+                            end;
+                        {?SOME, {CodeT, N, false}} ->
+                            case N of
+                                0 -> CodeT(St);
+                                1 -> CodeT(St, A);
+                                2 -> CodeT(St, A, B);
+                                3 -> CodeT(St, A, B, C)
+                            end;
+                        _ ->
+                            Code(St, {Recv, Fn, undefined, undefined},
+                                 args(N, A, B, C))
+                    end;
+                {?KNATIVE_TAG, Tag, _, _, _} ->
+                    arc@rt@builtins:dispatch_native(
+                        St, Tag, Recv, args(N, A, B, C));
+                _ -> {miss, St}
+            end;
+        _ -> {miss, St}
+    end.
+
+%% Fn (hit) | stale (a way for this shape+proto failed its chain) | miss.
 ic_probe(Data, Sid, Proto = {?SOME, {?HANDLE_TAG, PId}},
          [{?IC_CALL_WAY, Sid, PId, Chain, Fn} | _]) ->
     case ic_chain_ok(Data, Proto, Chain) of
-        true -> {hit, Fn};
+        true -> Fn;
         false -> stale
     end;
 ic_probe(Data, Sid, Proto, [_ | Rest]) -> ic_probe(Data, Sid, Proto, Rest);
@@ -261,9 +335,7 @@ mono_apply(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, Args) ->
         FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, FSlot) of
                 {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
-                  when element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
-                       element(?FNFLAGS_IS_GEN, Flags) =:= false,
-                       element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
+                  when ?KFN_PLAIN(Flags) ->
                     case Simple of
                         {?SOME, {CodeT, Arity, true}}
                           when length(Args) =:= Arity ->
