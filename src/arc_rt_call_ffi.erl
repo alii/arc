@@ -118,6 +118,17 @@ mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel) ->
                     end;
                 V -> mono_apply(St, Data, V, Recv, Args)
             end;
+        Slot when element(1, Slot) =:= ?SSHAPED_TAG ->
+            case mono_shaped_own(element(?AGENT_STORE, St), Slot, KeyBin) of
+                absent ->
+                    case element(?SSHAPED_PROTO, Slot) of
+                        {?SOME, {?HANDLE_TAG, NId}} ->
+                            mono_proto_walk(St, Data, NId, KeyBin, Recv,
+                                            Args, Fuel - 1);
+                        _ -> {miss, St}
+                    end;
+                V -> mono_apply(St, Data, V, Recv, Args)
+            end;
         _ -> {miss, St}
     end.
 
