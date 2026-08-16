@@ -18,6 +18,7 @@
 //// not an authenticity check, so only feed it bytes this library produced.
 
 import arc/host_hooks.{type HostHooks}
+import arc/internal/tree_array
 import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/store as rt_store
@@ -140,13 +141,20 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     shapes:,
     next_shape:,
     unit_uid:,
+    ics: _,
   ) = store
   let microtasks = types.jq_to_list(microtasks)
+  let data =
+    tree_array.sparse_fold(
+      fn(id, slot, acc) { dict.insert(acc, id, drop_regexp_matcher(slot)) },
+      dict.new(),
+      data,
+    )
   use Nil <- result.try(check_cells(data))
   use Nil <- result.try(check_jobs(microtasks))
   let store =
     StoreImage(
-      data: dict.map_values(data, drop_regexp_matcher),
+      data:,
       free:,
       next:,
       pinned_roots:,
@@ -207,7 +215,9 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     unit_uid:,
   ) = image
   JsStore(
-    data:,
+    data: dict.fold(data, rt_store.data_new(), fn(acc, id, slot) {
+      tree_array.set(id, slot, acc)
+    }),
     free:,
     next:,
     pinned_roots:,
@@ -223,6 +233,7 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     shapes:,
     next_shape:,
     unit_uid:,
+    ics: dict.new(),
   )
 }
 
@@ -261,7 +272,7 @@ fn holds_compiled_code(slot: JsSlot) -> Bool {
 /// A RegExp's cached matcher is a `re` compiled pattern, valid only on the
 /// OTP release that built it, so the image keeps source and flags and the
 /// restored object recompiles on its first exec.
-fn drop_regexp_matcher(_id: Int, slot: JsSlot) -> JsSlot {
+fn drop_regexp_matcher(slot: JsSlot) -> JsSlot {
   case slot {
     SObject(kind: RegExpObj(source:, flags:, last_index:, compiled: _), ..) ->
       SObject(

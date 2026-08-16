@@ -26,6 +26,8 @@
          t_math_sqrt/1, t_math_floor/1, t_math_abs/1,
          t_math_pow/2, t_math_min/2, t_math_max/2]).
 
+-define(MAX_SAFE_INT, 9007199254740991).
+
 %% math:exp/1 overflows only toward +Infinity (e^x for large positive x).
 exp(X) ->
     try {j_float, math:exp(X)}
@@ -166,8 +168,15 @@ t_math_sqrt(_) -> miss.
 
 %% §21.3.2.16: floor(NaN)=NaN, floor(±∞)=±∞, floor(±0)=±0.
 t_math_floor(X) when is_integer(X) -> X;
+%% Integral results come back as bare ints (the JInt wire shape) so they hit
+%% the integer index / smi fast paths; ±0 keeps its sign, and anything past
+%% 2^53 is already integral so X passes through unchanged.
 t_math_floor(X) when is_float(X) ->
-    try math:floor(X) catch error:badarith -> js_nan end;
+    case floor(X) of
+        0 -> case neg_sign(X) of true -> X; false -> 0 end;
+        R when R > ?MAX_SAFE_INT; R < -?MAX_SAFE_INT -> X;
+        R -> R
+    end;
 t_math_floor(js_nan) -> js_nan;
 t_math_floor(js_inf) -> js_inf;
 t_math_floor(js_neg_inf) -> js_neg_inf;

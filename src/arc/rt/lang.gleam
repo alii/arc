@@ -86,14 +86,18 @@ pub fn t_alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
 pub fn record_parts(st: Agent, rec: JsVal) -> option.Option(IteratorRecord) {
   case classify(rec) {
     KHandle(h) ->
-      case
-        rt_obj.t_ordinary_own_property(st, h, k_iterator),
-        rt_obj.t_ordinary_own_property(st, h, k_next)
-      {
-        Some(types.DataProperty(value: iterator, ..)),
-          Some(types.DataProperty(value: next_method, ..))
-        -> Some(IteratorRecord(iterator:, next_method:))
-        _, _ -> option.None
+      case rt_store.t_cell_get(st, h) {
+        types.SObject(kind: types.Ordinary, props:, ..) ->
+          case
+            dict.get(props, Named("iterator")),
+            dict.get(props, Named("next"))
+          {
+            Ok(types.DataProperty(value: iterator, ..)),
+              Ok(types.DataProperty(value: next_method, ..))
+            -> Some(IteratorRecord(iterator:, next_method:))
+            _, _ -> option.None
+          }
+        _ -> option.None
       }
     _ -> option.None
   }

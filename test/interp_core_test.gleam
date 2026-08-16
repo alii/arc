@@ -196,7 +196,7 @@ pub fn thrown_value_is_a_completion_test() {
 
 pub fn native_calls_back_into_bytecode_test() {
   // Array.prototype.map is a runtime native: each callback invocation goes
-  // rt/call → JsOps.call_bytecode → entry.run_bytecode.
+  // rt/call → JsOps.call_bytecode → entry.call_bytecode.
   assert eval_string("[1, 2, 3].map(x => x * 2).join(',')") == "2,4,6"
   assert eval_int(
       "function add(a, b) { return a + b } [1, 2, 3, 4].reduce(add, 0)",

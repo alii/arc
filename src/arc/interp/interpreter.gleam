@@ -18,21 +18,22 @@ import arc/bytecode/opcode.{
   AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
   CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
   CallMethodApply, CmpLocalConstJump, CmpLocalLocalJump, CreateArguments,
-  CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
-  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
-  DefineMethod, DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
-  DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup, ForInNext,
-  ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar,
-  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetPrivateFieldDyn,
-  GetPrivateFieldDyn2, GetPrototypeOf, GetSuperValue, GetSuperValue2, IncLocal,
-  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
-  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
-  JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod, NewObject,
-  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PrivateInDyn,
-  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutEvalVar, PutField,
-  PutGlobal, PutLocal, PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue,
-  Return, Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf,
-  TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
+  CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalFn, DeclareGlobalLex,
+  DeclareGlobalVar, DefineAccessor, DefineAccessorComputed, DefineField,
+  DefineFieldComputed, DefineMethod, DefineMethodComputed, DefinePrivateAccessor,
+  DefinePrivateField, DefinePrivateMethod, DeleteElem, DeleteField,
+  DeleteGlobalVar, Dup, ForInNext, ForInStart, GetAsyncIterator, GetBoxed,
+  GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal, GetIterator,
+  GetLocal, GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf,
+  GetSuperValue, GetSuperValue2, IncLocal, InitGlobalLex, InitialYield,
+  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
+  IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
+  MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
+  ObjectSpread, Pc, Pop, PrivateInDyn, PushConst, PushTry, PutBoxed,
+  PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
+  PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue, Return, Rot3, SetLine,
+  SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal,
+  UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -45,6 +46,7 @@ import arc/interp/state.{
   StackUnderflow, State, SuspensionLeak, Threw, VmFailed, Yielded,
 }
 import arc/rt/async as rt_async
+import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/disposable_stack
 import arc/rt/builtins/error as rt_error
 import arc/rt/builtins/global_fns
@@ -58,14 +60,16 @@ import arc/rt/elements as rt_elements
 import arc/rt/env as rt_env
 import arc/rt/inspect as rt_inspect
 import arc/rt/lang as rt_lang
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
-  AccessorProperty, Agent, DataProperty, ForInIterator, HintString, Index,
-  KBytecode, KCompiled, KHandle, KNull, KNum, KStr, KSym, KUndef, Named,
-  NoElements, Realm, SBox, SObject, SShapedObject, StringKey, SymbolKey,
+  AccessorProperty, Agent, DataProperty, ForInIterator, FunctionApply,
+  FunctionCall, FunctionN, HintString, Index, KBytecode, KCompiled, KHandle,
+  KNative, KNull, KNum, KStr, KSym, KUndef, Named, NoElements, Realm,
+  ReflectApply, ReflectN, SBox, SObject, SShapedObject, StringKey, SymbolKey,
   classify, mk_bool, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
@@ -95,10 +99,6 @@ pub type Outcome {
 // ============================================================================
 // The few tests `fast_loop` needs beyond the `arc_interp_ffi` kernels, kept
 // as total term probes so a hit never goes through `classify`.
-
-/// Exact term identity of two wire values.
-@external(erlang, "erlang", "=:=")
-fn same_term(a: JsVal, b: JsVal) -> Bool
 
 /// `v` is the Handle wire form `{js_cell, N}`.
 @external(erlang, "arc_rt_store_ffi", "is_handle")
@@ -485,9 +485,9 @@ fn lex_write(agent: Agent, name: String, binding: LexicalGlobal) -> Agent {
   )
 }
 
-fn is_tdz(v: JsVal) -> Bool {
-  same_term(v, mk_tdz())
-}
+/// `v` is the TDZ sentinel.
+@external(erlang, "arc_interp_ffi", "is_tdz")
+fn is_tdz(v: JsVal) -> Bool
 
 // ============================================================================
 // Execution loop
@@ -1045,11 +1045,13 @@ fn fast_loop(
     // -- Named data property ------------------------------------------------
     // `obj.x`: own or inherited plain data property along an all-ordinary
     // chain (`undefined` when absent on the whole chain, as OrdinaryGet
-    // answers). Accessors, proxies, namespaces, virtual `length` miss.
+    // answers). A string or number receiver reads its wrapper prototype
+    // (String "length" is answered directly). Accessors, proxies,
+    // namespaces, an object cell's virtual `length` miss.
     GetField(key.Named(name)) ->
       case stack {
         [recv, ..rest] -> {
-          let v = ffi.get_field(agent.store, recv, name)
+          let v = ffi.get_field(agent, recv, name)
           case ffi.is_miss(v) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
@@ -1073,7 +1075,7 @@ fn fast_loop(
     GetField2(key.Named(name)) ->
       case stack {
         [recv, ..rest] -> {
-          let v = ffi.get_field(agent.store, recv, name)
+          let v = ffi.get_field(agent, recv, name)
           case ffi.is_miss(v) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
@@ -1093,10 +1095,12 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
-    // `obj.x = v` overwriting an existing own writable data property: the
-    // value is replaced inside the descriptor, keeping attributes and
-    // creation order (§10.1.11). Creation (needs the proto-chain setter
-    // walk), non-writable, accessors and exotic receivers miss.
+    // `obj.x = v` on an existing own writable data property replaces the
+    // value inside the descriptor, keeping attributes and creation order
+    // (§10.1.11); on an extensible ordinary receiver whose prototype chain
+    // holds nothing but writable data at the key it creates the property
+    // (fresh seq from the store). Setters and read-only props up the chain,
+    // non-writable, accessors and exotic receivers miss.
     PutField(key.Named(name)) ->
       case stack {
         [val, recv, ..rest] -> {
@@ -1187,9 +1191,162 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
+    // [arg_n, .., arg_1, callee, ..] → the callee's frame or [result, ..].
+    Call(arity) ->
+      case pop_n(stack, arity) {
+        Some(#(args, [callee, ..rest])) ->
+          fast_call(
+            state,
+            drive,
+            pc,
+            stack,
+            locals,
+            agent,
+            code,
+            constants,
+            line,
+            callee,
+            mk_undefined(),
+            args,
+            rest,
+          )
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
+    // [arg_n, .., arg_1, method, receiver, ..]: this = receiver.
+    CallMethod(arity) ->
+      case pop_n(stack, arity) {
+        Some(#(args, [method, receiver, ..rest])) ->
+          fast_call(
+            state,
+            drive,
+            pc,
+            stack,
+            locals,
+            agent,
+            code,
+            constants,
+            line,
+            method,
+            receiver,
+            args,
+            rest,
+          )
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
+    Return ->
+      after_step(
+        call.return_op(
+          State(
+            ..state,
+            pc:,
+            stack:,
+            locals:,
+            agent: call.set_line(agent, line),
+          ),
+        ),
+        drive,
+      )
+
     _other -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
   }
 }
+
+/// Call/CallMethod from the loop's registers. A plain native callee (not
+/// call/apply/Reflect.apply, which re-dispatch) runs under the loop's own
+/// guard and depth bracket and the loop continues with its result; the
+/// State is only materialised for a throw. Every other callee takes the
+/// general call path with the cell already read.
+fn fast_call(
+  state: State,
+  drive: Drive,
+  pc: Int,
+  stack: List(JsVal),
+  locals: TupleArray(JsVal),
+  agent: Agent,
+  code: TupleArray(Op),
+  constants: TupleArray(JsVal),
+  line: Int,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+  rest: List(JsVal),
+) -> Result(#(Outcome, State), VmError) {
+  let agent = call.set_line(agent, line)
+  case classify(callee) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(agent, h) {
+        SObject(kind: KNative(tag:, ..), ..)
+          if tag != function_call
+          && tag != function_apply
+          && tag != reflect_apply
+          && agent.store.call_depth < limits.max_call_depth
+        -> {
+          let agent = rt_store.t_enter_call(agent)
+          case ffi.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
+            ffi.Ok(value: v, agent:) ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [v, ..rest],
+                locals,
+                rt_store.t_leave_call(agent),
+                code,
+                constants,
+                line,
+              )
+            ffi.Threw(agent:, thrown:) ->
+              after_step(
+                Error(Threw(
+                  thrown,
+                  State(
+                    ..state,
+                    pc:,
+                    stack: rest,
+                    locals:,
+                    agent: rt_store.t_leave_call(agent),
+                  ),
+                )),
+                drive,
+              )
+          }
+        }
+        slot ->
+          after_step(
+            call.call_cell(
+              State(..state, pc:, stack:, locals:, agent:),
+              h,
+              slot,
+              this,
+              args,
+              rest,
+              drive,
+            ),
+            drive,
+          )
+      }
+    _ ->
+      after_step(
+        call.call(
+          State(..state, pc:, stack:, locals:, agent:),
+          callee,
+          this,
+          args,
+          rest,
+          drive,
+        ),
+        drive,
+      )
+  }
+}
+
+const function_call = FunctionN(FunctionCall)
+
+const function_apply = FunctionN(FunctionApply)
+
+const reflect_apply = ReflectN(ReflectApply)
 
 /// The kernel for a resolver-classified pure binary operator: the result
 /// value, or `miss` when the operands need coercion the kernel cannot see
@@ -1309,7 +1466,20 @@ fn dispatch_slow(
 ) -> Result(#(Outcome, State), VmError) {
   let state =
     State(..state, pc:, stack:, locals:, agent: call.set_line(agent, line))
-  case step(state, drive, tuple_array.get_unchecked(state.pc, state.code)) {
+  after_step(
+    step(state, drive, tuple_array.get_unchecked(state.pc, state.code)),
+    drive,
+  )
+}
+
+/// Continue the loop after one stepped instruction: re-enter it on the new
+/// State, finish on Return, park a coroutine, or unwind a throw to its
+/// handler.
+fn after_step(
+  stepped: Result(State, StepExit),
+  drive: Drive,
+) -> Result(#(Outcome, State), VmError) {
+  case stepped {
     Ok(new_state) -> execute_inner(new_state, drive)
     Error(Returned(value, post)) ->
       Ok(#(Completed(NormalCompletion(value)), post))
@@ -1706,6 +1876,16 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       use state <- result.map(rt_unit3(
         state,
         rt_env.t_create_global_var_binding,
+        name,
+        deletable,
+      ))
+      State(..state, pc: state.pc + 1)
+    }
+
+    DeclareGlobalFn(name, deletable) -> {
+      use state <- result.map(rt_unit3(
+        state,
+        rt_env.t_create_global_fn_binding,
         name,
         deletable,
       ))
@@ -3076,10 +3256,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 [],
                 iterable,
               ))
-              let agent =
-                list.fold(items, state.agent, fn(agent, v) {
-                  array_push(agent, h, Some(v))
-                })
+              let agent = array_append(state.agent, h, items)
               State(..state, agent:, stack: [arr, ..rest], pc: state.pc + 1)
             }
             None -> underflow(state, "ArraySpread")
@@ -3440,9 +3617,10 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   pc: state.pc + 1,
                 ),
               )
-            False ->
-              case array_iter_step(state.agent, rec) {
-                Some(#(done, val, agent)) -> {
+            False -> {
+              let record = rt_lang.record_parts(state.agent, rec)
+              case fast_iter_step(state.agent, record) {
+                ArrayStep(done, val, agent) -> {
                   let slot = case done {
                     True -> mk_undefined()
                     False -> rec
@@ -3456,8 +3634,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     ),
                   )
                 }
-                None ->
-                  case iter_step(state, rec) {
+                fast ->
+                  case iter_step(state, rec, fast) {
                     Ok(#(#(done, val), state)) -> {
                       let slot = case done {
                         True -> mk_undefined()
@@ -3479,6 +3657,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                       )
                   }
               }
+            }
           }
         _ -> underflow(state, "IteratorNext")
       }
@@ -4244,6 +4423,22 @@ fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
   })
 }
 
+/// Append every value of `items` to an Array cell in one write (spread into
+/// an array literal); same invariants as `array_push`.
+fn array_append(agent: Agent, h: Handle, items: List(JsVal)) -> Agent {
+  rt_store.t_cell_update(agent, h, fn(slot) {
+    case slot {
+      SObject(kind: rt_types.ArrayObj(length:), elements:, ..) ->
+        SObject(
+          ..slot,
+          kind: rt_types.ArrayObj(length: length + list.length(items)),
+          elements: rt_elements.write_list(elements, length, items),
+        )
+      _ -> slot
+    }
+  })
+}
+
 /// Rebuild the full element list of an ArrayFromWithHoles literal: `values`
 /// are the non-hole items in order, `holes` the ascending hole indices.
 fn fill_holes(
@@ -4276,7 +4471,7 @@ fn fill_holes(
   }
 }
 
-/// IteratorNext for a record that is not the plain-Array shape, as
+/// IteratorNext for a record `fast_iter_step` did not step itself, as
 /// `#(done, value)`. A generator whose `next` is the intrinsic
 /// %GeneratorPrototype%.next is resumed for one turn and answers the pair
 /// itself: no `{value, done}` object is built per step only to be read
@@ -4284,15 +4479,11 @@ fn fill_holes(
 fn iter_step(
   state: State,
   rec: JsVal,
+  fast: FastIter,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
-  let native =
-    rt_lang.record_parts(state.agent, rec)
-    |> option.then(fn(record) {
-      native_generator(state.agent, record.iterator, record.next_method)
-    })
-  case native {
-    Some(data) -> rt3(state, rt_async.t_gen_step, data, mk_undefined())
-    None -> rt2(state, rt_lang.t_iter_next, rec)
+  case fast {
+    GenStep(data) -> rt3(state, rt_async.t_gen_step, data, mk_undefined())
+    ArrayStep(..) | Protocol -> rt2(state, rt_lang.t_iter_next, rec)
   }
 }
 
@@ -4341,6 +4532,17 @@ fn native_generator(
   }
 }
 
+/// What IteratorNext learns from one read of a record's [[Iterator]] and
+/// [[NextMethod]] cells.
+type FastIter {
+  /// The step was taken here.
+  ArrayStep(done: Bool, value: JsVal, agent: Agent)
+  /// A native generator to resume for one turn.
+  GenStep(data: Handle)
+  /// Run the protocol call.
+  Protocol
+}
+
 /// IteratorNext for the record of an unmodified Array values iteration
 /// (`for (x of array)`, spread of an array): the record's [[NextMethod]] IS
 /// %ArrayIteratorPrototype%.next and its [[Iterator]] an ArrayIterator over
@@ -4349,77 +4551,107 @@ fn native_generator(
 /// immediately take apart. Only the shapes whose element read observes
 /// nothing are handled (a present own element, no index override); a hole,
 /// an exhausted-but-not-yet-marked source of another kind, or anything else
-/// answers `None` and the generic protocol call runs instead.
-fn array_iter_step(agent: Agent, rec: JsVal) -> Option(#(Bool, JsVal, Agent)) {
-  use record <- option.then(rt_lang.record_parts(agent, rec))
-  use next_h <- option.then(handle_of(record.next_method))
-  use iter_h <- option.then(handle_of(record.iterator))
-  case rt_store.t_cell_get(agent, next_h), rt_store.t_cell_get(agent, iter_h) {
-    SObject(
-      kind: rt_types.KNative(
-        tag: rt_types.IteratorN(rt_types.ArrayIteratorNext),
-        ..,
-      ),
-      ..,
-    ),
-      SObject(
-        kind: rt_types.ArrayIterator(
-          target:,
-          index:,
-          kind: rt_types.ArrayIterValues as kind,
-        ),
-        ..,
-      ) as iter_slot
-    ->
-      case index < 0 {
-        // Already exhausted: done, nothing to write.
-        True -> Some(#(True, mk_undefined(), agent))
-        False ->
-          case rt_store.t_cell_get(agent, target) {
-            SObject(kind: rt_types.ArrayObj(length:), elements:, props:, ..) ->
-              case index >= length {
-                True ->
-                  Some(#(
-                    True,
-                    mk_undefined(),
-                    rt_store.t_cell_set(
-                      agent,
-                      iter_h,
-                      SObject(
-                        ..iter_slot,
-                        kind: rt_types.ArrayIterator(target:, index: -1, kind:),
-                      ),
-                    ),
-                  ))
+/// answers `Protocol` and the generic protocol call runs instead. The same
+/// cell reads spot a native generator (see `native_generator`).
+fn fast_iter_step(
+  agent: Agent,
+  record: Option(rt_types.IteratorRecord),
+) -> FastIter {
+  case record {
+    None -> Protocol
+    Some(record) ->
+      case handle_of(record.next_method), handle_of(record.iterator) {
+        Some(next_h), Some(iter_h) ->
+          case
+            rt_store.t_cell_get(agent, next_h),
+            rt_store.t_cell_get(agent, iter_h)
+          {
+            SObject(
+              kind: rt_types.KNative(
+                tag: rt_types.IteratorN(rt_types.ArrayIteratorNext),
+                ..,
+              ),
+              ..,
+            ),
+              SObject(
+                kind: rt_types.ArrayIterator(
+                  target:,
+                  index:,
+                  kind: rt_types.ArrayIterValues as kind,
+                ),
+                ..,
+              ) as iter_slot
+            ->
+              case index < 0 {
+                // Already exhausted: done, nothing to write.
+                True -> ArrayStep(True, mk_undefined(), agent)
                 False ->
-                  case
-                    dict.has_key(props, Index(index)),
-                    rt_elements.get_option(elements, index)
-                  {
-                    False, Some(v) ->
-                      Some(#(
-                        False,
-                        v,
-                        rt_store.t_cell_set(
-                          agent,
-                          iter_h,
-                          SObject(
-                            ..iter_slot,
-                            kind: rt_types.ArrayIterator(
-                              target:,
-                              index: index + 1,
-                              kind:,
+                  case rt_store.t_cell_get(agent, target) {
+                    SObject(
+                      kind: rt_types.ArrayObj(length:),
+                      elements:,
+                      props:,
+                      ..,
+                    ) ->
+                      case index >= length {
+                        True ->
+                          ArrayStep(
+                            True,
+                            mk_undefined(),
+                            rt_store.t_cell_set(
+                              agent,
+                              iter_h,
+                              SObject(
+                                ..iter_slot,
+                                kind: rt_types.ArrayIterator(
+                                  target:,
+                                  index: -1,
+                                  kind:,
+                                ),
+                              ),
                             ),
-                          ),
-                        ),
-                      ))
-                    _, _ -> None
+                          )
+                        False ->
+                          case
+                            dict.has_key(props, Index(index)),
+                            rt_elements.get_option(elements, index)
+                          {
+                            False, Some(v) ->
+                              ArrayStep(
+                                False,
+                                v,
+                                rt_store.t_cell_set(
+                                  agent,
+                                  iter_h,
+                                  SObject(
+                                    ..iter_slot,
+                                    kind: rt_types.ArrayIterator(
+                                      target:,
+                                      index: index + 1,
+                                      kind:,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            _, _ -> Protocol
+                          }
+                      }
+                    _ -> Protocol
                   }
               }
-            _ -> None
+            SObject(
+              kind: rt_types.KNative(
+                tag: rt_types.GeneratorN(rt_types.GeneratorNext),
+                ..,
+              ),
+              ..,
+            ),
+              SObject(kind: rt_types.GeneratorObj(data:), ..)
+            -> GenStep(data)
+            _, _ -> Protocol
           }
+        _, _ -> Protocol
       }
-    _, _ -> None
   }
 }
 

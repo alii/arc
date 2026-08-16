@@ -12,3 +12,4 @@ node_modules
 .claude/worktrees/
 .idea/
 /aot/build
+build/

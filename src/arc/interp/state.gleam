@@ -50,6 +50,10 @@ pub type State {
     /// Caller frames of THIS activation, innermost first. A nested
     /// `run_bytecode` entered from a builtin starts a fresh, empty list.
     call_stack: List(SavedFrame),
+    /// `store.call_depth` when this activation was entered: the units held
+    /// by whatever is beneath it. Each flat frame adds one on top, so
+    /// `call_depth == outer_depth + length(call_stack)` throughout.
+    outer_depth: Int,
     try_stack: List(TryFrame),
     /// §9.1.1.3 [[ThisValue]] the frame was entered with, after
     /// OrdinaryCallBindThis for non-arrows. Also seeded into the lexical
@@ -129,6 +133,8 @@ pub fn frame_roots(state: State) -> List(Handle) {
     // Plain id.
     unit: _,
     call_stack:,
+    // Plain count.
+    outer_depth: _,
     // Scalar: pc offsets and a stack depth.
     try_stack: _,
     this:,

@@ -22,6 +22,7 @@ import arc/rt/bytecode.{
   type EnvTuple, type FuncTemplate, type SuspendedFrame, FuncTemplate,
   SuspendedFrame,
 }
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type AsyncGenRequest, type Handle, type Job, type JsElements,
   type JsSlot, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
@@ -38,10 +39,11 @@ import arc/rt/types.{
   ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
   SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
   SetIterator, SetObj, Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
-  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakSetObj,
-  WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list, native_token_refs,
+  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj,
+  WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list,
+  native_token_refs,
 } as rt_types
-import gleam/dict.{type Dict}
+import gleam/dict
 import gleam/dynamic.{type Dynamic}
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -121,6 +123,9 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     next_shape: _,
     // Parse-id counter — no roots.
     unit_uid: _,
+    // Inline caches: call entries hold handles but are validated on use
+    // (rt_types.IcCall), so they are weak — never roots.
+    ics: _,
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
@@ -393,6 +398,9 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       list.fold(cells, push_val_refs(callback, acc), fn(a, cell) {
         push_val_refs(cell.held, a)
       })
+    // [[WeakRefTarget]] is weak (§26.1.1.1) and NOT traced — emptied in
+    // `prune_weak` once the target dies.
+    WeakRefObj(target: _) -> acc
     // A realm id: the realm's intrinsics are pinned roots already.
     rt_types.ShadowRealmObj(realm: _) -> acc
   }
@@ -557,7 +565,10 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
 
 /// Mark phase: from `roots`, return every reachable cell id. Port of arc
 /// `heap.mark_from` (heap.gleam:487-490).
-fn mark_from(data: Dict(Int, JsSlot), roots: List(Int)) -> Set(Int) {
+fn mark_from(
+  data: rt_tree_array.TreeArray(JsSlot),
+  roots: List(Int),
+) -> Set(Int) {
   mark_loop(data, roots, set.new())
 }
 
@@ -565,7 +576,7 @@ fn mark_from(data: Dict(Int, JsSlot), roots: List(Int)) -> Set(Int) {
 /// miss → skip. arc's `lazy_proto.decode_lazy_proto` branches (heap.gleam:
 /// 513-530) DELETED — no tagged ids in 2core (SPEC §7.M2 "Dropped from arc").
 fn mark_loop(
-  data: Dict(Int, JsSlot),
+  data: rt_tree_array.TreeArray(JsSlot),
   frontier: List(Int),
   visited: Set(Int),
 ) -> Set(Int) {
@@ -576,9 +587,9 @@ fn mark_loop(
         True -> mark_loop(data, rest, visited)
         False -> {
           let visited = set.insert(visited, id)
-          case dict.get(data, id) {
-            Error(Nil) -> mark_loop(data, rest, visited)
-            Ok(slot) ->
+          case rt_tree_array.get_option(id, data) {
+            None -> mark_loop(data, rest, visited)
+            Some(slot) ->
               // Prepend child ids directly onto frontier — avoids the
               // reverse+copy `list.append` allocates (arc heap.gleam:519-522).
               mark_loop(data, prepend_ids(refs_in_cell(slot), rest), visited)
@@ -599,9 +610,22 @@ fn prepend_ids(ids: List(Int), tail: List(Int)) -> List(Int) {
 }
 
 /// Sweep: keep only live cells. NO id renumbering; dead ids are discarded,
-/// not recycled (arc heap.gleam:471).
-fn sweep(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
-  dict.filter(data, fn(id, _) { set.contains(live, id) })
+/// not recycled (arc heap.gleam:471). Rebuilt into a fresh array so the
+/// leaves dead ids occupied are dropped, not just reset.
+fn sweep(
+  data: rt_tree_array.TreeArray(JsSlot),
+  live: Set(Int),
+) -> rt_tree_array.TreeArray(JsSlot) {
+  rt_tree_array.sparse_fold(
+    fn(id, slot, acc) {
+      case set.contains(live, id) {
+        True -> rt_tree_array.set(id, slot, acc)
+        False -> acc
+      }
+    },
+    rt_store.data_new(),
+    data,
+  )
 }
 
 /// Post-sweep weak-prune (SPEC §7.M2 §weak): drop `WeakMapObj`/`WeakSetObj`
@@ -613,7 +637,10 @@ fn sweep(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
 /// the cleanup job — which this runtime never enqueues — would remove it); a
 /// surviving cell whose [[UnregisterToken]] died has the token emptied so a
 /// recycled cell id can never match it.
-fn prune_weak(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
+fn prune_weak(
+  data: rt_tree_array.TreeArray(JsSlot),
+  live: Set(Int),
+) -> rt_tree_array.TreeArray(JsSlot) {
   let keep = fn(k: WeakKey) {
     case k {
       WeakObjKey(id:) -> set.contains(live, id)
@@ -632,26 +659,37 @@ fn prune_weak(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
       _ -> Some(v)
     }
   }
-  dict.map_values(data, fn(_, slot) {
-    case slot {
-      SObject(kind: WeakMapObj(entries:), ..) ->
-        SObject(
-          ..slot,
-          kind: WeakMapObj(entries: dict.filter(entries, fn(k, _) { keep(k) })),
-        )
-      SObject(kind: WeakSetObj(entries:), ..) ->
-        SObject(..slot, kind: WeakSetObj(entries: set.filter(entries, keep)))
-      SObject(kind: FinalizationRegistryObj(callback:, cells:), ..) -> {
-        let cells =
-          list.filter(cells, fn(c) { option.is_some(weak_live(c.target)) })
-          |> list.map(fn(c) {
-            FinRegCell(..c, token: option.then(c.token, weak_live))
-          })
-        SObject(..slot, kind: FinalizationRegistryObj(callback:, cells:))
-      }
-      _ -> slot
+  rt_tree_array.sparse_map(
+    fn(_, slot) { prune_weak_slot(slot, keep, weak_live) },
+    data,
+  )
+}
+
+fn prune_weak_slot(
+  slot: JsSlot,
+  keep: fn(WeakKey) -> Bool,
+  weak_live: fn(JsVal) -> Option(JsVal),
+) -> JsSlot {
+  case slot {
+    SObject(kind: WeakMapObj(entries:), ..) ->
+      SObject(
+        ..slot,
+        kind: WeakMapObj(entries: dict.filter(entries, fn(k, _) { keep(k) })),
+      )
+    SObject(kind: WeakSetObj(entries:), ..) ->
+      SObject(..slot, kind: WeakSetObj(entries: set.filter(entries, keep)))
+    SObject(kind: FinalizationRegistryObj(callback:, cells:), ..) -> {
+      let cells =
+        list.filter(cells, fn(c) { option.is_some(weak_live(c.target)) })
+        |> list.map(fn(c) {
+          FinRegCell(..c, token: option.then(c.token, weak_live))
+        })
+      SObject(..slot, kind: FinalizationRegistryObj(callback:, cells:))
     }
-  })
+    SObject(kind: WeakRefObj(target:), ..) ->
+      SObject(..slot, kind: WeakRefObj(target: option.then(target, weak_live)))
+    _ -> slot
+  }
 }
 
 // ── stats ───────────────────────────────────────────────────────────────────
@@ -660,7 +698,7 @@ fn prune_weak(data: Dict(Int, JsSlot), live: Set(Int)) -> Dict(Int, JsSlot) {
 /// (M2.md:77).
 pub type GcStats {
   GcStats(
-    /// `dict.size(data)` — cells currently allocated.
+    /// Cells currently allocated.
     live: Int,
     /// `list.length(free)` — recycled ids awaiting reuse.
     free: Int,
@@ -675,7 +713,7 @@ pub type GcStats {
 pub fn stats(st: Agent) -> GcStats {
   let js = require_js(st)
   GcStats(
-    live: dict.size(js.data),
+    live: rt_tree_array.sparse_fold(fn(_, _, n) { n + 1 }, 0, js.data),
     free: list.length(js.free),
     next: js.next,
     since_gc: js.alloc_since_gc,
@@ -687,5 +725,5 @@ pub fn stats(st: Agent) -> GcStats {
 pub fn t_is_live(st: Agent, h: Handle) -> Bool {
   let js = require_js(st)
   let JsCell(id) = h
-  dict.has_key(js.data, id)
+  option.is_some(rt_tree_array.get_option(id, js.data))
 }

@@ -48,6 +48,7 @@ import arc/rt/builtins/symbol as b_symbol
 import arc/rt/builtins/temporal as b_temporal
 import arc/rt/builtins/typed_array as b_typed_array
 import arc/rt/builtins/weak as b_weak
+import arc/rt/builtins/weak_ref as b_weak_ref
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
@@ -63,8 +64,8 @@ import arc/rt/types.{
   Ordinary, PromiseN, PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN,
   RegExpN, ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN,
   StringObj, SymbolConstructor, SymbolN, TemporalN, Test262N,
-  ThrowTypeErrorPoison, TypedArrayN, WeakN, classify, mk_number, mk_object,
-  mk_undefined,
+  ThrowTypeErrorPoison, TypedArrayN, WeakN, WeakRefN, classify, mk_number,
+  mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -167,6 +168,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   let #(#(weak_map, weak_set), st) = b_weak.init(st, object_proto, fn_proto)
   let #(finalization_registry, st) =
     b_finalization_registry.init(st, object_proto, fn_proto)
+  let #(weak_ref, st) = b_weak_ref.init(st, object_proto, fn_proto)
   // DisposableStack / AsyncDisposableStack constructors + prototypes.
   let #(disposable_stack, st) =
     b_disposable_stack.init(st, object_proto, fn_proto)
@@ -230,6 +232,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
         weak_map:,
         weak_set:,
         finalization_registry:,
+        weak_ref:,
         disposable_stack:,
         async_disposable_stack:,
         shadow_realm:,
@@ -274,6 +277,8 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       set:,
       weak_map:,
       weak_set:,
+      weak_ref:,
+      finalization_registry:,
       date:,
       regexp:,
       promise:,
@@ -344,7 +349,7 @@ pub fn seed_ops(st: Agent) -> Agent {
         to_object: realm_ops.t_box_primitive,
         new_error: realm_ops.t_new_error,
         eval_hook: no_eval,
-        call_bytecode: fn(_, _, _, _, _) {
+        call_bytecode: fn(_, _, _, _) {
           interpreter_not_linked("call_bytecode")
         },
         construct_bytecode: fn(_, _, _, _) {
@@ -395,6 +400,7 @@ type GlobalRefs {
     weak_map: BuiltinPair,
     weak_set: BuiltinPair,
     finalization_registry: BuiltinPair,
+    weak_ref: BuiltinPair,
     disposable_stack: BuiltinPair,
     async_disposable_stack: BuiltinPair,
     shadow_realm: BuiltinPair,
@@ -464,6 +470,7 @@ fn alloc_global_object(
     Builtin("WeakMap", ctor(r.weak_map)),
     Builtin("WeakSet", ctor(r.weak_set)),
     Builtin("FinalizationRegistry", ctor(r.finalization_registry)),
+    Builtin("WeakRef", ctor(r.weak_ref)),
     Builtin("DisposableStack", ctor(r.disposable_stack)),
     Builtin("AsyncDisposableStack", ctor(r.async_disposable_stack)),
     Builtin("ShadowRealm", ctor(r.shadow_realm)),
@@ -609,6 +616,7 @@ pub fn dispatch_native(
     WeakN(n) -> b_weak.dispatch(st, n, this, args)
     FinalizationRegistryN(n) ->
       b_finalization_registry.dispatch(st, n, this, args)
+    WeakRefN(n) -> b_weak_ref.dispatch(st, n, this, args)
     DisposableStackN(n) -> b_disposable_stack.dispatch(st, n, this, args)
     rt_types.ShadowRealmN(n) -> b_shadow_realm.dispatch(st, n, this, args)
     ArrayBufferN(n) -> b_array_buffer.dispatch(st, n, this, args)
@@ -654,6 +662,7 @@ pub fn dispatch_native_construct(
     WeakN(n) -> b_weak.dispatch_construct(st, n, args, new_target)
     FinalizationRegistryN(n) ->
       b_finalization_registry.dispatch_construct(st, n, args, new_target)
+    WeakRefN(n) -> b_weak_ref.dispatch_construct(st, n, args, new_target)
     DisposableStackN(n) ->
       b_disposable_stack.dispatch_construct(st, n, args, new_target)
     rt_types.ShadowRealmN(n) ->

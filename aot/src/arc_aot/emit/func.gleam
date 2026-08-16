@@ -1477,16 +1477,21 @@ pub fn emit_prologue(
   use e <- unpack_frame(e, is_arrow, info)
   use e <- binding_prologue(e, e.fn_scope)
   use e <- init_self_name(e, self_name, info)
+  // §10.2.11 step 22 creates `arguments` before the formals are bound (a
+  // default may read it). Mapped arguments (simple sloppy lists) need the
+  // param cells, so only that shape waits for unpack_args.
+  let unmapped = non_simple || rest_param != None
+  let init_args = fn(e, when: Bool, k) {
+    case when {
+      True ->
+        init_arguments(e, is_arrow, uses_args, fixed, non_simple, unmapped, k)
+      False -> k(e)
+    }
+  }
+  use e <- init_args(e, unmapped)
   use e, tail <- unpack_args(e, fixed, non_simple)
   use e <- bind_rest(e, rest_param, tail, non_simple)
-  use e <- init_arguments(
-    e,
-    is_arrow,
-    uses_args,
-    fixed,
-    non_simple,
-    rest_param != None,
-  )
+  use e <- init_args(e, !unmapped)
   // §10.2.11 step 28: non-simple params get a body var-boundary Block scope.
   case non_simple {
     False -> {

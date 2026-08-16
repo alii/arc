@@ -152,7 +152,7 @@ pub type Frame2 {
     ir_continue: String,
     js_label: Option(String),
     carried: List(Int),
-    iter_close: Option(String),
+    iter_close: Option(#(String, Escape)),
   )
   /// switch: break target only; unlabeled `break` targets it, `continue` walks
   /// past to the enclosing loop. Transparent when crossed.
@@ -166,7 +166,19 @@ pub type Frame2 {
   Barrier2(
     finally_body: Option(#(List(ast.StmtWithLine), ScopeSave2)),
     iter_close: Option(String),
+    escape: Option(Escape),
   )
+}
+
+/// The landing just outside a frame's ir.Try region. A cleanup inlined at a
+/// transfer site inside the region runs under its own ir.Try whose handler
+/// `Break`s here with the thrown value, so the region's handler never sees
+/// what its own finally block or iterator close threw; the landing rethrows
+/// outside. `arity` is how many carried values the landing block yields
+/// besides the flag and the exception. None for a marker barrier that owns
+/// no region.
+pub type Escape {
+  Escape(label: String, arity: Int)
 }
 
 /// Cleanup a break/continue/return performs when CROSSING a barrier on its
@@ -175,10 +187,14 @@ pub type Frame2 {
 pub type BarrierCleanup {
   /// Re-emit `body` at the crossing point, restoring `saved_scope` first so
   /// the finally block sees its own bindings (M17 barrier-duplication).
-  FinallyBlock(body: List(ast.StmtWithLine), saved_scope: ScopeSave2)
+  FinallyBlock(
+    body: List(ast.StmtWithLine),
+    saved_scope: ScopeSave2,
+    escape: Option(Escape),
+  )
   /// for-of / for-await-of iterator to close on abrupt exit; `is_async`
   /// selects the awaited variant (M18).
-  IterClose(iter_var: String, is_async: Bool)
+  IterClose(iter_var: String, is_async: Bool, escape: Option(Escape))
   /// try-catch with no finally: nothing to emit — ir.Try is structured so
   /// Break(label) is already valid; recorded only for completion semantics.
   CatchOnly
@@ -411,7 +427,7 @@ pub fn fresh_var(e: Emitter2) -> #(String, Emitter2) {
 
 /// Tail Value of a straight `Let…Values([v])` chain (the shape `emit_expr`
 /// returns for identifiers/literals). None for If/Block/multi-Values tails.
-fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
+pub fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
   case rhs {
     ir.Values([v]) -> Some(v)
     ir.Let(_, _, body) -> let_tail_value(body)
@@ -552,7 +568,7 @@ pub fn push_loop(
   ir_break: String,
   ir_continue: String,
   carried: List(Int),
-  iter_close: Option(String),
+  iter_close: Option(#(String, Escape)),
 ) -> Emitter2 {
   push_frame(
     e,
@@ -595,11 +611,89 @@ pub fn push_barrier(
   e: Emitter2,
   finally_body: Option(#(List(ast.StmtWithLine), ScopeSave2)),
   iter_close: Option(String),
+  escape: Option(Escape),
 ) -> Emitter2 {
   Emitter2(..e, frame_stack: [
-    Barrier2(finally_body:, iter_close:),
+    Barrier2(finally_body:, iter_close:, escape:),
     ..e.frame_stack
   ])
+}
+
+/// A fresh landing label for a region about to be emitted, carrying `arity`
+/// values past the flag and exception.
+pub fn fresh_escape(e: Emitter2, arity: Int) -> #(Escape, Emitter2) {
+  let #(label, e) = fresh_label(e)
+  #(Escape(label:, arity:), e)
+}
+
+fn fresh_vars(e: Emitter2, n: Int) -> #(List(String), Emitter2) {
+  let #(e, names) = {
+    use #(e, acc), _ <- list.fold(list.repeat(Nil, n), #(e, []))
+    let #(v, e) = fresh_var(e)
+    #(e, [v, ..acc])
+  }
+  #(list.reverse(names), e)
+}
+
+/// The handler a cleanup's own ir.Try uses to leave `esc`'s region with the
+/// thrown value.
+pub fn escape_handler(
+  e: Emitter2,
+  esc: Escape,
+) -> #(ir.CatchHandler, Emitter2) {
+  let #(x, e) = fresh_var(e)
+  let dummies = list.repeat(e.consts.undef, esc.arity)
+  #(
+    ir.CatchHandler(
+      on: ir.OnTag(e.consts.js_tag),
+      payload: [x],
+      exnref: None,
+      handler: ir.Break(esc.label, [ir.ConstI32(1), ir.Var(x), ..dummies]),
+    ),
+    e,
+  )
+}
+
+/// Wrap `region` (an ir.Try yielding `esc.arity` carried terms) in its landing
+/// block: a normal exit yields the carried values on through, an escape
+/// rethrows the carried exception outside the region. Yields the carried
+/// values.
+pub fn land_escapes(
+  e: Emitter2,
+  esc: Escape,
+  region: ir.Expr,
+) -> #(ir.Expr, Emitter2) {
+  let #(code, e) = fresh_var(e)
+  let #(exn, e) = fresh_var(e)
+  let #(inner, e) = fresh_vars(e, esc.arity)
+  let #(outer, e) = fresh_vars(e, esc.arity)
+  let tys = list.repeat(ir.TTerm, esc.arity)
+  let block =
+    ir.Block(
+      esc.label,
+      [ir.TI32, ir.TTerm, ..tys],
+      ir.Let(
+        inner,
+        region,
+        ir.Values([ir.ConstI32(0), e.consts.undef, ..list.map(inner, ir.Var)]),
+      ),
+    )
+  let tree =
+    ir.Let(
+      [code, exn, ..outer],
+      block,
+      ir.Let(
+        [],
+        ir.If(
+          ir.Var(code),
+          [],
+          ir.Throw(e.consts.js_tag, [ir.Var(exn)]),
+          ir.Values([]),
+        ),
+        ir.Values(list.map(outer, ir.Var)),
+      ),
+    )
+  #(tree, e)
 }
 
 /// Pop the innermost frame. Every pop pairs with a push_* in the same emit
@@ -663,15 +757,15 @@ fn continue_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
 /// IterClose then FinallyBlock (close the iterator before running finally).
 fn cross_cleanups(frame: Frame2) -> List(BarrierCleanup) {
   case frame {
-    Loop2(iter_close: Some(iv), ..) -> [IterClose(iv, False)]
+    Loop2(iter_close: Some(#(iv, esc)), ..) -> [IterClose(iv, False, Some(esc))]
     Loop2(..) | Switch2(..) | Labeled2(..) -> []
-    Barrier2(finally_body:, iter_close:) -> {
+    Barrier2(finally_body:, iter_close:, escape:) -> {
       let acc = case finally_body {
-        Some(#(body, save)) -> [FinallyBlock(body, save)]
+        Some(#(body, save)) -> [FinallyBlock(body, save, escape)]
         None -> []
       }
       case iter_close {
-        Some(iv) -> [IterClose(iv, False), ..acc]
+        Some(iv) -> [IterClose(iv, False, escape), ..acc]
         None ->
           case acc {
             [] -> [CatchOnly]
@@ -884,6 +978,35 @@ pub fn leave_scope(e: Emitter2, save: ScopeSave2) -> Emitter2 {
     slot_vars: save.slot_vars,
     in_block: save.in_block,
   )
+}
+
+/// leave_scope for a body that may have ended in a transfer. A block whose
+/// last statement is return/throw/break/continue never reaches the
+/// continuation that leaves its scope, so the emitter it hands back is still
+/// positioned inside `entered`; whatever is emitted next in the enclosing
+/// scope (an else arm, a catch handler, the statement after a loop) would
+/// resolve names against the dead block. Restores `save` in that case and is
+/// a no-op when the body left normally.
+pub fn leave_scope_if_inside(
+  e: Emitter2,
+  entered: ScopeId,
+  save: ScopeSave2,
+) -> Emitter2 {
+  case entered != save.cur_scope && scope_within(e.tree, e.cur_scope, entered) {
+    True -> leave_scope(e, save)
+    False -> e
+  }
+}
+
+fn scope_within(tree: ScopeTree, id: ScopeId, ancestor: ScopeId) -> Bool {
+  case id == ancestor {
+    True -> True
+    False ->
+      case scope.get_scope(tree, id).parent {
+        Some(parent) -> scope_within(tree, parent, ancestor)
+        None -> False
+      }
+  }
 }
 
 /// Conditionally consume the for-head Block scope (only pushed for

@@ -46,6 +46,11 @@ pub fn guarded(
 @external(erlang, "arc_interp_ffi", "guard1")
 pub fn guard1(f: fn(Agent) -> #(v, Agent), agent: Agent) -> Guarded(v)
 
+/// `guard1` for a body that carries its agent inside a `State`: the state
+/// goes in as built, nothing is re-seated on entry.
+@external(erlang, "arc_interp_ffi", "guard1")
+pub fn guard_state(f: fn(State) -> #(v, Agent), state: State) -> Guarded(v)
+
 @external(erlang, "arc_interp_ffi", "guard2")
 pub fn guard2(f: fn(Agent, a) -> #(v, Agent), agent: Agent, a: a) -> Guarded(v)
 
@@ -220,9 +225,10 @@ pub fn type_of(v: JsVal) -> String
 pub fn type_of_in(store: JsStore(Agent), v: JsVal) -> String
 
 /// `obj.key`: own or inherited plain data property, `undefined` if absent
-/// on an all-ordinary chain. `key` is a Named (non-index) key.
+/// on an all-ordinary chain; a string or number receiver reads from its
+/// realm wrapper prototype. `key` is a Named (non-index) key.
 @external(erlang, "arc_interp_ffi", "get_field")
-pub fn get_field(store: JsStore(Agent), obj: JsVal, key: String) -> JsVal
+pub fn get_field(agent: Agent, obj: JsVal, key: String) -> JsVal
 
 /// `obj[key]` for an integer index into an Array cell or a string key.
 @external(erlang, "arc_interp_ffi", "get_elem")

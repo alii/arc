@@ -111,13 +111,15 @@ pub fn js_store_test() {
   let store =
     JsStore(
       ..base,
-      data: dict.from_list([#(3, SBox(rt_types.mk_string("d")))]),
+      data: tree_array.set(3, SBox(rt_types.mk_string("d")), base.data),
       free: [11, 12],
       next: 13,
       pinned_roots: set.from_list([3]),
       alloc_since_gc: 14,
+      prop_seq: 16,
       shapes: dict.from_list([#(7, desc)]),
       next_shape: 15,
+      ics: dict.from_list([#(1, rt_types.IcRead(7, 0, <<"k":utf8>>))]),
     )
   assert tag_of(store) == tag("STORE_TAG")
   assert arity(store) == idx("STORE_ARITY")
@@ -126,8 +128,10 @@ pub fn js_store_test() {
   assert at(store, "STORE_NEXT") == dyn(13)
   assert at(store, "STORE_PINNED_ROOTS") == dyn(store.pinned_roots)
   assert at(store, "STORE_ALLOC") == dyn(14)
+  assert at(store, "STORE_PROP_SEQ") == dyn(16)
   assert at(store, "STORE_SHAPES") == dyn(store.shapes)
   assert at(store, "STORE_NEXT_SHAPE") == dyn(15)
+  assert at(store, "STORE_ICS") == dyn(store.ics)
 }
 
 pub fn realm_test() {
@@ -137,6 +141,8 @@ pub fn realm_test() {
   assert at(realm, "REALM_OBJECT") == dyn(realm.object)
   assert at(realm, "REALM_FUNCTION") == dyn(realm.function)
   assert at(realm, "REALM_ARRAY") == dyn(realm.array)
+  assert at(realm, "REALM_STRING") == dyn(realm.string)
+  assert at(realm, "REALM_NUMBER") == dyn(realm.number)
   assert at(realm, "REALM_GLOBAL") == dyn(realm.global_object)
   assert at(realm, "REALM_ID") == dyn(realm.id)
   assert realm.id == 0

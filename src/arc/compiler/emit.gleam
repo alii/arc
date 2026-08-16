@@ -1250,11 +1250,15 @@ fn emit_top_level_body(
   let e = case vars_to_global {
     False -> e
     True ->
-      list.append(
-        ast_util.collect_hoisted_vars(stmts),
+      list.fold(
         ast_util.direct_fn_names(stmts),
+        list.fold(
+          ast_util.collect_hoisted_vars(stmts),
+          e,
+          emit_declare_var_global,
+        ),
+        emit_declare_fn_global,
       )
-      |> list.fold(e, emit_declare_var_global)
   }
   // Annex B §B.3.2.2/.2.6: sloppy-mode function-in-block names get a var
   // binding (undefined) before the body runs. The analyzer precomputes the
@@ -1738,7 +1742,19 @@ fn emit_declare_var_global(e: Emitter, name: String) -> Emitter {
   }
 }
 
-/// Declare a let/const binding in the global lexical record when the
+/// `emit_declare_var_global` for a hoisted function name: the global-object
+/// route checks CanDeclareGlobalFunction first.
+fn emit_declare_fn_global(e: Emitter, name: String) -> Emitter {
+  case fn_fallthrough(e) {
+    ToGlobal ->
+      emit_op(
+        e,
+        opcode.DeclareGlobalFn(name, deletable: e.deletable_global_vars),
+      )
+    ToEvalEnv -> emit_op(e, opcode.DeclareEvalVar(name))
+  }
+}
+
 /// current statement is at LexGlobal top level. For local-slot bindings
 /// (LexLocal top level or any nested block), the analyzer pre-registered
 /// the slot and enter_scope's emit_binding_prologue seeded it — nothing

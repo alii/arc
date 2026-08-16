@@ -40,16 +40,17 @@
 -define(STORE_ALLOC, 6).
 -define(STORE_SHAPES, 15).
 -define(STORE_NEXT_SHAPE, 16).
--define(STORE_ARITY, 17).
+-define(STORE_ARITY, 18).
+-define(STORE_ICS, 18).
 
 %% arc/rt/types.Realm / BuiltinPair
 -define(REALM_TAG, realm).
 -define(REALM_OBJECT, 2).
 -define(REALM_FUNCTION, 3).
 -define(REALM_ARRAY, 4).
--define(REALM_GLOBAL, 49).
--define(REALM_ID, 51).
--define(REALM_ARITY, 53).
+-define(REALM_GLOBAL, 51).
+-define(REALM_ID, 53).
+-define(REALM_ARITY, 55).
 -define(PAIR_TAG, builtin_pair).
 -define(PAIR_PROTO, 2).
 -define(PAIR_CTOR, 3).
@@ -151,5 +152,18 @@
 %% arc/rt/call.Completion (built by the call ffi, matched by Gleam)
 -define(COMPLETION_NORMAL, normal_completion).
 -define(COMPLETION_THROW, throw_completion).
+
+%% arc/rt/types.Realm: the primitive wrapper prototypes the fused field
+%% read walks from for a string / number receiver.
+-define(REALM_STRING, 5).
+-define(REALM_NUMBER, 6).
+
+%% arc/rt/types.JsStore: the property creation-order stamp the fused
+%% field write bumps when it creates an own property.
+-define(STORE_PROP_SEQ, 9).
+
+%% arc/rt/types.JsStore.data is an OTP `array` indexed by cell id whose
+%% default is this sentinel: a freed or never-minted id reads back as it.
+-define(STORE_FREE_SLOT, js_free).
 
 -endif.

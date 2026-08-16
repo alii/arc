@@ -1,5 +1,5 @@
-//// The interpreter's GC safepoints: a collection triggered from the root
-//// activation keeps what the frame holds and drops the rest, memory stays
+//// The interpreter's GC safepoints: a collection triggered from a flat
+//// frame keeps what the frame holds and drops the rest, memory stays
 //// bounded under a small threshold, the turn-end drain keeps the completion
 //// value, and parked coroutine frames / closure environments are traced.
 
@@ -86,6 +86,7 @@ fn root_state(agent: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
     func:,
     unit: 0,
     call_stack: [],
+    outer_depth: agent.store.call_depth,
     try_stack: [],
     this: mk_undefined(),
     new_target: mk_undefined(),
@@ -101,8 +102,7 @@ pub fn toplevel_return_collects_and_keeps_frame_values_test() {
   let #(stacked_h, stacked, st) = new_object(st)
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
-  let s =
-    safepoint.maybe_collect_at_toplevel(root_state(st, [local], [stacked]))
+  let s = safepoint.maybe_collect_at_return(root_state(st, [local], [stacked]))
   assert rt_gc.t_is_live(s.agent, local_h)
   assert rt_gc.t_is_live(s.agent, stacked_h)
   assert !rt_gc.t_is_live(s.agent, dead_h)
@@ -112,7 +112,7 @@ pub fn toplevel_return_collects_and_keeps_frame_values_test() {
 pub fn below_threshold_does_not_collect_test() {
   let st = small_agent()
   let #(dead_h, _, st) = new_object(st)
-  let s = safepoint.maybe_collect_at_toplevel(root_state(st, [], []))
+  let s = safepoint.maybe_collect_at_return(root_state(st, [], []))
   assert rt_gc.t_is_live(s.agent, dead_h)
 }
 
@@ -121,21 +121,18 @@ pub fn nested_activation_never_collects_test() {
   let st = rt_store.t_enter_call(small_agent())
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
-  let s = safepoint.maybe_collect_at_toplevel(root_state(st, [], []))
+  let s = safepoint.maybe_collect_at_return(root_state(st, [], []))
   assert rt_gc.t_is_live(s.agent, dead_h)
 }
 
-pub fn inner_frame_return_never_collects_test() {
-  let st = small_agent()
-  let #(dead_h, _, st) = new_object(st)
-  let st = churn(st, threshold)
-  let s = root_state(st, [], [])
+/// `s` running as the callee of one flat frame that holds `held`.
+fn with_caller_frame(s: State, held: JsVal) -> State {
   let caller =
     SavedFrame(
       func: s.func,
       unit: s.unit,
       locals: s.locals,
-      stack: [],
+      stack: [held],
       pc: 0,
       try_stack: [],
       constructor_this: None,
@@ -145,7 +142,40 @@ pub fn inner_frame_return_never_collects_test() {
       call_args: [],
       eval_env: None,
     )
-  let s = safepoint.maybe_collect_at_toplevel(State(..s, call_stack: [caller]))
+  let store = s.agent.store
+  State(
+    ..s,
+    call_stack: [caller],
+    agent: Agent(
+      ..s.agent,
+      store: JsStore(..store, call_depth: store.call_depth + 1),
+    ),
+  )
+}
+
+pub fn inner_frame_return_collects_and_keeps_caller_values_test() {
+  let st = small_agent()
+  let #(held_h, held, st) = new_object(st)
+  let #(dead_h, _, st) = new_object(st)
+  let st = churn(st, threshold)
+  let s =
+    safepoint.maybe_collect_at_return(with_caller_frame(
+      root_state(st, [], []),
+      held,
+    ))
+  assert rt_gc.t_is_live(s.agent, held_h)
+  assert !rt_gc.t_is_live(s.agent, dead_h)
+}
+
+pub fn inner_frame_under_nested_entry_never_collects_test() {
+  let st = rt_store.t_enter_call(small_agent())
+  let #(dead_h, _, st) = new_object(st)
+  let st = churn(st, threshold)
+  let s =
+    safepoint.maybe_collect_at_return(with_caller_frame(
+      root_state(st, [], []),
+      mk_undefined(),
+    ))
   assert rt_gc.t_is_live(s.agent, dead_h)
 }
 
@@ -165,7 +195,7 @@ fn stress(s: State, rounds: Int, base: Int) -> State {
     0 -> s
     _ -> {
       let s = State(..s, agent: churn(s.agent, 2 * threshold))
-      let s = safepoint.maybe_collect_at_toplevel(s)
+      let s = safepoint.maybe_collect_at_return(s)
       assert rt_gc.stats(s.agent).live <= base + 2 * threshold
       stress(s, rounds - 1, base)
     }

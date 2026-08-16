@@ -69,6 +69,20 @@ pub fn method_call_proto_chain_diff_test() {
   assert c.stdout == i.stdout
 }
 
+// Prototypes that are themselves constructed (shaped) objects: 1/2/3-hop
+// walks, a shadow on the shaped proto after warm-up, and an own shadow.
+const method_call_shaped_chain_src = "function A(){this.a=1};A.prototype.m=function(){return 'A'+this.a+this.b+this.c};function B(){this.b=2};B.prototype=new A();function C(){this.c=3};C.prototype=new B();function D(){this.d=4};D.prototype=new C();var b=new B(),c=new C(),d=new D();var s='';for(var i=0;i<3;i++){s+=b.m()+'|'+c.m()+'|'+d.m()+'|'};console.log(s);C.prototype.m=function(){return 'C'};console.log(c.m()+b.m()+d.m());B.prototype.m=function(){return 'B'};console.log(c.m()+b.m());c.m=function(){return 'own'};console.log(c.m()+d.m())"
+
+pub fn method_call_shaped_chain_diff_test() {
+  let i = harness.run_interpreted(method_call_shaped_chain_src)
+  let c = harness.run_compiled(method_call_shaped_chain_src)
+  assert i.stdout
+    == <<
+      "A12undefined|A123|A123|A12undefined|A123|A123|A12undefined|A123|A123|\nCA12undefinedC\nCB\nownC\n":utf8,
+    >>
+  assert c.stdout == i.stdout
+}
+
 const method_call_miss_src = "var o={};try{o.nope()}catch(e){console.log('miss:'+e.name)};Object.defineProperty(o,'g',{get:function(){return function(){return 'getter'}}});console.log(o.g())"
 
 pub fn method_call_miss_diff_test() {
@@ -84,6 +98,46 @@ pub fn this_multi_field_diff_test() {
   let i = harness.run_interpreted(this_multi_field_src)
   let c = harness.run_compiled(this_multi_field_src)
   assert i.stdout == <<"12339\n":utf8>>
+  assert c.stdout == i.stdout
+}
+
+// Constructor field adds after the shape transition is cached: a setter, a
+// non-writable data property and a Proxy on the proto chain must all still
+// intercept `this.k = v`; a same-named writable slot on a shaped proto must
+// not.
+const ctor_add_setter_src = "function P(){this.x=1;this.y=2};new P();new P();Object.defineProperty(P.prototype,'y',{set:function(v){this.z=v*10}});var p=new P();console.log(''+p.x+p.y+p.z)"
+
+pub fn ctor_add_setter_diff_test() {
+  let i = harness.run_interpreted(ctor_add_setter_src)
+  let c = harness.run_compiled(ctor_add_setter_src)
+  assert i.stdout == <<"1undefined20\n":utf8>>
+  assert c.stdout == i.stdout
+}
+
+const ctor_add_readonly_src = "function P(){this.x=1;this.y=2};new P();new P();Object.defineProperty(P.prototype,'x',{value:7,writable:false});var p=new P();console.log(''+p.x+p.y+Object.keys(p))"
+
+pub fn ctor_add_readonly_diff_test() {
+  let i = harness.run_interpreted(ctor_add_readonly_src)
+  let c = harness.run_compiled(ctor_add_readonly_src)
+  assert i.stdout == <<"72y\n":utf8>>
+  assert c.stdout == i.stdout
+}
+
+const ctor_add_proxy_src = "function P(){this.x=1};new P();new P();P.prototype=new Proxy({},{set:function(t,k,v,r){console.log('trap:'+k);return Reflect.set(t,k,v,r)}});var p=new P();console.log(''+p.x+Object.keys(p))"
+
+pub fn ctor_add_proxy_diff_test() {
+  let i = harness.run_interpreted(ctor_add_proxy_src)
+  let c = harness.run_compiled(ctor_add_proxy_src)
+  assert i.stdout == <<"trap:x\n1x\n":utf8>>
+  assert c.stdout == i.stdout
+}
+
+const ctor_add_shaped_proto_src = "function A(){this.m=1};var proto=new A();function B(){this.m=2};B.prototype=proto;new B();var b=new B();console.log(''+b.m+proto.m+Object.keys(b))"
+
+pub fn ctor_add_shaped_proto_diff_test() {
+  let i = harness.run_interpreted(ctor_add_shaped_proto_src)
+  let c = harness.run_compiled(ctor_add_shaped_proto_src)
+  assert i.stdout == <<"21m\n":utf8>>
   assert c.stdout == i.stdout
 }
 
@@ -178,6 +232,26 @@ fn diff(src: String, want: String) {
 
 pub fn for_of_array_diff_test() {
   diff("var s='';for(const x of [1,2,3])s+=x;console.log(s)", "123\n")
+}
+
+/// Code after a try/catch runs outside it: a later throw in the same function
+/// must not land in the earlier handler, and a break out of a try body must
+/// leave it.
+pub fn throw_after_try_diff_test() {
+  diff(
+    "function f(){try{}catch(e){return 'wrong'}throw 1}try{console.log(f())}catch(e){console.log('ok',e)}function g(){for(;;){try{break}catch(e){return 'wrong'}}throw 2}try{console.log(g())}catch(e){console.log('ok',e)}",
+    "ok 1\nok 2\n",
+  )
+}
+
+/// A finally block that throws while a return/break crosses it runs once, and
+/// its throw is not seen by that try's own catch; an iterator close throwing
+/// on `return` inside for-of is not caught by an inner try/catch either.
+pub fn finally_throws_once_diff_test() {
+  diff(
+    "var n=0;function f(){try{return 1}finally{n++;throw 2}}try{f()}catch(e){console.log('A',e,n)}n=0;function g(){try{return 1}catch(e){console.log('inner',e)}finally{n++;throw 2}}try{g()}catch(e){console.log('B',e,n)}n=0;function h(){for(var i=0;i<1;i++){try{break}finally{n++;throw 3}}}try{h()}catch(e){console.log('C',e,n)}n=0;function k(){try{try{return 1}finally{n++;throw 4}}catch(e){console.log('k',e,n);return 9}}console.log('D',k(),n);var rc=0,fe=0,ce=0;var it={};it[Symbol.iterator]=function(){return{next(){return{done:false}},return(){rc++;throw 42}}};function m(){for(var x of it){try{return}catch(e){ce++}finally{fe++}}}try{m()}catch(e){console.log('E',e,rc,ce,fe)}",
+    "A 2 1\nB 2 1\nC 3 1\nk 4 1\nD 9 1\nE 42 1 0 1\n",
+  )
 }
 
 const user_iter_src = "var log=[];function it(n){var i=0;return {[Symbol.iterator](){return this},next(){i++;return {done:i>n,value:i}},return(){log.push('ret'+i);return {}}}}
@@ -412,10 +486,28 @@ pub fn float_overflow_is_infinity_diff_test() {
   )
 }
 
+/// Integer `+ - *` runs native when the result stays a safe integer; the
+/// widening, -0, Infinity, string and mixed cases still take the kernel.
+pub fn integer_arith_edges_diff_test() {
+  diff(
+    "function d(v){return 1/v===-Infinity?'-0':String(v)}var m=9007199254740991,z=0,n=-5,b=1e308,s='1',h=1.5;function f(a,b){return [a+b,a-b,a*b].join()}console.log(f(m,1),f(-m,-1),f(-m,1),f(m,-1),d(z*n),d(n*z),d(z*5),f(b,10),f(s,1),f(2,h),f(h,2),f(3,4));var i=0,j=m,k=1;for(var q=0;q<3;q++){i++;i+=2;i*=2;j++;k*=m}console.log(i,j,k,m*m,d(0*-1))",
+    "9007199254740992,9007199254740990,9007199254740991 -9007199254740992,-9007199254740990,9007199254740991 -9007199254740990,-9007199254740992,-9007199254740991 9007199254740990,9007199254740992,-9007199254740991 -0 -0 0 1e+308,1e+308,Infinity 11,0,1 3.5,0.5,3 3.5,-0.5,3 7,-1,12\n42 9007199254740992 7.307508186654512e+47 8.112963841460666e+31 -0\n",
+  )
+}
+
 pub fn minus_zero_is_preserved_diff_test() {
   diff(
     "function d(v){return 1/v===-Infinity?'-0':String(v)}var z=0,n=-1,p=5;console.log(d(-0),d(0*-1),d(z*n),d(n*z),d(z*p),d(-z),d(-0+-0),d(-0+0),d(0-0),d(-4%2),d(4%-2),d(z/-5),d(Math.round(-0.4)),d(-p*0));console.log(Object.is(-0,0),Object.is(z*n,-0),1/-0,(-0).toString(),JSON.stringify(-0),JSON.stringify([z*n]),String(-0),-0===0,[-0].includes(0),Math.max(-0,0)===0&&1/Math.max(-0,0));var o={};o[-0]='k';console.log(Object.keys(o).join());var q=0;q*= -1;console.log(d(q),d(q+1-1));var ng=-1,nz=-0;console.log(ng,ng==-1,5&ng,d(nz),d(nz*ng))",
     "-0 -0 -0 -0 0 -0 -0 0 0 -0 0 -0 -0 -0\nfalse true -Infinity 0 0 [0] 0 true true Infinity\n0\n-0 0\n-1 true 5 -0 0\n",
+  )
+}
+
+/// Integral floats as indices (`6/2`, `Math.floor(x)`) reach the same
+/// element as the integer, and the rounding ops keep -0 / huge / non-finite.
+pub fn float_index_and_rounding_diff_test() {
+  diff(
+    "var a=[10,20,30,40,50,60,70];console.log(a[Math.floor(2.5)],a[6/2],a[-0.0],a[Math.ceil(0.5)],a[Math.round(4.4)],a[Math.trunc(5.9)],a[0.5],a[1e300]);a[8/2]=99;a[Math.floor(6.7)]=77;a[a.length*1.0]=1;console.log(a.join(),a.length);console.log(Object.is(Math.floor(-0.5),-1),Object.is(Math.floor(-0),-0),Object.is(Math.floor(0.3),0),Object.is(Math.ceil(-0.3),-0),Object.is(Math.round(-0.4),-0),Object.is(Math.trunc(-0.9),-0));console.log(Math.floor(1e300).toString(),Math.floor(-1e21),Math.floor(2.5)/2,typeof Math.floor(2.5),Math.floor(NaN),Math.floor(-Infinity));var m={};m[4.0]='f';console.log(m[4],Object.keys(m).join())",
+    "30 40 10 20 50 60 undefined undefined\n10,20,30,40,99,60,77,1 8\ntrue true true true true true\n1e+300 -1e+21 1 number NaN -Infinity\nf 4\n",
   )
 }
 
@@ -600,7 +692,7 @@ pub fn derived_constructor_this_diff_test() {
 pub fn class_extends_natives_diff_test() {
   diff(
     "class MyArr extends Array { sum(){ return this.reduce((a,b)=>a+b, 0) } }\nvar m = new MyArr(); m.push(1,2,3);\nconsole.log(m.length, m.sum(), Array.isArray(m), m instanceof MyArr, m instanceof Array, MyArr.from([1]) instanceof MyArr);\nclass MyErr extends Error { constructor(msg){ super(msg); this.name = 'MyErr' } }\nvar e = new MyErr('boom');\nconsole.log(e.message, e.name, e instanceof Error, e instanceof MyErr, String(e), Object.prototype.toString.call(e));\ntry { throw new MyErr('t') } catch (x) { console.log(x instanceof MyErr, x.message) }\nclass MyMap extends Map { setx(k,v){ return super.set(k, v*2) } }\nvar mm = new MyMap([[1,1]]); mm.setx(2, 5); console.log(mm.get(1), mm.get(2), mm.size, mm instanceof Map);\nclass P extends Promise { }\nvar p = new P(function(r){ r(3) }); console.log(p instanceof P, p instanceof Promise, p.then(function(){}) instanceof P);\np.then(function(v){ console.log('v', v) });\nclass U extends Uint8Array { }\nvar u = new U(3); u[0] = 300; console.log(u.length, u[0], u instanceof U, u instanceof Uint8Array);\nclass TE extends TypeError {}\nconsole.log(new TE('x').name, new TE('x') instanceof TypeError, Object.getPrototypeOf(TE) === TypeError);\nclass O extends Object { constructor(){ super(); this.q = 1 } }\nconsole.log(new O().q);",
-    "3 6 true true true false\nboom MyErr true true MyErr: boom [object Error]\ntrue t\n1 10 2 true\ntrue true true\n3 44 true true\nTypeError true true\n1\nv 3\n",
+    "3 6 true true true true\nboom MyErr true true MyErr: boom [object Error]\ntrue t\n1 10 2 true\ntrue true true\n3 44 true true\nTypeError true true\n1\nv 3\n",
   )
 }
 

@@ -112,6 +112,7 @@ fn activation(
     func: template,
     unit:,
     call_stack: [],
+    outer_depth: agent.store.call_depth,
     try_stack: [],
     this:,
     new_target: mk_undefined(),
@@ -347,6 +348,7 @@ fn run_direct_eval(
         source,
         parser.parse_direct_eval(
           _,
+          strict: func.is_strict,
           allow_new_target: lexical.new_target_allowed(code_kind),
           allow_super_property: lexical.super_prop_allowed(code_kind),
           allow_super_call: lexical.super_call_allowed(code_kind),

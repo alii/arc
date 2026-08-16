@@ -66,13 +66,21 @@ pub fn harness_files(metadata: TestMetadata, is_async: Bool) -> List(String) {
 @external(erlang, "test_runner_ffi", "list_test_files")
 pub fn list_test_files(dir: String) -> List(String)
 
-/// Apply TEST262_FILTER (substring) and TEST262_SHARD=k/n (bucket k of a
+/// Apply TEST262_LIST (a file of relative paths, one per line),
+/// TEST262_FILTER (substring) and TEST262_SHARD=k/n (bucket k of a
 /// deterministic n-way hash partition; every file lands in exactly one
 /// bucket) from the environment.
 pub fn select_files(files: List(String)) -> List(String) {
-  let filtered = case test_runner.get_env("TEST262_FILTER") {
+  let listed = case test_runner.get_env("TEST262_LIST") {
     Ok("") | Error(Nil) -> files
-    Ok(filter) -> list.filter(files, string.contains(_, filter))
+    Ok(path) -> {
+      let wanted = load_pass_list(path)
+      list.filter(files, set.contains(wanted, _))
+    }
+  }
+  let filtered = case test_runner.get_env("TEST262_FILTER") {
+    Ok("") | Error(Nil) -> listed
+    Ok(filter) -> list.filter(listed, string.contains(_, filter))
   }
   case test_runner.get_env("TEST262_SHARD") {
     Ok("") | Error(Nil) -> filtered
@@ -104,7 +112,7 @@ fn phash2(term: String, range: Int) -> Int
 /// The env var, if any, that restricts this run to a subset of test262 — a
 /// snapshot written from such a run must not be committed as the full baseline.
 pub fn partial_run_env() -> Option(String) {
-  ["TEST262_SHARD", "TEST262_FILTER"]
+  ["TEST262_SHARD", "TEST262_FILTER", "TEST262_LIST"]
   |> list.find(fn(name) {
     case test_runner.get_env(name) {
       Ok("") -> False

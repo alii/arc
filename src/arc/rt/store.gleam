@@ -9,6 +9,7 @@
 //// every other op returns a bare `Agent`. `t_cell_new` NEVER collects
 //// (D11 — allocation is O(1) and pure; GC is turn-boundary only).
 
+import arc/internal/tree_array.{type TreeArray}
 import arc/rt/limits
 import arc/rt/types.{
   type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
@@ -24,6 +25,12 @@ import gleam/set
 @external(erlang, "arc_job_queue_ffi", "job_queue_new")
 fn jq_new() -> JobQueue
 
+/// Empty cell arena: an OTP `array` whose default is the free-slot
+/// sentinel (`arc_rt_layout.hrl` `STORE_FREE_SLOT`), so a freed or
+/// never-minted id reads back as absent.
+@external(erlang, "arc_rt_store_ffi", "data_new")
+pub fn data_new() -> TreeArray(JsSlot)
+
 // ── construction ────────────────────────────────────────────────────────────
 
 /// Build an empty, realm-less `JsStore` (SPEC §2.2 / §7.M1b). NO realm, NO
@@ -32,7 +39,7 @@ fn jq_new() -> JobQueue
 /// real M4/M-CALL fns as its step 1). Total; touches no process dictionary.
 pub fn t_store_new() -> JsStore(Agent) {
   JsStore(
-    data: dict.new(),
+    data: data_new(),
     free: [],
     next: 0,
     pinned_roots: set.new(),
@@ -50,6 +57,7 @@ pub fn t_store_new() -> JsStore(Agent) {
     ]),
     next_shape: 1,
     unit_uid: 0,
+    ics: dict.new(),
   )
 }
 
@@ -63,7 +71,7 @@ fn unseeded_ops() -> JsOps(Agent) {
     to_object: fn(_, _) { unseeded() },
     new_error: fn(_, _, _) { unseeded() },
     eval_hook: fn(_, _, _) { unseeded() },
-    call_bytecode: fn(_, _, _, _, _) { unseeded() },
+    call_bytecode: fn(_, _, _, _) { unseeded() },
     construct_bytecode: fn(_, _, _, _) { unseeded() },
     resume_frame: fn(_, _, _) { unseeded() },
   )
@@ -102,7 +110,7 @@ pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
   let js =
     JsStore(
       ..js,
-      data: dict.insert(js.data, id, slot),
+      data: tree_array.set(id, slot, js.data),
       free:,
       next:,
       alloc_since_gc: js.alloc_since_gc + 1,
@@ -123,7 +131,7 @@ pub fn t_cell_get(st: Agent, h: Handle) -> JsSlot
 pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
   let js = require_js(st)
   let JsCell(id) = h
-  with_js(st, JsStore(..js, data: dict.insert(js.data, id, slot)))
+  with_js(st, JsStore(..js, data: tree_array.set(id, slot, js.data)))
 }
 
 /// Read-modify-write the slot at `h` via `f`. Fail-closed panic on a dangling
@@ -139,7 +147,7 @@ pub fn t_cell_free(st: Agent, h: Handle) -> Agent {
   let JsCell(id) = h
   with_js(
     st,
-    JsStore(..js, data: dict.delete(js.data, id), free: [id, ..js.free]),
+    JsStore(..js, data: tree_array.reset(id, js.data), free: [id, ..js.free]),
   )
 }
 

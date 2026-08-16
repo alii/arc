@@ -258,6 +258,44 @@ fn bind_if_typed(
   }
 }
 
+/// Run `body` under a try that, on a JS throw, closes `iter` with an
+/// abrupt completion and rethrows (§7.4.8 IteratorClose on a throw
+/// completion — the close's own throw is dropped, the original wins). Slot
+/// rebinds inside `body` thread out through the Try's result the way
+/// `bind_if` threads an arm's.
+pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
+  fn(e: Emitter2, k) {
+    let sv0 = e.slot_vars
+    let #(body_tree, e_b) = run(then(body, fn(_) { pure(e.consts.undef) }), e)
+    let carried = slots_rebound(sv0, e_b.slot_vars)
+    let e = Emitter2(..e_b, slot_vars: sv0)
+    let #(exn, e) = state.fresh_var(e)
+    let #(closed, e) = state.fresh_var(e)
+    let #(r, e) = state.fresh_var(e)
+    let handler =
+      ir.Let(
+        [closed],
+        ir.CallHost("js", "iter_close", [iter, e.consts.true_]),
+        ir.Throw(e.consts.js_tag, [ir.Var(exn)]),
+      )
+    let body_tree = append_tail(body_tree, arm_slot_vals(e_b, carried))
+    let #(e, out) = rebind_slots(e, carried)
+    let tys = [ir.TTerm, ..list.map(carried, fn(_) { ir.TTerm })]
+    wrap(k(e, Nil), ir.Let(
+      [r, ..out],
+      ir.Try(result: tys, body: body_tree, handlers: [
+        ir.CatchHandler(
+          on: ir.OnTag(e.consts.js_tag),
+          payload: [exn],
+          exnref: None,
+          handler:,
+        ),
+      ]),
+      _,
+    ))
+  }
+}
+
 /// §7.1.2 ToBoolean(v) as a raw i32 for `ir.If` conds. Inlines the three
 /// operand shapes richards' 21k/run truthy sites actually see —
 /// `true`/`false` atoms (from `!=`/`<`/`!`) and bare Int 0|1 (from `==`'s
@@ -424,7 +462,71 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
 /// (native op, then widen an integer past 2^53 - 1 to a double and keep the
 /// sign of an integer zero product). The result is marked a known number.
 pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  then(host(op, [a, b]), mark_number)
+  use ii <- then(both_ints(a, b))
+  let slow = host(op, [a, b])
+  let arm = case op {
+    "num_add" -> Some(int_arm(ir.NAdd, a, b, False, slow))
+    "num_sub" -> Some(int_arm(ir.NSub, a, b, False, slow))
+    "num_mul" -> Some(int_arm(ir.NMul, a, b, True, slow))
+    _ -> None
+  }
+  case arm {
+    Some(fast) -> then(bind_if(ii, fast, slow), mark_number)
+    None -> then(slow, mark_number)
+  }
+}
+
+const max_safe_int = 9_007_199_254_740_991
+
+/// i32 `is_integer(a) & is_integer(b)`; an integer constant needs no test.
+fn both_ints(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
+  case is_const_int(a), is_const_int(b) {
+    True, True -> pure(ir.ConstI32(1))
+    True, False -> bind(ir.TermTest(ir.IsInt, b))
+    False, True -> bind(ir.TermTest(ir.IsInt, a))
+    False, False -> {
+      use ga <- then(bind(ir.TermTest(ir.IsInt, a)))
+      use gb <- then(bind(ir.TermTest(ir.IsInt, b)))
+      bind(ir.If(ga, [ir.TI32], ir.Values([gb]), ir.Values([ir.ConstI32(0)])))
+    }
+  }
+}
+
+fn is_const_int(v: ir.Value) -> Bool {
+  case v {
+    ir.ConstI32(_) | ir.ConstI64(_) -> True
+    _ -> False
+  }
+}
+
+/// Bare BEAM `+ - *` on two integers (never raises). The result stands when
+/// it fits 2^53 - 1 either side — and, for `*`, is not the zero whose sign
+/// only the kernel knows — else the kernel `slow` redoes the op.
+fn int_arm(
+  op: ir.NumTermOp,
+  a: ir.Value,
+  b: ir.Value,
+  zero_sign: Bool,
+  slow: Build(ir.Value),
+) -> Build(ir.Value) {
+  use r <- then(bind(ir.NumTerm(op, a, b)))
+  use hi <- then(bind(ir.NumTerm(ir.NLe, r, ir.ConstI64(max_safe_int))))
+  use fits <- then(bind_if_i32(
+    hi,
+    bind(ir.NumTerm(ir.NGe, r, ir.ConstI64(-max_safe_int))),
+    pure(ir.ConstI32(0)),
+  ))
+  case zero_sign {
+    False -> bind_if(fits, pure(r), slow)
+    True -> {
+      use nz <- then(bind_if_i32(
+        fits,
+        bind(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))),
+        pure(ir.ConstI32(1)),
+      ))
+      bind_if(nz, slow, pure(r))
+    }
+  }
 }
 
 /// JS arithmetic `+ - *`: `num_binop` fast path when both operands are BEAM

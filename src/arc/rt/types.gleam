@@ -922,7 +922,14 @@ pub type NativeToken {
   TemporalN(TemporalNative)
   DisposableStackN(DisposableStackNative)
   FinalizationRegistryN(FinalizationRegistryNative)
+  WeakRefN(WeakRefNative)
   ShadowRealmN(ShadowRealmNative)
+}
+
+/// §26.1 WeakRef natives.
+pub type WeakRefNative {
+  WeakRefConstructor
+  WeakRefPrototypeDeref
 }
 
 /// §26.2 FinalizationRegistry natives. The constructor closes over the
@@ -2563,6 +2570,7 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
     FinalizationRegistryN(FinalizationRegistryConstructor(proto:)) -> [proto]
     FinalizationRegistryN(FinalizationRegistryPrototypeRegister)
     | FinalizationRegistryN(FinalizationRegistryPrototypeUnregister) -> []
+    WeakRefN(_) -> []
     ShadowRealmN(n) -> shadow_realm_native_refs(n)
     DateN(n) -> date_native_refs(n)
     RegExpN(n) -> regexp_native_refs(n)
@@ -3110,6 +3118,9 @@ pub type ObjKind {
   /// §26.2 FinalizationRegistry — [[CleanupCallback]] (held strongly) and
   /// [[Cells]] (newest first; each cell's target/token weak, held strong).
   FinalizationRegistryObj(callback: JsVal, cells: List(FinRegCell))
+  /// §26.1 WeakRef — [[WeakRefTarget]], held weakly (GC does not trace it;
+  /// `None` = empty, set once the target's cell was swept).
+  WeakRefObj(target: Option(JsVal))
   /// A ShadowRealm instance (proposal-shadowrealm). `realm` is the
   /// [[ShadowRealm]] slot: the id of the realm the constructor made for it.
   ShadowRealmObj(realm: Int)
@@ -3189,6 +3200,34 @@ pub type ShapeDesc {
     arity: Int,
     offsets: Dict(BitArray, Int),
     transitions: Dict(BitArray, Int),
+  )
+}
+
+/// One compiled `.key` read site's inline cache: on a receiver of shape
+/// `shape_id` the key lives at slot `off`. `key` is kept so two modules that
+/// happen to share a site id can never read through each other's entry.
+/// Sound because a shape's offsets never change and shape ids are never
+/// recycled. Lives on `JsStore.ics`; a droppable cache (not snapshotted).
+///
+/// `IcCall` is a compiled `o.key(args)` site's cache: up to a few ways, each
+/// a receiver shape `shape_id` (so no own `key`) whose proto chain, from
+/// `proto_id` down to the holder, was `chain` (cell id and the cell's whole
+/// slot) when `key` resolved to the data value `callee`. The guard compares
+/// each live slot with `=:=` (pointer-equal while untouched; any write
+/// replaces it), so a way is sound whatever now lives at those ids: an equal
+/// slot has the same props and the same proto link, so the same lookup. Not
+/// a GC root — the handle is validated on use.
+pub type IcEntry {
+  IcRead(shape_id: Int, off: Int, key: BitArray)
+  IcCall(key: BitArray, ways: List(IcCallWay))
+}
+
+pub type IcCallWay {
+  IcCallWay(
+    shape_id: Int,
+    proto_id: Int,
+    chain: List(#(Int, JsSlot)),
+    callee: Handle,
   )
 }
 
@@ -3399,6 +3438,8 @@ pub type Realm {
     set: BuiltinPair,
     weak_map: BuiltinPair,
     weak_set: BuiltinPair,
+    weak_ref: BuiltinPair,
+    finalization_registry: BuiltinPair,
     date: BuiltinPair,
     regexp: BuiltinPair,
     promise: BuiltinPair,
@@ -3466,6 +3507,8 @@ pub fn unset_realm() -> Realm {
     set: p,
     weak_map: p,
     weak_set: p,
+    weak_ref: p,
+    finalization_registry: p,
     date: p,
     regexp: p,
     promise: p,
@@ -3557,9 +3600,10 @@ pub type JsOps(st) {
     /// error raises SyntaxError. Interpreter-seeded; the runtime's own seed
     /// raises TypeError (no compiler linked).
     eval_hook: fn(st, String, EvalKind) -> #(JsVal, st),
-    /// [[Call]] of a `KBytecode` cell: `(callee, this, args, new_target)`.
-    /// Runs a fresh activation to completion; re-raises a throw.
-    call_bytecode: fn(st, Handle, JsVal, List(JsVal), JsVal) -> #(JsVal, st),
+    /// [[Call]] of a `KBytecode` cell: `(callee, this, args)`. Runs a fresh
+    /// activation to completion; a throw comes back as `Error`, not a raise.
+    call_bytecode: fn(st, Handle, JsVal, List(JsVal)) ->
+      #(Result(JsVal, JsVal), st),
     /// [[Construct]] of a `KBytecode` cell: `(callee, args, new_target)`.
     construct_bytecode: fn(st, Handle, List(JsVal), JsVal) -> #(Handle, st),
     /// Resume a suspended interpreter frame with `sent` = `#(mode, value)`
@@ -3576,8 +3620,10 @@ pub type JsOps(st) {
 pub type JsStore(st) {
   JsStore(
     // ── cell arena (arc heap.gleam:21-45) ──
-    /// Live cells by id.
-    data: Dict(Int, JsSlot),
+    /// Live cells by id. Ids are dense (`next` / free-list), so an OTP
+    /// `array` indexed by id; a freed id reads back as the FFI's free
+    /// sentinel, which every reader treats as absent.
+    data: TreeArray(JsSlot),
     /// Recycled ids, LIFO.
     free: List(Int),
     /// Next never-used id (starts 0).
@@ -3617,6 +3663,9 @@ pub type JsStore(st) {
     /// dynamic-function body loaded into the agent. Qualifies per-site
     /// caches whose spec key is a Parse Node (§13.2.8.4 [[TemplateMap]]).
     unit_uid: Int,
+    /// Compiled-code property read inline caches by site id. Droppable:
+    /// no handles, rebuilt empty on restore.
+    ics: Dict(Int, IcEntry),
   )
 }
 

@@ -134,8 +134,8 @@ fn bind_identifier(name: String, v: ir.Value, mode: BindMode) -> Build(Nil) {
 /// RestElement drains via iter_rest and marks drained; other patterns step,
 /// project value (tuple_get 1, R7), and recurse. IteratorClose fires after
 /// the loop only when the iterator was NOT drained by a rest.
-/// PORT-GAP (matches expr.gleam:1537): §7.4.11 close-on-abrupt for a throwing
-/// nested bind lands with the M17 Try combinator — no OnTag wrap here yet.
+/// §8.6.2 step 3 / §7.4.11: a throwing element bind IteratorCloses (abrupt)
+/// unless a rest element already drained the iterator.
 fn emit_array_pattern(
   elements: List(Option(ast.Pattern)),
   source: ir.Value,
@@ -143,7 +143,19 @@ fn emit_array_pattern(
 ) -> Build(Nil) {
   use rc <- anf.then(expr.consts())
   use iter <- anf.then(anf.host("get_iterator", [source, ir.ConstAtom("sync")]))
-  use drained <- anf.then(emit_array_elements(elements, iter, mode))
+  let drained =
+    list.any(elements, fn(el) {
+      case el {
+        Some(ast.RestElement(..)) -> True
+        _ -> False
+      }
+    })
+  use _ <- anf.then(
+    anf.close_iter_on_throw(iter, {
+      use _ <- anf.then(emit_array_elements(elements, iter, mode))
+      anf.pure(Nil)
+    }),
+  )
   case drained {
     True -> anf.pure(Nil)
     False -> anf.host_unit("iter_close", [iter, rc.false_])

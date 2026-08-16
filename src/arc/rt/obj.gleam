@@ -38,6 +38,7 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set
 import gleam/string
 
@@ -339,6 +340,48 @@ fn own_property_of(
     // §10.1.5.1 OrdinaryGetOwnProperty. (Proxy / Module Namespace string
     // keys dispatch in `t_get_own_property` before reaching the slot read.)
     _, _ -> dict.get(props, key) |> option.from_result
+  }
+}
+
+/// Result of `t_get_own_index` — the own [[GetOwnProperty]] probe by integer
+/// index, one heap read.
+pub type OwnIndex {
+  /// Dense-elements hit on an Array/Arguments: the value itself, no
+  /// descriptor synthesized.
+  OwnIndexValue(JsVal)
+  /// Own property from the properties dict (override or non-exotic).
+  OwnIndexProperty(Property)
+  /// No own property; carries the prototype so callers continue the chain
+  /// walk without re-reading the cell.
+  OwnIndexAbsent(proto: Option(Handle))
+  /// Proxy / Module Namespace / TypedArray: [[HasProperty]] and [[Get]] are
+  /// not an own probe plus a proto walk — take the generic path.
+  OwnIndexExotic
+}
+
+/// [[GetOwnProperty]] by integer index in [0, 2^32-2] on an object handle.
+/// Same semantics as `t_get_own_property(h, StringKey(Index(idx)))` for the
+/// kinds it answers, minus the DataProperty allocation on the elements hit.
+pub fn t_get_own_index(st: Agent, h: Handle, idx: Int) -> OwnIndex {
+  case read_object(st, h) {
+    SObject(kind: ProxyObj(..), ..)
+    | SObject(kind: ModuleNamespace(..), ..)
+    | SObject(kind: TypedArrayObj(..), ..) -> OwnIndexExotic
+    SObject(kind: ArrayObj(_), props:, elements:, proto:, ..)
+    | SObject(kind: ArgumentsObj(..), props:, elements:, proto:, ..) ->
+      case dict.get(props, Index(idx)) {
+        Ok(prop) -> OwnIndexProperty(prop)
+        Error(Nil) ->
+          case elements.get_option(elements, idx) {
+            Some(v) -> OwnIndexValue(v)
+            None -> OwnIndexAbsent(proto)
+          }
+      }
+    slot ->
+      case own_and_proto_of_slot(st, slot, StringKey(Index(idx))) {
+        #(Some(prop), _) -> OwnIndexProperty(prop)
+        #(None, proto) -> OwnIndexAbsent(proto)
+      }
   }
 }
 
@@ -648,13 +691,35 @@ pub fn t_get_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
           <> key_text(key)
           <> "')",
       )
-    // Bool/Num/Str/BigInt/Symbol → box to a wrapper Handle, walk from there
-    // with the ORIGINAL primitive as Receiver (so accessor `this` is the
-    // primitive, per §10.1.8.1).
-    _ -> {
-      let #(h, st) = js_ops(st).to_object(st, recv)
-      get_from(st, h, key, recv)
-    }
+    // Bool/Num/Str/BigInt/Symbol: a fresh wrapper has no own props beyond the
+    // String exotic virtuals, so read those directly and otherwise walk from
+    // the realm prototype with the ORIGINAL primitive as Receiver (accessor
+    // `this` is the primitive, per §10.1.8.1). No box is allocated.
+    rt_types.KStr(s) -> primitive_string_get(st, s, key, recv)
+    rt_types.KNum(_) -> get_from(st, st.realm.number.prototype, key, recv)
+    rt_types.KBool(_) -> get_from(st, st.realm.boolean.prototype, key, recv)
+    rt_types.KSym(_) -> get_from(st, st.realm.symbol.prototype, key, recv)
+    rt_types.KBig(_) -> get_from(st, st.realm.bigint.prototype, key, recv)
+    KTdz -> panic as "t_get_prop: TDZ sentinel escaped into a JsVal"
+  }
+}
+
+/// [[Get]] on a string primitive: §10.4.3.5 virtual own props, then
+/// `%String.prototype%`.
+fn primitive_string_get(
+  st: Agent,
+  s: String,
+  key: ObjectKey,
+  recv: JsVal,
+) -> #(JsVal, Agent) {
+  let own = case key {
+    StringKey(Named("length")) -> Some(string_length_property(s))
+    StringKey(Index(i)) -> string_index_property(s, i)
+    _ -> None
+  }
+  case own {
+    Some(prop) -> t_property_get_value(st, prop, recv)
+    None -> get_from(st, st.realm.string.prototype, key, recv)
   }
 }
 
@@ -719,7 +784,7 @@ fn ordinary_get(
   let #(own, proto) = own_and_proto_of_slot(st, slot, key)
   case own {
     // Steps 3-7: found — read value or invoke getter.
-    Some(prop) -> property_get_value(st, prop, receiver)
+    Some(prop) -> t_property_get_value(st, prop, receiver)
     // Step 2: not own — walk prototype chain.
     None ->
       case proto {
@@ -731,7 +796,7 @@ fn ordinary_get(
 
 /// §10.1.8.1 steps 3-7 given a found descriptor: data → `[[Value]]`;
 /// accessor → `Call(getter, Receiver)` (D17 upcall) or `undefined`.
-fn property_get_value(
+pub fn t_property_get_value(
   st: Agent,
   prop: Property,
   receiver: JsVal,
@@ -770,13 +835,26 @@ pub fn t_set_prop(
           <> key_text(key)
           <> "')",
       )
-    // Primitive receiver: box to walk the proto chain for a setter; the
-    // Receiver stays the primitive, so the receiver-write step (2.b —
-    // "Receiver is not an Object → false") rejects if no setter is found.
-    _ -> {
-      let #(h, st) = js_ops(st).to_object(st, recv)
-      set_from(st, h, key, v, recv)
-    }
+    // Primitive receiver: a fresh wrapper's only own props are the String
+    // exotic virtuals (non-writable → false); otherwise walk the realm proto
+    // chain for a setter. The Receiver stays the primitive, so the
+    // receiver-write step (2.b — "Receiver is not an Object → false")
+    // rejects if no setter is found. No box is allocated.
+    rt_types.KStr(s) ->
+      case key {
+        StringKey(Named("length")) -> #(False, st)
+        StringKey(Index(i)) ->
+          case js_string.char_at(s, i) {
+            Some(_) -> #(False, st)
+            None -> set_from(st, st.realm.string.prototype, key, v, recv)
+          }
+        _ -> set_from(st, st.realm.string.prototype, key, v, recv)
+      }
+    rt_types.KNum(_) -> set_from(st, st.realm.number.prototype, key, v, recv)
+    rt_types.KBool(_) -> set_from(st, st.realm.boolean.prototype, key, v, recv)
+    rt_types.KSym(_) -> set_from(st, st.realm.symbol.prototype, key, v, recv)
+    rt_types.KBig(_) -> set_from(st, st.realm.bigint.prototype, key, v, recv)
+    KTdz -> panic as "t_set_prop: TDZ sentinel escaped into a JsVal"
   }
 }
 
@@ -3569,9 +3647,46 @@ pub fn t_set_prop_any(
   t_set_prop(st, recv, as_object_key(key), v)
 }
 
-/// SPEC§8 `define_prop` — §7.3.5 CreateDataProperty(OrThrow) with a wire-form
-/// key. Object-literal `{k: v}` emits this with a raw JsVal `v` (NOT a
-/// ParsedDesc), so route to `t_define_own_data` with all-true attributes.
+/// SPEC§8 `set_prop_strict` — strict-code PutValue (§13.15.2 step 6.b.iv):
+/// a failed [[Set]] throws TypeError instead of being ignored.
+pub fn t_set_prop_strict(
+  st: Agent,
+  recv: JsVal,
+  key: k,
+  v: JsVal,
+) -> #(Bool, Agent) {
+  let okey = as_object_key(key)
+  let #(ok, st) = t_set_prop(st, recv, okey, v)
+  case ok {
+    True -> #(True, st)
+    False ->
+      throw_type_error(
+        st,
+        "Cannot assign to read only property '" <> key_text(okey) <> "'",
+      )
+  }
+}
+
+/// SPEC§8 `delete_prop_strict` — §13.5.1.2 step 5.b.i: strict delete of a
+/// non-configurable property throws TypeError.
+pub fn t_delete_prop_strict(
+  st: Agent,
+  obj: Handle,
+  key: ObjectKey,
+) -> #(Bool, Agent) {
+  let #(deleted, st) = t_delete_prop(st, obj, key)
+  case deleted {
+    True -> #(True, st)
+    False ->
+      throw_type_error(st, "Cannot delete property '" <> key_text(key) <> "'")
+  }
+}
+
+/// SPEC§8 `define_prop` — §7.3.5 CreateDataPropertyOrThrow with a wire-form
+/// key. Object-literal `{k: v}` and class fields emit this with a raw JsVal
+/// `v` (NOT a ParsedDesc), so route to `t_define_own_data` with all-true
+/// attributes; a rejected define (frozen receiver, a class constructor's
+/// `prototype`) throws TypeError.
 pub fn t_create_data_prop(
   st: Agent,
   recv: JsVal,
@@ -3579,8 +3694,18 @@ pub fn t_create_data_prop(
   v: JsVal,
 ) -> #(Bool, Agent) {
   case rt_types.classify(recv) {
-    KHandle(h) ->
-      t_define_own_data(st, h, as_object_key(key), v, True, True, True)
+    KHandle(h) -> {
+      let okey = as_object_key(key)
+      let #(ok, st) = t_define_own_data(st, h, okey, v, True, True, True)
+      case ok {
+        True -> #(True, st)
+        False ->
+          throw_type_error(
+            st,
+            "Cannot define property '" <> key_text(okey) <> "'",
+          )
+      }
+    }
     _ ->
       throw_type_error(
         st,
@@ -3596,23 +3721,60 @@ pub fn t_create_data_prop(
   }
 }
 
-/// SPEC§8 `global_get` — read `name` from the realm's global object. Throws
-/// `ReferenceError` if the name is absent (§9.1.1.4.1 step 4) via M4's
-/// ordinary [[Get]] returning `undefined`; arc's M12 handles the strict-mode
-/// unresolved-reference throw at the emit layer, so this returns `undefined`
-/// for a missing binding rather than throwing.
+/// SPEC§8 `global_get` — read `name` from the realm's global object. An
+/// absent name is an unresolvable Reference, so GetValue (§6.2.5.5 step 3)
+/// throws `ReferenceError` in both strict and sloppy code.
 pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
-  let g = st.realm.global_object
-  t_get_prop(st, rt_types.mk_object(g), StringKey(binary_key(name)))
+  let g = rt_types.mk_object(st.realm.global_object)
+  let key = StringKey(binary_key(name))
+  let #(has, st) = t_has_prop(st, g, key)
+  case has {
+    True -> t_get_prop(st, g, key)
+    False -> {
+      let text = bit_array.to_string(name) |> result.unwrap("")
+      throw_reference_error(st, text <> " is not defined")
+    }
+  }
 }
 
-/// SPEC§8 `global_set` — `PutValue` on the global object (§9.1.1.4.5). arc's
-/// emit handles the strict-mode throw-on-failure; this drops the `Bool` result.
+/// The realm's global object as a value: the script-root `this` binding
+/// (§9.1.1.4.11 GetThisBinding on the global environment).
+pub fn t_global_this(st: Agent) -> JsVal {
+  rt_types.mk_object(st.realm.global_object)
+}
+
+/// SPEC§8 `global_set` — sloppy `PutValue` on the global object (§6.2.5.6
+/// step 3.b): an unresolvable name is created as a plain property and a
+/// failed [[Set]] is ignored.
 pub fn t_global_set(st: Agent, name: BitArray, v: JsVal) -> Agent {
   let g = st.realm.global_object
   let #(_, st) =
     t_set_prop(st, rt_types.mk_object(g), StringKey(binary_key(name)), v)
   st
+}
+
+/// SPEC§8 `global_set_strict` — strict `PutValue` (§6.2.5.6 step 3.a and
+/// §9.1.1.4.5): an unresolvable name throws ReferenceError and a failed
+/// [[Set]] throws TypeError.
+pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
+  let g = rt_types.mk_object(st.realm.global_object)
+  let key = StringKey(binary_key(name))
+  let text = bit_array.to_string(name) |> result.unwrap("")
+  let #(has, st) = t_has_prop(st, g, key)
+  case has {
+    False -> throw_reference_error(st, text <> " is not defined")
+    True -> {
+      let #(ok, st) = t_set_prop(st, g, key, v)
+      case ok {
+        True -> st
+        False ->
+          throw_type_error(
+            st,
+            "Cannot assign to read only property '" <> text <> "'",
+          )
+      }
+    }
+  }
 }
 
 /// SPEC§8 `global_typeof` — ES2024 §13.5.3 `typeof <ident>` where `<ident>` is

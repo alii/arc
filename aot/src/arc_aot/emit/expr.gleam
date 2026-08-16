@@ -183,7 +183,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
     // for `obj.tag`x`` and arg lowering ride the CallExpression arm.
     // §13.3.11.1 note: never a direct eval — wrap a bare `eval` tag.
     ast.TaggedTemplateExpression(tag:, parts:, span:) -> {
-      use site <- anf.then(next_template_site())
+      use site <- anf.then(next_site())
       let template =
         ast.IntrinsicTemplateObject(
           span:,
@@ -583,8 +583,9 @@ fn nul_eq_inline(v: ir.Value) -> Build(ir.Value) {
 /// Collect foldable-as-constant top-level `var` bindings. A binding is
 /// foldable iff (a) its declarator is `var NAME = <NumberLiteral(int)>`,
 /// (b) NAME never appears as an assignment/update target ANYWHERE in the
-/// script (including nested function bodies), (c) `eval`/`with` are absent
-/// (D15 already rejects them, so no check needed here). Limitation: a read
+/// script (including nested function bodies), (c) the script never names
+/// `eval` or `Function` (direct eval and `with` are D15-rejected, but
+/// indirect eval / Function() can redeclare a global `var`). Limitation: a read
 /// that runs before the `var` line (via a hoisted function called earlier)
 /// would observe `undefined` — no v8-v7 bench does this and it's a
 /// perf-only fold (a wrongly-folded read is caught by the differential
@@ -618,9 +619,55 @@ pub fn analyze_const_globals(
   case dict.is_empty(cands) {
     True -> cands
     False -> {
-      let assigned = list.fold(body, set.new(), stmt_assigned_globals)
-      dict.filter(cands, fn(name, _) { !set.contains(assigned, name) })
+      // Top-level `var X = init` is the candidate's own definition, so it
+      // does not count as a write — unless X is initialised twice up here.
+      // Any nested `var X` (a shadowing local, which the const read cannot
+      // tell apart) goes through decl_assigned and does.
+      let #(uses, _) =
+        list.fold(body, #(Uses(set.new(), False), set.new()), fn(st, s) {
+          let #(acc, seen) = st
+          case s.statement {
+            ast.VariableDeclaration(declarations:, ..) ->
+              list.fold(declarations, st, fn(st, d) {
+                let #(acc, seen) = st
+                let acc = opt_ex_assigned(acc, d.init)
+                case d.id, d.init {
+                  ast.IdentifierPattern(name:, ..), Some(_) ->
+                    case set.contains(seen, name) {
+                      True -> #(uses_assign(acc, name), seen)
+                      False -> #(acc, set.insert(seen, name))
+                    }
+                  ast.IdentifierPattern(..), None -> #(acc, seen)
+                  p, _ -> #(pat_bound_assigned(acc, p), seen)
+                }
+              })
+            _ -> #(stmt_assigned_globals(acc, s), seen)
+          }
+        })
+      case uses.names_eval {
+        True -> dict.new()
+        False ->
+          dict.filter(cands, fn(name, _) { !set.contains(uses.assigned, name) })
+      }
     }
+  }
+}
+
+/// Accumulator for the whole-script walk: every assignment/update target
+/// name, plus whether `eval` / `Function` is named anywhere (identifier,
+/// `.eval`, or `["eval"]`) — either can run code that redeclares a global.
+type Uses {
+  Uses(assigned: set.Set(String), names_eval: Bool)
+}
+
+fn uses_assign(acc: Uses, name: String) -> Uses {
+  Uses(..acc, assigned: set.insert(acc.assigned, name))
+}
+
+fn uses_name(acc: Uses, name: String) -> Uses {
+  case name {
+    "eval" | "Function" -> Uses(..acc, names_eval: True)
+    _ -> acc
   }
 }
 
@@ -709,22 +756,14 @@ fn small_int_value(f: Float) -> Option(ir.Value) {
 /// appearing as an assignment/update target — the prune set for
 /// analyze_const_globals. Over-approximates (includes locals shadowing a
 /// global — safe, just misses a fold).
-fn stmt_assigned_globals(
-  acc: set.Set(String),
-  s: ast.StmtWithLine,
-) -> set.Set(String) {
+fn stmt_assigned_globals(acc: Uses, s: ast.StmtWithLine) -> Uses {
   case s.statement {
     ast.EmptyStatement | ast.DebuggerStatement -> acc
     ast.BreakStatement(..) | ast.ContinueStatement(..) -> acc
     ast.ExpressionStatement(expression:, ..) -> ex_assigned(acc, expression)
     ast.BlockStatement(body:) -> list.fold(body, acc, stmt_assigned_globals)
     ast.VariableDeclaration(declarations:, ..) ->
-      list.fold(declarations, acc, fn(acc, d) {
-        case d.init {
-          Some(e) -> ex_assigned(acc, e)
-          None -> acc
-        }
-      })
+      list.fold(declarations, acc, decl_assigned)
     ast.ReturnStatement(argument:) -> opt_ex_assigned(acc, argument)
     ast.ThrowStatement(argument:) -> ex_assigned(acc, argument)
     ast.IfStatement(condition:, consequent:, alternate:) -> {
@@ -740,12 +779,8 @@ fn stmt_assigned_globals(
       st_assigned(ex_assigned(acc, condition), body)
     ast.ForStatement(init:, condition:, update:, body:) -> {
       let acc = case init {
-        Some(ast.ForInitExpression(e)) -> ex_assigned(acc, e)
-        Some(ast.ForInitDeclaration(declarations:, ..)) ->
-          list.fold(declarations, acc, fn(acc, d) {
-            opt_ex_assigned(acc, d.init)
-          })
-        Some(ast.ForInitPattern(_)) | None -> acc
+        Some(fi) -> for_init_assigned(acc, fi)
+        None -> acc
       }
       let acc = opt_ex_assigned(acc, condition)
       let acc = opt_ex_assigned(acc, update)
@@ -754,9 +789,13 @@ fn stmt_assigned_globals(
     ast.ForInStatement(left:, right:, body:)
     | ast.ForOfStatement(left:, right:, body:, ..) -> {
       let acc = case left {
-        ast.ForInitExpression(ast.Identifier(name:, ..)) ->
-          set.insert(acc, name)
-        _ -> acc
+        ast.ForInitExpression(target) ->
+          ex_assigned(assign_target(acc, target), target)
+        ast.ForInitDeclaration(declarations:, ..) ->
+          list.fold(declarations, acc, fn(acc, d) {
+            pat_bound_assigned(opt_ex_assigned(acc, d.init), d.id)
+          })
+        ast.ForInitPattern(p) -> pat_bound_assigned(acc, p)
       }
       st_assigned(ex_assigned(acc, right), body)
     }
@@ -770,14 +809,13 @@ fn stmt_assigned_globals(
     ast.TryStatement(block:, tail:) -> {
       let acc = list.fold(block, acc, stmt_assigned_globals)
       case tail {
-        ast.TryCatch(handler:) ->
-          list.fold(handler.body, acc, stmt_assigned_globals)
+        ast.TryCatch(handler:) -> catch_assigned(acc, handler)
         ast.TryFinally(finalizer:) ->
           list.fold(finalizer, acc, stmt_assigned_globals)
         ast.TryCatchFinally(handler:, finalizer:) ->
           list.fold(
             finalizer,
-            list.fold(handler.body, acc, stmt_assigned_globals),
+            catch_assigned(acc, handler),
             stmt_assigned_globals,
           )
       }
@@ -796,34 +834,76 @@ fn stmt_assigned_globals(
   }
 }
 
-fn st_assigned(acc: set.Set(String), s: ast.Statement) -> set.Set(String) {
+fn st_assigned(acc: Uses, s: ast.Statement) -> Uses {
   stmt_assigned_globals(acc, ast.StmtWithLine(0, s))
 }
 
-fn opt_ex_assigned(
-  acc: set.Set(String),
-  e: Option(ast.Expression),
-) -> set.Set(String) {
+/// A declarator below the top level: its initializer runs, and every name it
+/// binds is written (or shadowed by a same-named local, which the const read
+/// cannot tell apart from the global).
+fn decl_assigned(acc: Uses, d: ast.VariableDeclarator) -> Uses {
+  pat_bound_assigned(opt_ex_assigned(acc, d.init), d.id)
+}
+
+fn for_init_assigned(acc: Uses, fi: ast.ForInit) -> Uses {
+  case fi {
+    ast.ForInitExpression(e) -> ex_assigned(acc, e)
+    ast.ForInitDeclaration(declarations:, ..) ->
+      list.fold(declarations, acc, decl_assigned)
+    ast.ForInitPattern(p) -> pat_bound_assigned(acc, p)
+  }
+}
+
+fn catch_assigned(acc: Uses, handler: ast.CatchClause) -> Uses {
+  let acc = case handler.param {
+    Some(p) -> pat_default_assigned(acc, p)
+    None -> acc
+  }
+  list.fold(handler.body, acc, stmt_assigned_globals)
+}
+
+fn opt_ex_assigned(acc: Uses, e: Option(ast.Expression)) -> Uses {
   case e {
     Some(ex) -> ex_assigned(acc, ex)
     None -> acc
   }
 }
 
-fn pat_default_assigned(
-  acc: set.Set(String),
-  p: ast.Pattern,
-) -> set.Set(String) {
+/// Walk a binding pattern's default initializers and computed keys — the
+/// expressions that run when the pattern binds. Bound names are NOT marked;
+/// see `pat_bound_assigned` for the shapes that re-assign a global.
+fn pat_default_assigned(acc: Uses, p: ast.Pattern) -> Uses {
   case p {
-    ast.AssignmentPattern(right:, ..) -> ex_assigned(acc, right)
-    _ -> acc
+    ast.IdentifierPattern(..) -> acc
+    ast.AssignmentPattern(left:, right:) ->
+      pat_default_assigned(ex_assigned(acc, right), left)
+    ast.RestElement(argument:) -> pat_default_assigned(acc, argument)
+    ast.ArrayPattern(elements:) ->
+      list.fold(elements, acc, fn(acc, el) {
+        case el {
+          Some(ep) -> pat_default_assigned(acc, ep)
+          None -> acc
+        }
+      })
+    ast.ObjectPattern(properties:) ->
+      list.fold(properties, acc, fn(acc, pp) {
+        case pp {
+          ast.PatternProperty(key:, value:, ..) ->
+            pat_default_assigned(key_assigned(acc, key), value)
+          ast.RestProperty(..) -> acc
+        }
+      })
   }
 }
 
-fn class_body_assigned(
-  acc: set.Set(String),
-  body: List(ast.ClassElement),
-) -> set.Set(String) {
+/// `pat_default_assigned` plus every name the pattern binds: a destructuring
+/// `var` or a for-in/of head writes those names on each evaluation.
+fn pat_bound_assigned(acc: Uses, p: ast.Pattern) -> Uses {
+  let acc = pat_default_assigned(acc, p)
+  list.fold(ast.pattern_bound_names(p), acc, uses_assign)
+}
+
+fn class_body_assigned(acc: Uses, body: List(ast.ClassElement)) -> Uses {
   list.fold(body, acc, fn(acc, el) {
     case el {
       ast.ClassMethod(key:, value: ast.FunctionLiteral(body:, params:, ..), ..) ->
@@ -839,14 +919,14 @@ fn class_body_assigned(
   })
 }
 
-fn key_assigned(acc: set.Set(String), key: ast.PropertyKey) -> set.Set(String) {
+fn key_assigned(acc: Uses, key: ast.PropertyKey) -> Uses {
   case key {
     ast.KeyComputed(expression:) -> ex_assigned(acc, expression)
     _ -> acc
   }
 }
 
-fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
+fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
   case ex {
     ast.AssignmentExpression(left:, right:, ..) ->
       ex_assigned(ex_assigned(assign_target(acc, left), left), right)
@@ -871,8 +951,8 @@ fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
     ast.ClassExpression(super_class:, body:, ..) ->
       class_body_assigned(opt_ex_assigned(acc, super_class), body)
     // leaves
-    ast.Identifier(..)
-    | ast.NumberLiteral(..)
+    ast.Identifier(name:, ..) -> uses_name(acc, name)
+    ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
     | ast.StringExpression(..)
     | ast.BooleanLiteral(..)
@@ -906,8 +986,10 @@ fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
     | ast.OptionalMemberExpression(object:, property:, ..) -> {
       let acc = ex_assigned(acc, object)
       case property {
+        ast.Bracket(expression: ast.StringExpression(value:, ..)) ->
+          uses_name(acc, value)
         ast.Bracket(expression:) -> ex_assigned(acc, expression)
-        ast.Dot(..) -> acc
+        ast.Dot(name:, ..) -> uses_name(acc, name)
       }
     }
     ast.SequenceExpression(expressions:, ..) ->
@@ -945,9 +1027,29 @@ fn ex_assigned(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
   }
 }
 
-fn assign_target(acc: set.Set(String), ex: ast.Expression) -> set.Set(String) {
+/// Every identifier an assignment target writes, through nested
+/// destructuring shapes (`[a, {b}] = …`). Defaults and computed keys are
+/// walked by the caller's `ex_assigned` over the same expression.
+fn assign_target(acc: Uses, ex: ast.Expression) -> Uses {
   case ast_util.unwrap_parens(ex) {
-    ast.Identifier(name:, ..) -> set.insert(acc, name)
+    ast.Identifier(name:, ..) -> uses_assign(acc, name)
+    ast.ArrayExpression(_, elements) ->
+      list.fold(elements, acc, fn(acc, el) {
+        case el {
+          Some(e) -> assign_target(acc, e)
+          None -> acc
+        }
+      })
+    ast.SpreadElement(_, argument) -> assign_target(acc, argument)
+    ast.AssignmentExpression(_, ast.Assign, left, _) -> assign_target(acc, left)
+    ast.ObjectExpression(_, properties) ->
+      list.fold(properties, acc, fn(acc, prop) {
+        case prop {
+          ast.InitProperty(value:, ..) -> assign_target(acc, value)
+          ast.SpreadProperty(argument) -> assign_target(acc, argument)
+          ast.MethodProperty(..) | ast.AccessorProperty(..) -> acc
+        }
+      })
     _ -> acc
   }
 }
@@ -1079,9 +1181,10 @@ fn float_bits(f: Float) -> Int {
 
 // ── Templates (u-template, port emit.gleam:4916,5016-5047,5059-5078) ────────
 
-/// Next tagged-template call-site index in this module (§13.2.8.4 template
-/// caching key, qualified by the module name in `emit_template_object`).
-fn next_template_site() -> Build(Int) {
+/// Next site index in this module: tagged-template call sites (§13.2.8.4
+/// template caching key, qualified by the module name in
+/// `emit_template_object`) and property-read inline-cache sites share it.
+fn next_site() -> Build(Int) {
   fn(e: Emitter2, k) {
     k(state.Emitter2(..e, next_site: e.next_site + 1), e.next_site)
   }
@@ -1144,6 +1247,17 @@ pub fn read_slot(slot: Int, boxed: Bool) -> Build(ir.Value) {
   }
 }
 
+/// The folded literal for a const-global read inside a nested function.
+/// Top-level reads never fold: a script-level read can run before the `var`
+/// line (`undefined`) or after eval code redeclared the name, and the few
+/// top-level reads are not worth the miscompile.
+fn const_global(e: Emitter2, name: String) -> Option(ir.Value) {
+  case e.fn_scope == scope.root_scope_id {
+    True -> None
+    False -> option.from_result(dict.get(e.const_globals, name))
+  }
+}
+
 /// The non-with ("static") read of a resolved binding. EvalEnv → D15.
 pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
   case d {
@@ -1154,9 +1268,9 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
     // keeping binop's int_const_eq / int_const_bit fast paths live.
     scope.Local(slot:, boxed:, origin_kind: scope.VarBinding, ..) -> {
       use e <- anf.then(ask)
-      case dict.get(e.const_globals, name) {
-        Ok(lit) -> anf.pure(lit)
-        Error(Nil) -> read_slot(slot, boxed)
+      case const_global(e, name) {
+        Some(lit) -> anf.pure(lit)
+        None -> read_slot(slot, boxed)
       }
     }
     // §9.1.1.1.6 GetBindingValue: a lexical binding read before its
@@ -1192,11 +1306,11 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
       case dict.get(e.slotted_globals, g) {
         Ok(slot) -> read_slot(slot, True)
         Error(Nil) ->
-          case dict.get(e.const_globals, g) {
+          case const_global(e, g) {
             // Top-level `var G = <literal>` never reassigned in the whole
             // script — inline the literal (analyze_const_globals proved it).
-            Ok(lit) -> anf.pure(lit)
-            Error(Nil) -> {
+            Some(lit) -> anf.pure(lit)
+            None -> {
               // global_get_fast (JRead) probes the global object's own
               // data props. IsAtom catches `miss` AND atom-valued globals —
               // a perf-only conflation; full JMut `global_get` re-reads.
@@ -1319,6 +1433,17 @@ pub fn to_property_key(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
+/// ToPropertyKey for a computed member key `base[v]`: §6.2.5.5 GetValue /
+/// §6.2.5.6 PutValue run ToObject(base) before the key is coerced, so the
+/// slow arm checks the base for null/undefined first. The fast probe only
+/// hits int/string/symbol keys, whose coercion has no observable side
+/// effect, so a nullish base still surfaces as the [[Get]]/[[Set]] TypeError.
+pub fn to_property_key_of(base: ir.Value, v: ir.Value) -> Build(ir.Value) {
+  use k <- anf.then(anf.host("to_property_key_fast", [v]))
+  use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, k)))
+  anf.bind_if(is_miss, anf.host("to_property_key_of", [base, v]), anf.pure(k))
+}
+
 /// Static/computed PropertyKey → runtime key value. The four literal shapes
 /// lower to the compile-time-canonical wire tuple via `anf.object_key_lit`
 /// (invariant #4 — no runtime ToPropertyKey). KeyPrivate resolves the
@@ -1391,19 +1516,35 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   }
 }
 
-/// Own-data-property READ fast path: one JRead probe (`get_prop_own_data`,
-/// arc_rt_obj_ffi) for an own DataProperty / shaped slot on the receiver;
-/// `=:= miss` (NOT IsAtom — undefined/null/true/false are legitimate
-/// values) falls to `slow`, the full `get_prop`. The probe does its own
-/// receiver check, so non-handle receivers need no guard here.
+/// Own-data-property READ fast path. Each site gets a module-unique id and
+/// probes its store-resident inline cache first (`get_prop_ic`, a JRead:
+/// shape id + slot offset seen at this site). On a miss the JMut
+/// `get_prop_ic_miss` runs the own DataProperty / shaped slot probe
+/// (arc_rt_obj_ffi) and fills an empty site; `=:= miss` (NOT IsAtom —
+/// undefined/null/true/false are legitimate values) falls to `slow`, the
+/// full `get_prop`. The probes do their own receiver check, so non-handle
+/// receivers need no guard here.
 fn get_prop_fast(
   obj: ir.Value,
   kb: BitArray,
   slow: Build(ir.Value),
 ) -> Build(ir.Value) {
-  use v <- anf.then(anf.host("get_prop_own_data", [obj, ir.ConstBinary(kb)]))
-  use is_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
-  anf.bind_if(is_miss, slow, anf.pure(v))
+  use site <- anf.then(next_site())
+  let key = ir.ConstBinary(kb)
+  let site = ir.ConstI32(site)
+  use v <- anf.then(anf.host("get_prop_ic", [obj, key, site]))
+  use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
+  anf.bind_if(
+    ic_miss,
+    {
+      use v <- anf.then(anf.host("get_prop_ic_miss", [obj, key, site]))
+      use is_miss <- anf.then(
+        anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
+      )
+      anf.bind_if(is_miss, slow, anf.pure(v))
+    },
+    anf.pure(v),
+  )
 }
 
 /// Build the wire `{string_key, {named, kb}}` PropertyKey from a raw binary
@@ -1433,11 +1574,36 @@ fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
     is_miss,
     {
       use key <- anf.then(named_key_from_binary(kb))
-      anf.host("set_prop", [obj, key, v])
+      use op <- anf.then(set_prop_op())
+      anf.host(op, [obj, key, v])
     },
     anf.pure(v),
   ))
   anf.pure(v)
+}
+
+/// §13.15.2 PutValue step 6.b.iv: strict code turns a failed [[Set]] into a
+/// TypeError; sloppy code ignores it.
+pub fn set_prop_op_name(strict: Bool) -> String {
+  case strict {
+    True -> "set_prop_strict"
+    False -> "set_prop"
+  }
+}
+
+fn set_prop_op() -> Build(String) {
+  use e <- anf.then(ask)
+  anf.pure(set_prop_op_name(e.strict))
+}
+
+/// §13.5.1.2 step 5.b.i: strict code turns a failed [[Delete]] into a
+/// TypeError.
+fn delete_prop_op() -> Build(String) {
+  use e <- anf.then(ask)
+  anf.pure(case e.strict {
+    True -> "delete_prop_strict"
+    False -> "delete_prop"
+  })
 }
 
 /// Indexed-element READ fast path (SPEC array-index-fast-path). `idx` is
@@ -1489,7 +1655,7 @@ pub fn emit_member_get(
         ast.Bracket(expression:) -> {
           use idx <- anf.then(expr(expression))
           get_elem_fast(obj, idx, {
-            use k <- anf.then(to_property_key(idx))
+            use k <- anf.then(to_property_key_of(obj, idx))
             anf.host("get_prop", [obj, k])
           })
         }
@@ -1642,13 +1808,13 @@ pub fn emit_call_with_pair(
 }
 
 /// Method call `o.prop(args)` with `o` already Let-bound (§13.3.6.2 this=obj).
-/// Static-dot ∧ spread-free → fused JMut `call_method_mono` (proto walk +
+/// Static-dot ∧ spread-free → fused JMut `call_method_ic` (proto walk +
 /// KCompiled apply in ONE FFI call, `miss` on any shape mismatch); miss and
 /// every non-fusable shape fall to `emit_member_get` → `kfn_code` →
 /// `emit_call_with_pair` with `Positional(pos)` so simple-ABI still applies.
 /// Args evaluate ONCE, before the probe — the miss arm re-uses `pos` (no
 /// re-eval); the accessor-`prop` × side-effecting-arg reorder is the only
-/// observable delta and `call_method_mono` misses on accessors.
+/// observable delta and `call_method_ic` misses on accessors.
 fn emit_member_call(
   o: ir.Value,
   prop: ast.MemberProperty,
@@ -1671,10 +1837,7 @@ fn emit_member_call(
         }
         Some(kb) -> {
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          use args_l <- anf.then(anf.cons_list(pos))
-          use r <- anf.then(
-            anf.host("call_method_mono", [o, ir.ConstBinary(kb), args_l]),
-          )
+          use r <- anf.then(call_method_ic_pos(o, kb, pos))
           // `=:= miss` — NOT IsAtom: undefined/null/true/false are atoms and
           // are legitimate call results; an IsAtom guard would double-call.
           use is_miss <- anf.then(
@@ -1692,6 +1855,48 @@ fn emit_member_call(
         }
       }
   }
+}
+
+/// `call_method_ic` with the args passed positionally for 0..3 args (the
+/// FFI applies a matching simple variant without consing); the list form
+/// beyond that.
+fn call_method_ic_pos(
+  recv: ir.Value,
+  kb: BitArray,
+  pos: List(ir.Value),
+) -> Build(ir.Value) {
+  case pos {
+    [] | [_] | [_, _] | [_, _, _] -> {
+      use site <- anf.then(next_site())
+      anf.host("call_method_ic" <> int.to_string(list.length(pos)), [
+        recv,
+        ir.ConstBinary(kb),
+        ir.ConstI32(site),
+        ..pos
+      ])
+    }
+    _ -> {
+      use args_l <- anf.then(anf.cons_list(pos))
+      call_method_ic(recv, kb, args_l)
+    }
+  }
+}
+
+/// The fused method-call probe (`t_call_method_ic`, arc_rt_call_ffi): the
+/// mono proto walk + apply behind a per-site inline cache keyed by a
+/// module-unique site id (`next_site`, shared with the read caches).
+fn call_method_ic(
+  recv: ir.Value,
+  kb: BitArray,
+  args_l: ir.Value,
+) -> Build(ir.Value) {
+  use site <- anf.then(next_site())
+  anf.host("call_method_ic", [
+    recv,
+    ir.ConstBinary(kb),
+    args_l,
+    ir.ConstI32(site),
+  ])
 }
 
 /// §13.3.7.1 step 12 InitializeInstanceElements — call the captured
@@ -1841,8 +2046,8 @@ fn emit_chain_callee(
 fn emit_typeof_ident(name: String) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case state.resolve(e, name) {
-    scope.Plain(scope.Local(slot:, boxed:, ..)) -> {
-      use v <- anf.then(read_slot(slot, boxed))
+    scope.Plain(scope.Local(..) as d) -> {
+      use v <- anf.then(emit_direct_get(d, name))
       anf.host("type_of", [v])
     }
     scope.Plain(scope.Global(name: g)) ->
@@ -1885,8 +2090,15 @@ fn emit_delete(arg: ast.Expression) -> Build(ir.Value) {
     }
     ast.MemberExpression(_, obj, prop) -> {
       use ov <- anf.then(expr(obj))
-      use k <- anf.then(emit_key_from_prop(prop))
-      anf.host("delete_prop", [ov, k])
+      use k <- anf.then(case prop {
+        ast.Bracket(expression:) -> {
+          use v <- anf.then(expr(expression))
+          to_property_key_of(ov, v)
+        }
+        _ -> emit_key_from_prop(prop)
+      })
+      use op <- anf.then(delete_prop_op())
+      anf.host(op, [ov, k])
     }
     ast.Identifier(name:, ..) -> emit_delete_ident(name)
     // Any other expression: evaluate for side effects, result is `true`.
@@ -1950,7 +2162,7 @@ fn emit_apply_raw_general(
 /// `X.apply(Y, arguments)` fast-path — forwards the frame's raw `_args`
 /// cons-list directly, eliding the arguments-object read + Function.prototype
 /// .apply reflection (raytrace `Class.create`: 66k× per run). The tighter
-/// `this.M.apply(this, arguments)` shape routes through `call_method_mono`;
+/// `this.M.apply(this, arguments)` shape routes through `call_method_ic`;
 /// miss falls to the general form.
 fn emit_apply_arguments(
   inner: ast.Expression,
@@ -1963,9 +2175,7 @@ fn emit_apply_arguments(
       case static_dot_key(mprop) {
         Some(kb) -> {
           use this <- anf.then(emit_lexical(lexical.RefThis))
-          use r <- anf.then(
-            anf.host("call_method_mono", [this, ir.ConstBinary(kb), raw_args]),
-          )
+          use r <- anf.then(call_method_ic(this, kb, raw_args))
           use is_miss <- anf.then(
             anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))),
           )
@@ -2061,9 +2271,14 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
           emit_member_call(o, prop, args)
         }
       }
-    // Direct-eval candidate — D15 UnsupportedFeature.
-    ast.Identifier(name: "eval", ..) ->
+    // Direct-eval candidate — D15 UnsupportedFeature. §13.3.6.1 steps 1-3:
+    // the callee reference and the arguments are evaluated first, so a
+    // throwing argument wins over the unsupported-eval throw.
+    ast.Identifier(name: "eval", ..) -> {
+      use _ <- anf.then(expr(callee))
+      use _ <- anf.then(emit_args_list(args))
       throw_at_rt("throw_type_error", "unsupported: direct eval")
+    }
     // Regular call f(args): thisValue = undefined (§13.3.6.2 step 1.b.iii).
     // When the callee is an unboxed local ∉ carried OR a slotted-global cell
     // never reassigned in the loop, stmt.gleam's loop emit hoists
@@ -2201,7 +2416,7 @@ pub fn emit_direct_put(
         Ok(slot) -> write_slot(slot, True, v)
         Error(Nil) -> {
           use _ <- anf.then(
-            anf.host("global_set", [
+            anf.host(global_set_op(e.strict), [
               ir.ConstBinary(bit_array.from_string(name)),
               v,
             ]),
@@ -2212,6 +2427,15 @@ pub fn emit_direct_put(
     }
     scope.EvalEnv(_) ->
       throw_at_rt("throw_type_error", "unsupported: direct eval")
+  }
+}
+
+/// §6.2.5.6 PutValue on an unresolvable Reference: strict code throws
+/// ReferenceError, sloppy code creates the global property.
+pub fn global_set_op(strict: Bool) -> String {
+  case strict {
+    True -> "global_set_strict"
+    False -> "global_set"
   }
 }
 
@@ -2230,7 +2454,8 @@ pub fn emit_identifier_put(name: String, v: ir.Value) -> Build(ir.Value) {
 /// and let-bound. D15: no with-chain variant. `own_key` carries the raw key
 /// binary for a static non-private `.name` (own_data fast path); `elem_idx`
 /// carries the RAW evaluated bracket expression for `o[e]` (indexed-element
-/// fast path) — `key` is a dead placeholder when either is Some.
+/// fast path) — `key` is the `no_key` placeholder when either is Some,
+/// unless `settle_lvalue` already coerced the bracket expression once.
 pub type LValue {
   LvIdent(name: String, direct: scope.Direct)
   LvMember(
@@ -2273,10 +2498,10 @@ pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
       // the miss arm builds it from the raw material. `key` stays a dead
       // placeholder when either is Some (matches the LValue doc contract).
       use #(key, elem_idx) <- anf.then(case own_key, property {
-        Some(_), _ -> anf.pure(#(ir.ConstAtom("undefined"), None))
+        Some(_), _ -> anf.pure(#(no_key, None))
         None, ast.Bracket(expression:) -> {
           use idx <- anf.then(expr(expression))
-          anf.pure(#(ir.ConstAtom("undefined"), Some(idx)))
+          anf.pure(#(no_key, Some(idx)))
         }
         None, _ -> {
           use k <- anf.then(emit_key_from_prop(property))
@@ -2304,6 +2529,34 @@ pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
   }
 }
 
+/// Placeholder `key` of an LvMember whose fast-path material lives in
+/// `own_key` / `elem_idx`.
+const no_key: ir.Value = ir.ConstAtom("undefined")
+
+/// §13.15.2 / §13.4: a read-modify-write evaluates the bracket expression's
+/// ToPropertyKey exactly once. Coerce it up front (nullish base throws
+/// here, before the key's `toString` runs) and stash the wire key so both
+/// halves' miss arms reuse it; the raw `elem_idx` still drives the fast
+/// probes.
+pub fn settle_lvalue(lv: LValue) -> Build(LValue) {
+  case lv {
+    LvMember(obj:, is_private: False, elem_idx: Some(idx), ..) -> {
+      use key <- anf.then(to_property_key_of(obj, idx))
+      anf.pure(LvMember(..lv, key:))
+    }
+    _ -> anf.pure(lv)
+  }
+}
+
+/// Wire key for an `elem_idx` miss arm: the settled key when present,
+/// otherwise coerce now.
+fn elem_key(obj: ir.Value, idx: ir.Value, key: ir.Value) -> Build(ir.Value) {
+  case key == no_key {
+    True -> to_property_key_of(obj, idx)
+    False -> anf.pure(key)
+  }
+}
+
 /// Read the current value of `lv` (the "get" half of read-modify-write).
 pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
   case lv {
@@ -2315,9 +2568,9 @@ pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
         use key <- anf.then(named_key_from_binary(kb))
         anf.host("get_prop", [obj, key])
       })
-    LvMember(obj:, is_private: False, elem_idx: Some(idx), ..) ->
+    LvMember(obj:, key:, is_private: False, elem_idx: Some(idx), ..) ->
       get_elem_fast(obj, idx, {
-        use k <- anf.then(to_property_key(idx))
+        use k <- anf.then(elem_key(obj, idx, key))
         anf.host("get_prop", [obj, k])
       })
     LvMember(obj:, key:, is_private: False, own_key: None, elem_idx: None) ->
@@ -2337,13 +2590,15 @@ pub fn lvalue_put(lv: LValue, v: ir.Value) -> Build(ir.Value) {
     }
     LvMember(obj:, is_private: False, own_key: Some(kb), ..) ->
       set_prop_fast(obj, kb, v)
-    LvMember(obj:, is_private: False, elem_idx: Some(idx), ..) ->
+    LvMember(obj:, key:, is_private: False, elem_idx: Some(idx), ..) ->
       set_elem_fast(obj, idx, v, {
-        use k <- anf.then(to_property_key(idx))
-        anf.host("set_prop", [obj, k, v])
+        use k <- anf.then(elem_key(obj, idx, key))
+        use op <- anf.then(set_prop_op())
+        anf.host(op, [obj, k, v])
       })
     LvMember(obj:, key:, is_private: False, own_key: None, elem_idx: None) -> {
-      use _ <- anf.then(anf.host("set_prop", [obj, key, v]))
+      use op <- anf.then(set_prop_op())
+      use _ <- anf.then(anf.host(op, [obj, key, v]))
       anf.pure(v)
     }
     LvSuper(home:, this:, key:) -> {
@@ -2597,6 +2852,7 @@ fn emit_update(
     }
     ast.Identifier(..) | ast.MemberExpression(..) -> {
       use lv <- anf.then(emit_lvalue(target))
+      use lv <- anf.then(settle_lvalue(lv))
       use old <- anf.then(lvalue_get(lv))
       use one <- anf.then(number_literal(ast.FiniteNumber(1.0)))
       let #(fast_op, bop) = case op {
@@ -2719,6 +2975,10 @@ fn emit_assignment(
       }
     _ -> {
       use lv <- anf.then(emit_lvalue(left))
+      use lv <- anf.then(case op {
+        ast.Assign -> anf.pure(lv)
+        _ -> settle_lvalue(lv)
+      })
       case op {
         ast.Assign -> anf.then(emit(right, inferred), lvalue_put(lv, _))
         ast.LogicalAndAssign ->
@@ -2783,10 +3043,16 @@ pub fn emit_destructuring_assign(
       use iter <- anf.then(
         anf.host("get_iterator", [src, ir.ConstAtom("sync")]),
       )
-      // PORT-GAP: §13.15.5.3 step 6 — a throwing element assignment must
-      // IteratorClose(iter, abrupt). anf.gleam has no Try combinator yet;
-      // SPEC row 1409's OnTag("js_exn") wrap lands with M13/M17.
-      use drained <- anf.then(emit_array_assign_elements(elements, iter))
+      // §13.15.5.3 step 6: a throwing element assignment IteratorCloses
+      // (abrupt) unless the pattern already drained the iterator, in which
+      // case IteratorStep/iter_rest marked it done and close is a no-op.
+      let drained = array_assign_drains(elements)
+      use _ <- anf.then(
+        anf.close_iter_on_throw(iter, {
+          use _ <- anf.then(emit_array_assign_elements(elements, iter))
+          anf.pure(Nil)
+        }),
+      )
       // §13.15.5.2 step 7: IteratorClose only when the pattern didn't drain.
       case drained {
         True -> anf.pure(Nil)
@@ -2838,19 +3104,37 @@ fn iter_next_value(iter: ir.Value) -> Build(ir.Value) {
   anf.bind(anf.tuple_get(pair, 1))
 }
 
-/// Array assignment pattern elements (§13.15.5.3). Returns whether the
-/// iterator was fully drained (rest reached), so the caller skips iter_close.
+/// Whether the pattern ends in a rest element, which drains the iterator.
+fn array_assign_drains(elements: List(Option(ast.Expression))) -> Bool {
+  list.any(elements, fn(el) {
+    case el {
+      Some(ast.SpreadElement(..)) -> True
+      _ -> False
+    }
+  })
+}
+
+/// Array assignment pattern elements (§13.15.5.3).
 fn emit_array_assign_elements(
   elements: List(Option(ast.Expression)),
   iter: ir.Value,
-) -> Build(Bool) {
+) -> Build(Nil) {
   case elements {
-    [] -> anf.pure(False)
-    [Some(ast.SpreadElement(_, argument)), ..] -> {
-      use rest <- anf.then(anf.host("iter_rest", [iter]))
-      use _ <- anf.then(emit_destructuring_assign(argument, rest))
-      anf.pure(True)
-    }
+    [] -> anf.pure(Nil)
+    [Some(ast.SpreadElement(_, argument)), ..] ->
+      case is_member_target(argument) {
+        // §13.15.5.5 step 1: a MemberExpression rest target's lref is
+        // evaluated before the iterator is drained.
+        True -> {
+          use lv <- anf.then(emit_lvalue(argument))
+          use rest <- anf.then(anf.host("iter_rest", [iter]))
+          anf.then(lvalue_put(lv, rest), fn(_) { anf.pure(Nil) })
+        }
+        False -> {
+          use rest <- anf.then(anf.host("iter_rest", [iter]))
+          emit_destructuring_assign(argument, rest)
+        }
+      }
     [None, ..tail] -> {
       // Elision — step the iterator, discard the #(done, value) pair.
       use _ <- anf.then(anf.host("iter_next", [iter]))

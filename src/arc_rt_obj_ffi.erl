@@ -16,6 +16,7 @@
 %%% rebuilt `St'`.
 -module(arc_rt_obj_ffi).
 -export([t_get_prop_own_data/3, t_set_prop_own_data/4,
+         t_get_prop_ic/4, t_get_prop_ic_miss/4,
          t_instanceof_fast/3,
          t_get_elem_fast/3, t_set_elem_fast/4,
          t_global_get_fast/2,
@@ -32,6 +33,9 @@
 
 -compile({inline, [peek_get/3, slot_of/2, shape_offset/3]}).
 
+%% IcEntry (rt_types.gleam): {ic_read, Sid, Off, KeyBin}.
+-define(IC_READ, ic_read).
+
 %% t_get_prop_own_data(St, {js_cell,Id}, KeyBin) -> V | miss
 %% JRead. Own DataProperty on an Ordinary SObject (kind=:=ordinary avoids
 %% ArrayObj's virtual "length") or own slot on an SShapedObject. Accessors,
@@ -39,6 +43,50 @@
 t_get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
     peek_get(St, Id, KeyBin);
 t_get_prop_own_data(_, _, _) -> miss.
+
+%% t_get_prop_ic(St, {js_cell,Id}, KeyBin, Site) -> V | miss
+%% JRead. Warm inline-cache hit for a compiled `.key` read site: the entry
+%% installed at `Site` names the shape it was seen on and the slot offset
+%% the key has in that shape (`arc/rt/types.IcEntry`). Anything else → `miss`
+%% and the emitter runs `t_get_prop_ic_miss`.
+t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+    Store = element(?AGENT_STORE, St),
+    case element(?STORE_ICS, Store) of
+        #{Site := {?IC_READ, Sid, Off, KeyBin}} ->
+            case array:get(Id, element(?STORE_DATA, Store)) of
+                {?SSHAPED_TAG, Sid, _, Slots} -> element(Off + 1, Slots);
+                _ -> miss
+            end;
+        _ -> miss
+    end;
+t_get_prop_ic(_, _, _, _) -> miss.
+
+%% t_get_prop_ic_miss(St, Recv, KeyBin, Site) -> {V | miss, St'}
+%% JMut. The `t_get_prop_own_data` probe, plus: an own shaped slot fills an
+%% empty `Site` with its shape/offset. A site keeps its first entry (a
+%% mismatch is a plain probe, never a re-install), so a polymorphic site
+%% costs one map lookup over today's path and never churns the store.
+t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+    Store = element(?AGENT_STORE, St),
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        {?SSHAPED_TAG, Sid, _, Slots} ->
+            case shape_offset(St, Sid, KeyBin) of
+                miss -> {miss, St};
+                Off ->
+                    V = element(Off + 1, Slots),
+                    Ics = element(?STORE_ICS, Store),
+                    case is_map_key(Site, Ics) of
+                        true -> {V, St};
+                        false ->
+                            E = {?IC_READ, Sid, Off, KeyBin},
+                            {V, setelement(?AGENT_STORE, St,
+                                    setelement(?STORE_ICS, Store,
+                                               Ics#{Site => E}))}
+                    end
+            end;
+        _ -> {peek_get(St, Id, KeyBin), St}
+    end;
+t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
 %% t_global_get_fast(St, KeyBin) -> V | miss
 %% JRead global-var read: own data prop on the realm's global object.
@@ -69,41 +117,41 @@ peek_get(St, Id, KeyBin) ->
 %% JMutMiss. §10.1.9.2 OrdinarySetWithOwnDescriptor step 2 for an EXISTING
 %% own writable DataProperty on an Ordinary SObject (value replaced in the
 %% descriptor, attributes kept) or an own slot on an SShapedObject (all
-%% shaped slots are writable data by construction). Anything else → `miss`
-%% so the full `t_set_prop_any` runs. Returns the rebuilt St' (a tuple) on
-%% hit; the emitter's `is_atom` guard distinguishes it from `miss`.
+%% shaped slots are writable data by construction). A shaped receiver may
+%% also ADD a field (`this.k = v` in a constructor) when the shape already
+%% carries the transition edge for KeyBin and the proto chain provably has no
+%% KeyBin that would intercept (steps 1-2, `chain_absent`) — the same move
+%% `set_own_shaped` makes; the first-ever transition still misses so shape
+%% minting stays in Gleam. Anything else → `miss` so the full
+%% `t_set_prop_any` runs. Returns the rebuilt St' (a tuple) on hit; the
+%% emitter's `is_atom` guard distinguishes it from `miss`.
 t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    case Data of
-        #{Id := Slot} ->
-            case Slot of
-                {?SSHAPED_TAG, Sid, P, Slots} ->
-                    case shape_offset(St, Sid, KeyBin) of
-                        miss -> miss;
-                        Off ->
-                            NewSlot = {?SSHAPED_TAG, Sid, P,
-                                       setelement(Off + 1, Slots, V)},
-                            setelement(?AGENT_STORE, St,
-                                setelement(?STORE_DATA, Store,
-                                           Data#{Id := NewSlot}))
-                    end;
-                _ when element(1, Slot) =:= ?SOBJECT_TAG,
-                       element(?SOBJECT_KIND, Slot) =:= ?ORDINARY ->
-                    Props = element(?SOBJECT_PROPS, Slot),
-                    K = {?KEY_NAMED, KeyBin},
-                    case Props of
-                        #{K := Prop}
-                          when element(1, Prop) =:= ?DATAPROP_TAG,
-                               element(?DATAPROP_WRITABLE, Prop) =:= true ->
-                            NewProps =
-                                Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
-                            NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
-                            setelement(?AGENT_STORE, St,
-                                setelement(?STORE_DATA, Store,
-                                           Data#{Id := NewSlot}));
-                        _ -> miss
-                    end;
+    case array:get(Id, Data) of
+        {?SSHAPED_TAG, Sid, P, Slots} ->
+            Shapes = element(?STORE_SHAPES, Store),
+            case shaped_write(Data, Shapes, Sid, P, Slots, KeyBin, V) of
+                miss -> miss;
+                NewSlot ->
+                    setelement(?AGENT_STORE, St,
+                        setelement(?STORE_DATA, Store,
+                                   array:set(Id, NewSlot, Data)))
+            end;
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+                  element(?SOBJECT_KIND, Slot) =:= ?ORDINARY ->
+            Props = element(?SOBJECT_PROPS, Slot),
+            K = {?KEY_NAMED, KeyBin},
+            case Props of
+                #{K := Prop}
+                  when element(1, Prop) =:= ?DATAPROP_TAG,
+                       element(?DATAPROP_WRITABLE, Prop) =:= true ->
+                    NewProps =
+                        Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
+                    NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
+                    setelement(?AGENT_STORE, St,
+                        setelement(?STORE_DATA, Store,
+                                   array:set(Id, NewSlot, Data)));
                 _ -> miss
             end;
         _ -> miss
@@ -177,16 +225,17 @@ proto_has(_, _, _, _) -> 0.
 
 %% t_get_elem_fast(St, Recv, Idx) -> V | miss
 %% JRead. Gate: Recv={js_cell,Id}, Idx a bare non-negative BEAM integer (the
-%% JsVal wire form for a JS integer number — a float / string / bigint index
-%% falls to `to_property_key`), slot is ArrayObj with Idx < Length and no
+%% JsVal wire form for a JS integer number, or an integral float — a
+%% fractional / string / bigint index falls to `to_property_key`), slot is
+%% ArrayObj with Idx < Length and no
 %% {index,Idx} props override. Holes (dense default / sparse-absent) miss so
 %% the full path handles the proto walk. `IsAtom` on the emitter side treats
 %% any atom-valued V (undefined/true/…) as a miss too — a perf loss only.
 t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)
   when is_integer(Idx), Idx >= 0 ->
     Store = element(?AGENT_STORE, St),
-    case element(?STORE_DATA, Store) of
-        #{Id := Slot} when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
                     case element(?SOBJECT_PROPS, Slot) of
@@ -215,6 +264,11 @@ t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)
             end;
         _ -> miss
     end;
+%% Integral float index (8/2, Math.floor(x)): same element, canonicalized
+%% like CanonicalNumericIndexString (-0.0 → 0; a huge one fails Idx < Length).
+t_get_elem_fast(St, Recv, Idx)
+  when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
+    t_get_elem_fast(St, Recv, trunc(Idx));
 t_get_elem_fast(_, _, _) -> miss.
 
 %% t_set_elem_fast(St, Recv, Idx, V) -> St' | miss
@@ -229,10 +283,9 @@ t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0 ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    case Data of
-        #{Id := Slot}
-          when element(1, Slot) =:= ?SOBJECT_TAG,
-               element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
+    case array:get(Id, Data) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+                  element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
             case element(?SOBJECT_KIND, Slot) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
                     case element(?SOBJECT_PROPS, Slot) of
@@ -244,7 +297,7 @@ t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
                                     NewSlot = setelement(?SOBJECT_ELEMENTS, Slot, NewE),
                                     setelement(?AGENT_STORE, St,
                                         setelement(?STORE_DATA, Store,
-                                            Data#{Id := NewSlot}))
+                                            array:set(Id, NewSlot, Data)))
                             end
                     end;
                 {?ARRAYOBJ_TAG, Length} when Idx =:= Length ->
@@ -260,13 +313,16 @@ t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
                                         NewE),
                                     setelement(?AGENT_STORE, St,
                                         setelement(?STORE_DATA, Store,
-                                            Data#{Id := NewSlot}))
+                                            array:set(Id, NewSlot, Data)))
                             end
                     end;
                 _ -> miss
             end;
         _ -> miss
     end;
+t_set_elem_fast(St, Recv, Idx, V)
+  when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
+    t_set_elem_fast(St, Recv, trunc(Idx), V);
 t_set_elem_fast(_, _, _, _) -> miss.
 
 elem_write({?ELEMS_DENSE, A}, Idx, V) ->
@@ -304,6 +360,69 @@ shape_slots_fold_1(_, Acc, _, I, N) when I > N -> Acc;
 shape_slots_fold_1(Slots, Acc, F, I, N) ->
     shape_slots_fold_1(Slots, F(I - 1, element(I, Slots), Acc), F, I + 1, N).
 
+%% shaped_write(Data, Shapes, Sid, Proto, Slots, KeyBin, V) -> Slot' | miss
+%% Overwrite an existing slot in place, or append along the cached
+%% transition edge when the proto chain cannot intercept the write.
+shaped_write(Data, Shapes, Sid, P, Slots, KeyBin, V) ->
+    case Shapes of
+        #{Sid := Desc} ->
+            case element(?SHAPE_OFFSETS, Desc) of
+                #{KeyBin := Off} ->
+                    {?SSHAPED_TAG, Sid, P, setelement(Off + 1, Slots, V)};
+                _ ->
+                    case element(?SHAPE_TRANSITIONS, Desc) of
+                        #{KeyBin := To} ->
+                            case chain_absent(Data, Shapes, P, KeyBin, 6) of
+                                true ->
+                                    {?SSHAPED_TAG, To, P,
+                                     erlang:append_element(Slots, V)};
+                                false -> miss
+                            end;
+                        _ -> miss
+                    end
+            end;
+        _ -> miss
+    end.
+
+%% chain_absent(Data, Shapes, Proto, KeyBin, Fuel) -> boolean()
+%% True when every object on the proto chain either lacks KeyBin or holds it
+%% as a writable data slot (a shaped slot always is), so §10.1.9.2 lands on
+%% the receiver. Only shaped and ordinary / compiled-function SObjects are
+%% walked; an accessor, a non-writable data property, any exotic kind
+%% (Proxy, Array, TypedArray, …) or a chain deeper than Fuel → false.
+chain_absent(_, _, ?NONE, _, _) -> true;
+chain_absent(_, _, _, _, 0) -> false;
+chain_absent(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, KeyBin, Fuel) ->
+    case array:get(PId, Data) of
+        {?SSHAPED_TAG, Sid, P2, _} ->
+            case Shapes of
+                #{Sid := Desc} ->
+                    case element(?SHAPE_OFFSETS, Desc) of
+                        #{KeyBin := _} -> true;
+                        _ -> chain_absent(Data, Shapes, P2, KeyBin, Fuel - 1)
+                    end;
+                _ -> false
+            end;
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
+            Kind = element(?SOBJECT_KIND, Slot),
+            case Kind =:= ?ORDINARY orelse
+                     (is_tuple(Kind) andalso element(1, Kind) =:= ?KFN_TAG) of
+                true ->
+                    case element(?SOBJECT_PROPS, Slot) of
+                        #{{?KEY_NAMED, KeyBin} := Prop} ->
+                            element(1, Prop) =:= ?DATAPROP_TAG andalso
+                                element(?DATAPROP_WRITABLE, Prop) =:= true;
+                        _ ->
+                            chain_absent(Data, Shapes,
+                                         element(?SOBJECT_PROTO, Slot),
+                                         KeyBin, Fuel - 1)
+                    end;
+                false -> false
+            end;
+        _ -> false
+    end;
+chain_absent(_, _, _, _, _) -> false.
+
 %% shape_offset(St, ShapeId, KeyBin) -> Off | miss
 %% ShapeDesc.offsets lookup in JsStore.shapes.
 %%   ShapeDesc = {shape_desc, Arity, #{KeyBin=>Off}, #{KeyBin=>ToSid}}.
@@ -321,7 +440,7 @@ shape_offset(St, Sid, KeyBin) ->
 %% Read the slot for `Id` from `St.store.data`. `miss` if absent (a
 %% dangling handle).
 slot_of(St, Id) ->
-    case element(?STORE_DATA, element(?AGENT_STORE, St)) of
-        #{Id := Slot} -> Slot;
-        _ -> miss
+    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
+        ?STORE_FREE_SLOT -> miss;
+        Slot -> Slot
     end.

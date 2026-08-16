@@ -22,48 +22,49 @@ import arc/compiler/scope
 import arc/parser/ast
 import arc/parser/error.{
   ArgumentsInClassFieldInit, ArgumentsInStaticBlock, AwaitInAsyncFunction,
-  AwaitInModule, AwaitInStaticBlock, BreakOutsideLoopOrSwitch,
-  ClassConstructorAsync, ClassConstructorGenerator, ClassConstructorNotGetter,
-  ClassConstructorNotSetter, ClassDuplicateConstructor, CoalesceMixedWithLogical,
-  ContinueOutsideLoop, ContinueToNonIterationLabel, DeletePrivateName,
-  DeleteUnqualifiedStrictMode, DestructuringMissingInitializer,
-  DuplicateBindingLexical, DuplicateDefaultCase, DuplicateExport,
-  DuplicateImportBinding, DuplicateLabel, DuplicateParamNameStrictMode,
-  DuplicateParameterName, DuplicatePrivateName, DuplicateProtoProperty,
-  EnumReservedWord, EscapedReservedWord, EvalArgsAssignStrictMode,
-  ExpectedAfterOptionalChain, ExpectedAsOrFromAfterExportStar,
-  ExpectedBindingPattern, ExpectedBraceOrStarAfterComma,
-  ExpectedCallOrDotAfterImport, ExpectedCaseDefaultOrBrace,
-  ExpectedCloseAfterSetter, ExpectedCommaOrBraceInExport,
-  ExpectedCommaOrBraceInImport, ExpectedCommaOrBraceInObject,
-  ExpectedCommaOrBracket, ExpectedCommaOrBracketInExpr,
-  ExpectedCommaOrCloseParen, ExpectedCommaOrObjectClose, ExpectedExportAlias,
-  ExpectedExportSpecifierName, ExpectedForDeclSeparator,
-  ExpectedForHeadSeparator, ExpectedForSeparator, ExpectedFromOrComma,
-  ExpectedFunctionAfterAsync, ExpectedIdentifier, ExpectedIdentifierAfterDot,
-  ExpectedImportMeta, ExpectedImportSpecifier, ExpectedImportSpecifierName,
-  ExpectedModuleSpecifier, ExpectedNewTarget, ExpectedPropertyName,
-  ExpectedSemicolon, ExpectedToken, ExportNotTopLevel, FieldNamedConstructor,
-  ForInInitializer, ForOfInitializer, FunctionDeclInLabelBody,
-  FunctionDeclInSingleStatement, GeneratorDeclLabeled, GetterNoParams,
-  IdentifierAlreadyDeclared, ImportNotTopLevel, InvalidAssignmentLhs,
-  InvalidDestructuringTarget, InvalidForInLhs, InvalidForOfLhs,
-  InvalidLhsPrefixOp, InvalidPostfixLhs, InvalidRestBinding,
-  InvalidTemplateEscape, LetBindingInLexicalDecl, LetIdentifierStrictMode,
-  LexicalDeclInLabel, LexicalDeclInSingleStatement, MalformedNumericLiteral,
-  MisplacedUseStrictDirective, MissingCatchOrFinally, MissingConstInitializer,
-  NewTargetOutsideFunction, OctalEscapeStrictMode, OctalLiteralStrictMode,
-  PrivateNameAsPropertyKey, PrivateNameConstructor, ReservedWordImportBinding,
-  ReservedWordStrictMode, RestDefaultInitializer, RestMustBeLast,
-  RestTrailingComma, ReturnOutsideFunction, SetterExactlyOneParam, SetterNoRest,
+  AwaitInFormalParameter, AwaitInModule, AwaitInStaticBlock,
+  BreakOutsideLoopOrSwitch, ClassConstructorAsync, ClassConstructorGenerator,
+  ClassConstructorNotGetter, ClassConstructorNotSetter,
+  ClassDuplicateConstructor, CoalesceMixedWithLogical, ContinueOutsideLoop,
+  ContinueToNonIterationLabel, DeletePrivateName, DeleteUnqualifiedStrictMode,
+  DestructuringMissingInitializer, DuplicateBindingLexical, DuplicateDefaultCase,
+  DuplicateExport, DuplicateImportBinding, DuplicateLabel,
+  DuplicateParamNameStrictMode, DuplicateParameterName, DuplicatePrivateName,
+  DuplicateProtoProperty, EnumReservedWord, EscapedReservedWord,
+  EvalArgsAssignStrictMode, ExpectedAfterOptionalChain,
+  ExpectedAsOrFromAfterExportStar, ExpectedBindingPattern,
+  ExpectedBraceOrStarAfterComma, ExpectedCallOrDotAfterImport,
+  ExpectedCaseDefaultOrBrace, ExpectedCloseAfterSetter,
+  ExpectedCommaOrBraceInExport, ExpectedCommaOrBraceInImport,
+  ExpectedCommaOrBraceInObject, ExpectedCommaOrBracket,
+  ExpectedCommaOrBracketInExpr, ExpectedCommaOrCloseParen,
+  ExpectedCommaOrObjectClose, ExpectedExportAlias, ExpectedExportSpecifierName,
+  ExpectedForDeclSeparator, ExpectedForHeadSeparator, ExpectedForSeparator,
+  ExpectedFromOrComma, ExpectedFunctionAfterAsync, ExpectedIdentifier,
+  ExpectedIdentifierAfterDot, ExpectedImportMeta, ExpectedImportSpecifier,
+  ExpectedImportSpecifierName, ExpectedModuleSpecifier, ExpectedNewTarget,
+  ExpectedPropertyName, ExpectedSemicolon, ExpectedToken, ExportNotTopLevel,
+  FieldNamedConstructor, ForInInitializer, ForOfInitializer,
+  FunctionDeclInLabelBody, FunctionDeclInSingleStatement, GeneratorDeclLabeled,
+  GetterNoParams, IdentifierAlreadyDeclared, ImportMetaOutsideModule,
+  ImportNotTopLevel, InvalidAssignmentLhs, InvalidDestructuringTarget,
+  InvalidForInLhs, InvalidForOfLhs, InvalidLhsPrefixOp, InvalidPostfixLhs,
+  InvalidRestBinding, InvalidTemplateEscape, LetBindingInLexicalDecl,
+  LetIdentifierStrictMode, LexicalDeclInLabel, LexicalDeclInSingleStatement,
+  MalformedNumericLiteral, MisplacedUseStrictDirective, MissingCatchOrFinally,
+  MissingConstInitializer, NewTargetOutsideFunction, OctalEscapeStrictMode,
+  OctalLiteralStrictMode, PrivateNameAsPropertyKey, PrivateNameConstructor,
+  PrivateNameNotInBrandCheck, ReservedWordImportBinding, ReservedWordStrictMode,
+  RestDefaultInitializer, RestMustBeLast, RestTrailingComma,
+  ReturnOutsideFunction, SetterExactlyOneParam, SetterNoRest,
   ShorthandDefaultOutsideDestructuring, StaticPrototype,
   StaticReservedStrictMode, StrictModeAssignment, StrictModeBindingName,
   StrictModeModification, StrictModeParamName, SuperCallNotInDerivedConstructor,
-  SuperPrivateName, SuperPropertyNotInMethod, ThrowLineBreak,
-  UndeclaredExportBinding, UndeclaredPrivateName, UndefinedLabel,
-  UnexpectedAfterExport, UnexpectedCloseBrace, UnexpectedCloseParen,
-  UnexpectedExport, UnexpectedSuper, UnexpectedToken,
-  UnicodeEscapeInMetaProperty, UnterminatedTemplateSubstitution,
+  SuperPrivateName, SuperPropertyNotInMethod, TemplateInOptionalChain,
+  ThrowLineBreak, UnaryBeforeExponentiation, UndeclaredExportBinding,
+  UndeclaredPrivateName, UndefinedLabel, UnexpectedAfterExport,
+  UnexpectedCloseBrace, UnexpectedCloseParen, UnexpectedExport, UnexpectedSuper,
+  UnexpectedToken, UnicodeEscapeInMetaProperty, UnterminatedTemplateSubstitution,
   UsingAtScriptTopLevel, UsingInCaseClause, UsingInForIn,
   UsingMissingInitializer, UsingPatternBinding, WithNotAllowedStrictMode,
   YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode, lex_error,
@@ -290,6 +291,10 @@ type Ctx {
     // Whether we are inside formal parameter parsing. When true, yield
     // expressions are forbidden even inside generators.
     in_formal_params: Bool,
+    // The formal-parameter state above is borrowed by a catch parameter
+    // for its dup check; a CatchParameter is not FormalParameters, so
+    // `yield`/`await` stay legal in its defaults.
+    in_catch_param: Bool,
     // Whether we are inside arrow function parameter parsing. When true,
     // duplicate parameter names are always an error (even in sloppy mode).
     in_arrow_params: Bool,
@@ -547,6 +552,7 @@ fn init_parser(
           has_cover_initializer: False,
           dup_proto_pos: None,
           in_formal_params: False,
+          in_catch_param: False,
           in_arrow_params: False,
           has_non_simple_param: False,
           param_bound_names: [],
@@ -633,6 +639,7 @@ pub fn parse_module(
 /// accident.
 pub fn parse_direct_eval(
   source: String,
+  strict strict: Bool,
   allow_new_target allow_new_target: Bool,
   allow_super_property allow_super_property: Bool,
   allow_super_call allow_super_call: Bool,
@@ -640,7 +647,11 @@ pub fn parse_direct_eval(
   outer_private_names outer_private_names: List(String),
 ) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
   use p <- init_parser(source, Script)
-  // §19.2.1.1 PerformEval step 5: direct eval inside a method may legally
+  // §19.2.1.1 PerformEval step 12: `strict` is strictCaller — the eval body
+  // is parsed as strict code when the calling code is strict, so strict-only
+  // early errors (reserved words, octal literals, `with`) surface.
+  //
+  // Step 5: direct eval inside a method may legally
   // reference the caller's private names — `outer_private_names` is the
   // caller's PrivateEnvironment chain at the eval call site. Any other
   // unresolved private reference is the usual AllPrivateIdentifiersValid
@@ -654,6 +665,7 @@ pub fn parse_direct_eval(
       ..p,
       ctx: Ctx(
         ..p.ctx,
+        strict: p.ctx.strict || strict,
         allow_new_target:,
         allow_super_property:,
         allow_super_call:,
@@ -799,10 +811,10 @@ fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     }
     With -> parse_with_statement(p)
     Async -> {
-      case peek_at(p, 1) {
-        Function -> parse_function_declaration(p, True, True)
-        Colon -> parse_labeled_statement(p)
-        _ -> parse_expression_statement(p)
+      case async_function_start(p), peek_at(p, 1) {
+        True, _ -> parse_function_declaration(p, True, True)
+        False, Colon -> parse_labeled_statement(p)
+        False, _ -> parse_expression_statement(p)
       }
     }
     Yield | Await -> {
@@ -1005,7 +1017,7 @@ fn parse_single_statement_inner(
       }
     }
     Function ->
-      case allow_fn && !p.ctx.strict {
+      case allow_fn && !p.ctx.strict && peek_at(p, 1) != Star {
         // Annex B §B.3.3: sloppy `if (c) function f(){}` parses AS IF
         // `if (c) { function f(){} }` — push a synthetic Block scope so
         // register_function_name's in_block path fires (LetBinding for
@@ -1035,9 +1047,9 @@ fn parse_single_statement_inner(
     // Async function declarations are never legal in single-statement
     // position — Annex B §B.3.3 extends plain functions only.
     Async ->
-      case peek_at(p, 1) {
-        Function -> Error(FunctionDeclInSingleStatement(pos_of(p)))
-        _ -> parse_statement(p)
+      case async_function_start(p) {
+        True -> Error(FunctionDeclInSingleStatement(pos_of(p)))
+        False -> parse_statement(p)
       }
     Class -> Error(LexicalDeclInSingleStatement(pos_of(p)))
     _ -> parse_statement(p)
@@ -2715,6 +2727,7 @@ fn parse_throw_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
 
 fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   let p2 = advance(p)
+  let p2 = P(..p2, sb: scope.sb_enter_try(p2.sb))
   use #(p3, block) <- result.try(parse_block_body(p2))
   use #(p4, handler) <- result.try(parse_catch_clause(p3))
   use #(p5, finalizer) <- result.try(case peek(p4) {
@@ -2724,6 +2737,7 @@ fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     }
     _ -> Ok(#(p4, option.None))
   })
+  let p5 = P(..p5, sb: scope.sb_leave_try(p5.sb))
   use tail <- result.map(case handler, finalizer {
     option.None, option.None -> Error(MissingCatchOrFinally(pos_of(p5)))
     option.Some(handler), option.None -> Ok(ast.TryCatch(handler:))
@@ -2756,6 +2770,7 @@ fn parse_catch_clause(
             binding_kind: BindingParam,
             // Enable dup param detection for catch destructured bindings
             in_formal_params: True,
+            in_catch_param: True,
             param_bound_names: [],
             has_non_simple_param: True,
           ),
@@ -2784,6 +2799,7 @@ fn parse_catch_clause(
             ..p4.ctx,
             binding_kind: BindingNone,
             in_formal_params: p3.ctx.in_formal_params,
+            in_catch_param: p3.ctx.in_catch_param,
             param_bound_names: p3.ctx.param_bound_names,
             has_non_simple_param: p3.ctx.has_non_simple_param,
           ),
@@ -4474,23 +4490,17 @@ fn parse_class_element_body(
 }
 
 fn check_label_identifier(p: P, label: String) -> Result(Nil, ParseError) {
-  case label {
-    "yield" -> {
-      use <- bool.guard(p.ctx.strict, Error(YieldReservedStrictMode(pos_of(p))))
-      use <- bool.guard(p.ctx.in_generator, Error(YieldInGenerator(pos_of(p))))
-      Ok(Nil)
-    }
-    "await" -> {
-      use <- bool.guard(p.mode == Module, Error(AwaitInModule(pos_of(p))))
-      use <- bool.guard(p.ctx.in_async, Error(AwaitInAsyncFunction(pos_of(p))))
-      Ok(Nil)
-    }
-    _ -> Ok(Nil)
-  }
+  check_reserved_identifier_common(p, label)
 }
 
 fn parse_labeled_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   parse_label_chain(p, [])
+}
+
+/// `async function` with no LineTerminator between the two tokens — the
+/// only shape that starts an async function declaration (§15.8).
+fn async_function_start(p: P) -> Bool {
+  peek_at(p, 1) == Function && token_line_at(p, 1) == token_line_at(p, 0)
 }
 
 /// Whether the parser is positioned at another `Label :` link of a label
@@ -4572,15 +4582,25 @@ fn parse_labeled_statement_body(
     // and labeled function declarations (forbidden in strict mode)
     case peek(p3) {
       Const -> Error(LexicalDeclInLabel(pos_of(p3)))
-      Let ->
-        case
-          peek_at(p3, 1) == LeftBrace
-          || peek_at(p3, 1) == LeftBracket
-          || is_identifier_or_keyword(peek_at(p3, 1))
-        {
+      // Same lookahead as single-statement position: only `let [` is
+      // excluded outright; `let {` / `let ident` after a LineTerminator is
+      // the identifier `let` plus ASI.
+      Let -> {
+        let next = peek_at(p3, 1)
+        let decl_starter =
+          next == LeftBrace
+          || next == LeftBracket
+          || is_identifier_or_keyword(next)
+        let newline_after_let = token_line_at(p3, 1) > token_line_at(p3, 0)
+        case next == LeftBracket || { decl_starter && !newline_after_let } {
           True -> Error(LexicalDeclInLabel(pos_of(p3)))
-          False -> wrap_label(parse_statement(p3))
+          False ->
+            case decl_starter {
+              True -> wrap_label(parse_expression_statement(p3))
+              False -> wrap_label(parse_statement(p3))
+            }
         }
+      }
       Function -> {
         use <- bool.guard(
           peek_at(p3, 1) == Star,
@@ -4592,6 +4612,14 @@ fn parse_labeled_statement_body(
         )
         wrap_label(parse_statement(p3))
       }
+      Class -> Error(LexicalDeclInLabel(pos_of(p3)))
+      // Only a plain FunctionDeclaration may be a labelled item (Annex B);
+      // `label: async function f(){}` is never legal.
+      Async ->
+        case async_function_start(p3) {
+          True -> Error(FunctionDeclInLabelBody(pos_of(p3)))
+          False -> wrap_label(parse_statement(p3))
+        }
       // `label: using x = …` / `label: await using x = …` — a labelled item
       // must be a Statement, never a using declaration.
       Identifier ->
@@ -4939,19 +4967,23 @@ type ArrowAttempt {
 
 fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
   case peek(p) {
-    // async (...) => or async ident =>
+    // async (...) => or async ident => — `async` must sit on the same line
+    // as its parameters (§15.9 [no LineTerminator here]).
     Async -> {
+      let same_line = token_line_at(p, 1) == token_line_at(p, 0)
       case peek_at(p, 1) {
-        LeftParen -> try_paren_arrow(p, advance(advance(p)), True)
-        Identifier ->
-          case peek_at(p, 2) {
-            Arrow -> try_single_ident_arrow(p, advance(p), True)
-            _ -> Error(NotAnArrow)
+        LeftParen if same_line -> try_paren_arrow(p, advance(advance(p)), True)
+        // `async => …`: a plain arrow whose one parameter is named async.
+        Arrow -> try_single_ident_arrow(p, p, False)
+        next if same_line ->
+          case is_arrow_param_name(next), peek_at(p, 2) {
+            True, Arrow -> try_single_ident_arrow(p, advance(p), True)
+            _, _ -> Error(NotAnArrow)
           }
         _ -> Error(NotAnArrow)
       }
     }
-    Identifier | Yield | Await ->
+    Identifier | Yield | Await | Of | From | As | Let | Static ->
       case peek_at(p, 1) {
         Arrow -> try_single_ident_arrow(p, p, False)
         _ -> Error(NotAnArrow)
@@ -4968,6 +5000,15 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
 /// `outer` is the parser at the very start of the expression (the `async`
 /// token, or the identifier itself when not async) — used for error
 /// positions and for `finish_arrow` to restore the enclosing context.
+/// Token kinds that can spell a single arrow parameter (`x => …`): plain
+/// identifiers and the contextual keywords that are valid binding names.
+fn is_arrow_param_name(kind: TokenKind) -> Bool {
+  case kind {
+    Identifier | Yield | Await | Of | From | As | Let | Static | Async -> True
+    _ -> False
+  }
+}
+
 fn try_single_ident_arrow(
   outer: P,
   ident_p: P,
@@ -5206,7 +5247,7 @@ fn parse_arrow_body(
 
 fn parse_yield_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   // Yield expressions are forbidden in formal parameter defaults
-  case p.ctx.in_formal_params {
+  case p.ctx.in_formal_params && !p.ctx.in_catch_param {
     True -> Error(YieldInFormalParameter(pos_of(p)))
     False -> parse_yield_expression_inner(p)
   }
@@ -5301,14 +5342,39 @@ fn parse_binary_rhs(
   min_prec: Int,
 ) -> Result(#(P, ast.Expression), ParseError) {
   let tok = peek(p)
+  // §13.10: a bare `#x` primary is only the left operand of `in`; anywhere
+  // it survives to here unconsumed (or under another operator) it is an
+  // error.
+  let bare_private = case left {
+    ast.Identifier(name: "#" <> _, ..) -> True
+    _ -> False
+  }
   case binary_operator(tok, p.ctx.allow_in) {
     // Not a binary/logical operator (or `in` while `allow_in` is off).
-    None -> Ok(#(p, left))
+    None ->
+      case bare_private {
+        True -> Error(PrivateNameNotInBrandCheck(pos_of(p)))
+        False -> Ok(#(p, left))
+      }
     Some(BinaryOperator(precedence:, op:)) ->
       case precedence > min_prec {
-        False -> Ok(#(p, left))
+        False ->
+          case bare_private {
+            True -> Error(PrivateNameNotInBrandCheck(pos_of(p)))
+            False -> Ok(#(p, left))
+          }
         True -> {
           let op_pos = pos_of(p)
+          use <- bool.guard(
+            bare_private && tok != In,
+            Error(PrivateNameNotInBrandCheck(op_pos)),
+          )
+          // §13.6: `**` takes an UpdateExpression on the left, so an
+          // unparenthesized unary or await operand is an early error.
+          use <- bool.guard(
+            tok == StarStar && is_unary_operand(left),
+            Error(UnaryBeforeExponentiation(op_pos)),
+          )
           let p2 = advance(p)
           // Right-associative for **
           let next_min = case tok {
@@ -5357,6 +5423,20 @@ fn parse_binary_rhs(
   }
 }
 
+fn is_bare_private_name(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.Identifier(name: "#" <> _, ..) -> True
+    _ -> False
+  }
+}
+
+fn is_unary_operand(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.UnaryExpression(..) | ast.AwaitExpression(..) -> True
+    _ -> False
+  }
+}
+
 fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   // Every prefix-operator branch starts at the current token, so capture the
   // span start once. Branches that fall through to parse_postfix_expression
@@ -5364,6 +5444,10 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   let start = pos_of(p)
   let unary = fn(p2, op) {
     use #(p3, arg) <- result.try(parse_unary_expression(p2))
+    use <- bool.guard(
+      is_bare_private_name(arg),
+      Error(PrivateNameNotInBrandCheck(pos_of(p2))),
+    )
     Ok(#(
       P(..p3, last_expr_assignable: False, last_expr_is_assignment: False),
       ast.UnaryExpression(
@@ -5414,6 +5498,11 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
           use <- bool.guard(
             p.ctx.in_static_block,
             Error(AwaitInStaticBlock(start)),
+          )
+          // §15.8.1 / §15.9.1: no AwaitExpression in formal parameters.
+          use <- bool.guard(
+            p.ctx.in_formal_params && !p.ctx.in_catch_param,
+            Error(AwaitInFormalParameter(start)),
           )
           let p2 = advance(p)
           use #(p3, arg) <- result.try(parse_unary_expression(p2))
@@ -5804,6 +5893,10 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
           // must appear literally, so a \u escape in them is a SyntaxError.
           case peek(p3), peek_value(p3), peek_had_escape(p3) {
             Identifier, "meta", False -> {
+              use <- bool.guard(
+                p.mode == Script,
+                Error(ImportMetaOutsideModule(pos_of(p))),
+              )
               // Span covers `import.meta` — from the `import` keyword's
               // start to just past the `meta` identifier.
               let p4 = advance(p3)
@@ -5841,7 +5934,35 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     _ -> parse_primary_expression(p)
   }
   use #(p2, expr) <- result.try(parsed)
+  // A literal that only parses as an AssignmentPattern (`{a = 0}`) can
+  // never be the object of a member/call suffix — `[{a = 0}.x] = []` is a
+  // SyntaxError even though the enclosing array IS a pattern.
+  let literal_cover_error =
+    !p.ctx.has_cover_initializer
+    && p2.ctx.has_cover_initializer
+    && at_suffix_start(p2)
+    && case expr {
+      ast.ObjectExpression(..) | ast.ArrayExpression(..) -> True
+      _ -> False
+    }
+  use <- bool.guard(
+    literal_cover_error,
+    Error(ShorthandDefaultOutsideDestructuring(pos_of(p))),
+  )
   parse_call_chain(p2, expr)
+}
+
+/// Whether the next token continues a member/call chain.
+fn at_suffix_start(p: P) -> Bool {
+  case peek(p) {
+    Dot
+    | LeftBracket
+    | LeftParen
+    | QuestionDot
+    | TemplateLiteral
+    | TemplateHead -> True
+    _ -> False
+  }
 }
 
 /// §13.3.10 ImportCall phase forms: `import.source(expr)` / `import.defer(expr)`.
@@ -5934,10 +6055,27 @@ fn parse_call_chain(
         }
       }
     TemplateLiteral | TemplateHead -> {
+      // §13.3.1.1: no tagged template anywhere inside an OptionalChain.
+      use <- bool.guard(
+        in_optional_chain(callee),
+        Error(TemplateInOptionalChain(pos_of(p))),
+      )
       use #(p2, expr) <- result.try(parse_tagged_template(p, callee))
       parse_call_chain(p2, expr)
     }
     _ -> Ok(#(p, callee))
+  }
+}
+
+/// Whether `expr` is an OptionalChain or a member/call/template suffix
+/// applied to one (parentheses end the chain).
+fn in_optional_chain(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.OptionalMemberExpression(..) | ast.OptionalCallExpression(..) -> True
+    ast.MemberExpression(object:, ..) -> in_optional_chain(object)
+    ast.CallExpression(callee:, ..) -> in_optional_chain(callee)
+    ast.TaggedTemplateExpression(tag:, ..) -> in_optional_chain(tag)
+    _ -> False
   }
 }
 
@@ -6149,6 +6287,10 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       // static blocks / field initializers. Property names and member
       // accesses use other paths, so they still allow escaped reserved words.
       use Nil <- result.try(check_identifier_reference(p, val))
+      use <- bool.guard(
+        string.starts_with(val, "#") && peek_at(p, 1) != In,
+        Error(PrivateNameNotInBrandCheck(pos_of(p))),
+      )
       let p = note_private_ref(p, val)
       // V8 VariableProxy / Scope::AddUnresolved — record the bare ref
       // against the current scope for later resolution in `finalize`.
@@ -6258,9 +6400,9 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
     Function -> parse_function_expression(p, is_async: False)
     Class -> parse_class_expression(p)
     Async ->
-      case peek_at(p, 1) {
-        Function -> parse_function_expression(p, is_async: True)
-        _ -> contextual_ident_ok(p)
+      case async_function_start(p) {
+        True -> parse_function_expression(p, is_async: True)
+        False -> contextual_ident_ok(p)
       }
     Slash -> {
       // Could be a regex literal — but the lexer tokenized it as Slash.
@@ -6435,8 +6577,15 @@ fn parse_object_properties(
   case peek(p) {
     RightBrace -> Ok(#(advance(p), acc))
     DotDotDot -> {
+      // Cover grammar: an object rest target must be a simple assignment
+      // target (§13.15.5), so only the spread expression's own
+      // assignability counts — not the pattern flags of a literal nested
+      // inside it (`{...{b: 0}.x}`).
+      let saved_invalid = p.has_invalid_pattern
       let p2 = advance(p)
       use #(p3, expr) <- result.try(parse_assignment_expression(p2))
+      let p3 =
+        P(..p3, has_invalid_pattern: saved_invalid || !p3.last_expr_assignable)
       let prop = ast.SpreadProperty(argument: expr)
       case peek(p3) {
         // Anything after a spread (including a trailing comma) is fine in an
@@ -6496,7 +6645,9 @@ fn parse_method_prefix(
   star_ends_accessor: Bool,
 ) -> #(P, Bool, AccessorPrefix, Bool) {
   let is_async = case peek(p) {
-    Async -> !is_terminator(peek_at(p, 1))
+    Async ->
+      !is_terminator(peek_at(p, 1))
+      && token_line_at(p, 1) == token_line_at(p, 0)
     _ -> False
   }
   let p = case is_async {
@@ -6637,8 +6788,10 @@ fn parse_object_property_value(
     tok -> {
       // Shorthand `{ x }` or shorthand-with-default `{ x = d }` (cover
       // grammar — the latter only valid in destructuring / arrow params).
-      // Both require the key to be a plain identifier.
-      case is_valid_shorthand {
+      // Both require the key to be a plain identifier with no
+      // async/get/set prefix (`{async x}` is not a property).
+      let modified = has_async || accessor_kind != NoAccessor
+      case is_valid_shorthand && !modified {
         False -> Error(UnexpectedToken(pos_of(p5), prop_name_kind))
         True -> {
           // Shorthand is an IdentifierReference — apply §13.1.1 early
@@ -7679,6 +7832,7 @@ fn enter_function_context(
       has_cover_initializer: False,
       dup_proto_pos: None,
       in_formal_params: False,
+      in_catch_param: False,
       in_arrow_params: False,
       has_non_simple_param: False,
       param_bound_names: [],

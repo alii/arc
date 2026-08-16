@@ -281,10 +281,10 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
   let ops =
     JsOps(
       ..st.store.ops,
-      call_bytecode: fn(st, _callee, this, args, _new_target) {
+      call_bytecode: fn(st, _callee, this, args) {
         let assert [a] = args
         let #(sum, st) = rt_ops.t_add(st, this, a)
-        #(sum, st)
+        #(Ok(sum), st)
       },
       construct_bytecode: fn(st: Agent, _callee, _args, _new_target) {
         #(st.realm.array.prototype, st)

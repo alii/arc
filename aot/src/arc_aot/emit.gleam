@@ -1,6 +1,7 @@
 //// arc AST + scope tree -> twocore IR module. Façade over emit/{state,anf}
 //// and the M12-M18 emit_* passes; body is filled in by M19.
 
+import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser
@@ -97,8 +98,8 @@ fn root_binding_prologue(
   let bindings =
     dict.to_list(scope.get_scope(e.tree, scope.root_scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
-  let id = fn(t: ir.Expr) { t }
-  list.fold(bindings, #(id, e), fn(acc, entry) {
+  let #(wrap, e) = root_lexical_prologue(e)
+  list.fold(bindings, #(wrap, e), fn(acc, entry) {
     let #(wrap, e) = acc
     let #(name, b) = entry
     let sv = state.slot_var_name(b.slot)
@@ -123,6 +124,87 @@ fn root_binding_prologue(
     }
     #(wrap, e)
   })
+}
+
+/// §16.1.7 GlobalDeclarationInstantiation steps 17-18: every top-level
+/// `var` name, hoisted function name and (sloppy) Annex B function-in-block
+/// name that lives on the global object gets its `{undefined, W, E, C:false}`
+/// binding before the body runs, so a read ahead of the declaration sees
+/// `undefined` and eval code sees the binding as an existing var.
+fn global_var_prologue(
+  e: state.Emitter2,
+  body: List(ast.StmtWithLine),
+  strict: Bool,
+  wrap: fn(ir.Expr) -> ir.Expr,
+) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
+  let annexb = case strict {
+    True -> []
+    False -> state.fn_info(e).annexb_candidates
+  }
+  let vars =
+    list.append(ast_util.collect_hoisted_vars(body), annexb)
+    |> list.map(fn(name) { #(name, "declare_global_var") })
+  let fns =
+    ast_util.direct_fn_names(body)
+    |> list.map(fn(name) { #(name, "declare_global_fn") })
+  list.append(vars, fns)
+  |> list.unique
+  |> list.filter(fn(entry) {
+    case state.resolve(e, entry.0) {
+      scope.Plain(scope.Global(_)) -> True
+      _ -> False
+    }
+  })
+  |> list.fold(#(wrap, e), fn(acc, entry) {
+    let #(wrap, e) = acc
+    let #(name, op) = entry
+    let #(t, e) = state.fresh_var(e)
+    let kb = ir.ConstBinary(bit_array.from_string(name))
+    let w = fn(tail) {
+      wrap(ir.Let([t], ir.CallHost("js", op, [kb, ir.ConstAtom("false")]), tail))
+    }
+    #(w, e)
+  })
+}
+
+/// A Script root owns the four lexical pseudo-bindings (scope.gleam
+/// `script_root_owns_lexical`): `this` is the global object (§9.1.1.4.11),
+/// the other three are `undefined`. Mirrors func.unpack_frame for js_main,
+/// whose `_frame` carries no caller context.
+fn root_lexical_prologue(
+  e: state.Emitter2,
+) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
+  let info = state.fn_info(e)
+  let id = fn(t: ir.Expr) { t }
+  case info.lexical {
+    lexical.OwnedLexicalSlots(base:) ->
+      list.fold(lexical.all_lexical_refs, #(id, e), fn(acc, ref) {
+        let #(wrap, e) = acc
+        let slot = base + lexical.lexical_ref_offset(ref)
+        let sv = state.slot_var_name(slot)
+        let e = state.set_slot_var(e, slot, sv)
+        let init = case ref {
+          lexical.RefThis -> ir.CallHost("js", "global_this", [])
+          _ -> ir.Values([e.consts.undef])
+        }
+        let wrap = case state.lexical_is_boxed(e, info, ref) {
+          True -> fn(tail) {
+            wrap(ir.Let(
+              [sv <> "_raw"],
+              init,
+              ir.Let(
+                [sv],
+                ir.CallHost("js", "cell_new", [ir.Var(sv <> "_raw")]),
+                tail,
+              ),
+            ))
+          }
+          False -> fn(tail) { wrap(ir.Let([sv], init, tail)) }
+        }
+        #(wrap, e)
+      })
+    lexical.CapturedLexicalSlots(..) | lexical.NoLexicalSlots -> #(id, e)
+  }
 }
 
 /// SPEC§19.5 step 3 — Script-top-level FunctionDeclaration hoisting
@@ -239,6 +321,7 @@ pub fn compile_source(
         // cell_get/run ≈ +2.9ms. Re-enable only for a bench where profile
         // shows >1k/run t_global_get_fast.
         module_slot_globals: False,
+        box_try_writes: True,
       ),
     )
   use module <- result.map(compile(ast.Script(body:), tree, opts))
@@ -270,6 +353,7 @@ pub fn compile(
   // (top-level `var`/`function` under module_slot_globals) BEFORE hoists so
   // fn-decl closures cell_set into a live cell. Also seeds slotted_globals.
   let #(prologue, e) = root_binding_prologue(e)
+  let #(prologue, e) = global_var_prologue(e, body, strict, prologue)
   // (2) hoist top-level FunctionDeclarations (§16.1.7 step 16).
   use #(wrap, e) <- result.try(emit_hoists(e, body))
   // (3)+(4) statement fold; terminal K is Return(undef). The runner drains

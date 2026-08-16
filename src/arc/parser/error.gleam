@@ -102,6 +102,7 @@ pub type ParseError {
   IdentifierAlreadyDeclared(pos: Int, name: String)
   LexicalDeclInSingleStatement(pos: Int)
   YieldInFormalParameter(pos: Int)
+  AwaitInFormalParameter(pos: Int)
   InvalidLhsPrefixOp(pos: Int)
   SuperCallNotInDerivedConstructor(pos: Int)
   SuperPropertyNotInMethod(pos: Int)
@@ -206,6 +207,17 @@ pub type ParseError {
   /// §13.13.1: `??` mixed with `||`/`&&` at the same level without
   /// parentheses (`a ?? b || c`, `a && b ?? c`, …).
   CoalesceMixedWithLogical(pos: Int)
+  /// §13.6: the left operand of `**` must be an UpdateExpression, so an
+  /// unparenthesized unary/await operand (`-x ** 2`, `delete a ** 2`) is a
+  /// syntax error.
+  UnaryBeforeExponentiation(pos: Int)
+  /// §13.3.1.1: a tagged template inside an optional chain
+  /// (`a?.b`x``, `a?.()`x``).
+  TemplateInOptionalChain(pos: Int)
+  /// §13.3.12.1: `import.meta` in code whose goal symbol is Script.
+  ImportMetaOutsideModule(pos: Int)
+  /// §13.10: a bare `#x` is only ever the left operand of `in`.
+  PrivateNameNotInBrandCheck(pos: Int)
 }
 
 pub fn parse_error_to_string(error: ParseError) -> String {
@@ -289,6 +301,8 @@ pub fn parse_error_to_string(error: ParseError) -> String {
       "Lexical declaration cannot appear in a single-statement context"
     YieldInFormalParameter(_) ->
       "Yield expression not allowed in formal parameter"
+    AwaitInFormalParameter(_) ->
+      "Await expression not allowed in formal parameter"
     InvalidLhsPrefixOp(_) ->
       "Invalid left-hand side expression in prefix operation"
     SuperCallNotInDerivedConstructor(_) ->
@@ -416,6 +430,13 @@ pub fn parse_error_to_string(error: ParseError) -> String {
       "'using' declarations may only declare identifier bindings"
     CoalesceMixedWithLogical(_) ->
       "Nullish coalescing operator '??' requires parentheses when mixed with '||' or '&&'"
+    ImportMetaOutsideModule(_) -> "Cannot use 'import.meta' outside a module"
+    PrivateNameNotInBrandCheck(_) ->
+      "Private name must be the left operand of 'in'"
+    TemplateInOptionalChain(_) ->
+      "Tagged template cannot be used in optional chain"
+    UnaryBeforeExponentiation(_) ->
+      "Unary operator used immediately before exponentiation expression; parenthesize the operand"
   }
 }
 

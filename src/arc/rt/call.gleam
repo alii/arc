@@ -219,11 +219,15 @@ fn do_call(
       case read_obj_kind(st, h) {
         Some(KCompiled(code:, home_object:, flags:, ..)) ->
           call_kfunction(st, h, code, home_object, flags, this, args)
-        // Interpreted function: the interpreter runs a fresh activation.
-        Some(KBytecode(..)) ->
-          t_apply_protected(st, fn(st) {
-            js_ops(st).call_bytecode(st, h, this, args, mk_undefined())
-          })
+        // Interpreted function: the interpreter runs a fresh activation
+        // under its own backstop and hands the throw back as a value.
+        Some(KBytecode(..)) -> {
+          let #(res, st) = js_ops(st).call_bytecode(st, h, this, args)
+          case res {
+            Ok(v) -> #(NormalCompletion(v), st)
+            Error(e) -> #(ThrowCompletion(e), st)
+          }
+        }
         Some(KNative(tag:, ..)) ->
           t_apply_protected(st, fn(st) { dispatch_native(st, tag, this, args) })
         // §10.4.1.1: [[BoundThis]] replaces `this`; bound args prepend.
@@ -280,8 +284,7 @@ fn call_kfunction(
 /// `frame.bind_this` (`exec/frame.gleam:145-178`); arrows have lexical
 /// `this` (step 2) and keep the caller-supplied frame value.
 pub fn resolve_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
-  use <- bool.guard(flags.is_arrow, #(this, st))
-  case flags.is_strict {
+  case flags.is_arrow || flags.is_strict {
     // Step 5: thisMode is STRICT -> thisValue = thisArgument (no coercion).
     True -> #(this, st)
     // Step 6: Sloppy mode coercion.

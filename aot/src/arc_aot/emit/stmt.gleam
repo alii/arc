@@ -157,13 +157,52 @@ fn inline_cleanup(
   k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case cleanup {
-    state.FinallyBlock(body:, saved_scope:) ->
+    state.FinallyBlock(body:, saved_scope:, escape: None) ->
       exn.inline_finally(e, body, saved_scope, k)
-    state.IterClose(iter_var:, is_async:) ->
+    state.FinallyBlock(body:, saved_scope:, escape: Some(esc)) -> {
+      let carried = assigned_unboxed_slots_all(e, [ast.BlockStatement(body)])
+      use #(f_tree, e) <- result.try(
+        run_rk(e, fn(e, done) {
+          use e <- exn.inline_finally(e, body, saved_scope)
+          done(e, ir.Values(carried_values(e, carried)))
+        }),
+      )
+      use #(region, e) <- result.try(escaping(e, esc, carried, f_tree))
+      rebind_after_block(e, carried, region, k)
+    }
+    state.IterClose(iter_var:, is_async:, escape: None) ->
       host_unit_(e, "iter_close", [ir.Var(iter_var), bool_atom(e, is_async)], k)
+    state.IterClose(iter_var:, is_async:, escape: Some(esc)) -> {
+      let close =
+        ir.Let(
+          ["_"],
+          ir.CallHost("js", "iter_close", [
+            ir.Var(iter_var),
+            bool_atom(e, is_async),
+          ]),
+          ir.Values([]),
+        )
+      use #(region, e) <- result.try(escaping(e, esc, [], close))
+      use tail <- state.map_tree(k(e))
+      ir.Let([], region, tail)
+    }
     // Structured ir.Try makes a bare catch transparent — nothing to emit.
     state.CatchOnly -> k(e)
   }
+}
+
+/// A cleanup inlined inside `esc`'s region runs under its own ir.Try, so a
+/// throw out of it leaves the region through the landing instead of reaching
+/// the region's handler (which would run the finally block a second time, or
+/// let an inner catch see an iterator close it does not enclose).
+fn escaping(
+  e: Emitter2,
+  esc: state.Escape,
+  carried: List(Int),
+  body: ir.Expr,
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  let #(handler, e) = state.escape_handler(e, esc)
+  Ok(#(ir.Try(result: carried_types(carried), body:, handlers: [handler]), e))
 }
 
 /// Fold `cleanups` (innermost first, per state.find_*_target) through
@@ -185,15 +224,17 @@ fn inline_cleanups(
 fn return_cleanups(frames: List(state.Frame2)) -> List(BarrierCleanup) {
   use frame <- list.flat_map(frames)
   case frame {
-    state.Loop2(iter_close: Some(iv), ..) -> [state.IterClose(iv, False)]
+    state.Loop2(iter_close: Some(#(iv, esc)), ..) -> [
+      state.IterClose(iv, False, Some(esc)),
+    ]
     state.Loop2(..) | state.Switch2(..) | state.Labeled2(..) -> []
-    state.Barrier2(finally_body:, iter_close:) -> {
+    state.Barrier2(finally_body:, iter_close:, escape:) -> {
       let acc = case finally_body {
-        Some(#(body, save)) -> [state.FinallyBlock(body, save)]
+        Some(#(body, save)) -> [state.FinallyBlock(body, save, escape)]
         None -> []
       }
       case iter_close {
-        Some(iv) -> [state.IterClose(iv, False), ..acc]
+        Some(iv) -> [state.IterClose(iv, False, escape), ..acc]
         None ->
           case acc {
             [] -> [state.CatchOnly]
@@ -368,8 +409,23 @@ fn emit_stmt(
       expr_(e, expression, fn(e, _) { k(e) })
     // D15: `with` is unsupported — surface as compile-time EmitError (R12).
     ast.WithStatement(..) -> Error(state.UnsupportedFeature("with"))
-    // Already hoisted by func.emit_prologue — the statement itself is a no-op.
-    // Annex-B block-level fn promotion is skipped in v1.
+    // Already hoisted by func.emit_prologue / the block prologue. The only
+    // runtime effect at the statement's position is Annex B §B.3.2.6: in
+    // sloppy mode a block-level plain function is copied into the enclosing
+    // var-scope binding of the same name.
+    ast.FunctionDeclaration(
+      name: Some(ast.NamedBinding(name:, ..)),
+      is_generator: False,
+      is_async: False,
+      ..,
+    ) -> {
+      let blocked =
+        set.contains(scope.get_scope(e.tree, e.cur_scope).annexb_blocked, name)
+      case e.in_block && !e.strict && !blocked {
+        True -> annexb_promote(e, name, k)
+        False -> k(e)
+      }
+    }
     ast.FunctionDeclaration(..) -> k(e)
     ast.BlockStatement([]) -> k(e)
 
@@ -541,13 +597,18 @@ fn emit_block(
           // (before enter_scope) so only already-bound outer slots qualify.
           let carried = assigned_unboxed_slots(e, ast.BlockStatement(body))
           let #(e, save) = state.enter_scope(e, in_block: True)
+          let entered = e.cur_scope
           use e <- binding_prologue(e, e.cur_scope)
           use e <- hoist_fn_decls(e, body)
           case ast_util.has_using_decl(body) {
-            False ->
-              fold_body(e, body, fn(ef) {
-                next(leave_scope_carrying(ef, save, carried))
-              })
+            False -> {
+              use #(tree, e) <- result.map(
+                fold_body(e, body, fn(ef) {
+                  next(leave_scope_carrying(ef, save, carried))
+                }),
+              )
+              #(tree, state.leave_scope_if_inside(e, entered, save))
+            }
             True -> Error(state.UnsupportedFeature("using declaration"))
           }
         }
@@ -562,6 +623,103 @@ pub fn block_wrap_fn_decl(stmt: ast.Statement) -> ast.Statement {
     ast.FunctionDeclaration(..) ->
       ast.BlockStatement([ast.StmtWithLine(0, stmt)])
     _ -> stmt
+  }
+}
+
+/// Annex B §B.3.2.6: copy the block-scoped function binding `name` into the
+/// enclosing var-scope binding. Source is the innermost binding on the chain;
+/// the target walk steps over catch parameters (§B.3.4), stops at a
+/// let/const/fn-name shadow, writes a var/param/capture binding, and falls
+/// through to the global object when the function root has no binding.
+fn annexb_promote(
+  e: Emitter2,
+  name: String,
+  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  case annexb_find_source(e, e.cur_scope, name) {
+    None -> k(e)
+    Some(#(source, outside)) -> {
+      let target = case annexb_find_target(e, outside, name) {
+        None -> Some(scope.Global(name))
+        Some(scope.Binding(kind: LetBinding, ..))
+        | Some(scope.Binding(kind: ConstBinding, ..))
+        | Some(scope.Binding(kind: FnNameBinding, ..)) -> None
+        Some(scope.Binding(slot:, kind:, is_boxed:, origin_kind_for_capture:)) ->
+          Some(scope.Local(
+            slot:,
+            boxed: is_boxed,
+            kind:,
+            origin_kind: origin_kind_for_capture,
+          ))
+      }
+      case target {
+        None -> k(e)
+        Some(d) -> {
+          let copy = {
+            use v <- anf.then(read_binding(source))
+            expr.emit_direct_put(d, name, v)
+          }
+          let #(tree, e) = anf.run(copy, e)
+          use e, _ <- let_(e, tree)
+          k(e)
+        }
+      }
+    }
+  }
+}
+
+fn read_binding(b: Binding) -> anf.Build(ir.Value) {
+  fn(e: Emitter2, k) {
+    let v = ir.Var(state.get_slot_var(e, b.slot))
+    case b.is_boxed {
+      True -> anf.host("cell_get", [v])(e, k)
+      False -> k(e, v)
+    }
+  }
+}
+
+fn scope_parent_in_fn(e: Emitter2, id: ScopeId) -> Option(ScopeId) {
+  case id == e.fn_scope {
+    True -> None
+    False -> scope.get_scope(e.tree, id).parent
+  }
+}
+
+fn annexb_find_source(
+  e: Emitter2,
+  from: ScopeId,
+  name: String,
+) -> Option(#(Binding, Option(ScopeId))) {
+  let node = scope.get_scope(e.tree, from)
+  case dict.get(node.bindings, name) {
+    Ok(b) -> Some(#(b, scope_parent_in_fn(e, from)))
+    Error(Nil) ->
+      case scope_parent_in_fn(e, from) {
+        Some(parent) -> annexb_find_source(e, parent, name)
+        None -> None
+      }
+  }
+}
+
+fn annexb_find_target(
+  e: Emitter2,
+  from: Option(ScopeId),
+  name: String,
+) -> Option(Binding) {
+  case from {
+    None -> None
+    Some(id) -> {
+      let node = scope.get_scope(e.tree, id)
+      case node.kind {
+        scope.Catch -> annexb_find_target(e, scope_parent_in_fn(e, id), name)
+        _ ->
+          case dict.get(node.bindings, name) {
+            Ok(scope.Binding(kind: CatchBinding, ..)) | Error(Nil) ->
+              annexb_find_target(e, scope_parent_in_fn(e, id), name)
+            Ok(b) -> Some(b)
+          }
+      }
+    }
   }
 }
 
@@ -744,18 +902,37 @@ fn rebind_after_block(
 /// Nested function/class bodies are NOT descended — their assignments target
 /// the child frame, not this one.
 fn assigned_unboxed_slots(e: Emitter2, s: ast.Statement) -> List(Int) {
+  let bound_unboxed = fn(slot, boxed) {
+    case boxed, dict.has_key(e.slot_vars, slot) {
+      False, True -> Ok(slot)
+      _, _ -> Error(Nil)
+    }
+  }
+  let annexb = case e.strict {
+    True -> []
+    False -> state.fn_info(e).annexb_candidates
+  }
   stmt_assigned_names(s, [])
   |> list.unique
-  |> list.filter_map(fn(name) {
-    case state.resolve(e, name) {
-      scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
-        case dict.has_key(e.slot_vars, slot) {
-          True -> Ok(slot)
-          False -> Error(Nil)
-        }
+  |> list.flat_map(fn(name) {
+    let plain = case state.resolve(e, name) {
+      scope.Plain(scope.Local(slot:, boxed:, ..)) -> bound_unboxed(slot, boxed)
       _ -> Error(Nil)
     }
+    // Annex B §B.3.2.6 writes the var-scope twin, which a same-named catch
+    // parameter on the chain hides from the plain resolution.
+    let twin = case list.contains(annexb, name) {
+      False -> Error(Nil)
+      True ->
+        case annexb_find_target(e, Some(e.cur_scope), name) {
+          Some(scope.Binding(kind: VarBinding, slot:, is_boxed:, ..)) ->
+            bound_unboxed(slot, is_boxed)
+          _ -> Error(Nil)
+        }
+    }
+    result.values([plain, twin])
   })
+  |> list.unique
   |> list.sort(int.compare)
 }
 
@@ -1083,9 +1260,17 @@ fn stmt_assigned_names(s: ast.Statement, acc: List(String)) -> List(String) {
     ast.EmptyStatement
     | ast.DebuggerStatement
     | ast.BreakStatement(..)
-    | ast.ContinueStatement(..)
-    | // do NOT descend into nested function bodies
-      ast.FunctionDeclaration(..) -> acc
+    | ast.ContinueStatement(..) -> acc
+    // Annex B §B.3.2.6: a sloppy block-level plain function is copied into
+    // the enclosing var binding when its declaration is evaluated. Do NOT
+    // descend into the body.
+    ast.FunctionDeclaration(
+      name: Some(ast.NamedBinding(name:, ..)),
+      is_generator: False,
+      is_async: False,
+      ..,
+    ) -> [name, ..acc]
+    ast.FunctionDeclaration(..) -> acc
     // Class BODY is a nested scope, but the heritage clause evaluates here.
     ast.ClassDeclaration(super_class:, ..) ->
       opt_expr_assigned_names(super_class, acc)
@@ -1515,7 +1700,7 @@ fn for_lhs_ident_assign(
         Error(Nil) ->
           host_unit_(
             e,
-            "global_set",
+            expr.global_set_op(e.strict),
             [ir.ConstBinary(bit_array.from_string(name)), v],
             k,
           )
@@ -1576,13 +1761,17 @@ fn for_lhs_bind(
           // and key through dispatch.emit_expr.
           for_lhs_member_put(e, m, v, k)
         }
-        // Destructuring-assign target `for ([a,b] of it)` — Pattern grammar
-        // covers Identifier/Array/Object shapes with BindAssign semantics.
-        ast.ArrayExpression(..) | ast.ObjectExpression(..) ->
-          case expr_to_assign_pattern(target) {
-            Ok(pat) -> via_destructure(e, pat, state.BindAssign)
-            Error(msg) -> Error(state.EarlySyntaxError(msg))
-          }
+        // Destructuring-assign target `for ([a.b, {c: d.e}] of it)` — the
+        // expression-shaped §13.15.5 path, since Pattern has no member target.
+        ast.ArrayExpression(..) | ast.ObjectExpression(..) -> {
+          let assign =
+            anf.then(expr.emit_destructuring_assign(target, v), fn(_) {
+              anf.pure(v)
+            })
+          let #(dtree, e) = anf.run(assign, e)
+          use e, _ <- let_(e, dtree)
+          k(e)
+        }
         _ ->
           Error(state.EarlySyntaxError("invalid for-in/of assignment target"))
       }
@@ -1636,68 +1825,13 @@ fn for_lhs_member_put(
         e,
         ir.TermOp(ir.MakeTuple, [ir.ConstAtom("string_key"), inner]),
       )
-      host_unit_(e, "set_prop", [base, key, v], k)
+      host_unit_(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
     }
     ast.Bracket(expression:) -> {
       use e, kv <- expr_(e, expression)
       use e, key <- host_(e, "to_property_key", [kv])
-      host_unit_(e, "set_prop", [base, key, v], k)
+      host_unit_(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
     }
-  }
-}
-
-/// Convert an Array/ObjectExpression assignment target to the Pattern grammar
-/// so dispatch.emit_destructure(BindAssign) handles it. Member-expression
-/// element targets (`[o.k] = v`) have no Pattern shape — they surface as an
-/// EarlySyntaxError here (D15 residual; expr.emit_destructuring_assign is
-/// Build-typed and not on EmitDispatch).
-fn expr_to_assign_pattern(ex: ast.Expression) -> Result(ast.Pattern, String) {
-  case ast_util.unwrap_parens(ex) {
-    ast.Identifier(name:, span:) -> Ok(ast.IdentifierPattern(name:, span:))
-    ast.ArrayExpression(elements:, ..) -> {
-      use els <- result.try(
-        list.try_map(elements, fn(el) {
-          case el {
-            None -> Ok(None)
-            Some(ast.SpreadElement(argument:, ..)) -> {
-              use inner <- result.map(expr_to_assign_pattern(argument))
-              Some(ast.RestElement(inner))
-            }
-            Some(inner) -> {
-              use p <- result.map(expr_to_assign_pattern(inner))
-              Some(p)
-            }
-          }
-        }),
-      )
-      Ok(ast.ArrayPattern(els))
-    }
-    ast.ObjectExpression(properties:, ..) -> {
-      use props <- result.try(
-        list.try_map(properties, fn(prop) {
-          case prop {
-            ast.InitProperty(key:, value:, shorthand:) -> {
-              use vp <- result.map(expr_to_assign_pattern(value))
-              ast.PatternProperty(key:, value: vp, shorthand:)
-            }
-            ast.SpreadProperty(argument:) ->
-              case ast_util.unwrap_parens(argument) {
-                ast.Identifier(name:, span:) ->
-                  Ok(ast.RestProperty(name:, span:))
-                _ -> Error("invalid rest property in for-in/of head")
-              }
-            ast.MethodProperty(..) | ast.AccessorProperty(..) ->
-              Error("invalid destructuring target in for-in/of head")
-          }
-        }),
-      )
-      Ok(ast.ObjectPattern(props))
-    }
-    ast.AssignmentExpression(operator: ast.Assign, left:, right:, ..) -> {
-      use lp <- result.map(expr_to_assign_pattern(left))
-      ast.AssignmentPattern(left: lp, right:)
-    }
-    _ -> Error("invalid destructuring target in for-in/of head")
   }
 }
 
@@ -1812,7 +1946,8 @@ fn emit_for_of(
     let #(head, e) = state.fresh_label(e)
     let #(exn, e) = state.fresh_var(e)
     let #(user_params, e) = carried_params(e, carried)
-    let e = state.push_loop(e, brk, cont, carried, Some(it))
+    let #(esc, e) = state.fresh_escape(e, 0)
+    let e = state.push_loop(e, brk, cont, carried, Some(#(it, esc)))
     use #(loop_body, e) <- result.try(
       run_rk(e, fn(e, done) {
         let e = enter_loop_body(e, carried, user_params)
@@ -1858,17 +1993,20 @@ fn emit_for_of(
                 done_h(e, ir.Throw(e.consts.js_tag, [ir.Var(exn)]))
               }),
             )
-            done_nd(
-              e,
-              ir.Try(result: [], body: try_body, handlers: [
-                ir.CatchHandler(
-                  on: ir.OnTag(e.consts.js_tag),
-                  payload: [exn],
-                  exnref: None,
-                  handler:,
-                ),
-              ]),
-            )
+            let #(region, e) =
+              state.land_escapes(
+                e,
+                esc,
+                ir.Try(result: [], body: try_body, handlers: [
+                  ir.CatchHandler(
+                    on: ir.OnTag(e.consts.js_tag),
+                    payload: [exn],
+                    exnref: None,
+                    handler:,
+                  ),
+                ]),
+              )
+            done_nd(e, region)
           }),
         )
         done(e, ir.If(done_i, [], ir.Break(brk, brk_payload), not_done))
@@ -1911,29 +2049,40 @@ fn emit_try(
       // run_rk threads e out (state.gleam invariant #1: next_var/next_label/
       // fns_acc are module-monotone) so the handler and rebind_after_block see
       // vars/labels/fns allocated inside the try body.
+      let branch_slots = e.slot_vars
+      let #(esc, e) = state.fresh_escape(e, list.length(carried))
+      let e = state.push_barrier(e, None, None, Some(esc))
       use #(try_body, e) <- result.try(
         run_rk(e, fn(e, done) {
-          let e = state.push_barrier(e, None, None)
           use e <- emit_block(e, block)
-          let e = state.pop_frame(e)
           done(e, ir.Values(carried_values(e, carried)))
         }),
       )
+      // Popped on the emitter the body hands back: a body ending in a
+      // transfer never reaches the code after emit_block.
+      let e = state.pop_frame(e)
+      // The try body's slot_vars name Let-bindings inside try_body; the
+      // handler must read the pre-try names (as emit_if does per arm).
+      let e = state.Emitter2(..e, slot_vars: branch_slots)
       use #(handler, e) <- result.try(emit_catch_handler(
         e,
         param,
         catch_body,
         carried,
       ))
-      let region =
-        ir.Try(result: carried_types(carried), body: try_body, handlers: [
-          ir.CatchHandler(
-            on: ir.OnTag(e.consts.js_tag),
-            payload: ["_e"],
-            exnref: None,
-            handler:,
-          ),
-        ])
+      let #(region, e) =
+        state.land_escapes(
+          e,
+          esc,
+          ir.Try(result: carried_types(carried), body: try_body, handlers: [
+            ir.CatchHandler(
+              on: ir.OnTag(e.consts.js_tag),
+              payload: ["_e"],
+              exnref: None,
+              handler:,
+            ),
+          ]),
+        )
       rebind_after_block(e, carried, region, next)
     }
     // M17.md §3.4/§3.6 barrier-duplication (Gosub → inline). Bridge exn's
@@ -1985,7 +2134,7 @@ fn emit_catch_handler(
   case param {
     Some(p) -> {
       let #(e, save) = state.enter_scope(e, in_block: e.in_block)
-      use e <- binding_prologue(e, e.cur_scope)
+      use e <- exn.catch_binding_prologue(e, e.cur_scope)
       use #(dtree, e) <- result.try(e.dispatch.emit_destructure(
         e,
         p,
@@ -1993,12 +2142,18 @@ fn emit_catch_handler(
         state.BindLet,
       ))
       use e, _ <- let_(e, dtree)
-      use e <- emit_block(e, catch_body)
       // RULING slot-vars-scope-survival: read carried_values from the INNER e
       // before leave_scope drops outer-slot rebinds; the handler is a WRAPPED
-      // body so vals thread out via ir.Try.result → rebind_after_block.
-      let vals = carried_values(e, carried)
-      done(state.leave_scope(e, save), ir.Values(vals))
+      // body so vals thread out via ir.Try.result → rebind_after_block. The
+      // scope is left on the emitter the body hands back, so a body ending in
+      // a transfer still leaves it.
+      use #(body, e) <- result.try(
+        run_rk(e, fn(e, done) {
+          use e <- emit_block(e, catch_body)
+          done(e, ir.Values(carried_values(e, carried)))
+        }),
+      )
+      done(state.leave_scope(e, save), body)
     }
     None -> {
       use e <- emit_block(e, catch_body)

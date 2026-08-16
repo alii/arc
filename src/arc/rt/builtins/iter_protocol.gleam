@@ -11,16 +11,18 @@ import arc/rt/call.{
   type Completion, NormalCompletion, ThrowCompletion, is_callable, t_call,
   t_call_checked,
 }
+import arc/rt/elements as rt_elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsOps, type JsVal, ArrayObj,
-  AsyncFromSyncIterator, DataProperty, Dense, Index, IteratorRecord, KHandle,
-  KNull, KStr, KUndef, Named, NoElements, SObject, StringKey, SymbolKey, TypeErr,
-  classify, mk_object, mk_undefined, symbol_async_iterator, symbol_iterator,
+  type Agent, type Handle, type JsElements, type JsOps, type JsVal,
+  type Property, type PropertyKey, ArrayObj, AsyncFromSyncIterator, DataProperty,
+  Dense, Index, IteratorRecord, KHandle, KNull, KStr, KUndef, Named, NoElements,
+  SObject, StringKey, SymbolKey, TypeErr, classify, mk_object, mk_undefined,
+  symbol_async_iterator, symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -331,7 +333,10 @@ pub fn iterator_to_list(
   st: Agent,
   rec: IteratorRecord,
 ) -> #(List(JsVal), Agent) {
-  iterator_to_list_loop(st, rec, [])
+  case array_values_iterator(st, rec) {
+    Some(iter_h) -> array_values_to_list(st, rec, iter_h, [])
+    None -> iterator_to_list_loop(st, rec, [])
+  }
 }
 
 fn iterator_to_list_loop(
@@ -342,6 +347,93 @@ fn iterator_to_list_loop(
   case iterator_step_value(st, rec) {
     #(None, st) -> #(list.reverse(acc), st)
     #(Some(v), st) -> iterator_to_list_loop(st, rec, [v, ..acc])
+  }
+}
+
+/// The [[Iterator]] cell of `rec` when it is an unmodified Array values
+/// iteration: [[NextMethod]] IS %ArrayIteratorPrototype%.next and the
+/// iterator an ArrayIterator of kind values. Both cell kinds are fixed for
+/// the record's lifetime, so this is decided once per drain.
+fn array_values_iterator(st: Agent, rec: IteratorRecord) -> Option(Handle) {
+  case classify(rec.next_method), classify(rec.iterator) {
+    KHandle(next_h), KHandle(iter_h) ->
+      case rt_store.t_cell_get(st, next_h), rt_store.t_cell_get(st, iter_h) {
+        SObject(
+          kind: rt_types.KNative(
+            tag: rt_types.IteratorN(rt_types.ArrayIteratorNext),
+            ..,
+          ),
+          ..,
+        ),
+          SObject(
+            kind: rt_types.ArrayIterator(kind: rt_types.ArrayIterValues, ..),
+            ..,
+          )
+        -> Some(iter_h)
+        _, _ -> None
+      }
+    _, _ -> None
+  }
+}
+
+/// Drain an Array values iteration. While the source is a plain Array cell
+/// no user code can run between steps, so §23.1.5.2.1 is walked here in one
+/// pass without a native call or `{value, done}` object per element: every
+/// present own element up to the live length is taken and the cursor written
+/// back once. A hole or an index with an own property (its [[Get]] is
+/// observable), or a source of another kind, takes one protocol step and the
+/// walk resumes from the cursor it left.
+fn array_values_to_list(
+  st: Agent,
+  rec: IteratorRecord,
+  iter_h: Handle,
+  acc: List(JsVal),
+) -> #(List(JsVal), Agent) {
+  let assert SObject(kind: rt_types.ArrayIterator(target:, index:, kind:), ..) as iter_slot =
+    rt_store.t_cell_get(st, iter_h)
+  case index < 0 {
+    True -> #(list.reverse(acc), st)
+    False -> {
+      let #(acc, stop) = case rt_store.t_cell_get(st, target) {
+        SObject(kind: ArrayObj(length:), elements:, props:, ..) ->
+          walk_elements(elements, props, index, length, acc)
+        _ -> #(acc, index)
+      }
+      let st = case stop == index {
+        True -> st
+        False ->
+          rt_store.t_cell_set(
+            st,
+            iter_h,
+            SObject(
+              ..iter_slot,
+              kind: rt_types.ArrayIterator(target:, index: stop, kind:),
+            ),
+          )
+      }
+      case iterator_step_value(st, rec) {
+        #(None, st) -> #(list.reverse(acc), st)
+        #(Some(v), st) -> array_values_to_list(st, rec, iter_h, [v, ..acc])
+      }
+    }
+  }
+}
+
+fn walk_elements(
+  elements: JsElements,
+  props: Dict(PropertyKey, Property),
+  i: Int,
+  length: Int,
+  acc: List(JsVal),
+) -> #(List(JsVal), Int) {
+  case i < length {
+    False -> #(acc, i)
+    True ->
+      case dict.has_key(props, Index(i)), rt_elements.get_option(elements, i) {
+        False, Some(v) ->
+          walk_elements(elements, props, i + 1, length, [v, ..acc])
+        _, _ -> #(acc, i)
+      }
   }
 }
 

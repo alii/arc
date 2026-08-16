@@ -22,6 +22,7 @@ import arc/interp/safepoint
 import arc/interp/state.{
   type SavedFrame, type State, type StepExit, Returned, SavedFrame, State, Threw,
 }
+import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/function as b_function
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call as rt_call
@@ -31,11 +32,11 @@ import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type FnFlags, type Handle, type JsVal, Agent, ArgumentsObj,
-  ArrayObj, FrameInfo, FunctionApply, FunctionCall, FunctionN, JsStore, KBound,
-  KBytecode, KCompiled, KHandle, KNative, KNull, KTdz, KUndef, ProxyObj,
-  ReflectApply, ReflectN, SBox, SObject, classify, mk_object, mk_tdz,
-  mk_undefined,
+  type Agent, type FnFlags, type Handle, type JsSlot, type JsVal,
+  type NativeToken, Agent, ArgumentsObj, ArrayObj, FrameInfo, FunctionApply,
+  FunctionCall, FunctionN, JsStore, KBound, KBytecode, KCompiled, KHandle,
+  KNative, KNull, KTdz, KUndef, ProxyObj, ReflectApply, ReflectN, SBox, SObject,
+  classify, mk_object, mk_tdz, mk_undefined,
 }
 import gleam/bool
 import gleam/list
@@ -358,6 +359,7 @@ fn call_regular_function(
         constants: template.constants,
         pc: 0,
         call_stack: [saved, ..state.call_stack],
+        outer_depth: state.outer_depth,
         try_stack: [],
         this: this_val,
         new_target:,
@@ -444,108 +446,161 @@ pub fn call(
 ) -> Result(State, StepExit) {
   case classify(callee) {
     KHandle(h) ->
-      case rt_store.t_cell_get(state.agent, h) {
-        SObject(
-          kind: KBytecode(
-            template:,
-            env:,
-            home_object:,
-            flags:,
-            realm:,
-            unit:,
-            ..,
-          ),
-          ..,
-        )
-          if realm == state.agent.realm.id
-        -> {
-          let res =
-            call_function(
-              state,
-              h,
-              template,
-              unit,
-              env,
-              home_object,
-              flags,
-              args,
-              rest_stack,
-              this,
-              None,
-              mk_undefined(),
-              drive,
-            )
-          case is_tail_call(state, template) {
-            True -> elide_tail_frame(res)
-            False -> res
-          }
-        }
-        // §10.4.1.1: [[BoundThis]] replaces `this`; bound args prepend.
-        SObject(kind: KBound(target:, bound_this:, bound_args:), ..) ->
-          call(
-            state,
-            mk_object(target),
-            bound_this,
-            list.append(bound_args, args),
-            rest_stack,
-            drive,
-          )
-        // §20.2.3.3 Function.prototype.call(thisArg, ...args): `this` is
-        // the target function.
-        SObject(kind: KNative(tag: FunctionN(FunctionCall), ..), ..) -> {
-          let #(this_arg, call_args) = case args {
-            [t, ..rest] -> #(t, rest)
-            [] -> #(mk_undefined(), [])
-          }
-          call(state, this, this_arg, call_args, rest_stack, drive)
-        }
-        // §20.2.3.1 Function.prototype.apply(thisArg, argArray).
-        SObject(kind: KNative(tag: FunctionN(FunctionApply), ..), ..) -> {
-          let #(this_arg, arg_array) = case args {
-            [t, a, ..] -> #(t, a)
-            [t] -> #(t, mk_undefined())
-            [] -> #(mk_undefined(), mk_undefined())
-          }
-          // Step 1: If IsCallable(func) is false, throw a TypeError.
-          use <- require_callable(state, this)
-          // Step 3: undefined/null argArray → no args. Step 4:
-          // ? CreateListFromArrayLike(argArray).
-          use #(call_args, state) <- result.try(case classify(arg_array) {
-            KUndef | KNull -> Ok(#([], state))
-            _ ->
-              guarded(State(..state, stack: rest_stack), fn(agent) {
-                b_function.create_list_from_array_like(agent, arg_array)
-              })
-          })
-          call(state, this, this_arg, call_args, rest_stack, drive)
-        }
-        // §28.1.1 Reflect.apply(target, thisArgument, argumentsList).
-        SObject(kind: KNative(tag: ReflectN(ReflectApply), ..), ..) -> {
-          let #(target, this_arg, args_list) = case args {
-            [t, a, l, ..] -> #(t, a, l)
-            [t, a] -> #(t, a, mk_undefined())
-            [t] -> #(t, mk_undefined(), mk_undefined())
-            [] -> #(mk_undefined(), mk_undefined(), mk_undefined())
-          }
-          use <- require_callable(state, target)
-          use #(call_args, state) <- result.try(
-            guarded(State(..state, stack: rest_stack), fn(agent) {
-              b_function.create_list_from_array_like(agent, args_list)
-            }),
-          )
-          call(state, target, this_arg, call_args, rest_stack, drive)
-        }
-        // A closure from another realm runs with that realm current
-        // (§10.2.1.1 PrepareForOrdinaryCall step 5): one nested root
-        // activation, which `entry.run_root` enters the realm around.
-        SObject(kind: KBytecode(..), ..)
-        | SObject(kind: KNative(..), ..)
-        | SObject(kind: KCompiled(..), ..)
-        | SObject(kind: ProxyObj(..), ..) ->
-          call_nested(state, callee, this, args, rest_stack)
-        _ -> not_a_function(state, callee)
-      }
+      call_cell(
+        state,
+        h,
+        rt_store.t_cell_get(state.agent, h),
+        this,
+        args,
+        rest_stack,
+        drive,
+      )
     _ -> not_a_function(state, callee)
+  }
+}
+
+/// `call` for a callee handle whose cell the caller has already read.
+pub fn call_cell(
+  state: State,
+  h: Handle,
+  slot: JsSlot,
+  this: JsVal,
+  args: List(JsVal),
+  rest_stack: List(JsVal),
+  drive: Drive,
+) -> Result(State, StepExit) {
+  case slot {
+    SObject(
+      kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      ..,
+    )
+      if realm == state.agent.realm.id
+    -> {
+      let res =
+        call_function(
+          state,
+          h,
+          template,
+          unit,
+          env,
+          home_object,
+          flags,
+          args,
+          rest_stack,
+          this,
+          None,
+          mk_undefined(),
+          drive,
+        )
+      case is_tail_call(state, template) {
+        True -> elide_tail_frame(res)
+        False -> res
+      }
+    }
+    // §10.4.1.1: [[BoundThis]] replaces `this`; bound args prepend.
+    SObject(kind: KBound(target:, bound_this:, bound_args:), ..) ->
+      call(
+        state,
+        mk_object(target),
+        bound_this,
+        list.append(bound_args, args),
+        rest_stack,
+        drive,
+      )
+    // §20.2.3.3 Function.prototype.call(thisArg, ...args): `this` is
+    // the target function.
+    SObject(kind: KNative(tag: FunctionN(FunctionCall), ..), ..) -> {
+      let #(this_arg, call_args) = case args {
+        [t, ..rest] -> #(t, rest)
+        [] -> #(mk_undefined(), [])
+      }
+      call(state, this, this_arg, call_args, rest_stack, drive)
+    }
+    // §20.2.3.1 Function.prototype.apply(thisArg, argArray).
+    SObject(kind: KNative(tag: FunctionN(FunctionApply), ..), ..) -> {
+      let #(this_arg, arg_array) = case args {
+        [t, a, ..] -> #(t, a)
+        [t] -> #(t, mk_undefined())
+        [] -> #(mk_undefined(), mk_undefined())
+      }
+      // Step 1: If IsCallable(func) is false, throw a TypeError.
+      use <- require_callable(state, this)
+      // Step 3: undefined/null argArray → no args. Step 4:
+      // ? CreateListFromArrayLike(argArray).
+      use #(call_args, state) <- result.try(case classify(arg_array) {
+        KUndef | KNull -> Ok(#([], state))
+        _ ->
+          guarded(State(..state, stack: rest_stack), fn(agent) {
+            b_function.create_list_from_array_like(agent, arg_array)
+          })
+      })
+      call(state, this, this_arg, call_args, rest_stack, drive)
+    }
+    // §28.1.1 Reflect.apply(target, thisArgument, argumentsList).
+    SObject(kind: KNative(tag: ReflectN(ReflectApply), ..), ..) -> {
+      let #(target, this_arg, args_list) = case args {
+        [t, a, l, ..] -> #(t, a, l)
+        [t, a] -> #(t, a, mk_undefined())
+        [t] -> #(t, mk_undefined(), mk_undefined())
+        [] -> #(mk_undefined(), mk_undefined(), mk_undefined())
+      }
+      use <- require_callable(state, target)
+      use #(call_args, state) <- result.try(
+        guarded(State(..state, stack: rest_stack), fn(agent) {
+          b_function.create_list_from_array_like(agent, args_list)
+        }),
+      )
+      call(state, target, this_arg, call_args, rest_stack, drive)
+    }
+    // A closure from another realm runs with that realm current
+    // (§10.2.1.1 PrepareForOrdinaryCall step 5): one nested root
+    // activation, which `entry.run_root` enters the realm around.
+    SObject(kind: KNative(tag:, ..), ..) ->
+      call_native(state, tag, mk_object(h), this, args, rest_stack)
+    SObject(kind: KBytecode(..), ..)
+    | SObject(kind: KCompiled(..), ..)
+    | SObject(kind: ProxyObj(..), ..) ->
+      call_nested(state, mk_object(h), this, args, rest_stack)
+    _ -> not_a_function(state, mk_object(h))
+  }
+}
+
+/// A native method straight from the loop: the depth bracket `t_call` would
+/// take, around one guarded `dispatch_native`. At the depth limit the
+/// nested `t_call` raises the RangeError.
+fn call_native(
+  state: State,
+  tag: NativeToken,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+  rest_stack: List(JsVal),
+) -> Result(State, StepExit) {
+  case state.agent.store.call_depth >= limits.max_call_depth {
+    True -> call_nested(state, callee, this, args, rest_stack)
+    False -> {
+      let agent = rt_store.t_enter_call(state.agent)
+      case ffi.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
+        ffi.Ok(value: v, agent:) ->
+          Ok(
+            State(
+              ..state,
+              agent: rt_store.t_leave_call(agent),
+              stack: [v, ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        ffi.Threw(agent:, thrown:) ->
+          Error(Threw(
+            thrown,
+            State(
+              ..state,
+              agent: rt_store.t_leave_call(agent),
+              stack: rest_stack,
+            ),
+          ))
+      }
+    }
   }
 }
 
@@ -832,27 +887,32 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
     [saved, ..rest_frames] ->
       case resolve_return(state, return_value, saved.constructor_this) {
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
-        Ok(pushed) -> {
-          let caller = restore_frame(state, saved, rest_frames)
-          Ok(safepoint.maybe_collect_at_toplevel(
-            State(..caller, stack: [pushed, ..caller.stack]),
-          ))
-        }
+        Ok(pushed) ->
+          Ok(
+            safepoint.maybe_collect_at_return(restore_frame(
+              state,
+              saved,
+              [pushed, ..saved.stack],
+              rest_frames,
+            )),
+          )
       }
   }
 }
 
-/// Reinstate `saved` as the running frame (registers, depth, stack frame).
+/// Reinstate `saved` as the running frame (registers, depth, stack frame)
+/// with `stack` as its operand stack.
 fn restore_frame(
   state: State,
   saved: SavedFrame,
+  stack: List(JsVal),
   rest_frames: List(SavedFrame),
 ) -> State {
   let SavedFrame(
     func:,
     unit:,
     locals:,
-    stack:,
+    stack: _,
     pc:,
     try_stack:,
     constructor_this: _,
@@ -872,6 +932,7 @@ fn restore_frame(
     constants: func.constants,
     pc:,
     call_stack: rest_frames,
+    outer_depth: state.outer_depth,
     try_stack:,
     this:,
     new_target:,
@@ -887,7 +948,8 @@ fn restore_frame(
 pub fn unwind_frame(state: State) -> Option(State) {
   case state.call_stack {
     [] -> None
-    [saved, ..rest_frames] -> Some(restore_frame(state, saved, rest_frames))
+    [saved, ..rest_frames] ->
+      Some(restore_frame(state, saved, saved.stack, rest_frames))
   }
 }
 
@@ -923,31 +985,24 @@ pub fn create_rest_array(state: State, from_index: Int) -> State {
 
 // -- Root activations (JsOps.call_bytecode / construct_bytecode) ---------------
 
-/// How a root activation entered through `JsOps` must treat its completion
-/// value once its own call stack has emptied.
+/// How a root [[Construct]] entered through `JsOps` must treat its
+/// completion value once its own call stack has emptied.
 pub type RootKind {
-  RootCall
   RootBaseConstruct(this: Handle)
   RootDerivedConstruct
 }
 
-/// The receiver a root activation of the bytecode cell `fn_h` starts with:
-/// `this_arg` for a [[Call]] (`new_target` undefined), TDZ for a derived
-/// [[Construct]], a fresh object for a base one. §10.2.2 steps 1-3 run in
-/// the CALLER's context, before PrepareForOrdinaryCall switches realms, so
-/// this is taken before `entry.run_root` enters the callee's realm: `Error`
-/// carries a throwing `newTarget.prototype` with the agent to re-raise it
-/// under, its error created from the caller's intrinsics.
+/// The receiver a root [[Construct]] of a bytecode function starts with: TDZ
+/// for a derived constructor, a fresh object for a base one. §10.2.2 steps
+/// 1-3 run in the CALLER's context, before PrepareForOrdinaryCall switches
+/// realms, so this is taken before `entry.run_construct` enters the callee's
+/// realm: `Error` carries a throwing `newTarget.prototype` with the agent to
+/// re-raise it under, its error created from the caller's intrinsics.
 pub fn root_this(
   agent: Agent,
-  fn_h: Handle,
-  this_arg: JsVal,
+  template: FuncTemplate,
   new_target: JsVal,
 ) -> Result(#(JsVal, RootKind, Agent), #(JsVal, Agent)) {
-  use <- bool.guard(is_undefined(new_target), Ok(#(this_arg, RootCall, agent)))
-  let assert SObject(kind: KBytecode(template:, ..), ..) =
-    rt_store.t_cell_get(agent, fn_h)
-    as "root_this: handle is not a KBytecode cell"
   use <- bool.guard(
     template.is_derived_constructor,
     Ok(#(mk_tdz(), RootDerivedConstruct, agent)),
@@ -958,97 +1013,89 @@ pub fn root_this(
   }
 }
 
-/// Lay out a fresh root activation of the bytecode cell `fn_h` for a nested
-/// [[Call]] (`new_target` undefined) or [[Construct]] arriving from a
-/// builtin or compiled frame, over the receiver `root_this` prepared. The
-/// enclosing `t_call`/`apply_ctor` owns the depth bracket; this pushes the
-/// stack frame only. `Error` carries a throw raised before the body could
-/// start (class-ctor-without-new, created in the callee's realm as §10.2.1
-/// step 2's calleeContext has it) with the agent to re-raise it under.
+/// Lay out a fresh root activation of the bytecode cell `fn_h` (its fields
+/// already read) for a nested [[Call]] (`new_target` undefined) or
+/// [[Construct]] arriving from a builtin or compiled frame, over the receiver
+/// prepared for it. The enclosing `t_call`/`apply_ctor` owns the depth
+/// bracket; this pushes the stack frame only. `Error` carries a throw raised
+/// before the body could start (class-ctor-without-new, created in the
+/// callee's realm as §10.2.1 step 2's calleeContext has it) with the agent to
+/// re-raise it under.
 pub fn enter_root(
   agent: Agent,
   fn_h: Handle,
+  template: FuncTemplate,
+  env: EnvTuple,
+  home_object: Option(Handle),
+  flags: FnFlags,
+  unit: Int,
   this_arg: JsVal,
   args: List(JsVal),
   new_target: JsVal,
-) -> Result(#(State, CoroutineCall), #(JsVal, Agent)) {
-  let assert SObject(
-    kind: KBytecode(template:, env:, home_object:, flags:, unit:, ..),
-    ..,
-  ) = rt_store.t_cell_get(agent, fn_h)
-    as "enter_root: handle is not a KBytecode cell"
-  use <- refuse(
-    template.is_class_constructor && is_undefined(new_target),
-    agent,
-    types.TypeErr,
-    "Class constructor "
-      <> option.unwrap(template.name, "")
-      <> " cannot be invoked without 'new'",
-  )
-  let home = home_value(home_object)
-  let #(locals, this_val, agent) =
-    setup_frame(
-      agent,
-      env,
-      fn_h,
-      home,
-      template,
-      flags,
-      args,
-      this_arg,
-      new_target,
-    )
-  let agent = push_frame_info(agent, template)
-  let state =
-    State(
-      agent:,
-      pc: 0,
-      stack: [],
-      locals:,
-      code: template.bytecode,
-      constants: template.constants,
-      func: template,
-      unit:,
-      call_stack: [],
-      try_stack: [],
-      this: this_val,
-      new_target:,
-      home_object: home,
-      call_args: args,
-      eval_env: None,
-    )
-  Ok(#(
-    state,
-    CoroutineCall(
-      fn_h:,
-      template:,
-      unit:,
-      locals:,
-      this: this_val,
-      home_object: home,
-      args:,
-      rest_stack: [],
-    ),
-  ))
-}
-
-fn refuse(
-  cond: Bool,
-  agent: Agent,
-  kind: types.ErrorKind,
-  msg: String,
-  k: fn() -> Result(a, #(JsVal, Agent)),
-) -> Result(a, #(JsVal, Agent)) {
-  case cond {
-    False -> k()
+) -> Result(State, #(JsVal, Agent)) {
+  case template.is_class_constructor && is_undefined(new_target) {
     True -> {
-      let #(err, agent) = agent.store.ops.new_error(agent, kind, msg)
+      let #(err, agent) =
+        agent.store.ops.new_error(
+          agent,
+          types.TypeErr,
+          "Class constructor "
+            <> option.unwrap(template.name, "")
+            <> " cannot be invoked without 'new'",
+        )
       Error(#(err, agent))
+    }
+    False -> {
+      let home = home_value(home_object)
+      let #(locals, this_val, agent) =
+        setup_frame(
+          agent,
+          env,
+          fn_h,
+          home,
+          template,
+          flags,
+          args,
+          this_arg,
+          new_target,
+        )
+      Ok(State(
+        agent: push_frame_info(agent, template),
+        pc: 0,
+        stack: [],
+        locals:,
+        code: template.bytecode,
+        constants: template.constants,
+        func: template,
+        unit:,
+        call_stack: [],
+        outer_depth: agent.store.call_depth,
+        try_stack: [],
+        this: this_val,
+        new_target:,
+        home_object: home,
+        call_args: args,
+        eval_env: None,
+      ))
     }
   }
 }
 
-/// A root activation's `Returned(value, final_state)` folded through the
+/// The coroutine hand-off for a root activation `enter_root` laid out.
+pub fn root_coroutine(state: State, fn_h: Handle) -> CoroutineCall {
+  CoroutineCall(
+    fn_h:,
+    template: state.func,
+    unit: state.unit,
+    locals: state.locals,
+    this: state.this,
+    home_object: state.home_object,
+    args: state.call_args,
+    rest_stack: [],
+  )
+}
+
+/// A root [[Construct]]'s `Returned(value, final_state)` folded through the
 /// constructor return rules for `kind` (§10.2.2 steps 10-13). `final_state`
 /// is the activation's last state over the agent the caller resumed with:
 /// its `Error.stack` frame already popped and the caller's realm current.
@@ -1059,7 +1106,7 @@ pub fn finish_root(
 ) -> Result(#(JsVal, Agent), #(JsVal, Agent)) {
   let constructor_this = case kind {
     RootBaseConstruct(h) -> Some(mk_object(h))
-    RootCall | RootDerivedConstruct -> None
+    RootDerivedConstruct -> None
   }
   case resolve_return(final_state, value, constructor_this) {
     Ok(v) -> Ok(#(v, final_state.agent))

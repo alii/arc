@@ -21,29 +21,30 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayNative, type BuiltinPair, type Handle, type JsElements,
-  type JsVal, type Property, type PropertyKey, ArrayConstructor, ArrayFrom,
-  ArrayFromAsync, ArrayFromAsyncCloseReject, ArrayFromAsyncLikeOnMapped,
-  ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped, ArrayFromAsyncOnNext,
-  ArrayFromAsyncRejectWith, ArrayIsArray, ArrayIterEntries, ArrayIterKeys,
-  ArrayIterValues, ArrayIterator, ArrayN, ArrayObj, ArrayOf, ArrayPrototypeAt,
-  ArrayPrototypeConcat, ArrayPrototypeCopyWithin, ArrayPrototypeEntries,
-  ArrayPrototypeEvery, ArrayPrototypeFill, ArrayPrototypeFilter,
-  ArrayPrototypeFind, ArrayPrototypeFindIndex, ArrayPrototypeFindLast,
-  ArrayPrototypeFindLastIndex, ArrayPrototypeFlat, ArrayPrototypeFlatMap,
-  ArrayPrototypeForEach, ArrayPrototypeIncludes, ArrayPrototypeIndexOf,
-  ArrayPrototypeJoin, ArrayPrototypeKeys, ArrayPrototypeLastIndexOf,
-  ArrayPrototypeMap, ArrayPrototypePop, ArrayPrototypePush, ArrayPrototypeReduce,
-  ArrayPrototypeReduceRight, ArrayPrototypeReverse, ArrayPrototypeShift,
-  ArrayPrototypeSlice, ArrayPrototypeSome, ArrayPrototypeSort,
-  ArrayPrototypeSplice, ArrayPrototypeToLocaleString, ArrayPrototypeToReversed,
-  ArrayPrototypeToSorted, ArrayPrototypeToSpliced, ArrayPrototypeToString,
-  ArrayPrototypeUnshift, ArrayPrototypeValues, ArrayPrototypeWith, DataProperty,
-  Index, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr,
-  KUndef, Named, NoElements, ObjectPrototypeToString, Ordinary, ParsedDesc,
-  ProxyObj, ReturnThis, SObject, StringKey, StringObj, SymbolKey, classify,
-  index_key, key_display_string, max_array_length, mk_bool, mk_number, mk_object,
-  mk_string, mk_undefined, symbol_is_concat_spreadable, symbol_iterator,
-  symbol_species, symbol_unscopables,
+  type JsSlot, type JsVal, type Property, type PropertyKey, ArrayConstructor,
+  ArrayFrom, ArrayFromAsync, ArrayFromAsyncCloseReject,
+  ArrayFromAsyncLikeOnMapped, ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped,
+  ArrayFromAsyncOnNext, ArrayFromAsyncRejectWith, ArrayIsArray, ArrayIterEntries,
+  ArrayIterKeys, ArrayIterValues, ArrayIterator, ArrayN, ArrayObj, ArrayOf,
+  ArrayPrototypeAt, ArrayPrototypeConcat, ArrayPrototypeCopyWithin,
+  ArrayPrototypeEntries, ArrayPrototypeEvery, ArrayPrototypeFill,
+  ArrayPrototypeFilter, ArrayPrototypeFind, ArrayPrototypeFindIndex,
+  ArrayPrototypeFindLast, ArrayPrototypeFindLastIndex, ArrayPrototypeFlat,
+  ArrayPrototypeFlatMap, ArrayPrototypeForEach, ArrayPrototypeIncludes,
+  ArrayPrototypeIndexOf, ArrayPrototypeJoin, ArrayPrototypeKeys,
+  ArrayPrototypeLastIndexOf, ArrayPrototypeMap, ArrayPrototypePop,
+  ArrayPrototypePush, ArrayPrototypeReduce, ArrayPrototypeReduceRight,
+  ArrayPrototypeReverse, ArrayPrototypeShift, ArrayPrototypeSlice,
+  ArrayPrototypeSome, ArrayPrototypeSort, ArrayPrototypeSplice,
+  ArrayPrototypeToLocaleString, ArrayPrototypeToReversed, ArrayPrototypeToSorted,
+  ArrayPrototypeToSpliced, ArrayPrototypeToString, ArrayPrototypeUnshift,
+  ArrayPrototypeValues, ArrayPrototypeWith, DataProperty, Index, JFloat, JInt,
+  JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named, NoElements,
+  ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj, ReturnThis, SObject,
+  StringKey, StringObj, SymbolKey, classify, index_key, key_display_string,
+  max_array_length, mk_bool, mk_number, mk_object, mk_string, mk_undefined,
+  symbol_is_concat_spreadable, symbol_iterator, symbol_species,
+  symbol_unscopables,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bool
@@ -216,7 +217,7 @@ pub fn dispatch(
   case native {
     ArrayConstructor -> construct(st, args)
     ArrayIsArray -> is_array(st, args)
-    ArrayFrom -> array_from(st, args)
+    ArrayFrom -> array_from(st, this, args)
     ArrayFromAsync -> array_from_async.from_async(st, this, args)
     ArrayFromAsyncOnNext(ctx:) -> array_from_async.on_next(st, ctx, args)
     ArrayFromAsyncOnMapped(ctx:) -> array_from_async.on_mapped(st, ctx, args)
@@ -228,7 +229,7 @@ pub fn dispatch(
       array_from_async.like_on_value(st, ctx, args)
     ArrayFromAsyncLikeOnMapped(ctx:) ->
       array_from_async.like_on_mapped(st, ctx, args)
-    ArrayOf -> array_of(st, args)
+    ArrayOf -> array_of(st, this, args)
     ArrayPrototypeJoin -> array_join(st, this, args)
     ArrayPrototypePush -> array_push(st, this, args)
     ArrayPrototypePop -> array_pop(st, this, args)
@@ -588,10 +589,49 @@ fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
 }
 
 /// Fused HasProperty + Get by integer index. `Some(val)` when present (own or
-/// inherited); `None` on a hole. arc's own-index fast path is subsumed by
-/// `t_has_prop`/`t_get_prop`'s own-first walk — spec-equivalent, one extra
-/// heap read on the hit path vs arc.
+/// inherited); `None` on a hole. Own probe is one heap read via
+/// `t_get_own_index`; only a miss walks the prototype chain.
 fn get_index_if_present(
+  st: Agent,
+  this: JsVal,
+  idx: Int,
+) -> #(Option(JsVal), Agent) {
+  case classify(this), idx >= 0 && idx <= rt_types.max_array_index {
+    KHandle(h), True ->
+      case rt_obj.t_get_own_index(st, h, idx) {
+        rt_obj.OwnIndexValue(v) -> #(Some(v), st)
+        rt_obj.OwnIndexProperty(prop) -> {
+          let #(v, st) = rt_obj.t_property_get_value(st, prop, this)
+          #(Some(v), st)
+        }
+        rt_obj.OwnIndexAbsent(Some(proto)) ->
+          inherited_index(st, proto, this, idx)
+        rt_obj.OwnIndexAbsent(None) -> #(None, st)
+        rt_obj.OwnIndexExotic -> generic_index_if_present(st, this, idx)
+      }
+    _, _ -> generic_index_if_present(st, this, idx)
+  }
+}
+
+/// HasProperty on `proto`, then Get on `this`.
+fn inherited_index(
+  st: Agent,
+  proto: Handle,
+  this: JsVal,
+  idx: Int,
+) -> #(Option(JsVal), Agent) {
+  let key = StringKey(index_key(idx))
+  let #(has, st) = rt_obj.t_has_prop(st, mk_object(proto), key)
+  case has {
+    False -> #(None, st)
+    True -> {
+      let #(v, st) = rt_obj.t_get_prop(st, this, key)
+      #(Some(v), st)
+    }
+  }
+}
+
+fn generic_index_if_present(
   st: Agent,
   this: JsVal,
   idx: Int,
@@ -707,14 +747,15 @@ fn try_elements_fast_path(
 }
 
 /// Push-specific fast path — checks only the target index range instead of
-/// scanning every proto-chain dict key.
+/// scanning every proto-chain dict key. `slot` is the receiver's cell as
+/// already read by the caller.
 fn try_push_fast_path(
   st: Agent,
   ref: Handle,
-  expected_len: Int,
+  slot: JsSlot,
   args: List(JsVal),
 ) -> Option(#(Int, Agent)) {
-  case rt_store.t_cell_get(st, ref) {
+  case slot {
     SObject(
       kind: ArrayObj(length:),
       props:,
@@ -722,14 +763,14 @@ fn try_push_fast_path(
       proto:,
       extensible: True,
       ..,
-    ) as slot -> {
+    ) -> {
       let arg_count = list.length(args)
       let length_writable = case dict.get(props, Named("length")) {
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
       let eligible =
-        length == expected_len
+        length + arg_count <= max_array_length
         && length_writable
         && !dict_has_index_in_range(props, length, arg_count)
         && !proto_chain_has_index_in_range(st, proto, length, arg_count)
@@ -760,7 +801,12 @@ fn dict_has_index_in_range(
   start: Int,
   count: Int,
 ) -> Bool {
-  !dict.is_empty(props) && dict_index_in_range_loop(props, start, start + count)
+  case count {
+    1 -> dict.has_key(props, Index(start))
+    _ ->
+      !dict.is_empty(props)
+      && dict_index_in_range_loop(props, start, start + count)
+  }
 }
 
 fn dict_index_in_range_loop(
@@ -771,10 +817,8 @@ fn dict_index_in_range_loop(
   case idx >= end {
     True -> False
     False ->
-      case dict.get(props, Index(idx)) {
-        Ok(_) -> True
-        Error(Nil) -> dict_index_in_range_loop(props, idx + 1, end)
-      }
+      dict.has_key(props, Index(idx))
+      || dict_index_in_range_loop(props, idx + 1, end)
   }
 }
 
@@ -790,6 +834,9 @@ fn proto_chain_has_index_in_range(
       case rt_store.t_cell_get(st, proto_ref) {
         SObject(kind: ProxyObj(..), ..) -> True
         SObject(kind: StringObj(value: s), ..) if s != "" -> True
+        SObject(props:, elements: NoElements, proto:, ..) ->
+          dict_has_index_in_range(props, start, count)
+          || proto_chain_has_index_in_range(st, proto, start, count)
         SObject(props:, elements: proto_els, proto:, ..) ->
           elements_has_in_range(proto_els, start, count)
           || dict_has_index_in_range(props, start, count)
@@ -984,21 +1031,20 @@ fn join_elements_generic(
 
 // ───────────────────────── Array.prototype.push / pop ───────────────────────
 
-/// §23.1.3.22 Array.prototype.push(...items).
+/// §23.1.3.22 Array.prototype.push(...items). A real Array receiver goes
+/// straight to the fast path from one cell read; everything else (and any
+/// fast-path miss) takes the generic ToObject / LengthOfArrayLike route.
 fn array_push(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, _this, ref, length <- require_array(st, this)
-  use <- guard_safe_length(st, length + list.length(args))
-  let fast = case args {
-    [] -> None
-    _ ->
-      case length + list.length(args) > max_array_length {
-        True -> None
-        False -> try_push_fast_path(st, ref, length, args)
-      }
+  let fast = case classify(this), args {
+    KHandle(ref), [_, ..] ->
+      try_push_fast_path(st, ref, rt_store.t_cell_get(st, ref), args)
+    _, _ -> None
   }
   case fast {
     Some(#(new_length, st)) -> #(from_int(new_length), st)
     None -> {
+      use st, _this, ref, length <- require_array(st, this)
+      use <- guard_safe_length(st, length + list.length(args))
       let #(new_length, st) = push_generic(st, ref, length, args)
       #(from_int(new_length), st)
     }
@@ -3189,22 +3235,81 @@ fn copy_within_step(
 
 // ───────────────────────── Array.from / Array.of ────────────────────────────
 
+/// Where Array.from / Array.of put their elements: a plain Array built at
+/// the end from the collected values, or an object obtained from
+/// Construct(C, ...) (§23.1.2.1 step 5.c / 7.b, §23.1.2.3 step 4.a) that
+/// receives each element via CreateDataPropertyOrThrow and a final
+/// Set(A, "length", len, true).
+type FromTarget {
+  FreshArray(acc: List(JsVal))
+  Constructed(target: Handle)
+}
+
+/// `this` is a constructor other than this realm's %Array% — the only case
+/// where the constructed-object path is observable. A non-constructor `this`
+/// falls into ArrayCreate, which is exactly the fresh-array path.
+fn from_target(
+  st: Agent,
+  ctor: JsVal,
+  ctor_args: List(JsVal),
+) -> #(FromTarget, Agent) {
+  case classify(ctor) {
+    KHandle(h) if h != st.realm.array.constructor ->
+      case rt_call.is_constructor(st, ctor) {
+        True -> {
+          let #(a, st) = rt_call.t_construct(st, ctor, ctor_args, ctor)
+          #(Constructed(a), st)
+        }
+        False -> #(FreshArray([]), st)
+      }
+    _ -> #(FreshArray([]), st)
+  }
+}
+
+/// CreateDataPropertyOrThrow(A, ! ToString(𝔽(idx)), v).
+fn from_put(
+  st: Agent,
+  t: FromTarget,
+  idx: Int,
+  v: JsVal,
+) -> #(FromTarget, Agent) {
+  case t {
+    FreshArray(acc) -> #(FreshArray([v, ..acc]), st)
+    Constructed(target) -> #(t, write_species_element(st, target, idx, v))
+  }
+}
+
+/// Set(A, "length", 𝔽(len), true), then A.
+fn from_finish(st: Agent, t: FromTarget, len: Int) -> #(JsVal, Agent) {
+  case t {
+    FreshArray(acc) -> {
+      let array_proto = st.realm.array.prototype
+      alloc_array(st, len, elements.from_list(list.reverse(acc)), array_proto)
+    }
+    Constructed(target) -> {
+      let st = generic_set_length(st, target, len)
+      #(mk_object(target), st)
+    }
+  }
+}
+
 /// §23.1.2.1 Array.from(items[, mapFn[, thisArg]]).
-fn array_from(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+fn array_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(items_val, map_fn, this_arg) = helpers.three_args_or_undefined(args)
   case classify(map_fn) {
-    KUndef -> array_from_array_like(st, items_val, None, this_arg)
+    KUndef -> array_from_array_like(st, this, items_val, None, this_arg)
     _ -> {
       use mf <- helpers.require_callable(st, map_fn, fn() {
         not_a_function(st, map_fn)
       })
-      array_from_array_like(st, items_val, Some(mf), this_arg)
+      array_from_array_like(st, this, items_val, Some(mf), this_arg)
     }
   }
 }
 
 fn array_from_array_like(
   st: Agent,
+  ctor: JsVal,
   items: JsVal,
   map_fn: Option(JsVal),
   this_arg: JsVal,
@@ -3227,13 +3332,17 @@ fn array_from_array_like(
           use <- bool.lazy_guard(length > limits.max_iteration, fn() {
             rt_val.t_throw_range_error(st, iteration_budget_msg)
           })
-          array_from_loop(st, items, 0, length, map_fn, this_arg, [])
+          // Step 7.b: A = ? Construct(C, « 𝔽(len) »).
+          let #(target, st) = from_target(st, ctor, [from_int(length)])
+          array_from_loop(st, items, 0, length, map_fn, this_arg, target)
         }
         _ -> {
           use m <- helpers.require_callable(st, iter_method, fn() {
             not_a_function(st, iter_method)
           })
-          array_from_iterator(st, items, m, map_fn, this_arg)
+          // Step 5.c: A = ? Construct(C).
+          let #(target, st) = from_target(st, ctor, [])
+          array_from_iterator(st, items, m, map_fn, this_arg, target)
         }
       }
     }
@@ -3246,10 +3355,11 @@ fn array_from_iterator(
   iter_method: JsVal,
   map_fn: Option(JsVal),
   this_arg: JsVal,
+  target: FromTarget,
 ) -> #(JsVal, Agent) {
   let #(rec, st) =
     iter_protocol.get_iterator_from_method(st, items, iter_method)
-  array_from_iterator_loop(st, rec, map_fn, this_arg, 0, [])
+  array_from_iterator_loop(st, rec, map_fn, this_arg, 0, target)
 }
 
 fn array_from_iterator_loop(
@@ -3258,11 +3368,11 @@ fn array_from_iterator_loop(
   map_fn: Option(JsVal),
   this_arg: JsVal,
   k: Int,
-  acc: List(JsVal),
+  target: FromTarget,
 ) -> #(JsVal, Agent) {
   let #(step, st) = iter_protocol.iterator_step_value(st, rec)
   case step {
-    None -> alloc_array_list(st, list.reverse(acc))
+    None -> from_finish(st, target, k)
     Some(item) -> {
       let #(mapped, st) = case map_fn {
         // §23.1.2.1 step 5.e.vi-vii: IfAbruptCloseIterator on mapFn.
@@ -3274,7 +3384,17 @@ fn array_from_iterator_loop(
         }
         None -> #(item, st)
       }
-      array_from_iterator_loop(st, rec, map_fn, this_arg, k + 1, [mapped, ..acc])
+      // Step 5.e.viii-ix: IfAbruptCloseIterator on the define.
+      let #(target, st) = case target {
+        FreshArray(_) -> from_put(st, target, k, mapped)
+        Constructed(t) -> {
+          use _undef, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
+            #(mk_undefined(), write_species_element(st, t, k, mapped))
+          })
+          #(target, st)
+        }
+      }
+      array_from_iterator_loop(st, rec, map_fn, this_arg, k + 1, target)
     }
   }
 }
@@ -3286,42 +3406,34 @@ fn array_from_loop(
   length: Int,
   map_fn: Option(JsVal),
   this_arg: JsVal,
-  acc: List(JsVal),
+  target: FromTarget,
 ) -> #(JsVal, Agent) {
   case idx >= length {
-    True -> {
-      let array_proto = st.realm.array.prototype
-      alloc_array(
-        st,
-        length,
-        elements.from_list(list.reverse(acc)),
-        array_proto,
-      )
-    }
+    True -> from_finish(st, target, length)
     False -> {
       let #(elem, st) = get_index(st, items, idx)
-      case map_fn {
-        None ->
-          array_from_loop(st, items, idx + 1, length, map_fn, this_arg, [
-            elem,
-            ..acc
-          ])
-        Some(mf) -> {
-          let #(mapped, st) =
-            rt_call.t_call_checked(st, mf, this_arg, [elem, from_int(idx)])
-          array_from_loop(st, items, idx + 1, length, map_fn, this_arg, [
-            mapped,
-            ..acc
-          ])
-        }
+      let #(mapped, st) = case map_fn {
+        None -> #(elem, st)
+        Some(mf) ->
+          rt_call.t_call_checked(st, mf, this_arg, [elem, from_int(idx)])
       }
+      let #(target, st) = from_put(st, target, idx, mapped)
+      array_from_loop(st, items, idx + 1, length, map_fn, this_arg, target)
     }
   }
 }
 
 /// §23.1.2.3 Array.of(...items).
-fn array_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  alloc_array_list(st, args)
+fn array_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  let len = list.length(args)
+  // Step 4.a: A = ? Construct(C, « 𝔽(len) »).
+  let #(target, st) = from_target(st, this, [from_int(len)])
+  let #(target, st) =
+    list.index_fold(args, #(target, st), fn(acc, item, k) {
+      let #(target, st) = acc
+      from_put(st, target, k, item)
+    })
+  from_finish(st, target, len)
 }
 
 // ───────────────── change-array-by-copy: toSpliced / with / toReversed ──────
