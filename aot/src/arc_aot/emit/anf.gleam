@@ -462,7 +462,71 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
 /// (native op, then widen an integer past 2^53 - 1 to a double and keep the
 /// sign of an integer zero product). The result is marked a known number.
 pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  then(host(op, [a, b]), mark_number)
+  use ii <- then(both_ints(a, b))
+  let slow = host(op, [a, b])
+  let arm = case op {
+    "num_add" -> Some(int_arm(ir.NAdd, a, b, False, slow))
+    "num_sub" -> Some(int_arm(ir.NSub, a, b, False, slow))
+    "num_mul" -> Some(int_arm(ir.NMul, a, b, True, slow))
+    _ -> None
+  }
+  case arm {
+    Some(fast) -> then(bind_if(ii, fast, slow), mark_number)
+    None -> then(slow, mark_number)
+  }
+}
+
+const max_safe_int = 9_007_199_254_740_991
+
+/// i32 `is_integer(a) & is_integer(b)`; an integer constant needs no test.
+fn both_ints(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
+  case is_const_int(a), is_const_int(b) {
+    True, True -> pure(ir.ConstI32(1))
+    True, False -> bind(ir.TermTest(ir.IsInt, b))
+    False, True -> bind(ir.TermTest(ir.IsInt, a))
+    False, False -> {
+      use ga <- then(bind(ir.TermTest(ir.IsInt, a)))
+      use gb <- then(bind(ir.TermTest(ir.IsInt, b)))
+      bind(ir.If(ga, [ir.TI32], ir.Values([gb]), ir.Values([ir.ConstI32(0)])))
+    }
+  }
+}
+
+fn is_const_int(v: ir.Value) -> Bool {
+  case v {
+    ir.ConstI32(_) | ir.ConstI64(_) -> True
+    _ -> False
+  }
+}
+
+/// Bare BEAM `+ - *` on two integers (never raises). The result stands when
+/// it fits 2^53 - 1 either side — and, for `*`, is not the zero whose sign
+/// only the kernel knows — else the kernel `slow` redoes the op.
+fn int_arm(
+  op: ir.NumTermOp,
+  a: ir.Value,
+  b: ir.Value,
+  zero_sign: Bool,
+  slow: Build(ir.Value),
+) -> Build(ir.Value) {
+  use r <- then(bind(ir.NumTerm(op, a, b)))
+  use hi <- then(bind(ir.NumTerm(ir.NLe, r, ir.ConstI64(max_safe_int))))
+  use fits <- then(bind_if_i32(
+    hi,
+    bind(ir.NumTerm(ir.NGe, r, ir.ConstI64(-max_safe_int))),
+    pure(ir.ConstI32(0)),
+  ))
+  case zero_sign {
+    False -> bind_if(fits, pure(r), slow)
+    True -> {
+      use nz <- then(bind_if_i32(
+        fits,
+        bind(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))),
+        pure(ir.ConstI32(1)),
+      ))
+      bind_if(nz, slow, pure(r))
+    }
+  }
 }
 
 /// JS arithmetic `+ - *`: `num_binop` fast path when both operands are BEAM

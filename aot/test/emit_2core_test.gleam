@@ -472,6 +472,15 @@ pub fn float_overflow_is_infinity_diff_test() {
   )
 }
 
+/// Integer `+ - *` runs native when the result stays a safe integer; the
+/// widening, -0, Infinity, string and mixed cases still take the kernel.
+pub fn integer_arith_edges_diff_test() {
+  diff(
+    "function d(v){return 1/v===-Infinity?'-0':String(v)}var m=9007199254740991,z=0,n=-5,b=1e308,s='1',h=1.5;function f(a,b){return [a+b,a-b,a*b].join()}console.log(f(m,1),f(-m,-1),f(-m,1),f(m,-1),d(z*n),d(n*z),d(z*5),f(b,10),f(s,1),f(2,h),f(h,2),f(3,4));var i=0,j=m,k=1;for(var q=0;q<3;q++){i++;i+=2;i*=2;j++;k*=m}console.log(i,j,k,m*m,d(0*-1))",
+    "9007199254740992,9007199254740990,9007199254740991 -9007199254740992,-9007199254740990,9007199254740991 -9007199254740990,-9007199254740992,-9007199254740991 9007199254740990,9007199254740992,-9007199254740991 -0 -0 0 1e+308,1e+308,Infinity 11,0,1 3.5,0.5,3 3.5,-0.5,3 7,-1,12\n42 9007199254740992 7.307508186654512e+47 8.112963841460666e+31 -0\n",
+  )
+}
+
 pub fn minus_zero_is_preserved_diff_test() {
   diff(
     "function d(v){return 1/v===-Infinity?'-0':String(v)}var z=0,n=-1,p=5;console.log(d(-0),d(0*-1),d(z*n),d(n*z),d(z*p),d(-z),d(-0+-0),d(-0+0),d(0-0),d(-4%2),d(4%-2),d(z/-5),d(Math.round(-0.4)),d(-p*0));console.log(Object.is(-0,0),Object.is(z*n,-0),1/-0,(-0).toString(),JSON.stringify(-0),JSON.stringify([z*n]),String(-0),-0===0,[-0].includes(0),Math.max(-0,0)===0&&1/Math.max(-0,0));var o={};o[-0]='k';console.log(Object.keys(o).join());var q=0;q*= -1;console.log(d(q),d(q+1-1));var ng=-1,nz=-0;console.log(ng,ng==-1,5&ng,d(nz),d(nz*ng))",
