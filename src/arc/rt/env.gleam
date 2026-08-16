@@ -8,8 +8,8 @@
 
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, DataProperty, KHandle, Named, StringKey,
-  SymbolKey, classify, mk_object, mk_undefined,
+  type Agent, type Handle, type JsVal, AccessorProperty, DataProperty, KHandle,
+  Named, StringKey, SymbolKey, classify, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/option.{type Option, None, Some}
@@ -138,6 +138,57 @@ pub fn t_create_global_var_binding(
       st
     }
   }
+}
+
+/// §9.1.1.4.16 CanDeclareGlobalFunction(N) folded into the declaration half
+/// of §9.1.1.4.18 CreateGlobalFunctionBinding(N, V, D): the function value
+/// itself is stored by the following global set. A missing own property on
+/// a non-extensible global, or an existing non-configurable one that is not
+/// a writable enumerable data property, is a TypeError (§16.1.7 step 10.b,
+/// §19.2.1.3 step 8.a.iv); an existing configurable one is redefined as
+/// `{undefined, W: true, E: true, C: D}`.
+pub fn t_create_global_fn_binding(
+  st: Agent,
+  name: String,
+  deletable: Bool,
+) -> Agent {
+  let global = st.realm.global_object
+  let key = StringKey(Named(name))
+  let #(own, st) = rt_obj.t_get_own_property(st, global, key)
+  let define = fn(st) {
+    let #(_, st) =
+      rt_obj.t_define_own_data(
+        st,
+        global,
+        key,
+        mk_undefined(),
+        True,
+        True,
+        deletable,
+      )
+    st
+  }
+  case own {
+    None -> {
+      let #(extensible, st) = rt_obj.t_is_extensible(st, global)
+      case extensible {
+        True -> define(st)
+        False -> not_definable(st, name)
+      }
+    }
+    Some(DataProperty(configurable: True, ..))
+    | Some(AccessorProperty(configurable: True, ..)) -> define(st)
+    Some(DataProperty(writable: True, enumerable: True, ..)) -> st
+    Some(DataProperty(..)) | Some(AccessorProperty(..)) ->
+      not_definable(st, name)
+  }
+}
+
+fn not_definable(st: Agent, name: String) -> a {
+  rt_val.t_throw_type_error(
+    st,
+    "Cannot declare global function '" <> name <> "'",
+  )
 }
 
 /// §9.1.1.4.7 DeleteBinding(N), object-record half: a real [[Delete]] on the

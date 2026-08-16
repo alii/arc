@@ -18,21 +18,22 @@ import arc/bytecode/opcode.{
   AsyncYieldStarNext, AsyncYieldStarResume, Await, BinOp, BoxLocal, Call,
   CallApply, CallConstructor, CallConstructorApply, CallEval, CallMethod,
   CallMethodApply, CmpLocalConstJump, CmpLocalLocalJump, CreateArguments,
-  CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalLex, DeclareGlobalVar,
-  DefineAccessor, DefineAccessorComputed, DefineField, DefineFieldComputed,
-  DefineMethod, DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
-  DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup, ForInNext,
-  ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetEvalVar,
-  GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetPrivateFieldDyn,
-  GetPrivateFieldDyn2, GetPrototypeOf, GetSuperValue, GetSuperValue2, IncLocal,
-  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
-  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
-  JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod, NewObject,
-  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PrivateInDyn,
-  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutEvalVar, PutField,
-  PutGlobal, PutLocal, PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue,
-  Return, Rot3, SetLine, SetProto, SetupDerivedClass, Swap, TypeOf,
-  TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
+  CreateRestArray, DecLocal, DeclareEvalVar, DeclareGlobalFn, DeclareGlobalLex,
+  DeclareGlobalVar, DefineAccessor, DefineAccessorComputed, DefineField,
+  DefineFieldComputed, DefineMethod, DefineMethodComputed, DefinePrivateAccessor,
+  DefinePrivateField, DefinePrivateMethod, DeleteElem, DeleteField,
+  DeleteGlobalVar, Dup, ForInNext, ForInStart, GetAsyncIterator, GetBoxed,
+  GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal, GetIterator,
+  GetLocal, GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf,
+  GetSuperValue, GetSuperValue2, IncLocal, InitGlobalLex, InitialYield,
+  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
+  IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
+  MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
+  ObjectSpread, Pc, Pop, PrivateInDyn, PushConst, PushTry, PutBoxed,
+  PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
+  PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue, Return, Rot3, SetLine,
+  SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal,
+  UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -1706,6 +1707,16 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       use state <- result.map(rt_unit3(
         state,
         rt_env.t_create_global_var_binding,
+        name,
+        deletable,
+      ))
+      State(..state, pc: state.pc + 1)
+    }
+
+    DeclareGlobalFn(name, deletable) -> {
+      use state <- result.map(rt_unit3(
+        state,
+        rt_env.t_create_global_fn_binding,
         name,
         deletable,
       ))

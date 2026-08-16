@@ -538,6 +538,9 @@ pub type Op {
   /// (§9.1.1.4.18), so a top-level `var`/function binding survives
   /// `delete`; sloppy eval code passes D = true (§19.2.1.3).
   DeclareGlobalVar(name: String, deletable: Bool)
+  /// §9.1.1.4.16/.18: like DeclareGlobalVar for a hoisted function name,
+  /// but a name that CanDeclareGlobalFunction rejects is a TypeError.
+  DeclareGlobalFn(name: String, deletable: Bool)
   /// Create entry in lexical_globals (with JsUninitialized for TDZ).
   DeclareGlobalLex(name: String, is_const: Bool)
   /// Pop value from stack, initialize lexical binding (TDZ → value).
