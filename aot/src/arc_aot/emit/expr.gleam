@@ -1144,6 +1144,17 @@ pub fn read_slot(slot: Int, boxed: Bool) -> Build(ir.Value) {
   }
 }
 
+/// The folded literal for a const-global read inside a nested function.
+/// Top-level reads never fold: a script-level read can run before the `var`
+/// line (`undefined`) or after eval code redeclared the name, and the few
+/// top-level reads are not worth the miscompile.
+fn const_global(e: Emitter2, name: String) -> Option(ir.Value) {
+  case e.fn_scope == scope.root_scope_id {
+    True -> None
+    False -> option.from_result(dict.get(e.const_globals, name))
+  }
+}
+
 /// The non-with ("static") read of a resolved binding. EvalEnv → D15.
 pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
   case d {
@@ -1154,9 +1165,9 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
     // keeping binop's int_const_eq / int_const_bit fast paths live.
     scope.Local(slot:, boxed:, origin_kind: scope.VarBinding, ..) -> {
       use e <- anf.then(ask)
-      case dict.get(e.const_globals, name) {
-        Ok(lit) -> anf.pure(lit)
-        Error(Nil) -> read_slot(slot, boxed)
+      case const_global(e, name) {
+        Some(lit) -> anf.pure(lit)
+        None -> read_slot(slot, boxed)
       }
     }
     // §9.1.1.1.6 GetBindingValue: a lexical binding read before its
@@ -1192,11 +1203,11 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
       case dict.get(e.slotted_globals, g) {
         Ok(slot) -> read_slot(slot, True)
         Error(Nil) ->
-          case dict.get(e.const_globals, g) {
+          case const_global(e, g) {
             // Top-level `var G = <literal>` never reassigned in the whole
             // script — inline the literal (analyze_const_globals proved it).
-            Ok(lit) -> anf.pure(lit)
-            Error(Nil) -> {
+            Some(lit) -> anf.pure(lit)
+            None -> {
               // global_get_fast (JRead) probes the global object's own
               // data props. IsAtom catches `miss` AND atom-valued globals —
               // a perf-only conflation; full JMut `global_get` re-reads.

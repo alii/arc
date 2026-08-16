@@ -15,6 +15,7 @@ pub fn table() -> DirectHost {
   let obj = "arc@rt@obj"
   let obj_ffi = "arc_rt_obj_ffi"
   let lang = "arc@rt@lang"
+  let env = "arc@rt@env"
   let erl = "erlang"
   let ops = "arc@rt@ops"
   let ops_ffi = "arc_rt_ops_ffi"
@@ -99,6 +100,11 @@ pub fn table() -> DirectHost {
       #("global_typeof", HostOp(obj, "t_global_typeof", Mut)),
       #("global_this", HostOp(obj, "t_global_this", Read)),
       #("global_delete", HostOp(lang, "t_global_delete", Mut)),
+      #(
+        "declare_global_var",
+        HostOp(env, "t_create_global_var_binding", MutUnit),
+      ),
+      #("declare_global_fn", HostOp(env, "t_create_global_fn_binding", MutUnit)),
       #("set_proto", HostOp(obj, "t_set_proto", Mut)),
       #("num_add", HostOp(ops_ffi, "add", Pure)),
       #("num_sub", HostOp(ops_ffi, "sub", Pure)),

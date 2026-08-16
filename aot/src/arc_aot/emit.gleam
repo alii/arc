@@ -126,6 +126,47 @@ fn root_binding_prologue(
   })
 }
 
+/// §16.1.7 GlobalDeclarationInstantiation steps 17-18: every top-level
+/// `var` name, hoisted function name and (sloppy) Annex B function-in-block
+/// name that lives on the global object gets its `{undefined, W, E, C:false}`
+/// binding before the body runs, so a read ahead of the declaration sees
+/// `undefined` and eval code sees the binding as an existing var.
+fn global_var_prologue(
+  e: state.Emitter2,
+  body: List(ast.StmtWithLine),
+  strict: Bool,
+  wrap: fn(ir.Expr) -> ir.Expr,
+) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
+  let annexb = case strict {
+    True -> []
+    False -> state.fn_info(e).annexb_candidates
+  }
+  let vars =
+    list.append(ast_util.collect_hoisted_vars(body), annexb)
+    |> list.map(fn(name) { #(name, "declare_global_var") })
+  let fns =
+    ast_util.direct_fn_names(body)
+    |> list.map(fn(name) { #(name, "declare_global_fn") })
+  list.append(vars, fns)
+  |> list.unique
+  |> list.filter(fn(entry) {
+    case state.resolve(e, entry.0) {
+      scope.Plain(scope.Global(_)) -> True
+      _ -> False
+    }
+  })
+  |> list.fold(#(wrap, e), fn(acc, entry) {
+    let #(wrap, e) = acc
+    let #(name, op) = entry
+    let #(t, e) = state.fresh_var(e)
+    let kb = ir.ConstBinary(bit_array.from_string(name))
+    let w = fn(tail) {
+      wrap(ir.Let([t], ir.CallHost("js", op, [kb, ir.ConstAtom("false")]), tail))
+    }
+    #(w, e)
+  })
+}
+
 /// A Script root owns the four lexical pseudo-bindings (scope.gleam
 /// `script_root_owns_lexical`): `this` is the global object (§9.1.1.4.11),
 /// the other three are `undefined`. Mirrors func.unpack_frame for js_main,
@@ -311,6 +352,7 @@ pub fn compile(
   // (top-level `var`/`function` under module_slot_globals) BEFORE hoists so
   // fn-decl closures cell_set into a live cell. Also seeds slotted_globals.
   let #(prologue, e) = root_binding_prologue(e)
+  let #(prologue, e) = global_var_prologue(e, body, strict, prologue)
   // (2) hoist top-level FunctionDeclarations (§16.1.7 step 16).
   use #(wrap, e) <- result.try(emit_hoists(e, body))
   // (3)+(4) statement fold; terminal K is Return(undef). The runner drains
