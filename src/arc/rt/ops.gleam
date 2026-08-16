@@ -325,9 +325,9 @@ pub fn t_ge(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
 
 // ── §13.15.4 Bitwise / shift operators (ops-bitwise) ────────────────────────
 // Port of arc `operators.gleam:106-138, 284-298, 382-409`. Shared spine
-// (M5.md:68): ToPrimitive both LEFT-first (R1 order — object operands may
-// re-enter JS with side effects), then ToNumeric both. Result is always
-// `KBig | KNum` (rt_val.t_to_numeric guarantee).
+// (§13.15.3 ApplyStringOrNumericBinaryOperator steps 4-5): ToNumeric(lval)
+// completes — ToPrimitive and the Symbol TypeError — before ToNumeric(rval)
+// starts. Result is always `KBig | KNum` (rt_val.t_to_numeric guarantee).
 
 const bigint_mix_error = "Cannot mix BigInt and other types, use explicit conversions"
 
@@ -336,10 +336,8 @@ fn to_numeric_operands(
   a: JsVal,
   b: JsVal,
 ) -> #(JsVal, JsVal, Agent) {
-  let #(ap, st) = rt_val.t_to_primitive(st, a, HintNumber)
-  let #(bp, st) = rt_val.t_to_primitive(st, b, HintNumber)
-  let #(an, st) = rt_val.t_to_numeric(st, ap)
-  let #(bn, st) = rt_val.t_to_numeric(st, bp)
+  let #(an, st) = rt_val.t_to_numeric(st, a)
+  let #(bn, st) = rt_val.t_to_numeric(st, b)
   #(an, bn, st)
 }
 

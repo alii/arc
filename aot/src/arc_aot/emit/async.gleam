@@ -1467,7 +1467,7 @@ fn one_stmt(line: Int, s: ast.Statement) -> List(ast.StmtWithLine) {
 /// split-free stmt is `frag_push`ed verbatim; a split-containing control-flow
 /// construct is broken into states via the `plan_ctrl_*` helpers.
 fn ana_stmt(a: Ana, sl: ast.StmtWithLine, tail: List(ast.StmtWithLine)) -> Ana {
-  let ast.StmtWithLine(statement: s, ..) = sl
+  let ast.StmtWithLine(line:, statement: s) = sl
   case stmt_has_split(s) {
     // Split-free → append to open fragment; still shadow-walk for cursor sync
     // (nested fns/classes advance child_fn_cursor; blocks consume scope slots).
@@ -3221,6 +3221,8 @@ fn emit_delegate_arm(
   inner_idx: Int,
   result_idx: Int,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
+  let nd = d.state_id
+  let next_state = d.next_state
   let undef = ir.ConstAtom("undefined")
   let b = {
     // (1) restore iter_h / inner from loc.
@@ -3262,9 +3264,7 @@ fn emit_delegate_arm(
     let on_missing =
       if_terminal(
         is_throw,
-        // mode==1 (yield* step 7.b.iii): close inner, then a TypeError —
-        // thrown as a JS exception so the arm's try routes it to any
-        // enclosing catch/finally.
+        // mode==1: close inner (abrupt), then step_throw(sent_v).
         {
           use _ <- anf.then(
             anf.host_unit("iter_close", [
@@ -3272,18 +3272,17 @@ fn emit_delegate_arm(
               ir.ConstAtom("true"),
             ]),
           )
-          use _ <- anf.then(
-            anf.host("throw_type_error", [
-              ir.ConstBinary(bit_array.from_string(
-                "iterator does not have a throw method",
-              )),
-            ]),
-          )
           anf.pure(step_throw(ctx.sent_v))
         },
-        // mode==2 (yield* step 7.c.iii): the return completion propagates
-        // out of the generator, running enclosing finally blocks.
-        anf.pure(route_return(ctx, current_try(ctx), ctx.sent_v)),
+        // mode==2: SPEC §18.6 → result := sent_v, continue past the yield*.
+        {
+          use loc2 <- anf.then(pack_loc(
+            ctx,
+            dict.from_list([#(result_idx, ctx.sent_v)]),
+          ))
+          use rs <- anf.then(rs_box(next_state))
+          anf.pure(ir.Continue(ctx.lresume, [rs, loc2]))
+        },
       )
     // ── method present (or mode==0): call it, branch on {done, value} ───────
     let on_call = {
@@ -3348,18 +3347,11 @@ fn delegate_result(
       use v <- anf.then(anf.host("get_prop", [res, k_val]))
       if_terminal(
         done,
-        if_terminal(
-          is_return,
-          anf.pure(route_return(ctx, current_try(ctx), v)),
-          {
-            use loc2 <- anf.then(pack_loc(
-              ctx,
-              dict.from_list([#(result_idx, v)]),
-            ))
-            use rs <- anf.then(rs_box(d.next_state))
-            anf.pure(ir.Continue(ctx.lresume, [rs, loc2]))
-          },
-        ),
+        if_terminal(is_return, anf.pure(step_return(v)), {
+          use loc2 <- anf.then(pack_loc(ctx, dict.from_list([#(result_idx, v)])))
+          use rs <- anf.then(rs_box(d.next_state))
+          anf.pure(ir.Continue(ctx.lresume, [rs, loc2]))
+        }),
         anf.pure(step_yield(v, d.state_id, ctx.loc_v)),
       )
     },
@@ -4880,9 +4872,7 @@ fn is_trivial(ex: ast.Expression) -> Bool {
     | ast.FunctionExpression(..)
     | ast.ArrowFunctionExpression(..)
     | ast.ClassExpression(..) -> True
-    // Scratch locals and `#name in obj` private names never need pinning.
-    ast.Identifier(name:, ..) ->
-      is_temp_name(name) || string.starts_with(name, "#")
+    ast.Identifier(name:, ..) -> is_temp_name(name)
     ast.ParenthesizedExpression(_, inner) -> is_trivial(inner)
     _ -> False
   }
@@ -5185,63 +5175,9 @@ fn lin_split(a: Ana, line: Int, ex: ast.Expression) -> Lin {
         ),
       )
     }
-    ast.ClassExpression(span, name, super_class, body) -> {
-      let #(a, pre, super2, body2) = lin_class(a, line, super_class, body)
-      #(a, pre, ast.ClassExpression(span, name, super2, body2))
-    }
     // Optional chains, dynamic import and everything split-free: no rewrite.
     _ -> #(a, [], ex)
   }
-}
-
-/// Class heritage + computed keys are evaluated in order before any element
-/// body runs (§15.7.14), so they hoist like a plain operand list.
-fn lin_class(
-  a: Ana,
-  line: Int,
-  super_class: Option(ast.Expression),
-  body: List(ast.ClassElement),
-) -> #(
-  Ana,
-  List(ast.StmtWithLine),
-  Option(ast.Expression),
-  List(ast.ClassElement),
-) {
-  let keys =
-    list.flat_map(body, fn(el) {
-      case el {
-        ast.ClassMethod(key: ast.KeyComputed(k), ..)
-        | ast.ClassField(key: ast.KeyComputed(k), ..) -> [k]
-        _ -> []
-      }
-    })
-  let items = case super_class {
-    Some(sc) -> [sc, ..keys]
-    None -> keys
-  }
-  let #(a, pre, xs) = lin_list(a, line, items)
-  let #(super2, rest) = case super_class, xs {
-    Some(_), [sc2, ..rest] -> #(Some(sc2), rest)
-    _, _ -> #(super_class, xs)
-  }
-  let #(_, body2) =
-    list.map_fold(body, rest, fn(rest, el) {
-      case el, rest {
-        ast.ClassMethod(
-          key: ast.KeyComputed(_),
-          value: v,
-          kind: kd,
-          is_static: st,
-        ),
-          [k2, ..more]
-        -> #(more, ast.ClassMethod(ast.KeyComputed(k2), v, kd, st))
-        ast.ClassField(key: ast.KeyComputed(_), value: v, is_static: st),
-          [k2, ..more]
-        -> #(more, ast.ClassField(ast.KeyComputed(k2), v, st))
-        _, _ -> #(rest, el)
-      }
-    })
-  #(a, pre, super2, body2)
 }
 
 fn rebuild_template(
@@ -5712,10 +5648,6 @@ fn explode_stmt(
           done(a, pre, ast.SwitchStatement(d2, cs))
         }
       }
-    ast.ClassDeclaration(name:, super_class: sc, body: b) -> {
-      let #(a, pre, sc2, b2) = lin_class(a, line, sc, b)
-      done(a, pre, ast.ClassDeclaration(name, sc2, b2))
-    }
     ast.LabeledStatement(label:, body: b) ->
       case explode_stmt(a, ast.StmtWithLine(line:, statement: b)) {
         None -> None
