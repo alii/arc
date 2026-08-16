@@ -756,10 +756,7 @@ fn small_int_value(f: Float) -> Option(ir.Value) {
 /// appearing as an assignment/update target — the prune set for
 /// analyze_const_globals. Over-approximates (includes locals shadowing a
 /// global — safe, just misses a fold).
-fn stmt_assigned_globals(
-  acc: Uses,
-  s: ast.StmtWithLine,
-) -> Uses {
+fn stmt_assigned_globals(acc: Uses, s: ast.StmtWithLine) -> Uses {
   case s.statement {
     ast.EmptyStatement | ast.DebuggerStatement -> acc
     ast.BreakStatement(..) | ast.ContinueStatement(..) -> acc
@@ -816,7 +813,11 @@ fn stmt_assigned_globals(
         ast.TryFinally(finalizer:) ->
           list.fold(finalizer, acc, stmt_assigned_globals)
         ast.TryCatchFinally(handler:, finalizer:) ->
-          list.fold(finalizer, catch_assigned(acc, handler), stmt_assigned_globals)
+          list.fold(
+            finalizer,
+            catch_assigned(acc, handler),
+            stmt_assigned_globals,
+          )
       }
     }
     ast.LabeledStatement(body:, ..) -> st_assigned(acc, body)
@@ -861,10 +862,7 @@ fn catch_assigned(acc: Uses, handler: ast.CatchClause) -> Uses {
   list.fold(handler.body, acc, stmt_assigned_globals)
 }
 
-fn opt_ex_assigned(
-  acc: Uses,
-  e: Option(ast.Expression),
-) -> Uses {
+fn opt_ex_assigned(acc: Uses, e: Option(ast.Expression)) -> Uses {
   case e {
     Some(ex) -> ex_assigned(acc, ex)
     None -> acc
@@ -874,10 +872,7 @@ fn opt_ex_assigned(
 /// Walk a binding pattern's default initializers and computed keys — the
 /// expressions that run when the pattern binds. Bound names are NOT marked;
 /// see `pat_bound_assigned` for the shapes that re-assign a global.
-fn pat_default_assigned(
-  acc: Uses,
-  p: ast.Pattern,
-) -> Uses {
+fn pat_default_assigned(acc: Uses, p: ast.Pattern) -> Uses {
   case p {
     ast.IdentifierPattern(..) -> acc
     ast.AssignmentPattern(left:, right:) ->
@@ -908,10 +903,7 @@ fn pat_bound_assigned(acc: Uses, p: ast.Pattern) -> Uses {
   list.fold(ast.pattern_bound_names(p), acc, uses_assign)
 }
 
-fn class_body_assigned(
-  acc: Uses,
-  body: List(ast.ClassElement),
-) -> Uses {
+fn class_body_assigned(acc: Uses, body: List(ast.ClassElement)) -> Uses {
   list.fold(body, acc, fn(acc, el) {
     case el {
       ast.ClassMethod(key:, value: ast.FunctionLiteral(body:, params:, ..), ..) ->
