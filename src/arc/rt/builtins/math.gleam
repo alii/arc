@@ -109,10 +109,10 @@ pub fn dispatch(
   case native {
     MathPow -> math_pow(args, st)
     MathAbs -> math_abs(args, st)
-    MathFloor -> finite_passthrough(args, st, ffi_math_floor)
-    MathCeil -> finite_passthrough(args, st, ffi_math_ceil)
-    MathRound -> finite_passthrough(args, st, js_round)
-    MathTrunc -> finite_passthrough(args, st, js_trunc)
+    MathFloor -> rounding_passthrough(args, st, ffi_math_floor)
+    MathCeil -> rounding_passthrough(args, st, ffi_math_ceil)
+    MathRound -> rounding_passthrough(args, st, js_round)
+    MathTrunc -> rounding_passthrough(args, st, js_trunc)
     MathSqrt -> math_sqrt(args, st)
     MathMax -> math_max(args, st)
     MathMin -> math_min(args, st)
@@ -632,15 +632,30 @@ fn neg_zero_preserving(
   }
 }
 
-/// Unary op where finite n → JFloat(f(n)) and non-finite passes through.
-fn finite_passthrough(
+/// Rounding op (floor/ceil/round/trunc): a JInt is already its own result;
+/// an integral JFloat result in the safe range (not -0) comes back as JInt so
+/// `a[Math.floor(x)]` takes the integer index path. Non-finite passes through.
+fn rounding_passthrough(
   args: List(JsVal),
   st: Agent,
   f: fn(Float) -> Float,
 ) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
-    JInt(_) | JFloat(_) -> JFloat(f(finite_to_float(x)))
+    JInt(_) -> x
+    JFloat(n) -> {
+      let r = f(n)
+      let i = rt_val.float_to_int(r)
+      case
+        int.to_float(i) == r
+        && !rt_val.is_neg_zero(r)
+        && i >= 0 - rt_val.max_safe_integer
+        && i <= rt_val.max_safe_integer
+      {
+        True -> JInt(i)
+        False -> JFloat(r)
+      }
+    }
     other -> other
   }
 }

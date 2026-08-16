@@ -502,6 +502,15 @@ pub fn minus_zero_is_preserved_diff_test() {
   )
 }
 
+/// Integral floats as indices (`6/2`, `Math.floor(x)`) reach the same
+/// element as the integer, and the rounding ops keep -0 / huge / non-finite.
+pub fn float_index_and_rounding_diff_test() {
+  diff(
+    "var a=[10,20,30,40,50,60,70];console.log(a[Math.floor(2.5)],a[6/2],a[-0.0],a[Math.ceil(0.5)],a[Math.round(4.4)],a[Math.trunc(5.9)],a[0.5],a[1e300]);a[8/2]=99;a[Math.floor(6.7)]=77;a[a.length*1.0]=1;console.log(a.join(),a.length);console.log(Object.is(Math.floor(-0.5),-1),Object.is(Math.floor(-0),-0),Object.is(Math.floor(0.3),0),Object.is(Math.ceil(-0.3),-0),Object.is(Math.round(-0.4),-0),Object.is(Math.trunc(-0.9),-0));console.log(Math.floor(1e300).toString(),Math.floor(-1e21),Math.floor(2.5)/2,typeof Math.floor(2.5),Math.floor(NaN),Math.floor(-Infinity));var m={};m[4.0]='f';console.log(m[4],Object.keys(m).join())",
+    "30 40 10 20 50 60 undefined undefined\n10,20,30,40,99,60,77,1 8\ntrue true true true true true\n1e+300 -1e+21 1 number NaN -Infinity\nf 4\n",
+  )
+}
+
 /// A user species constructor can hand the reaction job a throwing
 /// `resolve`; the job has no caller, so the throw is reported to the host
 /// sink instead of vanishing.

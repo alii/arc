@@ -225,8 +225,9 @@ proto_has(_, _, _, _) -> 0.
 
 %% t_get_elem_fast(St, Recv, Idx) -> V | miss
 %% JRead. Gate: Recv={js_cell,Id}, Idx a bare non-negative BEAM integer (the
-%% JsVal wire form for a JS integer number — a float / string / bigint index
-%% falls to `to_property_key`), slot is ArrayObj with Idx < Length and no
+%% JsVal wire form for a JS integer number, or an integral float — a
+%% fractional / string / bigint index falls to `to_property_key`), slot is
+%% ArrayObj with Idx < Length and no
 %% {index,Idx} props override. Holes (dense default / sparse-absent) miss so
 %% the full path handles the proto walk. `IsAtom` on the emitter side treats
 %% any atom-valued V (undefined/true/…) as a miss too — a perf loss only.
@@ -263,6 +264,11 @@ t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)
             end;
         _ -> miss
     end;
+%% Integral float index (8/2, Math.floor(x)): same element, canonicalized
+%% like CanonicalNumericIndexString (-0.0 → 0; a huge one fails Idx < Length).
+t_get_elem_fast(St, Recv, Idx)
+  when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
+    t_get_elem_fast(St, Recv, trunc(Idx));
 t_get_elem_fast(_, _, _) -> miss.
 
 %% t_set_elem_fast(St, Recv, Idx, V) -> St' | miss
@@ -314,6 +320,9 @@ t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
             end;
         _ -> miss
     end;
+t_set_elem_fast(St, Recv, Idx, V)
+  when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
+    t_set_elem_fast(St, Recv, trunc(Idx), V);
 t_set_elem_fast(_, _, _, _) -> miss.
 
 elem_write({?ELEMS_DENSE, A}, Idx, V) ->
