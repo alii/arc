@@ -2010,7 +2010,12 @@ fn annexb_check_chain(
             // ParamBinding INSIDE a Catch scope (handled above); no
             // RawBinding of kind CatchBinding is ever declared.
             CatchBinding -> False
-            VarBinding | CaptureBinding -> False
+            // §10.2.11 step 22.f: when the arguments object is needed,
+            // "arguments" is appended to parameterNames, so the
+            // implicit (synthetic) `arguments` VarBinding at the
+            // function root blocks the promote exactly like a formal.
+            VarBinding -> rb.synthetic && name == "arguments"
+            CaptureBinding -> False
           }
       }
   }
