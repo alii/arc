@@ -17,7 +17,6 @@ language/expressions/class/decorator/syntax/valid/decorator-parenthesized-expr-i
 language/expressions/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference.js
 language/expressions/class/elements/syntax/valid/grammar-field-accessor.js
 language/expressions/import.meta/import-meta-is-an-ordinary-object.js
-language/expressions/import.meta/syntax/invalid-assignment-target-object-rest-destructuring-expr.js
 language/import/import-attributes/json-extensibility-array.js
 language/import/import-attributes/json-extensibility-object.js
 language/import/import-attributes/json-idempotency.js
@@ -69,10 +68,8 @@ language/statements/class/decorator/syntax/valid/decorator-member-expr-identifie
 language/statements/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference-yield.js
 language/statements/class/decorator/syntax/valid/decorator-parenthesized-expr-identifier-reference.js
 language/statements/class/elements/syntax/valid/grammar-field-accessor.js
-language/statements/for/head-init-async-of.js
 staging/decorators/private-auto-accessor.js
 staging/decorators/public-auto-accessor.js
-staging/sm/destructuring/bug1396261.js
 staging/sm/fields/await-identifier-module-3.js
 staging/sm/fields/await-identifier-script.js
 staging/sm/lexical-environment/block-scoped-functions-deprecated-redecl.js

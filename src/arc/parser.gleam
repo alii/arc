@@ -4965,15 +4965,17 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
       let same_line = token_line_at(p, 1) == token_line_at(p, 0)
       case peek_at(p, 1) {
         LeftParen if same_line -> try_paren_arrow(p, advance(advance(p)), True)
-        Identifier if same_line ->
-          case peek_at(p, 2) {
-            Arrow -> try_single_ident_arrow(p, advance(p), True)
-            _ -> Error(NotAnArrow)
+        // `async => …`: a plain arrow whose one parameter is named async.
+        Arrow -> try_single_ident_arrow(p, p, False)
+        next if same_line ->
+          case is_arrow_param_name(next), peek_at(p, 2) {
+            True, Arrow -> try_single_ident_arrow(p, advance(p), True)
+            _, _ -> Error(NotAnArrow)
           }
         _ -> Error(NotAnArrow)
       }
     }
-    Identifier | Yield | Await ->
+    Identifier | Yield | Await | Of | From | As | Let | Static ->
       case peek_at(p, 1) {
         Arrow -> try_single_ident_arrow(p, p, False)
         _ -> Error(NotAnArrow)
@@ -4990,6 +4992,15 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
 /// `outer` is the parser at the very start of the expression (the `async`
 /// token, or the identifier itself when not async) — used for error
 /// positions and for `finish_arrow` to restore the enclosing context.
+/// Token kinds that can spell a single arrow parameter (`x => …`): plain
+/// identifiers and the contextual keywords that are valid binding names.
+fn is_arrow_param_name(kind: TokenKind) -> Bool {
+  case kind {
+    Identifier | Yield | Await | Of | From | As | Let | Static | Async -> True
+    _ -> False
+  }
+}
+
 fn try_single_ident_arrow(
   outer: P,
   ident_p: P,
@@ -6530,8 +6541,15 @@ fn parse_object_properties(
   case peek(p) {
     RightBrace -> Ok(#(advance(p), acc))
     DotDotDot -> {
+      // Cover grammar: an object rest target must be a simple assignment
+      // target (§13.15.5), so only the spread expression's own
+      // assignability counts — not the pattern flags of a literal nested
+      // inside it (`{...{b: 0}.x}`).
+      let saved_invalid = p.has_invalid_pattern
       let p2 = advance(p)
       use #(p3, expr) <- result.try(parse_assignment_expression(p2))
+      let p3 =
+        P(..p3, has_invalid_pattern: saved_invalid || !p3.last_expr_assignable)
       let prop = ast.SpreadProperty(argument: expr)
       case peek(p3) {
         // Anything after a spread (including a trailing comma) is fine in an
