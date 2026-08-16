@@ -20,17 +20,14 @@ tree_array_from_list(List, Default) ->
 
 %% DenseElements uses JsUninitialized as default so holes (reset slots) are
 %% distinguishable from explicit `arr[i] = undefined`. A slot that equals
-%% default means "hole" → none. Out-of-bounds/negative → none. This is a READ,
-%% so a negative index answers "nothing there" rather than crashing.
+%% default means "hole" → none. Arrays here are always extensible, so
+%% array:get past the size answers the default too. Negative → none. This is
+%% a READ, so a negative index answers "nothing there" rather than crashing.
 tree_array_get_option(Index, A) when Index >= 0 ->
-    case Index < array:size(A) of
-        true ->
-            V = array:get(Index, A),
-            case V =:= array:default(A) of
-                true -> none;
-                false -> {some, V}
-            end;
-        false -> none
+    V = array:get(Index, A),
+    case V =:= array:default(A) of
+        true -> none;
+        false -> {some, V}
     end;
 tree_array_get_option(_Index, _A) ->
     none.

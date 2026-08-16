@@ -343,6 +343,48 @@ fn own_property_of(
   }
 }
 
+/// Result of `t_get_own_index` — the own [[GetOwnProperty]] probe by integer
+/// index, one heap read.
+pub type OwnIndex {
+  /// Dense-elements hit on an Array/Arguments: the value itself, no
+  /// descriptor synthesized.
+  OwnIndexValue(JsVal)
+  /// Own property from the properties dict (override or non-exotic).
+  OwnIndexProperty(Property)
+  /// No own property; carries the prototype so callers continue the chain
+  /// walk without re-reading the cell.
+  OwnIndexAbsent(proto: Option(Handle))
+  /// Proxy / Module Namespace / TypedArray: [[HasProperty]] and [[Get]] are
+  /// not an own probe plus a proto walk — take the generic path.
+  OwnIndexExotic
+}
+
+/// [[GetOwnProperty]] by integer index in [0, 2^32-2] on an object handle.
+/// Same semantics as `t_get_own_property(h, StringKey(Index(idx)))` for the
+/// kinds it answers, minus the DataProperty allocation on the elements hit.
+pub fn t_get_own_index(st: Agent, h: Handle, idx: Int) -> OwnIndex {
+  case read_object(st, h) {
+    SObject(kind: ProxyObj(..), ..)
+    | SObject(kind: ModuleNamespace(..), ..)
+    | SObject(kind: TypedArrayObj(..), ..) -> OwnIndexExotic
+    SObject(kind: ArrayObj(_), props:, elements:, proto:, ..)
+    | SObject(kind: ArgumentsObj(..), props:, elements:, proto:, ..) ->
+      case dict.get(props, Index(idx)) {
+        Ok(prop) -> OwnIndexProperty(prop)
+        Error(Nil) ->
+          case elements.get_option(elements, idx) {
+            Some(v) -> OwnIndexValue(v)
+            None -> OwnIndexAbsent(proto)
+          }
+      }
+    slot ->
+      case own_and_proto_of_slot(st, slot, StringKey(Index(idx))) {
+        #(Some(prop), _) -> OwnIndexProperty(prop)
+        #(None, proto) -> OwnIndexAbsent(proto)
+      }
+  }
+}
+
 /// Own symbol-keyed property lookup — `symbol_props` is a creation-ordered
 /// association list (arc `object.gleam:1877`).
 fn own_symbol_property_of(
@@ -676,7 +718,7 @@ fn primitive_string_get(
     _ -> None
   }
   case own {
-    Some(prop) -> property_get_value(st, prop, recv)
+    Some(prop) -> t_property_get_value(st, prop, recv)
     None -> get_from(st, st.realm.string.prototype, key, recv)
   }
 }
@@ -742,7 +784,7 @@ fn ordinary_get(
   let #(own, proto) = own_and_proto_of_slot(st, slot, key)
   case own {
     // Steps 3-7: found — read value or invoke getter.
-    Some(prop) -> property_get_value(st, prop, receiver)
+    Some(prop) -> t_property_get_value(st, prop, receiver)
     // Step 2: not own — walk prototype chain.
     None ->
       case proto {
@@ -754,7 +796,7 @@ fn ordinary_get(
 
 /// §10.1.8.1 steps 3-7 given a found descriptor: data → `[[Value]]`;
 /// accessor → `Call(getter, Receiver)` (D17 upcall) or `undefined`.
-fn property_get_value(
+pub fn t_property_get_value(
   st: Agent,
   prop: Property,
   receiver: JsVal,

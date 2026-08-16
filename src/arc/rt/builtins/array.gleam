@@ -589,10 +589,49 @@ fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
 }
 
 /// Fused HasProperty + Get by integer index. `Some(val)` when present (own or
-/// inherited); `None` on a hole. arc's own-index fast path is subsumed by
-/// `t_has_prop`/`t_get_prop`'s own-first walk — spec-equivalent, one extra
-/// heap read on the hit path vs arc.
+/// inherited); `None` on a hole. Own probe is one heap read via
+/// `t_get_own_index`; only a miss walks the prototype chain.
 fn get_index_if_present(
+  st: Agent,
+  this: JsVal,
+  idx: Int,
+) -> #(Option(JsVal), Agent) {
+  case classify(this), idx >= 0 && idx <= rt_types.max_array_index {
+    KHandle(h), True ->
+      case rt_obj.t_get_own_index(st, h, idx) {
+        rt_obj.OwnIndexValue(v) -> #(Some(v), st)
+        rt_obj.OwnIndexProperty(prop) -> {
+          let #(v, st) = rt_obj.t_property_get_value(st, prop, this)
+          #(Some(v), st)
+        }
+        rt_obj.OwnIndexAbsent(Some(proto)) ->
+          inherited_index(st, proto, this, idx)
+        rt_obj.OwnIndexAbsent(None) -> #(None, st)
+        rt_obj.OwnIndexExotic -> generic_index_if_present(st, this, idx)
+      }
+    _, _ -> generic_index_if_present(st, this, idx)
+  }
+}
+
+/// HasProperty on `proto`, then Get on `this`.
+fn inherited_index(
+  st: Agent,
+  proto: Handle,
+  this: JsVal,
+  idx: Int,
+) -> #(Option(JsVal), Agent) {
+  let key = StringKey(index_key(idx))
+  let #(has, st) = rt_obj.t_has_prop(st, mk_object(proto), key)
+  case has {
+    False -> #(None, st)
+    True -> {
+      let #(v, st) = rt_obj.t_get_prop(st, this, key)
+      #(Some(v), st)
+    }
+  }
+}
+
+fn generic_index_if_present(
   st: Agent,
   this: JsVal,
   idx: Int,
