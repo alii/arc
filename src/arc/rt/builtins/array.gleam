@@ -21,6 +21,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayNative, type BuiltinPair, type Handle, type JsElements,
+  type JsSlot,
   type JsVal, type Property, type PropertyKey, ArrayConstructor, ArrayFrom,
   ArrayFromAsync, ArrayFromAsyncCloseReject, ArrayFromAsyncLikeOnMapped,
   ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped, ArrayFromAsyncOnNext,
@@ -707,14 +708,15 @@ fn try_elements_fast_path(
 }
 
 /// Push-specific fast path — checks only the target index range instead of
-/// scanning every proto-chain dict key.
+/// scanning every proto-chain dict key. `slot` is the receiver's cell as
+/// already read by the caller.
 fn try_push_fast_path(
   st: Agent,
   ref: Handle,
-  expected_len: Int,
+  slot: JsSlot,
   args: List(JsVal),
 ) -> Option(#(Int, Agent)) {
-  case rt_store.t_cell_get(st, ref) {
+  case slot {
     SObject(
       kind: ArrayObj(length:),
       props:,
@@ -722,14 +724,14 @@ fn try_push_fast_path(
       proto:,
       extensible: True,
       ..,
-    ) as slot -> {
+    ) -> {
       let arg_count = list.length(args)
       let length_writable = case dict.get(props, Named("length")) {
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
       let eligible =
-        length == expected_len
+        length + arg_count <= max_array_length
         && length_writable
         && !dict_has_index_in_range(props, length, arg_count)
         && !proto_chain_has_index_in_range(st, proto, length, arg_count)
@@ -760,7 +762,12 @@ fn dict_has_index_in_range(
   start: Int,
   count: Int,
 ) -> Bool {
-  !dict.is_empty(props) && dict_index_in_range_loop(props, start, start + count)
+  case count {
+    1 -> dict.has_key(props, Index(start))
+    _ ->
+      !dict.is_empty(props)
+      && dict_index_in_range_loop(props, start, start + count)
+  }
 }
 
 fn dict_index_in_range_loop(
@@ -771,10 +778,8 @@ fn dict_index_in_range_loop(
   case idx >= end {
     True -> False
     False ->
-      case dict.get(props, Index(idx)) {
-        Ok(_) -> True
-        Error(Nil) -> dict_index_in_range_loop(props, idx + 1, end)
-      }
+      dict.has_key(props, Index(idx))
+      || dict_index_in_range_loop(props, idx + 1, end)
   }
 }
 
@@ -790,6 +795,9 @@ fn proto_chain_has_index_in_range(
       case rt_store.t_cell_get(st, proto_ref) {
         SObject(kind: ProxyObj(..), ..) -> True
         SObject(kind: StringObj(value: s), ..) if s != "" -> True
+        SObject(props:, elements: NoElements, proto:, ..) ->
+          dict_has_index_in_range(props, start, count)
+          || proto_chain_has_index_in_range(st, proto, start, count)
         SObject(props:, elements: proto_els, proto:, ..) ->
           elements_has_in_range(proto_els, start, count)
           || dict_has_index_in_range(props, start, count)
@@ -984,21 +992,20 @@ fn join_elements_generic(
 
 // ───────────────────────── Array.prototype.push / pop ───────────────────────
 
-/// §23.1.3.22 Array.prototype.push(...items).
+/// §23.1.3.22 Array.prototype.push(...items). A real Array receiver goes
+/// straight to the fast path from one cell read; everything else (and any
+/// fast-path miss) takes the generic ToObject / LengthOfArrayLike route.
 fn array_push(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, _this, ref, length <- require_array(st, this)
-  use <- guard_safe_length(st, length + list.length(args))
-  let fast = case args {
-    [] -> None
-    _ ->
-      case length + list.length(args) > max_array_length {
-        True -> None
-        False -> try_push_fast_path(st, ref, length, args)
-      }
+  let fast = case classify(this), args {
+    KHandle(ref), [_, ..] ->
+      try_push_fast_path(st, ref, rt_store.t_cell_get(st, ref), args)
+    _, _ -> None
   }
   case fast {
     Some(#(new_length, st)) -> #(from_int(new_length), st)
     None -> {
+      use st, _this, ref, length <- require_array(st, this)
+      use <- guard_safe_length(st, length + list.length(args))
       let #(new_length, st) = push_generic(st, ref, length, args)
       #(from_int(new_length), st)
     }

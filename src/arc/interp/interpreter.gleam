@@ -46,6 +46,7 @@ import arc/interp/state.{
   StackUnderflow, State, SuspensionLeak, Threw, VmFailed, Yielded,
 }
 import arc/rt/async as rt_async
+import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/disposable_stack
 import arc/rt/builtins/error as rt_error
 import arc/rt/builtins/global_fns
@@ -59,14 +60,16 @@ import arc/rt/elements as rt_elements
 import arc/rt/env as rt_env
 import arc/rt/inspect as rt_inspect
 import arc/rt/lang as rt_lang
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
-  AccessorProperty, Agent, DataProperty, ForInIterator, HintString, Index,
-  KBytecode, KCompiled, KHandle, KNull, KNum, KStr, KSym, KUndef, Named,
-  NoElements, Realm, SBox, SObject, SShapedObject, StringKey, SymbolKey,
+  AccessorProperty, Agent, DataProperty, ForInIterator, FunctionApply,
+  FunctionCall, FunctionN, HintString, Index, KBytecode, KCompiled, KHandle,
+  KNative, KNull, KNum, KStr, KSym, KUndef, Named, NoElements, Realm,
+  ReflectApply, ReflectN, SBox, SObject, SShapedObject, StringKey, SymbolKey,
   classify, mk_bool, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
@@ -96,10 +99,6 @@ pub type Outcome {
 // ============================================================================
 // The few tests `fast_loop` needs beyond the `arc_interp_ffi` kernels, kept
 // as total term probes so a hit never goes through `classify`.
-
-/// Exact term identity of two wire values.
-@external(erlang, "erlang", "=:=")
-fn same_term(a: JsVal, b: JsVal) -> Bool
 
 /// `v` is the Handle wire form `{js_cell, N}`.
 @external(erlang, "arc_rt_store_ffi", "is_handle")
@@ -486,9 +485,9 @@ fn lex_write(agent: Agent, name: String, binding: LexicalGlobal) -> Agent {
   )
 }
 
-fn is_tdz(v: JsVal) -> Bool {
-  same_term(v, mk_tdz())
-}
+/// `v` is the TDZ sentinel.
+@external(erlang, "arc_interp_ffi", "is_tdz")
+fn is_tdz(v: JsVal) -> Bool
 
 // ============================================================================
 // Execution loop
@@ -1188,9 +1187,148 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
+    // [arg_n, .., arg_1, callee, ..] → the callee's frame or [result, ..].
+    Call(arity) ->
+      case pop_n(stack, arity) {
+        Some(#(args, [callee, ..rest])) ->
+          fast_call(
+            state,
+            drive,
+            pc,
+            stack,
+            locals,
+            agent,
+            code,
+            constants,
+            line,
+            callee,
+            mk_undefined(),
+            args,
+            rest,
+          )
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
+    // [arg_n, .., arg_1, method, receiver, ..]: this = receiver.
+    CallMethod(arity) ->
+      case pop_n(stack, arity) {
+        Some(#(args, [method, receiver, ..rest])) ->
+          fast_call(
+            state,
+            drive,
+            pc,
+            stack,
+            locals,
+            agent,
+            code,
+            constants,
+            line,
+            method,
+            receiver,
+            args,
+            rest,
+          )
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
     _other -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
   }
 }
+
+/// Call/CallMethod from the loop's registers. A plain native callee (not
+/// call/apply/Reflect.apply, which re-dispatch) runs under the loop's own
+/// guard and depth bracket and the loop continues with its result; the
+/// State is only materialised for a throw. Every other callee takes the
+/// general call path with the cell already read.
+fn fast_call(
+  state: State,
+  drive: Drive,
+  pc: Int,
+  stack: List(JsVal),
+  locals: TupleArray(JsVal),
+  agent: Agent,
+  code: TupleArray(Op),
+  constants: TupleArray(JsVal),
+  line: Int,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+  rest: List(JsVal),
+) -> Result(#(Outcome, State), VmError) {
+  let agent = call.set_line(agent, line)
+  case classify(callee) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(agent, h) {
+        SObject(kind: KNative(tag:, ..), ..)
+          if tag != function_call
+          && tag != function_apply
+          && tag != reflect_apply
+          && agent.store.call_depth < limits.max_call_depth
+        -> {
+          let agent = rt_store.t_enter_call(agent)
+          case ffi.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
+            ffi.Ok(value: v, agent:) ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [v, ..rest],
+                locals,
+                rt_store.t_leave_call(agent),
+                code,
+                constants,
+                line,
+              )
+            ffi.Threw(agent:, thrown:) ->
+              after_step(
+                Error(Threw(
+                  thrown,
+                  State(
+                    ..state,
+                    pc:,
+                    stack: rest,
+                    locals:,
+                    agent: rt_store.t_leave_call(agent),
+                  ),
+                )),
+                drive,
+              )
+          }
+        }
+        slot ->
+          after_step(
+            call.call_cell(
+              State(..state, pc:, stack:, locals:, agent:),
+              h,
+              slot,
+              this,
+              args,
+              rest,
+              drive,
+            ),
+            drive,
+          )
+      }
+    _ ->
+      after_step(
+        call.call(
+          State(..state, pc:, stack:, locals:, agent:),
+          callee,
+          this,
+          args,
+          rest,
+          drive,
+        ),
+        drive,
+      )
+  }
+}
+
+const function_call = FunctionN(FunctionCall)
+
+const function_apply = FunctionN(FunctionApply)
+
+const reflect_apply = ReflectN(ReflectApply)
 
 /// The kernel for a resolver-classified pure binary operator: the result
 /// value, or `miss` when the operands need coercion the kernel cannot see
@@ -1310,7 +1448,20 @@ fn dispatch_slow(
 ) -> Result(#(Outcome, State), VmError) {
   let state =
     State(..state, pc:, stack:, locals:, agent: call.set_line(agent, line))
-  case step(state, drive, tuple_array.get_unchecked(state.pc, state.code)) {
+  after_step(
+    step(state, drive, tuple_array.get_unchecked(state.pc, state.code)),
+    drive,
+  )
+}
+
+/// Continue the loop after one stepped instruction: re-enter it on the new
+/// State, finish on Return, park a coroutine, or unwind a throw to its
+/// handler.
+fn after_step(
+  stepped: Result(State, StepExit),
+  drive: Drive,
+) -> Result(#(Outcome, State), VmError) {
+  case stepped {
     Ok(new_state) -> execute_inner(new_state, drive)
     Error(Returned(value, post)) ->
       Ok(#(Completed(NormalCompletion(value)), post))

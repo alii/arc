@@ -30,7 +30,7 @@
          guard7/8,
          guard_unit1/2, guard_unit2/3, guard_unit3/4, guard_unit4/5,
          guard_unit5/6, guard_unit6/7]).
--export([is_miss/1,
+-export([is_miss/1, is_tdz/1,
          add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1,
          lt/2, le/2, gt/2, ge/2, strict_eq/2, eq/2,
          truthy/1, nullish/1, typeof/1, typeof/2,
@@ -107,6 +107,11 @@ guard_unit6(F, St, A, B, C, D, X) ->
 %% collide with a real value.
 is_miss(miss) -> true;
 is_miss(_) -> false.
+
+%% is_tdz(V) -> boolean()
+%% V is the TDZ sentinel `js_tdz` (an uninitialised let/const/class slot).
+is_tdz(js_tdz) -> true;
+is_tdz(_) -> false.
 
 %% Number results keep the two invariants arc_rt_ops_ffi:add/2 keeps: an
 %% integer wider than 2^53 - 1 becomes the nearest double, and float
