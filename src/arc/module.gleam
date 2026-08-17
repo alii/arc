@@ -935,7 +935,7 @@ fn module_activation(
     func: template,
     unit:,
     call_stack: [],
-    outer_depth: agent.store.call_depth,
+    outer_depth: agent.call_depth,
     try_stack: [],
     this: mk_undefined(),
     new_target: mk_undefined(),

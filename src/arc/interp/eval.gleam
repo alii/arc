@@ -31,7 +31,7 @@ import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type Handle, type JsVal, Agent, DynamicFunction,
-  IndirectEval, JsStore, KBytecode, KHandle, KStr, RangeErr, SObject, ScriptEval,
+  IndirectEval, KBytecode, KHandle, KStr, RangeErr, SObject, ScriptEval,
   SyntaxErr, TypeErr, classify, mk_object, mk_undefined,
 }
 import gleam/int
@@ -112,7 +112,7 @@ fn activation(
     func: template,
     unit:,
     call_stack: [],
-    outer_depth: agent.store.call_depth,
+    outer_depth: agent.call_depth,
     try_stack: [],
     this:,
     new_target: mk_undefined(),
@@ -154,27 +154,22 @@ fn run_bracketed(
   make: fn(Agent) -> State,
   run: Run,
 ) -> #(Result(JsVal, JsVal), Agent) {
-  let store = agent.store
-  let depth = store.call_depth
+  let depth = agent.call_depth
   case depth >= limits.max_call_depth {
     True -> {
       let #(err, agent) =
-        store.ops.new_error(agent, RangeErr, "Maximum call stack size exceeded")
+        agent.store.ops.new_error(
+          agent,
+          RangeErr,
+          "Maximum call stack size exceeded",
+        )
       #(Error(err), agent)
     }
     False -> {
       let frames = agent.frames
-      let entered =
-        Agent(..agent, store: JsStore(..store, call_depth: depth + 1))
+      let entered = Agent(..agent, call_depth: depth + 1)
       let #(res, after) = run(make(entered))
-      #(
-        res,
-        Agent(
-          ..after,
-          frames:,
-          store: JsStore(..after.store, call_depth: depth),
-        ),
-      )
+      #(res, Agent(..after, frames:, call_depth: depth))
     }
   }
 }

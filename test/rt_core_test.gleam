@@ -108,7 +108,7 @@ pub fn call_depth_range_error_test() {
   let #(msg, st) = rt_obj.t_get_prop(st, e, StringKey(canonical_key("message")))
   assert classify(msg) == KStr("Maximum call stack size exceeded")
   // The agent is usable afterwards and depth accounting is balanced.
-  assert st.store.call_depth == 0
+  assert st.call_depth == 0
   let #(f, st) = this_fn(st, True)
   let assert #(NormalCompletion(_), _) =
     rt_call.t_call(st, f, mk_undefined(), [])

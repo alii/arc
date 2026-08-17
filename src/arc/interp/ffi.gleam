@@ -51,6 +51,14 @@ pub fn guard1(f: fn(Agent) -> #(v, Agent), agent: Agent) -> Guarded(v)
 @external(erlang, "arc_interp_ffi", "guard1")
 pub fn guard_state(f: fn(State) -> #(v, Agent), state: State) -> Guarded(v)
 
+/// `guard_state` with one extra argument for the body.
+@external(erlang, "arc_interp_ffi", "guard2")
+pub fn guard_state2(
+  f: fn(State, a) -> #(v, Agent),
+  state: State,
+  a: a,
+) -> Guarded(v)
+
 @external(erlang, "arc_interp_ffi", "guard2")
 pub fn guard2(f: fn(Agent, a) -> #(v, Agent), agent: Agent, a: a) -> Guarded(v)
 

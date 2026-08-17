@@ -86,7 +86,7 @@ fn root_state(agent: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
     func:,
     unit: 0,
     call_stack: [],
-    outer_depth: agent.store.call_depth,
+    outer_depth: agent.call_depth,
     try_stack: [],
     this: mk_undefined(),
     new_target: mk_undefined(),
@@ -142,14 +142,10 @@ fn with_caller_frame(s: State, held: JsVal) -> State {
       call_args: [],
       eval_env: None,
     )
-  let store = s.agent.store
   State(
     ..s,
     call_stack: [caller],
-    agent: Agent(
-      ..s.agent,
-      store: JsStore(..store, call_depth: store.call_depth + 1),
-    ),
+    agent: Agent(..s.agent, call_depth: s.agent.call_depth + 1),
   )
 }
 

@@ -198,7 +198,7 @@ pub fn t_call(
   this: JsVal,
   args: List(JsVal),
 ) -> #(Completion, Agent) {
-  case st.store.call_depth >= limits.max_call_depth {
+  case st.call_depth >= limits.max_call_depth {
     True -> t_apply_protected(st, rt_store.stack_overflow)
     False -> {
       let st = rt_store.t_enter_call(st)

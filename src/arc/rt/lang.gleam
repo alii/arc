@@ -12,8 +12,9 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type IteratorRecord, type JsVal, type ObjectKey,
-  Agent, IteratorRecord, KHandle, KNull, KUndef, Named, StringKey, TypeErr,
-  classify, mk_bool, mk_object, mk_string, mk_undefined,
+  Agent, DataProperty, IteratorRecord, JsStore, KHandle, KNull, KUndef, Named,
+  NoElements, Ordinary, SObject, StringKey, TypeErr, classify, mk_bool,
+  mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -64,13 +65,27 @@ const k_next = StringKey(Named("next"))
 const k_done = StringKey(Named("done"))
 
 fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
-  let #(h, st) = rt_obj.t_new_object(st, option.None)
-  let #(_, st) =
-    rt_obj.t_define_own_data(st, h, k_iterator, rec.iterator, True, True, True)
-  let #(_, st) =
-    rt_obj.t_define_own_data(st, h, k_next, rec.next_method, True, True, True)
-  let #(_, st) =
-    rt_obj.t_define_own_data(st, h, k_done, mk_bool(False), True, True, True)
+  let js = st.store
+  let seq = js.prop_seq
+  let props =
+    dict.from_list([
+      #(Named("iterator"), DataProperty(rec.iterator, True, True, True, seq)),
+      #(Named("next"), DataProperty(rec.next_method, True, True, True, seq + 1)),
+      #(Named("done"), DataProperty(mk_bool(False), True, True, True, seq + 2)),
+    ])
+  let st = Agent(..st, store: JsStore(..js, prop_seq: seq + 3))
+  let #(h, st) =
+    rt_store.t_cell_new(
+      st,
+      SObject(
+        kind: Ordinary,
+        proto: option.None,
+        props:,
+        symbol_props: [],
+        elements: NoElements,
+        extensible: True,
+      ),
+    )
   #(mk_object(h), st)
 }
 

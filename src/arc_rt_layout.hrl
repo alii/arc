@@ -7,14 +7,14 @@
 
 %% arc/rt/types.Agent:
 %%   {agent, Store, Realm, TemplateObjects, Frames, Hooks, HostFns, Realms,
-%%    ImportHook, Waiters}.
+%%    ImportHook, Waiters, CallDepth}.
 %% The indexed fields are bare (no Option wrapper).
 -define(AGENT_TAG, agent).
 -define(AGENT_STORE, 2).
 -define(AGENT_REALM, 3).
 -define(AGENT_HOST_FNS, 7).
 -define(AGENT_REALMS, 8).
--define(AGENT_ARITY, 10).
+-define(AGENT_ARITY, 11).
 -define(SOME, some).
 -define(NONE, none).
 
@@ -38,10 +38,10 @@
 -define(STORE_NEXT, 4).
 -define(STORE_PINNED_ROOTS, 5).
 -define(STORE_ALLOC, 6).
--define(STORE_SHAPES, 15).
--define(STORE_NEXT_SHAPE, 16).
--define(STORE_ARITY, 18).
--define(STORE_ICS, 18).
+-define(STORE_SHAPES, 14).
+-define(STORE_NEXT_SHAPE, 15).
+-define(STORE_ARITY, 17).
+-define(STORE_ICS, 17).
 
 %% arc/rt/types.Realm / BuiltinPair
 -define(REALM_TAG, realm).
@@ -160,7 +160,7 @@
 
 %% arc/rt/types.JsStore: the property creation-order stamp the fused
 %% field write bumps when it creates an own property.
--define(STORE_PROP_SEQ, 9).
+-define(STORE_PROP_SEQ, 8).
 
 %% arc/rt/types.JsStore.data is an OTP `array` indexed by cell id whose
 %% default is this sentinel: a freed or never-minted id reads back as it.

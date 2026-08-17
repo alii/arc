@@ -45,7 +45,6 @@ pub fn t_store_new() -> JsStore(Agent) {
     pinned_roots: set.new(),
     alloc_since_gc: 0,
     gc_threshold: 65_536,
-    call_depth: 0,
     prop_seq: 0,
     private_uid: 0,
     symbol_uid: 0,
@@ -198,13 +197,12 @@ pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
 /// `call.gleam:174-179`): the one depth choke point for calls, constructs
 /// and coroutine resumes.
 pub fn t_enter_call(st: Agent) -> Agent {
-  let js = require_js(st)
-  case js.call_depth >= limits.max_call_depth {
+  case st.call_depth >= limits.max_call_depth {
     True -> {
       let #(_, st) = stack_overflow(st)
       st
     }
-    False -> with_js(st, JsStore(..js, call_depth: js.call_depth + 1))
+    False -> Agent(..st, call_depth: st.call_depth + 1)
   }
 }
 
@@ -223,8 +221,7 @@ pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
 /// Leave a JS call: `--call_depth`. Paired with `t_enter_call` by M-CALL's
 /// `t_call_checked` around every compiled-fn invocation.
 pub fn t_leave_call(st: Agent) -> Agent {
-  let js = require_js(st)
-  with_js(st, JsStore(..js, call_depth: js.call_depth - 1))
+  Agent(..st, call_depth: st.call_depth - 1)
 }
 
 // ── exception (D7 / R2) ─────────────────────────────────────────────────────

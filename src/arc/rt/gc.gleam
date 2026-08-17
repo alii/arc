@@ -107,7 +107,6 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     // ── GC trigger counters — no roots ──
     alloc_since_gc: _,
     gc_threshold: _,
-    call_depth: _,
     // ── threaded uid counters — no roots ──
     prop_seq: _,
     private_uid: _,
@@ -521,7 +520,7 @@ pub fn t_maybe_collect(st: Agent) -> Agent {
 /// Same gate; `extra_roots` only matter when it fires.
 pub fn t_maybe_collect_with(st: Agent, extra_roots: List(Handle)) -> Agent {
   let js = require_js(st)
-  case js.call_depth == 0 && js.alloc_since_gc >= js.gc_threshold {
+  case st.call_depth == 0 && js.alloc_since_gc >= js.gc_threshold {
     True -> t_collect(st, extra_roots)
     False -> st
   }
