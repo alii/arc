@@ -7,7 +7,7 @@
 -module(arc_rt_ops_ffi).
 -export([pow_total/2, fmod_total/2, fadd/2, fsub/2, fmul/2, fdiv/2,
          t_eq_fast/2, nul_eq/1,
-         add/2, sub/2, mul/2,
+         add/2, sub/2, mul/2, t_add/3, t_sub/3, t_mul/3,
          t_bitand_fast/2, t_bitor_fast/2, t_bitxor_fast/2,
          t_shl_fast/2, t_shr_fast/2, t_ushr_fast/2, t_bitnot_fast/1]).
 
@@ -45,6 +45,17 @@ mul(A, B) ->
     try A * B
     catch error:badarith -> inf_val(is_negative(A) =/= is_negative(B))
     end.
+
+%% JS `+ - *` as one call per site: the two-number kernel above when both
+%% operands are BEAM numbers, else the full §13.15.4 operator in arc@rt@ops.
+t_add(St, A, B) when is_number(A), is_number(B) -> {add(A, B), St};
+t_add(St, A, B) -> 'arc@rt@ops':t_add(St, A, B).
+
+t_sub(St, A, B) when is_number(A), is_number(B) -> {sub(A, B), St};
+t_sub(St, A, B) -> 'arc@rt@ops':t_sub(St, A, B).
+
+t_mul(St, A, B) when is_number(A), is_number(B) -> {mul(A, B), St};
+t_mul(St, A, B) -> 'arc@rt@ops':t_mul(St, A, B).
 
 %% The same four operations over two finite doubles, as JsNum.
 fadd(X, Y) ->
