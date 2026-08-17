@@ -5,6 +5,7 @@
 
 import carder/runtime/instance.{
   type DirectHost, DirectHost, HostOp, Mut, MutMiss, MutUnit, Pure, Read,
+  ReadMiss,
 }
 import gleam/dict
 
@@ -72,7 +73,7 @@ pub fn table() -> DirectHost {
       #("new_arguments", HostOp(obj, "t_new_arguments", Mut)),
       #("get_prop", HostOp(obj, "t_get_prop_any", Mut)),
       #("get_prop_own_data", HostOp(obj_ffi, "t_get_prop_own_data", Read)),
-      #("get_prop_ic", HostOp(obj_ffi, "t_get_prop_ic", Read)),
+      #("get_prop_ic", HostOp(obj_ffi, "t_get_prop_ic", ReadMiss)),
       #("get_prop_ic_miss", HostOp(obj_ffi, "t_get_prop_ic_miss", Mut)),
       #("get_prop_slow", HostOp(obj_ffi, "t_get_prop_slow", Mut)),
       #("get_prop_site", HostOp(obj_ffi, "t_get_prop_site", Mut)),
