@@ -16,7 +16,8 @@
 %%% rebuilt `St'`.
 -module(arc_rt_obj_ffi).
 -export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
-         t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_site/4,
+         t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_slow/4,
+         t_get_prop_site/4,
          t_instanceof_fast/3,
          t_get_elem_fast/3, t_set_elem_fast/4,
          t_global_get_fast/2, t_global_get/2,
@@ -88,19 +89,24 @@ t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     end;
 t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
+%% t_get_prop_slow(St, Recv, KeyBin, Site) -> {V, St'}
+%% JMut. Everything past the IC hit for a compiled `.key` read: the filling
+%% probe, else the full [[Get]] with the named wire key. The emitter runs
+%% `t_get_prop_ic` (JRead, no St alloc on a hit) and calls this on `miss`.
+t_get_prop_slow(St, Recv, KeyBin, Site) ->
+    case t_get_prop_ic_miss(St, Recv, KeyBin, Site) of
+        {miss, St1} ->
+            'arc@rt@obj':t_get_prop_any(St1, Recv,
+                                        {string_key, {named, KeyBin}});
+        Hit -> Hit
+    end.
+
 %% t_get_prop_site(St, Recv, KeyBin, Site) -> {V, St'}
-%% JMut. The whole compiled `.key` read at one site: IC hit, else the
-%% filling probe, else the full [[Get]] with the named wire key. One call per
-%% site keeps the emitted IR flat; the IC data stays in the store.
+%% JMut. The whole compiled `.key` read at one site: IC hit, else
+%% `t_get_prop_slow`.
 t_get_prop_site(St, Recv, KeyBin, Site) ->
     case t_get_prop_ic(St, Recv, KeyBin, Site) of
-        miss ->
-            case t_get_prop_ic_miss(St, Recv, KeyBin, Site) of
-                {miss, St1} ->
-                    'arc@rt@obj':t_get_prop_any(St1, Recv,
-                                                {string_key, {named, KeyBin}});
-                Hit -> Hit
-            end;
+        miss -> t_get_prop_slow(St, Recv, KeyBin, Site);
         V -> {V, St}
     end.
 

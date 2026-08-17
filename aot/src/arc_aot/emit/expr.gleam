@@ -241,7 +241,10 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
         True -> emit_chain_root(ex)
         False -> {
           use ov <- anf.then(expr(object))
-          emit_member_get(ov, property)
+          case object, static_dot_key(property) {
+            ast.ThisExpression(_), Some(kb) -> get_prop_this(ov, kb)
+            _, _ -> emit_member_get(ov, property)
+          }
         }
       }
     // Optional member — always a chain root.
@@ -1511,15 +1514,31 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   }
 }
 
-/// Own-data-property READ fast path. Each site gets a module-unique id and
-/// the whole read is ONE host op, `get_prop_site` (arc_rt_obj_ffi): the
-/// store-resident inline cache probe (shape id + slot offset seen at this
+/// Own-data-property READ, static `.key`. Each site gets a module-unique id
+/// and the whole read is ONE JMut host op, `get_prop_site` (arc_rt_obj_ffi):
+/// the store-resident inline cache probe (shape id + slot offset seen at this
 /// site), then the own DataProperty / shaped slot probe that fills an empty
-/// site, then the full `get_prop` with the named key. Keeping the hit/miss
-/// chain inside the kernel leaves a single call in the IR per site.
+/// site, then the full `get_prop` with the named key. A single call keeps the
+/// site small in the emitted forms.
 fn get_prop_fast(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
   use site <- anf.then(next_site())
   anf.host("get_prop_site", [obj, ir.ConstBinary(kb), ir.ConstI32(site)])
+}
+
+/// `this.key` read — the shaped-object field read the IC exists for, and
+/// the hot read of every method body. The IC hit is probed INLINE with the
+/// JRead `get_prop_ic` (bare value on a warm hit, no `{V, St}` alloc, no
+/// state rebind); `=:= miss` (NOT IsAtom — undefined/null/true/false are
+/// legitimate values) falls to the JMut `get_prop_slow` kernel: the filling
+/// probe, then the full `get_prop`. Two calls per site — the inline branch
+/// costs ~200 words of forms, so only `this` receivers pay it.
+fn get_prop_this(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
+  use site <- anf.then(next_site())
+  let key = ir.ConstBinary(kb)
+  let site = ir.ConstI32(site)
+  use v <- anf.then(anf.host("get_prop_ic", [obj, key, site]))
+  use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
+  anf.bind_if(ic_miss, anf.host("get_prop_slow", [obj, key, site]), anf.pure(v))
 }
 
 /// Static-key property WRITE: one JMutUnit host op (`set_prop_named`) that
