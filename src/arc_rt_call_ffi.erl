@@ -23,9 +23,20 @@
          t_call_fast/4, t_call_fast0/3, t_call_fast1/4, t_call_fast2/5,
          t_call_fast3/6,
          t_call_method_mono/4, t_call_method_ic/5, t_call_method_ic0/4,
-         t_call_method_ic1/5, t_call_method_ic2/6, t_call_method_ic3/7]).
+         t_call_method_ic1/5, t_call_method_ic2/6, t_call_method_ic3/7,
+         t_args_tuple/2]).
 
 -include("arc_rt_layout.hrl").
+
+%% t_args_tuple(Args, N) -> tuple()
+%% Pure. The first N args as a tuple, `undefined`-padded / truncated: the
+%% frame-ABI shim of a simple-ABI function reads its positional params
+%% from it with element/2 (JS binds missing params to undefined and drops
+%% extras).
+t_args_tuple(Args, N) -> t_args_tuple(Args, N, []).
+t_args_tuple(_, 0, Acc) -> list_to_tuple(lists:reverse(Acc));
+t_args_tuple([A | Rest], N, Acc) -> t_args_tuple(Rest, N - 1, [A | Acc]);
+t_args_tuple([], N, Acc) -> t_args_tuple([], N - 1, [undefined | Acc]).
 
 %% t_kfn_code(St, Callee, This) -> {Code, ResolvedThis, Simple} | undefined
 %% CallClosure fast-path probe (JRead). One heap read, no cross-module calls.
