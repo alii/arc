@@ -296,33 +296,14 @@ pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
   }
 }
 
-/// §7.1.2 ToBoolean(v) as a raw i32 for `ir.If` conds. Inlines the three
-/// operand shapes richards' 21k/run truthy sites actually see —
-/// `true`/`false` atoms (from `!=`/`<`/`!`) and bare Int 0|1 (from `==`'s
-/// loose_eq / `||`-propagated `==` result) — so the `to_boolean_i32`
-/// call_ext fires only on strings/floats/objects. Checks ordered by warm
-/// frequency: `true` (both sites) → `false` (LogicalOr `!=` operand) →
-/// integer (if(method()) result). Each check is one `=:=`/`is_integer` BIF
-/// (~2ns) vs the ~33ns call_ext. Shared by `truthy_if` and
-/// `stmt.emit_cond_i32`'s fallthrough.
+/// §7.1.2 ToBoolean(v) as a raw i32 for `ir.If` conds: one call to the
+/// guard-dispatch `to_boolean_i32` kernel. The `true`/`false`/integer arms
+/// used to be inlined ahead of the call; with the kernel dispatching on the
+/// wire form the call costs the same as the inline chain (~1.5ns either way,
+/// measured) and the chain was ~30 Core lines per site. Shared by
+/// `truthy_if` and `stmt.emit_cond_i32`'s fallthrough.
 pub fn truthy_i32(v: ir.Value) -> Build(ir.Value) {
-  use is_t <- then(bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("true"))))
-  bind_if_i32(is_t, pure(ir.ConstI32(1)), {
-    use is_f <- then(bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("false"))))
-    bind_if_i32(is_f, pure(ir.ConstI32(0)), {
-      use is_i <- then(bind(ir.TermTest(ir.IsInt, v)))
-      bind_if_i32(
-        is_i,
-        // §7.1.2: Int 0 → 0, any other Int → 1. `NEq(v,0)` gives 1 iff v=:=0;
-        // second `NEq(·,0)` inverts. Two BIFs, no call_ext.
-        {
-          use z <- then(bind(ir.NumTerm(ir.NEq, v, ir.ConstI32(0))))
-          bind(ir.NumTerm(ir.NEq, z, ir.ConstI32(0)))
-        },
-        host("truthy", [v]),
-      )
-    })
-  })
+  host("truthy", [v])
 }
 
 /// `if (js-truthy v) then t else f`. i32 via `truthy_i32` then a single
@@ -462,8 +443,20 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
 /// (native op, then widen an integer past 2^53 - 1 to a double and keep the
 /// sign of an integer zero product). The result is marked a known number.
 pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  use ii <- then(both_ints(a, b))
   let slow = host(op, [a, b])
+  then(int_or(op, a, b, slow, slow), mark_number)
+}
+
+/// The inline integer arm of a `num_*` op when both operands are BEAM
+/// integers (`slow` on a range miss), else `other`. Ops without an integer
+/// arm are just `other`.
+fn int_or(
+  op: String,
+  a: ir.Value,
+  b: ir.Value,
+  slow: Build(ir.Value),
+  other: Build(ir.Value),
+) -> Build(ir.Value) {
   let arm = case op {
     "num_add" -> Some(int_arm(ir.NAdd, a, b, False, slow))
     "num_sub" -> Some(int_arm(ir.NSub, a, b, False, slow))
@@ -471,8 +464,11 @@ pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
     _ -> None
   }
   case arm {
-    Some(fast) -> then(bind_if(ii, fast, slow), mark_number)
-    None -> then(slow, mark_number)
+    Some(fast) -> {
+      use ii <- then(both_ints(a, b))
+      bind_if(ii, fast, other)
+    }
+    None -> other
   }
 }
 
@@ -529,20 +525,29 @@ fn int_arm(
   }
 }
 
-/// JS arithmetic `+ - *`: `num_binop` fast path when both operands are BEAM
-/// numbers, else the runtime slow path (handles ToPrimitive, string concat,
-/// bigint, throw-on-symbol). When BOTH operands are statically known numbers
-/// the guard/If/slow-arm are elided entirely — the M0 shape.
+/// JS arithmetic `+ - *`: the inline integer arm when both operands are BEAM
+/// integers, else ONE `*_any` kernel call (two numbers → the `num_*` kernel,
+/// anything else → the full operator: ToPrimitive, string concat, bigint,
+/// throw-on-symbol). When BOTH operands are statically known numbers the
+/// kernel arm is the pure `num_*` op — the M0 shape.
 pub fn guarded_binop(
   fast_op: String,
   slow_op: String,
   a: ir.Value,
   b: ir.Value,
 ) -> Build(ir.Value) {
-  use #(both, elided) <- then(both_numbers(a, b))
-  case elided {
-    True -> num_binop(fast_op, a, b)
-    False -> bind_if(both, num_binop(fast_op, a, b), host(slow_op, [a, b]))
+  fn(e, k) {
+    case is_known_number(e, a) && is_known_number(e, b) {
+      True -> num_binop(fast_op, a, b)(e, k)
+      False ->
+        int_or(
+          fast_op,
+          a,
+          b,
+          host(fast_op, [a, b]),
+          host(slow_op <> "_any", [a, b]),
+        )(e, k)
+    }
   }
 }
 

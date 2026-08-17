@@ -7,6 +7,9 @@
 ////     cd aot && gleam run -m emit_2core_v8v7_probe
 ////
 //// A compile/run failure is REPORTED, not fatal: this is measurement.
+//// Each column is min-of-N batches (PROBE_N, default 3; every batch is
+//// `reps` back-to-back iterations) and every ROW carries the 1/5/15-min
+//// load average it was captured under.
 
 // ── measure-iterate: fast-path before/after (µs/iter, this machine) ──
 // Captured via `gleam run -m emit_2core_v8v7_probe` with `gleam test` green
@@ -365,6 +368,7 @@ import emit_2core_harness as harness
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
+import gleam/list
 import gleam/string
 import simplifile
 
@@ -394,6 +398,29 @@ type Outcome {
   CompileFailed(stage: String, err: String)
   RunFailed(err: String, stdout: String)
   Measured(per_us: Int, reps: Int)
+}
+
+@external(erlang, "emit_2core_probe_ffi", "env_int")
+fn env_int(name: String, default: Int) -> Int
+
+@external(erlang, "emit_2core_probe_ffi", "load_average")
+fn load_average() -> String
+
+fn batches() -> Int {
+  env_int("PROBE_N", 3)
+}
+
+/// min-of-N: `reps` back-to-back iterations per batch, N batches, keep the
+/// fastest per-iteration figure.
+fn min_of_n(reps: Int, f: fn() -> a) -> Int {
+  list.repeat(Nil, batches())
+  |> list.map(fn(_) { time_us(fn() { repeat(reps, f) }).0 / reps })
+  |> list.fold(-1, fn(best, us) {
+    case best {
+      -1 -> us
+      _ -> int.min(best, us)
+    }
+  })
 }
 
 fn repeat(n: Int, f: fn() -> a) -> Nil {
@@ -471,9 +498,7 @@ fn bench_compiled(name: String, source: String) -> Outcome {
                   case stdout {
                     <<"ok\n":utf8>> -> {
                       let reps = reps_for(warm_us)
-                      let #(us, _) =
-                        time_us(fn() { repeat(reps, fn() { run_once(loaded) }) })
-                      Measured(us / reps, reps)
+                      Measured(min_of_n(reps, fn() { run_once(loaded) }), reps)
                     }
                     _ -> RunFailed("stdout mismatch", string.inspect(stdout))
                   }
@@ -494,11 +519,10 @@ fn bench_interp(source: String) -> Outcome {
       case stdout {
         <<"ok\n":utf8>> -> {
           let reps = reps_for(warm_us)
-          let #(us, _) =
-            time_us(fn() {
-              repeat(reps, fn() { harness.run_interpreted(source) })
-            })
-          Measured(us / reps, reps)
+          Measured(
+            min_of_n(reps, fn() { harness.run_interpreted(source) }),
+            reps,
+          )
         }
         _ -> RunFailed("stdout mismatch", string.inspect(stdout))
       }
@@ -554,8 +578,10 @@ fn one(name: String) {
       }
       io.println("  arc-interp : " <> show(interp))
       let #(qjs, llint) = ext_refs(name)
+      let load = load_average()
       io.println("  ref qjs    : " <> int.to_string(qjs) <> " µs")
       io.println("  ref llint  : " <> int.to_string(llint) <> " µs")
+      io.println("  load avg   : " <> load)
       io.println(
         "  ROW "
         <> name
@@ -566,15 +592,21 @@ fn one(name: String) {
         <> "\t"
         <> int.to_string(qjs)
         <> "\t"
-        <> int.to_string(llint),
+        <> int.to_string(llint)
+        <> "\t"
+        <> load,
       )
     }
   }
 }
 
 pub fn main() {
-  io.println("emit_2core V8-v7 probe — one call = one full bench iteration")
-  io.println("  ROW bench\temit_2core\tarc_interp\tqjs\tllint")
+  io.println(
+    "emit_2core V8-v7 probe — one call = one full bench iteration, min-of-"
+    <> int.to_string(batches())
+    <> " batches (PROBE_N)",
+  )
+  io.println("  ROW bench\temit_2core\tarc_interp\tqjs\tllint\tload_avg")
   one("richards")
   one("deltablue")
   one("crypto")

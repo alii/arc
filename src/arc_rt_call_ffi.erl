@@ -20,8 +20,10 @@
 -module(arc_rt_call_ffi).
 -export([t_call_protected/4, t_apply_protected/2, mk_frame/4, apply_sm/5,
          step_classify/1, t_kfn_code/3, t_new_simple/3,
-         t_call_method_mono/4, t_call_method_ic/5, t_call_method_ic0/4,
-         t_call_method_ic1/5, t_call_method_ic2/6, t_call_method_ic3/7]).
+         t_call_fast/4, t_call_fast0/3, t_call_fast1/4, t_call_fast2/5,
+         t_call_fast3/6,
+         t_call_method_mono/4, t_call_method_ic/6, t_call_method_ic0/5,
+         t_call_method_ic1/6, t_call_method_ic2/7, t_call_method_ic3/8]).
 
 -include("arc_rt_layout.hrl").
 
@@ -74,6 +76,76 @@ t_kfn_code(_, _, _) -> undefined.
          element(?FNFLAGS_IS_GEN, Flags) =:= false andalso
          element(?FNFLAGS_IS_ASYNC, Flags) =:= false)).
 
+%% t_call_fast(St, F, This, Args) -> {V, St'}
+%% The generic `f(args)` site as ONE host op: the t_kfn_code gate (matched
+%% in place, no triple built), then the simple-ABI (arity match) or Frame
+%% apply the emitter used to inline at every site, else
+%% arc@rt@call:t_call_checked. Same gate, same Frame, same fallback.
+t_call_fast(St, F, This, Args) ->
+    call_fast(St, F, This, Args, undefined, undefined, undefined).
+
+%% t_call_fastN(St, F, This, A1..AN) — the same with 0..3 positional args, so
+%% a simple-ABI hit applies the variant with no args list and no apply hop.
+t_call_fast0(St, F, This) ->
+    call_fast(St, F, This, 0, undefined, undefined, undefined).
+t_call_fast1(St, F, This, A) ->
+    call_fast(St, F, This, 1, A, undefined, undefined).
+t_call_fast2(St, F, This, A, B) ->
+    call_fast(St, F, This, 2, A, B, undefined).
+t_call_fast3(St, F, This, A, B, C) ->
+    call_fast(St, F, This, 3, A, B, C).
+
+%% N is the args list itself, or 0..3 with the args in A, B, C.
+call_fast(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
+    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, Slot) of
+                {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
+                  when ?KFN_PLAIN(Flags) ->
+                    %% §10.2.1.2 bind-this as in t_kfn_code.
+                    case element(?FNFLAGS_IS_ARROW, Flags)
+                         orelse element(?FNFLAGS_IS_STRICT, Flags) of
+                        true ->
+                            apply_fast(St, F, Code, Simple, This, N, A, B, C);
+                        false when This =:= undefined; This =:= null ->
+                            G = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
+                            apply_fast(St, F, Code, Simple, G, N, A, B, C);
+                        false when element(1, This) =:= ?HANDLE_TAG ->
+                            apply_fast(St, F, Code, Simple, This, N, A, B, C);
+                        false -> call_slow(St, F, This, N, A, B, C)
+                    end;
+                _ -> call_slow(St, F, This, N, A, B, C)
+            end;
+        _ -> call_slow(St, F, This, N, A, B, C)
+    end;
+call_fast(St, F, This, N, A, B, C) -> call_slow(St, F, This, N, A, B, C).
+
+call_slow(St, F, This, N, A, B, C) ->
+    arc@rt@call:t_call_checked(St, F, This, args(N, A, B, C)).
+
+apply_fast(St, _, _, {?SOME, {CodeS, Arity, NeedsThis}}, ThisR, Args, _, _, _)
+  when is_list(Args), length(Args) =:= Arity ->
+    case NeedsThis of
+        true -> apply_this(CodeS, St, ThisR, Args);
+        false -> erlang:apply(CodeS, [St | Args])
+    end;
+apply_fast(St, _, _, {?SOME, {CodeS, N, true}}, ThisR, N, A, B, C) ->
+    case N of
+        0 -> CodeS(St, ThisR);
+        1 -> CodeS(St, ThisR, A);
+        2 -> CodeS(St, ThisR, A, B);
+        3 -> CodeS(St, ThisR, A, B, C)
+    end;
+apply_fast(St, _, _, {?SOME, {CodeS, N, false}}, _, N, A, B, C) ->
+    case N of
+        0 -> CodeS(St);
+        1 -> CodeS(St, A);
+        2 -> CodeS(St, A, B);
+        3 -> CodeS(St, A, B, C)
+    end;
+apply_fast(St, F, Code, _, ThisR, N, A, B, C) ->
+    Code(St, {ThisR, F, undefined, undefined}, args(N, A, B, C)).
+
 %% IcEntry (rt_types.gleam): {ic_call, KeyBin, Entries}, each entry
 %% {ic_call_way, Sid, PId, Chain, Fn} with Chain = [{ProtoId, ProtoSlot}]
 %% from the receiver's proto down to the holder. Up to ?IC_CALL_WAYS entries
@@ -83,8 +155,14 @@ t_kfn_code(_, _, _) -> undefined.
 -define(IC_CALL_WAY, ic_call_way).
 -define(IC_CALL_WAYS, 4).
 
-%% t_call_method_ic(St, Recv, KeyBin, Args, Site) -> {V, St'} | {miss, St}
-%% JMut. `t_call_method_mono` with a per-site inline cache (JsStore.ics).
+%% t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) -> {V, St'}
+%% JMut. The whole compiled `o.key(args)` site as ONE host op: the IC probe
+%% below, and on its miss the same read + call the emitter used to inline at
+%% every site — `t_get_prop_site` at the read site `RSite`, then `call_fast`
+%% with `this = Recv`. St is unchanged on a probe miss (no side effect
+%% precedes the apply), so the read observes exactly the state it did inline.
+%%
+%% The probe: `t_call_method_mono` with a per-site inline cache (JsStore.ics).
 %% Hit: receiver is a shaped object of an entry's shape (so no own `key`),
 %% its proto is the entry's first cell and every cell on the chain still
 %% holds the very slot the key was resolved through (an equal slot has the
@@ -93,22 +171,32 @@ t_kfn_code(_, _, _) -> undefined.
 %% and, when a shaped receiver resolves the key on its proto chain, records
 %% the way: replacing a stale entry (same shape and proto, a chain cell was
 %% written) or adding one while the site has room.
-t_call_method_ic(St, Recv, KeyBin, Args, Site) ->
-    ic(St, Recv, KeyBin, Site, Args, undefined, undefined, undefined).
+t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) ->
+    method(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined,
+           undefined).
 
-%% t_call_method_icN(St, Recv, KeyBin, Site, A1..AN) — the same probe with
+%% t_call_method_icN(St, Recv, KeyBin, Site, RSite, A1..AN) — the same with
 %% 0..3 positional args, so a hit applies a matching simple variant with no
 %% args list, no length/1 and no apply hop.
-t_call_method_ic0(St, Recv, KeyBin, Site) ->
-    ic(St, Recv, KeyBin, Site, 0, undefined, undefined, undefined).
-t_call_method_ic1(St, Recv, KeyBin, Site, A) ->
-    ic(St, Recv, KeyBin, Site, 1, A, undefined, undefined).
-t_call_method_ic2(St, Recv, KeyBin, Site, A, B) ->
-    ic(St, Recv, KeyBin, Site, 2, A, B, undefined).
-t_call_method_ic3(St, Recv, KeyBin, Site, A, B, C) ->
-    ic(St, Recv, KeyBin, Site, 3, A, B, C).
+t_call_method_ic0(St, Recv, KeyBin, Site, RSite) ->
+    method(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined, undefined).
+t_call_method_ic1(St, Recv, KeyBin, Site, RSite, A) ->
+    method(St, Recv, KeyBin, Site, RSite, 1, A, undefined, undefined).
+t_call_method_ic2(St, Recv, KeyBin, Site, RSite, A, B) ->
+    method(St, Recv, KeyBin, Site, RSite, 2, A, B, undefined).
+t_call_method_ic3(St, Recv, KeyBin, Site, RSite, A, B, C) ->
+    method(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
 
 %% N is the args list itself, or 0..3 with the args in A, B, C.
+method(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
+    case ic(St, Recv, KeyBin, Site, N, A, B, C) of
+        {miss, St1} ->
+            {F, St2} = arc_rt_obj_ffi:t_get_prop_site(St1, Recv, KeyBin,
+                                                      RSite),
+            call_fast(St2, F, Recv, N, A, B, C);
+        Hit -> Hit
+    end.
+
 ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),

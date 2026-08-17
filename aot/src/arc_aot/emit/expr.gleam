@@ -241,7 +241,10 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
         True -> emit_chain_root(ex)
         False -> {
           use ov <- anf.then(expr(object))
-          emit_member_get(ov, property)
+          case object, static_dot_key(property) {
+            ast.ThisExpression(_), Some(kb) -> get_prop_this(ov, kb)
+            _, _ -> emit_member_get(ov, property)
+          }
         }
       }
     // Optional member — always a chain root.
@@ -1302,7 +1305,7 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
       use e <- anf.then(ask)
       // Optimization G: top-level `var`/`function` declared name → boxed
       // module-local cell (cell_get, ~3ns) instead of the global object
-      // (global_get_fast + IsAtom + bind_if, ~8ns × 41k/run on richards).
+      // (`global_get` kernel call, ~8ns × 41k/run on richards).
       case dict.get(e.slotted_globals, g) {
         Ok(slot) -> read_slot(slot, True)
         Error(Nil) ->
@@ -1310,15 +1313,10 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
             // Top-level `var G = <literal>` never reassigned in the whole
             // script — inline the literal (analyze_const_globals proved it).
             Some(lit) -> anf.pure(lit)
-            None -> {
-              // global_get_fast (JRead) probes the global object's own
-              // data props. IsAtom catches `miss` AND atom-valued globals —
-              // a perf-only conflation; full JMut `global_get` re-reads.
-              let kb = ir.ConstBinary(bit_array.from_string(g))
-              use v <- anf.then(anf.host("global_get_fast", [kb]))
-              use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
-              anf.bind_if(is_miss, anf.host("global_get", [kb]), anf.pure(v))
-            }
+            None ->
+              // JMut `global_get` kernel: own-data probe on the global
+              // object, full read on a miss — one host op per site.
+              anf.host("global_get", [ir.ConstBinary(bit_array.from_string(g))])
           }
       }
     }
@@ -1516,69 +1514,51 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   }
 }
 
-/// Own-data-property READ fast path. Each site gets a module-unique id and
-/// probes its store-resident inline cache first (`get_prop_ic`, a JRead:
-/// shape id + slot offset seen at this site). On a miss the JMut
-/// `get_prop_ic_miss` runs the own DataProperty / shaped slot probe
-/// (arc_rt_obj_ffi) and fills an empty site; `=:= miss` (NOT IsAtom —
-/// undefined/null/true/false are legitimate values) falls to `slow`, the
-/// full `get_prop`. The probes do their own receiver check, so non-handle
-/// receivers need no guard here.
-fn get_prop_fast(
-  obj: ir.Value,
-  kb: BitArray,
-  slow: Build(ir.Value),
-) -> Build(ir.Value) {
+/// Own-data-property READ, static `.key`. Each site gets a module-unique id
+/// and the whole read is ONE JMut host op, `get_prop_site` (arc_rt_obj_ffi):
+/// the store-resident inline cache probe (shape id + slot offset seen at this
+/// site), then the own DataProperty / shaped slot probe that fills an empty
+/// site, then the full `get_prop` with the named key. A single call keeps the
+/// site small in the emitted forms.
+fn get_prop_fast(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
+  use site <- anf.then(next_site())
+  anf.host("get_prop_site", [obj, ir.ConstBinary(kb), ir.ConstI32(site)])
+}
+
+/// `this.key` read — the shaped-object field read the IC exists for, and
+/// the hot read of every method body. The IC hit is probed INLINE with the
+/// JRead `get_prop_ic` (bare value on a warm hit, no `{V, St}` alloc, no
+/// state rebind); `=:= miss` (NOT IsAtom — undefined/null/true/false are
+/// legitimate values) falls to the JMut `get_prop_slow` kernel: the filling
+/// probe, then the full `get_prop`. Two calls per site — the inline branch
+/// costs ~200 words of forms, so only `this` receivers pay it.
+fn get_prop_this(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
   use site <- anf.then(next_site())
   let key = ir.ConstBinary(kb)
   let site = ir.ConstI32(site)
   use v <- anf.then(anf.host("get_prop_ic", [obj, key, site]))
   use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
-  anf.bind_if(
-    ic_miss,
-    {
-      use v <- anf.then(anf.host("get_prop_ic_miss", [obj, key, site]))
-      use is_miss <- anf.then(
-        anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
-      )
-      anf.bind_if(is_miss, slow, anf.pure(v))
-    },
-    anf.pure(v),
-  )
+  anf.bind_if(ic_miss, anf.host("get_prop_slow", [obj, key, site]), anf.pure(v))
 }
 
-/// Build the wire `{string_key, {named, kb}}` PropertyKey from a raw binary
-/// — the miss-branch fallback key. Deferred INTO the miss arm so the hot path
-/// pays zero MakeTuple.
-fn named_key_from_binary(kb: BitArray) -> Build(ir.Value) {
-  use inner <- anf.then(
-    anf.bind(
-      ir.TermOp(ir.MakeTuple, [
-        ir.ConstAtom("named"),
-        ir.ConstBinary(kb),
-      ]),
-    ),
-  )
-  anf.make_tuple([ir.ConstAtom("string_key"), inner])
-}
-
-/// Own-data-property WRITE fast path: one JMutMiss probe
-/// (`set_prop_own_data`) that overwrites an existing own writable
-/// DataProperty / shaped slot and yields the rebound state (a tuple) or the
-/// atom `miss`; `IsAtom` routes the miss to the full `set_prop`. Yields `v`
-/// (the assignment expression's own value).
+/// Static-key property WRITE: one JMutUnit host op (`set_prop_named`) that
+/// runs the own-data probe and falls to the full `set_prop` /
+/// `set_prop_strict` inside the runtime, so the site is a single call.
+/// Yields `v` (the assignment expression's own value).
 fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
-  use r <- anf.then(anf.host("set_prop_own_data", [obj, ir.ConstBinary(kb), v]))
-  use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, r)))
-  use _ <- anf.then(anf.bind_if(
-    is_miss,
-    {
-      use key <- anf.then(named_key_from_binary(kb))
-      use op <- anf.then(set_prop_op())
-      anf.host(op, [obj, key, v])
-    },
-    anf.pure(v),
-  ))
+  use e <- anf.then(ask)
+  let strict = case e.strict {
+    True -> ir.ConstAtom("true")
+    False -> ir.ConstAtom("false")
+  }
+  use _ <- anf.then(
+    anf.host("set_prop_named", [
+      obj,
+      ir.ConstBinary(kb),
+      v,
+      strict,
+    ]),
+  )
   anf.pure(v)
 }
 
@@ -1645,11 +1625,7 @@ pub fn emit_member_get(
   prop: ast.MemberProperty,
 ) -> Build(ir.Value) {
   case static_dot_key(prop) {
-    Some(kb) ->
-      get_prop_fast(obj, kb, {
-        use k <- anf.then(named_key_from_binary(kb))
-        anf.host("get_prop", [obj, k])
-      })
+    Some(kb) -> get_prop_fast(obj, kb)
     None ->
       case prop {
         ast.Bracket(expression:) -> {
@@ -1713,27 +1689,41 @@ fn fold_args_spread(
   }
 }
 
-/// D4: JS fn values are `{js_cell,N}` handles. Fast path: `kfn_code` reads the
-/// KCompiled ONCE and returns `{code, resolved_this, simple}` (§10.2.1.2
-/// bind-this folded in) → `TermTest(IsTuple)` guards `CallClosure`; else §8
-/// `t_call_checked`. One heap read per call, not two.
+/// D4: JS fn values are `{js_cell,N}` handles. The generic call site is ONE
+/// host op: `call_fast` (arc_rt_call_ffi) runs the `kfn_code` probe, the
+/// simple-ABI / Frame apply and the §8 `t_call_checked` fallback inside, so
+/// no per-site hit/miss branches reach the IR.
 pub fn emit_call(
   f: ir.Value,
   this: ir.Value,
   args_l: ir.Value,
 ) -> Build(ir.Value) {
-  use pair <- anf.then(anf.host("kfn_code", [f, this]))
-  emit_call_with_pair(pair, f, this, Consed(args_l))
+  anf.host("call_fast", [f, this, args_l])
+}
+
+/// `emit_call` with 0..3 positional args passed to `call_fastN` — a simple-ABI
+/// hit applies the variant with no args list; more args cons and use the
+/// list form.
+pub fn emit_call_pos(
+  f: ir.Value,
+  this: ir.Value,
+  pos: List(ir.Value),
+) -> Build(ir.Value) {
+  case pos {
+    [] | [_] | [_, _] | [_, _, _] ->
+      anf.host("call_fast" <> int.to_string(list.length(pos)), [f, this, ..pos])
+    _ -> {
+      use args_l <- anf.then(anf.cons_list(pos))
+      emit_call(f, this, args_l)
+    }
+  }
 }
 
 /// Call arguments as passed to `emit_call_with_pair`. `Positional` defers the
 /// args cons-list build so the simple-ABI hit path emits ZERO MakeCons.
-/// `ArgsList` is an already-built cons-list Value (the frame's raw `_args`) —
-/// passed verbatim, arity unknown so simple-ABI is skipped.
 pub type CallArgs {
   Consed(ir.Value)
   Positional(List(ir.Value))
-  ArgsList(ir.Value)
 }
 
 /// `emit_call` with the `kfn_code` triple already in hand. stmt.gleam hoists
@@ -1752,7 +1742,7 @@ pub fn emit_call_with_pair(
   // Cons the args-list only in arms that need it — `pos` values are already
   // Let-bound so duplicating the cons across branches reorders no side effects.
   let cons_args = case args {
-    Consed(v) | ArgsList(v) -> anf.pure(v)
+    Consed(v) -> anf.pure(v)
     Positional(pos) -> anf.cons_list(pos)
   }
   use is_kfn <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, pair)))
@@ -1766,7 +1756,7 @@ pub fn emit_call_with_pair(
       anf.bind(ir.CallClosure(code, [frame, args_l]))
     }
     case args {
-      Consed(_) | ArgsList(_) -> frame_path
+      Consed(_) -> frame_path
       Positional(pos) -> {
         use simple <- anf.then(anf.bind(anf.tuple_get(pair, 2)))
         use is_some <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, simple)))
@@ -1808,13 +1798,14 @@ pub fn emit_call_with_pair(
 }
 
 /// Method call `o.prop(args)` with `o` already Let-bound (§13.3.6.2 this=obj).
-/// Static-dot ∧ spread-free → fused JMut `call_method_ic` (proto walk +
-/// KCompiled apply in ONE FFI call, `miss` on any shape mismatch); miss and
-/// every non-fusable shape fall to `emit_member_get` → `kfn_code` →
-/// `emit_call_with_pair` with `Positional(pos)` so simple-ABI still applies.
-/// Args evaluate ONCE, before the probe — the miss arm re-uses `pos` (no
-/// re-eval); the accessor-`prop` × side-effecting-arg reorder is the only
-/// observable delta and `call_method_ic` misses on accessors.
+/// Static-dot ∧ spread-free → ONE JMut host op, `call_method_ic` (proto walk
+/// + KCompiled apply behind the site's inline cache, and on its miss the
+/// `get_prop_site` read + `call_fastN` call, all inside arc_rt_call_ffi);
+/// every non-fusable shape emits `emit_member_get` → `emit_call_pos`
+/// (`call_fastN` kernel) so simple-ABI still applies.
+/// Args evaluate ONCE, before the probe; the accessor-`prop` ×
+/// side-effecting-arg reorder is the only observable delta and the probe
+/// misses on accessors so the read runs after the args as before.
 fn emit_member_call(
   o: ir.Value,
   prop: ast.MemberProperty,
@@ -1832,26 +1823,11 @@ fn emit_member_call(
           // Computed / #private — key evals BEFORE args (§13.3.6 order).
           use f <- anf.then(emit_member_get(o, prop))
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          use pair <- anf.then(anf.host("kfn_code", [f, o]))
-          emit_call_with_pair(pair, f, o, Positional(pos))
+          emit_call_pos(f, o, pos)
         }
         Some(kb) -> {
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          use r <- anf.then(call_method_ic_pos(o, kb, pos))
-          // `=:= miss` — NOT IsAtom: undefined/null/true/false are atoms and
-          // are legitimate call results; an IsAtom guard would double-call.
-          use is_miss <- anf.then(
-            anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))),
-          )
-          anf.bind_if(
-            is_miss,
-            {
-              use f <- anf.then(emit_member_get(o, prop))
-              use pair <- anf.then(anf.host("kfn_code", [f, o]))
-              emit_call_with_pair(pair, f, o, Positional(pos))
-            },
-            anf.pure(r),
-          )
+          call_method_ic_pos(o, kb, pos)
         }
       }
   }
@@ -1867,11 +1843,12 @@ fn call_method_ic_pos(
 ) -> Build(ir.Value) {
   case pos {
     [] | [_] | [_, _] | [_, _, _] -> {
-      use site <- anf.then(next_site())
+      use #(site, rsite) <- anf.then(method_sites())
       anf.host("call_method_ic" <> int.to_string(list.length(pos)), [
         recv,
         ir.ConstBinary(kb),
-        ir.ConstI32(site),
+        site,
+        rsite,
         ..pos
       ])
     }
@@ -1882,21 +1859,25 @@ fn call_method_ic_pos(
   }
 }
 
-/// The fused method-call probe (`t_call_method_ic`, arc_rt_call_ffi): the
-/// mono proto walk + apply behind a per-site inline cache keyed by a
-/// module-unique site id (`next_site`, shared with the read caches).
+/// The fused method call (`t_call_method_ic`, arc_rt_call_ffi): the mono
+/// proto walk + apply behind a per-site inline cache, and the read + call
+/// on its miss, keyed by two module-unique site ids (`next_site`, shared
+/// with the read caches).
 fn call_method_ic(
   recv: ir.Value,
   kb: BitArray,
   args_l: ir.Value,
 ) -> Build(ir.Value) {
+  use #(site, rsite) <- anf.then(method_sites())
+  anf.host("call_method_ic", [recv, ir.ConstBinary(kb), args_l, site, rsite])
+}
+
+/// The call site's IC id and the read site's IC id for its miss arm — two
+/// ids, since `ic_call` and `ic_read` entries share the store's map.
+fn method_sites() -> Build(#(ir.Value, ir.Value)) {
   use site <- anf.then(next_site())
-  anf.host("call_method_ic", [
-    recv,
-    ir.ConstBinary(kb),
-    args_l,
-    ir.ConstI32(site),
-  ])
+  use rsite <- anf.then(next_site())
+  anf.pure(#(ir.ConstI32(site), ir.ConstI32(rsite)))
 }
 
 /// §13.3.7.1 step 12 InitializeInstanceElements — call the captured
@@ -2146,8 +2127,8 @@ fn emit_unary(op: ast.UnaryOp, arg: ast.Expression) -> Build(ir.Value) {
 // `chain_has_optional(ex)==False`; the optional-chain path handles `?.` links.
 
 /// General `X.apply(Y, arguments)` lowering: evaluate `X` → f, `Y` → recv,
-/// then `kfn_code(f, recv)` → frame-path call with the raw `_args` cons-list
-/// passed verbatim (arity unknown, so simple-ABI is skipped).
+/// then `call_fast(f, recv, _args)` with the raw `_args` cons-list passed
+/// verbatim.
 fn emit_apply_raw_general(
   inner: ast.Expression,
   recv_arg: ast.Expression,
@@ -2155,15 +2136,14 @@ fn emit_apply_raw_general(
 ) -> Build(ir.Value) {
   use f <- anf.then(expr(inner))
   use recv <- anf.then(expr(recv_arg))
-  use pair <- anf.then(anf.host("kfn_code", [f, recv]))
-  emit_call_with_pair(pair, f, recv, ArgsList(raw_args))
+  emit_call(f, recv, raw_args)
 }
 
 /// `X.apply(Y, arguments)` fast-path — forwards the frame's raw `_args`
 /// cons-list directly, eliding the arguments-object read + Function.prototype
 /// .apply reflection (raytrace `Class.create`: 66k× per run). The tighter
-/// `this.M.apply(this, arguments)` shape routes through `call_method_ic`;
-/// miss falls to the general form.
+/// `this.M.apply(this, arguments)` shape routes through `call_method_ic`
+/// (whose miss arm is the general read + call).
 fn emit_apply_arguments(
   inner: ast.Expression,
   recv_arg: ast.Expression,
@@ -2175,19 +2155,7 @@ fn emit_apply_arguments(
       case static_dot_key(mprop) {
         Some(kb) -> {
           use this <- anf.then(emit_lexical(lexical.RefThis))
-          use r <- anf.then(call_method_ic(this, kb, raw_args))
-          use is_miss <- anf.then(
-            anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))),
-          )
-          anf.bind_if(
-            is_miss,
-            {
-              use f <- anf.then(emit_member_get(this, mprop))
-              use pair <- anf.then(anf.host("kfn_code", [f, this]))
-              emit_call_with_pair(pair, f, this, ArgsList(raw_args))
-            },
-            anf.pure(r),
-          )
+          call_method_ic(this, kb, raw_args)
         }
         None -> emit_apply_raw_general(inner, recv_arg, raw_args)
       }
@@ -2302,17 +2270,17 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
         _ -> None
       }
       use f <- anf.then(expr(callee))
-      // Spread-free → keep the positional value list so `emit_call_with_pair`
-      // can try the simple-ABI closure; the hoisted (or fresh) `pair` supplies
-      // both the frame code AND `pair.2` — hoist × simple-abi compose.
+      // Spread-free → keep the positional value list so the simple-ABI
+      // closure applies: inline via the hoisted `pair` (frame code AND
+      // `pair.2`), else inside the `call_fastN` kernel.
       case ast_util.has_spread_arg(args) {
         False -> {
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          use pair <- anf.then(case hoisted {
-            Some(p) -> anf.pure(p)
-            None -> anf.host("kfn_code", [f, rc.undef])
-          })
-          emit_call_with_pair(pair, f, rc.undef, Positional(pos))
+          case hoisted {
+            Some(pair) ->
+              emit_call_with_pair(pair, f, rc.undef, Positional(pos))
+            None -> emit_call_pos(f, rc.undef, pos)
+          }
         }
         True -> {
           use args_l <- anf.then(emit_args_list(args))
@@ -2564,10 +2532,7 @@ pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
     LvMember(obj:, key:, is_private: True, ..) ->
       anf.host("private_get", [obj, key])
     LvMember(obj:, is_private: False, own_key: Some(kb), ..) ->
-      get_prop_fast(obj, kb, {
-        use key <- anf.then(named_key_from_binary(kb))
-        anf.host("get_prop", [obj, key])
-      })
+      get_prop_fast(obj, kb)
     LvMember(obj:, key:, is_private: False, elem_idx: Some(idx), ..) ->
       get_elem_fast(obj, idx, {
         use k <- anf.then(elem_key(obj, idx, key))

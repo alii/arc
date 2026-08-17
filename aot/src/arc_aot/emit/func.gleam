@@ -1657,6 +1657,90 @@ fn emit_simple_body(
   })
 }
 
+/// Frame-ABI entry for a function whose body lives in its simple-ABI variant:
+/// bind `this` from `_frame` when the variant takes it, walk `_args` binding
+/// one positional param per cons cell, and tail-call the variant with the
+/// captures forwarded. Each level tests once for the end of the list; when
+/// the list ends early the remaining params are `undefined`, extras are
+/// dropped. No allocation, one branch per param.
+fn simple_shim_body(
+  target: String,
+  ncap: Int,
+  arity: Int,
+  needs_this: Bool,
+  undef: ir.Value,
+) -> ir.Expr {
+  let caps =
+    build_ir_params(0, ncap)
+    |> list.take(ncap)
+    |> list.map(fn(l) { ir.Var(l.name) })
+  let this = case needs_this {
+    True -> [ir.Var(simple_this_param)]
+    False -> []
+  }
+  let lead = list.append(caps, this)
+  let unpack = shim_walk(target, 0, arity, undef, ir.Var("_args"), lead, [])
+  case needs_this {
+    True ->
+      ir.Let(
+        [simple_this_param],
+        ir.TermOp(ir.TupleGet(0), [ir.Var("_frame")]),
+        unpack,
+      )
+    False -> unpack
+  }
+}
+
+/// `bound` holds the positional params bound so far, reversed; `tail` is the
+/// unconsumed rest of `_args`.
+fn shim_walk(
+  target: String,
+  i: Int,
+  arity: Int,
+  undef: ir.Value,
+  tail: ir.Value,
+  lead: List(ir.Value),
+  bound: List(ir.Value),
+) -> ir.Expr {
+  let call = fn(pos) { ir.ReturnCall(target, list.append(lead, pos)) }
+  case i < arity {
+    False -> call(list.reverse(bound))
+    True -> {
+      let p = simple_param_name(i)
+      let short =
+        list.append(list.reverse(bound), list.repeat(undef, arity - i))
+      let more = case i + 1 < arity {
+        False ->
+          shim_walk(target, i + 1, arity, undef, tail, lead, [
+            ir.Var(p),
+            ..bound
+          ])
+        True -> {
+          let rest = "_r" <> int.to_string(i)
+          ir.Let(
+            [rest],
+            ir.TermOp(ir.ListTail, [tail]),
+            shim_walk(target, i + 1, arity, undef, ir.Var(rest), lead, [
+              ir.Var(p),
+              ..bound
+            ]),
+          )
+        }
+      }
+      ir.Let(
+        ["_e" <> int.to_string(i)],
+        ir.TermOp(ir.IsEmptyList, [tail]),
+        ir.If(
+          ir.Var("_e" <> int.to_string(i)),
+          [ir.TTerm],
+          call(short),
+          ir.Let([p], ir.TermOp(ir.ListHead, [tail]), more),
+        ),
+      )
+    }
+  }
+}
+
 // ── closure site (SPEC.md:1388; pure anf.* — dispatch-free) ─────────────────
 
 fn atom_bool(rc: state.RealmConsts, b: Bool) -> ir.Value {
@@ -1815,31 +1899,12 @@ pub fn emit_function_tree(
           this_tdz: derived_ctor || e_child.this_tdz,
         )
       let e_child = seed_capture_slots(e_child, child_info)
-      use #(body_expr, e_child) <- result.try(emit_body(
-        e_child,
-        sf,
-        params,
-        body,
-        child_info,
-      ))
       let ncap = capture_count(child_info)
-      let e_child =
-        state.add_function(
-          e_child,
-          ir.Function(
-            name: fn_name,
-            params: build_ir_params(0, ncap),
-            result: [ir.TTerm],
-            locals: [],
-            body: body_expr,
-          ),
-        )
-      let e = state.leave_function(e_child, save)
-      // Simple-ABI second closure: re-emit the body against fresh cursors
-      // (enter_function re-derives them from the tree) with positional _p{i}
-      // params instead of _frame/_args. self_name/lexical_boxed are extra
-      // gates on top of is_simple_abi_eligible — both would read the elided
-      // _frame slots.
+      // Simple-ABI closure: the body is emitted ONCE with positional _p{i}
+      // params instead of _frame/_args, and the frame-ABI function becomes a
+      // shim that unpacks `_args` and tail-calls it. self_name/lexical_boxed
+      // are extra gates on top of is_simple_abi_eligible — both would read
+      // the elided _frame slots.
       let simple_arity = case
         sf.self_name,
         child_info.lexical_boxed == lexical.no_lexical_refs,
@@ -1849,23 +1914,32 @@ pub fn emit_function_tree(
         _, _, _ -> None
       }
       use #(e, simple) <- result.try(case simple_arity {
-        None -> Ok(#(e, None))
+        None -> {
+          use #(body_expr, e_child) <- result.try(emit_body(
+            e_child,
+            sf,
+            params,
+            body,
+            child_info,
+          ))
+          let e_child =
+            state.add_function(
+              e_child,
+              ir.Function(
+                name: fn_name,
+                params: build_ir_params(0, ncap),
+                result: [ir.TTerm],
+                locals: [],
+                body: body_expr,
+              ),
+            )
+          Ok(#(state.leave_function(e_child, save), None))
+        }
         Some(#(arity, needs_this)) -> {
           let simple_fn_name = case needs_this {
             True -> fn_name <> "_t"
             False -> fn_name <> "_s"
           }
-          let #(e_child, save) =
-            state.enter_function(
-              e,
-              fn_scope_id,
-              strict: child_strict,
-              is_async: False,
-              is_generator: False,
-              is_arrow: sf.is_arrow,
-            )
-          let e_child = Emitter2(..e_child, field_init:)
-          let e_child = seed_capture_slots(e_child, child_info)
           use #(sbody, e_child) <- result.try(emit_simple_body(
             e_child,
             fixed,
@@ -1882,6 +1956,23 @@ pub fn emit_function_tree(
                 result: [ir.TTerm],
                 locals: [],
                 body: sbody,
+              ),
+            )
+          let e_child =
+            state.add_function(
+              e_child,
+              ir.Function(
+                name: fn_name,
+                params: build_ir_params(0, ncap),
+                result: [ir.TTerm],
+                locals: [],
+                body: simple_shim_body(
+                  simple_fn_name,
+                  ncap,
+                  arity,
+                  needs_this,
+                  e_child.consts.undef,
+                ),
               ),
             )
           Ok(#(

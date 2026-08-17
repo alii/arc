@@ -5,6 +5,7 @@
 import arc/bytecode/lexical
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
+import arc_aot/emit/split
 import carder/ir
 import gleam/dict.{type Dict}
 import gleam/list
@@ -493,10 +494,12 @@ pub fn fresh_fn_name(e: Emitter2) -> #(String, Emitter2) {
   #("jsf_" <> int_to_string(e.next_fn), Emitter2(..e, next_fn: e.next_fn + 1))
 }
 
-/// Prepend a lowered ir.Function to the module accumulator. fns_acc is
+/// Prepend a lowered ir.Function (split into a tail-call chain when its
+/// body is long, see split.gleam) to the module accumulator. fns_acc is
 /// module-monotone (invariant #1): survives enter_function/leave_function.
 pub fn add_function(e: Emitter2, f: ir.Function) -> Emitter2 {
-  Emitter2(..e, fns_acc: [f, ..e.fns_acc])
+  let fs = list.reverse(split.function(f))
+  Emitter2(..e, fns_acc: list.append(fs, e.fns_acc))
 }
 
 /// Drain the accumulated functions in emit order (M19 builds ir.Module from
