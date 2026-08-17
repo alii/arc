@@ -301,6 +301,11 @@ pub fn emit_hoists(
 /// emitted IR size).
 const chunk_budget = 100
 
+/// Widest live set a chunk may take as parameters. BEAM caps a function at
+/// 255 arguments and the backend adds the store, so a cut whose live set is
+/// wider than this waits for a narrower point.
+const max_live = 250
+
 /// Emit the hoists (one `emit_hoists` per statement, in source order) and
 /// then the statements, cutting to a new chunk function whenever the current
 /// one has spent `chunk_budget` fresh vars since `start`. Each cut tail-calls
@@ -335,12 +340,14 @@ fn cut_or_continue(
   n: Int,
 ) -> Result(#(ir.Expr, state.Emitter2), EmitError) {
   let done = hoists == [] && stmts == []
-  case e.next_var - start >= chunk_budget && !done {
+  let live =
+    dict.values(e.slot_vars) |> list.unique |> list.sort(string.compare)
+  let ready =
+    e.next_var - start >= chunk_budget && !done && list.length(live) <= max_live
+  case ready {
     False -> emit_top_level(e, hoists, stmts, start, n)
     True -> {
       let name = "js_main_" <> int.to_string(n + 1)
-      let live =
-        dict.values(e.slot_vars) |> list.unique |> list.sort(string.compare)
       use #(body, e) <- result.map(emit_top_level(
         e,
         hoists,
