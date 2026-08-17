@@ -15,11 +15,11 @@
 %%% `t_set_prop_any` path. Reads return the bare value; writes return the
 %%% rebuilt `St'`.
 -module(arc_rt_obj_ffi).
--export([t_get_prop_own_data/3, t_set_prop_own_data/4,
-         t_get_prop_ic/4, t_get_prop_ic_miss/4,
+-export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
+         t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_site/4,
          t_instanceof_fast/3,
          t_get_elem_fast/3, t_set_elem_fast/4,
-         t_global_get_fast/2,
+         t_global_get_fast/2, t_global_get/2,
          shape_slots_get/2, shape_slots_set/3, shape_slots_append/2,
          shape_slots_fold/3]).
 
@@ -88,12 +88,38 @@ t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     end;
 t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
+%% t_get_prop_site(St, Recv, KeyBin, Site) -> {V, St'}
+%% JMut. The whole compiled `.key` read at one site: IC hit, else the
+%% filling probe, else the full [[Get]] with the named wire key. One call per
+%% site keeps the emitted IR flat; the IC data stays in the store.
+t_get_prop_site(St, Recv, KeyBin, Site) ->
+    case t_get_prop_ic(St, Recv, KeyBin, Site) of
+        miss ->
+            case t_get_prop_ic_miss(St, Recv, KeyBin, Site) of
+                {miss, St1} ->
+                    'arc@rt@obj':t_get_prop_any(St1, Recv,
+                                                {string_key, {named, KeyBin}});
+                Hit -> Hit
+            end;
+        V -> {V, St}
+    end.
+
 %% t_global_get_fast(St, KeyBin) -> V | miss
 %% JRead global-var read: own data prop on the realm's global object.
 t_global_get_fast(St, KeyBin) ->
     Realm = element(?AGENT_REALM, St),
     {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, Realm),
     peek_get(St, GId, KeyBin).
+
+%% t_global_get(St, KeyBin) -> {V, St'}
+%% JMut kernel behind the emitted `global_get` host op: the own-data probe
+%% above, then the full spec read (proto walk / accessors / ReferenceError)
+%% on a miss. One call per site instead of probe + is_atom + branch.
+t_global_get(St, KeyBin) ->
+    case t_global_get_fast(St, KeyBin) of
+        miss -> arc@rt@obj:t_global_get(St, KeyBin);
+        V -> {V, St}
+    end.
 
 peek_get(St, Id, KeyBin) ->
     case slot_of(St, Id) of
@@ -157,6 +183,22 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
         _ -> miss
     end;
 t_set_prop_own_data(_, _, _, _) -> miss.
+
+%% t_set_prop_named(St, Obj, KeyBin, V, Strict) -> St'
+%% JMutUnit. The whole `.key = v` write in one call: the own-data probe above,
+%% then the full `t_set_prop_any` / `t_set_prop_strict` on miss. Yields only
+%% the rebound St'; the emitter already holds V.
+t_set_prop_named(St, Obj, KeyBin, V, Strict) ->
+    case t_set_prop_own_data(St, Obj, KeyBin, V) of
+        miss ->
+            Key = {?KEY_NAMED, KeyBin},
+            {_, St1} = case Strict of
+                true -> 'arc@rt@obj':t_set_prop_strict(St, Obj, Key, V);
+                false -> 'arc@rt@obj':t_set_prop_any(St, Obj, Key, V)
+            end,
+            St1;
+        St1 -> St1
+    end.
 
 %% t_instanceof_fast(St, V, Ctor) -> 0 | 1 | miss
 %% JRead fast-path for §13.10.2 InstanceofOperator → §7.3.22

@@ -1302,7 +1302,7 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
       use e <- anf.then(ask)
       // Optimization G: top-level `var`/`function` declared name → boxed
       // module-local cell (cell_get, ~3ns) instead of the global object
-      // (global_get_fast + IsAtom + bind_if, ~8ns × 41k/run on richards).
+      // (`global_get` kernel call, ~8ns × 41k/run on richards).
       case dict.get(e.slotted_globals, g) {
         Ok(slot) -> read_slot(slot, True)
         Error(Nil) ->
@@ -1310,15 +1310,10 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
             // Top-level `var G = <literal>` never reassigned in the whole
             // script — inline the literal (analyze_const_globals proved it).
             Some(lit) -> anf.pure(lit)
-            None -> {
-              // global_get_fast (JRead) probes the global object's own
-              // data props. IsAtom catches `miss` AND atom-valued globals —
-              // a perf-only conflation; full JMut `global_get` re-reads.
-              let kb = ir.ConstBinary(bit_array.from_string(g))
-              use v <- anf.then(anf.host("global_get_fast", [kb]))
-              use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
-              anf.bind_if(is_miss, anf.host("global_get", [kb]), anf.pure(v))
-            }
+            None ->
+              // JMut `global_get` kernel: own-data probe on the global
+              // object, full read on a miss — one host op per site.
+              anf.host("global_get", [ir.ConstBinary(bit_array.from_string(g))])
           }
       }
     }
@@ -1517,68 +1512,34 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
 }
 
 /// Own-data-property READ fast path. Each site gets a module-unique id and
-/// probes its store-resident inline cache first (`get_prop_ic`, a JRead:
-/// shape id + slot offset seen at this site). On a miss the JMut
-/// `get_prop_ic_miss` runs the own DataProperty / shaped slot probe
-/// (arc_rt_obj_ffi) and fills an empty site; `=:= miss` (NOT IsAtom —
-/// undefined/null/true/false are legitimate values) falls to `slow`, the
-/// full `get_prop`. The probes do their own receiver check, so non-handle
-/// receivers need no guard here.
-fn get_prop_fast(
-  obj: ir.Value,
-  kb: BitArray,
-  slow: Build(ir.Value),
-) -> Build(ir.Value) {
+/// the whole read is ONE host op, `get_prop_site` (arc_rt_obj_ffi): the
+/// store-resident inline cache probe (shape id + slot offset seen at this
+/// site), then the own DataProperty / shaped slot probe that fills an empty
+/// site, then the full `get_prop` with the named key. Keeping the hit/miss
+/// chain inside the kernel leaves a single call in the IR per site.
+fn get_prop_fast(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
   use site <- anf.then(next_site())
-  let key = ir.ConstBinary(kb)
-  let site = ir.ConstI32(site)
-  use v <- anf.then(anf.host("get_prop_ic", [obj, key, site]))
-  use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
-  anf.bind_if(
-    ic_miss,
-    {
-      use v <- anf.then(anf.host("get_prop_ic_miss", [obj, key, site]))
-      use is_miss <- anf.then(
-        anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
-      )
-      anf.bind_if(is_miss, slow, anf.pure(v))
-    },
-    anf.pure(v),
-  )
+  anf.host("get_prop_site", [obj, ir.ConstBinary(kb), ir.ConstI32(site)])
 }
 
-/// Build the wire `{string_key, {named, kb}}` PropertyKey from a raw binary
-/// — the miss-branch fallback key. Deferred INTO the miss arm so the hot path
-/// pays zero MakeTuple.
-fn named_key_from_binary(kb: BitArray) -> Build(ir.Value) {
-  use inner <- anf.then(
-    anf.bind(
-      ir.TermOp(ir.MakeTuple, [
-        ir.ConstAtom("named"),
-        ir.ConstBinary(kb),
-      ]),
-    ),
-  )
-  anf.make_tuple([ir.ConstAtom("string_key"), inner])
-}
-
-/// Own-data-property WRITE fast path: one JMutMiss probe
-/// (`set_prop_own_data`) that overwrites an existing own writable
-/// DataProperty / shaped slot and yields the rebound state (a tuple) or the
-/// atom `miss`; `IsAtom` routes the miss to the full `set_prop`. Yields `v`
-/// (the assignment expression's own value).
+/// Static-key property WRITE: one JMutUnit host op (`set_prop_named`) that
+/// runs the own-data probe and falls to the full `set_prop` /
+/// `set_prop_strict` inside the runtime, so the site is a single call.
+/// Yields `v` (the assignment expression's own value).
 fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
-  use r <- anf.then(anf.host("set_prop_own_data", [obj, ir.ConstBinary(kb), v]))
-  use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, r)))
-  use _ <- anf.then(anf.bind_if(
-    is_miss,
-    {
-      use key <- anf.then(named_key_from_binary(kb))
-      use op <- anf.then(set_prop_op())
-      anf.host(op, [obj, key, v])
-    },
-    anf.pure(v),
-  ))
+  use e <- anf.then(ask)
+  let strict = case e.strict {
+    True -> ir.ConstAtom("true")
+    False -> ir.ConstAtom("false")
+  }
+  use _ <- anf.then(
+    anf.host("set_prop_named", [
+      obj,
+      ir.ConstBinary(kb),
+      v,
+      strict,
+    ]),
+  )
   anf.pure(v)
 }
 
@@ -1645,11 +1606,7 @@ pub fn emit_member_get(
   prop: ast.MemberProperty,
 ) -> Build(ir.Value) {
   case static_dot_key(prop) {
-    Some(kb) ->
-      get_prop_fast(obj, kb, {
-        use k <- anf.then(named_key_from_binary(kb))
-        anf.host("get_prop", [obj, k])
-      })
+    Some(kb) -> get_prop_fast(obj, kb)
     None ->
       case prop {
         ast.Bracket(expression:) -> {
@@ -2564,10 +2521,7 @@ pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
     LvMember(obj:, key:, is_private: True, ..) ->
       anf.host("private_get", [obj, key])
     LvMember(obj:, is_private: False, own_key: Some(kb), ..) ->
-      get_prop_fast(obj, kb, {
-        use key <- anf.then(named_key_from_binary(kb))
-        anf.host("get_prop", [obj, key])
-      })
+      get_prop_fast(obj, kb)
     LvMember(obj:, key:, is_private: False, elem_idx: Some(idx), ..) ->
       get_elem_fast(obj, idx, {
         use k <- anf.then(elem_key(obj, idx, key))
