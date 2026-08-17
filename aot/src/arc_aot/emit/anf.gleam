@@ -11,7 +11,7 @@ import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 
 /// Tail continuation receives the final Emitter2 + result and returns the
 /// terminal ir.Expr paired with the emitter it finished with; the builder
@@ -464,15 +464,24 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
 pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   use ii <- then(both_ints(a, b))
   let slow = host(op, [a, b])
-  let arm = case op {
+  case int_arm_of(op, a, b, slow) {
+    Some(fast) -> then(bind_if(ii, fast, slow), mark_number)
+    None -> then(slow, mark_number)
+  }
+}
+
+/// The inline integer arm for a `num_*` kernel op, `slow` on a range miss.
+fn int_arm_of(
+  op: String,
+  a: ir.Value,
+  b: ir.Value,
+  slow: Build(ir.Value),
+) -> Option(Build(ir.Value)) {
+  case op {
     "num_add" -> Some(int_arm(ir.NAdd, a, b, False, slow))
     "num_sub" -> Some(int_arm(ir.NSub, a, b, False, slow))
     "num_mul" -> Some(int_arm(ir.NMul, a, b, True, slow))
     _ -> None
-  }
-  case arm {
-    Some(fast) -> then(bind_if(ii, fast, slow), mark_number)
-    None -> then(slow, mark_number)
   }
 }
 
@@ -529,10 +538,11 @@ fn int_arm(
   }
 }
 
-/// JS arithmetic `+ - *`: `num_binop` fast path when both operands are BEAM
-/// numbers, else the runtime slow path (handles ToPrimitive, string concat,
-/// bigint, throw-on-symbol). When BOTH operands are statically known numbers
-/// the guard/If/slow-arm are elided entirely — the M0 shape.
+/// JS arithmetic `+ - *`: the inline integer arm when both operands are BEAM
+/// integers, else ONE `*_any` kernel call (two numbers → the `num_*` kernel,
+/// anything else → the full operator: ToPrimitive, string concat, bigint,
+/// throw-on-symbol). When BOTH operands are statically known numbers the
+/// kernel arm is the pure `num_*` op — the M0 shape.
 pub fn guarded_binop(
   fast_op: String,
   slow_op: String,
