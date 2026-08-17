@@ -4332,14 +4332,17 @@ fn number_const(n: ast.LiteralNumber) -> JsVal {
   case n {
     ast.InfiniteNumber -> mk_number(JPosInf)
     ast.FiniteNumber(f) -> {
-      let i = float.truncate(f)
-      case
-        int.to_float(i) == f
-        && i >= 0
-        && i < 2_147_483_648
-        && !rt_val.is_neg_zero(f)
-      {
-        True -> mk_number(JInt(i))
+      // Range-check before truncating: only [0, 2^31) can become a JInt, and
+      // truncating a huge float (1e308) needs bignums AtomVM does not have.
+      let in_int_range = f >=. 0.0 && f <. 2_147_483_648.0
+      case in_int_range {
+        True -> {
+          let i = float.truncate(f)
+          case int.to_float(i) == f && !rt_val.is_neg_zero(f) {
+            True -> mk_number(JInt(i))
+            False -> mk_number(JFloat(f))
+          }
+        }
         False -> mk_number(JFloat(f))
       }
     }

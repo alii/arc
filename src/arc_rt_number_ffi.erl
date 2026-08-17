@@ -128,7 +128,7 @@ format_exponential([D | Rest], E) ->
 %% (leading and trailing zeros removed) and the decimal exponent E of its
 %% leading digit: X = d1.d2…dk × 10^E.
 shortest_digits(X) ->
-    {Mantissa, E0} = split_exponent(float_to_list(X, [short])),
+    {Mantissa, E0} = split_exponent(arc_rt_float_ffi:shortest(X)),
     [IntPart, FracPart] = string:split(Mantissa, "."),
     Combined = IntPart ++ FracPart,
     Lead = length(lists:takewhile(fun(C) -> C =:= $0 end, Combined)),
@@ -141,7 +141,7 @@ shortest_digits(X) ->
 %% {scientific, N} formats via the libc's correctly-rounded "%.*e") with 30
 %% guard digits, matching decimals_exact/2.
 significant_exact(X, P) ->
-    Sci = float_to_list(X, [{scientific, min(249, P + 30)}]),
+    Sci = arc_rt_float_ffi:scientific(X, min(249, P + 30)),
     {Mantissa, E0} = split_exponent(Sci),
     [IntPart, FracPart] = string:split(Mantissa, "."),
     {Keep, Rest} = lists:split(P, IntPart ++ FracPart),
@@ -171,7 +171,7 @@ split_exponent(S) ->
 %% digits of the exact expansion and round once, half away from zero
 %% (matching the spec's "pick the larger n").
 decimals_exact(X, D) ->
-    Wide = float_to_list(X, [{decimals, min(253, D + 30)}]),
+    Wide = arc_rt_float_ffi:decimals(X, min(253, D + 30)),
     [IntPart, Frac] = string:split(Wide, "."),
     Keep = lists:sublist(Frac, D),
     Rest = lists:nthtail(D, Frac),

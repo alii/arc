@@ -13,13 +13,31 @@
 %% protected part.
 start() ->
     register(main, self()),
-    loop().
+    %% Register first so calls that arrive while the engine is being built
+    %% queue up instead of failing with noproc; then build the one pristine
+    %% engine every run evaluates against (see arc/wasm/playground.gleam).
+    Eng = arc@wasm@playground:new_engine(),
+    announce_ready(),
+    loop(Eng).
 
-loop() ->
+%% Tell the page the listener is registered and the engine is built, so it can
+%% stop saying "warming up" — and, more importantly, so it knows when calling
+%% in is safe at all: `Module.call` before the VM's own start-up has finished
+%% spins on an uninitialised mutex and hangs the browser tab. Best effort: a
+%% build without the emscripten module (or an old runtime) just skips it.
+announce_ready() ->
+    try
+        emscripten:run_script(<<"globalThis.dispatchEvent(new Event('atomvm:ready'))">>,
+                              [main_thread, async])
+    catch
+        C:R -> io:format("arc_wasm_ffi: ready announcement failed ~p:~p~n", [C, R])
+    end.
+
+loop(Eng) ->
     receive
         {emscripten, {call, Promise, Src0}} ->
-            handle_call(Promise, Src0),
-            loop();
+            handle_call(Promise, Src0, Eng),
+            loop(Eng);
         {emscripten, Req} = Msg when is_tuple(Req), tuple_size(Req) >= 2,
                                      element(1, Req) =:= call ->
             %% A `call` request whose payload no longer matches the clause
@@ -27,13 +45,13 @@ loop() ->
             %% Reject the promise we can still see rather than dropping the
             %% message: a JS caller must never be left waiting.
             reject_malformed(element(2, Req), Msg),
-            loop();
+            loop(Eng);
         Other ->
             %% Nothing to settle, but never silently swallowed: an unexpected
             %% message here means someone is talking to us in a protocol we
             %% do not implement.
             io:format("arc_wasm_ffi: unexpected message ~p~n", [Other]),
-            loop()
+            loop(Eng)
     end.
 
 %% Both promise_resolve/2 and promise_reject/2 are inside the protected part
@@ -43,13 +61,15 @@ loop() ->
 %% the reason string (io_lib:format over an arbitrary crash term) is itself
 %% code that can crash, and doing it eagerly inside the catch handler would
 %% leave the promise unsettled — the one outcome this module forbids.
-handle_call(Promise, Src0) ->
+handle_call(Promise, Src0, Eng) ->
     try
         case normalise_source(Src0) of
             {ok, Src} ->
-                case arc@wasm@playground:eval(Src) of
+                case in_worker(fun() -> arc@wasm@playground:eval(Eng, Src) end) of
                     {ok, Out} -> emscripten:promise_resolve(Promise, Out);
-                    {error, Msg} -> emscripten:promise_reject(Promise, Msg)
+                    {error, Msg} -> emscripten:promise_reject(Promise, Msg);
+                    {crash, WC, WR, WSt} ->
+                        reject_quietly(Promise, fun() -> format_crash(WC, WR, WSt) end)
                 end;
             {error, Reason} ->
                 emscripten:promise_reject(Promise, Reason)
@@ -57,6 +77,26 @@ handle_call(Promise, Src0) ->
     catch
         C:R:St ->
             reject_quietly(Promise, fun() -> format_crash(C, R, St) end)
+    end.
+
+%% Run Eval in a fresh process and wait for its result.
+%%
+%% Why a process per run: AtomVM's copying GC makes every allocation cost
+%% O(that process's live heap), so a run's garbage must never accumulate in
+%% this long-lived loop (whose heap also holds the pristine engine). The
+%% closure copies the engine into the worker — ~70k words, milliseconds —
+%% which is nothing next to rebuilding it. A crash inside the run comes back
+%% as a value so the caller settles the promise like any other outcome.
+in_worker(Eval) ->
+    Self = self(),
+    Ref = make_ref(),
+    _Pid = spawn_opt(fun() ->
+                         Self ! {Ref, try Eval()
+                                      catch C:R:St -> {crash, C, R, St}
+                                      end}
+                     end, []),
+    receive
+        {Ref, Result} -> Result
     end.
 
 %% The request payload as it arrives from JS. `unicode:characters_to_binary/1`

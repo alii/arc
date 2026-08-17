@@ -1,13 +1,13 @@
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { javascript } from '@codemirror/lang-javascript';
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import { Compartment, EditorState } from '@codemirror/state';
 import { EditorView, keymap, placeholder } from '@codemirror/view';
-import { tags } from '@lezer/highlight';
 import * as Select from '@radix-ui/react-select';
 import { AnimatePresence, motion } from 'motion/react';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import gitExamples from 'virtual:examples';
+import { CodeView, type CodeLanguage } from './CodeView';
+import { baseTheme, getIsDark, themeExtensions, watchColorScheme } from './theme';
 import { useAtomVM } from './use-atomvm';
 
 const DEFAULT_EXAMPLE = {
@@ -28,146 +28,30 @@ console.log(take(fib(), 10));`,
 
 const examples = [DEFAULT_EXAMPLE, ...gitExamples];
 
-// Rose Pine
-const rp = {
-	base: '#191724',
-	surface: '#1f1d2e',
-	overlay: '#26233a',
-	muted: '#6e6a86',
-	subtle: '#908caa',
-	text: '#e0def4',
-	love: '#eb6f92',
-	gold: '#f6c177',
-	rose: '#ebbcba',
-	pine: '#31748f',
-	foam: '#9ccfd8',
-	iris: '#c4a7e7',
-};
+type AotTab = 'erlang' | 'core' | 'ir';
+type Tab = 'output' | AotTab;
 
-// Rose Pine Dawn
-const rpd = {
-	base: '#faf4ed',
-	surface: '#fffaf3',
-	overlay: '#f2e9e1',
-	muted: '#9893a5',
-	subtle: '#797593',
-	text: '#575279',
-	love: '#b4637a',
-	gold: '#ea9d34',
-	rose: '#d7827e',
-	pine: '#286983',
-	foam: '#56949f',
-	iris: '#907aa9',
-};
+const AOT_TABS: { id: AotTab; label: string; language: CodeLanguage; primary: boolean }[] = [
+	{ id: 'erlang', label: 'Erlang', language: 'erlang', primary: true },
+	{ id: 'core', label: 'Core Erlang', language: 'erlang', primary: false },
+	{ id: 'ir', label: 'IR', language: 'plain', primary: false },
+];
 
-const darkHighlight = HighlightStyle.define([
-	{ tag: tags.keyword, color: rp.love },
-	{ tag: tags.operator, color: rp.rose },
-	{ tag: tags.variableName, color: rp.text },
-	{ tag: tags.propertyName, color: rp.foam },
-	{ tag: tags.function(tags.variableName), color: rp.rose },
-	{ tag: tags.function(tags.propertyName), color: rp.foam },
-	{ tag: tags.string, color: rp.gold },
-	{ tag: tags.number, color: rp.iris },
-	{ tag: tags.bool, color: rp.iris },
-	{ tag: tags.null, color: rp.love },
-	{ tag: tags.comment, color: rp.muted },
-	{ tag: tags.paren, color: rp.subtle },
-	{ tag: tags.brace, color: rp.subtle },
-	{ tag: tags.bracket, color: rp.subtle },
-	{ tag: tags.punctuation, color: rp.subtle },
-	{ tag: tags.definition(tags.variableName), color: rp.iris },
-]);
+/**
+ * What the AOT compiler said about a given source. `source` is the exact text
+ * it was asked about, so a result can be shown as stale once the editor moves
+ * on without throwing it away.
+ */
+type Aot =
+	| { status: 'idle' }
+	| { status: 'compiling'; source: string }
+	| { status: 'done'; source: string; ms: number; ir: string; core: string; erlang: string }
+	| { status: 'error'; source: string; ms: number; message: string };
 
-const lightHighlight = HighlightStyle.define([
-	{ tag: tags.keyword, color: rpd.love },
-	{ tag: tags.operator, color: rpd.rose },
-	{ tag: tags.variableName, color: rpd.text },
-	{ tag: tags.propertyName, color: rpd.foam },
-	{ tag: tags.function(tags.variableName), color: rpd.rose },
-	{ tag: tags.function(tags.propertyName), color: rpd.foam },
-	{ tag: tags.string, color: rpd.gold },
-	{ tag: tags.number, color: rpd.iris },
-	{ tag: tags.bool, color: rpd.iris },
-	{ tag: tags.null, color: rpd.love },
-	{ tag: tags.comment, color: rpd.muted },
-	{ tag: tags.paren, color: rpd.subtle },
-	{ tag: tags.brace, color: rpd.subtle },
-	{ tag: tags.bracket, color: rpd.subtle },
-	{ tag: tags.punctuation, color: rpd.subtle },
-	{ tag: tags.definition(tags.variableName), color: rpd.iris },
-]);
-
-const baseTheme = EditorView.theme({
-	'&': {
-		fontSize: '14px',
-	},
-	'&, .cm-content': {
-		fontFamily: '"Iosevka Curly", ui-monospace, monospace',
-	},
-	'.cm-content': {
-		padding: '16px 0',
-	},
-	'.cm-line': {
-		padding: '0 16px',
-	},
-	'&.cm-focused': {
-		outline: 'none',
-	},
-	'.cm-gutters': {
-		display: 'none',
-	},
-	'.cm-activeLine': {
-		backgroundColor: 'transparent',
-	},
-});
-
-const darkTheme = EditorView.theme(
-	{
-		'&': {
-			backgroundColor: rp.base,
-			color: rp.text,
-		},
-		'.cm-content': {
-			caretColor: rp.text,
-		},
-		'.cm-selectionBackground': {
-			backgroundColor: `${rp.overlay} !important`,
-		},
-		'&.cm-focused .cm-selectionBackground': {
-			backgroundColor: `${rp.overlay} !important`,
-		},
-		'.cm-cursor': {
-			borderLeftColor: rp.text,
-		},
-	},
-	{ dark: true },
-);
-
-const lightTheme = EditorView.theme(
-	{
-		'&': {
-			backgroundColor: rpd.base,
-			color: rpd.text,
-		},
-		'.cm-content': {
-			caretColor: rpd.text,
-		},
-		'.cm-selectionBackground': {
-			backgroundColor: `${rpd.overlay} !important`,
-		},
-		'&.cm-focused .cm-selectionBackground': {
-			backgroundColor: `${rpd.overlay} !important`,
-		},
-		'.cm-cursor': {
-			borderLeftColor: rpd.text,
-		},
-	},
-	{ dark: false },
-);
-
-function getIsDark() {
-	return window.matchMedia('(prefers-color-scheme: dark)').matches;
+/** The `aot` endpoint answers IR, Core Erlang and Erlang joined by U+001E. */
+function parseEmitted(reply: string): { ir: string; core: string; erlang: string } {
+	const [ir = '', core = '', erlang = ''] = reply.split('');
+	return { ir, core, erlang };
 }
 
 function getIsMac() {
@@ -207,19 +91,30 @@ function Spinner() {
 	);
 }
 
+/** One line in the Output pane: what the program printed, what it evaluated to, or why it stopped. */
+type OutputLine = { id: number; kind: 'stdout' | 'result' | 'error'; text: string };
+
+const rainbowText =
+	'animate-rainbow bg-[length:200%_auto] bg-clip-text text-transparent bg-[linear-gradient(90deg,#eb6f92,#f6c177,#9ccfd8,#c4a7e7,#ebbcba,#31748f,#eb6f92)]';
+
 export function Playground() {
 	const [code, setCode] = useState(examples[0]?.code ?? '');
-	const [output, setOutput] = useState<{ id: number; text: string }[]>([]);
+	const [output, setOutput] = useState<OutputLine[]>([]);
 	const [running, setRunning] = useState(false);
 	const [didRun, setDidRun] = useState(false);
 	const [elapsed, setElapsed] = useState(0);
-	const [expanded, setExpanded] = useState(false);
+	const [tab, setTab] = useState<Tab>('output');
+	const [moreTabs, setMoreTabs] = useState(false);
+	const [aot, setAot] = useState<Aot>({ status: 'idle' });
 	const nextId = useRef(0);
 	const editorRef = useRef<HTMLDivElement>(null);
 	const outputRef = useRef<HTMLPreElement>(null);
 	const viewRef = useRef<EditorView | null>(null);
 	const codeRef = useRef(code);
 	const runRef = useRef<() => void>(() => {});
+	// The source being compiled right now, and the latest one asked for meanwhile.
+	const inflightRef = useRef<string | null>(null);
+	const pendingCompileRef = useRef<string | null>(null);
 
 	if (running && !didRun) setDidRun(true);
 
@@ -239,36 +134,76 @@ export function Playground() {
 		return () => clearInterval(id);
 	}, [running]);
 
-	const push = (text: string) => setOutput((o) => [...o, { id: nextId.current++, text }]);
+	const push = (kind: OutputLine['kind'], text: string) =>
+		setOutput((o) => [...o, { id: nextId.current++, kind, text }]);
 
-	const vm = useAtomVM(push);
+	const vm = useAtomVM((line) => push('stdout', line));
+
+	const compile = useCallback(
+		async (source: string) => {
+			if (vm.kind !== 'ready') return;
+			if (inflightRef.current !== null) {
+				// One compile at a time; remember only the latest ask.
+				pendingCompileRef.current = source;
+				return;
+			}
+			inflightRef.current = source;
+			setAot({ status: 'compiling', source });
+			const t0 = performance.now();
+			try {
+				const reply = await vm.vm.call('aot', source);
+				setAot({ status: 'done', source, ms: performance.now() - t0, ...parseEmitted(reply) });
+			} catch (e) {
+				setAot({ status: 'error', source, ms: performance.now() - t0, message: String(e) });
+			}
+			inflightRef.current = null;
+			const next = pendingCompileRef.current;
+			pendingCompileRef.current = null;
+			if (next !== null && next !== source) void compile(next);
+		},
+		[vm],
+	);
+
+	const isAotTab = tab !== 'output';
 
 	const run = useCallback(async () => {
 		if (vm.kind !== 'ready') return;
+		const source = codeRef.current;
 		setOutput([]);
 		setRunning(true);
+		const t0 = performance.now();
 		try {
-			const result = await vm.vm.call('main', codeRef.current);
-			push(`→ ${result}`);
+			const result = await vm.vm.call('main', source);
+			console.debug(`arc: run took ${(performance.now() - t0).toFixed(0)}ms`);
+			// A script's completion value is almost always `undefined` — noise.
+			if (result !== 'undefined') push('result', result);
 		} catch (e) {
-			push(`✗ ${e}`);
+			push('error', String(e));
 		} finally {
 			setRunning(false);
 		}
-	}, [vm]);
+		if (isAotTab) void compile(source);
+	}, [vm, isAotTab, compile]);
 
 	runRef.current = run;
+
+	// Selecting a compiler tab compiles what's in the editor if it hasn't been
+	// compiled yet (or has changed since).
+	const selectTab = useCallback(
+		(next: Tab) => {
+			setTab(next);
+			if (next === 'output') return;
+			const source = codeRef.current;
+			const fresh = aot.status !== 'idle' && aot.source === source;
+			if (!fresh) void compile(source);
+		},
+		[aot, compile],
+	);
 
 	useEffect(() => {
 		if (!editorRef.current) return;
 
-		const isDark = getIsDark();
 		const themeCompartment = new Compartment();
-
-		const themeExts = (dark: boolean) => [
-			dark ? darkTheme : lightTheme,
-			syntaxHighlighting(dark ? darkHighlight : lightHighlight),
-		];
 
 		const updateListener = EditorView.updateListener.of((update) => {
 			if (update.docChanged) {
@@ -294,7 +229,7 @@ export function Playground() {
 				keymap.of([...defaultKeymap, ...historyKeymap]),
 				javascript(),
 				baseTheme,
-				themeCompartment.of(themeExts(isDark)),
+				themeCompartment.of(themeExtensions(getIsDark())),
 				EditorView.lineWrapping,
 				placeholder('Write some JavaScript…'),
 				updateListener,
@@ -308,18 +243,16 @@ export function Playground() {
 
 		viewRef.current = view;
 
-		const mq = window.matchMedia('(prefers-color-scheme: dark)');
-		const handler = () => {
-			view.dispatch({
-				effects: themeCompartment.reconfigure(themeExts(getIsDark())),
-			});
-		};
-		mq.addEventListener('change', handler);
+		const unwatch = watchColorScheme((dark) => {
+			view.dispatch({ effects: themeCompartment.reconfigure(themeExtensions(dark)) });
+		});
 
 		return () => {
-			mq.removeEventListener('change', handler);
+			unwatch();
 			view.destroy();
 		};
+		// Mount once; the editor owns the document from here.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 
 	const loadExample = useCallback((code: string) => {
@@ -330,23 +263,53 @@ export function Playground() {
 		});
 		setOutput([]);
 		setDidRun(false);
-		setExpanded(false);
 	}, []);
 
+	const stale = aot.status !== 'idle' && aot.status !== 'compiling' && aot.source !== code;
+	const activeAotTab = AOT_TABS.find((t) => t.id === tab);
+	const visibleAotTabs = AOT_TABS.filter((t) => t.primary || moreTabs || t.id === tab);
+	const hiddenAotTabs = AOT_TABS.some((t) => !t.primary && !(moreTabs || t.id === tab));
+
+	const aotBody = (() => {
+		if (!activeAotTab) return null;
+		if (aot.status === 'idle' || (aot.status === 'compiling' && aot.source === code && !stale)) {
+			return (
+				<Empty>
+					{aot.status === 'compiling' ? (
+						<>
+							<Spinner /> compiling…
+						</>
+					) : (
+						'run to compile'
+					)}
+				</Empty>
+			);
+		}
+		if (aot.status === 'error') return <Empty tone="error">{aot.message}</Empty>;
+		if (aot.status === 'compiling')
+			return (
+				<Empty>
+					<Spinner /> compiling…
+				</Empty>
+			);
+		return <CodeView code={aot[activeAotTab.id]} language={activeAotTab.language} className="h-full" />;
+	})();
+
 	return (
-		<div className="rounded-lg border border-rpd-text/15 dark:border-rp-overlay overflow-hidden">
-			<div className="flex items-center px-3 py-1.5 bg-rpd-overlay/60 dark:bg-[#13111e] border-b border-rpd-text/10 dark:border-rp-overlay">
-				<span
-					className={`text-xs ${running ? 'animate-rainbow bg-[length:200%_auto] bg-clip-text text-transparent bg-[linear-gradient(90deg,#eb6f92,#f6c177,#9ccfd8,#c4a7e7,#ebbcba,#31748f,#eb6f92)]' : 'text-rpd-muted dark:text-rp-subtle'}`}
-				>
+		<div className="flex flex-col h-full rounded-lg border border-rpd-text/15 dark:border-rp-overlay overflow-hidden bg-rpd-base dark:bg-rp-base">
+			<div className="flex items-center shrink-0 px-3 py-1.5 bg-rpd-overlay/60 dark:bg-[#13111e] border-b border-rpd-text/10 dark:border-rp-overlay">
+				<span className={`text-xs ${running ? rainbowText : 'text-rpd-muted dark:text-rp-subtle'}`}>
 					{vm.kind === 'loading' && 'Loading AtomVM…'}
+					{vm.kind === 'warming' && 'Warming up…'}
 					{vm.kind === 'error' && `error: ${vm.message}`}
 					{vm.kind === 'ready' &&
 						(running
 							? `Running ${(elapsed / 1000).toFixed(1)}s`
 							: didRun
 								? `Done ${(elapsed / 1000).toFixed(1)}s`
-								: 'Ready')}
+								: vm.warm
+									? 'Ready'
+									: 'Ready · warming up caches…')}
 				</span>
 				<div className="flex items-center gap-1.5 ml-auto">
 					<Select.Root
@@ -408,63 +371,150 @@ export function Playground() {
 				</div>
 			</div>
 
-			<div className="relative">
-				<div
-					ref={editorRef}
-					className="overflow-hidden transition-[max-height] duration-300 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
-					style={{ maxHeight: expanded ? 2000 : 300 }}
-				/>
-				{!expanded && (
-					<div className="absolute bottom-0 left-0 right-0 h-10 bg-gradient-to-t from-rpd-base dark:from-rp-base pointer-events-none" />
-				)}
-				<button
-					onClick={() => setExpanded((e) => !e)}
-					className="absolute bottom-0 right-2 p-1 text-rpd-muted dark:text-rp-subtle cursor-pointer hover:text-rpd-text dark:hover:text-rp-text transition-colors"
-					aria-label={expanded ? 'Collapse editor' : 'Expand editor'}
-				>
-					<svg
-						width="16"
-						height="16"
-						viewBox="0 0 16 16"
-						fill="none"
-						stroke="currentColor"
-						strokeWidth="1.5"
-						strokeLinecap="round"
-						strokeLinejoin="round"
-						className={`transition-transform duration-300 ${expanded ? 'rotate-180' : ''}`}
-					>
-						<path d="M4 6l4 4 4-4" />
-					</svg>
-				</button>
-			</div>
+			<div ref={editorRef} className="h-[300px] lg:h-auto lg:flex-[3] min-h-0" />
 
-			<AnimatePresence>
-				{output.length > 0 && (
-					<motion.pre
-						ref={outputRef}
-						initial={{ opacity: 0 }}
-						animate={{ opacity: 1 }}
-						exit={{ height: 0, opacity: 0 }}
-						transition={{ duration: 0.2, ease: [0.25, 0.1, 0.25, 1] }}
-						className="m-0 bg-rpd-surface text-rpd-subtle dark:bg-[#13111e] dark:text-rp-subtle font-mono text-xs border-t border-rpd-text/10 dark:border-rp-overlay max-h-40 overflow-auto"
-					>
-						<div className="p-3 flex flex-col gap-0.5">
-							{output.map((line, i) => (
-								<motion.div
-									key={line.id}
-									initial={{ opacity: 0, filter: 'blur(4px)', height: 0 }}
-									animate={{ opacity: 1, filter: 'blur(0px)', height: 'auto' }}
-									transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
-									className="will-change-[filter] overflow-hidden flex"
-								>
-									<span className="select-none text-rpd-muted/50 dark:text-rp-muted/50 mr-3 tabular-nums">{i + 1}</span>
-									<span>{line.text}</span>
-								</motion.div>
-							))}
-						</div>
-					</motion.pre>
-				)}
-			</AnimatePresence>
+			<div className="flex flex-col shrink-0 h-[280px] lg:h-auto lg:flex-[2] min-h-0 border-t border-rpd-text/10 dark:border-rp-overlay bg-rpd-surface dark:bg-[#13111e]">
+				<div className="flex items-center gap-0.5 shrink-0 px-2 border-b border-rpd-text/10 dark:border-rp-overlay text-xs">
+					<TabButton active={tab === 'output'} onClick={() => selectTab('output')}>
+						Output
+					</TabButton>
+					{visibleAotTabs.map((t) => (
+						<TabButton key={t.id} active={tab === t.id} onClick={() => selectTab(t.id)}>
+							{t.label}
+						</TabButton>
+					))}
+					{hiddenAotTabs && (
+						<button
+							onClick={() => setMoreTabs(true)}
+							aria-label="Show Core Erlang and IR tabs"
+							title="Core Erlang · IR"
+							className="px-2 py-2 text-rpd-muted dark:text-rp-muted hover:text-rpd-text dark:hover:text-rp-text cursor-pointer transition-colors"
+						>
+							⋯
+						</button>
+					)}
+					<span className="ml-auto pl-2 text-rpd-muted dark:text-rp-muted whitespace-nowrap">
+						{isAotTab && aot.status === 'compiling' && <span className={rainbowText}>compiling…</span>}
+						{isAotTab && aot.status === 'done' && !stale && `compiled in ${(aot.ms / 1000).toFixed(1)}s`}
+						{isAotTab && aot.status !== 'compiling' && stale && (
+							<button
+								onClick={() => compile(codeRef.current)}
+								className="underline underline-offset-2 decoration-dotted hover:text-rpd-text dark:hover:text-rp-text cursor-pointer"
+							>
+								source changed — recompile
+							</button>
+						)}
+					</span>
+				</div>
+
+				<div className="flex-1 min-h-0 relative">
+					{tab === 'output' ? (
+						<pre
+							ref={outputRef}
+							className="m-0 h-full overflow-auto text-rpd-subtle dark:text-rp-subtle font-mono text-xs"
+						>
+							{output.length === 0 ? (
+								<Empty>{didRun || running ? '' : 'run to see output'}</Empty>
+							) : (
+								<div className="p-3 flex flex-col gap-0.5">
+									<AnimatePresence initial={false}>
+										{output.map((line, i) => (
+											<motion.div
+												key={line.id}
+												initial={{ opacity: 0, filter: 'blur(4px)', height: 0 }}
+												animate={{ opacity: 1, filter: 'blur(0px)', height: 'auto' }}
+												transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
+												className="will-change-[filter] overflow-hidden flex"
+											>
+												<span className="select-none text-rpd-muted/50 dark:text-rp-muted/50 mr-3 tabular-nums">
+													{i + 1}
+												</span>
+												<LineMarker kind={line.kind} />
+												<span
+													className={`whitespace-pre-wrap break-words ${
+														line.kind === 'error'
+															? 'text-rpd-love dark:text-rp-love'
+															: line.kind === 'result'
+																? 'text-rpd-iris dark:text-rp-iris'
+																: ''
+													}`}
+												>
+													{line.text}
+												</span>
+											</motion.div>
+										))}
+									</AnimatePresence>
+								</div>
+							)}
+						</pre>
+					) : (
+						aotBody
+					)}
+				</div>
+			</div>
+		</div>
+	);
+}
+
+/** Glyph-free prefix so it renders the same in every font: a chevron for a value, a cross for an error. */
+function LineMarker({ kind }: { kind: OutputLine['kind'] }) {
+	if (kind === 'stdout') return null;
+	const cls = `shrink-0 self-center mr-1.5 ${kind === 'error' ? 'text-rpd-love dark:text-rp-love' : 'text-rpd-iris dark:text-rp-iris'}`;
+	return kind === 'error' ? (
+		<svg
+			className={cls}
+			width="10"
+			height="10"
+			viewBox="0 0 10 10"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.5"
+			strokeLinecap="round"
+			aria-label="error"
+		>
+			<path d="M2 2l6 6M8 2l-6 6" />
+		</svg>
+	) : (
+		<svg
+			className={cls}
+			width="10"
+			height="10"
+			viewBox="0 0 10 10"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.5"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			aria-label="result"
+		>
+			<path d="M3.5 1.5L7 5l-3.5 3.5" />
+		</svg>
+	);
+}
+
+function TabButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+	return (
+		<button
+			onClick={onClick}
+			className={`relative px-2.5 py-2 cursor-pointer transition-colors ${
+				active
+					? 'text-rpd-text dark:text-rp-text after:absolute after:left-2 after:right-2 after:-bottom-px after:h-px after:bg-rpd-text dark:after:bg-rp-text'
+					: 'text-rpd-muted dark:text-rp-subtle hover:text-rpd-text dark:hover:text-rp-text'
+			}`}
+		>
+			{children}
+		</button>
+	);
+}
+
+function Empty({ children, tone = 'muted' }: { children: ReactNode; tone?: 'muted' | 'error' }) {
+	return (
+		<div
+			className={`h-full flex items-center justify-center gap-2 p-4 text-xs text-center whitespace-pre-wrap ${
+				tone === 'error' ? 'text-rpd-love dark:text-rp-love' : 'text-rpd-muted dark:text-rp-muted'
+			}`}
+		>
+			{children}
 		</div>
 	);
 }

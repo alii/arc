@@ -5,6 +5,9 @@ on:
     branches: [master]
     paths:
       - 'src/**'
+      - 'aot/src/**'
+      - 'aot/gleam.toml'
+      - 'aot/manifest.toml'
       - 'website/atomvm_shims/**'
       - 'website/scripts/**'
       - '.github/workflows/build-avm.yml'
