@@ -24,6 +24,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
+import gleam/string
 
 // ── SPEC §19.1 façade types ────────────────────────────────────────────────
 
@@ -294,6 +295,75 @@ pub fn emit_hoists(
   }
 }
 
+/// Fresh-var budget per top-level chunk. erlc's beam_ssa passes are
+/// superlinear in function size, so js_main is cut into a chain of chunk
+/// functions once a chunk has consumed this many fresh vars (a proxy for
+/// emitted IR size).
+const chunk_budget = 100
+
+/// Emit the hoists (one `emit_hoists` per statement, in source order) and
+/// then the statements, cutting to a new chunk function whenever the current
+/// one has spent `chunk_budget` fresh vars since `start`. Each cut tail-calls
+/// the next chunk with every live slot var; the chunk rebinds them under the
+/// same names so `e.slot_vars` stays valid across the boundary.
+fn emit_top_level(
+  e: state.Emitter2,
+  hoists: List(ast.StmtWithLine),
+  stmts: List(ast.StmtWithLine),
+  start: Int,
+  n: Int,
+) -> Result(#(ir.Expr, state.Emitter2), EmitError) {
+  case hoists, stmts {
+    [h, ..rest], _ -> {
+      use #(w, e) <- result.try(emit_hoists(e, [h]))
+      use #(tail, e) <- result.map(cut_or_continue(e, rest, stmts, start, n))
+      #(w(tail), e)
+    }
+    [], [] -> Ok(#(ir.Return([e.consts.undef]), e))
+    [], [s, ..rest] ->
+      e.dispatch.emit_stmts(e, [s], fn(ef) {
+        cut_or_continue(ef, [], rest, start, n)
+      })
+  }
+}
+
+fn cut_or_continue(
+  e: state.Emitter2,
+  hoists: List(ast.StmtWithLine),
+  stmts: List(ast.StmtWithLine),
+  start: Int,
+  n: Int,
+) -> Result(#(ir.Expr, state.Emitter2), EmitError) {
+  let done = hoists == [] && stmts == []
+  case e.next_var - start >= chunk_budget && !done {
+    False -> emit_top_level(e, hoists, stmts, start, n)
+    True -> {
+      let name = "js_main_" <> int.to_string(n + 1)
+      let live =
+        dict.values(e.slot_vars) |> list.unique |> list.sort(string.compare)
+      use #(body, e) <- result.map(emit_top_level(
+        e,
+        hoists,
+        stmts,
+        e.next_var,
+        n + 1,
+      ))
+      let chunk =
+        ir.Function(
+          name:,
+          params: list.map(live, ir.Local(_, ir.TTerm)),
+          result: [ir.TTerm],
+          locals: [],
+          body:,
+        )
+      #(
+        ir.ReturnCall(name, list.map(live, ir.Var)),
+        state.add_function(e, chunk),
+      )
+    }
+  }
+}
+
 /// Parse `source`, finalize its scope tree, and lower to an `ir.Module`.
 /// Thin wrapper over `compile` for callers holding raw source text.
 pub fn compile_source(
@@ -354,14 +424,11 @@ pub fn compile(
   // fn-decl closures cell_set into a live cell. Also seeds slotted_globals.
   let #(prologue, e) = root_binding_prologue(e)
   let #(prologue, e) = global_var_prologue(e, body, strict, prologue)
-  // (2) hoist top-level FunctionDeclarations (§16.1.7 step 16).
-  use #(wrap, e) <- result.try(emit_hoists(e, body))
-  // (3)+(4) statement fold; terminal K is Return(undef). The runner drains
-  // microtasks and runs the GC safepoint after js_main returns.
-  let terminal = fn(ef: state.Emitter2) {
-    Ok(#(ir.Return([ef.consts.undef]), ef))
-  }
-  use #(stmts_tree, ef) <- result.try(e.dispatch.emit_stmts(e, body, terminal))
+  // (2) hoist top-level FunctionDeclarations (§16.1.7 step 16), then (3)+(4)
+  // the statement fold, both cut into a chain of chunk functions. Terminal K
+  // is Return(undef); the runner drains microtasks and runs the GC safepoint
+  // after js_main returns.
+  use #(top_tree, ef) <- result.try(emit_top_level(e, body, body, e.next_var, 0))
   use Nil <- result.map(case list.reverse(ef.unsupported) {
     [feature, ..] -> Error(state.UnsupportedFeature(feature))
     [] -> Ok(Nil)
@@ -373,7 +440,7 @@ pub fn compile(
       params: [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)],
       result: [ir.TTerm],
       locals: [],
-      body: prologue(wrap(stmts_tree)),
+      body: prologue(top_tree),
     )
   // (6) all 12 ir.Module fields. Invariant: js_main is NOT in fns_acc; tags
   // has exactly one entry (R2 — every Throw/CatchTag names js_exn_tag).
