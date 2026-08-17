@@ -15,15 +15,15 @@ import arc_aot/emit/func
 import arc_aot/emit/state
 import arc_aot/emit/stmt
 import arc_aot/host_ops
+import carder/ir
+import carder/runtime/instance
+import carder/runtime/profiles
 import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
-import twocore/ir
-import twocore/runtime/instance
-import twocore/runtime/profiles
 
 // ── SPEC §19.1 façade types ────────────────────────────────────────────────
 

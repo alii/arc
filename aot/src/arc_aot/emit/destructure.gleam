@@ -9,11 +9,11 @@ import arc/parser/ast
 import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/expr
 import arc_aot/emit/state.{type BindMode, type EmitError, type Emitter2}
+import carder/ir
 import gleam/bit_array
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
-import twocore/ir
 
 // ── Entry point (EmitDispatch.emit_pattern / emit_destructure — SPEC:1562) ───
 

@@ -43,6 +43,7 @@ import arc_aot/emit/anf
 import arc_aot/emit/class
 import arc_aot/emit/func
 import arc_aot/emit/state.{type Emitter2}
+import carder/ir
 import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -52,7 +53,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 import gleam/string
-import twocore/ir
 
 // ── scope-cursor snapshot/restore (u-scope-cursor) ──────────────────────────
 

@@ -4,10 +4,10 @@
 import arc/parser
 import arc_aot/emit
 import arc_aot/emit/state
+import carder/ir
+import carder/ir/printer
+import carder/pipeline
 import gleam/result
-import twocore/ir
-import twocore/ir/printer
-import twocore/pipeline
 
 pub type CompileError {
   /// The source parses as an ES module (`import`/`export`), which the AOT

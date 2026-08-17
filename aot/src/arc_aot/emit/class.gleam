@@ -11,13 +11,13 @@ import arc/parser/ast
 import arc_aot/emit/anf
 import arc_aot/emit/func
 import arc_aot/emit/state.{type EmitError, type Emitter2, ClassCtx, Emitter2}
+import carder/ir
 import gleam/bit_array
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-import twocore/ir
 
 // ── Result-aware CPS (Rk chain) — mirrors func.gleam ────────────────────────
 // Rk returns the tree paired with the emitter the chain finished with.

@@ -360,13 +360,13 @@
 import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run
+import carder/pipeline
 import emit_2core_harness as harness
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
 import gleam/string
 import simplifile
-import twocore/pipeline
 
 type TimeUnit {
   Microsecond

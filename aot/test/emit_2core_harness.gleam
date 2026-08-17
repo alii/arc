@@ -10,11 +10,11 @@ import arc/internal/host_time
 import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run.{type RunResult}
+import carder/pipeline
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/string
-import twocore/pipeline
 
 /// Console stdout bytes in emission order plus how the top level completed.
 pub type DiffRun {

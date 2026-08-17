@@ -12,12 +12,12 @@ import arc/compiler/scope.{
 }
 import arc/parser/ast
 import arc_aot/emit/state.{type EmitError, type Emitter2}
+import carder/ir
 import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import twocore/ir
 
 /// R2: the single JS-exception ir.Throw/ir.Try tag.
 pub const js_exn_tag = "js_exn"

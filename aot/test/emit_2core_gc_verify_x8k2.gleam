@@ -18,6 +18,7 @@ import arc/rt/gc as rt_gc
 import arc/rt/types.{type Agent} as rt_types
 import arc_aot/emit as emit_2core
 import arc_aot/run
+import carder/pipeline
 import emit_2core_harness as harness
 import gleam/bit_array
 import gleam/erlang/atom.{type Atom}
@@ -25,7 +26,6 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/string
-import twocore/pipeline
 
 // ── programs ───────────────────────────────────────────────────────────────
 // NOTE: `{x:i}` object literal crashes compiled path (badarg element(6,0)).

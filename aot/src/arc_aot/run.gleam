@@ -6,10 +6,10 @@ import arc/host_hooks.{type HostHooks}
 import arc/interp/entry
 import arc/rt/builtins as rt_builtins
 import arc/rt/types.{type Agent, type JsVal}
+import carder/backend/build_beam
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/string
-import twocore/backend/build_beam
 
 /// How the top level completed: `Ok(v)` for a normal return,
 /// `Error(reason)` for a load failure, an uncaught throw (rendered with

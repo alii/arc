@@ -5,11 +5,11 @@
 import arc/bytecode/lexical
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
+import carder/ir
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
-import twocore/ir
 
 /// Compile-time ir.Value constants for JS sentinel atoms (SPEC §2.3 wire ABI).
 /// Built once by `realm_consts()`; carried on Emitter2 so emit_* sites write

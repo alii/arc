@@ -16,6 +16,7 @@ import arc_aot/emit/expr
 import arc_aot/emit/state.{
   type BarrierCleanup, type EmitError, type Emitter2, FnDecl, StmtBody,
 }
+import carder/ir
 import gleam/bit_array
 import gleam/dict
 import gleam/int
@@ -23,7 +24,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-import twocore/ir
 
 // ── Result-aware CPS (Rk chain) — mirrors func.gleam ────────────────────────
 // Rk returns the tree paired with the emitter the chain finished with.

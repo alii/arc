@@ -20,6 +20,7 @@ import arc/parser/ast
 import arc/rt/val as rt_val
 import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/state.{type EmitError, type Emitter2}
+import carder/ir
 import gleam/bit_array
 import gleam/dict
 import gleam/float
@@ -27,7 +28,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
-import twocore/ir
 
 // ── feature gates (flag-bisect via `gleam run -m emit_2core_profile`) ──────
 
