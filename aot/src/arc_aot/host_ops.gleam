@@ -169,7 +169,6 @@ pub fn table() -> DirectHost {
       #("construct", HostOp(call, "t_construct", Mut)),
       #("new_simple", HostOp(call_ffi, "t_new_simple", Mut)),
       #("kfn_code", HostOp(call_ffi, "t_kfn_code", Read)),
-      #("args_tuple", HostOp(call_ffi, "t_args_tuple", Pure)),
       #("new_private_name", HostOp(class, "t_new_private_name", Mut)),
       #("class_setup", HostOp(class, "t_class_setup", Mut)),
       #("define_method", HostOp(class, "t_define_method", MutUnit)),

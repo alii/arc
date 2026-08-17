@@ -1658,35 +1658,28 @@ fn emit_simple_body(
 }
 
 /// Frame-ABI entry for a function whose body lives in its simple-ABI variant:
-/// bind `this` from `_frame` when the variant takes it, pad/truncate `_args`
-/// to `arity` positional values (`args_tuple`, missing → undefined) and
-/// tail-call the variant with the captures forwarded.
+/// bind `this` from `_frame` when the variant takes it, walk `_args` binding
+/// one positional param per cons cell, and tail-call the variant with the
+/// captures forwarded. Each level tests once for the end of the list; when
+/// the list ends early the remaining params are `undefined`, extras are
+/// dropped. No allocation, one branch per param.
 fn simple_shim_body(
   target: String,
   ncap: Int,
   arity: Int,
   needs_this: Bool,
+  undef: ir.Value,
 ) -> ir.Expr {
   let caps =
     build_ir_params(0, ncap)
     |> list.take(ncap)
     |> list.map(fn(l) { ir.Var(l.name) })
-  let pos =
-    list.map(build_simple_pos_params(0, arity), fn(l) { ir.Var(l.name) })
   let this = case needs_this {
     True -> [ir.Var(simple_this_param)]
     False -> []
   }
-  let call = ir.ReturnCall(target, list.flatten([caps, this, pos]))
-  let unpack = case arity {
-    0 -> call
-    _ ->
-      ir.Let(
-        ["_argv"],
-        ir.CallHost("js", "args_tuple", [ir.Var("_args"), ir.ConstI32(arity)]),
-        shim_bind(0, arity, call),
-      )
-  }
+  let lead = list.append(caps, this)
+  let unpack = shim_walk(target, 0, arity, undef, ir.Var("_args"), lead, [])
   case needs_this {
     True ->
       ir.Let(
@@ -1698,15 +1691,53 @@ fn simple_shim_body(
   }
 }
 
-fn shim_bind(i: Int, arity: Int, body: ir.Expr) -> ir.Expr {
+/// `bound` holds the positional params bound so far, reversed; `tail` is the
+/// unconsumed rest of `_args`.
+fn shim_walk(
+  target: String,
+  i: Int,
+  arity: Int,
+  undef: ir.Value,
+  tail: ir.Value,
+  lead: List(ir.Value),
+  bound: List(ir.Value),
+) -> ir.Expr {
+  let call = fn(pos) { ir.ReturnCall(target, list.append(lead, pos)) }
   case i < arity {
-    False -> body
-    True ->
+    False -> call(list.reverse(bound))
+    True -> {
+      let p = simple_param_name(i)
+      let short =
+        list.append(list.reverse(bound), list.repeat(undef, arity - i))
+      let more = case i + 1 < arity {
+        False ->
+          shim_walk(target, i + 1, arity, undef, tail, lead, [
+            ir.Var(p),
+            ..bound
+          ])
+        True -> {
+          let rest = "_r" <> int.to_string(i)
+          ir.Let(
+            [rest],
+            ir.TermOp(ir.ListTail, [tail]),
+            shim_walk(target, i + 1, arity, undef, ir.Var(rest), lead, [
+              ir.Var(p),
+              ..bound
+            ]),
+          )
+        }
+      }
       ir.Let(
-        [simple_param_name(i)],
-        ir.TermOp(ir.TupleGet(i), [ir.Var("_argv")]),
-        shim_bind(i + 1, arity, body),
+        ["_e" <> int.to_string(i)],
+        ir.TermOp(ir.IsEmptyList, [tail]),
+        ir.If(
+          ir.Var("_e" <> int.to_string(i)),
+          [ir.TTerm],
+          call(short),
+          ir.Let([p], ir.TermOp(ir.ListHead, [tail]), more),
+        ),
       )
+    }
   }
 }
 
@@ -1935,7 +1966,13 @@ pub fn emit_function_tree(
                 params: build_ir_params(0, ncap),
                 result: [ir.TTerm],
                 locals: [],
-                body: simple_shim_body(simple_fn_name, ncap, arity, needs_this),
+                body: simple_shim_body(
+                  simple_fn_name,
+                  ncap,
+                  arity,
+                  needs_this,
+                  e_child.consts.undef,
+                ),
               ),
             )
           Ok(#(
