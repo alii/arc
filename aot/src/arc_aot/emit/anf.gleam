@@ -1,17 +1,17 @@
 //// M11: Build(a) CPS monad + ANF let-binding combinators over
-//// twocore/ir — bind/host/cons_list/bind_if/guarded_binop/object_key_lit.
+//// carder/ir — bind/host/cons_list/bind_if/guarded_binop/object_key_lit.
 //// Invariant #3: `host` is the ONLY CallHost("js", ..) site in emit_2core/*.
 
 import arc/bytecode/key
 import arc/parser/ast
 import arc/rt/val
 import arc_aot/emit/state.{type Emitter2, Emitter2}
+import carder/ir
 import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
-import twocore/ir
 
 /// Tail continuation receives the final Emitter2 + result and returns the
 /// terminal ir.Expr paired with the emitter it finished with; the builder

@@ -12,6 +12,7 @@
 import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run
+import carder/pipeline
 import emit_2core_bench.{adder_js, obj_js, sum_js}
 import emit_2core_harness as harness
 import gleam/dynamic.{type Dynamic}
@@ -21,7 +22,6 @@ import gleam/io
 import gleam/list
 import gleam/string
 import simplifile
-import twocore/pipeline
 
 // ───────────────────────────── FFI ─────────────────────────────
 
@@ -357,7 +357,7 @@ fn short(m: String) -> String {
 //   only compile-time non-emit is a static `.name` (get_prop_fast instead).
 //   No AST shape defeats emission; the gate is purely runtime (FFI).
 //
-// RUNTIME gate (twocore_rt_js_obj_ffi.erl:306/347):
+// RUNTIME gate (carder_rt_js_obj_ffi.erl:306/347):
 //   is_integer(Idx)∧Idx≥0 ∧ slot=s_object{array_obj,Len} ∧ Idx<Len ∧
 //   no {index,Idx} own-prop ∧ dense/sparse has value (holes miss).
 //
@@ -554,7 +554,7 @@ fn short(m: String) -> String {
 //       mismatch at every monomorphic inline site → t_ic_get.
 //
 // Math.* → JsMathFfi direct-dispatch: WIRED (expr.gleam:1200-1204 →
-//   emit_core.gleam:4024-4029 JPure). No twocore_rt_js_math_ffi row in
+//   emit_core.gleam:4024-4029 JPure). No carder_rt_js_math_ffi row in
 //   top-25 → either firing (JPure = single BIF, sub-top-25 cost) or
 //   drowned by (1)-(3); not the bottleneck either way.
 //
@@ -1135,7 +1135,7 @@ fn microbench() {
 //   Variable=7  ScaleConstraint=6  Binary/Equality=4  Unary/Stay/Edit=3
 //   Strength=2  OrderedCollection/Planner/Plan=1
 // ⇒ multi-field objects — the map-based poly pdict overlay
-//   (twocore_rt_js_obj_ffi.erl t_get_prop_own_data) now covers these;
+//   (carder_rt_js_obj_ffi.erl t_get_prop_own_data) now covers these;
 //   candidate B is landed. Verify emitted inline warm-probe matches.
 //
 // Array-index hotness: OrderedCollection.at (:67) = `this.elms[index]` and

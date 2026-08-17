@@ -3,10 +3,10 @@
 //// (`arc@rt@*` / `arc_rt_*_ffi`) or an `erlang` BIF, with the calling
 //// convention `emit_core` must use for it (`instance.OpKind`).
 
-import gleam/dict
-import twocore/runtime/instance.{
+import carder/runtime/instance.{
   type DirectHost, DirectHost, HostOp, Mut, MutMiss, MutUnit, Pure, Read,
 }
+import gleam/dict
 
 pub fn table() -> DirectHost {
   let store = "arc@rt@store"

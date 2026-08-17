@@ -8,15 +8,15 @@
 //// Not a test — delete once the perf work lands.
 
 import arc_aot/emit as emit_2core
+import carder/ir
+import carder/ir/printer
+import carder/pipeline
 import emit_2core_bench.{adder_js, obj_js, sum_js}
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/string
 import simplifile
-import twocore/ir
-import twocore/ir/printer
-import twocore/pipeline
 
 fn dump(name: String, source: String) -> Nil {
   io.println("═══════════════════════════════════════════════════════════════")
@@ -45,7 +45,7 @@ fn dump(name: String, source: String) -> Nil {
 }
 
 /// ir.Expr node count — 1 per node, recursing into structured sub-exprs.
-/// Mirrors twocore/middle/ir_opt/aggressive.gleam:node_count (private) plus
+/// Mirrors carder/middle/ir_opt/aggressive.gleam:node_count (private) plus
 /// the Try variant so richards' exception-free bodies still count exactly.
 fn node_count(e: ir.Expr) -> Int {
   case e {

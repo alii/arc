@@ -15,13 +15,13 @@ import arc/engine
 import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run
+import carder/pipeline
 import emit_2core_harness as harness
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
 import gleam/string
-import twocore/pipeline
 
 type TimeUnit {
   Microsecond
@@ -290,7 +290,7 @@ pub fn main() {
   print_row(obj)
 
   // Milestone-0 hand-IR figures (this machine, 2core `gleam test` — see
-  // twocore/milestone0_test.gleam). Re-measure there if the host changes.
+  // carder/milestone0_test.gleam). Re-measure there if the host changes.
   let m0_sum_us = 994
   let m0_adder_us = 2405
 
@@ -304,7 +304,7 @@ pub fn main() {
   summary("makeAdder", adder, m0_adder_us)
   summary("obj_prop ", obj, -1)
   io.println("")
-  io.println("m0-hand-IR = twocore/milestone0_test.gleam on this machine.")
+  io.println("m0-hand-IR = carder/milestone0_test.gleam on this machine.")
   io.println(
     "External refs (bench_driver.js): "
     <> "qjs sum=8639 adder=18764 obj=11543; "

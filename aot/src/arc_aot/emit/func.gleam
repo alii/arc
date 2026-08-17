@@ -18,6 +18,7 @@ import arc_aot/emit/state.{
   ClassInitFn, Emitter2, ExprBody, FieldInitAfterSuper, FnDecl, FnExpr, Method,
   NoFieldInit, StmtBody,
 }
+import carder/ir
 import gleam/bit_array
 import gleam/dict
 import gleam/int
@@ -25,7 +26,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-import twocore/ir
 
 // ── feature gates — see expr.gleam ───────────────────────────────────────────
 
