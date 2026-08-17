@@ -44,7 +44,7 @@ import arc/interp/ffi
 import arc/interp/park
 import arc/interp/state.{
   type State, type StepExit, type VmError, AsyncDelegateResume, Awaited,
-  DelegateYield, InitialSuspend, InternalError, PlainYield, Returned,
+  DelegateYield, InitialSuspend, InternalError, PlainYield, Returned, SavedFrame,
   StackUnderflow, State, SuspensionLeak, Threw, VmFailed, Yielded,
 }
 import arc/rt/async as rt_async
@@ -1239,19 +1239,46 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
+    // A plain call frame returning to a caller: no return override, so the
+    // caller is restored straight from the registers. Constructor frames and
+    // the activation root take the general path.
     Return ->
-      after_step(
-        call.return_op(
-          State(
-            ..state,
-            pc:,
-            stack:,
-            locals:,
-            agent: call.set_line(agent, line),
-          ),
-        ),
-        drive,
-      )
+      case state.call_stack {
+        [SavedFrame(constructor_this: None, ..) as saved, ..rest_frames]
+          if !state.func.is_derived_constructor
+        -> {
+          let value = case stack {
+            [v, ..] -> v
+            [] -> mk_undefined()
+          }
+          let new_state =
+            call.return_to(agent, state.outer_depth, saved, rest_frames, value)
+          fast_loop(
+            new_state,
+            drive,
+            new_state.pc,
+            new_state.stack,
+            new_state.locals,
+            new_state.agent,
+            new_state.code,
+            new_state.constants,
+            call.current_line(new_state.agent),
+          )
+        }
+        _ ->
+          after_step(
+            call.return_op(
+              State(
+                ..state,
+                pc:,
+                stack:,
+                locals:,
+                agent: call.set_line(agent, line),
+              ),
+            ),
+            drive,
+          )
+      }
 
     _other -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
   }
@@ -1260,8 +1287,10 @@ fn fast_loop(
 /// Call/CallMethod from the loop's registers. A plain native callee (not
 /// call/apply/Reflect.apply, which re-dispatch) runs under the loop's own
 /// guard and depth bracket and the loop continues with its result; the
-/// State is only materialised for a throw. Every other callee takes the
-/// general call path with the cell already read.
+/// State is only materialised for a throw. A plain same-realm bytecode
+/// callee has its frame built from the registers (`call.call_plain`) and
+/// the loop enters it directly. Every other callee takes the general call
+/// path with the cell already read.
 fn fast_call(
   state: State,
   drive: Drive,
@@ -1317,6 +1346,70 @@ fn fast_call(
               )
           }
         }
+        SObject(
+          kind: KBytecode(
+            template:,
+            env:,
+            home_object:,
+            flags:,
+            realm:,
+            unit:,
+            ..,
+          ),
+          ..,
+        ) as slot ->
+          case
+            realm == agent.realm.id
+            && !template.is_class_constructor
+            && !template.is_generator
+            && !template.is_async
+          {
+            True ->
+              case
+                call.call_plain(
+                  state,
+                  pc,
+                  locals,
+                  agent,
+                  h,
+                  template,
+                  unit,
+                  env,
+                  home_object,
+                  flags,
+                  args,
+                  rest,
+                  this,
+                )
+              {
+                Ok(callee) ->
+                  fast_loop(
+                    callee,
+                    drive,
+                    0,
+                    [],
+                    callee.locals,
+                    callee.agent,
+                    callee.code,
+                    callee.constants,
+                    0,
+                  )
+                Error(exit) -> after_step(Error(exit), drive)
+              }
+            False ->
+              after_step(
+                call.call_cell(
+                  State(..state, pc:, stack:, locals:, agent:),
+                  h,
+                  slot,
+                  this,
+                  args,
+                  rest,
+                  drive,
+                ),
+                drive,
+              )
+          }
         slot ->
           after_step(
             call.call_cell(

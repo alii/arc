@@ -30,7 +30,7 @@
          guard7/8,
          guard_unit1/2, guard_unit2/3, guard_unit3/4, guard_unit4/5,
          guard_unit5/6, guard_unit6/7]).
--export([is_miss/1, is_tdz/1,
+-export([is_miss/1, is_tdz/1, is_undefined/1,
          add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1,
          lt/2, le/2, gt/2, ge/2, strict_eq/2, eq/2,
          truthy/1, nullish/1, typeof/1, typeof/2,
@@ -112,6 +112,10 @@ is_miss(_) -> false.
 %% V is the TDZ sentinel `js_tdz` (an uninitialised let/const/class slot).
 is_tdz(js_tdz) -> true;
 is_tdz(_) -> false.
+
+%% is_undefined(V) -> boolean()
+is_undefined(undefined) -> true;
+is_undefined(_) -> false.
 
 %% Number results keep the two invariants arc_rt_ops_ffi:add/2 keeps: an
 %% integer wider than 2^53 - 1 becomes the nearest double, and float
@@ -844,6 +848,12 @@ setup_locals_seeded({}, {owned_lexical_slots, _Base},
                     This, FnObj, Home, NT, Args, Arity, LocalCount, _Undef)
         when LocalCount =:= Arity + 4, length(Args) =:= Arity ->
     list_to_tuple([This, FnObj, Home, NT | Args]);
+%% No env: the seeds lead, then the args padded/truncated to the local count.
+setup_locals_seeded({}, {owned_lexical_slots, _Base},
+                    This, FnObj, Home, NT, Args, Arity, LocalCount, Undef)
+        when LocalCount >= 4 ->
+    list_to_tuple([This, FnObj, Home, NT
+                   | locals_args(Args, Arity, LocalCount - 4, Undef)]);
 setup_locals_seeded(Env, Lexical, This, FnObj, Home, NT, Args, Arity,
                     LocalCount, Undef) when is_tuple(Env) ->
     setup_locals_seeded(tuple_to_list(Env), Lexical, This, FnObj, Home, NT,
@@ -892,6 +902,9 @@ locals_seeds([], Args, Arity, N, Undef) ->
 
 locals_args(_, _, 0, _) -> [];
 locals_args(_, 0, N, Undef) -> locals_pad(N, Undef);
+%% Every parameter supplied, no extras: the args as given, then the pad.
+locals_args(Args, Arity, N, Undef) when N >= Arity, length(Args) =:= Arity ->
+    Args ++ locals_pad(N - Arity, Undef);
 locals_args([A | Args], Arity, N, Undef) ->
     [A | locals_args(Args, Arity - 1, N - 1, Undef)];
 locals_args([], Arity, N, Undef) ->

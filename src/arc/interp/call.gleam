@@ -122,14 +122,22 @@ fn enter_frame(agent: Agent, template: FuncTemplate) -> Result(Agent, Nil) {
   let store = agent.store
   case store.call_depth >= limits.max_call_depth {
     True -> Error(Nil)
-    False ->
+    False -> {
+      let name = case template.name {
+        Some(name) -> name
+        None -> ""
+      }
       Ok(
         Agent(
           ..agent,
           store: JsStore(..store, call_depth: store.call_depth + 1),
-          frames: [template_frame(template), ..agent.frames],
+          frames: [
+            FrameInfo(name:, script: stack_source, line: 0),
+            ..agent.frames
+          ],
         ),
       )
+    }
   }
 }
 
@@ -372,6 +380,91 @@ fn call_regular_function(
   }
 }
 
+/// Plain [[Call]] of a same-realm bytecode function that is neither a class
+/// constructor nor a coroutine, straight from the loop's registers (`pc`,
+/// `locals`, `agent`; `state` carries the rest of the caller's frame). The
+/// callee frame is built without materialising the caller's State first.
+pub fn call_plain(
+  state: State,
+  pc: Int,
+  locals: TupleArray(JsVal),
+  agent: Agent,
+  fn_h: Handle,
+  template: FuncTemplate,
+  unit: Int,
+  env: EnvTuple,
+  home_object: Option(Handle),
+  flags: FnFlags,
+  args: List(JsVal),
+  rest_stack: List(JsVal),
+  this_arg: JsVal,
+) -> Result(State, StepExit) {
+  let undefined = mk_undefined()
+  let home = case home_object {
+    Some(h) -> mk_object(h)
+    None -> undefined
+  }
+  let #(callee_locals, this_val, agent) =
+    setup_frame(
+      agent,
+      env,
+      fn_h,
+      home,
+      template,
+      flags,
+      args,
+      this_arg,
+      undefined,
+    )
+  case enter_frame(agent, template) {
+    Error(Nil) ->
+      state.throw_range_error(
+        State(..state, pc:, stack: rest_stack, locals:, agent:),
+        "Maximum call stack size exceeded",
+      )
+    Ok(callee_agent) -> {
+      let saved =
+        SavedFrame(
+          func: state.func,
+          unit: state.unit,
+          locals:,
+          stack: rest_stack,
+          pc: pc + 1,
+          try_stack: state.try_stack,
+          constructor_this: None,
+          this: state.this,
+          new_target: state.new_target,
+          home_object: state.home_object,
+          call_args: state.call_args,
+          eval_env: state.eval_env,
+        )
+      let callee =
+        Ok(State(
+          agent: callee_agent,
+          stack: [],
+          locals: callee_locals,
+          func: template,
+          unit:,
+          code: template.bytecode,
+          constants: template.constants,
+          pc: 0,
+          call_stack: [saved, ..state.call_stack],
+          outer_depth: state.outer_depth,
+          try_stack: [],
+          this: this_val,
+          new_target: undefined,
+          home_object: home,
+          call_args: args,
+          eval_env: None,
+        ))
+      case is_tail_call(state, pc, template) {
+        True -> elide_tail_frame(callee)
+        False -> callee
+      }
+    }
+  }
+}
+
 // -- §15.10 tail calls --------------------------------------------------------
 
 /// §15.10 IsInTailPosition for a Call/CallMethod: the next opcode is Return,
@@ -379,7 +472,7 @@ fn call_regular_function(
 /// is a plain [[Call]] frame (constructor frames need Return's fixups) and
 /// there IS a caller frame to return to (coroutine bodies run at
 /// call_stack == [] and never elide, §15.10.1 steps 5-7).
-fn is_tail_call(state: State, callee: FuncTemplate) -> Bool {
+fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
   let frame_eligible = case state.try_stack, state.call_stack {
     [], [_, ..] ->
       state.func.is_strict
@@ -391,7 +484,7 @@ fn is_tail_call(state: State, callee: FuncTemplate) -> Bool {
   case frame_eligible {
     False -> False
     True ->
-      case tuple_array.get_unchecked(state.pc + 1, state.code) {
+      case tuple_array.get_unchecked(pc + 1, state.code) {
         opcode.Return -> True
         _ -> False
       }
@@ -427,12 +520,8 @@ fn elide_tail_frame(res: Result(State, StepExit)) -> Result(State, StepExit) {
 
 // -- [[Call]] dispatch (Call / CallMethod / CallApply / CallMethodApply) ------
 
-fn is_undefined(v: JsVal) -> Bool {
-  case classify(v) {
-    KUndef -> True
-    _ -> False
-  }
-}
+@external(erlang, "arc_interp_ffi", "is_undefined")
+fn is_undefined(v: JsVal) -> Bool
 
 /// Call `callee` with `this` and `args`; the result lands on `rest_stack`.
 /// Bytecode callees, bound chains and call/apply/Reflect.apply stay in the
@@ -493,7 +582,7 @@ pub fn call_cell(
           mk_undefined(),
           drive,
         )
-      case is_tail_call(state, template) {
+      case is_tail_call(state, state.pc, template) {
         True -> elide_tail_frame(res)
         False -> res
       }
@@ -889,22 +978,43 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
       case resolve_return(state, return_value, saved.constructor_this) {
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
         Ok(pushed) ->
-          Ok(
-            safepoint.maybe_collect_at_return(restore_frame(
-              state,
-              saved,
-              [pushed, ..saved.stack],
-              rest_frames,
-            )),
-          )
+          Ok(return_to(
+            state.agent,
+            state.outer_depth,
+            saved,
+            rest_frames,
+            pushed,
+          ))
       }
   }
 }
 
+/// Return from a plain-call frame straight from the loop's registers:
+/// `saved` is the caller (`constructor_this` None, callee not a derived
+/// constructor, so `resolve_return` is the identity), `value` the completion.
+/// The callee's frame is popped whole, so its line is never recorded.
+pub fn return_to(
+  agent: Agent,
+  outer_depth: Int,
+  saved: SavedFrame,
+  rest_frames: List(SavedFrame),
+  value: JsVal,
+) -> State {
+  safepoint.maybe_collect_at_return(restore_frame(
+    leave_frame(agent),
+    outer_depth,
+    saved,
+    [value, ..saved.stack],
+    rest_frames,
+  ))
+}
+
 /// Reinstate `saved` as the running frame (registers, depth, stack frame)
-/// with `stack` as its operand stack.
+/// with `stack` as its operand stack, under `agent` (the callee's frame
+/// already left).
 fn restore_frame(
-  state: State,
+  agent: Agent,
+  outer_depth: Int,
   saved: SavedFrame,
   stack: List(JsVal),
   rest_frames: List(SavedFrame),
@@ -924,7 +1034,7 @@ fn restore_frame(
     eval_env:,
   ) = saved
   State(
-    agent: leave_frame(state.agent),
+    agent:,
     stack:,
     locals:,
     func:,
@@ -933,7 +1043,7 @@ fn restore_frame(
     constants: func.constants,
     pc:,
     call_stack: rest_frames,
-    outer_depth: state.outer_depth,
+    outer_depth:,
     try_stack:,
     this:,
     new_target:,
@@ -950,7 +1060,13 @@ pub fn unwind_frame(state: State) -> Option(State) {
   case state.call_stack {
     [] -> None
     [saved, ..rest_frames] ->
-      Some(restore_frame(state, saved, saved.stack, rest_frames))
+      Some(restore_frame(
+        leave_frame(state.agent),
+        state.outer_depth,
+        saved,
+        saved.stack,
+        rest_frames,
+      ))
   }
 }
 
