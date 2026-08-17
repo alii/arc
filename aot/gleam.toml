@@ -7,6 +7,7 @@ arc = { path = ".." }
 carder = { git = "https://github.com/scarletindustries/carder", ref = "611b8c542cc0d6b8fb9df64281fabe95b6303a96" }
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"
 gleam_erlang = ">= 1.0.0 and < 2.0.0"
+argv = ">= 1.0.0 and < 2.0.0"
 simplifile = ">= 2.0.0 and < 3.0.0"
 
 [dev-dependencies]
