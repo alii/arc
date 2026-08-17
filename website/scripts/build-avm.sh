@@ -4,7 +4,8 @@ set -euo pipefail
 # Build Arc for AtomVM-WebAssembly.
 #
 # Produces in website/public/atomvm/:
-#   AtomVM.js, AtomVM.wasm  — prebuilt AtomVM web runtime
+#   AtomVM.js, AtomVM.wasm  — our patched AtomVM web runtime (see
+#                             scripts/build-atomvm-web.sh; committed, not built here)
 #   arc.avm                 — Arc interpreter + AOT emitter (aot/) + carder +
 #                             gleam_stdlib + shims + a few OTP stdlib modules
 #                             (erl_pp & friends) + AtomVM stdlib
@@ -68,6 +69,22 @@ keysearch(K, N, L) ->
     end.
 flatlength(L) -> length(lists:flatten(L)).
 EOF
+  # AtomVM's maps:find/2 and maps:get/3 are `try maps:get/2 catch badkey`:
+  # every dictionary miss is an exception, and AtomVM builds a raw stacktrace
+  # per raise. Arc's interpreter misses constantly (property lookups). Replace
+  # the bodies with is_map_key/map_get (both AtomVM BIFs).
+  python3 - "$src/maps.erl" <<'PYEOF'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+s2 = re.sub(r"find\(Key, Map\) ->\n    try\n        \{ok, \?MODULE:get\(Key, Map\)\}\n    catch\n        _:\{badkey, _\} ->\n            error\n    end\.",
+            "find(Key, Map) ->\n    case erlang:is_map_key(Key, Map) of\n        true -> {ok, erlang:map_get(Key, Map)};\n        false -> error\n    end.", s)
+s2 = re.sub(r"get\(Key, Map, Default\) ->\n    try\n        \?MODULE:get\(Key, Map\)\n    catch\n        error:\{badkey, _\} ->\n            Default\n    end\.",
+            "get(Key, Map, Default) ->\n    case erlang:is_map_key(Key, Map) of\n        true -> erlang:map_get(Key, Map);\n        false -> Default\n    end.", s2)
+if s2 == s:
+    sys.exit("maps.erl: find/2 or get/3 did not match the expected try/catch shape")
+open(p, "w").write(s2)
+print("maps.erl: find/2 and get/3 now exception-free")
+PYEOF
   patch_mod "$src/maps.erl" "with/2, without/2, update_with/4" <<'EOF'
 with(Ks, M) -> lists:foldl(fun(K, A) ->
     case maps:find(K, M) of {ok, V} -> A#{K => V}; error -> A end
@@ -161,19 +178,13 @@ if ! erlc -I "$OTP_STDLIB_SRC" -I "$OTP_STDLIB_SRC/../include" -o "$OTP_OUT" "$O
   exit 1
 fi
 
-echo "==> fetch AtomVM web runtime"
-fetch() {
-  [[ -f "$2" ]] || curl -fsSL -o "$2" \
-    "https://github.com/atomvm/AtomVM/releases/download/v${ATOMVM_VERSION}/$1"
+# The AtomVM web runtime (AtomVM.js/.wasm) is OUR build of upstream + patches,
+# produced by scripts/build-atomvm-web.sh and committed; this script only
+# packs arc.avm against it.
+[[ -f "$OUT/AtomVM.wasm" && -f "$OUT/AtomVM.js" ]] || {
+  echo "AtomVM web runtime missing in $OUT — run website/scripts/build-atomvm-web.sh" >&2
+  exit 1
 }
-fetch "AtomVM-web-v${ATOMVM_VERSION}.js" "$OUT/AtomVM.js"
-fetch "AtomVM-web-v${ATOMVM_VERSION}.wasm" "$OUT/AtomVM.wasm"
-
-# The prebuilt WASM declares max memory of 256 pages (16MB) which is too small
-# for programs that spawn many processes. Patch the memory import's maximum from
-# 256 pages to 4096 pages (256MB) so it matches INITIAL_MEMORY in use-atomvm.ts.
-echo "==> patch WASM max memory (256 -> 4096 pages)"
-python3 "$WEBSITE/scripts/patch_wasm_memory.py" "$OUT/AtomVM.wasm" 4096
 
 echo "==> pack arc.avm"
 # First occurrence of a module wins: shims first so they shadow the real

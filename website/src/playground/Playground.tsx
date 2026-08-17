@@ -8,12 +8,21 @@ import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useSta
 import gitExamples from 'virtual:examples';
 import { CodeView, type CodeLanguage } from './CodeView';
 import { baseTheme, getIsDark, themeExtensions, watchColorScheme } from './theme';
+import { AboutDialog } from '../components/about-dialog';
 import { useAtomVM } from './use-atomvm';
 
-const DEFAULT_EXAMPLE = {
-	name: 'playground',
+const HELLO_EXAMPLE = {
+	name: 'hello',
 	code: `// Real JavaScript, running as WebAssembly via AtomVM.
-function* fib() {
+const greet = (name) => \`Hello, \${name}!\`;
+
+console.log(greet('world'));
+console.log([1, 2, 3].map((n) => n * n));`,
+};
+
+const FIBONACCI_EXAMPLE = {
+	name: 'fibonacci',
+	code: `function* fib() {
   let [a, b] = [0, 1];
   while (true) {
     yield a;
@@ -26,7 +35,7 @@ const take = (it, k) => Array.from({ length: k }, () => it.next().value);
 console.log(take(fib(), 10));`,
 };
 
-const examples = [DEFAULT_EXAMPLE, ...gitExamples];
+const examples = [HELLO_EXAMPLE, FIBONACCI_EXAMPLE, ...gitExamples];
 
 type AotTab = 'erlang' | 'core' | 'ir';
 type Tab = 'output' | AotTab;
@@ -166,8 +175,13 @@ export function Playground() {
 
 	const isAotTab = tab !== 'output';
 
+	const runningRef = useRef(false);
+
 	const run = useCallback(async () => {
-		if (vm.kind !== 'ready') return;
+		// One run at a time: ⌘⏎ bypasses the disabled button, and overlapping
+		// calls into the VM are pointless (the listener serialises them anyway).
+		if (vm.kind !== 'ready' || runningRef.current) return;
+		runningRef.current = true;
 		const source = codeRef.current;
 		setOutput([]);
 		setRunning(true);
@@ -181,6 +195,7 @@ export function Playground() {
 			push('error', String(e));
 		} finally {
 			setRunning(false);
+			runningRef.current = false;
 		}
 		if (isAotTab) void compile(source);
 	}, [vm, isAotTab, compile]);
@@ -312,6 +327,17 @@ export function Playground() {
 									: 'Ready · warming up caches…')}
 				</span>
 				<div className="flex items-center gap-1.5 ml-auto">
+					<AboutDialog
+						trigger={
+							<button
+								aria-label="How this page works"
+								title="How this page works"
+								className="flex items-center justify-center h-8 w-8 text-xs rounded-md text-rpd-muted dark:text-rp-subtle border border-rpd-text/10 dark:border-rp-overlay hover:border-rpd-text/25 dark:hover:border-rp-subtle/40 hover:text-rpd-subtle dark:hover:text-rp-text cursor-pointer transition-all duration-150"
+							>
+								?
+							</button>
+						}
+					/>
 					<Select.Root
 						defaultValue="0"
 						onValueChange={(value) => {

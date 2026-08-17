@@ -27,11 +27,6 @@ loop() ->
             loop()
     end.
 
-%% SPIKE: micro-benchmarks of the primitives arc's runtime leans on.
-handle(Promise, <<"\\bench">>) ->
-    try emscripten:promise_resolve(Promise, unicode:characters_to_binary(bench()))
-    catch C0:R0:St0 -> catch emscripten:promise_reject(Promise, unicode:characters_to_binary(io_lib:format("~p:~p ~p", [C0, R0, St0])))
-    end;
 handle(Promise, Src0) ->
     try
         Src = unicode:characters_to_binary(Src0),
@@ -60,11 +55,12 @@ handle(Promise, Src0) ->
 in_worker(Work) ->
     Self = self(),
     Ref = make_ref(),
+    %% fibonacci growth: see arc_wasm_ffi:in_worker/1 for the measurements.
     _Pid = spawn_opt(fun() ->
                          Self ! {Ref, try Work()
                                       catch C:R:St -> {crash, C, R, St}
                                       end}
-                     end, []),
+                     end, [{atomvm_heap_growth, fibonacci}]),
     receive
         {Ref, Result} -> Result
     end.
@@ -92,36 +88,3 @@ format_crash(Class, Reason, Stack) ->
         Bin when is_binary(Bin) -> Bin;
         _NotUnicode -> <<"aot: internal error">>
     end.
-
-bench() ->
-    %% Same trivial fold, four ways: big live list vs none, small ints vs boxed.
-    Seq = lists:seq(1, 100000),
-    Fold = fun() -> lists:foldl(fun(K, A) -> A + K end, 0, Seq) end,          % boxed acc, 200k live words
-    FoldSmall = fun() -> lists:foldl(fun(K, A) -> (A + K) band 16#FFFFF end, 0, Seq) end, % small acc, big live
-    Loop = fun() -> loop(100000, 0) end,                                        % boxed acc, no live list
-    LoopSmall = fun() -> loop_small(100000, 0) end,                             % small acc, no live list
-    T1 = timeit(Fold), T2 = timeit(FoldSmall), T3 = timeit(Loop), T4 = timeit(LoopSmall),
-    T5 = timeit(fun() -> in_worker([{atomvm_heap_growth, fibonacci}], Fold) end),
-    T6 = timeit(fun() -> in_worker([{atomvm_heap_growth, minimum}], Fold) end),
-    T7 = timeit(fun() -> in_worker([{atomvm_heap_growth, bounded_free}], Fold) end),
-    T8 = timeit(fun() -> in_worker([{atomvm_heap_growth, fibonacci}, {min_heap_size, 300000}], Fold) end),
-    io_lib:format("fold boxed acc, big live list: ~pms~nfold small acc, big live list: ~pms~n"
-                  "loop boxed acc, no list: ~pms~nloop small acc, no list: ~pms~n"
-                  "fold boxed in worker fibonacci: ~pms~nfold boxed in worker minimum: ~pms~n"
-                  "fold boxed in worker bounded_free: ~pms~nfold boxed in worker fib+min_heap 300k: ~pms~n",
-                  [T1, T2, T3, T4, T5, T6, T7, T8]).
-
-loop(0, A) -> A;
-loop(N, A) -> loop(N - 1, A + N * 100000).
-loop_small(0, A) -> A;
-loop_small(N, A) -> loop_small(N - 1, (A + N) band 16#FFFFF).
-
-in_worker(Opts, F) ->
-    Self = self(), Ref = make_ref(),
-    spawn_opt(fun() -> Self ! {Ref, F()} end, Opts),
-    receive {Ref, R} -> R end.
-
-timeit(F) ->
-    T0 = erlang:monotonic_time(millisecond),
-    _ = F(),
-    erlang:monotonic_time(millisecond) - T0.

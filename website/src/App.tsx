@@ -1,5 +1,6 @@
 import { motion } from 'motion/react';
 import { useEffect, useState } from 'react';
+import { AboutDialog } from './components/about-dialog';
 import { ExternalLink } from './components/external-link';
 import { Playground } from './playground/Playground';
 import { useMediaQuery } from './use-media-query';
@@ -67,6 +68,18 @@ export default function App() {
 					Arc also compiles ahead of time. The same JavaScript is lowered to Erlang and compiled to BEAM bytecode, so it
 					runs as native BEAM code instead of being interpreted.
 					{wide ? ' The Erlang tab in the playground shows exactly what it emits.' : ''}
+					{wide && (
+						<>
+							{' '}
+							<AboutDialog
+								trigger={
+									<button className="underline decoration-dotted underline-offset-4 hover:text-rpd-text dark:hover:text-rp-text cursor-pointer transition-colors">
+										How this page works
+									</button>
+								}
+							/>
+						</>
+					)}
 				</motion.p>
 
 				<motion.div variants={item}>

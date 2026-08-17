@@ -81,12 +81,19 @@ handle_call(Promise, Src0, Eng) ->
 
 %% Run Eval in a fresh process and wait for its result.
 %%
-%% Why a process per run: AtomVM's copying GC makes every allocation cost
-%% O(that process's live heap), so a run's garbage must never accumulate in
-%% this long-lived loop (whose heap also holds the pristine engine). The
-%% closure copies the engine into the worker — ~70k words, milliseconds —
-%% which is nothing next to rebuilding it. A crash inside the run comes back
-%% as a value so the caller settles the promise like any other outcome.
+%% Why a process per run: a run's garbage must never accumulate in this
+%% long-lived loop (whose heap also holds the pristine engine). The closure
+%% copies the engine into the worker — ~70k words, milliseconds — which is
+%% nothing next to rebuilding it. A crash inside the run comes back as a
+%% value so the caller settles the promise like any other outcome.
+%%
+%% Why fibonacci heap growth: AtomVM's default (bounded_free) policy keeps a
+%% process's heap nearly full — it shrinks whenever free space exceeds a few
+%% dozen words — so allocation-heavy code collects every few allocations,
+%% and each collection costs on the order of 100µs in the WASM build.
+%% Measured on the playground: `for (i<5000) s+=i` 4.4s → 2.2s, fib(15)
+%% 5.6s → 1.6s. (Do NOT add min_heap_size: fibonacci then collects on every
+%% allocation trying to shrink below a floor it cannot pass — 3x slower.)
 in_worker(Eval) ->
     Self = self(),
     Ref = make_ref(),
@@ -94,7 +101,7 @@ in_worker(Eval) ->
                          Self ! {Ref, try Eval()
                                       catch C:R:St -> {crash, C, R, St}
                                       end}
-                     end, []),
+                     end, [{atomvm_heap_growth, fibonacci}]),
     receive
         {Ref, Result} -> Result
     end.

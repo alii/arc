@@ -25,6 +25,7 @@
     "@codemirror/legacy-modes": "^6.5.3",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.41.0",
+    "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-select": "^2.2.6",
     "codemirror": "^6.0.2",
     "motion": "^12.36.0",
