@@ -40,6 +40,7 @@ pub fn syntax_error_is_reported_test() {
 }
 
 pub fn esm_is_rejected_test() {
-  let assert Error(message) = playground.emit("export const x = 1", "playground")
+  let assert Error(message) =
+    playground.emit("export const x = 1", "playground")
   assert string.contains(message, "ES modules")
 }

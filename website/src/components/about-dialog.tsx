@@ -81,11 +81,12 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 									</Section>
 
 									<Section title="Erlang · Core Erlang · IR">
-										Arc also compiles ahead of time: the same JavaScript is lowered to a small IR, then to Core Erlang,
-										then to Erlang abstract forms that the Erlang compiler turns into BEAM bytecode. These tabs show
-										each stage for the program in the editor — the Erlang tab is exactly what would be compiled. The
-										final compile-to-BEAM step needs OTP's compiler, which doesn't exist in the browser, so here it's
-										for reading rather than running.
+										Arc also compiles ahead of time: the same JavaScript is lowered to a small IR, then to an internal
+										Core-Erlang-shaped module, then straight to Erlang abstract forms that the Erlang compiler turns
+										into BEAM bytecode. These tabs show each stage for the program in the editor: the Erlang tab is
+										exactly what would be compiled; the Core Erlang tab is a rendering of the intermediate for reading
+										(the compile path never goes through the Core Erlang compiler). The final compile-to-BEAM step needs
+										OTP's compiler, which doesn't exist in the browser, so here it's for reading rather than running.
 									</Section>
 
 									<Section title="Warming up">
@@ -97,10 +98,7 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 
 									<Section title="Speed, honestly">
 										AtomVM in WebAssembly is an interpreter running an interpreter, so programs run slower here than on
-										the real BEAM — roughly tens of times, not thousands. It got there because this page runs a lightly
-										patched AtomVM (see <code>website/atomvm_patches</code> in the repo): the stock 0.7 release
-										collected garbage every few instructions on code like Arc's. The timings are for feel, not for
-										benchmarking.
+										the real BEAM — roughly tens of times, not thousands.
 									</Section>
 
 									<Section title="Not (yet) in the browser build">
@@ -123,10 +121,10 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 	);
 }
 
+/** `title` names the paragraph in source and for screen readers; it isn't rendered. */
 function Section({ title, children }: { title: string; children: ReactNode }) {
 	return (
-		<motion.section variants={section} className="flex flex-col gap-1.5">
-			<h3 className="text-xs uppercase tracking-wider text-rpd-muted dark:text-rp-muted">{title}</h3>
+		<motion.section variants={section} aria-label={title}>
 			<p>{children}</p>
 		</motion.section>
 	);
