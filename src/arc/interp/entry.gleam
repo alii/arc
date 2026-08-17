@@ -121,7 +121,7 @@ type EntryMark {
 }
 
 fn mark(agent: Agent) -> EntryMark {
-  EntryMark(frames: agent.frames, call_depth: agent.store.call_depth)
+  EntryMark(frames: agent.frames, call_depth: agent.call_depth)
 }
 
 /// True `agent` up to `m`. On the ordinary paths this is a no-op (every
@@ -129,15 +129,9 @@ fn mark(agent: Agent) -> EntryMark {
 /// unwound out of the root frame, it discards what the abandoned frames
 /// left behind.
 fn settle(agent: Agent, m: EntryMark) -> Agent {
-  let store = agent.store
-  case store.call_depth == m.call_depth && agent.frames == m.frames {
+  case agent.call_depth == m.call_depth && agent.frames == m.frames {
     True -> agent
-    False ->
-      Agent(
-        ..agent,
-        frames: m.frames,
-        store: JsStore(..store, call_depth: m.call_depth),
-      )
+    False -> Agent(..agent, frames: m.frames, call_depth: m.call_depth)
   }
 }
 
@@ -204,7 +198,7 @@ pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
     func: template,
     unit:,
     call_stack: [],
-    outer_depth: agent.store.call_depth,
+    outer_depth: agent.call_depth,
     try_stack: [],
     this:,
     new_target: mk_undefined(),
@@ -511,7 +505,7 @@ fn start_coroutine(
       func: template,
       unit:,
       call_stack: [],
-      outer_depth: agent.store.call_depth,
+      outer_depth: agent.call_depth,
       try_stack: [],
       this:,
       new_target: mk_undefined(),
@@ -570,20 +564,14 @@ fn nested(
   caller: State,
   k: fn(Agent) -> Result(State, state.StepExit),
 ) -> Result(State, state.StepExit) {
-  let store = caller.agent.store
-  case store.call_depth >= limits.max_call_depth {
+  let agent = caller.agent
+  case agent.call_depth >= limits.max_call_depth {
     True -> {
       let #(err, caller) =
         state.new_error(caller, RangeErr, "Maximum call stack size exceeded")
       Error(state.Threw(err, caller))
     }
-    False ->
-      k(
-        Agent(
-          ..caller.agent,
-          store: JsStore(..store, call_depth: store.call_depth + 1),
-        ),
-      )
+    False -> k(Agent(..agent, call_depth: agent.call_depth + 1))
   }
 }
 

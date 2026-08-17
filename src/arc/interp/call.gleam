@@ -9,7 +9,7 @@
 //// `rt/call.t_call` / `t_construct`, which re-enters the interpreter via
 //// `JsOps.call_bytecode` if it calls back into bytecode.
 ////
-//// Depth: a flat frame push bumps `Store.call_depth` and pops it on
+//// Depth: a flat frame push bumps `Agent.call_depth` and pops it on
 //// Return/unwind, the same counter `t_enter_call` bumps for nested calls,
 //// so `limits.max_call_depth` bounds both. `Agent.frames` is pushed and
 //// popped in step so `Error.stack` names the live bytecode frames.
@@ -34,9 +34,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, type JsSlot, type JsVal,
   type NativeToken, Agent, ArgumentsObj, ArrayObj, FrameInfo, FunctionApply,
-  FunctionCall, FunctionN, JsStore, KBound, KBytecode, KCompiled, KHandle,
-  KNative, KNull, KTdz, KUndef, ProxyObj, ReflectApply, ReflectN, SBox, SObject,
-  classify, mk_object, mk_tdz, mk_undefined,
+  FunctionCall, FunctionN, KBound, KBytecode, KCompiled, KHandle, KNative, KNull,
+  KTdz, KUndef, ProxyObj, ReflectApply, ReflectN, SBox, SObject, classify,
+  mk_object, mk_tdz, mk_undefined,
 }
 import gleam/bool
 import gleam/list
@@ -119,8 +119,8 @@ pub fn current_line(agent: Agent) -> Int {
 /// `rt/store.t_enter_call` enforces for nested calls); the caller throws the
 /// RangeError in its own frame.
 fn enter_frame(agent: Agent, template: FuncTemplate) -> Result(Agent, Nil) {
-  let store = agent.store
-  case store.call_depth >= limits.max_call_depth {
+  let depth = agent.call_depth
+  case depth >= limits.max_call_depth {
     True -> Error(Nil)
     False -> {
       let name = case template.name {
@@ -128,14 +128,10 @@ fn enter_frame(agent: Agent, template: FuncTemplate) -> Result(Agent, Nil) {
         None -> ""
       }
       Ok(
-        Agent(
-          ..agent,
-          store: JsStore(..store, call_depth: store.call_depth + 1),
-          frames: [
-            FrameInfo(name:, script: stack_source, line: 0),
-            ..agent.frames
-          ],
-        ),
+        Agent(..agent, call_depth: depth + 1, frames: [
+          FrameInfo(name:, script: stack_source, line: 0),
+          ..agent.frames
+        ]),
       )
     }
   }
@@ -143,16 +139,11 @@ fn enter_frame(agent: Agent, template: FuncTemplate) -> Result(Agent, Nil) {
 
 /// Leave a flat bytecode frame: `--call_depth` and pop its stack frame.
 fn leave_frame(agent: Agent) -> Agent {
-  let store = agent.store
   let frames = case agent.frames {
     [_, ..rest] -> rest
     [] -> []
   }
-  Agent(
-    ..agent,
-    store: JsStore(..store, call_depth: store.call_depth - 1),
-    frames:,
-  )
+  Agent(..agent, call_depth: agent.call_depth - 1, frames:)
 }
 
 // -- Coroutine hand-off ---------------------------------------------------
@@ -508,15 +499,10 @@ fn elide_tail_frame(res: Result(State, StepExit)) -> Result(State, StepExit) {
         [callee, _caller, ..rest] -> [callee, ..rest]
         other -> other
       }
-      let store = agent.store
       State(
         ..new_state,
         call_stack: rest_frames,
-        agent: Agent(
-          ..agent,
-          frames:,
-          store: JsStore(..store, call_depth: store.call_depth - 1),
-        ),
+        agent: Agent(..agent, frames:, call_depth: agent.call_depth - 1),
       )
     }
     [] -> new_state
@@ -671,7 +657,7 @@ fn call_native(
   args: List(JsVal),
   rest_stack: List(JsVal),
 ) -> Result(State, StepExit) {
-  case state.agent.store.call_depth >= limits.max_call_depth {
+  case state.agent.call_depth >= limits.max_call_depth {
     True -> call_nested(state, callee, this, args, rest_stack)
     False -> {
       let agent = rt_store.t_enter_call(state.agent)
@@ -1191,7 +1177,7 @@ pub fn enter_root(
         func: template,
         unit:,
         call_stack: [],
-        outer_depth: agent.store.call_depth,
+        outer_depth: agent.call_depth,
         try_stack: [],
         this: this_val,
         new_target:,

@@ -1383,7 +1383,7 @@ fn asyncgen_turn(
   resume: Resume,
   sent: #(Int, JsVal),
 ) -> #(Step, Agent) {
-  case st.store.call_depth >= limits.max_call_depth {
+  case st.call_depth >= limits.max_call_depth {
     True -> {
       let #(e, st) =
         require_js(st).ops.new_error(

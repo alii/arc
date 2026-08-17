@@ -1314,7 +1314,7 @@ fn fast_call(
           if tag != function_call
           && tag != function_apply
           && tag != reflect_apply
-          && agent.store.call_depth < limits.max_call_depth
+          && agent.call_depth < limits.max_call_depth
         -> {
           let agent = rt_store.t_enter_call(agent)
           case ffi.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
@@ -4610,7 +4610,7 @@ fn gen_step(
         resume: rt_types.ResumeFrame(frame:) as resume,
       )
       if frame.realm == agent.realm.id
-      && agent.store.call_depth < limits.max_call_depth
+      && agent.call_depth < limits.max_call_depth
     ->
       case frame.parked {
         ParkedOp ->
@@ -4639,7 +4639,7 @@ fn resume_here(
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   let agent = state.agent
   let store = agent.store
-  let depth = store.call_depth
+  let depth = agent.call_depth
   let frames = agent.frames
   let running =
     Agent(
@@ -4651,8 +4651,8 @@ fn resume_here(
           rt_types.SGenerator(state: rt_types.GenExecuting, resume:),
           store.data,
         ),
-        call_depth: depth + 1,
       ),
+      call_depth: depth + 1,
       frames: [call.frame_info_at(frame.template, frame.line), ..frames],
     )
   let body = park.unpark_with(running, frame, stack)
@@ -4723,11 +4723,8 @@ fn settle_gen(
   let store = agent.store
   Agent(
     ..agent,
-    store: JsStore(
-      ..store,
-      data: tree_array.set(data.id, gen, store.data),
-      call_depth: depth,
-    ),
+    store: JsStore(..store, data: tree_array.set(data.id, gen, store.data)),
+    call_depth: depth,
     frames:,
   )
 }

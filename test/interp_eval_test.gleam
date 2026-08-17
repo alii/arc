@@ -231,7 +231,7 @@ pub fn direct_eval_escaping_throw_restores_depth_test() {
     "try { (function () { eval('(function a () { (function b () { null.x })() })()') })() } catch (e) {} "
   assert eval_int(leak <> leak <> leak <> depth) == eval_int(depth)
   let #(_, st) = eval(leak <> leak)
-  assert st.store.call_depth == 0
+  assert st.call_depth == 0
   assert st.frames == []
   // Repeated leaks used to exhaust the call stack for unrelated code.
   assert eval_int(

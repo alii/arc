@@ -89,6 +89,7 @@ pub fn new_agent(hooks: HostHooks) -> Agent {
       realms: dict.new(),
       import_hook: None,
       waiters: [],
+      call_depth: 0,
     )
   let #(_realm, st) = init_realm(seed_ops(st))
   st

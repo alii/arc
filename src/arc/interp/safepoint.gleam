@@ -1,5 +1,5 @@
 //// The GC safepoints the interpreter owns. The shared collector
-//// (`rt/gc.t_collect`) refuses to run while `store.call_depth > 0` and sees
+//// (`rt/gc.t_collect`) refuses to run while `call_depth > 0` and sees
 //// only the store's own roots, so a collection with an interpreter frame
 //// live must be triggered BY the interpreter, handing that frame's registers
 //// in as extra roots. Two such points exist:

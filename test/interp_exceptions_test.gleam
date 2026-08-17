@@ -107,7 +107,7 @@ pub fn uncaught_throw_restores_agent_bookkeeping_test() {
   let #(comp, st) = run(src)
   let assert ThrowCompletion(_) = comp
   assert st.frames == []
-  assert st.store.call_depth == 0
+  assert st.call_depth == 0
   // The agent is still usable and its globals survived.
   assert eval_string_on(st, "typeof outer") == "function"
 }
@@ -135,7 +135,7 @@ pub fn catch_sees_only_live_frames_test() {
   assert !string.contains(s, "outer")
   assert string.contains(s, "at script:3")
   assert st.frames == []
-  assert st.store.call_depth == 0
+  assert st.call_depth == 0
 }
 
 pub fn operand_stack_is_truncated_on_catch_test() {
@@ -302,7 +302,7 @@ pub fn bytecode_throw_through_native_frame_test() {
   let #(v, st) = eval(src)
   assert as_string(st, v, src) == "cb 2|at cb (script:1)"
   assert st.frames == []
-  assert st.store.call_depth == 0
+  assert st.call_depth == 0
   // Several native frames deep: sort comparator → forEach callback → throw.
   assert eval_string(
       "var r = []; try { [3, 1, 2].sort(function (a, b) { [0].forEach(function () { if (a === 1) throw 'deep' }); return a - b }) } catch (e) { r.push(e) } r.join()",
@@ -410,7 +410,7 @@ pub fn host_native_throw_and_reentry_test() {
   let #(_, st) =
     eval_on(st, "try { reenter(function () { thrower(0) }) } catch (e) {}")
   assert st.frames == []
-  assert st.store.call_depth == 0
+  assert st.call_depth == 0
 }
 
 pub fn deep_recursion_range_error_is_catchable_test() {

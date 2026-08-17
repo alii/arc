@@ -50,7 +50,7 @@ pub type State {
     /// Caller frames of THIS activation, innermost first. A nested
     /// `run_bytecode` entered from a builtin starts a fresh, empty list.
     call_stack: List(SavedFrame),
-    /// `store.call_depth` when this activation was entered: the units held
+    /// `call_depth` when this activation was entered: the units held
     /// by whatever is beneath it. Each flat frame adds one on top, so
     /// `call_depth == outer_depth + length(call_stack)` throughout.
     outer_depth: Int,

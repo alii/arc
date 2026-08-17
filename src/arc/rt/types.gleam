@@ -3636,9 +3636,6 @@ pub type JsStore(st) {
     /// `t_maybe_collect` fires when `alloc_since_gc >= gc_threshold`.
     /// Default 65_536 (arc `interpreter.gleam:5796`).
     gc_threshold: Int,
-    /// ++ on `t_call_checked` entry, -- on exit; `t_maybe_collect`
-    /// gate — only collects at `call_depth == 0` (D11).
-    call_depth: Int,
     // ── threaded counters (D9, D14) ──
     /// Property creation-order stamp.
     prop_seq: Int,
@@ -3710,6 +3707,10 @@ pub type Agent {
     /// The wakes are sent to the BEAM process that registered the waiter,
     /// so an agent holding any is drained from that process.
     waiters: List(AsyncWaiter),
+    /// Live JS call nesting: ++ on every call entry (flat interpreter frame,
+    /// `t_enter_call` for a native or compiled callee), -- on exit. Bounded
+    /// by `limits.max_call_depth`; the GC gate only collects at 0 (D11).
+    call_depth: Int,
   )
 }
 

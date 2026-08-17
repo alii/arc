@@ -119,6 +119,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     realms:,
     import_hook: _,
     waiters:,
+    call_depth: _,
   ) = st
   use Nil <- result.try(case waiters {
     [] -> Ok(Nil)
@@ -131,7 +132,6 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     pinned_roots:,
     alloc_since_gc:,
     gc_threshold:,
-    call_depth: _,
     prop_seq:,
     private_uid:,
     symbol_uid:,
@@ -193,6 +193,7 @@ pub fn deserialize(
     realms:,
     import_hook: None,
     waiters: [],
+    call_depth: 0,
   )
   |> rt_builtins.seed_ops
 }
@@ -223,7 +224,6 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     pinned_roots:,
     alloc_since_gc:,
     gc_threshold:,
-    call_depth: 0,
     prop_seq:,
     private_uid:,
     symbol_uid:,
