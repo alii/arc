@@ -20,7 +20,7 @@
 %% Integer arithmetic never overflows, so only the float clauses pay for a
 %% catch frame.
 -define(MAX_SAFE_INT, 9007199254740991).
--compile({inline, [norm/1]}).
+-compile({inline, [norm/1, add/2, sub/2, mul/2]}).
 norm(R) when R > ?MAX_SAFE_INT; R < -?MAX_SAFE_INT -> arc_rt_val_ffi:mk_int(R);
 norm(R) -> R.
 
