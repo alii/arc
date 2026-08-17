@@ -316,7 +316,7 @@ export function Playground() {
 				<span className={`text-xs ${running ? rainbowText : 'text-rpd-muted dark:text-rp-subtle'}`}>
 					{vm.kind === 'loading' && 'Loading AtomVM…'}
 					{vm.kind === 'warming' && 'Warming up…'}
-					{vm.kind === 'error' && `error: ${vm.message}`}
+					{vm.kind === 'error' && 'Unavailable'}
 					{vm.kind === 'ready' &&
 						(running
 							? `Running ${(elapsed / 1000).toFixed(1)}s`
@@ -439,7 +439,30 @@ export function Playground() {
 							ref={outputRef}
 							className="m-0 h-full overflow-auto text-rpd-subtle dark:text-rp-subtle font-mono text-xs"
 						>
-							{output.length === 0 ? (
+							{vm.kind === 'error' ? (
+								<div className="h-full flex items-center justify-center p-6 whitespace-normal">
+									<div className="flex items-start gap-3 max-w-[60ch] text-left">
+										<svg
+											className="shrink-0 mt-0.5 text-rpd-love dark:text-rp-love"
+											width="14"
+											height="14"
+											viewBox="0 0 16 16"
+											fill="none"
+											stroke="currentColor"
+											strokeWidth="1.5"
+											strokeLinecap="round"
+											strokeLinejoin="round"
+											aria-hidden="true"
+										>
+											<path d="M8 1.5l6.5 11.5H1.5L8 1.5zM8 6v3.5M8 12h.01" />
+										</svg>
+										<div className="text-xs leading-relaxed">
+											<p className="text-rpd-text dark:text-rp-text">{vm.message}.</p>
+											<p className="mt-1 text-rpd-muted dark:text-rp-muted">{vm.detail}</p>
+										</div>
+									</div>
+								</div>
+							) : output.length === 0 ? (
 								<Empty>{didRun || running ? '' : 'run to see output'}</Empty>
 							) : (
 								<div className="p-3 flex flex-col gap-0.5">

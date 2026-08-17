@@ -7,6 +7,7 @@ export type AtomVM = {
 
 type EmscriptenModule = Partial<AtomVM> & {
 	arguments?: string[];
+	onAbort?: (what: unknown) => void;
 	locateFile?: (path: string) => string;
 	print?: (s: string) => void;
 	printErr?: (s: string) => void;
@@ -24,7 +25,7 @@ type Status =
 	| { kind: 'loading' }
 	| { kind: 'warming' }
 	| { kind: 'ready'; vm: AtomVM; warm: boolean }
-	| { kind: 'error'; message: string };
+	| { kind: 'error'; message: string; detail: string };
 
 declare global {
 	interface Window {
@@ -143,6 +144,29 @@ function installJsBridge(mod: EmscriptenModule) {
 	(globalThis as unknown as { __arcJsBridge: typeof bridge }).__arcJsBridge = bridge;
 }
 
+/** What stops the runtime from starting here, or null if all good. */
+function preflight(): { message: string; detail: string } | null {
+	// Dev only: ?simulate=nowasm | noisolation to see these states on a normal browser.
+	const simulate = import.meta.env.DEV ? new URLSearchParams(location.search).get('simulate') : null;
+	const noWasm =
+		simulate === 'nowasm' || typeof WebAssembly === 'undefined' || typeof WebAssembly.instantiate !== 'function';
+	const noIsolation = simulate === 'noisolation' || typeof SharedArrayBuffer === 'undefined' || !crossOriginIsolated;
+	if (noWasm) {
+		return {
+			message: 'WebAssembly is off in this browser',
+			detail: 'This is usually because of a managed device policy.',
+		};
+	}
+	if (noIsolation) {
+		return {
+			message: 'Page isn’t cross-origin isolated',
+			detail:
+				'The headers that allow threads (COOP and COEP) were removed somewhere between the server and your browser.',
+		};
+	}
+	return null;
+}
+
 /**
  * Loads AtomVM-WASM + the Arc bundle. Emscripten reads its config from a
  * global `Module` object that must exist before AtomVM.js runs, hence the
@@ -156,6 +180,16 @@ export function useAtomVM(onPrint: (line: string) => void) {
 	useEffect(() => {
 		if (window.Module) return;
 
+		// Pre-flight: say clearly what is missing instead of loading forever.
+		// AtomVM-WASM is a pthreads build, so besides WebAssembly itself it needs
+		// SharedArrayBuffer, which browsers only expose to cross-origin-isolated
+		// pages (COOP/COEP headers — see vercel.json / vite.config.js).
+		const missing = preflight();
+		if (missing) {
+			setStatus({ kind: 'error', ...missing });
+			return;
+		}
+
 		let rejectPending: ((reason: Error) => void) | null = null;
 		let swallowPrints = false;
 
@@ -168,6 +202,19 @@ export function useAtomVM(onPrint: (line: string) => void) {
 
 		const mod: EmscriptenModule = {
 			arguments: ['/atomvm/arc.avm'],
+			// Aborts before the runtime is up are almost always the environment
+			// (CSP without 'wasm-unsafe-eval', memory limits) — surface them.
+			onAbort: (what) => {
+				setStatus((current) =>
+					current.kind === 'ready'
+						? current
+						: {
+								kind: 'error',
+								message: 'The runtime couldn’t start',
+								detail: `This is usually because of a strict Content Security Policy or a memory limit. (${String(what)})`,
+							},
+				);
+			},
 			locateFile: (p) => `/atomvm/${p}`,
 			INITIAL_MEMORY: 256 * 1024 * 1024,
 			print: (s) => {
@@ -233,9 +280,17 @@ export function useAtomVM(onPrint: (line: string) => void) {
 		const script = document.createElement('script');
 		script.src = '/atomvm/AtomVM.js';
 		script.async = true;
-		script.onerror = () => setStatus({ kind: 'error', message: 'failed to load AtomVM.js' });
+		script.onerror = () =>
+			setStatus({
+				kind: 'error',
+				message: 'Couldn’t load the runtime',
+				detail: 'The runtime script could not be downloaded.',
+			});
 		document.body.appendChild(script);
-	}, [onPrintStable]);
+		// Runs once: `onPrintStable` is an Effect Event (not reactive, must not be
+		// a dependency — its identity is not stable), and the loader is global.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
 
 	return status;
 }
