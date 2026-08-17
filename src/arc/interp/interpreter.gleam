@@ -5056,7 +5056,13 @@ fn delegate_target(
 
 /// Pop n items. Returns #(popped_in_order, remaining_stack).
 fn pop_n(stack: List(JsVal), n: Int) -> Option(#(List(JsVal), List(JsVal))) {
-  pop_n_loop(stack, n, [])
+  case n, stack {
+    0, _ -> Some(#([], stack))
+    1, [a, ..rest] -> Some(#([a], rest))
+    2, [b, a, ..rest] -> Some(#([a, b], rest))
+    3, [c, b, a, ..rest] -> Some(#([a, b, c], rest))
+    _, _ -> pop_n_loop(stack, n, [])
+  }
 }
 
 fn pop_n_loop(

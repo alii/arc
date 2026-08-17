@@ -217,10 +217,15 @@ fn setup_frame(
       agent,
     )
     False -> {
-      // A derived constructor enters with `this` in TDZ: nothing to bind.
-      let #(this_val, agent) = case classify(this_arg) {
-        KTdz -> #(this_arg, agent)
-        _ -> rt_call.resolve_this(agent, flags, this_arg)
+      // Strict [[ThisMode]] passes `this` through uncoerced (and a derived
+      // constructor enters with it in TDZ: nothing to bind either way).
+      let #(this_val, agent) = case flags.is_strict {
+        True -> #(this_arg, agent)
+        False ->
+          case classify(this_arg) {
+            KTdz -> #(this_arg, agent)
+            _ -> rt_call.resolve_this(agent, flags, this_arg)
+          }
       }
       #(
         ffi.setup_locals_seeded(
