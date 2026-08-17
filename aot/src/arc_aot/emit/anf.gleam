@@ -11,7 +11,7 @@ import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None, Some}
 
 /// Tail continuation receives the final Emitter2 + result and returns the
 /// terminal ir.Expr paired with the emitter it finished with; the builder
@@ -462,26 +462,32 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
 /// (native op, then widen an integer past 2^53 - 1 to a double and keep the
 /// sign of an integer zero product). The result is marked a known number.
 pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  use ii <- then(both_ints(a, b))
   let slow = host(op, [a, b])
-  case int_arm_of(op, a, b, slow) {
-    Some(fast) -> then(bind_if(ii, fast, slow), mark_number)
-    None -> then(slow, mark_number)
-  }
+  then(int_or(op, a, b, slow, slow), mark_number)
 }
 
-/// The inline integer arm for a `num_*` kernel op, `slow` on a range miss.
-fn int_arm_of(
+/// The inline integer arm of a `num_*` op when both operands are BEAM
+/// integers (`slow` on a range miss), else `other`. Ops without an integer
+/// arm are just `other`.
+fn int_or(
   op: String,
   a: ir.Value,
   b: ir.Value,
   slow: Build(ir.Value),
-) -> Option(Build(ir.Value)) {
-  case op {
+  other: Build(ir.Value),
+) -> Build(ir.Value) {
+  let arm = case op {
     "num_add" -> Some(int_arm(ir.NAdd, a, b, False, slow))
     "num_sub" -> Some(int_arm(ir.NSub, a, b, False, slow))
     "num_mul" -> Some(int_arm(ir.NMul, a, b, True, slow))
     _ -> None
+  }
+  case arm {
+    Some(fast) -> {
+      use ii <- then(both_ints(a, b))
+      bind_if(ii, fast, other)
+    }
+    None -> other
   }
 }
 
@@ -549,10 +555,18 @@ pub fn guarded_binop(
   a: ir.Value,
   b: ir.Value,
 ) -> Build(ir.Value) {
-  use #(both, elided) <- then(both_numbers(a, b))
-  case elided {
-    True -> num_binop(fast_op, a, b)
-    False -> bind_if(both, num_binop(fast_op, a, b), host(slow_op, [a, b]))
+  fn(e, k) {
+    case is_known_number(e, a) && is_known_number(e, b) {
+      True -> num_binop(fast_op, a, b)(e, k)
+      False ->
+        int_or(
+          fast_op,
+          a,
+          b,
+          host(fast_op, [a, b]),
+          host(slow_op <> "_any", [a, b]),
+        )(e, k)
+    }
   }
 }
 
