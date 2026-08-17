@@ -1670,27 +1670,41 @@ fn fold_args_spread(
   }
 }
 
-/// D4: JS fn values are `{js_cell,N}` handles. Fast path: `kfn_code` reads the
-/// KCompiled ONCE and returns `{code, resolved_this, simple}` (§10.2.1.2
-/// bind-this folded in) → `TermTest(IsTuple)` guards `CallClosure`; else §8
-/// `t_call_checked`. One heap read per call, not two.
+/// D4: JS fn values are `{js_cell,N}` handles. The generic call site is ONE
+/// host op: `call_fast` (arc_rt_call_ffi) runs the `kfn_code` probe, the
+/// simple-ABI / Frame apply and the §8 `t_call_checked` fallback inside, so
+/// no per-site hit/miss branches reach the IR.
 pub fn emit_call(
   f: ir.Value,
   this: ir.Value,
   args_l: ir.Value,
 ) -> Build(ir.Value) {
-  use pair <- anf.then(anf.host("kfn_code", [f, this]))
-  emit_call_with_pair(pair, f, this, Consed(args_l))
+  anf.host("call_fast", [f, this, args_l])
+}
+
+/// `emit_call` with 0..3 positional args passed to `call_fastN` — a simple-ABI
+/// hit applies the variant with no args list; more args cons and use the
+/// list form.
+pub fn emit_call_pos(
+  f: ir.Value,
+  this: ir.Value,
+  pos: List(ir.Value),
+) -> Build(ir.Value) {
+  case pos {
+    [] | [_] | [_, _] | [_, _, _] ->
+      anf.host("call_fast" <> int.to_string(list.length(pos)), [f, this, ..pos])
+    _ -> {
+      use args_l <- anf.then(anf.cons_list(pos))
+      emit_call(f, this, args_l)
+    }
+  }
 }
 
 /// Call arguments as passed to `emit_call_with_pair`. `Positional` defers the
 /// args cons-list build so the simple-ABI hit path emits ZERO MakeCons.
-/// `ArgsList` is an already-built cons-list Value (the frame's raw `_args`) —
-/// passed verbatim, arity unknown so simple-ABI is skipped.
 pub type CallArgs {
   Consed(ir.Value)
   Positional(List(ir.Value))
-  ArgsList(ir.Value)
 }
 
 /// `emit_call` with the `kfn_code` triple already in hand. stmt.gleam hoists
@@ -1709,7 +1723,7 @@ pub fn emit_call_with_pair(
   // Cons the args-list only in arms that need it — `pos` values are already
   // Let-bound so duplicating the cons across branches reorders no side effects.
   let cons_args = case args {
-    Consed(v) | ArgsList(v) -> anf.pure(v)
+    Consed(v) -> anf.pure(v)
     Positional(pos) -> anf.cons_list(pos)
   }
   use is_kfn <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, pair)))
@@ -1723,7 +1737,7 @@ pub fn emit_call_with_pair(
       anf.bind(ir.CallClosure(code, [frame, args_l]))
     }
     case args {
-      Consed(_) | ArgsList(_) -> frame_path
+      Consed(_) -> frame_path
       Positional(pos) -> {
         use simple <- anf.then(anf.bind(anf.tuple_get(pair, 2)))
         use is_some <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, simple)))
@@ -1767,8 +1781,8 @@ pub fn emit_call_with_pair(
 /// Method call `o.prop(args)` with `o` already Let-bound (§13.3.6.2 this=obj).
 /// Static-dot ∧ spread-free → fused JMut `call_method_ic` (proto walk +
 /// KCompiled apply in ONE FFI call, `miss` on any shape mismatch); miss and
-/// every non-fusable shape fall to `emit_member_get` → `kfn_code` →
-/// `emit_call_with_pair` with `Positional(pos)` so simple-ABI still applies.
+/// every non-fusable shape fall to `emit_member_get` → `emit_call_pos`
+/// (`call_fastN` kernel) so simple-ABI still applies.
 /// Args evaluate ONCE, before the probe — the miss arm re-uses `pos` (no
 /// re-eval); the accessor-`prop` × side-effecting-arg reorder is the only
 /// observable delta and `call_method_ic` misses on accessors.
@@ -1789,8 +1803,7 @@ fn emit_member_call(
           // Computed / #private — key evals BEFORE args (§13.3.6 order).
           use f <- anf.then(emit_member_get(o, prop))
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          use pair <- anf.then(anf.host("kfn_code", [f, o]))
-          emit_call_with_pair(pair, f, o, Positional(pos))
+          emit_call_pos(f, o, pos)
         }
         Some(kb) -> {
           use pos <- anf.then(anf.seq(list.map(args, expr)))
@@ -1804,8 +1817,7 @@ fn emit_member_call(
             is_miss,
             {
               use f <- anf.then(emit_member_get(o, prop))
-              use pair <- anf.then(anf.host("kfn_code", [f, o]))
-              emit_call_with_pair(pair, f, o, Positional(pos))
+              emit_call_pos(f, o, pos)
             },
             anf.pure(r),
           )
@@ -2103,8 +2115,8 @@ fn emit_unary(op: ast.UnaryOp, arg: ast.Expression) -> Build(ir.Value) {
 // `chain_has_optional(ex)==False`; the optional-chain path handles `?.` links.
 
 /// General `X.apply(Y, arguments)` lowering: evaluate `X` → f, `Y` → recv,
-/// then `kfn_code(f, recv)` → frame-path call with the raw `_args` cons-list
-/// passed verbatim (arity unknown, so simple-ABI is skipped).
+/// then `call_fast(f, recv, _args)` with the raw `_args` cons-list passed
+/// verbatim.
 fn emit_apply_raw_general(
   inner: ast.Expression,
   recv_arg: ast.Expression,
@@ -2112,8 +2124,7 @@ fn emit_apply_raw_general(
 ) -> Build(ir.Value) {
   use f <- anf.then(expr(inner))
   use recv <- anf.then(expr(recv_arg))
-  use pair <- anf.then(anf.host("kfn_code", [f, recv]))
-  emit_call_with_pair(pair, f, recv, ArgsList(raw_args))
+  emit_call(f, recv, raw_args)
 }
 
 /// `X.apply(Y, arguments)` fast-path — forwards the frame's raw `_args`
@@ -2140,8 +2151,7 @@ fn emit_apply_arguments(
             is_miss,
             {
               use f <- anf.then(emit_member_get(this, mprop))
-              use pair <- anf.then(anf.host("kfn_code", [f, this]))
-              emit_call_with_pair(pair, f, this, ArgsList(raw_args))
+              emit_call(f, this, raw_args)
             },
             anf.pure(r),
           )
@@ -2259,17 +2269,17 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
         _ -> None
       }
       use f <- anf.then(expr(callee))
-      // Spread-free → keep the positional value list so `emit_call_with_pair`
-      // can try the simple-ABI closure; the hoisted (or fresh) `pair` supplies
-      // both the frame code AND `pair.2` — hoist × simple-abi compose.
+      // Spread-free → keep the positional value list so the simple-ABI
+      // closure applies: inline via the hoisted `pair` (frame code AND
+      // `pair.2`), else inside the `call_fastN` kernel.
       case ast_util.has_spread_arg(args) {
         False -> {
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          use pair <- anf.then(case hoisted {
-            Some(p) -> anf.pure(p)
-            None -> anf.host("kfn_code", [f, rc.undef])
-          })
-          emit_call_with_pair(pair, f, rc.undef, Positional(pos))
+          case hoisted {
+            Some(pair) ->
+              emit_call_with_pair(pair, f, rc.undef, Positional(pos))
+            None -> emit_call_pos(f, rc.undef, pos)
+          }
         }
         True -> {
           use args_l <- anf.then(emit_args_list(args))

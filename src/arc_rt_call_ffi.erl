@@ -20,6 +20,8 @@
 -module(arc_rt_call_ffi).
 -export([t_call_protected/4, t_apply_protected/2, mk_frame/4, apply_sm/5,
          step_classify/1, t_kfn_code/3, t_new_simple/3,
+         t_call_fast/4, t_call_fast0/3, t_call_fast1/4, t_call_fast2/5,
+         t_call_fast3/6,
          t_call_method_mono/4, t_call_method_ic/5, t_call_method_ic0/4,
          t_call_method_ic1/5, t_call_method_ic2/6, t_call_method_ic3/7]).
 
@@ -73,6 +75,76 @@ t_kfn_code(_, _, _) -> undefined.
         (element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false andalso
          element(?FNFLAGS_IS_GEN, Flags) =:= false andalso
          element(?FNFLAGS_IS_ASYNC, Flags) =:= false)).
+
+%% t_call_fast(St, F, This, Args) -> {V, St'}
+%% The generic `f(args)` site as ONE host op: the t_kfn_code gate (matched
+%% in place, no triple built), then the simple-ABI (arity match) or Frame
+%% apply the emitter used to inline at every site, else
+%% arc@rt@call:t_call_checked. Same gate, same Frame, same fallback.
+t_call_fast(St, F, This, Args) ->
+    call_fast(St, F, This, Args, undefined, undefined, undefined).
+
+%% t_call_fastN(St, F, This, A1..AN) — the same with 0..3 positional args, so
+%% a simple-ABI hit applies the variant with no args list and no apply hop.
+t_call_fast0(St, F, This) ->
+    call_fast(St, F, This, 0, undefined, undefined, undefined).
+t_call_fast1(St, F, This, A) ->
+    call_fast(St, F, This, 1, A, undefined, undefined).
+t_call_fast2(St, F, This, A, B) ->
+    call_fast(St, F, This, 2, A, B, undefined).
+t_call_fast3(St, F, This, A, B, C) ->
+    call_fast(St, F, This, 3, A, B, C).
+
+%% N is the args list itself, or 0..3 with the args in A, B, C.
+call_fast(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
+    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, Slot) of
+                {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
+                  when ?KFN_PLAIN(Flags) ->
+                    %% §10.2.1.2 bind-this as in t_kfn_code.
+                    case element(?FNFLAGS_IS_ARROW, Flags)
+                         orelse element(?FNFLAGS_IS_STRICT, Flags) of
+                        true ->
+                            apply_fast(St, F, Code, Simple, This, N, A, B, C);
+                        false when This =:= undefined; This =:= null ->
+                            G = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
+                            apply_fast(St, F, Code, Simple, G, N, A, B, C);
+                        false when element(1, This) =:= ?HANDLE_TAG ->
+                            apply_fast(St, F, Code, Simple, This, N, A, B, C);
+                        false -> call_slow(St, F, This, N, A, B, C)
+                    end;
+                _ -> call_slow(St, F, This, N, A, B, C)
+            end;
+        _ -> call_slow(St, F, This, N, A, B, C)
+    end;
+call_fast(St, F, This, N, A, B, C) -> call_slow(St, F, This, N, A, B, C).
+
+call_slow(St, F, This, N, A, B, C) ->
+    arc@rt@call:t_call_checked(St, F, This, args(N, A, B, C)).
+
+apply_fast(St, _, _, {?SOME, {CodeS, Arity, NeedsThis}}, ThisR, Args, _, _, _)
+  when is_list(Args), length(Args) =:= Arity ->
+    case NeedsThis of
+        true -> apply_this(CodeS, St, ThisR, Args);
+        false -> erlang:apply(CodeS, [St | Args])
+    end;
+apply_fast(St, _, _, {?SOME, {CodeS, N, true}}, ThisR, N, A, B, C) ->
+    case N of
+        0 -> CodeS(St, ThisR);
+        1 -> CodeS(St, ThisR, A);
+        2 -> CodeS(St, ThisR, A, B);
+        3 -> CodeS(St, ThisR, A, B, C)
+    end;
+apply_fast(St, _, _, {?SOME, {CodeS, N, false}}, _, N, A, B, C) ->
+    case N of
+        0 -> CodeS(St);
+        1 -> CodeS(St, A);
+        2 -> CodeS(St, A, B);
+        3 -> CodeS(St, A, B, C)
+    end;
+apply_fast(St, F, Code, _, ThisR, N, A, B, C) ->
+    Code(St, {ThisR, F, undefined, undefined}, args(N, A, B, C)).
 
 %% IcEntry (rt_types.gleam): {ic_call, KeyBin, Entries}, each entry
 %% {ic_call_way, Sid, PId, Chain, Fn} with Chain = [{ProtoId, ProtoSlot}]
