@@ -46,12 +46,102 @@ const WARM_UP_CHUNKS = [
 	`Array.from({ length: 3 }, (_, i) => i).sort((a, b) => b - a).join(','); Object.entries({ a: 1, ...{ b: 2 } }); Object.assign({}, { c: 3 });`,
 	`JSON.parse(JSON.stringify({ a: [1, { b: 'c' }], d: null }));`,
 	`'Hello, World'.toUpperCase().split(', ').reverse().join('').padStart(20, '.').slice(1, -1) + \`\${1 + 1}\` + String(1.5e21) + (0.1 + 0.2).toFixed(2);`,
-	// No regex here: RegExp is unsupported in the browser build (no PCRE in AtomVM).
-	`Math.max(1, 2, Math.floor(Math.random() * 10)); new Date(0).toISOString(); 'x-y'.replace('-', '_').split('_').indexOf('y');`,
+	`Math.max(1, 2, Math.floor(Math.random() * 10)); new Date(0).toISOString(); /a(?<n>b)+/g.exec('abb')?.groups.n; 'x-y'.replace(/-/g, '_');`,
 	`let e; try { null.x; } catch (err) { e = err instanceof TypeError && err.message; }`,
 	`Symbol.iterator in [] && typeof BigInt(1) === 'bigint' && new Uint8Array([1, 2]).length;`,
 	`console.log([1, 'two', { three: 3 }, [4], null, undefined, () => {}, new Map([[1, 2]])], 'x', 1.5); console.error('e');`,
 ];
+
+/**
+ * The page half of `arc_js_bridge` (website/atomvm_shims/arc_js_bridge.erl):
+ * the Erlang side runs `__arcJsBridge.run(id, thunk)` on the main thread via
+ * `emscripten:run_script`, and the result goes back with `Module.cast` to the
+ * registered `arc_js_bridge` process as `id \x1f status \x1f payload`.
+ *
+ * On top of it, RegExp for the browser build: AtomVM has no PCRE, but the
+ * browser has the one regex engine with exactly JavaScript's semantics. The
+ * Erlang shim (atomvm_shims/arc_regexp_ffi.erl) speaks UTF-8 byte offsets, so
+ * the helpers convert to and from UTF-16 indices here.
+ */
+function installJsBridge(mod: EmscriptenModule) {
+	const RS = '\x1e';
+	const utf8Len = (s: string) => new TextEncoder().encode(s).length;
+
+	/** Capturing-group count and (name → 1-based index) pairs of a pattern source. */
+	const groupInfo = (source: string) => {
+		let count = 0;
+		let inClass = false;
+		const names: [string, number][] = [];
+		for (let i = 0; i < source.length; i++) {
+			const c = source[i];
+			if (c === '\\') {
+				i++;
+				continue;
+			}
+			if (inClass) {
+				if (c === ']') inClass = false;
+				continue;
+			}
+			if (c === '[') {
+				inClass = true;
+				continue;
+			}
+			if (c !== '(') continue;
+			if (source[i + 1] !== '?') {
+				count++;
+			} else if (source[i + 2] === '<' && source[i + 3] !== '=' && source[i + 3] !== '!') {
+				count++;
+				const end = source.indexOf('>', i + 3);
+				names.push([source.slice(i + 3, end), count]);
+			}
+		}
+		return { count, names };
+	};
+
+	/** UTF-8 byte offset → UTF-16 index, or -1 if it does not fall on a code point boundary. */
+	const utf16Index = (s: string, byteOffset: number) => {
+		let bytes = 0;
+		let idx = 0;
+		for (const ch of s) {
+			if (bytes >= byteOffset) break;
+			const cp = ch.codePointAt(0)!;
+			bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+			idx += ch.length;
+		}
+		return bytes === byteOffset ? idx : -1;
+	};
+
+	const bridge = {
+		run(id: number, thunk: () => unknown) {
+			let status = 'ok';
+			let payload: string;
+			try {
+				payload = String(thunk());
+			} catch (e) {
+				status = 'error';
+				payload = e instanceof Error ? e.message : String(e);
+			}
+			mod.cast!('arc_js_bridge', `${id}\x1f${status}\x1f${payload}`);
+		},
+		regexpCompile(pattern: string, flags: string) {
+			new RegExp(pattern, flags); // throws SyntaxError → error reply
+			const { count, names } = groupInfo(pattern);
+			return `${count}${RS}${names.map(([n, i]) => `${n}=${i}`).join(',')}`;
+		},
+		regexpExec(pattern: string, flags: string, s: string, byteOffset: number, sticky: boolean) {
+			const re = new RegExp(pattern, flags.replace(/[gyd]/g, '') + 'd' + (sticky ? 'y' : 'g'));
+			const start = utf16Index(s, byteOffset);
+			if (start < 0) return 'nomatch';
+			re.lastIndex = start;
+			const m = re.exec(s) as (RegExpExecArray & { indices?: [number, number][] }) | null;
+			if (!m || !m.indices) return 'nomatch';
+			const span = ([a, b]: [number, number]) => `${utf8Len(s.slice(0, a))},${utf8Len(s.slice(a, b))}`;
+			const groups = m.indices.slice(1).map((g) => (g ? span(g) : '-1,0'));
+			return `${span(m.indices[0])}${RS}${groups.join(';')}`;
+		},
+	};
+	(globalThis as unknown as { __arcJsBridge: typeof bridge }).__arcJsBridge = bridge;
+}
 
 /**
  * Loads AtomVM-WASM + the Arc bundle. Emscripten reads its config from a
@@ -89,6 +179,7 @@ export function useAtomVM(onPrint: (line: string) => void) {
 				handleAbort(s);
 			},
 			onRuntimeInitialized: () => {
+				installJsBridge(mod);
 				const rawCall = mod.call!.bind(mod);
 				const wrappedCall = (proc: string, msg: string): Promise<string> => {
 					return new Promise<string>((resolve, reject) => {

@@ -14,6 +14,15 @@ start() ->
     %% spawn/3, not spawn(fun M:F/0): an external-fun literal aborts AtomVM
     %% 0.7.0-alpha at load.
     spawn(arc_wasm_ffi, start, []),
+    %% Erlang -> page-JavaScript round trips (RegExp lives on it). A website
+    %% shim; absent from other bundles, so its start is guarded.
+    spawn(fun() ->
+              try
+                  arc_js_bridge:start()
+              catch
+                  C:R -> io:format("arc_aot_wasm_ffi: no arc_js_bridge (~p:~p)~n", [C, R])
+              end
+          end),
     register(aot, self()),
     loop().
 

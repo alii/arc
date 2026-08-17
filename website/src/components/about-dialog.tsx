@@ -101,10 +101,12 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 										the real BEAM — roughly tens of times, not thousands.
 									</Section>
 
-									<Section title="Not (yet) in the browser build">
-										Regular expressions: AtomVM has no PCRE, so <code>RegExp</code> throws a clear error rather than
-										silently failing. Timers, filesystem and network are absent for the same reason — Arc is host-
-										agnostic and this host provides none of them.
+									<Section title="Regular expressions">
+										AtomVM has no regex engine, so <code>RegExp</code> here is answered by the browser's own JavaScript
+										engine: Arc asks the page to run the match and hands the result back to the BEAM side, offsets
+										converted between UTF-8 and UTF-16 on the way. Exact JavaScript semantics, a millisecond or so per
+										match. Timers, filesystem and network are absent — Arc is host-agnostic and this host provides none
+										of them.
 									</Section>
 
 									<motion.p variants={section} className="text-xs text-rpd-muted dark:text-rp-muted">
