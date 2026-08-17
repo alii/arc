@@ -296,33 +296,14 @@ pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
   }
 }
 
-/// §7.1.2 ToBoolean(v) as a raw i32 for `ir.If` conds. Inlines the three
-/// operand shapes richards' 21k/run truthy sites actually see —
-/// `true`/`false` atoms (from `!=`/`<`/`!`) and bare Int 0|1 (from `==`'s
-/// loose_eq / `||`-propagated `==` result) — so the `to_boolean_i32`
-/// call_ext fires only on strings/floats/objects. Checks ordered by warm
-/// frequency: `true` (both sites) → `false` (LogicalOr `!=` operand) →
-/// integer (if(method()) result). Each check is one `=:=`/`is_integer` BIF
-/// (~2ns) vs the ~33ns call_ext. Shared by `truthy_if` and
-/// `stmt.emit_cond_i32`'s fallthrough.
+/// §7.1.2 ToBoolean(v) as a raw i32 for `ir.If` conds: one call to the
+/// guard-dispatch `to_boolean_i32` kernel. The `true`/`false`/integer arms
+/// used to be inlined ahead of the call; with the kernel dispatching on the
+/// wire form the call costs the same as the inline chain (~1.5ns either way,
+/// measured) and the chain was ~30 Core lines per site. Shared by
+/// `truthy_if` and `stmt.emit_cond_i32`'s fallthrough.
 pub fn truthy_i32(v: ir.Value) -> Build(ir.Value) {
-  use is_t <- then(bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("true"))))
-  bind_if_i32(is_t, pure(ir.ConstI32(1)), {
-    use is_f <- then(bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("false"))))
-    bind_if_i32(is_f, pure(ir.ConstI32(0)), {
-      use is_i <- then(bind(ir.TermTest(ir.IsInt, v)))
-      bind_if_i32(
-        is_i,
-        // §7.1.2: Int 0 → 0, any other Int → 1. `NEq(v,0)` gives 1 iff v=:=0;
-        // second `NEq(·,0)` inverts. Two BIFs, no call_ext.
-        {
-          use z <- then(bind(ir.NumTerm(ir.NEq, v, ir.ConstI32(0))))
-          bind(ir.NumTerm(ir.NEq, z, ir.ConstI32(0)))
-        },
-        host("truthy", [v]),
-      )
-    })
-  })
+  host("truthy", [v])
 }
 
 /// `if (js-truthy v) then t else f`. i32 via `truthy_i32` then a single
