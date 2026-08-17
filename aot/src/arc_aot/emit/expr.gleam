@@ -1798,13 +1798,14 @@ pub fn emit_call_with_pair(
 }
 
 /// Method call `o.prop(args)` with `o` already Let-bound (§13.3.6.2 this=obj).
-/// Static-dot ∧ spread-free → fused JMut `call_method_ic` (proto walk +
-/// KCompiled apply in ONE FFI call, `miss` on any shape mismatch); miss and
-/// every non-fusable shape fall to `emit_member_get` → `emit_call_pos`
+/// Static-dot ∧ spread-free → ONE JMut host op, `call_method_ic` (proto walk
+/// + KCompiled apply behind the site's inline cache, and on its miss the
+/// `get_prop_site` read + `call_fastN` call, all inside arc_rt_call_ffi);
+/// every non-fusable shape emits `emit_member_get` → `emit_call_pos`
 /// (`call_fastN` kernel) so simple-ABI still applies.
-/// Args evaluate ONCE, before the probe — the miss arm re-uses `pos` (no
-/// re-eval); the accessor-`prop` × side-effecting-arg reorder is the only
-/// observable delta and `call_method_ic` misses on accessors.
+/// Args evaluate ONCE, before the probe; the accessor-`prop` ×
+/// side-effecting-arg reorder is the only observable delta and the probe
+/// misses on accessors so the read runs after the args as before.
 fn emit_member_call(
   o: ir.Value,
   prop: ast.MemberProperty,
@@ -1826,20 +1827,7 @@ fn emit_member_call(
         }
         Some(kb) -> {
           use pos <- anf.then(anf.seq(list.map(args, expr)))
-          use r <- anf.then(call_method_ic_pos(o, kb, pos))
-          // `=:= miss` — NOT IsAtom: undefined/null/true/false are atoms and
-          // are legitimate call results; an IsAtom guard would double-call.
-          use is_miss <- anf.then(
-            anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))),
-          )
-          anf.bind_if(
-            is_miss,
-            {
-              use f <- anf.then(emit_member_get(o, prop))
-              emit_call_pos(f, o, pos)
-            },
-            anf.pure(r),
-          )
+          call_method_ic_pos(o, kb, pos)
         }
       }
   }
@@ -1855,11 +1843,12 @@ fn call_method_ic_pos(
 ) -> Build(ir.Value) {
   case pos {
     [] | [_] | [_, _] | [_, _, _] -> {
-      use site <- anf.then(next_site())
+      use #(site, rsite) <- anf.then(method_sites())
       anf.host("call_method_ic" <> int.to_string(list.length(pos)), [
         recv,
         ir.ConstBinary(kb),
-        ir.ConstI32(site),
+        site,
+        rsite,
         ..pos
       ])
     }
@@ -1870,21 +1859,25 @@ fn call_method_ic_pos(
   }
 }
 
-/// The fused method-call probe (`t_call_method_ic`, arc_rt_call_ffi): the
-/// mono proto walk + apply behind a per-site inline cache keyed by a
-/// module-unique site id (`next_site`, shared with the read caches).
+/// The fused method call (`t_call_method_ic`, arc_rt_call_ffi): the mono
+/// proto walk + apply behind a per-site inline cache, and the read + call
+/// on its miss, keyed by two module-unique site ids (`next_site`, shared
+/// with the read caches).
 fn call_method_ic(
   recv: ir.Value,
   kb: BitArray,
   args_l: ir.Value,
 ) -> Build(ir.Value) {
+  use #(site, rsite) <- anf.then(method_sites())
+  anf.host("call_method_ic", [recv, ir.ConstBinary(kb), args_l, site, rsite])
+}
+
+/// The call site's IC id and the read site's IC id for its miss arm — two
+/// ids, since `ic_call` and `ic_read` entries share the store's map.
+fn method_sites() -> Build(#(ir.Value, ir.Value)) {
   use site <- anf.then(next_site())
-  anf.host("call_method_ic", [
-    recv,
-    ir.ConstBinary(kb),
-    args_l,
-    ir.ConstI32(site),
-  ])
+  use rsite <- anf.then(next_site())
+  anf.pure(#(ir.ConstI32(site), ir.ConstI32(rsite)))
 }
 
 /// §13.3.7.1 step 12 InitializeInstanceElements — call the captured
@@ -2149,8 +2142,8 @@ fn emit_apply_raw_general(
 /// `X.apply(Y, arguments)` fast-path — forwards the frame's raw `_args`
 /// cons-list directly, eliding the arguments-object read + Function.prototype
 /// .apply reflection (raytrace `Class.create`: 66k× per run). The tighter
-/// `this.M.apply(this, arguments)` shape routes through `call_method_ic`;
-/// miss falls to the general form.
+/// `this.M.apply(this, arguments)` shape routes through `call_method_ic`
+/// (whose miss arm is the general read + call).
 fn emit_apply_arguments(
   inner: ast.Expression,
   recv_arg: ast.Expression,
@@ -2162,18 +2155,7 @@ fn emit_apply_arguments(
       case static_dot_key(mprop) {
         Some(kb) -> {
           use this <- anf.then(emit_lexical(lexical.RefThis))
-          use r <- anf.then(call_method_ic(this, kb, raw_args))
-          use is_miss <- anf.then(
-            anf.bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))),
-          )
-          anf.bind_if(
-            is_miss,
-            {
-              use f <- anf.then(emit_member_get(this, mprop))
-              emit_call(f, this, raw_args)
-            },
-            anf.pure(r),
-          )
+          call_method_ic(this, kb, raw_args)
         }
         None -> emit_apply_raw_general(inner, recv_arg, raw_args)
       }

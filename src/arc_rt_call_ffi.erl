@@ -22,8 +22,8 @@
          step_classify/1, t_kfn_code/3, t_new_simple/3,
          t_call_fast/4, t_call_fast0/3, t_call_fast1/4, t_call_fast2/5,
          t_call_fast3/6,
-         t_call_method_mono/4, t_call_method_ic/5, t_call_method_ic0/4,
-         t_call_method_ic1/5, t_call_method_ic2/6, t_call_method_ic3/7]).
+         t_call_method_mono/4, t_call_method_ic/6, t_call_method_ic0/5,
+         t_call_method_ic1/6, t_call_method_ic2/7, t_call_method_ic3/8]).
 
 -include("arc_rt_layout.hrl").
 
@@ -155,8 +155,14 @@ apply_fast(St, F, Code, _, ThisR, N, A, B, C) ->
 -define(IC_CALL_WAY, ic_call_way).
 -define(IC_CALL_WAYS, 4).
 
-%% t_call_method_ic(St, Recv, KeyBin, Args, Site) -> {V, St'} | {miss, St}
-%% JMut. `t_call_method_mono` with a per-site inline cache (JsStore.ics).
+%% t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) -> {V, St'}
+%% JMut. The whole compiled `o.key(args)` site as ONE host op: the IC probe
+%% below, and on its miss the same read + call the emitter used to inline at
+%% every site — `t_get_prop_site` at the read site `RSite`, then `call_fast`
+%% with `this = Recv`. St is unchanged on a probe miss (no side effect
+%% precedes the apply), so the read observes exactly the state it did inline.
+%%
+%% The probe: `t_call_method_mono` with a per-site inline cache (JsStore.ics).
 %% Hit: receiver is a shaped object of an entry's shape (so no own `key`),
 %% its proto is the entry's first cell and every cell on the chain still
 %% holds the very slot the key was resolved through (an equal slot has the
@@ -165,22 +171,32 @@ apply_fast(St, F, Code, _, ThisR, N, A, B, C) ->
 %% and, when a shaped receiver resolves the key on its proto chain, records
 %% the way: replacing a stale entry (same shape and proto, a chain cell was
 %% written) or adding one while the site has room.
-t_call_method_ic(St, Recv, KeyBin, Args, Site) ->
-    ic(St, Recv, KeyBin, Site, Args, undefined, undefined, undefined).
+t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) ->
+    method(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined,
+           undefined).
 
-%% t_call_method_icN(St, Recv, KeyBin, Site, A1..AN) — the same probe with
+%% t_call_method_icN(St, Recv, KeyBin, Site, RSite, A1..AN) — the same with
 %% 0..3 positional args, so a hit applies a matching simple variant with no
 %% args list, no length/1 and no apply hop.
-t_call_method_ic0(St, Recv, KeyBin, Site) ->
-    ic(St, Recv, KeyBin, Site, 0, undefined, undefined, undefined).
-t_call_method_ic1(St, Recv, KeyBin, Site, A) ->
-    ic(St, Recv, KeyBin, Site, 1, A, undefined, undefined).
-t_call_method_ic2(St, Recv, KeyBin, Site, A, B) ->
-    ic(St, Recv, KeyBin, Site, 2, A, B, undefined).
-t_call_method_ic3(St, Recv, KeyBin, Site, A, B, C) ->
-    ic(St, Recv, KeyBin, Site, 3, A, B, C).
+t_call_method_ic0(St, Recv, KeyBin, Site, RSite) ->
+    method(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined, undefined).
+t_call_method_ic1(St, Recv, KeyBin, Site, RSite, A) ->
+    method(St, Recv, KeyBin, Site, RSite, 1, A, undefined, undefined).
+t_call_method_ic2(St, Recv, KeyBin, Site, RSite, A, B) ->
+    method(St, Recv, KeyBin, Site, RSite, 2, A, B, undefined).
+t_call_method_ic3(St, Recv, KeyBin, Site, RSite, A, B, C) ->
+    method(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
 
 %% N is the args list itself, or 0..3 with the args in A, B, C.
+method(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
+    case ic(St, Recv, KeyBin, Site, N, A, B, C) of
+        {miss, St1} ->
+            {F, St2} = arc_rt_obj_ffi:t_get_prop_site(St1, Recv, KeyBin,
+                                                      RSite),
+            call_fast(St2, F, Recv, N, A, B, C);
+        Hit -> Hit
+    end.
+
 ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
