@@ -494,8 +494,7 @@ fn skip_line_inner(rest: BitArray, n: Int) -> Int {
     <<0xE2, 0x80, 0xA8, _:bytes>> -> n
     <<0xE2, 0x80, 0xA9, _:bytes>> -> n
     <<b, tail:bytes>> if b < 0x80 -> skip_line_inner(tail, n + 1)
-    <<b, _, tail:bytes>> if b >= 0xC0 && b < 0xE0 ->
-      skip_line_inner(tail, n + 2)
+    <<b, _, tail:bytes>> if b >= 0xC0 && b < 0xE0 -> skip_line_inner(tail, n + 2)
     <<b, _, _, tail:bytes>> if b >= 0xE0 && b < 0xF0 ->
       skip_line_inner(tail, n + 3)
     <<b, _, _, _, tail:bytes>> if b >= 0xF0 && b < 0xF8 ->

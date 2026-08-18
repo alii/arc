@@ -605,8 +605,7 @@ pub fn generator_data(st: Agent, this: JsVal) -> Handle {
 fn read_generator(st: Agent, gen_h: Handle) -> JsSlot {
   case rt_store.t_cell_get(st, gen_h) {
     SGenerator(..) as gen -> gen
-    _ ->
-      panic as "rt_async: Handle is not an SGenerator cell (engine invariant)"
+    _ -> panic as "rt_async: Handle is not an SGenerator cell (engine invariant)"
   }
 }
 

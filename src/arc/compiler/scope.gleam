@@ -522,10 +522,7 @@ pub type RawFunctionInfo {
 }
 
 /// Default `RawFunctionInfo` — non-arrow, no Annex-B candidates yet.
-const blank_raw_fn_info = RawFunctionInfo(
-  is_arrow: False,
-  annexb_candidates: [],
-)
+const blank_raw_fn_info = RawFunctionInfo(is_arrow: False, annexb_candidates: [])
 
 /// A fresh `RawScope` with the 8 always-default fields filled in. The 5
 /// per-site fields (id / parent / function_scope / kind / is_strict) are

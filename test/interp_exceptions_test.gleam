@@ -73,9 +73,7 @@ fn thrown(source: String) -> String {
   case run(source) {
     #(ThrowCompletion(e), st) -> rt_inspect.inspect(st, e)
     #(NormalCompletion(v), st) ->
-      panic as {
-        source <> " did not throw, gave " <> rt_inspect.inspect(st, v)
-      }
+      panic as { source <> " did not throw, gave " <> rt_inspect.inspect(st, v) }
   }
 }
 

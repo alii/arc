@@ -244,8 +244,7 @@ fn resolve_local_export(
         case binding {
           esm.NamedImport(local:, ..) if local == local_name ->
             Ok(#(dep, binding))
-          esm.DefaultImport(local:) if local == local_name ->
-            Ok(#(dep, binding))
+          esm.DefaultImport(local:) if local == local_name -> Ok(#(dep, binding))
           esm.NamespaceImport(local:, ..) if local == local_name ->
             Ok(#(dep, binding))
           _ -> Error(Nil)

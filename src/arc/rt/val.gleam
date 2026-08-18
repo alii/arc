@@ -1068,8 +1068,7 @@ pub fn t_to_numeric(st: Agent, v: JsVal) -> #(JsVal, Agent) {
     KNull -> #(mk_number(JInt(0)), st)
     KUndef -> #(mk_number(JNan), st)
     KSym(_) -> t_throw_type_error(st, "Cannot convert Symbol to number")
-    KHandle(_) | KTdz ->
-      panic as "ToNumeric: ToPrimitive returned non-primitive"
+    KHandle(_) | KTdz -> panic as "ToNumeric: ToPrimitive returned non-primitive"
   }
 }
 
