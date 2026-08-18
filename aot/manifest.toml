@@ -9,7 +9,7 @@
 packages = [
   { name = "arc", version = "0.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib", "simplifile"], source = "local", path = ".." },
   { name = "argv", version = "1.1.0", build_tools = ["gleam"], requirements = [], otp_app = "argv", source = "hex", outer_checksum = "3277D100448BDB4A29B6D58C0F36F631CBC349E8BDD09766C6309DF202831140" },
-  { name = "carder", version = "1.0.0", build_tools = ["gleam"], requirements = ["argv", "gleam_erlang", "gleam_stdlib", "simplifile"], source = "git", repo = "https://github.com/scarletindustries/carder", commit = "7928eb9242a9eb2acf9b93038f8d163bd196d0ec" },
+  { name = "carder", version = "1.0.0", build_tools = ["gleam"], requirements = ["argv", "gleam_erlang", "gleam_stdlib", "simplifile"], source = "git", repo = "https://github.com/scarletindustries/carder", commit = "e5af691f3bcca85440876017c2450ffa71e70ec9" },
   { name = "filepath", version = "1.1.2", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "filepath", source = "hex", outer_checksum = "B06A9AF0BF10E51401D64B98E4B627F1D2E48C154967DA7AF4D0914780A6D40A" },
   { name = "gleam_erlang", version = "1.3.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_erlang", source = "hex", outer_checksum = "1124AD3AA21143E5AF0FC5CF3D9529F6DB8CA03E43A55711B60B6B7B3874375C" },
   { name = "gleam_stdlib", version = "1.0.5", build_tools = ["gleam"], requirements = [], otp_app = "gleam_stdlib", source = "hex", outer_checksum = "CEE5B6C076A85B45F60C585F4316C63EC8B7127C119D5738C3958A9C4D50404E" },
@@ -20,7 +20,7 @@ packages = [
 [requirements]
 arc = { path = ".." }
 argv = { version = ">= 1.0.0 and < 2.0.0" }
-carder = { git = "https://github.com/scarletindustries/carder", ref = "7928eb9242a9eb2acf9b93038f8d163bd196d0ec" }
+carder = { git = "https://github.com/scarletindustries/carder", ref = "e5af691f3bcca85440876017c2450ffa71e70ec9" }
 gleam_erlang = { version = ">= 1.0.0 and < 2.0.0" }
 gleam_stdlib = { version = ">= 0.44.0 and < 2.0.0" }
 simplifile = { version = ">= 2.0.0 and < 3.0.0" }
