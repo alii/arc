@@ -17,7 +17,7 @@
 %%% and zero-copy in Erlang; awkward via `dynamic` in Gleam.
 -module(arc_rt_store_ffi).
 -export([t_throw/2, is_handle/1, handle_id/1, identity/1, as_object_key/1,
-         t_cell_get/2, data_new/0]).
+         t_cell_get/2, t_var_get/2, data_new/0]).
 
 -include("arc_rt_layout.hrl").
 
@@ -34,6 +34,19 @@ t_cell_get(St, {?HANDLE_TAG, Id}) ->
         ?STORE_FREE_SLOT -> erlang:error(#{gleam_error => panic, message =>
             <<"t_cell_get: dangling Handle (use-after-free)"/utf8>>});
         Slot -> Slot
+    end.
+
+%% t_var_get(St, {js_cell, Id}) -> JsVal
+%% Read a compiled-code variable box: the cell holds `{s_box, V}` (rt_types
+%% `SBox`, the same slot the interpreter uses for captured bindings), so the
+%% GC's `refs_in_cell` can trace it. Same dangling-handle posture as
+%% `t_cell_get`; a non-`SBox` slot here is an emitter bug and crashes.
+t_var_get(St, {?HANDLE_TAG, Id}) ->
+    Store = element(?AGENT_STORE, St),
+    case array:get(Id, element(?STORE_DATA, Store)) of
+        ?STORE_FREE_SLOT -> erlang:error(#{gleam_error => panic, message =>
+            <<"t_var_get: dangling Handle (use-after-free)"/utf8>>});
+        {s_box, V} -> V
     end.
 
 %% t_throw(St, V) -> no_return()

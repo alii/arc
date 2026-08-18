@@ -325,6 +325,21 @@ fn emit_top_level(
       #(w(tail), e)
     }
     [], [] -> Ok(#(ir.Return([e.consts.undef]), e))
+    // The script's completion value when its last statement is an
+    // expression statement (§16.1.6 step 12 with UpdateEmpty): return it,
+    // as the interpreter does. Any other final statement returns undefined.
+    [],
+      [
+        ast.StmtWithLine(
+          statement: ast.ExpressionStatement(expression:, ..),
+          ..,
+        ),
+      ]
+    -> {
+      use #(tree, e) <- result.try(e.dispatch.emit_expr(e, expression))
+      use e, v <- state.let_(e, tree)
+      Ok(#(ir.Return([v]), e))
+    }
     [], [s, ..rest] ->
       e.dispatch.emit_stmts(e, [s], fn(ef) {
         cut_or_continue(ef, [], rest, start, n)

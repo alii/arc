@@ -13,7 +13,7 @@ import arc/internal/tree_array.{type TreeArray}
 import arc/rt/limits
 import arc/rt/types.{
   type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
-  type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr,
+  type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr, SBox,
 } as rt_types
 import gleam/dict
 import gleam/set
@@ -131,6 +131,30 @@ pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
   let js = require_js(st)
   let JsCell(id) = h
   with_js(st, JsStore(..js, data: tree_array.set(id, slot, js.data)))
+}
+
+// ── variable boxes (compiled code's captured / TDZ bindings) ────────────────
+//
+// A boxed JS binding is a cell holding `SBox(value)` — the SAME slot shape the
+// interpreter uses for captured variables — never a bare `JsVal`: the GC's
+// `refs_in_cell` traces slots by constructor, so a raw value in a cell is
+// either untraced (a live object freed under it) or a `case_clause` crash
+// when the raw value happens to be a handle. The `js` direct-host ops
+// `cell_new`/`cell_get`/`cell_set` resolve here.
+
+/// Allocate a variable box holding `value`. `#(handle, st')`, value first.
+pub fn t_var_new(st: Agent, value: JsVal) -> #(Handle, Agent) {
+  t_cell_new(st, SBox(value))
+}
+
+/// Read a variable box. Fail-closed panic on a dangling handle or a slot that
+/// is not an `SBox` (an emitter bug), like `t_cell_get`.
+@external(erlang, "arc_rt_store_ffi", "t_var_get")
+pub fn t_var_get(st: Agent, h: Handle) -> JsVal
+
+/// Overwrite a variable box with `value`.
+pub fn t_var_set(st: Agent, h: Handle, value: JsVal) -> Agent {
+  t_cell_set(st, h, SBox(value))
 }
 
 /// Read-modify-write the slot at `h` via `f`. Fail-closed panic on a dangling

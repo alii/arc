@@ -30,9 +30,10 @@ pub fn table() -> DirectHost {
   DirectHost(
     capability: "js",
     ops: dict.from_list([
-      #("cell_new", HostOp(store, "t_cell_new", Mut)),
-      #("cell_get", HostOp(store, "t_cell_get", Read)),
-      #("cell_set", HostOp(store, "t_cell_set", MutUnit)),
+      // Boxed bindings are `SBox` cells (GC-traceable), not raw-value cells.
+      #("cell_new", HostOp(store, "t_var_new", Mut)),
+      #("cell_get", HostOp(store, "t_var_get", Read)),
+      #("cell_set", HostOp(store, "t_var_set", MutUnit)),
       #("pin_root", HostOp(store, "t_pin_root", MutUnit)),
       #("collect", HostOp(gc, "t_collect", MutUnit)),
       #("to_primitive", HostOp(val, "t_to_primitive", Mut)),
