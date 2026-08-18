@@ -371,6 +371,10 @@ pub type Emitter2 {
     /// Seeded by anf.bind_number/mark_number; read by anf.guarded_binop/cmp
     /// to elide `is_number` TermTests on the M0 sum hot path.
     known_numbers: Set(String),
+    /// IR vars known to hold a JS string (a `+` with a string operand, a
+    /// template literal, `typeof`); a `+`/`<` with one never takes the
+    /// integer fast path.
+    known_strings: Set(String),
     /// Unboxed-local slot → pre-computed `kfn_code` pair var, hoisted before a
     /// loop so calls in the body reuse it. Per-function; cleared on enter.
     hoisted_kfn: Dict(Int, ir.Value),
@@ -409,6 +413,14 @@ pub fn mark_known_number(e: Emitter2, name: String) -> Emitter2 {
 
 pub fn is_known_number(e: Emitter2, name: String) -> Bool {
   set.contains(e.known_numbers, name)
+}
+
+pub fn mark_known_string(e: Emitter2, name: String) -> Emitter2 {
+  Emitter2(..e, known_strings: set.insert(e.known_strings, name))
+}
+
+pub fn is_known_string(e: Emitter2, name: String) -> Bool {
+  set.contains(e.known_strings, name)
 }
 
 pub fn set_const_globals(e: Emitter2, d: Dict(String, ir.Value)) -> Emitter2 {
@@ -1088,6 +1100,7 @@ pub fn new_emitter(
     slot_vars: dict.new(),
     initialized: set.new(),
     known_numbers: set.new(),
+    known_strings: set.new(),
     hoisted_kfn: dict.new(),
     const_globals: dict.new(),
     slotted_globals: dict.new(),

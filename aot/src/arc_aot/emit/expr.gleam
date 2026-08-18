@@ -571,10 +571,16 @@ fn expr_operand(ex: ast.Expression) -> Build(ir.Value) {
   }
 }
 
+/// `v == null` as i32: `v =:= undefined orelse v =:= null`. Emitted as an
+/// If rather than an i32 add so the backend can spell it as the `orelse`.
 fn nul_eq_inline(v: ir.Value) -> Build(ir.Value) {
   use u <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("undefined"))))
-  use n <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("null"))))
-  anf.bind(ir.NumTerm(ir.NAdd, u, n))
+  anf.bind(ir.If(
+    u,
+    [ir.TI32],
+    ir.Values([ir.ConstI32(1)]),
+    ir.NumTerm(ir.NEq, v, ir.ConstAtom("null")),
+  ))
 }
 
 // ── const-global folding (perf-gate-richards) ───────────────────────────────

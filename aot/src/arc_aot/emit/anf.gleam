@@ -79,6 +79,27 @@ pub fn is_known_number(e: Emitter2, v: ir.Value) -> Bool {
   }
 }
 
+/// Record an existing `ir.Var` as a known JS string and yield it unchanged.
+pub fn mark_string(v: ir.Value) -> Build(ir.Value) {
+  fn(e, k) {
+    case v {
+      ir.Var(name) -> k(state.mark_known_string(e, name), v)
+      _ -> k(e, v)
+    }
+  }
+}
+
+/// True iff `v` is a string literal or a var recorded via `mark_string`. Such
+/// an operand can never be a BEAM number, so an arithmetic or relational op
+/// on it skips the integer fast path.
+pub fn is_known_string(e: Emitter2, v: ir.Value) -> Bool {
+  case v {
+    ir.Var(name) -> state.is_known_string(e, name)
+    ir.ConstBinary(_) -> True
+    _ -> False
+  }
+}
+
 /// Bind a `js` host call. D2: NO St arg — emit_core M9 injects instance state.
 /// Invariant #3: this is the ONLY CallHost("js", ..) constructor in emit_2core/*.
 pub fn host(op: String, args: List(ir.Value)) -> Build(ir.Value) {
@@ -537,9 +558,17 @@ pub fn guarded_binop(
   b: ir.Value,
 ) -> Build(ir.Value) {
   fn(e, k) {
-    case is_known_number(e, a) && is_known_number(e, b) {
-      True -> num_binop(fast_op, a, b)(e, k)
-      False ->
+    let string_side = is_known_string(e, a) || is_known_string(e, b)
+    case is_known_number(e, a) && is_known_number(e, b), string_side {
+      True, _ -> num_binop(fast_op, a, b)(e, k)
+      // A string operand can never take the integer arm; `+` on it is a
+      // concatenation, whose result is a string too.
+      False, True ->
+        case fast_op {
+          "num_add" -> then(host(slow_op <> "_any", [a, b]), mark_string)(e, k)
+          _ -> host(slow_op <> "_any", [a, b])(e, k)
+        }
+      False, False ->
         int_or(
           fast_op,
           a,
@@ -554,6 +583,21 @@ pub fn guarded_binop(
 /// JS relational `< <= > >= ==`: as `guarded_binop` but the fast arm's
 /// NumTerm yields TI32 (gotcha #4), so it is re-branched to a JS bool atom.
 pub fn guarded_cmp(
+  fast: ir.NumTermOp,
+  slow_op: String,
+  a: ir.Value,
+  b: ir.Value,
+) -> Build(ir.Value) {
+  fn(e, k) {
+    case is_known_string(e, a) || is_known_string(e, b) {
+      // A string operand never takes the numeric arm.
+      True -> then(host(slow_op, [a, b]), i32_to_js_bool)(e, k)
+      False -> guarded_cmp_numeric(fast, slow_op, a, b)(e, k)
+    }
+  }
+}
+
+fn guarded_cmp_numeric(
   fast: ir.NumTermOp,
   slow_op: String,
   a: ir.Value,
@@ -597,6 +641,20 @@ pub fn i32_to_js_bool(v: ir.Value) -> Build(ir.Value) {
 /// `ir.If` cond (loop conditions) — skips the bool-atom wrap + `truthy` unwrap
 /// that `guarded_cmp` incurs. Slow arm coerces the JS bool result to i32.
 pub fn cond_cmp(
+  fast: ir.NumTermOp,
+  slow_op: String,
+  a: ir.Value,
+  b: ir.Value,
+) -> Build(ir.Value) {
+  fn(e, k) {
+    case is_known_string(e, a) || is_known_string(e, b) {
+      True -> then(host(slow_op, [a, b]), fn(v) { host("truthy", [v]) })(e, k)
+      False -> cond_cmp_numeric(fast, slow_op, a, b)(e, k)
+    }
+  }
+}
+
+fn cond_cmp_numeric(
   fast: ir.NumTermOp,
   slow_op: String,
   a: ir.Value,
