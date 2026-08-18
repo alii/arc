@@ -294,7 +294,7 @@ fn store_slot(
     True ->
       host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
     False -> {
-      let name = state.slot_var_name(b.slot)
+      let name = state.slot_var_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, name)))
       ir.Let([name], ir.Values([val]), body)
     }
@@ -318,13 +318,13 @@ pub fn unpack_frame(
       use e, raw <- let_(e, ir.TermOp(ir.TupleGet(idx), [ir.Var("_frame")]))
       case state.lexical_is_boxed(e, info, ref) {
         False -> {
-          let name = state.slot_var_name(slot)
+          let name = state.slot_var_name(e, slot)
           use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
           ir.Let([name], ir.Values([raw]), body)
         }
         True -> {
           use e, cell <- host_(e, "cell_new", [raw])
-          let name = state.slot_var_name(slot)
+          let name = state.slot_var_name(e, slot)
           use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
           ir.Let([name], ir.Values([cell]), body)
         }
@@ -348,7 +348,7 @@ pub fn binding_prologue(
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   use e, entry, next <- each_(e, bindings, then: k)
   let #(_, b): #(String, Binding) = entry
-  let name = state.slot_var_name(b.slot)
+  let name = state.slot_var_name(e, b.slot)
   let seed = fn(e: Emitter2, init) {
     case b.is_boxed {
       False -> {
@@ -516,13 +516,13 @@ fn bind_one_param(
       let b = fn_scope_binding(e, name)
       case b.is_boxed {
         False -> {
-          let vn = state.slot_var_name(b.slot)
+          let vn = state.slot_var_name(e, b.slot)
           use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
           ir.Let([vn], ir.Values([raw]), body)
         }
         True -> {
           use e, cell <- host_(e, "cell_new", [raw])
-          let vn = state.slot_var_name(b.slot)
+          let vn = state.slot_var_name(e, b.slot)
           use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
           ir.Let([vn], ir.Values([cell]), body)
         }
@@ -1547,10 +1547,42 @@ fn simple_param_name(i: Int) -> String {
   "_p" <> int.to_string(i)
 }
 
+/// IR name for positional param `i` of a simple-ABI body: the JS parameter's
+/// own name when it is a plain identifier (so the Erlang reads `Xs`, not
+/// `P0`), else the positional `_p{i}`. `fixed` is the function's parameter
+/// pattern list; both the function signature and the body's binding prologue
+/// derive the name from it, so they agree.
+fn simple_param_ir_name(
+  e: Emitter2,
+  fixed: List(ast.Pattern),
+  i: Int,
+) -> String {
+  case list_at(fixed, i) {
+    Some(ast.IdentifierPattern(name:, ..)) -> {
+      let b = fn_scope_binding(e, name)
+      // The slot's own name; a param seeds its slot with itself so both
+      // sides read the same way. Any second parameter with the same name
+      // (sloppy `function f(a, a)`) shares the slot, so this is safe.
+      state.slot_var_name(e, b.slot)
+    }
+    _ -> simple_param_name(i)
+  }
+}
+
+fn list_at(xs: List(a), i: Int) -> Option(a) {
+  case xs, i {
+    [], _ -> None
+    [x, ..], 0 -> Some(x)
+    [_, ..rest], n -> list_at(rest, n - 1)
+  }
+}
+
 /// IR-param name for the positional `this` in a `_t`-variant simple body.
 pub const simple_this_param = "_this"
 
 fn build_simple_ir_params(
+  e: Emitter2,
+  fixed: List(ast.Pattern),
   i: Int,
   ncap: Int,
   arity: Int,
@@ -1559,10 +1591,10 @@ fn build_simple_ir_params(
   case i < ncap {
     True -> [
       ir.Local(cap_param_name(i), ir.TTerm),
-      ..build_simple_ir_params(i + 1, ncap, arity, needs_this)
+      ..build_simple_ir_params(e, fixed, i + 1, ncap, arity, needs_this)
     ]
     False -> {
-      let ps = build_simple_pos_params(0, arity)
+      let ps = build_simple_pos_params(e, fixed, 0, arity)
       case needs_this {
         True -> [ir.Local(simple_this_param, ir.TTerm), ..ps]
         False -> ps
@@ -1571,11 +1603,16 @@ fn build_simple_ir_params(
   }
 }
 
-fn build_simple_pos_params(i: Int, arity: Int) -> List(ir.Local) {
+fn build_simple_pos_params(
+  e: Emitter2,
+  fixed: List(ast.Pattern),
+  i: Int,
+  arity: Int,
+) -> List(ir.Local) {
   case i < arity {
     True -> [
-      ir.Local(simple_param_name(i), ir.TTerm),
-      ..build_simple_pos_params(i + 1, arity)
+      ir.Local(simple_param_ir_name(e, fixed, i), ir.TTerm),
+      ..build_simple_pos_params(e, fixed, i + 1, arity)
     ]
     False -> []
   }
@@ -1585,6 +1622,7 @@ fn build_simple_pos_params(i: Int, arity: Int) -> List(ir.Local) {
 /// IR-param (mirrors `bind_one_param`'s simple branch — cell_new if boxed).
 fn bind_simple_params(
   e: Emitter2,
+  fixed_all: List(ast.Pattern),
   fixed: List(ast.Pattern),
   i: Int,
   k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
@@ -1595,10 +1633,13 @@ fn bind_simple_params(
       let assert ast.IdentifierPattern(name:, ..) = p
         as "emit_2core/fn: simple-abi param not IdentifierPattern"
       let b = fn_scope_binding(e, name)
-      let raw = ir.Var(simple_param_name(i))
-      let vn = state.slot_var_name(b.slot)
-      let next = fn(e) { bind_simple_params(e, rest, i + 1, k) }
+      let pn = simple_param_ir_name(e, fixed_all, i)
+      let raw = ir.Var(pn)
+      let vn = state.slot_var_name(e, b.slot)
+      let next = fn(e) { bind_simple_params(e, fixed_all, rest, i + 1, k) }
       case b.is_boxed {
+        // The IR param already carries the slot's name: no alias needed.
+        False if pn == vn -> next(state.set_slot_var(e, b.slot, vn))
         False -> {
           use body <- state.map_tree(next(state.set_slot_var(e, b.slot, vn)))
           ir.Let([vn], ir.Values([raw]), body)
@@ -1650,7 +1691,7 @@ fn emit_simple_body(
   run_rk(e, fn(e, done) {
     use e <- seed_simple_this(e, needs_this, info)
     use e <- binding_prologue(e, e.fn_scope)
-    use e <- bind_simple_params(e, fixed, 0)
+    use e <- bind_simple_params(e, fixed, fixed, 0)
     use e <- hoist_fn_decls(e, stmts)
     use #(tree, ef) <- result.try(e.dispatch.emit_stmts(e, stmts, ret_undef))
     done(ef, tree)
@@ -1874,7 +1915,7 @@ pub fn emit_function_tree(
         capture_vals,
       )
     None -> {
-      let #(fn_name, e) = state.fresh_fn_name(e)
+      let #(fn_name, e) = state.fresh_fn_name(e, js_name)
       let field_init = derive_field_init(shape, e.field_init)
       let #(e_child, save) =
         state.enter_function(
@@ -1952,7 +1993,14 @@ pub fn emit_function_tree(
               e_child,
               ir.Function(
                 name: simple_fn_name,
-                params: build_simple_ir_params(0, ncap, arity, needs_this),
+                params: build_simple_ir_params(
+                  e_child,
+                  fixed,
+                  0,
+                  ncap,
+                  arity,
+                  needs_this,
+                ),
                 result: [ir.TTerm],
                 locals: [],
                 body: sbody,

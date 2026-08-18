@@ -189,7 +189,7 @@ fn rebind_slots(e: Emitter2, slots: List(Int)) -> #(Emitter2, List(String)) {
   let #(e, rev) =
     list.fold(slots, #(e, []), fn(acc, slot) {
       let #(e, ns) = acc
-      let #(n, e) = state.fresh_var(e)
+      let #(n, e) = state.fresh_slot_var(e, slot)
       #(state.set_slot_var(e, slot, n), [n, ..ns])
     })
   #(e, list.reverse(rev))

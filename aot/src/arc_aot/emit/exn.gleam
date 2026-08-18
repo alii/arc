@@ -421,7 +421,7 @@ pub fn catch_binding_prologue(
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   use e, entry, next <- each_(e, bindings, then: k)
   let #(_, b): #(String, Binding) = entry
-  let name = state.slot_var_name(b.slot)
+  let name = state.slot_var_name(e, b.slot)
   let seed = fn(e: Emitter2, init) {
     case b.is_boxed {
       False -> {

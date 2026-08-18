@@ -8,9 +8,12 @@ import arc/parser/ast
 import arc_aot/emit/split
 import carder/ir
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/set.{type Set}
+import gleam/string
 
 /// Compile-time ir.Value constants for JS sentinel atoms (SPEC §2.3 wire ABI).
 /// Built once by `realm_consts()`; carried on Emitter2 so emit_* sites write
@@ -320,11 +323,15 @@ pub type Emitter2 {
     scope_cursor: List(ScopeId),
     child_fn_cursor: List(ScopeId),
     in_block: Bool,
+    /// JS name for each `#(function scope, slot)`, see `slot_names`.
+    slot_names: Dict(#(ScopeId, Int), String),
     // ── name generation (ir.gleam:419-420 uniqueness) ──
     next_var: Int,
     next_label: Int,
     /// module-monotone — survives enter_function
     next_fn: Int,
+    /// Every function base name minted so far (module-monotone).
+    fn_names: Set(String),
     /// module-monotone tagged-template site counter (§13.2.8.4 cache key)
     next_site: Int,
     module_name: String,
@@ -490,8 +497,134 @@ pub fn fresh_label(e: Emitter2) -> #(String, Emitter2) {
   )
 }
 
-pub fn fresh_fn_name(e: Emitter2) -> #(String, Emitter2) {
-  #("jsf_" <> int_to_string(e.next_fn), Emitter2(..e, next_fn: e.next_fn + 1))
+/// A module-unique base name for a compiled function: the JS function's own
+/// name (`add`), `fn_<n>` when it has none, and `add_2`, `add_3`, ... for a
+/// second `add`. Derived names (`add_s`, `add_t`, `add_c3`, `add__sm`) are
+/// built by appending to the base, so a base is also refused when it would
+/// collide with a derived name of another base, or another base with its own
+/// derived name (JS `foo` and `foo_s`).
+pub fn fresh_fn_name(
+  e: Emitter2,
+  js_name: Option(String),
+) -> #(String, Emitter2) {
+  let base = case option.then(js_name, fn_base) {
+    Some(name) -> name
+    None -> "fn_" <> int_to_string(e.next_fn)
+  }
+  let name = unique_fn_name(base, e.fn_names, 2)
+  #(
+    name,
+    Emitter2(
+      ..e,
+      next_fn: e.next_fn + 1,
+      fn_names: set.insert(e.fn_names, name),
+    ),
+  )
+}
+
+/// A JS identifier as an Erlang-friendly function base: ASCII letters
+/// lowercased, digits and `_` kept, anything else (`$`, Unicode letters,
+/// escapes) becomes `_`. A name that is empty, all underscores, or starts
+/// with a digit is unusable and yields `None` (the caller falls back to
+/// `fn_<n>`); `js_main`/`instantiate`/`module_info` are the module's own
+/// entry points and are pushed aside.
+fn fn_base(js_name: String) -> Option(String) {
+  let name =
+    string.to_graphemes(js_name)
+    |> list.map(fn(g) {
+      case g {
+        "_" -> "_"
+        _ ->
+          case is_ascii_digit(g) || is_ascii_letter(g) {
+            True -> string.lowercase(g)
+            False -> "_"
+          }
+      }
+    })
+    |> string.concat
+  let all_underscores = string.replace(name, "_", "") == ""
+  case name, all_underscores {
+    "", _ -> None
+    _, True -> None
+    "js_main", _ | "instantiate", _ | "module_info", _ -> Some(name <> "_")
+    _, _ ->
+      case string.first(name) {
+        Ok(first) ->
+          case is_ascii_digit(first) {
+            True -> None
+            False -> Some(name)
+          }
+        Error(Nil) -> None
+      }
+  }
+}
+
+fn is_ascii_digit(g: String) -> Bool {
+  case g {
+    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
+    _ -> False
+  }
+}
+
+fn is_ascii_letter(g: String) -> Bool {
+  case string.to_utf_codepoints(g) {
+    [cp] -> {
+      let c = string.utf_codepoint_to_int(cp)
+      { c >= 65 && c <= 90 } || { c >= 97 && c <= 122 }
+    }
+    _ -> False
+  }
+}
+
+fn unique_fn_name(base: String, taken: Set(String), n: Int) -> String {
+  case fn_name_free(base, taken) {
+    True -> base
+    False -> {
+      let cand = base <> "_" <> int_to_string(n)
+      case fn_name_free(cand, taken) {
+        True -> cand
+        False -> unique_fn_name(base, taken, n + 1)
+      }
+    }
+  }
+}
+
+fn fn_name_free(cand: String, taken: Set(String)) -> Bool {
+  !set.contains(taken, cand)
+  && !set.contains(taken, cand <> "_s")
+  && !set.contains(taken, cand <> "_t")
+  && !set.contains(taken, cand <> "__sm")
+  && list.all(["_s", "_t", "__sm"], fn(suffix) {
+    case strip_suffix(cand, suffix) {
+      Some(stem) -> !set.contains(taken, stem)
+      None -> True
+    }
+  })
+  && case strip_chunk_suffix(cand) {
+    Some(stem) -> !set.contains(taken, stem)
+    None -> True
+  }
+}
+
+fn strip_suffix(s: String, suffix: String) -> Option(String) {
+  case string.ends_with(s, suffix) {
+    True -> Some(string.drop_end(s, string.length(suffix)))
+    False -> None
+  }
+}
+
+/// `foo_c12` → `foo`.
+fn strip_chunk_suffix(s: String) -> Option(String) {
+  case string.split(s, "_c") {
+    [_, _, ..] -> {
+      let assert Ok(last) = list.last(string.split(s, "_c"))
+      case int.parse(last) {
+        Ok(_) -> Some(string.drop_end(s, string.length(last) + 2))
+        Error(Nil) -> None
+      }
+    }
+    _ -> None
+  }
 }
 
 /// Prepend a lowered ir.Function (split into a tail-call chain when its
@@ -513,10 +646,15 @@ pub fn mark_unsupported(e: Emitter2, feature: String) -> Emitter2 {
   Emitter2(..e, unsupported: [feature, ..e.unsupported])
 }
 
-/// Canonical initial IR var name for scope slot `slot`. The function prologue
-/// Let-binds this name; unboxed re-assignment rebinds via set_slot_var.
-pub fn slot_var_name(slot: Int) -> String {
-  "js_local_" <> int_to_string(slot)
+/// Canonical initial IR var name for scope slot `slot` of the current
+/// function: the JS binding's own name (`n`, `xs`; see `slot_names`), or
+/// `js_local_N` for a slot no binding names. The function prologue Let-binds
+/// this name; unboxed re-assignment rebinds via set_slot_var.
+pub fn slot_var_name(e: Emitter2, slot: Int) -> String {
+  case dict.get(e.slot_names, #(e.fn_scope, slot)) {
+    Ok(name) -> name
+    Error(Nil) -> "js_local_" <> int_to_string(slot)
+  }
 }
 
 /// Current IR var name bound to `slot` — its slot_var_name, or the fresh name
@@ -524,8 +662,88 @@ pub fn slot_var_name(slot: Int) -> String {
 pub fn get_slot_var(e: Emitter2, slot: Int) -> String {
   case dict.get(e.slot_vars, slot) {
     Ok(name) -> name
-    Error(_) -> slot_var_name(slot)
+    Error(_) -> slot_var_name(e, slot)
   }
+}
+
+/// The IR var name for every local binding in the tree, keyed by the owning
+/// function scope and slot. Names are the JS identifiers so the emitted code
+/// reads like the source; the emitter's own names start with `_` (`_t7`,
+/// `_p0`, `_L2`), so a JS name that starts with `_` gets a `u` in front to
+/// stay clear of them, and two bindings of one name in the same frame (sibling
+/// blocks) get `__2`, `__3`, ... which the Erlang printer turns back into a
+/// per-function suffix.
+fn slot_names(tree: ScopeTree) -> Dict(#(ScopeId, Int), String) {
+  // Every binding, grouped by the function frame that owns its slot, in slot
+  // order within the frame so the numbering is stable.
+  let by_frame =
+    dict.fold(tree.scopes, dict.new(), fn(acc, _id, sc) {
+      dict.fold(sc.bindings, acc, fn(acc, js_name, b) {
+        dict.upsert(acc, sc.function_scope, fn(existing) {
+          [#(b.slot, js_name), ..option.unwrap(existing, [])]
+        })
+      })
+    })
+  dict.fold(by_frame, dict.new(), fn(acc, frame, entries) {
+    let sorted =
+      list.sort(entries, fn(a, b) {
+        case int.compare(a.0, b.0) {
+          order.Eq -> string.compare(a.1, b.1)
+          other -> other
+        }
+      })
+    let #(acc, _taken) =
+      list.fold(sorted, #(acc, set.new()), fn(st, entry) {
+        let #(acc, taken) = st
+        let #(slot, js_name) = entry
+        let key = #(frame, slot)
+        case dict.has_key(acc, key) {
+          // A capture re-declares the origin's binding in a child scope;
+          // the first name for the slot wins.
+          True -> #(acc, taken)
+          False -> {
+            let name = unique_name(ir_name(js_name), taken, 2)
+            #(dict.insert(acc, key, name), set.insert(taken, name))
+          }
+        }
+      })
+    acc
+  })
+}
+
+/// A class private name `#x` binds as `priv_x`; a JS name starting with `_`
+/// gets a `u` in front (the emitter's own names all start with `_`).
+fn ir_name(js_name: String) -> String {
+  case js_name {
+    "#" <> rest -> "priv_" <> rest
+    "_" <> _ -> "u" <> js_name
+    _ -> js_name
+  }
+}
+
+/// `fresh_slot_var` appends `_<counter>` for rebinds, so sibling duplicates
+/// use a double underscore (`y__2`) and the two can never coincide.
+fn unique_name(base: String, taken: Set(String), n: Int) -> String {
+  case set.contains(taken, base) {
+    False -> base
+    True -> {
+      let cand = base <> "__" <> int_to_string(n)
+      case set.contains(taken, cand) {
+        False -> cand
+        True -> unique_name(base, taken, n + 1)
+      }
+    }
+  }
+}
+
+/// A fresh IR var for an unboxed re-assignment of `slot`, named after the
+/// slot (`t_12` for `t`) so the Erlang reads `T`, `T2`, `T3` for one JS
+/// variable. Same uniqueness as `fresh_var`: the counter is shared.
+pub fn fresh_slot_var(e: Emitter2, slot: Int) -> #(String, Emitter2) {
+  #(
+    slot_var_name(e, slot) <> "_" <> int_to_string(e.next_var),
+    Emitter2(..e, next_var: e.next_var + 1),
+  )
 }
 
 /// Record `name` as the current IR var for `slot`. M12/M13/M15 call this after
@@ -846,9 +1064,11 @@ pub fn new_emitter(
     scope_cursor: block_child_scopes(tree, root),
     child_fn_cursor: scope.child_function_scopes(tree, root),
     in_block: False,
+    slot_names: slot_names(tree),
     next_var: 0,
     next_label: 0,
     next_fn: 0,
+    fn_names: set.new(),
     next_site: 0,
     module_name:,
     frame_stack: [],

@@ -103,7 +103,7 @@ fn root_binding_prologue(
   list.fold(bindings, #(wrap, e), fn(acc, entry) {
     let #(wrap, e) = acc
     let #(name, b) = entry
-    let sv = state.slot_var_name(b.slot)
+    let sv = state.slot_var_name(e, b.slot)
     let e = state.set_slot_var(e, b.slot, sv)
     let e = case b.kind {
       scope.VarBinding ->
@@ -182,7 +182,7 @@ fn root_lexical_prologue(
       list.fold(lexical.all_lexical_refs, #(id, e), fn(acc, ref) {
         let #(wrap, e) = acc
         let slot = base + lexical.lexical_ref_offset(ref)
-        let sv = state.slot_var_name(slot)
+        let sv = state.slot_var_name(e, slot)
         let e = state.set_slot_var(e, slot, sv)
         let init = case ref {
           lexical.RefThis -> ir.CallHost("js", "global_this", [])
@@ -261,7 +261,7 @@ pub fn emit_hoists(
         scope.Plain(scope.Local(slot:, boxed: False, ..)) -> {
           // Unboxed root fn slot (no nested fn captures it): fresh Let-
           // rebind + set_slot_var so later top-level reads see the closure.
-          let #(t, e) = state.fresh_var(e)
+          let #(t, e) = state.fresh_slot_var(e, slot)
           let e = state.set_slot_var(e, slot, t)
           let w = fn(tail) {
             wrap(ir.Let(

@@ -2311,7 +2311,7 @@ fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
           fn(_) { anf.pure(v) },
         )(e, k)
       False -> {
-        let #(name, e) = state.fresh_var(e)
+        let #(name, e) = state.fresh_slot_var(e, slot)
         // Propagate known-number through the unboxed alias so a slot re-read
         // (via read_slot → ir.Var(name)) still elides `is_number` guards.
         let e = case anf.is_known_number(e, v) {

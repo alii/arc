@@ -99,8 +99,7 @@ fn frame_carried_walk(
         state.Loop2(ir_break:, ir_continue:, carried:, ..)
           if ir_break == ir_label || ir_continue == ir_label
         -> carried
-        state.Switch2(ir_break:, carried:, ..) if ir_break == ir_label ->
-          carried
+        state.Switch2(ir_break:, carried:, ..) if ir_break == ir_label -> carried
         state.Labeled2(ir_break:, carried:, ..) if ir_break == ir_label ->
           carried
         _ -> frame_carried_walk(rest, ir_label)
@@ -482,7 +481,7 @@ fn store_slot(
     True ->
       host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
     False -> {
-      let name = state.slot_var_name(b.slot)
+      let name = state.slot_var_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, name)))
       ir.Let([name], ir.Values([val]), body)
     }
@@ -503,7 +502,7 @@ fn binding_prologue(
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   use e, entry, next <- each_(e, bindings, then: k)
   let #(_, b): #(String, Binding) = entry
-  let name = state.slot_var_name(b.slot)
+  let name = state.slot_var_name(e, b.slot)
   let seed = fn(e: Emitter2, init) {
     case b.is_boxed {
       False -> {
@@ -747,7 +746,7 @@ fn store_declared(
         True ->
           host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
         False -> {
-          let #(n, e) = state.fresh_var(e)
+          let #(n, e) = state.fresh_slot_var(e, slot)
           // Propagate known-number through the alias so a for-init `let i=0`
           // seed carries the mark.
           let e = case v {
@@ -854,7 +853,7 @@ fn carried_params(
   let #(e, params) = {
     use #(e, acc), slot <- list.fold(slots, #(e, []))
     let init = ir.Var(state.get_slot_var(e, slot))
-    let #(name, e) = state.fresh_var(e)
+    let #(name, e) = state.fresh_slot_var(e, slot)
     #(e, [ir.LoopParam(name:, ty: ir.TTerm, init:), ..acc])
   }
   #(list.reverse(params), e)
@@ -889,7 +888,7 @@ fn rebind_after_block(
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let #(e, names) = {
     use #(e, names), slot <- list.fold(slots, #(e, []))
-    let #(n, e) = state.fresh_var(e)
+    let #(n, e) = state.fresh_slot_var(e, slot)
     #(state.set_slot_var(e, slot, n), [n, ..names])
   }
   let names = list.reverse(names)
@@ -1662,7 +1661,7 @@ fn for_lhs_ident_assign(
               k,
             )
           False -> {
-            let #(n, e) = state.fresh_var(e)
+            let #(n, e) = state.fresh_slot_var(e, slot)
             use body <- state.map_tree(k(state.set_slot_var(e, slot, n)))
             ir.Let([n], ir.Values([v]), body)
           }
@@ -2489,7 +2488,7 @@ fn per_iter_rebox(
       let old = ir.Var(state.get_slot_var(e, slot))
       use e, v <- host_(e, "cell_get", [old])
       use e, cell <- host_(e, "cell_new", [v])
-      let #(n, e) = state.fresh_var(e)
+      let #(n, e) = state.fresh_slot_var(e, slot)
       use body <- state.map_tree(next(state.set_slot_var(e, slot, n)))
       ir.Let([n], ir.Values([cell]), body)
     }

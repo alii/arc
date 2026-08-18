@@ -4,7 +4,7 @@ target = "erlang"
 
 [dependencies]
 arc = { path = ".." }
-carder = { git = "https://github.com/scarletindustries/carder", ref = "ca536730bb66a83ad00fbffdbae06f4d5daad13d" }
+carder = { git = "https://github.com/scarletindustries/carder", ref = "7ac066a6c4544724bfe09a5a038c411b968a98cb" }
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"
 gleam_erlang = ">= 1.0.0 and < 2.0.0"
 argv = ">= 1.0.0 and < 2.0.0"
