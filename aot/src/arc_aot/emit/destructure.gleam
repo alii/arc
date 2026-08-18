@@ -95,7 +95,7 @@ fn bind_identifier(name: String, v: ir.Value, mode: BindMode) -> Build(Nil) {
             True ->
               anf.host_unit("cell_set", [ir.Var(state.get_slot_var(e, slot)), v])
             False -> fn(e, k) {
-              let #(n, e) = state.fresh_var(e)
+              let #(n, e) = state.fresh_slot_var(e, slot)
               anf.wrap(k(state.set_slot_var(e, slot, n), Nil), ir.Let(
                 [n],
                 ir.Values([v]),

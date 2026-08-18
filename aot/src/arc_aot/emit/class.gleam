@@ -113,7 +113,7 @@ fn store_class_const(
     True ->
       host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), v], k)
     False -> {
-      let vn = state.slot_var_name(b.slot)
+      let vn = state.slot_var_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
       ir.Let([vn], ir.Values([v]), body)
     }
@@ -766,7 +766,7 @@ fn build_class_init_closure(
   let child_info = scope.function_info(e.tree, child_id)
   // Capture values are read from the PARENT frame BEFORE enter_function.
   let capture_vals = func.build_capture_values(e, child_info)
-  let #(fn_name, e) = state.fresh_fn_name(e)
+  let #(fn_name, e) = state.fresh_fn_name(e, None)
   let #(e_child, save) =
     state.enter_function(
       e,

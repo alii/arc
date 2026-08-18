@@ -3441,7 +3441,7 @@ fn restore_and_seed_go(
   case slots {
     [] -> k(e)
     [#(slot, idx), ..rest] -> {
-      let #(name, e) = state.fresh_var(e)
+      let #(name, e) = state.fresh_slot_var(e, slot)
       let e = state.set_slot_var(e, slot, name)
       use body <- state.map_tree(restore_and_seed_go(e, ctx, rest, k))
       ir.Let([name], ir.TermOp(ir.TupleGet(idx), [ctx.loc_v]), body)
@@ -4583,9 +4583,9 @@ pub fn emit_coroutine_fn(
   let ncap = list.length(captures)
   let stmts = func.body_stmts(body)
   let is_strict = e.strict || ast_util.has_use_strict_directive(stmts)
-  let #(sm_base, e) = state.fresh_fn_name(e)
+  let #(sm_base, e) = state.fresh_fn_name(e, js_name)
   let sm_name = sm_base <> "__sm"
-  let #(outer_name, e) = state.fresh_fn_name(e)
+  let #(outer_name, e) = state.fresh_fn_name(e, js_name)
   let enter = fn(e) {
     state.enter_function(
       e,
