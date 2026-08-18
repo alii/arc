@@ -2787,20 +2787,20 @@ fn sm_default_arm(e: Emitter2) -> #(ir.Expr, Emitter2) {
 
 // ── §18.1 state-machine ir.Function shell (u-sm-skeleton-emit) ──────────────
 
-/// D13: local copy of func.gleam:226 `cap_param_name` — do NOT import
-/// func.gleam. Must stay byte-identical so the outer `jsf_N` and this
-/// `jsf_N__sm` closure agree on capture-param positions.
-fn cap_param_name(i: Int) -> String {
-  "cap_" <> int.to_string(i)
+/// The outer function and its state machine share one capture list, so both
+/// name capture param `i` through `state.cap_param_name` on an emitter that
+/// carries the same `cap_names` (the sm's emitter copies the outer's).
+fn cap_param_name(e: Emitter2, i: Int) -> String {
+  state.cap_param_name(e, i)
 }
 
 /// Build the sm function's ir param list: `[cap_0..cap_{ncap-1}, _rs, _sent,
 /// _loc]` (SPEC §18.1 / M8 wire ABI). Mirrors func.gleam:284-288 shape.
-fn build_sm_params(i: Int, ncap: Int) -> List(ir.Local) {
+fn build_sm_params(e: Emitter2, i: Int, ncap: Int) -> List(ir.Local) {
   case i < ncap {
     True -> [
-      ir.Local(cap_param_name(i), ir.TTerm),
-      ..build_sm_params(i + 1, ncap)
+      ir.Local(cap_param_name(e, i), ir.TTerm),
+      ..build_sm_params(e, i + 1, ncap)
     ]
     False -> [
       ir.Local("_rs", ir.TTerm),
@@ -2864,7 +2864,7 @@ fn emit_sm_function(
     e,
     ir.Function(
       name: sm_name,
-      params: build_sm_params(0, ncap),
+      params: build_sm_params(e, 0, ncap),
       result: [ir.TTerm],
       locals: [],
       body: body,
@@ -2876,21 +2876,21 @@ fn emit_sm_function(
 
 /// D5 uniform IR-param shape: [cap_0.., _frame, _args]. Local copy of
 /// func.gleam:284-288 (D13: no cross-emit-module imports).
-fn build_outer_params(i: Int, n: Int) -> List(ir.Local) {
+fn build_outer_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
     False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
     True -> [
-      ir.Local(cap_param_name(i), ir.TTerm),
-      ..build_outer_params(i + 1, n)
+      ir.Local(cap_param_name(e, i), ir.TTerm),
+      ..build_outer_params(e, i + 1, n)
     ]
   }
 }
 
 /// The outer's own cap-param Values, forwarded verbatim as sm's captures.
-fn cap_vars(i: Int, n: Int) -> List(ir.Value) {
+fn cap_vars(e: Emitter2, i: Int, n: Int) -> List(ir.Value) {
   case i < n {
     False -> []
-    True -> [ir.Var(cap_param_name(i)), ..cap_vars(i + 1, n)]
+    True -> [ir.Var(cap_param_name(e, i)), ..cap_vars(e, i + 1, n)]
   }
 }
 
@@ -4583,9 +4583,10 @@ pub fn emit_coroutine_fn(
   let ncap = list.length(captures)
   let stmts = func.body_stmts(body)
   let is_strict = e.strict || ast_util.has_use_strict_directive(stmts)
-  let #(sm_base, e) = state.fresh_fn_name(e, js_name)
-  let sm_name = sm_base <> "__sm"
+  // The outer function takes the JS name; its state machine is `<name>__sm`
+  // (a derived name, reserved with the base by `fresh_fn_name`).
   let #(outer_name, e) = state.fresh_fn_name(e, js_name)
+  let sm_name = outer_name <> "__sm"
   let enter = fn(e) {
     state.enter_function(
       e,
@@ -4626,6 +4627,8 @@ pub fn emit_coroutine_fn(
     // frame so `fns_acc`/`next_var` keep threading; its cursor and the set
     // of bindings already initialized are the post-prologue ones.
     let #(e_sm, sm_save) = enter(e_pro)
+    // The state machine takes the same captures as the outer function.
+    let e_sm = state.Emitter2(..e_sm, cap_names: e_pro.cap_names)
     let e_sm =
       state.Emitter2(
         ..install_cursor(e_sm, cur0),
@@ -4646,7 +4649,7 @@ pub fn emit_coroutine_fn(
             anf.make_tuple(initial_loc_values(e_pro, layout, info.local_count)),
           )
           use sm <- anf.then(
-            anf.bind(ir.MakeClosure(sm_name, cap_vars(0, ncap), 3)),
+            anf.bind(ir.MakeClosure(sm_name, cap_vars(e_pro, 0, ncap), 3)),
           )
           anf.host(start_op(kind), [
             sm,
@@ -4683,7 +4686,7 @@ pub fn emit_coroutine_fn(
       e_outer,
       ir.Function(
         name: outer_name,
-        params: build_outer_params(0, ncap),
+        params: build_outer_params(e_outer, 0, ncap),
         result: [ir.TTerm],
         locals: [],
         body: body_expr,

@@ -814,7 +814,7 @@ fn build_class_init_closure(
       e_child,
       ir.Function(
         name: fn_name,
-        params: func.build_ir_params(0, ncap),
+        params: func.build_ir_params(e_child, 0, ncap),
         result: [ir.TTerm],
         locals: [],
         body: body_expr,

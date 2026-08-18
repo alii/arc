@@ -136,6 +136,7 @@ pub type FnSave {
     class_stack: List(ClassCtx),
     // per-function slot mapping (slot indices are function-scope-local)
     slot_vars: Dict(Int, String),
+    cap_names: List(String),
     initialized: Set(Int),
     hoisted_kfn: Dict(Int, ir.Value),
     // M18: nested non-coroutine fn must NOT inherit the parent's SM intercept
@@ -325,6 +326,9 @@ pub type Emitter2 {
     in_block: Bool,
     /// JS name for each `#(function scope, slot)`, see `slot_names`.
     slot_names: Dict(#(ScopeId, Int), String),
+    /// IR names of the current function's capture params, in capture order
+    /// (`func.seed_capture_slots` sets it; the param builders read it).
+    cap_names: List(String),
     // ── name generation (ir.gleam:419-420 uniqueness) ──
     next_var: Int,
     next_label: Int,
@@ -758,6 +762,24 @@ pub fn fresh_slot_var(e: Emitter2, slot: Int) -> #(String, Emitter2) {
   )
 }
 
+/// IR name of capture param `i` of the current function: the captured JS
+/// binding's own name (set by `func.seed_capture_slots`), or `cap_<i>` when
+/// no name is recorded for that position.
+pub fn cap_param_name(e: Emitter2, i: Int) -> String {
+  case list_at(e.cap_names, i) {
+    Some(name) -> name
+    None -> "cap_" <> int_to_string(i)
+  }
+}
+
+fn list_at(xs: List(a), i: Int) -> Option(a) {
+  case xs, i {
+    [], _ -> None
+    [x, ..], 0 -> Some(x)
+    [_, ..rest], n -> list_at(rest, n - 1)
+  }
+}
+
 /// Record `name` as the current IR var for `slot`. M12/M13/M15 call this after
 /// every unboxed Let-rebind so later Identifier reads see the new SSA name.
 pub fn set_slot_var(e: Emitter2, slot: Int, name: String) -> Emitter2 {
@@ -1077,6 +1099,7 @@ pub fn new_emitter(
     child_fn_cursor: scope.child_function_scopes(tree, root),
     in_block: False,
     slot_names: slot_names(tree),
+    cap_names: [],
     next_var: 0,
     next_label: 0,
     next_fn: 0,
@@ -1303,6 +1326,7 @@ pub fn enter_function(
       this_tdz: e.this_tdz,
       class_stack: e.class_stack,
       slot_vars: e.slot_vars,
+      cap_names: e.cap_names,
       initialized: e.initialized,
       hoisted_kfn: e.hoisted_kfn,
       sm_abrupt: e.sm_abrupt,
@@ -1330,6 +1354,7 @@ pub fn enter_function(
       this_tdz: is_arrow && e.this_tdz,
       class_stack: e.class_stack,
       slot_vars: dict.new(),
+      cap_names: [],
       initialized: set.new(),
       hoisted_kfn: dict.new(),
       sm_abrupt: None,
@@ -1362,6 +1387,7 @@ pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
     this_tdz: save.this_tdz,
     class_stack: save.class_stack,
     slot_vars: save.slot_vars,
+    cap_names: save.cap_names,
     initialized: save.initialized,
     hoisted_kfn: save.hoisted_kfn,
     sm_abrupt: save.sm_abrupt,

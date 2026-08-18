@@ -214,8 +214,8 @@ fn derive_field_init(
 // ── captures (SPEC §3.1; compiler.gleam:595-622 canonical order) ────────────
 
 /// IR-param name for the i'th capture (D5: precedes `_frame`/`_args`).
-pub fn cap_param_name(i: Int) -> String {
-  "cap_" <> int.to_string(i)
+pub fn cap_param_name(e: Emitter2, i: Int) -> String {
+  state.cap_param_name(e, i)
 }
 
 fn capture_count(info: FunctionInfo) -> Int {
@@ -251,32 +251,45 @@ pub fn build_capture_values(
 /// Seed slot_vars in the CHILD frame so reads of a captured name resolve to
 /// the corresponding cap_i IR-param.
 pub fn seed_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
-  let #(e, i) =
-    list.fold(info.captures, #(e, 0), fn(acc, c) {
-      let #(e, i) = acc
+  // Name each capture param after the binding it carries: the JS name for
+  // a variable capture (unique in this frame like every slot name), a fixed
+  // name for a lexical one. Recorded on the emitter first so the same names
+  // reach the function's param list.
+  let names =
+    list.map(info.captures, fn(c) {
       let assert Ok(child_slot) = dict.get(info.names, c.0)
         as "emit_2core/fn: capture name missing from FunctionInfo.names"
-      #(state.set_slot_var(e, child_slot, cap_param_name(i)), i + 1)
+      #(child_slot, state.slot_var_name(e, child_slot))
     })
-  let #(e, _) =
-    list.fold(lexical.all_lexical_refs, #(e, i), fn(acc, ref) {
-      let #(e, i) = acc
+  let lexical_names =
+    list.filter_map(lexical.all_lexical_refs, fn(ref) {
       case dict.get(info.lexical_captures, ref) {
-        Ok(child_slot) -> #(
-          state.set_slot_var(e, child_slot, cap_param_name(i)),
-          i + 1,
-        )
-        Error(_) -> #(e, i)
+        Ok(child_slot) -> Ok(#(child_slot, lexical_capture_name(ref)))
+        Error(Nil) -> Error(Nil)
       }
     })
-  e
+  let all = list.append(names, lexical_names)
+  let e = Emitter2(..e, cap_names: list.map(all, fn(p) { p.1 }))
+  list.fold(all, e, fn(e, p) { state.set_slot_var(e, p.0, p.1) })
+}
+
+fn lexical_capture_name(ref: lexical.LexicalRef) -> String {
+  case ref {
+    lexical.RefThis -> "this_cap"
+    lexical.RefActiveFunc -> "func_cap"
+    lexical.RefHomeObject -> "home_cap"
+    lexical.RefNewTarget -> "new_target_cap"
+  }
 }
 
 /// D5 uniform IR-param shape: `[cap_0.., _frame, _args]`.
-pub fn build_ir_params(i: Int, n: Int) -> List(ir.Local) {
+pub fn build_ir_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
     False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
-    True -> [ir.Local(cap_param_name(i), ir.TTerm), ..build_ir_params(i + 1, n)]
+    True -> [
+      ir.Local(cap_param_name(e, i), ir.TTerm),
+      ..build_ir_params(e, i + 1, n)
+    ]
   }
 }
 
@@ -1590,7 +1603,7 @@ fn build_simple_ir_params(
 ) -> List(ir.Local) {
   case i < ncap {
     True -> [
-      ir.Local(cap_param_name(i), ir.TTerm),
+      ir.Local(cap_param_name(e, i), ir.TTerm),
       ..build_simple_ir_params(e, fixed, i + 1, ncap, arity, needs_this)
     ]
     False -> {
@@ -1705,6 +1718,7 @@ fn emit_simple_body(
 /// the list ends early the remaining params are `undefined`, extras are
 /// dropped. No allocation, one branch per param.
 fn simple_shim_body(
+  e: Emitter2,
   target: String,
   ncap: Int,
   arity: Int,
@@ -1712,7 +1726,7 @@ fn simple_shim_body(
   undef: ir.Value,
 ) -> ir.Expr {
   let caps =
-    build_ir_params(0, ncap)
+    build_ir_params(e, 0, ncap)
     |> list.take(ncap)
     |> list.map(fn(l) { ir.Var(l.name) })
   let this = case needs_this {
@@ -1968,7 +1982,7 @@ pub fn emit_function_tree(
               e_child,
               ir.Function(
                 name: fn_name,
-                params: build_ir_params(0, ncap),
+                params: build_ir_params(e_child, 0, ncap),
                 result: [ir.TTerm],
                 locals: [],
                 body: body_expr,
@@ -2011,10 +2025,11 @@ pub fn emit_function_tree(
               e_child,
               ir.Function(
                 name: fn_name,
-                params: build_ir_params(0, ncap),
+                params: build_ir_params(e_child, 0, ncap),
                 result: [ir.TTerm],
                 locals: [],
                 body: simple_shim_body(
+                  e_child,
                   simple_fn_name,
                   ncap,
                   arity,
