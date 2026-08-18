@@ -26,7 +26,7 @@
     classify/1,
     mk_undefined/0, mk_hole/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
-    to_boolean_i32/1,
+    to_boolean_i32/1, to_boolean/1,
     t_to_property_key_fast/1,
     js_number_to_string/1,
     parse_float/1,
@@ -58,6 +58,27 @@ classify({js_bigint, N}) -> {k_big, N};
 classify({js_sym, S}) -> {k_sym, S};
 classify({js_cell, N}) -> {k_handle, {js_cell, N}};
 classify(js_tdz) -> k_tdz.
+
+%% to_boolean(JsVal) -> boolean()
+%% ToBoolean as an Erlang boolean, for compiled code that tests it with a
+%% `case ... of false/true`. Same rows as to_boolean_i32/1.
+to_boolean(undefined) -> false;
+to_boolean(null) -> false;
+to_boolean(false) -> false;
+to_boolean(true) -> true;
+to_boolean(0) -> false;
+to_boolean(N) when is_integer(N) -> true;
+to_boolean(F) when is_float(F) -> F /= 0.0;
+to_boolean(js_nan) -> false;
+to_boolean(js_inf) -> true;
+to_boolean(js_neg_inf) -> true;
+to_boolean(<<>>) -> false;
+to_boolean(B) when is_binary(B) -> true;
+to_boolean({js_bigint, 0}) -> false;
+to_boolean({js_bigint, _}) -> true;
+to_boolean({js_sym, _}) -> true;
+to_boolean({js_cell, _}) -> true;
+to_boolean(js_tdz) -> false.
 
 %% to_boolean_i32(JsVal) -> 0 | 1
 %% ES2024 §7.1.2 ToBoolean as an i32 for direct use as an ir.If cond.
