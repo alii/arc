@@ -14,6 +14,7 @@ import arc/bytecode/opcode.{
   IrPutField, IterCloseGuard,
 }
 import arc/compiler/ast_util
+import arc/compiler/resolve
 import arc/compiler/scope.{
   type BindingKind, type GlobalFallthrough, type ScopeId, type TopLevelLex,
   CaptureBinding, CatchBinding, ConstBinding, FnNameBinding, LetBinding,
@@ -22,8 +23,8 @@ import arc/compiler/scope.{
 }
 import arc/parser/ast
 import arc/rt/types.{
-  type JsVal, JFloat, JInt, JPosInf, mk_bigint, mk_bool, mk_null, mk_number,
-  mk_string, mk_tdz, mk_undefined,
+  type JsNum, type JsVal, JFloat, JInt, JNegInf, JPosInf, mk_bigint, mk_bool,
+  mk_null, mk_number, mk_string, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -302,6 +303,9 @@ pub opaque type Emitter {
     /// (TDZ-check read before the put). Slots are never reused across
     /// bindings in a function frame, so a plain Int set is sound.
     initialized: Set(Int),
+    /// The line the last emitted SetLine set, or 0 when unknown: reset at
+    /// every label, since a jump may arrive there from a different line.
+    line: Int,
     /// Emission-order child FUNCTION-scope ids nested in `fn_scope`'s
     /// frame (i.e. `scope.child_function_scopes(scope_tree, fn_scope)`),
     /// not yet consumed. `compile_function_body` pops the head to learn
@@ -1159,10 +1163,7 @@ fn emit_classic_loop(
   let e = push_loop(e, loop_end, loop_continue)
   let e = emit_ir(e, IrLabel(loop_start))
   use e <- result.try(case condition {
-    Some(cond) -> {
-      use e <- result.map(emit_expr(e, cond))
-      emit_ir(e, IrJumpIfFalse(loop_end))
-    }
+    Some(cond) -> emit_test(e, cond, False, loop_end)
     None -> Ok(e)
   })
   use e <- result.try(emit_stmt(e, body))
@@ -1170,7 +1171,7 @@ fn emit_classic_loop(
   let e = list.fold(per_iter, e, emit_var_rebox)
   use e <- result.map(case update {
     Some(upd) -> {
-      use e <- result.map(emit_expr(e, upd))
+      use e <- result.map(emit_expr(e, for_effect(upd)))
       emit_op(e, opcode.Pop)
     }
     None -> Ok(e)
@@ -1341,6 +1342,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     completion_var: None,
     ref_free: [],
     initialized: set.new(),
+    line: 0,
     next_site: 0,
   )
 }
@@ -1502,17 +1504,14 @@ fn enter_root_scope(e: Emitter) -> Emitter {
   // Owned lexical pseudo-slots (this / active_func / home_object /
   // new.target) are NOT in `Scope.bindings` — they live in
   // `FunctionInfo.lexical` and are seeded by the runtime before pc=0
-  // (frame.setup_frame). When an inner arrow / direct-eval captures one,
-  // `analyze_captures` sets the matching `FunctionInfo.lexical_boxed` flag
-  // and `resolve_lexical` reports the slot as boxed, so reads emit
-  // IrGetBoxed — the slot must therefore be wrapped in a box here, in the
-  // prologue, exactly as `emit_binding_prologue` does for named bindings.
-  // The legacy resolver did this on the `DeclareLexical(ref)` marker; that
-  // marker is gone, so the box step is reproduced from the analyzer's
-  // `lexical_boxed` directly. INHERITED slots (arrow / direct-eval body —
-  // `info.lexical` mirrors `info.lexical_captures`) arrive already boxed
-  // from the parent and are skipped via the `lexical_captures` membership
-  // guard, mirroring `emit_binding_prologue`'s CaptureBinding skip.
+  // (frame.setup_frame). When `analyze_captures` decides one must live in
+  // a box (`FunctionInfo.lexical_boxed`), `resolve_lexical` reports the slot
+  // as boxed and reads emit IrGetBoxed — so the slot is wrapped in a box
+  // here, in the prologue, exactly as `emit_binding_prologue` does for named
+  // bindings. INHERITED slots (arrow / direct-eval body — `info.lexical`
+  // mirrors `info.lexical_captures`) arrive from the parent as they are and
+  // are skipped via the `lexical_captures` membership guard, mirroring
+  // `emit_binding_prologue`'s CaptureBinding skip.
   let info = fn_info(e)
   use e, ref <- list.fold(lexical.all_lexical_refs, e)
   case
@@ -1529,6 +1528,8 @@ fn enter_root_scope(e: Emitter) -> Emitter {
 /// inline equivalent of the old Phase-2 `seed_and_box` (scope.gleam) that
 /// ran on each DeclareVar marker:
 ///   var               → push undef; PutLocal slot; [BoxLocal slot]
+///                       (seed skipped in the function's own root scope:
+///                       the fresh frame already holds undefined there)
 ///   let/const/fn-name → push uninit; PutLocal slot; [BoxLocal slot]
 ///   param/catch       → [BoxLocal slot]   (value set by call/unwind)
 ///   capture           → (nothing — already a box from the parent)
@@ -1543,10 +1544,14 @@ fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
     dict.to_list(s.bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   let at_module_root = scope_id == root_scope_id && e.fn_scope == root_scope_id
+  // The frame builder pads every slot with undefined, so a `var` in the
+  // function's own root scope is already seeded when the prologue runs.
+  let fresh_frame = scope_id == e.fn_scope
   use e, #(name, b) <- list.fold(bindings, e)
   let seeded = at_module_root && set.contains(e.scope_tree.linker_seeded, name)
   use <- bool.guard(seeded, e)
   let e = case b.kind {
+    VarBinding if fresh_frame -> e
     VarBinding -> seed_local(e, b.slot, mk_undefined())
     LetBinding | ConstBinding | FnNameBinding -> seed_local(e, b.slot, mk_tdz())
     ParamBinding | CatchBinding | CaptureBinding -> e
@@ -1778,7 +1783,10 @@ fn init_lex(e: Emitter, name: String) -> Emitter {
 }
 
 fn emit_ir(e: Emitter, op: IrOp) -> Emitter {
-  Emitter(..e, code: [op, ..e.code])
+  case op {
+    IrLabel(_) -> Emitter(..e, code: [op, ..e.code], line: 0)
+    _ -> Emitter(..e, code: [op, ..e.code])
+  }
 }
 
 /// Emit an opcode that is already in final form (no label / key / operator
@@ -1852,7 +1860,7 @@ fn emit_var_put(e: Emitter, name: String) -> Emitter {
   let e = track_arguments_ref(e, name)
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
   use e <- emit_with_chain(e, crossed, opcode.IrWithPutVar(name, _))
-  emit_static_put(e, fallback, name)
+  emit_static_put(e, fallback, name, False)
 }
 
 /// One-time init store that bypasses the const-reassign / TDZ checks in
@@ -1952,8 +1960,16 @@ fn emit_var_delete(e: Emitter, name: String) -> Emitter {
 /// `base_slot` is `Some(slot)` exactly when the resolution crossed a `with`
 /// scope: the scratch local holds the matched with object (or undefined =
 /// take the static fallback), captured before the RHS could mutate it.
+/// `read` records that a GetValue through this reference has already been
+/// emitted (read-modify-write): the binding cannot still be in TDZ at the
+/// PutValue, so its guard read is dropped.
 type VarRef {
-  VarRef(name: String, fallback: scope.Direct, base_slot: Option(Int))
+  VarRef(
+    name: String,
+    fallback: scope.Direct,
+    base_slot: Option(Int),
+    read: Bool,
+  )
 }
 
 /// §13.15.2 step 1a — ResolveBinding for an assignment-like target before
@@ -1966,7 +1982,7 @@ fn emit_var_ref_make(e: Emitter, name: String) -> #(Emitter, VarRef) {
   let e = track_arguments_ref(e, name)
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
   case crossed {
-    [] -> #(e, VarRef(name:, fallback:, base_slot: None))
+    [] -> #(e, VarRef(name:, fallback:, base_slot: None, read: False))
     _ -> {
       let #(e, slot) = acquire_ref_slot(e)
       let #(e, lref) = fresh_label(e)
@@ -1982,7 +1998,7 @@ fn emit_var_ref_make(e: Emitter, name: String) -> #(Emitter, VarRef) {
       let e = emit_ir(e, IrLabel(lref))
       #(
         emit_op(e, opcode.PutLocal(slot)),
-        VarRef(name:, fallback:, base_slot: Some(slot)),
+        VarRef(name:, fallback:, base_slot: Some(slot), read: False),
       )
     }
   }
@@ -2008,13 +2024,13 @@ fn emit_var_ref_get(e: Emitter, ref: VarRef) -> Emitter {
 /// closes it (frees the scratch base slot).
 fn emit_var_ref_put(e: Emitter, ref: VarRef) -> Emitter {
   case ref.base_slot {
-    None -> emit_static_put(e, ref.fallback, ref.name)
+    None -> emit_static_put(e, ref.fallback, ref.name, ref.read)
     Some(slot) -> {
       let e = Emitter(..e, ref_free: [slot, ..e.ref_free])
       let #(e, ld) = fresh_label(e)
       let e = emit_op(e, opcode.GetLocal(slot))
       let e = emit_ir(e, opcode.IrWithPutRefValue(ref.name, ld))
-      let e = emit_static_put(e, ref.fallback, ref.name)
+      let e = emit_static_put(e, ref.fallback, ref.name, ref.read)
       emit_ir(e, IrLabel(ld))
     }
   }
@@ -2024,17 +2040,29 @@ fn emit_var_ref_put(e: Emitter, ref: VarRef) -> Emitter {
 /// shape of identifier-target assignment (§13.15.2 step 1.a): the reference
 /// is resolved once before the body runs (observable via `with` Proxy traps
 /// and binding deletion during RHS), Dup keeps the value as the expression
-/// result, PutValue stores it. The body receives the resolved `VarRef` so a
-/// read of the target (compound assignment, `x++`, `&&=`) goes through the
-/// SAME reference rather than re-resolving.
+/// result, PutValue stores it.
 fn with_identifier_lref(
   e: Emitter,
   name: String,
-  body: fn(Emitter, VarRef) -> Result(Emitter, EmitError),
+  body: fn(Emitter) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
   let #(e, ref) = emit_var_ref_make(e, name)
-  use e <- result.map(body(e, ref))
+  use e <- result.map(body(e))
   e |> emit_op(opcode.Dup) |> emit_var_ref_put(ref)
+}
+
+/// Read-modify-write twin of `with_identifier_lref` (compound assignment,
+/// `++x`, `&&=`): MakeRef → GetValue → `body` → Dup → PutValue, the read going
+/// through the SAME reference rather than re-resolving.
+fn with_identifier_rmw(
+  e: Emitter,
+  name: String,
+  body: fn(Emitter) -> Result(Emitter, EmitError),
+) -> Result(Emitter, EmitError) {
+  let #(e, ref) = emit_var_ref_make(e, name)
+  let e = emit_var_ref_get(e, ref)
+  use e <- result.map(body(e))
+  e |> emit_op(opcode.Dup) |> emit_var_ref_put(VarRef(..ref, read: True))
 }
 
 /// §14.7.4.2 CreatePerIterationEnvironment: copy a for-let binding's current
@@ -2100,7 +2128,12 @@ fn emit_static_get(e: Emitter, res: scope.Direct) -> Emitter {
 /// SetMutableBinding step 6 — const bindings are always strict (§14.3.1.3),
 /// so reassignment unconditionally throws TypeError. RHS is already on the
 /// stack; throw discards it via unwind.
-fn emit_static_put(e: Emitter, res: scope.Direct, name: String) -> Emitter {
+fn emit_static_put(
+  e: Emitter,
+  res: scope.Direct,
+  name: String,
+  after_read: Bool,
+) -> Emitter {
   case res {
     // Immutable-origin writes (§9.1.1.1.5 SetMutableBinding). For every
     // non-capture binding `origin_kind == kind` (scope.add_binding), so
@@ -2120,15 +2153,19 @@ fn emit_static_put(e: Emitter, res: scope.Direct, name: String) -> Emitter {
     // let still in TDZ when this closure runs (`(function(){x=1})(); let x`)
     // — §9.1.1.1.5 step 5: store to an uninitialized binding is a
     // ReferenceError. Every mutable-capture store is TDZ-checked (a guard
-    // read that throws on JsUninitialized before the put). Var/param origin
-    // cells are never uninitialized, so for them this is only a wasted read.
+    // read that throws on JsUninitialized before the put) unless a read
+    // through the same reference just succeeded. Var/param origin cells are
+    // never uninitialized, so for them this is only a wasted read.
     scope.Local(kind: CaptureBinding, slot:, boxed:, ..) ->
-      emit_checked_put(e, scope.SlotRef(slot:, boxed:))
+      case after_read {
+        True -> emit_slot_put(e, scope.SlotRef(slot:, boxed:))
+        False -> emit_checked_put(e, scope.SlotRef(slot:, boxed:))
+      }
     // A let binding whose initialization has NOT been emitted yet
     // (linearly) — the store may run during TDZ (`{ x = 1; let x; }`),
     // so check first.
     scope.Local(kind: LetBinding, slot:, boxed:, ..) ->
-      case set.contains(e.initialized, slot) {
+      case after_read || set.contains(e.initialized, slot) {
         True -> emit_slot_put(e, scope.SlotRef(slot:, boxed:))
         False -> emit_checked_put(e, scope.SlotRef(slot:, boxed:))
       }
@@ -2617,10 +2654,9 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
 
 /// Resolve a lexical pseudo-binding (this / active_func / home_object /
 /// new.target) for THIS body to its `Some(#(slot, is_boxed))`. Mirrors
-/// `scope.lookup_lexical`: an OWNED slot (`FunctionInfo.lexical`) is boxed
-/// only when an inner arrow / direct-eval captures it
-/// (`FunctionInfo.lexical_boxed`); an INHERITED slot (arrow / direct-eval
-/// body — `FunctionInfo.lexical_captures`) is always a parent box.
+/// `scope.lookup_lexical`: owned or inherited, the slot is a box exactly
+/// when `FunctionInfo.lexical_boxed` says so (direct eval, or a class
+/// member's arrow-captured `this`); otherwise it holds the value itself.
 ///
 /// Returns `None` when neither exists. This is the legitimate state for a
 /// Script/Module root body — the analyzer assigns it `NoLexicalSlots`
@@ -2633,12 +2669,12 @@ fn resolve_lexical(
   ref: lexical.LexicalRef,
 ) -> Option(#(Int, Bool)) {
   let info = fn_info(e)
+  let boxed = lexical.lexical_refs_get(info.lexical_boxed, ref)
   case lexical.lexical_slot(info.lexical, ref) {
-    Some(slot) ->
-      Some(#(slot, lexical.lexical_refs_get(info.lexical_boxed, ref)))
+    Some(slot) -> Some(#(slot, boxed))
     None ->
       case dict.get(info.lexical_captures, ref) {
-        Ok(slot) -> Some(#(slot, True))
+        Ok(slot) -> Some(#(slot, boxed))
         Error(Nil) -> None
       }
   }
@@ -2914,20 +2950,17 @@ fn emit_stmt_tail_completion(
 /// report it), unless the line is 0 — the sentinel for synthetic statements
 /// the parser never produced (class field inits, desugared arrow bodies).
 fn set_line(e: Emitter, line: Int) -> Emitter {
-  case line {
-    0 -> e
-    _ ->
+  case line == 0 || line == e.line {
+    True -> e
+    False ->
       case e.code {
         // An immediately preceding SetLine is dead — no op executes between
         // the two — so replace it instead of stacking markers. Statements
         // that compile to nothing (e.g. elided empty blocks) would otherwise
         // emit one IrSetLine each.
-        [IrFinal(opcode.SetLine(prev)), ..rest] ->
-          case prev == line {
-            True -> e
-            False -> Emitter(..e, code: [IrFinal(opcode.SetLine(line)), ..rest])
-          }
-        _ -> emit_op(e, opcode.SetLine(line))
+        [IrFinal(opcode.SetLine(_)), ..rest] ->
+          Emitter(..e, code: [IrFinal(opcode.SetLine(line)), ..rest], line:)
+        _ -> Emitter(..emit_op(e, opcode.SetLine(line)), line:)
       }
   }
 }
@@ -3046,8 +3079,7 @@ fn emit_if(
 ) -> Result(Emitter, EmitError) {
   let #(e, else_label) = fresh_label(e)
   let #(e, end_label) = fresh_label(e)
-  use e <- result.try(emit_expr(e, condition))
-  let e = emit_ir(e, IrJumpIfFalse(else_label))
+  use e <- result.try(emit_test(e, condition, False, else_label))
   use e <- result.try(branch(e, block_wrap_fn_decl(consequent)))
   let e = emit_ir(e, IrJump(end_label))
   let e = emit_ir(e, IrLabel(else_label))
@@ -3732,6 +3764,22 @@ fn compile_function_body(
 // Statement emission
 // ============================================================================
 
+/// An expression evaluated only for effect: postfix `x++` takes the prefix
+/// lowering (same get/ToNumeric/put sequence, no old-value stash).
+fn for_effect(expr: ast.Expression) -> ast.Expression {
+  case expr {
+    ast.UpdateExpression(span, op, False, arg) ->
+      ast.UpdateExpression(span, op, True, arg)
+    ast.SequenceExpression(span, exprs) ->
+      case list.reverse(exprs) {
+        [last, ..init] ->
+          ast.SequenceExpression(span, list.reverse([for_effect(last), ..init]))
+        [] -> expr
+      }
+    _ -> expr
+  }
+}
+
 fn emit_stmts(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
@@ -3779,15 +3827,14 @@ fn emit_stmt_inner(
   case stmt {
     ast.EmptyStatement | ast.DebuggerStatement -> Ok(e)
 
-    ast.ExpressionStatement(expression: expr, ..) -> {
-      use e <- result.map(emit_expr(e, expr))
+    ast.ExpressionStatement(expression: expr, ..) ->
       // Completion-value mode: the statement's value becomes the tracked V
       // (IrPutLocal pops, so stack balance matches the IrPop path).
       case e.completion_var {
-        Some(v) -> emit_scratch_put(e, v)
-        None -> emit_op(e, opcode.Pop)
+        Some(v) -> result.map(emit_expr(e, expr), emit_scratch_put(_, v))
+        None ->
+          result.map(emit_expr(e, for_effect(expr)), emit_op(_, opcode.Pop))
       }
-    }
 
     ast.BlockStatement(body) -> emit_block(e, body, tail: False)
 
@@ -3850,8 +3897,7 @@ fn emit_stmt_inner(
       let #(e, loop_end) = fresh_label(e)
       let e = push_loop(e, loop_end, loop_start)
       let e = emit_ir(e, IrLabel(loop_start))
-      use e <- result.try(emit_expr(e, condition))
-      let e = emit_ir(e, IrJumpIfFalse(loop_end))
+      use e <- result.try(emit_test(e, condition, False, loop_end))
       use e <- result.try(emit_stmt(e, body))
       let e = emit_ir(e, IrJump(loop_start))
       let e = emit_ir(e, IrLabel(loop_end))
@@ -3867,8 +3913,7 @@ fn emit_stmt_inner(
       let e = emit_ir(e, IrLabel(loop_start))
       use e <- result.try(emit_stmt(e, body))
       let e = emit_ir(e, IrLabel(loop_cond))
-      use e <- result.try(emit_expr(e, condition))
-      let e = emit_ir(e, IrJumpIfTrue(loop_start))
+      use e <- result.try(emit_test(e, condition, True, loop_start))
       let e = emit_ir(e, IrLabel(loop_end))
       let e = pop_frame(e)
       Ok(e)
@@ -4329,8 +4374,12 @@ fn emit_chain_call_args(
 /// value in `[0, 2^31)` that is not `-0` is an int, anything else a float, so
 /// interpreted and compiled code hold identical constants.
 fn number_const(n: ast.LiteralNumber) -> JsVal {
+  mk_number(literal_num(n))
+}
+
+fn literal_num(n: ast.LiteralNumber) -> JsNum {
   case n {
-    ast.InfiniteNumber -> mk_number(JPosInf)
+    ast.InfiniteNumber -> JPosInf
     ast.FiniteNumber(f) -> {
       // Range-check before truncating: only [0, 2^31) can become a JInt, and
       // truncating a huge float (1e308) needs bignums AtomVM does not have.
@@ -4339,13 +4388,54 @@ fn number_const(n: ast.LiteralNumber) -> JsVal {
         True -> {
           let i = float.truncate(f)
           case int.to_float(i) == f && !rt_val.is_neg_zero(f) {
-            True -> mk_number(JInt(i))
-            False -> mk_number(JFloat(f))
+            True -> JInt(i)
+            False -> JFloat(f)
           }
         }
-        False -> mk_number(JFloat(f))
+        False -> JFloat(f)
       }
     }
+  }
+}
+
+/// ToBoolean of a literal, when the expression is one.
+fn literal_truthy(expr: ast.Expression) -> Option(Bool) {
+  case expr {
+    ast.BooleanLiteral(_, b) -> Some(b)
+    ast.NumberLiteral(_, ast.FiniteNumber(f)) -> Some(f != 0.0)
+    ast.NumberLiteral(_, ast.InfiniteNumber) -> Some(True)
+    ast.BigIntLiteral(_, n) -> Some(n != 0)
+    ast.StringExpression(_, s) -> Some(s != "")
+    ast.NullLiteral(_) | ast.UndefinedExpression(_) -> Some(False)
+    _ -> None
+  }
+}
+
+/// Constant-fold a unary operator over a literal operand (`-1`, `void 0`,
+/// `!0`, `~1`) into the single constant it denotes.
+fn fold_unary(op: ast.UnaryOp, arg: ast.Expression) -> Option(JsVal) {
+  case op, arg {
+    ast.Negate, ast.NumberLiteral(_, n) ->
+      Some(
+        mk_number(case literal_num(n) {
+          JInt(0) -> JFloat(-0.0)
+          JInt(x) -> JInt(-x)
+          JFloat(x) -> JFloat(float.negate(x))
+          _ -> JNegInf
+        }),
+      )
+    ast.Negate, ast.BigIntLiteral(_, n) -> Some(mk_bigint(-n))
+    ast.UnaryPlus, ast.NumberLiteral(_, n) -> Some(number_const(n))
+    // literal_num ints are below 2^31, so already an int32.
+    ast.BitwiseNot, ast.NumberLiteral(_, n) ->
+      case literal_num(n) {
+        JInt(x) -> Some(mk_number(JInt(-x - 1)))
+        _ -> None
+      }
+    ast.LogicalNot, _ ->
+      literal_truthy(arg) |> option.map(fn(t) { mk_bool(!t) })
+    ast.Void, _ -> literal_truthy(arg) |> option.map(fn(_) { mk_undefined() })
+    _, _ -> None
   }
 }
 
@@ -4465,8 +4555,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         translate_unaryop(op)
         |> option.to_result(NonGenericUnaryOperator),
       )
-      use e <- result.map(emit_expr(e, arg))
-      emit_op(e, opcode.UnaryOp(kind))
+      case fold_unary(op, arg) {
+        Some(value) -> Ok(push_const(e, value))
+        None -> {
+          use e <- result.map(emit_expr(e, arg))
+          emit_op(e, opcode.UnaryOp(kind))
+        }
+      }
     }
 
     // Update expressions (++/--) — unwrap parens because (x)++ === x++.
@@ -4503,8 +4598,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         True -> {
           // ++x: get, ToNumeric (§13.4.2 step 3), add 1; helper dups the
           // result and stores to ref. Unary `+` is ToNumber.
-          use e, ref <- with_identifier_lref(e, name)
-          let e = emit_var_ref_get(e, ref)
+          use e <- with_identifier_rmw(e, name)
           let e = emit_op(e, opcode.UnaryOp(opcode.Pos))
           let e = push_const(e, one)
           Ok(emit_ir(e, IrBinOp(bin_kind)))
@@ -4518,8 +4612,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
           let e = emit_op(e, opcode.Dup)
           let e = push_const(e, one)
           let e = emit_ir(e, IrBinOp(bin_kind))
-          let e = emit_var_ref_put(e, ref)
-          Ok(e)
+          Ok(emit_var_ref_put(e, VarRef(..ref, read: True)))
         }
       }
     }
@@ -4574,7 +4667,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       ast.Assign,
       ast.ParenthesizedExpression(_, ast.Identifier(name:, ..)),
       right,
-    ) -> with_identifier_lref(e, name, fn(e, _ref) { emit_expr(e, right) })
+    ) -> with_identifier_lref(e, name, emit_expr(_, right))
     // Non-simple-assign parenthesized LHS — safe to unwrap (no name inference
     // for compound assignment anyway).
     ast.AssignmentExpression(
@@ -4618,17 +4711,14 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         "*default*" -> "default"
         _ -> name
       }
-      with_identifier_lref(e, name, fn(e, _ref) {
-        emit_named_expr(e, right, inferred_name)
-      })
+      with_identifier_lref(e, name, emit_named_expr(_, right, inferred_name))
     }
 
     // Compound assignment to identifier (x += v etc.).
     ast.AssignmentExpression(_, op, ast.Identifier(name:, ..), right) -> {
       case compound_to_binop(op) {
         Ok(bin_kind) -> {
-          use e, ref <- with_identifier_lref(e, name)
-          let e = emit_var_ref_get(e, ref)
+          use e <- with_identifier_rmw(e, name)
           use e <- result.map(emit_expr(e, right))
           emit_ir(e, IrBinOp(bin_kind))
         }
@@ -4882,8 +4972,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.ConditionalExpression(_, condition, consequent, alternate) -> {
       let #(e, else_label) = fresh_label(e)
       let #(e, end_label) = fresh_label(e)
-      use e <- result.try(emit_expr(e, condition))
-      let e = emit_ir(e, IrJumpIfFalse(else_label))
+      use e <- result.try(emit_test(e, condition, False, else_label))
       use e <- result.try(emit_expr(e, consequent))
       let e = emit_ir(e, IrJump(end_label))
       let e = emit_ir(e, IrLabel(else_label))
@@ -5143,20 +5232,34 @@ fn emit_template_literal(
   parts: ast.TemplateParts(String),
 ) -> Result(Emitter, EmitError) {
   // `a${x}b${y}c` is TemplateParts(head: "a", tail: [#(x, "b"), #(y, "c")]).
-  // Desugar to: "a" + x + "b" + y + "c". The alternation is total by
-  // construction — no empty-quasis or trailing-expression case exists.
-  let e = push_const(e, mk_string(parts.head))
-  list.try_fold(parts.tail, e, fn(e, part) {
-    let #(expr, quasi) = part
-    // Emit expression, ToString it (§13.2.8.5 — string hint, NOT the Add
-    // operator's default-hint ToPrimitive), then concat with accumulator.
-    use e <- result.map(emit_expr(e, expr))
-    let e = emit_op(e, opcode.ToStringVal)
-    let e = emit_ir(e, IrBinOp(opcode.Add))
-    // Emit the following quasi string, concat.
-    let e = push_const(e, mk_string(quasi))
-    emit_ir(e, IrBinOp(opcode.Add))
-  })
+  // Desugar to: "a" + x + "b" + y + "c", skipping empty quasis (a
+  // substitution is already ToString'd, so concatenating "" is a no-op).
+  let #(e, started) = case parts.head, parts.tail {
+    "", [_, ..] -> #(e, False)
+    head, _ -> #(push_const(e, mk_string(head)), True)
+  }
+  use #(e, _) <- result.map(
+    list.try_fold(parts.tail, #(e, started), fn(acc, part) {
+      let #(e, started) = acc
+      let #(expr, quasi) = part
+      // Emit expression, ToString it (§13.2.8.5 — string hint, NOT the Add
+      // operator's default-hint ToPrimitive), then concat with accumulator.
+      use e <- result.map(emit_expr(e, expr))
+      let e = emit_op(e, opcode.ToStringVal)
+      let e = case started {
+        True -> emit_ir(e, IrBinOp(opcode.Add))
+        False -> e
+      }
+      case quasi {
+        "" -> #(e, True)
+        _ -> #(
+          emit_ir(push_const(e, mk_string(quasi)), IrBinOp(opcode.Add)),
+          True,
+        )
+      }
+    }),
+  )
+  e
 }
 
 fn emit_switch(
@@ -5279,7 +5382,7 @@ fn emit_sequence(
     [] -> Ok(push_const(e, mk_undefined()))
     [only] -> emit_expr(e, only)
     [first, ..rest] -> {
-      use e <- result.try(emit_expr(e, first))
+      use e <- result.try(emit_expr(e, for_effect(first)))
       let e = emit_op(e, opcode.Pop)
       emit_sequence(e, rest)
     }
@@ -7062,8 +7165,7 @@ fn emit_logical_assign(
     }
     PlainTarget(ast.Identifier(name:, ..)) -> {
       let #(e, end_label) = fresh_label(e)
-      with_identifier_lref(e, name, fn(e, ref) {
-        let e = emit_var_ref_get(e, ref)
+      with_identifier_rmw(e, name, fn(e) {
         let e = emit_short_circuit_test(e, op, end_label)
         // Test passed: drop the old value, evaluate RHS, write, leave RHS.
         let e = emit_op(e, opcode.Pop)
@@ -7098,6 +7200,129 @@ fn emit_logical_assign_member(
   |> emit_ir(IrLabel(short_label))
   |> repeat_nip(kept)
   |> emit_ir(IrLabel(end_label))
+}
+
+/// Branch context (V8 VisitForTest): transfer control to `target` when the
+/// truthiness of `expr` equals `when`, fall through otherwise, without
+/// materialising the boolean. `!` flips polarity, `&&`/`||` become
+/// short-circuit jumps and literals fold to a plain jump or nothing.
+fn emit_test(
+  e: Emitter,
+  expr: ast.Expression,
+  when: Bool,
+  target: LabelId,
+) -> Result(Emitter, EmitError) {
+  case expr {
+    ast.ParenthesizedExpression(_, inner) -> emit_test(e, inner, when, target)
+    ast.UnaryExpression(_, ast.LogicalNot, arg) ->
+      emit_test(e, arg, !when, target)
+    ast.LogicalExpression(_, ast.LogicalAnd as op, left, right)
+    | ast.LogicalExpression(_, ast.LogicalOr as op, left, right) -> {
+      // `left` short-circuits the whole test when it is falsy (&&) / truthy
+      // (||): straight to `target` if that is the polarity asked for, else
+      // past `right`.
+      let short_on = op == ast.LogicalOr
+      let #(e, skip) = fresh_label(e)
+      let left_target = case short_on == when {
+        True -> target
+        False -> skip
+      }
+      use e <- result.try(emit_test(e, left, short_on, left_target))
+      use e <- result.map(emit_test(e, right, when, target))
+      emit_ir(e, IrLabel(skip))
+    }
+    // `x == null` / `x != undefined`: loose equality against a nullish
+    // literal holds exactly when x is null or undefined, coercing nothing.
+    ast.BinaryExpression(_, ast.Equal as op, left, right)
+    | ast.BinaryExpression(_, ast.NotEqual as op, left, right) ->
+      case nullish_literal(left), nullish_literal(right) {
+        True, _ ->
+          emit_nullish_test(e, right, { op == ast.Equal } == when, target)
+        _, True ->
+          emit_nullish_test(e, left, { op == ast.Equal } == when, target)
+        False, False -> emit_value_test(e, expr, when, target)
+      }
+    _ ->
+      case literal_truthy(expr) {
+        Some(truthy) if truthy == when -> Ok(emit_ir(e, IrJump(target)))
+        Some(_) -> Ok(e)
+        None -> emit_value_test(e, expr, when, target)
+      }
+  }
+}
+
+fn emit_value_test(
+  e: Emitter,
+  expr: ast.Expression,
+  when: Bool,
+  target: LabelId,
+) -> Result(Emitter, EmitError) {
+  use e <- result.map(emit_expr(e, expr))
+  emit_jump_if(e, when, target)
+}
+
+fn nullish_literal(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.NullLiteral(_) | ast.UndefinedExpression(_) -> True
+    _ -> False
+  }
+}
+
+/// Jump to `target` when `operand` is nullish (`when` True) or when it is
+/// not (`when` False: hop over a Jump, there being no jump-if-not-nullish).
+fn emit_nullish_test(
+  e: Emitter,
+  operand: ast.Expression,
+  when: Bool,
+  target: LabelId,
+) -> Result(Emitter, EmitError) {
+  use e <- result.map(emit_expr(e, operand))
+  case when {
+    True -> emit_ir(e, IrJumpIfNullish(target))
+    False -> {
+      let #(e, over) = fresh_label(e)
+      e
+      |> emit_ir(IrJumpIfNullish(over))
+      |> emit_ir(IrJump(target))
+      |> emit_ir(IrLabel(over))
+    }
+  }
+}
+
+/// Pop the test value and jump to `target` when its truthiness is `when`.
+/// A fusable local compare (see resolve.peephole) only fuses under
+/// JumpIfFalse, so the `True` polarity inverts the branch around a Jump to
+/// keep the compare-and-branch superinstruction.
+fn emit_jump_if(e: Emitter, when: Bool, target: LabelId) -> Emitter {
+  case when, e.code {
+    False, _ -> emit_ir(e, IrJumpIfFalse(target))
+    True,
+      [
+        IrBinOp(kind),
+        IrFinal(opcode.GetLocal(_)),
+        IrFinal(opcode.GetLocal(_)),
+        ..
+      ]
+    | True,
+      [
+        IrBinOp(kind),
+        IrFinal(opcode.PushConst(_)),
+        IrFinal(opcode.GetLocal(_)),
+        ..
+      ]
+    ->
+      case resolve.fusable_cmp(kind) {
+        Some(_) -> {
+          let #(e, over) = fresh_label(e)
+          e
+          |> emit_ir(IrJumpIfFalse(over))
+          |> emit_ir(IrJump(target))
+          |> emit_ir(IrLabel(over))
+        }
+        None -> emit_ir(e, IrJumpIfTrue(target))
+      }
+    True, _ -> emit_ir(e, IrJumpIfTrue(target))
+  }
 }
 
 /// Short-circuit test for `&&` / `||` / `??` (and their `op=` assign forms).

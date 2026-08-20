@@ -1413,6 +1413,37 @@ pub fn closure_nested_block_shadow_test() -> Nil {
   )
 }
 
+pub fn closure_const_by_value_test() -> Nil {
+  // A const captured only after its initializer ran is copied, not boxed;
+  // every earlier or hoisted capturer still shares the binding and its TDZ.
+  assert_normal(
+    "function f() {
+       var r = [];
+       const g = () => a; try { g(); r.push('no') } catch (e) { r.push(e.constructor.name) }
+       function h() { return a } try { h(); r.push('no') } catch (e) { r.push(e.constructor.name) }
+       const a = 1; r.push(g(), h(), (() => a)());
+       for (const x of [2, 3]) r.push((() => x)());
+       switch (r.length) { case 0: const k = 0; case 7: try { (() => k)() } catch (e) { r.push(e.constructor.name) } }
+       return r.join();
+     }
+     f()",
+    JsString("ReferenceError,ReferenceError,1,1,1,2,3,ReferenceError"),
+  )
+}
+
+pub fn closure_this_by_value_test() -> Nil {
+  // Outside a class body `this` and new.target are fixed for the activation
+  // and reach arrows by value; a derived constructor still shares `this`.
+  assert_normal(
+    "function F(v) { this.v = v; this.get = () => () => this.v; this.nt = () => new.target === F }
+     var f = new F(4);
+     class A { constructor() { this.a = 5 } }
+     class B extends A { constructor() { const g = () => this; super(); this.ok = g() === this } }
+     [f.get()(), f.nt(), new B().ok, new B().a].join()",
+    JsString("4,true,true,5"),
+  )
+}
+
 // ============================================================================
 // Array tests
 // ============================================================================
