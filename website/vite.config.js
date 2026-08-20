@@ -1,8 +1,8 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
 import fs from 'node:fs';
 import path from 'node:path';
+import { defineConfig } from 'vite';
 
 const coopCoep = {
 	'Cross-Origin-Opener-Policy': 'same-origin',
@@ -65,7 +65,6 @@ function test262HistoryPlugin() {
 
 export default defineConfig({
 	plugins: [tailwindcss(), react(), examplesPlugin(), test262HistoryPlugin()],
-	resolve: { dedupe: ['@codemirror/state', '@codemirror/view', '@codemirror/language'] },
 	server: { headers: coopCoep },
 	preview: { headers: coopCoep },
 });
