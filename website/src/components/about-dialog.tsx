@@ -68,7 +68,7 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 									</motion.div>
 
 									<Section title="Everything runs in your tab">
-										Arc — a JavaScript engine written in Gleam — is compiled to WebAssembly through{' '}
+										Arc is a JavaScript engine written in Gleam. This page runs it compiled to WebAssembly through{' '}
 										<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink>, a small BEAM implementation. The
 										page loads it once (about 7 MB); after that nothing you type leaves the browser and there is no
 										server involved.
@@ -92,21 +92,20 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 									<Section title="Warming up">
 										AtomVM loads code on first use and Arc builds JavaScript's global environment (hundreds of
 										built-ins) when it starts. So right after the page loads, a little program runs behind the scenes to
-										pull all of that in — otherwise your first click would pay for it. The status says{' '}
+										pull all of that in, so your first click does not pay for it. The status says{' '}
 										<em>warming up caches</em> while that happens; you can run anyway, it just queues.
 									</Section>
 
-									<Section title="Speed, honestly">
-										AtomVM in WebAssembly is an interpreter running an interpreter, so programs run slower here than on
-										the real BEAM — roughly tens of times, not thousands.
+									<Section title="Speed">
+										AtomVM in WebAssembly is an interpreter running an interpreter. Programs run roughly tens of times
+										slower here than on the real BEAM.
 									</Section>
 
 									<Section title="Regular expressions">
 										AtomVM has no regex engine, so <code>RegExp</code> here is answered by the browser's own JavaScript
 										engine: Arc asks the page to run the match and hands the result back to the BEAM side, offsets
-										converted between UTF-8 and UTF-16 on the way. Exact JavaScript semantics, a millisecond or so per
-										match. Timers, filesystem and network are absent — Arc is host-agnostic and this host provides none
-										of them.
+										converted between UTF-8 and UTF-16 on the way. Each match costs about a millisecond. There are no
+										timers, filesystem or network: Arc does not provide them and this page does not either.
 									</Section>
 
 									<motion.p variants={section} className="text-xs text-rpd-muted dark:text-rp-muted">
