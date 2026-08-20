@@ -112,7 +112,6 @@ pub fn js_store_test() {
     JsStore(
       ..base,
       data: tree_array.set(3, SBox(rt_types.mk_string("d")), base.data),
-      free: [11, 12],
       next: 13,
       pinned_roots: set.from_list([3]),
       alloc_since_gc: 14,
@@ -124,7 +123,6 @@ pub fn js_store_test() {
   assert tag_of(store) == tag("STORE_TAG")
   assert arity(store) == idx("STORE_ARITY")
   assert at(store, "STORE_DATA") == dyn(store.data)
-  assert at(store, "STORE_FREE") == dyn([11, 12])
   assert at(store, "STORE_NEXT") == dyn(13)
   assert at(store, "STORE_PINNED_ROOTS") == dyn(store.pinned_roots)
   assert at(store, "STORE_ALLOC") == dyn(14)
@@ -241,6 +239,7 @@ pub fn keys_and_elements_test() {
   let sparse = dict.from_list([#(0, rt_types.mk_string("s"))])
   assert tag_of(Sparse(sparse)) == tag("ELEMS_SPARSE")
   assert element(2, dyn(Sparse(sparse))) == dyn(sparse)
+  assert dyn(rt_types.mk_hole()) == tag("ELEMS_HOLE")
 }
 
 pub fn sshaped_object_test() {
@@ -518,8 +517,9 @@ pub fn proxy_fast_paths_miss_test() {
   assert instanceof_fast(st, rt_types.mk_object(child), f) == dyn(Miss)
 }
 
-/// String exotics never take the Erlang own-data / element fast paths: the
-/// synthesized index and "length" properties live in no props dict.
+/// A String exotic's synthesized index and "length" properties live in no
+/// props dict, so they never take the Erlang own-data / element fast paths;
+/// its plain named properties do.
 pub fn string_object_fast_paths_miss_test() {
   let st = seeded()
   let n = rt_types.mk_number(rt_types.JInt(1))
@@ -538,8 +538,9 @@ pub fn string_object_fast_paths_miss_test() {
   assert set_elem_fast(st, s, 0, n) == dyn(Miss)
   assert set_elem_fast(st, s, 3, n) == dyn(Miss)
   assert get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
-  assert get_prop_own_data(st, s, <<"extra">>) == dyn(Miss)
-  assert set_prop_own_data(st, s, <<"extra">>, n) == dyn(Miss)
+  assert set_prop_own_data(st, s, <<"length">>, n) == dyn(Miss)
+  assert get_prop_own_data(st, s, <<"extra">>) == dyn(rt_types.mk_string("x"))
+  assert set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
 }
 
 /// Interpreted functions never take a compiled-code fast path: the closure

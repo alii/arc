@@ -2115,9 +2115,30 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
 /// Port of arc `mop.own_property_keys` + `own_string_keys_flagged` +
 /// `collect_own_symbol_keys` (`object.gleam:2333-2410`, `mop.gleam:2176`).
 pub fn t_own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
-  // Enumeration needs the full props dict — materialize (slow-path only).
-  let assert SObject(kind:, props:, symbol_props:, elements:, ..) =
-    as_sobject(st, read_object(st, obj))
+  case read_object(st, obj) {
+    // A shaped object's keys are its shape's named slots in offset order
+    // (creation order): no indices, no symbols, no virtual "length".
+    SShapedObject(shape_id:, ..) -> #(shaped_own_keys(st, shape_id), st)
+    slot -> sobject_own_keys(st, slot)
+  }
+}
+
+fn shaped_own_keys(st: Agent, shape_id: Int) -> List(ObjectKey) {
+  case dict.get(require_js(st).shapes, shape_id) {
+    Ok(ShapeDesc(offsets:, ..)) ->
+      dict.to_list(offsets)
+      |> list.sort(fn(a, b) { int.compare(a.1, b.1) })
+      |> list.filter_map(fn(pair) {
+        // shape keys are utf8 by construction
+        bit_array.to_string(pair.0)
+        |> result.map(fn(name) { StringKey(Named(name)) })
+      })
+    Error(Nil) -> []
+  }
+}
+
+fn sobject_own_keys(st: Agent, slot: JsSlot) -> #(List(ObjectKey), Agent) {
+  let assert SObject(kind:, props:, symbol_props:, elements:, ..) = slot
   use <- proxy_or(kind, proxy_own_keys(st, _))
   let has_virtual_length = case kind {
     ArrayObj(_) | StringObj(_) -> True
@@ -3560,8 +3581,31 @@ fn compatible_descriptor(
 
 /// [[DefineOwnProperty]] with a fully-populated data descriptor
 /// `{value, writable, enumerable, configurable}`. Thin `ParsedDesc` builder
-/// over `t_define_own_prop` for method/field installation (M6/M7).
+/// over `t_define_own_prop` for method/field installation (M6/M7). An
+/// all-true descriptor on a shaped receiver is exactly a shaped slot, so it
+/// overwrites or transitions in place instead of devolving the cell.
 pub fn t_define_own_data(
+  st: Agent,
+  h: Handle,
+  key: ObjectKey,
+  value: JsVal,
+  writable: Bool,
+  enumerable: Bool,
+  configurable: Bool,
+) -> #(Bool, Agent) {
+  case key, writable && enumerable && configurable {
+    StringKey(Named(name)), True ->
+      case rt_store.t_cell_get(st, h) {
+        SShapedObject(shape_id:, proto:, slots:) ->
+          set_own_shaped(st, h, shape_id, proto, slots, name, value)
+        _ -> define_own_data(st, h, key, value, True, True, True)
+      }
+    _, _ ->
+      define_own_data(st, h, key, value, writable, enumerable, configurable)
+  }
+}
+
+fn define_own_data(
   st: Agent,
   h: Handle,
   key: ObjectKey,
@@ -3684,10 +3728,20 @@ pub fn t_delete_prop_strict(
 
 /// SPEC§8 `define_prop` — §7.3.5 CreateDataPropertyOrThrow with a wire-form
 /// key. Object-literal `{k: v}` and class fields emit this with a raw JsVal
-/// `v` (NOT a ParsedDesc), so route to `t_define_own_data` with all-true
-/// attributes; a rejected define (frozen receiver, a class constructor's
-/// `prototype`) throws TypeError.
+/// `v` (NOT a ParsedDesc). The kernel creates an absent plain key in one heap
+/// write and hands everything else to `t_create_data_prop_slow`.
+@external(erlang, "arc_rt_obj_ffi", "t_create_data_prop")
 pub fn t_create_data_prop(
+  st: Agent,
+  recv: JsVal,
+  key: k,
+  v: JsVal,
+) -> #(Bool, Agent)
+
+/// `t_create_data_prop` past the kernel: route to `t_define_own_data` with
+/// all-true attributes; a rejected define (frozen receiver, a class
+/// constructor's `prototype`) throws TypeError.
+pub fn t_create_data_prop_slow(
   st: Agent,
   recv: JsVal,
   key: k,
@@ -3823,7 +3877,10 @@ pub fn t_new_arguments(
     False -> None
   }
   let elements = tree_array.from_list(args, rt_types.mk_hole())
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  // Two creation seqs ("length", then "callee") in one store rebuild.
+  let js = require_js(st)
+  let seq = js.prop_seq
+  let st = Agent(..st, store: JsStore(..js, prop_seq: seq + 2))
   let length_prop =
     DataProperty(
       value: rt_types.mk_number(rt_types.JInt(len)),
@@ -3832,7 +3889,6 @@ pub fn t_new_arguments(
       configurable: True,
       seq:,
     )
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
   let callee_prop = case mapped_cells {
     Some(_) ->
       DataProperty(
@@ -3840,7 +3896,7 @@ pub fn t_new_arguments(
         writable: True,
         enumerable: False,
         configurable: True,
-        seq:,
+        seq: seq + 1,
       )
     None -> {
       let thrower = Some(rt_types.mk_object(st.realm.throw_type_error))
@@ -3849,7 +3905,7 @@ pub fn t_new_arguments(
         set: thrower,
         enumerable: False,
         configurable: False,
-        seq:,
+        seq: seq + 1,
       )
     }
   }

@@ -813,11 +813,13 @@ pub fn js_to_map_key(v: JsVal) -> MapKey {
 
 /// Inverse of `js_to_map_key`. Lossless except -0 → +0 (§24.1.3.9 step 4
 /// requires exactly that). Used by Map forEach/entries to reconstruct the
-/// original JS key (arc `value.gleam:1014-1027`).
+/// original JS key (arc `value.gleam:1014-1027`). An integral number comes
+/// back in the `JInt` shape literals have, so `arr[key]` downstream stays on
+/// the integer-index paths.
 pub fn map_key_to_js(key: MapKey) -> JsVal {
   case key {
     MKString(s) -> mk_string(s)
-    MKNumber(f) -> mk_number(JFloat(f))
+    MKNumber(f) -> mk_number(integral_key_number(f))
     MKNan -> mk_number(JNan)
     MKInfinity -> mk_number(JPosInf)
     MKNegInfinity -> mk_number(JNegInf)
@@ -827,6 +829,20 @@ pub fn map_key_to_js(key: MapKey) -> JsVal {
     MKObject(h) -> mk_object(h)
     MKSymbol(id) -> mk_symbol(id)
     MKBigInt(n) -> mk_bigint(n)
+  }
+}
+
+/// A finite key back as a Number: `JInt` when it is an integer a double
+/// holds exactly (|n| <= 2^53 - 1), else the float as stored.
+fn integral_key_number(f: Float) -> JsNum {
+  let n = float.truncate(f)
+  let exact =
+    int.to_float(n) == f
+    && n <= 9_007_199_254_740_991
+    && n >= -9_007_199_254_740_991
+  case exact {
+    True -> JInt(n)
+    False -> JFloat(f)
   }
 }
 
@@ -3620,22 +3636,26 @@ pub type JsOps(st) {
 pub type JsStore(st) {
   JsStore(
     // ── cell arena (arc heap.gleam:21-45) ──
-    /// Live cells by id. Ids are dense (`next` / free-list), so an OTP
+    /// Live cells by id. Ids are dense (minted from `next`), so an OTP
     /// `array` indexed by id; a freed id reads back as the FFI's free
     /// sentinel, which every reader treats as absent.
     data: TreeArray(JsSlot),
-    /// Recycled ids, LIFO.
-    free: List(Int),
-    /// Next never-used id (starts 0).
+    /// Next id to mint (starts 0). A collection lowers it to one past the
+    /// highest survivor, so a dead tail's ids are minted again.
     next: Int,
     /// Permanent GC roots: realm intrinsics + captured-binding cells.
     pinned_roots: Set(Int),
     // ── GC trigger (M2) ──
     /// Bumped by `t_cell_new`; reset by `t_collect`.
     alloc_since_gc: Int,
-    /// `t_maybe_collect` fires when `alloc_since_gc >= gc_threshold`.
-    /// Default 65_536 (arc `interpreter.gleam:5796`).
+    /// `t_maybe_collect` fires when `alloc_since_gc` reaches this, scaled
+    /// up with `gc_live` for heaps past twice the default (`rt/gc.due`).
+    /// Default 65_536.
     gc_threshold: Int,
+    /// Cells that survived the last collection; scales the next trigger
+    /// (`rt/gc.due`) so marking stays proportional to allocation however
+    /// large the heap grows. 0 until the first collection.
+    gc_live: Int,
     // ── threaded counters (D9, D14) ──
     /// Property creation-order stamp.
     prop_seq: Int,

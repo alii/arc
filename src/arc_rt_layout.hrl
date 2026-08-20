@@ -34,10 +34,9 @@
 %% arc/rt/types.JsStore
 -define(STORE_TAG, js_store).
 -define(STORE_DATA, 2).
--define(STORE_FREE, 3).
--define(STORE_NEXT, 4).
--define(STORE_PINNED_ROOTS, 5).
--define(STORE_ALLOC, 6).
+-define(STORE_NEXT, 3).
+-define(STORE_PINNED_ROOTS, 4).
+-define(STORE_ALLOC, 5).
 -define(STORE_SHAPES, 14).
 -define(STORE_NEXT_SHAPE, 15).
 -define(STORE_ARITY, 17).
@@ -148,6 +147,9 @@
 -define(ELEMS_NONE, no_elements).
 -define(ELEMS_DENSE, dense).
 -define(ELEMS_SPARSE, sparse).
+%% The dense store's `array` default (arc_rt_val_ffi:mk_hole/0): an absent
+%% index, never a JsVal. Reads past the array's size answer it too.
+-define(ELEMS_HOLE, js_hole).
 
 %% arc/rt/call.Completion (built by the call ffi, matched by Gleam)
 -define(COMPLETION_NORMAL, normal_completion).

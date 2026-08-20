@@ -111,15 +111,13 @@ fn compile_load(source: String, name: String) -> Result(Atom, String) {
 }
 
 fn stats_line(label: String, s: rt_gc.GcStats) -> String {
-  let rt_gc.GcStats(live:, free:, next:, since_gc:) = s
+  let rt_gc.GcStats(live:, next:, since_gc:) = s
   "  "
   <> label
   <> " next="
   <> int.to_string(next)
   <> " live="
   <> int.to_string(live)
-  <> " free="
-  <> int.to_string(free)
   <> " since_gc="
   <> int.to_string(since_gc)
 }

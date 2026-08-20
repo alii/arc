@@ -7,9 +7,9 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, type JsSlot, type JsVal, type Property,
-  type PropertyKey, Agent, DataProperty, FnFlags, JInt, JsStore, KBytecode,
-  KHandle, Named, NoElements, Ordinary, SObject, StringKey, classify, mk_number,
-  mk_object, mk_string,
+  type PropertyKey, DataProperty, FnFlags, JInt, KBytecode, KHandle, Named,
+  NoElements, Ordinary, SObject, StringKey, classify, mk_number, mk_object,
+  mk_string,
 }
 import gleam/dict
 import gleam/option.{type Option, None, Some}
@@ -57,10 +57,10 @@ pub fn template_flags(template: FuncTemplate) -> FnFlags {
 /// `MakeMethod`/`DefineMethod` re-home concise methods afterwards.
 ///
 /// This is the hottest allocation path in the interpreter, so both objects
-/// are built directly rather than through [[DefineOwnProperty]]: one counter
-/// bump reserves every birth-prop seq, the `prototype` object is allocated
-/// first so the function cell is written once complete, and only the
-/// `constructor` back-pointer costs a second write to the prototype cell.
+/// are built directly rather than through [[DefineOwnProperty]], in one
+/// store write: it reserves every birth-prop seq and mints the function cell
+/// together with its complete `prototype` object, `constructor` back-pointer
+/// included.
 pub fn t_new_bytecode_function(
   st: Agent,
   template: FuncTemplate,
@@ -75,81 +75,75 @@ pub fn t_new_bytecode_function(
     False, True -> realm.async_fn.prototype
     False, False -> realm.function.prototype
   }
-  let has_prototype = flags.is_constructor || flags.is_generator
-  let #(seq, st) =
-    reserve_prop_seqs(st, case has_prototype, flags.is_constructor {
-      False, _ -> 2
-      True, False -> 3
-      True, True -> 4
-    })
-  let birth_props = [
-    #(Named("length"), fn_own_prop(mk_number(JInt(template.length)), seq)),
-    #(
-      Named("name"),
-      fn_own_prop(mk_string(option.unwrap(template.name, "")), seq + 1),
-    ),
-  ]
-  case has_prototype {
-    False ->
-      rt_store.t_cell_new(
-        st,
-        fn_slot(
-          realm.id,
-          unit,
-          template,
-          env,
-          flags,
-          fn_proto,
-          None,
-          birth_props,
-        ),
-      )
+  let birth_props = fn(seq) {
+    [
+      #(Named("length"), fn_own_prop(mk_number(JInt(template.length)), seq)),
+      #(
+        Named("name"),
+        fn_own_prop(mk_string(option.unwrap(template.name, "")), seq + 1),
+      ),
+    ]
+  }
+  let new_fn = fn(home_object, props) {
+    fn_slot(realm.id, unit, template, env, flags, fn_proto, home_object, props)
+  }
+  case flags.is_constructor || flags.is_generator {
+    False -> {
+      use seq <- rt_store.t_cell_new_with(st, 2)
+      new_fn(None, birth_props(seq))
+    }
     True -> {
       let proto_parent = case flags.is_generator, flags.is_async {
         True, True -> realm.async_gen.prototype
         True, False -> realm.generator.prototype
         False, _ -> realm.object.prototype
       }
-      let #(proto, st) = rt_obj.t_new_object(st, Some(proto_parent))
-      let prototype_prop =
-        DataProperty(
-          value: mk_object(proto),
-          writable: !flags.is_class_constructor,
-          enumerable: False,
-          configurable: False,
-          seq: seq + 2,
-        )
-      let #(h, st) =
-        rt_store.t_cell_new(
-          st,
-          fn_slot(realm.id, unit, template, env, flags, fn_proto, Some(proto), [
-            #(Named("prototype"), prototype_prop),
-            ..birth_props
-          ]),
-        )
-      case flags.is_constructor {
-        False -> #(h, st)
-        True -> {
-          let constructor_prop =
-            DataProperty(
-              value: mk_object(h),
-              writable: True,
-              enumerable: False,
-              configurable: True,
-              seq: seq + 3,
-            )
-          let proto_slot =
-            SObject(
-              kind: Ordinary,
-              proto: Some(proto_parent),
-              props: dict.from_list([#(Named("constructor"), constructor_prop)]),
-              symbol_props: [],
-              elements: NoElements,
-              extensible: True,
-            )
-          #(h, rt_store.t_cell_set(st, proto, proto_slot))
-        }
+      let seqs = case flags.is_constructor {
+        True -> 4
+        False -> 3
       }
+      let #(h, _, st) = {
+        use seq, h, proto <- rt_store.t_cell_new_pair(st, seqs)
+        let prototype_prop =
+          DataProperty(
+            value: mk_object(proto),
+            writable: !flags.is_class_constructor,
+            enumerable: False,
+            configurable: False,
+            seq: seq + 2,
+          )
+        let proto_props = case flags.is_constructor {
+          False -> dict.new()
+          True ->
+            dict.from_list([
+              #(
+                Named("constructor"),
+                DataProperty(
+                  value: mk_object(h),
+                  writable: True,
+                  enumerable: False,
+                  configurable: True,
+                  seq: seq + 3,
+                ),
+              ),
+            ])
+        }
+        #(
+          new_fn(Some(proto), [
+            #(Named("prototype"), prototype_prop),
+            ..birth_props(seq)
+          ]),
+          SObject(
+            kind: Ordinary,
+            proto: Some(proto_parent),
+            props: proto_props,
+            symbol_props: [],
+            elements: NoElements,
+            extensible: True,
+          ),
+        )
+      }
+      #(h, st)
     }
   }
 }
@@ -180,13 +174,6 @@ fn fn_slot(
     elements: NoElements,
     extensible: True,
   )
-}
-
-/// Reserve `n` consecutive `Property.seq` stamps with a single store write
-/// (`rt_store.t_next_prop_seq` × n in one step); returns the first.
-fn reserve_prop_seqs(st: Agent, n: Int) -> #(Int, Agent) {
-  let js = st.store
-  #(js.prop_seq, Agent(..st, store: JsStore(..js, prop_seq: js.prop_seq + n)))
 }
 
 /// %AsyncGeneratorFunction.prototype%: the realm record keeps only the

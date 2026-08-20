@@ -29,7 +29,11 @@ import arc/rt/types.{type Agent, type JsVal}
 /// (`frame_roots`).
 pub fn maybe_collect_at_return(state: State) -> State {
   let js = state.agent.store
-  case js.alloc_since_gc >= js.gc_threshold && state.outer_depth == 0 {
+  case
+    state.outer_depth == 0
+    && js.alloc_since_gc >= js.gc_threshold
+    && rt_gc.due(js)
+  {
     True ->
       State(
         ..state,

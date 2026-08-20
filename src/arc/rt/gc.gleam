@@ -27,27 +27,26 @@ import arc/rt/types.{
   type Agent, type AsyncGenRequest, type Handle, type Job, type JsElements,
   type JsSlot, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
   type PromiseState, type Property, type ReactionHandler, type Resume,
-  type WeakKey, AccessorProperty, Agent, ArgumentsObj, ArrayBufferObj,
-  ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGenRequest,
-  AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty, DataViewObj, DateObj,
-  Dense, DisposableStackObj, ErrorObj, FinRegCell, FinalizationRegistryObj,
-  ForInIterator, GeneratorObj, Handler, HostJob, IdentityPassThrough, IntlObj,
-  IteratorHelperObj, JsCell, JsStore, KBound, KBytecode, KCompiled, KHandle,
-  KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements, NumberObj,
-  Ordinary, PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction,
-  PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
-  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
-  SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
-  SetIterator, SetObj, Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
-  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj,
-  WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list,
-  native_token_refs,
+  type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
+  AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
+  BooleanObj, DataViewObj, DateObj, Dense, DisposableStackObj, ErrorObj,
+  FinRegCell, FinalizationRegistryObj, ForInIterator, GeneratorObj, Handler,
+  HostJob, IdentityPassThrough, IntlObj, IteratorHelperObj, JsCell, JsStore,
+  KBound, KBytecode, KCompiled, KHandle, KHost, KNative, MapIterator, MapObj,
+  ModuleNamespace, NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj,
+  PromisePending, PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj,
+  ReactionJob, RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame,
+  SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject,
+  SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, StringIterator,
+  StringObj, SymbolObj, TemporalObj, ThrowerPassThrough, TypedArrayObj,
+  WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
+  WrapForValidIteratorObj, classify, jq_to_list, native_token_refs,
 } as rt_types
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/set.{type Set}
+import gleam/set
 
 // ── FFI: deep BEAM-term walk (M2-I8) ────────────────────────────────────────
 
@@ -57,6 +56,17 @@ import gleam/set.{type Set}
 /// captured `Handle` bindings alive. Impl: `arc_rt_gc_ffi.erl`.
 @external(erlang, "arc_rt_gc_ffi", "refs_in_term")
 pub fn push_term_refs(v: Dynamic, acc: List(Int)) -> List(Int)
+
+/// The ids an object's property map / symbol-property list name: property
+/// values and accessor pairs, read by position (`arc_rt_layout.hrl`).
+@external(erlang, "arc_rt_gc_ffi", "refs_in_props")
+fn push_props_refs(props: Dict(k, Property), acc: List(Int)) -> List(Int)
+
+@external(erlang, "arc_rt_gc_ffi", "refs_in_symbol_props")
+fn push_symbol_props_refs(
+  props: List(#(k, Property)),
+  acc: List(Int),
+) -> List(Int)
 
 /// Identity erase to `Dynamic` for the FFI term walk. Tier-O
 /// (`gleam_stdlib:identity/1`); matches the coercion idiom in
@@ -100,13 +110,13 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
   let JsStore(
     // ── cell arena bookkeeping — no roots ──
     data: _,
-    free: _,
     next: _,
     // Set(Int): realm intrinsics + global_object + captured-binding cells.
     pinned_roots:,
     // ── GC trigger counters — no roots ──
     alloc_since_gc: _,
     gc_threshold: _,
+    gc_live: _,
     // ── threaded uid counters — no roots ──
     prop_seq: _,
     private_uid: _,
@@ -150,36 +160,35 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
 
 // ── cell tracer (arc gc_trace.gleam:61-540) ─────────────────────────────────
 
-/// Every cell id directly reachable from `slot`. Port of arc
+/// Push every cell id directly reachable from `slot` onto `acc`. Port of arc
 /// `gc_trace.refs_in_slot`. EXHAUSTIVE match on `JsSlot` with NO wildcard
 /// (SPEC §7.M2 / D8 safety property): adding a `JsSlot` variant is a compile
 /// error here, never a silent free-of-live-cell.
-pub fn refs_in_cell(slot: JsSlot) -> List(Int) {
+pub fn refs_in_cell(slot: JsSlot, acc: List(Int)) -> List(Int) {
   case slot {
-    SObject(kind:, proto:, props:, symbol_props:, elements:, extensible: _) -> {
-      let acc = push_objkind_refs(kind, [])
-      let acc = push_opt_handle(proto, acc)
-      let acc = dict.fold(props, acc, fn(a, _, p) { push_property_refs(p, a) })
-      let acc =
-        list.fold(symbol_props, acc, fn(a, sp) { push_property_refs(sp.1, a) })
-      push_elements_refs(elements, acc)
-    }
-    SShapedObject(shape_id: _, proto:, slots:) -> {
-      let acc = push_opt_handle(proto, [])
-      rt_types.shape_slots_fold(slots, acc, fn(_, v, a) { push_val_refs(v, a) })
-    }
-    SBox(value:) -> push_val_refs(value, [])
-    SPromiseData(state:, is_handled: _) -> push_promise_state_refs(state, [])
-    SGenerator(state: _, resume:) -> push_resume_refs(resume, [])
+    // `kind` keeps a typed walk (weak containers, code templates) and so do
+    // dense elements: an OTP array read other than through its API can see
+    // a stale leaf.
+    SObject(kind:, proto:, props:, symbol_props:, elements:, extensible: _) ->
+      push_objkind_refs(kind, push_opt_handle(proto, acc))
+      |> push_props_refs(props, _)
+      |> push_symbol_props_refs(symbol_props, _)
+      |> push_elements_refs(elements, _)
+    SShapedObject(shape_id: _, proto:, slots:) ->
+      push_term_refs(to_dynamic(slots), push_opt_handle(proto, acc))
+    SBox(value:) -> push_val_refs(value, acc)
+    SPromiseData(state:, is_handled: _) -> push_promise_state_refs(state, acc)
+    SGenerator(state: _, resume:) -> push_resume_refs(resume, acc)
     SAsyncGen(state: _, resume:, queue: #(front, back)) -> {
-      let acc = push_resume_refs(resume, [])
+      let acc = push_resume_refs(resume, acc)
       let acc = list.fold(front, acc, push_request_refs)
       list.fold(back, acc, push_request_refs)
     }
-    SAsyncContext(resume:, promise:) -> push_resume_refs(resume, [promise.id])
+    SAsyncContext(resume:, promise:) ->
+      push_resume_refs(resume, [promise.id, ..acc])
     // The resource stack holds user values, dispose methods and callback
     // argument lists — all `JsVal`s; walk the whole list term.
-    SDisposeCapability(resources:) -> push_term_refs(to_dynamic(resources), [])
+    SDisposeCapability(resources:) -> push_term_refs(to_dynamic(resources), acc)
   }
 }
 
@@ -405,21 +414,12 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
   }
 }
 
-fn push_property_refs(prop: Property, acc: List(Int)) -> List(Int) {
-  case prop {
-    DataProperty(value:, writable: _, enumerable: _, configurable: _, seq: _) ->
-      push_val_refs(value, acc)
-    AccessorProperty(get:, set:, enumerable: _, configurable: _, seq: _) ->
-      push_opt_val(set, push_opt_val(get, acc))
-  }
-}
-
 fn push_elements_refs(elems: JsElements, acc: List(Int)) -> List(Int) {
   case elems {
     NoElements -> acc
     Dense(arr) ->
       rt_tree_array.sparse_fold(fn(_, v, a) { push_val_refs(v, a) }, acc, arr)
-    Sparse(d) -> dict.fold(d, acc, fn(a, _, v) { push_val_refs(v, a) })
+    Sparse(d) -> push_term_refs(to_dynamic(d), acc)
   }
 }
 
@@ -478,13 +478,6 @@ fn push_opt_handle(oh: Option(Handle), acc: List(Int)) -> List(Int) {
   }
 }
 
-fn push_opt_val(ov: Option(JsVal), acc: List(Int)) -> List(Int) {
-  case ov {
-    Some(v) -> push_val_refs(v, acc)
-    None -> acc
-  }
-}
-
 // ── mark / sweep (arc heap.gleam:442-563) ───────────────────────────────────
 //
 // SPEC §7.M2 "Dropped from arc": `lazy_proto` handling (arc heap.gleam:
@@ -492,13 +485,12 @@ fn push_opt_val(ov: Option(JsVal), acc: List(Int)) -> List(Int) {
 // has NO tagged-id decode branch and `sweep` has NO `is_real_slot` filter.
 // Handles are stable: a collection never renumbers ids. Like arc
 // `heap.compact` (heap.gleam:459-473) the sweep DISCARDS the dead ids rather
-// than refilling the free list: an allocation-heavy turn (test262's
+// than keeping a free list: an allocation-heavy turn (test262's
 // dst-offset-caching family allocates ~2.4M short-lived Dates) would
 // otherwise leave a multi-megaword free list inside the store record, which
 // then travels with the Agent across every process boundary and defeats the
-// point of collecting. Discarding them only wastes id space — `t_cell_new`
-// falls back to bumping `next`, and ids are plain ints. `free` still serves
-// explicit `t_cell_free`.
+// point of collecting. Only the ids past the highest survivor come back, by
+// lowering `next`; the rest is wasted id space, and ids are plain ints.
 
 /// Default allocation-count threshold before an automatic collection. Seeds
 /// `JsStore.gc_threshold` in `t_store_new`; `t_maybe_collect` reads the
@@ -507,10 +499,10 @@ fn push_opt_val(ov: Option(JsVal), acc: List(Int)) -> List(Int) {
 pub const default_gc_threshold: Int = 65_536
 
 /// TURN-BOUNDARY safepoint (D11). Collects only when `call_depth == 0` AND
-/// `alloc_since_gc >= gc_threshold` (the store's own `gc_threshold` field).
-/// Safepoints: `rt/async.drain` between jobs, the runner / engine after a
-/// top-level return, and the interpreter's root-activation `Return`
-/// (`arc/interp/safepoint`, via `t_maybe_collect_with`). NEVER at fn-entry.
+/// the store is `due` a collection. Safepoints: `rt/async.drain` between
+/// jobs, the runner / engine after a top-level return, and the interpreter's
+/// root-activation `Return` (`arc/interp/safepoint`, via
+/// `t_maybe_collect_with`). NEVER at fn-entry.
 pub fn t_maybe_collect(st: Agent) -> Agent {
   t_maybe_collect_with(st, [])
 }
@@ -519,11 +511,22 @@ pub fn t_maybe_collect(st: Agent) -> Agent {
 /// cannot see: the interpreter's root activation passes its frame registers.
 /// Same gate; `extra_roots` only matter when it fires.
 pub fn t_maybe_collect_with(st: Agent, extra_roots: List(Handle)) -> Agent {
-  let js = require_js(st)
-  case st.call_depth == 0 && js.alloc_since_gc >= js.gc_threshold {
+  case st.call_depth == 0 && due(require_js(st)) {
     True -> t_collect(st, extra_roots)
     False -> st
   }
+}
+
+/// A collection is due once the allocations since the last one reach
+/// `gc_threshold`, scaled up by `gc_live / (2 * default_gc_threshold)` when
+/// the survivors of the last collection outnumber that: with the default
+/// threshold a large heap is next marked after allocating half its live size
+/// again, so marking stays proportional to allocation instead of costing the
+/// whole live set every `gc_threshold` cells.
+pub fn due(js: JsStore(st)) -> Bool {
+  js.alloc_since_gc >= js.gc_threshold
+  && js.alloc_since_gc * 2 * default_gc_threshold
+  >= js.gc_threshold * js.gc_live
 }
 
 /// Keep the cells `held` names alive across a stretch where safepoints fire
@@ -550,81 +553,83 @@ pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
 
 /// Mark-and-sweep the JS heap. Roots = `roots_of_state(st)` ∪ `extra_roots`
 /// (the interpreter's live root frame, or a host-driven mid-turn `gc()`).
-/// Resets `alloc_since_gc` and drops the free list (see above). NO id
-/// renumbering (SPEC §7.M2 invariant). Port of arc `heap.compact`
-/// (heap.gleam:459-473).
+/// Resets `alloc_since_gc` and records the survivor count for `due`. NO id
+/// renumbering (SPEC §7.M2 invariant), but `next` falls back to just past
+/// the highest survivor so the ids of a dead tail are minted again and the
+/// arena's depth tracks the live set rather than every allocation ever made.
 pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   let js = require_js(st)
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
-  let live = mark_from(js.data, roots)
-  let data = sweep(js.data, live) |> prune_weak(live)
-  Agent(..st, store: JsStore(..js, data:, free: [], alloc_since_gc: 0))
+  let live = mark_loop(js.data, roots, dict.new())
+  let #(data, next) = sweep(js.data, live)
+  Agent(
+    ..st,
+    store: JsStore(
+      ..js,
+      data:,
+      next:,
+      alloc_since_gc: 0,
+      gc_live: dict.size(live),
+    ),
+  )
 }
 
-/// Mark phase: from `roots`, return every reachable cell id. Port of arc
-/// `heap.mark_from` (heap.gleam:487-490).
-fn mark_from(
-  data: rt_tree_array.TreeArray(JsSlot),
-  roots: List(Int),
-) -> Set(Int) {
-  mark_loop(data, roots, set.new())
-}
+/// The mark set is a bare map keyed by cell id, probed and grown with the
+/// map BIFs directly: this is the one loop that runs per heap edge.
+@external(erlang, "maps", "is_key")
+fn marked(id: Int, live: Dict(Int, Nil)) -> Bool
 
-/// Tail-recursive DFS. Cycles: `visited` check. Dangling refs: `dict.get`
-/// miss → skip. arc's `lazy_proto.decode_lazy_proto` branches (heap.gleam:
-/// 513-530) DELETED — no tagged ids in 2core (SPEC §7.M2 "Dropped from arc").
+@external(erlang, "maps", "put")
+fn mark(id: Int, nil: Nil, live: Dict(Int, Nil)) -> Dict(Int, Nil)
+
+/// Mark phase: tail-recursive DFS from `frontier`, returning every reachable
+/// cell id. Cycles: `visited` check. Dangling refs: an absent id is skipped.
 fn mark_loop(
   data: rt_tree_array.TreeArray(JsSlot),
   frontier: List(Int),
-  visited: Set(Int),
-) -> Set(Int) {
+  visited: Dict(Int, Nil),
+) -> Dict(Int, Nil) {
   case frontier {
     [] -> visited
     [id, ..rest] ->
-      case set.contains(visited, id) {
+      case marked(id, visited) {
         True -> mark_loop(data, rest, visited)
         False -> {
-          let visited = set.insert(visited, id)
+          let visited = mark(id, Nil, visited)
           case rt_tree_array.get_option(id, data) {
             None -> mark_loop(data, rest, visited)
-            Some(slot) ->
-              // Prepend child ids directly onto frontier — avoids the
-              // reverse+copy `list.append` allocates (arc heap.gleam:519-522).
-              mark_loop(data, prepend_ids(refs_in_cell(slot), rest), visited)
+            Some(slot) -> mark_loop(data, refs_in_cell(slot, rest), visited)
           }
         }
       }
   }
 }
 
-/// Prepend `ids` onto `tail` without the intermediate reversed copy that
-/// `list.append` allocates. Port of arc `heap.prepend_ref_ids` (heap.gleam:
-/// 541-546); ids are already `Int` here so no `.id` unwrap is needed.
-fn prepend_ids(ids: List(Int), tail: List(Int)) -> List(Int) {
-  case ids {
-    [] -> tail
-    [id, ..rest] -> prepend_ids(rest, [id, ..tail])
-  }
-}
-
-/// Sweep: keep only live cells. NO id renumbering; dead ids are discarded,
-/// not recycled (arc heap.gleam:471). Rebuilt into a fresh array so the
-/// leaves dead ids occupied are dropped, not just reset.
+/// Sweep: rebuild the arena from the live cells alone, in one ascending pass
+/// that also applies the weak-container prune, and report the `next` id to
+/// mint (one past the highest survivor). Each leaf is built once and the
+/// leaves only dead ids occupied are dropped.
 fn sweep(
   data: rt_tree_array.TreeArray(JsSlot),
-  live: Set(Int),
-) -> rt_tree_array.TreeArray(JsSlot) {
-  rt_tree_array.sparse_fold(
-    fn(id, slot, acc) {
-      case set.contains(live, id) {
-        True -> rt_tree_array.set(id, slot, acc)
-        False -> acc
-      }
-    },
-    rt_store.data_new(),
-    data,
-  )
+  live: Dict(Int, Nil),
+) -> #(rt_tree_array.TreeArray(JsSlot), Int) {
+  let kept =
+    rt_tree_array.sparse_fold(
+      fn(id, slot, acc) {
+        case marked(id, live) {
+          True -> [#(id, prune_weak_slot(slot, live)), ..acc]
+          False -> acc
+        }
+      },
+      [],
+      data,
+    )
+  let next = case kept {
+    [] -> 0
+    [#(id, _), ..] -> id + 1
+  }
+  #(rt_store.data_from_descending(kept), next)
 }
 
 /// Post-sweep weak-prune (SPEC §7.M2 §weak): drop `WeakMapObj`/`WeakSetObj`
@@ -635,59 +640,57 @@ fn sweep(
 /// [[WeakRefTarget]] died is dropped (§9.10.3: the target is set to empty and
 /// the cleanup job — which this runtime never enqueues — would remove it); a
 /// surviving cell whose [[UnregisterToken]] died has the token emptied so a
-/// recycled cell id can never match it.
-fn prune_weak(
-  data: rt_tree_array.TreeArray(JsSlot),
-  live: Set(Int),
-) -> rt_tree_array.TreeArray(JsSlot) {
-  let keep = fn(k: WeakKey) {
-    case k {
-      WeakObjKey(id:) -> set.contains(live, id)
-      WeakSymKey(_) -> True
-    }
-  }
-  // A weakly-held value after the sweep: itself when still usable (a live
-  // cell, or a symbol — not a heap cell), None when its cell was swept.
-  let weak_live = fn(v: JsVal) -> Option(JsVal) {
-    case classify(v) {
-      KHandle(JsCell(id)) ->
-        case set.contains(live, id) {
-          True -> Some(v)
-          False -> None
-        }
-      _ -> Some(v)
-    }
-  }
-  rt_tree_array.sparse_map(
-    fn(_, slot) { prune_weak_slot(slot, keep, weak_live) },
-    data,
-  )
-}
-
-fn prune_weak_slot(
-  slot: JsSlot,
-  keep: fn(WeakKey) -> Bool,
-  weak_live: fn(JsVal) -> Option(JsVal),
-) -> JsSlot {
+/// recycled cell id can never match it. Every other slot passes through.
+fn prune_weak_slot(slot: JsSlot, live: Dict(Int, Nil)) -> JsSlot {
   case slot {
     SObject(kind: WeakMapObj(entries:), ..) ->
       SObject(
         ..slot,
-        kind: WeakMapObj(entries: dict.filter(entries, fn(k, _) { keep(k) })),
+        kind: WeakMapObj(
+          entries: dict.filter(entries, fn(k, _) { weak_key_live(k, live) }),
+        ),
       )
     SObject(kind: WeakSetObj(entries:), ..) ->
-      SObject(..slot, kind: WeakSetObj(entries: set.filter(entries, keep)))
+      SObject(
+        ..slot,
+        kind: WeakSetObj(
+          entries: set.filter(entries, fn(k) { weak_key_live(k, live) }),
+        ),
+      )
     SObject(kind: FinalizationRegistryObj(callback:, cells:), ..) -> {
       let cells =
-        list.filter(cells, fn(c) { option.is_some(weak_live(c.target)) })
+        list.filter(cells, fn(c) { option.is_some(weak_live(c.target, live)) })
         |> list.map(fn(c) {
-          FinRegCell(..c, token: option.then(c.token, weak_live))
+          FinRegCell(..c, token: option.then(c.token, weak_live(_, live)))
         })
       SObject(..slot, kind: FinalizationRegistryObj(callback:, cells:))
     }
     SObject(kind: WeakRefObj(target:), ..) ->
-      SObject(..slot, kind: WeakRefObj(target: option.then(target, weak_live)))
+      SObject(
+        ..slot,
+        kind: WeakRefObj(target: option.then(target, weak_live(_, live))),
+      )
     _ -> slot
+  }
+}
+
+fn weak_key_live(k: WeakKey, live: Dict(Int, Nil)) -> Bool {
+  case k {
+    WeakObjKey(id:) -> marked(id, live)
+    WeakSymKey(_) -> True
+  }
+}
+
+/// A weakly-held value after the sweep: itself when still usable (a live
+/// cell, or a symbol — not a heap cell), None when its cell was swept.
+fn weak_live(v: JsVal, live: Dict(Int, Nil)) -> Option(JsVal) {
+  case classify(v) {
+    KHandle(JsCell(id)) ->
+      case marked(id, live) {
+        True -> Some(v)
+        False -> None
+      }
+    _ -> Some(v)
   }
 }
 
@@ -699,9 +702,7 @@ pub type GcStats {
   GcStats(
     /// Cells currently allocated.
     live: Int,
-    /// `list.length(free)` — recycled ids awaiting reuse.
-    free: Int,
-    /// `next` — next never-used id (total ids ever minted).
+    /// `next` — the next id to mint.
     next: Int,
     /// `alloc_since_gc` — allocations since the last `t_collect`.
     since_gc: Int,
@@ -713,7 +714,6 @@ pub fn stats(st: Agent) -> GcStats {
   let js = require_js(st)
   GcStats(
     live: rt_tree_array.sparse_fold(fn(_, _, n) { n + 1 }, 0, js.data),
-    free: list.length(js.free),
     next: js.next,
     since_gc: js.alloc_since_gc,
   )
