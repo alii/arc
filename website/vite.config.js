@@ -21,10 +21,11 @@ function examplesPlugin() {
 		},
 		load(id) {
 			if (id !== resolved) return;
-			const files = fs.readdirSync(examplesDir)
-				.filter(f => f.endsWith('.js'))
+			const files = fs
+				.readdirSync(examplesDir)
+				.filter((f) => f.endsWith('.js'))
 				.sort();
-			const examples = files.map(f => ({
+			const examples = files.map((f) => ({
 				name: f.replace(/\.js$/, '').replace(/[_-]/g, ' '),
 				code: fs.readFileSync(path.join(examplesDir, f), 'utf-8').trim(),
 			}));
@@ -64,6 +65,7 @@ function test262HistoryPlugin() {
 
 export default defineConfig({
 	plugins: [tailwindcss(), react(), examplesPlugin(), test262HistoryPlugin()],
+	resolve: { dedupe: ['@codemirror/state', '@codemirror/view', '@codemirror/language'] },
 	server: { headers: coopCoep },
 	preview: { headers: coopCoep },
 });
