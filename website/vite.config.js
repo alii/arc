@@ -39,8 +39,31 @@ function examplesPlugin() {
 	};
 }
 
+function test262HistoryPlugin() {
+	const virtualId = 'virtual:test262-history';
+	const resolved = '\0' + virtualId;
+	const file = path.resolve(__dirname, '../.github/test262/history.json');
+
+	return {
+		name: 'arc-test262-history',
+		resolveId(id) {
+			if (id === virtualId) return resolved;
+		},
+		load(id) {
+			if (id !== resolved) return;
+			return `export default ${fs.readFileSync(file, 'utf-8')};`;
+		},
+		handleHotUpdate({ file: changed, server }) {
+			if (changed === file) {
+				const mod = server.moduleGraph.getModuleById(resolved);
+				if (mod) return [mod];
+			}
+		},
+	};
+}
+
 export default defineConfig({
-	plugins: [tailwindcss(), react(), examplesPlugin()],
+	plugins: [tailwindcss(), react(), examplesPlugin(), test262HistoryPlugin()],
 	server: { headers: coopCoep },
 	preview: { headers: coopCoep },
 });

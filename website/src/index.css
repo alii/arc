@@ -54,6 +54,15 @@
   animation: rainbow 0.8s linear infinite;
 }
 
+@keyframes chart-reveal {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+@utility animate-chart-reveal {
+  animation: chart-reveal 1.4s cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+
 @keyframes spinner-fade {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.15; }

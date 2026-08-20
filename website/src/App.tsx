@@ -1,6 +1,7 @@
 import { motion } from 'motion/react';
 import { useEffect, useState } from 'react';
 import { AboutDialog } from './components/about-dialog';
+import { ConformanceChart } from './components/conformance-chart';
 import { ExternalLink } from './components/external-link';
 import { Playground } from './playground/Playground';
 import { useMediaQuery } from './use-media-query';
@@ -86,17 +87,7 @@ export default function App() {
 					<p>
 						Tested against <ExternalLink href="https://github.com/tc39/test262">test262</ExternalLink> on every commit:
 					</p>
-					<picture className="block mt-3">
-						<source
-							media="(prefers-color-scheme: dark)"
-							srcSet="https://raw.githubusercontent.com/alii/arc/master/.github/test262/conformance-dark.png"
-						/>
-						<img
-							alt="test262 conformance chart"
-							src="https://raw.githubusercontent.com/alii/arc/master/.github/test262/conformance.png"
-							className="w-full rounded-lg"
-						/>
-					</picture>
+					<ConformanceChart />
 				</motion.div>
 
 				<motion.hr variants={item} className="w-12 border-rpd-overlay dark:border-rp-overlay" />
