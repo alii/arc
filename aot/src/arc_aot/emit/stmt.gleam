@@ -2530,7 +2530,7 @@ fn emit_for_classic(
     // `x++`/`x--` in `upd` (never in body/cond) stays a BEAM number iff its
     // pre-loop init var was one — number±1 is a number, and every path into
     // Block(cont) carries the untouched LoopParam. Mark it so guarded_binop /
-    // emit_update / emit_loop_cond_i32 elide the `is_number` guard on it.
+    // emit_update / emit_cond_i32 elide the `is_number` guard on it.
     let counter_known = for_counter_known(e, upd, body, cond, carried, params)
     let mark_counter = fn(e: Emitter2) {
       list.fold(counter_known, e, fn(e, slot) {
@@ -2586,7 +2586,7 @@ fn emit_for_classic(
             done(e, tt)
           }
           Some(c) -> {
-            use e, t <- emit_loop_cond_i32(e, c)
+            use e, t <- emit_cond_i32(e, c)
             let brk_payload = carried_values(e, carried)
             use #(tt, e) <- result.try(then_part(e))
             done(e, ir.If(t, [], tt, ir.Break(brk, brk_payload)))
@@ -2672,16 +2672,6 @@ fn emit_cond_i32(
   let_(e, tree, k)
 }
 
-/// Compat alias — earlier only loops had the specialised cond emit; now
-/// `emit_if` shares it. Kept so the three loop callers stay unchanged.
-fn emit_loop_cond_i32(
-  e: Emitter2,
-  cond: ast.Expression,
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  emit_cond_i32(e, cond, k)
-}
-
 // ── While / DoWhile (port emit.gleam:3781-3808 → R15 uniform loop shape) ────
 
 /// `while (cond) body`. Port of emit.gleam:3781-3793 → R15 shape:
@@ -2713,7 +2703,7 @@ fn emit_while(
   use #(loop_body, e) <- result.try(
     run_rk(e, fn(e, done) {
       let e = enter_loop_body(e, carried, params)
-      use e, t <- emit_loop_cond_i32(e, cond)
+      use e, t <- emit_cond_i32(e, cond)
       // else-arm captured BEFORE body — the LoopParam names (plus any cond
       // assignment rebinds threaded through expr_/host_).
       let brk_payload = carried_values(e, carried)
@@ -2777,7 +2767,7 @@ fn emit_do_while(
         carried,
         ir.Block(cont, result_tys, cont_body),
       )
-      use e, t <- emit_loop_cond_i32(e, cond)
+      use e, t <- emit_cond_i32(e, cond)
       let payload = carried_values(e, carried)
       done(e, ir.If(t, [], ir.Continue(head, payload), ir.Break(brk, payload)))
     }),

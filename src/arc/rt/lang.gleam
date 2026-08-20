@@ -18,10 +18,10 @@ import arc/rt/types.{
 }
 import arc/rt/val as rt_val
 import gleam/bool
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{type Option, None, Some}
 
 /// Same try/catch as `t_call`; the wire shape is `arc/rt/call.Completion`
 /// with the step pair in the normal arm.
@@ -79,7 +79,7 @@ fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
       st,
       SObject(
         kind: Ordinary,
-        proto: option.None,
+        proto: None,
         props:,
         symbol_props: [],
         elements: NoElements,
@@ -98,23 +98,34 @@ pub fn t_alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
 /// The `[[Iterator]]`/`[[NextMethod]]` pair of a record object, `None` when
 /// `rec` is not one. yield* delegation reads them to call `next` itself and
 /// to forward `return`/`throw` to the underlying iterator.
-pub fn record_parts(st: Agent, rec: JsVal) -> option.Option(IteratorRecord) {
+pub fn record_parts(st: Agent, rec: JsVal) -> Option(IteratorRecord) {
+  record_props(st, rec) |> option.then(parts_of)
+}
+
+/// The own props of an engine-created record object (`alloc_record`), read
+/// straight off its cell.
+fn record_props(
+  st: Agent,
+  rec: JsVal,
+) -> Option(Dict(types.PropertyKey, types.Property)) {
   case classify(rec) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        types.SObject(kind: types.Ordinary, props:, ..) ->
-          case
-            dict.get(props, Named("iterator")),
-            dict.get(props, Named("next"))
-          {
-            Ok(types.DataProperty(value: iterator, ..)),
-              Ok(types.DataProperty(value: next_method, ..))
-            -> Some(IteratorRecord(iterator:, next_method:))
-            _, _ -> option.None
-          }
-        _ -> option.None
+        SObject(kind: Ordinary, props:, ..) -> Some(props)
+        _ -> None
       }
-    _ -> option.None
+    _ -> None
+  }
+}
+
+fn parts_of(
+  props: Dict(types.PropertyKey, types.Property),
+) -> Option(IteratorRecord) {
+  case dict.get(props, Named("iterator")), dict.get(props, Named("next")) {
+    Ok(DataProperty(value: iterator, ..)),
+      Ok(DataProperty(value: next_method, ..))
+    -> Some(IteratorRecord(iterator:, next_method:))
+    _, _ -> None
   }
 }
 
@@ -124,7 +135,7 @@ pub fn record_parts(st: Agent, rec: JsVal) -> option.Option(IteratorRecord) {
 fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
   case record_fields(st, rec) {
     Some(#(done, record)) -> #(done, record, st)
-    option.None -> {
+    None -> {
       let #(done, st) = rt_obj.t_get_prop(st, rec, k_done)
       let #(iterator, st) = rt_obj.t_get_prop(st, rec, k_iterator)
       let #(next_method, st) = rt_obj.t_get_prop(st, rec, k_next)
@@ -133,32 +144,15 @@ fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
   }
 }
 
-fn record_fields(
-  st: Agent,
-  rec: JsVal,
-) -> option.Option(#(Bool, IteratorRecord)) {
-  case classify(rec) {
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: Ordinary, props:, ..) ->
-          case
-            dict.get(props, Named("done")),
-            dict.get(props, Named("iterator")),
-            dict.get(props, Named("next"))
-          {
-            Ok(DataProperty(value: done, ..)),
-              Ok(DataProperty(value: iterator, ..)),
-              Ok(DataProperty(value: next_method, ..))
-            ->
-              Some(#(
-                rt_val.to_boolean(done),
-                IteratorRecord(iterator:, next_method:),
-              ))
-            _, _, _ -> option.None
-          }
-        _ -> option.None
+fn record_fields(st: Agent, rec: JsVal) -> Option(#(Bool, IteratorRecord)) {
+  case record_props(st, rec) {
+    Some(props) ->
+      case dict.get(props, Named("done")), parts_of(props) {
+        Ok(DataProperty(value: done, ..)), Some(record) ->
+          Some(#(rt_val.to_boolean(done), record))
+        _, _ -> None
       }
-    _ -> option.None
+    None -> None
   }
 }
 
@@ -168,12 +162,12 @@ fn mark_done(st: Agent, rec: JsVal) -> Agent {
 }
 
 /// The step taken engine-side when `next` is an intrinsic iterator-next and
-/// the iterator is its matching built-in kind (see `iterator.native_step`):
+/// the iterator is its matching built-in kind (see `iter_protocol.native_step`):
 /// no call, no try frame, no result object.
 fn native_step(
   st: Agent,
   record: IteratorRecord,
-) -> option.Option(#(option.Option(JsVal), Agent)) {
+) -> Option(#(Option(JsVal), Agent)) {
   use #(next, iter_h) <- option.then(iter_protocol.intrinsic_next(st, record))
   iter_protocol.native_step(st, next, iter_h)
 }
@@ -199,8 +193,8 @@ pub fn t_iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
   use <- bool.guard(done, #(#(True, mk_undefined()), st))
   case native_step(st, record) {
     Some(#(Some(v), st)) -> #(#(False, v), st)
-    Some(#(option.None, st)) -> #(#(True, mk_undefined()), mark_done(st, rec))
-    option.None -> protocol_step(st, rec, record)
+    Some(#(None, st)) -> #(#(True, mk_undefined()), mark_done(st, rec))
+    None -> protocol_step(st, rec, record)
   }
 }
 

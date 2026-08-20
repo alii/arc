@@ -55,17 +55,16 @@ import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
-  type Realm, Agent, ArrayBufferN, ArrayN, AsyncGenResume, AsyncResume, AtomicsN,
-  BigIntN, BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty,
-  DataViewN, DateN, DisposableStackN, DomExceptionN, ErrorN,
-  FinalizationRegistryN, FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry,
-  IntlN, IteratorN, JInt, JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN,
-  MathN, Named, NoElements, NumberConstructor, NumberN, NumberObj, ObjectN,
-  Ordinary, PromiseN, PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN,
-  RegExpN, ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN,
-  StringObj, SymbolConstructor, SymbolN, TemporalN, Test262N,
-  ThrowTypeErrorPoison, TypedArrayN, WeakN, WeakRefN, classify, mk_number,
-  mk_object, mk_undefined,
+  type Realm, Agent, ArrayBufferN, ArrayN, AsyncGenResume, AtomicsN, BigIntN,
+  BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty, DataViewN,
+  DateN, DisposableStackN, DomExceptionN, ErrorN, FinalizationRegistryN,
+  FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry, IntlN, IteratorN, JInt,
+  JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, Named, NoElements,
+  NumberConstructor, NumberN, NumberObj, ObjectN, Ordinary, PromiseN,
+  PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN,
+  ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN, StringObj,
+  SymbolConstructor, SymbolN, TemporalN, Test262N, ThrowTypeErrorPoison,
+  TypedArrayN, WeakN, WeakRefN, classify, mk_number, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -571,8 +570,6 @@ pub fn dispatch_native(
       rt_async.do_resolve_fn(st, promise, already_resolved, args)
     PromiseRejectFn(promise:, already_resolved:) ->
       rt_async.do_reject_fn(st, promise, already_resolved, args)
-    AsyncResume(gen:, is_throw:) ->
-      rt_async.do_async_resume(st, gen, is_throw, args)
     AsyncGenResume(gen:, is_throw:, kind:) -> #(
       mk_undefined(),
       rt_async.t_asyncgen_resume(
@@ -757,7 +754,6 @@ pub fn dispatch_native_construct(
     IteratorN(n) -> b_iterator.dispatch_construct(st, n, args, new_target)
     PromiseResolveFn(..)
     | PromiseRejectFn(..)
-    | AsyncResume(..)
     | AsyncGenResume(..)
     | ReturnThis
     | ThrowTypeErrorPoison

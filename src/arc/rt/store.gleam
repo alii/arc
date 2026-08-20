@@ -185,26 +185,6 @@ pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
   with_js(st, JsStore(..js, data: data_set(id, slot, js.data)))
 }
 
-/// `t_cell_set` for a slot that needs `seqs` fresh `Property.seq` stamps
-/// (an own property being created): one store write for both.
-pub fn t_cell_set_with(
-  st: Agent,
-  h: Handle,
-  seqs: Int,
-  build: fn(Int) -> JsSlot,
-) -> Agent {
-  let js = require_js(st)
-  let JsCell(id) = h
-  with_js(
-    st,
-    JsStore(
-      ..js,
-      data: data_set(id, build(js.prop_seq), js.data),
-      prop_seq: js.prop_seq + seqs,
-    ),
-  )
-}
-
 // ── variable boxes (compiled code's captured / TDZ bindings) ────────────────
 //
 // A boxed JS binding is a cell holding `SBox(value)` — the SAME slot shape the
@@ -257,14 +237,8 @@ pub fn t_pin_root(st: Agent, h: Handle) -> Agent {
 /// Next `Property.seq` stamp, threaded through the store (D14). Returns
 /// `#(seq, st')` (R1).
 pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
-  t_next_prop_seqs(st, 1)
-}
-
-/// Reserve `n` consecutive `Property.seq` stamps in one store write; returns
-/// the first.
-pub fn t_next_prop_seqs(st: Agent, n: Int) -> #(Int, Agent) {
   let js = require_js(st)
-  #(js.prop_seq, with_js(st, JsStore(..js, prop_seq: js.prop_seq + n)))
+  #(js.prop_seq, with_js(st, JsStore(..js, prop_seq: js.prop_seq + 1)))
 }
 
 /// Next private-name uid for `t_new_private_name` (D9). Per-evaluation

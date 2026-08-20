@@ -965,22 +965,18 @@ fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
     }
     JsonObject(entries) -> {
       let #(entries, st) = materialize_plain_entries(st, entries, [])
-      let js = st.store
-      let #(props, seq) = plain_props(entries, dict.new(), js.prop_seq)
-      let st =
-        rt_types.Agent(..st, store: rt_types.JsStore(..js, prop_seq: seq))
-      let #(h, st) =
-        rt_store.t_cell_new(
-          st,
-          SObject(
-            kind: Ordinary,
-            proto: Some(st.realm.object.prototype),
-            props:,
-            symbol_props: [],
-            elements: rt_types.NoElements,
-            extensible: True,
-          ),
+      let object_proto = st.realm.object.prototype
+      let #(h, st) = {
+        use seq <- rt_store.t_cell_new_with(st, list.length(entries))
+        SObject(
+          kind: Ordinary,
+          proto: Some(object_proto),
+          props: plain_props(entries, dict.new(), seq),
+          symbol_props: [],
+          elements: rt_types.NoElements,
+          extensible: True,
         )
+      }
       #(mk_object(h), st)
     }
   }
@@ -1014,15 +1010,15 @@ fn materialize_plain_entries(
   }
 }
 
-/// `props_from_entries` over plain values, numbering new keys from `seq`
-/// (one store update for the whole object instead of one per member).
+/// `props_from_entries` over plain values, numbering new keys from `seq`; a
+/// repeated key keeps its first occurrence's position.
 fn plain_props(
   entries: List(#(String, JsVal)),
   acc: dict.Dict(rt_types.PropertyKey, rt_types.Property),
   seq: Int,
-) -> #(dict.Dict(rt_types.PropertyKey, rt_types.Property), Int) {
+) -> dict.Dict(rt_types.PropertyKey, rt_types.Property) {
   case entries {
-    [] -> #(acc, seq)
+    [] -> acc
     [#(name, value), ..rest] -> {
       let key = rt_types.canonical_key(name)
       case dict.get(acc, key) {

@@ -13,15 +13,17 @@
 %%% proto-walk chain. On any shape miss the atom `miss` is returned and the
 %%% emitter's guard falls back to the full `t_get_prop_any` /
 %%% `t_set_prop_any` path. Reads return the bare value; writes return the
-%%% rebuilt `St'`.
+%%% rebuilt `St'`. The interpreter's kernels (arc_interp_ffi) share the
+%%% proto-chain predicate `named_free` and `store_put_seq`.
 -module(arc_rt_obj_ffi).
 -export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
-         t_create_data_prop/4,
+         t_create_data_prop/4, store_put_seq/3,
          t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_slow/4,
          t_get_prop_site/4,
          t_instanceof_fast/3,
          t_get_elem_fast/3, t_set_elem_fast/4,
          t_global_get_fast/2, t_global_get/2,
+         named_free/5,
          shape_slots_get/2, shape_slots_set/3, shape_slots_append/2,
          shape_slots_fold/3]).
 
@@ -334,7 +336,7 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
                         _ when element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
                             case named_free(Data, element(?STORE_SHAPES, Store),
                                             element(?SOBJECT_PROTO, Slot),
-                                            KeyBin, 64) of
+                                            K, 64) of
                                 false -> miss;
                                 true ->
                                     Seq = element(?STORE_PROP_SEQ, Store),
@@ -354,6 +356,7 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
     end;
 t_set_prop_own_data(_, _, _, _) -> miss.
 
+%% store_put_seq(Store, Data, Seq) -> Store2
 %% Store with new data and prop_seq; the arity guard lets the compiler build
 %% the updated store as one tuple.
 store_put_seq(Store, Data, Seq) when tuple_size(Store) =:= ?STORE_ARITY ->
@@ -402,7 +405,7 @@ t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
                 false -> miss
             end;
         {?KEY_INDEX, _} when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case index_plain(element(?SOBJECT_KIND, Slot)) of
+            case index_in_props(element(?SOBJECT_KIND, Slot)) of
                 true -> plain_define(Slot, PK, V, Store);
                 false -> miss
             end;
@@ -580,7 +583,7 @@ index_read(Slot, Idx) when element(1, Slot) =:= ?SOBJECT_TAG ->
                     end
             end;
         Kind ->
-            case index_plain(Kind) of
+            case index_in_props(Kind) of
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
                         #{{?KEY_INDEX, Idx} := Prop}
@@ -627,11 +630,11 @@ named_read(_, _, _, _) -> miss.
 %% (rt/obj own_property_of, set_own_string): Array / Arguments keep indices
 %% in `elements` (Arguments may map them), String indices are virtual,
 %% TypedArray / Proxy / module namespace are exotic.
-index_plain(Kind) when is_atom(Kind) -> true;
-index_plain(Kind) ->
+index_in_props(Kind) when is_atom(Kind) -> true;
+index_in_props(Kind) ->
     case element(1, Kind) of
         ?ARRAYOBJ_TAG -> false;
-        arguments_obj -> false;
+        ?ARGUMENTSOBJ_TAG -> false;
         string_obj -> false;
         typed_array_obj -> false;
         ?PROXYOBJ_TAG -> false;
@@ -668,7 +671,8 @@ index_write(St, Id, Idx, V) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case array:get(Id, Data) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+        Slot when tuple_size(Slot) =:= ?SOBJECT_ARITY,
+                  element(1, Slot) =:= ?SOBJECT_TAG,
                   element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
             case element(?SOBJECT_KIND, Slot) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
@@ -701,7 +705,7 @@ index_write(St, Id, Idx, V) ->
                             end
                     end;
                 Kind ->
-                    case index_plain(Kind) of
+                    case index_in_props(Kind) of
                         true ->
                             index_prop_write(St, Store, Data, Id, Slot, Idx, V);
                         false -> miss
@@ -709,7 +713,7 @@ index_write(St, Id, Idx, V) ->
             end;
         %% Non-extensible: only an existing plain index prop is written.
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case index_plain(element(?SOBJECT_KIND, Slot)) of
+            case index_in_props(element(?SOBJECT_KIND, Slot)) of
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
                         #{{?KEY_INDEX, Idx} := _} ->
@@ -766,9 +770,9 @@ index_free(Data, {?SOME, {?HANDLE_TAG, PId}}, Idx, Fuel) ->
         {?SSHAPED_TAG, _, P2, _} -> index_free(Data, P2, Idx, Fuel - 1);
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             Kind = element(?SOBJECT_KIND, Slot),
-            Walk = index_plain(Kind) orelse element(1, Kind) =:= ?ARRAYOBJ_TAG
-                orelse (element(1, Kind) =:= arguments_obj
-                        andalso element(3, Kind) =:= ?NONE),
+            Walk = index_in_props(Kind) orelse element(1, Kind) =:= ?ARRAYOBJ_TAG
+                orelse (element(1, Kind) =:= ?ARGUMENTSOBJ_TAG
+                        andalso element(?ARGUMENTSOBJ_MAPPED, Kind) =:= ?NONE),
             case Walk of
                 false -> false;
                 true ->
@@ -832,7 +836,8 @@ shaped_write(Data, Shapes, Sid, P, Slots, KeyBin, V) ->
                 _ ->
                     case element(?SHAPE_TRANSITIONS, Desc) of
                         #{KeyBin := To} ->
-                            case named_free(Data, Shapes, P, KeyBin, 64) of
+                            case named_free(Data, Shapes, P,
+                                            {?KEY_NAMED, KeyBin}, 64) of
                                 true ->
                                     {?SSHAPED_TAG, To, P,
                                      erlang:append_element(Slots, V)};
@@ -844,37 +849,38 @@ shaped_write(Data, Shapes, Sid, P, Slots, KeyBin, V) ->
         _ -> miss
     end.
 
-%% named_free(Data, Shapes, Proto, KeyBin, Fuel) -> boolean()
+%% named_free(Data, Shapes, Proto, K, Fuel) -> boolean()
 %% True when every object on the proto chain from `Proto` down either lacks
-%% an own property at KeyBin or holds a writable data property there (a
-%% shaped slot always is), along hops whose named lookup is a pure
+%% an own property at the Named key K or holds a writable data property
+%% there (a shaped slot always is), along hops whose named lookup is a pure
 %% slots/props probe, so §10.1.9.2 lands on the receiver. An accessor, a
 %% read-only property, an exotic hop (Proxy, TypedArray, Array "length", …),
-%% a dangling handle or a chain deeper than Fuel → false.
+%% a dangling handle or a chain deeper than Fuel → false. K is the props-map
+%% key `{named, KeyBin}`, built once by the caller rather than per hop.
 named_free(_, _, ?NONE, _, _) -> true;
 named_free(_, _, _, _, 0) -> false;
-named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, KeyBin, Fuel) ->
+named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
     case array:get(PId, Data) of
         {?SSHAPED_TAG, Sid, P2, _} ->
             case Shapes of
                 #{Sid := Desc} ->
                     case element(?SHAPE_OFFSETS, Desc) of
-                        #{KeyBin := _} -> true;
-                        _ -> named_free(Data, Shapes, P2, KeyBin, Fuel - 1)
+                        #{element(2, K) := _} -> true;
+                        _ -> named_free(Data, Shapes, P2, K, Fuel - 1)
                     end;
                 _ -> false
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
+            case named_plain(element(?SOBJECT_KIND, Slot), element(2, K)) of
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_NAMED, KeyBin} := Prop} ->
+                        #{K := Prop} ->
                             element(1, Prop) =:= ?DATAPROP_TAG andalso
                                 element(?DATAPROP_WRITABLE, Prop) =:= true;
                         _ ->
                             named_free(Data, Shapes,
                                        element(?SOBJECT_PROTO, Slot),
-                                       KeyBin, Fuel - 1)
+                                       K, Fuel - 1)
                     end;
                 false -> false
             end;

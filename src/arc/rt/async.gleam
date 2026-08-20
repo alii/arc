@@ -31,7 +31,7 @@ import arc/rt/types.{
   type JsStore, type JsVal, type Loc, type NativeToken, type PromiseReaction,
   type PromiseState, type ReactionHandler, type Resume, type SabOwner, type SmFn,
   type Step, type WaiterRef, AGAwaitingReturn, AGCompleted, AGExecuting,
-  AGResumeAwaitingReturn, AGResumeBody, AGResumeReturnUnwind, AGSuspendedStart,
+  AGResumeAwaitingReturn, AGResumeReturnUnwind, AGSuspendedStart,
   AGSuspendedYield, Agent, AsyncGenRequest, AsyncGenResume, AsyncGeneratorObj,
   AsyncWaiter, DataProperty, GenCompleted, GenExecuting, GenNext, GenReturn,
   GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj, Handler, HostJob,
@@ -542,29 +542,24 @@ fn throw_type_error(st: Agent, msg: String) -> a {
 
 /// §7.4.11 CreateIterResultObject(value, done) — allocate a fresh ordinary
 /// `{value, done}` with proto = `%Object.prototype%`. Port of arc
-/// `common.create_iter_result` re-expressed over threaded `t_next_prop_seq`.
+/// `common.create_iter_result`.
 pub fn alloc_iter_result(
   st: Agent,
   value: JsVal,
   done: Bool,
 ) -> #(Handle, Agent) {
-  let #(seq0, st) = rt_store.t_next_prop_seq(st)
-  let #(seq1, st) = rt_store.t_next_prop_seq(st)
-  let props =
-    dict.from_list([
-      #(Named("value"), DataProperty(value, True, True, True, seq0)),
-      #(Named("done"), DataProperty(mk_bool(done), True, True, True, seq1)),
-    ])
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind: Ordinary,
-      proto: Some(st.realm.object.prototype),
-      props:,
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
+  let object_proto = st.realm.object.prototype
+  use seq <- rt_store.t_cell_new_with(st, 2)
+  SObject(
+    kind: Ordinary,
+    proto: Some(object_proto),
+    props: dict.from_list([
+      #(Named("value"), DataProperty(value, True, True, True, seq)),
+      #(Named("done"), DataProperty(mk_bool(done), True, True, True, seq + 1)),
+    ]),
+    symbol_props: [],
+    elements: NoElements,
+    extensible: True,
   )
 }
 
@@ -1100,11 +1095,12 @@ pub fn t_perform_then(
 
 /// §27.7.5.3 Await steps 2-7 / §27.6.3.8: PromiseResolve(%Promise%,
 /// `awaited`), then PerformPromiseThen with no result capability whose
-/// onFulfilled/onRejected continue the coroutine behind data cell `data_h`.
+/// onFulfilled/onRejected continue the coroutine behind data cell `data_h`
+/// (an async function's `SAsyncContext` or an async generator's `SAsyncGen`).
 /// The value passes straight through to `settle`, which resumes the cell, so
 /// no closure pair is allocated per await. Always enqueues (an
 /// already-settled promise still resumes asynchronously).
-fn await_into(st: Agent, data_h: Handle, awaited: JsVal) -> Agent {
+pub fn t_await(st: Agent, data_h: Handle, awaited: JsVal) -> Agent {
   let #(awaited_h, st) = promise_resolve_static(st, awaited)
   let target = mk_object(data_h)
   perform_then(
@@ -1471,7 +1467,7 @@ fn drive_asyncgen_step(
       // until a yield/return/throw settles it. The reaction continues the
       // data cell itself (`resume_asyncgen`).
       let st = write_asyncgen(st, gen_h, fn(ag) { AGLive(..ag, resume:) })
-      await_into(st, gen_h, value)
+      t_await(st, gen_h, value)
     }
   }
 }
@@ -1498,8 +1494,8 @@ fn redrive_asyncgen(
   drive_asyncgen_step(st, gen_h, req, step)
 }
 
-/// AsyncGeneratorAwaitReturn / body-await / return-unwind settlement. Called
-/// from `dispatch_native` for `AsyncGenResume(gen_h, is_throw, kind)` with
+/// AsyncGeneratorAwaitReturn / return-unwind settlement. Called from
+/// `dispatch_native` for `AsyncGenResume(gen_h, is_throw, kind)` with
 /// `settled` = the awaited value/reason. Port of arc `call_native_resume`
 /// (async_generators.gleam:584-663) with delegate arms dropped.
 pub fn t_asyncgen_resume(
@@ -1523,12 +1519,11 @@ pub fn t_asyncgen_resume(
           }
           drain_queue(st, gen_h)
         }
-        // Body await OR §27.6.3.10 return-unwind await: re-drive the body.
-        // Only the fulfil-mode differs — return-unwind injects mode 2 with
-        // the AWAITED value (arc AGResumeReturnUnwind :646-655).
-        _, True -> redrive_asyncgen(st, gen_h, ag, req, #(sent_throw, settled))
-        AGResumeBody, False ->
-          redrive_asyncgen(st, gen_h, ag, req, #(sent_next, settled))
+        // §27.6.3.10 return-unwind await: re-drive the body, injecting mode 2
+        // with the AWAITED value on fulfilment (arc AGResumeReturnUnwind
+        // :646-655).
+        AGResumeReturnUnwind, True ->
+          redrive_asyncgen(st, gen_h, ag, req, #(sent_throw, settled))
         AGResumeReturnUnwind, False ->
           redrive_asyncgen(st, gen_h, ag, req, #(sent_return, settled))
       }
@@ -1720,13 +1715,6 @@ fn drive_async_step(
   }
 }
 
-/// §27.7.5.3 Await for the async function whose context cell is `ctx_h`:
-/// its stored `Resume` continues with `{mode, settled}` once `awaited`
-/// settles. Port of arc `promises.gleam:1715-1766 setup_await`.
-pub fn t_await(st: Agent, ctx_h: Handle, awaited: JsVal) -> Agent {
-  await_into(st, ctx_h, awaited)
-}
-
 // ── native-token dispatch bodies (called by dispatch_native) ────────────────
 
 /// `PromiseResolveFn` body — §27.2.1.3.2 Promise Resolve Functions. Checks
@@ -1776,29 +1764,5 @@ fn check_already_resolved(st: Agent, already_h: Handle) -> #(Bool, Agent) {
       }
     _ ->
       panic as "rt_async: [[AlreadyResolved]] handle is not SBox (engine invariant)"
-  }
-}
-
-/// `AsyncResume` body — §27.7.5.3 Await onFulfilled/onRejected. Continues the
-/// `Resume` stored on the context cell with `Sent = {mode, settled_value}` and
-/// drives the resulting step. Port of arc `call.gleam:481-543
-/// call_native_async_resume`.
-pub fn do_async_resume(
-  st: Agent,
-  ctx_h: Handle,
-  is_throw: Bool,
-  args: List(JsVal),
-) -> #(JsVal, Agent) {
-  case rt_store.t_cell_get(st, ctx_h) {
-    SAsyncContext(resume:, promise:) -> {
-      let mode = case is_throw {
-        False -> sent_next
-        True -> sent_throw
-      }
-      let #(step, st) = apply_resume(st, resume, #(mode, first_arg(args)))
-      #(mk_undefined(), drive_async_step(st, Some(ctx_h), promise, step))
-    }
-    _ ->
-      panic as "rt_async: AsyncResume target is not SAsyncContext (engine invariant)"
   }
 }

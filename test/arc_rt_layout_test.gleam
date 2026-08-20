@@ -9,11 +9,11 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type JsVal, type ShapeSlots,
-  AccessorProperty, ArrayObj, DataProperty, Dense, FnFlags, Index, JsCell,
-  JsStore, KBytecode, KCompiled, KHandle, KNative, Named, NoElements, Ordinary,
-  Private, ProxyObj, ResumeCompiled, ResumeFrame, ReturnThis, SBox, SObject,
-  SShapedObject, ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow, StepYield,
-  StringKey, SymbolKey,
+  AccessorProperty, ArgumentsObj, ArrayObj, DataProperty, Dense, FnFlags, Index,
+  JsCell, JsStore, KBytecode, KCompiled, KHandle, KNative, Named, NoElements,
+  Ordinary, Private, ProxyObj, ResumeCompiled, ResumeFrame, ReturnThis, SBox,
+  SObject, SShapedObject, ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow,
+  StepYield, StringKey, SymbolKey,
 } as rt_types
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
@@ -218,8 +218,15 @@ pub fn sobject_test() {
   assert tag_of(kind) == tag("ARRAYOBJ_TAG")
   assert arity(kind) == idx("ARRAYOBJ_ARITY")
   assert at(kind, "ARRAYOBJ_LENGTH") == dyn(9)
+  let args = ArgumentsObj(length: 2, mapped: None)
+  assert tag_of(args) == tag("ARGUMENTSOBJ_TAG")
+  assert arity(args) == idx("ARGUMENTSOBJ_ARITY")
+  assert at(args, "ARGUMENTSOBJ_MAPPED") == dyn(None)
   assert tag_of(ProxyObj(target: proto, handler: proto, revoked: False))
     == tag("PROXYOBJ_TAG")
+  let box = SBox(rt_types.mk_string("b"))
+  assert tag_of(box) == tag("SBOX_TAG")
+  assert at(box, "SBOX_VALUE") == dyn(rt_types.mk_string("b"))
 }
 
 pub fn keys_and_elements_test() {

@@ -2127,7 +2127,8 @@ fn emit_static_get(e: Emitter, res: scope.Direct) -> Emitter {
 /// The non-with ("static") store to a resolved binding. §9.1.1.1.5
 /// SetMutableBinding step 6 — const bindings are always strict (§14.3.1.3),
 /// so reassignment unconditionally throws TypeError. RHS is already on the
-/// stack; throw discards it via unwind.
+/// stack; throw discards it via unwind. `after_read`: a GetValue through the
+/// same reference already ran, so the TDZ check before the store is dropped.
 fn emit_static_put(
   e: Emitter,
   res: scope.Direct,
@@ -2947,8 +2948,9 @@ fn emit_stmt_tail_completion(
 }
 
 /// Emit an IrSetLine for the statement's source line (so `Error.stack` can
-/// report it), unless the line is 0 — the sentinel for synthetic statements
-/// the parser never produced (class field inits, desugared arrow bodies).
+/// report it), unless it is the line already in effect or 0 — the sentinel
+/// for synthetic statements the parser never produced (class field inits,
+/// desugared arrow bodies).
 fn set_line(e: Emitter, line: Int) -> Emitter {
   case line == 0 || line == e.line {
     True -> e

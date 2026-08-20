@@ -501,22 +501,19 @@ fn throw_reference_error(st: Agent, msg: String) -> a {
 /// result object; the ordinary counterpart of `common.alloc_pojo`, which this
 /// module cannot import).
 fn alloc_plain(st: Agent, entries: List(#(String, JsVal))) -> #(Handle, Agent) {
-  let #(props, st) =
-    list.fold(entries, #(dict.new(), st), fn(acc, entry) {
-      let #(props, st) = acc
-      let #(prop, st) = new_data_property(st, entry.1)
-      #(dict.insert(props, Named(entry.0), prop), st)
+  let object_proto = st.realm.object.prototype
+  use seq <- rt_store.t_cell_new_with(st, list.length(entries))
+  let props =
+    list.index_map(entries, fn(entry, i) {
+      #(Named(entry.0), DataProperty(entry.1, True, True, True, seq + i))
     })
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind: Ordinary,
-      proto: Some(st.realm.object.prototype),
-      props:,
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
+  SObject(
+    kind: Ordinary,
+    proto: Some(object_proto),
+    props: dict.from_list(props),
+    symbol_props: [],
+    elements: NoElements,
+    extensible: True,
   )
 }
 
@@ -3877,65 +3874,60 @@ pub fn t_new_arguments(
     False -> None
   }
   let elements = tree_array.from_list(args, rt_types.mk_hole())
-  // Two creation seqs ("length", then "callee") in one store rebuild.
-  let js = require_js(st)
-  let seq = js.prop_seq
-  let st = Agent(..st, store: JsStore(..js, prop_seq: seq + 2))
-  let length_prop =
-    DataProperty(
-      value: rt_types.mk_number(rt_types.JInt(len)),
-      writable: True,
-      enumerable: False,
-      configurable: True,
-      seq:,
-    )
-  let callee_prop = case mapped_cells {
-    Some(_) ->
-      DataProperty(
-        value: callee,
-        writable: True,
-        enumerable: False,
-        configurable: True,
-        seq: seq + 1,
-      )
-    None -> {
-      let thrower = Some(rt_types.mk_object(st.realm.throw_type_error))
-      AccessorProperty(
-        get: thrower,
-        set: thrower,
-        enumerable: False,
-        configurable: False,
-        seq: seq + 1,
-      )
-    }
-  }
-  let props =
-    dict.from_list([
-      #(Named("length"), length_prop),
-      #(Named("callee"), callee_prop),
-    ])
+  let realm = st.realm
   let symbol_props = case
     t_ordinary_own_property(
       st,
-      st.realm.array.prototype,
+      realm.array.prototype,
       SymbolKey(rt_types.symbol_iterator),
     )
   {
     Some(values_prop) -> [#(rt_types.symbol_iterator, values_prop)]
     None -> []
   }
-  let #(h, st) =
-    rt_store.t_cell_new(
-      st,
-      SObject(
-        kind: ArgumentsObj(length: len, mapped: mapped_cells),
-        proto: Some(st.realm.object.prototype),
-        props:,
-        symbol_props:,
-        elements: Dense(elements),
-        extensible: True,
-      ),
+  let #(h, st) = {
+    // Two creation seqs: "length", then "callee".
+    use seq <- rt_store.t_cell_new_with(st, 2)
+    let length_prop =
+      DataProperty(
+        value: rt_types.mk_number(rt_types.JInt(len)),
+        writable: True,
+        enumerable: False,
+        configurable: True,
+        seq:,
+      )
+    let callee_prop = case mapped_cells {
+      Some(_) ->
+        DataProperty(
+          value: callee,
+          writable: True,
+          enumerable: False,
+          configurable: True,
+          seq: seq + 1,
+        )
+      None -> {
+        let thrower = Some(rt_types.mk_object(realm.throw_type_error))
+        AccessorProperty(
+          get: thrower,
+          set: thrower,
+          enumerable: False,
+          configurable: False,
+          seq: seq + 1,
+        )
+      }
+    }
+    SObject(
+      kind: ArgumentsObj(length: len, mapped: mapped_cells),
+      proto: Some(realm.object.prototype),
+      props: dict.from_list([
+        #(Named("length"), length_prop),
+        #(Named("callee"), callee_prop),
+      ]),
+      symbol_props:,
+      elements: Dense(elements),
+      extensible: True,
     )
+  }
   #(rt_types.mk_object(h), st)
 }
 

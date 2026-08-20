@@ -1147,9 +1147,7 @@ fn species_constructor(st: Agent, o: JsVal) -> #(JsVal, Agent) {
 /// %Promise%, and `%Promise%[@@species]` a `ReturnThis` getter (which would
 /// return its receiver, %Promise%). Anything else takes the generic protocol.
 fn intrinsic_species(st: Agent, o: JsVal) -> Bool {
-  is_plain_promise(st, o)
-  && promise_prototype_names_intrinsic(st)
-  && species_returns_this(st, st.realm.promise.constructor)
+  is_plain_promise(st, o) && common.species_intact(st, st.realm.promise)
 }
 
 /// `o` is a %Promise% instance whose `constructor` lookup reaches
@@ -1161,42 +1159,6 @@ fn is_plain_promise(st: Agent, o: JsVal) -> Bool {
         SObject(kind: rt_types.PromiseObj(..), proto: Some(p), props:, ..) ->
           p == st.realm.promise.prototype
           && !dict.has_key(props, Named("constructor"))
-        _ -> False
-      }
-    _ -> False
-  }
-}
-
-/// `%Promise.prototype%.constructor` is still a data property holding
-/// %Promise%.
-fn promise_prototype_names_intrinsic(st: Agent) -> Bool {
-  let realm = st.realm
-  case
-    rt_obj.t_ordinary_own_property(
-      st,
-      realm.promise.prototype,
-      StringKey(Named("constructor")),
-    )
-  {
-    Some(rt_types.DataProperty(value:, ..)) ->
-      value == mk_object(realm.promise.constructor)
-    _ -> False
-  }
-}
-
-/// `ctor[@@species]` is an own accessor whose getter is a `ReturnThis`
-/// native: reading it through `ctor` yields `ctor` and runs nothing else.
-fn species_returns_this(st: Agent, ctor: Handle) -> Bool {
-  case
-    rt_obj.t_ordinary_own_property(st, ctor, SymbolKey(rt_types.symbol_species))
-  {
-    Some(rt_types.AccessorProperty(get: Some(getter), ..)) ->
-      case classify(getter) {
-        KHandle(g) ->
-          case rt_store.t_cell_get(st, g) {
-            SObject(kind: rt_types.KNative(tag: ReturnThis, ..), ..) -> True
-            _ -> False
-          }
         _ -> False
       }
     _ -> False

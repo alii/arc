@@ -12,15 +12,13 @@
 %%%     remote fun refs (`fun 'arc@rt@obj':t_get_prop/3`), so no closure is
 %%%     allocated per call.
 %%%
-%%%  2. Fused hot-path kernels (add/2, lt/2, get_field/3, ...) that match the
-%%%     raw JsVal wire term (arc_rt_val_ffi §2.3: bare ints/floats/binaries,
-%%%     `undefined | null | true | false | js_nan | js_inf | js_neg_inf |
-%%%     js_tdz` atoms, `{js_cell,N} | {js_bigint,N} | {js_sym,S}` tuples) and
-%%%     answer the result directly, or the atom `miss` when the operands need
-%%%     anything observable (ToPrimitive on an object, a getter, a proxy
-%%%     trap, a throw). They are TOTAL: no clause raises for any wire term.
-%%%     The Gleam side types each kernel with its hit type and checks
-%%%     `is_miss/1` before touching the result.
+%%%  2. Fused hot-path kernels (truthy/1, get_field/3, put_elem/4, ...) that
+%%%     match the raw JsVal wire term and the store records directly and
+%%%     answer the result, or the atom `miss` when the operands need anything
+%%%     observable (a getter, a proxy trap, a throw). They are TOTAL: no
+%%%     clause raises for any wire term. The Gleam side types each kernel
+%%%     with its hit type and checks `is_miss/1` before touching the result.
+%%%     The operator kernels (add/2, lt/2, ...) live in arc_rt_ops_ffi.
 %%%
 %%%  3. setup_locals_tuple/6, setup_locals_seeded/10 — the one-pass locals
 %%%     tuple build for a call prologue.
@@ -31,8 +29,6 @@
          guard_unit1/2, guard_unit2/3, guard_unit3/4, guard_unit4/5,
          guard_unit5/6, guard_unit6/7]).
 -export([is_miss/1, is_tdz/1, is_undefined/1,
-         add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
-         lt/2, le/2, gt/2, ge/2, strict_eq/2, strict_neq/2, eq/2, neq/2,
          truthy/1, lnot/1, nullish/1, typeof/1, typeof/2,
          box_get/2, cell_of/2, get_global/3, put_global/6, instance_of/4,
          get_field/3, get_elem/3, get_elem2/3, put_field/4, put_elem/4,
@@ -40,10 +36,6 @@
 -export([setup_locals_tuple/6, setup_locals_seeded/10]).
 
 -include("arc_rt_layout.hrl").
-%% arc/rt/types.JsSlot: SBox(value) (a captured binding's cell), and
-%% ObjKind: ArgumentsObj(length, mapped).
--define(SBOX_TAG, s_box).
--define(ARGUMENTSOBJ_TAG, arguments_obj).
 %% The Named "length" PropertyKey term.
 -define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
 
@@ -124,291 +116,6 @@ is_tdz(_) -> false.
 %% is_undefined(V) -> boolean()
 is_undefined(undefined) -> true;
 is_undefined(_) -> false.
-
-%% Number results keep the two invariants arc_rt_ops_ffi:add/2 keeps: an
-%% integer wider than 2^53 - 1 becomes the nearest double, and float
-%% overflow (badarith, the BEAM has no infinities) becomes ±Infinity.
--define(MAX_SAFE_INT, 9007199254740991).
--compile({inline, [norm/1, inf_val/1, nul/1]}).
-norm(R) when R > ?MAX_SAFE_INT; R < -?MAX_SAFE_INT -> arc_rt_val_ffi:mk_int(R);
-norm(R) -> R.
-
-inf_val(false) -> js_inf;
-inf_val(true) -> js_neg_inf.
-
-%% add(A, B) -> JsVal | miss
-%% §13.15.3 ApplyStringOrNumericBinaryOperator `+` for primitive operands:
-%% number + number, string ++ string, and string with a primitive whose
-%% ToString is pure. Objects (ToPrimitive), symbols (TypeError) and BigInt
-%% mixes miss.
-add(A, B) when is_integer(A), is_integer(B) -> norm(A + B);
-add(A, B) when is_number(A), is_number(B) ->
-    try A + B
-    catch error:badarith -> inf_val(A < 0)
-    end;
-add(A, B) when is_binary(A), is_binary(B) -> <<A/binary, B/binary>>;
-add(A, B) when is_binary(A) ->
-    case str_of(B) of
-        miss -> miss;
-        S -> <<A/binary, S/binary>>
-    end;
-add(A, B) when is_binary(B) ->
-    case str_of(A) of
-        miss -> miss;
-        S -> <<S/binary, B/binary>>
-    end;
-add({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A + B};
-add(A, B) -> nonfinite_add(A, B).
-
-%% §6.1.6.1.7 Number::add rows with a NaN or ±Infinity operand; anything
-%% that is not two Numbers misses.
-nonfinite_add(js_nan, B) when is_number(B); B =:= js_nan;
-                              B =:= js_inf; B =:= js_neg_inf -> js_nan;
-nonfinite_add(A, js_nan) when is_number(A);
-                              A =:= js_inf; A =:= js_neg_inf -> js_nan;
-nonfinite_add(js_inf, js_neg_inf) -> js_nan;
-nonfinite_add(js_neg_inf, js_inf) -> js_nan;
-nonfinite_add(js_inf, B) when is_number(B); B =:= js_inf -> js_inf;
-nonfinite_add(js_neg_inf, B) when is_number(B); B =:= js_neg_inf -> js_neg_inf;
-nonfinite_add(A, js_inf) when is_number(A) -> js_inf;
-nonfinite_add(A, js_neg_inf) when is_number(A) -> js_neg_inf;
-nonfinite_add(_, _) -> miss.
-
-%% §7.1.17 ToString for the primitives where it observes nothing.
-str_of(N) when is_integer(N) -> integer_to_binary(N);
-str_of(F) when is_float(F) -> arc_rt_val_ffi:js_number_to_string(F);
-str_of(undefined) -> <<"undefined">>;
-str_of(null) -> <<"null">>;
-str_of(true) -> <<"true">>;
-str_of(false) -> <<"false">>;
-str_of(js_nan) -> <<"NaN">>;
-str_of(js_inf) -> <<"Infinity">>;
-str_of(js_neg_inf) -> <<"-Infinity">>;
-str_of({js_bigint, N}) -> integer_to_binary(N);
-str_of(_) -> miss.
-
-%% sub(A, B) -> JsVal | miss
-%% §6.1.6.1.8 Number::subtract on two Numbers; everything else misses.
-sub(A, B) when is_integer(A), is_integer(B) -> norm(A - B);
-sub(A, B) when is_number(A), is_number(B) ->
-    try A - B
-    catch error:badarith -> inf_val(A < 0)
-    end;
-sub({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A - B};
-sub(A, js_inf) -> nonfinite_add(A, js_neg_inf);
-sub(A, js_neg_inf) -> nonfinite_add(A, js_inf);
-sub(A, B) when is_number(B); B =:= js_nan -> nonfinite_add(A, B);
-sub(_, _) -> miss.
-
-%% mul(A, B) -> JsVal | miss
-%% §6.1.6.1.4 Number::multiply on two Numbers. An integer product of zero
-%% takes the operands' sign (0 * -1 is -0); Infinity * 0 is NaN.
-mul(A, B) when is_integer(A), is_integer(B) ->
-    case A * B of
-        0 when A < 0; B < 0 -> -0.0;
-        R -> norm(R)
-    end;
-mul(A, B) when is_number(A), is_number(B) ->
-    try A * B
-    catch error:badarith -> inf_val((A < 0) =/= (B < 0))
-    end;
-mul({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A * B};
-mul(js_nan, B) when is_number(B); B =:= js_nan;
-                    B =:= js_inf; B =:= js_neg_inf -> js_nan;
-mul(A, js_nan) when is_number(A); A =:= js_inf; A =:= js_neg_inf -> js_nan;
-mul(A, B) when A =:= js_inf; A =:= js_neg_inf -> inf_times(A, B);
-mul(A, B) when B =:= js_inf; B =:= js_neg_inf -> inf_times(B, A);
-mul(_, _) -> miss.
-
-%% ±Infinity times a Number: zero gives NaN, otherwise the sign product.
-inf_times(Inf, B) when is_number(B) ->
-    case B == 0 of
-        true -> js_nan;
-        false -> inf_val((Inf =:= js_neg_inf) =/= num_is_negative(B))
-    end;
-inf_times(Inf, Inf) -> js_inf;
-inf_times(_, B) when B =:= js_inf; B =:= js_neg_inf -> js_neg_inf;
-inf_times(_, _) -> miss.
-
-%% Sign of a finite Number term, reading the IEEE sign bit for -0.0.
-num_is_negative(F) when is_float(F) ->
-    F < 0.0 orelse arc_rt_val_ffi:is_neg_zero(F);
-num_is_negative(N) -> N < 0.
-
-%% div(A, B) -> JsVal | miss
-%% §6.1.6.1.5 Number::divide on two finite Numbers. Exact integer
-%% quotients stay integers; a zero dividend or divisor takes the IEEE sign
-%% rules (0 / -3 is -0, 1 / 0 is Infinity, 0 / 0 is NaN). Non-finite
-%% operands miss (the sign table lives in rt/ops num_div).
-'div'(A, B) when is_integer(A), is_integer(B) ->
-    if
-        B =:= 0 -> zero_divisor(A, false);
-        A =:= 0 -> case B < 0 of true -> -0.0; false -> 0 end;
-        A rem B =:= 0 -> A div B;
-        true -> A / B
-    end;
-'div'(A, B) when is_number(A), is_number(B) ->
-    case B == 0 of
-        true -> zero_divisor(A, num_is_negative(B));
-        false ->
-            try A / B
-            catch error:badarith ->
-                inf_val(num_is_negative(A) =/= num_is_negative(B))
-            end
-    end;
-'div'(_, _) -> miss.
-
-%% x / ±0: NaN for a zero dividend, else Infinity signed by both operands.
-zero_divisor(A, DivisorNeg) ->
-    case A == 0 of
-        true -> js_nan;
-        false -> inf_val(num_is_negative(A) =/= DivisorNeg)
-    end.
-
-%% mod(A, B) -> JsVal | miss
-%% §6.1.6.1.6 Number::remainder for two integers: sign follows the
-%% dividend (Erlang `rem`), so a zero result from a negative dividend is -0;
-%% n % 0 is NaN. Floats miss (fmod and its ±0/Infinity table are rt/ops).
-mod(A, B) when is_integer(A), is_integer(B) ->
-    case B of
-        0 -> js_nan;
-        _ ->
-            case A rem B of
-                0 when A < 0 -> -0.0;
-                R -> R
-            end
-    end;
-mod(_, _) -> miss.
-
-%% neg(A) -> JsVal | miss
-%% §6.1.6.1.1 Number::unaryMinus. Integer 0 negates to -0.0; -0.0 to 0.
-neg(0) -> -0.0;
-neg(N) when is_integer(N) -> -N;
-neg(F) when is_float(F) ->
-    case F == 0.0 andalso arc_rt_val_ffi:is_neg_zero(F) of
-        true -> 0;
-        false -> -F
-    end;
-neg(js_nan) -> js_nan;
-neg(js_inf) -> js_neg_inf;
-neg(js_neg_inf) -> js_inf;
-neg({js_bigint, N}) -> {js_bigint, -N};
-neg(_) -> miss.
-
-%% plus(A) -> JsVal | miss
-%% §13.5.4 unary `+` (ToNumber): identity on Numbers, else miss.
-plus(N) when is_number(N) -> N;
-plus(A) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> A;
-plus(_) -> miss.
-
-%% step(A, Delta) -> JsVal | miss
-%% `ToNumber(A) + Delta` for a Number A and a small integer Delta (the
-%% IncLocal / DecLocal `i++` kernel): add(plus(A), Delta) without building
-%% the Delta term. A finite float plus a small integer cannot overflow.
-step(A, D) when is_integer(A) -> norm(A + D);
-step(A, D) when is_float(A) -> A + D;
-step(A, _) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> A;
-step(_, _) -> miss.
-
-%% lt/le/gt/ge(A, B) -> boolean() | miss
-%% §7.2.13 IsLessThan for Number×Number (mixed int/float compare
-%% numerically on the BEAM), String×String (byte order, matching rt/ops
-%% D10) and BigInt×BigInt; NaN compares false; everything else misses.
-lt(A, B) when is_number(A), is_number(B) -> A < B;
-lt(A, B) when is_binary(A), is_binary(B) -> A < B;
-lt({js_bigint, A}, {js_bigint, B}) -> A < B;
-lt(A, B) -> cmp_nonfinite(A, B, lt).
-
-le(A, B) when is_number(A), is_number(B) -> A =< B;
-le(A, B) when is_binary(A), is_binary(B) -> A =< B;
-le({js_bigint, A}, {js_bigint, B}) -> A =< B;
-le(A, B) -> cmp_nonfinite(A, B, le).
-
-gt(A, B) when is_number(A), is_number(B) -> A > B;
-gt(A, B) when is_binary(A), is_binary(B) -> A > B;
-gt({js_bigint, A}, {js_bigint, B}) -> A > B;
-gt(A, B) -> cmp_nonfinite(A, B, gt).
-
-ge(A, B) when is_number(A), is_number(B) -> A >= B;
-ge(A, B) when is_binary(A), is_binary(B) -> A >= B;
-ge({js_bigint, A}, {js_bigint, B}) -> A >= B;
-ge(A, B) -> cmp_nonfinite(A, B, ge).
-
-%% Relational compare when at least one operand is NaN/±Infinity and both
-%% are Numbers: rank -Infinity < finite < Infinity and compare ranks (two
-%% finites never reach here). NaN is false under every operator.
-cmp_nonfinite(A, B, Op) ->
-    case {num_rank(A), num_rank(B)} of
-        {miss, _} -> miss;
-        {_, miss} -> miss;
-        {nan, _} -> false;
-        {_, nan} -> false;
-        {RA, RB} ->
-            case Op of
-                lt -> RA < RB;
-                le -> RA =< RB;
-                gt -> RA > RB;
-                ge -> RA >= RB
-            end
-    end.
-
-num_rank(js_neg_inf) -> -1;
-num_rank(N) when is_number(N) -> 0;
-num_rank(js_inf) -> 1;
-num_rank(js_nan) -> nan;
-num_rank(_) -> miss.
-
-%% strict_eq(A, B) -> boolean()
-%% §7.2.15 IsStrictlyEqual, total on wire terms. NaN is unequal to itself;
-%% Numbers compare numerically (1 === 1.0, +0 === -0); every other row is
-%% exact term identity (same atom, same binary, same {js_cell,N} /
-%% {js_bigint,N} / {js_sym,S}).
-strict_eq(js_nan, _) -> false;
-strict_eq(_, js_nan) -> false;
-strict_eq(A, B) when is_number(A), is_number(B) -> A == B;
-strict_eq(A, B) -> A =:= B.
-
-%% strict_neq(A, B) -> boolean()
-strict_neq(A, B) -> not strict_eq(A, B).
-
-%% eq(A, B) -> boolean() | miss
-%% §7.2.14 IsLooselyEqual for the pairs that never run user code: null /
-%% undefined against anything (steps 2-3, 14), same-type primitives, object
-%% identity. Object×primitive (ToPrimitive) and cross-type coercions miss.
-eq(undefined, B) -> nul(B);
-eq(null, B) -> nul(B);
-eq(A, undefined) -> nul(A);
-eq(A, null) -> nul(A);
-eq({?HANDLE_TAG, A}, {?HANDLE_TAG, B}) -> A =:= B;
-eq({?HANDLE_TAG, _}, _) -> miss;
-eq(_, {?HANDLE_TAG, _}) -> miss;
-eq(A, B) when is_number(A), is_number(B) -> A == B;
-eq(A, B) when is_binary(A), is_binary(B) -> A =:= B;
-eq(A, B) when is_boolean(A), is_boolean(B) -> A =:= B;
-eq({js_bigint, A}, {js_bigint, B}) -> A =:= B;
-eq({js_sym, A}, {js_sym, B}) -> A =:= B;
-eq(js_nan, _) -> false;
-eq(_, js_nan) -> false;
-eq(A, B) when A =:= js_inf; A =:= js_neg_inf ->
-    case B of
-        A -> true;
-        _ when is_number(B); B =:= js_inf; B =:= js_neg_inf -> false;
-        _ -> miss
-    end;
-eq(A, B) when B =:= js_inf; B =:= js_neg_inf ->
-    case is_number(A) of true -> false; false -> miss end;
-eq(_, _) -> miss.
-
-%% neq(A, B) -> boolean() | miss
-neq(A, B) ->
-    case eq(A, B) of
-        miss -> miss;
-        R -> not R
-    end.
-
-nul(undefined) -> true;
-nul(null) -> true;
-nul(_) -> false.
 
 %% truthy(V) -> boolean()
 %% §7.1.2 ToBoolean, total; row-for-row with arc_rt_val_ffi:to_boolean_i32.
@@ -611,7 +318,7 @@ chain_reaches(Data, VId, PId, Fuel) ->
 %% props-map key as is so no hop rebuilds it.
 get_field(Agent, {?HANDLE_TAG, Id}, K) ->
     cell_field(element(?AGENT_STORE, Agent), Id, K);
-get_field(_, Bin, {?KEY_NAMED, <<"length">>}) when is_binary(Bin) ->
+get_field(_, Bin, ?LENGTH_KEY) when is_binary(Bin) ->
     arc_string_ffi:string_codepoint_length(Bin);
 get_field(Agent, Bin, K) when is_binary(Bin) ->
     proto_field(Agent, ?REALM_STRING, K);
@@ -681,7 +388,7 @@ field_walk(Data, Shapes, Id, K, Fuel, Absent) ->
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             Kind = element(?SOBJECT_KIND, Slot),
-            case named_is_ordinary(Kind, K) of
+            case named_plain(Kind, K) of
                 false -> named_virtual(Kind, K);
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
@@ -706,7 +413,7 @@ field_next(_, _, _, _, _, _) -> miss.
 
 %% The one virtual named data property a read kernel synthesizes: an Array
 %% cell's "length" IS its kind payload (§10.4.2, always an own data
-%% property, so no chain walk). Every other non-ordinary named read misses.
+%% property, so no chain walk). Every other non-plain named read misses.
 named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY) -> Length;
 named_virtual(_, _) -> miss.
 
@@ -714,10 +421,10 @@ named_virtual(_, _) -> miss.
 %% [[Get]] and [[Set]] (rt/obj own_property_of, get_from, set arms): Proxy,
 %% module namespace and TypedArray cells are exotic for string keys, and
 %% Array / String objects synthesize "length".
--compile({inline, [named_is_ordinary/2, named_virtual/2]}).
-named_is_ordinary(?ORDINARY, _) -> true;
-named_is_ordinary(Kind, _) when is_atom(Kind) -> true;
-named_is_ordinary(Kind, K) ->
+-compile({inline, [named_plain/2, named_virtual/2]}).
+named_plain(?ORDINARY, _) -> true;
+named_plain(Kind, _) when is_atom(Kind) -> true;
+named_plain(Kind, K) ->
     case element(1, Kind) of
         ?PROXYOBJ_TAG -> false;
         module_namespace -> false;
@@ -803,7 +510,7 @@ elem_read({?ELEMS_DENSE, A}, Idx) ->
     case Idx < array:size(A) of
         true ->
             case array:get(Idx, A) of
-                js_hole -> miss;
+                ?ELEMS_HOLE -> miss;
                 V -> V
             end;
         false -> miss
@@ -821,7 +528,7 @@ elem_read(_, _) -> miss.
 %% SShapedObject slot, or replace the value inside the DataProperty
 %% (attributes and creation seq kept, §10.1.11). Step 1 → 2.c-h, CREATION
 %% on an extensible SObject: only when the prototype chain holds nothing
-%% at the key but plain writable data (named_free), so a setter or a
+%% at the key but plain writable data (chain_free), so a setter or a
 %% read-only property up the chain still takes the slow path; the new
 %% {W,E,C} property is stamped with the store's prop_seq (t_next_prop_seq).
 %% Non-writable, accessors, non-extensible / shaped receivers for a new key
@@ -846,7 +553,7 @@ put_field(Store, {?HANDLE_TAG, Id}, K, V, Create) ->
                 _ -> miss
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_is_ordinary(element(?SOBJECT_KIND, Slot), K) of
+            case named_plain(element(?SOBJECT_KIND, Slot), K) of
                 false -> miss;
                 true -> put_prop(Store, Data, Id, Slot, K, V, Create)
             end;
@@ -878,10 +585,8 @@ put_prop(Store, Data, Id, Slot, K, V, Create) ->
                     Seq = element(?STORE_PROP_SEQ, Store),
                     Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
                     NewSlot = setelement(?SOBJECT_PROPS, Slot, Props#{K => Prop}),
-                    setelement(?STORE_PROP_SEQ,
-                               setelement(?STORE_DATA, Store,
-                                          array:set(Id, NewSlot, Data)),
-                               Seq + 1)
+                    arc_rt_obj_ffi:store_put_seq(Store, array:set(Id, NewSlot, Data),
+                                                 Seq + 1)
             end;
         _ -> miss
     end.
@@ -912,57 +617,17 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V) ->
                     Seq = element(?STORE_PROP_SEQ, Store),
                     Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
                     NewSlot = setelement(?SOBJECT_PROPS, Slot, Props#{K => Prop}),
-                    setelement(?STORE_PROP_SEQ,
-                               setelement(?STORE_DATA, Store,
-                                          array:set(Id, NewSlot, Data)),
-                               Seq + 1)
+                    arc_rt_obj_ffi:store_put_seq(Store, array:set(Id, NewSlot, Data),
+                                                 Seq + 1)
             end;
         _ -> miss
     end;
 define_field(_, _, _, _) -> miss.
 
 chain_free(Data, Shapes, Proto, {?KEY_NAMED, _} = K) ->
-    named_free(Data, Shapes, Proto, K, 64);
+    arc_rt_obj_ffi:named_free(Data, Shapes, Proto, K, 64);
 chain_free(Data, Shapes, Proto, {?KEY_INDEX, Idx}) ->
     index_free(Data, Shapes, Proto, Idx, 64).
-
-%% named_free(Data, Shapes, Proto, K, Fuel) -> boolean()
-%% Every object on the prototype chain starting at Proto either lacks an
-%% own property at K or holds a writable data property there, along
-%% hops whose named lookup is a pure slots/props probe (§10.1.9.2 step 1:
-%% ordinary [[Set]] then creates on the receiver). An accessor or read-only
-%% property, an exotic hop, a dangling handle, or more than Fuel hops
-%% answer false.
-named_free(_, _, ?NONE, _, _) -> true;
-named_free(_, _, _, _, 0) -> false;
-named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
-    case array:get(P, Data) of
-        {?SSHAPED_TAG, Sid, Proto, _Slots} ->
-            case Shapes of
-                #{Sid := Desc} ->
-                    KeyBin = element(2, K),
-                    case element(?SHAPE_OFFSETS, Desc) of
-                        #{KeyBin := _} -> true;
-                        _ -> named_free(Data, Shapes, Proto, K, Fuel - 1)
-                    end;
-                _ -> false
-            end;
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_is_ordinary(element(?SOBJECT_KIND, Slot), K) of
-                false -> false;
-                true ->
-                    case element(?SOBJECT_PROPS, Slot) of
-                        #{K := Prop} ->
-                            element(1, Prop) =:= ?DATAPROP_TAG
-                                andalso element(?DATAPROP_WRITABLE, Prop) =:= true;
-                        _ ->
-                            named_free(Data, Shapes, element(?SOBJECT_PROTO, Slot),
-                                       K, Fuel - 1)
-                    end
-            end;
-        _ -> false
-    end;
-named_free(_, _, _, _, _) -> false.
 
 %% put_elem(Store, V, Idx, Val) -> Store2 | miss
 %% `V[Idx] = Val` on an extensible Array cell for an array index Idx
@@ -981,7 +646,8 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     Data = element(?STORE_DATA, Store),
     case array:get(Id, Data) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+        Slot when tuple_size(Slot) =:= ?SOBJECT_ARITY,
+                  element(1, Slot) =:= ?SOBJECT_TAG,
                   element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
             Props = element(?SOBJECT_PROPS, Slot),
             case element(?SOBJECT_KIND, Slot) of
@@ -1035,7 +701,7 @@ put_elem(_, _, _, _) -> miss.
 
 %% The Array "length" attribute override, when defineProperty made one;
 %% absent means the default writable length.
-length_writable(#{{?KEY_NAMED, <<"length">>} := Prop})
+length_writable(#{?LENGTH_KEY := Prop})
   when element(1, Prop) =:= ?DATAPROP_TAG ->
     element(?DATAPROP_WRITABLE, Prop) =:= true;
 length_writable(_) -> true.
@@ -1084,7 +750,7 @@ index_is_plain(Kind) ->
 
 %% A present (non-hole) element at Idx.
 elem_has({?ELEMS_DENSE, A}, Idx) ->
-    Idx < array:size(A) andalso array:get(Idx, A) =/= js_hole;
+    Idx < array:size(A) andalso array:get(Idx, A) =/= ?ELEMS_HOLE;
 elem_has({?ELEMS_SPARSE, M}, Idx) -> is_map_key(Idx, M);
 elem_has(_, _) -> false.
 
@@ -1109,7 +775,7 @@ elem_write_grow({?ELEMS_DENSE, A}, Idx, V) ->
     end;
 elem_write_grow({?ELEMS_SPARSE, M}, Idx, V) -> {?ELEMS_SPARSE, M#{Idx => V}};
 elem_write_grow(?ELEMS_NONE, Idx, V) when Idx =< ?MAX_GAP ->
-    {?ELEMS_DENSE, array:set(Idx, V, array:new({default, js_hole}))};
+    {?ELEMS_DENSE, array:set(Idx, V, array:new({default, ?ELEMS_HOLE}))};
 elem_write_grow(_, _, _) -> miss.
 
 %% ── 3. locals tuple build ────────────────────────────────────────────────

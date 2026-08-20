@@ -22,8 +22,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayNative, type BuiltinPair, type Handle, type JsElements,
-  type JsSlot, type JsVal, type Property, type PropertyKey, AccessorProperty,
-  ArrayConstructor, ArrayFrom, ArrayFromAsync, ArrayFromAsyncCloseReject,
+  type JsSlot, type JsVal, type Property, type PropertyKey, ArrayConstructor,
+  ArrayFrom, ArrayFromAsync, ArrayFromAsyncCloseReject,
   ArrayFromAsyncLikeOnMapped, ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped,
   ArrayFromAsyncOnNext, ArrayFromAsyncRejectWith, ArrayIsArray, ArrayIterEntries,
   ArrayIterKeys, ArrayIterValues, ArrayIterator, ArrayN, ArrayObj, ArrayOf,
@@ -40,11 +40,11 @@ import arc/rt/types.{
   ArrayPrototypeToLocaleString, ArrayPrototypeToReversed, ArrayPrototypeToSorted,
   ArrayPrototypeToSpliced, ArrayPrototypeToString, ArrayPrototypeUnshift,
   ArrayPrototypeValues, ArrayPrototypeWith, DataProperty, Index, JFloat, JInt,
-  JNan, JNegInf, JPosInf, KHandle, KNative, KNull, KNum, KStr, KUndef, Named,
-  NoElements, ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj,
-  ReturnThis, SObject, StringKey, StringObj, SymbolKey, classify, index_key,
-  key_display_string, max_array_length, mk_bool, mk_number, mk_object, mk_string,
-  mk_undefined, symbol_is_concat_spreadable, symbol_iterator, symbol_species,
+  JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named, NoElements,
+  ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj, ReturnThis, SObject,
+  StringKey, StringObj, SymbolKey, classify, index_key, key_display_string,
+  max_array_length, mk_bool, mk_number, mk_object, mk_string, mk_undefined,
+  symbol_is_concat_spreadable, symbol_iterator, symbol_species,
   symbol_unscopables,
 } as rt_types
 import arc/rt/val as rt_val
@@ -59,8 +59,7 @@ import gleam/string
 /// array-length Set. Shared with the string-size cap.
 const iteration_budget_msg = "Invalid array length"
 
-/// Per-element iteration-budget check; a plain call, unlike `bool.lazy_guard`
-/// which allocates two closures per step.
+/// Throw the iteration-budget RangeError when `exhausted`.
 fn check_budget(st: Agent, exhausted: Bool) -> Nil {
   case exhausted {
     True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
@@ -592,16 +591,6 @@ fn generic_get(st: Agent, ref: Handle, idx: Int) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, mk_object(ref), StringKey(index_key(idx)))
 }
 
-/// §7.3.2 Get on any array-like receiver (including primitive strings) by
-/// integer index. A present own element of a plain Array is read directly;
-/// everything else goes through `t_get_prop`, which auto-boxes primitives.
-fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
-  case helpers.own_element(st, this, idx) {
-    helpers.Hit(v) -> #(v, st)
-    helpers.Slow -> rt_obj.t_get_prop(st, this, StringKey(index_key(idx)))
-  }
-}
-
 /// Fused HasProperty + Get by integer index. `Some(val)` when present (own or
 /// inherited); `None` on a hole. Own probe is one heap read via
 /// `t_get_own_index`; only a miss walks the prototype chain.
@@ -665,7 +654,7 @@ fn generic_index_if_present(
   case has {
     False -> #(None, st)
     True -> {
-      let #(v, st) = get_index(st, this, idx)
+      let #(v, st) = helpers.get_index(st, this, idx)
       #(Some(v), st)
     }
   }
@@ -1034,7 +1023,7 @@ fn join_elements_generic(
   case idx >= length {
     True -> finish_join(st, acc, separator)
     False -> {
-      let #(v, st) = get_index(st, this, idx)
+      let #(v, st) = helpers.get_index(st, this, idx)
       case classify(v) {
         KUndef | KNull ->
           join_elements_generic(st, this, idx + 1, length, separator, [
@@ -1268,7 +1257,7 @@ fn copy_range_dense(
   case remaining <= 0 {
     True -> #(dst, st)
     False -> {
-      let #(val, st) = get_index(st, src, src_idx)
+      let #(val, st) = helpers.get_index(st, src, src_idx)
       copy_range_dense(
         st,
         src,
@@ -1582,46 +1571,12 @@ fn array_species_create(
 /// Every Get the protocol would run then yields %Array% without user code,
 /// which is the `None` (plain ArrayCreate) outcome.
 fn intrinsic_species(st: Agent, slot: JsSlot) -> Bool {
-  let array_proto = st.realm.array.prototype
+  let array = st.realm.array
   case slot {
     SObject(kind: ArrayObj(_), proto: Some(p), props:, ..) ->
-      p == array_proto
+      p == array.prototype
       && !dict.has_key(props, Named("constructor"))
-      && proto_constructor_is(st, p, st.realm.array.constructor)
-    _ -> False
-  }
-}
-
-fn proto_constructor_is(st: Agent, proto: Handle, ctor: Handle) -> Bool {
-  case rt_store.t_cell_get(st, proto) {
-    SObject(props:, ..) ->
-      case dict.get(props, Named("constructor")) {
-        Ok(DataProperty(value: c, ..)) ->
-          c == mk_object(ctor) && species_getter_returns_this(st, ctor)
-        _ -> False
-      }
-    _ -> False
-  }
-}
-
-fn species_getter_returns_this(st: Agent, ctor: Handle) -> Bool {
-  case rt_store.t_cell_get(st, ctor) {
-    SObject(symbol_props:, ..) ->
-      case list.key_find(symbol_props, symbol_species) {
-        Ok(AccessorProperty(get: Some(g), ..)) -> is_return_this_native(st, g)
-        _ -> False
-      }
-    _ -> False
-  }
-}
-
-fn is_return_this_native(st: Agent, f: JsVal) -> Bool {
-  case classify(f) {
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: KNative(tag: ReturnThis, ..), ..) -> True
-        _ -> False
-      }
+      && common.species_intact(st, array)
     _ -> False
   }
 }
@@ -1925,7 +1880,7 @@ fn array_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case idx < 0 || idx >= length {
     True -> #(mk_undefined(), st)
-    False -> get_index(st, this, idx)
+    False -> helpers.get_index(st, this, idx)
   }
 }
 
@@ -2140,7 +2095,7 @@ fn search_forward_generic(
       let #(maybe_val, st) = case hole_mode {
         SkipHoles -> get_index_if_present(st, this, idx)
         VisitHoles -> {
-          let #(v, st) = get_index(st, this, idx)
+          let #(v, st) = helpers.get_index(st, this, idx)
           #(Some(v), st)
         }
       }
@@ -3654,7 +3609,7 @@ fn array_from_loop(
   case idx >= length {
     True -> from_finish(st, target, length)
     False -> {
-      let #(elem, st) = get_index(st, items, idx)
+      let #(elem, st) = helpers.get_index(st, items, idx)
       let #(mapped, st) = case map_fn {
         None -> #(elem, st)
         Some(mf) ->
@@ -3767,7 +3722,7 @@ fn collect_elements_descending(
   case idx < 0 {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(val, st) = get_index(st, this, idx)
+      let #(val, st) = helpers.get_index(st, this, idx)
       collect_elements_descending(st, this, idx - 1, [val, ..acc])
     }
   }
@@ -3825,7 +3780,7 @@ fn to_locale_string_loop(
         Error(Nil) -> rt_val.t_throw_range_error(st, "Invalid string length")
       }
     False -> {
-      let #(elem, st) = get_index(st, this, idx)
+      let #(elem, st) = helpers.get_index(st, this, idx)
       case classify(elem) {
         KUndef | KNull ->
           to_locale_string_loop(

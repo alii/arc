@@ -666,10 +666,10 @@ pub fn guarded_div(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   num_or_any("num_div", a, b, host("div", [a, b]))
 }
 
-/// JS `%`: two BEAM integers → the pure `int_mod` kernel, else the full
-/// operator (floats included).
+/// JS `%`: probe the pure `num_mod` kernel (two BEAM numbers); on `miss`
+/// the full operator.
 pub fn guarded_mod(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  miss_or(host("int_mod", [a, b]), host("mod", [a, b]))
+  miss_or(host("num_mod", [a, b]), host("mod", [a, b]))
 }
 
 /// JS unary `-`: a BEAM number → the pure `num_neg` kernel (a number again,

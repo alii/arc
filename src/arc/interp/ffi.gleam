@@ -1,6 +1,7 @@
-//// Bindings for `arc_interp_ffi`: the raise adapter that turns a raising
-//// runtime call into a `Result` for the interpreter's slow path, and the
-//// fused hot-path kernels `fast_loop` runs before falling back to it.
+//// Bindings for `arc_interp_ffi` (and the `arc_rt_ops_ffi` operator
+//// kernels): the raise adapter that turns a raising runtime call into a
+//// `Result` for the interpreter's slow path, and the fused hot-path kernels
+//// `fast_loop` runs before falling back to it.
 ////
 //// Kernels are typed with their HIT type but may return the atom `miss`
 //// instead. `is_miss` / `is(_, Miss)` are the one probe that knows this; a
@@ -165,9 +166,9 @@ pub fn guard_unit6(
 ) -> Guarded(Nil)
 
 // -- Fused kernels ---------------------------------------------------------------
-// Each returns its result or `miss`; only `strict_eq`, `truthy` and `nullish`
-// are total. A miss means the operands need something observable
-// (ToPrimitive, a getter, a proxy trap, a throw): take the guarded slow path.
+// Each returns its result or `miss`; only `truthy` and `nullish` are total.
+// A miss means the operands need something observable (ToPrimitive, a
+// getter, a proxy trap, a throw): take the guarded slow path.
 
 /// True when a kernel answered `miss` instead of a value of its result type.
 @external(erlang, "arc_interp_ffi", "is_miss")
@@ -197,65 +198,65 @@ pub fn is_bool(v: JsVal, b: Bool) -> Bool
 pub fn cell_of(agent: Agent, v: JsVal) -> JsSlot
 
 /// `a + b` for numbers, strings, and a string with a pure-ToString primitive.
-@external(erlang, "arc_interp_ffi", "add")
+@external(erlang, "arc_rt_ops_ffi", "add")
 pub fn add(a: JsVal, b: JsVal) -> JsVal
 
 /// `a - b` for numbers.
-@external(erlang, "arc_interp_ffi", "sub")
+@external(erlang, "arc_rt_ops_ffi", "sub")
 pub fn sub(a: JsVal, b: JsVal) -> JsVal
 
 /// `a * b` for numbers.
-@external(erlang, "arc_interp_ffi", "mul")
+@external(erlang, "arc_rt_ops_ffi", "mul")
 pub fn mul(a: JsVal, b: JsVal) -> JsVal
 
-/// `a / b` for finite numbers.
-@external(erlang, "arc_interp_ffi", "div")
+/// `a / b` for numbers.
+@external(erlang, "arc_rt_ops_ffi", "div")
 pub fn div(a: JsVal, b: JsVal) -> JsVal
 
-/// `a % b` for integers.
-@external(erlang, "arc_interp_ffi", "mod")
+/// `a % b` for finite numbers.
+@external(erlang, "arc_rt_ops_ffi", "mod")
 pub fn mod(a: JsVal, b: JsVal) -> JsVal
 
 /// `-a` for numbers and BigInt.
-@external(erlang, "arc_interp_ffi", "neg")
+@external(erlang, "arc_rt_ops_ffi", "neg")
 pub fn neg(a: JsVal) -> JsVal
 
 /// `+a` for numbers.
-@external(erlang, "arc_interp_ffi", "plus")
+@external(erlang, "arc_rt_ops_ffi", "plus")
 pub fn plus(a: JsVal) -> JsVal
 
 /// `+a + delta` for a Number `a` and a small integer `delta` (the `i++` /
 /// `i--` kernel).
-@external(erlang, "arc_interp_ffi", "step")
+@external(erlang, "arc_rt_ops_ffi", "step")
 pub fn step(a: JsVal, delta: Int) -> JsVal
 
 /// The compare and equality kernels answer `true | false | miss`; the
 /// boolean atoms ARE the boolean wire terms, so the answer is typed as the
 /// value it pushes. `a < b` etc. for number, string and BigInt pairs.
-@external(erlang, "arc_interp_ffi", "lt")
+@external(erlang, "arc_rt_ops_ffi", "lt")
 pub fn lt(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "le")
+@external(erlang, "arc_rt_ops_ffi", "le")
 pub fn le(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "gt")
+@external(erlang, "arc_rt_ops_ffi", "gt")
 pub fn gt(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "ge")
+@external(erlang, "arc_rt_ops_ffi", "ge")
 pub fn ge(a: JsVal, b: JsVal) -> JsVal
 
-/// §7.2.15 IsStrictlyEqual and its negation. Total.
-@external(erlang, "arc_interp_ffi", "strict_eq")
+/// §7.2.15 IsStrictlyEqual and its negation; a TDZ sentinel misses.
+@external(erlang, "arc_rt_ops_ffi", "strict_eq")
 pub fn strict_eq(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "strict_neq")
+@external(erlang, "arc_rt_ops_ffi", "strict_neq")
 pub fn strict_neq(a: JsVal, b: JsVal) -> JsVal
 
 /// §7.2.14 IsLooselyEqual (and its negation) for the coercion-free pairs.
-@external(erlang, "arc_interp_ffi", "eq")
+@external(erlang, "arc_rt_ops_ffi", "eq")
 pub fn eq(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "neq")
+@external(erlang, "arc_rt_ops_ffi", "neq")
 pub fn neq(a: JsVal, b: JsVal) -> JsVal
 
 /// `!v`. Total.

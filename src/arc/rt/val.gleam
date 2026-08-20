@@ -353,7 +353,7 @@ fn try_primitive_methods(
 /// ES2024 §7.2.14 IsStrictlyEqual (JS `===`). NaN !== NaN; +0 === -0.
 /// Numbers compare with arithmetic `==` (1 === 1.0, -0.0 == 0.0); every
 /// other row is exact wire-term identity.
-@external(erlang, "arc_rt_builtins_ffi", "strict_eq")
+@external(erlang, "arc_rt_val_ffi", "strict_eq")
 pub fn strict_equal(left: JsVal, right: JsVal) -> Bool
 
 /// ES2024 §7.2.11 SameValue. Like `===`, except NaN equals NaN and +0 does NOT
@@ -375,7 +375,7 @@ pub fn same_value(left: JsVal, right: JsVal) -> Bool {
 
 /// ES2024 §7.2.12 SameValueZero. Like `===`, but NaN equals NaN. ±0 are still
 /// equal. Used by Array.prototype.includes and Map/Set key equality.
-@external(erlang, "arc_rt_builtins_ffi", "same_value_zero")
+@external(erlang, "arc_rt_val_ffi", "same_value_zero")
 pub fn same_value_zero(left: JsVal, right: JsVal) -> Bool
 
 /// Erlang `=:=` on floats: exact term equality, distinguishes -0.0 from +0.0.
@@ -559,10 +559,10 @@ pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
 
 // ── §7.1.17 ToString (threaded — objects go through ToPrimitive) ────────────
 
-/// ES2024 §7.1.17 ToString(argument). ToPrimitive with hint "string" first,
-/// then a total match on §7.1.17's conversion table over the primitive
-/// result — so no re-dispatch, no recursion. Port of arc
-/// `coerce.gleam:168-190 js_to_string` with the D7 Result→throw rewrite.
+/// ES2024 §7.1.17 ToString(argument): a total match on §7.1.17's conversion
+/// table. Primitives convert directly; an object goes through ToPrimitive
+/// with hint "string" and re-enters once. Port of arc `coerce.gleam:168-190
+/// js_to_string` with the D7 Result→throw rewrite.
 pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent) {
   case classify(v) {
     KStr(s) -> #(s, st)
@@ -913,20 +913,12 @@ fn parse_decimal_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   }
 }
 
-/// Parse an all-digits integer literal. Goes through float syntax first;
-/// only literals beyond double range (~1e308, 309+ digits) fall back to
-/// arbitrary-precision integer parsing, which `num_from_int` saturates to
-/// Infinity per §7.1.4.1 instead of crashing in erlang:float/1.
+/// Parse an all-digits integer literal: exact while it fits 2^53 - 1, else
+/// the nearest double, which `num_from_int` saturates to Infinity beyond
+/// double range (~1e308, 309+ digits) per §7.1.4.1.
 fn parse_integer_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   use digits <- result.try(bit_array.to_string(bytes))
-  case int.parse(digits) {
-    Ok(n) if n <= max_safe_integer -> Ok(JInt(n))
-    _ ->
-      case float.parse(digits <> ".0") {
-        Ok(f) -> Ok(JFloat(f))
-        Error(Nil) -> int.parse(digits) |> result.map(num_from_int)
-      }
-  }
+  int.parse(digits) |> result.map(int_number)
 }
 
 /// Parse the digits of a NonDecimalIntegerLiteral ("0x.." / "0o.." / "0b..").

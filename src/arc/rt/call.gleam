@@ -25,9 +25,9 @@ import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
   type NativeToken, type ObjKind, type Property, type Realm, Agent, ArrayObj,
   DataProperty, Dense, JInt, JPosInf, KBound, KBytecode, KCompiled, KHandle,
-  KNative, KNull, KNum, KStr, KTdz, KUndef, Named, NoElements, ProxyObj,
-  ReferenceErr, SObject, StringKey, TypeErr, classify, mk_number, mk_object,
-  mk_string, mk_tdz, mk_undefined,
+  KNative, KNull, KNum, KStr, KTdz, KUndef, Named, NoElements, Ordinary,
+  ProxyObj, ReferenceErr, SObject, StringKey, TypeErr, classify, mk_number,
+  mk_object, mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -188,8 +188,8 @@ pub fn t_kfn_code(st: Agent, callee: JsVal, this: JsVal) -> JsVal
 
 /// §10.2.1 `[[Call]]`. Applies `callee(this, ...args)`, catching a JS throw
 /// into `ThrowCompletion` — the ONE catching entry point every rt_js module
-/// that runs user code goes through. Bracketed with `t_enter_call` /
-/// `t_leave_call` so `call_depth > 0` gates the D11 GC safepoint. At
+/// that runs user code goes through. Bumps `call_depth` around the call so
+/// `call_depth > 0` gates the D11 GC safepoint. At
 /// `limits.max_call_depth` the call is refused with a RangeError completion
 /// (arc `call.gleam:174-179`, thrown in the caller's frame).
 pub fn t_call(
@@ -830,41 +830,22 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
 // (M6 pins intrinsics via `t_pin_root` after `t_native_new`).
 //
 // Birth-time property `seq`: arc uses constants 0/1/2 in a reserved range
-// below its +16-offset counter (arc `common.gleam:528-536`). 2core's
-// `prop_seq` starts at 0 with NO offset (`rt_store.gleam:49`), so a
-// constant 0/1 would collide with the first user-added property's seq. We
-// thread `t_next_prop_seq` per birth prop instead — two extra increments per
-// allocation, but preserves the §10.1.11 "birth props before any later prop"
-// ordering invariant without editing the frozen store.
+// below its +16-offset counter (arc `common.gleam:528-536`). `prop_seq` starts
+// at 0 with NO offset here, so a constant 0/1 would collide with the first
+// user-added property's seq; the birth props take fresh stamps reserved in
+// the allocating store write instead, which preserves the §10.1.11 "birth
+// props before any later prop" ordering invariant.
 
-/// §20.2.4.1 `length` own-property — `{W:F, E:F, C:T}`. `value` is a `JsVal`
-/// (not `Int`) so `t_bound_new` can install `+∞` per §20.2.3.2 step 6.b.ii.
-fn fn_length_prop(st: Agent, value: JsVal) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
-  #(
-    DataProperty(
-      value:,
-      writable: False,
-      enumerable: False,
-      configurable: True,
-      seq:,
-    ),
-    st,
-  )
-}
-
-/// §20.2.4.2 `name` own-property — `{W:F, E:F, C:T}`.
-fn fn_name_prop(st: Agent, name: String) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
-  #(
-    DataProperty(
-      value: mk_string(name),
-      writable: False,
-      enumerable: False,
-      configurable: True,
-      seq:,
-    ),
-    st,
+/// A §20.2.4 `length` / `name` own property: `{W:F, E:F, C:T}`. `length` is a
+/// `JsVal` (not `Int`) so `t_bound_new` can install `+∞` per §20.2.3.2 step
+/// 6.b.ii.
+pub fn fn_own_prop(value: JsVal, seq: Int) -> Property {
+  DataProperty(
+    value:,
+    writable: False,
+    enumerable: False,
+    configurable: True,
+    seq:,
   )
 }
 
@@ -880,21 +861,17 @@ fn alloc_fn_cell(
   length_v: JsVal,
   name: String,
 ) -> #(Handle, Agent) {
-  let #(length_prop, st) = fn_length_prop(st, length_v)
-  let #(name_prop, st) = fn_name_prop(st, name)
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind:,
-      proto:,
-      props: dict.from_list([
-        #(Named("length"), length_prop),
-        #(Named("name"), name_prop),
-      ]),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
+  use seq <- rt_store.t_cell_new_with(st, 2)
+  SObject(
+    kind:,
+    proto:,
+    props: dict.from_list([
+      #(Named("length"), fn_own_prop(length_v, seq)),
+      #(Named("name"), fn_own_prop(mk_string(name), seq + 1)),
+    ]),
+    symbol_props: [],
+    elements: NoElements,
+    extensible: True,
   )
 }
 
@@ -995,17 +972,19 @@ pub fn t_new_function(
 /// M14's `emit_closure_site` can tail-call this after `fn_new`.
 pub fn t_make_constructor(st: Agent, f: JsVal) -> #(JsVal, Agent) {
   let assert KHandle(fh) = classify(f)
-  let #(proto, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
-  let #(_, st) =
-    rt_obj.t_define_own_data(
-      st,
-      proto,
-      StringKey(Named("constructor")),
-      f,
-      True,
-      False,
-      True,
+  let object_proto = st.realm.object.prototype
+  let #(proto, st) = {
+    use seq <- rt_store.t_cell_new_with(st, 1)
+    let constructor = DataProperty(f, True, False, True, seq)
+    SObject(
+      kind: Ordinary,
+      proto: Some(object_proto),
+      props: dict.from_list([#(Named("constructor"), constructor)]),
+      symbol_props: [],
+      elements: NoElements,
+      extensible: True,
     )
+  }
   let #(_, st) =
     rt_obj.t_define_own_data(
       st,

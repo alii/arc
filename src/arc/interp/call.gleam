@@ -518,9 +518,9 @@ fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
   }
 }
 
-/// §15.10.3 PrepareForTailCall: `call_regular_function` has just parked the
-/// caller; discard that frame (and its depth/stack-frame entry) so the
-/// callee returns straight to the caller's caller.
+/// §15.10.3 PrepareForTailCall: the caller has just been parked; discard
+/// that frame (and its depth/stack-frame entry) so the callee returns
+/// straight to the caller's caller.
 fn elide_tail_frame(new_state: State) -> State {
   case new_state.call_stack {
     [_caller, ..rest_frames] -> {

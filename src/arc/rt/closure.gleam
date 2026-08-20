@@ -3,10 +3,11 @@
 //// not lazily on first read.
 
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
+import arc/rt/call.{fn_own_prop}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type FnFlags, type Handle, type JsSlot, type JsVal, type Property,
+  type Agent, type FnFlags, type Handle, type JsSlot, type Property,
   type PropertyKey, DataProperty, FnFlags, JInt, KBytecode, KHandle, Named,
   NoElements, Ordinary, SObject, StringKey, classify, mk_number, mk_object,
   mk_string,
@@ -195,15 +196,4 @@ fn async_generator_fn_prototype(st: Agent) -> Handle {
       }
     _ -> realm.function.prototype
   }
-}
-
-/// A §20.2.4 `length`/`name` own property: {W:F, E:F, C:T}.
-fn fn_own_prop(value: JsVal, seq: Int) -> Property {
-  DataProperty(
-    value:,
-    writable: False,
-    enumerable: False,
-    configurable: True,
-    seq:,
-  )
 }

@@ -3512,22 +3512,10 @@ fn restore_and_seed_go(
   }
 }
 
-/// Continue(lresume, [ConstI32(ns), loc']) with loc' = pack_loc(ctx, ovr).
-/// Runs the pack Build via anf.run_to so its fresh_var allocations thread out.
-fn jump_state(
-  e: Emitter2,
-  ctx: SmCtx,
-  ns: Int,
-  overrides: Dict(Int, ir.Value),
-) -> #(ir.Expr, Emitter2) {
-  anf.run_to(pack_loc(ctx, overrides), e, fn(_e, loc2) {
-    ir.Continue(ctx.lresume, [ir.ConstI32(ns), loc2])
-  })
-}
-
-/// Like `jump_state` but packs loc via `pack_loc_cps`, so hoisted-local slots
-/// read the CURRENT `state.get_slot_var` (picking up reassignments made by the
-/// preceding emit_stmts) instead of copy-forwarding from arm-entry `loc_v`.
+/// Continue(lresume, [ConstI32(ns), loc']) with loc' packed via
+/// `pack_loc_cps`, so hoisted-local slots read the CURRENT
+/// `state.get_slot_var` (picking up reassignments made by the preceding
+/// emit_stmts) instead of copy-forwarding from arm-entry `loc_v`.
 fn jump_state_leaf(
   e: Emitter2,
   ctx: SmCtx,

@@ -22,8 +22,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacySlot,
-  type LegacyStatics, type ObjectKey, type RegExpFlag, type RegExpNative, Agent,
-  ArrayObj, DataProperty, Index, JInt, JsStore, KHandle, KNative, KNull, KUndef,
+  type LegacyStatics, type ObjectKey, type RegExpFlag, type RegExpNative,
+  ArrayObj, DataProperty, Index, JInt, KHandle, KNative, KNull, KUndef,
   LegacyInput, LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen1,
   LegacyParen2, LegacyParen3, LegacyParen4, LegacyParen5, LegacyParen6,
   LegacyParen7, LegacyParen8, LegacyParen9, LegacyRightContext, LegacyStatics,
@@ -885,10 +885,6 @@ type ExecMode {
 }
 
 /// §22.2.7.2 RegExpBuiltinExec(R, S). arc `try_builtin_exec`.
-fn builtin_exec(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
-  builtin_exec_mode(st, h, s, MatchArray)
-}
-
 fn builtin_exec_mode(
   st: Agent,
   h: Handle,
@@ -1119,26 +1115,19 @@ fn alloc_array_with_props(
   values: List(JsVal),
   entries: List(#(String, JsVal)),
 ) -> #(Handle, Agent) {
-  let js = st.store
-  let #(props, seq) =
-    list.fold(entries, #(dict.new(), js.prop_seq), fn(acc, kv) {
-      let #(props, seq) = acc
-      let #(k, v) = kv
-      #(dict.insert(props, Named(k), DataProperty(v, True, True, True, seq)), {
-        seq + 1
-      })
+  let array_proto = st.realm.array.prototype
+  use seq <- rt_store.t_cell_new_with(st, list.length(entries))
+  let props =
+    list.index_map(entries, fn(kv, i) {
+      #(Named(kv.0), DataProperty(kv.1, True, True, True, seq + i))
     })
-  let st = Agent(..st, store: JsStore(..js, prop_seq: seq))
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind: ArrayObj(list.length(values)),
-      proto: Some(st.realm.array.prototype),
-      props:,
-      symbol_props: [],
-      elements: elements.from_list(values),
-      extensible: True,
-    ),
+  SObject(
+    kind: ArrayObj(list.length(values)),
+    proto: Some(array_proto),
+    props: dict.from_list(props),
+    symbol_props: [],
+    elements: elements.from_list(values),
+    extensible: True,
   )
 }
 
@@ -1152,7 +1141,7 @@ fn regexp_exec(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         SObject(kind: RegExpObj(..), ..) -> {
           let #(s, st) =
             rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-          builtin_exec(st, h, s)
+          builtin_exec_mode(st, h, s, MatchArray)
         }
         _ -> not_regexp(st, "exec")
       }

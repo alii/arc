@@ -22,9 +22,8 @@
 %% from_code_point_loop) — so a bad byte reaching here means the boundary that
 %% produced the string is broken. Every walker therefore has NO per-byte
 %% fallback clause and crashes with function_clause on one, at the string it
-%% was handed, instead of quietly counting it as a codepoint (cp_length,
-%% cp_off, cp_explode used to) or reporting end-of-string (char_at_skip did) —
-%% three answers to the same question, none of them a bug report.
+%% was handed, instead of quietly counting it as a codepoint or reporting
+%% end-of-string.
 %%
 %% TODO(Deviation): still not fully spec-correct — JS indexes by UTF-16
 %% code unit, so astral-plane chars (U+10000+) should count as 2 indices.
@@ -44,9 +43,9 @@ string_char_at(Bin, Idx) ->
         none -> none
     end.
 
-%% Same walk as string_char_at, but returns the codepoint as an integer —
-%% for charCodeAt / codePointAt, where building even a one-char binary per
-%% call would be wasted allocation. Running out of string is `none` (an
+%% The codepoint at index Idx as an integer (string_char_at wraps it) — for
+%% charCodeAt / codePointAt, where building even a one-char binary per call
+%% would be wasted allocation. Running out of string is `none` (an
 %% out-of-range index).
 string_codepoint_at(Bin, Idx) when Idx >= 0 ->
     Off = cp_off(Bin, Idx, 0),
