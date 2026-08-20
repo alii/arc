@@ -24,16 +24,16 @@ import arc/bytecode/opcode.{
   DefinePrivateField, DefinePrivateMethod, DeleteElem, DeleteField,
   DeleteGlobalVar, Dup, ForInNext, ForInStart, GetAsyncIterator, GetBoxed,
   GetElem, GetElem2, GetEvalVar, GetField, GetField2, GetGlobal, GetIterator,
-  GetLocal, GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf,
-  GetSuperValue, GetSuperValue2, IncLocal, InitGlobalLex, InitialYield,
-  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
-  IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  MakeClosure, MakeMethod, NewObject, NewPrivateName, NewRegExp, ObjectRestCopy,
-  ObjectSpread, Pc, Pop, PrivateInDyn, PushConst, PushTry, PutBoxed,
-  PutBoxedCheckInit, PutElem, PutEvalVar, PutField, PutGlobal, PutLocal,
-  PutLocalCheckInit, PutPrivateFieldDyn, PutSuperValue, Return, Rot3, SetLine,
-  SetProto, SetupDerivedClass, Swap, TypeOf, TypeofEvalVar, TypeofGlobal,
-  UnaryOp, Unrot4, Yield, YieldStar,
+  GetLocal, GetLocalField, GetLocalField2, GetPrivateFieldDyn,
+  GetPrivateFieldDyn2, GetPrototypeOf, GetSuperValue, GetSuperValue2, IncLocal,
+  InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
+  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
+  JumpIfFalse, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod, NewObject,
+  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PrivateInDyn,
+  PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem, PutEvalVar, PutField,
+  PutFieldPop, PutGlobal, PutLocal, PutLocalCheckInit, PutPrivateFieldDyn,
+  PutSuperValue, Return, Rot3, SetLine, SetProto, SetupDerivedClass, Swap,
+  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/internal/tree_array
 import arc/internal/tuple_array.{type TupleArray}
@@ -1213,6 +1213,70 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
+    PutFieldPop(key.Named(_) as k) ->
+      case stack {
+        [val, recv, ..rest] -> {
+          let store = ffi.put_field(agent.store, recv, k, val)
+          case ffi.is(store, ffi.Miss) {
+            True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+            False ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                rest,
+                locals,
+                Agent(..agent, store:),
+                code,
+                constants,
+                line,
+              )
+          }
+        }
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
+    // `local.x`: a TDZ local is not an object, so it misses like any other
+    // non-plain read and the step handler throws.
+    GetLocalField(index, key.Named(_) as k) -> {
+      let v = ffi.get_field(agent, tuple_array.element(index + 1, locals), k)
+      case ffi.is(v, ffi.Miss) {
+        True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+        False ->
+          fast_loop(
+            state,
+            drive,
+            pc + 1,
+            [v, ..stack],
+            locals,
+            agent,
+            code,
+            constants,
+            line,
+          )
+      }
+    }
+
+    GetLocalField2(index, key.Named(_) as k) -> {
+      let recv = tuple_array.element(index + 1, locals)
+      let v = ffi.get_field(agent, recv, k)
+      case ffi.is(v, ffi.Miss) {
+        True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+        False ->
+          fast_loop(
+            state,
+            drive,
+            pc + 1,
+            [v, recv, ..stack],
+            locals,
+            agent,
+            code,
+            constants,
+            line,
+          )
+      }
+    }
+
     // -- Global identifiers ---------------------------------------------------
     // An initialised lexical global, or a plain data property along the
     // global object's chain. TDZ, accessors, a proxy hop and an
@@ -1422,7 +1486,22 @@ fn fast_loop(
                     line,
                   )
                 }
-                _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+                // A generator or protocol step needs the State; hand it the
+                // record already taken apart instead of re-dispatching.
+                fast -> {
+                  let state =
+                    State(
+                      ..state,
+                      pc:,
+                      stack:,
+                      locals:,
+                      agent: call.set_line(agent, line),
+                    )
+                  after_step(
+                    iterator_next_slow(state, drive, rec, rest, fast),
+                    drive,
+                  )
+                }
               }
           }
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
@@ -3004,61 +3083,46 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "GetField2")
       }
 
+    GetLocalField(index, k) -> {
+      let receiver = tuple_array.get_unchecked(index, state.locals)
+      case is_tdz(receiver) {
+        True -> tdz_reference_error(state)
+        False -> {
+          use #(val, state) <- result.map(get_field(state, receiver, k))
+          State(..state, stack: [val, ..state.stack], pc: state.pc + 1)
+        }
+      }
+    }
+
+    GetLocalField2(index, k) -> {
+      let receiver = tuple_array.get_unchecked(index, state.locals)
+      case is_tdz(receiver) {
+        True -> tdz_reference_error(state)
+        False -> {
+          use #(val, state) <- result.map(get_field(state, receiver, k))
+          State(
+            ..state,
+            stack: [val, receiver, ..state.stack],
+            pc: state.pc + 1,
+          )
+        }
+      }
+    }
+
     // Consumes [value, obj] and pushes value back (assignment is an
     // expression).
     PutField(k) ->
       case state.stack {
         [value, receiver, ..rest] ->
-          case classify(receiver) {
-            KHandle(_) -> {
-              use #(ok, state) <- result.try(rt4(
-                state,
-                rt_obj.t_set_prop,
-                receiver,
-                okey(k),
-                value,
-              ))
-              // §13.15.2 PutValue step 6.b.iv: a failed [[Set]] throws
-              // TypeError in strict mode; sloppy mode ignores the failure.
-              case ok, state.func.is_strict {
-                False, True ->
-                  state.throw_type_error(
-                    state,
-                    "Cannot assign to read only property '"
-                      <> key.key_display_string(k)
-                      <> "' of object",
-                  )
-                _, _ ->
-                  Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
-              }
-            }
-            // §6.2.5.6 PutValue step 5.a: ToObject(undefined|null) throws in
-            // BOTH modes.
-            KUndef | KNull ->
-              state.throw_type_error(
-                state,
-                "Cannot set properties of "
-                  <> rt_val.nullish_label(receiver)
-                  <> " (setting '"
-                  <> key.key_display_string(k)
-                  <> "')",
-              )
-            // Primitive base: §13.15.2 PutValue 6.b.iv, strict throws
-            // TypeError, sloppy silently ignores.
-            _ ->
-              case state.func.is_strict {
-                True ->
-                  state.throw_type_error(
-                    state,
-                    "Cannot create property '"
-                      <> key.key_display_string(k)
-                      <> "' on primitive value",
-                  )
-                False ->
-                  Ok(State(..state, stack: [value, ..rest], pc: state.pc + 1))
-              }
-          }
+          put_field_step(state, k, value, receiver, [value, ..rest])
         _ -> underflow(state, "PutField")
+      }
+
+    PutFieldPop(k) ->
+      case state.stack {
+        [value, receiver, ..rest] ->
+          put_field_step(state, k, value, receiver, rest)
+        _ -> underflow(state, "PutFieldPop")
       }
 
     // §15.7.14 step 5/6: mint a fresh PrivateName for this class evaluation.
@@ -4113,28 +4177,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     ),
                   )
                 }
-                fast ->
-                  case iter_step(state, drive, rec, fast) {
-                    Ok(#(#(done, val), state)) -> {
-                      let slot = case done {
-                        True -> mk_undefined()
-                        False -> rec
-                      }
-                      Ok(
-                        State(
-                          ..state,
-                          stack: [mk_bool(done), val, slot, ..rest],
-                          pc: state.pc + 1,
-                        ),
-                      )
-                    }
-                    Error(exit) ->
-                      Error(
-                        state.map_exit_state(exit, fn(s) {
-                          State(..s, stack: [mk_undefined(), ..rest])
-                        }),
-                      )
-                  }
+                fast -> iterator_next_slow(state, drive, rec, rest, fast)
               }
             }
           }
@@ -4473,6 +4516,64 @@ fn read_box(state: State, slot: JsVal) -> Option(JsVal) {
 
 fn lookup_eval_env(state: State, name: String) -> Option(JsVal) {
   option.then(state.eval_env, rt_env.eval_env_lookup(state.agent, _, name))
+}
+
+/// PutField / PutFieldPop body: §6.2.5.6 PutValue on a property reference
+/// with a static key, leaving `stack` behind.
+fn put_field_step(
+  state: State,
+  k: key.PropertyKey,
+  value: JsVal,
+  receiver: JsVal,
+  stack: List(JsVal),
+) -> Result(State, StepExit) {
+  case classify(receiver) {
+    KHandle(_) -> {
+      use #(ok, state) <- result.try(rt4(
+        state,
+        rt_obj.t_set_prop,
+        receiver,
+        okey(k),
+        value,
+      ))
+      // §13.15.2 PutValue step 6.b.iv: a failed [[Set]] throws
+      // TypeError in strict mode; sloppy mode ignores the failure.
+      case ok, state.func.is_strict {
+        False, True ->
+          state.throw_type_error(
+            state,
+            "Cannot assign to read only property '"
+              <> key.key_display_string(k)
+              <> "' of object",
+          )
+        _, _ -> Ok(State(..state, stack:, pc: state.pc + 1))
+      }
+    }
+    // §6.2.5.6 PutValue step 5.a: ToObject(undefined|null) throws in
+    // BOTH modes.
+    KUndef | KNull ->
+      state.throw_type_error(
+        state,
+        "Cannot set properties of "
+          <> rt_val.nullish_label(receiver)
+          <> " (setting '"
+          <> key.key_display_string(k)
+          <> "')",
+      )
+    // Primitive base: §13.15.2 PutValue 6.b.iv, strict throws
+    // TypeError, sloppy silently ignores.
+    _ ->
+      case state.func.is_strict {
+        True ->
+          state.throw_type_error(
+            state,
+            "Cannot create property '"
+              <> key.key_display_string(k)
+              <> "' on primitive value",
+          )
+        False -> Ok(State(..state, stack:, pc: state.pc + 1))
+      }
+  }
 }
 
 /// GetField / GetField2 body: RequireObjectCoercible with the property name
@@ -4948,6 +5049,38 @@ fn fill_holes(
               ])
           }
       }
+  }
+}
+
+/// IteratorNext past the array fast path: step the generator or run the
+/// protocol call, then push `[done, value, slot]` over `rest`.
+fn iterator_next_slow(
+  state: State,
+  drive: Drive,
+  rec: JsVal,
+  rest: List(JsVal),
+  fast: FastIter,
+) -> Result(State, StepExit) {
+  case iter_step(state, drive, rec, fast) {
+    Ok(#(#(done, val), state)) -> {
+      let slot = case done {
+        True -> mk_undefined()
+        False -> rec
+      }
+      Ok(
+        State(
+          ..state,
+          stack: [mk_bool(done), val, slot, ..rest],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+    Error(exit) ->
+      Error(
+        state.map_exit_state(exit, fn(s) {
+          State(..s, stack: [mk_undefined(), ..rest])
+        }),
+      )
   }
 }
 

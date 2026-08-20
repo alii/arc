@@ -402,15 +402,25 @@ pub type Op {
   IncLocal(index: Int)
   /// Statement-position postfix `i--;` — same as IncLocal with Sub.
   DecLocal(index: Int)
-  /// Fused loop-condition compare-and-branch:
+  /// Fused compare-and-branch:
   /// GetLocal(left); GetLocal(right); BinOp(kind); JumpIfFalse(target).
-  /// Only emitted for the pure relational kinds (Lt/LtEq/Gt/GtEq) — hence the
+  /// Only emitted for the relational and equality kinds — hence the
   /// `PureBinOp` field: an `Add`/`In`/`InstanceOf` here would be a compile
-  /// error, not a runtime surprise for `binop_direct`.
+  /// error, not a runtime surprise for `binop_direct`. Reads the locals
+  /// directly, so both the fast kernel and the step handler do the TDZ
+  /// check GetLocal would have done.
   CmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, target: Pc)
   /// Same with a constant right operand:
   /// GetLocal(left); PushConst(const_index); BinOp(kind); JumpIfFalse(target).
   CmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, target: Pc)
+  /// `local.x` (incl. `this.x`): GetLocal(index); GetField(key).
+  /// [..] → [val, ..]. TDZ check on the local, then the full GetField.
+  GetLocalField(index: Int, key: PropertyKey)
+  /// `local.m(` — GetLocal(index); GetField2(key). [..] → [val, obj, ..].
+  GetLocalField2(index: Int, key: PropertyKey)
+  /// Statement-position `o.x = v;`: PutField(key); Pop.
+  /// [val, obj, ..] → [..].
+  PutFieldPop(key: PropertyKey)
 
   // -- Iteration --
   ForInStart

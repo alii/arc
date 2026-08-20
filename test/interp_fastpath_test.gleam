@@ -274,6 +274,59 @@ pub fn cmp_local_jump_test() {
     == "ReferenceError"
 }
 
+/// Equality compare-and-branch on locals fuses too: strict and loose kinds,
+/// object identity, ToPrimitive on a loose object/primitive pair, and the
+/// TDZ ReferenceError on either operand.
+pub fn cmp_local_equality_jump_test() {
+  assert run_string(
+      "(function () {
+         var r = [];
+         var x = 1; if (x === 1) r.push('a'); if (x !== 1) r.push('never'); if (x === '1') r.push('never');
+         if (x == '1') r.push('b'); if (x != true) r.push('never');
+         var n = null; while (n !== null) r.push('never'); var u; if (u == n) r.push('c'); if (u === n) r.push('never');
+         var o = {}, p = o, q = {}; if (o === p) r.push('d'); if (o == q) r.push('never'); if (o != p) r.push('never');
+         var calls = 0; var v = { valueOf() { calls++; return 7 } }; var seven = 7;
+         if (v == seven) r.push('e'); if (seven != v) r.push('never'); if (v === seven) r.push('never');
+         var nan = NaN; if (nan === nan) r.push('never'); if (nan != nan) r.push('f');
+         var z = 0, mz = -0; if (z === mz) r.push('g');
+         var big = 2n, two = 2; if (big == two) r.push('h'); if (big === two) r.push('never');
+         var t; try { if (w === 1) {} let w = 0; t = 'nothrow' } catch (e) { t = e.constructor.name }
+         var t2; try { if (x != w2) {} let w2 = 0; t2 = 'nothrow' } catch (e) { t2 = e.constructor.name }
+         return r.join('') + calls + t + t2
+       })()",
+    )
+    == "abcdefgh2ReferenceErrorReferenceError"
+}
+
+/// `local.x`, `local.m(`, and statement `o.x = v;` fuse to GetLocalField /
+/// GetLocalField2 / PutFieldPop: getters, setters, proxies, primitive and
+/// nullish receivers, frozen targets, the derived-constructor `this` TDZ and
+/// the eval completion value all behave as the unfused pair.
+pub fn local_field_superinstruction_test() {
+  assert run_string(
+      "(function () {
+         var r = [];
+         var o = { a: 1, get g() { return this.a + 1 }, set s(v) { r.push('set' + v) }, m() { return this.a * 10 } };
+         r.push(o.a, o.g, o.m(), o.missing === undefined);
+         var p = new Proxy({}, { get(t, k) { return 'trap:' + String(k) }, set(t, k, v) { r.push('pset' + v); return true } });
+         r.push(p.q); p.z = 3; o.s = 4;
+         var str = 'abc'; r.push(str.length, str.toUpperCase());
+         var n = null; try { n.x } catch (e) { r.push(e.constructor.name) }
+         var u; try { u.m() } catch (e) { r.push(e.constructor.name) }
+         try { n.x = 1; } catch (e) { r.push(e.constructor.name) }
+         'use strict'; var f = Object.freeze({ k: 1 });
+         try { (function () { 'use strict'; f.k = 2; })() } catch (e) { r.push('strict' + e.constructor.name) }
+         f.k = 3; r.push(f.k);
+         class B {} class D extends B { constructor() { try { this.x; } catch (e) { r.push('tdz' + e.constructor.name) } super(); this.y = 5; r.push(this.y) } }
+         new D();
+         r.push(eval('var q = {}; q.w = 7;'));
+         function* gen(t) { t.v = yield 1; r.push(t.v) } var it = gen({}); it.next(); it.next(9);
+         return r.join()
+       })()",
+    )
+    == "1,2,10,true,trap:q,pset3,set4,3,ABC,TypeError,TypeError,TypeError,strictTypeError,1,tdzReferenceError,5,7,9"
+}
+
 /// Prefix `++i`/`--i` on a plain local fuse to IncLocal/DecLocal (plus a
 /// read when the value is used): same coercions, same TDZ error.
 pub fn prefix_inc_dec_local_test() {

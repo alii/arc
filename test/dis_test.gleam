@@ -29,3 +29,18 @@ pub fn disassemble_string_constant_test() {
   let text = dis_js("let greeting = \"hi\"")
   assert string.contains(text, "; \"hi\"")
 }
+
+/// The resolver's superinstructions show up under their own names: a local
+/// compared against a constant, `this.x`, `o.m(` on a local, and a
+/// statement-position field store.
+pub fn disassemble_fused_ops_test() {
+  let text =
+    dis_js(
+      "function f(o) { if (o === 1) return; while (o != null) o = o.next; this.count = o.size; o.run(1) }",
+    )
+  assert string.contains(text, "CmpLocalConstJump(4, 0, Equality(StrictEqOp)")
+  assert string.contains(text, "GetLocalField(4, Named(\"next\"))")
+  assert string.contains(text, "GetLocalField(4, Named(\"size\"))")
+  assert string.contains(text, "PutFieldPop(Named(\"count\"))")
+  assert string.contains(text, "GetLocalField2(4, Named(\"run\"))")
+}

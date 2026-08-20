@@ -65,8 +65,10 @@ pub fn resolve(
 ///      PushConst 1; BinOp Add|Sub; Dup; PutLocal i) → IncLocal/DecLocal;
 ///      GetLocal i (or just IncLocal/DecLocal when a Pop follows).
 ///   3b. PushConst; PutLocal i; PutLocal i → PutLocal i (dead seed).
-///   4. Loop-condition compare-and-branch (GetLocal; GetLocal|PushConst;
-///      BinOp Lt|LtEq|Gt|GtEq; JumpIfFalse) → CmpLocal*Jump.
+///   4. Compare-and-branch (GetLocal; GetLocal|PushConst;
+///      BinOp Lt|LtEq|Gt|GtEq|==|!=|===|!==; JumpIfFalse) → CmpLocal*Jump.
+///   5. GetLocal i; GetField k → GetLocalField, GetLocal i; GetField2 k →
+///      GetLocalField2, PutField k; Pop → PutFieldPop.
 fn peephole(
   code: List(IrOp),
   consts: tuple_array.TupleArray(JsVal),
@@ -234,21 +236,42 @@ fn peephole(
           )
       }
 
+    // -- Pattern 5: field access superinstructions -----------------------
+    [IrFinal(opcode.GetLocal(i)), IrGetField(name), ..rest] ->
+      peephole(rest, consts, [
+        IrFinal(opcode.GetLocalField(i, key.canonical_key(name))),
+        ..acc
+      ])
+    [IrFinal(opcode.GetLocal(i)), IrGetField2(name), ..rest] ->
+      peephole(rest, consts, [
+        IrFinal(opcode.GetLocalField2(i, key.canonical_key(name))),
+        ..acc
+      ])
+    [IrPutField(name), IrFinal(opcode.Pop), ..rest] ->
+      peephole(rest, consts, [
+        IrFinal(opcode.PutFieldPop(key.canonical_key(name))),
+        ..acc
+      ])
+
     [op, ..rest] -> peephole(rest, consts, [op, ..acc])
   }
 }
 
-/// Only the pure relational kinds are fused — their step semantics are
-/// exactly binop_direct / binop_with_to_primitive (no In/InstanceOf heap
-/// access, no Add string-concat split, no loose-eq coercion table). Returns
-/// the narrowed `PureBinOp` the fused opcode carries, so the fusion cannot
-/// smuggle an operator the fused step handler can't run.
+/// Only the relational and equality kinds are fused: their step semantics
+/// are exactly the guarded pure-binop path (no In/InstanceOf heap access, no
+/// Add string-concat split). Returns the narrowed `PureBinOp` the fused
+/// opcode carries, so the fusion cannot smuggle an operator the fused step
+/// handler can't run.
 pub fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
   case kind {
     opcode.Lt -> Some(binop.Compare(binop.LtCmp))
     opcode.LtEq -> Some(binop.Compare(binop.LtEqCmp))
     opcode.Gt -> Some(binop.Compare(binop.GtCmp))
     opcode.GtEq -> Some(binop.Compare(binop.GtEqCmp))
+    opcode.StrictEq -> Some(binop.Equality(binop.StrictEqOp))
+    opcode.StrictNotEq -> Some(binop.Equality(binop.StrictNotEqOp))
+    opcode.Eq -> Some(binop.Equality(binop.EqOp))
+    opcode.NotEq -> Some(binop.Equality(binop.NotEqOp))
     _ -> None
   }
 }
