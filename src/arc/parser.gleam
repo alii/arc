@@ -427,6 +427,7 @@ fn with_allow_in(
   then: fn(P) -> Result(#(P, a), ParseError),
 ) -> Result(#(P, a), ParseError) {
   let saved = p.ctx.allow_in
+  use <- bool.lazy_guard(saved == value, fn() { then(p) })
   use #(p, parsed) <- result.map(then(
     P(..p, ctx: Ctx(..p.ctx, allow_in: value)),
   ))
@@ -4883,7 +4884,11 @@ fn parse_assignment_rhs(p: P) -> Result(#(P, ast.Expression), ParseError) {
         }
         // Not an assignment — clear the flag so it doesn't leak
         // from a previous sibling expression (e.g. [a = 1, 0])
-        None -> Ok(#(P(..p2, last_expr_is_assignment: False), lhs_expr))
+        None ->
+          case p2.last_expr_is_assignment {
+            True -> Ok(#(P(..p2, last_expr_is_assignment: False), lhs_expr))
+            False -> Ok(#(p2, lhs_expr))
+          }
       }
   }
 }
@@ -4972,7 +4977,11 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
     Async -> {
       let same_line = token_line_at(p, 1) == token_line_at(p, 0)
       case peek_at(p, 1) {
-        LeftParen if same_line -> try_paren_arrow(p, advance(advance(p)), True)
+        LeftParen if same_line ->
+          case paren_arrow_ahead(look_skip(look_skip(look_from(p)))) {
+            True -> try_paren_arrow(p, advance(advance(p)), True)
+            False -> Error(NotAnArrow)
+          }
         // `async => …`: a plain arrow whose one parameter is named async.
         Arrow -> try_single_ident_arrow(p, p, False)
         next if same_line ->
@@ -4988,10 +4997,57 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
         Arrow -> try_single_ident_arrow(p, p, False)
         _ -> Error(NotAnArrow)
       }
-    // (a, b) => is the hardest case — vs (a, b) as expression.
-    // We speculatively parse and backtrack if it's not an arrow.
-    LeftParen -> try_paren_arrow(p, advance(p), False)
+    // (a, b) => is the hardest case — vs (a, b) as expression. A cheap
+    // token scan settles most heads; the rest are parsed speculatively
+    // and backtracked if not an arrow.
+    LeftParen ->
+      case paren_arrow_ahead(look_skip(look_from(p))) {
+        True -> try_paren_arrow(p, advance(p), False)
+        False -> Error(NotAnArrow)
+      }
     _ -> Error(NotAnArrow)
+  }
+}
+
+/// Could the tokens after a `(` (where `look` sits) be an arrow head
+/// `(...) =>`? `False` is definite: `try_paren_arrow` would backtrack, so
+/// the speculative parse is skipped. `True` means "possibly" — decided by
+/// balancing brackets up to the matching `)` and testing for `=>`
+/// (QuickJS's js_parse_skip_parens_token), giving up (as "possibly") at
+/// anything only the real parse can classify (`/`, a template
+/// substitution, a lexer error) or after a bounded number of tokens, so
+/// nested `(a = (b = (c = 0)))` is decided per level instead of re-parsed
+/// exponentially.
+fn paren_arrow_ahead(look: Look) -> Bool {
+  let #(first, look) = look_next(look)
+  case first.kind {
+    RightParen | DotDotDot -> True
+    LeftBracket | LeftBrace -> balanced_arrow_ahead(look, 2, 64)
+    kind ->
+      is_binding_ident_token(kind)
+      && {
+        let #(second, look) = look_next(look)
+        case second.kind {
+          RightParen -> { look_next(look).0 }.kind == Arrow
+          Comma | Equal -> balanced_arrow_ahead(look, 1, 64)
+          _ -> False
+        }
+      }
+  }
+}
+
+fn balanced_arrow_ahead(look: Look, depth: Int, budget: Int) -> Bool {
+  use <- bool.guard(budget <= 0, True)
+  let #(token, look) = look_next(look)
+  case token.kind {
+    LeftParen | LeftBracket | LeftBrace ->
+      balanced_arrow_ahead(look, depth + 1, budget - 1)
+    RightParen if depth == 1 -> { look_next(look).0 }.kind == Arrow
+    RightBracket | RightBrace if depth == 1 -> False
+    RightParen | RightBracket | RightBrace ->
+      balanced_arrow_ahead(look, depth - 1, budget - 1)
+    Slash | SlashEqual | TemplateHead | Illegal | LexFailure(_) | Eof -> True
+    _ -> balanced_arrow_ahead(look, depth, budget - 1)
   }
 }
 
@@ -6272,12 +6328,7 @@ fn parse_argument(p: P) -> Result(#(P, ast.Expression), ParseError) {
 }
 
 fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
-  // Default to no name — only the Identifier branch sets Some(name).
-  let p = P(..p, last_expr_name: None)
   case peek(p) {
-    // A hard lexer error, materialised as a zero-length LexFailure token
-    // (lexing is on demand — see ensure_current): report ITS message.
-    Illegal | LexFailure(_) -> Error(illegal_token_error(p))
     Identifier -> {
       let val = peek_value(p)
       // §13.1.1 IdentifierReference early errors: escaped always-reserved
@@ -6287,21 +6338,49 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       // static blocks / field initializers. Property names and member
       // accesses use other paths, so they still allow escaped reserved words.
       use Nil <- result.try(check_identifier_reference(p, val))
-      use <- bool.guard(
-        string.starts_with(val, "#") && peek_at(p, 1) != In,
-        Error(PrivateNameNotInBrandCheck(pos_of(p))),
-      )
-      let p = note_private_ref(p, val)
-      // V8 VariableProxy / Scope::AddUnresolved — record the bare ref
-      // against the current scope for later resolution in `finalize`.
       // A bare private name `#x` only reaches this arm in the `#x in obj`
       // brand-check form; `obj.#x` is recorded in finish_dot_member.
-      let p = P(..p, sb: scope.sb_ref(p.sb, val))
-      Ok(#(
-        P(..advance(p), last_expr_assignable: True, last_expr_name: Some(val)),
-        ast.Identifier(name: val, span: span_of(p)),
-      ))
+      case val {
+        "#" <> _ ->
+          case peek_at(p, 1) {
+            In -> identifier_reference(note_private_ref(p, val), val)
+            _ -> Error(PrivateNameNotInBrandCheck(pos_of(p)))
+          }
+        _ -> identifier_reference(p, val)
+      }
     }
+    // Default to no name — only the Identifier branch sets Some(name).
+    _ -> parse_primary_non_identifier(P(..p, last_expr_name: None))
+  }
+}
+
+/// Consume the IdentifierReference `name` at the current token, recording
+/// the bare ref against the current scope (V8 VariableProxy /
+/// Scope::AddUnresolved) for later resolution in `finalize`.
+fn identifier_reference(
+  p: P,
+  name: String,
+) -> Result(#(P, ast.Expression), ParseError) {
+  Ok(#(
+    advance(
+      P(
+        ..p,
+        sb: scope.sb_ref(p.sb, name),
+        last_expr_assignable: True,
+        last_expr_name: Some(name),
+      ),
+    ),
+    ast.Identifier(name:, span: span_of(p)),
+  ))
+}
+
+fn parse_primary_non_identifier(
+  p: P,
+) -> Result(#(P, ast.Expression), ParseError) {
+  case peek(p) {
+    // A hard lexer error, materialised as a zero-length LexFailure token
+    // (lexing is on demand — see ensure_current): report ITS message.
+    Illegal | LexFailure(_) -> Error(illegal_token_error(p))
     Number -> {
       use <- bool.guard(
         p.ctx.strict && peek_annex_b_legacy(p),
@@ -7981,10 +8060,10 @@ fn peek(p: P) -> TokenKind {
   }
 }
 
-/// The `n`-th upcoming token (0 = the current token). Depths >= 1 are a
-/// bounded, pure lookahead that LEXES ahead on demand without retaining
-/// the result — the ordinary scan never runs ahead of the parse (see
-/// `advance`), so nothing is ever lexed past a construct the parser
+/// The `n`-th upcoming token (0 = the current token). Depths past the
+/// window are a bounded, pure lookahead that LEXES ahead on demand without
+/// retaining the result — the ordinary scan never runs ahead of the parse
+/// (see `advance`), so nothing is ever lexed past a construct the parser
 /// re-scans from source (a regex literal's body, a template span) unless
 /// a grammar rule explicitly looks there. The grammar's deepest lookahead
 /// is 3 (`export async function *` name extraction). At end of input the
@@ -7994,9 +8073,10 @@ fn upcoming(p: P, n: Int) -> Token {
 }
 
 fn peek_at(p: P, n: Int) -> TokenKind {
-  case n {
-    0 -> peek(p)
-    _ -> {
+  case n, p.tokens {
+    0, _ -> peek(p)
+    1, [_, lexer.Token(kind: k, ..), ..] -> k
+    _, _ -> {
       let lexer.Token(kind: k, ..) = upcoming(p, n)
       k
     }
@@ -8215,27 +8295,72 @@ fn line_of(p: P) -> Int {
   }
 }
 
-/// Consume the current token and lex the next one (when none is buffered
-/// already — after a template continuation the tail span is).
+/// Consume the current token and top the window back up (see
+/// `may_rescan` for how far).
 ///
-/// NOTHING is ever lexed beyond the token the parse is at, except through
-/// an explicit bounded lookahead (`upcoming`), which retains nothing. That
-/// is the invariant the on-demand design rests on (QuickJS / V8 keep at
-/// most one pending token for the same reason): the ordinary token scan
-/// never touches source the parser re-scans and jumps over — a regex
-/// literal's body, a template span after a substitution's `}` — so no
-/// garbage token, however expensive its scan would be, is ever produced.
+/// Nothing is ever lexed beyond a token the parser may re-scan from
+/// source — a `/` or `/=` that turns out to open a regex literal, the `}`
+/// that closes a template substitution — except through an explicit
+/// bounded lookahead (`upcoming`), which retains nothing. That is the
+/// invariant the on-demand design rests on (QuickJS / V8 keep at most one
+/// pending token for the same reason): the ordinary token scan never
+/// touches source the parser re-scans and jumps over, so no garbage
+/// token, however expensive its scan would be, is ever produced.
 fn advance(p: P) -> P {
   case p.tokens {
     [lexer.Token(line: line, pos: pos, raw_len: rl, ..), ..rest] ->
       case rest {
         [] -> {
           let #(token, scan) = lexer.scan_next(p.scan)
-          P(..p, tokens: [token], scan:, prev_line: line, prev_end: pos + rl)
+          case may_rescan(token.kind) {
+            True ->
+              P(
+                ..p,
+                tokens: [token],
+                scan:,
+                prev_line: line,
+                prev_end: pos + rl,
+              )
+            False -> {
+              let #(next, scan) = lexer.scan_next(scan)
+              P(
+                ..p,
+                tokens: [token, next],
+                scan:,
+                prev_line: line,
+                prev_end: pos + rl,
+              )
+            }
+          }
         }
+        [token] ->
+          case may_rescan(token.kind) {
+            True -> P(..p, tokens: rest, prev_line: line, prev_end: pos + rl)
+            False -> {
+              let #(next, scan) = lexer.scan_next(p.scan)
+              P(
+                ..p,
+                tokens: [token, next],
+                scan:,
+                prev_line: line,
+                prev_end: pos + rl,
+              )
+            }
+          }
         _ -> P(..p, tokens: rest, prev_line: line, prev_end: pos + rl)
       }
     [] -> p
+  }
+}
+
+/// The window holds the current token plus ONE token of lookahead (the
+/// grammar's depth-1 peeks then cost nothing), but the lookahead is never
+/// lexed past a `/`, `/=` or `}`: what follows those is only known once
+/// the parser has classified them, and a re-scan discards the window.
+fn may_rescan(kind: TokenKind) -> Bool {
+  case kind {
+    Slash | SlashEqual | RightBrace | Eof | LexFailure(_) -> True
+    _ -> False
   }
 }
 
