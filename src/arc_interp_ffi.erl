@@ -31,13 +31,21 @@
          guard_unit1/2, guard_unit2/3, guard_unit3/4, guard_unit4/5,
          guard_unit5/6, guard_unit6/7]).
 -export([is_miss/1, is_tdz/1, is_undefined/1,
-         add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1,
-         lt/2, le/2, gt/2, ge/2, strict_eq/2, eq/2,
-         truthy/1, nullish/1, typeof/1, typeof/2,
-         get_field/3, get_elem/3, put_field/4, put_elem/4]).
+         add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
+         lt/2, le/2, gt/2, ge/2, strict_eq/2, strict_neq/2, eq/2, neq/2,
+         truthy/1, lnot/1, nullish/1, typeof/1, typeof/2,
+         box_get/2, cell_of/2, get_global/3, put_global/6, instance_of/4,
+         get_field/3, get_elem/3, get_elem2/3, put_field/4, put_elem/4,
+         define_field/4]).
 -export([setup_locals_tuple/6, setup_locals_seeded/10]).
 
 -include("arc_rt_layout.hrl").
+%% arc/rt/types.JsSlot: SBox(value) (a captured binding's cell), and
+%% ObjKind: ArgumentsObj(length, mapped).
+-define(SBOX_TAG, s_box).
+-define(ARGUMENTSOBJ_TAG, arguments_obj).
+%% The Named "length" PropertyKey term.
+-define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
 
 %% ── 1. raise adapter ─────────────────────────────────────────────────────
 
@@ -293,6 +301,15 @@ plus(N) when is_number(N) -> N;
 plus(A) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> A;
 plus(_) -> miss.
 
+%% step(A, Delta) -> JsVal | miss
+%% `ToNumber(A) + Delta` for a Number A and a small integer Delta (the
+%% IncLocal / DecLocal `i++` kernel): add(plus(A), Delta) without building
+%% the Delta term. A finite float plus a small integer cannot overflow.
+step(A, D) when is_integer(A) -> norm(A + D);
+step(A, D) when is_float(A) -> A + D;
+step(A, _) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> A;
+step(_, _) -> miss.
+
 %% lt/le/gt/ge(A, B) -> boolean() | miss
 %% §7.2.13 IsLessThan for Number×Number (mixed int/float compare
 %% numerically on the BEAM), String×String (byte order, matching rt/ops
@@ -351,6 +368,9 @@ strict_eq(_, js_nan) -> false;
 strict_eq(A, B) when is_number(A), is_number(B) -> A == B;
 strict_eq(A, B) -> A =:= B.
 
+%% strict_neq(A, B) -> boolean()
+strict_neq(A, B) -> not strict_eq(A, B).
+
 %% eq(A, B) -> boolean() | miss
 %% §7.2.14 IsLooselyEqual for the pairs that never run user code: null /
 %% undefined against anything (steps 2-3, 14), same-type primitives, object
@@ -379,6 +399,13 @@ eq(A, B) when B =:= js_inf; B =:= js_neg_inf ->
     case is_number(A) of true -> false; false -> miss end;
 eq(_, _) -> miss.
 
+%% neq(A, B) -> boolean() | miss
+neq(A, B) ->
+    case eq(A, B) of
+        miss -> miss;
+        R -> not R
+    end.
+
 nul(undefined) -> true;
 nul(null) -> true;
 nul(_) -> false.
@@ -402,6 +429,10 @@ truthy({js_bigint, _}) -> true;
 truthy({js_sym, _}) -> true;
 truthy({?HANDLE_TAG, _}) -> true;
 truthy(js_tdz) -> false.
+
+%% lnot(V) -> boolean()
+%% `!V`. Total.
+lnot(V) -> not truthy(V).
 
 %% nullish(V) -> boolean()
 %% `V` is null or undefined (the `??` / `?.` / JumpIfNullish test). Total.
@@ -448,59 +479,213 @@ typeof(_Store, V) -> typeof(V).
 kind_tag(Kind) when is_atom(Kind) -> Kind;
 kind_tag(Kind) -> element(1, Kind).
 
-%% get_field(Agent, V, KeyBin) -> JsVal | miss
+%% cell_of(Agent, V) -> JsSlot | miss
+%% The store cell behind an object value (the fast call arms' callee read);
+%% any other value, or a freed id, misses.
+cell_of(Agent, {?HANDLE_TAG, Id}) ->
+    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+        ?STORE_FREE_SLOT -> miss;
+        Slot -> Slot
+    end;
+cell_of(_, _) -> miss.
+
+%% box_get(Agent, Slot) -> JsVal | miss
+%% The value in the SBox cell a captured local holds (GetBoxed). The TDZ
+%% sentinel, a local that is not a box handle, or a dangling handle miss.
+box_get(Agent, {?HANDLE_TAG, Id}) ->
+    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+        {?SBOX_TAG, js_tdz} -> miss;
+        {?SBOX_TAG, V} -> V;
+        _ -> miss
+    end;
+box_get(_, _) -> miss.
+
+%% instance_of(Agent, V, Ctor, HasInstanceSym) -> boolean() | miss
+%% §13.10.2 InstanceofOperator when GetMethod(Ctor, @@hasInstance) provably
+%% resolves to the intrinsic %Function.prototype%[@@hasInstance] or to
+%% undefined: Ctor is a plain (bytecode / compiled / native, so callable and
+%% not bound) function cell and no hop of its prototype chain below the
+%% realm's Function.prototype holds an own HasInstanceSym (that intrinsic is
+%% {W:false, C:false}, so reaching Function.prototype settles it). Both
+%% cases run §7.3.22 OrdinaryHasInstance, inlined: a non-object V is false
+%% before "prototype" is read; Ctor's own data "prototype" must hold an
+%% object; then V's chain is compared to it by identity. A proxy hop, an
+%% accessor or absent "prototype", an own @@hasInstance, any other Ctor, or
+%% more than 64 hops miss.
+instance_of(Agent, V, {?HANDLE_TAG, CId}, Sym) ->
+    Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
+    {?HANDLE_TAG, FP} =
+        element(?PAIR_PROTO,
+                element(?REALM_FUNCTION, element(?AGENT_REALM, Agent))),
+    case array:get(CId, Data) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
+            Kind = kind_tag(element(?SOBJECT_KIND, Slot)),
+            case
+                (Kind =:= ?KBYTECODE_TAG orelse Kind =:= ?KFN_TAG
+                 orelse Kind =:= ?KNATIVE_TAG)
+                andalso ordinary_has_instance(Data, Slot, FP, Sym, 64)
+            of
+                false -> miss;
+                true ->
+                    case V of
+                        {?HANDLE_TAG, VId} ->
+                            case element(?SOBJECT_PROPS, Slot) of
+                                #{{?KEY_NAMED, <<"prototype">>} := Prop}
+                                  when element(1, Prop) =:= ?DATAPROP_TAG ->
+                                    case element(?DATAPROP_VALUE, Prop) of
+                                        {?HANDLE_TAG, PId} ->
+                                            chain_reaches(Data, VId, PId, 64);
+                                        _ -> miss
+                                    end;
+                                _ -> miss
+                            end;
+                        _ -> false
+                    end
+            end;
+        _ -> miss
+    end;
+instance_of(_, _, _, _) -> miss.
+
+%% No own Sym on this cell or any plain hop above it short of FP (or the
+%% end of the chain).
+ordinary_has_instance(_, _, _, _, 0) -> false;
+ordinary_has_instance(Data, Slot, FP, Sym, Fuel) ->
+    (not lists:keymember(Sym, 1, element(?SOBJECT_SYMBOL_PROPS, Slot)))
+        andalso case element(?SOBJECT_PROTO, Slot) of
+                    ?NONE -> true;
+                    {?SOME, {?HANDLE_TAG, FP}} -> true;
+                    {?SOME, {?HANDLE_TAG, P}} -> plain_above(Data, P, FP, Sym, Fuel - 1);
+                    _ -> false
+                end.
+
+plain_above(Data, P, FP, Sym, Fuel) ->
+    case array:get(P, Data) of
+        %% A shape holds string keys only: no own symbols on a shaped hop.
+        {?SSHAPED_TAG, _, ?NONE, _} -> true;
+        {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, FP}}, _} -> true;
+        {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, Q}}, _} ->
+            plain_above(Data, Q, FP, Sym, Fuel - 1);
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
+            case kind_tag(element(?SOBJECT_KIND, Slot)) of
+                ?PROXYOBJ_TAG -> false;
+                _ -> ordinary_has_instance(Data, Slot, FP, Sym, Fuel)
+            end;
+        _ -> false
+    end.
+
+%% §7.3.22 step 7: whether the cell PId is on VId's prototype chain. A Proxy
+%% hop ([[GetPrototypeOf]] is a trap) or fuel exhaustion miss.
+chain_reaches(_, _, _, 0) -> miss;
+chain_reaches(Data, VId, PId, Fuel) ->
+    case array:get(VId, Data) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG;
+                  element(1, Slot) =:= ?SSHAPED_TAG ->
+            case element(1, Slot) =:= ?SOBJECT_TAG
+                 andalso kind_tag(element(?SOBJECT_KIND, Slot)) =:= ?PROXYOBJ_TAG of
+                true -> miss;
+                false ->
+                    %% proto is element 3 of both cell shapes.
+                    case element(?SOBJECT_PROTO, Slot) of
+                        ?NONE -> false;
+                        {?SOME, {?HANDLE_TAG, PId}} -> true;
+                        {?SOME, {?HANDLE_TAG, Next}} ->
+                            chain_reaches(Data, Next, PId, Fuel - 1);
+                        _ -> miss
+                    end
+            end;
+        _ -> miss
+    end.
+
+%% get_field(Agent, V, K) -> JsVal | miss
 %% §10.1.8.1 OrdinaryGet for a Named string key on an object cell, walking
 %% the prototype chain while every hop is an ordinary read: an own slot on
 %% an SShapedObject, or an own DataProperty in an SObject's props map for a
 %% kind whose named keys are not virtual. A string or number primitive
 %% starts the walk at its realm wrapper prototype (String "length" is
-%% answered directly). Accessors, Proxy / module namespace / TypedArray
-%% cells, Array and String object "length", a dangling handle, any other
-%% primitive, or more than 64 hops all miss. Absent on the whole chain is
-%% `undefined`, exactly as OrdinaryGet answers.
-%% KeyBin is a canonical Named key (the compiler emits Index keys for
-%% array-index strings).
-get_field(Agent, {?HANDLE_TAG, Id}, KeyBin) ->
-    cell_field(element(?AGENT_STORE, Agent), Id, KeyBin);
-get_field(_, Bin, <<"length">>) when is_binary(Bin) ->
+%% answered directly, as is an Array cell's). Accessors, Proxy / module
+%% namespace / TypedArray cells, a String object's "length", a dangling
+%% handle, any other primitive, or more than 64 hops all miss. Absent on
+%% the whole chain is `undefined`, exactly as OrdinaryGet answers.
+%% K is the canonical `{named, KeyBin}` PropertyKey term the opcode carries
+%% (the compiler emits Index keys for array-index strings), used as the
+%% props-map key as is so no hop rebuilds it.
+get_field(Agent, {?HANDLE_TAG, Id}, K) ->
+    cell_field(element(?AGENT_STORE, Agent), Id, K);
+get_field(_, Bin, {?KEY_NAMED, <<"length">>}) when is_binary(Bin) ->
     arc_string_ffi:string_codepoint_length(Bin);
-get_field(Agent, Bin, KeyBin) when is_binary(Bin) ->
-    proto_field(Agent, ?REALM_STRING, KeyBin);
-get_field(Agent, N, KeyBin) when is_number(N) ->
-    proto_field(Agent, ?REALM_NUMBER, KeyBin);
+get_field(Agent, Bin, K) when is_binary(Bin) ->
+    proto_field(Agent, ?REALM_STRING, K);
+get_field(Agent, N, K) when is_number(N) ->
+    proto_field(Agent, ?REALM_NUMBER, K);
 get_field(_, _, _) -> miss.
+
+%% get_global(Agent, Lex, NameBin) -> JsVal | miss
+%% §9.1.1.4.6 GetBindingValue on the global Environment Record for the
+%% plain case: an initialised lexical (let/const/class) binding from Lex
+%% (the realm's `lexical_globals` map of {let|const, V}), else an own or
+%% inherited plain data property of the global object, walked as get_field
+%% walks. A binding in its TDZ, an accessor, an exotic hop, or a name absent
+%% everywhere (ReferenceError, or "undefined" for typeof) miss.
+get_global(Agent, Lex, Name) ->
+    case Lex of
+        #{Name := Binding} ->
+            case element(2, Binding) of
+                js_tdz -> miss;
+                V -> V
+            end;
+        _ ->
+            {?HANDLE_TAG, G} = element(?REALM_GLOBAL, element(?AGENT_REALM, Agent)),
+            Store = element(?AGENT_STORE, Agent),
+            field_walk(element(?STORE_DATA, Store), element(?STORE_SHAPES, Store),
+                       G, {?KEY_NAMED, Name}, 64, miss)
+    end.
+
+%% put_global(Store, Lex, Global, NameBin, V, Strict) -> Store2 | miss
+%% §9.1.1.4.5 SetMutableBinding, object-record half, as put_field on the
+%% global object: an existing own writable data property is replaced; a
+%% sloppy frame may also create it (strict must see ReferenceError). A
+%% lexical binding of the name, or anything put_field misses on, miss.
+put_global(Store, Lex, Global, Name, V, Strict) ->
+    case is_map_key(Name, Lex) of
+        true -> miss;
+        false -> put_field(Store, Global, {?KEY_NAMED, Name}, V, not Strict)
+    end.
 
 %% A string / number primitive has no own named props besides String
 %% "length", so a read walks the realm's wrapper prototype. Only a data
 %% property answers here; a getter misses so the slow path can pass the
 %% primitive as `this`.
-proto_field(Agent, Which, KeyBin) ->
+proto_field(Agent, Which, K) ->
     Pair = element(Which, element(?AGENT_REALM, Agent)),
     {?HANDLE_TAG, Id} = element(?PAIR_PROTO, Pair),
-    cell_field(element(?AGENT_STORE, Agent), Id, KeyBin).
+    cell_field(element(?AGENT_STORE, Agent), Id, K).
 
-cell_field(Store, Id, KeyBin) ->
+cell_field(Store, Id, K) ->
     field_walk(element(?STORE_DATA, Store), element(?STORE_SHAPES, Store),
-               Id, KeyBin, 64).
+               Id, K, 64, undefined).
 
-field_walk(_, _, _, _, 0) -> miss;
-field_walk(Data, Shapes, Id, KeyBin, Fuel) ->
+%% Absent is the answer when the whole chain lacks the key: `undefined` for
+%% OrdinaryGet, `miss` for a global binding lookup.
+field_walk(_, _, _, _, 0, _) -> miss;
+field_walk(Data, Shapes, Id, K, Fuel, Absent) ->
     case array:get(Id, Data) of
         {?SSHAPED_TAG, Sid, Proto, Slots} ->
             case Shapes of
                 #{Sid := Desc} ->
+                    KeyBin = element(2, K),
                     case element(?SHAPE_OFFSETS, Desc) of
                         #{KeyBin := Off} -> element(Off + 1, Slots);
-                        _ -> field_next(Data, Shapes, Proto, KeyBin, Fuel)
+                        _ -> field_next(Data, Shapes, Proto, K, Fuel, Absent)
                     end;
                 _ -> miss
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_is_ordinary(element(?SOBJECT_KIND, Slot), KeyBin) of
-                false -> miss;
+            Kind = element(?SOBJECT_KIND, Slot),
+            case named_is_ordinary(Kind, K) of
+                false -> named_virtual(Kind, K);
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_NAMED, KeyBin} := Prop} ->
+                        #{K := Prop} ->
                             case element(1, Prop) of
                                 ?DATAPROP_TAG -> element(?DATAPROP_VALUE, Prop);
                                 _ -> miss
@@ -508,47 +693,85 @@ field_walk(Data, Shapes, Id, KeyBin, Fuel) ->
                         _ ->
                             field_next(Data, Shapes,
                                        element(?SOBJECT_PROTO, Slot),
-                                       KeyBin, Fuel)
+                                       K, Fuel, Absent)
                     end
             end;
         _ -> miss
     end.
 
-field_next(_, _, ?NONE, _, _) -> undefined;
-field_next(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, KeyBin, Fuel) ->
-    field_walk(Data, Shapes, P, KeyBin, Fuel - 1);
-field_next(_, _, _, _, _) -> miss.
+field_next(_, _, ?NONE, _, _, Absent) -> Absent;
+field_next(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, K, Fuel, Absent) ->
+    field_walk(Data, Shapes, P, K, Fuel - 1, Absent);
+field_next(_, _, _, _, _, _) -> miss.
+
+%% The one virtual named data property a read kernel synthesizes: an Array
+%% cell's "length" IS its kind payload (§10.4.2, always an own data
+%% property, so no chain walk). Every other non-ordinary named read misses.
+named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY) -> Length;
+named_virtual(_, _) -> miss.
 
 %% Whether a Named key on this ObjKind is a plain props-map entry for both
 %% [[Get]] and [[Set]] (rt/obj own_property_of, get_from, set arms): Proxy,
 %% module namespace and TypedArray cells are exotic for string keys, and
 %% Array / String objects synthesize "length".
+-compile({inline, [named_is_ordinary/2, named_virtual/2]}).
 named_is_ordinary(?ORDINARY, _) -> true;
 named_is_ordinary(Kind, _) when is_atom(Kind) -> true;
-named_is_ordinary(Kind, KeyBin) ->
+named_is_ordinary(Kind, K) ->
     case element(1, Kind) of
         ?PROXYOBJ_TAG -> false;
         module_namespace -> false;
         typed_array_obj -> false;
-        ?ARRAYOBJ_TAG -> KeyBin =/= <<"length">>;
-        string_obj -> KeyBin =/= <<"length">>;
+        ?ARRAYOBJ_TAG -> K =/= ?LENGTH_KEY;
+        string_obj -> K =/= ?LENGTH_KEY;
         _ -> true
     end.
 
 %% get_elem(Store, V, Key) -> JsVal | miss
-%% `V[Key]` for the two shapes a loop body produces: a non-negative integer
-%% index into an Array cell (own element present, no {index,_} props
-%% override; holes miss so the full path does the proto walk), or a string
-%% key, which canonicalizes and reads as get_field / an index. Anything
-%% else (float or negative index, symbol, object key, non-array cell) misses.
+%% `V[Key]` for the shapes a loop body produces: a non-negative integer
+%% index into an Array or Arguments cell (own element present, no
+%% {index,_} props override; holes miss so the full path does the proto
+%% walk), an array index on an ordinary props-only cell (an own data
+%% property, or `undefined` when the whole plain chain lacks it), or a
+%% string key, which canonicalizes and reads as get_field / an index.
+%% Anything else (float or negative index, symbol, object key, an exotic
+%% cell) misses.
+-define(MAX_ARRAY_INDEX, 4294967294).
 get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
-    case array:get(Id, element(?STORE_DATA, Store)) of
+    Data = element(?STORE_DATA, Store),
+    case array:get(Id, Data) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
+            Props = element(?SOBJECT_PROPS, Slot),
             case element(?SOBJECT_KIND, Slot) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
-                    case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_INDEX, Idx} := _} -> miss;
-                        _ -> elem_read(element(?SOBJECT_ELEMENTS, Slot), Idx)
+                    case index_overridden(Props, Idx) of
+                        true -> miss;
+                        false -> elem_read(element(?SOBJECT_ELEMENTS, Slot), Idx)
+                    end;
+                {?ARRAYOBJ_TAG, _} -> miss;
+                {?ARGUMENTSOBJ_TAG, _, _} ->
+                    case index_overridden(Props, Idx) of
+                        true -> miss;
+                        false -> elem_read(element(?SOBJECT_ELEMENTS, Slot), Idx)
+                    end;
+                Kind when Idx =< ?MAX_ARRAY_INDEX ->
+                    case index_is_plain(Kind) of
+                        false -> miss;
+                        true ->
+                            case Props of
+                                #{{?KEY_INDEX, Idx} := Prop} ->
+                                    case element(1, Prop) of
+                                        ?DATAPROP_TAG -> element(?DATAPROP_VALUE, Prop);
+                                        _ -> miss
+                                    end;
+                                _ ->
+                                    case index_free(Data, element(?STORE_SHAPES, Store),
+                                                    element(?SOBJECT_PROTO, Slot),
+                                                    Idx, 64) of
+                                        true -> undefined;
+                                        false -> miss
+                                    end
+                            end
                     end;
                 _ -> miss
             end;
@@ -556,12 +779,25 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
     end;
 get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when is_binary(Key) ->
     case arc_rt_val_ffi:t_to_property_key_fast(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
-            cell_field(Store, element(?HANDLE_ID, Obj), KeyBin);
+        {?OKEY_STRING, {?KEY_NAMED, _} = K} ->
+            cell_field(Store, element(?HANDLE_ID, Obj), K);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
         _ -> miss
     end;
 get_elem(_, _, _) -> miss.
+
+%% get_elem2(Store, V, Key) -> JsVal | miss
+%% get_elem for GetElem2, which also re-pushes the canonical key: only an
+%% integer key is its own canonical value, so any other key misses.
+get_elem2(Store, Obj, Idx) when is_integer(Idx) -> get_elem(Store, Obj, Idx);
+get_elem2(_, _, _) -> miss.
+
+%% An {index,Idx} props entry shadowing the elements store (a defineProperty'd
+%% element). An array's props map is nearly always empty, which map_size
+%% sees without building the key.
+-compile({inline, [index_overridden/2]}).
+index_overridden(Props, Idx) ->
+    map_size(Props) =/= 0 andalso is_map_key({?KEY_INDEX, Idx}, Props).
 
 elem_read({?ELEMS_DENSE, A}, Idx) ->
     case Idx < array:size(A) of
@@ -579,7 +815,7 @@ elem_read({?ELEMS_SPARSE, M}, Idx) ->
     end;
 elem_read(_, _) -> miss.
 
-%% put_field(Store, V, KeyBin, Val) -> Store2 | miss
+%% put_field(Store, V, K, Val) -> Store2 | miss
 %% §10.1.9.2 OrdinarySetWithOwnDescriptor for a kind whose named keys are
 %% ordinary. Step 2, an EXISTING own writable data property: overwrite the
 %% SShapedObject slot, or replace the value inside the DataProperty
@@ -590,12 +826,16 @@ elem_read(_, _) -> miss.
 %% {W,E,C} property is stamped with the store's prop_seq (t_next_prop_seq).
 %% Non-writable, accessors, non-extensible / shaped receivers for a new key
 %% and exotic receivers miss. Returns the rebuilt store.
-put_field(Store, {?HANDLE_TAG, Id}, KeyBin, V) ->
+put_field(Store, Obj, K, V) -> put_field(Store, Obj, K, V, true).
+
+%% Create: whether an absent key may be created (false: replace only).
+put_field(Store, {?HANDLE_TAG, Id}, K, V, Create) ->
     Data = element(?STORE_DATA, Store),
     case array:get(Id, Data) of
         {?SSHAPED_TAG, Sid, P, Slots} ->
             case element(?STORE_SHAPES, Store) of
                 #{Sid := Desc} ->
+                    KeyBin = element(2, K),
                     case element(?SHAPE_OFFSETS, Desc) of
                         #{KeyBin := Off} ->
                             NewSlot = {?SSHAPED_TAG, Sid, P,
@@ -606,73 +846,118 @@ put_field(Store, {?HANDLE_TAG, Id}, KeyBin, V) ->
                 _ -> miss
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_is_ordinary(element(?SOBJECT_KIND, Slot), KeyBin) of
+            case named_is_ordinary(element(?SOBJECT_KIND, Slot), K) of
                 false -> miss;
-                true ->
-                    Props = element(?SOBJECT_PROPS, Slot),
-                    K = {?KEY_NAMED, KeyBin},
-                    case Props of
-                        #{K := Prop}
-                          when element(1, Prop) =:= ?DATAPROP_TAG,
-                               element(?DATAPROP_WRITABLE, Prop) =:= true ->
-                            NewProps =
-                                Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
-                            NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
-                            setelement(?STORE_DATA, Store, array:set(Id, NewSlot, Data));
-                        #{K := _} -> miss;
-                        _ when element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
-                            case named_free(Data, element(?STORE_SHAPES, Store),
-                                            element(?SOBJECT_PROTO, Slot),
-                                            KeyBin, 64) of
-                                false -> miss;
-                                true ->
-                                    Seq = element(?STORE_PROP_SEQ, Store),
-                                    Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
-                                    NewSlot = setelement(?SOBJECT_PROPS, Slot,
-                                                         Props#{K => Prop}),
-                                    setelement(?STORE_PROP_SEQ,
-                                               setelement(?STORE_DATA, Store,
-                                                          array:set(Id, NewSlot, Data)),
-                                               Seq + 1)
-                            end;
-                        _ -> miss
-                    end
+                true -> put_prop(Store, Data, Id, Slot, K, V, Create)
             end;
         _ -> miss
     end;
-put_field(_, _, _, _) -> miss.
+put_field(_, _, _, _, _) -> miss.
 
-%% named_free(Data, Shapes, Proto, KeyBin, Fuel) -> boolean()
+%% put_prop(Store, Data, Id, Slot, K, V, Create) -> Store2 | miss
+%% The props-map half of put_field / put_elem for an SObject whose lookup
+%% of K ({named,Bin} or {index,Idx}) is a plain props probe: replace the
+%% value of an existing own writable data property, or (Create) add a
+%% {W,E,C} one stamped with the store's prop_seq when the receiver is
+%% extensible and the chain above holds nothing but writable data at K.
+put_prop(Store, Data, Id, Slot, K, V, Create) ->
+    Props = element(?SOBJECT_PROPS, Slot),
+    case Props of
+        #{K := Prop}
+          when element(1, Prop) =:= ?DATAPROP_TAG,
+               element(?DATAPROP_WRITABLE, Prop) =:= true ->
+            NewProps = Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
+            NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
+            setelement(?STORE_DATA, Store, array:set(Id, NewSlot, Data));
+        #{K := _} -> miss;
+        _ when Create, element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
+            case chain_free(Data, element(?STORE_SHAPES, Store),
+                            element(?SOBJECT_PROTO, Slot), K) of
+                false -> miss;
+                true ->
+                    Seq = element(?STORE_PROP_SEQ, Store),
+                    Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
+                    NewSlot = setelement(?SOBJECT_PROPS, Slot, Props#{K => Prop}),
+                    setelement(?STORE_PROP_SEQ,
+                               setelement(?STORE_DATA, Store,
+                                          array:set(Id, NewSlot, Data)),
+                               Seq + 1)
+            end;
+        _ -> miss
+    end.
+
+%% define_field(Store, V, K, Val) -> Store2 | miss
+%% §7.3.5 CreateDataProperty of a Named key on an ordinary, extensible
+%% SObject (the `{key: v}` literal field): a fresh {W,E,C} data property
+%% stamped with the store's prop_seq, or an in-place replacement of a
+%% configurable data property (creation order kept, §10.1.11). A
+%% non-configurable or accessor current property, and any other receiver,
+%% miss to the full [[DefineOwnProperty]].
+define_field(Store, {?HANDLE_TAG, Id}, K, V) ->
+    Data = element(?STORE_DATA, Store),
+    case array:get(Id, Data) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
+                  element(?SOBJECT_KIND, Slot) =:= ?ORDINARY,
+                  element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
+            Props = element(?SOBJECT_PROPS, Slot),
+            case Props of
+                #{K := Old} when element(1, Old) =:= ?DATAPROP_TAG,
+                                 element(?DATAPROP_CONFIGURABLE, Old) =:= true ->
+                    Prop = {?DATAPROP_TAG, V, true, true, true,
+                            element(?DATAPROP_SEQ, Old)},
+                    NewSlot = setelement(?SOBJECT_PROPS, Slot, Props#{K := Prop}),
+                    setelement(?STORE_DATA, Store, array:set(Id, NewSlot, Data));
+                #{K := _} -> miss;
+                _ ->
+                    Seq = element(?STORE_PROP_SEQ, Store),
+                    Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
+                    NewSlot = setelement(?SOBJECT_PROPS, Slot, Props#{K => Prop}),
+                    setelement(?STORE_PROP_SEQ,
+                               setelement(?STORE_DATA, Store,
+                                          array:set(Id, NewSlot, Data)),
+                               Seq + 1)
+            end;
+        _ -> miss
+    end;
+define_field(_, _, _, _) -> miss.
+
+chain_free(Data, Shapes, Proto, {?KEY_NAMED, _} = K) ->
+    named_free(Data, Shapes, Proto, K, 64);
+chain_free(Data, Shapes, Proto, {?KEY_INDEX, Idx}) ->
+    index_free(Data, Shapes, Proto, Idx, 64).
+
+%% named_free(Data, Shapes, Proto, K, Fuel) -> boolean()
 %% Every object on the prototype chain starting at Proto either lacks an
-%% own property at KeyBin or holds a writable data property there, along
+%% own property at K or holds a writable data property there, along
 %% hops whose named lookup is a pure slots/props probe (§10.1.9.2 step 1:
 %% ordinary [[Set]] then creates on the receiver). An accessor or read-only
 %% property, an exotic hop, a dangling handle, or more than Fuel hops
 %% answer false.
 named_free(_, _, ?NONE, _, _) -> true;
 named_free(_, _, _, _, 0) -> false;
-named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, KeyBin, Fuel) ->
+named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
     case array:get(P, Data) of
         {?SSHAPED_TAG, Sid, Proto, _Slots} ->
             case Shapes of
                 #{Sid := Desc} ->
+                    KeyBin = element(2, K),
                     case element(?SHAPE_OFFSETS, Desc) of
                         #{KeyBin := _} -> true;
-                        _ -> named_free(Data, Shapes, Proto, KeyBin, Fuel - 1)
+                        _ -> named_free(Data, Shapes, Proto, K, Fuel - 1)
                     end;
                 _ -> false
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_is_ordinary(element(?SOBJECT_KIND, Slot), KeyBin) of
+            case named_is_ordinary(element(?SOBJECT_KIND, Slot), K) of
                 false -> false;
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_NAMED, KeyBin} := Prop} ->
+                        #{K := Prop} ->
                             element(1, Prop) =:= ?DATAPROP_TAG
                                 andalso element(?DATAPROP_WRITABLE, Prop) =:= true;
                         _ ->
                             named_free(Data, Shapes, element(?SOBJECT_PROTO, Slot),
-                                       KeyBin, Fuel - 1)
+                                       K, Fuel - 1)
                     end
             end;
         _ -> false
@@ -687,10 +972,11 @@ named_free(_, _, _, _, _) -> false.
 %% property, so it first needs the prototype chain to hold nothing at Idx
 %% (a setter or read-only index up the chain takes the store, §10.1.9.2
 %% step 2) and, for the append, a writable "length" (§10.4.2.1 step 2.h).
-%% An {index,Idx} props override, a non-extensible or non-array receiver,
-%% a key past the array-index range (2^32-1 is a Named key and never moves
-%% "length"), or a dense fill past the allocated size misses.
--define(MAX_ARRAY_INDEX, 4294967294).
+%% An ordinary props-only receiver takes the put_field write under the
+%% {index,Idx} key; a string key canonicalizes to one of the two. An
+%% {index,Idx} props override on an array, a non-extensible or exotic
+%% receiver, a key past the array-index range (2^32-1 is a Named key and
+%% never moves "length"), or a dense fill past the allocated size misses.
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     Data = element(?STORE_DATA, Store),
@@ -699,7 +985,10 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
                   element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
             Props = element(?SOBJECT_PROPS, Slot),
             case element(?SOBJECT_KIND, Slot) of
-                _ when is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
+                Kind when is_atom(Kind) ->
+                    put_prop(Store, Data, Id, Slot, {?KEY_INDEX, Idx}, V, true);
+                _ when map_size(Props) =/= 0
+                       andalso is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
                     Elems = element(?SOBJECT_ELEMENTS, Slot),
                     case elem_has(Elems, Idx)
@@ -734,6 +1023,12 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
                     end;
                 _ -> miss
             end;
+        _ -> miss
+    end;
+put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when is_binary(Key) ->
+    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
+        {?OKEY_STRING, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V);
+        {?OKEY_STRING, {?KEY_INDEX, Idx}} -> put_elem(Store, Obj, Idx, V);
         _ -> miss
     end;
 put_elem(_, _, _, _) -> miss.

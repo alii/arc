@@ -33,6 +33,18 @@ pub fn get_unchecked(index: Int, arr: TupleArray(a)) -> a
 @external(erlang, "arc_tuple_array_ffi", "array_set_unchecked")
 pub fn set_unchecked(index: Int, value: a, arr: TupleArray(a)) -> TupleArray(a)
 
+/// Read the element at 1-based `position`, bound straight to the
+/// `element/2` BIF so the call site gets the inlined instruction rather
+/// than a remote call. Same contract as `get_unchecked` (badarg when out
+/// of bounds); for the dispatch loop's fetch and slot reads only.
+@external(erlang, "erlang", "element")
+pub fn element(position: Int, arr: TupleArray(a)) -> a
+
+/// Write the element at 1-based `position` (`setelement/3` bound
+/// directly). Same contract as `set_unchecked`.
+@external(erlang, "erlang", "setelement")
+pub fn set_element(position: Int, arr: TupleArray(a), value: a) -> TupleArray(a)
+
 /// Number of elements. O(1).
 @external(erlang, "erlang", "tuple_size")
 pub fn size(arr: TupleArray(a)) -> Int

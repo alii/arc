@@ -308,10 +308,27 @@ fn run_call(
 }
 
 /// The body of a plain root call under the backstop: run to the `Return`
-/// and pop the activation's `Error.stack` frame.
+/// and pop the activation's `Error.stack` frame. `complete` unrolled for
+/// the callback path, so a normal return costs no intermediate wrappers.
 fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
-  let #(res, s) = complete(state, "run_bytecode")
-  #(res, call.pop_frame_info(s.agent))
+  case interpreter.execute_inner(state, drive()) {
+    Ok(#(Completed(NormalCompletion(v)), s)) -> #(
+      Ok(v),
+      call.pop_frame_info(s.agent),
+    )
+    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(
+      Error(e),
+      call.pop_frame_info(s.agent),
+    )
+    Ok(#(Suspended(kind, _), s)) -> {
+      let #(res, s) = fault(s, SuspensionLeak(site: "run_bytecode", kind:))
+      #(res, call.pop_frame_info(s.agent))
+    }
+    Error(err) -> {
+      let #(res, s) = fault(state, err)
+      #(res, call.pop_frame_info(s.agent))
+    }
+  }
 }
 
 /// `JsOps.construct_bytecode`: §10.2.2 [[Construct]] of the bytecode cell

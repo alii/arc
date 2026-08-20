@@ -78,7 +78,6 @@ import arc/rt/types.{
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
-import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -144,12 +143,6 @@ fn k_ushr(a: JsVal, b: JsVal) -> JsVal
 
 @external(erlang, "arc_rt_ops_ffi", "t_bitnot_fast")
 fn k_bitnot(a: JsVal) -> JsVal
-
-/// A compare/equality kernel's `true | false | miss` answer as a value: the
-/// boolean atoms ARE the boolean wire terms, and `miss` passes through for
-/// the caller's `is_miss` test.
-@external(erlang, "arc_rt_store_ffi", "identity")
-fn tri(b: Bool) -> JsVal
 
 // ============================================================================
 // Guarded runtime calls
@@ -554,12 +547,12 @@ fn fast_loop(
   constants: TupleArray(JsVal),
   line: Int,
 ) -> Result(#(Outcome, State), VmError) {
-  case tuple_array.get_unchecked(pc, code) {
+  case tuple_array.element(pc + 1, code) {
     SetLine(l) ->
       fast_loop(state, drive, pc + 1, stack, locals, agent, code, constants, l)
 
     PushConst(index) -> {
-      let v = tuple_array.get_unchecked(index, constants)
+      let v = tuple_array.element(index + 1, constants)
       fast_loop(
         state,
         drive,
@@ -625,9 +618,9 @@ fn fast_loop(
       }
 
     GetLocal(index) -> {
-      let v = tuple_array.get_unchecked(index, locals)
+      let v = tuple_array.element(index + 1, locals)
       // TDZ: the slow path rebuilds State and throws the ReferenceError.
-      case is_tdz(v) {
+      case ffi.is(v, ffi.JsTdz) {
         True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
         False ->
           fast_loop(
@@ -652,7 +645,7 @@ fn fast_loop(
             drive,
             pc + 1,
             rest,
-            tuple_array.set_unchecked(index, v, locals),
+            tuple_array.set_element(index + 1, locals, v),
             agent,
             code,
             constants,
@@ -661,12 +654,12 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
-    GetBoxed(index) ->
-      case box_value(agent, tuple_array.get_unchecked(index, locals)) {
-        // TDZ / not a box: the slow path throws.
-        Error(Nil) ->
-          dispatch_slow(state, drive, pc, stack, locals, agent, line)
-        Ok(v) ->
+    GetBoxed(index) -> {
+      let v = ffi.box_get(agent, tuple_array.element(index + 1, locals))
+      // TDZ / not a box: the slow path throws.
+      case ffi.is(v, ffi.Miss) {
+        True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+        False ->
           fast_loop(
             state,
             drive,
@@ -679,11 +672,12 @@ fn fast_loop(
             line,
           )
       }
+    }
 
     PutBoxed(index) ->
       case stack {
         [v, ..rest] -> {
-          let slot = tuple_array.get_unchecked(index, locals)
+          let slot = tuple_array.element(index + 1, locals)
           case is_handle(slot) {
             False -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             True ->
@@ -718,20 +712,10 @@ fn fast_loop(
 
     JumpIfFalse(Pc(target)) ->
       case stack {
+        // A boolean (what a compare leaves) is tested in place; anything
+        // else asks the ToBoolean kernel.
         [top, ..rest] ->
-          case ffi.truthy(top) {
-            False ->
-              fast_loop(
-                state,
-                drive,
-                target,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                line,
-              )
+          case ffi.is_bool(top, True) {
             True ->
               fast_loop(
                 state,
@@ -744,14 +728,58 @@ fn fast_loop(
                 constants,
                 line,
               )
+            False ->
+              case ffi.is_bool(top, False) {
+                True ->
+                  fast_loop(
+                    state,
+                    drive,
+                    target,
+                    rest,
+                    locals,
+                    agent,
+                    code,
+                    constants,
+                    line,
+                  )
+                False ->
+                  case ffi.truthy(top) {
+                    True ->
+                      fast_loop(
+                        state,
+                        drive,
+                        pc + 1,
+                        rest,
+                        locals,
+                        agent,
+                        code,
+                        constants,
+                        line,
+                      )
+                    False ->
+                      fast_loop(
+                        state,
+                        drive,
+                        target,
+                        rest,
+                        locals,
+                        agent,
+                        code,
+                        constants,
+                        line,
+                      )
+                  }
+              }
           }
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
     JumpIfTrue(Pc(target)) ->
       case stack {
+        // A boolean (what a compare leaves) is tested in place; anything
+        // else asks the ToBoolean kernel.
         [top, ..rest] ->
-          case ffi.truthy(top) {
+          case ffi.is_bool(top, True) {
             True ->
               fast_loop(
                 state,
@@ -765,17 +793,47 @@ fn fast_loop(
                 line,
               )
             False ->
-              fast_loop(
-                state,
-                drive,
-                pc + 1,
-                rest,
-                locals,
-                agent,
-                code,
-                constants,
-                line,
-              )
+              case ffi.is_bool(top, False) {
+                True ->
+                  fast_loop(
+                    state,
+                    drive,
+                    pc + 1,
+                    rest,
+                    locals,
+                    agent,
+                    code,
+                    constants,
+                    line,
+                  )
+                False ->
+                  case ffi.truthy(top) {
+                    True ->
+                      fast_loop(
+                        state,
+                        drive,
+                        target,
+                        rest,
+                        locals,
+                        agent,
+                        code,
+                        constants,
+                        line,
+                      )
+                    False ->
+                      fast_loop(
+                        state,
+                        drive,
+                        pc + 1,
+                        rest,
+                        locals,
+                        agent,
+                        code,
+                        constants,
+                        line,
+                      )
+                  }
+              }
           }
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
@@ -821,10 +879,12 @@ fn fast_loop(
           let r = case kind {
             opcode.AddOp -> ffi.add(left, right)
             opcode.PureOp(op) -> pure_binop_kernel(op, left, right)
-            // instanceof / in read the heap and can run user code.
-            opcode.InstanceOfOp | opcode.InOp -> miss_value(Miss)
+            opcode.InstanceOfOp ->
+              ffi.instance_of(agent, left, right, rt_types.symbol_has_instance)
+            // `in` reads the heap and can run user code.
+            opcode.InOp -> miss_value(Miss)
           }
-          case ffi.is_miss(r) {
+          case ffi.is(r, ffi.Miss) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
               fast_loop(
@@ -849,11 +909,11 @@ fn fast_loop(
           let r = case kind {
             opcode.Neg -> ffi.neg(operand)
             opcode.Pos -> ffi.plus(operand)
-            opcode.LogicalNot -> mk_bool(!ffi.truthy(operand))
+            opcode.LogicalNot -> ffi.lnot(operand)
             opcode.Void -> mk_undefined()
             opcode.BitNot -> k_bitnot(operand)
           }
-          case ffi.is_miss(r) {
+          case ffi.is(r, ffi.Miss) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
               fast_loop(
@@ -877,8 +937,8 @@ fn fast_loop(
     // no stack traffic. Non-numbers (objects, strings, BigInt, TDZ) take the
     // slow path's full coercion chain.
     IncLocal(index) -> {
-      let r = number_step(tuple_array.get_unchecked(index, locals), 1)
-      case ffi.is_miss(r) {
+      let r = ffi.step(tuple_array.element(index + 1, locals), 1)
+      case ffi.is(r, ffi.Miss) {
         True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
         False ->
           fast_loop(
@@ -886,7 +946,7 @@ fn fast_loop(
             drive,
             pc + 1,
             stack,
-            tuple_array.set_unchecked(index, r, locals),
+            tuple_array.set_element(index + 1, locals, r),
             agent,
             code,
             constants,
@@ -896,8 +956,8 @@ fn fast_loop(
     }
 
     DecLocal(index) -> {
-      let r = number_step(tuple_array.get_unchecked(index, locals), -1)
-      case ffi.is_miss(r) {
+      let r = ffi.step(tuple_array.element(index + 1, locals), -1)
+      case ffi.is(r, ffi.Miss) {
         True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
         False ->
           fast_loop(
@@ -905,7 +965,7 @@ fn fast_loop(
             drive,
             pc + 1,
             stack,
-            tuple_array.set_unchecked(index, r, locals),
+            tuple_array.set_element(index + 1, locals, r),
             agent,
             code,
             constants,
@@ -920,13 +980,13 @@ fn fast_loop(
       let r =
         pure_binop_kernel(
           kind,
-          tuple_array.get_unchecked(left_idx, locals),
-          tuple_array.get_unchecked(right_idx, locals),
+          tuple_array.element(left_idx + 1, locals),
+          tuple_array.element(right_idx + 1, locals),
         )
-      case ffi.is_miss(r) {
+      case ffi.is(r, ffi.Miss) {
         True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
         False ->
-          case ffi.truthy(r) {
+          case ffi.is_bool(r, True) {
             True ->
               fast_loop(
                 state,
@@ -959,13 +1019,13 @@ fn fast_loop(
       let r =
         pure_binop_kernel(
           kind,
-          tuple_array.get_unchecked(left_idx, locals),
-          tuple_array.get_unchecked(const_index, constants),
+          tuple_array.element(left_idx + 1, locals),
+          tuple_array.element(const_index + 1, constants),
         )
-      case ffi.is_miss(r) {
+      case ffi.is(r, ffi.Miss) {
         True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
         False ->
-          case ffi.truthy(r) {
+          case ffi.is_bool(r, True) {
             True ->
               fast_loop(
                 state,
@@ -1002,7 +1062,7 @@ fn fast_loop(
       case stack {
         [k, recv, ..rest] -> {
           let v = ffi.get_elem(agent.store, recv, k)
-          case ffi.is_miss(v) {
+          case ffi.is(v, ffi.Miss) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
               fast_loop(
@@ -1021,13 +1081,38 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
+    // Compound assignment head `a[i] op= ..`: the value over the key and
+    // receiver, integer keys only (the key is re-pushed canonicalized).
+    GetElem2 ->
+      case stack {
+        [k, recv, ..] -> {
+          let v = ffi.get_elem2(agent.store, recv, k)
+          case ffi.is(v, ffi.Miss) {
+            True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+            False ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [v, ..stack],
+                locals,
+                agent,
+                code,
+                constants,
+                line,
+              )
+          }
+        }
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
     // `a[i] = v` on an extensible Array cell: overwrite, hole-fill inside
     // the allocated dense size, or append at `length`.
     PutElem ->
       case stack {
         [val, k, recv, ..rest] -> {
           let store = ffi.put_elem(agent.store, recv, k, val)
-          case ffi.is_miss(store) {
+          case ffi.is(store, ffi.Miss) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
               fast_loop(
@@ -1050,13 +1135,13 @@ fn fast_loop(
     // `obj.x`: own or inherited plain data property along an all-ordinary
     // chain (`undefined` when absent on the whole chain, as OrdinaryGet
     // answers). A string or number receiver reads its wrapper prototype
-    // (String "length" is answered directly). Accessors, proxies,
-    // namespaces, an object cell's virtual `length` miss.
-    GetField(key.Named(name)) ->
+    // (String and Array "length" are answered directly). Accessors,
+    // proxies, namespaces miss.
+    GetField(key.Named(_) as k) ->
       case stack {
         [recv, ..rest] -> {
-          let v = ffi.get_field(agent, recv, name)
-          case ffi.is_miss(v) {
+          let v = ffi.get_field(agent, recv, k)
+          case ffi.is(v, ffi.Miss) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
               fast_loop(
@@ -1076,11 +1161,11 @@ fn fast_loop(
       }
 
     // Like GetField but keeps the receiver beneath the value for CallMethod.
-    GetField2(key.Named(name)) ->
+    GetField2(key.Named(_) as k) ->
       case stack {
         [recv, ..rest] -> {
-          let v = ffi.get_field(agent, recv, name)
-          case ffi.is_miss(v) {
+          let v = ffi.get_field(agent, recv, k)
+          case ffi.is(v, ffi.Miss) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
               fast_loop(
@@ -1105,11 +1190,11 @@ fn fast_loop(
     // holds nothing but writable data at the key it creates the property
     // (fresh seq from the store). Setters and read-only props up the chain,
     // non-writable, accessors and exotic receivers miss.
-    PutField(key.Named(name)) ->
+    PutField(key.Named(_) as k) ->
       case stack {
         [val, recv, ..rest] -> {
-          let store = ffi.put_field(agent.store, recv, name, val)
-          case ffi.is_miss(store) {
+          let store = ffi.put_field(agent.store, recv, k, val)
+          case ffi.is(store, ffi.Miss) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
               fast_loop(
@@ -1126,6 +1211,89 @@ fn fast_loop(
           }
         }
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
+    // -- Global identifiers ---------------------------------------------------
+    // An initialised lexical global, or a plain data property along the
+    // global object's chain. TDZ, accessors, a proxy hop and an
+    // unresolvable name (ReferenceError / typeof "undefined") miss.
+    GetGlobal(name) -> {
+      let v = ffi.get_global(agent, agent.realm.lexical_globals, name)
+      case ffi.is(v, ffi.Miss) {
+        True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+        False ->
+          fast_loop(
+            state,
+            drive,
+            pc + 1,
+            [v, ..stack],
+            locals,
+            agent,
+            code,
+            constants,
+            line,
+          )
+      }
+    }
+
+    TypeofGlobal(name) -> {
+      let v = ffi.get_global(agent, agent.realm.lexical_globals, name)
+      case ffi.is(v, ffi.Miss) {
+        True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+        False -> {
+          let t = ffi.type_of_in(agent.store, v)
+          case ffi.is(t, ffi.Miss) {
+            True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+            False ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [mk_string(t), ..stack],
+                locals,
+                agent,
+                code,
+                constants,
+                line,
+              )
+          }
+        }
+      }
+    }
+
+    // The object-record half only: an existing own writable data property of
+    // the global object, created when absent in a sloppy frame. Lexical
+    // bindings, setters, read-only and strict creation miss.
+    PutGlobal(name) ->
+      case stack {
+        [val, ..rest] -> {
+          let realm = agent.realm
+          let store =
+            ffi.put_global(
+              agent.store,
+              realm.lexical_globals,
+              realm.global_object,
+              name,
+              val,
+              state.func.is_strict,
+            )
+          case ffi.is(store, ffi.Miss) {
+            True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+            False ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                rest,
+                locals,
+                Agent(..agent, store:),
+                code,
+                constants,
+                line,
+              )
+          }
+        }
+        [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
     // -- Object literal construction ---------------------------------------
@@ -1150,7 +1318,7 @@ fn fast_loop(
       case stack {
         [v, ..rest] -> {
           let t = ffi.type_of_in(agent.store, v)
-          case ffi.is_miss(t) {
+          case ffi.is(t, ffi.Miss) {
             True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
             False ->
               fast_loop(
@@ -1173,27 +1341,176 @@ fn fast_loop(
     // extensible SObject takes a raw own insert (CreateDataProperty on such a
     // target can neither trap nor fail). Anything else goes through step's
     // full [[DefineOwnProperty]].
-    DefineField(key.Named(name)) ->
+    DefineField(key.Named(_) as k) ->
       case stack {
-        [val, obj, ..rest] ->
-          case define_plain(agent, obj, Named(name), val) {
-            Ok(agent) ->
+        [val, obj, ..rest] -> {
+          let store = ffi.define_field(agent.store, obj, k, val)
+          case ffi.is(store, ffi.Miss) {
+            True -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+            False ->
               fast_loop(
                 state,
                 drive,
                 pc + 1,
                 [obj, ..rest],
                 locals,
+                Agent(..agent, store:),
+                code,
+                constants,
+                line,
+              )
+          }
+        }
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
+    MakeClosure(func_index) -> {
+      let template = tuple_array.element(func_index + 1, state.func.functions)
+      let captured =
+        list.map(template.env_descriptors, fn(desc) {
+          tuple_array.element(desc.parent_index + 1, locals)
+        })
+      let #(fn_h, agent) = make_closure(agent, template, captured, state.unit)
+      fast_loop(
+        state,
+        drive,
+        pc + 1,
+        [mk_object(fn_h), ..stack],
+        locals,
+        agent,
+        code,
+        constants,
+        line,
+      )
+    }
+
+    // for-of over a plain Array through the intrinsic iterator: the step
+    // reads the element straight off the cells. Generators, other
+    // iterables and holes take the protocol path in `step`.
+    IteratorNext ->
+      case stack {
+        [rec, ..rest] ->
+          case ffi.is(rec, ffi.Undefined) {
+            True ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [mk_bool(True), mk_undefined(), rec, ..rest],
+                locals,
                 agent,
                 code,
                 constants,
                 line,
               )
-            Error(Nil) ->
-              dispatch_slow(state, drive, pc, stack, locals, agent, line)
+            False ->
+              case fast_iter_step(agent, rt_lang.record_parts(agent, rec)) {
+                ArrayStep(done, val, agent) -> {
+                  let slot = case done {
+                    True -> mk_undefined()
+                    False -> rec
+                  }
+                  fast_loop(
+                    state,
+                    drive,
+                    pc + 1,
+                    [mk_bool(done), val, slot, ..rest],
+                    locals,
+                    agent,
+                    code,
+                    constants,
+                    line,
+                  )
+                }
+                _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+              }
           }
-        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+        [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
+
+    // -- Coroutine suspension ---------------------------------------------------
+    // The parked State is built once, already fixed up the way `after_step`
+    // fixes up a stepped Yield/Await (operand popped, pc past the op).
+    Yield -> {
+      let #(v, rest) = top_or_undefined(stack)
+      let parked =
+        State(
+          ..state,
+          pc: pc + 1,
+          stack: rest,
+          locals:,
+          agent: call.set_line(agent, line),
+        )
+      Ok(#(Suspended(state.Yield, v), parked))
+    }
+
+    Await -> {
+      let #(v, rest) = top_or_undefined(stack)
+      let parked =
+        State(
+          ..state,
+          pc: pc + 1,
+          stack: rest,
+          locals:,
+          agent: call.set_line(agent, line),
+        )
+      Ok(#(Suspended(state.Await, v), parked))
+    }
+
+    InitialYield ->
+      Ok(#(
+        Suspended(state.Yield, mk_undefined()),
+        State(
+          ..state,
+          pc: pc + 1,
+          stack:,
+          locals:,
+          agent: call.set_line(agent, line),
+        ),
+      ))
+
+    // -- Frame bookkeeping that only touches State --------------------------
+    PushTry(catch_target: Pc(catch_target), kind:) -> {
+      let frame =
+        TryFrame(catch_target:, stack_depth: list.length(stack), kind:)
+      fast_loop(
+        State(..state, try_stack: [frame, ..state.try_stack]),
+        drive,
+        pc + 1,
+        stack,
+        locals,
+        agent,
+        code,
+        constants,
+        line,
+      )
+    }
+
+    opcode.PopTry ->
+      case state.try_stack {
+        [_, ..try_rest] ->
+          fast_loop(
+            State(..state, try_stack: try_rest),
+            drive,
+            pc + 1,
+            stack,
+            locals,
+            agent,
+            code,
+            constants,
+            line,
+          )
+        [] -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
+    CreateArguments(simple_params:) -> {
+      let s =
+        call.create_arguments(
+          State(..state, pc:, stack:, locals:, agent:),
+          simple_params,
+        )
+      fast_loop(s, drive, s.pc, s.stack, locals, s.agent, code, constants, line)
+    }
 
     // [arg_n, .., arg_1, callee, ..] → the callee's frame or [result, ..].
     Call(arity) ->
@@ -1239,9 +1556,30 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
       }
 
+    // [arg_n, .., arg_1, new_target, ctor, ..] → the constructor's frame.
+    CallConstructor(arity) ->
+      case pop_n(stack, arity) {
+        Some(#(args, [new_target, ctor, ..rest])) ->
+          fast_construct(
+            state,
+            drive,
+            pc,
+            stack,
+            locals,
+            agent,
+            line,
+            ctor,
+            new_target,
+            args,
+            rest,
+          )
+        _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+      }
+
     // A plain call frame returning to a caller: no return override, so the
-    // caller is restored straight from the registers. Constructor frames and
-    // the activation root take the general path.
+    // caller is restored straight from the registers. A base-constructor
+    // frame hands back its receiver unless the body returned an object.
+    // Derived-constructor frames take the general path.
     Return ->
       case state.call_stack {
         [SavedFrame(constructor_this: None, ..) as saved, ..rest_frames]
@@ -1262,7 +1600,44 @@ fn fast_loop(
             new_state.agent,
             new_state.code,
             new_state.constants,
-            call.current_line(new_state.agent),
+            top_line(new_state.agent),
+          )
+        }
+        // The activation root: its driver owns the frame bookkeeping.
+        [] -> {
+          let value = case stack {
+            [v, ..] -> v
+            [] -> mk_undefined()
+          }
+          Ok(#(
+            Completed(NormalCompletion(value)),
+            State(..state, pc:, stack:, locals:, agent:),
+          ))
+        }
+        [
+          SavedFrame(constructor_this: Some(receiver), ..) as saved,
+          ..rest_frames
+        ] -> {
+          let value = case stack {
+            [v, ..] ->
+              case is_handle(v) {
+                True -> v
+                False -> receiver
+              }
+            [] -> receiver
+          }
+          let new_state =
+            call.return_to(agent, state.outer_depth, saved, rest_frames, value)
+          fast_loop(
+            new_state,
+            drive,
+            new_state.pc,
+            new_state.stack,
+            new_state.locals,
+            new_state.agent,
+            new_state.code,
+            new_state.constants,
+            top_line(new_state.agent),
           )
         }
         _ ->
@@ -1306,17 +1681,17 @@ fn fast_call(
   args: List(JsVal),
   rest: List(JsVal),
 ) -> Result(#(Outcome, State), VmError) {
-  let agent = call.set_line(agent, line)
-  case classify(callee) {
-    KHandle(h) ->
-      case rt_store.t_cell_get(agent, h) {
+  let slot = ffi.cell_of(agent, callee)
+  case ffi.is(slot, ffi.Miss) {
+    False ->
+      case slot {
         SObject(kind: KNative(tag:, ..), ..)
           if tag != function_call
           && tag != function_apply
           && tag != reflect_apply
           && agent.call_depth < limits.max_call_depth
         -> {
-          let agent = rt_store.t_enter_call(agent)
+          let agent = call.enter_native_at(agent, line)
           case ffi.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
             ffi.Ok(value: v, agent:) ->
               fast_loop(
@@ -1325,7 +1700,7 @@ fn fast_call(
                 pc + 1,
                 [v, ..rest],
                 locals,
-                rt_store.t_leave_call(agent),
+                Agent(..agent, call_depth: agent.call_depth - 1),
                 code,
                 constants,
                 line,
@@ -1339,7 +1714,7 @@ fn fast_call(
                     pc:,
                     stack: rest,
                     locals:,
-                    agent: rt_store.t_leave_call(agent),
+                    agent: Agent(..agent, call_depth: agent.call_depth - 1),
                   ),
                 )),
                 drive,
@@ -1363,15 +1738,17 @@ fn fast_call(
             && !template.is_class_constructor
             && !template.is_generator
             && !template.is_async
+            && agent.call_depth < limits.max_call_depth
           {
-            True ->
-              case
+            True -> {
+              let callee =
                 call.call_plain(
                   state,
                   pc,
                   locals,
                   agent,
-                  h,
+                  line,
+                  callee,
                   template,
                   unit,
                   env,
@@ -1380,27 +1757,32 @@ fn fast_call(
                   args,
                   rest,
                   this,
+                  None,
+                  mk_undefined(),
                 )
-              {
-                Ok(callee) ->
-                  fast_loop(
-                    callee,
-                    drive,
-                    0,
-                    [],
-                    callee.locals,
-                    callee.agent,
-                    callee.code,
-                    callee.constants,
-                    0,
-                  )
-                Error(exit) -> after_step(Error(exit), drive)
-              }
+              fast_loop(
+                callee,
+                drive,
+                0,
+                [],
+                callee.locals,
+                callee.agent,
+                callee.code,
+                callee.constants,
+                0,
+              )
+            }
             False ->
               after_step(
                 call.call_cell(
-                  State(..state, pc:, stack:, locals:, agent:),
-                  h,
+                  State(
+                    ..state,
+                    pc:,
+                    stack:,
+                    locals:,
+                    agent: call.set_line(agent, line),
+                  ),
+                  as_handle(callee),
                   slot,
                   this,
                   args,
@@ -1413,8 +1795,14 @@ fn fast_call(
         slot ->
           after_step(
             call.call_cell(
-              State(..state, pc:, stack:, locals:, agent:),
-              h,
+              State(
+                ..state,
+                pc:,
+                stack:,
+                locals:,
+                agent: call.set_line(agent, line),
+              ),
+              as_handle(callee),
               slot,
               this,
               args,
@@ -1424,10 +1812,16 @@ fn fast_call(
             drive,
           )
       }
-    _ ->
+    True ->
       after_step(
         call.call(
-          State(..state, pc:, stack:, locals:, agent:),
+          State(
+            ..state,
+            pc:,
+            stack:,
+            locals:,
+            agent: call.set_line(agent, line),
+          ),
           callee,
           this,
           args,
@@ -1436,6 +1830,82 @@ fn fast_call(
         ),
         drive,
       )
+  }
+}
+
+/// CallConstructor from the loop's registers. A same-realm, non-derived
+/// bytecode constructor whose `newTarget.prototype` is a plain data read
+/// of an object gets its receiver allocated here (§10.1.13
+/// OrdinaryCreateFromConstructor) and its frame entered like a plain call;
+/// every other constructor, and a `prototype` that needs the observable
+/// [[Get]] or the realm-intrinsic fallback, takes the general path.
+fn fast_construct(
+  state: State,
+  drive: Drive,
+  pc: Int,
+  stack: List(JsVal),
+  locals: TupleArray(JsVal),
+  agent: Agent,
+  line: Int,
+  ctor: JsVal,
+  new_target: JsVal,
+  args: List(JsVal),
+  rest: List(JsVal),
+) -> Result(#(Outcome, State), VmError) {
+  case ffi.cell_of(agent, ctor) {
+    SObject(
+      kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      ..,
+    )
+      if flags.is_constructor
+      && !template.is_derived_constructor
+      && realm == agent.realm.id
+      && agent.call_depth < limits.max_call_depth
+    -> {
+      // `new_target` is `ctor` itself or a derived constructor's own
+      // NewTarget, an object either way; a primitive here can only be a
+      // primitive `ctor`, which never reaches this arm.
+      let proto = ffi.get_field(agent, new_target, key.Named("prototype"))
+      case is_handle(proto) {
+        False -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
+        True -> {
+          let #(obj, agent) = rt_obj.t_new_object(agent, Some(as_handle(proto)))
+          let receiver = mk_object(obj)
+          let callee =
+            call.call_plain(
+              state,
+              pc,
+              locals,
+              agent,
+              line,
+              ctor,
+              template,
+              unit,
+              env,
+              home_object,
+              flags,
+              args,
+              rest,
+              receiver,
+              Some(receiver),
+              new_target,
+            )
+          fast_loop(
+            callee,
+            drive,
+            0,
+            [],
+            callee.locals,
+            callee.agent,
+            callee.code,
+            callee.constants,
+            0,
+          )
+        }
+      }
+    }
+    // Any other constructor, a non-object, or the kernel's miss.
+    _ -> dispatch_slow(state, drive, pc, stack, locals, agent, line)
   }
 }
 
@@ -1461,91 +1931,30 @@ fn pure_binop_kernel(op: binop.PureBinOp, left: JsVal, right: JsVal) -> JsVal {
     binop.Bitwise(binop.ShlOp) -> k_shl(left, right)
     binop.Bitwise(binop.ShrOp) -> k_shr(left, right)
     binop.Bitwise(binop.UShrOp) -> k_ushr(left, right)
-    binop.Compare(binop.LtCmp) -> tri(ffi.lt(left, right))
-    binop.Compare(binop.LtEqCmp) -> tri(ffi.le(left, right))
-    binop.Compare(binop.GtCmp) -> tri(ffi.gt(left, right))
-    binop.Compare(binop.GtEqCmp) -> tri(ffi.ge(left, right))
-    binop.Equality(binop.StrictEqOp) -> mk_bool(ffi.strict_eq(left, right))
-    binop.Equality(binop.StrictNotEqOp) -> mk_bool(!ffi.strict_eq(left, right))
-    binop.Equality(binop.EqOp) -> tri(ffi.eq(left, right))
-    binop.Equality(binop.NotEqOp) -> {
-      let r = tri(ffi.eq(left, right))
-      case ffi.is_miss(r) {
-        True -> r
-        False -> mk_bool(!ffi.truthy(r))
-      }
-    }
+    binop.Compare(binop.LtCmp) -> ffi.lt(left, right)
+    binop.Compare(binop.LtEqCmp) -> ffi.le(left, right)
+    binop.Compare(binop.GtCmp) -> ffi.gt(left, right)
+    binop.Compare(binop.GtEqCmp) -> ffi.ge(left, right)
+    binop.Equality(binop.StrictEqOp) -> ffi.strict_eq(left, right)
+    binop.Equality(binop.StrictNotEqOp) -> ffi.strict_neq(left, right)
+    binop.Equality(binop.EqOp) -> ffi.eq(left, right)
+    binop.Equality(binop.NotEqOp) -> ffi.neq(left, right)
   }
 }
 
-/// §7.3.5 CreateDataProperty on an ordinary, extensible `SObject` under a
-/// string key: a fresh `{W, E, C: true}` data property is inserted, or
-/// replaces a configurable one in place (§10.1.6.3: any configurable
-/// current accepts the new descriptor; the key keeps its creation order,
-/// §10.1.11). `Error(Nil)` when the receiver is anything else (array,
-/// proxy, non-extensible, shaped or not an object) or the current property
-/// is non-configurable, so the caller takes the full [[DefineOwnProperty]].
-fn define_plain(
-  agent: Agent,
-  obj: JsVal,
-  pk: rt_types.PropertyKey,
-  val: JsVal,
-) -> Result(Agent, Nil) {
-  use <- bool.guard(!is_handle(obj), Error(Nil))
-  let h = as_handle(obj)
-  case rt_store.t_cell_get(agent, h) {
-    SObject(kind: rt_types.Ordinary, extensible: True, props:, ..) as slot -> {
-      let current = case dict.get(props, pk) {
-        Ok(old) ->
-          case rt_types.prop_configurable(old) {
-            True -> Ok(#(rt_types.prop_seq(old), agent))
-            False -> Error(Nil)
-          }
-        Error(Nil) -> Ok(rt_store.t_next_prop_seq(agent))
-      }
-      use #(seq, agent) <- result.map(current)
-      let prop =
-        DataProperty(
-          value: val,
-          writable: True,
-          enumerable: True,
-          configurable: True,
-          seq:,
-        )
-      rt_store.t_cell_set(
-        agent,
-        h,
-        SObject(..slot, props: dict.insert(props, pk, prop)),
-      )
-    }
-    _ -> Error(Nil)
+/// `call.current_line`, kept local so the Return arms read it in place.
+fn top_line(agent: Agent) -> Int {
+  case agent.frames {
+    [rt_types.FrameInfo(line:, ..), ..] -> line
+    [] -> 0
   }
 }
 
-/// The value in the box cell a captured local holds, `Error(Nil)` for the
-/// TDZ sentinel or a local that is not a box handle.
-fn box_value(agent: Agent, slot: JsVal) -> Result(JsVal, Nil) {
-  case is_handle(slot) {
-    False -> Error(Nil)
-    True ->
-      case rt_store.t_cell_get(agent, as_handle(slot)) {
-        SBox(value:) ->
-          case is_tdz(value) {
-            True -> Error(Nil)
-            False -> Ok(value)
-          }
-        _ -> Error(Nil)
-      }
-  }
-}
-
-/// `v + delta` for a Number local (the IncLocal/DecLocal kernel): the unary
-/// plus kernel gates on Number so a string local never concatenates.
-fn number_step(v: JsVal, delta: Int) -> JsVal {
-  let n = ffi.plus(v)
-  case ffi.is_miss(n) {
-    True -> n
-    False -> ffi.add(n, int_val(delta))
+/// The operand a Yield/Await pops, `undefined` off an empty stack.
+fn top_or_undefined(stack: List(JsVal)) -> #(JsVal, List(JsVal)) {
+  case stack {
+    [v, ..rest] -> #(v, rest)
+    [] -> #(mk_undefined(), [])
   }
 }
 
@@ -1563,10 +1972,7 @@ fn dispatch_slow(
 ) -> Result(#(Outcome, State), VmError) {
   let state =
     State(..state, pc:, stack:, locals:, agent: call.set_line(agent, line))
-  after_step(
-    step(state, drive, tuple_array.get_unchecked(state.pc, state.code)),
-    drive,
-  )
+  after_step(step(state, drive, tuple_array.element(pc + 1, state.code)), drive)
 }
 
 /// Continue the loop after one stepped instruction: re-enter it on the new
@@ -2776,39 +3182,15 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [value, obj, ..rest] ->
           case handle_of(obj) {
-            Some(h) ->
-              case okey(k) {
-                StringKey(pk) ->
-                  case define_plain(state.agent, obj, pk, value) {
-                    Ok(agent) ->
-                      Ok(
-                        State(
-                          ..state,
-                          agent:,
-                          stack: [obj, ..rest],
-                          pc: state.pc + 1,
-                        ),
-                      )
-                    Error(Nil) -> {
-                      use state <- result.map(create_data_property_or_throw(
-                        state,
-                        h,
-                        StringKey(pk),
-                        value,
-                      ))
-                      State(..state, stack: [obj, ..rest], pc: state.pc + 1)
-                    }
-                  }
-                symbol_key -> {
-                  use state <- result.map(create_data_property_or_throw(
-                    state,
-                    h,
-                    symbol_key,
-                    value,
-                  ))
-                  State(..state, stack: [obj, ..rest], pc: state.pc + 1)
-                }
-              }
+            Some(h) -> {
+              use state <- result.map(create_data_property_or_throw(
+                state,
+                h,
+                okey(k),
+                value,
+              ))
+              State(..state, stack: [obj, ..rest], pc: state.pc + 1)
+            }
             // DefineField on non-object: no-op, keep object on stack.
             None -> Ok(State(..state, pc: state.pc + 1))
           }

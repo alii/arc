@@ -23,7 +23,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
-  type NativeToken, type ObjKind, type Property, type Realm, ArrayObj,
+  type NativeToken, type ObjKind, type Property, type Realm, Agent, ArrayObj,
   DataProperty, Dense, JInt, JPosInf, KBound, KBytecode, KCompiled, KHandle,
   KNative, KNull, KNum, KStr, KTdz, KUndef, Named, NoElements, ProxyObj,
   ReferenceErr, SObject, StringKey, TypeErr, classify, mk_number, mk_object,
@@ -198,12 +198,13 @@ pub fn t_call(
   this: JsVal,
   args: List(JsVal),
 ) -> #(Completion, Agent) {
-  case st.call_depth >= limits.max_call_depth {
+  let depth = st.call_depth
+  case depth >= limits.max_call_depth {
     True -> t_apply_protected(st, rt_store.stack_overflow)
     False -> {
-      let st = rt_store.t_enter_call(st)
-      let #(c, st) = do_call(st, callee, this, args)
-      #(c, rt_store.t_leave_call(st))
+      let #(c, st) =
+        do_call(Agent(..st, call_depth: depth + 1), callee, this, args)
+      #(c, Agent(..st, call_depth: st.call_depth - 1))
     }
   }
 }
