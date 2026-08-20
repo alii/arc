@@ -865,8 +865,9 @@ fn take_or_drop(
   alloc_helper(st, make_kind(remaining), rec)
 }
 
-/// §27.1.4.10/12 step 3-6: ToIntegerOrInfinity(ToNumber(limit)) with NaN /
-/// negative → RangeError. On any abrupt completion, close `this` first.
+/// §27.1.4.10/12 step 4-9: ToNumber(limit); NaN, a finite value above
+/// 2^53 - 1, or a negative ToIntegerOrInfinity → RangeError. On any abrupt
+/// completion, close `this` first.
 fn coerce_limit(
   st: Agent,
   this: JsVal,
@@ -876,29 +877,26 @@ fn coerce_limit(
   let arg = first_arg_or_undefined(args)
   // ToNumber via t_to_number (runs ToPrimitive for objects; may throw).
   let #(nout, st) = protected_any(st, fn(st) { rt_val.t_to_number(st, arg) })
+  let range_error = fn(st, problem) {
+    let #(e, st) = new_range_error(st, name <> " limit is " <> problem)
+    iter_protocol.close_throw(st, this, e)
+  }
   case nout {
     ThrowCompletion(thrown) -> iter_protocol.close_throw(st, this, thrown)
     NormalCompletion(n) ->
       case n {
-        JNan -> {
-          let #(e, st) = new_range_error(st, name <> " limit is NaN")
-          iter_protocol.close_throw(st, this, e)
-        }
+        JNan -> range_error(st, "NaN")
         JPosInf -> #(limits.max_safe_integer, st)
-        JNegInf -> {
-          let #(e, st) = new_range_error(st, name <> " limit is negative")
-          iter_protocol.close_throw(st, this, e)
-        }
-        JInt(i) if i < 0 -> {
-          let #(e, st) = new_range_error(st, name <> " limit is negative")
-          iter_protocol.close_throw(st, this, e)
-        }
-        JFloat(f) if f <. 0.0 -> {
-          let #(e, st) = new_range_error(st, name <> " limit is negative")
-          iter_protocol.close_throw(st, this, e)
-        }
+        JNegInf -> range_error(st, "negative")
+        JInt(i) if i > limits.max_safe_integer -> range_error(st, "too large")
+        JInt(i) if i < 0 -> range_error(st, "negative")
         JInt(i) -> #(i, st)
-        JFloat(f) -> #(rt_val.float_to_int(f), st)
+        JFloat(f) if f >. 9_007_199_254_740_991.0 -> range_error(st, "too large")
+        JFloat(f) ->
+          case rt_val.float_to_int(f) {
+            i if i < 0 -> range_error(st, "negative")
+            i -> #(i, st)
+          }
       }
   }
 }
