@@ -6,8 +6,13 @@
 //// are parked frames resumed through `JsOps.resume_frame`. Either way the
 //// suspension point comes back as a `Resume` inside the `Step`, is stored on
 //// the coroutine's data cell, and is handed to `apply_resume` with the next
-//// `Sent = #(mode, value)` (0 = next, 1 = throw, 2 = return). `drive_step` is
-//// the one place a `Step` is cased on.
+//// `Sent = #(mode, value)` (0 = next, 1 = throw, 2 = return).
+////
+//// A promise reaction's result capability is stored as a settle target, not
+//// as a pair of resolving functions: `undefined` for no child, the child
+//// promise itself when the capability is an internal %Promise% one, the
+//// coroutine data cell an `await` continues, or a user capability's
+//// resolve/reject function. `settle` is the one place that is cased on.
 ////
 //// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
 
@@ -28,15 +33,15 @@ import arc/rt/types.{
   type Step, type WaiterRef, AGAwaitingReturn, AGCompleted, AGExecuting,
   AGResumeAwaitingReturn, AGResumeBody, AGResumeReturnUnwind, AGSuspendedStart,
   AGSuspendedYield, Agent, AsyncGenRequest, AsyncGenResume, AsyncGeneratorObj,
-  AsyncResume, AsyncWaiter, DataProperty, GenCompleted, GenExecuting, GenNext,
-  GenReturn, GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj,
-  Handler, HostJob, IdentityPassThrough, JsCell, JsStore, KHandle, Named,
-  NoElements, Ordinary, PromiseFulfilled, PromiseObj, PromisePending,
-  PromiseReaction, PromiseRejectFn, PromiseRejected, PromiseResolveFn, RangeErr,
-  ReactionJob, ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext,
-  SAsyncGen, SBox, SGenerator, SObject, SPromiseData, StepAwait, StepReturn,
-  StepThrow, StepYield, StringKey, ThrowerPassThrough, TypeErr, classify, jq_pop,
-  jq_push, mk_bool, mk_object, mk_string, mk_undefined,
+  AsyncWaiter, DataProperty, GenCompleted, GenExecuting, GenNext, GenReturn,
+  GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj, Handler, HostJob,
+  IdentityPassThrough, JsCell, JsStore, KHandle, Named, NoElements, Ordinary,
+  PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
+  PromiseRejected, PromiseResolveFn, RangeErr, ReactionJob, ResolveThenableJob,
+  ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox, SGenerator,
+  SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
+  ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push, mk_bool, mk_object,
+  mk_string, mk_undefined,
 } as rt_types
 import gleam/dict
 import gleam/int
@@ -89,41 +94,6 @@ pub fn apply_resume(
   }
 }
 
-// ── drive_step: generic step dispatcher ─────────────────────────────────────
-
-/// Per-driver continuation table. Each of `t_async_start` / `t_gen_next` /
-/// `t_asyncgen_*` builds one and hands it to `drive_step` — the ONE place a
-/// `Step` is cased on. Generic in `r` because the three drivers settle to
-/// different shapes (bare `Agent` for async/asyncgen; `#(Handle, St)`
-/// for a sync generator's iter-result).
-pub type StepCtx(r) {
-  StepCtx(
-    on_return: fn(Agent, JsVal) -> r,
-    on_throw: fn(Agent, JsVal) -> r,
-    on_yield: fn(Agent, JsVal, Resume) -> r,
-    on_await: fn(Agent, JsVal, Resume) -> r,
-  )
-}
-
-/// Dispatch a `Step` to `ctx`'s matching continuation. Total; every arm
-/// forwards the threaded `st` (R1).
-pub fn drive_step(st: Agent, ctx: StepCtx(r), step: Step) -> r {
-  case step {
-    StepReturn(v) -> ctx.on_return(st, v)
-    StepThrow(e) -> ctx.on_throw(st, e)
-    StepYield(value:, resume:) -> ctx.on_yield(st, value, resume)
-    StepAwait(value:, resume:) -> ctx.on_await(st, value, resume)
-  }
-}
-
-/// A `StepCtx` continuation for the arm a driver cannot legitimately reach —
-/// `on_await` in a sync generator, `on_yield` in a plain async function.
-/// Engine-bug panic: neither the state-machine lowering nor the bytecode
-/// compiler produces the wrong step kind for a given function flavour.
-pub fn step_unreachable(_st: Agent, _v: JsVal, _resume: Resume) -> r {
-  panic as "rt_async: unreachable Step variant for this coroutine kind"
-}
-
 // ── native-closure allocation ───────────────────────────────────────────────
 // Data-carrying `NativeToken` variants (arc `value.gleam:3020-3055`):
 // `KNative` stays payload-free; the closed-over `Handle`s ride on the tag,
@@ -164,21 +134,11 @@ pub fn alloc_resolving_fns(
   #(#(resolve_h, reject_h), st)
 }
 
-/// §27.7.5.3 Await steps 3-5: allocate the on-fulfilled/on-rejected `KNative`
-/// resume closure for a plain async function. The `Resume` is already stored
-/// on the context cell — the closure carries only `(ctx_h, is_throw)`,
-/// matching arc `AsyncResume(data_ref, is_reject)`.
-pub fn alloc_resume(
-  st: Agent,
-  ctx_h: Handle,
-  is_throw: Bool,
-) -> #(Handle, Agent) {
-  alloc_native_fn(st, AsyncResume(gen: ctx_h, is_throw:), "", 1)
-}
-
-/// Async-generator counterpart of `alloc_resume` — dispatches to the
-/// request-queue driver instead of settling a result promise directly.
-pub fn alloc_asyncgen_resume(
+/// The on-fulfilled/on-rejected `KNative` closure for an async generator's
+/// driver-level `.return(v)` awaits (§27.6.3.9, §27.6.3.10 step 8), whose
+/// `kind` the data cell alone cannot tell apart. A body `await` needs none:
+/// its reaction continues the data cell directly (`settle`).
+fn alloc_asyncgen_resume(
   st: Agent,
   gen_h: Handle,
   is_throw: Bool,
@@ -319,14 +279,15 @@ pub fn t_add_waiter(
   ref: WaiterRef,
   deadline: Option(Int),
 ) -> #(Handle, Agent) {
-  let #(#(promise, resolve_h, reject_h), st) = t_new_promise_capability(st)
+  let #(promise, st) = t_new_promise(st)
+  let target = mk_object(promise)
   let waiter =
     AsyncWaiter(
       owner:,
       ref:,
       promise:,
-      resolve: mk_object(resolve_h),
-      reject: mk_object(reject_h),
+      resolve: target,
+      reject: target,
       deadline:,
     )
   #(promise, Agent(..st, waiters: list.append(st.waiters, [waiter])))
@@ -414,7 +375,7 @@ fn fire_due_waiters(st: Agent, cutoff: Int) -> Agent {
     })
   list.fold(due, Agent(..st, waiters: pending), fn(st, w) {
     case cancel_waiter(w.owner, w.ref) {
-      Cancelled -> call_settle(st, w.resolve, [wait_result_js(TimedOut)])
+      Cancelled -> settle(st, w.resolve, Fulfil, wait_result_js(TimedOut))
       AlreadyWoken -> {
         let Nil = consume_wake(w.ref)
         enqueue_resolve_ok(st, w)
@@ -449,6 +410,62 @@ fn finish_drain(st: Agent) -> Agent {
     }
   })
   with_js(st, JsStore(..js, unhandled_rejections: []))
+}
+
+/// Which of a result capability's two functions a settlement stands for.
+type Side {
+  Fulfil
+  Reject
+}
+
+/// Settle a reaction's result capability, stored as `target` (the module doc
+/// lists the shapes). Resolving functions (a species constructor's, or ones
+/// minted by `t_new_promise_capability`) are called; the internal shapes
+/// settle in place, which is all their resolving functions could ever have
+/// done: nothing else holds them, so `[[AlreadyResolved]]` reduces to the
+/// pending check.
+fn settle(st: Agent, target: JsVal, side: Side, value: JsVal) -> Agent {
+  case classify(target) {
+    rt_types.KUndef -> st
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h), side {
+        SObject(kind: PromiseObj(..), ..), Fulfil ->
+          t_promise_resolve(st, h, value)
+        SObject(kind: PromiseObj(..), ..), Reject ->
+          t_promise_reject(st, h, value)
+        SAsyncContext(resume:, promise:), _ -> {
+          use st <- resume_from_job(st)
+          let #(step, st) = apply_resume(st, resume, sent_of(side, value))
+          drive_async_step(st, Some(h), promise, step)
+        }
+        SAsyncGen(..), _ -> {
+          use st <- resume_from_job(st)
+          resume_asyncgen(st, h, sent_of(side, value))
+        }
+        _, _ -> call_settle(st, target, [value])
+      }
+    _ -> call_settle(st, target, [value])
+  }
+}
+
+/// §27.7.5.3 Await steps 3.c / 5.c: the `Sent` pair a settled await resumes
+/// its coroutine with.
+fn sent_of(side: Side, value: JsVal) -> #(Int, JsVal) {
+  case side {
+    Fulfil -> #(sent_next, value)
+    Reject -> #(sent_throw, value)
+  }
+}
+
+/// Run a coroutine turn from a reaction job the way calling a resume closure
+/// would have: inside the call-depth bracket (D11: an interpreter body only
+/// collects at its own returns while it owns every unit of `call_depth`) and
+/// under the job's catch, so a throw escaping the turn is reported rather
+/// than unwound through the drain.
+fn resume_from_job(st: Agent, turn: fn(Agent) -> Agent) -> Agent {
+  let st = rt_store.t_enter_call(st)
+  let #(outcome, st) = protected(st, fn(st) { #(mk_undefined(), turn(st)) })
+  report_job_throw(#(outcome, rt_store.t_leave_call(st)))
 }
 
 /// Fire-and-forget invoke of a promise-capability resolve/reject fn during
@@ -493,12 +510,12 @@ fn execute_job(st: Agent, job: Job) -> Agent {
     // §27.2.2.1 NewPromiseReactionJob.
     ReactionJob(handler:, arg:, resolve:, reject:) ->
       case handler {
-        IdentityPassThrough -> call_settle(st, resolve, [arg])
-        ThrowerPassThrough -> call_settle(st, reject, [arg])
+        IdentityPassThrough -> settle(st, resolve, Fulfil, arg)
+        ThrowerPassThrough -> settle(st, reject, Reject, arg)
         Handler(fun) ->
           case t_call(st, fun, mk_undefined(), [arg]) {
-            #(NormalCompletion(v), st) -> call_settle(st, resolve, [v])
-            #(ThrowCompletion(e), st) -> call_settle(st, reject, [e])
+            #(NormalCompletion(v), st) -> settle(st, resolve, Fulfil, v)
+            #(ThrowCompletion(e), st) -> settle(st, reject, Reject, e)
           }
       }
     // §27.2.2.2 NewPromiseResolveThenableJob.
@@ -771,29 +788,26 @@ fn gen_resume(
   let st = rt_store.t_enter_call(st)
   let #(step, st) = apply_resume(st, resume, sent)
   let st = rt_store.t_leave_call(st)
-  drive_step(
-    st,
-    StepCtx(
-      on_return: fn(st, v) {
-        #(#(True, v), set_gen_state(st, gen_h, gen, GenCompleted))
-      },
-      on_throw: fn(st, e) {
-        let st = set_gen_state(st, gen_h, gen, GenCompleted)
-        rt_store.t_throw(st, e)
-      },
-      on_yield: fn(st, v, resume) {
-        let st =
-          rt_store.t_cell_set(
-            st,
-            gen_h,
-            SGenerator(state: GenSuspendedYield, resume:),
-          )
-        #(#(False, v), st)
-      },
-      on_await: step_unreachable,
-    ),
-    step,
-  )
+  case step {
+    StepReturn(v) -> #(#(True, v), set_gen_state(st, gen_h, gen, GenCompleted))
+    StepThrow(e) -> {
+      let st = set_gen_state(st, gen_h, gen, GenCompleted)
+      rt_store.t_throw(st, e)
+    }
+    StepYield(value:, resume:) -> {
+      let st =
+        rt_store.t_cell_set(
+          st,
+          gen_h,
+          SGenerator(state: GenSuspendedYield, resume:),
+        )
+      #(#(False, value), st)
+    }
+    // The bytecode compiler and the state-machine lowering never emit an
+    // await step for a sync generator body.
+    StepAwait(..) ->
+      panic as "rt_async: sync generator body produced an await step"
+  }
 }
 
 // ── Promise core (§27.2; port arc builtins/promise.gleam:89-718 +
@@ -1046,8 +1060,10 @@ pub fn promise_resolve_static(st: Agent, v: JsVal) -> #(Handle, Agent) {
 }
 
 /// §27.2.5.4.1 PerformPromiseThen(promise, onFulfilled, onRejected,
-/// resultCapability) with a fresh %Promise% capability. Returns the child
-/// promise handle. Port of arc `perform_promise_then`
+/// resultCapability) with NewPromiseCapability(%Promise%) as the result.
+/// Returns the child promise handle. The capability's resolving functions
+/// could never reach user code, so the child promise itself is the reaction's
+/// settle target and none are allocated. Port of arc `perform_promise_then`
 /// (builtins/promise.gleam:465-568).
 pub fn t_promise_then(
   st: Agent,
@@ -1055,23 +1071,19 @@ pub fn t_promise_then(
   on_fulfilled: JsVal,
   on_rejected: JsVal,
 ) -> #(Handle, Agent) {
-  let #(#(child_h, resolve_h, reject_h), st) = t_new_promise_capability(st)
-  let st =
-    t_perform_then(
-      st,
-      promise_h,
-      on_fulfilled,
-      on_rejected,
-      mk_object(resolve_h),
-      mk_object(reject_h),
-    )
-  #(child_h, st)
+  let #(child_h, st) = t_new_promise(st)
+  let child = mk_object(child_h)
+  #(
+    child_h,
+    t_perform_then(st, promise_h, on_fulfilled, on_rejected, child, child),
+  )
 }
 
 /// §27.2.5.4.1 PerformPromiseThen with a caller-supplied capability: attach
-/// the reaction with `resolve`/`reject` as the child directly. Shared by
-/// `t_promise_then`, `Promise.prototype.then` (species capability) and
-/// §27.1.4.4 AsyncFromSyncIteratorContinuation.
+/// the reaction with `resolve`/`reject` as the child's settle targets (its
+/// resolving functions, or one of the internal shapes `settle` takes).
+/// Shared by `t_promise_then`, `Promise.prototype.then` (species capability)
+/// and §27.1.4.4 AsyncFromSyncIteratorContinuation.
 pub fn t_perform_then(
   st: Agent,
   promise_h: Handle,
@@ -1083,6 +1095,37 @@ pub fn t_perform_then(
   // Steps 3-6: non-callable → the spec's "empty" handler.
   let fulfill_handler = to_handler(st, on_fulfilled, IdentityPassThrough)
   let reject_handler = to_handler(st, on_rejected, ThrowerPassThrough)
+  perform_then(st, promise_h, fulfill_handler, reject_handler, resolve, reject)
+}
+
+/// §27.7.5.3 Await steps 2-7 / §27.6.3.8: PromiseResolve(%Promise%,
+/// `awaited`), then PerformPromiseThen with no result capability whose
+/// onFulfilled/onRejected continue the coroutine behind data cell `data_h`.
+/// The value passes straight through to `settle`, which resumes the cell, so
+/// no closure pair is allocated per await. Always enqueues (an
+/// already-settled promise still resumes asynchronously).
+fn await_into(st: Agent, data_h: Handle, awaited: JsVal) -> Agent {
+  let #(awaited_h, st) = promise_resolve_static(st, awaited)
+  let target = mk_object(data_h)
+  perform_then(
+    st,
+    awaited_h,
+    IdentityPassThrough,
+    ThrowerPassThrough,
+    target,
+    target,
+  )
+}
+
+/// PerformPromiseThen steps 7-13 over already-classified handlers.
+fn perform_then(
+  st: Agent,
+  promise_h: Handle,
+  fulfill_handler: ReactionHandler,
+  reject_handler: ReactionHandler,
+  resolve: JsVal,
+  reject: JsVal,
+) -> Agent {
   case promise_data(st, promise_h) {
     // Step 9: pending → append reaction; step 12: [[PromiseIsHandled]] = true.
     // Stored newest-first (O(1) prepend), reversed once at settle time.
@@ -1247,7 +1290,8 @@ fn asyncgen_method(
   completion: GeneratorCompletion,
   value: JsVal,
 ) -> #(Handle, Agent) {
-  let #(#(promise_h, resolve_h, reject_h), st) = t_new_promise_capability(st)
+  // NewPromiseCapability(%Promise%): internal, so the promise is the target.
+  let #(promise_h, st) = t_new_promise(st)
   case asyncgen_data_of(st, this) {
     Error(Nil) -> {
       // §27.6.1.2 step 4: brand check fails → reject the returned promise.
@@ -1259,16 +1303,12 @@ fn asyncgen_method(
         )
       #(promise_h, t_promise_reject(st, promise_h, e))
     }
-    Ok(#(gen_h, gen_state)) -> {
+    Ok(#(gen_h, ag)) -> {
+      let promise = mk_object(promise_h)
       let req =
-        AsyncGenRequest(
-          completion:,
-          value:,
-          resolve: mk_object(resolve_h),
-          reject: mk_object(reject_h),
-        )
-      let st = write_asyncgen(st, gen_h, ag_enqueue(_, req))
-      let st = case gen_state {
+        AsyncGenRequest(completion:, value:, resolve: promise, reject: promise)
+      let st = put_asyncgen(st, gen_h, ag_enqueue(ag, req))
+      let st = case ag.state {
         AGExecuting | AGAwaitingReturn -> st
         _ -> drain_queue(st, gen_h)
       }
@@ -1278,19 +1318,13 @@ fn asyncgen_method(
 }
 
 /// Brand check: `this` is an `AsyncGeneratorObj`; yields its data handle and
-/// current state.
-fn asyncgen_data_of(
-  st: Agent,
-  this: JsVal,
-) -> Result(#(Handle, AsyncGenState), Nil) {
+/// the decoded data cell.
+fn asyncgen_data_of(st: Agent, this: JsVal) -> Result(#(Handle, AGLive), Nil) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: AsyncGeneratorObj(data:), ..) ->
-          case rt_store.t_cell_get(st, data) {
-            SAsyncGen(state:, ..) -> Ok(#(data, state))
-            _ -> Error(Nil)
-          }
+          Ok(#(data, read_asyncgen(st, data)))
         _ -> Error(Nil)
       }
     _ -> Error(Nil)
@@ -1301,7 +1335,9 @@ fn asyncgen_data_of(
 
 /// Pull the head request and act on it based on current state. Loops until
 /// queue is empty or an await suspends via microtask. Port of arc
-/// `resume_next` (async_generators.gleam:130-184).
+/// `resume_next` (async_generators.gleam:130-184). No user code runs between
+/// the read and each arm's first write, so that write persists the decoded
+/// `ag` (normalised queue included) rather than reading the cell again.
 fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
   let ag = ag_normalize(read_asyncgen(st, gen_h))
   case ag.front {
@@ -1312,20 +1348,20 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
         AGCompleted ->
           case req.completion {
             GenNext -> {
-              let st = write_asyncgen(st, gen_h, ag_drop_head)
+              let st = put_asyncgen(st, gen_h, ag_drop_head(ag))
               let st = fulfill_iter(st, req.resolve, mk_undefined(), True)
               drain_queue(st, gen_h)
             }
             GenThrow -> {
-              let st = write_asyncgen(st, gen_h, ag_drop_head)
-              let st = call_settle(st, req.reject, [req.value])
+              let st = put_asyncgen(st, gen_h, ag_drop_head(ag))
+              let st = settle(st, req.reject, Reject, req.value)
               drain_queue(st, gen_h)
             }
             GenReturn -> {
               // §27.6.3.5 step 5.b: Await(completion.[[Value]]) first.
               let st =
-                write_asyncgen(st, gen_h, ag_set_state(_, AGAwaitingReturn))
-              setup_asyncgen_await(st, gen_h, req.value, AGResumeAwaitingReturn)
+                put_asyncgen(st, gen_h, ag_set_state(ag, AGAwaitingReturn))
+              setup_return_await(st, gen_h, req.value, AGResumeAwaitingReturn)
             }
           }
         AGSuspendedStart ->
@@ -1333,24 +1369,24 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
             // §27.6.3.5 step 5.a: return/throw on a never-started gen →
             // Completed, then fall through on next loop.
             GenReturn | GenThrow -> {
-              let st = write_asyncgen(st, gen_h, ag_set_state(_, AGCompleted))
+              let st = put_asyncgen(st, gen_h, ag_set_state(ag, AGCompleted))
               drain_queue(st, gen_h)
             }
-            GenNext -> run_asyncgen_body(st, gen_h, req, sent_start())
+            GenNext -> run_asyncgen_body(st, gen_h, ag, req, sent_start())
           }
         AGSuspendedYield ->
           case req.completion {
             GenNext ->
-              run_asyncgen_body(st, gen_h, req, #(sent_next, req.value))
+              run_asyncgen_body(st, gen_h, ag, req, #(sent_next, req.value))
             GenThrow ->
-              run_asyncgen_body(st, gen_h, req, #(sent_throw, req.value))
+              run_asyncgen_body(st, gen_h, ag, req, #(sent_throw, req.value))
             GenReturn -> {
               // §27.6.3.10 step 8: the DRIVER does Await(resumptionValue)
               // FIRST (arc `run_body` AGReturn :231-240; the body emits no
               // await for mode 2). State stays Executing; the
               // AGResumeReturnUnwind arm injects mode 2 with the AWAITED v.
-              let st = write_asyncgen(st, gen_h, ag_set_state(_, AGExecuting))
-              setup_asyncgen_await(st, gen_h, req.value, AGResumeReturnUnwind)
+              let st = put_asyncgen(st, gen_h, ag_set_state(ag, AGExecuting))
+              setup_return_await(st, gen_h, req.value, AGResumeReturnUnwind)
             }
           }
       }
@@ -1359,17 +1395,18 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
 
 /// Mark `Executing`, run one turn, dispatch outcome. Port of arc `run_body`
 /// (async_generators.gleam:189-243) with the `yield*`-delegate branch dropped.
+/// `ag` is the cell as `drain_queue` just read it.
 fn run_asyncgen_body(
   st: Agent,
   gen_h: Handle,
+  ag: AGLive,
   req: AsyncGenRequest,
   sent: #(Int, JsVal),
 ) -> Agent {
   // Mark executing FIRST so re-entrant next()/return()/throw() enqueue.
-  let st = write_asyncgen(st, gen_h, ag_set_state(_, AGExecuting))
-  let resume = { read_asyncgen(st, gen_h) }.resume
-  let #(step, st) = asyncgen_turn(st, resume, sent)
-  drive_step(st, asyncgen_ctx(gen_h, req), step)
+  let st = put_asyncgen(st, gen_h, ag_set_state(ag, AGExecuting))
+  let #(step, st) = asyncgen_turn(st, ag.resume, sent)
+  drive_asyncgen_step(st, gen_h, req, step)
 }
 
 /// Run one asyncgen body turn under the `call_depth` gate. The generator is
@@ -1400,36 +1437,65 @@ fn asyncgen_turn(
   }
 }
 
-/// The `StepCtx` for the asyncgen body — port of arc `handle_exec_result`
-/// (async_generators.gleam:546-579).
-fn asyncgen_ctx(gen_h: Handle, req: AsyncGenRequest) -> StepCtx(Agent) {
-  StepCtx(
-    on_return: fn(st, v) {
+/// Outcome dispatch for one asyncgen body turn — port of arc
+/// `handle_exec_result` (async_generators.gleam:546-579). User code ran in
+/// the turn, so every write re-reads the live cell (`write_asyncgen`).
+fn drive_asyncgen_step(
+  st: Agent,
+  gen_h: Handle,
+  req: AsyncGenRequest,
+  step: Step,
+) -> Agent {
+  case step {
+    StepReturn(v) -> {
       let st = write_asyncgen(st, gen_h, ag_complete_drop_head)
       let st = fulfill_iter(st, req.resolve, v, True)
       drain_queue(st, gen_h)
-    },
-    on_throw: fn(st, e) {
+    }
+    StepThrow(e) -> {
       let st = write_asyncgen(st, gen_h, ag_complete_drop_head)
-      let st = call_settle(st, req.reject, [e])
+      let st = settle(st, req.reject, Reject, e)
       drain_queue(st, gen_h)
-    },
-    on_yield: fn(st, v, resume) {
+    }
+    StepYield(value:, resume:) -> {
       // Store resume, dequeue + resolve request, loop.
       let st =
         write_asyncgen(st, gen_h, fn(ag) {
           AGLive(..ag, resume:, state: AGSuspendedYield) |> ag_drop_head
         })
-      let st = fulfill_iter(st, req.resolve, v, False)
+      let st = fulfill_iter(st, req.resolve, value, False)
       drain_queue(st, gen_h)
-    },
-    on_await: fn(st, v, resume) {
+    }
+    StepAwait(value:, resume:) -> {
       // State stays Executing; do NOT dequeue — same request stays at head
-      // until a yield/return/throw settles it.
+      // until a yield/return/throw settles it. The reaction continues the
+      // data cell itself (`resume_asyncgen`).
       let st = write_asyncgen(st, gen_h, fn(ag) { AGLive(..ag, resume:) })
-      setup_asyncgen_await(st, gen_h, v, AGResumeBody)
-    },
-  )
+      await_into(st, gen_h, value)
+    }
+  }
+}
+
+/// A body `await` settled (its reaction's target is the data cell): re-drive
+/// the body with `sent` for the request still at the queue head.
+fn resume_asyncgen(st: Agent, gen_h: Handle, sent: #(Int, JsVal)) -> Agent {
+  let ag = ag_normalize(read_asyncgen(st, gen_h))
+  case ag.front {
+    [] -> st
+    [req, ..] -> redrive_asyncgen(st, gen_h, ag, req, sent)
+  }
+}
+
+/// Run one more body turn from `ag.resume` and dispatch its outcome.
+fn redrive_asyncgen(
+  st: Agent,
+  gen_h: Handle,
+  ag: AGLive,
+  req: AsyncGenRequest,
+  sent: #(Int, JsVal),
+) -> Agent {
+  let #(step, st) = asyncgen_turn(st, ag.resume, sent)
+  drive_asyncgen_step(st, gen_h, req, step)
 }
 
 /// AsyncGeneratorAwaitReturn / body-await / return-unwind settlement. Called
@@ -1447,69 +1513,35 @@ pub fn t_asyncgen_resume(
   case ag.front {
     [] -> st
     [req, ..] ->
-      case kind {
-        AGResumeAwaitingReturn -> {
-          // Completed-gen `.return(v)` await settled: settle head, drain.
-          let st = write_asyncgen(st, gen_h, ag_complete_drop_head)
+      case kind, is_throw {
+        // Completed-gen `.return(v)` await settled: settle head, drain.
+        AGResumeAwaitingReturn, _ -> {
+          let st = put_asyncgen(st, gen_h, ag_complete_drop_head(ag))
           let st = case is_throw {
             False -> fulfill_iter(st, req.resolve, settled, True)
-            True -> call_settle(st, req.reject, [settled])
+            True -> settle(st, req.reject, Reject, settled)
           }
           drain_queue(st, gen_h)
         }
         // Body await OR §27.6.3.10 return-unwind await: re-drive the body.
         // Only the fulfil-mode differs — return-unwind injects mode 2 with
         // the AWAITED value (arc AGResumeReturnUnwind :646-655).
-        AGResumeBody ->
-          redrive_asyncgen(
-            st,
-            gen_h,
-            req,
-            ag.resume,
-            is_throw,
-            sent_next,
-            settled,
-          )
-        AGResumeReturnUnwind ->
-          redrive_asyncgen(
-            st,
-            gen_h,
-            req,
-            ag.resume,
-            is_throw,
-            sent_return,
-            settled,
-          )
+        _, True -> redrive_asyncgen(st, gen_h, ag, req, #(sent_throw, settled))
+        AGResumeBody, False ->
+          redrive_asyncgen(st, gen_h, ag, req, #(sent_next, settled))
+        AGResumeReturnUnwind, False ->
+          redrive_asyncgen(st, gen_h, ag, req, #(sent_return, settled))
       }
   }
 }
 
-/// Shared body of `t_asyncgen_resume`'s `AGResumeBody`/`AGResumeReturnUnwind`
-/// arms: run one turn with `Sent = {sent_throw|fulfil_mode, settled}`.
-fn redrive_asyncgen(
-  st: Agent,
-  gen_h: Handle,
-  req: AsyncGenRequest,
-  resume: Resume,
-  is_throw: Bool,
-  fulfil_mode: Int,
-  settled: JsVal,
-) -> Agent {
-  let mode = case is_throw {
-    True -> sent_throw
-    False -> fulfil_mode
-  }
-  let #(step, st) = asyncgen_turn(st, resume, #(mode, settled))
-  drive_step(st, asyncgen_ctx(gen_h, req), step)
-}
-
 // ── await wiring (§27.7.5.3 Await, specialized to asyncgen) ─────────────────
 
-/// PromiseResolve(awaited).then(on_fulfill, on_reject) with `AsyncGenResume`
-/// closures. Port of arc `promises.setup_await` (promises.gleam:1715-1766).
-/// The child promise `t_promise_then` allocates is discarded (spec's step 6
-/// PerformPromiseThen has no result capability; the extra cell is inert).
-fn setup_asyncgen_await(
+/// The driver's own `Await(v)` for a `.return(v)` request (§27.6.3.9 on a
+/// completed generator, §27.6.3.10 step 8 at a yield): PromiseResolve then
+/// PerformPromiseThen with `AsyncGenResume(kind)` closures and no result
+/// capability. Port of arc `promises.setup_await` (promises.gleam:1715-1766).
+fn setup_return_await(
   st: Agent,
   gen_h: Handle,
   awaited: JsVal,
@@ -1519,16 +1551,21 @@ fn setup_asyncgen_await(
   let #(promise_h, st) = promise_resolve_static(st, awaited)
   let #(on_fulfill, st) = alloc_asyncgen_resume(st, gen_h, False, kind)
   let #(on_reject, st) = alloc_asyncgen_resume(st, gen_h, True, kind)
-  let #(_, st) =
-    t_promise_then(st, promise_h, mk_object(on_fulfill), mk_object(on_reject))
-  st
+  perform_then(
+    st,
+    promise_h,
+    Handler(mk_object(on_fulfill)),
+    Handler(mk_object(on_reject)),
+    mk_undefined(),
+    mk_undefined(),
+  )
 }
 
-/// Call `resolve({value, done})`. Port of arc `fulfill_iter`
-/// (async_generators.gleam:893-902).
+/// AsyncGeneratorCompleteStep: resolve the request's promise with a fresh
+/// `{value, done}`. Port of arc `fulfill_iter` (async_generators.gleam:893).
 fn fulfill_iter(st: Agent, resolve: JsVal, value: JsVal, done: Bool) -> Agent {
   let #(result_h, st) = alloc_iter_result(st, value, done)
-  call_settle(st, resolve, [mk_object(result_h)])
+  settle(st, resolve, Fulfil, mk_object(result_h))
 }
 
 // ── SAsyncGen slot helpers (port arc slot read/write helpers :681-886) ──────
@@ -1565,11 +1602,12 @@ fn write_asyncgen(
   gen_h: Handle,
   update: fn(AGLive) -> AGLive,
 ) -> Agent {
-  rt_store.t_cell_set(
-    st,
-    gen_h,
-    encode_asyncgen(update(read_asyncgen(st, gen_h))),
-  )
+  put_asyncgen(st, gen_h, update(read_asyncgen(st, gen_h)))
+}
+
+/// Write `ag` back as-is: only for a value read since user code last ran.
+fn put_asyncgen(st: Agent, gen_h: Handle, ag: AGLive) -> Agent {
+  rt_store.t_cell_set(st, gen_h, encode_asyncgen(ag))
 }
 
 // -- pure AGLive updaters, composed inside `write_asyncgen` callbacks --------
@@ -1606,8 +1644,8 @@ fn ag_complete_drop_head(ag: AGLive) -> AGLive {
 // Port of arc `exec/call.gleam:324-543 call_async_function` /
 // `finish_async_execution` / `call_native_async_resume` +
 // `exec/promises.gleam:1715-1766 setup_await`. The running body's context is
-// an `SAsyncContext(resume, promise)` cell reachable only from the
-// `AsyncResume` closures of its current await.
+// an `SAsyncContext(resume, promise)` cell reachable only as the settle
+// target of its current await's reaction.
 
 /// First argument or `undefined` — the `arguments[0]` a resolving/resume
 /// function's body reads (arc `helpers.first_arg_or_undefined`).
@@ -1644,65 +1682,49 @@ pub fn t_async_reject(st: Agent, reason: JsVal) -> #(Handle, Agent) {
 }
 
 /// AsyncFunctionStart for a body that begins at `resume`: allocate the
-/// result promise and the `SAsyncContext`, run the first turn now, drive
-/// its outcome, and return the result promise.
+/// result promise, run the first turn now, drive its outcome, and return the
+/// result promise. The `SAsyncContext` is only allocated once the body first
+/// awaits.
 pub fn t_async_run(st: Agent, resume: Resume) -> #(Handle, Agent) {
   let #(promise_h, st) = t_new_promise(st)
-  let #(ctx_h, st) =
-    rt_store.t_cell_new(st, SAsyncContext(resume:, promise: promise_h))
   let #(step, st) = apply_resume(st, resume, sent_start())
-  let st = drive_async_step(st, ctx_h, promise_h, step)
-  #(promise_h, st)
+  #(promise_h, drive_async_step(st, None, promise_h, step))
 }
 
-/// Shared completion handling for one async-fn turn. Port of arc
+/// Shared completion handling for one async-fn turn; `ctx` is the body's
+/// context cell if an earlier await already made one. Port of arc
 /// `call.gleam:398-465 finish_async_execution`. `StepYield` in a plain async
 /// function is an engine bug.
 fn drive_async_step(
   st: Agent,
-  ctx_h: Handle,
+  ctx: Option(Handle),
   promise_h: Handle,
   step: Step,
 ) -> Agent {
-  drive_step(
-    st,
-    StepCtx(
-      // §27.7.5.2 step 3.d: fulfil via Resolve so a thenable return is adopted.
-      on_return: fn(st, v) { t_promise_resolve(st, promise_h, v) },
-      // §27.7.5.2 step 3.f: reject the result promise.
-      on_throw: fn(st, e) { t_promise_reject(st, promise_h, e) },
-      on_yield: step_unreachable,
-      // Body hit `await` — store where to resume and hand off to `t_await`.
-      on_await: fn(st, awaited, resume) {
-        let st =
-          rt_store.t_cell_set(
-            st,
-            ctx_h,
-            SAsyncContext(resume:, promise: promise_h),
-          )
-        t_await(st, ctx_h, awaited)
-      },
-    ),
-    step,
-  )
+  case step {
+    // §27.7.5.2 step 3.d: fulfil via Resolve so a thenable return is adopted.
+    StepReturn(v) -> t_promise_resolve(st, promise_h, v)
+    // §27.7.5.2 step 3.f: reject the result promise.
+    StepThrow(e) -> t_promise_reject(st, promise_h, e)
+    // Body hit `await` — store where to resume and hand off to `t_await`.
+    StepAwait(value:, resume:) -> {
+      let context = SAsyncContext(resume:, promise: promise_h)
+      let #(ctx_h, st) = case ctx {
+        Some(h) -> #(h, rt_store.t_cell_set(st, h, context))
+        None -> rt_store.t_cell_new(st, context)
+      }
+      t_await(st, ctx_h, value)
+    }
+    StepYield(..) ->
+      panic as "rt_async: plain async function body produced a yield step"
+  }
 }
 
-/// §27.7.5.3 Await. `PromiseResolve(%Promise%, awaited)` then
-/// `PerformPromiseThen` with `AsyncResume` on-fulfill/on-reject closures that
-/// continue `ctx_h`'s stored `Resume` with `{mode, settled}`. Port of arc
-/// `promises.gleam:1715-1766 setup_await`. Always enqueues (§27.5.3 — an
-/// already-settled promise still resumes asynchronously).
+/// §27.7.5.3 Await for the async function whose context cell is `ctx_h`:
+/// its stored `Resume` continues with `{mode, settled}` once `awaited`
+/// settles. Port of arc `promises.gleam:1715-1766 setup_await`.
 pub fn t_await(st: Agent, ctx_h: Handle, awaited: JsVal) -> Agent {
-  // §27.7.5.3 step 2: PromiseResolve(%Promise%, value).
-  let #(awaited_h, st) = promise_resolve_static(st, awaited)
-  // Steps 3-4: onFulfilled/onRejected close over the async-context handle.
-  let #(on_fulfill, st) = alloc_resume(st, ctx_h, False)
-  let #(on_reject, st) = alloc_resume(st, ctx_h, True)
-  // Step 5: PerformPromiseThen with a throwaway capability (§27.7.5.3 note —
-  // the child promise is never observed; arc allocates one anyway).
-  let #(_child, st) =
-    t_promise_then(st, awaited_h, mk_object(on_fulfill), mk_object(on_reject))
-  st
+  await_into(st, ctx_h, awaited)
 }
 
 // ── native-token dispatch bodies (called by dispatch_native) ────────────────
@@ -1774,7 +1796,7 @@ pub fn do_async_resume(
         True -> sent_throw
       }
       let #(step, st) = apply_resume(st, resume, #(mode, first_arg(args)))
-      #(mk_undefined(), drive_async_step(st, ctx_h, promise, step))
+      #(mk_undefined(), drive_async_step(st, Some(ctx_h), promise, step))
     }
     _ ->
       panic as "rt_async: AsyncResume target is not SAsyncContext (engine invariant)"

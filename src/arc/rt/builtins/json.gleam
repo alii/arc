@@ -135,21 +135,18 @@ fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
       // After parsing, skip trailing whitespace and ensure nothing else.
       case skip_whitespace(rest) {
         <<>> -> {
-          // Successfully parsed — materialize the value on the heap.
-          let #(record, st) = materialize(st, val)
-          let unfiltered = record_value(record)
-          // Steps 7-10: run the reviver, if one was supplied and is callable.
-          case helpers.list_at(args, 1) {
-            Some(reviver) ->
-              case rt_call.is_callable(st, reviver) {
-                False -> #(unfiltered, st)
-                True -> {
-                  let #(root, st) = alloc_holder(st, unfiltered)
-                  let ctx = ReviveCtx(reviver:, caller:)
-                  internalize_json_property(st, ctx, root, "", Some(record))
-                }
-              }
-            None -> #(unfiltered, st)
+          // Steps 7-10: with a callable reviver, materialize alongside the
+          // parse-record tree the reviver walk reads; without one (the
+          // common call) build the values alone.
+          let reviver = helpers.arg_at(args, 1)
+          case rt_call.is_callable(st, reviver) {
+            False -> materialize_plain(st, val)
+            True -> {
+              let #(record, st) = materialize(st, val)
+              let #(root, st) = alloc_holder(st, record_value(record))
+              let ctx = ReviveCtx(reviver:, caller:)
+              internalize_json_property(st, ctx, root, "", Some(record))
+            }
           }
         }
         _ ->
@@ -883,14 +880,18 @@ fn parse_object(
   }
 }
 
-/// Slice the first `len` bytes off `bytes` as a String.
-/// O(1) on BEAM — the slice is a zero-copy sub-binary of the input.
+/// Slice the first `len` bytes off `bytes` as a String. O(1) on BEAM: a
+/// zero-copy sub-binary, viewed as the String it provably is — `bytes` came
+/// from a String and every cut the scanner makes is at an ASCII byte, so the
+/// slice is well-formed UTF-8 without `bit_array.to_string` re-walking it.
 fn take_string(bytes: BitArray, len: Int) -> Result(String, JsonParseError) {
-  case bit_array.slice(bytes, 0, len) {
-    Ok(slice) -> bit_array.to_string(slice) |> result.replace_error(InvalidUtf8)
-    Error(Nil) -> Error(UnexpectedEnd)
-  }
+  bit_array.slice(bytes, 0, len)
+  |> result.map(utf8_slice_as_string)
+  |> result.replace_error(UnexpectedEnd)
 }
+
+@external(erlang, "gleam_stdlib", "identity")
+fn utf8_slice_as_string(bytes: BitArray) -> String
 
 /// Slice the first `len` bytes off `bytes`, undecoded.
 /// Truly O(1) — a zero-copy sub-binary, with none of the UTF-8 validation
@@ -946,6 +947,101 @@ fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
           ),
         )
       #(ObjectRecord(value: mk_object(h), entries:), st)
+    }
+  }
+}
+
+/// `materialize` without the parse-record tree: just the JS values.
+fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
+  case val {
+    JsonNull(..) -> #(mk_null(), st)
+    JsonBool(value: b, ..) -> #(mk_bool(b), st)
+    JsonNumber(value: n, ..) -> #(mk_number(n), st)
+    JsonString(value: s, ..) -> #(mk_string(s), st)
+    JsonArray(items) -> {
+      let #(values, st) = materialize_plain_list(st, items, [])
+      let #(h, st) = realm_ops.alloc_array(st, values)
+      #(mk_object(h), st)
+    }
+    JsonObject(entries) -> {
+      let #(entries, st) = materialize_plain_entries(st, entries, [])
+      let js = st.store
+      let #(props, seq) = plain_props(entries, dict.new(), js.prop_seq)
+      let st =
+        rt_types.Agent(..st, store: rt_types.JsStore(..js, prop_seq: seq))
+      let #(h, st) =
+        rt_store.t_cell_new(
+          st,
+          SObject(
+            kind: Ordinary,
+            proto: Some(st.realm.object.prototype),
+            props:,
+            symbol_props: [],
+            elements: rt_types.NoElements,
+            extensible: True,
+          ),
+        )
+      #(mk_object(h), st)
+    }
+  }
+}
+
+fn materialize_plain_list(
+  st: Agent,
+  items: List(JsonValue),
+  acc: List(JsVal),
+) -> #(List(JsVal), Agent) {
+  case items {
+    [] -> #(list.reverse(acc), st)
+    [item, ..rest] -> {
+      let #(v, st) = materialize_plain(st, item)
+      materialize_plain_list(st, rest, [v, ..acc])
+    }
+  }
+}
+
+fn materialize_plain_entries(
+  st: Agent,
+  entries: List(#(String, JsonValue)),
+  acc: List(#(String, JsVal)),
+) -> #(List(#(String, JsVal)), Agent) {
+  case entries {
+    [] -> #(list.reverse(acc), st)
+    [#(name, val), ..rest] -> {
+      let #(v, st) = materialize_plain(st, val)
+      materialize_plain_entries(st, rest, [#(name, v), ..acc])
+    }
+  }
+}
+
+/// `props_from_entries` over plain values, numbering new keys from `seq`
+/// (one store update for the whole object instead of one per member).
+fn plain_props(
+  entries: List(#(String, JsVal)),
+  acc: dict.Dict(rt_types.PropertyKey, rt_types.Property),
+  seq: Int,
+) -> #(dict.Dict(rt_types.PropertyKey, rt_types.Property), Int) {
+  case entries {
+    [] -> #(acc, seq)
+    [#(name, value), ..rest] -> {
+      let key = rt_types.canonical_key(name)
+      case dict.get(acc, key) {
+        Ok(first) -> {
+          let prop =
+            rt_types.DataProperty(
+              value,
+              True,
+              True,
+              True,
+              rt_types.prop_seq(first),
+            )
+          plain_props(rest, dict.insert(acc, key, prop), seq)
+        }
+        Error(Nil) -> {
+          let prop = rt_types.DataProperty(value, True, True, True, seq)
+          plain_props(rest, dict.insert(acc, key, prop), seq + 1)
+        }
+      }
     }
   }
 }

@@ -13,6 +13,17 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/option.{type Option, None, Some}
 
+/// A present own element of a plain Array / Arguments object read straight
+/// off the heap term, or `Slow` for anything `rt_obj.t_get_own_index` has to
+/// look at properly (index override, hole, exotic receiver, primitive).
+pub type OwnElement {
+  Hit(JsVal)
+  Slow
+}
+
+@external(erlang, "arc_rt_builtins_ffi", "own_index")
+pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
+
 /// Get element at index from a list (0-based). O(n).
 pub fn list_at(lst: List(a), idx: Int) -> Option(a) {
   case idx, lst {

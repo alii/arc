@@ -118,16 +118,64 @@ pub fn record_parts(st: Agent, rec: JsVal) -> option.Option(IteratorRecord) {
   }
 }
 
+/// The record object is engine-created (`alloc_record`) and never reachable
+/// from user code, so its three fields are read straight off the cell; the
+/// generic [[Get]]s remain only as the total fallback.
 fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
-  let #(done, st) = rt_obj.t_get_prop(st, rec, k_done)
-  let #(iterator, st) = rt_obj.t_get_prop(st, rec, k_iterator)
-  let #(next_method, st) = rt_obj.t_get_prop(st, rec, k_next)
-  #(rt_val.to_boolean(done), IteratorRecord(iterator:, next_method:), st)
+  case record_fields(st, rec) {
+    Some(#(done, record)) -> #(done, record, st)
+    option.None -> {
+      let #(done, st) = rt_obj.t_get_prop(st, rec, k_done)
+      let #(iterator, st) = rt_obj.t_get_prop(st, rec, k_iterator)
+      let #(next_method, st) = rt_obj.t_get_prop(st, rec, k_next)
+      #(rt_val.to_boolean(done), IteratorRecord(iterator:, next_method:), st)
+    }
+  }
+}
+
+fn record_fields(
+  st: Agent,
+  rec: JsVal,
+) -> option.Option(#(Bool, IteratorRecord)) {
+  case classify(rec) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: Ordinary, props:, ..) ->
+          case
+            dict.get(props, Named("done")),
+            dict.get(props, Named("iterator")),
+            dict.get(props, Named("next"))
+          {
+            Ok(DataProperty(value: done, ..)),
+              Ok(DataProperty(value: iterator, ..)),
+              Ok(DataProperty(value: next_method, ..))
+            ->
+              Some(#(
+                rt_val.to_boolean(done),
+                IteratorRecord(iterator:, next_method:),
+              ))
+            _, _, _ -> option.None
+          }
+        _ -> option.None
+      }
+    _ -> option.None
+  }
 }
 
 fn mark_done(st: Agent, rec: JsVal) -> Agent {
   let #(_, st) = rt_obj.t_set_prop(st, rec, k_done, mk_bool(True))
   st
+}
+
+/// The step taken engine-side when `next` is an intrinsic iterator-next and
+/// the iterator is its matching built-in kind (see `iterator.native_step`):
+/// no call, no try frame, no result object.
+fn native_step(
+  st: Agent,
+  record: IteratorRecord,
+) -> option.Option(#(option.Option(JsVal), Agent)) {
+  use #(next, iter_h) <- option.then(iter_protocol.intrinsic_next(st, record))
+  iter_protocol.native_step(st, next, iter_h)
 }
 
 /// §7.4.3 GetIterator(obj, hint). Returns the record object.
@@ -148,30 +196,34 @@ pub fn t_get_iterator(
 /// a surrounding IteratorClose skips `.return()` (§14.7.5.7 step 6.b).
 pub fn t_iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
   let #(done, record, st) = read_record(st, rec)
-  case done {
-    True -> #(#(True, mk_undefined()), st)
-    False -> {
-      let step = fn(st) {
-        use result, done, st <- iter_protocol.iterator_step_result(st, record)
-        case done {
-          True -> #(#(True, mk_undefined()), st)
-          False -> {
-            let #(v, st) =
-              rt_obj.t_get_prop(st, result, StringKey(Named("value")))
-            #(#(False, v), st)
-          }
-        }
-      }
-      case protected_step(st, step) {
-        #(NormalCompletion(#(True, _) as pair), st) -> #(
-          pair,
-          mark_done(st, rec),
-        )
-        #(NormalCompletion(pair), st) -> #(pair, st)
-        #(ThrowCompletion(thrown), st) ->
-          rt_store.t_throw(mark_done(st, rec), thrown)
+  use <- bool.guard(done, #(#(True, mk_undefined()), st))
+  case native_step(st, record) {
+    Some(#(Some(v), st)) -> #(#(False, v), st)
+    Some(#(option.None, st)) -> #(#(True, mk_undefined()), mark_done(st, rec))
+    option.None -> protocol_step(st, rec, record)
+  }
+}
+
+fn protocol_step(
+  st: Agent,
+  rec: JsVal,
+  record: IteratorRecord,
+) -> #(#(Bool, JsVal), Agent) {
+  let step = fn(st) {
+    use result, done, st <- iter_protocol.iterator_step_result(st, record)
+    case done {
+      True -> #(#(True, mk_undefined()), st)
+      False -> {
+        let #(v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("value")))
+        #(#(False, v), st)
       }
     }
+  }
+  case protected_step(st, step) {
+    #(NormalCompletion(#(True, _) as pair), st) -> #(pair, mark_done(st, rec))
+    #(NormalCompletion(pair), st) -> #(pair, st)
+    #(ThrowCompletion(thrown), st) ->
+      rt_store.t_throw(mark_done(st, rec), thrown)
   }
 }
 

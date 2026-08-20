@@ -4,7 +4,6 @@
 //// iterator-proto bootstrap + arc `exec/promises.gleam:1791-2003`
 //// Async-from-Sync dispatch, re-expressed over threaded `Agent` (R1).
 
-import arc/internal/ordered_entries
 import arc/rt/async as rt_async
 import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
@@ -12,7 +11,6 @@ import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/rt/builtins/iter_protocol.{IterateStrings, RejectPrimitives}
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
-import arc/rt/js_string
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
@@ -20,22 +18,20 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayIterKind, type BuiltinPair, type ConcatItem,
   type GeneratorState, type Handle, type HelperBody, type IteratorHelperKind,
-  type IteratorNative, type IteratorRecord, type JsVal, type MapIterKind,
-  type NativeToken, type ObjKind, type ObjectKey, type SetIterKind,
-  type ZipMember, type ZipMode, ArgumentsObj, ArrayIterEntries, ArrayIterKeys,
-  ArrayIterValues, ArrayIterator, ArrayObj, AsyncFromSyncClose,
-  AsyncFromSyncIterator, AsyncFromSyncNext, AsyncFromSyncReturn,
-  AsyncFromSyncThrow, AsyncFromSyncUnwrap, ClassicHelper, ConcatHelper,
-  ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart, GenSuspendedYield,
-  HelperDrop, HelperFilter, HelperFlatMap, HelperMap, HelperTake,
-  IteratorConstructor, IteratorHelperObj, IteratorN, JFloat, JInt, JNan, JNegInf,
-  JPosInf, KHandle, KNull, KStr, KUndef, MapIterEntries, MapIterKeys,
-  MapIterValues, MapIterator, MapObj, Named, NoElements, Ordinary, RangeErr,
-  ReturnThis, SObject, SetIterEntries, SetIterValues, SetIterator, SetObj,
+  type IteratorNative, type IteratorRecord, type JsVal, type NativeToken,
+  type ObjKind, type ObjectKey, type ZipMember, type ZipMode, ArgumentsObj,
+  ArrayIterEntries, ArrayIterKeys, ArrayIterValues, ArrayIterator, ArrayObj,
+  AsyncFromSyncClose, AsyncFromSyncIterator, AsyncFromSyncNext,
+  AsyncFromSyncReturn, AsyncFromSyncThrow, AsyncFromSyncUnwrap, ClassicHelper,
+  ConcatHelper, ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart,
+  GenSuspendedYield, HelperDrop, HelperFilter, HelperFlatMap, HelperMap,
+  HelperTake, IteratorConstructor, IteratorHelperObj, IteratorN, JFloat, JInt,
+  JNan, JNegInf, JPosInf, KHandle, KNull, KStr, KUndef, MapIterator, Named,
+  NoElements, Ordinary, RangeErr, ReturnThis, SObject, SetIterator,
   StringIterator, StringKey, SymbolKey, TypeErr, TypedArrayObj,
   WrapForValidIteratorObj, ZipExhausted, ZipHelper, ZipLongest, ZipOpen,
-  ZipShortest, ZipStrict, classify, index_key, map_key_to_js, mk_bool, mk_number,
-  mk_object, mk_string, mk_undefined, symbol_async_iterator, symbol_iterator,
+  ZipShortest, ZipStrict, classify, index_key, mk_bool, mk_number, mk_object,
+  mk_string, mk_undefined, symbol_async_iterator, symbol_iterator,
   symbol_to_string_tag,
 } as rt_types
 import arc/rt/val as rt_val
@@ -479,51 +475,11 @@ const iteration_budget_msg = "Array-like length exceeds the maximum supported it
 // ── §24.1.5.2.1 %MapIteratorPrototype%.next() (arc call.gleam:1933) ─────────
 
 fn map_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use st, iter_h, target, index, kind <- require_map_iter(st, this)
-  case index < 0 {
-    True -> iter_done(st)
-    False -> {
-      let step = case rt_store.t_cell_get(st, target) {
-        SObject(kind: MapObj(entries:), ..) ->
-          ordered_entries.next_from(entries, index)
-        _ -> None
-      }
-      case step {
-        None ->
-          iter_done(set_iter_kind(
-            st,
-            iter_h,
-            MapIterator(target:, index: -1, kind:),
-          ))
-        Some(#(next_cursor, mk, v)) -> {
-          let #(out, st) = case kind {
-            MapIterKeys -> #(map_key_to_js(mk), st)
-            MapIterValues -> #(v, st)
-            MapIterEntries -> alloc_pair(st, map_key_to_js(mk), v)
-          }
-          let st =
-            set_iter_kind(
-              st,
-              iter_h,
-              MapIterator(target:, index: next_cursor, kind:),
-            )
-          iter_yield(st, out)
-        }
-      }
-    }
-  }
-}
-
-fn require_map_iter(
-  st: Agent,
-  this: JsVal,
-  cont: fn(Agent, Handle, Handle, Int, MapIterKind) -> #(JsVal, Agent),
-) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: MapIterator(target:, index:, kind:), ..) ->
-          cont(st, h, target, index, kind)
+        SObject(kind: MapIterator(..), ..) as slot ->
+          yield_step(iter_protocol.map_iterator_step(st, h, slot))
         _ -> iter_incompatible(st, "Map")
       }
     _ -> iter_incompatible(st, "Map")
@@ -533,50 +489,11 @@ fn require_map_iter(
 // ── §24.2.5.2.1 %SetIteratorPrototype%.next() (arc call.gleam:1880) ─────────
 
 fn set_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use st, iter_h, target, index, kind <- require_set_iter(st, this)
-  case index < 0 {
-    True -> iter_done(st)
-    False -> {
-      let step = case rt_store.t_cell_get(st, target) {
-        SObject(kind: SetObj(entries:), ..) ->
-          ordered_entries.next_from(entries, index)
-        _ -> None
-      }
-      case step {
-        None ->
-          iter_done(set_iter_kind(
-            st,
-            iter_h,
-            SetIterator(target:, index: -1, kind:),
-          ))
-        Some(#(next_cursor, _mk, v)) -> {
-          let #(out, st) = case kind {
-            SetIterValues -> #(v, st)
-            SetIterEntries -> alloc_pair(st, v, v)
-          }
-          let st =
-            set_iter_kind(
-              st,
-              iter_h,
-              SetIterator(target:, index: next_cursor, kind:),
-            )
-          iter_yield(st, out)
-        }
-      }
-    }
-  }
-}
-
-fn require_set_iter(
-  st: Agent,
-  this: JsVal,
-  cont: fn(Agent, Handle, Handle, Int, SetIterKind) -> #(JsVal, Agent),
-) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: SetIterator(target:, index:, kind:), ..) ->
-          cont(st, h, target, index, kind)
+        SObject(kind: SetIterator(..), ..) as slot ->
+          yield_step(iter_protocol.set_iterator_step(st, h, slot))
         _ -> iter_incompatible(st, "Set")
       }
     _ -> iter_incompatible(st, "Set")
@@ -585,35 +502,17 @@ fn require_set_iter(
 
 // ── §22.1.5.1.1 %StringIteratorPrototype%.next() ────────────────────────────
 
-/// D10: codepoint-indexed. `char_at` walks UTF-8 codepoints; the source string
-/// is immutable so no explicit exhaustion latch is needed, but we still write
-/// one for consistency with the other iterators.
+/// D10: `index` is [[StringNextIndex]] kept as a BYTE offset into the UTF-8
+/// source (never observable), so each step is O(1) instead of a codepoint
+/// walk from byte 0. The source string is immutable so no explicit
+/// exhaustion latch is needed, but we still write one for consistency with
+/// the other iterators.
 fn string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: StringIterator(source:, index:), ..) ->
-          case index < 0 {
-            True -> iter_done(st)
-            False ->
-              case js_string.char_at(source, index) {
-                None ->
-                  iter_done(set_iter_kind(
-                    st,
-                    h,
-                    StringIterator(source:, index: -1),
-                  ))
-                Some(ch) -> {
-                  let st =
-                    set_iter_kind(
-                      st,
-                      h,
-                      StringIterator(source:, index: index + 1),
-                    )
-                  iter_yield(st, mk_string(ch))
-                }
-              }
-          }
+        SObject(kind: StringIterator(..), ..) as slot ->
+          yield_step(iter_protocol.string_iterator_step(st, h, slot))
         _ -> iter_incompatible(st, "String")
       }
     _ -> iter_incompatible(st, "String")
@@ -621,6 +520,13 @@ fn string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 // ── shared iterator-next helpers ────────────────────────────────────────────
+
+fn yield_step(step: #(Option(JsVal), Agent)) -> #(JsVal, Agent) {
+  case step {
+    #(Some(v), st) -> iter_yield(st, v)
+    #(None, st) -> iter_done(st)
+  }
+}
 
 fn iter_done(st: Agent) -> #(JsVal, Agent) {
   let #(h, st) = rt_async.alloc_iter_result(st, mk_undefined(), True)

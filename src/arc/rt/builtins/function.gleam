@@ -369,9 +369,15 @@ pub fn create_list_from_array_like(
   arr: JsVal,
 ) -> #(List(JsVal), Agent) {
   case classify(arr) {
-    KHandle(_) -> {
-      let #(len_v, st) = rt_obj.t_get_prop(st, arr, StringKey(Named("length")))
-      let #(len, st) = rt_val.t_to_length(st, len_v)
+    KHandle(h) -> {
+      let #(len, st) = case rt_store.t_cell_get(st, h) {
+        SObject(kind: rt_types.ArrayObj(length:), ..) -> #(length, st)
+        _ -> {
+          let #(len_v, st) =
+            rt_obj.t_get_prop(st, arr, StringKey(Named("length")))
+          rt_val.t_to_length(st, len_v)
+        }
+      }
       collect_array_like(st, arr, 0, len, [])
     }
     _ ->
@@ -392,8 +398,11 @@ fn collect_array_like(
   case i >= len {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(v, st) =
-        rt_obj.t_get_prop(st, arr, StringKey(rt_types.index_key(i)))
+      let #(v, st) = case helpers.own_element(st, arr, i) {
+        helpers.Hit(v) -> #(v, st)
+        helpers.Slow ->
+          rt_obj.t_get_prop(st, arr, StringKey(rt_types.index_key(i)))
+      }
       collect_array_like(st, arr, i + 1, len, [v, ..acc])
     }
   }
