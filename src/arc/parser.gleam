@@ -4085,7 +4085,11 @@ fn class_seed_ctor_shell(
   is_synthetic: Bool,
   has_super_class: Bool,
 ) -> scope.ScopeBuilder {
-  let sb = scope.sb_enter(sb, ctor_id)
+  let sb =
+    scope.sb_enter(sb, ctor_id)
+    |> scope.sb_update_current_fn(fn(fi) {
+      scope.RawFunctionInfo(..fi, is_derived_constructor: has_super_class)
+    })
   // Synthetic ctor never went through parse_function_params_and_body,
   // so `arguments` was never declared.
   let sb = case is_synthetic {

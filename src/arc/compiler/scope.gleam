@@ -239,8 +239,8 @@ pub type FunctionInfo {
     lexical: LexicalSlots,
     /// Which lexical pseudo-slots (`lexical` above, owned or captured) hold
     /// a heap box rather than the value: all four under direct eval, and a
-    /// class member's `this` when an inner arrow captures it (super() may
-    /// still write it); everything else is captured by value. `lookup_lexical`
+    /// derived constructor's `this` when an inner arrow captures it (super()
+    /// may still write it); everything else is captured by value. `lookup_lexical`
     /// returns this as the boxed flag. Populated by `analyze_captures`.
     lexical_boxed: LexicalRefs,
     captures: List(#(String, Int)),
@@ -267,6 +267,9 @@ pub type FunctionInfo {
     /// `build_capture_inputs` can derive `FnAnalysisInput.is_arrow`
     /// without re-walking the AST. V8: `IsArrowFunction(function_kind_)`.
     is_arrow: Bool,
+    /// Constructor of a class with a heritage clause: `super()` binds
+    /// `this` after entry, so an arrow-captured `this` stays boxed.
+    is_derived_constructor: Bool,
   )
 }
 
@@ -517,11 +520,19 @@ pub type RawScope {
 /// `hoist_annexb_block_functions` can walk block→fn-scope and decide
 /// blocked-vs-hoisted once the whole body is known.
 pub type RawFunctionInfo {
-  RawFunctionInfo(is_arrow: Bool, annexb_candidates: List(#(ScopeId, String)))
+  RawFunctionInfo(
+    is_arrow: Bool,
+    is_derived_constructor: Bool,
+    annexb_candidates: List(#(ScopeId, String)),
+  )
 }
 
 /// Default `RawFunctionInfo` — non-arrow, no Annex-B candidates yet.
-const blank_raw_fn_info = RawFunctionInfo(is_arrow: False, annexb_candidates: [])
+const blank_raw_fn_info = RawFunctionInfo(
+  is_arrow: False,
+  is_derived_constructor: False,
+  annexb_candidates: [],
+)
 
 /// A fresh `RawScope` with the 8 always-default fields filled in. The 5
 /// per-site fields (id / parent / function_scope / kind / is_strict) are
@@ -1543,6 +1554,7 @@ fn blank_function_info(
     // pairs, the cooked list is just the unblocked names.
     annexb_candidates: [],
     is_arrow: raw.is_arrow,
+    is_derived_constructor: raw.is_derived_constructor,
   )
 }
 
@@ -2400,8 +2412,8 @@ fn fold_enclosing_withs(
 /// Resolve a lexical pseudo-binding (this / active_func / home_object /
 /// new.target) from `scope_id`. Returns the local slot in the owning
 /// function's frame and whether it is boxed (`FunctionInfo.lexical_boxed`:
-/// direct eval, or a class member's `this` captured by an arrow so writes
-/// via super() alias correctly).
+/// direct eval, or a derived constructor's `this` captured by an arrow so
+/// the write via super() aliases correctly).
 pub fn lookup_lexical(
   tree: ScopeTree,
   scope_id: ScopeId,
@@ -2845,8 +2857,6 @@ fn compute_down(
     derive_lexical_layout(
       is_root,
       kind,
-      { get_scope(tree, fn_id) }.parent,
-      tree,
       inp,
       up,
       seeded_info,
@@ -3035,8 +3045,6 @@ fn derive_name_captures(
 fn derive_lexical_layout(
   is_root: Bool,
   kind: ScopeKind,
-  parent_scope: Option(ScopeId),
-  tree: ScopeTree,
   inp: FnAnalysisInput,
   up: Up,
   seeded: FunctionInfo,
@@ -3133,26 +3141,19 @@ fn derive_lexical_layout(
   // so eval anywhere below boxes all four. Otherwise the pseudo-bindings are
   // fixed at frame entry and arrow children capture them BY VALUE, with one
   // exception: `this` in a derived-class constructor is written by `super()`
-  // after arrows may already hold it. The tree does not mark constructors,
-  // so an owner directly inside a class body boxes `this` whenever an arrow
-  // child references it. A NON-owner's slots are its capture slots: each is
-  // a box exactly when the parent's was.
+  // after arrows may already hold it, so it is boxed whenever an arrow child
+  // references it. A NON-owner's slots are its capture slots: each is a box
+  // exactly when the parent's was.
   let lexical_boxed = case owns_lexical, up.eval_in_subtree {
     _, True -> lexical.every_lexical_ref
     True, False -> {
-      let class_member = case parent_scope {
-        Some(pid) -> { get_scope(tree, pid) }.kind == ClassBody
-        None -> False
-      }
       let this_captured =
-        list.any(children, fn(cid) {
+        seeded.is_derived_constructor
+        && list.any(children, fn(cid) {
           let cinp = get_input(inputs, cid)
           cinp.is_arrow && cinp.lexical_refs.this
         })
-      lexical.LexicalRefs(
-        ..lexical.no_lexical_refs,
-        this: class_member && this_captured,
-      )
+      lexical.LexicalRefs(..lexical.no_lexical_refs, this: this_captured)
     }
     False, False ->
       lexical_refs_and(
