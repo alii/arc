@@ -1327,6 +1327,7 @@ built-ins/Array/proto.js
 built-ins/Array/prototype/Symbol.iterator.js
 built-ins/Array/prototype/Symbol.iterator/not-a-constructor.js
 built-ins/Array/prototype/Symbol.unscopables/array-find-from-last.js
+built-ins/Array/prototype/Symbol.unscopables/at.js
 built-ins/Array/prototype/Symbol.unscopables/change-array-by-copy.js
 built-ins/Array/prototype/Symbol.unscopables/prop-desc.js
 built-ins/Array/prototype/Symbol.unscopables/value.js
@@ -7152,6 +7153,10 @@ built-ins/Iterator/prototype/Symbol.iterator/prop-desc.js
 built-ins/Iterator/prototype/Symbol.iterator/return-val.js
 built-ins/Iterator/prototype/Symbol.toStringTag/prop-desc.js
 built-ins/Iterator/prototype/Symbol.toStringTag/weird-setter.js
+built-ins/Iterator/prototype/chunks/chunkSize-no-coercion.js
+built-ins/Iterator/prototype/chunks/chunkSize-not-a-number.js
+built-ins/Iterator/prototype/chunks/non-constructible.js
+built-ins/Iterator/prototype/chunks/this-non-object.js
 built-ins/Iterator/prototype/constructor/prop-desc.js
 built-ins/Iterator/prototype/constructor/weird-setter.js
 built-ins/Iterator/prototype/drop/argument-effect-order.js
@@ -7166,6 +7171,7 @@ built-ins/Iterator/prototype/drop/length.js
 built-ins/Iterator/prototype/drop/limit-equals-total.js
 built-ins/Iterator/prototype/drop/limit-greater-than-total.js
 built-ins/Iterator/prototype/drop/limit-less-than-total.js
+built-ins/Iterator/prototype/drop/limit-rangeerror.js
 built-ins/Iterator/prototype/drop/limit-tonumber-throws.js
 built-ins/Iterator/prototype/drop/limit-tonumber.js
 built-ins/Iterator/prototype/drop/name.js
@@ -7360,7 +7366,13 @@ built-ins/Iterator/prototype/forEach/result-is-undefined.js
 built-ins/Iterator/prototype/forEach/this-non-callable-next.js
 built-ins/Iterator/prototype/forEach/this-non-object.js
 built-ins/Iterator/prototype/forEach/this-plain-iterator.js
+built-ins/Iterator/prototype/includes/next-method-returns-non-object.js
+built-ins/Iterator/prototype/includes/non-constructible.js
+built-ins/Iterator/prototype/includes/this-non-callable-next.js
+built-ins/Iterator/prototype/includes/this-non-object.js
 built-ins/Iterator/prototype/initial-value.js
+built-ins/Iterator/prototype/join/does-not-close-on-iterator-protocol-violation.js
+built-ins/Iterator/prototype/join/receiver-not-object.js
 built-ins/Iterator/prototype/map/argument-effect-order.js
 built-ins/Iterator/prototype/map/argument-validation-failure-closes-underlying.js
 built-ins/Iterator/prototype/map/callable.js
@@ -7471,6 +7483,7 @@ built-ins/Iterator/prototype/take/is-function.js
 built-ins/Iterator/prototype/take/length.js
 built-ins/Iterator/prototype/take/limit-greater-than-or-equal-to-total.js
 built-ins/Iterator/prototype/take/limit-less-than-total.js
+built-ins/Iterator/prototype/take/limit-rangeerror.js
 built-ins/Iterator/prototype/take/limit-tonumber-throws.js
 built-ins/Iterator/prototype/take/limit-tonumber.js
 built-ins/Iterator/prototype/take/name.js
@@ -7510,6 +7523,11 @@ built-ins/Iterator/prototype/toArray/proto.js
 built-ins/Iterator/prototype/toArray/this-non-callable-next.js
 built-ins/Iterator/prototype/toArray/this-non-object.js
 built-ins/Iterator/prototype/toArray/this-plain-iterator.js
+built-ins/Iterator/prototype/windows/non-constructible.js
+built-ins/Iterator/prototype/windows/this-non-object.js
+built-ins/Iterator/prototype/windows/undersized-invalid.js
+built-ins/Iterator/prototype/windows/windowSize-no-coercion.js
+built-ins/Iterator/prototype/windows/windowSize-not-a-number.js
 built-ins/Iterator/subclassable.js
 built-ins/Iterator/zip/basic-longest.js
 built-ins/Iterator/zip/basic-shortest.js
@@ -12410,6 +12428,7 @@ built-ins/Promise/allSettledKeyed/resolved-all-fulfilled.js
 built-ins/Promise/allSettledKeyed/resolved-all-mixed.js
 built-ins/Promise/allSettledKeyed/resolved-all-rejected.js
 built-ins/Promise/allSettledKeyed/resolves-empty-object.js
+built-ins/Promise/allSettledKeyed/result-property-descriptors.js
 built-ins/Promise/allSettledKeyed/symbol-keys.js
 built-ins/Promise/any/call-reject-element-after-return.js
 built-ins/Promise/any/call-reject-element-items.js
@@ -12553,11 +12572,13 @@ built-ins/Promise/prototype/finally/length.js
 built-ins/Promise/prototype/finally/name.js
 built-ins/Promise/prototype/finally/not-a-constructor.js
 built-ins/Promise/prototype/finally/prop-desc.js
+built-ins/Promise/prototype/finally/rejected-observable-then-calls-PromiseResolve.js
 built-ins/Promise/prototype/finally/rejected-observable-then-calls-argument.js
 built-ins/Promise/prototype/finally/rejected-observable-then-calls.js
 built-ins/Promise/prototype/finally/rejection-reason-no-fulfill.js
 built-ins/Promise/prototype/finally/rejection-reason-override-with-throw.js
 built-ins/Promise/prototype/finally/resolution-value-no-override.js
+built-ins/Promise/prototype/finally/resolved-observable-then-calls-PromiseResolve.js
 built-ins/Promise/prototype/finally/resolved-observable-then-calls-argument.js
 built-ins/Promise/prototype/finally/resolved-observable-then-calls.js
 built-ins/Promise/prototype/finally/species-constructor-throws.js
@@ -25182,10 +25203,13 @@ intl402/Locale/prototype/getCalendars/name.js
 intl402/Locale/prototype/getCalendars/output-array.js
 intl402/Locale/prototype/getCalendars/prop-desc.js
 intl402/Locale/prototype/getCollations/branding.js
+intl402/Locale/prototype/getCollations/collation-keyword.js
 intl402/Locale/prototype/getCollations/name.js
+intl402/Locale/prototype/getCollations/output-array-sorted.js
 intl402/Locale/prototype/getCollations/output-array-values.js
 intl402/Locale/prototype/getCollations/output-array.js
 intl402/Locale/prototype/getCollations/prop-desc.js
+intl402/Locale/prototype/getCollations/und-language.js
 intl402/Locale/prototype/getHourCycles/branding.js
 intl402/Locale/prototype/getHourCycles/name.js
 intl402/Locale/prototype/getHourCycles/output-array-values.js
@@ -29251,7 +29275,6 @@ language/expressions/assignment/dstr/array-rest-after-elision.js
 language/expressions/assignment/dstr/array-rest-before-element.js
 language/expressions/assignment/dstr/array-rest-before-elision.js
 language/expressions/assignment/dstr/array-rest-before-rest.js
-language/expressions/assignment/dstr/array-rest-elision-invalid.js
 language/expressions/assignment/dstr/array-rest-elision-iter-abpt.js
 language/expressions/assignment/dstr/array-rest-elision.js
 language/expressions/assignment/dstr/array-rest-init.js
@@ -29434,6 +29457,7 @@ language/expressions/assignment/dstr/obj-prop-put-prop-ref-user-err.js
 language/expressions/assignment/dstr/obj-prop-put-prop-ref.js
 language/expressions/assignment/dstr/obj-prop-put-unresolvable-no-strict.js
 language/expressions/assignment/dstr/obj-prop-put-unresolvable-strict.js
+language/expressions/assignment/dstr/obj-rest-before-comma-invalid.js
 language/expressions/assignment/dstr/obj-rest-computed-property-no-strict.js
 language/expressions/assignment/dstr/obj-rest-computed-property.js
 language/expressions/assignment/dstr/obj-rest-descriptors.js
@@ -42062,6 +42086,8 @@ language/statements/await-using/initializer-Symbol.asyncDispose-called-at-end-of
 language/statements/await-using/initializer-Symbol.asyncDispose-called-at-end-of-forstatement.js
 language/statements/await-using/initializer-Symbol.asyncDispose-called-if-subsequent-initializer-throws-in-forstatement-head.js
 language/statements/await-using/initializer-Symbol.asyncDispose-called-if-subsequent-initializer-throws.js
+language/statements/await-using/initializer-Symbol.asyncDispose-disposed-at-end-of-imported-module.js
+language/statements/await-using/initializer-Symbol.asyncDispose-disposed-at-end-of-module.js
 language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-asyncfunctionbody.js
 language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-asyncgeneratorbody.js
 language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-block.js
@@ -42069,6 +42095,8 @@ language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-each
 language/statements/await-using/initializer-Symbol.dispose-called-at-end-of-forstatement.js
 language/statements/await-using/initializer-Symbol.dispose-called-if-subsequent-initializer-throws-in-forstatement-head.js
 language/statements/await-using/initializer-Symbol.dispose-called-if-subsequent-initializer-throws.js
+language/statements/await-using/initializer-Symbol.dispose-disposed-at-end-of-imported-module.js
+language/statements/await-using/initializer-Symbol.dispose-disposed-at-end-of-module.js
 language/statements/await-using/multiple-resources-disposed-in-reverse-order.js
 language/statements/await-using/puts-initializer-on-top-of-disposableresourcestack-multiple-bindings.js
 language/statements/await-using/puts-initializer-on-top-of-disposableresourcestack-subsequent-usings.js
@@ -47990,7 +48018,6 @@ language/statements/for-in/dstr/array-elem-target-yield-invalid.js
 language/statements/for-in/dstr/array-rest-before-element.js
 language/statements/for-in/dstr/array-rest-before-elision.js
 language/statements/for-in/dstr/array-rest-before-rest.js
-language/statements/for-in/dstr/array-rest-elision-invalid.js
 language/statements/for-in/dstr/array-rest-init.js
 language/statements/for-in/dstr/array-rest-nested-array-invalid.js
 language/statements/for-in/dstr/array-rest-nested-array-yield-ident-invalid.js
@@ -48010,6 +48037,7 @@ language/statements/for-in/dstr/obj-prop-nested-array-invalid.js
 language/statements/for-in/dstr/obj-prop-nested-array-yield-ident-invalid.js
 language/statements/for-in/dstr/obj-prop-nested-obj-invalid.js
 language/statements/for-in/dstr/obj-prop-nested-obj-yield-ident-invalid.js
+language/statements/for-in/dstr/obj-rest-before-comma-invalid.js
 language/statements/for-in/dstr/obj-rest-not-last-element-invalid.js
 language/statements/for-in/head-const-bound-names-dup.js
 language/statements/for-in/head-const-bound-names-fordecl-tdz.js
@@ -48049,6 +48077,10 @@ language/statements/for-in/order-property-added.js
 language/statements/for-in/order-property-on-prototype.js
 language/statements/for-in/order-simple-object.js
 language/statements/for-in/resizable-buffer.js
+language/statements/for-in/return-from-catch.js
+language/statements/for-in/return-from-finally.js
+language/statements/for-in/return-from-try.js
+language/statements/for-in/return.js
 language/statements/for-in/scope-body-lex-boundary.js
 language/statements/for-in/scope-body-lex-close.js
 language/statements/for-in/scope-body-lex-open.js
@@ -48222,7 +48254,6 @@ language/statements/for-of/dstr/array-rest-after-elision.js
 language/statements/for-of/dstr/array-rest-before-element.js
 language/statements/for-of/dstr/array-rest-before-elision.js
 language/statements/for-of/dstr/array-rest-before-rest.js
-language/statements/for-of/dstr/array-rest-elision-invalid.js
 language/statements/for-of/dstr/array-rest-elision-iter-abpt.js
 language/statements/for-of/dstr/array-rest-elision.js
 language/statements/for-of/dstr/array-rest-init.js
@@ -48554,6 +48585,7 @@ language/statements/for-of/dstr/obj-prop-put-prop-ref-user-err.js
 language/statements/for-of/dstr/obj-prop-put-prop-ref.js
 language/statements/for-of/dstr/obj-prop-put-unresolvable-no-strict.js
 language/statements/for-of/dstr/obj-prop-put-unresolvable-strict.js
+language/statements/for-of/dstr/obj-rest-before-comma-invalid.js
 language/statements/for-of/dstr/obj-rest-computed-property-no-strict.js
 language/statements/for-of/dstr/obj-rest-computed-property.js
 language/statements/for-of/dstr/obj-rest-descriptors.js
@@ -50501,6 +50533,8 @@ language/statements/using/initializer-disposed-at-end-of-block.js
 language/statements/using/initializer-disposed-at-end-of-forstatement.js
 language/statements/using/initializer-disposed-at-end-of-functionbody.js
 language/statements/using/initializer-disposed-at-end-of-generatorbody.js
+language/statements/using/initializer-disposed-at-end-of-imported-module.js
+language/statements/using/initializer-disposed-at-end-of-module.js
 language/statements/using/initializer-disposed-if-subsequent-initializer-throws-in-forstatement-head.js
 language/statements/using/initializer-disposed-if-subsequent-initializer-throws.js
 language/statements/using/multiple-resources-disposed-in-reverse-order.js
@@ -51516,6 +51550,7 @@ staging/sm/Iterator/prototype/some/return-false-if-none-match.js
 staging/sm/Iterator/prototype/some/short-circuit-on-true.js
 staging/sm/Iterator/prototype/some/this-not-iterator-throws.js
 staging/sm/Iterator/prototype/some/value-throws-iterator-not-closed.js
+staging/sm/Iterator/prototype/take-drop-throw-eagerly-on-negative.js
 staging/sm/Iterator/prototype/take-drop-throw-eagerly-on-non-integer.js
 staging/sm/Iterator/prototype/take/close-iterator-when-none-remaining.js
 staging/sm/Iterator/prototype/take/length.js
