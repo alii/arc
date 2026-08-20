@@ -210,18 +210,33 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
     // ── Logical / Conditional / Sequence (u-logical-cond-seq) ───────────────
     // §13.13 short-circuit: RHS is evaluated INSIDE the If arm so its side
     // effects are guarded. Port of emit.gleam:4470-4510.
-    ast.LogicalExpression(operator: op, left:, right:, ..) -> {
-      use l <- anf.then(expr(left))
-      case op {
-        ast.LogicalAnd -> anf.truthy_if(l, expr(right), anf.pure(l))
-        ast.LogicalOr -> anf.truthy_if(l, anf.pure(l), expr(right))
-        ast.NullishCoalescing -> anf.nullish_if(l, expr(right), anf.pure(l))
+    ast.LogicalExpression(operator: op, left:, right:, ..) ->
+      case op, is_boolean_expr(left) {
+        // A Boolean-valued left operand IS its own truth value: branch on
+        // the raw i32 and rebuild the `false`/`true` it short-circuits to.
+        ast.LogicalAnd, True -> {
+          use c <- anf.then(cond_i32(left))
+          use rc <- anf.then(consts())
+          anf.bind_if(c, expr(right), anf.pure(rc.false_))
+        }
+        ast.LogicalOr, True -> {
+          use c <- anf.then(cond_i32(left))
+          use rc <- anf.then(consts())
+          anf.bind_if(c, anf.pure(rc.true_), expr(right))
+        }
+        _, _ -> {
+          use l <- anf.then(expr(left))
+          case op {
+            ast.LogicalAnd -> anf.truthy_if(l, expr(right), anf.pure(l))
+            ast.LogicalOr -> anf.truthy_if(l, anf.pure(l), expr(right))
+            ast.NullishCoalescing -> anf.nullish_if(l, expr(right), anf.pure(l))
+          }
+        }
       }
-    }
     // §13.14 ConditionalExpression: `c ? t : f`.
     ast.ConditionalExpression(condition:, consequent:, alternate:, ..) -> {
-      use c <- anf.then(expr(condition))
-      anf.truthy_if(c, expr(consequent), expr(alternate))
+      use c <- anf.then(cond_i32(condition))
+      anf.bind_if(c, expr(consequent), expr(alternate))
     }
     // §13.16 comma operator: eval left-to-right for effects, yield last.
     ast.SequenceExpression(expressions:, ..) -> emit_sequence(expressions)
@@ -447,13 +462,19 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
     ast.LessThanEqual -> anf.guarded_cmp(ir.NLe, "le", l, r)
     ast.GreaterThan -> anf.guarded_cmp(ir.NGt, "gt", l, r)
     ast.GreaterThanEqual -> anf.guarded_cmp(ir.NGe, "ge", l, r)
-    ast.Divide -> anf.host("div", [l, r])
-    ast.Modulo -> anf.host("mod", [l, r])
+    ast.Divide -> anf.guarded_div(l, r)
+    ast.Modulo -> anf.guarded_mod(l, r)
     ast.Exponentiation -> anf.host("pow", [l, r])
-    // R8: strict_eq/strict_ne are JPure and yield a TTerm bool atom directly —
-    // no i32_to_bool wrap. Same `host` seam; M9 does the JPure classification.
-    ast.StrictEqual -> anf.host("strict_eq", [l, r])
-    ast.StrictNotEqual -> anf.host("strict_ne", [l, r])
+    // §7.2.15 IsStrictlyEqual yields a Boolean — re-branch the i32 result.
+    ast.StrictEqual -> {
+      use v <- anf.then(strict_eq(l, r))
+      anf.i32_to_js_bool(v)
+    }
+    ast.StrictNotEqual -> {
+      use v <- anf.then(strict_eq(l, r))
+      use rc <- anf.then(consts())
+      anf.bind_if(v, anf.pure(rc.false_), anf.pure(rc.true_))
+    }
     // Abstract equality: eq_fast (JPure, 0|1|miss) covers null/undef, num×
     // num, str×str, cell×cell, bool×bool; on `miss` (any pair reaching
     // ToPrimitive or a cross-type coercion) fall to full JMut `eq`. Both
@@ -469,42 +490,129 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
       anf.bind_if(v, anf.pure(rc.false_), anf.pure(rc.true_))
     }
     ast.LeftShift ->
-      case perf8_int_const_shift {
+      int_result(l, r, case perf8_int_const_shift {
         True -> int_const_shift("erl_bsl", "shl_fast", "shl", l, r)
         False -> int_fast("shl_fast", "shl", l, r)
-      }
+      })
     ast.RightShift ->
-      case perf8_int_const_shift {
+      int_result(l, r, case perf8_int_const_shift {
         True -> int_const_shift("erl_bsr", "shr_fast", "shr", l, r)
         False -> int_fast("shr_fast", "shr", l, r)
-      }
+      })
     ast.UnsignedRightShift ->
-      case perf8_int_const_shift {
+      int_result(l, r, case perf8_int_const_shift {
         True -> int_fast("ushr_fast", "ushr", l, r)
         False -> anf.host("ushr", [l, r])
-      }
-    ast.BitwiseAnd -> int_const_bit("erl_band", "bitand_fast", "bitand", l, r)
-    ast.BitwiseOr -> int_fast("bitor_fast", "bitor", l, r)
-    ast.BitwiseXor -> int_fast("bitxor_fast", "bitxor", l, r)
+      })
+    ast.BitwiseAnd ->
+      int_result(l, r, int_const_bit("erl_band", "bitand_fast", "bitand", l, r))
+    ast.BitwiseOr -> int_result(l, r, int_fast("bitor_fast", "bitor", l, r))
+    ast.BitwiseXor -> int_result(l, r, int_fast("bitxor_fast", "bitxor", l, r))
     // §13.10.1 RelationalExpression `in` yields a Boolean; `t_in` returns the
     // i32 truth value, so re-branch it before it escapes as a JS value.
-    ast.In -> {
-      use v <- anf.then(anf.host("op_in", [l, r]))
-      anf.i32_to_js_bool(v)
-    }
-    // instanceof_fast (JRead, 0|1|miss) probes the ordinary proto-walk; on
-    // atom `miss` fall to full JMut instance_of. Both arms yield Int 0|1, and
+    ast.In -> anf.then(anf.host("op_in", [l, r]), anf.i32_to_js_bool)
     // §13.10.2 InstanceofOperator yields a Boolean — re-branch the result.
-    ast.InstanceOf -> {
-      use v <- anf.then(anf.host("instanceof_fast", [l, r]))
-      use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
-      use i <- anf.then(anf.bind_if(
-        is_miss,
-        anf.host("instance_of", [l, r]),
-        anf.pure(v),
-      ))
-      anf.i32_to_js_bool(i)
+    ast.InstanceOf -> anf.then(instance_of_i32(l, r), anf.i32_to_js_bool)
+  }
+}
+
+/// instanceof_fast (JRead, 0|1|miss) probes the ordinary proto-walk; on
+/// atom `miss` fall to full JMut instance_of. Both arms yield Int 0|1.
+fn instance_of_i32(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
+  use v <- anf.then(anf.host("instanceof_fast", [l, r]))
+  use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
+  anf.bind_if_i32(is_miss, anf.host("instance_of", [l, r]), anf.pure(v))
+}
+
+/// A condition as the raw i32 truth value an `ir.If` tests, never a JS
+/// Boolean: comparisons keep their NumTerm / kernel 0|1, `!` inverts with
+/// `=:= 0`, `&&` / `||` / `?:` nest as `If`s over i32 arms, and only a value
+/// of unknown shape pays the `truthy` (to_boolean_i32) call. Shared by
+/// if/loop conditions (stmt) and by `!x`, `c ? a : b` and Boolean-valued
+/// `&&`/`||` operands in value position.
+pub fn cond_i32(cond: ast.Expression) -> Build(ir.Value) {
+  case ast_util.unwrap_parens(cond) {
+    ast.BinaryExpression(operator: op, left:, right:, ..) ->
+      case op {
+        ast.Equal -> loose_eq_i32(left, right)
+        ast.NotEqual -> anf.then(loose_eq_i32(left, right), not_i32)
+        ast.StrictEqual -> strict_eq_i32(left, right)
+        ast.StrictNotEqual -> anf.then(strict_eq_i32(left, right), not_i32)
+        ast.LessThan -> cond_rel(ir.NLt, "lt", left, right)
+        ast.LessThanEqual -> cond_rel(ir.NLe, "le", left, right)
+        ast.GreaterThan -> cond_rel(ir.NGt, "gt", left, right)
+        ast.GreaterThanEqual -> cond_rel(ir.NGe, "ge", left, right)
+        ast.InstanceOf -> {
+          use l <- anf.then(expr(left))
+          use r <- anf.then(expr(right))
+          instance_of_i32(l, r)
+        }
+        _ -> anf.then(expr(cond), anf.truthy_i32)
+      }
+    ast.UnaryExpression(operator: ast.LogicalNot, argument:, ..) ->
+      anf.then(cond_i32(argument), not_i32)
+    ast.LogicalExpression(operator: ast.LogicalAnd, left:, right:, ..) -> {
+      use c <- anf.then(cond_i32(left))
+      anf.bind_if_i32(c, cond_i32(right), anf.pure(ir.ConstI32(0)))
     }
+    ast.LogicalExpression(operator: ast.LogicalOr, left:, right:, ..) -> {
+      use c <- anf.then(cond_i32(left))
+      anf.bind_if_i32(c, anf.pure(ir.ConstI32(1)), cond_i32(right))
+    }
+    ast.ConditionalExpression(condition:, consequent:, alternate:, ..) -> {
+      use c <- anf.then(cond_i32(condition))
+      anf.bind_if_i32(c, cond_i32(consequent), cond_i32(alternate))
+    }
+    ast.BooleanLiteral(value:, ..) ->
+      anf.pure(case value {
+        True -> ir.ConstI32(1)
+        False -> ir.ConstI32(0)
+      })
+    _ -> anf.then(expr(cond), anf.truthy_i32)
+  }
+}
+
+fn not_i32(v: ir.Value) -> Build(ir.Value) {
+  anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstI32(0)))
+}
+
+fn cond_rel(
+  fast: ir.NumTermOp,
+  slow_op: String,
+  left: ast.Expression,
+  right: ast.Expression,
+) -> Build(ir.Value) {
+  use l <- anf.then(expr_operand(left))
+  use r <- anf.then(expr_operand(right))
+  anf.cond_cmp(fast, slow_op, l, r)
+}
+
+/// True iff `ex` always evaluates to a JS Boolean, so its ToBoolean is the
+/// value itself and `false`/`true` can stand in for it at a join.
+fn is_boolean_expr(ex: ast.Expression) -> Bool {
+  case ast_util.unwrap_parens(ex) {
+    ast.BooleanLiteral(..) -> True
+    ast.UnaryExpression(operator: ast.LogicalNot, ..) -> True
+    ast.BinaryExpression(operator: op, ..) ->
+      case op {
+        ast.Equal
+        | ast.NotEqual
+        | ast.StrictEqual
+        | ast.StrictNotEqual
+        | ast.LessThan
+        | ast.LessThanEqual
+        | ast.GreaterThan
+        | ast.GreaterThanEqual
+        | ast.In
+        | ast.InstanceOf -> True
+        _ -> False
+      }
+    ast.LogicalExpression(operator: ast.LogicalAnd, left:, right:, ..)
+    | ast.LogicalExpression(operator: ast.LogicalOr, left:, right:, ..) ->
+      is_boolean_expr(left) && is_boolean_expr(right)
+    ast.ConditionalExpression(consequent:, alternate:, ..) ->
+      is_boolean_expr(consequent) && is_boolean_expr(alternate)
+    _ -> False
   }
 }
 
@@ -541,6 +649,8 @@ fn loose_eq(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
       case l, r {
         ir.ConstI32(c), _ if c >= 0 && c < 0x80000000 -> int_const_eq(r, l)
         _, ir.ConstI32(c) if c >= 0 && c < 0x80000000 -> int_const_eq(l, r)
+        ir.ConstI64(_), _ -> int_const_eq(r, l)
+        _, ir.ConstI64(_) -> int_const_eq(l, r)
         _, _ -> loose_eq_slow(l, r)
       }
   }
@@ -557,15 +667,69 @@ fn loose_eq_slow(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   anf.bind_if(is_miss, anf.host("eq", [l, r]), anf.pure(v))
 }
 
+/// `left === right` as the raw i32 0|1 for cond position.
+pub fn strict_eq_i32(
+  left: ast.Expression,
+  right: ast.Expression,
+) -> Build(ir.Value) {
+  use l <- anf.then(expr_operand(left))
+  use r <- anf.then(expr_operand(right))
+  strict_eq(l, r)
+}
+
+/// `d === selector` for one `case selector:` label, as the raw i32.
+pub fn case_test_i32(d: ir.Value, selector: ast.Expression) -> Build(ir.Value) {
+  use t <- anf.then(expr_operand(selector))
+  strict_eq(d, t)
+}
+
+/// §7.2.15 as an i32. A literal `null`/`undefined`/boolean/string operand is
+/// equal only to the identical term, so those are one inline `=:=`; a
+/// non-negative small-int constant takes `=:=` under an `is_integer` guard
+/// (a float `1.0 === 1` still holds, via the kernel); everything else is one
+/// call to the pure `strict_eq` kernel (numeric `==`, NaN unequal, identity).
+fn strict_eq(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
+  case l, r {
+    ir.ConstAtom(_), _ | ir.ConstBinary(_), _ ->
+      anf.bind(ir.NumTerm(ir.NEq, r, l))
+    _, ir.ConstAtom(_) | _, ir.ConstBinary(_) ->
+      anf.bind(ir.NumTerm(ir.NEq, l, r))
+    ir.ConstI32(c), _ if c >= 0 && c < 0x80000000 -> int_const_seq(r, l)
+    _, ir.ConstI32(c) if c >= 0 && c < 0x80000000 -> int_const_seq(l, r)
+    ir.ConstI64(_), _ -> int_const_seq(r, l)
+    _, ir.ConstI64(_) -> int_const_seq(l, r)
+    _, _ -> anf.host("strict_eq_i32", [l, r])
+  }
+}
+
+fn int_const_seq(v: ir.Value, c: ir.Value) -> Build(ir.Value) {
+  use is_i <- anf.then(anf.bind(ir.TermTest(ir.IsInt, v)))
+  anf.bind_if_i32(
+    is_i,
+    anf.bind(ir.NumTerm(ir.NEq, v, c)),
+    anf.host("strict_eq_i32", [v, c]),
+  )
+}
+
 /// A binop operand: small-int NumberLiteral → bare ConstI32 (skips the
 /// Let-bound Convert(BoxInt) so `binop` sees the constant directly and
-/// its fast-path detectors fire); everything else via `expr`.
+/// its fast-path detectors fire), `-<int>` → bare ConstI64; everything else
+/// via `expr`.
 fn expr_operand(ex: ast.Expression) -> Build(ir.Value) {
   case ast_util.unwrap_parens(ex) {
     ast.NumberLiteral(_, ast.FiniteNumber(f)) ->
       case small_int_value(f) {
         Some(v) -> anf.mark_number(v)
         None -> expr(ex)
+      }
+    ast.UnaryExpression(
+      operator: ast.Negate,
+      argument: ast.NumberLiteral(_, ast.FiniteNumber(f)),
+      ..,
+    ) ->
+      case small_int_value(f) {
+        Some(ir.ConstI32(i)) if i > 0 -> anf.pure(ir.ConstI64(-i))
+        _ -> expr(ex)
       }
     _ -> expr(ex)
   }
@@ -698,13 +862,7 @@ fn fold_const_int(
   ex: ast.Expression,
 ) -> Option(Int) {
   case ex {
-    ast.NumberLiteral(_, ast.FiniteNumber(f)) -> {
-      let i = float.truncate(f)
-      case int.to_float(i) == f {
-        True -> Some(i)
-        False -> None
-      }
-    }
+    ast.NumberLiteral(_, ast.FiniteNumber(f)) -> small_int_of(f)
     ast.Identifier(name:, ..) ->
       case dict.get(known, name) {
         Ok(ir.ConstI32(v)) -> Some(v)
@@ -729,15 +887,38 @@ fn fold_const_int(
             ast.BitwiseOr -> Some(int.bitwise_or(a, b))
             ast.BitwiseAnd -> Some(int.bitwise_and(a, b))
             ast.BitwiseXor -> Some(int.bitwise_exclusive_or(a, b))
-            ast.Add -> Some(a + b)
-            ast.Subtract -> Some(a - b)
+            ast.Add -> small_int(a + b)
+            ast.Subtract -> small_int(a - b)
             ast.Multiply if a * b == 0 && { a < 0 || b < 0 } -> None
-            ast.Multiply -> Some(a * b)
+            ast.Multiply -> small_int(a * b)
             _ -> None
           }
         _, _ -> None
       }
     _ -> None
+  }
+}
+
+/// The fold works in exact integers, so every intermediate must stay inside
+/// the int32 range a folded constant can end up as (and far from the floats
+/// `int.to_float` cannot represent).
+fn small_int(i: Int) -> Option(Int) {
+  case i >= -2_147_483_648 && i < 2_147_483_648 {
+    True -> Some(i)
+    False -> None
+  }
+}
+
+fn small_int_of(f: Float) -> Option(Int) {
+  case f >=. -2_147_483_648.0 && f <. 2_147_483_648.0 {
+    False -> None
+    True -> {
+      let i = float.truncate(f)
+      case int.to_float(i) == f {
+        True -> Some(i)
+        False -> None
+      }
+    }
   }
 }
 
@@ -1063,6 +1244,20 @@ fn assign_target(acc: Uses, ex: ast.Expression) -> Uses {
   }
 }
 
+/// A bitwise/shift op with a Number-constant operand can only yield an
+/// int32 (a BigInt operand throws on the mix), so its result is a known
+/// BEAM number for the arithmetic that follows.
+fn int_result(
+  l: ir.Value,
+  r: ir.Value,
+  op: Build(ir.Value),
+) -> Build(ir.Value) {
+  case l, r {
+    ir.ConstI32(_), _ | _, ir.ConstI32(_) -> anf.then(op, anf.mark_number)
+    _, _ -> op
+  }
+}
+
 fn is_nullish_const(v: ir.Value) -> Bool {
   case v {
     ir.ConstAtom("null") | ir.ConstAtom("undefined") -> True
@@ -1155,37 +1350,36 @@ fn int_const_shift(
 
 // ── Number literals (u-literals, SPEC §7.M12) ───────────────────────────────
 
-/// Integral value in `[-2³¹, 2³¹)` boxes as a W32 smi via
-/// `Convert(BoxInt(W32), ConstI32)`; every other finite double routes through
-/// `host("float_lit", [ConstF64(bits)])` so `-0.0`/denormals stay bit-exact
-/// (D5). `1e400` — the parser's sole non-finite literal — is `pos_inf`.
+/// A non-negative integral value below 2³¹ boxes as a W32 smi via
+/// `Convert(BoxInt(W32), ConstI32)`, a negative one above -2³¹ via
+/// `BoxInt(W64)` (`ConstI32` carries unsigned bits) — the integer the
+/// interpreter's negate of the same constant yields; every other finite double
+/// is `erlang:binary_to_float` of its shortest round-trip text, which the
+/// BEAM compiler folds to a float literal (`-0.0` and denormals included).
+/// `1e400` — the parser's sole non-finite literal — is `pos_inf`.
 fn number_literal(n: ast.LiteralNumber) -> Build(ir.Value) {
   case n {
     ast.InfiniteNumber -> anf.then(consts(), fn(rc) { anf.pure(rc.pos_inf) })
     ast.FiniteNumber(f) -> {
       let i = float.truncate(f)
-      case
-        int.to_float(i) == f
-        && i >= 0
-        && i < 2_147_483_648
-        && !rt_val.is_neg_zero(f)
-      {
+      let integral = int.to_float(i) == f && !rt_val.is_neg_zero(f)
+      case integral && i >= 0 && i < 2_147_483_648 {
         True -> anf.bind_number(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(i)))
         False ->
-          anf.then(
-            anf.host("float_lit", [ir.ConstF64(float_bits(f))]),
-            anf.mark_number,
-          )
+          case integral && i < 0 && i > -2_147_483_648 {
+            True ->
+              anf.bind_number(ir.Convert(ir.BoxInt(ir.W64), ir.ConstI64(i)))
+            False ->
+              anf.then(
+                anf.host("float_lit", [
+                  ir.ConstBinary(bit_array.from_string(float.to_string(f))),
+                ]),
+                anf.mark_number,
+              )
+          }
       }
     }
   }
-}
-
-/// Raw IEEE-754 binary64 bit pattern of `f` as a non-negative Int in
-/// `[0, 2⁶⁴)`, via a bit-array round-trip.
-fn float_bits(f: Float) -> Int {
-  let assert <<bits:size(64)>> = <<f:float-size(64)>>
-  bits
 }
 
 // ── Templates (u-template, port emit.gleam:4916,5016-5047,5059-5078) ────────
@@ -1200,21 +1394,31 @@ fn next_site() -> Build(Int) {
 }
 
 /// `` `a${x}b${y}c` `` is `TemplateParts("a", [#(x,"b"), #(y,"c")])`. §13.2.8.5
-/// concatenates via ToString (string-hint), NOT `+`'s ToPrimitive — so each
-/// hole goes through host("to_string") and the join is host("string_concat")
-/// (SPEC §8 JPure binary concat), never guarded_binop(NAdd,"add").
+/// concatenates via ToString (string-hint), NOT `+`'s ToPrimitive. For a
+/// primitive hole the two agree, so the pure `add_prim(acc, v)` kernel
+/// appends a string or a side-effect-free ToString in one call; an object
+/// (or symbol, which throws) misses to host("to_string") + string_concat.
+/// Empty quasis add nothing.
 fn emit_template_literal(parts: ast.TemplateParts(String)) -> Build(ir.Value) {
   let head = ir.ConstBinary(bit_array.from_string(parts.head))
   list.fold(parts.tail, anf.pure(head), fn(acc_b, part) {
     let #(sub, quasi) = part
     use acc <- anf.then(acc_b)
     use v <- anf.then(expr(sub))
-    use s <- anf.then(anf.host("to_string", [v]))
-    use a1 <- anf.then(anf.host("string_concat", [acc, s]))
-    anf.host("string_concat", [
-      a1,
-      ir.ConstBinary(bit_array.from_string(quasi)),
-    ])
+    use a1 <- anf.then(
+      anf.miss_or(anf.host("add_prim", [acc, v]), {
+        use s <- anf.then(anf.host("to_string", [v]))
+        anf.host("string_concat", [acc, s])
+      }),
+    )
+    case quasi {
+      "" -> anf.pure(a1)
+      _ ->
+        anf.host("string_concat", [
+          a1,
+          ir.ConstBinary(bit_array.from_string(quasi)),
+        ])
+    }
   })
 }
 
@@ -1319,10 +1523,7 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
             // Top-level `var G = <literal>` never reassigned in the whole
             // script — inline the literal (analyze_const_globals proved it).
             Some(lit) -> anf.pure(lit)
-            None ->
-              // JMut `global_get` kernel: own-data probe on the global
-              // object, full read on a miss — one host op per site.
-              anf.host("global_get", [ir.ConstBinary(bit_array.from_string(g))])
+            None -> global_read(e, g)
           }
       }
     }
@@ -1331,6 +1532,26 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
         "throw_type_error",
         "unsupported: direct eval (" <> name <> ")",
       )
+  }
+}
+
+/// Read global `g` off the global object. Inside a function body the JRead
+/// own-data probe `global_get_fast` runs inline (bare value on a hit, no
+/// state pair) and only a miss (accessor, prototype-chain or absent
+/// property) calls the full JMut `global_get`; run-once top-level code keeps
+/// the single `global_get` call (probe + full read inside the runtime) for
+/// its smaller forms.
+fn global_read(e: Emitter2, g: String) -> Build(ir.Value) {
+  let key = ir.ConstBinary(bit_array.from_string(g))
+  case e.fn_scope == scope.root_scope_id {
+    True -> anf.host("global_get", [key])
+    False -> {
+      use v <- anf.then(anf.host("global_get_fast", [key]))
+      use miss <- anf.then(
+        anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
+      )
+      anf.bind_if(miss, anf.host("global_get", [key]), anf.pure(v))
+    }
   }
 }
 
@@ -1380,7 +1601,7 @@ fn lexical_value(ref: lexical.LexicalRef) -> Build(ir.Value) {
 /// ReferenceError when `super()` never ran.
 pub fn derived_return_value(v: ir.Value) -> Build(ir.Value) {
   use rc <- anf.then(consts())
-  use is_undef <- anf.then(anf.host_bool("strict_eq", [v, rc.undef]))
+  use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, rc.undef)))
   anf.bind_if(is_undef, lexical_value(lexical.RefThis), anf.pure(v))
 }
 
@@ -2113,11 +2334,16 @@ fn emit_unary(op: ast.UnaryOp, arg: ast.Expression) -> Build(ir.Value) {
       anf.pure(rc.undef)
     }
     ast.LogicalNot -> {
-      use v <- anf.then(expr(arg))
+      use c <- anf.then(cond_i32(arg))
       use rc <- anf.then(consts())
-      anf.truthy_if(v, anf.pure(rc.false_), anf.pure(rc.true_))
+      anf.bind_if(c, anf.pure(rc.false_), anf.pure(rc.true_))
     }
-    ast.Negate -> anf.then(expr(arg), fn(v) { anf.host("neg", [v]) })
+    ast.Negate ->
+      case ast_util.unwrap_parens(arg) {
+        ast.NumberLiteral(_, ast.FiniteNumber(f)) ->
+          number_literal(ast.FiniteNumber(float.negate(f)))
+        _ -> anf.then(expr(arg), anf.guarded_neg)
+      }
     ast.UnaryPlus -> anf.then(expr(arg), fn(v) { anf.host("plus", [v]) })
     ast.BitwiseNot ->
       anf.then(expr(arg), fn(v) {
@@ -2847,19 +3073,13 @@ fn emit_update(
           // arm knows `old` is a BEAM number so num_binop applies directly;
           // slow arm keeps full to_numeric + guarded_binop for str/obj/bigint.
           use is_num <- anf.then(anf.bind(ir.TermTest(ir.IsNumber, old)))
-          use pair <- anf.then(anf.bind_if(
+          use #(old_n, new) <- anf.then(anf.bind_if2(
             is_num,
-            anf.then(anf.num_binop(fast_op, old, one), fn(new) {
-              anf.make_tuple([old, new])
-            }),
+            anf.map(anf.num_binop(fast_op, old, one), fn(new) { #(old, new) }),
             anf.then(anf.host("to_numeric", [old]), fn(old_n) {
-              anf.then(binop(bop, old_n, one), fn(new) {
-                anf.make_tuple([old_n, new])
-              })
+              anf.map(binop(bop, old_n, one), fn(new) { #(old_n, new) })
             }),
           ))
-          use old_n <- anf.then(anf.bind(anf.tuple_get(pair, 0)))
-          use new <- anf.then(anf.bind(anf.tuple_get(pair, 1)))
           use _ <- anf.then(lvalue_put(lv, new))
           case prefix {
             True -> anf.pure(new)
@@ -3001,7 +3221,7 @@ pub fn emit_destructuring_assign(
         ast.Identifier(name:, ..) -> Some(name)
         _ -> None
       }
-      use is_undef <- anf.then(anf.host_bool("strict_eq", [src, rc.undef]))
+      use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, src, rc.undef)))
       use v <- anf.then(anf.bind_if(
         is_undef,
         emit(default_expr, named),

@@ -246,35 +246,72 @@ fn bind_if_typed(
   t: Build(ir.Value),
   f: Build(ir.Value),
 ) -> Build(ir.Value) {
+  let one = fn(b) { map(b, fn(v) { [v] }) }
+  use vs <- map(bind_if_n(cond, [head_ty], one(t), one(f)))
+  let assert [v] = vs
+  v
+}
+
+/// `bind_if` yielding two term values from each arm (no pair tuple built).
+pub fn bind_if2(
+  cond: ir.Value,
+  t: Build(#(ir.Value, ir.Value)),
+  f: Build(#(ir.Value, ir.Value)),
+) -> Build(#(ir.Value, ir.Value)) {
+  let two = fn(b) { map(b, fn(p: #(ir.Value, ir.Value)) { [p.0, p.1] }) }
+  use vs <- map(bind_if_n(cond, [ir.TTerm, ir.TTerm], two(t), two(f)))
+  let assert [a, b] = vs
+  #(a, b)
+}
+
+fn bind_if_n(
+  cond: ir.Value,
+  head_tys: List(ir.ValType),
+  t: Build(List(ir.Value)),
+  f: Build(List(ir.Value)),
+) -> Build(List(ir.Value)) {
   fn(e: Emitter2, k) {
     let sv0 = e.slot_vars
-    let #(then_tree, e_t) = run(t, e)
-    let #(else_tree, e_f) = run(f, Emitter2(..e_t, slot_vars: sv0))
+    let values = fn(_, vs) { ir.Values(vs) }
+    let #(then_tree, e_t) = run_to(t, e, values)
+    let #(else_tree, e_f) = run_to(f, Emitter2(..e_t, slot_vars: sv0), values)
     let carried =
       merge_slots(
         slots_rebound(sv0, e_t.slot_vars),
         slots_rebound(sv0, e_f.slot_vars),
       )
     let e = Emitter2(..e_f, slot_vars: sv0)
-    let #(r, e) = state.fresh_var(e)
+    let #(e, rs) = fresh_vars(e, list.length(head_tys))
+    let heads = list.map(rs, ir.Var)
     case carried {
       [] ->
-        wrap(k(e, ir.Var(r)), ir.Let(
-          [r],
-          ir.If(cond, [head_ty], then_tree, else_tree),
+        wrap(k(e, heads), ir.Let(
+          rs,
+          ir.If(cond, head_tys, then_tree, else_tree),
           _,
         ))
       _ -> {
         let then_tree = append_tail(then_tree, arm_slot_vals(e_t, carried))
         let else_tree = append_tail(else_tree, arm_slot_vals(e_f, carried))
         let #(e, out) = rebind_slots(e, carried)
-        let tys = [head_ty, ..list.map(carried, fn(_) { ir.TTerm })]
-        wrap(k(e, ir.Var(r)), ir.Let(
-          [r, ..out],
+        let tys = list.append(head_tys, list.map(carried, fn(_) { ir.TTerm }))
+        wrap(k(e, heads), ir.Let(
+          list.append(rs, out),
           ir.If(cond, tys, then_tree, else_tree),
           _,
         ))
       }
+    }
+  }
+}
+
+fn fresh_vars(e: Emitter2, n: Int) -> #(Emitter2, List(String)) {
+  case n {
+    0 -> #(e, [])
+    _ -> {
+      let #(r, e) = state.fresh_var(e)
+      let #(e, rest) = fresh_vars(e, n - 1)
+      #(e, [r, ..rest])
     }
   }
 }
@@ -547,10 +584,12 @@ fn int_arm(
 }
 
 /// JS arithmetic `+ - *`: the inline integer arm when both operands are BEAM
-/// integers, else ONE `*_any` kernel call (two numbers → the `num_*` kernel,
-/// anything else → the full operator: ToPrimitive, string concat, bigint,
-/// throw-on-symbol). When BOTH operands are statically known numbers the
-/// kernel arm is the pure `num_*` op — the M0 shape.
+/// integers; past that, two BEAM numbers take the pure `num_*` kernel (bare
+/// result, no state pair) and only a non-number operand reaches the `*_any`
+/// operator (ToPrimitive, string concat, bigint, throw-on-symbol). `+` folds
+/// the number and string cases into the one pure `add_prim` kernel, which
+/// misses only for objects, symbols and mixed BigInt. When BOTH operands are
+/// statically known numbers the kernel arm is the pure `num_*` op alone.
 pub fn guarded_binop(
   fast_op: String,
   slow_op: String,
@@ -558,24 +597,93 @@ pub fn guarded_binop(
   b: ir.Value,
 ) -> Build(ir.Value) {
   fn(e, k) {
-    let string_side = is_known_string(e, a) || is_known_string(e, b)
-    case is_known_number(e, a) && is_known_number(e, b), string_side {
-      True, _ -> num_binop(fast_op, a, b)(e, k)
-      // A string operand can never take the integer arm; `+` on it is a
-      // concatenation, whose result is a string too.
-      False, True ->
-        case fast_op {
-          "num_add" -> then(host(slow_op <> "_any", [a, b]), mark_string)(e, k)
-          _ -> host(slow_op <> "_any", [a, b])(e, k)
+    let any = host(slow_op <> "_any", [a, b])
+    case is_known_number(e, a) && is_known_number(e, b) {
+      True -> num_binop(fast_op, a, b)(e, k)
+      False -> {
+        let str = is_known_string(e, a) || is_known_string(e, b)
+        case str || non_number_const(a) || non_number_const(b), fast_op {
+          // A string / atom literal operand never takes a numeric arm:
+          // `"x" + v` is one `add_prim` (miss → the full operator), and with
+          // a known string side the result is a string too.
+          True, "num_add" -> {
+            let add = miss_or(host("add_prim", [a, b]), any)
+            case str {
+              True -> then(add, mark_string)(e, k)
+              False -> add(e, k)
+            }
+          }
+          True, _ -> any(e, k)
+          False, _ -> {
+            let other = case fast_op {
+              "num_add" -> miss_or(host("add_prim", [a, b]), any)
+              _ -> num_or_any(fast_op, a, b, any)
+            }
+            int_or(fast_op, a, b, host(fast_op, [a, b]), other)(e, k)
+          }
         }
-      False, False ->
-        int_or(
-          fast_op,
-          a,
-          b,
-          host(fast_op, [a, b]),
-          host(slow_op <> "_any", [a, b]),
-        )(e, k)
+      }
+    }
+  }
+}
+
+fn non_number_const(v: ir.Value) -> Bool {
+  case v {
+    ir.ConstBinary(_) | ir.ConstAtom(_) -> True
+    _ -> False
+  }
+}
+
+/// `r <- probe; r =:= miss ? slow : r` for a pure kernel whose result may
+/// itself be an atom (`js_nan`), so `IsAtom` cannot tell a miss apart.
+pub fn miss_or(
+  probe: Build(ir.Value),
+  slow: Build(ir.Value),
+) -> Build(ir.Value) {
+  use r <- then(probe)
+  use m <- then(bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))))
+  bind_if(m, slow, pure(r))
+}
+
+/// Two BEAM numbers → the pure `pure_op` kernel, else `slow`; the guard is
+/// elided per operand already known to be a number.
+fn num_or_any(
+  pure_op: String,
+  a: ir.Value,
+  b: ir.Value,
+  slow: Build(ir.Value),
+) -> Build(ir.Value) {
+  use #(both, elided) <- then(both_numbers(a, b))
+  case elided {
+    True -> host(pure_op, [a, b])
+    False -> bind_if(both, host(pure_op, [a, b]), slow)
+  }
+}
+
+/// JS `/`: two BEAM numbers → the pure `num_div` kernel (exact integer
+/// quotients stay integers), anything else the full operator.
+pub fn guarded_div(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
+  num_or_any("num_div", a, b, host("div", [a, b]))
+}
+
+/// JS `%`: two BEAM integers → the pure `int_mod` kernel, else the full
+/// operator (floats included).
+pub fn guarded_mod(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
+  miss_or(host("int_mod", [a, b]), host("mod", [a, b]))
+}
+
+/// JS unary `-`: a BEAM number → the pure `num_neg` kernel (a number again,
+/// so the result is marked when the operand was known), else the full
+/// operator (ToNumeric, BigInt).
+pub fn guarded_neg(v: ir.Value) -> Build(ir.Value) {
+  fn(e, k) {
+    case is_known_number(e, v) {
+      True -> then(host("num_neg", [v]), mark_number)(e, k)
+      False ->
+        {
+          use is_n <- then(bind(ir.TermTest(ir.IsNumber, v)))
+          bind_if(is_n, host("num_neg", [v]), host("neg", [v]))
+        }(e, k)
     }
   }
 }
