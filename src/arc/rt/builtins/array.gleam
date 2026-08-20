@@ -1547,20 +1547,26 @@ fn is_concat_spreadable(st: Agent, item: JsVal) -> #(Bool, Agent) {
 
 // ─────────────────────── ArraySpeciesCreate + species writes ────────────────
 
-/// §9.4.2.3 ArraySpeciesCreate. `None` → caller allocates a plain Array;
+/// §9.4.2.3 ArraySpeciesCreate. `None` → caller allocates a plain Array
+/// (ArrayCreate's 2^32 - 1 length check, §10.4.2.2 step 1, is done here);
 /// `Some(target)` → a custom species constructor was invoked.
 fn array_species_create(
   st: Agent,
   original: JsVal,
   length: Int,
 ) -> #(Option(Handle), Agent) {
-  case classify(original) {
+  let #(species, st) = case classify(original) {
     KHandle(h) ->
       case intrinsic_species(st, rt_store.t_cell_get(st, h)) {
         True -> #(None, st)
         False -> species_protocol(st, original, length)
       }
     _ -> #(None, st)
+  }
+  case species {
+    None if length > 4_294_967_295 ->
+      rt_val.t_throw_range_error(st, "Invalid array length")
+    _ -> #(species, st)
   }
 }
 
