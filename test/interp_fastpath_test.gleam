@@ -274,6 +274,95 @@ pub fn cmp_local_jump_test() {
     == "ReferenceError"
 }
 
+/// Equality compare-and-branch on locals fuses too: strict and loose kinds,
+/// object identity, ToPrimitive on a loose object/primitive pair, and the
+/// TDZ ReferenceError on either operand.
+pub fn cmp_local_equality_jump_test() {
+  assert run_string(
+      "(function () {
+         var r = [];
+         var x = 1; if (x === 1) r.push('a'); if (x !== 1) r.push('never'); if (x === '1') r.push('never');
+         if (x == '1') r.push('b'); if (x != true) r.push('never');
+         var n = null; while (n !== null) r.push('never'); var u; if (u == n) r.push('c'); if (u === n) r.push('never');
+         var o = {}, p = o, q = {}; if (o === p) r.push('d'); if (o == q) r.push('never'); if (o != p) r.push('never');
+         var calls = 0; var v = { valueOf() { calls++; return 7 } }; var seven = 7;
+         if (v == seven) r.push('e'); if (seven != v) r.push('never'); if (v === seven) r.push('never');
+         var nan = NaN; if (nan === nan) r.push('never'); if (nan != nan) r.push('f');
+         var z = 0, mz = -0; if (z === mz) r.push('g');
+         var big = 2n, two = 2; if (big == two) r.push('h'); if (big === two) r.push('never');
+         var t; try { if (w === 1) {} let w = 0; t = 'nothrow' } catch (e) { t = e.constructor.name }
+         var t2; try { if (x != w2) {} let w2 = 0; t2 = 'nothrow' } catch (e) { t2 = e.constructor.name }
+         return r.join('') + calls + t + t2
+       })()",
+    )
+    == "abcdefgh2ReferenceErrorReferenceError"
+}
+
+/// `local.x`, `local.m(`, and statement `o.x = v;` fuse to GetLocalField /
+/// GetLocalField2 / PutFieldPop: getters, setters, proxies, primitive and
+/// nullish receivers, frozen targets, the derived-constructor `this` TDZ and
+/// the eval completion value all behave as the unfused pair.
+pub fn local_field_superinstruction_test() {
+  assert run_string(
+      "(function () {
+         var r = [];
+         var o = { a: 1, get g() { return this.a + 1 }, set s(v) { r.push('set' + v) }, m() { return this.a * 10 } };
+         r.push(o.a, o.g, o.m(), o.missing === undefined);
+         var p = new Proxy({}, { get(t, k) { return 'trap:' + String(k) }, set(t, k, v) { r.push('pset' + v); return true } });
+         r.push(p.q); p.z = 3; o.s = 4;
+         var str = 'abc'; r.push(str.length, str.toUpperCase());
+         var n = null; try { n.x } catch (e) { r.push(e.constructor.name) }
+         var u; try { u.m() } catch (e) { r.push(e.constructor.name) }
+         try { n.x = 1; } catch (e) { r.push(e.constructor.name) }
+         'use strict'; var f = Object.freeze({ k: 1 });
+         try { (function () { 'use strict'; f.k = 2; })() } catch (e) { r.push('strict' + e.constructor.name) }
+         f.k = 3; r.push(f.k);
+         class B {} class D extends B { constructor() { try { this.x; } catch (e) { r.push('tdz' + e.constructor.name) } super(); this.y = 5; r.push(this.y) } }
+         new D();
+         r.push(eval('var q = {}; q.w = 7;'));
+         function* gen(t) { t.v = yield 1; r.push(t.v) } var it = gen({}); it.next(); it.next(9);
+         return r.join()
+       })()",
+    )
+    == "1,2,10,true,trap:q,pset3,set4,3,ABC,TypeError,TypeError,TypeError,strictTypeError,1,tdzReferenceError,5,7,9"
+}
+
+/// Prefix `++i`/`--i` on a plain local fuse to IncLocal/DecLocal (plus a
+/// read when the value is used): same coercions, same TDZ error.
+pub fn prefix_inc_dec_local_test() {
+  assert run_string(
+      "(function () {
+         var s = '1'; var a = ++s; var n = 3; var seen = []; while (--n >= 0) seen.push(n);
+         var o = { valueOf() { return 41 } }; var b = --o;
+         var t; try { ++z; let z = 0; t = 'nothrow' } catch (e) { t = e.constructor.name }
+         return [typeof s, s, a, seen.join(''), o, b, t].join()
+       })()",
+    )
+    == "number,2,2,210,40,40,ReferenceError"
+}
+
+/// Conditions lowered in branch context (`!`, `&&`, `||`, `== null`,
+/// literal tests, inverted fused compares) keep evaluation order and
+/// short-circuiting.
+pub fn branch_lowering_test() {
+  assert run_string(
+      "(function () {
+         var log = ''; function t(x) { log += x; return x }
+         var r = [];
+         if (t(1) && t(0) && t(2)) r.push('a'); else r.push('b');
+         if (!(t(0) || !t(3))) r.push('c');
+         if (!t('')) r.push('d');
+         var i = 5; do { r.push(i) } while (--i > 3);
+         var j = 0; do { j++ } while (j < 2 || t(0));
+         while (true) { if (null == t(null) && t(4) != undefined) break }
+         for (; 0;) r.push('never');
+         r.push(t({ valueOf() { return null } }) == null ? 'obj' : 'ok');
+         return r.join() + '/' + log + '/' + j
+       })()",
+    )
+    == "b,c,d,5,4,ok/10030null4null/2"
+}
+
 // -- typeof / truthiness --------------------------------------------------------
 
 pub fn typeof_kernel_test() {
@@ -288,4 +377,117 @@ pub fn truthy_kernel_test() {
       "[0, -0, NaN, '', null, undefined, 0n, false, 1, 'a', {}, [], 1n, Symbol(), Infinity].map(function (v) { return v ? 1 : 0 }).join('')",
     )
     == "000000001111111"
+}
+
+// -- Globals -------------------------------------------------------------------
+
+pub fn get_global_kernel_test() {
+  // Lexical (let/const), var, an accessor on the global object, a name
+  // resolved through the global's prototype chain, and typeof of each.
+  assert run_string(
+      "let lx = 1; const cx = 2; var vx = 3;
+       Object.defineProperty(globalThis, 'acc', { get: function () { return 4 }, configurable: true });
+       [lx + cx + vx + acc, typeof nope, typeof vx, typeof lx, typeof Math, toString === Object.prototype.toString].join()",
+    )
+    == "10,undefined,number,number,object,true"
+  // TDZ and unresolvable names still throw.
+  assert run_string(
+      "var out = [];
+       try { tdz } catch (e) { out.push(e.constructor.name) }
+       try { typeof tdz } catch (e) { out.push(e.constructor.name) }
+       let tdz = 0;
+       try { nope } catch (e) { out.push(e.constructor.name) }
+       out.join()",
+    )
+    == "ReferenceError,ReferenceError,ReferenceError"
+}
+
+pub fn put_global_kernel_test() {
+  // Sloppy creation, replacement of a var, a lexical let, a strict miss on
+  // an undeclared name, and a read-only global left alone.
+  assert run_string(
+      "var v = 1; let l = 2; v = 10; l = 20; fresh = 30;
+       var d = Object.getOwnPropertyDescriptor(globalThis, 'fresh');
+       var strict = (function () { 'use strict'; try { undeclared = 1; return 'set' } catch (e) { return e.constructor.name } })();
+       Object.defineProperty(globalThis, 'ro', { value: 1, writable: false }); ro = 5;
+       [v, l, fresh, d.writable && d.enumerable && d.configurable, strict, ro, 'l' in globalThis].join()",
+    )
+    == "10,20,30,true,ReferenceError,1,false"
+}
+
+// -- new / constructor return ----------------------------------------------------
+
+pub fn construct_fast_path_test() {
+  assert run_string(
+      "function K(a) { this.a = a } K.prototype = { z: 1 };
+       var k = new K(5);
+       function R() { this.q = 1; return { r: 2 } }
+       function S() { this.q = 1; return 5 }
+       var out = [k.a, k.z, Object.getPrototypeOf(k) === K.prototype, new R().r, new R().q, new S().q];
+       K.prototype = null; out.push(Object.getPrototypeOf(new K(1)) === Object.prototype);
+       class B { constructor() { this.b = 1 } } class D extends B { constructor() { super(); this.d = 2 } }
+       var dd = new D(); out.push(dd.b + dd.d, dd instanceof B);
+       try { new (() => 1)() } catch (e) { out.push(e.constructor.name) }
+       var P = new Proxy(function () {}, { get: function (t, k) { return k === 'prototype' ? { viaProxy: true } : t[k] } });
+       out.push(Reflect.construct(K, [], P).viaProxy);
+       out.join()",
+    )
+    == "5,1,true,2,,1,true,3,true,TypeError,true"
+}
+
+// -- instanceof ---------------------------------------------------------------
+
+pub fn instanceof_kernel_test() {
+  assert run_string(
+      "function G() {} var g = new G(); var out = [];
+       out.push(g instanceof G, ({}) instanceof G, 5 instanceof G, [] instanceof Array, new Map instanceof Map, G instanceof Function, g instanceof Object);
+       class B {} class D extends B {} out.push(new D instanceof B, new B instanceof D);
+       out.push(g instanceof G.bind(null));
+       var H = function () {}; Object.defineProperty(H, Symbol.hasInstance, { value: function () { return true } });
+       out.push(1 instanceof H);
+       function F() {} Object.setPrototypeOf(F, Object.create(Function.prototype, { [Symbol.hasInstance]: { value: function () { return true } } }));
+       out.push(({}) instanceof F);
+       try { g instanceof {} } catch (e) { out.push(e.constructor.name) }
+       var A = () => 1; try { g instanceof A } catch (e) { out.push(e.constructor.name) }
+       out.push(g instanceof new Proxy(G, {}));
+       out.join()",
+    )
+    == "true,false,false,true,true,true,true,true,false,true,true,true,TypeError,TypeError,true"
+}
+
+// -- Computed access on ordinary objects / arguments / string keys ------------
+
+pub fn elem_kernels_ordinary_and_arguments_test() {
+  assert run_string(
+      "var o = {}; o[3] = 'x'; o[4294967295] = 'big'; o['7'] = 's'; var k = 'name'; o[k] = 'n';
+       var out = [o[3], o['3'], o[4294967295], o[7], o.name, o[9], Object.keys(o).join('|')];
+       var P = { set 5(v) { out.push('setter' + v) } }; var c = Object.create(P); c[5] = 1; out.push(Object.keys(c).length);
+       var ro = Object.create(Object.defineProperty({}, '6', { value: 0, writable: false })); ro[6] = 1; out.push(ro[6]);
+       var fz = Object.freeze({}); fz[1] = 2; out.push(fz[1]);
+       function A(a, b) { arguments[0] = 9; return [arguments[0], arguments[1], arguments[2], arguments.length].join('/') }
+       out.push(A(1, 2));
+       var arr = [1, 2, 3]; out.push(arr.length, arr['length']); arr.length = 1; out.push(arr.length, arr[1]);
+       var xs = [1, 2]; xs[1] += 5; var oo = { q: 1 }; var qq = 'q'; oo[qq] += 1; out.push(xs[1], oo.q);
+       out.join()",
+    )
+    == "x,x,big,s,n,,3|7|4294967295|name,setter1,0,0,,9/2//2,3,3,1,,7,2"
+}
+
+// -- Object literal fields, closures, try, generators in the loop -------------
+
+pub fn literal_closure_try_yield_arms_test() {
+  assert run_string(
+      "var out = [];
+       var lit = { a: 1, b: 2, a: 3 }; out.push(Object.keys(lit).join('|'), lit.a);
+       var fs = []; for (var i = 0; i < 3; i++) fs.push((function (x) { return function () { return x } })(i));
+       out.push(fs.map(function (f) { return f() }).join('|'));
+       function T() { try { throw 1 } catch (e) { return e + 1 } finally { out.push('fin') } } out.push(T());
+       function* gen(k) { for (var j = 0; j < k; j++) yield j; return 'done' }
+       var s = 0; for (var v of gen(4)) s += v; out.push(s);
+       var it = gen(1); out.push(it.next().value, it.next().value, it.next().done);
+       async function af() { var x = await 5; return x + 1 } var r; af().then(function (v) { r = v });
+       out.push(typeof r);
+       out.join()",
+    )
+    == "a|b,3,0|1|2,fin,2,6,0,done,true,undefined"
 }

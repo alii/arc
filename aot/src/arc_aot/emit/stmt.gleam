@@ -1952,10 +1952,8 @@ fn emit_for_of(
         let e = enter_loop_body(e, carried, user_params)
         use e, step <- host_(e, "iter_next", [ir.Var(it)])
         use e, done_v <- let_(e, ir.TermOp(ir.TupleGet(0), [step]))
-        // M19: done_v is a Gleam Bool ATOM (SPEC:728 t_iter_next → #(Bool,
-        // JsVal)), NOT a JsVal — to_boolean is JsVal→i32. M19 must wire the
-        // bool-atom→i32 coercion (or make rt_js.to_boolean accept atoms).
-        use e, done_i <- host_(e, "truthy", [done_v])
+        // done_v is a Gleam Bool atom (t_iter_next → #(Bool, JsVal)).
+        use e, done_i <- let_(e, anf.is_true_expr(done_v))
         let brk_payload = carried_values(e, carried)
         // Nested run_rk so every sibling arm's fresh_var bumps reach `done` —
         // ir.gleam:420 requires all Let names function-unique, and the catch
@@ -2392,10 +2390,10 @@ fn switch_test_chain(
       // default: not tested — its label is the miss target.
       switch_test_chain(e, d, rest, carried, miss)
     [CaseEntry(lbl:, cond: Some(test_expr), ..), ..rest] -> {
-      use #(test_tree, e) <- result.try(e.dispatch.emit_expr(e, test_expr))
-      let #(t, e) = state.fresh_var(e)
-      let #(eq, e) = state.fresh_var(e)
-      let #(eqi, e) = state.fresh_var(e)
+      // §14.12.3 CaseClauseIsSelected: IsStrictlyEqual(input, selector) as
+      // the raw i32 (`===`'s inline literal arms / pure kernel).
+      let #(eq_tree, e) = anf.run(expr.case_test_i32(d, test_expr), e)
+      use e, eqi <- let_(e, eq_tree)
       use #(else_chain, e) <- result.map(switch_test_chain(
         e,
         d,
@@ -2403,20 +2401,8 @@ fn switch_test_chain(
         carried,
         miss,
       ))
-      // R8: strict_eq JPure → TTerm bool atom; truthy → i32 for If.cond
-      // (async.gleam:4156 mirror). Atom-as-cond is always non-zero.
-      let branch =
-        ir.If(
-          ir.Var(eqi),
-          [],
-          ir.Break(lbl, carried_values(e, carried)),
-          else_chain,
-        )
-      let with_eqi =
-        ir.Let([eqi], ir.CallHost("js", "truthy", [ir.Var(eq)]), branch)
-      let with_eq =
-        ir.Let([eq], ir.CallHost("js", "strict_eq", [d, ir.Var(t)]), with_eqi)
-      #(ir.Let([t], test_tree, with_eq), e)
+      let hit = ir.Break(lbl, carried_values(e, carried))
+      #(ir.If(eqi, [], hit, else_chain), e)
     }
   }
 }
@@ -2544,7 +2530,7 @@ fn emit_for_classic(
     // `x++`/`x--` in `upd` (never in body/cond) stays a BEAM number iff its
     // pre-loop init var was one — number±1 is a number, and every path into
     // Block(cont) carries the untouched LoopParam. Mark it so guarded_binop /
-    // emit_update / emit_loop_cond_i32 elide the `is_number` guard on it.
+    // emit_update / emit_cond_i32 elide the `is_number` guard on it.
     let counter_known = for_counter_known(e, upd, body, cond, carried, params)
     let mark_counter = fn(e: Emitter2) {
       list.fold(counter_known, e, fn(e, slot) {
@@ -2600,7 +2586,7 @@ fn emit_for_classic(
             done(e, tt)
           }
           Some(c) -> {
-            use e, t <- emit_loop_cond_i32(e, c)
+            use e, t <- emit_cond_i32(e, c)
             let brk_payload = carried_values(e, carried)
             use #(tt, e) <- result.try(then_part(e))
             done(e, ir.If(t, [], tt, ir.Break(brk, brk_payload)))
@@ -2676,122 +2662,14 @@ fn for_counter_known(
   }
 }
 
-/// True iff `ex` is statically a BEAM number in the current scope: a finite
-/// NumberLiteral, or an unboxed local whose current slot var is known-number.
-/// AST-level so the mark isn't lost through `expr_`'s let-alias.
-fn cond_operand_known(e: Emitter2, ex: ast.Expression) -> Bool {
-  case ast_util.unwrap_parens(ex) {
-    ast.NumberLiteral(_, ast.FiniteNumber(_)) -> True
-    ast.Identifier(name:, ..) ->
-      case state.resolve(e, name) {
-        scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
-          state.is_known_number(e, state.get_slot_var(e, slot))
-        _ -> False
-      }
-    _ -> False
-  }
-}
-
-/// If/loop condition → raw i32 truth value for `ir.If`. Recognises the
-/// dominant richards/deltablue cond shapes and emits the i32 directly,
-/// SKIPPING the `truthy` (to_boolean_i32) call_ext when the producer is
-/// already Int 0|1 (`==`/`!=` via loose_eq, relational via NumTerm). Any
-/// unrecognised shape falls back to `expr_`→`truthy` (the previous default).
+/// If/loop condition → raw i32 truth value for `ir.If` (expr.cond_i32).
 fn emit_cond_i32(
   e: Emitter2,
   cond: ast.Expression,
   k: Rk(ir.Value),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  case ast_util.unwrap_parens(cond) {
-    // `==`: expr.loose_eq_i32 → Int 0|1 (not expr.binop, which re-branches
-    // to a JS Boolean); use it as the cond.
-    ast.BinaryExpression(operator: ast.Equal, left:, right:, ..) -> {
-      let #(tree, e) = anf.run(expr.loose_eq_i32(left, right), e)
-      let_(e, tree, k)
-    }
-    // `!=`: emit as `==` (Int 0|1) then invert via `=:= 0` → 1|0.
-    ast.BinaryExpression(operator: ast.NotEqual, left:, right:, ..) -> {
-      let #(tree, e) = anf.run(expr.loose_eq_i32(left, right), e)
-      use e, cv <- let_(e, tree)
-      let_(e, ir.NumTerm(ir.NEq, cv, ir.ConstI32(0)), k)
-    }
-    // Relational: inline NumTerm fast path (TermTest(IsNumber)×2 ∧ →
-    // NumTerm(NLt/…) : host slow+truthy). When BOTH operands are statically
-    // known BEAM numbers the guard/If/slow-arm are elided entirely.
-    ast.BinaryExpression(operator: ast.LessThan, left:, right:, ..) ->
-      cond_rel_i32(e, ir.NLt, "lt", left, right, k)
-    ast.BinaryExpression(operator: ast.LessThanEqual, left:, right:, ..) ->
-      cond_rel_i32(e, ir.NLe, "le", left, right, k)
-    ast.BinaryExpression(operator: ast.GreaterThan, left:, right:, ..) ->
-      cond_rel_i32(e, ir.NGt, "gt", left, right, k)
-    ast.BinaryExpression(operator: ast.GreaterThanEqual, left:, right:, ..) ->
-      cond_rel_i32(e, ir.NGe, "ge", left, right, k)
-    // `!cond` in cond position: emit inner as i32, invert via `=:= 0`.
-    ast.UnaryExpression(operator: ast.LogicalNot, argument: inner, ..) -> {
-      use e, cv <- emit_cond_i32(e, inner)
-      let_(e, ir.NumTerm(ir.NEq, cv, ir.ConstI32(0)), k)
-    }
-    _ -> {
-      use e, cv <- expr_(e, cond)
-      // anf.truthy_i32 inlines `true`/`false` → 1/0 so `if(method())` (whose
-      // callee returns a bool atom — richards isHeldOrSuspended) skips the
-      // to_boolean_i32 call_ext on the warm path. anf.run+let_ splices the
-      // Build tree into this Rk chain (same bridge as expr_).
-      let #(tree, e) = anf.run(anf.truthy_i32(cv), e)
-      let_(e, tree, k)
-    }
-  }
-}
-
-fn cond_rel_i32(
-  e: Emitter2,
-  fast: ir.NumTermOp,
-  slow_op: String,
-  left: ast.Expression,
-  right: ast.Expression,
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let a_known = cond_operand_known(e, left)
-  let b_known = cond_operand_known(e, right)
-  use e, a <- expr_(e, left)
-  use e, b <- expr_(e, right)
-  case a_known && b_known {
-    True -> let_(e, ir.NumTerm(fast, a, b), k)
-    False -> {
-      use e, an <- let_(e, ir.TermTest(ir.IsNumber, a))
-      use e, bn <- let_(e, ir.TermTest(ir.IsNumber, b))
-      // Nested If instead of Num(IAnd(W32)) — the latter lowers to a
-      // cross-module `rt_num:i32_and` call per iteration.
-      use e, both <- let_(
-        e,
-        ir.If(an, [ir.TI32], ir.Values([bn]), ir.Values([ir.ConstI32(0)])),
-      )
-      use #(fast_arm, e) <- result.try(
-        run_rk(e, fn(e, d) {
-          use e, c <- let_(e, ir.NumTerm(fast, a, b))
-          d(e, ir.Values([c]))
-        }),
-      )
-      use #(slow_arm, e) <- result.try(
-        run_rk(e, fn(e, d) {
-          use e, sv <- host_(e, slow_op, [a, b])
-          use e, ti <- host_(e, "truthy", [sv])
-          d(e, ir.Values([ti]))
-        }),
-      )
-      let_(e, ir.If(both, [ir.TI32], fast_arm, slow_arm), k)
-    }
-  }
-}
-
-/// Compat alias — earlier only loops had the specialised cond emit; now
-/// `emit_if` shares it. Kept so the three loop callers stay unchanged.
-fn emit_loop_cond_i32(
-  e: Emitter2,
-  cond: ast.Expression,
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  emit_cond_i32(e, cond, k)
+  let #(tree, e) = anf.run(expr.cond_i32(cond), e)
+  let_(e, tree, k)
 }
 
 // ── While / DoWhile (port emit.gleam:3781-3808 → R15 uniform loop shape) ────
@@ -2825,7 +2703,7 @@ fn emit_while(
   use #(loop_body, e) <- result.try(
     run_rk(e, fn(e, done) {
       let e = enter_loop_body(e, carried, params)
-      use e, t <- emit_loop_cond_i32(e, cond)
+      use e, t <- emit_cond_i32(e, cond)
       // else-arm captured BEFORE body — the LoopParam names (plus any cond
       // assignment rebinds threaded through expr_/host_).
       let brk_payload = carried_values(e, carried)
@@ -2889,7 +2767,7 @@ fn emit_do_while(
         carried,
         ir.Block(cont, result_tys, cont_body),
       )
-      use e, t <- emit_loop_cond_i32(e, cond)
+      use e, t <- emit_cond_i32(e, cond)
       let payload = carried_values(e, carried)
       done(e, ir.If(t, [], ir.Continue(head, payload), ir.Break(brk, payload)))
     }),

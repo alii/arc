@@ -27,6 +27,7 @@
     mk_undefined/0, mk_hole/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
     to_boolean_i32/1, to_boolean/1,
+    strict_eq/2, strict_neq/2, same_value_zero/2,
     t_to_property_key_fast/1,
     js_number_to_string/1,
     parse_float/1,
@@ -103,6 +104,24 @@ to_boolean_i32({js_bigint, _}) -> 1;
 to_boolean_i32({js_sym, _}) -> 1;
 to_boolean_i32({js_cell, _}) -> 1;
 to_boolean_i32(js_tdz) -> 0.
+
+%% strict_eq(A, B) -> boolean()
+%% §7.2.15 IsStrictlyEqual, total on wire terms. NaN is unequal to itself;
+%% Numbers compare numerically (1 === 1.0, +0 === -0); every other row is
+%% exact term identity (same atom, same binary, same {js_cell,N} /
+%% {js_bigint,N} / {js_sym,S}).
+strict_eq(js_nan, _) -> false;
+strict_eq(_, js_nan) -> false;
+strict_eq(A, B) when is_number(A), is_number(B) -> A == B;
+strict_eq(A, B) -> A =:= B.
+
+%% strict_neq(A, B) -> boolean()
+strict_neq(A, B) -> not strict_eq(A, B).
+
+%% same_value_zero(A, B) -> boolean()
+%% §7.2.12 SameValueZero: IsStrictlyEqual except NaN equals NaN.
+same_value_zero(js_nan, js_nan) -> true;
+same_value_zero(A, B) -> strict_eq(A, B).
 
 %% t_to_property_key_fast(V) -> ObjectKey | miss
 %% JPure §7.1.19 ToPropertyKey for the primitive shapes whose result does

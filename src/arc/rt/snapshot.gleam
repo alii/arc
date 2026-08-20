@@ -127,11 +127,11 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
   })
   let JsStore(
     data:,
-    free:,
     next:,
     pinned_roots:,
     alloc_since_gc:,
     gc_threshold:,
+    gc_live: _,
     prop_seq:,
     private_uid:,
     symbol_uid:,
@@ -155,7 +155,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
   let store =
     StoreImage(
       data:,
-      free:,
+      free: [],
       next:,
       pinned_roots:,
       alloc_since_gc:,
@@ -201,7 +201,7 @@ pub fn deserialize(
 fn restore(image: StoreImage) -> JsStore(Agent) {
   let StoreImage(
     data:,
-    free:,
+    free: _,
     next:,
     pinned_roots:,
     alloc_since_gc:,
@@ -219,11 +219,11 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     data: dict.fold(data, rt_store.data_new(), fn(acc, id, slot) {
       tree_array.set(id, slot, acc)
     }),
-    free:,
     next:,
     pinned_roots:,
     alloc_since_gc:,
     gc_threshold:,
+    gc_live: 0,
     prop_seq:,
     private_uid:,
     symbol_uid:,

@@ -1413,6 +1413,53 @@ pub fn closure_nested_block_shadow_test() -> Nil {
   )
 }
 
+pub fn closure_const_by_value_test() -> Nil {
+  // A const captured only after its initializer ran is copied, not boxed;
+  // every earlier or hoisted capturer still shares the binding and its TDZ.
+  assert_normal(
+    "function f() {
+       var r = [];
+       const g = () => a; try { g(); r.push('no') } catch (e) { r.push(e.constructor.name) }
+       function h() { return a } try { h(); r.push('no') } catch (e) { r.push(e.constructor.name) }
+       const a = 1; r.push(g(), h(), (() => a)());
+       for (const x of [2, 3]) r.push((() => x)());
+       switch (r.length) { case 0: const k = 0; case 7: try { (() => k)() } catch (e) { r.push(e.constructor.name) } }
+       return r.join();
+     }
+     f()",
+    JsString("ReferenceError,ReferenceError,1,1,1,2,3,ReferenceError"),
+  )
+}
+
+pub fn closure_this_by_value_test() -> Nil {
+  // Outside a class body `this` and new.target are fixed for the activation
+  // and reach arrows by value; a derived constructor still shares `this`.
+  assert_normal(
+    "function F(v) { this.v = v; this.get = () => () => this.v; this.nt = () => new.target === F }
+     var f = new F(4);
+     class A { constructor() { this.a = 5 } }
+     class B extends A { constructor() { const g = () => this; super(); this.ok = g() === this } }
+     [f.get()(), f.nt(), new B().ok, new B().a].join()",
+    JsString("4,true,true,5"),
+  )
+}
+
+pub fn class_this_by_value_test() -> Nil {
+  // Methods, field initialisers, static blocks and base constructors hand
+  // `this` to arrows by value; only a derived constructor keeps it shared so
+  // an arrow created before super() sees the instance (and its TDZ) later.
+  assert_normal(
+    "var r = [];
+     class A { constructor() { this.a = 5; this.f = () => this.a } m() { return [2].map(x => x * this.a)[0] } static s() { return (() => this === A)() } x = (() => this)(); static { r.push((() => this === A)()) } }
+     var a = new A(); r.push(a.f(), a.m(), A.s(), a.x === a);
+     var B = class extends A { constructor() { const g = () => this; try { g() } catch (e) { r.push(e.constructor.name) } (() => super())(); r.push(g() === this);
+       class I { constructor() { this.i = 7 } get() { return (() => this.i)() } } r.push(new I().get()) } };
+     new B(); class C extends A {} r.push(new C().m());
+     r.join()",
+    JsString("true,5,10,true,true,ReferenceError,true,7,10"),
+  )
+}
+
 // ============================================================================
 // Array tests
 // ============================================================================

@@ -1,17 +1,24 @@
-//// Bindings for `arc_interp_ffi`: the raise adapter that turns a raising
-//// runtime call into a `Result` for the interpreter's slow path, and the
-//// fused hot-path kernels `fast_loop` runs before falling back to it.
+//// Bindings for `arc_interp_ffi` (and the `arc_rt_ops_ffi` operator
+//// kernels): the raise adapter that turns a raising runtime call into a
+//// `Result` for the interpreter's slow path, and the fused hot-path kernels
+//// `fast_loop` runs before falling back to it.
 ////
 //// Kernels are typed with their HIT type but may return the atom `miss`
-//// instead. `is_miss` is the one place that knows this; a caller must test
-//// it before using the value in any other way. That confines the type
-//// assertion to a single probe and keeps a hit allocation-free.
+//// instead. `is_miss` / `is(_, Miss)` are the one probe that knows this; a
+//// caller must test it before using the value in any other way. That
+//// confines the type assertion to a single probe and keeps a hit
+//// allocation-free.
 
+import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type LexicalSlots}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, type StepExit}
-import arc/rt/types.{type Agent, type JsStore, type JsVal}
+import arc/rt/types.{
+  type Agent, type Handle, type JsSlot, type JsStore, type JsVal,
+  type LexicalGlobal, type SymbolId,
+}
 import gleam
+import gleam/dict.{type Dict}
 
 // -- Raise adapter -------------------------------------------------------------
 
@@ -159,62 +166,114 @@ pub fn guard_unit6(
 ) -> Guarded(Nil)
 
 // -- Fused kernels ---------------------------------------------------------------
-// Each returns its result or `miss`; only `strict_eq`, `truthy` and `nullish`
-// are total. A miss means the operands need something observable
-// (ToPrimitive, a getter, a proxy trap, a throw): take the guarded slow path.
+// Each returns its result or `miss`; only `truthy` and `nullish` are total.
+// A miss means the operands need something observable (ToPrimitive, a
+// getter, a proxy trap, a throw): take the guarded slow path.
 
 /// True when a kernel answered `miss` instead of a value of its result type.
 @external(erlang, "arc_interp_ffi", "is_miss")
 pub fn is_miss(result: a) -> Bool
 
+/// The bare atoms the fast loop tests a term against: a kernel's `miss`
+/// answer, the TDZ sentinel (`arc_rt_val_ffi:mk_tdz`) and the `undefined`
+/// value. The constructors lower to those atoms.
+pub type Sentinel {
+  Miss
+  JsTdz
+  Undefined
+}
+
+/// `v =:= s`: the `is_miss` / TDZ probe as the inlined compare BIF, for the
+/// fast loop where a remote call per test shows.
+@external(erlang, "erlang", "=:=")
+pub fn is(v: a, s: Sentinel) -> Bool
+
+/// `v =:= b`: a value against a boolean wire term (the atoms themselves).
+@external(erlang, "erlang", "=:=")
+pub fn is_bool(v: JsVal, b: Bool) -> Bool
+
+/// The cell a callee value designates, for the call arms to match on;
+/// a non-object callee (or a dangling handle) misses.
+@external(erlang, "arc_interp_ffi", "cell_of")
+pub fn cell_of(agent: Agent, v: JsVal) -> JsSlot
+
 /// `a + b` for numbers, strings, and a string with a pure-ToString primitive.
-@external(erlang, "arc_interp_ffi", "add")
+@external(erlang, "arc_rt_ops_ffi", "add")
 pub fn add(a: JsVal, b: JsVal) -> JsVal
 
 /// `a - b` for numbers.
-@external(erlang, "arc_interp_ffi", "sub")
+@external(erlang, "arc_rt_ops_ffi", "sub")
 pub fn sub(a: JsVal, b: JsVal) -> JsVal
 
 /// `a * b` for numbers.
-@external(erlang, "arc_interp_ffi", "mul")
+@external(erlang, "arc_rt_ops_ffi", "mul")
 pub fn mul(a: JsVal, b: JsVal) -> JsVal
 
-/// `a / b` for finite numbers.
-@external(erlang, "arc_interp_ffi", "div")
+/// `a / b` for numbers.
+@external(erlang, "arc_rt_ops_ffi", "div")
 pub fn div(a: JsVal, b: JsVal) -> JsVal
 
-/// `a % b` for integers.
-@external(erlang, "arc_interp_ffi", "mod")
+/// `a % b` for finite numbers.
+@external(erlang, "arc_rt_ops_ffi", "mod")
 pub fn mod(a: JsVal, b: JsVal) -> JsVal
 
 /// `-a` for numbers and BigInt.
-@external(erlang, "arc_interp_ffi", "neg")
+@external(erlang, "arc_rt_ops_ffi", "neg")
 pub fn neg(a: JsVal) -> JsVal
 
 /// `+a` for numbers.
-@external(erlang, "arc_interp_ffi", "plus")
+@external(erlang, "arc_rt_ops_ffi", "plus")
 pub fn plus(a: JsVal) -> JsVal
 
-/// `a < b` for number, string and BigInt pairs.
-@external(erlang, "arc_interp_ffi", "lt")
-pub fn lt(a: JsVal, b: JsVal) -> Bool
+/// `+a + delta` for a Number `a` and a small integer `delta` (the `i++` /
+/// `i--` kernel).
+@external(erlang, "arc_rt_ops_ffi", "step")
+pub fn step(a: JsVal, delta: Int) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "le")
-pub fn le(a: JsVal, b: JsVal) -> Bool
+/// The compare and equality kernels answer `true | false | miss`; the
+/// boolean atoms ARE the boolean wire terms, so the answer is typed as the
+/// value it pushes. `a < b` etc. for number, string and BigInt pairs.
+@external(erlang, "arc_rt_ops_ffi", "lt")
+pub fn lt(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "gt")
-pub fn gt(a: JsVal, b: JsVal) -> Bool
+@external(erlang, "arc_rt_ops_ffi", "le")
+pub fn le(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "ge")
-pub fn ge(a: JsVal, b: JsVal) -> Bool
+@external(erlang, "arc_rt_ops_ffi", "gt")
+pub fn gt(a: JsVal, b: JsVal) -> JsVal
 
-/// §7.2.15 IsStrictlyEqual. Total.
-@external(erlang, "arc_interp_ffi", "strict_eq")
-pub fn strict_eq(a: JsVal, b: JsVal) -> Bool
+@external(erlang, "arc_rt_ops_ffi", "ge")
+pub fn ge(a: JsVal, b: JsVal) -> JsVal
 
-/// §7.2.14 IsLooselyEqual for the coercion-free pairs.
-@external(erlang, "arc_interp_ffi", "eq")
-pub fn eq(a: JsVal, b: JsVal) -> Bool
+/// §7.2.15 IsStrictlyEqual and its negation; a TDZ sentinel misses.
+@external(erlang, "arc_rt_ops_ffi", "strict_eq")
+pub fn strict_eq(a: JsVal, b: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_ops_ffi", "strict_neq")
+pub fn strict_neq(a: JsVal, b: JsVal) -> JsVal
+
+/// §7.2.14 IsLooselyEqual (and its negation) for the coercion-free pairs.
+@external(erlang, "arc_rt_ops_ffi", "eq")
+pub fn eq(a: JsVal, b: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_ops_ffi", "neq")
+pub fn neq(a: JsVal, b: JsVal) -> JsVal
+
+/// `!v`. Total.
+@external(erlang, "arc_interp_ffi", "lnot")
+pub fn lnot(v: JsVal) -> JsVal
+
+/// `v instanceof ctor` when `ctor[@@hasInstance]` (`has_instance` is that
+/// symbol) provably resolves to the Function.prototype intrinsic or to
+/// nothing: OrdinaryHasInstance by identity walk. Anything observable
+/// misses.
+@external(erlang, "arc_interp_ffi", "instance_of")
+pub fn instance_of(
+  agent: Agent,
+  v: JsVal,
+  ctor: JsVal,
+  has_instance: SymbolId,
+) -> JsVal
 
 /// §7.1.2 ToBoolean. Total.
 @external(erlang, "arc_interp_ffi", "truthy")
@@ -232,15 +291,50 @@ pub fn type_of(v: JsVal) -> String
 @external(erlang, "arc_interp_ffi", "typeof")
 pub fn type_of_in(store: JsStore(Agent), v: JsVal) -> String
 
+/// The value in the box cell a captured local holds; the TDZ sentinel or a
+/// non-box slot miss.
+@external(erlang, "arc_interp_ffi", "box_get")
+pub fn box_get(agent: Agent, slot: JsVal) -> JsVal
+
 /// `obj.key`: own or inherited plain data property, `undefined` if absent
 /// on an all-ordinary chain; a string or number receiver reads from its
-/// realm wrapper prototype. `key` is a Named (non-index) key.
+/// realm wrapper prototype. `key` is a `Named` (non-index) key, handed over
+/// whole so the kernel probes with the term the opcode already holds.
 @external(erlang, "arc_interp_ffi", "get_field")
-pub fn get_field(agent: Agent, obj: JsVal, key: String) -> JsVal
+pub fn get_field(agent: Agent, obj: JsVal, key: PropertyKey) -> JsVal
+
+/// A global identifier read (§9.1.1.4 GetBindingValue): an initialised
+/// lexical binding from `lex`, else a plain data property on the global
+/// object's chain. TDZ, accessors, exotic hops and an unresolvable name
+/// miss.
+@external(erlang, "arc_interp_ffi", "get_global")
+pub fn get_global(
+  agent: Agent,
+  lex: Dict(String, LexicalGlobal),
+  name: String,
+) -> JsVal
+
+/// A global identifier write on the object record (no lexical binding of
+/// the name): replace an own writable data property of the global object,
+/// or create it when the frame is sloppy. The store with the write applied.
+@external(erlang, "arc_interp_ffi", "put_global")
+pub fn put_global(
+  store: JsStore(Agent),
+  lex: Dict(String, LexicalGlobal),
+  global: Handle,
+  name: String,
+  v: JsVal,
+  strict: Bool,
+) -> JsStore(Agent)
 
 /// `obj[key]` for an integer index into an Array cell or a string key.
 @external(erlang, "arc_interp_ffi", "get_elem")
 pub fn get_elem(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
+
+/// `get_elem` for an integer key only (GetElem2 re-pushes the key, and an
+/// integer is its own canonical form).
+@external(erlang, "arc_interp_ffi", "get_elem2")
+pub fn get_elem2(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
 
 /// `obj.key = v` over an existing own writable data property; the store
 /// with the write applied.
@@ -248,7 +342,17 @@ pub fn get_elem(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
 pub fn put_field(
   store: JsStore(Agent),
   obj: JsVal,
-  key: String,
+  key: PropertyKey,
+  v: JsVal,
+) -> JsStore(Agent)
+
+/// `{key: v}`: CreateDataProperty of a Named key on an ordinary extensible
+/// object; the store with the property defined.
+@external(erlang, "arc_interp_ffi", "define_field")
+pub fn define_field(
+  store: JsStore(Agent),
+  obj: JsVal,
+  key: PropertyKey,
   v: JsVal,
 ) -> JsStore(Agent)
 

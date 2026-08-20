@@ -47,11 +47,26 @@ pub fn drop_start(s: String, n: Int) -> String
 @external(erlang, "arc_string_ffi", "string_cp_explode")
 pub fn explode(s: String) -> List(String)
 
+/// `String.prototype.split` by a non-empty literal `sep`, keeping at most
+/// `limit` parts. Byte-level `binary:split`, sub-binary parts.
+@external(erlang, "arc_string_ffi", "string_split")
+pub fn split(s: String, sep: String, limit: Int) -> List(String)
+
+/// `n` copies of `s` (n <= 0 gives ""). One `binary:copy`; callers bound the
+/// size first (see `limits.repeat`).
+@external(erlang, "arc_string_ffi", "string_repeat")
+pub fn repeat(s: String, n: Int) -> String
+
 /// Integer codepoint at codepoint index `pos`, or None when out of bounds.
-/// Shares the cursor cache with `char_at`, so sequential scans resume from
-/// the previous position instead of re-walking from byte 0.
+/// Same walk as `char_at` without building the one-character string.
 @external(erlang, "arc_string_ffi", "string_codepoint_at")
 pub fn codepoint_at(s: String, pos: Int) -> Option(Int)
+
+/// The character starting at BYTE offset `off` and the byte offset just past
+/// it, or None at the end. O(1): a sequential reader threads the returned
+/// offset instead of re-walking from byte 0 with `char_at`.
+@external(erlang, "arc_string_ffi", "string_char_at_offset")
+pub fn char_at_offset(s: String, off: Int) -> Option(#(String, Int))
 
 /// StringIndexOf (§7.1.18): the codepoint index of the first occurrence of
 /// `needle` at or after `from`, or None when there is none. Total — an empty

@@ -351,32 +351,10 @@ fn try_primitive_methods(
 // ── §7.2 Testing and Comparison Operations: equality ────────────────────────
 
 /// ES2024 §7.2.14 IsStrictlyEqual (JS `===`). NaN !== NaN; +0 === -0.
-/// BEAM's `=:=` distinguishes ±0, so finite floats are normalized by adding
-/// 0.0 before comparing (IEEE 754: -0.0 + 0.0 = +0.0). 2core's `JsNum` splits
-/// arc's single `Finite(Float)` into `JInt|JFloat`, so cross-shape finites
-/// compare via `int.to_float` under the same normalization.
-pub fn strict_equal(left: JsVal, right: JsVal) -> Bool {
-  case classify(left), classify(right) {
-    KUndef, KUndef -> True
-    KNull, KNull -> True
-    KBool(a), KBool(b) -> a == b
-    // NaN !== NaN
-    KNum(JNan), _ | _, KNum(JNan) -> False
-    // +0 === -0: normalize -0 → +0 via IEEE addition before comparing
-    KNum(JFloat(a)), KNum(JFloat(b)) -> a +. 0.0 == b +. 0.0
-    KNum(JInt(a)), KNum(JInt(b)) -> a == b
-    KNum(JInt(a)), KNum(JFloat(b)) -> int.to_float(a) == b +. 0.0
-    KNum(JFloat(a)), KNum(JInt(b)) -> a +. 0.0 == int.to_float(b)
-    // ±Infinity: structural equality on the remaining JsNum arms
-    KNum(a), KNum(b) -> a == b
-    KStr(a), KStr(b) -> a == b
-    KBig(a), KBig(b) -> a == b
-    // Object identity (same Handle) — covers functions and arrays too
-    KHandle(a), KHandle(b) -> a == b
-    KSym(a), KSym(b) -> a == b
-    _, _ -> False
-  }
-}
+/// Numbers compare with arithmetic `==` (1 === 1.0, -0.0 == 0.0); every
+/// other row is exact wire-term identity.
+@external(erlang, "arc_rt_val_ffi", "strict_eq")
+pub fn strict_equal(left: JsVal, right: JsVal) -> Bool
 
 /// ES2024 §7.2.11 SameValue. Like `===`, except NaN equals NaN and +0 does NOT
 /// equal -0. Used by Proxy invariant checks and Object.defineProperty.
@@ -397,13 +375,8 @@ pub fn same_value(left: JsVal, right: JsVal) -> Bool {
 
 /// ES2024 §7.2.12 SameValueZero. Like `===`, but NaN equals NaN. ±0 are still
 /// equal. Used by Array.prototype.includes and Map/Set key equality.
-pub fn same_value_zero(left: JsVal, right: JsVal) -> Bool {
-  case classify(left), classify(right) {
-    // NaN SameValueZero NaN → true (this is the only difference from ===)
-    KNum(JNan), KNum(JNan) -> True
-    _, _ -> strict_equal(left, right)
-  }
-}
+@external(erlang, "arc_rt_val_ffi", "same_value_zero")
+pub fn same_value_zero(left: JsVal, right: JsVal) -> Bool
 
 /// Erlang `=:=` on floats: exact term equality, distinguishes -0.0 from +0.0.
 /// Exists solely for SameValue's ±0-distinguishing number compare above.
@@ -586,13 +559,12 @@ pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
 
 // ── §7.1.17 ToString (threaded — objects go through ToPrimitive) ────────────
 
-/// ES2024 §7.1.17 ToString(argument). ToPrimitive with hint "string" first,
-/// then a total match on §7.1.17's conversion table over the primitive
-/// result — so no re-dispatch, no recursion. Port of arc
-/// `coerce.gleam:168-190 js_to_string` with the D7 Result→throw rewrite.
+/// ES2024 §7.1.17 ToString(argument): a total match on §7.1.17's conversion
+/// table. Primitives convert directly; an object goes through ToPrimitive
+/// with hint "string" and re-enters once. Port of arc `coerce.gleam:168-190
+/// js_to_string` with the D7 Result→throw rewrite.
 pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent) {
-  let #(prim, st) = t_to_primitive(st, v, HintString)
-  case classify(prim) {
+  case classify(v) {
     KStr(s) -> #(s, st)
     KNum(n) -> #(jsnum_to_string(n), st)
     KBool(True) -> #("true", st)
@@ -602,8 +574,12 @@ pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent) {
     KBig(n) -> #(int.to_string(n), st)
     KSym(_) ->
       t_throw_type_error(st, "Cannot convert a Symbol value to a string")
-    // t_to_primitive never returns an object, and it panics on TDZ.
-    KHandle(_) | KTdz -> panic as "ToString: ToPrimitive returned non-primitive"
+    // t_to_primitive never returns an object, so this recurs exactly once.
+    KHandle(_) -> {
+      let #(prim, st) = t_to_primitive(st, v, HintString)
+      t_to_string(st, prim)
+    }
+    KTdz -> panic as "ToString on TDZ sentinel"
   }
 }
 
@@ -711,15 +687,17 @@ pub fn string_to_number(s: String) -> JsNum {
 /// result is identical to the general path. Anything else falls through.
 fn parse_plain_digits(s: String) -> Result(JsNum, Nil) {
   case bit_array.from_string(s) {
-    // '-' prefix: negate via float.negate so "-0" yields -0.0 like the
-    // general path does.
+    // "-0" is -0.0, which only the float shape can carry.
     <<0x2d, rest:bytes>> -> {
       use n <- result.map(accumulate_digits(rest, 0, 0))
-      JFloat(float.negate(int.to_float(n)))
+      case n {
+        0 -> JFloat(-0.0)
+        _ -> JInt(-n)
+      }
     }
     bytes -> {
       use n <- result.map(accumulate_digits(bytes, 0, 0))
-      JFloat(int.to_float(n))
+      JInt(n)
     }
   }
 }
@@ -773,6 +751,7 @@ fn string_to_number_slow(s: String) -> JsNum {
 fn negate_jsnum(n: JsNum) -> JsNum {
   case n {
     JFloat(f) -> JFloat(float.negate(f))
+    JInt(0) -> JFloat(-0.0)
     JInt(i) -> JInt(0 - i)
     JPosInf -> JNegInf
     JNegInf -> JPosInf
@@ -934,16 +913,12 @@ fn parse_decimal_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   }
 }
 
-/// Parse an all-digits integer literal. Goes through float syntax first;
-/// only literals beyond double range (~1e308, 309+ digits) fall back to
-/// arbitrary-precision integer parsing, which `num_from_int` saturates to
-/// Infinity per §7.1.4.1 instead of crashing in erlang:float/1.
+/// Parse an all-digits integer literal: exact while it fits 2^53 - 1, else
+/// the nearest double, which `num_from_int` saturates to Infinity beyond
+/// double range (~1e308, 309+ digits) per §7.1.4.1.
 fn parse_integer_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   use digits <- result.try(bit_array.to_string(bytes))
-  case float.parse(digits <> ".0") {
-    Ok(f) -> Ok(JFloat(f))
-    Error(Nil) -> int.parse(digits) |> result.map(num_from_int)
-  }
+  int.parse(digits) |> result.map(int_number)
 }
 
 /// Parse the digits of a NonDecimalIntegerLiteral ("0x.." / "0o.." / "0b..").
@@ -966,6 +941,15 @@ fn parse_radix_literal(digits: BitArray, radix: Int) -> JsNum {
 const nf_two52 = 4_503_599_627_370_496
 
 const nf_two53 = 9_007_199_254_740_992
+
+/// Integer → Number keeping the exact `JInt` shape while |n| <= 2^53 - 1 (the
+/// shape number literals and integer arithmetic produce), else `num_from_int`.
+pub fn int_number(n: Int) -> JsNum {
+  case n <= max_safe_integer && n >= -max_safe_integer {
+    True -> JInt(n)
+    False -> num_from_int(n)
+  }
+}
 
 /// Integer → Number with correct rounding (round-to-nearest, ties-to-even).
 /// Erlang's float/1 mis-rounds integers wider than 53 bits, so reduce to a
@@ -1041,8 +1025,7 @@ fn parse_bigint_radix_digits(digits: String, base: Int) -> Option(Int) {
 /// are TypeErrors (§7.1.4 conversion table). Port of arc
 /// `coerce.gleam:202-225 js_to_number` with the D7 Result→throw rewrite.
 pub fn t_to_number(st: Agent, v: JsVal) -> #(JsNum, Agent) {
-  let #(prim, st) = t_to_primitive(st, v, HintNumber)
-  case classify(prim) {
+  case classify(v) {
     KNum(n) -> #(n, st)
     KStr(s) -> #(string_to_number(s), st)
     KBool(True) -> #(JInt(1), st)
@@ -1051,24 +1034,31 @@ pub fn t_to_number(st: Agent, v: JsVal) -> #(JsNum, Agent) {
     KUndef -> #(JNan, st)
     KBig(_) -> t_throw_type_error(st, "Cannot convert BigInt to number")
     KSym(_) -> t_throw_type_error(st, "Cannot convert Symbol to number")
-    KHandle(_) | KTdz -> panic as "ToNumber: ToPrimitive returned non-primitive"
+    KHandle(_) -> {
+      let #(prim, st) = t_to_primitive(st, v, HintNumber)
+      t_to_number(st, prim)
+    }
+    KTdz -> panic as "ToNumber on TDZ sentinel"
   }
 }
 
 /// ES2024 §7.1.3 ToNumeric: ToPrimitive(number hint), then a BigInt is
 /// returned as-is; otherwise wrapped ToNumber. Result is always `KNum | KBig`.
 pub fn t_to_numeric(st: Agent, v: JsVal) -> #(JsVal, Agent) {
-  let #(prim, st) = t_to_primitive(st, v, HintNumber)
-  case classify(prim) {
-    KBig(_) -> #(prim, st)
-    KNum(_) -> #(prim, st)
+  case classify(v) {
+    KBig(_) -> #(v, st)
+    KNum(_) -> #(v, st)
     KStr(s) -> #(mk_number(string_to_number(s)), st)
     KBool(True) -> #(mk_number(JInt(1)), st)
     KBool(False) -> #(mk_number(JInt(0)), st)
     KNull -> #(mk_number(JInt(0)), st)
     KUndef -> #(mk_number(JNan), st)
     KSym(_) -> t_throw_type_error(st, "Cannot convert Symbol to number")
-    KHandle(_) | KTdz -> panic as "ToNumeric: ToPrimitive returned non-primitive"
+    KHandle(_) -> {
+      let #(prim, st) = t_to_primitive(st, v, HintNumber)
+      t_to_numeric(st, prim)
+    }
+    KTdz -> panic as "ToNumeric on TDZ sentinel"
   }
 }
 

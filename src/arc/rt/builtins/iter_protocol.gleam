@@ -6,20 +6,26 @@
 //// none of them import each other for §7.4 ops. Throwing ops diverge via
 //// `t_throw` (D7); catching sites use `t_apply_protected`.
 
+import arc/internal/ordered_entries
 import arc/internal/tree_array
+import arc/rt/builtins/helpers
 import arc/rt/call.{
   type Completion, NormalCompletion, ThrowCompletion, is_callable, t_call,
   t_call_checked,
 }
 import arc/rt/elements as rt_elements
+import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsElements, type JsOps, type JsVal,
+  type Agent, type Handle, type JsElements, type JsOps, type JsSlot, type JsVal,
   type Property, type PropertyKey, ArrayObj, AsyncFromSyncIterator, DataProperty,
-  Dense, Index, IteratorRecord, KHandle, KNull, KStr, KUndef, Named, NoElements,
-  SObject, StringKey, SymbolKey, TypeErr, classify, mk_object, mk_undefined,
-  symbol_async_iterator, symbol_iterator,
+  Dense, Index, IteratorRecord, JInt, KHandle, KNull, KStr, KUndef,
+  MapIterEntries, MapIterKeys, MapIterValues, MapIterator, MapObj, Named,
+  NoElements, SObject, SetIterEntries, SetIterValues, SetIterator, SetObj,
+  StringIterator, StringKey, SymbolKey, TypeErr, classify, map_key_to_js,
+  mk_number, mk_object, mk_string, mk_undefined, symbol_async_iterator,
+  symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict.{type Dict}
@@ -335,7 +341,31 @@ pub fn iterator_to_list(
 ) -> #(List(JsVal), Agent) {
   case array_values_iterator(st, rec) {
     Some(iter_h) -> array_values_to_list(st, rec, iter_h, [])
-    None -> iterator_to_list_loop(st, rec, [])
+    None ->
+      case intrinsic_next(st, rec) {
+        Some(#(next, iter_h)) -> native_to_list(st, rec, next, iter_h, [])
+        None -> iterator_to_list_loop(st, rec, [])
+      }
+  }
+}
+
+/// The drain over `native_step`; a step it cannot take runs once through the
+/// protocol and the walk resumes.
+fn native_to_list(
+  st: Agent,
+  rec: IteratorRecord,
+  next: rt_types.IteratorNative,
+  iter_h: Handle,
+  acc: List(JsVal),
+) -> #(List(JsVal), Agent) {
+  case native_step(st, next, iter_h) {
+    Some(#(Some(v), st)) -> native_to_list(st, rec, next, iter_h, [v, ..acc])
+    Some(#(None, st)) -> #(list.reverse(acc), st)
+    None ->
+      case iterator_step_value(st, rec) {
+        #(None, st) -> #(list.reverse(acc), st)
+        #(Some(v), st) -> native_to_list(st, rec, next, iter_h, [v, ..acc])
+      }
   }
 }
 
@@ -434,6 +464,236 @@ fn walk_elements(
           walk_elements(elements, props, i + 1, length, [v, ..acc])
         _, _ -> #(acc, i)
       }
+  }
+}
+
+// ── engine-side stepping of the built-in iterators ─────────────────────────
+//
+// The %ArrayIteratorPrototype% / %MapIteratorPrototype% / %SetIteratorPrototype%
+// / %StringIteratorPrototype% `next` steps run no user code (bar an Array
+// element [[Get]]), so a driver that has proved [[NextMethod]] IS one of those
+// intrinsics can take the step here: cursor advanced in place, no call, no
+// try frame, no `{value, done}` object.
+
+/// `Some(#(next, iterator))` when `rec`'s [[NextMethod]] is an intrinsic
+/// iterator `next` (which one) — the precondition for `native_step`.
+pub fn intrinsic_next(
+  st: Agent,
+  rec: IteratorRecord,
+) -> Option(#(rt_types.IteratorNative, Handle)) {
+  case classify(rec.next_method), classify(rec.iterator) {
+    KHandle(next_h), KHandle(iter_h) ->
+      case rt_store.t_cell_get(st, next_h) {
+        SObject(kind: rt_types.KNative(tag: rt_types.IteratorN(next), ..), ..) ->
+          Some(#(next, iter_h))
+        _ -> None
+      }
+    _, _ -> None
+  }
+}
+
+/// One step of iterator `iter_h` whose `next` is the intrinsic `next`:
+/// `Some(#(value-or-None, st))` with the cursor advanced, or `None` when the
+/// iterator is not the matching built-in kind or an Array step would have to
+/// run user code (a hole, an index accessor, an exotic or array-like source),
+/// in which case the caller takes the protocol step instead. Never throws.
+pub fn native_step(
+  st: Agent,
+  next: rt_types.IteratorNative,
+  iter_h: Handle,
+) -> Option(#(Option(JsVal), Agent)) {
+  let slot = rt_store.t_cell_get(st, iter_h)
+  case next, slot {
+    rt_types.ArrayIteratorNext, SObject(kind: rt_types.ArrayIterator(..), ..) ->
+      array_iterator_step(st, iter_h, slot)
+    rt_types.MapIteratorNext, SObject(kind: MapIterator(..), ..) ->
+      Some(map_iterator_step(st, iter_h, slot))
+    rt_types.SetIteratorNext, SObject(kind: SetIterator(..), ..) ->
+      Some(set_iterator_step(st, iter_h, slot))
+    rt_types.StringIteratorNext, SObject(kind: StringIterator(..), ..) ->
+      Some(string_iterator_step(st, iter_h, slot))
+    _, _ -> None
+  }
+}
+
+/// The user-code-free subset of §23.1.5.2.1 for a plain Array source: past
+/// the live length (latched exhausted), a `keys` step, or a present own
+/// element. Anything `own_element` cannot answer is `None`.
+fn array_iterator_step(
+  st: Agent,
+  iter_h: Handle,
+  slot: JsSlot,
+) -> Option(#(Option(JsVal), Agent)) {
+  case slot {
+    SObject(kind: rt_types.ArrayIterator(target:, index:, kind:), ..)
+      if index >= 0
+    ->
+      case rt_store.t_cell_get(st, target) {
+        SObject(kind: ArrayObj(length:), ..) if index >= length ->
+          Some(#(
+            None,
+            rt_store.t_cell_set(
+              st,
+              iter_h,
+              SObject(
+                ..slot,
+                kind: rt_types.ArrayIterator(target:, index: -1, kind:),
+              ),
+            ),
+          ))
+        SObject(kind: ArrayObj(_), ..) -> {
+          let out = case kind {
+            rt_types.ArrayIterKeys -> Some(#(mk_number(JInt(index)), st))
+            rt_types.ArrayIterValues ->
+              case helpers.own_element(st, mk_object(target), index) {
+                helpers.Hit(v) -> Some(#(v, st))
+                helpers.Slow -> None
+              }
+            rt_types.ArrayIterEntries ->
+              case helpers.own_element(st, mk_object(target), index) {
+                helpers.Hit(v) ->
+                  Some(rt_obj.t_new_array(st, [mk_number(JInt(index)), v]))
+                helpers.Slow -> None
+              }
+          }
+          use #(v, st) <- option.map(out)
+          let st =
+            rt_store.t_cell_set(
+              st,
+              iter_h,
+              SObject(
+                ..slot,
+                kind: rt_types.ArrayIterator(target:, index: index + 1, kind:),
+              ),
+            )
+          #(Some(v), st)
+        }
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+/// One step on a Map Iterator cell already read as `slot`: the next
+/// key / value / [key, value] (cursor advanced) or None (latched exhausted).
+/// Runs no user code.
+pub fn map_iterator_step(
+  st: Agent,
+  iter_h: Handle,
+  slot: JsSlot,
+) -> #(Option(JsVal), Agent) {
+  case slot {
+    SObject(kind: MapIterator(target:, index:, kind:), ..) if index >= 0 -> {
+      let step = case rt_store.t_cell_get(st, target) {
+        SObject(kind: MapObj(entries:), ..) ->
+          ordered_entries.next_from(entries, index)
+        _ -> None
+      }
+      case step {
+        None -> #(
+          None,
+          rt_store.t_cell_set(
+            st,
+            iter_h,
+            SObject(..slot, kind: MapIterator(target:, index: -1, kind:)),
+          ),
+        )
+        Some(#(next_cursor, mk, v)) -> {
+          let #(out, st) = case kind {
+            MapIterKeys -> #(map_key_to_js(mk), st)
+            MapIterValues -> #(v, st)
+            MapIterEntries -> rt_obj.t_new_array(st, [map_key_to_js(mk), v])
+          }
+          let st =
+            rt_store.t_cell_set(
+              st,
+              iter_h,
+              SObject(
+                ..slot,
+                kind: MapIterator(target:, index: next_cursor, kind:),
+              ),
+            )
+          #(Some(out), st)
+        }
+      }
+    }
+    _ -> #(None, st)
+  }
+}
+
+/// The Set counterpart of `map_iterator_step`.
+pub fn set_iterator_step(
+  st: Agent,
+  iter_h: Handle,
+  slot: JsSlot,
+) -> #(Option(JsVal), Agent) {
+  case slot {
+    SObject(kind: SetIterator(target:, index:, kind:), ..) if index >= 0 -> {
+      let step = case rt_store.t_cell_get(st, target) {
+        SObject(kind: SetObj(entries:), ..) ->
+          ordered_entries.next_from(entries, index)
+        _ -> None
+      }
+      case step {
+        None -> #(
+          None,
+          rt_store.t_cell_set(
+            st,
+            iter_h,
+            SObject(..slot, kind: SetIterator(target:, index: -1, kind:)),
+          ),
+        )
+        Some(#(next_cursor, _mk, v)) -> {
+          let #(out, st) = case kind {
+            SetIterValues -> #(v, st)
+            SetIterEntries -> rt_obj.t_new_array(st, [v, v])
+          }
+          let st =
+            rt_store.t_cell_set(
+              st,
+              iter_h,
+              SObject(
+                ..slot,
+                kind: SetIterator(target:, index: next_cursor, kind:),
+              ),
+            )
+          #(Some(out), st)
+        }
+      }
+    }
+    _ -> #(None, st)
+  }
+}
+
+/// One §22.1.5.1.1 step on a String Iterator cell already read as `slot`:
+/// the next character (cursor advanced) or None (latched exhausted). Runs no
+/// user code.
+pub fn string_iterator_step(
+  st: Agent,
+  h: Handle,
+  slot: JsSlot,
+) -> #(Option(JsVal), Agent) {
+  case slot {
+    SObject(kind: StringIterator(source:, index:), ..) if index >= 0 ->
+      case js_string.char_at_offset(source, index) {
+        None -> #(
+          None,
+          rt_store.t_cell_set(
+            st,
+            h,
+            SObject(..slot, kind: StringIterator(source:, index: -1)),
+          ),
+        )
+        Some(#(ch, next)) -> #(
+          Some(mk_string(ch)),
+          rt_store.t_cell_set(
+            st,
+            h,
+            SObject(..slot, kind: StringIterator(source:, index: next)),
+          ),
+        )
+      }
+    _ -> #(None, st)
   }
 }
 

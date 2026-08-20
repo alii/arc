@@ -1,8 +1,9 @@
 -module(arc_string_ffi).
 -export([string_char_at/2, string_codepoint_at/2, string_codepoint_length/1,
-         replacement_codepoint/0]).
+         string_char_at_offset/2, replacement_codepoint/0]).
 -export([string_index_of/3, string_last_index_of/3]).
 -export([string_cp_slice/3, string_cp_drop/2, string_cp_explode/1]).
+-export([string_split/3, string_repeat/2]).
 -export([string_ascii_upper/1, string_ascii_lower/1]).
 
 %% Bytes of match-start window string_last_index_of scans per backward step.
@@ -21,9 +22,8 @@
 %% from_code_point_loop) — so a bad byte reaching here means the boundary that
 %% produced the string is broken. Every walker therefore has NO per-byte
 %% fallback clause and crashes with function_clause on one, at the string it
-%% was handed, instead of quietly counting it as a codepoint (cp_length,
-%% cp_off, cp_explode used to) or reporting end-of-string (char_at_skip did) —
-%% three answers to the same question, none of them a bug report.
+%% was handed, instead of quietly counting it as a codepoint or reporting
+%% end-of-string.
 %%
 %% TODO(Deviation): still not fully spec-correct — JS indexes by UTF-16
 %% code unit, so astral-plane chars (U+10000+) should count as 2 indices.
@@ -32,8 +32,10 @@
 %% than the previous string.slice approach.
 %%
 %% Both walks start from byte 0 on every call: string_char_at is O(i) and
-%% string_codepoint_length is O(n), so `for (i = 0; i < s.length; i++)
-%% use(s[i])` is O(n^2) in the string length.
+%% string_codepoint_length is O(n) (7 ASCII bytes per step, see cp_off), so
+%% `for (i = 0; i < s.length; i++) use(s[i])` is O(n^2) in the string
+%% length. Sequential readers (the String iterator) keep a byte offset and
+%% use string_char_at_offset instead.
 
 string_char_at(Bin, Idx) ->
     case string_codepoint_at(Bin, Idx) of
@@ -41,22 +43,27 @@ string_char_at(Bin, Idx) ->
         none -> none
     end.
 
-%% Same walk as string_char_at, but returns the codepoint as an integer —
-%% for String.prototype.codePointAt, where building even a one-char binary
-%% per call would be wasted allocation.
+%% The codepoint at index Idx as an integer (string_char_at wraps it) — for
+%% charCodeAt / codePointAt, where building even a one-char binary per call
+%% would be wasted allocation. Running out of string is `none` (an
+%% out-of-range index).
 string_codepoint_at(Bin, Idx) when Idx >= 0 ->
-    case char_at_skip(Bin, Idx) of
-        none -> none;
-        Char -> {some, Char}
+    Off = cp_off(Bin, Idx, 0),
+    case Bin of
+        <<_:Off/binary, C/utf8, _/binary>> -> {some, C};
+        _ -> none
     end;
 string_codepoint_at(_, _) -> none.
 
-%% Walk N codepoints forward, returning the integer codepoint there. Running
-%% out of string is `none` (an out-of-range index); an invalid byte is not a
-%% clause here — see the invalid-UTF-8 policy above.
-char_at_skip(<<C/utf8, _/binary>>, 0) -> C;
-char_at_skip(<<_/utf8, Rest/binary>>, N) -> char_at_skip(Rest, N - 1);
-char_at_skip(<<>>, _) -> none.
+%% string_char_at_offset(Bin, Off) -> {some, {Char, NextOff}} | none
+%% The one-codepoint string starting at BYTE offset Off plus the offset just
+%% past it; `none` at or beyond the end. O(1) per call, so a cursor that
+%% carries NextOff walks the whole string in O(n).
+string_char_at_offset(Bin, Off) when Off >= 0, Off < byte_size(Bin) ->
+    <<_:Off/binary, C/utf8, _/binary>> = Bin,
+    Ch = <<C/utf8>>,
+    {some, {Ch, Off + byte_size(Ch)}};
+string_char_at_offset(_, _) -> none.
 
 %% U+FFFD REPLACEMENT CHARACTER. UtfCodepoint is an integer on the Erlang
 %% target, so this is a constant-pool literal — no Result/assert overhead.
@@ -176,6 +183,21 @@ string_cp_drop(Bin, _) -> Bin.
 string_cp_explode(Bin) -> cp_explode(Bin, []).
 cp_explode(<<>>, Acc) -> lists:reverse(Acc);
 cp_explode(<<C/utf8, Rest/binary>>, Acc) -> cp_explode(Rest, [<<C/utf8>> | Acc]).
+
+%% §22.1.3.23 split by a non-empty literal separator: the leftmost
+%% non-overlapping matches, at most Lim parts, each a sub-binary of Hay.
+%% Byte-level matching equals codepoint matching here because UTF-8 is
+%% self-synchronising: a well-formed needle never matches mid-codepoint.
+string_split(Hay, Sep, Lim) ->
+    Parts = binary:split(Hay, Sep, [global]),
+    case length(Parts) > Lim of
+        true -> lists:sublist(Parts, Lim);
+        false -> Parts
+    end.
+
+%% N concatenated copies of Bin (N >= 0) as one binary, built by the BIF.
+string_repeat(Bin, N) when N > 0 -> binary:copy(Bin, N);
+string_repeat(_, _) -> <<>>.
 
 %% Byte offset after skipping N codepoints (clamps at end). Alloc-free.
 cp_byte_offset(Bin, N) -> cp_off(Bin, N, 0).

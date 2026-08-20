@@ -6,9 +6,9 @@
 /// is this a BigInt?) is decided exactly once, in `classify`.
 import arc/internal/digits
 import arc/parser/ast.{type LiteralNumber, FiniteNumber, InfiniteNumber}
+import gleam/bit_array
 import gleam/int
-import gleam/list
-import gleam/option
+import gleam/option.{Some}
 import gleam/result
 import gleam/string
 
@@ -60,8 +60,9 @@ type LiteralForm {
   /// Annex B §B.1.1 NonOctalDecimalIntegerLiteral: `08`, `09` — a leading
   /// zero that cannot be octal, so it is base 10. Sloppy mode only.
   NonOctalDecimal(digits: String)
-  /// An ordinary DecimalLiteral, with an optional fraction and/or exponent.
-  Decimal(text: String)
+  /// An ordinary DecimalLiteral; `is_float` when it has a fraction and/or
+  /// an exponent.
+  Decimal(text: String, is_float: Bool)
   /// A BigInt literal, `n` suffix already stripped.
   BigInt(digits: String, radix: Int)
 }
@@ -75,8 +76,8 @@ pub fn parse_numeric_literal(
     // The whole point of the classifier: `010` is base 8.
     LegacyOctal(digits) -> integer_number(digits, 8)
     NonOctalDecimal(digits) -> integer_number(digits, 10)
-    Decimal(text) -> {
-      use n <- result.map(parse_decimal(text))
+    Decimal(text:, is_float:) -> {
+      use n <- result.map(parse_decimal(text, is_float))
       NumberValue(n)
     }
     BigInt(digits:, radix:) -> {
@@ -94,11 +95,34 @@ fn integer_number(
   NumberValue(nonneg_int_to_number(i))
 }
 
+/// What one pass over the literal's bytes finds: a numeric separator
+/// anywhere, a `.`/`e`/`E` anywhere (only meaningful for a decimal form),
+/// and a trailing `n`.
+type Shape {
+  Shape(has_separator: Bool, is_float: Bool, is_bigint: Bool)
+}
+
+fn shape(bytes: BitArray, sep: Bool, float: Bool) -> Shape {
+  case bytes {
+    <<0x5F, rest:bytes>> -> shape(rest, True, float)
+    <<0x2E, rest:bytes>> | <<0x65, rest:bytes>> | <<0x45, rest:bytes>> ->
+      shape(rest, sep, True)
+    <<0x6E>> -> Shape(sep, float, True)
+    <<_, rest:bytes>> -> shape(rest, sep, float)
+    _ -> Shape(sep, float, False)
+  }
+}
+
 fn classify(raw: String) -> LiteralForm {
+  let Shape(has_separator:, is_float:, is_bigint:) =
+    shape(bit_array.from_string(raw), False, False)
   // Numeric separators are only ever legal between digits, so a blanket
   // strip is safe and keeps every arm below separator-free.
-  let clean = string.replace(raw, "_", "")
-  case string.ends_with(clean, "n") {
+  let clean = case has_separator {
+    True -> string.replace(raw, "_", "")
+    False -> raw
+  }
+  case is_bigint {
     True -> {
       let #(digits, radix) = split_radix(string.drop_end(clean, 1))
       BigInt(digits:, radix:)
@@ -108,28 +132,32 @@ fn classify(raw: String) -> LiteralForm {
         "0x" <> hex | "0X" <> hex -> Radix(hex, 16)
         "0o" <> oct | "0O" <> oct -> Radix(oct, 8)
         "0b" <> bin | "0B" <> bin -> Radix(bin, 2)
-        "0" <> rest -> classify_leading_zero(rest)
-        _ -> Decimal(clean)
+        "0" -> Decimal("0", False)
+        "0" <> rest ->
+          case is_float {
+            True -> Decimal(clean, True)
+            False -> classify_leading_zero(rest)
+          }
+        _ -> Decimal(clean, is_float)
       }
   }
 }
 
-/// A `0`-prefixed literal that is not 0x/0o/0b. All-octal digits behind the
-/// zero make it a LegacyOctalIntegerLiteral; an 8 or a 9 makes it a
-/// NonOctalDecimalIntegerLiteral; anything else (`0`, `0.5`, `0e3`) is an
-/// ordinary DecimalLiteral that just happens to start with a zero.
+/// A `0`-prefixed integer literal that is not 0x/0o/0b. All-octal digits
+/// behind the zero make it a LegacyOctalIntegerLiteral; an 8 or a 9 makes it
+/// a NonOctalDecimalIntegerLiteral.
 fn classify_leading_zero(rest: String) -> LiteralForm {
-  case string.to_graphemes(rest) {
-    [] -> Decimal("0")
-    graphemes ->
-      case list.all(graphemes, digits.is_octal_digit) {
-        True -> LegacyOctal(rest)
-        False ->
-          case list.all(graphemes, digits.is_decimal_digit) {
-            True -> NonOctalDecimal(rest)
-            False -> Decimal("0" <> rest)
-          }
-      }
+  case all_octal(bit_array.from_string(rest)) {
+    True -> LegacyOctal(rest)
+    False -> NonOctalDecimal(rest)
+  }
+}
+
+fn all_octal(bytes: BitArray) -> Bool {
+  case bytes {
+    <<c, tail:bytes>> if c >= 0x30 && c <= 0x37 -> all_octal(tail)
+    <<>> -> True
+    _ -> False
   }
 }
 
@@ -142,14 +170,13 @@ fn split_radix(digits: String) -> #(String, Int) {
   }
 }
 
-fn parse_decimal(text: String) -> Result(LiteralNumber, NumberParseError) {
+fn parse_decimal(
+  text: String,
+  is_float: Bool,
+) -> Result(LiteralNumber, NumberParseError) {
   // A dot or an exponent means a float literal; otherwise a decimal integer,
   // which we convert exactly (see nonneg_int_to_number).
-  case
-    string.contains(text, ".")
-    || string.contains(text, "e")
-    || string.contains(text, "E")
-  {
+  case is_float {
     True ->
       case parse_float(text) {
         Ok(f) -> Ok(FiniteNumber(f))
@@ -222,17 +249,25 @@ pub fn parse_float(s: String) -> Result(Float, FloatParseError)
 
 /// The exact integer value of a run of digits in `radix`.
 fn parse_digits(s: String, radix: Int) -> Result(Int, NumberParseError) {
-  case string.to_graphemes(s) {
-    [] -> Error(EmptyDigits)
-    graphemes ->
-      list.try_fold(graphemes, 0, fn(acc, ch) {
-        use d <- result.try(
-          digits.hex_value(ch) |> option.to_result(NotANumericLiteral(s)),
-        )
-        case d < radix {
-          True -> Ok(acc * radix + d)
-          False -> Error(NotANumericLiteral(s))
-        }
-      })
+  case bit_array.from_string(s) {
+    <<>> -> Error(EmptyDigits)
+    bytes -> digits_value(bytes, radix, 0, s)
+  }
+}
+
+fn digits_value(
+  bytes: BitArray,
+  radix: Int,
+  acc: Int,
+  s: String,
+) -> Result(Int, NumberParseError) {
+  case bytes {
+    <<>> -> Ok(acc)
+    <<c, rest:bytes>> ->
+      case digits.hex_value_code(c) {
+        Some(d) if d < radix -> digits_value(rest, radix, acc * radix + d, s)
+        _ -> Error(NotANumericLiteral(s))
+      }
+    _ -> Error(NotANumericLiteral(s))
   }
 }

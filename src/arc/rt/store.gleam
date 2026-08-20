@@ -31,6 +31,17 @@ fn jq_new() -> JobQueue
 @external(erlang, "arc_rt_store_ffi", "data_new")
 pub fn data_new() -> TreeArray(JsSlot)
 
+/// Rebuild the arena from `#(id, slot)` pairs in DESCENDING id order (the
+/// shape a `tree_array.sparse_fold` accumulator has), each leaf built once;
+/// every id not listed reads back as absent.
+@external(erlang, "arc_rt_store_ffi", "data_from_descending")
+pub fn data_from_descending(cells: List(#(Int, JsSlot))) -> TreeArray(JsSlot)
+
+/// `tree_array.set` without its index guard hop: cell ids are minted here
+/// and never negative.
+@external(erlang, "array", "set")
+fn data_set(id: Int, slot: JsSlot, data: TreeArray(JsSlot)) -> TreeArray(JsSlot)
+
 // ── construction ────────────────────────────────────────────────────────────
 
 /// Build an empty, realm-less `JsStore` (SPEC §2.2 / §7.M1b). NO realm, NO
@@ -40,11 +51,11 @@ pub fn data_new() -> TreeArray(JsSlot)
 pub fn t_store_new() -> JsStore(Agent) {
   JsStore(
     data: data_new(),
-    free: [],
     next: 0,
     pinned_roots: set.new(),
     alloc_since_gc: 0,
     gc_threshold: 65_536,
+    gc_live: 0,
     prop_seq: 0,
     private_uid: 0,
     symbol_uid: 0,
@@ -97,28 +108,69 @@ fn with_js(st: Agent, js: JsStore(Agent)) -> Agent {
 // ── cell ops (arc heap.gleam:115-400) ───────────────────────────────────────
 
 /// Allocate a fresh cell holding `slot`, returning `#(handle, st')` (R1 —
-/// value first). Prefers a recycled id from the free list, else bumps `next`.
-/// Bumps `alloc_since_gc` for the M2 turn-boundary trigger. **Never collects**
+/// value first). Mints id `next`. Bumps `alloc_since_gc` for the M2
+/// turn-boundary trigger. **Never collects**
 /// (D11) — allocation is O(1) and pure; GC only runs at `call_depth == 0`.
 pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
   let js = require_js(st)
-  let #(id, free, next) = case js.free {
-    [id, ..rest] -> #(id, rest, js.next)
-    [] -> #(js.next, [], js.next + 1)
-  }
+  let id = js.next
   let js =
     JsStore(
       ..js,
-      data: tree_array.set(id, slot, js.data),
-      free:,
-      next:,
+      data: data_set(id, slot, js.data),
+      next: id + 1,
       alloc_since_gc: js.alloc_since_gc + 1,
     )
   #(JsCell(id), with_js(st, js))
 }
 
+/// `t_cell_new` for a slot that needs `seqs` fresh `Property.seq` stamps:
+/// `build` gets the first, and the counter bump rides in the same store
+/// write as the allocation.
+pub fn t_cell_new_with(
+  st: Agent,
+  seqs: Int,
+  build: fn(Int) -> JsSlot,
+) -> #(Handle, Agent) {
+  let js = require_js(st)
+  let id = js.next
+  let js =
+    JsStore(
+      ..js,
+      data: data_set(id, build(js.prop_seq), js.data),
+      next: id + 1,
+      alloc_since_gc: js.alloc_since_gc + 1,
+      prop_seq: js.prop_seq + seqs,
+    )
+  #(JsCell(id), with_js(st, js))
+}
+
+/// Allocate two cells that name each other in one store write. `build` gets
+/// the first of `seqs` reserved stamps and both handles, and returns the two
+/// slots in handle order.
+pub fn t_cell_new_pair(
+  st: Agent,
+  seqs: Int,
+  build: fn(Int, Handle, Handle) -> #(JsSlot, JsSlot),
+) -> #(Handle, Handle, Agent) {
+  let js = require_js(st)
+  let id = js.next
+  let a = JsCell(id)
+  let b = JsCell(id + 1)
+  let #(slot_a, slot_b) = build(js.prop_seq, a, b)
+  let js =
+    JsStore(
+      ..js,
+      data: data_set(id + 1, slot_b, data_set(id, slot_a, js.data)),
+      next: id + 2,
+      alloc_since_gc: js.alloc_since_gc + 2,
+      prop_seq: js.prop_seq + seqs,
+    )
+  #(a, b, with_js(st, js))
+}
+
 /// Read the slot at `h`. Fail-closed panic on a dangling handle — every live
-/// `Handle` was minted by `t_cell_new` and is not on the free list, so a miss
+/// `Handle` was minted by `t_cell_new` and not since freed or swept, so a miss
 /// is a use-after-free / GC bug, never a normal path. FFI-backed so the hot
 /// emitted-code read path is one map lookup, not `require_js` + `dict.get`.
 @external(erlang, "arc_rt_store_ffi", "t_cell_get")
@@ -130,7 +182,7 @@ pub fn t_cell_get(st: Agent, h: Handle) -> JsSlot
 pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
   let js = require_js(st)
   let JsCell(id) = h
-  with_js(st, JsStore(..js, data: tree_array.set(id, slot, js.data)))
+  with_js(st, JsStore(..js, data: data_set(id, slot, js.data)))
 }
 
 // ── variable boxes (compiled code's captured / TDZ bindings) ────────────────
@@ -163,15 +215,12 @@ pub fn t_cell_update(st: Agent, h: Handle, f: fn(JsSlot) -> JsSlot) -> Agent {
   t_cell_set(st, h, f(t_cell_get(st, h)))
 }
 
-/// Return `h`'s id to the free list and drop its slot. Caller guarantees no
-/// live reference to `h` remains (the GC's sweep is the normal caller).
+/// Drop `h`'s slot, so it reads back as absent. Caller guarantees no live
+/// reference to `h` remains.
 pub fn t_cell_free(st: Agent, h: Handle) -> Agent {
   let js = require_js(st)
   let JsCell(id) = h
-  with_js(
-    st,
-    JsStore(..js, data: tree_array.reset(id, js.data), free: [id, ..js.free]),
-  )
+  with_js(st, JsStore(..js, data: tree_array.reset(id, js.data)))
 }
 
 /// Add `h` to the permanent GC root set (`pinned_roots`). Realm intrinsics

@@ -49,7 +49,7 @@ fn go(pat: ast.Pattern, source: ir.Value, mode: BindMode) -> Build(Nil) {
         _ -> None
       }
       use rc <- anf.then(expr.consts())
-      use is_undef <- anf.then(anf.host_bool("strict_eq", [source, rc.undef]))
+      use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, source, rc.undef)))
       use v <- anf.then(anf.bind_if(
         is_undef,
         expr.bridge_expr(fn(e: Emitter2) {

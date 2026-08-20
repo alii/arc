@@ -645,12 +645,18 @@ fn pack_loc_from(
 }
 
 fn slot_at_loc_idx(layout: LocLayout, idx: Int) -> Option(Int) {
-  dict.fold(layout.slot_to_idx, None, fn(found, slot, at) {
-    case found, at == idx {
-      None, True -> Some(slot)
-      _, _ -> found
-    }
-  })
+  // The layout maps slot i to idx i, so probe that first; the fold only
+  // runs for an idx past the hoisted block (an extra) or a non-identity map.
+  case dict.get(layout.slot_to_idx, idx) {
+    Ok(at) if at == idx -> Some(idx)
+    _ ->
+      dict.fold(layout.slot_to_idx, None, fn(found, slot, at) {
+        case found, at == idx {
+          None, True -> Some(slot)
+          _, _ -> found
+        }
+      })
+  }
 }
 
 /// Route an abrupt completion out of the current fragment (§18.5). Walks
@@ -2516,6 +2522,10 @@ pub fn inner_key(state_id: Int) -> String {
   "inner_" <> int.to_string(state_id)
 }
 
+/// Marker held in a delegate's result slot from `yield*` setup until the
+/// first inner call: not a JS value, so no sent value or mode collides.
+const delegate_start = "yield_star_start"
+
 pub fn delegate_result_key(state_id: Int) -> String {
   "delegate_result_" <> int.to_string(state_id)
 }
@@ -3187,6 +3197,19 @@ fn key_named(s: String) -> anf.Build(ir.Value) {
   anf.make_tuple([ir.ConstAtom("string_key"), inner])
 }
 
+/// [[Get]] of a static string key through a fresh inline-cache site: the
+/// one-call `get_prop_site` kernel (IC probe, own-data fill, full read).
+fn get_named(obj: ir.Value, name: String) -> anf.Build(ir.Value) {
+  use site <- anf.then(fn(e: Emitter2, k) {
+    k(state.Emitter2(..e, next_site: e.next_site + 1), e.next_site)
+  })
+  anf.host("get_prop_site", [
+    obj,
+    ir.ConstBinary(bit_array.from_string(name)),
+    ir.ConstI32(site),
+  ])
+}
+
 /// Dynamic named-string wire key from a runtime binary Value (mname).
 fn key_named_dyn(bin: ir.Value) -> anf.Build(ir.Value) {
   use inner <- anf.then(anf.make_tuple([ir.ConstAtom("named"), bin]))
@@ -3212,13 +3235,21 @@ fn emit_delegate_setup(
   iter_idx: Int,
   inner_idx: Int,
 ) -> #(ir.Expr, Emitter2) {
+  let result_idx = extra_idx(ctx.layout, delegate_result_key(nd))
   let b = {
     use iter_h <- anf.then(
       anf.host("get_iterator", [expr_v, iter_hint(ctx.kind)]),
     )
     use k_iter <- anf.then(key_named("iterator"))
     use inner <- anf.then(anf.host("get_prop", [iter_h, k_iter]))
-    let ov = dict.from_list([#(iter_idx, iter_h), #(inner_idx, inner)])
+    // The result slot doubles as the "received is still the initial
+    // NormalCompletion(undefined)" flag until the first inner call.
+    let ov =
+      dict.from_list([
+        #(iter_idx, iter_h),
+        #(inner_idx, inner),
+        #(result_idx, ir.ConstAtom(delegate_start)),
+      ])
     // pack_loc_cps (not pack_loc): setup runs at seg-tail post-fragment, so
     // hoisted-local reassignments must repack from current slot_vars (§18.4.4).
     use loc2 <- anf.then(fn(e, k) { pack_loc_cps(e, ctx, ov, k) })
@@ -3249,34 +3280,55 @@ fn emit_delegate_arm(
     // (1) restore iter_h / inner from loc.
     use iter_h <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, iter_idx)))
     use inner <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, inner_idx)))
-    // (2) mname via Switch on unboxed mode → "next"/"throw"/"return".
+    // First entry (straight from setup): received is NormalCompletion(
+    // undefined) whatever resumed the outer generator (§27.5.3.8 step 5),
+    // so force mode next / sent undefined.
+    use flag <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, result_idx)))
+    use first <- anf.then(
+      anf.bind(ir.NumTerm(ir.NEq, flag, ir.ConstAtom(delegate_start))),
+    )
+    use mode_v <- anf.then(anf.bind_if(first, rs_box(0), anf.pure(ctx.mode_v)))
+    use sent_v <- anf.then(anf.bind_if(
+      first,
+      anf.pure(undef),
+      anf.pure(ctx.sent_v),
+    ))
+    let ctx = SmCtx(..ctx, mode_v:, sent_v:)
+    // (2) mode 0 (next) calls the record's captured [[NextMethod]]
+    // (§27.5.3.8 step 7.a.i); throw/return re-resolve the method on the
+    // inner iterator by name (steps 7.b.i / 7.c.ii).
     use mode_i32 <- anf.then(
       anf.bind(ir.Convert(ir.UnboxInt(ir.W32), ctx.mode_v)),
     )
-    let mbin = fn(s) { ir.Values([ir.ConstBinary(bit_array.from_string(s))]) }
-    use mname <- anf.then(
-      anf.bind(ir.Switch(
-        mode_i32,
-        [ir.TTerm],
-        [
-          ir.SwitchArm(0, mbin("next")),
-          ir.SwitchArm(1, mbin("throw")),
-          ir.SwitchArm(2, mbin("return")),
-        ],
-        mbin("next"),
-      )),
-    )
-    // (3) key = {string_key, {named, mname}}; (4) meth = inner[key].
-    use key <- anf.then(key_named_dyn(mname))
-    use meth <- anf.then(anf.host("get_prop", [inner, key]))
-    // (5) missing = (mode≠0) ∧ (meth === undefined) — both i32, IAnd → i32.
     use mode_ne0 <- anf.then(
       anf.bind(ir.Num(ir.INe(ir.W32), [mode_i32, ir.ConstI32(0)])),
     )
-    use is_undef_t <- anf.then(anf.host("strict_eq", [meth, undef]))
-    use is_undef <- anf.then(anf.host("truthy", [is_undef_t]))
+    let mbin = fn(s) { ir.Values([ir.ConstBinary(bit_array.from_string(s))]) }
+    use meth <- anf.then(anf.bind_if(
+      mode_ne0,
+      {
+        use mname <- anf.then(
+          anf.bind(ir.Switch(
+            mode_i32,
+            [ir.TTerm],
+            [ir.SwitchArm(1, mbin("throw")), ir.SwitchArm(2, mbin("return"))],
+            mbin("next"),
+          )),
+        )
+        use key <- anf.then(key_named_dyn(mname))
+        anf.host("get_prop", [inner, key])
+      },
+      get_named(iter_h, "next"),
+    ))
+    // (5) missing = (mode≠0) ∧ (meth is undefined or null) (§7.3.11
+    // GetMethod step 2) — all i32.
+    use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, meth, undef)))
+    use is_null <- anf.then(
+      anf.bind(ir.NumTerm(ir.NEq, meth, ir.ConstAtom("null"))),
+    )
+    use is_nullish <- anf.then(anf.bind(ir.NumTerm(ir.NAdd, is_undef, is_null)))
     use missing <- anf.then(
-      anf.bind(ir.Num(ir.IAnd(ir.W32), [mode_ne0, is_undef])),
+      anf.bind(ir.Num(ir.IAnd(ir.W32), [mode_ne0, is_nullish])),
     )
     use is_throw <- anf.then(
       anf.bind(ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(1)])),
@@ -3320,7 +3372,7 @@ fn emit_delegate_arm(
           ))
           anf.pure(step_await(res, na, loc2))
         }
-        None -> delegate_result(ctx, d, res, mode_i32, result_idx)
+        None -> delegate_result(ctx, d, res, mode_i32, result_idx, first)
       }
     }
     if_terminal(missing, on_missing, on_call)
@@ -3341,7 +3393,8 @@ fn emit_delegate_await_arm(
   let b = {
     use mode_v <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, result_idx)))
     use mode_i32 <- anf.then(anf.bind(ir.Convert(ir.UnboxInt(ir.W32), mode_v)))
-    delegate_result(ctx, d, ctx.sent_v, mode_i32, result_idx)
+    // The result slot holds the stashed mode here, never the start flag.
+    delegate_result(ctx, d, ctx.sent_v, mode_i32, result_idx, ir.ConstI32(0))
   }
   Ok(run_terminal(b, e))
 }
@@ -3356,6 +3409,7 @@ fn delegate_result(
   res: ir.Value,
   mode_i32: ir.Value,
   result_idx: Int,
+  first: ir.Value,
 ) -> anf.Build(ir.Expr) {
   use is_obj <- anf.then(anf.host_bool("is_object", [res]))
   use is_return <- anf.then(
@@ -3364,11 +3418,9 @@ fn delegate_result(
   if_terminal(
     is_obj,
     {
-      use k_done <- anf.then(key_named("done"))
-      use done_t <- anf.then(anf.host("get_prop", [res, k_done]))
+      use done_t <- anf.then(get_named(res, "done"))
       use done <- anf.then(anf.host("truthy", [done_t]))
-      use k_val <- anf.then(key_named("value"))
-      use v <- anf.then(anf.host("get_prop", [res, k_val]))
+      use v <- anf.then(get_named(res, "value"))
       if_terminal(
         done,
         if_terminal(
@@ -3383,7 +3435,18 @@ fn delegate_result(
             anf.pure(ir.Continue(ctx.lresume, [rs, loc2]))
           },
         ),
-        anf.pure(step_yield(v, d.state_id, ctx.loc_v)),
+        {
+          // Re-entered on resumption: the start flag must be gone by then.
+          use loc2 <- anf.then(anf.bind_if(
+            first,
+            pack_loc(
+              ctx,
+              dict.from_list([#(result_idx, ir.ConstAtom("undefined"))]),
+            ),
+            anf.pure(ctx.loc_v),
+          ))
+          anf.pure(step_yield(v, d.state_id, loc2))
+        },
       )
     },
     {
@@ -3449,22 +3512,10 @@ fn restore_and_seed_go(
   }
 }
 
-/// Continue(lresume, [ConstI32(ns), loc']) with loc' = pack_loc(ctx, ovr).
-/// Runs the pack Build via anf.run_to so its fresh_var allocations thread out.
-fn jump_state(
-  e: Emitter2,
-  ctx: SmCtx,
-  ns: Int,
-  overrides: Dict(Int, ir.Value),
-) -> #(ir.Expr, Emitter2) {
-  anf.run_to(pack_loc(ctx, overrides), e, fn(_e, loc2) {
-    ir.Continue(ctx.lresume, [ir.ConstI32(ns), loc2])
-  })
-}
-
-/// Like `jump_state` but packs loc via `pack_loc_cps`, so hoisted-local slots
-/// read the CURRENT `state.get_slot_var` (picking up reassignments made by the
-/// preceding emit_stmts) instead of copy-forwarding from arm-entry `loc_v`.
+/// Continue(lresume, [ConstI32(ns), loc']) with loc' packed via
+/// `pack_loc_cps`, so hoisted-local slots read the CURRENT
+/// `state.get_slot_var` (picking up reassignments made by the preceding
+/// emit_stmts) instead of copy-forwarding from arm-entry `loc_v`.
 fn jump_state_leaf(
   e: Emitter2,
   ctx: SmCtx,
@@ -4157,7 +4208,11 @@ fn emit_for_of_step(
                 done_rhs,
                 ir.Let(
                   [done_i],
-                  ir.CallHost("js", "truthy", [ir.Var(done_t)]),
+                  // sync: a Gleam Bool atom; for-await: any JS value.
+                  case is_await {
+                    True -> ir.CallHost("js", "truthy", [ir.Var(done_t)])
+                    False -> anf.is_true_expr(ir.Var(done_t))
+                  },
                   branch,
                 ),
               ),
@@ -4443,9 +4498,30 @@ fn build_switch_arms(
       let #(ctx, e) = st
       let ctx = with_region(ctx, arm.region)
       let region = current_try(ctx)
-      use #(inner, e) <- result.map(emit_arm_body(e, ctx, arm))
-      let dispatched = emit_mode_dispatch(ctx, arm.entry_kind, region, inner)
-      let wrapped = wrap_arm_try(ctx, arm.state_id, region, dispatched)
+      // The arm after a `yield*` is entered by Continue from the delegate
+      // arm with the inner return value in that delegate's result slot
+      // (§27.5.3.8 step 7.a.v / 7.b.ii.7 / 7.c.viii): it consumes that, not
+      // the last resumption's sent value, and skips mode dispatch (the
+      // delegate arm already forwarded the injected completion).
+      let follow_of =
+        list.find(plan.delegates, fn(d) { d.next_state == arm.state_id })
+      use #(wrapped, e) <- result.map(case arm.entry_kind, follow_of {
+        AeResume(SkYieldStar), Ok(d) -> {
+          let #(rv, e) = state.fresh_var(e)
+          let idx = extra_idx(ctx.layout, delegate_result_key(d.state_id))
+          let arm_ctx = SmCtx(..ctx, sent_v: ir.Var(rv))
+          use #(inner, e) <- result.map(emit_arm_body(e, arm_ctx, arm))
+          let body =
+            ir.Let([rv], ir.TermOp(ir.TupleGet(idx), [ctx.loc_v]), inner)
+          #(wrap_arm_try(ctx, arm.state_id, region, body), e)
+        }
+        _, _ -> {
+          use #(inner, e) <- result.map(emit_arm_body(e, ctx, arm))
+          let dispatched =
+            emit_mode_dispatch(ctx, arm.entry_kind, region, inner)
+          #(wrap_arm_try(ctx, arm.state_id, region, dispatched), e)
+        }
+      })
       #(push_arm(ctx, arm.state_id, wrapped), e)
     }),
   )
@@ -4798,17 +4874,17 @@ fn emit_for_await_check(
       ir.Var(val_name),
     ))
     let #(drop, e) = state.fresh_var(e)
-    let #(body_jump, e) = jump_state(e, ctx, fap.body_s, dict.new())
+    // Leaf pack: the loop variable `bind_for_lhs` just (re)bound must reach
+    // the body state through loc, not the arm-entry copy.
+    let #(body_jump, e) = jump_state_leaf(e, ctx, fap.body_s, dict.new())
     let not_done = state.splice_let(bind_tree, drop, body_jump)
     // Outer chain: sent_v is the iterresult; project done/value; branch.
     let #(chain, e) =
       run_terminal(
         {
-          use dk <- anf.then(key_named("done"))
-          use done_jv <- anf.then(anf.host("get_prop", [ctx.sent_v, dk]))
+          use done_jv <- anf.then(get_named(ctx.sent_v, "done"))
           use done_i <- anf.then(anf.host("truthy", [done_jv]))
-          use vk <- anf.then(key_named("value"))
-          use value <- anf.then(anf.host("get_prop", [ctx.sent_v, vk]))
+          use value <- anf.then(get_named(ctx.sent_v, "value"))
           anf.pure(ir.Let(
             [val_name],
             ir.Values([value]),

@@ -227,8 +227,8 @@ fn parse_int_digits(str: String, radix: Int, negative: Bool) -> JsNum {
       case negative, math_int {
         // Step 15: -0.
         True, 0 -> JFloat(-0.0)
-        True, n -> rt_val.num_from_int(0 - n)
-        False, n -> rt_val.num_from_int(n)
+        True, n -> rt_val.int_number(0 - n)
+        False, n -> rt_val.int_number(n)
       }
   }
 }

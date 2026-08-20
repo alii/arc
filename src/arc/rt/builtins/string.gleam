@@ -282,16 +282,8 @@ fn string_char_code_at(
   let #(s, st) = with_this_string(st, this)
   let #(idx, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  let ch = case idx >= 0 {
-    True -> js_string.char_at(s, idx)
-    False -> None
-  }
-  case ch {
-    Some(ch) ->
-      case string.to_utf_codepoints(ch) {
-        [cp, ..] -> #(mk_number(JInt(string.utf_codepoint_to_int(cp))), st)
-        [] -> #(mk_number(JNan), st)
-      }
+  case js_string.codepoint_at(s, idx) {
+    Some(cp) -> #(mk_number(JInt(cp)), st)
     None -> #(mk_number(JNan), st)
   }
 }
@@ -337,7 +329,9 @@ fn string_includes(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  string_search_bool(st, this, args, "includes", string.contains)
+  string_search_bool(st, this, args, "includes", fn(hay, needle) {
+    option.is_some(js_string.index_of(hay, needle, 0))
+  })
 }
 
 /// §22.1.3.22 String.prototype.startsWith.
@@ -838,10 +832,10 @@ fn string_split_parts(
         0 -> ok_array(st, [])
         _ -> {
           let parts = case sep {
-            "" -> js_string.explode(s) |> list.map(mk_string)
-            _ -> string.split(s, sep) |> list.map(mk_string)
+            "" -> js_string.explode(s) |> list.take(lim)
+            _ -> js_string.split(s, sep, lim)
           }
-          ok_array(st, list.take(parts, lim))
+          ok_array(st, list.map(parts, mk_string))
         }
       }
     }

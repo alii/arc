@@ -19,7 +19,8 @@ import arc/rt/gc as rt_gc
 import arc/rt/types.{type Agent, type JsVal}
 
 /// `Return` safepoint, run by the `Return` arm once it has popped back into
-/// the caller. Collects when the store has grown past its threshold AND
+/// the caller. Collects when a collection is due (`rt_gc.due`, whose first
+/// threshold test is repeated inline so the common case costs no call) AND
 /// this activation sits at the bottom of the depth bracket (`outer_depth ==
 /// 0`, i.e. every unit of `call_depth` is one of its own flat frames): a
 /// nested `run_bytecode` under a native (an array callback, a generator
@@ -29,7 +30,11 @@ import arc/rt/types.{type Agent, type JsVal}
 /// (`frame_roots`).
 pub fn maybe_collect_at_return(state: State) -> State {
   let js = state.agent.store
-  case js.alloc_since_gc >= js.gc_threshold && state.outer_depth == 0 {
+  case
+    state.outer_depth == 0
+    && js.alloc_since_gc >= js.gc_threshold
+    && rt_gc.due(js)
+  {
     True ->
       State(
         ..state,

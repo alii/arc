@@ -100,18 +100,21 @@ call_fast(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
     case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
-                {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
+                {?KFN_TAG, Code, Home, Flags, _, Simple}
                   when ?KFN_PLAIN(Flags) ->
                     %% §10.2.1.2 bind-this as in t_kfn_code.
                     case element(?FNFLAGS_IS_ARROW, Flags)
                          orelse element(?FNFLAGS_IS_STRICT, Flags) of
                         true ->
-                            apply_fast(St, F, Code, Simple, This, N, A, B, C);
+                            apply_fast(St, F, Code, Home, Simple, This, N, A,
+                                       B, C);
                         false when This =:= undefined; This =:= null ->
                             G = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
-                            apply_fast(St, F, Code, Simple, G, N, A, B, C);
+                            apply_fast(St, F, Code, Home, Simple, G, N, A, B,
+                                       C);
                         false when element(1, This) =:= ?HANDLE_TAG ->
-                            apply_fast(St, F, Code, Simple, This, N, A, B, C);
+                            apply_fast(St, F, Code, Home, Simple, This, N, A,
+                                       B, C);
                         false -> call_slow(St, F, This, N, A, B, C)
                     end;
                 _ -> call_slow(St, F, This, N, A, B, C)
@@ -123,28 +126,33 @@ call_fast(St, F, This, N, A, B, C) -> call_slow(St, F, This, N, A, B, C).
 call_slow(St, F, This, N, A, B, C) ->
     arc@rt@call:t_call_checked(St, F, This, args(N, A, B, C)).
 
-apply_fast(St, _, _, {?SOME, {CodeS, Arity, NeedsThis}}, ThisR, Args, _, _, _)
+apply_fast(St, _, _, _, {?SOME, {CodeS, Arity, NeedsThis}}, ThisR, Args, _, _,
+           _)
   when is_list(Args), length(Args) =:= Arity ->
     case NeedsThis of
         true -> apply_this(CodeS, St, ThisR, Args);
         false -> erlang:apply(CodeS, [St | Args])
     end;
-apply_fast(St, _, _, {?SOME, {CodeS, N, true}}, ThisR, N, A, B, C) ->
+apply_fast(St, _, _, _, {?SOME, {CodeS, N, true}}, ThisR, N, A, B, C) ->
     case N of
         0 -> CodeS(St, ThisR);
         1 -> CodeS(St, ThisR, A);
         2 -> CodeS(St, ThisR, A, B);
         3 -> CodeS(St, ThisR, A, B, C)
     end;
-apply_fast(St, _, _, {?SOME, {CodeS, N, false}}, _, N, A, B, C) ->
+apply_fast(St, _, _, _, {?SOME, {CodeS, N, false}}, _, N, A, B, C) ->
     case N of
         0 -> CodeS(St);
         1 -> CodeS(St, A);
         2 -> CodeS(St, A, B);
         3 -> CodeS(St, A, B, C)
     end;
-apply_fast(St, F, Code, _, ThisR, N, A, B, C) ->
-    Code(St, {ThisR, F, undefined, undefined}, args(N, A, B, C)).
+apply_fast(St, F, Code, Home, _, ThisR, N, A, B, C) ->
+    Code(St, {ThisR, F, home(Home), undefined}, args(N, A, B, C)).
+
+%% Frame slot 3: the callee's [[HomeObject]] cell, or `undefined`.
+home({?SOME, H}) -> H;
+home(?NONE) -> undefined.
 
 %% IcEntry (rt_types.gleam): {ic_call, KeyBin, Entries}, each entry
 %% {ic_call_way, Sid, PId, Chain, Fn} with Chain = [{ProtoId, ProtoSlot}]
@@ -241,7 +249,7 @@ apply_pos(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, N, A, B, C) ->
     case array:get(FnId, Data) of
         FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, FSlot) of
-                {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
+                {?KFN_TAG, Code, Home, Flags, _, Simple}
                   when ?KFN_PLAIN(Flags) ->
                     case Simple of
                         {?SOME, {CodeT, N, true}} ->
@@ -259,7 +267,7 @@ apply_pos(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, N, A, B, C) ->
                                 3 -> CodeT(St, A, B, C)
                             end;
                         _ ->
-                            Code(St, {Recv, Fn, undefined, undefined},
+                            Code(St, {Recv, Fn, home(Home), undefined},
                                  args(N, A, B, C))
                     end;
                 {?KNATIVE_TAG, Tag, _, _, _} ->
@@ -411,24 +419,27 @@ mono_shaped_own(Store, RSlot, KeyBin) ->
         _ -> absent
     end.
 
-%% Gate + apply. Same KCompiled gate as t_kfn_code (home_object=:=none so
-%% super.x methods miss to the full MOR). KNative → dispatch_native (M6 seam)
-%% so `Array.prototype.push` etc. hit here too. `this` is Recv — always a
-%% cell, so no OrdinaryCallBindThis substitution. A this-ABI simple variant
-%% (KCompiled.simple with needs_this=true) of matching arity is applied as
-%% CodeT(St, Recv, P0..Pn-1) with no Frame tuple; otherwise Frame per D5
-%% mk_frame.
+%% Gate + apply. Same KCompiled gate as call_fast; a method's [[HomeObject]]
+%% rides in the Frame (a simple variant never reads it). KNative →
+%% dispatch_native (M6 seam) so `Array.prototype.push` etc. hit here too.
+%% `this` is Recv — always a cell, so no OrdinaryCallBindThis substitution. A
+%% simple variant (KCompiled.simple) of matching arity is applied as
+%% CodeT(St, Recv, P0..Pn-1) / CodeS(St, P0..Pn-1) with no Frame tuple;
+%% otherwise Frame per D5 mk_frame.
 mono_apply(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, Args) ->
     case array:get(FnId, Data) of
         FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, FSlot) of
-                {?KFN_TAG, Code, ?NONE, Flags, _, Simple}
+                {?KFN_TAG, Code, Home, Flags, _, Simple}
                   when ?KFN_PLAIN(Flags) ->
                     case Simple of
                         {?SOME, {CodeT, Arity, true}}
                           when length(Args) =:= Arity ->
                             apply_this(CodeT, St, Recv, Args);
-                        _ -> Code(St, {Recv, Fn, undefined, undefined}, Args)
+                        {?SOME, {CodeS, Arity, false}}
+                          when length(Args) =:= Arity ->
+                            erlang:apply(CodeS, [St | Args]);
+                        _ -> Code(St, {Recv, Fn, home(Home), undefined}, Args)
                     end;
                 {?KNATIVE_TAG, Tag, _, _, _} ->
                     arc@rt@builtins:dispatch_native(
@@ -446,9 +457,9 @@ apply_this(CodeT, St, Recv, [A, B, C]) -> CodeT(St, Recv, A, B, C);
 apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 
 %% t_new_simple(St, Ctor, Args) -> {Handle, St'} | {miss, St}
-%% JMut fast-path probe for `new F(args)` on a plain-function ctor
-%% (§10.2.2 base case). Gate: F is a KCompiled with is_constructor,
-%% NOT class/derived/gen/async, home_object=fields_init=none, and its own
+%% JMut fast-path probe for `new F(args)` on a base constructor (§10.2.2
+%% kind base): F is a KCompiled with is_constructor, a plain function or a
+%% base class constructor, NOT derived/gen/async, no fields_init, and its own
 %% "prototype" is a data-property Handle → inline OrdinaryCreateFromConstructor
 %% + `t_cell_new` + apply body + §10.2.2 step 13 base return-override
 %% (object result overrides `this`; else new `this`). Any shape miss →
@@ -463,9 +474,8 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     case array:get(CId, Data) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
-                {?KFN_TAG, Code, ?NONE, Flags, ?NONE, _}
+                {?KFN_TAG, Code, Home, Flags, ?NONE, _}
                   when element(?FNFLAGS_IS_CTOR, Flags) =:= true,
-                       element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
                        element(?FNFLAGS_IS_DERIVED, Flags) =:= false,
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
@@ -475,7 +485,7 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
                             case element(?DATAPROP_VALUE, Prop) of
                                 Proto = {?HANDLE_TAG, _} ->
                                     new_simple_apply(St, Store, Data, Ctor,
-                                                     Code, Proto, Args);
+                                                     Code, Home, Proto, Args);
                                 _ -> {miss, St}
                             end;
                         _ -> {miss, St}
@@ -486,20 +496,18 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     end;
 t_new_simple(St, _, _) -> {miss, St}.
 
-%% Inline `t_cell_new` (rt_store.gleam) + apply + return-override.
-new_simple_apply(St, Store, Data, Ctor, Code, Proto, Args) ->
+%% Inline `t_cell_new` (rt_store.gleam) + apply + return-override. The
+%% arity guard lets the compiler fold the store update into one tuple build.
+new_simple_apply(St, Store, Data, Ctor, Code, Home, Proto, Args)
+  when tuple_size(Store) =:= ?STORE_ARITY ->
     NewSlot = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}},
-    {NewId, Free, Next} = case element(?STORE_FREE, Store) of
-        [Id | Rest] -> {Id, Rest, element(?STORE_NEXT, Store)};
-        [] -> N = element(?STORE_NEXT, Store), {N, [], N + 1}
-    end,
+    NewId = element(?STORE_NEXT, Store),
     Store2 = setelement(?STORE_DATA, Store, array:set(NewId, NewSlot, Data)),
-    Store3 = setelement(?STORE_FREE, Store2, Free),
-    Store4 = setelement(?STORE_NEXT, Store3, Next),
-    Store5 = setelement(?STORE_ALLOC, Store4, element(?STORE_ALLOC, Store) + 1),
-    St2 = setelement(?AGENT_STORE, St, Store5),
+    Store3 = setelement(?STORE_NEXT, Store2, NewId + 1),
+    Store4 = setelement(?STORE_ALLOC, Store3, element(?STORE_ALLOC, Store) + 1),
+    St2 = setelement(?AGENT_STORE, St, Store4),
     NewThis = {?HANDLE_TAG, NewId},
-    Frame = {NewThis, Ctor, undefined, Ctor},
+    Frame = {NewThis, Ctor, home(Home), Ctor},
     {V, St3} = Code(St2, Frame, Args),
     case V of
         {?HANDLE_TAG, _} -> {V, St3};

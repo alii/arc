@@ -51,8 +51,8 @@ pub fn integral_literal_outside_i32_is_float_row_test() {
   let kinds = constant_kinds(compile("var big = 4294967296; var neg = -7;"))
   assert list.contains(kinds, KNum(JFloat(4_294_967_296.0)))
   assert !list.contains(kinds, KNum(JInt(4_294_967_296)))
-  // `-7` is unary minus applied to the literal 7.
-  assert list.contains(kinds, KNum(JInt(7)))
+  // `-7` folds to the int -7, the value unary minus gives the literal 7.
+  assert list.contains(kinds, KNum(JInt(-7)))
 }
 
 pub fn nested_function_template_constants_classify_test() {

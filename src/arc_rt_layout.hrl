@@ -34,10 +34,9 @@
 %% arc/rt/types.JsStore
 -define(STORE_TAG, js_store).
 -define(STORE_DATA, 2).
--define(STORE_FREE, 3).
--define(STORE_NEXT, 4).
--define(STORE_PINNED_ROOTS, 5).
--define(STORE_ALLOC, 6).
+-define(STORE_NEXT, 3).
+-define(STORE_PINNED_ROOTS, 4).
+-define(STORE_ALLOC, 5).
 -define(STORE_SHAPES, 14).
 -define(STORE_NEXT_SHAPE, 15).
 -define(STORE_ARITY, 17).
@@ -58,6 +57,10 @@
 %% arc/rt/types.Handle, also the JsVal object wire row
 -define(HANDLE_TAG, js_cell).
 -define(HANDLE_ID, 2).
+
+%% arc/rt/types.JsSlot: SBox(value), a captured binding's cell
+-define(SBOX_TAG, s_box).
+-define(SBOX_VALUE, 2).
 
 %% arc/rt/types.JsSlot: SObject
 -define(SOBJECT_TAG, s_object).
@@ -108,6 +111,10 @@
 -define(ARRAYOBJ_LENGTH, 2).
 -define(ARRAYOBJ_ARITY, 2).
 -define(ORDINARY, ordinary).
+%% arc/rt/types.ObjKind: ArgumentsObj(length, mapped)
+-define(ARGUMENTSOBJ_TAG, arguments_obj).
+-define(ARGUMENTSOBJ_MAPPED, 3).
+-define(ARGUMENTSOBJ_ARITY, 3).
 %% arc/rt/types.ObjKind: ProxyObj (tag only: fast paths must never read
 %% through a proxy's stored proto/props — its internal methods are traps)
 -define(PROXYOBJ_TAG, proxy_obj).
@@ -148,6 +155,9 @@
 -define(ELEMS_NONE, no_elements).
 -define(ELEMS_DENSE, dense).
 -define(ELEMS_SPARSE, sparse).
+%% The dense store's `array` default (arc_rt_val_ffi:mk_hole/0): an absent
+%% index, never a JsVal. Reads past the array's size answer it too.
+-define(ELEMS_HOLE, js_hole).
 
 %% arc/rt/call.Completion (built by the call ffi, matched by Gleam)
 -define(COMPLETION_NORMAL, normal_completion).

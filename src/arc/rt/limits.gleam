@@ -5,8 +5,9 @@
 //// Error(Nil) if it would exceed max_string_bytes, so pathological inputs
 //// (`"x".repeat(2**30)`) fail fast instead of OOMing the BEAM process.
 
+import arc/rt/js_string
 import gleam/bool
-import gleam/int
+import gleam/result
 import gleam/string
 
 /// Practical cap on iteration for methods that must materialize O(length)
@@ -45,52 +46,45 @@ pub const max_call_depth = 10_000
 /// bound, matching V8's stack-limit check in `HasInPrototypeChain`).
 pub const max_prototype_depth = 1000
 
-/// Bounded string.repeat. Returns Error(Nil) if `byte_size(s) * count`
+/// Bounded string repeat. Returns Error(Nil) if `byte_size(s) * count`
 /// would exceed max_string_bytes.
 pub fn repeat(s: String, count: Int) -> Result(String, Nil) {
   case string.byte_size(s) * count > max_string_bytes {
     True -> Error(Nil)
-    False -> Ok(string.repeat(s, count))
+    False -> Ok(js_string.repeat(s, count))
   }
 }
 
-/// Bounded pad. Returns Error(Nil) if the padded output would exceed
-/// max_string_bytes.
+/// Bounded §22.1.3.17.1 StringPad at start. Returns Error(Nil) if the
+/// padded output would exceed max_string_bytes.
 pub fn pad_start(s: String, to: Int, with: String) -> Result(String, Nil) {
-  bounded_pad(s, to, with, string.pad_start)
+  use fill <- result.map(pad_filler(s, to, with))
+  fill <> s
 }
 
 pub fn pad_end(s: String, to: Int, with: String) -> Result(String, Nil) {
-  bounded_pad(s, to, with, string.pad_end)
+  use fill <- result.map(pad_filler(s, to, with))
+  s <> fill
 }
 
-/// Guard on the *byte* size of the padded result, not the grapheme count `to`.
-/// Comparing `to` (graphemes) against max_string_bytes (bytes) lets a
-/// multi-byte filler like "\u{10000}" (4 bytes/grapheme) build a string up to
-/// 4x over the cap. gleam/string.pad_* emits exactly the `needed` missing
-/// graphemes: floor(needed / length(with)) whole copies of the filler plus a
-/// prefix slice of one more, so the padding is bounded by
-/// ceil(needed / length(with)) whole copies. Multiplying `needed` by the byte
-/// size of the WHOLE filler instead would over-estimate by a factor of
-/// length(with) and spuriously reject spec-valid pads.
-fn bounded_pad(
-  s: String,
-  to: Int,
-  with: String,
-  pad: fn(String, Int, String) -> String,
-) -> Result(String, Nil) {
-  // §22.1.3.16.1 StringPad step 4: an empty filler pads nothing — the result
-  // is `s` no matter how large `to` is, so it must never be length-rejected.
-  use <- bool.guard(with == "", Ok(s))
-  let needed = int.max(0, to - string.length(s))
-  let with_len = string.length(with)
-  // ceil(needed / with_len) copies; 0 when no padding is needed, so a string
-  // already at the cap is never rejected when `to` doesn't grow it.
-  let pad_bytes = { needed + with_len - 1 } / with_len * string.byte_size(with)
-  let estimated_bytes = string.byte_size(s) + pad_bytes
-  case estimated_bytes > max_string_bytes {
+/// StringPad steps 3-9: the filler repeated and truncated to bring `s` up to
+/// `to` JS-string units (not grapheme clusters); "" when `s` is already long
+/// enough or the filler is empty (steps 4-5, never length-rejected). The
+/// guard is on the BYTE size of the exact result.
+fn pad_filler(s: String, to: Int, with: String) -> Result(String, Nil) {
+  let needed = to - js_string.length(s)
+  use <- bool.guard(needed <= 0 || with == "", Ok(""))
+  let with_len = js_string.length(with)
+  let copies = needed / with_len
+  let tail = js_string.slice(with, 0, needed % with_len)
+  let bytes =
+    string.byte_size(s)
+    + copies
+    * string.byte_size(with)
+    + string.byte_size(tail)
+  case bytes > max_string_bytes {
     True -> Error(Nil)
-    False -> Ok(pad(s, to, with))
+    False -> Ok(js_string.repeat(with, copies) <> tail)
   }
 }
 

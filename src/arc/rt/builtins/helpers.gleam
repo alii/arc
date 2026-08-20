@@ -4,14 +4,36 @@
 //// Argument helpers + brand checks over the threaded `Agent` model. Errors
 //// go through `rt_val.t_throw_type_error` (D7 — raise, never `Result`).
 
+import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsVal, type ObjKind, type SymbolId,
   BigIntObj, BooleanObj, KBig, KBool, KHandle, KNum, KStr, KSym, NumberObj,
-  SObject, StringObj, SymbolObj, classify, mk_undefined,
+  SObject, StringKey, StringObj, SymbolObj, classify, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/option.{type Option, None, Some}
+
+/// A present own element of a plain Array / Arguments object read straight
+/// off the heap term, or `Slow` for anything `rt_obj.t_get_own_index` has to
+/// look at properly (index override, hole, exotic receiver, primitive).
+pub type OwnElement {
+  Hit(JsVal)
+  Slow
+}
+
+@external(erlang, "arc_rt_builtins_ffi", "own_element")
+pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
+
+/// §7.3.2 Get on any array-like receiver (including primitive strings) by
+/// integer index. A present own element of a plain Array is read directly;
+/// everything else goes through `t_get_prop`, which auto-boxes primitives.
+pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
+  case own_element(st, this, idx) {
+    Hit(v) -> #(v, st)
+    Slow -> rt_obj.t_get_prop(st, this, StringKey(rt_types.index_key(idx)))
+  }
+}
 
 /// Get element at index from a list (0-based). O(n).
 pub fn list_at(lst: List(a), idx: Int) -> Option(a) {

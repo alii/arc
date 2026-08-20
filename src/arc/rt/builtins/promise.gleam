@@ -244,20 +244,30 @@ fn then(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let promise_h = require_promise(st, this, "Promise.prototype.then")
   // Step 3: C = ? SpeciesConstructor(promise, %Promise%).
   let #(c, st) = species_constructor(st, this)
-  // Step 4: resultCapability = ? NewPromiseCapability(C). Intrinsic %Promise%
-  // hits the fast path inside `new_capability_from_constructor`.
-  let #(cap, st) = new_capability_from_constructor(st, c)
-  // Step 5: PerformPromiseThen(promise, onFulfilled, onRejected, resultCap).
-  let st =
-    rt_async.t_perform_then(
-      st,
-      promise_h,
-      on_fulfilled,
-      on_rejected,
-      cap.resolve,
-      cap.reject,
-    )
-  #(cap.promise, st)
+  case c == mk_object(st.realm.promise.constructor) {
+    // Steps 4-5 for NewPromiseCapability(%Promise%): its resolving functions
+    // never reach user code, so the child promise is the reaction's target.
+    True -> {
+      let #(child, st) =
+        rt_async.t_promise_then(st, promise_h, on_fulfilled, on_rejected)
+      #(mk_object(child), st)
+    }
+    False -> {
+      // Step 4: resultCapability = ? NewPromiseCapability(C).
+      let #(cap, st) = new_capability_from_constructor(st, c)
+      // Step 5: PerformPromiseThen(promise, onFulfilled, onRejected, cap).
+      let st =
+        rt_async.t_perform_then(
+          st,
+          promise_h,
+          on_fulfilled,
+          on_rejected,
+          cap.resolve,
+          cap.reject,
+        )
+      #(cap.promise, st)
+    }
+  }
 }
 
 // ── §27.2.5.3 Promise.prototype.finally ─────────────────────────────────────
@@ -316,8 +326,7 @@ fn finally_wrapper(
   // Step 1: result = ? Call(onFinally, undefined).
   let #(result, st) = t_call_checked(st, on_finally, mk_undefined(), [])
   // Step 2: p = ? PromiseResolve(C, result).
-  let #(cap, st) = new_capability_from_constructor(st, constructor)
-  let #(_, st) = t_call_checked(st, cap.resolve, mk_undefined(), [result])
+  let #(p, st) = promise_resolve(st, constructor, result)
   // Step 4: handler = CreateBuiltinFunction(() => original | throw original,
   // 0, "", « »).
   let #(handler, st) = case rejecting {
@@ -326,7 +335,7 @@ fn finally_wrapper(
     True -> alloc_closure_n(st, PromiseN(PromiseFinallyThrower(original)), 0)
   }
   // Step 5: Return ? Invoke(p, "then", « handler »).
-  t_call_method(st, cap.promise, StringKey(Named("then")), [handler])
+  t_call_method(st, p, StringKey(Named("then")), [handler])
 }
 
 // ── §27.2.4.7 Promise.resolve / §27.2.4.6 Promise.reject ────────────────────
@@ -339,36 +348,37 @@ fn resolve_static(
   let val = first_arg_or_undefined(args)
   // Step 2: If C is not an Object, throw a TypeError.
   case classify(this) {
-    KHandle(_) -> Nil
+    KHandle(_) -> promise_resolve(st, this, val)
     _ -> throw_type_error(st, "Promise.resolve called on non-object")
-  }
-  let realm = st.realm
-  let intrinsic = mk_object(realm.promise.constructor)
-  // §27.2.4.7.1 step 1: if x is a promise whose constructor is C, return x.
-  case rt_async.as_promise(st, val) {
-    Some(_) -> {
-      let #(ctor, st) =
-        rt_obj.t_get_prop(st, val, StringKey(Named("constructor")))
-      case ctor == this {
-        True -> #(val, st)
-        False -> resolve_with_constructor(st, this, val, intrinsic)
-      }
-    }
-    None -> resolve_with_constructor(st, this, val, intrinsic)
   }
 }
 
+/// §27.2.4.7.1 PromiseResolve(C, x): `x` itself when it is a promise whose
+/// `constructor` is C, else a new C capability resolved with `x`.
+fn promise_resolve(st: Agent, c: JsVal, x: JsVal) -> #(JsVal, Agent) {
+  // Step 1: IsPromise(x) and SameValue(x.constructor, C) → return x.
+  case rt_async.as_promise(st, x) {
+    Some(_) -> {
+      let #(ctor, st) =
+        rt_obj.t_get_prop(st, x, StringKey(Named("constructor")))
+      case ctor == c {
+        True -> #(x, st)
+        False -> resolve_with_constructor(st, c, x)
+      }
+    }
+    None -> resolve_with_constructor(st, c, x)
+  }
+}
+
+/// PromiseResolve steps 2-4: NewPromiseCapability(C), resolve it with `val`.
 fn resolve_with_constructor(
   st: Agent,
   c: JsVal,
   val: JsVal,
-  intrinsic: JsVal,
 ) -> #(JsVal, Agent) {
-  case c == intrinsic {
+  case c == mk_object(st.realm.promise.constructor) {
+    // Intrinsic %Promise%: the capability's resolve function is unobservable.
     True -> {
-      // §27.2.4.7.1 steps 2-4 for the intrinsic %Promise%: always a FRESH
-      // promise resolved with `val` (step 1's same-constructor early return
-      // was already decided by the caller).
       let #(h, st) = rt_async.t_new_promise(st)
       #(mk_object(h), rt_async.t_promise_resolve(st, h, val))
     }
@@ -382,11 +392,21 @@ fn resolve_with_constructor(
 
 fn reject_static(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let reason = first_arg_or_undefined(args)
-  // Step 2: capability = ? NewPromiseCapability(C).
-  let #(cap, st) = new_capability_from_constructor(st, this)
-  // Step 3: ? Call(cap.[[Reject]], undefined, « r »).
-  let #(_, st) = t_call_checked(st, cap.reject, mk_undefined(), [reason])
-  #(cap.promise, st)
+  case this == mk_object(st.realm.promise.constructor) {
+    // Steps 2-3 for the intrinsic %Promise%: the reject function is
+    // unobservable, so reject the fresh promise in place.
+    True -> {
+      let #(h, st) = rt_async.t_new_promise(st)
+      #(mk_object(h), rt_async.t_promise_reject(st, h, reason))
+    }
+    False -> {
+      // Step 2: capability = ? NewPromiseCapability(C).
+      let #(cap, st) = new_capability_from_constructor(st, this)
+      // Step 3: ? Call(cap.[[Reject]], undefined, « r »).
+      let #(_, st) = t_call_checked(st, cap.reject, mk_undefined(), [reason])
+      #(cap.promise, st)
+    }
+  }
 }
 
 // ── §27.2.4.1-.5 combinators (all/allSettled/any/race) ──────────────────────
@@ -1114,6 +1134,42 @@ fn get_promise_resolve(st: Agent, c: JsVal) -> #(JsVal, Agent) {
 /// falls back to %Promise% on undefined/null at any step.
 fn species_constructor(st: Agent, o: JsVal) -> #(JsVal, Agent) {
   let default = mk_object(st.realm.promise.constructor)
+  case intrinsic_species(st, o) {
+    True -> #(default, st)
+    False -> species_constructor_generic(st, o, default)
+  }
+}
+
+/// The SpeciesConstructor(O, %Promise%) protocol answers %Promise% without
+/// running anything when every step is a plain data read of the intrinsics
+/// as `init` left them: `O` a plain %Promise% instance with no own
+/// `constructor`, `%Promise.prototype%.constructor` a data property holding
+/// %Promise%, and `%Promise%[@@species]` a `ReturnThis` getter (which would
+/// return its receiver, %Promise%). Anything else takes the generic protocol.
+fn intrinsic_species(st: Agent, o: JsVal) -> Bool {
+  is_plain_promise(st, o) && common.species_intact(st, st.realm.promise)
+}
+
+/// `o` is a %Promise% instance whose `constructor` lookup reaches
+/// %Promise.prototype%: that prototype, and no own `constructor`.
+fn is_plain_promise(st: Agent, o: JsVal) -> Bool {
+  case classify(o) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: rt_types.PromiseObj(..), proto: Some(p), props:, ..) ->
+          p == st.realm.promise.prototype
+          && !dict.has_key(props, Named("constructor"))
+        _ -> False
+      }
+    _ -> False
+  }
+}
+
+fn species_constructor_generic(
+  st: Agent,
+  o: JsVal,
+  default: JsVal,
+) -> #(JsVal, Agent) {
   let #(c, st) = rt_obj.t_get_prop(st, o, StringKey(Named("constructor")))
   case classify(c) {
     rt_types.KUndef -> #(default, st)

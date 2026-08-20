@@ -10,6 +10,7 @@
 
 import arc/internal/tree_array
 import arc/rt/call as rt_call
+import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
@@ -190,23 +191,18 @@ pub fn alloc_pojo(
   object_proto: Handle,
   props: List(#(String, JsVal)),
 ) -> #(Handle, Agent) {
-  let #(entries, st) =
-    list.fold(props, #([], st), fn(acc, kv) {
-      let #(entries, st) = acc
-      let #(k, v) = kv
-      let #(prop, st) = data_property(st, v)
-      #([#(k, prop), ..entries], st)
+  use seq <- rt_store.t_cell_new_with(st, list.length(props))
+  let entries =
+    list.index_map(props, fn(kv, i) {
+      #(Named(kv.0), DataProperty(kv.1, True, True, True, seq + i))
     })
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind: Ordinary,
-      proto: Some(object_proto),
-      props: named_props(list.reverse(entries)),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
+  SObject(
+    kind: Ordinary,
+    proto: Some(object_proto),
+    props: dict.from_list(entries),
+    symbol_props: [],
+    elements: NoElements,
+    extensible: True,
   )
 }
 
@@ -561,6 +557,43 @@ pub fn add_species_accessor(
       configurable: True,
     )
   add_symbol_property(st, ctor_h, rt_types.symbol_species, prop)
+}
+
+/// Whether the reads SpeciesConstructor / ArraySpeciesCreate make on the
+/// intrinsic `pair` still yield its constructor without running anything: the
+/// prototype's `constructor` is a data property holding the constructor, whose
+/// own `@@species` is an accessor with a `ReturnThis` native getter
+/// (`add_species_accessor`), which returns its receiver.
+pub fn species_intact(st: Agent, pair: BuiltinPair) -> Bool {
+  let BuiltinPair(prototype:, constructor:) = pair
+  case
+    rt_obj.t_ordinary_own_property(
+      st,
+      prototype,
+      rt_types.StringKey(Named("constructor")),
+    ),
+    rt_obj.t_ordinary_own_property(
+      st,
+      constructor,
+      rt_types.SymbolKey(rt_types.symbol_species),
+    )
+  {
+    Some(DataProperty(value:, ..)),
+      Some(AccessorProperty(get: Some(getter), ..))
+    -> value == mk_object(constructor) && is_return_this(st, getter)
+    _, _ -> False
+  }
+}
+
+fn is_return_this(st: Agent, f: JsVal) -> Bool {
+  case rt_types.classify(f) {
+    rt_types.KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: KNative(tag: rt_types.ReturnThis, ..), ..) -> True
+        _ -> False
+      }
+    _ -> False
+  }
 }
 
 // ── error / array allocation (port arc common.gleam:1012-1229) ──────────────

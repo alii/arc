@@ -813,11 +813,13 @@ pub fn js_to_map_key(v: JsVal) -> MapKey {
 
 /// Inverse of `js_to_map_key`. Lossless except -0 → +0 (§24.1.3.9 step 4
 /// requires exactly that). Used by Map forEach/entries to reconstruct the
-/// original JS key (arc `value.gleam:1014-1027`).
+/// original JS key (arc `value.gleam:1014-1027`). An integral number comes
+/// back in the `JInt` shape literals have, so `arr[key]` downstream stays on
+/// the integer-index paths.
 pub fn map_key_to_js(key: MapKey) -> JsVal {
   case key {
     MKString(s) -> mk_string(s)
-    MKNumber(f) -> mk_number(JFloat(f))
+    MKNumber(f) -> mk_number(integral_key_number(f))
     MKNan -> mk_number(JNan)
     MKInfinity -> mk_number(JPosInf)
     MKNegInfinity -> mk_number(JNegInf)
@@ -827,6 +829,20 @@ pub fn map_key_to_js(key: MapKey) -> JsVal {
     MKObject(h) -> mk_object(h)
     MKSymbol(id) -> mk_symbol(id)
     MKBigInt(n) -> mk_bigint(n)
+  }
+}
+
+/// A finite key back as a Number: `JInt` when it is an integer a double
+/// holds exactly (|n| <= 2^53 - 1), else the float as stored.
+fn integral_key_number(f: Float) -> JsNum {
+  let n = float.truncate(f)
+  let exact =
+    int.to_float(n) == f
+    && n <= 9_007_199_254_740_991
+    && n >= -9_007_199_254_740_991
+  case exact {
+    True -> JInt(n)
+    False -> JFloat(f)
   }
 }
 
@@ -872,9 +888,6 @@ pub type NativeToken {
   PromiseResolveFn(promise: Handle, already_resolved: Handle)
   /// §27.2.1.3.1 Promise Reject Function — same closure fields as resolve.
   PromiseRejectFn(promise: Handle, already_resolved: Handle)
-  /// Async-function await resumption (§27.7.5.3 steps 3c/5c): continues the
-  /// `SAsyncContext` at `gen` with `Sent = {mode, args[0]}`.
-  AsyncResume(gen: Handle, is_throw: Bool)
   /// Async-generator internal-await resumption (§27.6.3.5 machinery).
   /// `kind` distinguishes body-await vs the two driver-level return awaits.
   AsyncGenResume(gen: Handle, is_throw: Bool, kind: AGResumeKind)
@@ -2534,12 +2547,11 @@ pub type TemporalData {
   TemporalZonedDateTime(epoch_ns: Int, time_zone: TimeZone, calendar: Calendar)
 }
 
-/// Which async-generator suspension the settled `AsyncGenResume` await was for
-/// (arc `value.gleam:4126`). Delegate variants dropped — `yield*` is lowered
-/// entirely inside the sm (SPEC §18.6 / Q6).
+/// Which driver-level `.return(v)` await the settled `AsyncGenResume` was for
+/// (arc `value.gleam:4126`). A body `await` needs no closure (its reaction
+/// continues the data cell directly); delegate variants dropped — `yield*` is
+/// lowered entirely inside the sm (SPEC §18.6 / Q6).
 pub type AGResumeKind {
-  /// Body `await` settled — resume the sm with the awaited value (mode 0/1).
-  AGResumeBody
   /// `.return(v)` on a completed gen (§27.6.3.9) — settle the head request.
   AGResumeAwaitingReturn
   /// `.return(v)` at a suspended yield (§27.6.3.10 step 8): the driver's
@@ -2559,7 +2571,7 @@ pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
       promise,
       already_resolved,
     ]
-    AsyncResume(gen:, is_throw: _) | AsyncGenResume(gen:, ..) -> [gen]
+    AsyncGenResume(gen:, ..) -> [gen]
     ObjectN(_) | FunctionN(_) | ReturnThis -> []
     ErrorN(n) -> error_native_refs(n)
     DomExceptionN(DomExceptionConstructor(proto:)) -> [proto]
@@ -3152,8 +3164,8 @@ pub type JsSlot {
     queue: #(List(AsyncGenRequest), List(AsyncGenRequest)),
   )
   /// A running async function: where its body resumes after the current
-  /// `await`, and the result promise object it settles. Reachable only from
-  /// the `AsyncResume` closures of that await.
+  /// `await`, and the result promise object it settles. Reachable only as
+  /// the settle target of that await's reaction.
   SAsyncContext(resume: Resume, promise: Handle)
   /// A pending `DisposableStackObj`'s [[DisposeCapability]]: its
   /// [[DisposableResourceStack]], newest first. `move()` re-points a new
@@ -3248,7 +3260,9 @@ pub type ReactionHandler {
 }
 
 /// A stored reaction waiting for promise settlement. `child_resolve` /
-/// `child_reject` are the derived-promise capability's resolve/reject fns.
+/// `child_reject` are the derived capability's settle targets (`rt/async
+/// settle`): `undefined` for none, an internal child promise or coroutine
+/// data cell settled in place, or a user capability's resolving function.
 pub type PromiseReaction {
   PromiseReaction(
     on_fulfill: ReactionHandler,
@@ -3268,7 +3282,8 @@ pub type PromiseState {
 
 /// A microtask job for the promise job queue.
 pub type Job {
-  /// Run `handler(arg)`, then resolve/reject the child promise.
+  /// Run `handler(arg)`, then settle the child through the `resolve` /
+  /// `reject` settle targets (as `PromiseReaction`).
   ReactionJob(
     handler: ReactionHandler,
     arg: JsVal,
@@ -3313,7 +3328,8 @@ pub type AsyncGenState {
 }
 
 /// A pending `.next()`/`.return()`/`.throw()` call on an async generator.
-/// Carries the promise capability that settles when the request runs.
+/// `resolve` / `reject` are the settle targets for its result: both the
+/// request's own %Promise%, settled in place when the request runs.
 pub type AsyncGenRequest {
   AsyncGenRequest(
     completion: GeneratorCompletion,
@@ -3620,22 +3636,26 @@ pub type JsOps(st) {
 pub type JsStore(st) {
   JsStore(
     // ── cell arena (arc heap.gleam:21-45) ──
-    /// Live cells by id. Ids are dense (`next` / free-list), so an OTP
+    /// Live cells by id. Ids are dense (minted from `next`), so an OTP
     /// `array` indexed by id; a freed id reads back as the FFI's free
     /// sentinel, which every reader treats as absent.
     data: TreeArray(JsSlot),
-    /// Recycled ids, LIFO.
-    free: List(Int),
-    /// Next never-used id (starts 0).
+    /// Next id to mint (starts 0). A collection lowers it to one past the
+    /// highest survivor, so a dead tail's ids are minted again.
     next: Int,
     /// Permanent GC roots: realm intrinsics + captured-binding cells.
     pinned_roots: Set(Int),
     // ── GC trigger (M2) ──
     /// Bumped by `t_cell_new`; reset by `t_collect`.
     alloc_since_gc: Int,
-    /// `t_maybe_collect` fires when `alloc_since_gc >= gc_threshold`.
-    /// Default 65_536 (arc `interpreter.gleam:5796`).
+    /// `t_maybe_collect` fires when `alloc_since_gc` reaches this, scaled
+    /// up with `gc_live` for heaps past twice the default (`rt/gc.due`).
+    /// Default 65_536.
     gc_threshold: Int,
+    /// Cells that survived the last collection; scales the next trigger
+    /// (`rt/gc.due`) so marking stays proportional to allocation however
+    /// large the heap grows. 0 until the first collection.
+    gc_live: Int,
     // ── threaded counters (D9, D14) ──
     /// Property creation-order stamp.
     prop_seq: Int,
@@ -3726,8 +3746,8 @@ pub type AsyncWaiter {
     owner: SabOwner,
     ref: WaiterRef,
     /// [[PromiseCapability]]: `promise` is the result object's `value`;
-    /// `resolve`/`reject` are its resolving functions, called by the
-    /// timeout job and by NotifyWaiter's resolve-in-agent job.
+    /// `resolve`/`reject` are the settle targets (that same promise, settled
+    /// in place) the timeout job and NotifyWaiter's resolve-in-agent job use.
     promise: Handle,
     resolve: JsVal,
     reject: JsVal,

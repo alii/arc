@@ -16,6 +16,7 @@ import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as object_builtin
 import arc/rt/call as rt_call
 import arc/rt/elements
+import arc/rt/js_string
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -57,6 +58,14 @@ import gleam/string
 /// V8's message for the iteration-budget RangeError and for a rejected
 /// array-length Set. Shared with the string-size cap.
 const iteration_budget_msg = "Invalid array length"
+
+/// Throw the iteration-budget RangeError when `exhausted`.
+fn check_budget(st: Agent, exhausted: Bool) -> Nil {
+  case exhausted {
+    True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False -> Nil
+  }
+}
 
 /// V8's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
@@ -428,7 +437,7 @@ fn require_array(
 fn object_length(st: Agent, ref: Handle) -> #(Int, Agent) {
   case rt_store.t_cell_get(st, ref) {
     SObject(kind: ArrayObj(length:), ..) -> #(length, st)
-    SObject(kind: StringObj(value: s), ..) -> #(string.length(s), st)
+    SObject(kind: StringObj(value: s), ..) -> #(js_string.length(s), st)
     SObject(props:, ..) -> length_of_properties(st, ref, props)
     rt_types.SShapedObject(..) as s ->
       case rt_obj.as_sobject(st, s) {
@@ -582,16 +591,21 @@ fn generic_get(st: Agent, ref: Handle, idx: Int) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, mk_object(ref), StringKey(index_key(idx)))
 }
 
-/// §7.3.2 Get on any array-like receiver (including primitive strings) by
-/// integer index. Goes through `t_get_prop`, which auto-boxes primitives.
-fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, this, StringKey(index_key(idx)))
-}
-
 /// Fused HasProperty + Get by integer index. `Some(val)` when present (own or
 /// inherited); `None` on a hole. Own probe is one heap read via
 /// `t_get_own_index`; only a miss walks the prototype chain.
 fn get_index_if_present(
+  st: Agent,
+  this: JsVal,
+  idx: Int,
+) -> #(Option(JsVal), Agent) {
+  case helpers.own_element(st, this, idx) {
+    helpers.Hit(v) -> #(Some(v), st)
+    helpers.Slow -> probe_index_if_present(st, this, idx)
+  }
+}
+
+fn probe_index_if_present(
   st: Agent,
   this: JsVal,
   idx: Int,
@@ -640,7 +654,7 @@ fn generic_index_if_present(
   case has {
     False -> #(None, st)
     True -> {
-      let #(v, st) = get_index(st, this, idx)
+      let #(v, st) = helpers.get_index(st, this, idx)
       #(Some(v), st)
     }
   }
@@ -672,42 +686,27 @@ fn dense_snapshot(
 /// True when `props` carries any Index-keyed entry (accessor / attribute
 /// override) — forces the generic per-element path.
 fn properties_have_index_keys(props: Dict(PropertyKey, Property)) -> Bool {
-  !dict.is_empty(props)
-  && list.any(dict.keys(props), fn(key) {
-    case key {
-      Index(_) -> True
-      _ -> False
-    }
-  })
+  !dict.is_empty(props) && any_index_key(dict.keys(props))
 }
 
-/// True when any prototype-chain object carries an Index property (dict or
-/// elements) — makes holes / beyond-length writes observable.
-fn proto_chain_has_index_keys(st: Agent, proto: Option(Handle)) -> Bool {
-  case proto {
-    None -> False
-    Some(proto_ref) ->
-      case rt_store.t_cell_get(st, proto_ref) {
-        SObject(kind: ProxyObj(..), ..) -> True
-        SObject(kind: StringObj(value: s), ..) if s != "" -> True
-        SObject(props:, elements: els, proto:, ..) ->
-          !elements.is_empty(els)
-          || properties_have_index_keys(props)
-          || proto_chain_has_index_keys(st, proto)
-        // Shaped: no elements, Named-only keys → recurse.
-        rt_types.SShapedObject(proto:, ..) ->
-          proto_chain_has_index_keys(st, proto)
-        _ -> False
-      }
+fn any_index_key(keys: List(PropertyKey)) -> Bool {
+  case keys {
+    [] -> False
+    [Index(_), ..] -> True
+    [_, ..rest] -> any_index_key(rest)
   }
 }
 
 /// Bulk in-place mutator fast path — one heap read, one `transform` on the
 /// #(elements, length), one heap write. `None` when ineligible (see arc doc).
+/// `from`/`to` bound the indices the operation reads or writes, so the
+/// own-props / prototype-chain probe only looks there.
 fn try_elements_fast_path(
   st: Agent,
   ref: Handle,
   expected_len: Int,
+  from: Int,
+  to: Int,
   transform: fn(JsElements, Int) -> #(JsElements, Int, payload),
 ) -> Option(#(payload, Agent)) {
   case rt_store.t_cell_get(st, ref) {
@@ -723,11 +722,12 @@ fn try_elements_fast_path(
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
+      let count = to - from
       let eligible =
         length == expected_len
         && length_writable
-        && !properties_have_index_keys(props)
-        && !proto_chain_has_index_keys(st, proto)
+        && !dict_has_index_in_range(props, from, count)
+        && !proto_chain_has_index_in_range(st, proto, from, count)
       case eligible {
         False -> None
         True -> {
@@ -796,6 +796,9 @@ fn try_push_fast_path(
   }
 }
 
+/// Any own Index key in [start, start+count)? A handful of indices are
+/// probed directly; a wider range scans the key list instead (a superset
+/// answer: any Index key at all), which is cheaper than more probes.
 fn dict_has_index_in_range(
   props: Dict(PropertyKey, Property),
   start: Int,
@@ -803,9 +806,15 @@ fn dict_has_index_in_range(
 ) -> Bool {
   case count {
     1 -> dict.has_key(props, Index(start))
-    _ ->
-      !dict.is_empty(props)
-      && dict_index_in_range_loop(props, start, start + count)
+    _ if count <= 0 -> False
+    _ -> {
+      let size = dict.size(props)
+      size > 0
+      && case count > 4 {
+        True -> any_index_key(dict.keys(props))
+        False -> dict_index_in_range_loop(props, start, start + count)
+      }
+    }
   }
 }
 
@@ -850,7 +859,8 @@ fn proto_chain_has_index_in_range(
 }
 
 fn elements_has_in_range(els: JsElements, start: Int, count: Int) -> Bool {
-  !elements.is_empty(els) && elements_in_range_loop(els, start, start + count)
+  !elements.is_empty(els)
+  && { count > 64 || elements_in_range_loop(els, start, start + count) }
 }
 
 fn elements_in_range_loop(els: JsElements, idx: Int, end: Int) -> Bool {
@@ -1013,7 +1023,7 @@ fn join_elements_generic(
   case idx >= length {
     True -> finish_join(st, acc, separator)
     False -> {
-      let #(v, st) = get_index(st, this, idx)
+      let #(v, st) = helpers.get_index(st, this, idx)
       case classify(v) {
         KUndef | KNull ->
           join_elements_generic(st, this, idx + 1, length, separator, [
@@ -1086,7 +1096,7 @@ fn array_pop(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
     False -> {
       let new_len = length - 1
       let fast = {
-        use els, len <- try_elements_fast_path(st, ref, length)
+        use els, len <- try_elements_fast_path(st, ref, length, new_len, length)
         #(elements.truncate(els, len - 1), len - 1, elements.get(els, len - 1))
       }
       case fast {
@@ -1110,7 +1120,7 @@ fn array_shift(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
     True -> #(mk_undefined(), generic_set_length(st, ref, 0))
     False -> {
       let fast = {
-        use els, len <- try_elements_fast_path(st, ref, length)
+        use els, len <- try_elements_fast_path(st, ref, length, 0, length)
         let first = elements.get(els, 0)
         let els =
           elements.move_range(els, 1, len, -1) |> elements.truncate(len - 1)
@@ -1147,9 +1157,7 @@ fn move_range(
   case done {
     True -> st
     False -> {
-      use <- bool.lazy_guard(fuel <= 0, fn() {
-        rt_val.t_throw_range_error(st, iteration_budget_msg)
-      })
+      check_budget(st, fuel <= 0)
       let step = step_of(dir)
       let to = k + delta
       let #(has_k, st) = generic_has_op(st, ref, k)
@@ -1182,7 +1190,7 @@ fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   })
   use <- guard_safe_length(st, new_len)
   let fast = {
-    use els, len <- try_elements_fast_path(st, ref, length)
+    use els, len <- try_elements_fast_path(st, ref, length, 0, new_len)
     let els =
       elements.move_range(els, 0, len, arg_count)
       |> elements.write_list(0, args)
@@ -1245,13 +1253,11 @@ fn copy_range_dense(
   remaining: Int,
   dst: JsElements,
 ) -> #(JsElements, Agent) {
-  use <- bool.lazy_guard(remaining > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  check_budget(st, remaining > limits.max_iteration)
   case remaining <= 0 {
     True -> #(dst, st)
     False -> {
-      let #(val, st) = get_index(st, src, src_idx)
+      let #(val, st) = helpers.get_index(st, src, src_idx)
       copy_range_dense(
         st,
         src,
@@ -1294,9 +1300,7 @@ fn copy_range_fueled(
   dst: JsElements,
   fuel: Int,
 ) -> #(JsElements, Agent) {
-  use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  check_budget(st, fuel <= 0 && remaining > 0)
   case dense_snapshot(st, src) {
     Some(#(els, proto)) ->
       copy_range_snapshot(
@@ -1325,9 +1329,7 @@ fn copy_range_snapshot(
   dst: JsElements,
   fuel: Int,
 ) -> #(JsElements, Agent) {
-  use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  check_budget(st, fuel <= 0 && remaining > 0)
   case remaining <= 0 {
     True -> #(dst, st)
     False ->
@@ -1384,9 +1386,7 @@ fn copy_range_generic(
   dst: JsElements,
   fuel: Int,
 ) -> #(JsElements, Agent) {
-  use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  check_budget(st, fuel <= 0 && remaining > 0)
   case remaining <= 0 {
     True -> #(dst, st)
     False -> {
@@ -1555,6 +1555,39 @@ fn array_species_create(
   length: Int,
 ) -> #(Option(Handle), Agent) {
   case classify(original) {
+    KHandle(h) ->
+      case intrinsic_species(st, rt_store.t_cell_get(st, h)) {
+        True -> #(None, st)
+        False -> species_protocol(st, original, length)
+      }
+    _ -> #(None, st)
+  }
+}
+
+/// §9.4.2.3 steps 3-7 decided from heap state alone: `slot` is a plain Array
+/// with no own "constructor", its [[Prototype]] is this realm's
+/// %Array.prototype% whose "constructor" is still a data property holding
+/// %Array%, and %Array%[@@species] is still a `ReturnThis` native getter.
+/// Every Get the protocol would run then yields %Array% without user code,
+/// which is the `None` (plain ArrayCreate) outcome.
+fn intrinsic_species(st: Agent, slot: JsSlot) -> Bool {
+  let array = st.realm.array
+  case slot {
+    SObject(kind: ArrayObj(_), proto: Some(p), props:, ..) ->
+      p == array.prototype
+      && !dict.has_key(props, Named("constructor"))
+      && common.species_intact(st, array)
+    _ -> False
+  }
+}
+
+/// The observable §9.4.2.3 protocol.
+fn species_protocol(
+  st: Agent,
+  original: JsVal,
+  length: Int,
+) -> #(Option(Handle), Agent) {
+  case classify(original) {
     KHandle(_) -> {
       let #(is_arr, st) = try_is_array(st, original)
       case is_arr {
@@ -1710,9 +1743,7 @@ fn copy_range_to_species(
   remaining: Int,
   fuel: Int,
 ) -> Agent {
-  use <- bool.lazy_guard(fuel <= 0 && remaining > 0, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  check_budget(st, fuel <= 0 && remaining > 0)
   case remaining <= 0 {
     True -> st
     False -> {
@@ -1744,7 +1775,7 @@ fn array_reverse(
 ) -> #(JsVal, Agent) {
   use st, this, ref, length <- require_array(st, this)
   let fast = {
-    use els, len <- try_elements_fast_path(st, ref, length)
+    use els, len <- try_elements_fast_path(st, ref, length, 0, length)
     #(elements.reverse_range(els, len), len, Nil)
   }
   case fast {
@@ -1766,9 +1797,7 @@ fn reverse_generic(
   case lo >= hi {
     True -> st
     False -> {
-      use <- bool.lazy_guard(fuel <= 0, fn() {
-        rt_val.t_throw_range_error(st, iteration_budget_msg)
-      })
+      check_budget(st, fuel <= 0)
       let #(has_lo, st) = generic_has_op(st, ref, lo)
       let #(lo_val, st) = get_index_if(st, ref, lo, has_lo)
       let #(has_hi, st) = generic_has_op(st, ref, hi)
@@ -1818,7 +1847,7 @@ fn array_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     rt_val.t_throw_range_error(st, iteration_budget_msg)
   })
   let fast = {
-    use els, len <- try_elements_fast_path(st, ref, length)
+    use els, len <- try_elements_fast_path(st, ref, length, start, end)
     #(elements.fill_range(els, start, end, fill_val), len, Nil)
   }
   case fast {
@@ -1851,7 +1880,7 @@ fn array_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case idx < 0 || idx >= length {
     True -> #(mk_undefined(), st)
-    False -> get_index(st, this, idx)
+    False -> helpers.get_index(st, this, idx)
   }
 }
 
@@ -1863,14 +1892,7 @@ fn array_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  forward_search_driver(
-    st,
-    this,
-    args,
-    rt_val.strict_equal,
-    SkipHoles,
-    from_int,
-  )
+  forward_search_driver(st, this, args, Strict, SkipHoles, from_int)
 }
 
 /// §23.1.3.15 Array.prototype.includes(searchElement[, fromIndex]).
@@ -1879,14 +1901,9 @@ fn array_includes(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  forward_search_driver(
-    st,
-    this,
-    args,
-    rt_val.same_value_zero,
-    VisitHoles,
-    fn(found) { mk_bool(found >= 0) },
-  )
+  forward_search_driver(st, this, args, SameValueZero, VisitHoles, fn(found) {
+    mk_bool(found >= 0)
+  })
 }
 
 /// Shared prologue + dispatch for indexOf / includes.
@@ -1894,7 +1911,7 @@ fn forward_search_driver(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
-  eq: fn(JsVal, JsVal) -> Bool,
+  eq: EqMode,
   hole_mode: HoleMode,
   wrap: fn(Int) -> JsVal,
 ) -> #(JsVal, Agent) {
@@ -1944,37 +1961,152 @@ fn array_last_index_of(
   #(from_int(found), st)
 }
 
+/// Which equality a search uses: indexOf/lastIndexOf IsStrictlyEqual,
+/// includes SameValueZero. An atom the FFI scan dispatches on.
+type EqMode {
+  Strict
+  SameValueZero
+}
+
+fn eq_apply(eq: EqMode, a: JsVal, b: JsVal) -> Bool {
+  case eq {
+    Strict -> rt_val.strict_equal(a, b)
+    SameValueZero -> rt_val.same_value_zero(a, b)
+  }
+}
+
+/// Outcome of an FFI element scan: a match, the first hole met (the caller
+/// decides whether it is inherited / counts as undefined), or exhausted.
+type Scan {
+  Match(Int)
+  HoleAt(Int)
+  Absent
+}
+
+@external(erlang, "arc_rt_builtins_ffi", "scan_forward")
+fn scan_forward(
+  els: JsElements,
+  search: JsVal,
+  idx: Int,
+  end: Int,
+  eq: EqMode,
+) -> Scan
+
+@external(erlang, "arc_rt_builtins_ffi", "scan_backward")
+fn scan_backward(els: JsElements, search: JsVal, idx: Int, eq: EqMode) -> Scan
+
 fn search_forward(
   st: Agent,
   this: JsVal,
   idx: Int,
   length: Int,
   search: JsVal,
-  eq: fn(JsVal, JsVal) -> Bool,
+  eq: EqMode,
   hole_mode: HoleMode,
   fuel: Int,
 ) -> #(Int, Agent) {
-  use <- bool.lazy_guard(fuel <= 0 && idx < length, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  case dense_snapshot(st, this) {
+    Some(#(els, proto)) ->
+      search_forward_snapshot(
+        st,
+        this,
+        els,
+        proto,
+        idx,
+        length,
+        search,
+        eq,
+        hole_mode,
+        fuel,
+      )
+    None ->
+      search_forward_generic(st, this, idx, length, search, eq, hole_mode, fuel)
+  }
+}
+
+fn search_forward_snapshot(
+  st: Agent,
+  this: JsVal,
+  els: JsElements,
+  proto: Option(Handle),
+  idx: Int,
+  length: Int,
+  search: JsVal,
+  eq: EqMode,
+  hole_mode: HoleMode,
+  fuel: Int,
+) -> #(Int, Agent) {
+  case scan_forward(els, search, idx, length, eq) {
+    Match(i) -> #(i, st)
+    Absent -> #(-1, st)
+    HoleAt(i) -> {
+      let fuel = fuel - { i - idx }
+      check_budget(st, fuel <= 0)
+      let #(inherited, st) = hole_is_inherited(st, proto, i)
+      let matched = case inherited, hole_mode {
+        False, VisitHoles -> eq_apply(eq, mk_undefined(), search)
+        _, _ -> False
+      }
+      case inherited, matched {
+        True, _ ->
+          search_forward_generic(
+            st,
+            this,
+            i,
+            length,
+            search,
+            eq,
+            hole_mode,
+            fuel,
+          )
+        False, True -> #(i, st)
+        False, False ->
+          search_forward_snapshot(
+            st,
+            this,
+            els,
+            proto,
+            i + 1,
+            length,
+            search,
+            eq,
+            hole_mode,
+            fuel - 1,
+          )
+      }
+    }
+  }
+}
+
+fn search_forward_generic(
+  st: Agent,
+  this: JsVal,
+  idx: Int,
+  length: Int,
+  search: JsVal,
+  eq: EqMode,
+  hole_mode: HoleMode,
+  fuel: Int,
+) -> #(Int, Agent) {
+  check_budget(st, fuel <= 0 && idx < length)
   case idx >= length {
     True -> #(-1, st)
     False -> {
       let #(maybe_val, st) = case hole_mode {
         SkipHoles -> get_index_if_present(st, this, idx)
         VisitHoles -> {
-          let #(v, st) = get_index(st, this, idx)
+          let #(v, st) = helpers.get_index(st, this, idx)
           #(Some(v), st)
         }
       }
       let matched = case maybe_val {
-        Some(val) -> eq(val, search)
+        Some(val) -> eq_apply(eq, val, search)
         None -> False
       }
       case matched {
         True -> #(idx, st)
         False ->
-          search_forward(
+          search_forward_generic(
             st,
             this,
             idx + 1,
@@ -1996,19 +2128,65 @@ fn search_backward(
   search: JsVal,
   fuel: Int,
 ) -> #(Int, Agent) {
-  use <- bool.lazy_guard(fuel <= 0 && idx >= 0, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  case dense_snapshot(st, this) {
+    Some(#(els, proto)) ->
+      search_backward_snapshot(st, this, els, proto, idx, search, fuel)
+    None -> search_backward_generic(st, this, idx, search, fuel)
+  }
+}
+
+fn search_backward_snapshot(
+  st: Agent,
+  this: JsVal,
+  els: JsElements,
+  proto: Option(Handle),
+  idx: Int,
+  search: JsVal,
+  fuel: Int,
+) -> #(Int, Agent) {
+  case scan_backward(els, search, idx, Strict) {
+    Match(i) -> #(i, st)
+    Absent -> #(-1, st)
+    HoleAt(i) -> {
+      let fuel = fuel - { idx - i }
+      check_budget(st, fuel <= 0)
+      let #(inherited, st) = hole_is_inherited(st, proto, i)
+      case inherited {
+        True -> search_backward_generic(st, this, i, search, fuel)
+        False ->
+          search_backward_snapshot(
+            st,
+            this,
+            els,
+            proto,
+            i - 1,
+            search,
+            fuel - 1,
+          )
+      }
+    }
+  }
+}
+
+fn search_backward_generic(
+  st: Agent,
+  this: JsVal,
+  idx: Int,
+  search: JsVal,
+  fuel: Int,
+) -> #(Int, Agent) {
+  check_budget(st, fuel <= 0 && idx >= 0)
   case idx < 0 {
     True -> #(-1, st)
     False -> {
       let #(maybe_val, st) = get_index_if_present(st, this, idx)
       case maybe_val {
-        None -> search_backward(st, this, idx - 1, search, fuel - 1)
+        None -> search_backward_generic(st, this, idx - 1, search, fuel - 1)
         Some(val) ->
           case rt_val.strict_equal(val, search) {
             True -> #(idx, st)
-            False -> search_backward(st, this, idx - 1, search, fuel - 1)
+            False ->
+              search_backward_generic(st, this, idx - 1, search, fuel - 1)
           }
       }
     }
@@ -2092,16 +2270,19 @@ fn iterate_loop(
   stop_on: fn(JsVal) -> Bool,
   cont: fn(Agent, FoundAt) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  use <- bool.lazy_guard(fuel <= 0 && idx != end, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  check_budget(st, fuel <= 0 && idx != end)
   case idx == end {
     True -> cont(st, NotFound)
     False -> {
-      let #(maybe_elem, st) = get_index_if_present(st, arr, idx)
-      let maybe_elem = case hole_mode {
-        VisitHoles -> Some(option.unwrap(maybe_elem, mk_undefined()))
-        SkipHoles -> maybe_elem
+      let #(maybe_elem, st) = case helpers.own_element(st, arr, idx) {
+        helpers.Hit(elem) -> #(Some(elem), st)
+        helpers.Slow -> {
+          let #(maybe_elem, st) = probe_index_if_present(st, arr, idx)
+          case hole_mode {
+            VisitHoles -> #(Some(option.unwrap(maybe_elem, mk_undefined())), st)
+            SkipHoles -> #(maybe_elem, st)
+          }
+        }
       }
       case maybe_elem {
         None ->
@@ -2177,23 +2358,38 @@ fn fold_loop(
 ) -> #(acc, Agent) {
   case idx >= length {
     True -> #(acc, st)
-    False -> {
-      let #(maybe_elem, st) = get_index_if_present(st, arr, idx)
-      case maybe_elem {
-        None -> fold_loop(st, arr, idx + 1, length, cb, this_arg, acc, combine)
-        Some(elem) -> {
-          let #(result, st) =
-            rt_call.t_call_checked(st, cb, this_arg, [
-              elem,
-              from_int(idx),
-              arr,
-            ])
-          let acc = combine(st, acc, result, elem, idx)
-          fold_loop(st, arr, idx + 1, length, cb, this_arg, acc, combine)
+    False ->
+      case helpers.own_element(st, arr, idx) {
+        helpers.Hit(elem) ->
+          fold_step(st, arr, idx, length, cb, this_arg, acc, combine, elem)
+        helpers.Slow -> {
+          let #(maybe_elem, st) = probe_index_if_present(st, arr, idx)
+          case maybe_elem {
+            None ->
+              fold_loop(st, arr, idx + 1, length, cb, this_arg, acc, combine)
+            Some(elem) ->
+              fold_step(st, arr, idx, length, cb, this_arg, acc, combine, elem)
+          }
         }
       }
-    }
   }
+}
+
+fn fold_step(
+  st: Agent,
+  arr: JsVal,
+  idx: Int,
+  length: Int,
+  cb: JsVal,
+  this_arg: JsVal,
+  acc: acc,
+  combine: fn(Agent, acc, JsVal, JsVal, Int) -> acc,
+  elem: JsVal,
+) -> #(acc, Agent) {
+  let #(result, st) =
+    rt_call.t_call_checked(st, cb, this_arg, [elem, from_int(idx), arr])
+  let acc = combine(st, acc, result, elem, idx)
+  fold_loop(st, arr, idx + 1, length, cb, this_arg, acc, combine)
 }
 
 /// §23.1.3.13 Array.prototype.forEach(callbackfn[, thisArg]).
@@ -2463,9 +2659,7 @@ fn find_present(
   case idx == end {
     True -> #(None, st)
     False -> {
-      use <- bool.lazy_guard(fuel <= 0, fn() {
-        rt_val.t_throw_range_error(st, iteration_budget_msg)
-      })
+      check_budget(st, fuel <= 0)
       let #(maybe_val, st) = get_index_if_present(st, this, idx)
       case maybe_val {
         Some(val) -> #(Some(#(idx, val)), st)
@@ -2489,9 +2683,7 @@ fn reduce_loop(
   case idx == end {
     True -> #(acc, st)
     False -> {
-      use <- bool.lazy_guard(fuel <= 0, fn() {
-        rt_val.t_throw_range_error(st, iteration_budget_msg)
-      })
+      check_budget(st, fuel <= 0)
       let #(maybe_elem, st) = get_index_if_present(st, arr, idx)
       case maybe_elem {
         None -> reduce_loop(st, arr, idx + step, end, cb, acc, dir, fuel - 1)
@@ -2838,7 +3030,7 @@ fn write_sort_result(
 ) -> Agent {
   let fast = case idx == 0 {
     True -> {
-      use _els, len <- try_elements_fast_path(st, ref, length)
+      use _els, len <- try_elements_fast_path(st, ref, length, 0, length)
       #(elements.from_list(values), len, Nil)
     }
     False -> None
@@ -2952,7 +3144,13 @@ fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   let shift = item_count - actual_delete_count
   let fast = {
-    use els, len <- try_elements_fast_path(st, ref, length)
+    use els, len <- try_elements_fast_path(
+      st,
+      ref,
+      length,
+      actual_start,
+      int.max(length, new_length),
+    )
     let move_from = actual_start + actual_delete_count
     let els = case shift == 0 {
       True -> els
@@ -3180,7 +3378,7 @@ fn array_copy_within(
     True -> #(this, st)
     False -> {
       let fast = {
-        use els, len <- try_elements_fast_path(st, ref, length)
+        use els, len <- try_elements_fast_path(st, ref, length, 0, length)
         #(elements.copy_within(els, from, target, count), len, Nil)
       }
       case fast {
@@ -3411,7 +3609,7 @@ fn array_from_loop(
   case idx >= length {
     True -> from_finish(st, target, length)
     False -> {
-      let #(elem, st) = get_index(st, items, idx)
+      let #(elem, st) = helpers.get_index(st, items, idx)
       let #(mapped, st) = case map_fn {
         None -> #(elem, st)
         Some(mf) ->
@@ -3524,7 +3722,7 @@ fn collect_elements_descending(
   case idx < 0 {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(val, st) = get_index(st, this, idx)
+      let #(val, st) = helpers.get_index(st, this, idx)
       collect_elements_descending(st, this, idx - 1, [val, ..acc])
     }
   }
@@ -3582,7 +3780,7 @@ fn to_locale_string_loop(
         Error(Nil) -> rt_val.t_throw_range_error(st, "Invalid string length")
       }
     False -> {
-      let #(elem, st) = get_index(st, this, idx)
+      let #(elem, st) = helpers.get_index(st, this, idx)
       case classify(elem) {
         KUndef | KNull ->
           to_locale_string_loop(

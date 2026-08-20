@@ -237,12 +237,11 @@ pub type FunctionInfo {
   FunctionInfo(
     local_count: Int,
     lexical: LexicalSlots,
-    /// Which OWNED lexical pseudo-slots (`lexical` above) are heap-boxed
-    /// because an inner arrow / direct-eval captures them. `lookup_lexical`
-    /// returns this as the boxed flag for an owned slot — a non-captured
-    /// `this` is a plain local, not a box. Populated by `analyze_captures`
-    /// (it is the per-function `lexical_captured` value). Replaces the
-    /// legacy resolver's `lexical_captured: LexicalRefs` on Resolved.
+    /// Which lexical pseudo-slots (`lexical` above, owned or captured) hold
+    /// a heap box rather than the value: all four under direct eval, and a
+    /// derived constructor's `this` when an inner arrow captures it (super()
+    /// may still write it); everything else is captured by value. `lookup_lexical`
+    /// returns this as the boxed flag. Populated by `analyze_captures`.
     lexical_boxed: LexicalRefs,
     captures: List(#(String, Int)),
     lexical_captures: Dict(LexicalRef, Int),
@@ -268,6 +267,9 @@ pub type FunctionInfo {
     /// `build_capture_inputs` can derive `FnAnalysisInput.is_arrow`
     /// without re-walking the AST. V8: `IsArrowFunction(function_kind_)`.
     is_arrow: Bool,
+    /// Constructor of a class with a heritage clause: `super()` binds
+    /// `this` after entry, so an arrow-captured `this` stays boxed.
+    is_derived_constructor: Bool,
   )
 }
 
@@ -518,11 +520,19 @@ pub type RawScope {
 /// `hoist_annexb_block_functions` can walk block→fn-scope and decide
 /// blocked-vs-hoisted once the whole body is known.
 pub type RawFunctionInfo {
-  RawFunctionInfo(is_arrow: Bool, annexb_candidates: List(#(ScopeId, String)))
+  RawFunctionInfo(
+    is_arrow: Bool,
+    is_derived_constructor: Bool,
+    annexb_candidates: List(#(ScopeId, String)),
+  )
 }
 
 /// Default `RawFunctionInfo` — non-arrow, no Annex-B candidates yet.
-const blank_raw_fn_info = RawFunctionInfo(is_arrow: False, annexb_candidates: [])
+const blank_raw_fn_info = RawFunctionInfo(
+  is_arrow: False,
+  is_derived_constructor: False,
+  annexb_candidates: [],
+)
 
 /// A fresh `RawScope` with the 8 always-default fields filled in. The 5
 /// per-site fields (id / parent / function_scope / kind / is_strict) are
@@ -572,10 +582,11 @@ pub type ScopeBuilder {
     current_fn: ScopeId,
     raw_refs: List(#(ScopeId, String)),
     /// Subset of `raw_refs` that appear as an assignment TARGET (LHS of
-    /// `=`/`op=`, `++`/`--`, for-in/of head, destructuring-assignment leaf).
-    /// Drives capture-by-value: a captured binding never in this list can
-    /// skip boxing (see `derive_vars_to_box`).
-    assign_refs: List(#(ScopeId, String)),
+    /// `=`/`op=`, `++`/`--`, for-in/of head, destructuring-assignment leaf),
+    /// each stamped with `next_id` at the write: every scope with an id at
+    /// or above it was opened after the write in source order. Drives
+    /// capture-by-value (see `derive_vars_to_box` / `never_box_names`).
+    assign_refs: List(#(ScopeId, String, ScopeId)),
     /// Enclosing scope of each `try` statement currently being parsed,
     /// innermost first.
     try_scopes: List(ScopeId),
@@ -841,7 +852,7 @@ pub fn sb_assign_ref(sb: ScopeBuilder, name: String) -> ScopeBuilder {
   }
   ScopeBuilder(
     ..sb,
-    assign_refs: [#(sb.current, name), ..sb.assign_refs],
+    assign_refs: [#(sb.current, name, sb.next_id), ..sb.assign_refs],
     try_assign_refs:,
   )
 }
@@ -1088,17 +1099,20 @@ pub fn sb_prune_empty_block(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
           )
         }
       }
-      let own_children = sb_children_raw(sb, id) |> list.reverse
+      let own_children = sb_children_raw(sb, id)
       // Reparent: replace `id` in parent's (reverse-order) child list with
       // `id`'s own children, and rewrite each child's `parent` pointer.
-      let parent_children = sb_children_raw(sb, parent_id)
-      let spliced =
-        list.flat_map(parent_children, fn(c) {
-          case c == id {
-            True -> list.reverse(own_children)
-            False -> [c]
-          }
-        })
+      // The block just closed, so it heads the prepend-only list.
+      let spliced = case sb_children_raw(sb, parent_id) {
+        [head, ..rest] if head == id -> list.append(own_children, rest)
+        parent_children ->
+          list.flat_map(parent_children, fn(c) {
+            case c == id {
+              True -> own_children
+              False -> [c]
+            }
+          })
+      }
       // PERF: do NOT `dict.delete(sb.scopes, id)` and do NOT walk
       // `sb.raw_refs` to remap refs from `id` → `parent_id`. `raw_refs`
       // is the global prepend-only list of every identifier seen so
@@ -1540,6 +1554,7 @@ fn blank_function_info(
     // pairs, the cooked list is just the unblocked names.
     annexb_candidates: [],
     is_arrow: raw.is_arrow,
+    is_derived_constructor: raw.is_derived_constructor,
   )
 }
 
@@ -1649,6 +1664,15 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
     False -> dict.new()
   }
   let refs_args = resolve_arguments_refs(tree, sb)
+  // Hoisted FunctionDeclarations: instantiated at scope entry, before any
+  // statement of their scope has run.
+  let fn_decls =
+    dict.fold(sb.scopes, set.new(), fn(acc, id, raw) {
+      case raw.source_tag {
+        TagFnDecl -> set.insert(acc, id)
+        TagSwitchTest | TagOther -> acc
+      }
+    })
   // --- (d) capture/boxing/lexical allocation — unchanged ------------------
   analyze_captures(
     tree,
@@ -1656,6 +1680,7 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
     assigned,
     try_assigned,
     refs_args,
+    fn_decls,
     sb.own_lexical_refs,
   )
 }
@@ -2068,15 +2093,16 @@ fn resolve_raw_refs(
 }
 
 /// Resolve every parser-recorded assignment target to the FUNCTION scope
-/// that declares it. Result: `declaring_fn → names ever assigned to`.
+/// that declares it. Result: `declaring_fn → name → stamp of its LAST
+/// write` (the highest `next_id` seen at a write, see `assign_refs`).
 /// Used by `derive_vars_to_box` to skip boxing never-reassigned captures.
 /// Undeclared (global) targets are dropped — they never had a local slot.
 fn resolve_assign_refs(
   tree: ScopeTree,
   sb: ScopeBuilder,
-) -> Dict(ScopeId, Set(String)) {
+) -> Dict(ScopeId, Dict(String, ScopeId)) {
   use acc, ref <- list.fold(sb.assign_refs, dict.new())
-  let #(scope_id, name) = ref
+  let #(scope_id, name, stamp) = ref
   case nearest_finalized(tree, sb, scope_id) {
     None -> acc
     Some(start) ->
@@ -2084,10 +2110,10 @@ fn resolve_assign_refs(
         None -> acc
         Some(decl) ->
           dict.upsert(acc, decl.function_scope, fn(prev) {
-            case prev {
-              Some(s) -> set.insert(s, name)
-              None -> set.from_list([name])
-            }
+            option.unwrap(prev, dict.new())
+            |> dict.upsert(name, fn(last) {
+              int.max(stamp, option.unwrap(last, 0))
+            })
           })
       }
   }
@@ -2385,8 +2411,9 @@ fn fold_enclosing_withs(
 
 /// Resolve a lexical pseudo-binding (this / active_func / home_object /
 /// new.target) from `scope_id`. Returns the local slot in the owning
-/// function's frame and whether it is boxed (it is when an inner arrow
-/// or direct-eval captures it, so writes via super() alias correctly).
+/// function's frame and whether it is boxed (`FunctionInfo.lexical_boxed`:
+/// direct eval, or a derived constructor's `this` captured by an arrow so
+/// the write via super() aliases correctly).
 pub fn lookup_lexical(
   tree: ScopeTree,
   scope_id: ScopeId,
@@ -2394,15 +2421,12 @@ pub fn lookup_lexical(
 ) -> SlotRef {
   let scope = get_scope(tree, scope_id)
   let info = function_info(tree, scope.function_scope)
+  let boxed = lexical.lexical_refs_get(info.lexical_boxed, ref)
   case lexical.lexical_slot(info.lexical, ref) {
-    // Owned slot: boxed only when an inner arrow / direct-eval captures it
-    // (FunctionInfo.lexical_boxed, populated by analyze_captures). A
-    // non-captured `this` is a plain GetLocal, not a box deref.
-    Some(slot) ->
-      SlotRef(slot:, boxed: lexical.lexical_refs_get(info.lexical_boxed, ref))
+    Some(slot) -> SlotRef(slot:, boxed:)
     None ->
       case dict.get(info.lexical_captures, ref) {
-        Ok(slot) -> SlotRef(slot:, boxed: True)
+        Ok(slot) -> SlotRef(slot:, boxed:)
         // No owned slot and no inherited capture: unreachable by
         // construction — every site that calls lookup_lexical is inside a
         // function the analyzer has populated. Returning a sentinel slot
@@ -2533,6 +2557,8 @@ type ParentView {
   ParentView(
     /// All visible names → PARENT's slot index (for env_descriptors).
     names: Dict(String, Int),
+    /// `dict.keys(names)` as a set, built once per view.
+    name_set: Set(String),
     /// Subset whose ORIGIN binding is const.
     consts: Set(String),
     /// Subset whose ORIGIN binding is a named-function-expression self name.
@@ -2546,6 +2572,9 @@ type ParentView {
     /// Lexical pseudo-slots the parent has available (owned or captured).
     /// An arrow can capture only refs the parent actually has.
     lexical_available: LexicalRefs,
+    /// Subset of `lexical_available` the parent keeps in a heap box; the
+    /// rest an arrow captures by value.
+    lexical_boxed: LexicalRefs,
   )
 }
 
@@ -2653,9 +2682,10 @@ fn build_inputs_rec(
 fn analyze_captures(
   tree: ScopeTree,
   captured: Set(#(ScopeId, String)),
-  assigned: Dict(ScopeId, Set(String)),
+  assigned: Dict(ScopeId, Dict(String, ScopeId)),
   try_assigned: Dict(ScopeId, Set(String)),
   refs_args: Set(ScopeId),
+  fn_decls: Set(ScopeId),
   own_lexical_refs: Dict(ScopeId, LexicalRefs),
 ) -> ScopeTree {
   let inputs = build_capture_inputs(tree, captured, own_lexical_refs)
@@ -2674,11 +2704,13 @@ fn analyze_captures(
   let root_parent =
     ParentView(
       names: dict.new(),
+      name_set: set.new(),
       consts: set.new(),
       fn_names: set.new(),
       lets: set.new(),
       boxed: set.new(),
       lexical_available: lexical.no_lexical_refs,
+      lexical_boxed: lexical.every_lexical_ref,
     )
   compute_down(
     tree,
@@ -2688,6 +2720,7 @@ fn analyze_captures(
     assigned,
     try_assigned,
     refs_args,
+    fn_decls,
     root_scope_id,
     root_parent,
   )
@@ -2745,12 +2778,21 @@ fn compute_up(
   // child's creation site (scan_free's `in_scope` filter at IrMakeClosure)
   // ∪ inherited with-object synthetics not declared here.
   let declared = declared_in(own_scopes)
-  let from_children =
-    list.fold(children, set.new(), fn(s, cid) {
-      let visible = visible_at_creation(tree, cid)
-      let visible_names = set.from_list(dict.keys(visible))
+  // Siblings created in the same scope see the same bindings: build the
+  // visible-name set once per creation scope, not once per child.
+  let #(from_children, _) =
+    list.fold(children, #(set.new(), dict.new()), fn(st, cid) {
+      let #(s, memo) = st
+      let creation = { get_scope(tree, cid) }.parent
+      let #(visible_names, memo) = case dict.get(memo, creation) {
+        Ok(names) -> #(names, memo)
+        Error(Nil) -> {
+          let names = set.from_list(dict.keys(visible_at_creation(tree, cid)))
+          #(names, dict.insert(memo, creation, names))
+        }
+      }
       let child_free = { get_up(acc, cid) }.transitive_free
-      set.union(s, set.difference(child_free, visible_names))
+      #(set.union(s, set.difference(child_free, visible_names)), memo)
     })
   let with_free = fn_with_stack_free(tree, fn_id, declared)
   let transitive_free =
@@ -2788,9 +2830,10 @@ fn compute_down(
   inputs: Dict(ScopeId, FnAnalysisInput),
   by_fn: Dict(ScopeId, List(ScopeId)),
   ups: Dict(ScopeId, Up),
-  assigned: Dict(ScopeId, Set(String)),
+  assigned: Dict(ScopeId, Dict(String, ScopeId)),
   try_assigned: Dict(ScopeId, Set(String)),
   refs_args: Set(ScopeId),
+  fn_decls: Set(ScopeId),
   fn_id: ScopeId,
   parent: ParentView,
 ) -> ScopeTree {
@@ -2830,11 +2873,27 @@ fn compute_down(
       False -> set.new()
     }
     |> set.union(dict.get(try_assigned, fn_id) |> result.unwrap(set.new()))
-  let assigned_here = dict.get(assigned, fn_id) |> result.unwrap(set.new())
+  let assigned_here = dict.get(assigned, fn_id) |> result.unwrap(dict.new())
   // Sloppy body + `arguments` referenced ⇒ mapped-arguments MAY alias
   // params (§10.2.11), so `arguments[i]=v` is an unseen write path.
   let may_map_args = !inp.is_strict && set.contains(refs_args, fn_id)
-  let never_box = never_box_names(own_scopes, assigned_here, may_map_args)
+  // A const may be captured by value when every child closure that could
+  // capture it is created only after its initializer ran: opened after the
+  // (last) write in source order and not a hoisted declaration. A child
+  // opened earlier, or hoisted, may run while the binding is still in TDZ
+  // and must observe the later initialization through a shared box.
+  let const_settled = fn(name) {
+    case dict.get(assigned_here, name) {
+      Error(Nil) -> False
+      Ok(last_write) ->
+        list.all(children, fn(cid) {
+          !set.contains({ get_up(ups, cid) }.transitive_free, name)
+          || { cid >= last_write && !set.contains(fn_decls, cid) }
+        })
+    }
+  }
+  let never_box =
+    never_box_names(own_scopes, assigned_here, may_map_args, const_settled)
   let vars_to_box =
     derive_vars_to_box(up, ups, children, declared, never_box, forced_box)
 
@@ -2891,30 +2950,46 @@ fn compute_down(
 
   // (7) Recurse into children with THEIR parent view. Mirrors
   //     compile_children passing resolved.closure_scopes/closure_consts/
-  //     closure_fn_names down.
-  list.fold(children, tree, fn(tree, cid) {
-    let view =
-      child_parent_view(
-        tree,
-        cid,
-        captures,
-        const_captures,
-        fn_name_captures,
-        let_captures,
-        lex.available,
-      )
-    compute_down(
-      tree,
-      inputs,
-      by_fn,
-      ups,
-      assigned,
-      try_assigned,
-      refs_args,
-      cid,
-      view,
-    )
-  })
+  //     closure_fn_names down. The view depends only on the child's
+  //     creation scope (a child's own pass touches only its own scopes),
+  //     so it is built once per creation scope and shared by siblings.
+  let #(tree, _) =
+    list.fold(children, #(tree, dict.new()), fn(st, cid) {
+      let #(tree, memo) = st
+      let creation = { get_scope(tree, cid) }.parent
+      let #(view, memo) = case dict.get(memo, creation) {
+        Ok(view) -> #(view, memo)
+        Error(Nil) -> {
+          let view =
+            child_parent_view(
+              tree,
+              cid,
+              captures,
+              const_captures,
+              fn_name_captures,
+              let_captures,
+              lex.available,
+              lex.lexical_boxed,
+            )
+          #(view, dict.insert(memo, creation, view))
+        }
+      }
+      let tree =
+        compute_down(
+          tree,
+          inputs,
+          by_fn,
+          ups,
+          assigned,
+          try_assigned,
+          refs_args,
+          fn_decls,
+          cid,
+          view,
+        )
+      #(tree, memo)
+    })
+  tree
 }
 
 /// captures: free names that exist in the parent's view. eval poisons
@@ -2924,10 +2999,9 @@ fn derive_name_captures(
   up: Up,
   parent: ParentView,
 ) -> #(List(#(String, Int)), Set(String), Set(String), Set(String)) {
-  let parent_name_set = set.from_list(dict.keys(parent.names))
   let captured_names = case up.eval_in_subtree {
-    True -> parent_name_set
-    False -> set.intersection(up.transitive_free, parent_name_set)
+    True -> parent.name_set
+    False -> set.intersection(up.transitive_free, parent.name_set)
   }
   let captures =
     captured_names
@@ -3062,32 +3136,29 @@ fn derive_lexical_layout(
     )
   }
 
-  // lexical_captured: which lexical slots THIS body must box. eval → all
-  // (compile_child :676-679). Otherwise OR of arrow children's
-  // lexical_refs (collect_arrow_lexical_refs).
-  let lexical_captured = case up.eval_in_subtree {
-    True -> lexical.every_lexical_ref
-    False ->
-      list.fold(children, lexical.no_lexical_refs, fn(refs, cid) {
-        let cinp = get_input(inputs, cid)
-        case cinp.is_arrow {
-          True -> lexical.lexical_refs_or(refs, cinp.lexical_refs)
-          False -> refs
-        }
-      })
-  }
-  // lexical_boxed: for owners, exactly `lexical_captured` (an owned slot
-  // is boxed iff some arrow child / eval captures it). For NON-owners,
-  // `lexical` now points at the capture slots themselves (see above),
-  // and capture slots always hold boxes — so every ref present in
-  // `lexical_captures` must read as boxed via lookup_lexical, on top of
-  // whatever arrow-grandchildren capture transitively.
-  let lexical_boxed = case owns_lexical {
-    True -> lexical_captured
-    False ->
-      lexical.lexical_refs_or(
-        lexical_captured,
+  // lexical_boxed: which lexical slots hold a heap box rather than the
+  // value itself. Direct eval reaches the caller's slots only through boxes,
+  // so eval anywhere below boxes all four. Otherwise the pseudo-bindings are
+  // fixed at frame entry and arrow children capture them BY VALUE, with one
+  // exception: `this` in a derived-class constructor is written by `super()`
+  // after arrows may already hold it, so it is boxed whenever an arrow child
+  // references it. A NON-owner's slots are its capture slots: each is a box
+  // exactly when the parent's was.
+  let lexical_boxed = case owns_lexical, up.eval_in_subtree {
+    _, True -> lexical.every_lexical_ref
+    True, False -> {
+      let this_captured =
+        seeded.is_derived_constructor
+        && list.any(children, fn(cid) {
+          let cinp = get_input(inputs, cid)
+          cinp.is_arrow && cinp.lexical_refs.this
+        })
+      lexical.LexicalRefs(..lexical.no_lexical_refs, this: this_captured)
+    }
+    False, False ->
+      lexical_refs_and(
         lexical_refs_present(lexical_captures),
+        parent.lexical_boxed,
       )
   }
 
@@ -3144,46 +3215,64 @@ fn derive_vars_to_box(
 }
 
 /// Names declared in `own_scopes` that are safe to capture BY VALUE (skip
-/// boxing) when never reassigned: their kind guarantees the binding is
-/// initialised before any body code runs (so no closure can capture a
-/// stale pre-init value), and `assigned_here` proves no later write.
-/// Let/Const/Var are excluded — their declarator-init writes at statement
-/// position, potentially AFTER a capturing closure is created.
+/// boxing): params / catch params / fn-expr self names are initialised
+/// before any body code runs (so no closure can capture a stale pre-init
+/// value) and `assigned_here` proves no later write; a `const` is written
+/// exactly once per binding instance, so it qualifies when `const_settled`
+/// shows every possible capturer is created after that write. Let/Var are
+/// excluded — a single source-level write may still run many times (loop)
+/// or after a capturing closure is created.
 ///
 /// Name-granularity is deliberately conservative: `poison` is every name
-/// with a Var/Let/Const/Capture binding ANYWHERE in `own_scopes`, so a
-/// param/catch shadowed by a same-named block-let (or a `var` re-decl on
-/// a param, which lands in the var-boundary scope for non-simple param
-/// lists) never enters the result. `may_map_args` (sloppy body that
-/// references `arguments`) poisons ALL params — `arguments[i]=v` is an
-/// alias write the assign-ref pass cannot see.
+/// with a Var/Let/Capture (or unsettled Const) binding ANYWHERE in
+/// `own_scopes`, and a settled const only counts when no other kind shares
+/// its name, so a param/catch shadowed by a same-named block-let (or a
+/// `var` re-decl on a param, which lands in the var-boundary scope for
+/// non-simple param lists) never enters the result. `may_map_args` (sloppy
+/// body that references `arguments`) poisons ALL params — `arguments[i]=v`
+/// is an alias write the assign-ref pass cannot see.
 fn never_box_names(
   own_scopes: List(Scope),
-  assigned_here: Set(String),
+  assigned_here: Dict(String, ScopeId),
   may_map_args: Bool,
+  const_settled: fn(String) -> Bool,
 ) -> Set(String) {
-  let #(safe, poison) = {
-    use acc, scope <- list.fold(own_scopes, #(set.new(), set.new()))
+  let #(safe, consts, others, poison) = {
+    use acc, scope <- list.fold(own_scopes, #(
+      set.new(),
+      set.new(),
+      set.new(),
+      set.new(),
+    ))
     use acc, name, b <- dict.fold(scope.bindings, acc)
-    let #(safe, poison) = acc
+    let #(safe, consts, others, poison) = acc
+    let assigned = dict.has_key(assigned_here, name)
     case b.kind {
       ParamBinding ->
-        case may_map_args || set.contains(assigned_here, name) {
-          False -> #(set.insert(safe, name), poison)
-          True -> acc
+        case may_map_args || assigned {
+          False -> #(set.insert(safe, name), consts, others, poison)
+          True -> #(safe, consts, set.insert(others, name), poison)
         }
       CatchBinding | FnNameBinding ->
-        case set.contains(assigned_here, name) {
-          False -> #(set.insert(safe, name), poison)
-          True -> acc
+        case assigned {
+          False -> #(set.insert(safe, name), consts, others, poison)
+          True -> #(safe, consts, set.insert(others, name), poison)
         }
-      VarBinding | LetBinding | ConstBinding | CaptureBinding -> #(
+      ConstBinding ->
+        case const_settled(name) {
+          True -> #(safe, set.insert(consts, name), others, poison)
+          False -> #(safe, consts, others, set.insert(poison, name))
+        }
+      VarBinding | LetBinding | CaptureBinding -> #(
         safe,
+        consts,
+        others,
         set.insert(poison, name),
       )
     }
   }
-  set.difference(safe, poison)
+  let consts = set.difference(consts, others) |> set.difference(safe)
+  set.union(safe, consts) |> set.difference(poison)
 }
 
 /// fallthrough: sloppy + eval-in-subtree → unresolved names check the
@@ -3350,6 +3439,7 @@ fn child_parent_view(
   our_fn_name_captures: Set(String),
   our_let_captures: Set(String),
   lexical_available: LexicalRefs,
+  lexical_boxed: LexicalRefs,
 ) -> ParentView {
   // Our captures occupy our slots 0..N-1 in capture-list order. After
   // `insert_captures` they ALSO appear in the function-root scope's
@@ -3391,7 +3481,16 @@ fn child_parent_view(
         False -> s
       }
     })
-  ParentView(names:, consts:, fn_names:, lets:, boxed:, lexical_available:)
+  ParentView(
+    names:,
+    name_set: set.from_list(dict.keys(names)),
+    consts:,
+    fn_names:,
+    lets:,
+    boxed:,
+    lexical_available:,
+    lexical_boxed:,
+  )
 }
 
 /// Set `is_boxed` on every binding in `fn_id`'s scope subtree whose name is
@@ -3438,6 +3537,15 @@ fn update_function_info(
 ) -> ScopeTree {
   let info = function_info(tree, fn_id)
   ScopeTree(..tree, functions: dict.insert(tree.functions, fn_id, f(info)))
+}
+
+fn lexical_refs_and(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
+  lexical.LexicalRefs(
+    this: a.this && b.this,
+    active_func: a.active_func && b.active_func,
+    home_object: a.home_object && b.home_object,
+    new_target: a.new_target && b.new_target,
+  )
 }
 
 fn lexical_refs_present(d: Dict(LexicalRef, a)) -> LexicalRefs {

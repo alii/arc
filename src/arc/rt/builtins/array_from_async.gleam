@@ -3,7 +3,7 @@
 //// The whole body runs as the spec's fromAsyncClosure: any synchronous abrupt
 //// completion rejects the returned promise instead of throwing. Await points
 //// are native promise-reaction closures (`FromAsyncCtx` carries the loop
-//// state), the same machinery as `AsyncResume` / the AsyncFromSync wrappers.
+//// state), the same machinery as the AsyncFromSync wrappers.
 //// Continuation handlers run with a throwaway result capability, so they
 //// route every failure through the captured `reject` function explicitly.
 

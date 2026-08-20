@@ -88,18 +88,24 @@ fn cut_step(
 ) -> Cut {
   let #(names, rhs) = node
   let index = cut.index - 1
-  let live =
-    set.intersection(cut.rest_fv, bound)
-    |> set.to_list
-    |> list.sort(string.compare)
-  let live_types = list.try_map(live, dict.get(env, _))
   // Cut below `names` when the tail is a full chunk, we are not at the very
   // top, the live set fits a call, and every live value has a known type to
-  // declare the param with.
-  let ready =
-    cut.since_cut >= chunk && index > 0 && list.length(live) <= max_live
-  case ready, live_types {
-    True, Ok(tys) -> {
+  // declare the param with. The live set is only computed at a candidate.
+  let candidate = case cut.since_cut >= chunk && index > 0 {
+    False -> None
+    True -> {
+      let live =
+        set.intersection(cut.rest_fv, bound)
+        |> set.to_list
+        |> list.sort(string.compare)
+      case list.length(live) <= max_live, list.try_map(live, dict.get(env, _)) {
+        True, Ok(tys) -> Some(#(live, tys))
+        _, _ -> None
+      }
+    }
+  }
+  case candidate {
+    Some(#(live, tys)) -> {
       let name = f.name <> "_c" <> int.to_string(index)
       let helper =
         ir.Function(
@@ -121,7 +127,7 @@ fn cut_step(
         helpers: [helper, ..cut.helpers],
       )
     }
-    _, _ ->
+    None ->
       Cut(
         rest: ir.Let(names, rhs, cut.rest),
         rest_fv: set.difference(

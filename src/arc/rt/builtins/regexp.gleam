@@ -16,24 +16,26 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
+import arc/rt/elements
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacySlot,
-  type LegacyStatics, type ObjectKey, type RegExpFlag, type RegExpNative, Index,
-  JInt, KHandle, KNative, KNull, KUndef, LegacyInput, LegacyLastMatch,
-  LegacyLastParen, LegacyLeftContext, LegacyParen1, LegacyParen2, LegacyParen3,
-  LegacyParen4, LegacyParen5, LegacyParen6, LegacyParen7, LegacyParen8,
-  LegacyParen9, LegacyRightContext, LegacyStatics, Named, NoElements, Ordinary,
-  RFDotAll, RFGlobal, RFHasIndices, RFIgnoreCase, RFMultiline, RFSticky,
-  RFUnicode, RFUnicodeSets, RegExpConstructor, RegExpGetFlag, RegExpGetFlags,
-  RegExpGetSource, RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN,
-  RegExpObj, RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
-  RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
-  RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
-  RegExpSymbolSplit, ReturnThis, SObject, StringKey, classify, mk_bool, mk_null,
-  mk_number, mk_object, mk_string, mk_undefined,
+  type LegacyStatics, type ObjectKey, type RegExpFlag, type RegExpNative,
+  ArrayObj, DataProperty, Index, JInt, KHandle, KNative, KNull, KUndef,
+  LegacyInput, LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen1,
+  LegacyParen2, LegacyParen3, LegacyParen4, LegacyParen5, LegacyParen6,
+  LegacyParen7, LegacyParen8, LegacyParen9, LegacyRightContext, LegacyStatics,
+  Named, NoElements, Ordinary, RFDotAll, RFGlobal, RFHasIndices, RFIgnoreCase,
+  RFMultiline, RFSticky, RFUnicode, RFUnicodeSets, RegExpConstructor,
+  RegExpGetFlag, RegExpGetFlags, RegExpGetSource, RegExpLegacyGetter,
+  RegExpLegacyInputSetter, RegExpN, RegExpObj, RegExpPrototypeCompile,
+  RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
+  RegExpStringIteratorNext, RegExpSymbolMatch, RegExpSymbolMatchAll,
+  RegExpSymbolReplace, RegExpSymbolSearch, RegExpSymbolSplit, ReturnThis,
+  SObject, StringKey, classify, mk_bool, mk_null, mk_number, mk_object,
+  mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -814,36 +816,81 @@ fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
 /// §22.2.7.1 RegExpExec(R, S) — calls R.exec if callable (validating result is
 /// Object|null), else RegExpBuiltinExec for real RegExps. arc `try_regexp_exec`.
 fn regexp_exec_abstract(st: Agent, rx: JsVal, s: String) -> #(JsVal, Agent) {
+  regexp_exec_mode(st, rx, s, MatchArray)
+}
+
+/// RegExpExec with a result `mode`: after the observable Get(R, "exec"), a
+/// real RegExp whose exec is the intrinsic %RegExp.prototype.exec% runs
+/// RegExpBuiltinExec directly in that mode, so test() can skip building the
+/// match array it would only compare against null.
+fn regexp_exec_mode(
+  st: Agent,
+  rx: JsVal,
+  s: String,
+  mode: ExecMode,
+) -> #(JsVal, Agent) {
   let h = require_object(st, rx, ".exec")
   let #(exec_fn, st) = get_named(st, rx, "exec")
-  let #(is_call, st) = rt_val.t_is_callable(st, exec_fn)
-  case is_call {
-    True -> {
-      let js = st.store
-      let #(result, st) = js.ops.call(st, exec_fn, rx, [mk_string(s)])
-      case classify(result) {
-        KHandle(_) | KNull -> #(result, st)
-        _ ->
-          rt_val.t_throw_type_error(
-            st,
-            "exec method returned something other than an Object or null",
-          )
+  let receiver = rt_store.t_cell_get(st, h)
+  case receiver, is_intrinsic_exec(st, exec_fn) {
+    SObject(kind: RegExpObj(..), ..), True -> builtin_exec_mode(st, h, s, mode)
+    _, _ -> {
+      let #(is_call, st) = rt_val.t_is_callable(st, exec_fn)
+      case is_call {
+        True -> {
+          let js = st.store
+          let #(result, st) = js.ops.call(st, exec_fn, rx, [mk_string(s)])
+          case classify(result) {
+            KHandle(_) | KNull -> #(result, st)
+            _ ->
+              rt_val.t_throw_type_error(
+                st,
+                "exec method returned something other than an Object or null",
+              )
+          }
+        }
+        False ->
+          case receiver {
+            SObject(kind: RegExpObj(..), ..) ->
+              builtin_exec_mode(st, h, s, mode)
+            _ ->
+              rt_val.t_throw_type_error(
+                st,
+                "Method called on incompatible receiver: not a RegExp",
+              )
+          }
       }
     }
-    False ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: RegExpObj(..), ..) -> builtin_exec(st, h, s)
-        _ ->
-          rt_val.t_throw_type_error(
-            st,
-            "Method called on incompatible receiver: not a RegExp",
-          )
-      }
   }
 }
 
+fn is_intrinsic_exec(st: Agent, f: JsVal) -> Bool {
+  case classify(f) {
+    KHandle(fh) ->
+      case rt_store.t_cell_get(st, fh) {
+        SObject(kind: KNative(tag: RegExpN(RegExpPrototypeExec), ..), ..) ->
+          True
+        _ -> False
+      }
+    _ -> False
+  }
+}
+
+/// What RegExpBuiltinExec hands back on a match: the §22.2.7.2 match array,
+/// or just `true` for callers that only test for null (lastIndex and the
+/// legacy statics are updated either way).
+type ExecMode {
+  MatchArray
+  MatchOnly
+}
+
 /// §22.2.7.2 RegExpBuiltinExec(R, S). arc `try_builtin_exec`.
-fn builtin_exec(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
+fn builtin_exec_mode(
+  st: Agent,
+  h: Handle,
+  s: String,
+  mode: ExecMode,
+) -> #(JsVal, Agent) {
   // Step 2: lastIndex = ? ToLength(? Get(R, "lastIndex")).
   let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
   let #(last_index, st) = rt_val.t_to_length(st, li_v)
@@ -881,7 +928,11 @@ fn builtin_exec(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
       // wrong: it would leave a *stale* previous match readable through
       // RegExp.$1 & co, a result no engine and no spec produces.
       let st = update_legacy_statics(st, s, whole, groups)
-      build_exec_result(st, s, whole, groups, names, has_indices)
+      case mode {
+        MatchArray ->
+          build_exec_result(st, s, whole, groups, names, has_indices)
+        MatchOnly -> #(mk_bool(True), st)
+      }
     }
   }
 }
@@ -947,14 +998,12 @@ fn build_exec_result(
     False -> #(mk_undefined(), st)
     True -> make_indices(st, whole, groups, names)
   }
-  let realm = st.realm
-  let #(arr_h, st) = common.alloc_array(st, match_values, realm.array.prototype)
   let extra = case classify(indices_val) {
     KUndef -> []
     _ -> [#("indices", indices_val)]
   }
-  let st =
-    add_own_data_props(st, arr_h, [
+  let #(arr_h, st) =
+    alloc_array_with_props(st, match_values, [
       #("index", mk_number(JInt(match_start))),
       #("input", mk_string(s)),
       #("groups", groups_val),
@@ -1003,8 +1052,8 @@ fn make_indices(
       alloc_null_proto_object(st, dedupe_group_values(values))
     }
   }
-  let #(arr_h, st) = common.alloc_array(st, pair_values, realm.array.prototype)
-  let st = add_own_data_props(st, arr_h, [#("groups", groups_val)])
+  let #(arr_h, st) =
+    alloc_array_with_props(st, pair_values, [#("groups", groups_val)])
   #(mk_object(arr_h), st)
 }
 
@@ -1059,22 +1108,27 @@ fn capture_to_value(s: String, cap: #(Int, Int)) -> JsVal {
   }
 }
 
-fn add_own_data_props(
+/// A plain Array of `values` that also carries the given {W,E,C} named data
+/// properties in creation order, allocated as one cell with one seq range.
+fn alloc_array_with_props(
   st: Agent,
-  h: Handle,
+  values: List(JsVal),
   entries: List(#(String, JsVal)),
-) -> Agent {
-  list.fold(entries, st, fn(st, kv) {
-    let #(k, v) = kv
-    let #(prop, st) = common.data_property(st, v)
-    rt_store.t_cell_update(st, h, fn(slot) {
-      case slot {
-        SObject(props:, ..) ->
-          SObject(..slot, props: dict.insert(props, Named(k), prop))
-        _ -> slot
-      }
+) -> #(Handle, Agent) {
+  let array_proto = st.realm.array.prototype
+  use seq <- rt_store.t_cell_new_with(st, list.length(entries))
+  let props =
+    list.index_map(entries, fn(kv, i) {
+      #(Named(kv.0), DataProperty(kv.1, True, True, True, seq + i))
     })
-  })
+  SObject(
+    kind: ArrayObj(list.length(values)),
+    proto: Some(array_proto),
+    props: dict.from_list(props),
+    symbol_props: [],
+    elements: elements.from_list(values),
+    extensible: True,
+  )
 }
 
 // ── prototype methods ───────────────────────────────────────────────────────
@@ -1087,7 +1141,7 @@ fn regexp_exec(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         SObject(kind: RegExpObj(..), ..) -> {
           let #(s, st) =
             rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-          builtin_exec(st, h, s)
+          builtin_exec_mode(st, h, s, MatchArray)
         }
         _ -> not_regexp(st, "exec")
       }
@@ -1099,7 +1153,7 @@ fn regexp_exec(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 fn regexp_test(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let _ = require_object(st, this, ".test")
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  let #(m, st) = regexp_exec_abstract(st, this, s)
+  let #(m, st) = regexp_exec_mode(st, this, s, MatchOnly)
   #(mk_bool(classify(m) != KNull), st)
 }
 

@@ -61,8 +61,14 @@ pub fn resolve(
 ///      dead Dup/Pop pair is dropped, keeping the explicit ops.
 ///   3. Dup; PutLocal/PutBoxed; Pop → PutLocal/PutBoxed (prefix updates and
 ///      any other store whose expression value is discarded).
-///   4. Loop-condition compare-and-branch (GetLocal; GetLocal|PushConst;
-///      BinOp Lt|LtEq|Gt|GtEq; JumpIfFalse) → CmpLocal*Jump.
+///   1b. Prefix update on a plain local (GetLocal i; UnaryOp Pos;
+///      PushConst 1; BinOp Add|Sub; Dup; PutLocal i) → IncLocal/DecLocal;
+///      GetLocal i (or just IncLocal/DecLocal when a Pop follows).
+///   3b. PushConst; PutLocal i; PutLocal i → PutLocal i (dead seed).
+///   4. Compare-and-branch (GetLocal; GetLocal|PushConst;
+///      BinOp Lt|LtEq|Gt|GtEq|==|!=|===|!==; JumpIfFalse) → CmpLocal*Jump.
+///   5. GetLocal i; GetField k → GetLocalField, GetLocal i; GetField2 k →
+///      GetLocalField2, PutField k; Pop → PutFieldPop.
 fn peephole(
   code: List(IrOp),
   consts: tuple_array.TupleArray(JsVal),
@@ -104,6 +110,36 @@ fn peephole(
       }
     }
 
+    // -- Pattern 1b: prefix update on a plain local ------------------------
+    // GetLocal i; Pos; PushConst 1; Add|Sub; Dup; PutLocal i leaves the new
+    // value on the stack: IncLocal i; GetLocal i is the same store and the
+    // same value (nothing can observe slot i in between). The GetLocal is
+    // fed back through the window so a following compare still fuses, and a
+    // trailing Pop (statement position) drops with it.
+    [
+      IrFinal(opcode.GetLocal(i)) as get,
+      IrFinal(opcode.UnaryOp(opcode.Pos)),
+      IrFinal(opcode.PushConst(c)),
+      IrBinOp(kind),
+      IrFinal(opcode.Dup),
+      IrFinal(opcode.PutLocal(j)),
+      ..rest
+    ]
+      if i == j
+    -> {
+      let fused = case is_const_one(consts, c), kind {
+        True, opcode.Add -> Some(IrFinal(opcode.IncLocal(i)))
+        True, opcode.Sub -> Some(IrFinal(opcode.DecLocal(i)))
+        _, _ -> None
+      }
+      case fused, rest {
+        Some(op), [IrFinal(opcode.Pop), ..rest] ->
+          peephole(rest, consts, [op, ..acc])
+        Some(op), _ -> peephole([get, ..rest], consts, [op, ..acc])
+        None, _ -> peephole(list.drop(code, 1), consts, [get, ..acc])
+      }
+    }
+
     // -- Pattern 2: postfix update statement on a boxed local ------------
     // Same shape via GetBoxed/PutBoxed: drop the dead Dup/Pop pair.
     [
@@ -141,6 +177,18 @@ fn peephole(
       IrFinal(opcode.Pop),
       ..rest
     ] -> peephole(rest, consts, [IrFinal(opcode.PutBoxed(i)), ..acc])
+
+    // -- Pattern 3b: seed immediately overwritten -------------------------
+    // PushConst c; PutLocal i; PutLocal i (a per-iteration TDZ seed followed
+    // straight away by the binding's init) ≡ PutLocal i.
+    [
+      IrFinal(opcode.PushConst(_)),
+      IrFinal(opcode.PutLocal(i)),
+      IrFinal(opcode.PutLocal(j)),
+      ..rest
+    ]
+      if i == j
+    -> peephole(rest, consts, [IrFinal(opcode.PutLocal(i)), ..acc])
 
     // -- Pattern 4: fused compare-and-branch loop conditions -------------
     [
@@ -188,21 +236,42 @@ fn peephole(
           )
       }
 
+    // -- Pattern 5: field access superinstructions -----------------------
+    [IrFinal(opcode.GetLocal(i)), IrGetField(name), ..rest] ->
+      peephole(rest, consts, [
+        IrFinal(opcode.GetLocalField(i, key.canonical_key(name))),
+        ..acc
+      ])
+    [IrFinal(opcode.GetLocal(i)), IrGetField2(name), ..rest] ->
+      peephole(rest, consts, [
+        IrFinal(opcode.GetLocalField2(i, key.canonical_key(name))),
+        ..acc
+      ])
+    [IrPutField(name), IrFinal(opcode.Pop), ..rest] ->
+      peephole(rest, consts, [
+        IrFinal(opcode.PutFieldPop(key.canonical_key(name))),
+        ..acc
+      ])
+
     [op, ..rest] -> peephole(rest, consts, [op, ..acc])
   }
 }
 
-/// Only the pure relational kinds are fused — their step semantics are
-/// exactly binop_direct / binop_with_to_primitive (no In/InstanceOf heap
-/// access, no Add string-concat split, no loose-eq coercion table). Returns
-/// the narrowed `PureBinOp` the fused opcode carries, so the fusion cannot
-/// smuggle an operator the fused step handler can't run.
-fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
+/// Only the relational and equality kinds are fused: their step semantics
+/// are exactly the guarded pure-binop path (no In/InstanceOf heap access, no
+/// Add string-concat split). Returns the narrowed `PureBinOp` the fused
+/// opcode carries, so the fusion cannot smuggle an operator the fused step
+/// handler can't run.
+pub fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
   case kind {
     opcode.Lt -> Some(binop.Compare(binop.LtCmp))
     opcode.LtEq -> Some(binop.Compare(binop.LtEqCmp))
     opcode.Gt -> Some(binop.Compare(binop.GtCmp))
     opcode.GtEq -> Some(binop.Compare(binop.GtEqCmp))
+    opcode.StrictEq -> Some(binop.Equality(binop.StrictEqOp))
+    opcode.StrictNotEq -> Some(binop.Equality(binop.StrictNotEqOp))
+    opcode.Eq -> Some(binop.Equality(binop.EqOp))
+    opcode.NotEq -> Some(binop.Equality(binop.NotEqOp))
     _ -> None
   }
 }

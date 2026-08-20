@@ -17,13 +17,20 @@
 %%% and zero-copy in Erlang; awkward via `dynamic` in Gleam.
 -module(arc_rt_store_ffi).
 -export([t_throw/2, is_handle/1, handle_id/1, identity/1, as_object_key/1,
-         t_cell_get/2, t_var_get/2, data_new/0]).
+         t_cell_get/2, t_var_get/2, data_new/0, data_from_descending/1]).
 
 -include("arc_rt_layout.hrl").
 
 %% data_new() -> array()
 %% The empty cell arena: unset ids answer ?STORE_FREE_SLOT.
 data_new() -> array:new({default, ?STORE_FREE_SLOT}).
+
+%% data_from_descending([{Id, Slot}]) -> array()
+%% The arena holding exactly the listed cells, given highest id first (a
+%% sparse fold's accumulator order). array:from_orddict builds each leaf
+%% once and leaves all-absent subtrees unexpanded.
+data_from_descending(Cells) ->
+    array:from_orddict(lists:reverse(Cells), ?STORE_FREE_SLOT).
 
 %% t_cell_get(St, {js_cell, Id}) -> JsSlot
 %% Hot-path cell read — inlines require_js + the array read so emitted code
