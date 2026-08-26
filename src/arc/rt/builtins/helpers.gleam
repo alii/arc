@@ -22,7 +22,7 @@ pub type OwnElement {
   Slow
 }
 
-@external(erlang, "arc_rt_builtins_ffi", "own_element")
+@external(erlang, "arc_rt_array_ffi", "own_element")
 pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
 
 /// §7.3.2 Get on any array-like receiver (including primitive strings) by

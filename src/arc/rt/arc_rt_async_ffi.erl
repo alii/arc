@@ -6,7 +6,7 @@
 %%% decoded here into arc/rt/types.Step, folding `(Sm, Ns, Loc)` into a
 %%% `ResumeCompiled` so the driver never re-pins anything.
 -module(arc_rt_async_ffi).
--export([apply_sm/5, loc_empty/0]).
+-export([apply_sm/5]).
 
 -include("arc_rt_layout.hrl").
 
@@ -24,6 +24,3 @@ step(_Sm, {return, V}) -> {?STEP_RETURN, V};
 step(_Sm, {throw, V}) -> {?STEP_THROW, V};
 step(Sm, {yield, V, Ns, Loc}) -> {?STEP_YIELD, V, {?RESUME_COMPILED_TAG, Sm, Ns, Loc}};
 step(Sm, {await, V, Ns, Loc}) -> {?STEP_AWAIT, V, {?RESUME_COMPILED_TAG, Sm, Ns, Loc}}.
-
-%% Initial locals tuple for a body with zero hoisted locals.
-loc_empty() -> {}.

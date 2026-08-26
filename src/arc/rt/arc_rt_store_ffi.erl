@@ -12,11 +12,11 @@
 %%% per-clause `try…catch` and top-level run-ABI catch match it identically; the
 %%% payload carries the THREADED Agent `St` alongside the thrown JsVal
 %%% `V` (payload order `[St, V]` — R2) so the catch site recovers the mutated
-%%% state. (2) `is_handle`/`handle_id` are total pattern-match probes on the
-%%% opaque `JsVal` wire form for a Handle (`{js_cell, N}`, SPEC §2.3) — trivial
+%%% state. (2) `is_handle` is a total pattern-match probe on the opaque
+%%% `JsVal` wire form for a Handle (`{js_cell, N}`, SPEC §2.3) — trivial
 %%% and zero-copy in Erlang; awkward via `dynamic` in Gleam.
 -module(arc_rt_store_ffi).
--export([t_throw/2, is_handle/1, handle_id/1, identity/1, as_object_key/1,
+-export([t_throw/2, is_handle/1, identity/1, as_object_key/1,
          t_cell_get/2, t_var_get/2, data_new/0, data_from_descending/1]).
 
 -include("arc_rt_layout.hrl").
@@ -69,12 +69,6 @@ t_throw(St, V) -> erlang:error({wasm_exn, 0, [St, V]}).
 %% number/binary/{js_bigint,_}/{js_sym,_}/js_tdz/…) yields false.
 is_handle({js_cell, N}) when is_integer(N) -> true;
 is_handle(_) -> false.
-
-%% handle_id({js_cell, N}) -> N
-%% Extract the integer cell id from a Handle wire term. Partial by design —
-%% callers gate on `is_handle/1` (or a `KHandle` classify) first; a non-Handle
-%% argument function_clause-crashes rather than fabricating an id.
-handle_id({js_cell, N}) -> N.
 
 %% identity(X) -> X — Gleam-opaque unsafe_coerce for wire-level term reuse
 %% (SPEC§8 adapters). Total.

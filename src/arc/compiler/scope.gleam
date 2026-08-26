@@ -966,7 +966,7 @@ pub fn sb_declare_in(
 /// parser already declared during `parse_formal_parameters` (the
 /// destructured / defaulted / rest-target names) past the shims. The
 /// runtime calling convention writes positional arg N into the Nth
-/// declared slot (arc_interp_ffi:setup_locals_tuple), so
+/// declared slot (arc_interp_locals_ffi:setup_locals_tuple), so
 /// the shims must own indices 0..count-1; emit.compile_function_body
 /// then reads each shim by name and runs `emit_destructuring_bind`
 /// into the user names. The shims are contiguous at the front (rather

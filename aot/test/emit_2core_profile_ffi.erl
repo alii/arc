@@ -25,6 +25,7 @@ mods() ->
      'arc@vm@internal@ordered_entries',
      %% hand FFI shims
      arc_rt_call_ffi,
+     arc_rt_call_fast_ffi,
      arc_rt_store_ffi,
      arc_rt_ops_ffi,
      arc_rt_val_ffi,

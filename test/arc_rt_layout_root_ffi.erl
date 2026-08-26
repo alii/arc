@@ -1,7 +1,7 @@
 -module(arc_rt_layout_root_ffi).
 -export([idx/1, tag/1, element/2, tuple_size/1, dyn/1, slots/1]).
 
--include("arc_rt_layout.hrl").
+-include("arc/rt/arc_rt_layout.hrl").
 
 %% Macro table keyed by name so the Gleam test asserts the header, not a
 %% second copy of the numbers.

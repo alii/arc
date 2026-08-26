@@ -20,7 +20,7 @@
 
 %% Plain (non-record) tuples the Erlang also indexes; documented, not named:
 %%   Frame  {This, ActiveFunc, HomeObject, NewTarget}      (call_ffi mk_frame)
-%%   KFN_SIMPLE payload {some, {Code, Arity, NeedsFrame}}   (call_ffi)
+%%   KFN_SIMPLE payload {some, {Code, Arity, NeedsFrame}}   (call_ffi, call_fast_ffi)
 %%   ShapeSlots: bare tuple, 0-based Off reads element(Off + 1, Slots)
 
 %% arc/rt/types.Step / Resume (built by async_ffi from the sm wire step)

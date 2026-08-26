@@ -1,5 +1,5 @@
-//// Bindings for `arc_interp_ffi` (and the `arc_rt_ops_ffi` operator
-//// kernels): the raise adapter that turns a raising runtime call into a
+//// Bindings for the `arc_interp_*_ffi` kernel families (and the
+//// `arc_rt_ops_ffi` operator kernels): the raise adapter that turns a raising runtime call into a
 //// `Result` for the interpreter's slow path, and the fused hot-path kernels
 //// `fast_loop` runs before falling back to it.
 ////
@@ -24,7 +24,7 @@ import gleam/dict.{type Dict}
 
 /// Outcome of a guarded runtime call: the value and the agent it returned,
 /// or the agent and value carried by the `wasm_exn` it raised. Wire form
-/// `{ok, V, Agent} | {threw, Agent, E}` as built by `arc_interp_ffi:guardN`.
+/// `{ok, V, Agent} | {threw, Agent, E}` as built by `arc_interp_guard_ffi:guardN`.
 pub type Guarded(v) {
   Ok(value: v, agent: Agent)
   Threw(agent: Agent, thrown: JsVal)
@@ -50,26 +50,26 @@ pub fn guarded(
 /// `f(agent, ..) -> #(v, Agent)` under one `try`. Pass a module function
 /// (`rt_obj.t_get_prop`), never a fresh closure: it lowers to a literal
 /// remote fun reference.
-@external(erlang, "arc_interp_ffi", "guard1")
+@external(erlang, "arc_interp_guard_ffi", "guard1")
 pub fn guard1(f: fn(Agent) -> #(v, Agent), agent: Agent) -> Guarded(v)
 
 /// `guard1` for a body that carries its agent inside a `State`: the state
 /// goes in as built, nothing is re-seated on entry.
-@external(erlang, "arc_interp_ffi", "guard1")
+@external(erlang, "arc_interp_guard_ffi", "guard1")
 pub fn guard_state(f: fn(State) -> #(v, Agent), state: State) -> Guarded(v)
 
 /// `guard_state` with one extra argument for the body.
-@external(erlang, "arc_interp_ffi", "guard2")
+@external(erlang, "arc_interp_guard_ffi", "guard2")
 pub fn guard_state2(
   f: fn(State, a) -> #(v, Agent),
   state: State,
   a: a,
 ) -> Guarded(v)
 
-@external(erlang, "arc_interp_ffi", "guard2")
+@external(erlang, "arc_interp_guard_ffi", "guard2")
 pub fn guard2(f: fn(Agent, a) -> #(v, Agent), agent: Agent, a: a) -> Guarded(v)
 
-@external(erlang, "arc_interp_ffi", "guard3")
+@external(erlang, "arc_interp_guard_ffi", "guard3")
 pub fn guard3(
   f: fn(Agent, a, b) -> #(v, Agent),
   agent: Agent,
@@ -77,7 +77,7 @@ pub fn guard3(
   b: b,
 ) -> Guarded(v)
 
-@external(erlang, "arc_interp_ffi", "guard4")
+@external(erlang, "arc_interp_guard_ffi", "guard4")
 pub fn guard4(
   f: fn(Agent, a, b, c) -> #(v, Agent),
   agent: Agent,
@@ -86,7 +86,7 @@ pub fn guard4(
   c: c,
 ) -> Guarded(v)
 
-@external(erlang, "arc_interp_ffi", "guard5")
+@external(erlang, "arc_interp_guard_ffi", "guard5")
 pub fn guard5(
   f: fn(Agent, a, b, c, d) -> #(v, Agent),
   agent: Agent,
@@ -96,7 +96,7 @@ pub fn guard5(
   d: d,
 ) -> Guarded(v)
 
-@external(erlang, "arc_interp_ffi", "guard6")
+@external(erlang, "arc_interp_guard_ffi", "guard6")
 pub fn guard6(
   f: fn(Agent, a, b, c, d, e) -> #(v, Agent),
   agent: Agent,
@@ -107,7 +107,7 @@ pub fn guard6(
   e: e,
 ) -> Guarded(v)
 
-@external(erlang, "arc_interp_ffi", "guard7")
+@external(erlang, "arc_interp_guard_ffi", "guard7")
 pub fn guard7(
   f: fn(Agent, a, b, c, d, e, g) -> #(v, Agent),
   agent: Agent,
@@ -121,13 +121,13 @@ pub fn guard7(
 
 /// `guard_unitN`: the same for runtime functions that return the bare
 /// `Agent`; the value is `Nil`.
-@external(erlang, "arc_interp_ffi", "guard_unit1")
+@external(erlang, "arc_interp_guard_ffi", "guard_unit1")
 pub fn guard_unit1(f: fn(Agent) -> Agent, agent: Agent) -> Guarded(Nil)
 
-@external(erlang, "arc_interp_ffi", "guard_unit2")
+@external(erlang, "arc_interp_guard_ffi", "guard_unit2")
 pub fn guard_unit2(f: fn(Agent, a) -> Agent, agent: Agent, a: a) -> Guarded(Nil)
 
-@external(erlang, "arc_interp_ffi", "guard_unit3")
+@external(erlang, "arc_interp_guard_ffi", "guard_unit3")
 pub fn guard_unit3(
   f: fn(Agent, a, b) -> Agent,
   agent: Agent,
@@ -135,7 +135,7 @@ pub fn guard_unit3(
   b: b,
 ) -> Guarded(Nil)
 
-@external(erlang, "arc_interp_ffi", "guard_unit4")
+@external(erlang, "arc_interp_guard_ffi", "guard_unit4")
 pub fn guard_unit4(
   f: fn(Agent, a, b, c) -> Agent,
   agent: Agent,
@@ -144,7 +144,7 @@ pub fn guard_unit4(
   c: c,
 ) -> Guarded(Nil)
 
-@external(erlang, "arc_interp_ffi", "guard_unit5")
+@external(erlang, "arc_interp_guard_ffi", "guard_unit5")
 pub fn guard_unit5(
   f: fn(Agent, a, b, c, d) -> Agent,
   agent: Agent,
@@ -154,7 +154,7 @@ pub fn guard_unit5(
   d: d,
 ) -> Guarded(Nil)
 
-@external(erlang, "arc_interp_ffi", "guard_unit6")
+@external(erlang, "arc_interp_guard_ffi", "guard_unit6")
 pub fn guard_unit6(
   f: fn(Agent, a, b, c, d, e) -> Agent,
   agent: Agent,
@@ -300,14 +300,14 @@ pub fn box_get(agent: Agent, slot: JsVal) -> JsVal
 /// on an all-ordinary chain; a string or number receiver reads from its
 /// realm wrapper prototype. `key` is a `Named` (non-index) key, handed over
 /// whole so the kernel probes with the term the opcode already holds.
-@external(erlang, "arc_interp_ffi", "get_field")
+@external(erlang, "arc_interp_prop_ffi", "get_field")
 pub fn get_field(agent: Agent, obj: JsVal, key: PropertyKey) -> JsVal
 
 /// A global identifier read (§9.1.1.4 GetBindingValue): an initialised
 /// lexical binding from `lex`, else a plain data property on the global
 /// object's chain. TDZ, accessors, exotic hops and an unresolvable name
 /// miss.
-@external(erlang, "arc_interp_ffi", "get_global")
+@external(erlang, "arc_interp_prop_ffi", "get_global")
 pub fn get_global(
   agent: Agent,
   lex: Dict(String, LexicalGlobal),
@@ -317,7 +317,7 @@ pub fn get_global(
 /// A global identifier write on the object record (no lexical binding of
 /// the name): replace an own writable data property of the global object,
 /// or create it when the frame is sloppy. The store with the write applied.
-@external(erlang, "arc_interp_ffi", "put_global")
+@external(erlang, "arc_interp_prop_ffi", "put_global")
 pub fn put_global(
   store: JsStore(Agent),
   lex: Dict(String, LexicalGlobal),
@@ -328,17 +328,17 @@ pub fn put_global(
 ) -> JsStore(Agent)
 
 /// `obj[key]` for an integer index into an Array cell or a string key.
-@external(erlang, "arc_interp_ffi", "get_elem")
+@external(erlang, "arc_interp_prop_ffi", "get_elem")
 pub fn get_elem(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
 
 /// `get_elem` for an integer key only (GetElem2 re-pushes the key, and an
 /// integer is its own canonical form).
-@external(erlang, "arc_interp_ffi", "get_elem2")
+@external(erlang, "arc_interp_prop_ffi", "get_elem2")
 pub fn get_elem2(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
 
 /// `obj.key = v` over an existing own writable data property; the store
 /// with the write applied.
-@external(erlang, "arc_interp_ffi", "put_field")
+@external(erlang, "arc_interp_prop_ffi", "put_field")
 pub fn put_field(
   store: JsStore(Agent),
   obj: JsVal,
@@ -348,7 +348,7 @@ pub fn put_field(
 
 /// `{key: v}`: CreateDataProperty of a Named key on an ordinary extensible
 /// object; the store with the property defined.
-@external(erlang, "arc_interp_ffi", "define_field")
+@external(erlang, "arc_interp_prop_ffi", "define_field")
 pub fn define_field(
   store: JsStore(Agent),
   obj: JsVal,
@@ -358,7 +358,7 @@ pub fn define_field(
 
 /// `arr[i] = v` overwriting, hole-filling or appending on an extensible
 /// Array cell; the store with the write applied.
-@external(erlang, "arc_interp_ffi", "put_elem")
+@external(erlang, "arc_interp_prop_ffi", "put_elem")
 pub fn put_elem(
   store: JsStore(Agent),
   obj: JsVal,
@@ -372,7 +372,7 @@ pub fn put_elem(
 /// `env ++ seeds ++ args` fitted to `arity`, padded with `undef` to
 /// `local_count`. `env` is the closure's captured environment (tuple or
 /// list of values).
-@external(erlang, "arc_interp_ffi", "setup_locals_tuple")
+@external(erlang, "arc_interp_locals_ffi", "setup_locals_tuple")
 pub fn setup_locals_tuple(
   env: env,
   seeds: List(JsVal),
@@ -384,7 +384,7 @@ pub fn setup_locals_tuple(
 
 /// Locals tuple for a non-arrow body, seeding `this` / active function /
 /// home object / new.target into its owned lexical slots.
-@external(erlang, "arc_interp_ffi", "setup_locals_seeded")
+@external(erlang, "arc_interp_locals_ffi", "setup_locals_seeded")
 pub fn setup_locals_seeded(
   env: env,
   lexical: LexicalSlots,

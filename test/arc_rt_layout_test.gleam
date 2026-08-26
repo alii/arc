@@ -454,7 +454,7 @@ fn set_prop_own_data(st: Agent, recv: JsVal, key: BitArray, v: JsVal) -> Dynamic
 @external(erlang, "arc_rt_obj_ffi", "t_instanceof_fast")
 fn instanceof_fast(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
 
-@external(erlang, "arc_rt_call_ffi", "t_call_method_mono")
+@external(erlang, "arc_rt_call_fast_ffi", "t_call_method_mono")
 fn call_method_mono(
   st: Agent,
   recv: JsVal,
@@ -462,7 +462,7 @@ fn call_method_mono(
   args: List(JsVal),
 ) -> #(Dynamic, Agent)
 
-@external(erlang, "arc_rt_call_ffi", "t_new_simple")
+@external(erlang, "arc_rt_call_fast_ffi", "t_new_simple")
 fn new_simple(st: Agent, ctor: JsVal, args: List(JsVal)) -> #(Dynamic, Agent)
 
 type Probe {

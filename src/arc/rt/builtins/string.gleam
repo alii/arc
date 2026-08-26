@@ -1534,13 +1534,13 @@ fn is_case_ignorable_cp(cp: Int) -> Bool {
 
 // ── FFI ─────────────────────────────────────────────────────────────────────
 
-@external(erlang, "arc_rt_string_ffi", "trim_js_ws")
+@external(erlang, "arc_string_ffi", "trim_js_ws")
 fn trim_js_ws(s: String) -> String
 
-@external(erlang, "arc_rt_string_ffi", "trim_leading_js_ws")
+@external(erlang, "arc_string_ffi", "trim_leading_js_ws")
 fn trim_leading_js_ws(s: String) -> String
 
-@external(erlang, "arc_rt_string_ffi", "trim_trailing_js_ws")
+@external(erlang, "arc_string_ffi", "trim_trailing_js_ws")
 fn trim_trailing_js_ws(s: String) -> String
 
 @external(erlang, "unicode", "characters_to_nfc_binary")

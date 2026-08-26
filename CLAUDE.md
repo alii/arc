@@ -104,10 +104,12 @@ Things LLMs commonly get wrong:
 This project uses Erlang FFI for performance-critical operations (math, number formatting, regexp, URI encoding, I/O).
 
 ```gleam
-@external(erlang, "arc_math_ffi", "fround")
+@external(erlang, "arc_rt_math_ffi", "fround")
 pub fn fround(value: Float) -> Float
 ```
 
 - Never name `.erl` modules the same as Gleam modules (causes infinite loops)
+- Put each `.erl` next to the Gleam module that binds it (e.g. `src/arc/rt/arc_rt_val_ffi.erl` for `src/arc/rt/val.gleam`), never in `src/` root
+- Gleam compiles native files with no `-I` flags, so `-include` an `.hrl` by a path relative to the including file (`"arc_rt_layout.hrl"` from `src/arc/rt/`, `"../rt/arc_rt_layout.hrl"` from `src/arc/interp/`)
 - Keep FFI modules small and focused
 - FFI breaks type safety — the compiler trusts your annotations without verification

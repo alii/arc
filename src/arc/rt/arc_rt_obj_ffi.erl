@@ -13,7 +13,7 @@
 %%% proto-walk chain. On any shape miss the atom `miss` is returned and the
 %%% emitter's guard falls back to the full `t_get_prop_any` /
 %%% `t_set_prop_any` path. Reads return the bare value; writes return the
-%%% rebuilt `St'`. The interpreter's kernels (arc_interp_ffi) share the
+%%% rebuilt `St'`. The interpreter's kernels (arc_interp_prop_ffi) share the
 %%% proto-chain predicate `named_free` and `store_put_seq`.
 -module(arc_rt_obj_ffi).
 -export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,

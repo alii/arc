@@ -777,5 +777,5 @@ fn hex4(a: Int, b: Int, c: Int, d: Int) -> Option(Int) {
 /// Erlang's Unicode White_Space set (which misses ZWNBSP and includes NEL).
 /// Byte-wise over code points, so a CR LF pair is two characters, not one
 /// grapheme.
-@external(erlang, "arc_rt_string_ffi", "trim_leading_js_ws")
+@external(erlang, "arc_string_ffi", "trim_leading_js_ws")
 fn trim_leading_js_whitespace(s: String) -> String

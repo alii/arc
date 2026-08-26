@@ -1,6 +1,6 @@
 //// The interpreter's dispatch loop. `fast_loop` runs the two dozen common
 //// opcodes on bare registers (pc, stack, locals, agent) over the total
-//// `arc_interp_ffi` kernels; a kernel `miss`, an empty stack, or any other
+//// `arc_interp_*_ffi` kernels; a kernel `miss`, an empty stack, or any other
 //// opcode materialises the full `State` once and goes through `step`, the
 //// one big instruction dispatcher. `step` is Result-based: `Ok(state)`
 //// continues, `Error(StepExit)` leaves the loop with a throw, the frame's
@@ -100,7 +100,7 @@ pub type Outcome {
 // ============================================================================
 // Wire-level probes for the fast loop
 // ============================================================================
-// The few tests `fast_loop` needs beyond the `arc_interp_ffi` kernels, kept
+// The few tests `fast_loop` needs beyond the `arc_interp_*_ffi` kernels, kept
 // as total term probes so a hit never goes through `classify`.
 
 /// `v` is the Handle wire form `{js_cell, N}`.

@@ -26,15 +26,11 @@
     classify/1,
     mk_undefined/0, mk_hole/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
-    to_boolean_i32/1, to_boolean/1,
-    strict_eq/2, strict_neq/2, same_value_zero/2,
+    to_boolean_i32/1,
+    strict_eq/2, same_value_zero/2,
     t_to_property_key_fast/1,
     js_number_to_string/1,
     parse_float/1,
-    format_to_fixed/2,
-    format_to_exponential/2,
-    format_to_exponential_auto/1,
-    format_to_precision/2,
     is_neg_zero/1, float_same_term/2
 ]).
 
@@ -59,27 +55,6 @@ classify({js_bigint, N}) -> {k_big, N};
 classify({js_sym, S}) -> {k_sym, S};
 classify({js_cell, N}) -> {k_handle, {js_cell, N}};
 classify(js_tdz) -> k_tdz.
-
-%% to_boolean(JsVal) -> boolean()
-%% ToBoolean as an Erlang boolean, for compiled code that tests it with a
-%% `case ... of false/true`. Same rows as to_boolean_i32/1.
-to_boolean(undefined) -> false;
-to_boolean(null) -> false;
-to_boolean(false) -> false;
-to_boolean(true) -> true;
-to_boolean(0) -> false;
-to_boolean(N) when is_integer(N) -> true;
-to_boolean(F) when is_float(F) -> F /= 0.0;
-to_boolean(js_nan) -> false;
-to_boolean(js_inf) -> true;
-to_boolean(js_neg_inf) -> true;
-to_boolean(<<>>) -> false;
-to_boolean(B) when is_binary(B) -> true;
-to_boolean({js_bigint, 0}) -> false;
-to_boolean({js_bigint, _}) -> true;
-to_boolean({js_sym, _}) -> true;
-to_boolean({js_cell, _}) -> true;
-to_boolean(js_tdz) -> false.
 
 %% to_boolean_i32(JsVal) -> 0 | 1
 %% ES2024 §7.1.2 ToBoolean as an i32 for direct use as an ir.If cond.
@@ -114,9 +89,6 @@ strict_eq(js_nan, _) -> false;
 strict_eq(_, js_nan) -> false;
 strict_eq(A, B) when is_number(A), is_number(B) -> A == B;
 strict_eq(A, B) -> A =:= B.
-
-%% strict_neq(A, B) -> boolean()
-strict_neq(A, B) -> not strict_eq(A, B).
 
 %% same_value_zero(A, B) -> boolean()
 %% §7.2.12 SameValueZero: IsStrictlyEqual except NaN equals NaN.
@@ -221,69 +193,19 @@ mk_tdz() -> js_tdz.
 
 %% ── §6.1.6.1.20 Number::toString ──────────────────────────────────────────
 %%
-%% JS number formatting: ES2024 §6.1.6.1.20 Number::toString and the
-%% Number.prototype.{toFixed,toExponential,toPrecision} algorithms
-%% (§21.1.3.3, §21.1.3.2, §21.1.3.5).
-%%
-%% Two digit sources, both derived from the double itself rather than from a
-%% pre-rounded intermediate string:
-%%   * shortest_digits/1   — the shortest digit string that round-trips the
-%%     double (Erlang's [short] / Ryu output), used wherever the spec asks
-%%     for "k is as small as possible".
-%%   * significant_exact/2 — the first P significant digits of the (near)
-%%     exact decimal expansion, rounded once, half away from zero.
-%% Fixed-point rounding goes through decimals_exact/2 for the same
-%% single-rounding reason (see its doc comment).
-
-%% Number.prototype.toFixed(fractionDigits) — ES2024 §21.1.3.3.
-%% The Gleam caller guarantees |X| < 1e21 (step 10: larger magnitudes use
-%% Number::toString instead) and 0 =< Digits =< 100.
-format_to_fixed(X, Digits) ->
-    with_abs(X, fun(A) -> list_to_binary(decimals_exact(A, Digits)) end).
-
-%% Number.prototype.toExponential(fractionDigits) — ES2024 §21.1.3.2 with an
-%% explicit fractionDigits (0..100): FractionDigits+1 significant digits.
-format_to_exponential(X, FractionDigits) ->
-    with_abs(X, fun(A) -> exponential_pos(A, FractionDigits) end).
-
-%% Number.prototype.toExponential() with fractionDigits undefined — §21.1.3.2
-%% step 6.c: as many significant digits as needed to round-trip the value
-%% and no more ("k is as small as possible").
-format_to_exponential_auto(X) ->
-    with_abs(X, fun exponential_auto_pos/1).
-
-%% Number.prototype.toPrecision(precision) — ES2024 §21.1.3.5, 1 =< P =< 100.
-format_to_precision(X, Precision) ->
-    with_abs(X, fun(A) -> precision_pos(A, Precision) end).
+%% JS Number::toString(x, 10) from the double's shortest round-trip digits
+%% (shortest_digits/1: Erlang's [short] / Ryu output), which is what the spec
+%% asks for with "k is as small as possible". The Number.prototype
+%% {toFixed,toExponential,toPrecision} formatters live in arc_rt_number_ffi.
 
 %% JS Number::toString(x, 10) per ES2024 §6.1.6.1.20 for a finite x.
-%% Like the three Number.prototype formatters above, this operates on ℝ(x),
-%% so -0 stringifies unsigned as "0". It short-circuits the zero case itself
-%% (js_positive_to_string/1 has no zero guard) rather than using with_abs/2.
+%% Operates on ℝ(x), so -0 stringifies unsigned as "0"; the zero case is
+%% short-circuited here because js_positive_to_string/1 has no zero guard.
 js_number_to_string(N) when is_float(N) ->
     case N == 0.0 of
         true -> <<"0">>;
         false when N < 0.0 -> <<"-", (js_positive_to_string(-N))/binary>>;
         false -> js_positive_to_string(N)
-    end.
-
-%% ---------------------------------------------------------------------------
-%% Shared sign prelude
-%% ---------------------------------------------------------------------------
-
-%% The three Number.prototype formatters all set x to ℝ(x) and then emit a
-%% "-" prefix only "if x < 0" (§21.1.3.2/3/5). ℝ(-0) = 0 is not < 0, so -0
-%% formats unsigned — hence the numeric `<`, NOT the IEEE sign bit.
-%%
-%% -0.0 is neither `< 0.0` nor distinguishable from 0.0 by `==`, so it would
-%% otherwise fall straight through to Fmt UNNORMALIZED and every formatter
-%% downstream would need its own -0 handling. Normalize it here, once: Fmt is
-%% guaranteed a value that is either strictly positive or exactly +0.0.
-with_abs(X, Fmt) ->
-    case X < 0.0 of
-        true -> <<"-", (Fmt(-X))/binary>>;
-        false when X == 0.0 -> Fmt(0.0);
-        false -> Fmt(X)
     end.
 
 %% ---------------------------------------------------------------------------
@@ -311,51 +233,6 @@ js_positive_to_string(X) ->
         true ->
             format_exponential(Digits, E)
     end.
-
-%% ---------------------------------------------------------------------------
-%% toExponential
-%% ---------------------------------------------------------------------------
-
-%% F+1 significant digits of positive X in exponential notation.
-exponential_pos(X, F) when X == 0.0 ->
-    format_exponential(lists:duplicate(F + 1, $0), 0);
-exponential_pos(X, F) ->
-    {Digits, E} = significant_exact(X, F + 1),
-    format_exponential(Digits, E).
-
-%% Shortest round-trip digits of positive X in exponential notation.
-exponential_auto_pos(X) when X == 0.0 ->
-    <<"0e+0">>;
-exponential_auto_pos(X) ->
-    {Digits, E} = shortest_digits(X),
-    format_exponential(Digits, E).
-
-%% ---------------------------------------------------------------------------
-%% toPrecision
-%% ---------------------------------------------------------------------------
-
-precision_pos(X, P) when X == 0.0 ->
-    %% §21.1.3.5 step 9: m is p zeros and e is 0.
-    format_precision(lists:duplicate(P, $0), 0, P);
-precision_pos(X, P) ->
-    {Digits, E} = significant_exact(X, P),
-    format_precision(Digits, E, P).
-
-%% §21.1.3.5 steps 10-12: fixed vs exponential is decided from the exponent
-%% E of the ROUNDED p-significant-digit string, not of the raw value.
-format_precision(Digits, E, P) when E < -6; E >= P ->
-    %% Step 10: exponential notation.
-    format_exponential(Digits, E);
-format_precision(Digits, E, P) when E =:= P - 1 ->
-    %% Step 11: exactly p integer digits.
-    list_to_binary(Digits);
-format_precision(Digits, E, _P) when E >= 0 ->
-    %% Step 12.a: decimal point after e+1 digits.
-    {I, F} = lists:split(E + 1, Digits),
-    list_to_binary(I ++ "." ++ F);
-format_precision(Digits, E, _P) ->
-    %% Step 12.b: -6 =< e < 0 — leading "0." and -(e+1) zeros.
-    list_to_binary("0." ++ lists:duplicate(-(E + 1), $0) ++ Digits).
 
 %% ---------------------------------------------------------------------------
 %% Digit extraction
@@ -386,56 +263,12 @@ shortest_digits(X) ->
     Digits = string:trim(lists:nthtail(Lead, Combined), trailing, "0"),
     {Digits, length(IntPart) - 1 - Lead + E0}.
 
-%% The first P significant decimal digits of positive X, rounded once, half
-%% away from zero (the spec's "pick the larger n"), and the decimal exponent
-%% E of the result's leading digit. Rounds the exact expansion (Erlang's
-%% {scientific, N} formats via the libc's correctly-rounded "%.*e") with 30
-%% guard digits, matching decimals_exact/2.
-significant_exact(X, P) ->
-    Sci = arc_rt_float_ffi:scientific(X, min(249, P + 30)),
-    {Mantissa, E0} = split_exponent(Sci),
-    [IntPart, FracPart] = string:split(Mantissa, "."),
-    {Keep, Rest} = lists:split(P, IntPart ++ FracPart),
-    RoundUp = case Rest of [C | _] when C >= $5 -> true; _ -> false end,
-    Rounded = case RoundUp of
-        true -> integer_to_list(list_to_integer(Keep) + 1);
-        false -> Keep
-    end,
-    case length(Rounded) > P of
-        %% Rounding carried into a new leading digit (e.g. 9.99 -> 10):
-        %% keep P digits and bump the exponent.
-        true -> {lists:sublist(Rounded, P), E0 + 1};
-        false -> {Rounded, E0}
-    end.
-
 %% Split Erlang float text into its mantissa and integer exponent
 %% ("1.5e-7" -> {"1.5", -7}); no exponent part means 0.
 split_exponent(S) ->
     case string:split(S, "e") of
         [Mantissa, Exp] -> {Mantissa, list_to_integer(Exp)};
         [Mantissa] -> {Mantissa, 0}
-    end.
-
-%% float_to_list with {decimals, D} rounds from the float's shortest decimal
-%% representation, double-rounding values like 1.3548387096774195 at 15
-%% decimals ("…420" instead of the correct "…419"). Format with 30 guard
-%% digits of the exact expansion and round once, half away from zero
-%% (matching the spec's "pick the larger n").
-decimals_exact(X, D) ->
-    Wide = arc_rt_float_ffi:decimals(X, min(253, D + 30)),
-    [IntPart, Frac] = string:split(Wide, "."),
-    Keep = lists:sublist(Frac, D),
-    Rest = lists:nthtail(D, Frac),
-    RoundUp = case Rest of [C | _] when C >= $5 -> true; _ -> false end,
-    Num0 = list_to_integer(IntPart ++ Keep),
-    Num = case RoundUp of true -> Num0 + 1; false -> Num0 end,
-    S = integer_to_list(Num),
-    case D of
-        0 -> S;
-        _ ->
-            Padded = lists:duplicate(max(0, D + 1 - length(S)), $0) ++ S,
-            {I2, F2} = lists:split(length(Padded) - D, Padded),
-            I2 ++ "." ++ F2
     end.
 
 %% ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ pub fn table() -> DirectHost {
   let ops_ffi = "arc_rt_ops_ffi"
   let call = "arc@rt@call"
   let call_ffi = "arc_rt_call_ffi"
+  let call_fast_ffi = "arc_rt_call_fast_ffi"
   let class = "arc@rt@class"
   let async = "arc@rt@async"
   let gc = "arc@rt@gc"
@@ -161,19 +162,19 @@ pub fn table() -> DirectHost {
       #("instance_of", HostOp(ops, "t_instance_of", Mut)),
       #("instanceof_fast", HostOp(obj_ffi, "t_instanceof_fast", Read)),
       #("call", HostOp(call, "t_call_checked", Mut)),
-      #("call_fast", HostOp(call_ffi, "t_call_fast", Mut)),
-      #("call_fast0", HostOp(call_ffi, "t_call_fast0", Mut)),
-      #("call_fast1", HostOp(call_ffi, "t_call_fast1", Mut)),
-      #("call_fast2", HostOp(call_ffi, "t_call_fast2", Mut)),
-      #("call_fast3", HostOp(call_ffi, "t_call_fast3", Mut)),
-      #("call_method_mono", HostOp(call_ffi, "t_call_method_mono", Mut)),
-      #("call_method_ic", HostOp(call_ffi, "t_call_method_ic", Mut)),
-      #("call_method_ic0", HostOp(call_ffi, "t_call_method_ic0", Mut)),
-      #("call_method_ic1", HostOp(call_ffi, "t_call_method_ic1", Mut)),
-      #("call_method_ic2", HostOp(call_ffi, "t_call_method_ic2", Mut)),
-      #("call_method_ic3", HostOp(call_ffi, "t_call_method_ic3", Mut)),
+      #("call_fast", HostOp(call_fast_ffi, "t_call_fast", Mut)),
+      #("call_fast0", HostOp(call_fast_ffi, "t_call_fast0", Mut)),
+      #("call_fast1", HostOp(call_fast_ffi, "t_call_fast1", Mut)),
+      #("call_fast2", HostOp(call_fast_ffi, "t_call_fast2", Mut)),
+      #("call_fast3", HostOp(call_fast_ffi, "t_call_fast3", Mut)),
+      #("call_method_mono", HostOp(call_fast_ffi, "t_call_method_mono", Mut)),
+      #("call_method_ic", HostOp(call_fast_ffi, "t_call_method_ic", Mut)),
+      #("call_method_ic0", HostOp(call_fast_ffi, "t_call_method_ic0", Mut)),
+      #("call_method_ic1", HostOp(call_fast_ffi, "t_call_method_ic1", Mut)),
+      #("call_method_ic2", HostOp(call_fast_ffi, "t_call_method_ic2", Mut)),
+      #("call_method_ic3", HostOp(call_fast_ffi, "t_call_method_ic3", Mut)),
       #("construct", HostOp(call, "t_construct", Mut)),
-      #("new_simple", HostOp(call_ffi, "t_new_simple", Mut)),
+      #("new_simple", HostOp(call_fast_ffi, "t_new_simple", Mut)),
       #("kfn_code", HostOp(call_ffi, "t_kfn_code", Read)),
       #("new_private_name", HostOp(class, "t_new_private_name", Mut)),
       #("class_setup", HostOp(class, "t_class_setup", Mut)),

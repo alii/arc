@@ -22,7 +22,7 @@
 %% Faithful port of arc_math_ffi.erl; JsNum tag names adapted to 2core's
 %% wire encoding (JInt/JFloat/JNan/JPosInf/JNegInf → snake_case atoms).
 -module(arc_rt_math_ffi).
--export([exp/1, pow/2, cosh/1, sinh/1, hypot/1, fround/1, is_neg_zero/1,
+-export([exp/1, pow/2, cosh/1, sinh/1, hypot/1, fround/1,
          t_math_sqrt/1, t_math_floor/1, t_math_abs/1,
          t_math_pow/2, t_math_min/2, t_math_max/2]).
 
@@ -259,11 +259,3 @@ num_or_miss(_) -> miss.
 
 is_neg_zero_v(X) when is_float(X) -> X == 0.0 andalso neg_sign(X);
 is_neg_zero_v(_) -> false.
-
-%% Detect IEEE 754 negative zero: a zero whose sign bit is set. BEAM floats
-%% preserve the sign bit but Erlang's == and =:= don't reliably distinguish
-%% ±0 in all contexts.
-is_neg_zero(X) when is_float(X) ->
-    X == 0.0 andalso neg_sign(X);
-is_neg_zero(_) ->
-    false.

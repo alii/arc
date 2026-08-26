@@ -669,7 +669,7 @@ fn alnum_value(ch: String) -> Option(Int) {
 
 // ── FFI (port arc_number_ffi.erl) ───────────────────────────────────────────
 
-@external(erlang, "arc_rt_string_ffi", "trim_leading_js_ws")
+@external(erlang, "arc_string_ffi", "trim_leading_js_ws")
 fn trim_leading_js_ws(s: String) -> String
 
 @external(erlang, "arc_rt_number_ffi", "format_to_fixed")

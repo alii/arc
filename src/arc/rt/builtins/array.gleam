@@ -1989,7 +1989,7 @@ type Scan {
   Absent
 }
 
-@external(erlang, "arc_rt_builtins_ffi", "scan_forward")
+@external(erlang, "arc_rt_array_ffi", "scan_forward")
 fn scan_forward(
   els: JsElements,
   search: JsVal,
@@ -1998,7 +1998,7 @@ fn scan_forward(
   eq: EqMode,
 ) -> Scan
 
-@external(erlang, "arc_rt_builtins_ffi", "scan_backward")
+@external(erlang, "arc_rt_array_ffi", "scan_backward")
 fn scan_backward(els: JsElements, search: JsVal, idx: Int, eq: EqMode) -> Scan
 
 fn search_forward(
