@@ -1,3 +1,5 @@
+// @ts-check
+
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import fs from 'node:fs';
@@ -9,6 +11,7 @@ const coopCoep = {
 	'Cross-Origin-Embedder-Policy': 'require-corp',
 };
 
+/** @returns {import("vite").PluginOption} */
 function examplesPlugin() {
 	const virtualId = 'virtual:examples';
 	const resolved = '\0' + virtualId;
@@ -40,6 +43,7 @@ function examplesPlugin() {
 	};
 }
 
+/** @returns {import("vite").PluginOption} */
 function test262HistoryPlugin() {
 	const virtualId = 'virtual:test262-history';
 	const resolved = '\0' + virtualId;
