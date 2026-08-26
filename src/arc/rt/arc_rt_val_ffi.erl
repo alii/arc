@@ -26,7 +26,7 @@
     classify/1,
     mk_undefined/0, mk_hole/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
-    to_boolean_i32/1,
+    to_boolean_i32/1, to_boolean/1,
     strict_eq/2, same_value_zero/2,
     t_to_property_key_fast/1,
     js_number_to_string/1,
@@ -79,6 +79,29 @@ to_boolean_i32({js_bigint, _}) -> 1;
 to_boolean_i32({js_sym, _}) -> 1;
 to_boolean_i32({js_cell, _}) -> 1;
 to_boolean_i32(js_tdz) -> 0.
+
+%% to_boolean(JsVal) -> boolean()
+%% ToBoolean as an Erlang boolean. NOT bound from Gleam and NOT dead: carder
+%% (aot backend, carder/backend/eaf_simplify.gleam) rewrites `to_boolean_i32`
+%% into a call to this "boolean twin" so emitted code can `case ... of
+%% true/false` directly. Same rows as to_boolean_i32/1.
+to_boolean(undefined) -> false;
+to_boolean(null) -> false;
+to_boolean(false) -> false;
+to_boolean(true) -> true;
+to_boolean(0) -> false;
+to_boolean(N) when is_integer(N) -> true;
+to_boolean(F) when is_float(F) -> F /= 0.0;
+to_boolean(js_nan) -> false;
+to_boolean(js_inf) -> true;
+to_boolean(js_neg_inf) -> true;
+to_boolean(<<>>) -> false;
+to_boolean(B) when is_binary(B) -> true;
+to_boolean({js_bigint, 0}) -> false;
+to_boolean({js_bigint, _}) -> true;
+to_boolean({js_sym, _}) -> true;
+to_boolean({js_cell, _}) -> true;
+to_boolean(js_tdz) -> false.
 
 %% strict_eq(A, B) -> boolean()
 %% §7.2.15 IsStrictlyEqual, total on wire terms. NaN is unequal to itself;

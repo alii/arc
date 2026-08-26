@@ -113,3 +113,4 @@ pub fn fround(value: Float) -> Float
 - Gleam compiles native files with no `-I` flags, so `-include` an `.hrl` by a path relative to the including file (`"arc_rt_layout.hrl"` from `src/arc/rt/`, `"../rt/arc_rt_layout.hrl"` from `src/arc/interp/`)
 - Keep FFI modules small and focused
 - FFI breaks type safety — the compiler trusts your annotations without verification
+- AOT-emitted code calls `arc_rt_*_ffi` by name: `aot/src/arc_aot/host_ops.gleam` plus hardcoded peepholes in carder (`aot/build/packages/carder/src`, e.g. `arc_rt_val_ffi:to_boolean`). Grep both before removing or renaming an export, and run `cd aot && gleam test`
