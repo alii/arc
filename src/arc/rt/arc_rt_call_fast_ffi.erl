@@ -47,10 +47,10 @@ t_call_fast3(St, F, This, A, B, C) ->
 
 %% N is the args list itself, or 0..3 with the args in A, B, C.
 call_fast(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
-    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
-                {?KFN_TAG, Code, Home, Flags, _, Simple}
+                {?KFN_TAG, Code, Home, Flags, _, Simple, _, _, _}
                   when ?KFN_PLAIN(Flags) ->
                     %% §10.2.1.2 bind-this as in t_kfn_code.
                     case element(?FNFLAGS_IS_ARROW, Flags)
@@ -104,14 +104,28 @@ apply_fast(St, F, Code, Home, _, ThisR, N, A, B, C) ->
 home({?SOME, H}) -> H;
 home(?NONE) -> undefined.
 
-%% IcEntry (rt_types.gleam): {ic_call, KeyBin, Entries}, each entry
-%% {ic_call_way, Sid, PId, Chain, Fn} with Chain = [{ProtoId, ProtoSlot}]
-%% from the receiver's proto down to the holder. Up to ?IC_CALL_WAYS entries
-%% per site (raytrace's shape.intersect and Class.create's shared
-%% `this.initialize.apply(this, arguments)` are polymorphic).
+%% IcEntry (rt_types.gleam): {ic_call, KeyBin, Ways}, Ways a map from a
+%% way's Match to {Chain, Fn, Kind} (rt_types.IcCallWay): Match says which
+%% receivers the way answers for —
+%%   {ic_shaped, Sid, PId}  a shaped object of shape Sid (so no own `key`)
+%%                          whose proto is PId;
+%%   {ic_plain, PId}        an SObject whose named `key` would be a plain
+%%                          props entry (arc_rt_obj_ffi:named_plain) but is
+%%                          absent, and whose proto is PId;
+%%   {ic_own, RId}          the very cell RId while it still holds the slot
+%%                          in Chain (= [{RId, Slot}]), `key` being its own
+%%                          data property;
+%%   {ic_prim, W, PId}      a string (W = ?REALM_STRING, `key` not its own
+%%                          "length") or number (?REALM_NUMBER) primitive
+%%                          while the realm's wrapper prototype is PId, the
+%%                          callee a native or strict function (`this` stays
+%%                          the primitive, §10.2.1.2) —
+%% Chain = [{ProtoId, ProtoSlot}] from the receiver's proto down to the holder
+%% and Kind the callee cell's ObjKind when the way was filled. Up to
+%% ?IC_CALL_WAYS ways per site (raytrace's shape.intersect and Class.create's
+%% shared `this.initialize.apply(this, arguments)` are polymorphic).
 -define(IC_CALL, ic_call).
--define(IC_CALL_WAY, ic_call_way).
--define(IC_CALL_WAYS, 4).
+-define(IC_CALL_WAYS, 16).
 
 %% t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) -> {V, St'}
 %% JMut. The whole compiled `o.key(args)` site as ONE host op: the IC probe
@@ -121,68 +135,106 @@ home(?NONE) -> undefined.
 %% precedes the apply), so the read observes exactly the state it did inline.
 %%
 %% The probe: `t_call_method_mono` with a per-site inline cache (JsStore.ics).
-%% Hit: receiver is a shaped object of an entry's shape (so no own `key`),
-%% its proto is the entry's first cell and every cell on the chain still
-%% holds the very slot the key was resolved through (an equal slot has the
-%% same props and the same proto link; any write replaces it), then apply
-%% the entry's data value with the mono gate. Otherwise the mono body runs
-%% and, when a shaped receiver resolves the key on its proto chain, records
-%% the way: replacing a stale entry (same shape and proto, a chain cell was
-%% written) or adding one while the site has room.
+%% Hit: a way's Match holds for the receiver and every cell on its chain
+%% still holds the very slot the key was resolved through (an equal slot has
+%% the same props and the same proto link; any write replaces it), then
+%% apply the way's recorded callee kind with the mono gate, without reading
+%% the callee cell (rt_types.IcCallWay says why). Otherwise the mono body
+%% runs and, when it resolves the key to a callee that passes the gate,
+%% records the way before applying it: replacing a stale way (same Match, a
+%% chain cell was written) or adding one while the site has room. An `own`
+%% way whose cell changed is never refilled, so a receiver whose own slots
+%% keep changing costs one probe, not a store write per call.
 t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) ->
-    method(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined,
-           undefined).
+    ic(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined, undefined).
 
 %% t_call_method_icN(St, Recv, KeyBin, Site, RSite, A1..AN) — the same with
 %% 0..3 positional args, so a hit applies a matching simple variant with no
 %% args list, no length/1 and no apply hop.
 t_call_method_ic0(St, Recv, KeyBin, Site, RSite) ->
-    method(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined, undefined).
+    ic(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined, undefined).
 t_call_method_ic1(St, Recv, KeyBin, Site, RSite, A) ->
-    method(St, Recv, KeyBin, Site, RSite, 1, A, undefined, undefined).
+    ic(St, Recv, KeyBin, Site, RSite, 1, A, undefined, undefined).
 t_call_method_ic2(St, Recv, KeyBin, Site, RSite, A, B) ->
-    method(St, Recv, KeyBin, Site, RSite, 2, A, B, undefined).
+    ic(St, Recv, KeyBin, Site, RSite, 2, A, B, undefined).
 t_call_method_ic3(St, Recv, KeyBin, Site, RSite, A, B, C) ->
-    method(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
+    ic(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
 
-%% N is the args list itself, or 0..3 with the args in A, B, C.
-method(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
-    case ic(St, Recv, KeyBin, Site, N, A, B, C) of
-        {miss, St1} ->
-            {F, St2} = arc_rt_obj_ffi:t_get_prop_site(St1, Recv, KeyBin,
-                                                      RSite),
-            call_fast(St2, F, Recv, N, A, B, C);
-        Hit -> Hit
-    end.
-
-ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, N, A, B, C) ->
+%% N is the args list itself, or 0..3 with the args in A, B, C. A hit applies
+%% the callee as a tail call; every other way runs the mono body under
+%% `slow`, which takes the emitter's read + call on its miss. Fill is `none`
+%% (record nothing) or the site to record the resolved way on.
+ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    RSlot = array:get(RId, Data),
-    case element(?STORE_ICS, Store) of
-        #{Site := {?IC_CALL, KeyBin, Entries}} ->
-            case RSlot of
-                {?SSHAPED_TAG, Sid, Proto, _} ->
-                    case ic_probe(Data, Sid, Proto, Entries) of
-                        Fn = {?HANDLE_TAG, _} ->
-                            apply_pos(St, Data, Fn, Recv, N, A, B, C);
-                        stale ->
-                            mono(St, Recv, RSlot, KeyBin, args(N, A, B, C),
-                                 Site);
-                        miss when length(Entries) < ?IC_CALL_WAYS ->
-                            mono(St, Recv, RSlot, KeyBin, args(N, A, B, C),
-                                 Site);
-                        miss ->
-                            mono(St, Recv, RSlot, KeyBin, args(N, A, B, C),
-                                 none)
-                    end;
-                _ -> mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), none)
+    RSlot = arc_rt_arena_ffi:get(RId, Data),
+    Fill = case element(?STORE_ICS, Store) of
+        #{Site := {?IC_CALL, KeyBin, Ways}} ->
+            case ic_probe(Data, RId, RSlot, KeyBin, Ways) of
+                {hit, _, _} = Hit -> Hit;
+                stale -> Site;
+                spent -> none;
+                miss when map_size(Ways) < ?IC_CALL_WAYS -> Site;
+                miss -> none
             end;
-        #{Site := _} ->
-            mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), none);
-        _ -> mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), Site)
+        #{Site := _} -> none;
+        _ -> Site
+    end,
+    case Fill of
+        {hit, Fn1, Kind1} -> apply_kind(St, Kind1, Fn1, Recv, N, A, B, C);
+        _ ->
+            slow(mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), Fill), Recv,
+                 KeyBin, RSite, N, A, B, C)
     end;
-ic(St, _, _, _, _, _, _, _) -> {miss, St}.
+ic(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
+    case prim_wrapper(Recv, KeyBin) of
+        none -> slow({miss, St}, Recv, KeyBin, RSite, N, A, B, C);
+        W -> prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C)
+    end.
+
+%% The Realm field of the wrapper prototype a primitive receiver's method
+%% read starts from (arc_rt_obj_ffi:read_prim), or `none`.
+prim_wrapper(Recv, KeyBin) when is_binary(Recv), KeyBin =/= <<"length">> ->
+    ?REALM_STRING;
+prim_wrapper(Recv, _) when is_number(Recv) -> ?REALM_NUMBER;
+prim_wrapper(_, _) -> none.
+
+%% The method call on a string / number primitive: probe the site's
+%% `ic_prim` way for this wrapper, else walk from the wrapper prototype as
+%% the mono body does, recording the way.
+prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
+    Store = element(?AGENT_STORE, St),
+    Data = element(?STORE_DATA, Store),
+    Proto = {?SOME, {?HANDLE_TAG, PId}} =
+        {?SOME, element(?PAIR_PROTO, element(W, element(?AGENT_REALM, St)))},
+    Fill = case element(?STORE_ICS, Store) of
+        #{Site := {?IC_CALL, KeyBin, Ways}} ->
+            case Ways of
+                #{{ic_prim, W, PId} := {Chain, Fn0, Kind0}} ->
+                    case ic_chain_ok(Data, Proto, Chain) of
+                        true -> {hit, Fn0, Kind0};
+                        false -> Site
+                    end;
+                _ when map_size(Ways) < ?IC_CALL_WAYS -> Site;
+                _ -> none
+            end;
+        #{Site := _} -> none;
+        _ -> Site
+    end,
+    case Fill of
+        {hit, Fn, Kind} -> apply_kind(St, Kind, Fn, Recv, N, A, B, C);
+        none -> slow({miss, St}, Recv, KeyBin, RSite, N, A, B, C);
+        _ ->
+            slow(mono_proto_walk(St, Data, PId, KeyBin, Recv,
+                                 args(N, A, B, C), ?MONO_PROTO_MAX,
+                                 {Fill, {ic_prim, W}, []}),
+                 Recv, KeyBin, RSite, N, A, B, C)
+    end.
+
+slow({miss, St}, Recv, KeyBin, RSite, N, A, B, C) ->
+    {F, St1} = arc_rt_obj_ffi:t_get_prop_site(St, Recv, KeyBin, RSite),
+    call_fast(St1, F, Recv, N, A, B, C);
+slow(Hit, _, _, _, _, _, _, _) -> Hit.
 
 args(L, _, _, _) when is_list(L) -> L;
 args(0, _, _, _) -> [];
@@ -190,57 +242,82 @@ args(1, A, _, _) -> [A];
 args(2, A, B, _) -> [A, B];
 args(3, A, B, C) -> [A, B, C].
 
-%% mono_apply with positional args: a simple variant of arity N is applied
+%% Apply a way's recorded callee Kind (already past the mono gate when it
+%% was filled) with positional args: a simple variant of arity N is applied
 %% directly (with `this` only when it reads it); the Frame and native paths
 %% cons the list.
-apply_pos(St, Data, Fn, Recv, Args, _, _, _) when is_list(Args) ->
-    mono_apply(St, Data, Fn, Recv, Args);
-apply_pos(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, N, A, B, C) ->
-    case array:get(FnId, Data) of
-        FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
-            case element(?SOBJECT_KIND, FSlot) of
-                {?KFN_TAG, Code, Home, Flags, _, Simple}
-                  when ?KFN_PLAIN(Flags) ->
-                    case Simple of
-                        {?SOME, {CodeT, N, true}} ->
-                            case N of
-                                0 -> CodeT(St, Recv);
-                                1 -> CodeT(St, Recv, A);
-                                2 -> CodeT(St, Recv, A, B);
-                                3 -> CodeT(St, Recv, A, B, C)
-                            end;
-                        {?SOME, {CodeT, N, false}} ->
-                            case N of
-                                0 -> CodeT(St);
-                                1 -> CodeT(St, A);
-                                2 -> CodeT(St, A, B);
-                                3 -> CodeT(St, A, B, C)
-                            end;
-                        _ ->
-                            Code(St, {Recv, Fn, home(Home), undefined},
-                                 args(N, A, B, C))
-                    end;
-                {?KNATIVE_TAG, Tag, _, _, _} ->
-                    arc@rt@builtins:dispatch_native(
-                        St, Tag, Recv, args(N, A, B, C));
-                _ -> {miss, St}
+apply_kind(St, Kind, Fn, Recv, Args, _, _, _) when is_list(Args) ->
+    kind_apply(St, Kind, Fn, Recv, Args);
+apply_kind(St, {?KFN_TAG, Code, Home, _, _, Simple, _, _, _}, Fn, Recv, N, A,
+           B, C) ->
+    case Simple of
+        {?SOME, {CodeT, N, true}} ->
+            case N of
+                0 -> CodeT(St, Recv);
+                1 -> CodeT(St, Recv, A);
+                2 -> CodeT(St, Recv, A, B);
+                3 -> CodeT(St, Recv, A, B, C)
             end;
-        _ -> {miss, St}
-    end.
-
-%% Fn (hit) | stale (a way for this shape+proto failed its chain) | miss.
-ic_probe(Data, Sid, Proto = {?SOME, {?HANDLE_TAG, PId}},
-         [{?IC_CALL_WAY, Sid, PId, Chain, Fn} | _]) ->
-    case ic_chain_ok(Data, Proto, Chain) of
-        true -> Fn;
-        false -> stale
+        {?SOME, {CodeS, N, false}} ->
+            case N of
+                0 -> CodeS(St);
+                1 -> CodeS(St, A);
+                2 -> CodeS(St, A, B);
+                3 -> CodeS(St, A, B, C)
+            end;
+        _ -> Code(St, {Recv, Fn, home(Home), undefined}, args(N, A, B, C))
     end;
-ic_probe(Data, Sid, Proto, [_ | Rest]) -> ic_probe(Data, Sid, Proto, Rest);
-ic_probe(_, _, _, []) -> miss.
+apply_kind(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, N, A, B, C) ->
+    arc@rt@builtins:dispatch_native(St, Tag, Recv, args(N, A, B, C)).
+
+%% {hit, Fn, Kind} | stale (a shaped/plain way for this receiver failed its
+%% chain: refill) | spent (an own way for this cell no longer holds: do not
+%% refill) | miss (no way for this receiver).
+ic_probe(Data, _, {?SSHAPED_TAG, Sid, {?SOME, {?HANDLE_TAG, PId}} = Proto, _},
+         _, Ways) ->
+    case Ways of
+        #{{ic_shaped, Sid, PId} := {Chain, Fn, Kind}} ->
+            case ic_chain_ok(Data, Proto, Chain) of
+                true -> {hit, Fn, Kind};
+                false -> stale
+            end;
+        _ -> miss
+    end;
+ic_probe(Data, RId, RSlot, KeyBin, Ways) when element(1, RSlot) =:= ?SOBJECT_TAG ->
+    case Ways of
+        #{{ic_own, RId} := {[{_, Slot}], Fn, Kind}} ->
+            case Slot =:= RSlot of
+                true -> {hit, Fn, Kind};
+                false -> spent
+            end;
+        _ ->
+            case element(?SOBJECT_PROTO, RSlot) of
+                {?SOME, {?HANDLE_TAG, PId}} = Proto ->
+                    case Ways of
+                        #{{ic_plain, PId} := {Chain, Fn, Kind}} ->
+                            Own = is_map_key({?KEY_NAMED, KeyBin},
+                                             element(?SOBJECT_PROPS, RSlot))
+                                orelse not arc_rt_obj_ffi:named_plain(
+                                             element(?SOBJECT_KIND, RSlot),
+                                             KeyBin),
+                            case Own of
+                                true -> miss;
+                                false ->
+                                    case ic_chain_ok(Data, Proto, Chain) of
+                                        true -> {hit, Fn, Kind};
+                                        false -> stale
+                                    end
+                            end;
+                        _ -> miss
+                    end;
+                _ -> miss
+            end
+    end;
+ic_probe(_, _, _, _, _) -> miss.
 
 ic_chain_ok(_, _, []) -> true;
 ic_chain_ok(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PSlot} | Rest]) ->
-    case array:get(PId, Data) of
+    case arc_rt_arena_ffi:get(PId, Data) of
         PSlot -> ic_chain_ok(Data, element(?SOBJECT_PROTO, PSlot), Rest);
         _ -> false
     end;
@@ -258,21 +335,30 @@ ic_chain_ok(_, _, _) -> false.
 %% accessor shadows too and misses.
 t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
-    mono(St, Recv, array:get(RId, Data), KeyBin, Args, none);
+    mono(St, Recv, arc_rt_arena_ffi:get(RId, Data), KeyBin, Args, none);
 t_call_method_mono(St, _, _, _) -> {miss, St}.
 
 %% RSlot is the receiver's slot; Site is `none` (no cache) or the site id
-%% to record the resolved way on.
-mono(St, Recv, RSlot, KeyBin, Args, Site) when is_tuple(RSlot) ->
+%% to record the resolved way on. Ic is `none` or `{Site, Match0, Chain}`:
+%% the way being built, Match0 lacking the proto id the first hop supplies.
+mono(St, Recv = {?HANDLE_TAG, RId}, RSlot, KeyBin, Args, Site)
+  when is_tuple(RSlot) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     {Own, Ic} = case element(1, RSlot) of
-        ?SOBJECT_TAG -> {mono_own_value(RSlot, KeyBin), none};
+        ?SOBJECT_TAG when Site =:= none ->
+            {mono_own_value(RSlot, KeyBin), none};
+        ?SOBJECT_TAG ->
+            case arc_rt_obj_ffi:named_plain(element(?SOBJECT_KIND, RSlot),
+                                            KeyBin) of
+                true -> {mono_own_value(RSlot, KeyBin), {Site, ic_plain, []}};
+                false -> {mono_own_value(RSlot, KeyBin), none}
+            end;
         ?SSHAPED_TAG when Site =:= none ->
             {mono_shaped_own(Store, RSlot, KeyBin), none};
         ?SSHAPED_TAG ->
             {mono_shaped_own(Store, RSlot, KeyBin),
-             {Site, element(?SSHAPED_SID, RSlot), []}};
+             {Site, {ic_shaped, element(?SSHAPED_SID, RSlot)}, []}};
         _ -> {miss, none}
     end,
     case Own of
@@ -281,6 +367,9 @@ mono(St, Recv, RSlot, KeyBin, Args, Site) when is_tuple(RSlot) ->
             mono_proto(St, Data, element(?SOBJECT_PROTO, RSlot), KeyBin,
                        Recv, Args, Ic);
         miss -> {miss, St};
+        V when Ic =/= none, element(1, RSlot) =:= ?SOBJECT_TAG ->
+            mono_found(St, Data, V, KeyBin, Recv, Args,
+                       {Site, {ic_own, RId, RSlot}, []});
         V -> mono_apply(St, Data, V, Recv, Args)
     end;
 mono(St, _, _, _, _, _) -> {miss, St}.
@@ -289,11 +378,11 @@ mono_proto(St, Data, {?SOME, {?HANDLE_TAG, PId}}, KeyBin, Recv, Args, Ic) ->
     mono_proto_walk(St, Data, PId, KeyBin, Recv, Args, ?MONO_PROTO_MAX, Ic);
 mono_proto(St, _, _, _, _, _, _) -> {miss, St}.
 
-%% Bounded walk. Accessor or non-cell hit at any hop shadows → miss. Ic is
-%% `none` or `{Site, Sid, Chain}` accumulating the hops walked (reversed).
+%% Bounded walk. Accessor or non-cell hit at any hop shadows → miss. Ic
+%% accumulates the hops walked (reversed).
 mono_proto_walk(St, _, _, _, _, _, 0, _) -> {miss, St};
 mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel, Ic) ->
-    case array:get(Id, Data) of
+    case arc_rt_arena_ffi:get(Id, Data) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             mono_hop(St, Data, Id, Slot, mono_own_value(Slot, KeyBin),
                      KeyBin, Recv, Args, Fuel, Ic);
@@ -311,34 +400,50 @@ mono_hop(St, Data, Id, Slot, absent, KeyBin, Recv, Args, Fuel, Ic) ->
                             ic_hop(Ic, Id, Slot));
         _ -> {miss, St}
     end;
-mono_hop(St, Data, Id, Slot, Fn = {?HANDLE_TAG, _}, KeyBin, Recv, Args, _, Ic)
-  when Ic =/= none ->
-    case mono_apply(St, Data, Fn, Recv, Args) of
-        {miss, _} = Miss -> Miss;
-        {V, St2} -> {V, ic_fill(St2, ic_hop(Ic, Id, Slot), Fn, KeyBin)}
-    end;
+mono_hop(St, Data, Id, Slot, V, KeyBin, Recv, Args, _, Ic) when Ic =/= none ->
+    mono_found(St, Data, V, KeyBin, Recv, Args, ic_hop(Ic, Id, Slot));
 mono_hop(St, Data, _, _, V, _, Recv, Args, _, _) ->
     mono_apply(St, Data, V, Recv, Args).
 
-ic_hop(none, _, _) -> none;
-ic_hop({Site, Sid, Chain}, Id, Slot) -> {Site, Sid, [{Id, Slot} | Chain]}.
+%% The key resolved to V with a way to record: gate, fill, then apply. A
+%% primitive receiver is passed as `this` unconverted, so only a native or a
+%% strict function takes it (§10.2.1.2 OrdinaryCallBindThis).
+mono_found(St, Data, Fn = {?HANDLE_TAG, _}, KeyBin, Recv, Args, Ic) ->
+    case mono_kind(Data, Fn) of
+        miss -> {miss, St};
+        {?KFN_TAG, _, _, Flags, _, _, _, _, _}
+          when not is_tuple(Recv),
+               element(?FNFLAGS_IS_STRICT, Flags) =/= true ->
+            {miss, St};
+        Kind ->
+            kind_apply(ic_fill(St, Ic, Fn, Kind, KeyBin), Kind, Fn, Recv, Args)
+    end;
+mono_found(St, _, _, _, _, _, _) -> {miss, St}.
 
-%% Record the resolved way after a successful apply: drop the entry for the
-%% same shape and proto (it went stale), then add while there is room.
-ic_fill(St, {Site, Sid, RevChain}, Fn, KeyBin) ->
+ic_hop(none, _, _) -> none;
+ic_hop({Site, Match, Chain}, Id, Slot) -> {Site, Match, [{Id, Slot} | Chain]}.
+
+%% Record the resolved way under its Match (replacing a stale one) while the
+%% site has room. An `own` way's chain is the receiver cell itself.
+ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, KeyBin) ->
     Store = element(?AGENT_STORE, St),
     Ics = element(?STORE_ICS, Store),
-    Chain = [{PId, _} | _] = lists:reverse(RevChain),
-    Kept = case Ics of
-        #{Site := {?IC_CALL, KeyBin, Es}} ->
-            [E || E = {?IC_CALL_WAY, S, P, _, _} <- Es,
-                  S =/= Sid orelse P =/= PId];
-        _ -> []
+    Chain = lists:reverse(RevChain),
+    {Match, Way} = case {Match0, Chain} of
+        {{ic_shaped, Sid}, [{PId, _} | _]} ->
+            {{ic_shaped, Sid, PId}, {Chain, Fn, Kind}};
+        {ic_plain, [{PId, _} | _]} -> {{ic_plain, PId}, {Chain, Fn, Kind}};
+        {{ic_own, RId, RSlot}, []} ->
+            {{ic_own, RId}, {[{RId, RSlot}], Fn, Kind}};
+        {{ic_prim, W}, [{PId, _} | _]} -> {{ic_prim, W, PId}, {Chain, Fn, Kind}}
     end,
-    case length(Kept) < ?IC_CALL_WAYS of
+    Ways = case Ics of
+        #{Site := {?IC_CALL, KeyBin, Ways0}} -> Ways0;
+        _ -> #{}
+    end,
+    case is_map_key(Match, Ways) orelse map_size(Ways) < ?IC_CALL_WAYS of
         true ->
-            New = {?IC_CALL_WAY, Sid, PId, Chain, Fn},
-            IcE = {?IC_CALL, KeyBin, [New | Kept]},
+            IcE = {?IC_CALL, KeyBin, Ways#{Match => Way}},
             setelement(?AGENT_STORE, St,
                        setelement(?STORE_ICS, Store, Ics#{Site => IcE}));
         false -> St
@@ -376,29 +481,37 @@ mono_shaped_own(Store, RSlot, KeyBin) ->
 %% simple variant (KCompiled.simple) of matching arity is applied as
 %% CodeT(St, Recv, P0..Pn-1) / CodeS(St, P0..Pn-1) with no Frame tuple;
 %% otherwise Frame per D5 mk_frame.
-mono_apply(St, Data, Fn = {?HANDLE_TAG, FnId}, Recv, Args) ->
-    case array:get(FnId, Data) of
-        FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
-            case element(?SOBJECT_KIND, FSlot) of
-                {?KFN_TAG, Code, Home, Flags, _, Simple}
-                  when ?KFN_PLAIN(Flags) ->
-                    case Simple of
-                        {?SOME, {CodeT, Arity, true}}
-                          when length(Args) =:= Arity ->
-                            apply_this(CodeT, St, Recv, Args);
-                        {?SOME, {CodeS, Arity, false}}
-                          when length(Args) =:= Arity ->
-                            erlang:apply(CodeS, [St | Args]);
-                        _ -> Code(St, {Recv, Fn, home(Home), undefined}, Args)
-                    end;
-                {?KNATIVE_TAG, Tag, _, _, _} ->
-                    arc@rt@builtins:dispatch_native(
-                        St, Tag, Recv, Args);
-                _ -> {miss, St}
-            end;
-        _ -> {miss, St}
+mono_apply(St, Data, Fn = {?HANDLE_TAG, _}, Recv, Args) ->
+    case mono_kind(Data, Fn) of
+        miss -> {miss, St};
+        Kind -> kind_apply(St, Kind, Fn, Recv, Args)
     end;
 mono_apply(St, _, _, _, _) -> {miss, St}.
+
+%% The callee's ObjKind when it passes the gate, else `miss`.
+mono_kind(Data, {?HANDLE_TAG, FnId}) ->
+    case arc_rt_arena_ffi:get(FnId, Data) of
+        FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, FSlot) of
+                Kind = {?KFN_TAG, _, _, Flags, _, _, _, _, _}
+                  when ?KFN_PLAIN(Flags) ->
+                    Kind;
+                Kind when element(1, Kind) =:= ?KNATIVE_TAG -> Kind;
+                _ -> miss
+            end;
+        _ -> miss
+    end.
+
+kind_apply(St, {?KFN_TAG, Code, Home, _, _, Simple, _, _, _}, Fn, Recv, Args) ->
+    case Simple of
+        {?SOME, {CodeT, Arity, true}} when length(Args) =:= Arity ->
+            apply_this(CodeT, St, Recv, Args);
+        {?SOME, {CodeS, Arity, false}} when length(Args) =:= Arity ->
+            erlang:apply(CodeS, [St | Args]);
+        _ -> Code(St, {Recv, Fn, home(Home), undefined}, Args)
+    end;
+kind_apply(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, Args) ->
+    arc@rt@builtins:dispatch_native(St, Tag, Recv, Args).
 
 apply_this(CodeT, St, Recv, []) -> CodeT(St, Recv);
 apply_this(CodeT, St, Recv, [A]) -> CodeT(St, Recv, A);
@@ -421,10 +534,10 @@ apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    case array:get(CId, Data) of
+    case arc_rt_arena_ffi:get(CId, Data) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
-                {?KFN_TAG, Code, Home, Flags, ?NONE, _}
+                Kind = {?KFN_TAG, _, _, Flags, ?NONE, _, _, _, _}
                   when element(?FNFLAGS_IS_CTOR, Flags) =:= true,
                        element(?FNFLAGS_IS_DERIVED, Flags) =:= false,
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
@@ -435,7 +548,7 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
                             case element(?DATAPROP_VALUE, Prop) of
                                 Proto = {?HANDLE_TAG, _} ->
                                     new_simple_apply(St, Store, Data, Ctor,
-                                                     Code, Home, Proto, Args);
+                                                     Kind, Proto, Args);
                                 _ -> {miss, St}
                             end;
                         _ -> {miss, St}
@@ -448,17 +561,25 @@ t_new_simple(St, _, _) -> {miss, St}.
 
 %% Inline `t_cell_new` (rt_store.gleam) + apply + return-override. The
 %% arity guard lets the compiler fold the store update into one tuple build.
-new_simple_apply(St, Store, Data, Ctor, Code, Home, Proto, Args)
+%% A simple variant of matching arity takes `this` positionally (it never
+%% reads new.target); otherwise the Frame carries NewTarget = Ctor.
+new_simple_apply(St, Store, Data, Ctor, {_, Code, Home, _, _, Simple, _, _, _},
+                 Proto, Args)
   when tuple_size(Store) =:= ?STORE_ARITY ->
     NewSlot = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}},
     NewId = element(?STORE_NEXT, Store),
-    Store2 = setelement(?STORE_DATA, Store, array:set(NewId, NewSlot, Data)),
+    Store2 = setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(NewId, NewSlot, Data)),
     Store3 = setelement(?STORE_NEXT, Store2, NewId + 1),
     Store4 = setelement(?STORE_ALLOC, Store3, element(?STORE_ALLOC, Store) + 1),
     St2 = setelement(?AGENT_STORE, St, Store4),
     NewThis = {?HANDLE_TAG, NewId},
-    Frame = {NewThis, Ctor, home(Home), Ctor},
-    {V, St3} = Code(St2, Frame, Args),
+    {V, St3} = case Simple of
+        {?SOME, {CodeT, Arity, true}} when length(Args) =:= Arity ->
+            apply_this(CodeT, St2, NewThis, Args);
+        {?SOME, {CodeS, Arity, false}} when length(Args) =:= Arity ->
+            erlang:apply(CodeS, [St2 | Args]);
+        _ -> Code(St2, {NewThis, Ctor, home(Home), Ctor}, Args)
+    end,
     case V of
         {?HANDLE_TAG, _} -> {V, St3};
         _ -> {NewThis, St3}

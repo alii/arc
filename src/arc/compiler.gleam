@@ -125,7 +125,8 @@ fn resolve_top_level(
   code_kind: CodeKind,
   local_names: Option(EvalNameTable),
 ) -> FuncTemplate {
-  let #(bytecode, constants) = resolve.resolve(code, constants)
+  let resolve.Resolved(bytecode:, constants:, lines:) =
+    resolve.resolve(code, constants)
   FuncTemplate(
     name: None,
     arity: 0,
@@ -133,6 +134,7 @@ fn resolve_top_level(
     local_count: info.local_count,
     bytecode:,
     constants:,
+    lines:,
     functions: tuple_array.from_list(child_templates),
     env_descriptors: [],
     is_strict:,
@@ -645,7 +647,8 @@ fn compile_child(
     compile_children(child.functions, tree, child.scope_id)
 
   // Phase 3: Resolve labels.
-  let #(bytecode, constants) = resolve.resolve(child.code, child.constants)
+  let resolve.Resolved(bytecode:, constants:, lines:) =
+    resolve.resolve(child.code, child.constants)
   FuncTemplate(
     name: child.name,
     arity: child.arity,
@@ -653,6 +656,7 @@ fn compile_child(
     local_count: info.local_count,
     bytecode:,
     constants:,
+    lines:,
     functions: tuple_array.from_list(grandchild_templates),
     env_descriptors:,
     is_strict: child.is_strict,

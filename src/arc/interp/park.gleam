@@ -2,11 +2,12 @@
 //// `State` becomes a `SuspendedFrame` and back, so the two stay exact
 //// inverses and a field added to either is a compile error here.
 
-import arc/interp/call
+import arc/internal/tuple_array
+import arc/interp/ffi
 import arc/interp/state.{type State, State}
 import arc/rt/bytecode.{type ParkedAt, type SuspendedFrame, SuspendedFrame}
-import arc/rt/types.{type Agent, type JsVal, JsCell, mk_undefined}
-import gleam/option
+import arc/rt/types.{type Agent, type JsVal, Agent, FrameInfo, JsCell}
+import gleam/option.{None, Some}
 
 /// Snapshot `state` (already fixed up by the suspending opcode) as a frame
 /// `JsOps.resume_frame` can rebuild from an `Agent` alone. `parked` says
@@ -21,8 +22,10 @@ pub fn park(state: State, parked: ParkedAt) -> SuspendedFrame {
     try_stack: state.try_stack,
     this: state.this,
     home_object: state.home_object,
-    eval_env: option.map(state.eval_env, fn(h) { h.id }),
-    line: call.current_line(state.agent),
+    eval_env: case state.eval_env {
+      Some(h) -> Some(h.id)
+      None -> None
+    },
     parked:,
     call_args: state.call_args,
     realm: state.agent.realm.id,
@@ -33,7 +36,7 @@ pub fn park(state: State, parked: ParkedAt) -> SuspendedFrame {
 /// Rebuild the activation `frame` describes on top of `agent` as a root
 /// activation (no caller frames, no `new.target`: a coroutine body is never
 /// constructed). The caller pushes the body's `Error.stack` frame and has
-/// entered `frame.realm`; the parked line is written onto it here.
+/// entered `frame.realm`; the line it parked at is written onto it here.
 pub fn unpark(agent: Agent, frame: SuspendedFrame) -> State {
   unpark_with(agent, frame, frame.stack)
 }
@@ -54,14 +57,19 @@ pub fn unpark_with(
     this:,
     home_object:,
     eval_env:,
-    line:,
     parked: _,
     call_args:,
     realm: _,
     unit:,
   ) = frame
+  let line = tuple_array.element(pc + 1, template.lines)
+  let agent = case agent.frames {
+    [FrameInfo(line: l, ..), ..] if l == line -> agent
+    [top, ..rest] -> Agent(..agent, frames: [FrameInfo(..top, line:), ..rest])
+    [] -> agent
+  }
   State(
-    agent: call.set_line(agent, line),
+    agent:,
     pc:,
     stack:,
     locals:,
@@ -73,9 +81,12 @@ pub fn unpark_with(
     outer_depth: agent.call_depth,
     try_stack:,
     this:,
-    new_target: mk_undefined(),
+    new_target: ffi.val([ffi.Undefined]),
     home_object:,
     call_args:,
-    eval_env: option.map(eval_env, JsCell),
+    eval_env: case eval_env {
+      Some(id) -> Some(JsCell(id))
+      None -> None
+    },
   )
 }

@@ -39,6 +39,11 @@ pub type EnvCapture {
 /// Compiled function definition (§10.2 [[ECMAScriptCode]] and friends).
 /// The constant pool holds wire values built at compile time: primitives and
 /// the TDZ sentinel only, never a heap handle.
+/// The source line `template`'s instruction at `pc` belongs to.
+pub fn line_at(template: FuncTemplate, pc: Int) -> Int {
+  tuple_array.element(pc + 1, template.lines)
+}
+
 pub type FuncTemplate {
   FuncTemplate(
     name: Option(String),
@@ -49,6 +54,10 @@ pub type FuncTemplate {
     local_count: Int,
     bytecode: TupleArray(Op),
     constants: TupleArray(JsVal),
+    /// Source line of each instruction, by PC (the statement it was
+    /// compiled from; 0 ahead of the body's first statement). What
+    /// `Error.stack` reports for a frame stopped at that PC.
+    lines: TupleArray(Int),
     functions: TupleArray(FuncTemplate),
     env_descriptors: List(EnvCapture),
     is_strict: Bool,
@@ -136,8 +145,6 @@ pub type SuspendedFrame {
     home_object: JsVal,
     /// Cell id of the frame's sloppy-direct-eval var object, if one exists.
     eval_env: Option(Int),
-    /// Source line the body was on when it parked.
-    line: Int,
     parked: ParkedAt,
     /// The activation's argument list. An async function parks at pc 0
     /// before its prologue, so `arguments` / rest are built on resume.

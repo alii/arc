@@ -43,7 +43,7 @@ import arc/rt/types.{
   JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named, NoElements,
   ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj, ReturnThis, SObject,
   StringKey, StringObj, SymbolKey, classify, index_key, key_display_string,
-  max_array_length, mk_bool, mk_number, mk_object, mk_string, mk_undefined,
+  max_array_length, mk_bool, mk_object, mk_string, mk_undefined,
   symbol_is_concat_spreadable, symbol_iterator, symbol_species,
   symbol_unscopables,
 } as rt_types
@@ -71,9 +71,8 @@ fn check_budget(st: Agent, exhausted: Bool) -> Nil {
 const cannot_convert = "Cannot convert undefined or null to object"
 
 /// A JS integer as `JsVal` — port of arc `value.from_int`.
-fn from_int(n: Int) -> JsVal {
-  mk_number(JInt(n))
-}
+@external(erlang, "arc_rt_val_ffi", "mk_int")
+fn from_int(n: Int) -> JsVal
 
 // ────────────────────────────── init / dispatch ─────────────────────────────
 
@@ -468,14 +467,29 @@ fn length_of_properties(
 
 /// IsCallable check + argument extraction shared by the callback-driven
 /// Array.prototype methods (§7.2.3 IsCallable → TypeError).
+/// IsCallable(callbackfn) or a TypeError, then `cont` with the callback
+/// bound to `thisArg`: `call(st, [element, index, array])`.
 fn require_callback(
   st: Agent,
   args: List(JsVal),
-  cont: fn(Agent, JsVal, JsVal) -> #(JsVal, Agent),
+  cont: fn(Agent, ElementFn) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let #(cb, this_arg) = helpers.two_args_or_undefined(args)
-  use cb <- helpers.require_callable(st, cb, fn() { not_a_function(st, cb) })
-  cont(st, cb, this_arg)
+  use call <- require_bound(st, cb, this_arg)
+  cont(st, call)
+}
+
+/// IsCallable(cb) or a TypeError, then `cont` with `cb` bound to `this`.
+fn require_bound(
+  st: Agent,
+  cb: JsVal,
+  this: JsVal,
+  cont: fn(ElementFn) -> #(JsVal, Agent),
+) -> #(JsVal, Agent) {
+  case rt_call.t_bind_callable(st, cb, this) {
+    Some(call) -> cont(call)
+    None -> rt_val.t_throw_type_error(st, not_a_function(st, cb))
+  }
 }
 
 fn not_a_function(st: Agent, v: JsVal) -> String {
@@ -726,8 +740,7 @@ fn try_elements_fast_path(
       let eligible =
         length == expected_len
         && length_writable
-        && !dict_has_index_in_range(props, from, count)
-        && !proto_chain_has_index_in_range(st, proto, from, count)
+        && index_free(st, props, proto, from, count)
       case eligible {
         False -> None
         True -> {
@@ -772,8 +785,7 @@ fn try_push_fast_path(
       let eligible =
         length + arg_count <= max_array_length
         && length_writable
-        && !dict_has_index_in_range(props, length, arg_count)
-        && !proto_chain_has_index_in_range(st, proto, length, arg_count)
+        && index_free(st, props, proto, length, arg_count)
       case eligible {
         False -> None
         True -> {
@@ -796,83 +808,20 @@ fn try_push_fast_path(
   }
 }
 
-/// Any own Index key in [start, start+count)? A handful of indices are
-/// probed directly; a wider range scans the key list instead (a superset
-/// answer: any Index key at all), which is cheaper than more probes.
-fn dict_has_index_in_range(
-  props: Dict(PropertyKey, Property),
-  start: Int,
-  count: Int,
-) -> Bool {
-  case count {
-    1 -> dict.has_key(props, Index(start))
-    _ if count <= 0 -> False
-    _ -> {
-      let size = dict.size(props)
-      size > 0
-      && case count > 4 {
-        True -> any_index_key(dict.keys(props))
-        False -> dict_index_in_range_loop(props, start, start + count)
-      }
-    }
-  }
-}
-
-fn dict_index_in_range_loop(
-  props: Dict(PropertyKey, Property),
-  idx: Int,
-  end: Int,
-) -> Bool {
-  case idx >= end {
-    True -> False
-    False ->
-      dict.has_key(props, Index(idx))
-      || dict_index_in_range_loop(props, idx + 1, end)
-  }
-}
-
-fn proto_chain_has_index_in_range(
+/// Nothing intercepts a plain element read or write at the indices
+/// `[start, start+count)` of an object with own `props` and prototype
+/// `proto`: no own Index key there, and up the chain only ordinary cells with
+/// no such key and no element there (a Proxy or non-empty String wrapper on
+/// the chain fails it). A handful of indices are probed directly; a wider
+/// range asks the cheaper superset question (any Index key / element at all).
+@external(erlang, "arc_rt_array_ffi", "index_free")
+fn index_free(
   st: Agent,
+  props: Dict(PropertyKey, Property),
   proto: Option(Handle),
   start: Int,
   count: Int,
-) -> Bool {
-  case proto {
-    None -> False
-    Some(proto_ref) ->
-      case rt_store.t_cell_get(st, proto_ref) {
-        SObject(kind: ProxyObj(..), ..) -> True
-        SObject(kind: StringObj(value: s), ..) if s != "" -> True
-        SObject(props:, elements: NoElements, proto:, ..) ->
-          dict_has_index_in_range(props, start, count)
-          || proto_chain_has_index_in_range(st, proto, start, count)
-        SObject(props:, elements: proto_els, proto:, ..) ->
-          elements_has_in_range(proto_els, start, count)
-          || dict_has_index_in_range(props, start, count)
-          || proto_chain_has_index_in_range(st, proto, start, count)
-        // Shaped: no elements, Named-only keys → recurse.
-        rt_types.SShapedObject(proto:, ..) ->
-          proto_chain_has_index_in_range(st, proto, start, count)
-        _ -> False
-      }
-  }
-}
-
-fn elements_has_in_range(els: JsElements, start: Int, count: Int) -> Bool {
-  !elements.is_empty(els)
-  && { count > 64 || elements_in_range_loop(els, start, start + count) }
-}
-
-fn elements_in_range_loop(els: JsElements, idx: Int, end: Int) -> Bool {
-  case idx >= end {
-    True -> False
-    False ->
-      case elements.has(els, idx) {
-        True -> True
-        False -> elements_in_range_loop(els, idx + 1, end)
-      }
-  }
-}
+) -> Bool
 
 /// True when a hole at `idx` is shadowed by an inherited property — reading it
 /// would invoke [[Get]] on the prototype chain (possibly user code). A proxy
@@ -2241,8 +2190,7 @@ fn iterate_array(
   arr: JsVal,
   length: Int,
   dir: Direction,
-  cb: JsVal,
-  this_arg: JsVal,
+  cb: ElementFn,
   hole_mode: HoleMode,
   stop_on: fn(JsVal) -> Bool,
   cont: fn(Agent, FoundAt) -> #(JsVal, Agent),
@@ -2256,7 +2204,6 @@ fn iterate_array(
     step,
     limits.max_iteration,
     cb,
-    this_arg,
     hole_mode,
     stop_on,
     cont,
@@ -2270,16 +2217,15 @@ fn iterate_loop(
   end: Int,
   step: Int,
   fuel: Int,
-  cb: JsVal,
-  this_arg: JsVal,
+  cb: ElementFn,
   hole_mode: HoleMode,
   stop_on: fn(JsVal) -> Bool,
   cont: fn(Agent, FoundAt) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  check_budget(st, fuel <= 0 && idx != end)
-  case idx == end {
-    True -> cont(st, NotFound)
-    False -> {
+  case idx == end, fuel {
+    True, _ -> cont(st, NotFound)
+    False, 0 -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False, _ -> {
       let #(maybe_elem, st) = case helpers.own_element(st, arr, idx) {
         helpers.Hit(elem) -> #(Some(elem), st)
         helpers.Slow -> {
@@ -2300,18 +2246,12 @@ fn iterate_loop(
             step,
             fuel - 1,
             cb,
-            this_arg,
             hole_mode,
             stop_on,
             cont,
           )
         Some(elem) -> {
-          let #(result, st) =
-            rt_call.t_call_checked(st, cb, this_arg, [
-              elem,
-              from_int(idx),
-              arr,
-            ])
+          let #(result, st) = cb(st, [elem, from_int(idx), arr])
           case stop_on(result) {
             True -> cont(st, Found(elem, idx))
             False ->
@@ -2323,7 +2263,6 @@ fn iterate_loop(
                 step,
                 fuel - 1,
                 cb,
-                this_arg,
                 hole_mode,
                 stop_on,
                 cont,
@@ -2335,67 +2274,135 @@ fn iterate_loop(
   }
 }
 
-/// Shared driver for map / filter / flatMap — cb per element with an
-/// accumulator; SkipHoles.
-fn fold_array(
-  st: Agent,
-  arr: JsVal,
-  length: Int,
-  cb: JsVal,
-  this_arg: JsVal,
-  initial: acc,
-  combine: fn(Agent, acc, JsVal, JsVal, Int) -> acc,
-) -> #(acc, Agent) {
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
-  fold_loop(st, arr, 0, length, cb, this_arg, initial, combine)
+/// A callback bound once per builtin call (`rt/call.t_bind_call`): takes
+/// the argument list, raises the callback's throw.
+type ElementFn =
+  fn(Agent, List(JsVal)) -> #(JsVal, Agent)
+
+/// RangeError for a walk longer than the iteration budget.
+fn within_budget(st: Agent, length: Int, k: fn() -> a) -> a {
+  case length > limits.max_iteration {
+    True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False -> k()
+  }
 }
 
-fn fold_loop(
+/// map over a receiver with no hole met yet: the mapped values collect in a
+/// list (newest first) that becomes the result's dense elements in one go.
+/// The first hole hands the rest of the walk to `map_sparse`.
+fn map_dense(
   st: Agent,
   arr: JsVal,
   idx: Int,
   length: Int,
-  cb: JsVal,
-  this_arg: JsVal,
-  acc: acc,
-  combine: fn(Agent, acc, JsVal, JsVal, Int) -> acc,
-) -> #(acc, Agent) {
+  cb: ElementFn,
+  acc: List(JsVal),
+) -> #(JsElements, Agent) {
   case idx >= length {
-    True -> #(acc, st)
+    True -> #(elements.from_list(list.reverse(acc)), st)
     False ->
       case helpers.own_element(st, arr, idx) {
-        helpers.Hit(elem) ->
-          fold_step(st, arr, idx, length, cb, this_arg, acc, combine, elem)
-        helpers.Slow -> {
-          let #(maybe_elem, st) = probe_index_if_present(st, arr, idx)
-          case maybe_elem {
-            None ->
-              fold_loop(st, arr, idx + 1, length, cb, this_arg, acc, combine)
-            Some(elem) ->
-              fold_step(st, arr, idx, length, cb, this_arg, acc, combine, elem)
+        helpers.Hit(elem) -> map_dense_step(st, arr, idx, length, cb, acc, elem)
+        helpers.Slow ->
+          case probe_index_if_present(st, arr, idx) {
+            #(Some(elem), st) ->
+              map_dense_step(st, arr, idx, length, cb, acc, elem)
+            #(None, st) ->
+              map_sparse(
+                st,
+                arr,
+                idx + 1,
+                length,
+                cb,
+                elements.from_list(list.reverse(acc)),
+              )
           }
-        }
       }
   }
 }
 
-fn fold_step(
+fn map_dense_step(
   st: Agent,
   arr: JsVal,
   idx: Int,
   length: Int,
-  cb: JsVal,
-  this_arg: JsVal,
-  acc: acc,
-  combine: fn(Agent, acc, JsVal, JsVal, Int) -> acc,
+  cb: ElementFn,
+  acc: List(JsVal),
   elem: JsVal,
-) -> #(acc, Agent) {
-  let #(result, st) =
-    rt_call.t_call_checked(st, cb, this_arg, [elem, from_int(idx), arr])
-  let acc = combine(st, acc, result, elem, idx)
-  fold_loop(st, arr, idx + 1, length, cb, this_arg, acc, combine)
+) -> #(JsElements, Agent) {
+  let #(result, st) = cb(st, [elem, from_int(idx), arr])
+  map_dense(st, arr, idx + 1, length, cb, [result, ..acc])
+}
+
+/// map past a hole: each mapped value is set at its own index.
+fn map_sparse(
+  st: Agent,
+  arr: JsVal,
+  idx: Int,
+  length: Int,
+  cb: ElementFn,
+  acc: JsElements,
+) -> #(JsElements, Agent) {
+  case idx >= length {
+    True -> #(acc, st)
+    False -> {
+      let #(maybe_elem, st) = get_index_if_present(st, arr, idx)
+      case maybe_elem {
+        Some(elem) -> {
+          let #(result, st) = cb(st, [elem, from_int(idx), arr])
+          map_sparse(
+            st,
+            arr,
+            idx + 1,
+            length,
+            cb,
+            elements.set(acc, idx, result),
+          )
+        }
+        None -> map_sparse(st, arr, idx + 1, length, cb, acc)
+      }
+    }
+  }
+}
+
+/// filter: the kept elements, newest first.
+fn filter_loop(
+  st: Agent,
+  arr: JsVal,
+  idx: Int,
+  length: Int,
+  cb: ElementFn,
+  kept: List(JsVal),
+) -> #(List(JsVal), Agent) {
+  case idx >= length {
+    True -> #(kept, st)
+    False ->
+      case helpers.own_element(st, arr, idx) {
+        helpers.Hit(elem) -> filter_step(st, arr, idx, length, cb, kept, elem)
+        helpers.Slow ->
+          case probe_index_if_present(st, arr, idx) {
+            #(Some(elem), st) ->
+              filter_step(st, arr, idx, length, cb, kept, elem)
+            #(None, st) -> filter_loop(st, arr, idx + 1, length, cb, kept)
+          }
+      }
+  }
+}
+
+fn filter_step(
+  st: Agent,
+  arr: JsVal,
+  idx: Int,
+  length: Int,
+  cb: ElementFn,
+  kept: List(JsVal),
+  elem: JsVal,
+) -> #(List(JsVal), Agent) {
+  let #(result, st) = cb(st, [elem, from_int(idx), arr])
+  case rt_val.to_boolean(result) {
+    True -> filter_loop(st, arr, idx + 1, length, cb, [elem, ..kept])
+    False -> filter_loop(st, arr, idx + 1, length, cb, kept)
+  }
 }
 
 /// §23.1.3.13 Array.prototype.forEach(callbackfn[, thisArg]).
@@ -2405,35 +2412,41 @@ fn array_for_each(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
-  use st, cb, this_arg <- require_callback(st, args)
-  use st, _found <- iterate_array(
-    st,
-    this,
-    length,
-    Ascending,
-    cb,
-    this_arg,
-    SkipHoles,
-    fn(_) { False },
-  )
-  #(mk_undefined(), st)
+  use st, call <- require_callback(st, args)
+  #(mk_undefined(), for_each_loop(st, this, 0, length, call))
+}
+
+fn for_each_loop(
+  st: Agent,
+  arr: JsVal,
+  idx: Int,
+  length: Int,
+  cb: ElementFn,
+) -> Agent {
+  case idx >= length, idx == limits.max_iteration {
+    True, _ -> st
+    False, True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False, False -> {
+      let st = case helpers.own_element(st, arr, idx) {
+        helpers.Hit(elem) -> cb(st, [elem, from_int(idx), arr]).1
+        helpers.Slow ->
+          case probe_index_if_present(st, arr, idx) {
+            #(Some(elem), st) -> cb(st, [elem, from_int(idx), arr]).1
+            #(None, st) -> st
+          }
+      }
+      for_each_loop(st, arr, idx + 1, length, cb)
+    }
+  }
 }
 
 /// §23.1.3.19 Array.prototype.map(callbackfn[, thisArg]).
 fn array_map(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
-  use st, cb, this_arg <- require_callback(st, args)
+  use st, call <- require_callback(st, args)
   let #(species, st) = array_species_create(st, this, length)
-  let #(els, st) =
-    fold_array(
-      st,
-      this,
-      length,
-      cb,
-      this_arg,
-      elements.new(),
-      fn(_st, acc, result, _elem, idx) { elements.set(acc, idx, result) },
-    )
+  use <- within_budget(st, length)
+  let #(els, st) = map_dense(st, this, 0, length, call, [])
   case species {
     None -> finish_array(st, els, length)
     Some(target) -> {
@@ -2456,23 +2469,10 @@ fn finish_array(
 /// §23.1.3.8 Array.prototype.filter(callbackfn[, thisArg]).
 fn array_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
-  use st, cb, this_arg <- require_callback(st, args)
+  use st, call <- require_callback(st, args)
   let #(species, st) = array_species_create(st, this, 0)
-  let #(kept_rev, st) =
-    fold_array(
-      st,
-      this,
-      length,
-      cb,
-      this_arg,
-      [],
-      fn(_st, acc, result, elem, _idx) {
-        case rt_val.to_boolean(result) {
-          True -> [elem, ..acc]
-          False -> acc
-        }
-      },
-    )
+  use <- within_budget(st, length)
+  let #(kept_rev, st) = filter_loop(st, this, 0, length, call, [])
   case species {
     None -> alloc_array_list(st, list.reverse(kept_rev))
     Some(target) -> {
@@ -2507,14 +2507,13 @@ fn every_some(
   match_on match_on: Bool,
 ) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
-  use st, cb, this_arg <- require_callback(st, args)
+  use st, call <- require_callback(st, args)
   use st, found <- iterate_array(
     st,
     this,
     length,
     Ascending,
-    cb,
-    this_arg,
+    call,
     SkipHoles,
     fn(r) { rt_val.to_boolean(r) == match_on },
   )
@@ -2534,14 +2533,13 @@ fn find_via_predicate(
   cont: fn(Agent, FoundAt) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
-  use st, cb, this_arg <- require_callback(st, args)
+  use st, call <- require_callback(st, args)
   use st, found <- iterate_array(
     st,
     this,
     length,
     dir,
-    cb,
-    this_arg,
+    call,
     VisitHoles,
     rt_val.to_boolean,
   )
@@ -2620,7 +2618,7 @@ fn reduce_impl(
 ) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
   let cb = helpers.first_arg_or_undefined(args)
-  use cb <- helpers.require_callable(st, cb, fn() { not_a_function(st, cb) })
+  use call <- require_bound(st, cb, mk_undefined())
   let #(start, end, step) = bounds(dir, length)
   let #(has_init, init) = case args {
     [_, v, ..] -> #(True, v)
@@ -2628,7 +2626,7 @@ fn reduce_impl(
   }
   case has_init {
     True ->
-      reduce_loop(st, this, start, end, cb, init, dir, limits.max_iteration)
+      reduce_loop(st, this, start, end, call, init, dir, limits.max_iteration)
     False -> {
       let #(found, st) =
         find_present(st, this, start, end, dir, limits.max_iteration)
@@ -2644,7 +2642,7 @@ fn reduce_impl(
             this,
             first_idx + step,
             end,
-            cb,
+            call,
             first_val,
             dir,
             limits.max_iteration,
@@ -2680,29 +2678,30 @@ fn reduce_loop(
   arr: JsVal,
   idx: Int,
   end: Int,
-  cb: JsVal,
+  cb: ElementFn,
   acc: JsVal,
   dir: Direction,
   fuel: Int,
 ) -> #(JsVal, Agent) {
-  let step = step_of(dir)
-  case idx == end {
-    True -> #(acc, st)
-    False -> {
-      check_budget(st, fuel <= 0)
-      let #(maybe_elem, st) = get_index_if_present(st, arr, idx)
-      case maybe_elem {
-        None -> reduce_loop(st, arr, idx + step, end, cb, acc, dir, fuel - 1)
-        Some(elem) -> {
-          let #(result, st) =
-            rt_call.t_call_checked(st, cb, mk_undefined(), [
-              acc,
-              elem,
-              from_int(idx),
-              arr,
-            ])
+  case idx == end, fuel {
+    True, _ -> #(acc, st)
+    False, 0 -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False, _ -> {
+      let step = step_of(dir)
+      case helpers.own_element(st, arr, idx) {
+        helpers.Hit(elem) -> {
+          let #(result, st) = cb(st, [acc, elem, from_int(idx), arr])
           reduce_loop(st, arr, idx + step, end, cb, result, dir, fuel - 1)
         }
+        helpers.Slow ->
+          case probe_index_if_present(st, arr, idx) {
+            #(Some(elem), st) -> {
+              let #(result, st) = cb(st, [acc, elem, from_int(idx), arr])
+              reduce_loop(st, arr, idx + step, end, cb, result, dir, fuel - 1)
+            }
+            #(None, st) ->
+              reduce_loop(st, arr, idx + step, end, cb, acc, dir, fuel - 1)
+          }
       }
     }
   }
@@ -2954,6 +2953,10 @@ fn stringify_elements(
 }
 
 /// Stable bottom-up merge sort with a state-threaded effectful comparator.
+/// `list.reverse(items)` followed by `tail`, in one pass.
+@external(erlang, "lists", "reverse")
+fn reverse_onto(items: List(a), tail: List(a)) -> List(a)
+
 fn merge_sort(
   st: Agent,
   items: List(JsVal),
@@ -2961,14 +2964,19 @@ fn merge_sort(
 ) -> #(List(JsVal), Agent) {
   case items {
     [] | [_] -> #(items, st)
-    _ -> merge_all(st, list.map(items, fn(x) { [x] }), comparefn)
+    _ ->
+      merge_all(
+        st,
+        list.map(items, fn(x) { [x] }),
+        rt_call.t_bind_call(st, comparefn, mk_undefined()),
+      )
   }
 }
 
 fn merge_all(
   st: Agent,
   runs: List(List(JsVal)),
-  comparefn: JsVal,
+  comparefn: ElementFn,
 ) -> #(List(JsVal), Agent) {
   case runs {
     [] -> #([], st)
@@ -2983,7 +2991,7 @@ fn merge_all(
 fn merge_pairs(
   st: Agent,
   runs: List(List(JsVal)),
-  comparefn: JsVal,
+  comparefn: ElementFn,
   acc: List(List(JsVal)),
 ) -> #(List(List(JsVal)), Agent) {
   case runs {
@@ -3000,15 +3008,14 @@ fn merge_two(
   st: Agent,
   left: List(JsVal),
   right: List(JsVal),
-  comparefn: JsVal,
+  comparefn: ElementFn,
   acc: List(JsVal),
 ) -> #(List(JsVal), Agent) {
   case left, right {
-    [], _ -> #(list.append(list.reverse(acc), right), st)
-    _, [] -> #(list.append(list.reverse(acc), left), st)
+    [], _ -> #(reverse_onto(acc, right), st)
+    _, [] -> #(reverse_onto(acc, left), st)
     [l, ..ls], [r, ..rs] -> {
-      let #(res, st) =
-        rt_call.t_call_checked(st, comparefn, mk_undefined(), [l, r])
+      let #(res, st) = comparefn(st, [l, r])
       // §23.1.3.30.2 step 6: v = ? ToNumber(v); step 7: NaN → +0.
       let #(num, st) = rt_val.t_to_number(st, res)
       let cmp = case num {
@@ -3314,12 +3321,10 @@ fn array_flat_map(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
-  use st, cb, this_arg <- require_callback(st, args)
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use st, call <- require_callback(st, args)
+  use <- within_budget(st, length)
   let #(species, st) = array_species_create(st, this, 0)
-  let #(kept_rev, st) = flat_map_loop(st, this, 0, length, cb, this_arg, [])
+  let #(kept_rev, st) = flat_map_loop(st, this, 0, length, call, [])
   finish_species_list(st, kept_rev, species)
 }
 
@@ -3328,8 +3333,7 @@ fn flat_map_loop(
   arr: JsVal,
   idx: Int,
   length: Int,
-  cb: JsVal,
-  this_arg: JsVal,
+  cb: ElementFn,
   acc: List(JsVal),
 ) -> #(List(JsVal), Agent) {
   case idx >= length {
@@ -3337,26 +3341,17 @@ fn flat_map_loop(
     False -> {
       let #(maybe_elem, st) = get_index_if_present(st, arr, idx)
       case maybe_elem {
-        None -> flat_map_loop(st, arr, idx + 1, length, cb, this_arg, acc)
+        None -> flat_map_loop(st, arr, idx + 1, length, cb, acc)
         Some(elem) -> {
-          let #(mapped, st) =
-            rt_call.t_call_checked(st, cb, this_arg, [
-              elem,
-              from_int(idx),
-              arr,
-            ])
+          let #(mapped, st) = cb(st, [elem, from_int(idx), arr])
           let #(should_flatten, st) = try_is_array(st, mapped)
           case classify(mapped), should_flatten {
             KHandle(sub_ref), True -> {
               let #(sub_len, st) = object_length(st, sub_ref)
               let #(new_acc, st) = flatten_into(st, mapped, sub_len, 0, acc)
-              flat_map_loop(st, arr, idx + 1, length, cb, this_arg, new_acc)
+              flat_map_loop(st, arr, idx + 1, length, cb, new_acc)
             }
-            _, _ ->
-              flat_map_loop(st, arr, idx + 1, length, cb, this_arg, [
-                mapped,
-                ..acc
-              ])
+            _, _ -> flat_map_loop(st, arr, idx + 1, length, cb, [mapped, ..acc])
           }
         }
       }

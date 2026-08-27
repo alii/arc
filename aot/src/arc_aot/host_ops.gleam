@@ -15,6 +15,7 @@ pub fn table() -> DirectHost {
   let val_ffi = "arc_rt_val_ffi"
   let obj = "arc@rt@obj"
   let obj_ffi = "arc_rt_obj_ffi"
+  let obj_fast_ffi = "arc_rt_obj_fast_ffi"
   let lang = "arc@rt@lang"
   let env = "arc@rt@env"
   let erl = "erlang"
@@ -67,11 +68,11 @@ pub fn table() -> DirectHost {
       #("tdz_check", HostOp(val, "t_tdz_check", MutUnit)),
       #("check_this", HostOp(val, "t_check_this", MutUnit)),
       #("new_object", HostOp(obj, "t_new_object_literal", Mut)),
+      #("new_object_props", HostOp(obj_fast_ffi, "t_new_object_props", Mut)),
       #("new_array", HostOp(obj, "t_new_array", Mut)),
       #("array_from_list", HostOp(obj, "t_new_array", Mut)),
       #("new_error", HostOp(lang, "t_new_error", Mut)),
       #("fn_new", HostOp(call, "t_new_function", Mut)),
-      #("make_constructor", HostOp(call, "t_make_constructor", Mut)),
       #("new_arguments", HostOp(obj, "t_new_arguments", Mut)),
       #("get_prop", HostOp(obj, "t_get_prop_any", Mut)),
       #("get_prop_own_data", HostOp(obj_ffi, "t_get_prop_own_data", Read)),
@@ -82,10 +83,12 @@ pub fn table() -> DirectHost {
       #("erl_band", HostOp(erl, "band", Pure)),
       #("erl_bsr", HostOp(erl, "bsr", Pure)),
       #("erl_bsl", HostOp(erl, "bsl", Pure)),
+      #("erl_rem", HostOp(erl, "rem", Pure)),
       #("set_prop", HostOp(obj, "t_set_prop_any", Mut)),
       #("set_prop_strict", HostOp(obj, "t_set_prop_strict", Mut)),
       #("set_prop_own_data", HostOp(obj_ffi, "t_set_prop_own_data", MutMiss)),
       #("set_prop_named", HostOp(obj_ffi, "t_set_prop_named", MutUnit)),
+      #("set_props_named", HostOp(obj_fast_ffi, "t_set_props_named", MutUnit)),
       #("get_elem_fast", HostOp(obj_ffi, "t_get_elem_fast", Read)),
       #("set_elem_fast", HostOp(obj_ffi, "t_set_elem_fast", MutMiss)),
       #("define_prop", HostOp(obj, "t_create_data_prop", Mut)),

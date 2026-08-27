@@ -68,7 +68,7 @@ pub fn nested_frames_have_lines_test() {
   assert string.contains(s, "at script:3")
 }
 
-/// A stack captured in a callee before its first SetLine (a default
+/// A stack captured in a callee before its first statement (a default
 /// parameter initialiser) must not report the caller's line for the callee
 /// frame, whatever kind of function the callee is.
 pub fn prologue_frame_does_not_inherit_caller_line_test() {

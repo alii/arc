@@ -246,6 +246,20 @@ pub type FnBody {
   ExprBody(ast.Expression)
 }
 
+/// A compiled function as a call site can reach it: straight into its
+/// simple-ABI variant `name(captures.., [this,] p0..p{arity-1})`, or through
+/// the closure-site tree that builds its function object.
+pub type FnSite {
+  DirectFn(
+    name: String,
+    captures: List(ir.Value),
+    arity: Int,
+    needs_this: Bool,
+    strict: Bool,
+  )
+  ClosureSite(tree: ir.Expr)
+}
+
 pub type CoroutineKind {
   CorGenerator
   CorAsync
@@ -289,6 +303,16 @@ pub type EmitDispatch {
       FnBody,
       ScopeId,
     ) -> Result(#(ir.Expr, Emitter2), EmitError),
+    /// `emit_function` for a site that calls the function once and drops
+    /// it: the simple-ABI variant to call directly when there is one.
+    emit_function_site: fn(
+      Emitter2,
+      FnShape,
+      Option(String),
+      List(ast.Pattern),
+      FnBody,
+      ScopeId,
+    ) -> Result(#(FnSite, Emitter2), EmitError),
     emit_class: fn(
       Emitter2,
       Option(String),

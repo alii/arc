@@ -344,9 +344,11 @@ timeout_for(Name) ->
 %% several are multi-megabyte source files whose ASTs alone exceed the
 %% default cap — so it gets a large one of its own.
 max_heap_for(Name) ->
-    case binary:match(Name, <<"test262_run_test">>) of
+    case binary:match(Name, [<<"test262_run_test">>,
+                             <<"nested_starts_are_depth_bounded">>]) of
         nomatch -> 10000000;
-        _ -> 120000000
+        {_, 16} -> 120000000;
+        _ -> 20000000
     end.
 
 is_slow_test(Name) ->

@@ -16,31 +16,32 @@
 //// `pinned_roots ∪ refs_in_term(microtasks) ∪ unhandled_rejections`.
 
 import arc/internal/ordered_entries
-import arc/internal/tree_array as rt_tree_array
+import arc/internal/tree_array
 import arc/internal/tuple_array.{type TupleArray}
+import arc/rt/arena.{type Arena}
 import arc/rt/bytecode.{
   type EnvTuple, type FuncTemplate, type SuspendedFrame, FuncTemplate,
   SuspendedFrame,
 }
-import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type AsyncGenRequest, type Handle, type Job, type JsElements,
-  type JsSlot, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
-  type PromiseState, type Property, type ReactionHandler, type Resume,
-  type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
-  AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
+  type Agent, type AsyncGenRequest, type Handle, type IcEntry, type Job,
+  type JsElements, type JsSlot, type JsStore, type JsVal, type ObjKind,
+  type PromiseReaction, type PromiseState, type Property, type ReactionHandler,
+  type Resume, type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator,
+  ArrayObj, AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
   BooleanObj, DataViewObj, DateObj, Dense, DisposableStackObj, ErrorObj,
   FinRegCell, FinalizationRegistryObj, ForInIterator, GeneratorObj, Handler,
-  HostJob, IdentityPassThrough, IntlObj, IteratorHelperObj, JsCell, JsStore,
-  KBound, KBytecode, KCompiled, KHandle, KHost, KNative, MapIterator, MapObj,
-  ModuleNamespace, NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj,
-  PromisePending, PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj,
-  ReactionJob, RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame,
-  SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject,
-  SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, StringIterator,
-  StringObj, SymbolObj, TemporalObj, ThrowerPassThrough, TypedArrayObj,
-  WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
-  WrapForValidIteratorObj, classify, jq_to_list, native_token_refs,
+  HostJob, IcCall, IcRead, IdentityPassThrough, IntlObj, IteratorHelperObj,
+  JsCell, JsStore, KBound, KBytecode, KCompiled, KHandle, KHost, KNative,
+  MapIterator, MapObj, ModuleNamespace, NoElements, NumberObj, Ordinary,
+  PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejected,
+  ProxyObj, RawJsonObj, ReactionJob, RegExpObj, ResolveThenableJob,
+  ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox,
+  SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
+  SetIterator, SetObj, Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
+  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj,
+  WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list,
+  native_token_refs,
 } as rt_types
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
@@ -223,7 +224,6 @@ pub fn push_suspended_frame_refs(
     this:,
     home_object:,
     eval_env:,
-    line: _,
     parked: _,
     call_args:,
     // Realm id: realms are registry entries, rooted in their own right.
@@ -256,6 +256,8 @@ fn push_template_refs(template: FuncTemplate, acc: List(Int)) -> List(Int) {
     // Opcodes: operands are ints, strings and pool indices.
     bytecode: _,
     constants:,
+    // Plain ints.
+    lines: _,
     functions: _,
     // Parent-slot indices.
     env_descriptors: _,
@@ -311,9 +313,19 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     BooleanObj(value: _) -> acc
     BigIntObj(value: _) -> acc
     SymbolObj(value: _) -> acc
-    KCompiled(code:, home_object:, flags: _, fields_init:, simple:) -> {
+    KCompiled(
+      code:,
+      home_object:,
+      flags: _,
+      fields_init:,
+      simple:,
+      name: _,
+      length: _,
+      birth:,
+    ) -> {
       let acc = push_opt_handle(home_object, acc)
       let acc = push_opt_handle(fields_init, acc)
+      let acc = push_birth_refs(birth, acc)
       // `code`/`simple` are opaque `CompiledFn`s; the captures live in their
       // fun env, walked via FFI.
       let acc = push_term_refs(to_dynamic(code), acc)
@@ -327,9 +339,11 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       fields_init:,
       realm: _,
       unit: _,
+      birth:,
     ) -> {
       let acc = push_opt_handle(home_object, acc)
       let acc = push_opt_handle(fields_init, acc)
+      let acc = push_birth_refs(birth, acc)
       let acc = push_template_refs(template, acc)
       push_env_refs(env, acc)
     }
@@ -418,7 +432,7 @@ fn push_elements_refs(elems: JsElements, acc: List(Int)) -> List(Int) {
   case elems {
     NoElements -> acc
     Dense(arr) ->
-      rt_tree_array.sparse_fold(fn(_, v, a) { push_val_refs(v, a) }, acc, arr)
+      tree_array.sparse_fold(fn(_, v, a) { push_val_refs(v, a) }, acc, arr)
     Sparse(d) -> push_term_refs(to_dynamic(d), acc)
   }
 }
@@ -475,6 +489,14 @@ fn push_opt_handle(oh: Option(Handle), acc: List(Int)) -> List(Int) {
   case oh {
     Some(h) -> [h.id, ..acc]
     None -> acc
+  }
+}
+
+fn push_birth_refs(birth: rt_types.FnBirth, acc: List(Int)) -> List(Int) {
+  case birth {
+    rt_types.BirthPending(prototype_parent:) ->
+      push_opt_handle(prototype_parent, acc)
+    rt_types.BirthSettled -> acc
   }
 }
 
@@ -571,8 +593,18 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
       next:,
       alloc_since_gc: 0,
       gc_live: dict.size(live),
+      ics: dict.filter(js.ics, fn(_, entry) { is_read_ic(entry) }),
     ),
   )
+}
+
+/// Read entries name shapes, which are never recycled; call entries name
+/// cell ids, which `sweep` hands out again past the highest survivor.
+fn is_read_ic(entry: IcEntry) -> Bool {
+  case entry {
+    IcRead(..) -> True
+    IcCall(..) -> False
+  }
 }
 
 /// The mark set is a bare map keyed by cell id, probed and grown with the
@@ -586,7 +618,7 @@ fn mark(id: Int, nil: Nil, live: Dict(Int, Nil)) -> Dict(Int, Nil)
 /// Mark phase: tail-recursive DFS from `frontier`, returning every reachable
 /// cell id. Cycles: `visited` check. Dangling refs: an absent id is skipped.
 fn mark_loop(
-  data: rt_tree_array.TreeArray(JsSlot),
+  data: Arena(JsSlot),
   frontier: List(Int),
   visited: Dict(Int, Nil),
 ) -> Dict(Int, Nil) {
@@ -597,7 +629,7 @@ fn mark_loop(
         True -> mark_loop(data, rest, visited)
         False -> {
           let visited = mark(id, Nil, visited)
-          case rt_tree_array.get_option(id, data) {
+          case arena.get_option(id, data) {
             None -> mark_loop(data, rest, visited)
             Some(slot) -> mark_loop(data, refs_in_cell(slot, rest), visited)
           }
@@ -610,12 +642,9 @@ fn mark_loop(
 /// that also applies the weak-container prune, and report the `next` id to
 /// mint (one past the highest survivor). Each leaf is built once and the
 /// leaves only dead ids occupied are dropped.
-fn sweep(
-  data: rt_tree_array.TreeArray(JsSlot),
-  live: Dict(Int, Nil),
-) -> #(rt_tree_array.TreeArray(JsSlot), Int) {
+fn sweep(data: Arena(JsSlot), live: Dict(Int, Nil)) -> #(Arena(JsSlot), Int) {
   let kept =
-    rt_tree_array.sparse_fold(
+    arena.fold(
       fn(id, slot, acc) {
         case marked(id, live) {
           True -> [#(id, prune_weak_slot(slot, live)), ..acc]
@@ -629,7 +658,7 @@ fn sweep(
     [] -> 0
     [#(id, _), ..] -> id + 1
   }
-  #(rt_store.data_from_descending(kept), next)
+  #(arena.from_descending(kept), next)
 }
 
 /// Post-sweep weak-prune (SPEC §7.M2 §weak): drop `WeakMapObj`/`WeakSetObj`
@@ -713,7 +742,7 @@ pub type GcStats {
 pub fn stats(st: Agent) -> GcStats {
   let js = require_js(st)
   GcStats(
-    live: rt_tree_array.sparse_fold(fn(_, _, n) { n + 1 }, 0, js.data),
+    live: arena.count(js.data),
     next: js.next,
     since_gc: js.alloc_since_gc,
   )
@@ -724,5 +753,5 @@ pub fn stats(st: Agent) -> GcStats {
 pub fn t_is_live(st: Agent, h: Handle) -> Bool {
   let js = require_js(st)
   let JsCell(id) = h
-  option.is_some(rt_tree_array.get_option(id, js.data))
+  option.is_some(arena.get_option(id, js.data))
 }

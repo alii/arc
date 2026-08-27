@@ -402,9 +402,9 @@ fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
   case proto {
     Some(h) if fuel > 0 ->
       case rt_obj.as_sobject(st, rt_store.t_cell_get(st, h)) {
-        SObject(props:, proto: parent, ..) ->
-          case dict.get(props, Named("name")) {
-            Ok(DataProperty(value: v, ..)) ->
+        SObject(proto: parent, ..) ->
+          case rt_obj.t_ordinary_own_property(st, h, StringKey(Named("name"))) {
+            Some(DataProperty(value: v, ..)) ->
               case classify(v) {
                 KStr(n) -> n
                 _ -> error_name(st, parent, fuel - 1)

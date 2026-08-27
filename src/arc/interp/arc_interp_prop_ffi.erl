@@ -4,11 +4,12 @@
 %%% wire term and the store records directly, answer the hit value (reads) or
 %%% the rebuilt agent (writes), or the atom `miss` when the operands need
 %%% anything observable. TOTAL: no clause raises for any wire term. Shares
-%%% the proto-chain predicate `named_free` and `store_put_seq` with the AOT
-%%% fast paths in arc_rt_obj_ffi.
+%%% the proto-chain predicate `named_free` with the AOT fast paths in
+%%% arc_rt_obj_ffi.
 -module(arc_interp_prop_ffi).
--export([get_field/3, get_elem/3, get_elem2/3, put_field/4, put_elem/4,
-         define_field/4, get_global/3, put_global/6]).
+-export([get_field/3, own_data/2, get_elem/3, get_elem2/3, put_field/5, put_elem/4,
+         define_field/4, new_object/5, new_receiver/2, get_global/3,
+         put_global/6]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -29,7 +30,7 @@
 %% (the compiler emits Index keys for array-index strings), used as the
 %% props-map key as is so no hop rebuilds it.
 get_field(Agent, {?HANDLE_TAG, Id}, K) ->
-    cell_field(element(?AGENT_STORE, Agent), Id, K);
+    cell_field(element(?AGENT_STORE, Agent), Id, K, undefined);
 get_field(_, Bin, ?LENGTH_KEY) when is_binary(Bin) ->
     arc_string_ffi:string_codepoint_length(Bin);
 get_field(Agent, Bin, K) when is_binary(Bin) ->
@@ -37,6 +38,16 @@ get_field(Agent, Bin, K) when is_binary(Bin) ->
 get_field(Agent, N, K) when is_number(N) ->
     proto_field(Agent, ?REALM_NUMBER, K);
 get_field(_, _, _) -> miss.
+
+%% own_data(Props, K) -> JsVal | miss
+%% The value of an own data property K in an SObject's props map; an
+%% accessor or an absent key miss.
+own_data(Props, K) ->
+    case Props of
+        #{K := Prop} when element(1, Prop) =:= ?DATAPROP_TAG ->
+            element(?DATAPROP_VALUE, Prop);
+        _ -> miss
+    end.
 
 %% get_global(Agent, Lex, NameBin) -> JsVal | miss
 %% §9.1.1.4.6 GetBindingValue on the global Environment Record for the
@@ -54,9 +65,7 @@ get_global(Agent, Lex, Name) ->
             end;
         _ ->
             {?HANDLE_TAG, G} = element(?REALM_GLOBAL, element(?AGENT_REALM, Agent)),
-            Store = element(?AGENT_STORE, Agent),
-            field_walk(element(?STORE_DATA, Store), element(?STORE_SHAPES, Store),
-                       G, {?KEY_NAMED, Name}, 64, miss)
+            cell_field(element(?AGENT_STORE, Agent), G, {?KEY_NAMED, Name}, miss)
     end.
 
 %% put_global(Store, Lex, Global, NameBin, V, Strict) -> Store2 | miss
@@ -77,17 +86,31 @@ put_global(Store, Lex, Global, Name, V, Strict) ->
 proto_field(Agent, Which, K) ->
     Pair = element(Which, element(?AGENT_REALM, Agent)),
     {?HANDLE_TAG, Id} = element(?PAIR_PROTO, Pair),
-    cell_field(element(?AGENT_STORE, Agent), Id, K).
+    cell_field(element(?AGENT_STORE, Agent), Id, K, undefined).
 
-cell_field(Store, Id, K) ->
-    field_walk(element(?STORE_DATA, Store), element(?STORE_SHAPES, Store),
-               Id, K, 64, undefined).
+%% The walk from cell Id. Absent is the answer when the whole chain lacks
+%% the key: `undefined` for OrdinaryGet, `miss` for a global binding lookup.
+%% The ordinary-kind own probe is spelled out here so the commonest read is
+%% no call past the arena read; every other slot takes the shared hop.
+cell_field(Store, Id, K, Absent) ->
+    Data = element(?STORE_DATA, Store),
+    case arc_rt_arena_ffi:get(Id, Data) of
+        {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _} ->
+            case Props of
+                #{K := Prop} when element(1, Prop) =:= ?DATAPROP_TAG ->
+                    element(?DATAPROP_VALUE, Prop);
+                #{K := _} -> miss;
+                _ ->
+                    field_next(Data, element(?STORE_SHAPES, Store), Proto, K,
+                               64, Absent)
+            end;
+        Slot ->
+            hop(Data, element(?STORE_SHAPES, Store), Slot, K, 64, Absent)
+    end.
 
-%% Absent is the answer when the whole chain lacks the key: `undefined` for
-%% OrdinaryGet, `miss` for a global binding lookup.
-field_walk(_, _, _, _, 0, _) -> miss;
-field_walk(Data, Shapes, Id, K, Fuel, Absent) ->
-    case array:get(Id, Data) of
+%% One hop of the walk on the already-read Slot; Fuel more hops may follow.
+hop(Data, Shapes, Slot, K, Fuel, Absent) ->
+    case Slot of
         {?SSHAPED_TAG, Sid, Proto, Slots} ->
             case Shapes of
                 #{Sid := Desc} ->
@@ -98,7 +121,7 @@ field_walk(Data, Shapes, Id, K, Fuel, Absent) ->
                     end;
                 _ -> miss
             end;
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
+        _ when element(1, Slot) =:= ?SOBJECT_TAG ->
             Kind = element(?SOBJECT_KIND, Slot),
             case named_plain(Kind, K) of
                 false -> named_virtual(Kind, K);
@@ -119,8 +142,9 @@ field_walk(Data, Shapes, Id, K, Fuel, Absent) ->
     end.
 
 field_next(_, _, ?NONE, _, _, Absent) -> Absent;
-field_next(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, K, Fuel, Absent) ->
-    field_walk(Data, Shapes, P, K, Fuel - 1, Absent);
+field_next(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, K, Fuel, Absent)
+  when Fuel > 1 ->
+    hop(Data, Shapes, arc_rt_arena_ffi:get(P, Data), K, Fuel - 1, Absent);
 field_next(_, _, _, _, _, _) -> miss.
 
 %% The one virtual named data property a read kernel synthesizes: an Array
@@ -131,9 +155,12 @@ named_virtual(_, _) -> miss.
 
 %% Whether a Named key on this ObjKind is a plain props-map entry for both
 %% [[Get]] and [[Set]] (rt/obj own_property_of, get_from, set arms): Proxy,
-%% module namespace and TypedArray cells are exotic for string keys, and
-%% Array / String objects synthesize "length".
--compile({inline, [named_plain/2, named_virtual/2]}).
+%% module namespace and TypedArray cells are exotic for string keys, Array /
+%% String objects synthesize "length", and a function's "length", "name"
+%% and "prototype" may not be in its props yet (rt/types FnBirth).
+-compile({inline, [named_plain/2, named_virtual/2, birth_plain/2, cell_field/4,
+                   hop/6, proto_field/3, put_prop/7, chain_free/4,
+                   literal_props/3]}).
 named_plain(?ORDINARY, _) -> true;
 named_plain(Kind, _) when is_atom(Kind) -> true;
 named_plain(Kind, K) ->
@@ -143,8 +170,19 @@ named_plain(Kind, K) ->
         typed_array_obj -> false;
         ?ARRAYOBJ_TAG -> K =/= ?LENGTH_KEY;
         string_obj -> K =/= ?LENGTH_KEY;
+        ?KBYTECODE_TAG -> birth_plain(element(?KBYTECODE_BIRTH, Kind), K);
+        ?KFN_TAG -> birth_plain(element(?KFN_BIRTH, Kind), K);
         _ -> true
     end.
+
+%% Pending birth props (rt/types FnBirth): "length" and "name" are not in
+%% the props map until settled, nor is "prototype" while its parent is Some.
+birth_plain(?BIRTH_SETTLED, _) -> true;
+birth_plain(_, ?LENGTH_KEY) -> false;
+birth_plain(_, {?KEY_NAMED, <<"name">>}) -> false;
+birth_plain(Birth, {?KEY_NAMED, <<"prototype">>}) ->
+    element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
+birth_plain(_, _) -> true.
 
 %% get_elem(Store, V, Key) -> JsVal | miss
 %% `V[Key]` for the shapes a loop body produces: a non-negative integer
@@ -158,7 +196,7 @@ named_plain(Kind, K) ->
 -define(MAX_ARRAY_INDEX, 4294967294).
 get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
     Data = element(?STORE_DATA, Store),
-    case array:get(Id, Data) of
+    case arc_rt_arena_ffi:get(Id, Data) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             Props = element(?SOBJECT_PROPS, Slot),
             case element(?SOBJECT_KIND, Slot) of
@@ -199,7 +237,7 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
 get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when is_binary(Key) ->
     case arc_rt_val_ffi:t_to_property_key_fast(Key) of
         {?OKEY_STRING, {?KEY_NAMED, _} = K} ->
-            cell_field(Store, element(?HANDLE_ID, Obj), K);
+            cell_field(Store, element(?HANDLE_ID, Obj), K, undefined);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
         _ -> miss
     end;
@@ -218,14 +256,12 @@ get_elem2(_, _, _) -> miss.
 index_overridden(Props, Idx) ->
     map_size(Props) =/= 0 andalso is_map_key({?KEY_INDEX, Idx}, Props).
 
+%% A dense store is a non-fixed `array`, so a read past its size is the
+%% default (a hole) rather than badarg.
 elem_read({?ELEMS_DENSE, A}, Idx) ->
-    case Idx < array:size(A) of
-        true ->
-            case array:get(Idx, A) of
-                ?ELEMS_HOLE -> miss;
-                V -> V
-            end;
-        false -> miss
+    case array:get(Idx, A) of
+        ?ELEMS_HOLE -> miss;
+        V -> V
     end;
 elem_read({?ELEMS_SPARSE, M}, Idx) ->
     case M of
@@ -234,7 +270,7 @@ elem_read({?ELEMS_SPARSE, M}, Idx) ->
     end;
 elem_read(_, _) -> miss.
 
-%% put_field(Store, V, K, Val) -> Store2 | miss
+%% put_field(Store, V, K, Val, Create) -> Store2 | miss
 %% §10.1.9.2 OrdinarySetWithOwnDescriptor for a kind whose named keys are
 %% ordinary. Step 2, an EXISTING own writable data property: overwrite the
 %% SShapedObject slot, or replace the value inside the DataProperty
@@ -244,13 +280,12 @@ elem_read(_, _) -> miss.
 %% read-only property up the chain still takes the slow path; the new
 %% {W,E,C} property is stamped with the store's prop_seq (t_next_prop_seq).
 %% Non-writable, accessors, non-extensible / shaped receivers for a new key
-%% and exotic receivers miss. Returns the rebuilt store.
-put_field(Store, Obj, K, V) -> put_field(Store, Obj, K, V, true).
-
-%% Create: whether an absent key may be created (false: replace only).
-put_field(Store, {?HANDLE_TAG, Id}, K, V, Create) ->
+%% and exotic receivers miss. Create: whether an absent key may be created
+%% (false: replace only). Returns the rebuilt store.
+put_field(Store, {?HANDLE_TAG, Id}, K, V, Create)
+  when tuple_size(Store) =:= ?STORE_ARITY ->
     Data = element(?STORE_DATA, Store),
-    case array:get(Id, Data) of
+    case arc_rt_arena_ffi:get(Id, Data) of
         {?SSHAPED_TAG, Sid, P, Slots} ->
             case element(?STORE_SHAPES, Store) of
                 #{Sid := Desc} ->
@@ -259,7 +294,7 @@ put_field(Store, {?HANDLE_TAG, Id}, K, V, Create) ->
                         #{KeyBin := Off} ->
                             NewSlot = {?SSHAPED_TAG, Sid, P,
                                        setelement(Off + 1, Slots, V)},
-                            setelement(?STORE_DATA, Store, array:set(Id, NewSlot, Data));
+                            setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(Id, NewSlot, Data));
                         _ -> miss
                     end;
                 _ -> miss
@@ -279,26 +314,29 @@ put_field(_, _, _, _, _) -> miss.
 %% value of an existing own writable data property, or (Create) add a
 %% {W,E,C} one stamped with the store's prop_seq when the receiver is
 %% extensible and the chain above holds nothing but writable data at K.
+%% The SObject and DataProperty rows are matched and rebuilt whole (field
+%% order per arc_rt_layout.hrl) rather than through setelement.
 put_prop(Store, Data, Id, Slot, K, V, Create) ->
-    Props = element(?SOBJECT_PROPS, Slot),
+    {_, Kind, Proto, Props, Sym, Elems, Ext} = Slot,
     case Props of
-        #{K := Prop}
-          when element(1, Prop) =:= ?DATAPROP_TAG,
-               element(?DATAPROP_WRITABLE, Prop) =:= true ->
-            NewProps = Props#{K := setelement(?DATAPROP_VALUE, Prop, V)},
-            NewSlot = setelement(?SOBJECT_PROPS, Slot, NewProps),
-            setelement(?STORE_DATA, Store, array:set(Id, NewSlot, Data));
+        #{K := {?DATAPROP_TAG, _, true, E, C, Sq}} ->
+            NewSlot = {?SOBJECT_TAG, Kind, Proto,
+                       Props#{K := {?DATAPROP_TAG, V, true, E, C, Sq}},
+                       Sym, Elems, Ext},
+            setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(Id, NewSlot, Data));
         #{K := _} -> miss;
-        _ when Create, element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
-            case chain_free(Data, element(?STORE_SHAPES, Store),
-                            element(?SOBJECT_PROTO, Slot), K) of
+        _ when Create, Ext =:= true ->
+            case chain_free(Data, element(?STORE_SHAPES, Store), Proto, K) of
                 false -> miss;
                 true ->
                     Seq = element(?STORE_PROP_SEQ, Store),
-                    Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
-                    NewSlot = setelement(?SOBJECT_PROPS, Slot, Props#{K => Prop}),
-                    arc_rt_obj_ffi:store_put_seq(Store, array:set(Id, NewSlot, Data),
-                                                 Seq + 1)
+                    NewSlot = {?SOBJECT_TAG, Kind, Proto,
+                               Props#{K => {?DATAPROP_TAG, V, true, true, true, Seq}},
+                               Sym, Elems, Ext},
+                    setelement(?STORE_PROP_SEQ,
+                               setelement(?STORE_DATA, Store,
+                                          arc_rt_arena_ffi:set(Id, NewSlot, Data)),
+                               Seq + 1)
             end;
         _ -> miss
     end.
@@ -310,31 +348,86 @@ put_prop(Store, Data, Id, Slot, K, V, Create) ->
 %% configurable data property (creation order kept, §10.1.11). A
 %% non-configurable or accessor current property, and any other receiver,
 %% miss to the full [[DefineOwnProperty]].
-define_field(Store, {?HANDLE_TAG, Id}, K, V) ->
+define_field(Store, {?HANDLE_TAG, Id}, K, V)
+  when tuple_size(Store) =:= ?STORE_ARITY ->
     Data = element(?STORE_DATA, Store),
-    case array:get(Id, Data) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
-                  element(?SOBJECT_KIND, Slot) =:= ?ORDINARY,
-                  element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
-            Props = element(?SOBJECT_PROPS, Slot),
+    case arc_rt_arena_ffi:get(Id, Data) of
+        {?SOBJECT_TAG, ?ORDINARY, Proto, Props, Sym, Elems, true} ->
             case Props of
-                #{K := Old} when element(1, Old) =:= ?DATAPROP_TAG,
-                                 element(?DATAPROP_CONFIGURABLE, Old) =:= true ->
-                    Prop = {?DATAPROP_TAG, V, true, true, true,
-                            element(?DATAPROP_SEQ, Old)},
-                    NewSlot = setelement(?SOBJECT_PROPS, Slot, Props#{K := Prop}),
-                    setelement(?STORE_DATA, Store, array:set(Id, NewSlot, Data));
+                #{K := {?DATAPROP_TAG, _, _, _, true, Sq}} ->
+                    NewSlot = {?SOBJECT_TAG, ?ORDINARY, Proto,
+                               Props#{K := {?DATAPROP_TAG, V, true, true, true, Sq}},
+                               Sym, Elems, true},
+                    setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(Id, NewSlot, Data));
                 #{K := _} -> miss;
                 _ ->
                     Seq = element(?STORE_PROP_SEQ, Store),
-                    Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
-                    NewSlot = setelement(?SOBJECT_PROPS, Slot, Props#{K => Prop}),
-                    arc_rt_obj_ffi:store_put_seq(Store, array:set(Id, NewSlot, Data),
-                                                 Seq + 1)
+                    NewSlot = {?SOBJECT_TAG, ?ORDINARY, Proto,
+                               Props#{K => {?DATAPROP_TAG, V, true, true, true, Seq}},
+                               Sym, Elems, true},
+                    setelement(?STORE_PROP_SEQ,
+                               setelement(?STORE_DATA, Store,
+                                          arc_rt_arena_ffi:set(Id, NewSlot, Data)),
+                               Seq + 1)
             end;
         _ -> miss
     end;
 define_field(_, _, _, _) -> miss.
+
+%% new_object(Store, Proto, Keys, N, Stack) -> {Obj, Stack2, Store2}
+%% The object literal head `{k1: v1, .., kn: vn}`: one fresh ordinary,
+%% extensible SObject on Proto whose own {W,E,C} data properties are the N
+%% distinct Named Keys (given last first) holding the top N values of Stack
+%% ([Vn, .., V1 | Stack2]), stamped prop_seq .. prop_seq+N-1 in source
+%% order. Allocated the way rt/store t_cell_new_with allocates: id `next`,
+%% alloc_since_gc bumped, never collects.
+new_object(Store, Proto, Keys, N, Stack) when tuple_size(Store) =:= ?STORE_ARITY ->
+    Seq = element(?STORE_PROP_SEQ, Store),
+    {Props, Stack2} = literal_props(Keys, Stack, Seq),
+    Slot = {?SOBJECT_TAG, ?ORDINARY, {?SOME, Proto}, Props, [], ?ELEMS_NONE, true},
+    Id = element(?STORE_NEXT, Store),
+    Store2 = setelement(?STORE_DATA, Store,
+                        arc_rt_arena_ffi:set(Id, Slot, element(?STORE_DATA, Store))),
+    Store3 = setelement(?STORE_NEXT, Store2, Id + 1),
+    Store4 = setelement(?STORE_ALLOC, Store3, element(?STORE_ALLOC, Store) + 1),
+    {{?HANDLE_TAG, Id}, Stack2, setelement(?STORE_PROP_SEQ, Store4, Seq + N)}.
+
+%% new_receiver(Agent, Proto) -> {Receiver, Agent2} | miss
+%% §10.1.13 OrdinaryCreateFromConstructor once `prototype` has been read: a
+%% fresh empty ordinary object on the object Proto, allocated as new_object
+%% allocates. A non-object Proto (the realm-intrinsic fallback) misses.
+new_receiver(Agent, {?HANDLE_TAG, _} = Proto)
+  when tuple_size(Agent) =:= ?AGENT_ARITY ->
+    case element(?AGENT_STORE, Agent) of
+        Store when tuple_size(Store) =:= ?STORE_ARITY ->
+            Slot = {?SOBJECT_TAG, ?ORDINARY, {?SOME, Proto}, #{}, [], ?ELEMS_NONE,
+                    true},
+            Id = element(?STORE_NEXT, Store),
+            Store2 = setelement(?STORE_DATA, Store,
+                                arc_rt_arena_ffi:set(Id, Slot, element(?STORE_DATA, Store))),
+            Store3 = setelement(?STORE_NEXT, Store2, Id + 1),
+            Store4 = setelement(?STORE_ALLOC, Store3,
+                                element(?STORE_ALLOC, Store) + 1),
+            {{?HANDLE_TAG, Id}, setelement(?AGENT_STORE, Agent, Store4)};
+        _ -> miss
+    end;
+new_receiver(_, _) -> miss.
+
+-define(WEC(V, Seq), {?DATAPROP_TAG, V, true, true, true, Seq}).
+%% The literal's props map and the stack beneath its values; up to two
+%% keys are map literals.
+literal_props([], Stack, _) -> {#{}, Stack};
+literal_props([K1], [V1 | Stack], Seq) ->
+    {#{K1 => ?WEC(V1, Seq)}, Stack};
+literal_props([K2, K1], [V2, V1 | Stack], Seq) ->
+    {#{K1 => ?WEC(V1, Seq), K2 => ?WEC(V2, Seq + 1)}, Stack};
+literal_props(Keys, Stack, Seq) ->
+    {Pairs, Stack2} = literal_pairs(Keys, Stack, Seq + length(Keys) - 1, []),
+    {maps:from_list(Pairs), Stack2}.
+
+literal_pairs([K | Keys], [V | Stack], Seq, Acc) ->
+    literal_pairs(Keys, Stack, Seq - 1, [{K, ?WEC(V, Seq)} | Acc]);
+literal_pairs([], Stack, _, Acc) -> {Acc, Stack}.
 
 chain_free(Data, Shapes, Proto, {?KEY_NAMED, _} = K) ->
     arc_rt_obj_ffi:named_free(Data, Shapes, Proto, K, 64);
@@ -355,9 +448,10 @@ chain_free(Data, Shapes, Proto, {?KEY_INDEX, Idx}) ->
 %% receiver, a key past the array-index range (2^32-1 is a Named key and
 %% never moves "length"), or a dense fill past the allocated size misses.
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
-  when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
+  when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX,
+       tuple_size(Store) =:= ?STORE_ARITY ->
     Data = element(?STORE_DATA, Store),
-    case array:get(Id, Data) of
+    case arc_rt_arena_ffi:get(Id, Data) of
         Slot when tuple_size(Slot) =:= ?SOBJECT_ARITY,
                   element(1, Slot) =:= ?SOBJECT_TAG,
                   element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
@@ -369,18 +463,21 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
                        andalso is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
                     Elems = element(?SOBJECT_ELEMENTS, Slot),
-                    case elem_has(Elems, Idx)
-                         orelse index_free(Data, element(?STORE_SHAPES, Store),
-                                           element(?SOBJECT_PROTO, Slot), Idx, 64) of
-                        false -> miss;
-                        true ->
-                            case elem_write(Elems, Idx, V) of
-                                miss -> miss;
-                                NewE ->
-                                    NewSlot = setelement(?SOBJECT_ELEMENTS, Slot, NewE),
-                                    setelement(?STORE_DATA, Store,
-                                               array:set(Id, NewSlot, Data))
-                            end
+                    NewE = case elem_overwrite(Elems, Idx, V) of
+                        hole ->
+                            case index_free(Data, element(?STORE_SHAPES, Store),
+                                            element(?SOBJECT_PROTO, Slot), Idx, 64) of
+                                true -> elem_write(Elems, Idx, V);
+                                false -> miss
+                            end;
+                        E -> E
+                    end,
+                    case NewE of
+                        miss -> miss;
+                        _ ->
+                            NewSlot = setelement(?SOBJECT_ELEMENTS, Slot, NewE),
+                            setelement(?STORE_DATA, Store,
+                                       arc_rt_arena_ffi:set(Id, NewSlot, Data))
                     end;
                 {?ARRAYOBJ_TAG, Idx} ->
                     case length_writable(Props)
@@ -396,7 +493,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
                                                    {?ARRAYOBJ_TAG, Idx + 1}),
                                         NewE),
                                     setelement(?STORE_DATA, Store,
-                                               array:set(Id, NewSlot, Data))
+                                               arc_rt_arena_ffi:set(Id, NewSlot, Data))
                             end
                     end;
                 _ -> miss
@@ -405,7 +502,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
     end;
 put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when is_binary(Key) ->
     case arc_rt_val_ffi:t_to_property_key_fast(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V);
+        {?OKEY_STRING, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V, true);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> put_elem(Store, Obj, Idx, V);
         _ -> miss
     end;
@@ -426,7 +523,7 @@ length_writable(_) -> true.
 index_free(_, _, ?NONE, _, _) -> true;
 index_free(_, _, _, _, 0) -> false;
 index_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
-    case array:get(P, Data) of
+    case arc_rt_arena_ffi:get(P, Data) of
         {?SSHAPED_TAG, Sid, Proto, _Slots} ->
             case Shapes of
                 #{Sid := Desc} ->
@@ -461,10 +558,23 @@ index_is_plain(Kind) ->
     end.
 
 %% A present (non-hole) element at Idx.
-elem_has({?ELEMS_DENSE, A}, Idx) ->
-    Idx < array:size(A) andalso array:get(Idx, A) =/= ?ELEMS_HOLE;
+elem_has({?ELEMS_DENSE, A}, Idx) -> array:get(Idx, A) =/= ?ELEMS_HOLE;
 elem_has({?ELEMS_SPARSE, M}, Idx) -> is_map_key(Idx, M);
 elem_has(_, _) -> false.
+
+%% Replace a present element; `hole` when Idx holds none (a present dense
+%% element is always inside the allocated size).
+elem_overwrite({?ELEMS_DENSE, A}, Idx, V) ->
+    case array:get(Idx, A) of
+        ?ELEMS_HOLE -> hole;
+        _ -> {?ELEMS_DENSE, array:set(Idx, V, A)}
+    end;
+elem_overwrite({?ELEMS_SPARSE, M}, Idx, V) ->
+    case M of
+        #{Idx := _} -> {?ELEMS_SPARSE, M#{Idx := V}};
+        _ -> hole
+    end;
+elem_overwrite(_, _, _) -> hole.
 
 elem_write({?ELEMS_DENSE, A}, Idx, V) ->
     case Idx < array:size(A) of

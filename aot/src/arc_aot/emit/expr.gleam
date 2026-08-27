@@ -13,6 +13,7 @@
 //// called and the CPS chain stays total. `emit_expr` therefore always returns
 //// Ok — the Result wrapper exists to satisfy state.EmitDispatch.emit_expr.
 
+import arc/bytecode/key
 import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
@@ -22,6 +23,7 @@ import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/state.{type EmitError, type Emitter2}
 import carder/ir
 import gleam/bit_array
+import gleam/bool
 import gleam/dict
 import gleam/float
 import gleam/int
@@ -1789,6 +1791,170 @@ fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
   anf.pure(v)
 }
 
+/// A run of `obj.k = v;` expression statements on one receiver: `object` is
+/// `this` or an unboxed local, `first` is the leading write (any value
+/// expression) and `rest` the writes after it, whose values are `simple`.
+pub type PropWriteRun {
+  PropWriteRun(
+    object: ast.Expression,
+    first: #(BitArray, ast.Expression),
+    rest: List(#(BitArray, ast.Expression)),
+  )
+}
+
+/// The longest leading run of two or more `obj.k = v;` statements in `ss`
+/// that can be written as one `set_props_named` call, and the statements
+/// after it. Every value after the first must be `simple`: evaluating it
+/// before the earlier writes run (a setter up the proto chain, a TypeError
+/// on a frozen receiver) is unobservable, because it cannot throw, has no
+/// effect and reads nothing those writes could change.
+pub fn prop_write_run(
+  e: Emitter2,
+  ss: List(ast.StmtWithLine),
+) -> Option(#(PropWriteRun, List(ast.StmtWithLine))) {
+  case ss {
+    [ast.StmtWithLine(statement: s, ..), ..tail] ->
+      case prop_write(s) {
+        Some(#(object, key, value)) ->
+          case stable_receiver(e, object) {
+            True -> {
+              let #(rest, tail) = prop_write_tail(e, object, tail, [])
+              case rest {
+                [] -> None
+                _ -> Some(#(PropWriteRun(object, #(key, value), rest), tail))
+              }
+            }
+            False -> None
+          }
+        None -> None
+      }
+    [] -> None
+  }
+}
+
+fn prop_write_tail(
+  e: Emitter2,
+  object: ast.Expression,
+  ss: List(ast.StmtWithLine),
+  acc: List(#(BitArray, ast.Expression)),
+) -> #(List(#(BitArray, ast.Expression)), List(ast.StmtWithLine)) {
+  let done = fn() { #(list.reverse(acc), ss) }
+  case ss {
+    [ast.StmtWithLine(statement: s, ..), ..tail] ->
+      case prop_write(s) {
+        Some(#(o, key, value)) ->
+          case same_receiver(object, o) && simple(e, value) {
+            True -> prop_write_tail(e, object, tail, [#(key, value), ..acc])
+            False -> done()
+          }
+        None -> done()
+      }
+    [] -> done()
+  }
+}
+
+/// `obj.name = value;` with a static, non-private key.
+fn prop_write(
+  s: ast.Statement,
+) -> Option(#(ast.Expression, BitArray, ast.Expression)) {
+  case s {
+    ast.ExpressionStatement(
+      expression: ast.AssignmentExpression(
+        operator: ast.Assign,
+        left: ast.MemberExpression(object:, property:, ..),
+        right:,
+        ..,
+      ),
+      ..,
+    ) ->
+      case static_dot_key(property) {
+        Some(kb) -> Some(#(object, kb, right))
+        None -> None
+      }
+    _ -> None
+  }
+}
+
+fn same_receiver(a: ast.Expression, b: ast.Expression) -> Bool {
+  case a, b {
+    ast.ThisExpression(_), ast.ThisExpression(_) -> True
+    ast.Identifier(name: x, ..), ast.Identifier(name: y, ..) -> x == y
+    _, _ -> False
+  }
+}
+
+/// A receiver no write in the run can rebind: `this`, or a local held in a
+/// register (a captured local is boxed, and a setter could assign it).
+fn stable_receiver(e: Emitter2, ex: ast.Expression) -> Bool {
+  case ex {
+    ast.ThisExpression(_) -> !e.this_tdz
+    ast.Identifier(name:, ..) -> register_local(e, name)
+    _ -> False
+  }
+}
+
+fn register_local(e: Emitter2, name: String) -> Bool {
+  case state.resolve(e, name) {
+    scope.Plain(scope.Local(slot:, boxed: False, origin_kind:, ..)) ->
+      case origin_kind {
+        scope.VarBinding | scope.ParamBinding -> True
+        scope.LetBinding | scope.ConstBinding | scope.FnNameBinding ->
+          set.contains(e.initialized, slot)
+        _ -> False
+      }
+    _ -> False
+  }
+}
+
+/// An expression whose evaluation cannot throw, has no side effect and
+/// depends on nothing a property write can change.
+fn simple(e: Emitter2, ex: ast.Expression) -> Bool {
+  case ex {
+    ast.NumberLiteral(..)
+    | ast.StringExpression(..)
+    | ast.BooleanLiteral(..)
+    | ast.NullLiteral(..)
+    | ast.UndefinedExpression(..) -> True
+    ast.ThisExpression(_) -> !e.this_tdz
+    ast.Identifier(name:, ..) -> register_local(e, name)
+    ast.ParenthesizedExpression(_, inner) -> simple(e, inner)
+    ast.UnaryExpression(
+      operator: ast.Negate,
+      argument: ast.NumberLiteral(..),
+      ..,
+    ) -> True
+    ast.UnaryExpression(operator: ast.LogicalNot, argument:, ..) ->
+      simple(e, argument)
+    ast.LogicalExpression(left:, right:, ..) ->
+      simple(e, left) && simple(e, right)
+    ast.ConditionalExpression(condition:, consequent:, alternate:, ..) ->
+      simple(e, condition) && simple(e, consequent) && simple(e, alternate)
+    _ -> False
+  }
+}
+
+/// Emit a `PropWriteRun`: the receiver, the first value, the remaining
+/// values, then one `set_props_named` host op over the key and value lists.
+pub fn emit_prop_write_run(run: PropWriteRun) -> Build(ir.Value) {
+  let PropWriteRun(object:, first: #(k0, v0), rest:) = run
+  use obj <- anf.then(expr(object))
+  use v0 <- anf.then(expr(v0))
+  use vs <- anf.then(anf.seq(list.map(rest, fn(p) { expr(p.1) })))
+  use keys <- anf.then(
+    anf.cons_list([
+      ir.ConstBinary(k0),
+      ..list.map(rest, fn(p) { ir.ConstBinary(p.0) })
+    ]),
+  )
+  use vals <- anf.then(anf.cons_list([v0, ..vs]))
+  use e <- anf.then(ask)
+  let strict = case e.strict {
+    True -> ir.ConstAtom("true")
+    False -> ir.ConstAtom("false")
+  }
+  anf.host("set_props_named", [obj, keys, vals, strict])
+}
+
 /// §13.15.2 PutValue step 6.b.iv: strict code turns a failed [[Set]] into a
 /// TypeError; sloppy code ignores it.
 pub fn set_prop_op_name(strict: Bool) -> String {
@@ -2479,49 +2645,135 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
       use _ <- anf.then(emit_args_list(args))
       throw_at_rt("throw_type_error", "unsupported: direct eval")
     }
-    // Regular call f(args): thisValue = undefined (§13.3.6.2 step 1.b.iii).
-    // When the callee is an unboxed local ∉ carried OR a slotted-global cell
-    // never reassigned in the loop, stmt.gleam's loop emit hoists
-    // `kfn_code(f, undef)` before the ir.Loop and records the pair var in
-    // e.hoisted_kfn — reuse it here to skip the per-iteration heap read.
-    // Slotted-global entries are keyed `-1 - slot` (disjoint from local slots).
-    _ -> {
-      use rc <- anf.then(consts())
-      use e <- anf.then(ask)
-      let hoisted = case ast_util.unwrap_parens(callee) {
-        ast.Identifier(name:, ..) ->
-          case state.resolve(e, name) {
-            scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
-              state.lookup_hoisted_kfn(e, slot)
-            // Slotted-global boxed cell — keyed at `-1 - slot` (current
-            // frame's slot; matches loop_invariant_callees' key).
-            scope.Plain(scope.Local(slot:, boxed: True, ..)) ->
-              state.lookup_hoisted_kfn(e, -1 - slot)
-            _ -> None
-          }
-        _ -> None
+    // Immediately invoked function / arrow expression: nothing but this call
+    // can ever reach the function, so when its body has a simple-ABI variant
+    // the call goes straight to it and no function object is created.
+    _ ->
+      case ast_util.unwrap_parens(callee) {
+        ast.FunctionExpression(
+          name: None,
+          params:,
+          body:,
+          is_generator: False,
+          is_async: False,
+          ..,
+        ) ->
+          emit_iife(
+            callee,
+            state.FnExpr(self_name: None, is_gen: False, is_async: False),
+            params,
+            state.StmtBody(body),
+            args,
+          )
+        ast.ArrowFunctionExpression(params:, body:, is_async: False, ..) ->
+          emit_iife(
+            callee,
+            state.Arrow(is_async: False),
+            params,
+            case body {
+              ast.ArrowBodyBlock(stmts) -> state.StmtBody(stmts)
+              ast.ArrowBodyExpression(x) -> state.ExprBody(x)
+            },
+            args,
+          )
+        _ -> emit_generic_call(callee, args)
       }
-      use f <- anf.then(expr(callee))
-      // Spread-free → keep the positional value list so the simple-ABI
-      // closure applies: inline via the hoisted `pair` (frame code AND
-      // `pair.2`), else inside the `call_fastN` kernel.
-      case ast_util.has_spread_arg(args) {
-        False -> {
-          use pos <- anf.then(anf.seq(list.map(args, expr)))
-          case hoisted {
-            Some(pair) ->
-              emit_call_with_pair(pair, f, rc.undef, Positional(pos))
-            None -> emit_call_pos(f, rc.undef, pos)
-          }
+  }
+}
+
+/// Regular call f(args): thisValue = undefined (§13.3.6.2 step 1.b.iii).
+/// When the callee is an unboxed local ∉ carried OR a slotted-global cell
+/// never reassigned in the loop, stmt.gleam's loop emit hoists
+/// `kfn_code(f, undef)` before the ir.Loop and records the pair var in
+/// e.hoisted_kfn — reuse it here to skip the per-iteration heap read.
+/// Slotted-global entries are keyed `-1 - slot` (disjoint from local slots).
+fn emit_generic_call(
+  callee: ast.Expression,
+  args: List(ast.Expression),
+) -> Build(ir.Value) {
+  {
+    use rc <- anf.then(consts())
+    use e <- anf.then(ask)
+    let hoisted = case ast_util.unwrap_parens(callee) {
+      ast.Identifier(name:, ..) ->
+        case state.resolve(e, name) {
+          scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
+            state.lookup_hoisted_kfn(e, slot)
+          // Slotted-global boxed cell — keyed at `-1 - slot` (current
+          // frame's slot; matches loop_invariant_callees' key).
+          scope.Plain(scope.Local(slot:, boxed: True, ..)) ->
+            state.lookup_hoisted_kfn(e, -1 - slot)
+          _ -> None
         }
-        True -> {
-          use args_l <- anf.then(emit_args_list(args))
-          case hoisted {
-            Some(pair) -> emit_call_with_pair(pair, f, rc.undef, Consed(args_l))
-            None -> emit_call(f, rc.undef, args_l)
-          }
+      _ -> None
+    }
+    use f <- anf.then(expr(callee))
+    // Spread-free → keep the positional value list so the simple-ABI
+    // closure applies: inline via the hoisted `pair` (frame code AND
+    // `pair.2`), else inside the `call_fastN` kernel.
+    case ast_util.has_spread_arg(args) {
+      False -> {
+        use pos <- anf.then(anf.seq(list.map(args, expr)))
+        case hoisted {
+          Some(pair) -> emit_call_with_pair(pair, f, rc.undef, Positional(pos))
+          None -> emit_call_pos(f, rc.undef, pos)
         }
       }
+      True -> {
+        use args_l <- anf.then(emit_args_list(args))
+        case hoisted {
+          Some(pair) -> emit_call_with_pair(pair, f, rc.undef, Consed(args_l))
+          None -> emit_call(f, rc.undef, args_l)
+        }
+      }
+    }
+  }
+}
+
+/// `(function (..) {..})(args)` / `(() => ..)(args)`. The callee compiles
+/// like any function expression; with a simple-ABI variant it is applied by
+/// name — captures, then `this` per §10.2.1.2 (undefined, or the global
+/// object for a sloppy function), then the arguments padded / truncated to
+/// its arity (all of them evaluated, in order) — otherwise through the usual
+/// closure and `call_fast`.
+fn emit_iife(
+  callee: ast.Expression,
+  shape: state.FnShape,
+  params: List(ast.Pattern),
+  body: state.FnBody,
+  args: List(ast.Expression),
+) -> Build(ir.Value) {
+  use <- bool.lazy_guard(ast_util.has_spread_arg(args), fn() {
+    emit_generic_call(callee, args)
+  })
+  use rc <- anf.then(consts())
+  use site <- anf.then(fn(e: Emitter2, k) {
+    let #(fn_id, e) = state.pop_child_fn(e)
+    case e.dispatch.emit_function_site(e, shape, None, params, body, fn_id) {
+      Ok(#(site, e)) -> k(e, site)
+      Error(err) ->
+        {
+          use v <- anf.then(throw_at_rt("throw_type_error", describe_error(err)))
+          anf.pure(state.ClosureSite(ir.Values([v])))
+        }(e, k)
+    }
+  })
+  case site {
+    state.DirectFn(name:, captures:, arity:, needs_this:, strict:) -> {
+      use pos <- anf.then(anf.seq(list.map(args, expr)))
+      use this <- anf.then(case needs_this, strict {
+        False, _ -> anf.pure([])
+        True, True -> anf.pure([rc.undef])
+        True, False -> anf.map(anf.host("global_this", []), fn(g) { [g] })
+      })
+      let passed = list.take(pos, arity)
+      let pad = list.repeat(rc.undef, arity - list.length(passed))
+      anf.bind(ir.CallDirect(name, list.flatten([captures, this, passed, pad])))
+    }
+    state.ClosureSite(tree) -> {
+      use f <- anf.then(anf.bind(tree))
+      use pos <- anf.then(anf.seq(list.map(args, expr)))
+      emit_call_pos(f, rc.undef, pos)
     }
   }
 }
@@ -2996,8 +3248,71 @@ fn emit_object(
   properties: List(ast.Property),
   _named: Option(String),
 ) -> Build(ir.Value) {
-  use obj <- anf.then(anf.host("new_object", []))
-  fold_build(properties, obj, emit_object_property)
+  let #(lead, rest) = plain_members(properties, [], set.new())
+  use obj <- anf.then(case lead {
+    [] -> anf.host("new_object", [])
+    _ -> {
+      use vs <- anf.then(
+        anf.seq(
+          list.map(lead, fn(m) { emit(m.1, ast.property_key_static_name(m.0)) }),
+        ),
+      )
+      use keys <- anf.then(
+        anf.cons_list(
+          list.map(lead, fn(m) { ir.ConstBinary(bit_array.from_string(m.2)) }),
+        ),
+      )
+      use vals <- anf.then(anf.cons_list(vs))
+      anf.host("new_object_props", [keys, vals])
+    }
+  })
+  fold_build(rest, obj, emit_object_property)
+}
+
+/// The leading `key: value` members (shorthand included) whose keys are
+/// distinct static strings that are neither `__proto__` nor an array index,
+/// as `#(key, value, name)` triples, and the members from the first other
+/// one on. Nothing can observe the object before the literal completes, so
+/// these are created with it in one `new_object_props` after their values
+/// are evaluated in order.
+fn plain_members(
+  ps: List(ast.Property),
+  acc: List(#(ast.PropertyKey, ast.Expression, String)),
+  seen: set.Set(String),
+) -> #(List(#(ast.PropertyKey, ast.Expression, String)), List(ast.Property)) {
+  let done = fn() { #(list.reverse(acc), ps) }
+  case ps {
+    [ast.InitProperty(key:, value:, ..), ..rest] ->
+      case plain_member_name(key) {
+        Some(name) ->
+          case set.contains(seen, name) {
+            True -> done()
+            False ->
+              plain_members(
+                rest,
+                [#(key, value, name), ..acc],
+                set.insert(seen, name),
+              )
+          }
+        None -> done()
+      }
+    _ -> done()
+  }
+}
+
+fn plain_member_name(key: ast.PropertyKey) -> Option(String) {
+  case key {
+    ast.KeyIdentifier(name: "__proto__", ..)
+    | ast.KeyString(value: "__proto__", ..) -> None
+    // An IdentifierName never starts with a digit, so is never an index.
+    ast.KeyIdentifier(name:, ..) -> Some(name)
+    ast.KeyString(value:, ..) ->
+      case key.canonical_key(value) {
+        key.Named(_) -> Some(value)
+        _ -> None
+      }
+    _ -> None
+  }
 }
 
 /// §13.2.4 ArrayExpression. Port of emit.gleam:4865-4875.

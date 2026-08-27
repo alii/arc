@@ -10,10 +10,10 @@ import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledFn, type JsVal, Agent, FnFlags, FrameInfo, JFloat,
-  JInt, JNegInf, JPosInf, JsOps, JsStore, KBool, KBytecode, KHandle, KNum, KStr,
-  NoElements, SObject, StringKey, canonical_key, classify, mk_null, mk_number,
-  mk_object, mk_string, mk_undefined,
+  type Agent, type CompiledFn, type JsVal, Agent, BirthSettled, FnFlags,
+  FrameInfo, JFloat, JInt, JNegInf, JPosInf, JsOps, JsStore, KBool, KBytecode,
+  KHandle, KNum, KStr, NoElements, SObject, StringKey, canonical_key, classify,
+  mk_null, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -281,10 +281,13 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
   let ops =
     JsOps(
       ..st.store.ops,
-      call_bytecode: fn(st, _callee, this, args) {
+      call_bytecode: fn(st, _callee, _kind, this, args) {
         let assert [a] = args
         let #(sum, st) = rt_ops.t_add(st, this, a)
         #(Ok(sum), st)
+      },
+      bind_call: fn(_st, _callee, _kind, _this) {
+        panic as "bind_call not under test"
       },
       construct_bytecode: fn(st: Agent, _callee, _args, _new_target) {
         #(st.realm.array.prototype, st)
@@ -300,6 +303,7 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
       fields_init: None,
       realm: 0,
       unit: 0,
+      birth: BirthSettled,
     )
   let #(fh, st) =
     rt_store.t_cell_new(

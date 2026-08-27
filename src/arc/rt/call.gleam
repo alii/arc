@@ -23,16 +23,15 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
-  type NativeToken, type ObjKind, type Property, type Realm, Agent, ArrayObj,
-  DataProperty, Dense, JInt, JPosInf, KBound, KBytecode, KCompiled, KHandle,
-  KNative, KNull, KNum, KStr, KTdz, KUndef, Named, NoElements, Ordinary,
-  ProxyObj, ReferenceErr, SObject, StringKey, TypeErr, classify, mk_number,
-  mk_object, mk_string, mk_tdz, mk_undefined,
+  type NativeToken, type ObjKind, type Property, type PropertyKey, type Realm,
+  Agent, ArrayObj, BirthPending, BirthSettled, DataProperty, Dense, JInt,
+  JPosInf, KBound, KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr,
+  KTdz, KUndef, Named, NoElements, ProxyObj, ReferenceErr, SObject, StringKey,
+  TypeErr, classify, mk_number, mk_object, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/bool
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -89,15 +88,16 @@ fn t_apply_protected(
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(Completion, Agent)
 
-/// M6 native-method dispatch (giant `case tag`). Forward-declared: gleam
+/// M6 native-method dispatch (`arc_rt_builtins_ffi:dispatch_native`, the
+/// giant `case tag`) under that same try/catch. Forward-declared: gleam
 /// check does not resolve `@external` targets (SPEC assumption).
-@external(erlang, "arc_rt_builtins_ffi", "dispatch_native")
-fn dispatch_native(
+@external(erlang, "arc_rt_call_ffi", "t_native_protected")
+fn t_native_protected(
   st: Agent,
   tag: NativeToken,
   this: JsVal,
   args: List(JsVal),
-) -> #(JsVal, Agent)
+) -> #(Completion, Agent)
 
 /// M6 native-constructor dispatch (`new Map()` etc). Forward-declared.
 @external(erlang, "arc_rt_builtins_ffi", "dispatch_native_construct")
@@ -188,28 +188,13 @@ pub fn t_kfn_code(st: Agent, callee: JsVal, this: JsVal) -> JsVal
 
 /// §10.2.1 `[[Call]]`. Applies `callee(this, ...args)`, catching a JS throw
 /// into `ThrowCompletion` — the ONE catching entry point every rt_js module
-/// that runs user code goes through. Bumps `call_depth` around the call so
-/// `call_depth > 0` gates the D11 GC safepoint. At
+/// that runs user code goes through. The call holds one unit of `call_depth`
+/// while it runs (so `call_depth > 0` gates the D11 GC safepoint); at
 /// `limits.max_call_depth` the call is refused with a RangeError completion
-/// (arc `call.gleam:174-179`, thrown in the caller's frame).
+/// (arc `call.gleam:174-179`, thrown in the caller's frame). A bytecode
+/// callee takes that unit inside `JsOps.call_bytecode`; every other kind is
+/// bracketed here.
 pub fn t_call(
-  st: Agent,
-  callee: JsVal,
-  this: JsVal,
-  args: List(JsVal),
-) -> #(Completion, Agent) {
-  let depth = st.call_depth
-  case depth >= limits.max_call_depth {
-    True -> t_apply_protected(st, rt_store.stack_overflow)
-    False -> {
-      let #(c, st) =
-        do_call(Agent(..st, call_depth: depth + 1), callee, this, args)
-      #(c, Agent(..st, call_depth: st.call_depth - 1))
-    }
-  }
-}
-
-fn do_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
@@ -217,34 +202,63 @@ fn do_call(
 ) -> #(Completion, Agent) {
   case classify(callee) {
     KHandle(h) ->
-      case read_obj_kind(st, h) {
-        Some(KCompiled(code:, home_object:, flags:, ..)) ->
-          call_kfunction(st, h, code, home_object, flags, this, args)
-        // Interpreted function: the interpreter runs a fresh activation
-        // under its own backstop and hands the throw back as a value.
-        Some(KBytecode(..)) -> {
-          let #(res, st) = js_ops(st).call_bytecode(st, h, this, args)
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: KBytecode(..) as kind, ..) -> {
+          let #(res, st) = js_ops(st).call_bytecode(st, h, kind, this, args)
           case res {
             Ok(v) -> #(NormalCompletion(v), st)
             Error(e) -> #(ThrowCompletion(e), st)
           }
         }
-        Some(KNative(tag:, ..)) ->
-          t_apply_protected(st, fn(st) { dispatch_native(st, tag, this, args) })
-        // §10.4.1.1: [[BoundThis]] replaces `this`; bound args prepend.
-        Some(KBound(target:, bound_this:, bound_args:)) ->
-          do_call(
-            st,
-            mk_object(target),
-            bound_this,
-            list.append(bound_args, args),
-          )
-        // §10.5.12 Proxy [[Call]].
-        Some(ProxyObj(target:, handler:, revoked:)) ->
-          call_proxy(st, callee, target, handler, revoked, this, args)
-        _ -> not_a_function(st, callee)
+        slot -> call_slot(st, callee, h, slot, this, args)
       }
-    _ -> not_a_function(st, callee)
+    _ -> bracketed(st, fn(st) { not_a_function(st, callee) })
+  }
+}
+
+/// `t_call` for a callee cell that is not bytecode (its slot already read).
+fn call_slot(
+  st: Agent,
+  callee: JsVal,
+  h: Handle,
+  slot: rt_types.JsSlot,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(Completion, Agent) {
+  case slot {
+    SObject(kind: KCompiled(code:, home_object:, flags:, ..), ..) -> {
+      use st <- bracketed(st)
+      call_kfunction(st, h, code, home_object, flags, this, args)
+    }
+    SObject(kind: KNative(tag:, ..), ..) -> {
+      use st <- bracketed(st)
+      t_native_protected(st, tag, this, args)
+    }
+    // §10.4.1.1: [[BoundThis]] replaces `this`; bound args prepend.
+    SObject(kind: KBound(target:, bound_this:, bound_args:), ..) ->
+      t_call(st, mk_object(target), bound_this, list.append(bound_args, args))
+    // §10.5.12 Proxy [[Call]].
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..) -> {
+      use st <- bracketed(st)
+      call_proxy(st, callee, target, handler, revoked, this, args)
+    }
+    _ -> bracketed(st, fn(st) { not_a_function(st, callee) })
+  }
+}
+
+/// Run `body` holding one unit of `call_depth`, or refuse it with the
+/// RangeError completion at `limits.max_call_depth`.
+fn bracketed(
+  st: Agent,
+  body: fn(Agent) -> #(Completion, Agent),
+) -> #(Completion, Agent) {
+  let depth = st.call_depth
+  case depth >= limits.max_call_depth {
+    True -> t_apply_protected(st, rt_store.stack_overflow)
+    False -> {
+      let #(c, st) = body(Agent(..st, call_depth: depth + 1))
+      #(c, Agent(..st, call_depth: st.call_depth - 1))
+    }
   }
 }
 
@@ -389,14 +403,125 @@ fn not_a_function_raise(st: Agent, callee: JsVal) -> a {
 
 /// `t_call`, then on `ThrowCompletion` re-raise via `t_throw` so the throw
 /// propagates unchanged. This is the fn seeded into `JsOps.call` (D17) — its
-/// `#(JsVal, st)` shape matches the field type.
+/// `#(JsVal, st)` shape matches the field type. A bytecode callee's result
+/// is unwrapped straight off `JsOps.call_bytecode`, with no `Completion`
+/// built in between.
 pub fn t_call_checked(
   st: Agent,
   callee: JsVal,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  case t_call(st, callee, this, args) {
+  case classify(callee) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: KBytecode(..) as kind, ..) ->
+          case js_ops(st).call_bytecode(st, h, kind, this, args) {
+            #(Ok(v), st) -> #(v, st)
+            #(Error(e), st) -> rt_store.t_throw(st, e)
+          }
+        slot -> rethrown(call_slot(st, callee, h, slot, this, args))
+      }
+    _ -> rethrown(bracketed(st, fn(st) { not_a_function(st, callee) }))
+  }
+}
+
+/// `t_call_checked` with `callee` and `this` fixed: the callee's cell is
+/// read and dispatched on once here, and the function handed back makes the
+/// call for each argument list it is given. For a builtin that calls one
+/// callback per element; anything but a bytecode callee just defers to
+/// `t_call_checked`.
+pub fn t_bind_call(
+  st: Agent,
+  callee: JsVal,
+  this: JsVal,
+) -> fn(Agent, List(JsVal)) -> #(JsVal, Agent) {
+  let generic = fn(st, args) { t_call_checked(st, callee, this, args) }
+  case classify(callee) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: KBytecode(..) as kind, ..) ->
+          js_ops(st).bind_call(st, h, kind, this)
+        SObject(kind: KNative(tag:, ..), ..) -> fn(st, args) {
+          call_native(st, tag, this, args)
+        }
+        SObject(kind: KCompiled(code:, home_object:, flags:, ..), ..) -> fn(
+          st,
+          args,
+        ) {
+          call_compiled(st, h, code, home_object, flags, this, args)
+        }
+        _ -> generic
+      }
+    _ -> generic
+  }
+}
+
+/// `t_call_checked` of the compiled function `h`, its cell already read.
+fn call_compiled(
+  st: Agent,
+  h: Handle,
+  code: CompiledFn,
+  home_object: Option(Handle),
+  flags: FnFlags,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  use st <- rethrown_bracket(st)
+  call_kfunction(st, h, code, home_object, flags, this, args)
+}
+
+/// `t_call_checked` of the native method `tag`.
+fn call_native(
+  st: Agent,
+  tag: NativeToken,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  use st <- rethrown_bracket(st)
+  t_native_protected(st, tag, this, args)
+}
+
+fn rethrown_bracket(
+  st: Agent,
+  body: fn(Agent) -> #(Completion, Agent),
+) -> #(JsVal, Agent) {
+  rethrown(bracketed(st, body))
+}
+
+/// `t_bind_call` for a `callee` not yet known to be callable, off the same
+/// cell read: `None` when §7.2.3 IsCallable is false.
+pub fn t_bind_callable(
+  st: Agent,
+  callee: JsVal,
+  this: JsVal,
+) -> Option(fn(Agent, List(JsVal)) -> #(JsVal, Agent)) {
+  let generic = fn(st, args) { t_call_checked(st, callee, this, args) }
+  case classify(callee) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
+        SObject(kind: KBytecode(..) as kind, ..) ->
+          Some(js_ops(st).bind_call(st, h, kind, this))
+        SObject(kind: KNative(tag:, ..), ..) ->
+          Some(fn(st, args) { call_native(st, tag, this, args) })
+        SObject(kind: KCompiled(code:, home_object:, flags:, ..), ..) ->
+          Some(fn(st, args) {
+            call_compiled(st, h, code, home_object, flags, this, args)
+          })
+        SObject(kind: KBound(..), ..) -> Some(generic)
+        SObject(kind: ProxyObj(target:, ..), ..) ->
+          case is_callable(st, mk_object(target)) {
+            True -> Some(generic)
+            False -> None
+          }
+        _ -> None
+      }
+    _ -> None
+  }
+}
+
+fn rethrown(outcome: #(Completion, Agent)) -> #(JsVal, Agent) {
+  case outcome {
     #(NormalCompletion(v), st) -> #(v, st)
     #(ThrowCompletion(e), st) -> rt_store.t_throw(st, e)
   }
@@ -829,12 +954,13 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
 // `length` own properties. Do NOT root — lifetime is normal GC reachability
 // (M6 pins intrinsics via `t_pin_root` after `t_native_new`).
 //
-// Birth-time property `seq`: arc uses constants 0/1/2 in a reserved range
-// below its +16-offset counter (arc `common.gleam:528-536`). `prop_seq` starts
-// at 0 with NO offset here, so a constant 0/1 would collide with the first
-// user-added property's seq; the birth props take fresh stamps reserved in
-// the allocating store write instead, which preserves the §10.1.11 "birth
-// props before any later prop" ordering invariant.
+// Birth-time property `seq`: the props every function object is born with
+// take constants (`length` 0, `name` 1, `rt_obj.prototype_seq` 2), and
+// `rt_store.t_store_new` starts the threaded `prop_seq` counter past them,
+// so any property added later still enumerates after the birth props
+// (§10.1.11) without a counter bump per allocation (arc
+// `common.gleam:528-536`). A compiled or interpreted function does not even
+// store them until something looks (`FnBirth`).
 
 /// A §20.2.4 `length` / `name` own property: `{W:F, E:F, C:T}`. `length` is a
 /// `JsVal` (not `Int`) so `t_bound_new` can install `+∞` per §20.2.3.2 step
@@ -849,6 +975,11 @@ pub fn fn_own_prop(value: JsVal, seq: Int) -> Property {
   )
 }
 
+/// The own props of a fresh function object: `length` then `name`, each a
+/// `fn_own_prop` at seq 0 and 1.
+@external(erlang, "arc_rt_call_ffi", "birth_props")
+pub fn birth_props(length_v: JsVal, name: String) -> Dict(PropertyKey, Property)
+
 /// Shared allocator core: an `SObject` with the given callable `ObjKind`,
 /// `proto`, and `length`+`name` own props (§10.2.9 SetFunctionLength runs
 /// before §10.2.8 SetFunctionName in every OrdinaryFunctionCreate path, so
@@ -861,17 +992,16 @@ fn alloc_fn_cell(
   length_v: JsVal,
   name: String,
 ) -> #(Handle, Agent) {
-  use seq <- rt_store.t_cell_new_with(st, 2)
-  SObject(
-    kind:,
-    proto:,
-    props: dict.from_list([
-      #(Named("length"), fn_own_prop(length_v, seq)),
-      #(Named("name"), fn_own_prop(mk_string(name), seq + 1)),
-    ]),
-    symbol_props: [],
-    elements: NoElements,
-    extensible: True,
+  rt_store.t_cell_new(
+    st,
+    SObject(
+      kind:,
+      proto:,
+      props: birth_props(length_v, name),
+      symbol_props: [],
+      elements: NoElements,
+      extensible: True,
+    ),
   )
 }
 
@@ -895,34 +1025,42 @@ pub fn t_fn_new(
   alloc_fn_cell(
     st,
     Some(st.realm.function.prototype),
-    KCompiled(code:, home_object: home, flags:, fields_init: None, simple:),
+    KCompiled(
+      code:,
+      home_object: home,
+      flags:,
+      fields_init: None,
+      simple:,
+      name:,
+      length: len,
+      birth: BirthSettled,
+    ),
     mk_number(JInt(len)),
     name,
   )
 }
 
 /// SPEC§8 `fn_new` — the closure site of every compiled function; arg order
-/// `(code, flags, name, len, simple)`. `name` arrives as the raw `BitArray`
-/// (arc's `ir.ConstBinary`); `len` is a boxed `Int` from `ConstI32`.
+/// `(code, flags, name, len, simple)`. `name` arrives as the emitter's UTF-8
+/// `ir.ConstBinary`, which is the `String`; `len` is a boxed `Int` from
+/// `ConstI32`.
 /// `[[HomeObject]]` starts unset (`t_make_method` fills it for methods). The
 /// function's [[Prototype]] follows its kind (§27.3.3 %GeneratorFunction
 /// .prototype%, §27.4.3 %AsyncGeneratorFunction.prototype%, §27.7.3
-/// %AsyncFunction.prototype%, else %Function.prototype%), and a generator
+/// %AsyncFunction.prototype%, else %Function.prototype%). A generator
 /// function also gets its own writable `prototype` object, inheriting from
 /// %GeneratorPrototype% / %AsyncGeneratorPrototype% with no `constructor`
-/// back-link (§15.5.3 / §15.6.3).
+/// back-link (§15.5.3 / §15.6.3); a class constructor gets its from
+/// `rt_class.t_class_setup`. `length`, `name` and a plain constructor's
+/// §10.2.5 MakeConstructor `prototype` start out `BirthPending`.
 pub fn t_new_function(
   st: Agent,
   code: CompiledFn,
   flags: FnFlags,
-  name: BitArray,
+  name: String,
   len: Int,
   simple: Option(#(CompiledFn, Int, Bool)),
 ) -> #(JsVal, Agent) {
-  let name_s = case bit_array.to_string(name) {
-    Ok(s) -> s
-    Error(Nil) -> ""
-  }
   let realm = st.realm
   let proto = case flags.is_generator, flags.is_async {
     True, False -> realm.generator_fn.prototype
@@ -930,13 +1068,32 @@ pub fn t_new_function(
     False, True -> realm.async_fn.prototype
     False, False -> realm.function.prototype
   }
+  let prototype_parent = case
+    flags.is_constructor && !flags.is_class_constructor && !flags.is_generator
+  {
+    True -> Some(realm.object.prototype)
+    False -> None
+  }
   let #(h, st) =
-    alloc_fn_cell(
+    rt_store.t_cell_new(
       st,
-      Some(proto),
-      KCompiled(code:, home_object: None, flags:, fields_init: None, simple:),
-      mk_number(JInt(len)),
-      name_s,
+      SObject(
+        kind: KCompiled(
+          code:,
+          home_object: None,
+          flags:,
+          fields_init: None,
+          simple:,
+          name:,
+          length: len,
+          birth: BirthPending(prototype_parent),
+        ),
+        proto: Some(proto),
+        props: dict.new(),
+        symbol_props: [],
+        elements: NoElements,
+        extensible: True,
+      ),
     )
   let st = case flags.is_generator {
     False -> st
@@ -960,42 +1117,6 @@ pub fn t_new_function(
     }
   }
   #(mk_object(h), st)
-}
-
-/// ES2024 §10.2.5 MakeConstructor — allocate an own writable `.prototype`
-/// object on a plain function (FnDecl/FnExpr only; arrows/methods/class-ctors
-/// never reach here). `proto` is a fresh ordinary object whose [[Prototype]]
-/// is `%Object.prototype%`, with own `constructor` → `f` {W:T,E:F,C:T}. `f`
-/// gains own `prototype` → `proto` {W:T,E:F,C:F} — writable, unlike a class
-/// constructor's non-writable `.prototype` (§15.7.14 step 14; see
-/// `rt_class.t_class_setup`). JMut pass-through: returns `f` unchanged so
-/// M14's `emit_closure_site` can tail-call this after `fn_new`.
-pub fn t_make_constructor(st: Agent, f: JsVal) -> #(JsVal, Agent) {
-  let assert KHandle(fh) = classify(f)
-  let object_proto = st.realm.object.prototype
-  let #(proto, st) = {
-    use seq <- rt_store.t_cell_new_with(st, 1)
-    let constructor = DataProperty(f, True, False, True, seq)
-    SObject(
-      kind: Ordinary,
-      proto: Some(object_proto),
-      props: dict.from_list([#(Named("constructor"), constructor)]),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    )
-  }
-  let #(_, st) =
-    rt_obj.t_define_own_data(
-      st,
-      fh,
-      StringKey(Named("prototype")),
-      mk_object(proto),
-      True,
-      False,
-      False,
-    )
-  #(f, st)
 }
 
 /// Allocate a `KNative` cell for a built-in function (M6 realm bootstrap).

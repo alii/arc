@@ -13,9 +13,11 @@ import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type LexicalSlots}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, type StepExit}
+import arc/rt/bytecode.{type EnvCapture, type EnvTuple}
 import arc/rt/types.{
   type Agent, type Handle, type JsSlot, type JsStore, type JsVal,
-  type LexicalGlobal, type SymbolId,
+  type LexicalGlobal, type Property, type PropertyKey as RtPropertyKey,
+  type SymbolId,
 }
 import gleam
 import gleam/dict.{type Dict}
@@ -192,10 +194,33 @@ pub fn is(v: a, s: Sentinel) -> Bool
 @external(erlang, "erlang", "=:=")
 pub fn is_bool(v: JsVal, b: Bool) -> Bool
 
+/// `a =:= b` on two values: the same primitive term or the same cell.
+@external(erlang, "erlang", "=:=")
+pub fn same(a: JsVal, b: JsVal) -> Bool
+
 /// The cell a callee value designates, for the call arms to match on;
 /// a non-object callee (or a dangling handle) misses.
 @external(erlang, "arc_interp_ffi", "cell_of")
 pub fn cell_of(agent: Agent, v: JsVal) -> JsSlot
+
+/// The environment a closure over `descriptors` captures from the current
+/// frame's `locals`, packed in descriptor order.
+@external(erlang, "arc_interp_ffi", "capture_env")
+pub fn capture_env(
+  descriptors: List(EnvCapture),
+  locals: TupleArray(JsVal),
+) -> EnvTuple
+
+/// `new_target.prototype` when it is a plain own data read of a function
+/// cell yielding an object (the [[Construct]] receiver's prototype);
+/// anything observable or needing the realm fallback misses.
+@external(erlang, "arc_interp_ffi", "ctor_prototype")
+pub fn ctor_prototype(agent: Agent, new_target: JsVal) -> Handle
+
+/// CreateListFromArrayLike over a plain Array or Arguments cell whose
+/// elements are all present plain values; anything observable misses.
+@external(erlang, "arc_interp_ffi", "list_of")
+pub fn list_of(agent: Agent, array_like: JsVal) -> List(JsVal)
 
 /// `a + b` for numbers, strings, and a string with a pure-ToString primitive.
 @external(erlang, "arc_rt_ops_ffi", "add")
@@ -303,6 +328,11 @@ pub fn box_get(agent: Agent, slot: JsVal) -> JsVal
 @external(erlang, "arc_interp_prop_ffi", "get_field")
 pub fn get_field(agent: Agent, obj: JsVal, key: PropertyKey) -> JsVal
 
+/// The value of the own data property `key` in a cell's `props`; an
+/// accessor or an absent key misses.
+@external(erlang, "arc_interp_prop_ffi", "own_data")
+pub fn own_data(props: Dict(RtPropertyKey, Property), key: PropertyKey) -> JsVal
+
 /// A global identifier read (§9.1.1.4 GetBindingValue): an initialised
 /// lexical binding from `lex`, else a plain data property on the global
 /// object's chain. TDZ, accessors, exotic hops and an unresolvable name
@@ -336,15 +366,36 @@ pub fn get_elem(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
 @external(erlang, "arc_interp_prop_ffi", "get_elem2")
 pub fn get_elem2(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
 
-/// `obj.key = v` over an existing own writable data property; the store
-/// with the write applied.
+/// `obj.key = v` over an existing own writable data property, or (`create`)
+/// a new one on an extensible ordinary receiver whose chain cannot intercept
+/// the write; the store with the write applied.
 @external(erlang, "arc_interp_prop_ffi", "put_field")
 pub fn put_field(
   store: JsStore(Agent),
   obj: JsVal,
   key: PropertyKey,
   v: JsVal,
+  create: Bool,
 ) -> JsStore(Agent)
+
+/// The object an all-static-keys literal head makes: a fresh ordinary
+/// object on `proto` whose data properties are `keys` (last first) paired
+/// with the top `count` stack values. The object, the stack beneath the
+/// values, and the store holding the new cell.
+@external(erlang, "arc_interp_prop_ffi", "new_object")
+pub fn new_object(
+  store: JsStore(Agent),
+  proto: Handle,
+  keys: List(PropertyKey),
+  count: Int,
+  stack: List(JsVal),
+) -> #(JsVal, List(JsVal), JsStore(Agent))
+
+/// The receiver `new F` runs F's body on: a fresh ordinary object whose
+/// prototype is `proto`, with the agent holding it. A non-object `proto`
+/// misses.
+@external(erlang, "arc_interp_prop_ffi", "new_receiver")
+pub fn new_receiver(agent: Agent, proto: JsVal) -> #(JsVal, Agent)
 
 /// `{key: v}`: CreateDataProperty of a Named key on an ordinary extensible
 /// object; the store with the property defined.
@@ -368,24 +419,11 @@ pub fn put_elem(
 
 // -- Call prologue ---------------------------------------------------------------
 
-/// Locals tuple for an arrow / lexical-free body:
-/// `env ++ seeds ++ args` fitted to `arity`, padded with `undef` to
-/// `local_count`. `env` is the closure's captured environment (tuple or
-/// list of values).
-@external(erlang, "arc_interp_locals_ffi", "setup_locals_tuple")
-pub fn setup_locals_tuple(
-  env: env,
-  seeds: List(JsVal),
-  args: List(JsVal),
-  arity: Int,
-  local_count: Int,
-  undef: JsVal,
-) -> TupleArray(JsVal)
-
-/// Locals tuple for a non-arrow body, seeding `this` / active function /
-/// home object / new.target into its owned lexical slots.
-@external(erlang, "arc_interp_locals_ffi", "setup_locals_seeded")
-pub fn setup_locals_seeded(
+/// The callee's locals tuple: `env`, then `this` / active function / home
+/// object / new.target when `lexical` says the body owns those slots, then
+/// `args` fitted to `arity`, padded with `undefined` to `local_count`.
+@external(erlang, "arc_interp_locals_ffi", "frame_locals")
+pub fn frame_locals(
   env: env,
   lexical: LexicalSlots,
   this: JsVal,
@@ -395,5 +433,25 @@ pub fn setup_locals_seeded(
   args: List(JsVal),
   arity: Int,
   local_count: Int,
-  undef: JsVal,
 ) -> TupleArray(JsVal)
+
+/// OrdinaryCallBindThis for a sloppy callee: objects pass, null/undefined
+/// become `global`; a primitive (needs a wrapper object) misses.
+@external(erlang, "arc_interp_locals_ffi", "bind_this")
+pub fn bind_this(this: JsVal, global: Handle) -> JsVal
+
+/// A `Sentinel` as the value it names: `val([Undefined])`. Lowers to
+/// `hd([undefined])`, which the compiler folds to the bare atom, so this is
+/// a constant, not a call.
+@external(erlang, "erlang", "hd")
+pub fn val(of: List(Sentinel)) -> JsVal
+
+/// A handle as the object value it already is on the wire (`mk_object` is
+/// the identity): `object([h])` folds to `h` itself.
+@external(erlang, "erlang", "hd")
+pub fn object(of: List(Handle)) -> JsVal
+
+/// The converse for a value already proven an object (`cell_of` hit,
+/// `is_handle`): `handle([v])` folds to `v`.
+@external(erlang, "erlang", "hd")
+pub fn handle(of: List(JsVal)) -> Handle

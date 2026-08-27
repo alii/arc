@@ -11,6 +11,7 @@ import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/internal/ordered_entries.{type OrderedEntries}
 import arc/internal/temporal_calendar.{type Calendar}
 import arc/internal/tree_array.{type TreeArray}
+import arc/rt/arena.{type Arena}
 import arc/rt/builtins/temporal_tz
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, type SuspendedFrame}
 import arc/rt/intl_data.{
@@ -97,6 +98,10 @@ pub fn mk_bool(b: Bool) -> JsVal
 /// §2.3 sentinel atom).
 @external(erlang, "arc_rt_val_ffi", "mk_number")
 pub fn mk_number(n: JsNum) -> JsVal
+
+/// A JS number from an exact integer (`mk_number(JInt(n))`).
+@external(erlang, "arc_rt_val_ffi", "mk_int")
+pub fn mk_int(n: Int) -> JsVal
 
 /// A JS string. Gleam `String` is already the UTF-8 binary wire form (D10).
 @external(erlang, "arc_rt_val_ffi", "mk_string")
@@ -755,6 +760,22 @@ pub type JsElements {
   NoElements
   Dense(TreeArray(JsVal))
   Sparse(Dict(Int, JsVal))
+}
+
+/// Where a `KCompiled` / `KBytecode` function's birth properties live:
+/// §10.2.9 `length`, §10.2.10 `name` and, for a plain constructor, the
+/// §10.2.5 MakeConstructor `prototype`. `rt_obj` settles them into ordinary
+/// own properties the first time an operation could tell the difference, so
+/// creating a closure allocates neither the two descriptors nor the
+/// `prototype` object.
+pub type FnBirth {
+  /// Not in `props` yet: `length` and `name` read through to the template
+  /// (or the `KCompiled` fields), and when `prototype_parent` is `Some` the
+  /// own `prototype` — a fresh object inheriting it, the creating realm's
+  /// %Object.prototype% — is still unallocated.
+  BirthPending(prototype_parent: Option(Handle))
+  /// Ordinary own properties in `props` (unless since deleted).
+  BirthSettled
 }
 
 /// Function creation-time flags. Fixed at closure creation; never mutated.
@@ -3017,6 +3038,11 @@ pub type ObjKind {
     /// a positional-args body that skips Frame/args-list build. `needs_this`
     /// True ⇒ closure is `fun(St,This,P0..Pn-1)`; False ⇒ `fun(St,P0..Pn-1)`.
     simple: Option(#(CompiledFn, Int, Bool)),
+    /// §10.2.9 / §10.2.10: the values `length` and `name` read through to
+    /// while `birth` is pending.
+    name: String,
+    length: Int,
+    birth: FnBirth,
   )
   /// An interpreted function: bytecode `template` closed over `env`.
   /// [[Call]]/[[Construct]] go through `JsOps.call_bytecode` /
@@ -3035,6 +3061,7 @@ pub type ObjKind {
     /// created the closure), like [[ScriptOrModule]] but one per parse:
     /// [[Call]] runs with it as the activation's `unit`.
     unit: Int,
+    birth: FnBirth,
   )
   KNative(tag: NativeToken, name: String, length: Int, constructible: Bool)
   KBound(target: Handle, bound_this: JsVal, bound_args: List(JsVal))
@@ -3215,32 +3242,50 @@ pub type ShapeDesc {
   )
 }
 
-/// One compiled `.key` read site's inline cache: on a receiver of shape
-/// `shape_id` the key lives at slot `off`. `key` is kept so two modules that
-/// happen to share a site id can never read through each other's entry.
-/// Sound because a shape's offsets never change and shape ids are never
-/// recycled. Lives on `JsStore.ics`; a droppable cache (not snapshotted).
+/// One compiled `.key` read site's inline cache: on a receiver of one of the
+/// shapes in `offsets` the key lives at that slot offset (a few shapes per
+/// site, so a read over two or three object layouts still hits). `key` is
+/// kept so two modules that happen to share a site id can never read through
+/// each other's entry. Sound because a shape's offsets never change and
+/// shape ids are never recycled. Lives on `JsStore.ics`; a droppable cache
+/// (not snapshotted).
 ///
 /// `IcCall` is a compiled `o.key(args)` site's cache: up to a few ways, each
-/// a receiver shape `shape_id` (so no own `key`) whose proto chain, from
-/// `proto_id` down to the holder, was `chain` (cell id and the cell's whole
-/// slot) when `key` resolved to the data value `callee`. The guard compares
-/// each live slot with `=:=` (pointer-equal while untouched; any write
-/// replaces it), so a way is sound whatever now lives at those ids: an equal
-/// slot has the same props and the same proto link, so the same lookup. Not
-/// a GC root — the handle is validated on use.
+/// the receivers it answers for (`match`) and the proto chain, from the
+/// receiver's proto down to the holder, as it was (`chain`: cell id and the
+/// cell's whole slot) when `key` resolved to the data value `callee`, a
+/// function cell whose kind was `kind`. The guard compares each live slot
+/// with `=:=` (pointer-equal while untouched; any write replaces it), so an
+/// equal slot has the same props and the same proto link, so the same
+/// lookup. `kind` is applied without reading the callee's cell again: a
+/// plain function's `KCompiled` / `KNative` kind never changes once the
+/// function is reachable, and a collection drops every `IcCall`
+/// (`rt/gc.t_collect`) so a way never outlives the id space it was filled
+/// in. Not a GC root. Built and read only by `arc_rt_call_fast_ffi`, as
+/// bare Erlang tuples: a way is `{chain, callee, kind}` under its match.
 pub type IcEntry {
-  IcRead(shape_id: Int, off: Int, key: BitArray)
-  IcCall(key: BitArray, ways: List(IcCallWay))
+  IcRead(key: BitArray, offsets: Dict(Int, Int))
+  IcCall(key: BitArray, ways: Dict(IcCallMatch, IcCallWay))
 }
 
 pub type IcCallWay {
-  IcCallWay(
-    shape_id: Int,
-    proto_id: Int,
-    chain: List(#(Int, JsSlot)),
-    callee: Handle,
-  )
+  IcCallWay(chain: List(#(Int, JsSlot)), callee: Handle, kind: ObjKind)
+}
+
+/// Which receivers a way answers for, and why `key` is not their own.
+pub type IcCallMatch {
+  /// A shaped object of this shape (so no own `key`) on this proto.
+  IcShaped(shape_id: Int, proto_id: Int)
+  /// An `SObject` on this proto whose named `key` would be a plain props
+  /// entry and is absent.
+  IcPlain(proto_id: Int)
+  /// This one cell while it still holds the slot in the way's one-hop
+  /// `chain`, `key` being its own data property.
+  IcOwn(id: Int)
+  /// A string or number primitive (`wrapper` is the Realm field of its
+  /// wrapper pair) while that wrapper prototype is `proto_id`; the callee is
+  /// a native or strict function, so `this` stays the primitive.
+  IcPrim(wrapper: Int, proto_id: Int)
 }
 
 // ───────────────────────────────── §2.4 ASYNC ──────────────────────────────
@@ -3616,10 +3661,17 @@ pub type JsOps(st) {
     /// error raises SyntaxError. Interpreter-seeded; the runtime's own seed
     /// raises TypeError (no compiler linked).
     eval_hook: fn(st, String, EvalKind) -> #(JsVal, st),
-    /// [[Call]] of a `KBytecode` cell: `(callee, this, args)`. Runs a fresh
-    /// activation to completion; a throw comes back as `Error`, not a raise.
-    call_bytecode: fn(st, Handle, JsVal, List(JsVal)) ->
+    /// [[Call]] of a `KBytecode` cell: `(callee, its kind, this, args)`.
+    /// Runs a fresh activation to completion holding its own unit of
+    /// `call_depth`; a throw comes back as `Error`, not a raise.
+    call_bytecode: fn(st, Handle, ObjKind, JsVal, List(JsVal)) ->
       #(Result(JsVal, JsVal), st),
+    /// `call_bytecode` for the `KBytecode` cell `(callee, its kind)` with
+    /// `this` fixed and the args still to come, for a caller about to make
+    /// the same call many times over. Each call of the result raises its
+    /// throw, as `t_call_checked` would.
+    bind_call: fn(st, Handle, ObjKind, JsVal) ->
+      fn(st, List(JsVal)) -> #(JsVal, st),
     /// [[Construct]] of a `KBytecode` cell: `(callee, args, new_target)`.
     construct_bytecode: fn(st, Handle, List(JsVal), JsVal) -> #(Handle, st),
     /// Resume a suspended interpreter frame with `sent` = `#(mode, value)`
@@ -3636,10 +3688,10 @@ pub type JsOps(st) {
 pub type JsStore(st) {
   JsStore(
     // ── cell arena (arc heap.gleam:21-45) ──
-    /// Live cells by id. Ids are dense (minted from `next`), so an OTP
-    /// `array` indexed by id; a freed id reads back as the FFI's free
-    /// sentinel, which every reader treats as absent.
-    data: TreeArray(JsSlot),
+    /// Live cells by id. Ids are dense (minted from `next`), so a trie
+    /// indexed by id; a freed id reads back as the FFI's free sentinel,
+    /// which every reader treats as absent.
+    data: Arena(JsSlot),
     /// Next id to mint (starts 0). A collection lowers it to one past the
     /// highest survivor, so a dead tail's ids are minted again.
     next: Int,

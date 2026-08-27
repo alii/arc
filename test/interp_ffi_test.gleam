@@ -71,14 +71,14 @@ pub fn get_and_put_field_test() {
   assert ffi.is_miss(ffi.get_field(st, mk_undefined(), key.Named("x")))
   assert ffi.type_of_in(st.store, obj) == "object"
   // Overwrite through the kernel, read back through the runtime.
-  let store = ffi.put_field(st.store, obj, key.Named("x"), mk_int(43))
+  let store = ffi.put_field(st.store, obj, key.Named("x"), mk_int(43), True)
   assert !ffi.is_miss(store)
   let st = types.Agent(..st, store:)
   let #(v, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("x")))
   assert classify(v) == KNum(JInt(43))
   // Creation on an extensible receiver whose chain holds nothing at the
   // key: a fresh {W,E,C} property stamped after the existing ones.
-  let store = ffi.put_field(st.store, obj, key.Named("y"), mk_int(1))
+  let store = ffi.put_field(st.store, obj, key.Named("y"), mk_int(1), True)
   assert !ffi.is_miss(store)
   let st = types.Agent(..st, store:)
   let #(keys, st) = rt_obj.t_own_keys(st, handle_of(obj))
@@ -97,9 +97,16 @@ pub fn get_and_put_field_test() {
     obj,
     key.Named("__proto__"),
     mk_int(1),
+    True,
   ))
   let #(_, st) = rt_obj.t_prevent_extensions(st, handle_of(obj))
-  assert ffi.is_miss(ffi.put_field(st.store, obj, key.Named("z"), mk_int(1)))
+  assert ffi.is_miss(ffi.put_field(
+    st.store,
+    obj,
+    key.Named("z"),
+    mk_int(1),
+    True,
+  ))
 }
 
 pub fn get_and_put_elem_test() {

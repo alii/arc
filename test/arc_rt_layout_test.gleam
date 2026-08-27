@@ -2,18 +2,22 @@
 //// the Gleam runtime records the hand-written Erlang fast paths index with
 //// element/2. A field reorder or insert in those records fails here.
 
+import arc/bytecode/opcode
 import arc/internal/tree_array
+import arc/interp/ffi
+import arc/rt/arena
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type JsVal, type ShapeSlots,
-  AccessorProperty, ArgumentsObj, ArrayObj, DataProperty, Dense, FnFlags, Index,
-  JsCell, JsStore, KBytecode, KCompiled, KHandle, KNative, Named, NoElements,
-  Ordinary, Private, ProxyObj, ResumeCompiled, ResumeFrame, ReturnThis, SBox,
-  SObject, SShapedObject, ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow,
-  StepYield, StringKey, SymbolKey,
+  AccessorProperty, ArgumentsObj, ArrayObj, BirthPending, BirthSettled,
+  DataProperty, Dense, FnFlags, Index, JsCell, JsStore, KBytecode, KCompiled,
+  KHandle, KNative, Named, NoElements, Ordinary, Private, ProxyObj,
+  ResumeCompiled, ResumeFrame, ReturnThis, SBox, SObject, SShapedObject,
+  ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
+  StringObj, SymbolKey,
 } as rt_types
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
@@ -111,14 +115,16 @@ pub fn js_store_test() {
   let store =
     JsStore(
       ..base,
-      data: tree_array.set(3, SBox(rt_types.mk_string("d")), base.data),
+      data: arena.set(3, SBox(rt_types.mk_string("d")), base.data),
       next: 13,
       pinned_roots: set.from_list([3]),
       alloc_since_gc: 14,
       prop_seq: 16,
       shapes: dict.from_list([#(7, desc)]),
       next_shape: 15,
-      ics: dict.from_list([#(1, rt_types.IcRead(7, 0, <<"k":utf8>>))]),
+      ics: dict.from_list([
+        #(1, rt_types.IcRead(<<"k":utf8>>, dict.from_list([#(7, 0)]))),
+      ]),
     )
   assert tag_of(store) == tag("STORE_TAG")
   assert arity(store) == idx("STORE_ARITY")
@@ -224,6 +230,9 @@ pub fn sobject_test() {
   assert at(args, "ARGUMENTSOBJ_MAPPED") == dyn(None)
   assert tag_of(ProxyObj(target: proto, handler: proto, revoked: False))
     == tag("PROXYOBJ_TAG")
+  let wrapper = StringObj("s")
+  assert tag_of(wrapper) == tag("STRINGOBJ_TAG")
+  assert at(wrapper, "STRINGOBJ_VALUE") == dyn("s")
   let box = SBox(rt_types.mk_string("b"))
   assert tag_of(box) == tag("SBOX_TAG")
   assert at(box, "SBOX_VALUE") == dyn(rt_types.mk_string("b"))
@@ -315,6 +324,9 @@ pub fn kcompiled_test() {
       flags:,
       fields_init: Some(JsCell(31)),
       simple: Some(#(code_s, 2, True)),
+      name: "nm",
+      length: 2,
+      birth: BirthPending(Some(JsCell(32))),
     )
   assert tag_of(kfn) == tag("KFN_TAG")
   assert arity(kfn) == idx("KFN_ARITY")
@@ -322,6 +334,12 @@ pub fn kcompiled_test() {
   assert at(kfn, "KFN_HOME") == dyn(Some(JsCell(30)))
   assert at(kfn, "KFN_FLAGS") == dyn(flags)
   assert at(kfn, "KFN_FIELDS_INIT") == dyn(Some(JsCell(31)))
+  assert at(kfn, "KFN_NAME") == dyn("nm")
+  assert at(kfn, "KFN_LENGTH") == dyn(2)
+  let birth = at(kfn, "KFN_BIRTH")
+  assert birth == dyn(BirthPending(Some(JsCell(32))))
+  assert tag_of(birth) == tag("BIRTH_PENDING_TAG")
+  assert at(birth, "BIRTH_PROTOTYPE_PARENT") == dyn(Some(JsCell(32)))
   let simple = at(kfn, "KFN_SIMPLE")
   assert tag_of(simple) == tag("SOME")
   let inner = element(2, simple)
@@ -330,10 +348,20 @@ pub fn kcompiled_test() {
   assert element(2, inner) == dyn(2)
   assert element(3, inner) == dyn(True)
   let bare =
-    KCompiled(code:, home_object: None, flags:, fields_init: None, simple: None)
+    KCompiled(
+      code:,
+      home_object: None,
+      flags:,
+      fields_init: None,
+      simple: None,
+      name: "",
+      length: 0,
+      birth: BirthSettled,
+    )
   assert at(bare, "KFN_HOME") == tag("NONE")
   assert at(bare, "KFN_FIELDS_INIT") == tag("NONE")
   assert at(bare, "KFN_SIMPLE") == tag("NONE")
+  assert at(bare, "KFN_BIRTH") == tag("BIRTH_SETTLED")
 }
 
 pub fn knative_test() {
@@ -514,9 +542,10 @@ pub fn proxy_fast_paths_miss_test() {
   // `p instanceof F` must reach the getPrototypeOf trap: the probe takes the
   // fast path for a plain-function ctor over an ordinary V, but never over a
   // proxy V or an ordinary V whose prototype chain crosses a proxy.
-  let #(fh, st) =
-    rt_call.t_fn_new(st, compiled_fn("F"), no_flags(), "F", 0, None, None)
-  let #(f, st) = rt_call.t_make_constructor(st, rt_types.mk_object(fh))
+  let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
+  let #(f, st) =
+    rt_call.t_new_function(st, compiled_fn("F"), ctor_flags, "F", 0, None)
+  let #(_, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
   let #(plain, st) = rt_obj.t_new_object_literal(st)
   assert instanceof_fast(st, plain, f) == dyn(0)
   assert instanceof_fast(st, p, f) == dyn(Miss)
@@ -565,8 +594,11 @@ pub fn bytecode_function_fast_paths_miss_test() {
       fields_init: None,
       realm: 0,
       unit: 0,
+      birth: BirthSettled,
     )
   assert tag_of(kind) == tag("KBYTECODE_TAG")
+  assert arity(kind) == idx("KBYTECODE_ARITY")
+  assert at(kind, "KBYTECODE_BIRTH") == tag("BIRTH_SETTLED")
   let #(fh, st) =
     rt_store.t_cell_new(
       st,
@@ -580,7 +612,6 @@ pub fn bytecode_function_fast_paths_miss_test() {
       ),
     )
   let f = rt_types.mk_object(fh)
-  let #(f, st) = rt_call.t_make_constructor(st, f)
   assert rt_call.is_callable(st, f)
   assert rt_call.is_constructor(st, f)
   let undef = rt_types.mk_undefined()
@@ -590,4 +621,88 @@ pub fn bytecode_function_fast_paths_miss_test() {
   assert call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
   assert new_simple(st, f, []).0 == dyn(Miss)
   assert instanceof_fast(st, o, f) == dyn(Miss)
+}
+
+@external(erlang, "arc_rt_layout_root_ffi", "dyn")
+fn compiled_code(
+  code: fn(Agent, Dynamic, List(JsVal)) -> #(JsVal, Agent),
+) -> CompiledFn
+
+/// The positional `KCompiled` matches in the call fast paths keep up with the
+/// record: a plain compiled function takes the closure probe, and `new` on it
+/// takes the fast path once its `prototype` is settled.
+pub fn compiled_function_fast_paths_hit_test() {
+  let st = seeded()
+  let undef = rt_types.mk_undefined()
+  let code = compiled_code(fn(st, _frame, _args) { #(undef, st) })
+  let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
+  let #(f, st) = rt_call.t_new_function(st, code, flags, "F", 0, None)
+  assert dyn(rt_call.t_kfn_code(st, f, undef)) != dyn(undef)
+  assert new_simple(st, f, []).0 == dyn(Miss)
+  let #(proto, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
+  let #(this, _) = new_simple(st, f, [])
+  assert this != dyn(Miss)
+  assert this != dyn(proto)
+}
+
+@external(erlang, "arc_rt_ops_ffi", "binop")
+fn k_binop(kind: opcode.Classified, a: JsVal, b: JsVal) -> Dynamic
+
+/// arc_rt_ops_ffi:binop/3 matches the `opcode.Classified` term the resolver
+/// stores in BinOp: every operator it can run answers a value for two small
+/// integers, and the heap-reading ones answer `miss`.
+fn num(n: Int) -> JsVal {
+  rt_types.mk_number(rt_types.JInt(n))
+}
+
+pub fn binop_kind_terms_test() {
+  let six = num(6)
+  let three = num(3)
+  let answers = [
+    #(opcode.Add, dyn(num(9))),
+    #(opcode.Sub, dyn(num(3))),
+    #(opcode.Mul, dyn(num(18))),
+    #(opcode.Div, dyn(num(2))),
+    #(opcode.Mod, dyn(num(0))),
+    #(opcode.BitAnd, dyn(num(2))),
+    #(opcode.BitOr, dyn(num(7))),
+    #(opcode.BitXor, dyn(num(5))),
+    #(opcode.ShiftLeft, dyn(num(48))),
+    #(opcode.ShiftRight, dyn(num(0))),
+    #(opcode.UShiftRight, dyn(num(0))),
+    #(opcode.Eq, dyn(False)),
+    #(opcode.NotEq, dyn(True)),
+    #(opcode.StrictEq, dyn(False)),
+    #(opcode.StrictNotEq, dyn(True)),
+    #(opcode.Lt, dyn(False)),
+    #(opcode.LtEq, dyn(False)),
+    #(opcode.Gt, dyn(True)),
+    #(opcode.GtEq, dyn(True)),
+    #(opcode.Exp, dyn(ffi.Miss)),
+    #(opcode.In, dyn(ffi.Miss)),
+    #(opcode.InstanceOf, dyn(ffi.Miss)),
+  ]
+  list.each(answers, fn(row) {
+    let #(kind, expected) = row
+    assert k_binop(opcode.classify(kind), six, three) == expected
+  })
+}
+
+pub fn iterator_kinds_test() {
+  let h = JsCell(9)
+  let it =
+    rt_types.ArrayIterator(target: h, index: 4, kind: rt_types.ArrayIterValues)
+  assert tag_of(it) == tag("ARRAYITER_TAG")
+  assert arity(it) == idx("ARRAYITER_ARITY")
+  assert at(it, "ARRAYITER_TARGET") == dyn(h)
+  assert at(it, "ARRAYITER_INDEX") == dyn(4)
+  assert at(it, "ARRAYITER_KIND") == tag("ARRAYITER_VALUES")
+  let g = rt_types.GeneratorObj(data: h)
+  assert tag_of(g) == tag("GENERATOROBJ_TAG")
+  assert arity(g) == idx("GENERATOROBJ_ARITY")
+  assert at(g, "GENERATOROBJ_DATA") == dyn(h)
+  assert dyn(rt_types.IteratorN(rt_types.ArrayIteratorNext))
+    == tag("TOKEN_ARRAY_ITER_NEXT")
+  assert dyn(rt_types.GeneratorN(rt_types.GeneratorNext))
+    == tag("TOKEN_GENERATOR_NEXT")
 }

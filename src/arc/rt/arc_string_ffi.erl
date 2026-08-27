@@ -71,7 +71,10 @@ string_char_at_offset(_, _) -> none.
 replacement_codepoint() -> 16#FFFD.
 
 string_codepoint_length(Bin) -> cp_length(Bin, 0).
-%% W:56 clause: 7 ASCII bytes per step, small-int safe (see cp_drop).
+%% W:56 clauses: 28 then 7 ASCII bytes per step, small-int safe (see cp_drop).
+cp_length(<<W1:56, W2:56, W3:56, W4:56, Rest/binary>>, N)
+    when (W1 bor W2 bor W3 bor W4) band 16#80808080808080 =:= 0 ->
+    cp_length(Rest, N + 28);
 cp_length(<<W:56, Rest/binary>>, N)
     when W band 16#80808080808080 =:= 0 ->
     cp_length(Rest, N + 7);
@@ -214,6 +217,9 @@ cp_byte_offset(Bin, N) -> cp_off(Bin, N, 0).
 %% (or a truncated multibyte sequence) matches no clause and crashes — see the
 %% invalid-UTF-8 policy at the top of the module. The two terminal clauses are
 %% "ran off the end" (clamp) and "skipped them all", nothing else.
+cp_off(<<W1:56, W2:56, W3:56, W4:56, R/binary>>, N, Off)
+    when N >= 28, (W1 bor W2 bor W3 bor W4) band 16#80808080808080 =:= 0 ->
+    cp_off(R, N - 28, Off + 28);
 cp_off(<<W:56, R/binary>>, N, Off)
     when N >= 7, W band 16#80808080808080 =:= 0 ->
     cp_off(R, N - 7, Off + 7);

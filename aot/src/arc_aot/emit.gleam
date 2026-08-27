@@ -81,6 +81,7 @@ fn init_emitter(
       emit_pattern: destructure.emit_pattern,
       emit_destructure: destructure.emit_pattern,
       emit_function: func.emit_function,
+      emit_function_site: func.emit_function_site,
       emit_class: class.emit_class,
       emit_async_body: async.emit_coroutine_fn,
     )

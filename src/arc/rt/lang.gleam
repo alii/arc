@@ -4,6 +4,7 @@
 //// spread and rest, regexp and template literals, sloppy `delete x`.
 //// Sits above `arc/rt/builtins/*` so it can reuse their spec routines.
 
+import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/builtins/regexp as b_regexp
@@ -11,8 +12,9 @@ import arc/rt/call.{t_call_checked}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type IteratorRecord, type JsVal, type ObjectKey,
-  Agent, DataProperty, IteratorRecord, JsStore, KHandle, KNull, KUndef, Named,
+  type Agent, type Handle, type IteratorNative, type IteratorRecord, type JsVal,
+  type ObjectKey, Agent, DataProperty, GeneratorN, GeneratorNext, GeneratorObj,
+  IteratorN, IteratorRecord, JsStore, KHandle, KNative, KNull, KUndef, Named,
   NoElements, Ordinary, SObject, StringKey, TypeErr, classify, mk_bool,
   mk_object, mk_string, mk_undefined,
 }
@@ -161,15 +163,51 @@ fn mark_done(st: Agent, rec: JsVal) -> Agent {
   st
 }
 
-/// The step taken engine-side when `next` is an intrinsic iterator-next and
-/// the iterator is its matching built-in kind (see `iter_protocol.native_step`):
-/// no call, no try frame, no result object.
-fn native_step(
+/// What one read of the record's [[NextMethod]] and [[Iterator]] cells says
+/// the step can skip the protocol call for.
+type NativeIter {
+  /// An intrinsic iterator `next` over its built-in kind
+  /// (`iter_protocol.native_step`).
+  NativeNext(next: IteratorNative, iter_h: Handle)
+  /// The unmodified %GeneratorPrototype%.next on a generator object: calling
+  /// it could do nothing but resume the `SGenerator` cell `data` (the
+  /// interpreter's `for..of` takes the same shortcut).
+  NativeGenerator(data: Handle)
+  NotNative
+}
+
+fn native_iter(st: Agent, record: IteratorRecord) -> NativeIter {
+  case classify(record.next_method), classify(record.iterator) {
+    KHandle(next_h), KHandle(iter_h) ->
+      case rt_store.t_cell_get(st, next_h) {
+        SObject(kind: KNative(tag: IteratorN(next), ..), ..) ->
+          NativeNext(next, iter_h)
+        SObject(kind: KNative(tag: GeneratorN(GeneratorNext), ..), ..) ->
+          case rt_store.t_cell_get(st, iter_h) {
+            SObject(kind: GeneratorObj(data:), ..) -> NativeGenerator(data)
+            _ -> NotNative
+          }
+        _ -> NotNative
+      }
+    _, _ -> NotNative
+  }
+}
+
+/// One GeneratorResume with no result object. A throwing body marks the
+/// record done before propagating, as `protocol_step` does, so a surrounding
+/// IteratorClose skips `.return()`.
+fn generator_step(
   st: Agent,
-  record: IteratorRecord,
-) -> Option(#(Option(JsVal), Agent)) {
-  use #(next, iter_h) <- option.then(iter_protocol.intrinsic_next(st, record))
-  iter_protocol.native_step(st, next, iter_h)
+  rec: JsVal,
+  data: Handle,
+) -> #(Option(JsVal), Agent) {
+  let step = fn(st) { rt_async.t_gen_step(st, data, mk_undefined()) }
+  case protected_step(st, step) {
+    #(NormalCompletion(#(True, _)), st) -> #(None, st)
+    #(NormalCompletion(#(False, v)), st) -> #(Some(v), st)
+    #(ThrowCompletion(thrown), st) ->
+      rt_store.t_throw(mark_done(st, rec), thrown)
+  }
 }
 
 /// §7.4.3 GetIterator(obj, hint). Returns the record object.
@@ -191,7 +229,12 @@ pub fn t_get_iterator(
 pub fn t_iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
   let #(done, record, st) = read_record(st, rec)
   use <- bool.guard(done, #(#(True, mk_undefined()), st))
-  case native_step(st, record) {
+  let stepped = case native_iter(st, record) {
+    NativeNext(next, iter_h) -> iter_protocol.native_step(st, next, iter_h)
+    NativeGenerator(data) -> Some(generator_step(st, rec, data))
+    NotNative -> None
+  }
+  case stepped {
     Some(#(Some(v), st)) -> #(#(False, v), st)
     Some(#(None, st)) -> #(#(True, mk_undefined()), mark_done(st, rec))
     None -> protocol_step(st, rec, record)

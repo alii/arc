@@ -14,7 +14,7 @@
 %%% nearest double (arc_rt_val_ffi:mk_int/1).
 -module(arc_rt_ops_ffi).
 -export([add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
-         lt/2, le/2, gt/2, ge/2, eq/2, neq/2,
+         lt/2, le/2, gt/2, ge/2, eq/2, neq/2, binop/3, pure_binop/3,
          t_add/3, t_sub/3, t_mul/3, t_div/3, t_mod/3, t_neg/2,
          pow_total/2, fmod_total/2, fadd/2, fsub/2, fmul/2, fdiv/2,
          t_eq_fast/2, nul_eq/1, strict_eq/2, strict_neq/2, strict_eq_i32/2,
@@ -27,7 +27,11 @@
 -define(IS_INF(X), (X =:= js_inf orelse X =:= js_neg_inf)).
 -define(IS_NUM(X), (is_float(X) orelse is_integer(X) orelse X =:= js_nan
                     orelse ?IS_INF(X))).
--compile({inline, [norm/1, inf_val/1, nul/1, add/2, sub/2, mul/2]}).
+-compile({inline, [norm/1, inf_val/1, nul/1, add/2, sub/2, mul/2,
+                   'div'/2, mod/2, lt/2, le/2, gt/2, ge/2,
+                   eq/2, neq/2, strict_eq/2, strict_neq/2,
+                   t_bitand_fast/2, t_bitor_fast/2, t_bitxor_fast/2,
+                   t_shl_fast/2, t_shr_fast/2, t_ushr_fast/2]}).
 norm(R) when R > ?MAX_SAFE_INT; R < -?MAX_SAFE_INT -> arc_rt_val_ffi:mk_int(R);
 norm(R) -> R.
 
@@ -277,18 +281,24 @@ num_rank(js_nan) -> nan;
 num_rank(_) -> miss.
 
 %% strict_eq(A, B) -> boolean() | miss
-%% §7.2.15 IsStrictlyEqual (arc_rt_val_ffi:strict_eq/2) as an operator
+%% §7.2.15 IsStrictlyEqual (as arc_rt_val_ffi:strict_eq/2) as an operator
 %% kernel: a TDZ sentinel operand (the interpreter's fused compare-and-branch
 %% ops read locals directly) misses so the slow path throws the
 %% ReferenceError.
 strict_eq(js_tdz, _) -> miss;
 strict_eq(_, js_tdz) -> miss;
-strict_eq(A, B) -> arc_rt_val_ffi:strict_eq(A, B).
+strict_eq(js_nan, _) -> false;
+strict_eq(_, js_nan) -> false;
+strict_eq(A, B) when is_number(A), is_number(B) -> A == B;
+strict_eq(A, B) -> A =:= B.
 
 %% strict_neq(A, B) -> boolean() | miss
 strict_neq(js_tdz, _) -> miss;
 strict_neq(_, js_tdz) -> miss;
-strict_neq(A, B) -> not arc_rt_val_ffi:strict_eq(A, B).
+strict_neq(js_nan, _) -> true;
+strict_neq(_, js_nan) -> true;
+strict_neq(A, B) when is_number(A), is_number(B) -> A /= B;
+strict_neq(A, B) -> A =/= B.
 
 %% eq(A, B) -> boolean() | miss
 %% §7.2.14 IsLooselyEqual for the pairs that never run user code: null /
@@ -331,6 +341,45 @@ neq(A, B) ->
 nul(undefined) -> true;
 nul(null) -> true;
 nul(_) -> false.
+
+%% The PureBinOp dispatch, expanded into both binop/3 and pure_binop/3 so
+%% the inlined kernels sit directly under one call.
+-define(PURE_BINOP(Op, A, B),
+    case Op of
+        {arith, arith_sub} -> sub(A, B);
+        {arith, arith_mul} -> mul(A, B);
+        {arith, arith_div} -> 'div'(A, B);
+        {arith, arith_mod} -> mod(A, B);
+        {bitwise, and_op} -> t_bitand_fast(A, B);
+        {bitwise, or_op} -> t_bitor_fast(A, B);
+        {bitwise, xor_op} -> t_bitxor_fast(A, B);
+        {bitwise, shl_op} -> t_shl_fast(A, B);
+        {bitwise, shr_op} -> t_shr_fast(A, B);
+        {bitwise, u_shr_op} -> t_ushr_fast(A, B);
+        {compare, lt_cmp} -> lt(A, B);
+        {compare, lt_eq_cmp} -> le(A, B);
+        {compare, gt_cmp} -> gt(A, B);
+        {compare, gt_eq_cmp} -> ge(A, B);
+        {equality, strict_eq_op} -> strict_eq(A, B);
+        {equality, strict_not_eq_op} -> strict_neq(A, B);
+        {equality, eq_op} -> eq(A, B);
+        {equality, not_eq_op} -> neq(A, B);
+        _ -> miss
+    end).
+
+%% binop(Kind, A, B) -> JsVal | miss
+%% The kernel above for an `arc/bytecode/opcode.Classified` term (the BinOp
+%% operand the resolver stores): `add_op | in_op | instance_of_op |
+%% {pure_op, PureBinOp}`. `**`, `in` and `instanceof` need the heap or a
+%% float pow and always miss here.
+binop(add_op, A, B) -> add(A, B);
+binop({pure_op, Op}, A, B) -> ?PURE_BINOP(Op, A, B);
+binop(_, _, _) -> miss.
+
+%% pure_binop(Op, A, B) -> JsVal | miss
+%% binop/3 for an `arc/bytecode/binop.PureBinOp` term:
+%% `{arith|bitwise|compare|equality, Op}`.
+pure_binop(Op, A, B) -> ?PURE_BINOP(Op, A, B).
 
 %% ── 2. One call per operator site ────────────────────────────────────────
 %% The Number kernel above when the operands are BEAM numbers, else the full

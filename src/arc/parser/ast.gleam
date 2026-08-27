@@ -115,7 +115,7 @@ pub type MemberProperty {
 
 /// A statement paired with the 1-based source line where it begins. Statement
 /// *lists* (block bodies, program bodies, switch-case bodies) hold `Stmt` so the
-/// compiler can emit `SetLine` ops and build line numbers for `Error.stack`.
+/// compiler can record statement lines for `Error.stack`.
 /// Sub-statements held singly (an `if` consequent, a loop body) stay bare
 /// `Statement` and inherit the enclosing line.
 pub type StmtWithLine {

@@ -156,11 +156,10 @@ signed_infinity(X) ->
          orelse X =:= js_inf orelse X =:= js_neg_inf)).
 
 %% §21.3.2.32: sqrt(NaN)=NaN, sqrt(x<0)=NaN, sqrt(-0)=-0, sqrt(+∞)=+∞.
-t_math_sqrt(X) when is_integer(X) -> t_math_sqrt(float(X));
-t_math_sqrt(X) when is_float(X), X < 0.0 -> js_nan;
-t_math_sqrt(X) when is_float(X) ->
-    %% -0.0: math:sqrt(-0.0) already returns -0.0 on IEEE platforms.
-    try math:sqrt(X) catch error:badarith -> js_nan end;
+%% -0.0 compares equal to 0 and math:sqrt(-0.0) already returns -0.0 on
+%% IEEE platforms; a non-negative finite argument cannot raise.
+t_math_sqrt(X) when is_number(X), X >= 0 -> math:sqrt(X);
+t_math_sqrt(X) when is_number(X) -> js_nan;
 t_math_sqrt(js_nan) -> js_nan;
 t_math_sqrt(js_inf) -> js_inf;
 t_math_sqrt(js_neg_inf) -> js_nan;

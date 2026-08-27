@@ -389,9 +389,19 @@ pub fn emit_stmts(
   ss: List(ast.StmtWithLine),
   k: state.K,
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  each_(e, ss, then: k, with: fn(e, located, next) {
-    emit_stmt(e, located.statement, next)
-  })
+  case expr.prop_write_run(e, ss) {
+    Some(#(run, rest)) -> {
+      let #(tree, e) = anf.run(expr.emit_prop_write_run(run), e)
+      use e, _ <- let_(e, tree)
+      emit_stmts(e, rest, k)
+    }
+    None ->
+      case ss {
+        [] -> k(e)
+        [located, ..rest] ->
+          emit_stmt(e, located.statement, fn(e) { emit_stmts(e, rest, k) })
+      }
+  }
 }
 
 /// Lower one Statement. `k` is the "rest of the block" continuation — trivial

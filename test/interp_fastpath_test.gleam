@@ -491,3 +491,159 @@ pub fn literal_closure_try_yield_arms_test() {
     )
     == "a|b,3,0|1|2,fin,2,6,0,done,true,undefined"
 }
+
+// -- Object literal head, CallNew, fused stores and method calls --------------
+
+/// NewObjectWith defines the leading static keys at once; a repeated key, an
+/// accessor, a computed key, a spread and `__proto__: v` end the head and
+/// keep their PropertyDefinitionEvaluation order and meaning.
+pub fn object_literal_head_test() {
+  assert run_string(
+      "var p = { z: 0 };
+       var o = { b: 1, a: 2, b: 3, __proto__: p, '3': 4, c: function () {}, ['d']: 5, ...{ e: 6 }, f: 7 };
+       var out = [Object.keys(o).join('|'), o.b, Object.getPrototypeOf(o) === p, o.c.name, o.z, o.hasOwnProperty('__proto__')];
+       var q = { __proto__: p, x: 1 }; out.push(Object.getPrototypeOf(q) === p, Object.keys(q).join('|'));
+       var s = { __proto__ }; var __proto__; out.push(s.hasOwnProperty('__proto__'));
+       var d = Object.getOwnPropertyDescriptor({ k: 1 }, 'k');
+       out.push(d.writable && d.enumerable && d.configurable, Object.keys({}).length);
+       var big = { a0: 0, a1: 1, a2: 2, a3: 3, a4: 4 }; out.push(Object.keys(big).join('|'), big.a3);
+       out.join()",
+    )
+    == "3|b|a|c|d|e|f,3,true,c,0,false,true,x,true,true,0,a0|a1|a2|a3|a4,3"
+}
+
+/// `new F(args)` reads F once as both constructor and newTarget; a spread
+/// argument list, a non-constructor and a settled or replaced `prototype`
+/// behave as [[Construct]] says.
+pub fn call_new_test() {
+  assert run_string(
+      "function F(a, b) { this.s = a + b } var out = [new F(1, 2).s, new F(...[3, 4]).s];
+       out.push(new F(1, 2) instanceof F);
+       function G() { return new.target === G } out.push(new G().constructor === G);
+       F.prototype = { tag: 'swapped' }; out.push(new F(0, 0).tag);
+       try { new Math.max() } catch (e) { out.push(e.constructor.name) }
+       try { new (function* () {})() } catch (e) { out.push(e.constructor.name) }
+       var n = 0; new (function () { n++ })(); new (function () { n++ }); out.push(n);
+       out.join()",
+    )
+    == "3,7,true,true,swapped,TypeError,TypeError,2"
+}
+
+/// `local.k = local2` / `local.k = const` fuse to one op: same [[Set]]
+/// (setters, read-only, proxies, primitives), and a TDZ receiver or value
+/// throws in source order.
+pub fn fused_field_store_test() {
+  assert run_string(
+      "var out = [];
+       (function () { try { o.x = 1 } catch (e) { out.push(e.constructor.name) } let o = {} })();
+       (function () { let o = {}; try { o.x = v } catch (e) { out.push(e.constructor.name) } let v = 1 })();
+       var log = []; var t = { set s(v) { log.push('s' + v) } }; var one = 1; t.s = one; t.s = 2; out.push(log.join('|'));
+       var fz = Object.freeze({ a: 1 }); (function () { var z = 5; fz.a = z; fz.a = null })(); out.push(fz.a);
+       try { (function () { 'use strict'; var z = 5; fz.a = z })() } catch (e) { out.push('strict' + e.constructor.name) }
+       var px = new Proxy({}, { set(t, k, v) { log.push('p' + k + v); return true } }); var w = 9; px.q = w; px.r = 0; out.push(log.join('|'));
+       var prim = 'str'; (function () { var y = 1; prim.len = y })(); out.push(prim.len === undefined);
+       function C(a) { this.a = a; this.b = null; this.c = 3 } var c = new C(7); out.push(Object.keys(c).join('|'), c.a, c.b, c.c);
+       out.join()",
+    )
+    == "ReferenceError,ReferenceError,s1|s2,1,strictTypeError,s1|s2|pq9|pr0,true,a|b|c,7,,3"
+}
+
+/// `o.m()` / `local.m()` fuse the method read with the call: getters still
+/// run first, a missing or nullish base throws TypeError, primitives box,
+/// proxies trap, and `this` is the base.
+pub fn fused_method_call_test() {
+  assert run_string(
+      "var out = [];
+       var o = { v: 4, m() { return this.v }, get g() { out.push('get'); return function () { return this === o } } };
+       out.push(o.m(), o.g());
+       try { null.m() } catch (e) { out.push(e.constructor.name) }
+       try { ({}).nope() } catch (e) { out.push(e.constructor.name) }
+       function* gen() { yield 1 } var it = gen(); out.push(it.next().value);
+       var p = new Proxy({}, { get(t, k) { return function () { return 'trap' + String(k) } } }); out.push(p.hi());
+       class A { m() { return 'A' } } class B extends A { m() { return super.m() + 'B' } } out.push(new B().m());
+       out.push('abc'.toUpperCase(), (255).toString(), [3, 1, 2].sort().join('|'));
+       (function () { try { x.m() } catch (e) { out.push(e.constructor.name) } let x = {} })();
+       var bound = { f: function () { return this.tag }.bind({ tag: 'bound' }) }; out.push(bound.f());
+       var one = { id(x) { return x }, get g1() { out.push('g1'); return function (x) { return x + 1 } } };
+       var a1 = 7; out.push(one.id(a1), one.g1(a1), 'abc'.indexOf(a1), p.q(a1));
+       (function () { try { one.id(z) } catch (e) { out.push(e.constructor.name) } let z = 1 })();
+       (function () { try { ({ get m() { out.push('read'); return null } }).m(w) } catch (e) { out.push(e.constructor.name) } let w = 1 })();
+       out.join()",
+    )
+    == "get,4,true,TypeError,TypeError,1,traphi,AB,ABC,255,1|2|3,ReferenceError,bound,g1,7,8,-1,trapq,ReferenceError,read,ReferenceError"
+}
+
+// -- Folded operand / store superinstructions ------------------------------
+
+/// BinOpLocal*, BinOp*Put, PostIncLocal, GetElemLocals and BinOpLocalField
+/// read locals directly: a TDZ local still throws the ReferenceError, an
+/// object operand still runs ToPrimitive once per read in source order, and
+/// a getter / string / prototype element read still goes through [[Get]].
+pub fn folded_operand_ops_test() {
+  assert run_string(
+      "var out = [];
+       function C() {}
+       function f1() { var a = {valueOf(){ out.push('a'); return 2 }}, b = {valueOf(){ out.push('b'); return 3 }}; var c; c = a * b; return c }
+       function f2() { try { var r = x + 1; let x = 5 } catch (e) { return e.constructor.name } }
+       function f3() { try { let y = q * q; let q = 1 } catch (e) { return e.constructor.name } }
+       function f4() { try { var r = z instanceof C; let z = 1; return r } catch (e) { return e.constructor.name } }
+       function f5() { var o = { get 3() { return 'g' } }; var k = 3; var s = 'abc'; var k2 = 1; var arr = [1,,3]; var h = 1;
+                       Object.prototype[1] = 'P'; var r = o[k] + s[k2] + arr[h]; delete Object.prototype[1]; return r }
+       function f6() { var i = '5'; var j = i++; var o = {valueOf(){ return 7 }}; var p = o++; return [i, j, o, p].join() }
+       function f7() { var s = 'a'; s = s + 1; var t; t = 'x' in {x:1}; var u; u = [] instanceof Array; return [s,t,u].join() }
+       function f8(o) { return 1 + o.x }
+       out.push(f1(), f2(), f3(), f4(), f5(), f6(), f7(), f8({x:2}), f8({get x() { return 10 }}), f8({x:{valueOf(){ return 5 }}}));
+       try { f8(null) } catch (e) { out.push(e.constructor.name) }
+       out.join('|')",
+    )
+    == "a|b|6|ReferenceError|ReferenceError|ReferenceError|gbP|6,5,8,7|a1,true,true|3|11|6|TypeError"
+}
+
+/// CmpJump / CmpConstJump / IncLocalJump / JumpIfNotNullish: comparisons
+/// with a non-local operand, the loop back edge, and `!= null` tests keep
+/// their coercions and branch targets.
+pub fn fused_branch_ops_test() {
+  assert run_string(
+      "var out = [], n = 0, calls = 0;
+       var o = { valueOf() { calls++; return 3 } };
+       for (var i = 0; i < 10; i++) { if (i % 4 === 0) n++; if (o > i) n += 10 }
+       out.push(n, calls);
+       var u; var v = null; var w = 0;
+       out.push(u != null ? 'a' : 'b', v == undefined ? 'c' : 'd', w != null ? 'e' : 'f');
+       var k = 'x'; try { for (var j = 0; j < 2; k++) { j++ } } catch (e) { out.push('threw') }
+       out.push(String(k));
+       out.join('|')",
+    )
+    == "33|10|b|c|e|NaN"
+}
+
+/// `f.apply(t, arguments)` as the only use of `arguments` forwards the
+/// argument list (ApplyArguments) without building the object; a
+/// non-intrinsic or patched `apply` still receives a real arguments object
+/// (the same one each time within an activation, unmapped when strict), a
+/// non-callable target still throws, and any other use of `arguments`
+/// (including from an inner arrow) keeps the ordinary path.
+pub fn apply_arguments_forwarding_test() {
+  assert run_string(
+      "var log = [];
+       function Base(a, b) { log.push('b' + a + b + arguments.length) }
+       function D() { Base.apply(this, arguments) }
+       new D(1, 2); D(3); D.call({}, 4, 5, 6);
+       var weird = { apply: function (t, args) { log.push('w' + args.length + typeof args.callee); return args } };
+       function W() { var a1 = weird.apply(this, arguments); var a2 = weird.apply(this, arguments); log.push(a1 === a2) }
+       W(7, 8);
+       function S() { 'use strict'; return weird.apply(null, arguments) }
+       try { S(1).callee } catch (e) { log.push(e.constructor.name) }
+       var orig = Function.prototype.apply;
+       Function.prototype.apply = function (t, a) { log.push('p' + a.length); return orig.call(this, t, a) };
+       function P() { return Base.apply(null, arguments) } P(9, 10);
+       Function.prototype.apply = orig;
+       function NC() { var o = { apply: orig }; return o.apply(this, arguments) }
+       try { NC(1) } catch (e) { log.push(e.constructor.name) }
+       function E() { var n = arguments.length; Base.apply(this, arguments); return n } log.push(E(1, 2));
+       function A() { var f = () => Base.apply(this, arguments); f() } A('x', 'y');
+       function R() { return Base.apply(this, arguments) } R('r', 's');
+       log.join()",
+    )
+    == "b122,b3undefined1,b453,w2function,w2function,true,TypeError,p2,b9102,TypeError,b122,2,bxy2,brs2"
+}

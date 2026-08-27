@@ -94,11 +94,21 @@
 -define(KFN_FLAGS, 4).
 -define(KFN_FIELDS_INIT, 5).
 -define(KFN_SIMPLE, 6).
--define(KFN_ARITY, 6).
+-define(KFN_NAME, 7).
+-define(KFN_LENGTH, 8).
+-define(KFN_BIRTH, 9).
+-define(KFN_ARITY, 9).
 
-%% arc/rt/types.ObjKind: KBytecode (tag only: an interpreted function never
-%% takes a compiled-code fast path; its [[Call]] goes through JsOps)
+%% arc/rt/types.ObjKind: KBytecode (an interpreted function never takes a
+%% compiled-code fast path; its [[Call]] goes through JsOps)
 -define(KBYTECODE_TAG, k_bytecode).
+-define(KBYTECODE_BIRTH, 9).
+-define(KBYTECODE_ARITY, 9).
+
+%% arc/rt/types.FnBirth
+-define(BIRTH_SETTLED, birth_settled).
+-define(BIRTH_PENDING_TAG, birth_pending).
+-define(BIRTH_PROTOTYPE_PARENT, 2).
 
 %% arc/rt/types.ObjKind: KNative, ArrayObj, Ordinary
 -define(KNATIVE_TAG, k_native).
@@ -115,9 +125,25 @@
 -define(ARGUMENTSOBJ_TAG, arguments_obj).
 -define(ARGUMENTSOBJ_MAPPED, 3).
 -define(ARGUMENTSOBJ_ARITY, 3).
+%% arc/rt/types.ObjKind: ArrayIterator(target, index, kind), GeneratorObj(data)
+-define(ARRAYITER_TAG, array_iterator).
+-define(ARRAYITER_TARGET, 2).
+-define(ARRAYITER_INDEX, 3).
+-define(ARRAYITER_KIND, 4).
+-define(ARRAYITER_ARITY, 4).
+-define(ARRAYITER_VALUES, array_iter_values).
+-define(GENERATOROBJ_TAG, generator_obj).
+-define(GENERATOROBJ_DATA, 2).
+-define(GENERATOROBJ_ARITY, 2).
+%% arc/rt/types.NativeToken: IteratorN(ArrayIteratorNext), GeneratorN(GeneratorNext)
+-define(TOKEN_ARRAY_ITER_NEXT, {iterator_n, array_iterator_next}).
+-define(TOKEN_GENERATOR_NEXT, {generator_n, generator_next}).
 %% arc/rt/types.ObjKind: ProxyObj (tag only: fast paths must never read
 %% through a proxy's stored proto/props — its internal methods are traps)
 -define(PROXYOBJ_TAG, proxy_obj).
+%% arc/rt/types.ObjKind: StringObj(value)
+-define(STRINGOBJ_TAG, string_obj).
+-define(STRINGOBJ_VALUE, 2).
 
 %% arc/rt/types.FnFlags
 -define(FNFLAGS_TAG, fn_flags).
@@ -172,8 +198,8 @@
 %% field write bumps when it creates an own property.
 -define(STORE_PROP_SEQ, 8).
 
-%% arc/rt/types.JsStore.data is an OTP `array` indexed by cell id whose
-%% default is this sentinel: a freed or never-minted id reads back as it.
+%% arc/rt/types.JsStore.data is the cell arena (arc_rt_arena_ffi): a
+%% freed or never-minted id reads back as this sentinel.
 -define(STORE_FREE_SLOT, js_free).
 
 -endif.

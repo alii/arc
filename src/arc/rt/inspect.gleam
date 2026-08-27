@@ -91,8 +91,14 @@ fn inspect_object(
       case kind {
         ArrayObj(length:) -> inspect_array(st, elements, length, depth, visited)
         KCompiled(..) | KBytecode(..) | KNative(..) | KBound(..) -> {
-          let name = case dict.get(props, Named("name")) {
-            Ok(DataProperty(value:, ..)) ->
+          let name = case
+            rt_obj.t_ordinary_own_property(
+              st,
+              h,
+              rt_types.StringKey(Named("name")),
+            )
+          {
+            Some(DataProperty(value:, ..)) ->
               case classify(value) {
                 KStr(n) -> n
                 _ -> ""

@@ -17,6 +17,7 @@
 
 import arc/internal/tree_array
 import arc/rt/buffer
+import arc/rt/bytecode.{FuncTemplate}
 import arc/rt/elements
 import arc/rt/js_string
 import arc/rt/limits
@@ -25,11 +26,12 @@ import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsOps, type JsSlot,
   type JsStore, type JsVal, type ObjKind, type ObjectKey, type ParsedDesc,
   type Property, type PropertyKey, type SymbolId, type TypedArrayKind,
-  AccessorProperty, Agent, ArgumentsObj, ArrayObj, DataProperty, Dense, Index,
-  JsStore, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named, NoElements,
-  Ordinary, ParsedDesc, Private, ProxyObj, SAsyncContext, SAsyncGen, SBox,
-  SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
-  ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr, TypedArrayObj,
+  AccessorProperty, Agent, ArgumentsObj, ArrayObj, BirthPending, BirthSettled,
+  DataProperty, Dense, Index, JsStore, KBytecode, KCompiled, KHandle, KNull,
+  KTdz, KUndef, ModuleNamespace, Named, NoElements, Ordinary, ParsedDesc,
+  Private, ProxyObj, SAsyncContext, SAsyncGen, SBox, SDisposeCapability,
+  SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, StringKey,
+  StringObj, SymbolKey, TypeErr, TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -337,6 +339,15 @@ fn own_property_of(
             )
           })
       }
+    // A function's pending birth `length` / `name` (`FnBirth`).
+    KBytecode(template:, birth: BirthPending(_), ..), Named("length") ->
+      Some(birth_prop(rt_types.mk_int(template.length), 0))
+    KBytecode(template:, birth: BirthPending(_), ..), Named("name") ->
+      Some(birth_prop(rt_types.mk_string(option.unwrap(template.name, "")), 1))
+    KCompiled(length:, birth: BirthPending(_), ..), Named("length") ->
+      Some(birth_prop(rt_types.mk_int(length), 0))
+    KCompiled(name:, birth: BirthPending(_), ..), Named("name") ->
+      Some(birth_prop(rt_types.mk_string(name), 1))
     // §10.1.5.1 OrdinaryGetOwnProperty. (Proxy / Module Namespace string
     // keys dispatch in `t_get_own_property` before reaching the slot read.)
     _, _ -> dict.get(props, key) |> option.from_result
@@ -541,6 +552,169 @@ pub fn t_new_object(st: Agent, proto: Option(Handle)) -> #(Handle, Agent) {
 pub fn t_new_object_literal(st: Agent) -> #(JsVal, Agent) {
   let #(h, st) = t_new_object(st, Some(st.realm.object.prototype))
   #(rt_types.mk_object(h), st)
+}
+
+// ── function birth properties (§10.2.5 / §10.2.9 / §10.2.10) ────────────────
+//
+// A function object's own `length` (seq 0), `name` (seq 1) and, on a
+// constructor, `prototype` (seq 2) start out `BirthPending` (`FnBirth`):
+// [[GetOwnProperty]] answers `length` / `name` from the function's kind, and
+// every other MOP entry below that could observe the three settles them
+// into `props` first, so the deferral is invisible.
+
+/// Creation seq of a function's own `prototype`.
+pub const prototype_seq = 2
+
+/// A §20.2.4 `length` / `name` own property: `{W:F, E:F, C:T}`.
+fn birth_prop(value: JsVal, seq: Int) -> Property {
+  DataProperty(value, False, False, True, seq)
+}
+
+/// The own props of a fresh `F.prototype` object: `constructor` → `f`
+/// {W:T, E:F, C:T}.
+pub fn constructor_props(f: Handle) -> Dict(PropertyKey, Property) {
+  dict.from_list([
+    #(
+      Named("constructor"),
+      DataProperty(rt_types.mk_object(f), True, False, True, 0),
+    ),
+  ])
+}
+
+/// The birth `#(length, name, prototype_parent)` of a function cell whose
+/// birth properties are still pending.
+fn pending_birth(slot: JsSlot) -> Option(#(Int, String, Option(Handle))) {
+  case slot {
+    SObject(kind: KBytecode(template:, birth: BirthPending(parent), ..), ..) ->
+      Some(#(template.length, option.unwrap(template.name, ""), parent))
+    SObject(
+      kind: KCompiled(length:, name:, birth: BirthPending(parent), ..),
+      ..,
+    ) -> Some(#(length, name, parent))
+    _ -> None
+  }
+}
+
+fn is_birth_key(key: ObjectKey) -> Bool {
+  case key {
+    StringKey(Named("length"))
+    | StringKey(Named("name"))
+    | StringKey(Named("prototype")) -> True
+    _ -> False
+  }
+}
+
+/// Move `f`'s pending birth properties into `props` (`f`'s cell is `slot`,
+/// its birth `pending`): `length` and `name`, and for a constructor the
+/// deferred MakeConstructor — allocate the `prototype` object inheriting
+/// `parent` with `constructor` → `f`, under `prototype` {W:T, E:F, C:F}.
+fn settle_birth(
+  st: Agent,
+  f: Handle,
+  slot: JsSlot,
+  pending: #(Int, String, Option(Handle)),
+) -> Agent {
+  let #(length, name, parent) = pending
+  let assert SObject(kind:, props:, ..) = slot
+  let props =
+    props
+    |> dict.insert(Named("length"), birth_prop(rt_types.mk_int(length), 0))
+    |> dict.insert(Named("name"), birth_prop(rt_types.mk_string(name), 1))
+  let #(props, st) = case parent {
+    None -> #(props, st)
+    Some(parent) -> {
+      let #(proto, st) =
+        rt_store.t_cell_new(
+          st,
+          SObject(
+            kind: Ordinary,
+            proto: Some(parent),
+            props: constructor_props(f),
+            symbol_props: [],
+            elements: NoElements,
+            extensible: True,
+          ),
+        )
+      let prototype =
+        DataProperty(
+          rt_types.mk_object(proto),
+          True,
+          False,
+          False,
+          prototype_seq,
+        )
+      #(dict.insert(props, Named("prototype"), prototype), st)
+    }
+  }
+  let kind = case kind {
+    KBytecode(..) -> KBytecode(..kind, birth: BirthSettled)
+    KCompiled(..) -> KCompiled(..kind, birth: BirthSettled)
+    _ -> kind
+  }
+  rt_store.t_cell_set(st, f, SObject(..slot, kind:, props:))
+}
+
+/// Settle `h`'s pending birth properties, if any (`slot` is its cell).
+fn settle(st: Agent, h: Handle, slot: JsSlot) -> #(JsSlot, Agent) {
+  case pending_birth(slot) {
+    Some(pending) -> {
+      let st = settle_birth(st, h, slot, pending)
+      #(read_object(st, h), st)
+    }
+    None -> #(slot, st)
+  }
+}
+
+/// `read_object`, first settling pending birth properties if `key` names
+/// one of them.
+fn read_settled(st: Agent, h: Handle, key: ObjectKey) -> #(JsSlot, Agent) {
+  let slot = read_object(st, h)
+  case is_birth_key(key) {
+    True -> settle(st, h, slot)
+    False -> #(slot, st)
+  }
+}
+
+/// SetFunctionName on a closure that was compiled anonymous: give `f` the
+/// own `name` `name` iff its current one is the empty string (a computed
+/// key), keeping the property's attributes and creation seq.
+pub fn t_name_if_anonymous(st: Agent, f: Handle, name: String) -> Agent {
+  use slot <- rt_store.t_cell_update(st, f)
+  case slot {
+    SObject(kind: KBytecode(template:, birth: BirthPending(_), ..) as kind, ..) ->
+      case option.unwrap(template.name, "") {
+        "" ->
+          SObject(
+            ..slot,
+            kind: KBytecode(
+              ..kind,
+              template: FuncTemplate(..template, name: Some(name)),
+            ),
+          )
+        _ -> slot
+      }
+    SObject(kind: KCompiled(name: "", birth: BirthPending(_), ..) as kind, ..) ->
+      SObject(..slot, kind: KCompiled(..kind, name:))
+    SObject(kind: KBytecode(..), props:, ..)
+    | SObject(kind: KCompiled(..), props:, ..) ->
+      case dict.get(props, Named("name")) {
+        Ok(DataProperty(value: v, seq:, ..)) ->
+          case rt_types.classify(v) {
+            rt_types.KStr("") ->
+              SObject(
+                ..slot,
+                props: dict.insert(
+                  props,
+                  Named("name"),
+                  birth_prop(rt_types.mk_string(name), seq),
+                ),
+              )
+            _ -> slot
+          }
+        _ -> slot
+      }
+    _ -> slot
+  }
 }
 
 // ── prototype ops (§10.1.1 / §10.1.2) ───────────────────────────────────────
@@ -766,6 +940,14 @@ fn get_from(
         True -> #(rt_types.mk_undefined(), st)
         False -> ordinary_get(st, slot, key, receiver)
       }
+    SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..) as slot,
+      StringKey(Named("prototype"))
+    | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..) as slot,
+      StringKey(Named("prototype"))
+    -> {
+      let #(_, st) = settle(st, h, slot)
+      get_from(st, h, key, receiver)
+    }
     slot, _ -> ordinary_get(st, slot, key, receiver)
   }
 }
@@ -929,6 +1111,14 @@ fn set_from(
           }
         False -> ordinary_set(st, slot, key, v, receiver)
       }
+    SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..) as slot,
+      StringKey(Named("prototype"))
+    | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..) as slot,
+      StringKey(Named("prototype"))
+    -> {
+      let #(_, st) = settle(st, h, slot)
+      set_from(st, h, key, v, receiver)
+    }
     slot, _ -> ordinary_set(st, slot, key, v, receiver)
   }
 }
@@ -1005,6 +1195,7 @@ fn set_on_receiver(
         }
         _, _ -> {
           let st = devolve(st, recv_h)
+          let #(slot, st) = read_settled(st, recv_h, key)
           let assert SObject(
             kind:,
             props:,
@@ -1012,7 +1203,7 @@ fn set_on_receiver(
             elements:,
             extensible:,
             ..,
-          ) = read_object(st, recv_h)
+          ) = slot
           case key {
             StringKey(pk) ->
               set_own_string(
@@ -1495,8 +1686,9 @@ pub fn t_define_own_prop(
     }
     _, _, _ -> #(desc, None, st)
   }
+  let #(slot, st) = read_settled(st, obj, key)
   let assert SObject(kind:, props:, symbol_props:, elements:, extensible:, ..) =
-    read_object(st, obj)
+    slot
   use <- exotic_define(st, kind, key, desc)
   let indexed_kind = case kind {
     ArrayObj(_) | ArgumentsObj(..) -> True
@@ -1936,6 +2128,11 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
     _, StringKey(Private(_)) -> #(False, st)
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
       proxy_has(st, Proxy(target:, handler:, revoked:), key)
+    SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..),
+      StringKey(Named("prototype"))
+    | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..),
+      StringKey(Named("prototype"))
+    -> #(True, st)
     // §10.4.6.7: exported names only; symbols are OrdinaryHasProperty over
     // `symbol_props` (null prototype, so no chain walk).
     SObject(kind: ModuleNamespace(exports:), symbol_props:, ..), _ -> #(
@@ -1978,8 +2175,8 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
 /// `delete_property` + `delete_symbol_property` (`object.gleam:2118-2305`).
 pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
   let st = devolve(st, obj)
-  let assert SObject(kind:, props:, symbol_props:, elements:, ..) =
-    read_object(st, obj)
+  let #(slot, st) = read_settled(st, obj, key)
+  let assert SObject(kind:, props:, symbol_props:, elements:, ..) = slot
   case key {
     SymbolKey(sym) ->
       case kind {
@@ -2116,7 +2313,10 @@ pub fn t_own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
     // A shaped object's keys are its shape's named slots in offset order
     // (creation order): no indices, no symbols, no virtual "length".
     SShapedObject(shape_id:, ..) -> #(shaped_own_keys(st, shape_id), st)
-    slot -> sobject_own_keys(st, slot)
+    slot -> {
+      let #(slot, st) = settle(st, obj, slot)
+      sobject_own_keys(st, slot)
+    }
   }
 }
 
@@ -2359,14 +2559,24 @@ pub fn t_get_own_property(
       namespace_own_property(st, exports, pk),
       st,
     )
+    SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..) as slot,
+      StringKey(Named("prototype"))
+    | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..) as slot,
+      StringKey(Named("prototype"))
+    -> {
+      let #(slot, st) = settle(st, h, slot)
+      #(own_and_proto_of_slot(st, slot, key).0, st)
+    }
     slot, _ -> #(own_and_proto_of_slot(st, slot, key).0, st)
   }
 }
 
 /// §10.1.5.1 OrdinaryGetOwnProperty ( O, P ) — the raw own-descriptor slot
 /// read with NO prototype walk and NO trap dispatch. JRead: no state
-/// threaded. Private-name lookup (M7 `t_private_get`/`t_private_in`) lands
-/// here: private elements live in the object's own table even on a Proxy.
+/// threaded, so a plain constructor's still-pending `prototype` reads as
+/// absent (`t_get_own_property` settles it). Private-name lookup (M7
+/// `t_private_get`/`t_private_in`) lands here: private elements live in the
+/// object's own table even on a Proxy.
 pub fn t_ordinary_own_property(
   st: Agent,
   h: Handle,
@@ -2374,6 +2584,17 @@ pub fn t_ordinary_own_property(
 ) -> Option(Property) {
   let #(own, _proto) = read_own_and_proto(st, h, key)
   own
+}
+
+/// `t_ordinary_own_property` with the state threaded, so a pending
+/// `prototype` that `key` names is settled first. Still no traps.
+pub fn t_own_property(
+  st: Agent,
+  h: Handle,
+  key: ObjectKey,
+) -> #(Option(Property), Agent) {
+  let #(slot, st) = read_settled(st, h, key)
+  #(own_and_proto_of_slot(st, slot, key).0, st)
 }
 
 /// **IsExtensible ( O )** — §7.2.5 / §10.5.3 Proxy [[IsExtensible]] (the

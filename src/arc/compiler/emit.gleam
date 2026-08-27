@@ -5,16 +5,16 @@
 /// Emitter at each entry point) and emitted as concrete IrGetLocal /
 /// IrGetBoxed / IrGetGlobal / IrWith* ops; jump targets use integer label
 /// IDs (IrJump) resolved in the label-resolution pass.
+import arc/bytecode/key
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarNext,
   IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
   IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
-  IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
-  IrPutField, IterCloseGuard,
+  IrJump, IrJumpIfFalse, IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue,
+  IrLabel, IrPushTry, IrPutField, IterCloseGuard,
 }
 import arc/compiler/ast_util
-import arc/compiler/resolve
 import arc/compiler/scope.{
   type BindingKind, type GlobalFallthrough, type ScopeId, type TopLevelLex,
   CaptureBinding, CatchBinding, ConstBinding, FnNameBinding, LetBinding,
@@ -202,6 +202,12 @@ pub opaque type Emitter {
     /// emission to decide whether the `arguments` object is created — so
     /// functions that never touch `arguments` pay zero allocation cost.
     references_arguments: Bool,
+    /// True once `arguments` has been referenced in any way other than as
+    /// the argument list of `f.apply(t, arguments)` in this body itself
+    /// (any reference from an inner arrow counts). While it stays False the
+    /// object need not exist at all: those call sites forward the
+    /// activation's argument list (ApplyArguments).
+    arguments_escape: Bool,
     /// What kind of code the body being emitted is. Arrows inherit the
     /// parent's verbatim; non-arrows take it from their function kind.
     code_kind: lexical.CodeKind,
@@ -303,7 +309,7 @@ pub opaque type Emitter {
     /// (TDZ-check read before the put). Slots are never reused across
     /// bindings in a function frame, so a plain Int set is sound.
     initialized: Set(Int),
-    /// The line the last emitted SetLine set, or 0 when unknown: reset at
+    /// The line the last emitted IrLine set, or 0 when unknown: reset at
     /// every label, since a jump may arrive there from a different line.
     line: Int,
     /// Emission-order child FUNCTION-scope ids nested in `fn_scope`'s
@@ -784,7 +790,7 @@ fn declare_scratch(e: Emitter, slot: Int, init: JsVal) -> Emitter {
 /// The fold carries the last line marker this function emitted (0 = unknown).
 /// `set_line` only collapses a marker against an *immediately* preceding one,
 /// and each declarator's disposer-register ops sit between the two, so
-/// `using a = 1, b = 2;` would otherwise emit a redundant IrSetLine per extra
+/// `using a = 1, b = 2;` would otherwise emit a redundant IrLine per extra
 /// declarator. A PlainItem's statement can move the marker anywhere, so it
 /// resets the tracker to unknown rather than claiming its own line.
 fn emit_using_body(
@@ -1129,7 +1135,7 @@ fn emit_for_using_classic(
 ) -> Result(Emitter, EmitError) {
   let #(e, save) = enter_scope(e, in_block: e.in_block)
   // Line 0 → set_line is a no-op (the enclosing emit_stmt already emitted
-  // the IrSetLine for this statement's source line).
+  // the IrLine for this statement's source line).
   let head = [
     ast.StmtWithLine(0, ast.VariableDeclaration(kind:, declarations:)),
   ]
@@ -1158,27 +1164,77 @@ fn emit_classic_loop(
   per_iter: List(String),
 ) -> Result(Emitter, EmitError) {
   let #(e, loop_start) = fresh_label(e)
+  let #(e, loop_test) = fresh_label(e)
   let #(e, loop_continue) = fresh_label(e)
   let #(e, loop_end) = fresh_label(e)
   let e = push_loop(e, loop_end, loop_continue)
-  let e = emit_ir(e, IrLabel(loop_start))
+  // Bottom-tested: each iteration closes with one conditional branch back
+  // to the body instead of a top test plus an unconditional jump. Entry is
+  // guarded by a copy of the test when it can be emitted twice (so a counted
+  // loop's update and test sit together and fuse), else by a jump to the
+  // bottom test.
   use e <- result.try(case condition {
-    Some(cond) -> emit_test(e, cond, False, loop_end)
+    Some(cond) ->
+      case reemittable(cond) {
+        True -> emit_test(e, cond, False, loop_end)
+        False -> Ok(emit_ir(e, IrJump(loop_test)))
+      }
     None -> Ok(e)
   })
+  let e = emit_ir(e, IrLabel(loop_start))
   use e <- result.try(emit_stmt(e, body))
   let e = emit_ir(e, IrLabel(loop_continue))
   let e = list.fold(per_iter, e, emit_var_rebox)
-  use e <- result.map(case update {
+  use e <- result.try(case update {
     Some(upd) -> {
       use e <- result.map(emit_expr(e, for_effect(upd)))
       emit_op(e, opcode.Pop)
     }
     None -> Ok(e)
   })
-  let e = emit_ir(e, IrJump(loop_start))
+  use e <- result.map(case condition {
+    Some(cond) -> {
+      let e = case reemittable(cond) {
+        True -> e
+        False -> emit_ir(e, IrLabel(loop_test))
+      }
+      emit_test(e, cond, True, loop_start)
+    }
+    None -> Ok(emit_ir(e, IrJump(loop_start)))
+  })
   let e = emit_ir(e, IrLabel(loop_end))
   pop_frame(e)
+}
+
+/// Whether a loop test may be emitted twice (entry guard and bottom test):
+/// plain operators over variables, literals, member reads and calls. Nothing
+/// that compiles a nested function, allocates a template site, or suspends,
+/// since those are numbered once per source occurrence.
+fn reemittable(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.Identifier(..)
+    | ast.NumberLiteral(..)
+    | ast.BigIntLiteral(..)
+    | ast.StringExpression(..)
+    | ast.BooleanLiteral(..)
+    | ast.NullLiteral(..)
+    | ast.UndefinedExpression(..)
+    | ast.ThisExpression(..) -> True
+    ast.ParenthesizedExpression(_, inner)
+    | ast.UnaryExpression(_, _, inner)
+    | ast.UpdateExpression(argument: inner, ..)
+    | ast.MemberExpression(_, inner, ast.Dot(..)) -> reemittable(inner)
+    ast.MemberExpression(_, obj, ast.Bracket(k))
+    | ast.BinaryExpression(_, _, obj, k)
+    | ast.LogicalExpression(_, _, obj, k)
+    | ast.AssignmentExpression(_, _, obj, k) ->
+      reemittable(obj) && reemittable(k)
+    ast.ConditionalExpression(_, a, b, c) ->
+      reemittable(a) && reemittable(b) && reemittable(c)
+    ast.CallExpression(_, callee, args) ->
+      reemittable(callee) && list.all(args, reemittable)
+    _ -> False
+  }
 }
 
 /// Module body containing top-level using declarations: emit the body
@@ -1325,6 +1381,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     is_arrow: False,
     lexical_refs: lexical.no_lexical_refs,
     references_arguments: False,
+    arguments_escape: False,
     code_kind: lexical.ScriptCode,
     top_lex: tree.top_lex,
     scope_tree: tree,
@@ -1825,8 +1882,41 @@ fn emit_op(e: Emitter, op: opcode.Op) -> Emitter {
 /// Mirrors how `lexical_refs` is tracked in get_lexical.
 fn track_arguments_ref(e: Emitter, name: String) -> Emitter {
   case name {
-    "arguments" -> Emitter(..e, references_arguments: True)
+    "arguments" ->
+      Emitter(..e, references_arguments: True, arguments_escape: True)
     _ -> e
+  }
+}
+
+/// `f.apply(t, arguments)` in a non-arrow function body where `arguments`
+/// is this activation's own binding in a plain local slot: the call can
+/// forward the argument list instead of reading the object (see
+/// Op.ApplyArguments). Returns `t` and the slot.
+fn forwarded_arguments(
+  e: Emitter,
+  call: ast.Expression,
+) -> Option(#(ast.Expression, Int)) {
+  let own_binding = case e.is_arrow, e.code_kind {
+    False, lexical.FunctionCode | False, lexical.MethodCode -> True
+    _, _ -> False
+  }
+  case call {
+    ast.CallExpression(
+      _,
+      ast.MemberExpression(_, _, ast.Dot(name: "apply", ..)),
+      [this_arg, ast.Identifier(name: "arguments", ..)],
+    )
+      if own_binding
+    ->
+      // Only the implicit binding (the analyzer's VarBinding): a parameter
+      // or lexical declaration named `arguments` is an ordinary variable.
+      case this_arg, resolve(e, "arguments") {
+        ast.SpreadElement(..), _ -> None
+        _, scope.Plain(scope.Local(slot:, boxed: False, kind: VarBinding, ..))
+        -> Some(#(this_arg, slot))
+        _, _ -> None
+      }
+    _ -> None
   }
 }
 
@@ -2629,16 +2719,47 @@ fn emit_goto_loop_walk(
   }
 }
 
+/// Finalise the body's ApplyArguments sites (emitted before it was known
+/// whether `arguments` escapes): keep them, now carrying `simple_params`,
+/// when the object is forwarded; otherwise lower each back to
+/// GetLocal(slot); CallMethod(2). `code` is the reversed op list.
+fn settle_apply_arguments(
+  code: List(IrOp),
+  forward: Bool,
+  simple_params: Bool,
+  acc: List(IrOp),
+) -> List(IrOp) {
+  case code {
+    [] -> list.reverse(acc)
+    [IrFinal(opcode.ApplyArguments(slot:, ..)), ..rest] -> {
+      let acc = case forward {
+        True -> [IrFinal(opcode.ApplyArguments(slot:, simple_params:)), ..acc]
+        False -> [
+          IrFinal(opcode.GetLocal(slot)),
+          IrFinal(opcode.CallMethod(2)),
+          ..acc
+        ]
+      }
+      settle_apply_arguments(rest, forward, simple_params, acc)
+    }
+    [op, ..rest] ->
+      settle_apply_arguments(rest, forward, simple_params, [op, ..acc])
+  }
+}
+
 fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
   let idx = e.next_func
   // Arrow children inherit lexical bindings, so their references are the
   // parent's references. Non-arrows own their slots — flags don't propagate.
-  let #(lexical_refs, references_arguments) = case child.is_arrow {
+  let #(lexical_refs, references_arguments, arguments_escape) = case
+    child.is_arrow
+  {
     True -> #(
       lexical.lexical_refs_or(e.lexical_refs, child.lexical_refs),
       e.references_arguments || child.references_arguments,
+      e.arguments_escape || child.references_arguments,
     )
-    False -> #(e.lexical_refs, e.references_arguments)
+    False -> #(e.lexical_refs, e.references_arguments, e.arguments_escape)
   }
   #(
     Emitter(
@@ -2648,6 +2769,7 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
       next_func: idx + 1,
       lexical_refs:,
       references_arguments:,
+      arguments_escape:,
     ),
     idx,
   )
@@ -2947,7 +3069,7 @@ fn emit_stmt_tail_completion(
   emit_scratch_get(e, slot)
 }
 
-/// Emit an IrSetLine for the statement's source line (so `Error.stack` can
+/// Emit an IrLine for the statement's source line (so `Error.stack` can
 /// report it), unless it is the line already in effect or 0 — the sentinel
 /// for synthetic statements the parser never produced (class field inits,
 /// desugared arrow bodies).
@@ -2956,13 +3078,13 @@ fn set_line(e: Emitter, line: Int) -> Emitter {
     True -> e
     False ->
       case e.code {
-        // An immediately preceding SetLine is dead — no op executes between
-        // the two — so replace it instead of stacking markers. Statements
-        // that compile to nothing (e.g. elided empty blocks) would otherwise
-        // emit one IrSetLine each.
-        [IrFinal(opcode.SetLine(_)), ..rest] ->
-          Emitter(..e, code: [IrFinal(opcode.SetLine(line)), ..rest], line:)
-        _ -> Emitter(..emit_op(e, opcode.SetLine(line)), line:)
+        // An immediately preceding marker is dead — no op sits between the
+        // two — so replace it instead of stacking markers. Statements that
+        // compile to nothing (e.g. elided empty blocks) would otherwise emit
+        // one IrLine each.
+        [opcode.IrLine(_), ..rest] ->
+          Emitter(..e, code: [opcode.IrLine(line), ..rest], line:)
+        _ -> Emitter(..emit_ir(e, opcode.IrLine(line)), line:)
       }
   }
 }
@@ -3707,13 +3829,21 @@ fn compile_function_body(
   // the analyzer pre-registers a VarBinding for it whenever the body
   // references `arguments`. The splice only needs to CREATE the object
   // and STORE it.
-  let args_setup_rev = case uses_args {
-    True -> [
-      put_args,
-      IrFinal(opcode.CreateArguments(
-        simple_params: !non_simple_fixed && rest_param == None,
-      )),
-    ]
+  let simple_params = !non_simple_fixed && rest_param == None
+  // `arguments` only ever forwarded (`f.apply(t, arguments)`) and never
+  // visible to eval: the object is not built here; each ApplyArguments site
+  // forwards the argument list (building the object itself only for a
+  // non-intrinsic `apply`). Any other use keeps the eager object and turns
+  // those sites back into the plain read + CallMethod(2).
+  let forward_args =
+    uses_args && !e.arguments_escape && !fn_info(e).eval_in_subtree
+  let e =
+    Emitter(
+      ..e,
+      code: settle_apply_arguments(e.code, forward_args, simple_params, []),
+    )
+  let args_setup_rev = case uses_args && !forward_args {
+    True -> [put_args, IrFinal(opcode.CreateArguments(simple_params:))]
     False -> []
   }
   let e =
@@ -3895,13 +4025,18 @@ fn emit_stmt_inner(
       emit_if(e, cond, cons, alt, emit_stmt, fn(e) { e })
 
     ast.WhileStatement(condition, body) -> {
-      let #(e, loop_start) = fresh_label(e)
+      let #(e, loop_body) = fresh_label(e)
+      let #(e, loop_test) = fresh_label(e)
       let #(e, loop_end) = fresh_label(e)
-      let e = push_loop(e, loop_end, loop_start)
-      let e = emit_ir(e, IrLabel(loop_start))
-      use e <- result.try(emit_test(e, condition, False, loop_end))
+      let e = push_loop(e, loop_end, loop_test)
+      use e <- result.try(case reemittable(condition) {
+        True -> emit_test(e, condition, False, loop_end)
+        False -> Ok(emit_ir(e, IrJump(loop_test)))
+      })
+      let e = emit_ir(e, IrLabel(loop_body))
       use e <- result.try(emit_stmt(e, body))
-      let e = emit_ir(e, IrJump(loop_start))
+      let e = emit_ir(e, IrLabel(loop_test))
+      use e <- result.try(emit_test(e, condition, True, loop_body))
       let e = emit_ir(e, IrLabel(loop_end))
       let e = pop_frame(e)
       Ok(e)
@@ -4868,10 +5003,17 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       ast.MemberExpression(_, obj, ast.Dot(name: method_name, ..)),
       args,
     ) ->
-      case ast_util.chain_has_optional(obj) {
+      case ast_util.chain_has_optional(obj), forwarded_arguments(e, expr) {
         // `a?.b.m(x)` — the receiver chain short-circuits the call too.
-        True -> emit_chain_root(e, expr)
-        False -> {
+        True, _ -> emit_chain_root(e, expr)
+        False, Some(#(this_arg, slot)) -> {
+          use e <- result.try(emit_expr(e, obj))
+          let e = emit_get_field2(e, method_name)
+          use e <- result.map(emit_expr(e, this_arg))
+          let e = Emitter(..e, references_arguments: True)
+          emit_op(e, opcode.ApplyArguments(slot:, simple_params: False))
+        }
+        False, None -> {
           use e <- result.try(emit_expr(e, obj))
           let e = emit_get_field2(e, method_name)
           emit_call_args(
@@ -4985,10 +5127,27 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Sequence expression (comma operator)
     ast.SequenceExpression(_, exprs) -> emit_sequence(e, exprs)
 
-    // Object literal
+    // Object literal. A leading run of distinct static-key data properties
+    // has its values pushed first and lands in one NewObjectWith: the object
+    // is unreachable until the literal completes, so defining those together
+    // before the remaining properties is unobservable.
     ast.ObjectExpression(_, properties) -> {
-      let e = emit_op(e, opcode.NewObject)
-      list.try_fold(properties, e, emit_object_property)
+      let #(keys, head, rest) = literal_head(properties, [], [], set.new())
+      case head {
+        [] -> {
+          let e = emit_op(e, opcode.NewObject)
+          list.try_fold(properties, e, emit_object_property)
+        }
+        _ -> {
+          use e <- result.try(
+            list.try_fold(head, e, fn(e, member) {
+              emit_named_expr(e, member.1, member.0)
+            }),
+          )
+          let e = emit_op(e, opcode.NewObjectWith(keys, list.length(keys)))
+          list.try_fold(rest, e, emit_object_property)
+        }
+      }
     }
 
     // §13.3.7.3 super.prop / super[k] — read via [[HomeObject]].[[Prototype]]
@@ -5070,17 +5229,27 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.MetaProperty(_, ast.ImportMeta) ->
       Error(UnsupportedFeature("import.meta"))
 
-    // New expression: new Foo(args). CallConstructor's stack contract is
-    // [args, new_target, ctor] — for plain `new`, newTarget == ctor, so Dup.
+    // New expression: new Foo(args), newTarget == Foo. CallNew reads the
+    // one ctor slot for both; the spread form keeps CallConstructorApply's
+    // [args, new_target, ctor] contract, so Dup.
     ast.NewExpression(_, callee, args) -> {
       use e <- result.try(emit_expr(e, callee))
-      let e = emit_op(e, opcode.Dup)
-      emit_call_args(
-        e,
-        args,
-        fn(n) { IrFinal(opcode.CallConstructor(n)) },
-        IrFinal(opcode.CallConstructorApply),
-      )
+      case ast_util.has_spread_arg(args) {
+        False ->
+          emit_call_args(
+            e,
+            args,
+            fn(n) { IrFinal(opcode.CallNew(n)) },
+            IrFinal(opcode.CallConstructorApply),
+          )
+        True ->
+          emit_call_args(
+            emit_op(e, opcode.Dup),
+            args,
+            fn(n) { IrFinal(opcode.CallConstructor(n)) },
+            IrFinal(opcode.CallConstructorApply),
+          )
+      }
     }
 
     // Template literal: `text ${expr} more`
@@ -5521,6 +5690,55 @@ fn emit_method_value(
 ) -> Result(Emitter, EmitError) {
   let ast.FunctionLiteral(_, params, body, is_gen, is_async) = value
   make_method_closure(e, name, params, body, is_gen, is_async)
+}
+
+/// Split an object literal's members into the leading `name: value` /
+/// `"name": value` members NewObjectWith can define at once (distinct Named
+/// keys, no `__proto__`), as their keys last-first plus the members in
+/// source order, and the members left for `emit_object_property`.
+fn literal_head(
+  properties: List(ast.Property),
+  keys: List(key.PropertyKey),
+  head: List(#(String, ast.Expression)),
+  seen: Set(String),
+) -> #(
+  List(key.PropertyKey),
+  List(#(String, ast.Expression)),
+  List(ast.Property),
+) {
+  let done = #(keys, list.reverse(head), properties)
+  case properties {
+    [ast.InitProperty(key: k, value:, ..), ..rest] ->
+      case literal_key(k, seen) {
+        Some(#(name, pk)) ->
+          literal_head(
+            rest,
+            [pk, ..keys],
+            [#(name, value), ..head],
+            set.insert(seen, name),
+          )
+        None -> done
+      }
+    _ -> done
+  }
+}
+
+/// The static name and Named key of a literal member NewObjectWith takes.
+fn literal_key(
+  k: ast.PropertyKey,
+  seen: Set(String),
+) -> Option(#(String, key.PropertyKey)) {
+  let name = case k {
+    ast.KeyIdentifier(name:, ..) -> Some(name)
+    ast.KeyString(value: name, ..) -> Some(name)
+    _ -> None
+  }
+  use name <- option.then(name)
+  use <- bool.guard(name == "__proto__" || set.contains(seen, name), None)
+  case key.canonical_key(name) {
+    key.Named(_) as pk -> Some(#(name, pk))
+    _ -> None
+  }
 }
 
 /// Emit one property in an object literal. Object is already on the stack.
@@ -7271,7 +7489,7 @@ fn nullish_literal(expr: ast.Expression) -> Bool {
 }
 
 /// Jump to `target` when `operand` is nullish (`when` True) or when it is
-/// not (`when` False: hop over a Jump, there being no jump-if-not-nullish).
+/// not (`when` False).
 fn emit_nullish_test(
   e: Emitter,
   operand: ast.Expression,
@@ -7281,49 +7499,15 @@ fn emit_nullish_test(
   use e <- result.map(emit_expr(e, operand))
   case when {
     True -> emit_ir(e, IrJumpIfNullish(target))
-    False -> {
-      let #(e, over) = fresh_label(e)
-      e
-      |> emit_ir(IrJumpIfNullish(over))
-      |> emit_ir(IrJump(target))
-      |> emit_ir(IrLabel(over))
-    }
+    False -> emit_ir(e, IrJumpIfNotNullish(target))
   }
 }
 
 /// Pop the test value and jump to `target` when its truthiness is `when`.
-/// A fusable local compare (see resolve.peephole) only fuses under
-/// JumpIfFalse, so the `True` polarity inverts the branch around a Jump to
-/// keep the compare-and-branch superinstruction.
 fn emit_jump_if(e: Emitter, when: Bool, target: LabelId) -> Emitter {
-  case when, e.code {
-    False, _ -> emit_ir(e, IrJumpIfFalse(target))
-    True,
-      [
-        IrBinOp(kind),
-        IrFinal(opcode.GetLocal(_)),
-        IrFinal(opcode.GetLocal(_)),
-        ..
-      ]
-    | True,
-      [
-        IrBinOp(kind),
-        IrFinal(opcode.PushConst(_)),
-        IrFinal(opcode.GetLocal(_)),
-        ..
-      ]
-    ->
-      case resolve.fusable_cmp(kind) {
-        Some(_) -> {
-          let #(e, over) = fresh_label(e)
-          e
-          |> emit_ir(IrJumpIfFalse(over))
-          |> emit_ir(IrJump(target))
-          |> emit_ir(IrLabel(over))
-        }
-        None -> emit_ir(e, IrJumpIfTrue(target))
-      }
-    True, _ -> emit_ir(e, IrJumpIfTrue(target))
+  case when {
+    False -> emit_ir(e, IrJumpIfFalse(target))
+    True -> emit_ir(e, IrJumpIfTrue(target))
   }
 }
 

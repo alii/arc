@@ -10,7 +10,8 @@
 -module(arc_interp_ffi).
 -export([is_miss/1, is_tdz/1, is_undefined/1,
          truthy/1, lnot/1, nullish/1, typeof/1, typeof/2,
-         box_get/2, cell_of/2, instance_of/4]).
+         box_get/2, cell_of/2, ctor_prototype/2, list_of/2, instance_of/4,
+         capture_env/2, iter_step/2]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -79,7 +80,7 @@ typeof(_) -> miss.
 %% "function", any other object cell "object". A Proxy answers from its
 %% target (§10.5.14), so it misses rather than chase the chain here.
 typeof(Store, {?HANDLE_TAG, Id}) ->
-    case array:get(Id, element(?STORE_DATA, Store)) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case kind_tag(element(?SOBJECT_KIND, Slot)) of
                 ?KFN_TAG -> <<"function">>;
@@ -103,22 +104,109 @@ kind_tag(Kind) -> element(1, Kind).
 %% The store cell behind an object value (the fast call arms' callee read);
 %% any other value, or a freed id, misses.
 cell_of(Agent, {?HANDLE_TAG, Id}) ->
-    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
         ?STORE_FREE_SLOT -> miss;
         Slot -> Slot
     end;
 cell_of(_, _) -> miss.
 
+%% ctor_prototype(Agent, NewTarget) -> Handle | miss
+%% §10.1.13 GetPrototypeFromConstructor step 2, `Get(NewTarget,
+%% "prototype")`, when it is provably a plain read that yields an object:
+%% NewTarget is a function cell (bytecode / compiled / native) holding an
+%% own data "prototype" whose value is an object. Anything else (an
+%% accessor, a non-object value needing the realm fallback, a proxy or
+%% bound newTarget, a non-object) misses.
+ctor_prototype(Agent, {?HANDLE_TAG, Id}) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
+            Kind = kind_tag(element(?SOBJECT_KIND, Slot)),
+            case
+                Kind =:= ?KBYTECODE_TAG orelse Kind =:= ?KFN_TAG
+                orelse Kind =:= ?KNATIVE_TAG
+            of
+                true ->
+                    case element(?SOBJECT_PROPS, Slot) of
+                        #{{?KEY_NAMED, <<"prototype">>} := Prop}
+                          when element(1, Prop) =:= ?DATAPROP_TAG ->
+                            case element(?DATAPROP_VALUE, Prop) of
+                                {?HANDLE_TAG, _} = P -> P;
+                                _ -> miss
+                            end;
+                        _ -> miss
+                    end;
+                false -> miss
+            end;
+        _ -> miss
+    end;
+ctor_prototype(_, _) -> miss.
+
+%% list_of(Agent, V) -> [JsVal] | miss
+%% §7.3.20 CreateListFromArrayLike when every step is a plain read (the
+%% `f.apply(this, arguments)` / `f.apply(this, array)` shapes): V is an
+%% Array cell, or an Arguments cell whose only own string properties are
+%% its born "length" (an integer data property) and "callee" and whose
+%% parameters are unmapped, with no index property overrides and a dense
+%% element store holding every index below the length. A hole (which would
+%% read through the prototype chain), an accessor, or any other receiver
+%% miss.
+list_of(Agent, {?HANDLE_TAG, Id}) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, {?ELEMS_DENSE, A}, _}
+          when map_size(Props) =:= 0 ->
+            dense_list(A, Len);
+        {?SOBJECT_TAG, {?ARGUMENTSOBJ_TAG, _, Mapped}, _, Props, _,
+         {?ELEMS_DENSE, A}, _}
+          when map_size(Props) =:= 2, (Mapped =:= ?NONE orelse Mapped =:= {?SOME, []}) ->
+            case Props of
+                #{{?KEY_NAMED, <<"length">>} := Prop}
+                  when element(1, Prop) =:= ?DATAPROP_TAG,
+                       is_integer(element(?DATAPROP_VALUE, Prop)),
+                       is_map_key({?KEY_NAMED, <<"callee">>}, Props) ->
+                    dense_list(A, element(?DATAPROP_VALUE, Prop));
+                _ -> miss
+            end;
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, 0}, _, Props, _, _, _}
+          when map_size(Props) =:= 0 ->
+            [];
+        _ -> miss
+    end;
+list_of(_, _) -> miss.
+
+%% Elements 0..Len-1 of the dense store A, or miss on a hole / short store.
+dense_list(A, Len) ->
+    case array:size(A) >= Len of
+        false -> miss;
+        true -> dense_prefix(A, Len - 1, [])
+    end.
+
+dense_prefix(_, I, Acc) when I < 0 -> Acc;
+dense_prefix(A, I, Acc) ->
+    case array:get(I, A) of
+        ?ELEMS_HOLE -> miss;
+        V -> dense_prefix(A, I - 1, [V | Acc])
+    end.
+
 %% box_get(Agent, Slot) -> JsVal | miss
 %% The value in the SBox cell a captured local holds (GetBoxed). The TDZ
 %% sentinel, a local that is not a box handle, or a dangling handle miss.
 box_get(Agent, {?HANDLE_TAG, Id}) ->
-    case array:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
         {?SBOX_TAG, js_tdz} -> miss;
         {?SBOX_TAG, V} -> V;
         _ -> miss
     end;
 box_get(_, _) -> miss.
+
+%% capture_env(Descriptors, Locals) -> EnvTuple
+%% The environment a MakeClosure closes over: the parent frame's local at
+%% each `{capture_local, ParentIndex}` descriptor, in order, as one tuple.
+capture_env([], _) -> {};
+capture_env([{capture_local, I}], Locals) -> {element(I + 1, Locals)};
+capture_env([{capture_local, I}, {capture_local, J}], Locals) ->
+    {element(I + 1, Locals), element(J + 1, Locals)};
+capture_env(Descriptors, Locals) ->
+    list_to_tuple([element(I + 1, Locals) || {capture_local, I} <- Descriptors]).
 
 %% instance_of(Agent, V, Ctor, HasInstanceSym) -> boolean() | miss
 %% §13.10.2 InstanceofOperator when GetMethod(Ctor, @@hasInstance) provably
@@ -130,14 +218,16 @@ box_get(_, _) -> miss.
 %% cases run §7.3.22 OrdinaryHasInstance, inlined: a non-object V is false
 %% before "prototype" is read; Ctor's own data "prototype" must hold an
 %% object; then V's chain is compared to it by identity. A proxy hop, an
-%% accessor or absent "prototype", an own @@hasInstance, any other Ctor, or
-%% more than 64 hops miss.
+%% accessor or absent "prototype", an own @@hasInstance, any other Ctor, a
+%% TDZ sentinel V (a fused op read the local directly), or more than 64
+%% hops miss.
+instance_of(_, js_tdz, _, _) -> miss;
 instance_of(Agent, V, {?HANDLE_TAG, CId}, Sym) ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
     {?HANDLE_TAG, FP} =
         element(?PAIR_PROTO,
                 element(?REALM_FUNCTION, element(?AGENT_REALM, Agent))),
-    case array:get(CId, Data) of
+    case arc_rt_arena_ffi:get(CId, Data) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             Kind = kind_tag(element(?SOBJECT_KIND, Slot)),
             case
@@ -179,7 +269,7 @@ ordinary_has_instance(Data, Slot, FP, Sym, Fuel) ->
                 end.
 
 plain_above(Data, P, FP, Sym, Fuel) ->
-    case array:get(P, Data) of
+    case arc_rt_arena_ffi:get(P, Data) of
         %% A shape holds string keys only: no own symbols on a shaped hop.
         {?SSHAPED_TAG, _, ?NONE, _} -> true;
         {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, FP}}, _} -> true;
@@ -197,7 +287,7 @@ plain_above(Data, P, FP, Sym, Fuel) ->
 %% hop ([[GetPrototypeOf]] is a trap) or fuel exhaustion miss.
 chain_reaches(_, _, _, 0) -> miss;
 chain_reaches(Data, VId, PId, Fuel) ->
-    case array:get(VId, Data) of
+    case arc_rt_arena_ffi:get(VId, Data) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG;
                   element(1, Slot) =:= ?SSHAPED_TAG ->
             case element(1, Slot) =:= ?SOBJECT_TAG
@@ -215,3 +305,90 @@ chain_reaches(Data, VId, PId, Fuel) ->
             end;
         _ -> miss
     end.
+
+%% iter_step(Store, Rec) ->
+%%     {array_step, Done, Value, Store2} | {gen_step, Data} | protocol
+%% IteratorNext over an engine-built iterator record cell (rt/lang
+%% alloc_record: an Ordinary cell with "iterator" and "next" data props).
+%% When [[NextMethod]] is the intrinsic %ArrayIteratorPrototype%.next and
+%% [[Iterator]] a values ArrayIterator over a plain Array cell, §23.1.5.2.1
+%% is stepped here: a present own element (no index override) is the value
+%% and the iterator's index advances; past the end the iterator is marked
+%% exhausted (-1) and the step is done. When [[NextMethod]] is
+%% %GeneratorPrototype%.next on a generator object, its SGenerator data
+%% handle is answered for the interpreter to resume. A hole, another target
+%% kind, any other next/iterator pair, or a non-record answers `protocol`.
+-define(ITERATOR_KEY, {?KEY_NAMED, <<"iterator">>}).
+-define(NEXT_KEY, {?KEY_NAMED, <<"next">>}).
+iter_step(Store, {?HANDLE_TAG, RecId}) ->
+    Data = element(?STORE_DATA, Store),
+    case arc_rt_arena_ffi:get(RecId, Data) of
+        {?SOBJECT_TAG, ?ORDINARY, _, #{?ITERATOR_KEY := IP, ?NEXT_KEY := NP},
+         _, _, _}
+          when element(1, IP) =:= ?DATAPROP_TAG,
+               element(1, NP) =:= ?DATAPROP_TAG ->
+            case {element(?DATAPROP_VALUE, NP), element(?DATAPROP_VALUE, IP)} of
+                {{?HANDLE_TAG, NextId}, {?HANDLE_TAG, IterId}} ->
+                    iter_step_with(Store, Data, native_token(arc_rt_arena_ffi:get(NextId, Data)),
+                                   IterId, arc_rt_arena_ffi:get(IterId, Data));
+                _ -> protocol
+            end;
+        _ -> protocol
+    end;
+iter_step(_, _) -> protocol.
+
+%% The dispatch token of a KNative cell, `none` for anything else.
+native_token(Slot)
+  when element(1, Slot) =:= ?SOBJECT_TAG,
+       element(1, element(?SOBJECT_KIND, Slot)) =:= ?KNATIVE_TAG ->
+    element(?KNATIVE_TOKEN, element(?SOBJECT_KIND, Slot));
+native_token(_) -> none.
+
+iter_step_with(Store, Data, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterSlot)
+  when element(1, IterSlot) =:= ?SOBJECT_TAG ->
+    case element(?SOBJECT_KIND, IterSlot) of
+        {?ARRAYITER_TAG, _, Index, ?ARRAYITER_VALUES} when Index < 0 ->
+            {array_step, true, undefined, Store};
+        {?ARRAYITER_TAG, {?HANDLE_TAG, T} = Target, Index, ?ARRAYITER_VALUES} ->
+            case arc_rt_arena_ffi:get(T, Data) of
+                {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when Index >= Len ->
+                    array_iter_advance(Store, Data, IterId, IterSlot, Target, -1,
+                                       true, undefined);
+                {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _, Els, _} ->
+                    case map_size(Props) =/= 0
+                         andalso is_map_key({?KEY_INDEX, Index}, Props) of
+                        true -> protocol;
+                        false ->
+                            case iter_elem(Els, Index) of
+                                ?ELEMS_HOLE -> protocol;
+                                V ->
+                                    array_iter_advance(Store, Data, IterId, IterSlot,
+                                                       Target, Index + 1, false, V)
+                            end
+                    end;
+                _ -> protocol
+            end;
+        _ -> protocol
+    end;
+iter_step_with(_, _, ?TOKEN_GENERATOR_NEXT, _, IterSlot)
+  when element(1, IterSlot) =:= ?SOBJECT_TAG ->
+    case element(?SOBJECT_KIND, IterSlot) of
+        {?GENERATOROBJ_TAG, DataH} -> {gen_step, DataH};
+        _ -> protocol
+    end;
+iter_step_with(_, _, _, _, _) -> protocol.
+
+array_iter_advance(Store, Data, IterId, IterSlot, Target, Index, Done, V) ->
+    NewSlot = setelement(?SOBJECT_KIND, IterSlot,
+                         {?ARRAYITER_TAG, Target, Index, ?ARRAYITER_VALUES}),
+    {array_step, Done, V,
+     setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(IterId, NewSlot, Data))}.
+
+%% A dense store is a non-fixed `array`: past its size reads the hole.
+iter_elem({?ELEMS_DENSE, A}, Idx) -> array:get(Idx, A);
+iter_elem({?ELEMS_SPARSE, M}, Idx) ->
+    case M of
+        #{Idx := V} -> V;
+        _ -> ?ELEMS_HOLE
+    end;
+iter_elem(_, _) -> ?ELEMS_HOLE.

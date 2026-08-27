@@ -15,9 +15,9 @@ import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, Agent, FnFlags, GenSuspendedYield,
-  HostJob, JsStore, KBytecode, KHandle, NoElements, ResumeFrame, SGenerator,
-  SObject, classify, mk_object, mk_undefined,
+  type Agent, type Handle, type JsVal, Agent, BirthSettled, FnFlags,
+  GenSuspendedYield, HostJob, JsStore, KBytecode, KHandle, NoElements,
+  ResumeFrame, SGenerator, SObject, classify, mk_object, mk_undefined,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -58,6 +58,7 @@ fn empty_template() -> FuncTemplate {
     local_count: 1,
     bytecode: tuple_array.from_list([]),
     constants: tuple_array.from_list([]),
+    lines: tuple_array.from_list([]),
     functions: tuple_array.from_list([]),
     env_descriptors: [],
     is_strict: True,
@@ -242,7 +243,6 @@ pub fn parked_frame_roots_its_registers_test() {
       this:,
       home_object: mk_undefined(),
       eval_env: Some(env_h.id),
-      line: 1,
       parked: ParkedOp,
       call_args: [],
       realm: st.realm.id,
@@ -295,6 +295,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
           fields_init: None,
           realm: 0,
           unit: 0,
+          birth: BirthSettled,
         ),
         proto: None,
         props: dict.new(),

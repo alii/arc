@@ -667,9 +667,32 @@ pub fn guarded_div(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
 }
 
 /// JS `%`: probe the pure `num_mod` kernel (two BEAM numbers); on `miss`
-/// the full operator.
+/// the full operator. With a positive integer literal divisor and an integer
+/// dividend, §6.1.6.1.6 is `erlang:rem` (sign of the dividend, an inline
+/// instruction) except for the -0 a negative dividend's zero remainder must
+/// be, which the kernel produces.
 pub fn guarded_mod(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  miss_or(host("num_mod", [a, b]), host("mod", [a, b]))
+  let kernel = miss_or(host("num_mod", [a, b]), host("mod", [a, b]))
+  case b {
+    ir.ConstI32(c) if c > 0 -> {
+      use is_i <- then(bind(ir.TermTest(ir.IsInt, a)))
+      bind_if(
+        is_i,
+        {
+          use r <- then(host("erl_rem", [a, b]))
+          use zero <- then(bind(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))))
+          use neg_zero <- then(bind_if_i32(
+            zero,
+            bind(ir.NumTerm(ir.NLt, a, ir.ConstI32(0))),
+            pure(ir.ConstI32(0)),
+          ))
+          bind_if(neg_zero, kernel, then(pure(r), mark_number))
+        },
+        kernel,
+      )
+    }
+    _ -> kernel
+  }
 }
 
 /// JS unary `-`: a BEAM number → the pure `num_neg` kernel (a number again,

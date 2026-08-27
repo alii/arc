@@ -41,6 +41,7 @@ import arc/rt/types.{
   mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
+import gleam/bool
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -60,6 +61,7 @@ fn linked_ops(ops: JsOps(Agent)) -> JsOps(Agent) {
     ..ops,
     eval_hook: eval_source,
     call_bytecode:,
+    bind_call:,
     construct_bytecode:,
     resume_frame:,
   )
@@ -88,13 +90,11 @@ fn fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
 }
 
 /// The loop's callbacks into this module.
-fn drive() -> call.Drive {
-  call.Drive(start_coroutine:)
-}
+const drive = call.Drive(start_coroutine:)
 
 /// Drive `state` until its call stack empties or it parks.
 fn execute(state: State) -> Outcome {
-  case interpreter.execute_inner(state, drive()) {
+  case interpreter.execute_inner(state, drive) {
     Ok(#(Completed(NormalCompletion(v)), s)) -> Finished(Ok(v), s)
     Ok(#(Completed(ThrowCompletion(e)), s)) -> Finished(Error(e), s)
     Ok(#(Suspended(kind, v), s)) -> Parked(kind, v, s)
@@ -223,38 +223,120 @@ pub fn run_script(
 
 // -- JsOps.call_bytecode / construct_bytecode ----------------------------------
 
-/// `JsOps.call_bytecode`: [[Call]] of the bytecode cell `fn_h` as a fresh
-/// root activation over `this` and `args`, run until ITS call stack empties,
-/// inside the caller's `t_call` bracket (which owns the depth unit). A throw
-/// comes back as `Error`, never as a raise. §10.2.1.1 PrepareForOrdinaryCall
-/// step 5: the callee's [[Realm]] is the running realm while its body runs
-/// and the caller's is restored once it unwinds.
+/// `JsOps.call_bytecode`: [[Call]] of the bytecode cell `fn_h` (its `kind`
+/// already read by the caller) as a fresh root activation over `this` and
+/// `args`, run until ITS call stack empties. The activation's unit of
+/// `call_depth` is taken here, as `rt/call.t_call` does for every other
+/// callee kind: RangeError at `limits.max_call_depth`. A throw comes back as
+/// `Error`, never as a raise. §10.2.1.1 PrepareForOrdinaryCall step 5: the
+/// callee's [[Realm]] is the running realm while its body runs and the
+/// caller's is restored once it unwinds.
 pub fn call_bytecode(
   st: Agent,
   fn_h: Handle,
+  kind: types.ObjKind,
   this: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsVal, JsVal), Agent) {
-  let assert SObject(
-    kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
-    ..,
-  ) = rt_store.t_cell_get(st, fn_h)
-    as "call_bytecode: handle is not a KBytecode cell"
-  case realm == st.realm.id {
-    True ->
+  let assert KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..) =
+    kind
+    as "call_bytecode: not a KBytecode kind"
+  case st.call_depth >= limits.max_call_depth, realm == st.realm.id {
+    True, _ -> depth_exceeded(st)
+    False, True ->
       run_call(st, fn_h, template, env, home_object, flags, unit, this, args)
-    False -> {
+    False, False -> {
       use st <- rt_realm.with_realm(st, realm)
       run_call(st, fn_h, template, env, home_object, flags, unit, this, args)
     }
   }
 }
 
-/// A [[Call]] root activation: `enter_root` binds `this` and refuses a class
-/// constructor; a generator or async body starts through the coroutine
-/// driver and completes with its generator object / promise; anything else
-/// runs to its `Return`, whose value is the result as-is (§10.2.2's return
-/// rules apply to constructs only). This owns the backstop.
+/// `JsOps.bind_call`: `call_bytecode` of `fn_h` (of kind `kind`) over
+/// `this`, taking the args later and raising its throw. What does not vary
+/// with the args is decided once: a plain function of the running realm goes
+/// straight to `run_plain_call` each time; anything else through
+/// `call_bytecode` whole.
+pub fn bind_call(
+  st: Agent,
+  fn_h: Handle,
+  kind: types.ObjKind,
+  this: JsVal,
+) -> fn(Agent, List(JsVal)) -> #(JsVal, Agent) {
+  let assert KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..) =
+    kind
+    as "bind_call: not a KBytecode kind"
+  case
+    realm == st.realm.id
+    && !template.is_generator
+    && !template.is_async
+    && !template.is_class_constructor
+  {
+    True -> {
+      let callee =
+        call.root_callee(fn_h, template, env, home_object, flags, unit)
+      let new_target = mk_undefined()
+      fn(st, args) { call_bound(st, callee, this, args, new_target) }
+    }
+    False -> fn(st, args) { raised(call_bytecode(st, fn_h, kind, this, args)) }
+  }
+}
+
+/// One call through `bind_call`'s binding of a plain, callable function of
+/// the running realm: `run_plain_call` with the depth check in front and
+/// the throw raised rather than returned.
+fn call_bound(
+  st: Agent,
+  callee: call.RootCallee,
+  this: JsVal,
+  args: List(JsVal),
+  new_target: JsVal,
+) -> #(JsVal, Agent) {
+  let frames = st.frames
+  let depth = st.call_depth
+  case depth >= limits.max_call_depth {
+    True -> raised(depth_exceeded(st))
+    False ->
+      case
+        ffi.guard_state(
+          complete_call,
+          call.root_state(st, callee, this, args, new_target),
+        )
+      {
+        ffi.Ok(value: Ok(v), agent:) -> #(
+          v,
+          Agent(..agent, frames:, call_depth: depth),
+        )
+        ffi.Ok(value: Error(e), agent:) ->
+          rt_store.t_throw(Agent(..agent, frames:, call_depth: depth), e)
+        ffi.Threw(agent:, thrown:) ->
+          rt_store.t_throw(Agent(..agent, frames:, call_depth: depth), thrown)
+      }
+  }
+}
+
+fn raised(outcome: #(Result(JsVal, JsVal), Agent)) -> #(JsVal, Agent) {
+  case outcome {
+    #(Ok(v), st) -> #(v, st)
+    #(Error(e), st) -> rt_store.t_throw(st, e)
+  }
+}
+
+/// The RangeError completion a call refused at `limits.max_call_depth`
+/// answers with, thrown in the caller's frame.
+fn depth_exceeded(st: Agent) -> #(Result(JsVal, JsVal), Agent) {
+  let #(e, st) =
+    st.store.ops.new_error(st, RangeErr, "Maximum call stack size exceeded")
+  #(Error(e), st)
+}
+
+/// A [[Call]] root activation: `enter_root` binds `this`, refuses a class
+/// constructor and takes the depth unit and `Error.stack` frame; a generator
+/// or async body starts through the coroutine driver and completes with its
+/// generator object / promise; anything else runs to its `Return`, whose
+/// value is the result as-is (§10.2.2's return rules apply to constructs
+/// only). This owns the backstop, and hands back the agent trued up to the
+/// frames and depth it entered with.
 fn run_call(
   st: Agent,
   fn_h: Handle,
@@ -266,27 +348,16 @@ fn run_call(
   this: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsVal, JsVal), Agent) {
-  let m = mark(st)
-  case
-    call.enter_root(
-      st,
-      fn_h,
-      template,
-      env,
-      home_object,
-      flags,
-      unit,
-      this,
-      args,
-      mk_undefined(),
-    )
-  {
-    Error(#(thrown, st)) -> #(Error(thrown), st)
-    Ok(state) ->
-      case template.is_generator || template.is_async {
+  let callee = call.root_callee(fn_h, template, env, home_object, flags, unit)
+  case template.is_generator || template.is_async {
+    False -> run_plain_call(st, callee, this, args)
+    True -> {
+      let m = mark(st)
+      case call.enter_root(st, callee, this, args, mk_undefined()) {
+        Error(#(thrown, st)) -> #(Error(thrown), st)
         // `start_coroutine` gives the body its own `Error.stack` frame:
         // drop the one `enter_root` pushed rather than show it twice.
-        True -> {
+        Ok(state) -> {
           let agent = call.pop_frame_info(state.agent)
           let body = fn(agent) {
             let #(res, s) =
@@ -298,35 +369,52 @@ fn run_call(
           }
           backstopped(agent, m, body, Error)
         }
-        False ->
-          case ffi.guard_state(complete_call, state) {
-            ffi.Ok(value:, agent:) -> #(value, settle(agent, m))
-            ffi.Threw(agent:, thrown:) -> #(Error(thrown), settle(agent, m))
-          }
+      }
+    }
+  }
+}
+
+/// `run_call` of a plain (non-coroutine) function: enter the root frame and
+/// run it to its `Return` under the backstop, then true the agent up to the
+/// frames and depth it entered with.
+fn run_plain_call(
+  st: Agent,
+  callee: call.RootCallee,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(Result(JsVal, JsVal), Agent) {
+  let frames = st.frames
+  let depth = st.call_depth
+  case call.enter_root(st, callee, this, args, mk_undefined()) {
+    Error(#(thrown, st)) -> #(Error(thrown), st)
+    Ok(state) ->
+      case ffi.guard_state(complete_call, state) {
+        ffi.Ok(value:, agent:) -> #(
+          value,
+          Agent(..agent, frames:, call_depth: depth),
+        )
+        ffi.Threw(agent:, thrown:) -> #(
+          Error(thrown),
+          Agent(..agent, frames:, call_depth: depth),
+        )
       }
   }
 }
 
-/// The body of a plain root call under the backstop: run to the `Return`
-/// and pop the activation's `Error.stack` frame. `complete` unrolled for
-/// the callback path, so a normal return costs no intermediate wrappers.
+/// The body of a plain root call under the backstop: run to the `Return`.
+/// `complete` unrolled for the callback path, so a normal return costs no
+/// intermediate wrappers; the caller leaves the activation's frame.
 fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
-  case interpreter.execute_inner(state, drive()) {
-    Ok(#(Completed(NormalCompletion(v)), s)) -> #(
-      Ok(v),
-      call.pop_frame_info(s.agent),
-    )
-    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(
-      Error(e),
-      call.pop_frame_info(s.agent),
-    )
+  case interpreter.execute_inner(state, drive) {
+    Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s.agent)
+    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s.agent)
     Ok(#(Suspended(kind, _), s)) -> {
       let #(res, s) = fault(s, SuspensionLeak(site: "run_bytecode", kind:))
-      #(res, call.pop_frame_info(s.agent))
+      #(res, s.agent)
     }
     Error(err) -> {
       let #(res, s) = fault(state, err)
-      #(res, call.pop_frame_info(s.agent))
+      #(res, s.agent)
     }
   }
 }
@@ -334,20 +422,23 @@ fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
 /// `JsOps.construct_bytecode`: §10.2.2 [[Construct]] of the bytecode cell
 /// `fn_h` (IsConstructor already checked by `t_construct`). `t_construct`
 /// dispatches here unbracketed, so the construct's unit of `call_depth` is
-/// taken here, as `rt/call.apply_ctor` does for a compiled constructor:
-/// RangeError at `limits.max_call_depth`, and the body's root-`Return`
-/// safepoint kept shut over the caller's registers. The result is always an
-/// object: `root_this`/`finish_root` create the receiver and apply the
-/// return override, so a non-object here is an engine fault.
+/// taken here (by `enter_root`), as `rt/call.apply_ctor` does for a compiled
+/// constructor: RangeError at `limits.max_call_depth`, and the body's
+/// root-`Return` safepoint kept shut over the caller's registers. The result
+/// is always an object: `root_this`/`finish_root` create the receiver and
+/// apply the return override, so a non-object here is an engine fault.
 pub fn construct_bytecode(
   st: Agent,
   fn_h: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  let st = rt_store.t_enter_call(st)
+  use <- bool.lazy_guard(st.call_depth >= limits.max_call_depth, fn() {
+    let #(e, st) =
+      st.store.ops.new_error(st, RangeErr, "Maximum call stack size exceeded")
+    rt_store.t_throw(st, e)
+  })
   let #(completion, st) = run_construct(st, fn_h, args, new_target)
-  let st = rt_store.t_leave_call(st)
   let #(v, st) = case completion {
     NormalCompletion(v) -> #(v, st)
     ThrowCompletion(e) -> rt_store.t_throw(st, e)
@@ -369,8 +460,8 @@ pub fn construct_bytecode(
 /// The body of a [[Construct]] of the bytecode cell `cell`, run as a fresh
 /// root activation until its call stack empties, with the receiver
 /// `root_this` creates and the constructor return rules applied to the
-/// result. The enclosing bracket owns the depth; `enter_root` owns the
-/// `Error.stack` frame; this owns the backstop.
+/// result. `enter_root` owns the depth unit and the `Error.stack` frame;
+/// this owns the backstop.
 ///
 /// §10.2.2 [[Construct]] steps 1-3 create the receiver in the caller's
 /// context, so `root_this` runs before the realm switch. §10.2.1.1
@@ -396,20 +487,9 @@ fn run_construct(
     Ok(#(this, kind, st)) -> {
       let #(outcome, st) = {
         use st <- rt_realm.with_realm(st, realm)
-        case
-          call.enter_root(
-            st,
-            cell,
-            template,
-            env,
-            home_object,
-            flags,
-            unit,
-            this,
-            args,
-            new_target,
-          )
-        {
+        let callee =
+          call.root_callee(cell, template, env, home_object, flags, unit)
+        case call.enter_root(st, callee, this, args, new_target) {
           Error(#(thrown, agent)) -> #(
             RootSettled(ThrowCompletion(thrown)),
             agent,
@@ -417,10 +497,9 @@ fn run_construct(
           Ok(state) -> {
             let body = fn(agent) {
               let #(res, s) = complete(State(..state, agent:), "run_bytecode")
-              let agent = call.pop_frame_info(s.agent)
               case res {
-                Ok(v) -> #(RootReturned(v, s), agent)
-                Error(e) -> #(RootSettled(ThrowCompletion(e)), agent)
+                Ok(v) -> #(RootReturned(v, s), s.agent)
+                Error(e) -> #(RootSettled(ThrowCompletion(e)), s.agent)
               }
             }
             backstopped(state.agent, m, body, escaped)

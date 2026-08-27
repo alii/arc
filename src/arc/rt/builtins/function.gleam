@@ -368,8 +368,9 @@ pub fn create_list_from_array_like(
   st: Agent,
   arr: JsVal,
 ) -> #(List(JsVal), Agent) {
-  case classify(arr) {
-    KHandle(h) -> {
+  case arg_list(st, arr), classify(arr) {
+    ArgsHit(args), _ -> #(args, st)
+    ArgsSlow, KHandle(h) -> {
       let #(len, st) = case rt_store.t_cell_get(st, h) {
         SObject(kind: rt_types.ArrayObj(length:), ..) -> #(length, st)
         _ -> {
@@ -380,13 +381,23 @@ pub fn create_list_from_array_like(
       }
       collect_array_like(st, arr, 0, len, [])
     }
-    _ ->
+    ArgsSlow, _ ->
       rt_val.t_throw_type_error(
         st,
         "CreateListFromArrayLike called on non-object",
       )
   }
 }
+
+/// The whole argument list read straight off a plain Array or Arguments
+/// cell, or `ArgsSlow` when any index needs the full [[Get]].
+type ArgList {
+  ArgsHit(List(JsVal))
+  ArgsSlow
+}
+
+@external(erlang, "arc_rt_array_ffi", "arg_list")
+fn arg_list(st: Agent, arr: JsVal) -> ArgList
 
 fn collect_array_like(
   st: Agent,
@@ -414,11 +425,13 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KCompiled(..), props:, ..)
-        | SObject(kind: KBytecode(..), props:, ..)
-        | SObject(kind: KNative(..), props:, ..) -> {
-          let name = case dict.get(props, Named("name")) {
-            Ok(DataProperty(value: v, ..)) ->
+        SObject(kind: KCompiled(..), ..)
+        | SObject(kind: KBytecode(..), ..)
+        | SObject(kind: KNative(..), ..) -> {
+          let name = case
+            rt_obj.t_ordinary_own_property(st, h, StringKey(Named("name")))
+          {
+            Some(DataProperty(value: v, ..)) ->
               case classify(v) {
                 KStr(n) -> n
                 _ -> ""

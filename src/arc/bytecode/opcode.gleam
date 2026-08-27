@@ -76,13 +76,6 @@ pub type TryKind(target) {
 /// Resolved bytecode instruction. All variable references are numeric indices,
 /// all jump targets are absolute PC addresses. The VM only sees these.
 pub type Op {
-  // -- Source mapping --
-  /// Record the source line of the following instructions into
-  /// `state.current_line`. Emitted by the compiler at the start of each
-  /// statement whose line differs from the previous one. Used to build the
-  /// line numbers in `Error.prototype.stack`. No stack effect; pc+1.
-  SetLine(line: Int)
-
   // -- Literals + Stack --
   PushConst(index: Int)
   Pop
@@ -241,6 +234,11 @@ pub type Op {
 
   // -- Object/Array Construction --
   NewObject
+  /// The `{k1: v1, .., kn: vn}` head of an object literal: pops the n values
+  /// ([vn, .., v1, ..] -> [obj, ..]) into a fresh %Object.prototype% object
+  /// whose own data properties are the distinct Named `keys` in creation
+  /// order. `keys` is stored last key first, the order the values pop in.
+  NewObjectWith(keys: List(PropertyKey), count: Int)
   DefineField(key: PropertyKey)
   DefineFieldComputed
   /// §7.1.19 ToPropertyKey. Stack: [key, ..] → [key', ..]. Runs
@@ -328,14 +326,26 @@ pub type Op {
   CallMethod(arity: Int)
   /// `new ctor(args)` and `super(args)`. Stack:
   /// [arg_n, ..., arg_1, new_target, ctor, ..] → [instance, ..].
-  /// §10.1.13 [[Construct]] takes (args, newTarget); for plain `new X()` the
-  /// emitter Dups X so newTarget == ctor, for `super()` it pushes the lexical
-  /// new.target slot. Mirrors QuickJS OP_call_constructor.
+  /// §10.1.13 [[Construct]] takes (args, newTarget): `super()` pushes the
+  /// lexical new.target slot, a spread `new X(...xs)` Dups X. Mirrors
+  /// QuickJS OP_call_constructor.
   CallConstructor(arity: Int)
+  /// [arg_n, ..., arg_1, ctor, ..] → [instance, ..]: plain `new X(args)`,
+  /// CallConstructor with newTarget = ctor read once instead of Dup'd.
+  CallNew(arity: Int)
   /// [args_array, callee] → [result]; this=undefined. Spread-call path.
   CallApply
   /// [args_array, callee, receiver] → [result]; this=receiver. Spread-method-call.
   CallMethodApply
+  /// `f.apply(t, arguments)` in a function whose `arguments` is used for
+  /// nothing else, so the object is never built up front. Stack:
+  /// [t, apply_fn, f, ..] → [result, ..]. When `apply_fn` is
+  /// %Function.prototype.apply% and locals[slot] holds no arguments object
+  /// yet, calls f with the activation's own argument list directly.
+  /// Otherwise materialises the arguments object into locals[slot] (once;
+  /// `simple_params` as for CreateArguments) and makes the ordinary
+  /// two-argument method call.
+  ApplyArguments(slot: Int, simple_params: Bool)
   /// [args_array, new_target, ctor] → [new instance]. Spread-new path.
   CallConstructorApply
   Return
@@ -345,6 +355,8 @@ pub type Op {
   JumpIfFalse(target: Pc)
   JumpIfTrue(target: Pc)
   JumpIfNullish(target: Pc)
+  /// Pop; jump when the value is neither null nor undefined.
+  JumpIfNotNullish(target: Pc)
   /// Push (pc+1) onto operand stack as return address, jump to target.
   /// QuickJS OP_gosub — used to enter the finally block as a subroutine.
   Gosub(target: Pc)
@@ -402,25 +414,111 @@ pub type Op {
   IncLocal(index: Int)
   /// Statement-position postfix `i--;` — same as IncLocal with Sub.
   DecLocal(index: Int)
+  /// Branch on a plain local's truthiness: GetLocal(index);
+  /// JumpIfFalse(target) (`when` False) / JumpIfTrue(target) (`when` True).
+  JumpIfLocal(index: Int, target: Pc, when: Bool)
+  /// A loop's update and back edge: IncLocal(index); Jump(target).
+  IncLocalJump(index: Int, target: Pc)
+  /// A counted loop's update and bottom test in one step:
+  /// IncLocal(index); CmpLocalConstJump(index, const_index, kind, target, when).
+  IncLocalCmpConstJump(
+    index: Int,
+    const_index: Int,
+    kind: PureBinOp,
+    target: Pc,
+    when: Bool,
+  )
+  /// IncLocal(index); CmpLocalLocalJump(index, right, kind, target, when).
+  IncLocalCmpLocalJump(
+    index: Int,
+    right: Int,
+    kind: PureBinOp,
+    target: Pc,
+    when: Bool,
+  )
   /// Fused compare-and-branch:
-  /// GetLocal(left); GetLocal(right); BinOp(kind); JumpIfFalse(target).
+  /// GetLocal(left); GetLocal(right); BinOp(kind); JumpIfFalse(target) (`when`
+  /// False) or …; JumpIfTrue(target) (`when` True) — control goes to
+  /// `target` when the comparison's result equals `when`.
   /// Only emitted for the relational and equality kinds — hence the
   /// `PureBinOp` field: an `Add`/`In`/`InstanceOf` here would be a compile
   /// error, not a runtime surprise for `binop_direct`. Reads the locals
   /// directly, so both the fast kernel and the step handler do the TDZ
   /// check GetLocal would have done.
-  CmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, target: Pc)
+  CmpLocalLocalJump(
+    left: Int,
+    right: Int,
+    kind: PureBinOp,
+    target: Pc,
+    when: Bool,
+  )
   /// Same with a constant right operand:
-  /// GetLocal(left); PushConst(const_index); BinOp(kind); JumpIfFalse(target).
-  CmpLocalConstJump(left: Int, const_index: Int, kind: PureBinOp, target: Pc)
+  /// GetLocal(left); PushConst(const_index); BinOp(kind); JumpIf*(target).
+  CmpLocalConstJump(
+    left: Int,
+    const_index: Int,
+    kind: PureBinOp,
+    target: Pc,
+    when: Bool,
+  )
+  /// Both operands on the stack: BinOp(kind); JumpIf*(target).
+  /// [right, left, ..] → [..].
+  CmpJump(kind: PureBinOp, target: Pc, when: Bool)
+  /// PushConst(const_index); BinOp(kind); JumpIf*(target). [left, ..] → [..].
+  CmpConstJump(const_index: Int, kind: PureBinOp, target: Pc, when: Bool)
   /// `local.x` (incl. `this.x`): GetLocal(index); GetField(key).
   /// [..] → [val, ..]. TDZ check on the local, then the full GetField.
   GetLocalField(index: Int, key: PropertyKey)
   /// `local.m(` — GetLocal(index); GetField2(key). [..] → [val, obj, ..].
   GetLocalField2(index: Int, key: PropertyKey)
+  /// `o.m()`: GetField2(key); CallMethod(0). [obj, ..] → [result, ..].
+  GetFieldCall(key: PropertyKey)
+  /// `o.m(local)`: GetField2(key); GetLocal(arg); CallMethod(1).
+  /// [obj, ..] → [result, ..]. The method is read before the argument's TDZ
+  /// check, as in the unfused sequence.
+  GetFieldCall1(key: PropertyKey, arg: Int)
+  /// `local.m()`: GetLocalField2(index, key); CallMethod(0).
+  /// [..] → [result, ..].
+  GetLocalFieldCall(index: Int, key: PropertyKey)
   /// Statement-position `o.x = v;`: PutField(key); Pop.
   /// [val, obj, ..] → [..].
   PutFieldPop(key: PropertyKey)
+  /// `local.x = local2;` (incl. `this.x = arg;`): GetLocal(obj);
+  /// GetLocal(value); PutFieldPop(key). Stack-neutral; TDZ checks in that
+  /// order.
+  PutLocalLocalField(obj: Int, value: Int, key: PropertyKey)
+  /// `local.x = <const>;`: GetLocal(obj); PushConst(const_index);
+  /// PutFieldPop(key). Stack-neutral.
+  PutLocalConstField(obj: Int, const_index: Int, key: PropertyKey)
+  /// PushConst(const_index); BinOp(kind). [left, ..] → [result, ..].
+  BinOpConst(kind: Classified, const_index: Int)
+  /// GetLocal(index); BinOp(kind). [left, ..] → [result, ..]. TDZ check on
+  /// the local, then the full BinOp.
+  BinOpLocal(kind: Classified, index: Int)
+  /// GetLocal(left); GetLocal(right); BinOp(kind). [..] → [result, ..].
+  BinOpLocalLocal(kind: Classified, left: Int, right: Int)
+  /// GetLocal(left); PushConst(const_index); BinOp(kind). [..] → [result, ..].
+  BinOpLocalConst(kind: Classified, left: Int, const_index: Int)
+  /// Value-position postfix `i++` on a plain local: GetLocal(i);
+  /// UnaryOp(Pos); Dup; PushConst(1); BinOp(Add); PutLocal(i).
+  /// [..] → [ToNumber(old), ..], the local holding old + 1.
+  PostIncLocal(index: Int)
+  /// Value-position postfix `i--`: same as PostIncLocal with Sub.
+  PostDecLocal(index: Int)
+  /// Statement-position `a[i] = v;`: PutElem; Pop. [val, key, obj, ..] → [..].
+  PutElemPop
+  /// GetLocal(obj); GetLocal(key); GetElem. [..] → [value, ..].
+  GetElemLocals(obj: Int, key: Int)
+  /// GetLocalField(index, key); BinOp(kind). [left, ..] → [result, ..].
+  BinOpLocalField(kind: Classified, index: Int, key: PropertyKey)
+  /// BinOp(kind); PutLocal(dst). [right, left, ..] → [..].
+  BinOpPut(kind: Classified, dst: Int)
+  /// BinOpConst(kind, const_index); PutLocal(dst). [left, ..] → [..].
+  BinOpConstPut(kind: Classified, const_index: Int, dst: Int)
+  /// BinOpLocal(kind, index); PutLocal(dst). [left, ..] → [..].
+  BinOpLocalPut(kind: Classified, index: Int, dst: Int)
+  /// BinOpLocalLocal(kind, left, right); PutLocal(dst). Stack untouched.
+  BinOpLocalLocalPut(kind: Classified, left: Int, right: Int, dst: Int)
 
   // -- Iteration --
   ForInStart
@@ -698,6 +796,13 @@ pub type IrOp {
   /// Already-final instruction: nothing left to resolve. `resolve` unwraps it.
   IrFinal(op: Op)
 
+  // -- Source mapping --
+  /// The instructions that follow belong to source line `line`. Occupies no
+  /// PC slot: `resolve` drops it and records the line against their PCs in
+  /// `FuncTemplate.lines`, which `Error.prototype.stack` reads. Emitted at
+  /// the start of each statement whose line differs from the previous one.
+  IrLine(line: Int)
+
   // -- Labels and jumps (label ids resolved to PCs in Phase 3) --
   /// A jump target marker. Occupies no PC slot; dropped by `resolve`.
   IrLabel(id: LabelId)
@@ -705,6 +810,7 @@ pub type IrOp {
   IrJumpIfFalse(label: LabelId)
   IrJumpIfTrue(label: LabelId)
   IrJumpIfNullish(label: LabelId)
+  IrJumpIfNotNullish(label: LabelId)
   IrPushTry(catch_label: LabelId, kind: TryKind(LabelId))
   IrGosub(label: LabelId)
   /// See Op.AsyncYieldStarNext — `after_label` becomes `after_pc`.
@@ -738,11 +844,36 @@ pub type IrOp {
 
   // -- Fused compare-and-branch superinstructions (produced by the resolver
   // peephole; label targets, hence not `IrFinal`). See the matching Ops. --
-  IrCmpLocalLocalJump(left: Int, right: Int, kind: PureBinOp, label: LabelId)
+  IrCmpLocalLocalJump(
+    left: Int,
+    right: Int,
+    kind: PureBinOp,
+    label: LabelId,
+    when: Bool,
+  )
   IrCmpLocalConstJump(
     left: Int,
     const_index: Int,
     kind: PureBinOp,
     label: LabelId,
+    when: Bool,
+  )
+  IrCmpJump(kind: PureBinOp, label: LabelId, when: Bool)
+  IrCmpConstJump(const_index: Int, kind: PureBinOp, label: LabelId, when: Bool)
+  IrIncLocalJump(index: Int, label: LabelId)
+  IrJumpIfLocal(index: Int, label: LabelId, when: Bool)
+  IrIncLocalCmpConstJump(
+    index: Int,
+    const_index: Int,
+    kind: PureBinOp,
+    label: LabelId,
+    when: Bool,
+  )
+  IrIncLocalCmpLocalJump(
+    index: Int,
+    right: Int,
+    kind: PureBinOp,
+    label: LabelId,
+    when: Bool,
   )
 }

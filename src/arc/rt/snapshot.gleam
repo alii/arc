@@ -18,7 +18,7 @@
 //// not an authenticity check, so only feed it bytes this library produced.
 
 import arc/host_hooks.{type HostHooks}
-import arc/internal/tree_array
+import arc/rt/arena
 import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/store as rt_store
@@ -44,7 +44,9 @@ import gleam/set.{type Set}
 ///   4     interpreter heap inside the `{arc_snapshot, ..}` term
 ///   5     shared-store image
 ///   6     parse ids: `unit_uid` counter, `unit` on closures and frames
-pub const abi_version = 6
+///   7     code templates carry a per-PC line table instead of line ops;
+///         parked frames drop their line
+pub const abi_version = 7
 
 /// Why `serialize` refused to write the agent.
 pub type SnapshotError {
@@ -145,7 +147,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
   ) = store
   let microtasks = types.jq_to_list(microtasks)
   let data =
-    tree_array.sparse_fold(
+    arena.fold(
       fn(id, slot, acc) { dict.insert(acc, id, drop_regexp_matcher(slot)) },
       dict.new(),
       data,
@@ -216,8 +218,8 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     unit_uid:,
   ) = image
   JsStore(
-    data: dict.fold(data, rt_store.data_new(), fn(acc, id, slot) {
-      tree_array.set(id, slot, acc)
+    data: dict.fold(data, arena.new(), fn(acc, id, slot) {
+      arena.set(id, slot, acc)
     }),
     next:,
     pinned_roots:,

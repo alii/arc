@@ -311,35 +311,7 @@ fn set_fn_name_if_empty(
   prefix: String,
   name: String,
 ) -> Agent {
-  rt_store.t_cell_update(st, fn_h, fn(slot) {
-    case slot {
-      SObject(kind: KCompiled(..), props:, ..)
-      | SObject(kind: KBytecode(..), props:, ..) ->
-        case dict.get(props, Named("name")) {
-          Ok(DataProperty(value: v, seq:, ..)) ->
-            case classify(v) {
-              KStr("") ->
-                SObject(
-                  ..slot,
-                  props: dict.insert(
-                    props,
-                    Named("name"),
-                    DataProperty(
-                      value: mk_string(prefix <> name),
-                      writable: False,
-                      enumerable: False,
-                      configurable: True,
-                      seq:,
-                    ),
-                  ),
-                )
-              _ -> slot
-            }
-          _ -> slot
-        }
-      _ -> slot
-    }
-  })
+  rt_obj.t_name_if_anonymous(st, fn_h, prefix <> name)
 }
 
 // ── C5: private-element install (§7.3.28/§7.3.29) ───────────────────────────

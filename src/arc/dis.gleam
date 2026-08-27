@@ -12,6 +12,7 @@
 ///
 /// Jump targets are absolute PCs (phase 3 already resolved them), and every
 /// line is prefixed with its own PC, so control flow can be followed by eye.
+/// A `.line N` row marks where the ops of source line N begin.
 /// Ops that carry an index into a side table get a trailing `; ...` comment
 /// resolving it: `PushConst`/`CmpLocalConstJump` show the constant, and
 /// `MakeClosure` shows the nested function's name.
@@ -113,8 +114,16 @@ fn render(template: FuncTemplate, label: String, path: String) -> List(String) {
   let ops = tuple_array.to_list(template.bytecode)
   let width = pc_width(list.length(ops))
 
-  let code =
-    list.index_map(ops, fn(op, pc) { format_op(pc, width, op, template) })
+  let #(_, code) =
+    list.index_fold(ops, #(0, []), fn(acc, op, pc) {
+      let #(prev_line, rows) = acc
+      let row = format_op(pc, width, op, template)
+      case bytecode.line_at(template, pc) {
+        line if line == prev_line -> #(line, [row, ..rows])
+        line -> #(line, [row, line_marker(width, line), ..rows])
+      }
+    })
+  let code = list.reverse(code)
 
   let children =
     tuple_array.to_list(template.functions)
@@ -170,6 +179,11 @@ fn flags(template: FuncTemplate) -> String {
   }
 }
 
+/// `      .line 3`: the ops from here on were compiled from source line 3.
+fn line_marker(width: Int, line: Int) -> String {
+  "  " <> string.repeat(" ", width) <> "  .line " <> int.to_string(line)
+}
+
 /// `  12  PushConst(0)          ; "hello"`
 fn format_op(pc: Int, width: Int, op: Op, template: FuncTemplate) -> String {
   let addr = string.pad_start(int.to_string(pc), width, " ")
@@ -187,7 +201,12 @@ fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
   case op {
     opcode.PushConst(index) ->
       Some(resolve(index, template.constants, constant_to_string))
-    opcode.CmpLocalConstJump(_, index, _, _) ->
+    opcode.CmpLocalConstJump(_, index, _, _, _)
+    | opcode.IncLocalCmpConstJump(_, index, _, _, _)
+    | opcode.CmpConstJump(index, _, _, _)
+    | opcode.BinOpConst(_, index)
+    | opcode.BinOpConstPut(_, index, _)
+    | opcode.BinOpLocalConst(_, _, index) ->
       Some(resolve(index, template.constants, constant_to_string))
     opcode.MakeClosure(index) ->
       Some(resolve(index, template.functions, child_label))

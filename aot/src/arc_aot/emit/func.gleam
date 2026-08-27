@@ -1284,9 +1284,9 @@ fn refs_args_body(body: FnBody) -> Bool {
 
 /// Some(#(arity, needs_this)) when this function can also be compiled as a
 /// positional-args closure that skips _frame/_args entirely: plain FnDecl/
-/// FnExpr/Arrow (non-gen, non-async), every param a bare identifier (no rest/
-/// default/destructure), and the body never reads `arguments`, `new.target`,
-/// or `super`. `needs_this=False` → `jsf_N_s([caps.., p0..pN-1])`;
+/// FnExpr/Arrow/Method or base ClassCtor (non-gen, non-async), every param a
+/// bare identifier (no rest/default/destructure), and the body never reads
+/// `arguments`, `new.target`, or `super`. `needs_this=False` → `jsf_N_s([caps.., p0..pN-1])`;
 /// `needs_this=True` → `jsf_N_t([caps.., _this, p0..pN-1])` (body reads ONLY
 /// `this` from the frame — passed positionally, no 4-tuple). Over-rejection is
 /// a perf miss only — the full-ABI closure is always emitted alongside.
@@ -1303,6 +1303,10 @@ fn is_simple_abi_eligible(
     // overwritten via RefActiveFunc (=_frame[1]), which the simple-ABI skips.
     FnExpr(is_gen: False, is_async: False, self_name: None) -> #(True, False)
     Arrow(is_async: False) -> #(True, True)
+    // A method or base constructor reads the frame only for `super`
+    // (HomeObject) and `new.target`, both rejected below with `arguments`.
+    Method(is_gen: False, is_async: False) -> #(True, False)
+    ClassCtor(derived: False, has_field_init: False, ..) -> #(True, False)
     _ -> #(False, False)
   }
   case shape_ok {
@@ -1859,21 +1863,13 @@ fn emit_closure_site(
           anf.make_tuple([ir.ConstAtom("some"), inner])
         }
       })
-      use fn_h <- anf.then(
-        anf.host("fn_new", [
-          fun,
-          flags_t,
-          name_bin,
-          ir.ConstI32(expected_length),
-          simple_v,
-        ]),
-      )
-      // §10.2.5 MakeConstructor — only FnDecl/FnExpr (!gen && !async) get an
-      // own writable .prototype; class ctors get theirs from class_setup.
-      case sf.is_constructor && !sf.is_class_constructor {
-        True -> anf.host("make_constructor", [fn_h])
-        False -> anf.pure(fn_h)
-      }
+      anf.host("fn_new", [
+        fun,
+        flags_t,
+        name_bin,
+        ir.ConstI32(expected_length),
+        simple_v,
+      ])
     },
     e,
   )
@@ -1893,17 +1889,18 @@ fn expected_length(fixed: List(ast.Pattern)) -> Int {
 
 // ── entry point ─────────────────────────────────────────────────────────────
 
-/// Lower one JS function. Emits the ir.Function to e.fns_acc; returns the
-/// PARENT-frame closure-site tree (Let-chain ending in the KCompiled handle).
-/// Callers Let-bind this tree to obtain the fn_h Value (see hoist_fn_decls).
-pub fn emit_function_tree(
+/// Lower one JS function. Emits the ir.Function(s) to e.fns_acc; the
+/// PARENT-frame closure-site tree (Let-chain ending in the KCompiled handle)
+/// is built on demand by the returned `site`. Callers Let-bind that tree to
+/// obtain the fn_h Value (see hoist_fn_decls).
+fn compile_function(
   e: Emitter2,
   shape: FnShape,
   js_name: Option(String),
   params: List(ast.Pattern),
   body: FnBody,
   fn_scope_id: ScopeId,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+) -> Result(#(Compiled, Emitter2), EmitError) {
   let sf = derive_flags(shape)
   let stmts = case body {
     StmtBody(s) -> s
@@ -1918,8 +1915,8 @@ pub fn emit_function_tree(
 
   // gen|async → M18 owns the state-machine body; already tree-shaped (R14).
   case coroutine_kind(sf) {
-    Some(_) ->
-      e.dispatch.emit_async_body(
+    Some(_) -> {
+      use #(tree, e) <- result.map(e.dispatch.emit_async_body(
         e,
         shape,
         js_name,
@@ -1927,7 +1924,9 @@ pub fn emit_function_tree(
         body,
         fn_scope_id,
         capture_vals,
-      )
+      ))
+      #(Compiled(fn(e) { #(tree, e) }, None), e)
+    }
     None -> {
       let #(fn_name, e) = state.fresh_fn_name(e, js_name)
       let field_init = derive_field_init(shape, e.field_init)
@@ -2044,18 +2043,65 @@ pub fn emit_function_tree(
           ))
         }
       })
-      Ok(emit_closure_site(
-        e,
-        fn_name,
-        sf,
-        child_strict,
-        js_name,
-        exp_len,
-        capture_vals,
-        simple,
-      ))
+      let site = fn(e) {
+        emit_closure_site(
+          e,
+          fn_name,
+          sf,
+          child_strict,
+          js_name,
+          exp_len,
+          capture_vals,
+          simple,
+        )
+      }
+      case simple {
+        Some(#(name, arity, needs_this)) ->
+          Ok(#(
+            Compiled(
+              site,
+              Some(state.DirectFn(
+                name:,
+                captures: capture_vals,
+                arity:,
+                needs_this:,
+                strict: child_strict,
+              )),
+            ),
+            e,
+          ))
+        None -> Ok(#(Compiled(site, None), e))
+      }
     }
   }
+}
+
+/// What `compile_function` hands back: the closure-site builder, plus the
+/// direct entry when the body got a simple-ABI variant.
+type Compiled {
+  Compiled(
+    site: fn(Emitter2) -> #(ir.Expr, Emitter2),
+    direct: Option(state.FnSite),
+  )
+}
+
+fn emit_function_tree(
+  e: Emitter2,
+  shape: FnShape,
+  js_name: Option(String),
+  params: List(ast.Pattern),
+  body: FnBody,
+  fn_scope_id: ScopeId,
+) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  use #(compiled, e) <- result.map(compile_function(
+    e,
+    shape,
+    js_name,
+    params,
+    body,
+    fn_scope_id,
+  ))
+  compiled.site(e)
 }
 
 /// EmitDispatch.emit_function entry point (state.gleam:221-228). Returns the
@@ -2070,4 +2116,31 @@ pub fn emit_function(
   fn_scope_id: ScopeId,
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   emit_function_tree(e, shape, js_name, params, body, fn_scope_id)
+}
+
+/// EmitDispatch.emit_function_site: compile the function; a body with a
+/// simple-ABI variant is reached directly and no function object is built.
+pub fn emit_function_site(
+  e: Emitter2,
+  shape: FnShape,
+  js_name: Option(String),
+  params: List(ast.Pattern),
+  body: FnBody,
+  fn_scope_id: ScopeId,
+) -> Result(#(state.FnSite, Emitter2), EmitError) {
+  use #(compiled, e) <- result.map(compile_function(
+    e,
+    shape,
+    js_name,
+    params,
+    body,
+    fn_scope_id,
+  ))
+  case compiled.direct {
+    Some(direct) -> #(direct, e)
+    None -> {
+      let #(tree, e) = compiled.site(e)
+      #(state.ClosureSite(tree), e)
+    }
+  }
 }

@@ -349,9 +349,10 @@ pub fn seed_ops(st: Agent) -> Agent {
         to_object: realm_ops.t_box_primitive,
         new_error: realm_ops.t_new_error,
         eval_hook: no_eval,
-        call_bytecode: fn(_, _, _, _) {
+        call_bytecode: fn(_, _, _, _, _) {
           interpreter_not_linked("call_bytecode")
         },
+        bind_call: fn(_, _, _, _) { interpreter_not_linked("bind_call") },
         construct_bytecode: fn(_, _, _, _) {
           interpreter_not_linked("construct_bytecode")
         },
@@ -816,7 +817,8 @@ fn construct_host_fn(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   let #(v, st) = call_host_fn(st, id, mk_undefined(), args, new_target)
-  case classify(v), own_data_prototype(st, new_target) {
+  let #(proto, st) = own_data_prototype(st, new_target)
+  case classify(v), proto {
     KHandle(h), Some(proto) -> {
       let #(_changed, st) = rt_obj.t_set_prototype(st, h, Some(proto))
       #(h, st)
@@ -829,11 +831,20 @@ fn construct_host_fn(
 
 /// `ctor.prototype` iff it is an own DATA property holding an object: no
 /// getter runs and no proxy trap fires.
-fn own_data_prototype(st: Agent, ctor: JsVal) -> option.Option(Handle) {
-  use h <- option.then(as_handle(ctor))
-  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named("prototype"))) {
-    Some(DataProperty(value:, ..)) -> as_handle(value)
-    _ -> None
+fn own_data_prototype(
+  st: Agent,
+  ctor: JsVal,
+) -> #(option.Option(Handle), Agent) {
+  case as_handle(ctor) {
+    None -> #(None, st)
+    Some(h) -> {
+      let #(prop, st) =
+        rt_obj.t_own_property(st, h, StringKey(Named("prototype")))
+      case prop {
+        Some(DataProperty(value:, ..)) -> #(as_handle(value), st)
+        _ -> #(None, st)
+      }
+    }
   }
 }
 
