@@ -35464,6 +35464,7 @@ language/expressions/conditional/in-branch-1.js
 language/expressions/conditional/in-branch-2.js
 language/expressions/conditional/in-condition.js
 language/expressions/conditional/symbol-conditional-evaluation.js
+language/expressions/conditional/tco-cond.js
 language/expressions/conditional/tco-pos.js
 language/expressions/delete/11.4.1-0-1.js
 language/expressions/delete/11.4.1-2-2.js
