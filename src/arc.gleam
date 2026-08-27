@@ -10,7 +10,6 @@ import arc/module/load_error
 import arc/module_host.{type LoadError, type ResolveError}
 import arc/parser
 import arc/repl/examples
-import gleam/dynamic
 import gleam/int
 import gleam/io
 import gleam/option.{None, Some}
@@ -18,10 +17,12 @@ import gleam/result
 import gleam/string
 import simplifile
 
+type ReadLineReadErrorReason
+
 type ReadLine {
   Line(String)
   Eof
-  ReadError(reason: dynamic.Dynamic)
+  ReadError(reason: ReadLineReadErrorReason)
 }
 
 @external(erlang, "arc_cli_ffi", "read_line")
